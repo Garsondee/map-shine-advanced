@@ -299,6 +299,10 @@ export { registerAnchorViewModeButton, syncAnchorViewModeButtonState } from './s
 // Studio side-by-side with the old panel during rollout (see scene-controls-
 // button.js's own doc for why this is the same proven mechanism, twice over).
 export { registerStudioButton, syncStudioButtonState } from './scene-controls-button.js';
+// THE REMOTE TOGGLE (U2) — a fourth, GM-only tool that opens the new
+// LANTERN Remote side-by-side with the panel/Studio (see scene-controls-
+// button.js's own doc for why this is the same proven mechanism, a fourth time).
+export { registerRemoteButton, syncRemoteButtonState } from './scene-controls-button.js';
 
 // THE SCENE EXPORTER (2026-08-10, author directive) — the one human-operated
 // bridge to an assistant working on a SEPARATE, disposable bench world: the

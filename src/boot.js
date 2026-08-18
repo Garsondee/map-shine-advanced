@@ -368,6 +368,8 @@ import {
   syncAnchorViewModeButtonState,
   registerStudioButton,
   syncStudioButtonState,
+  registerRemoteButton,
+  syncRemoteButtonState,
   watchSceneWallStructure,
   watchDoorOpenings,
   readSceneDoors,
@@ -413,6 +415,7 @@ import {
   updateFloorTransitionProgress,
   endFloorTransition,
   installStudio,
+  installRemote,
 } from './ui/index.js';
 import {
   SORT_LAYERS,
@@ -928,6 +931,33 @@ function install() {
   // registry `installDebugPanel` just built, and so its rail can gate LAB
   // on the same `isGM()` the old panel already uses.
   MapShine.__studio = installStudio({ debugPanel: MapShine.debug });
+  // THE REMOTE (U2, docs/holy/UI-Testament.md §4, §9) — side-by-side with
+  // both the old panel and the Studio. Every callback below is a closure
+  // reference, not an eager read — installRemote() itself runs NOW (this
+  // eager point in install()), but the Remote's own shell.js defers calling
+  // any of them until the room's first open(), by which point
+  // buildAstrolabeOptions/skyScope/editSky (all declared further down this
+  // same closure) are fully initialized. See shell.js's own header for why
+  // that deferral exists at all.
+  MapShine.__remote = installRemote({
+    mountAstrolabeDial: (container) => {
+      remoteAstrolabe = createAstrolabe(buildAstrolabeOptions());
+      container.appendChild(remoteAstrolabe.root);
+    },
+    getPosture: () => skyScope.sky?.mode,
+    // Play/pause IS the rate (astrolabe-panel.js's own note) — 'playing'
+    // means whatever the current rate is, is non-zero.
+    isFlowPlaying: () => (skyScope.sky?.rateHoursPerMinute ?? 0) > 0,
+    onFlowToggle: () => {
+      const current = skyScope.sky?.rateHoursPerMinute ?? 0;
+      if (current > 0) {
+        lastNonZeroRateHoursPerMinute = current;
+        void editSky({ rateHoursPerMinute: 0 });
+      } else {
+        void editSky({ rateHoursPerMinute: lastNonZeroRateHoursPerMinute || 1 });
+      }
+    },
+  });
   // The in-app painter (tier 0): registers its "🖌️ Paint _Fire" action on the
   // debug panel and returns a hydrate hook the canvasReady handler calls to pull
   // any saved paint for the newly-loaded scene (docs/planning/Authoring-and-Distribution.md).
@@ -6913,12 +6943,35 @@ function install() {
   // A dial that cached the hour would be a mirror, and mirrors are what
   // Environment.md §2.4 is about.
   let astrolabe = null;
+  // THE REMOTE'S OWN SECOND LIVE INSTANCE (U2) — same real handlers
+  // (buildAstrolabeOptions, above), a second DOM tree, side by side with the
+  // old panel's — never a second copy of the wiring itself.
+  let remoteAstrolabe = null;
+  /** Remembers the rate a GM was actually running at before the Remote's
+   * flow-pause corner button froze it, so un-pausing restores it rather than
+   * guessing a default. Session-only, matching the astrolabe's own "no
+   * dial keeps its own copy of the hour" rule — this ISN'T a second store
+   * of the rate itself, only of "what to go back to". */
+  let lastNonZeroRateHoursPerMinute = 1;
   let windDirectionDeg = 0;
   let windSpeed01 = 0;
   /** Unsubscribe for the scene-sky watcher (a second GM's edit reaching here). */
   let skyUnsub = null;
   void skyUnsub; // held for a future teardown path; the watcher lives for the session
   const applyAmbientWind = () => setVtPanViewerWindAmbient(windDirectionDeg, windSpeed01);
+
+  // WIND'S CONSOLE/UI DOOR (U2) — the astrolabe's own dial already steers
+  // wind live; these two just expose that same door on MapShine so the
+  // Remote (or the console) never has to reach past the public API for it,
+  // matching setSunHour/setCloudCover's own shape above. `direction`/`speed01`
+  // land through the identical `applyAmbientWind` commit path the dial uses
+  // on pointer-release — never a second write route.
+  MapShine.getWind = () => ({ directionDeg: windDirectionDeg, speed01: windSpeed01 });
+  MapShine.setWind = ({ directionDeg, speed01 } = {}) => {
+    if (Number.isFinite(directionDeg)) windDirectionDeg = directionDeg;
+    if (Number.isFinite(speed01)) windSpeed01 = Math.max(0, Math.min(1, speed01));
+    applyAmbientWind();
+  };
 
   /** Compass point for the collapsed Wind card's status line. Wind direction is
    * conventionally named for where it blows TOWARDS here, matching the dial's
@@ -6963,95 +7016,111 @@ function install() {
     { zone: 'workshop', effect: 'wind', order: 25 }
   );
 
+  // A FUNCTION, not an inline object — hoisted, so it can sit exactly where
+  // the original inline object did (before editSky/skyScope's own `let`/
+  // `const` declarations further down this closure) while still safely
+  // referencing them: nothing CALLS this until a panel/room actually
+  // renders, well after install() has finished defining everything once.
+  // The Remote's OWN astrolabe instance (installRemote's mountAstrolabeDial,
+  // U2) calls this SAME function a second time to build the identical real
+  // handlers — never a hand-copied second set that could silently drift
+  // from this one. Both instances read/write the SAME closure state
+  // (windDirectionDeg, windSpeed01, editSky, ...), and pumpAstrolabe (this
+  // file, further down) updates whichever of the two DOM trees is actually
+  // connected at the time.
+  function buildAstrolabeOptions() {
+    return {
+      // The ring's coloured bands ARE the sun model, inverted — never a
+      // second, hand-placed copy of when dusk is (world/sun.js's own essay).
+      phaseBands: phaseBoundaryHours(),
+      // Dragging the ring applies live every pointermove (so the sun tracks
+      // the finger) but PERSISTS only on release — a scene-flag write per
+      // pointer event would be hundreds of document updates per drag.
+      onTimeChange: (hour, committed) => {
+        setVtPanViewerSunHour(hour);
+        if (committed) void editSky({ todHour: hour });
+      },
+      onTimeStop: (hour) => {
+        sweepVtPanViewerTimeOfDay(hour);
+        void editSky({ todHour: hour });
+      },
+      onTimeRateChange: (rate) => void editSky({ rateHoursPerMinute: rate }),
+      onTimeModeChange: (mode) => void editSky({ mode }),
+      onWindDirectionChange: (deg, committed) => {
+        windDirectionDeg = deg;
+        // Direction commits on RELEASE only: `setWindAmbient` re-bakes the
+        // whole wall-relaxed structure grid, and firing that per pointermove
+        // would rebake a few hundred times per drag.
+        if (committed) applyAmbientWind();
+      },
+      onWindSpeedChange: (v, committed) => {
+        windSpeed01 = v;
+        if (committed) applyAmbientWind();
+      },
+      // THE SKY. Every one of these goes through `editSky`, so the astrolabe
+      // never decides WHICH scope it is writing to — `applySkyEdit` does, from
+      // the one precedence rule. A UI that picked the target itself would be a
+      // second copy of that rule, free to disagree with it.
+      // Dragging Cloud moves the sky OFF whatever named row it was on, so the
+      // stored archetype becomes `custom` in the same write. Leaving it
+      // naming the old row would persist a sky that claims to be `overcast`
+      // at cover 0.2 — the exact lie the manager's derived label prevents at
+      // runtime, reintroduced through the store. One edit, both fields.
+      onCloudChange: (v, committed) => {
+        if (committed) void editSky({ cloudCover01: v, weatherArchetype: 'custom' });
+      },
+      // THE HORIZON SHELF (docs/planning/Weather-Manager.md §9) — one click,
+      // one named sky. Stores the ID, not the four axis values: the row IS
+      // the authored intent, and re-deriving the axes from it on load means a
+      // future tweak to a row reaches every scene that chose it.
+      onArchetypeChange: (id) => {
+        void editSky({ weatherArchetype: id });
+      },
+      // ⭐ THE MODE TOGGLE (Weather-Manager.md §5, §9). Goes through the SAME
+      // `editSky` path as everything else on this dial — the mode is per-
+      // world/per-scene exactly like the hour and the cloud slider are.
+      onWeatherModeChange: (mode) => {
+        void editSky({ weatherMode: mode });
+      },
+      // THE ALMANAC'S CLIMATE (ROH). `null` from the "— none (idle) —"
+      // option is a real, honest edit, not a no-op — see
+      // `DEFAULT_SKY.weatherBiome`'s own note on why idle is legitimate.
+      onWeatherBiomeChange: (id) => {
+        void editSky({ weatherBiome: id });
+      },
+      onWeatherVolatilityChange: (v, committed) => {
+        if (committed) void editSky({ weatherVolatility: v });
+      },
+      // THE PIN GLYPH. Unpinning is live SESSION state (the manager's own
+      // `pinnedAxes` Set), not a persisted sky field — releasing a pin lets
+      // the walk touch that axis again on its own next transition; it does
+      // not itself move anything, so there is nothing here to persist.
+      onUnpinCloudCover: () => {
+        unpinVtPanViewerWeatherAxis('cloudCover01');
+      },
+      onSkyRealismChange: (v, committed) => {
+        if (committed) void editSky({ realism01: v });
+      },
+      // THE ENVIRONMENTAL GRADE (docs/planning/Grade.md) — same editSky path
+      // as the sky. The ARTISTIC "Look" grade is NOT here any more: it is now
+      // a first-class effect with its own Workshop card (below), so it has one
+      // home, not two (the astrolabe Look dropdown retired 2026-07-23).
+      onGradeEnvChange: (v, committed) => {
+        if (committed) void editSky({ gradeEnvStrength: v });
+      },
+      onSceneOverrideChange: async (enabled) => {
+        const result = await setSceneSkyOverride(enabled, skyScope.sky);
+        if (!result.ok) log.warn(`scene sky override not changed: ${result.reason}`);
+        resolveAndApplySky();
+      },
+    };
+  }
+
   MapShine.debug.registerPanel(
     'astrolabe',
     '🧭 Astrolabe',
     () => {
-      astrolabe = createAstrolabe({
-        // The ring's coloured bands ARE the sun model, inverted — never a
-        // second, hand-placed copy of when dusk is (world/sun.js's own essay).
-        phaseBands: phaseBoundaryHours(),
-        // Dragging the ring applies live every pointermove (so the sun tracks
-        // the finger) but PERSISTS only on release — a scene-flag write per
-        // pointer event would be hundreds of document updates per drag.
-        onTimeChange: (hour, committed) => {
-          setVtPanViewerSunHour(hour);
-          if (committed) void editSky({ todHour: hour });
-        },
-        onTimeStop: (hour) => {
-          sweepVtPanViewerTimeOfDay(hour);
-          void editSky({ todHour: hour });
-        },
-        onTimeRateChange: (rate) => void editSky({ rateHoursPerMinute: rate }),
-        onTimeModeChange: (mode) => void editSky({ mode }),
-        onWindDirectionChange: (deg, committed) => {
-          windDirectionDeg = deg;
-          // Direction commits on RELEASE only: `setWindAmbient` re-bakes the
-          // whole wall-relaxed structure grid, and firing that per pointermove
-          // would rebake a few hundred times per drag.
-          if (committed) applyAmbientWind();
-        },
-        onWindSpeedChange: (v, committed) => {
-          windSpeed01 = v;
-          if (committed) applyAmbientWind();
-        },
-        // THE SKY. Every one of these goes through `editSky`, so the astrolabe
-        // never decides WHICH scope it is writing to — `applySkyEdit` does, from
-        // the one precedence rule. A UI that picked the target itself would be a
-        // second copy of that rule, free to disagree with it.
-        // Dragging Cloud moves the sky OFF whatever named row it was on, so the
-        // stored archetype becomes `custom` in the same write. Leaving it
-        // naming the old row would persist a sky that claims to be `overcast`
-        // at cover 0.2 — the exact lie the manager's derived label prevents at
-        // runtime, reintroduced through the store. One edit, both fields.
-        onCloudChange: (v, committed) => {
-          if (committed) void editSky({ cloudCover01: v, weatherArchetype: 'custom' });
-        },
-        // THE HORIZON SHELF (docs/planning/Weather-Manager.md §9) — one click,
-        // one named sky. Stores the ID, not the four axis values: the row IS
-        // the authored intent, and re-deriving the axes from it on load means a
-        // future tweak to a row reaches every scene that chose it.
-        onArchetypeChange: (id) => {
-          void editSky({ weatherArchetype: id });
-        },
-        // ⭐ THE MODE TOGGLE (Weather-Manager.md §5, §9). Goes through the SAME
-        // `editSky` path as everything else on this dial — the mode is per-
-        // world/per-scene exactly like the hour and the cloud slider are.
-        onWeatherModeChange: (mode) => {
-          void editSky({ weatherMode: mode });
-        },
-        // THE ALMANAC'S CLIMATE (ROH). `null` from the "— none (idle) —"
-        // option is a real, honest edit, not a no-op — see
-        // `DEFAULT_SKY.weatherBiome`'s own note on why idle is legitimate.
-        onWeatherBiomeChange: (id) => {
-          void editSky({ weatherBiome: id });
-        },
-        onWeatherVolatilityChange: (v, committed) => {
-          if (committed) void editSky({ weatherVolatility: v });
-        },
-        // THE PIN GLYPH. Unpinning is live SESSION state (the manager's own
-        // `pinnedAxes` Set), not a persisted sky field — releasing a pin lets
-        // the walk touch that axis again on its own next transition; it does
-        // not itself move anything, so there is nothing here to persist.
-        onUnpinCloudCover: () => {
-          unpinVtPanViewerWeatherAxis('cloudCover01');
-        },
-        onSkyRealismChange: (v, committed) => {
-          if (committed) void editSky({ realism01: v });
-        },
-        // THE ENVIRONMENTAL GRADE (docs/planning/Grade.md) — same editSky path
-        // as the sky. The ARTISTIC "Look" grade is NOT here any more: it is now
-        // a first-class effect with its own Workshop card (below), so it has one
-        // home, not two (the astrolabe Look dropdown retired 2026-07-23).
-        onGradeEnvChange: (v, committed) => {
-          if (committed) void editSky({ gradeEnvStrength: v });
-        },
-        onSceneOverrideChange: async (enabled) => {
-          const result = await setSceneSkyOverride(enabled, skyScope.sky);
-          if (!result.ok) log.warn(`scene sky override not changed: ${result.reason}`);
-          resolveAndApplySky();
-        },
-      });
+      astrolabe = createAstrolabe(buildAstrolabeOptions());
       return astrolabe.root;
     },
     // order:-1 pins the dial above the Bridge's control row no matter when it
@@ -7215,11 +7284,11 @@ function install() {
     // a far smaller failure than a dial that silently freezes with no visible
     // cause. (3) the throttle window has elapsed.
     const hiddenForMeasurement = MapShine.debug?.isPanelVisible?.() === false;
-    if (
-      astrolabe?.root?.isConnected &&
-      !hiddenForMeasurement &&
-      nowMs - lastAstrolabeRepaintMs >= ASTROLABE_REPAINT_INTERVAL_MS
-    ) {
+    // Either DOM tree being connected is enough to justify computing one
+    // payload — a GM can have the old panel's dial, the Remote's, both, or
+    // neither on screen at a given moment (side-by-side rollout, U1/U2).
+    const anyConnected = astrolabe?.root?.isConnected || remoteAstrolabe?.root?.isConnected;
+    if (anyConnected && !hiddenForMeasurement && nowMs - lastAstrolabeRepaintMs >= ASTROLABE_REPAINT_INTERVAL_MS) {
       lastAstrolabeRepaintMs = nowMs;
       const dial = getVtPanViewerTimeDialState();
       // `windSpeed01` is the ONE value the dial owns rather than reads back:
@@ -7230,7 +7299,7 @@ function install() {
       // dial keeps — so the checkbox and the sliders always show the store that
       // is actually in force, including after another GM changes it.
       if (dial) {
-        astrolabe.update({
+        const payload = {
           ...dial,
           windSpeed01,
           cloudCover01: skyScope.sky?.cloudCover01 ?? 0,
@@ -7256,7 +7325,9 @@ function install() {
           // scope instead (exactly like weatherMode/weatherBiome above)
           // closes that hole the same way it is already closed for them.
           mode: skyScope.sky?.mode ?? 'aesthetic',
-        });
+        };
+        if (astrolabe?.root?.isConnected) astrolabe.update(payload);
+        if (remoteAstrolabe?.root?.isConnected) remoteAstrolabe.update(payload);
       }
     }
     requestAnimationFrame(pumpAstrolabe);
@@ -10143,6 +10214,18 @@ function install() {
         },
       });
       MapShine.__studio?.onOpenChange((open) => syncStudioButtonState(open));
+
+      // THE REMOTE TOGGLE (U2) — the fourth tool, side-by-side rollout: opens
+      // the new Remote next to the panel/Studio, changes nothing about any
+      // existing button (foundry/scene-controls-button.js#registerRemoteButton).
+      registerRemoteButton({
+        isActive: () => MapShine.__remote?.isOpen() ?? false,
+        onToggle: (active) => {
+          if (active) MapShine.__remote?.open();
+          else MapShine.__remote?.close();
+        },
+      });
+      MapShine.__remote?.onOpenChange((open) => syncRemoteButtonState(open));
     });
     Hooks.once('ready', () => {
       // A `ready`-time safety net for the calendar install above: by `ready`,

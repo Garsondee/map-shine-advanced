@@ -28,6 +28,7 @@
 const TOOL_NAME = 'map-shine-advanced';
 const ANCHOR_VIEW_TOOL_NAME = 'map-shine-anchor-view';
 const STUDIO_TOOL_NAME = 'map-shine-studio';
+const REMOTE_TOOL_NAME = 'map-shine-remote';
 
 /**
  * @param {{ isActive: () => boolean, onToggle: (nextActive: boolean) => void }} handlers
@@ -158,6 +159,48 @@ export function registerStudioButton({ isActive, onToggle }) {
  */
 export function syncStudioButtonState(active) {
   const tool = ui?.controls?.controls?.tokens?.tools?.[STUDIO_TOOL_NAME];
+  if (!tool) return;
+  tool.active = !!active;
+  ui.controls.render(true);
+}
+
+/**
+ * THE REMOTE TOGGLE (U2, docs/holy/UI-Testament.md §4, §9) — a FOURTH tool
+ * in the same `tokens.tools` record, the identical mechanism proven three
+ * times over above (`order:103`, right after the Studio's `102`).
+ *
+ * GM-ONLY for this checkpoint: every piece the Remote renders today (the
+ * astrolabe corners, camera path, Now Playing) is GM-facing session control,
+ * same reasoning as the Studio's own gate. This is NOT yet the Testament's
+ * eventual Player face (§5.5, U5) — that is a separate, later surface this
+ * button does not open, not a reason to widen visibility here early.
+ * @param {{ isActive: () => boolean, onToggle: (nextActive: boolean) => void }} handlers
+ */
+export function registerRemoteButton({ isActive, onToggle }) {
+  Hooks.on('getSceneControlButtons', (controls) => {
+    const tokenControls = controls?.tokens;
+    if (!tokenControls?.tools) return;
+    if (Object.prototype.hasOwnProperty.call(tokenControls.tools, REMOTE_TOOL_NAME)) return;
+    tokenControls.tools[REMOTE_TOOL_NAME] = {
+      name: REMOTE_TOOL_NAME,
+      title: 'MSA Remote (new UI, in progress)',
+      icon: 'fas fa-satellite-dish',
+      toggle: true,
+      order: 103,
+      visible: game.user?.isGM === true,
+      active: isActive(),
+      onChange: (_event, active) => onToggle(active),
+    };
+  });
+}
+
+/** Re-sync this toggle's highlight when the Remote closes itself (its own
+ * Close button) rather than via a click on this exact toolbar button —
+ * mirrors `syncStudioButtonState` exactly.
+ * @param {boolean} active
+ */
+export function syncRemoteButtonState(active) {
+  const tool = ui?.controls?.controls?.tokens?.tools?.[REMOTE_TOOL_NAME];
   if (!tool) return;
   tool.active = !!active;
   ui.controls.render(true);

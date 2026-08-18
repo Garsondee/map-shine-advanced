@@ -2136,6 +2136,87 @@ Foundry session; the function itself is three lines reading two already-tested s
 narrower gap than U4's own unverified exit gate. The concurrent water-flow session's own files
 remain completely untouched.*
 
+**P18 — filed by Claude Sonnet 5, 2026-08-18 (worker tier; author directive: "If you could fix
+the painter that would be great since you spotted an issue" — closing P16's own named gap.
+Player-light stays deliberately untouched, per the author's own "it needs to be recreated as an
+effect and it will be soon.").** "Paint fire, see fire" is now genuinely true, on Save, for all
+six paintable effects at once — not a UI change, a real third door into the render pipeline.
+
+1. **`scene/mask-authority.js#ingestPaintedMask(floorIndex, kindId, grid)` — a THIRD ingest door,
+   alongside file discovery and the VT decode stream, this file's own header used to name as
+   exhaustive.** Read the WHOLE file (1,236 lines) before touching it, not just the two doors P16
+   already knew about, to find the actual, minimal, correct seam. A painted layer is FLOOR-scoped
+   (keyed `${floorIndex}/${kindId}`), not item-scoped like every other source here — `scene/paint-
+   mask.js`'s own header already states why: "a painted mask is a `MaskGrid`... the SAME grid type
+   the mask authority uses for its derived products," just at a higher resolution (4096 vs 512),
+   covering the identical scene rect. That meant NO new coordinate math was needed — the painted
+   grid's own `spec.x/y/width/height` (already world-space, from `computeMaskGridSpec`) becomes
+   the `placement` `compositeItemOverwrite` already knows how to sample through, unrotated,
+   top-left anchored (`anchorX:0, anchorY:0` — confirmed against `worldToItemUv`'s own math by
+   hand before writing a line, not assumed).
+2. **SELF-ALPHA is the load-bearing safety property.** A painted layer has no separate alpha
+   channel the way a real mask FILE's own decode does — so its own byte value is passed as ITS OWN
+   alpha too. Under `compositeItemOverwrite`'s already-existing "transparent means unpainted" law
+   (2026-08-02), an unpainted texel (byte 0) is therefore fully transparent and the file/earlier
+   source shows through completely unchanged; a fully-painted texel (255) fully overwrites. This
+   is the ONE property that makes the whole design safe: the author's brush can only ever ADD to
+   or touch up a file, never silently blank out everything a file painted OUTSIDE the stroke —
+   confirmed by a dedicated test (below), not just reasoned about.
+3. **Composites LAST in `sourcesFor`'s own draw order** — the author's own most recent in-app edit
+   wins over file-based content wherever painted, the SAME "later host overwrites earlier" law
+   `compositeItemOverwrite`'s own doc already states for Tiles blowing a hole in a background,
+   applied here to a painted layer instead of a second file.
+4. **ZERO changes needed in any effect.** Fire, water, window, specular, fluid, and vegetation all
+   already read their own mask exclusively through `maskAuthority.getDerived(kindId, floorIndex)`
+   (confirmed for fire by reading `fire-mask.js`'s own JSDoc: "from `maskAuthority.getDerived
+   ('fire', floorIndex)`") — and that function's own "staleness is lazy, not scheduled" design
+   (this file's own header, already true before this petition) means every one of them picks up
+   painted content on its own next read, the instant `touch()` marks the authority dirty. No
+   effect file was touched.
+5. **A REAL scene-load ordering hazard, found by tracing the actual hook sequence, not assumed
+   safe.** `ui/paint-mode.js#hydrateFromScene()` runs at the TOP of `canvasReady`'s own handler;
+   `maskAuthority.reset()` (which wipes `paintedIngests` wholesale for the new scene) runs several
+   hundred lines LATER in that SAME hook, inside `startRealSceneViewer`. Feeding the bridge
+   straight from `hydrateFromScene()` itself would have ingested a previously-saved painted mask
+   into the OLD scene's soon-to-be-discarded authority state, silently lost the moment `reset()`
+   ran moments later — a real bug that would have shipped invisibly (painting would work all
+   session, but a RELOAD would silently drop every previously-saved painted mask). Fixed by NOT
+   calling the bridge from inside `hydrateFromScene()` at all: it now exposes `getLayers()` (a
+   plain, read-only getter), and boot.js's own `canvasReady` handler calls the bridge itself
+   immediately AFTER `startRealSceneViewer` succeeds — after `reset()` has definitely already run.
+   `save()`'s own call to the bridge has no such hazard (a user can only open the painter and Save
+   well after scene-load sequencing has long settled) and was left calling it directly.
+6. **Corrected two claims this same session had shipped as fact, now that they're not.**
+   `paintAffordance`'s own tooltip (`boot.js`) and the PAINTER department's own notice box
+   (`ui/rooms/studio/painter-department.js`) both said outright "no effect reads a painted mask
+   back" — true when P16 wrote it, false now. Both corrected to state the REAL current behaviour
+   (updates on Save, not yet live mid-stroke) rather than leaving a now-false claim shipping
+   because the code that made it false landed in a later commit.
+7. **NOT built, named rather than attempted:** live ingest DURING a stroke, before Save — would
+   mean hooking `paint-mode-canvas.js`'s own per-frame preview loop (tuned for cheap dirty-rect-
+   only repaints) rather than the already-explicit Save action, a real, separate, higher-risk
+   follow-up. Player-light: untouched, per the author's own explicit instruction that it "needs to
+   be recreated as an effect and it will be soon" — P17's own finding stands as written.
+
+*Verification note: `npx eslint`, `npx prettier --check` clean on every file touched
+(`scene/mask-authority.js`, `scene/__tests__/mask-authority.test.mjs`, `ui/paint-mode.js`,
+`ui/rooms/studio/painter-department.js`, `boot.js`). `node tools/run-tests.mjs`: 27 suites, 11274
+assertions, ALL GREEN (+11 over P17 — the new `ingestPaintedMask` suite: an unknown-kind throw,
+painted-only with no file, painted composited on top of a file with the unpainted half provably
+untouched, an all-zero layer as a total self-alpha no-op, an explicit `grid=null` clear, and a
+scene reset wiping `paintedIngests`). One of those 11 briefly failed on first run — traced to the
+TEST's own fixture using a top-left-anchored placement where every other fixture in that file (and
+this new one's OWN painted-layer placement) is centre-anchored (`worldToItemUv`'s own default);
+fixed in the test, not the production code, and re-verified green before moving on rather than
+assumed. `node tools/verify-structure.mjs`: the same two pre-existing violations, unchanged.
+Live-verified in the browser: the PAINTER department's updated subtitle ("live on Save") and
+notice text render correctly, zero console errors. **Not verified: the actual end-to-end
+paint→Save→render flow against a real Foundry scene** — that needs a real `canvas.scene` and a
+real VT viewer this session's tooling cannot construct; the ingest logic itself is exhaustively
+Node-tested against the exact same `compositeItemOverwrite`/`sampleWorld` machinery every other
+mask consumer already trusts, named honestly as the boundary of what could actually be checked
+this round. The concurrent water-flow session's own files remain completely untouched.*
+
 ---
 
 ## 13. STATUS LOG

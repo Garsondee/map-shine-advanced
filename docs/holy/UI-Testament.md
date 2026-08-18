@@ -2456,6 +2456,95 @@ completely untouched, confirmed by hunk-count diffing before every commit.*
 
 ---
 
+**P21 — filed by Claude Sonnet 5, 2026-08-18 (worker tier; the astrolabe visual-parity
+fix — a live author bug report against U2's own re-home decision, filed the same session
+as P19/P20).** The author's report, verbatim: *"The new remote still looks very very
+different to the one that we built as a mock up. The astrolabe looks completely
+different. The CSS and layout are not the same yet. Keep working on the problem."* Root-
+caused, not patched: U2 re-homed `createAstrolabe()` on the premise that it only needed
+re-skinning (Petition P11: "already live, already wired... the least-new-code highest-
+payoff item"), true of its DATA wiring, false of its VISUAL DESIGN. DOM inspection
+confirmed the actual gap — every internal div carried `cls:"(none)"` (zero LANTERN
+classes), overall footprint 547×436px against the mock's 340×340px — because
+`createAstrolabe()` was built for `Control-Panel.md`'s older "Bridge" doctrine: a flat
+SVG ring bundled with a full legacy control block (wind/cloud/sky-light/atmosphere
+sliders, a 13-button weather shelf, a mode `<select>`, a tuning drawer) that LANTERN
+already rebuilt separately as `weather-board.js`. Not a CSS bug — the wrong paradigm,
+requiring a new dedicated component, not a patch.
+
+1. **`ui/rooms/remote/astrolabe-dial.js` (new) is the real re-skin**, reproducing the
+   mock's actual instrument: a static `conic-gradient` ring (not per-band SVG arcs) with
+   a rotating handle, a landscape scene (multi-keyframe sky gradient, an orbiting sun/moon
+   with glow, a rotating star field, terrain silhouettes), and a masked "topper" layer
+   guaranteeing the sun/moon stay visible over UI text — the exact fix already named in
+   memory as `feedback_svg_mask_on_transformed_element_trap` (mask on a static wrapper,
+   never a transformed element), applied here rather than rediscovered the hard way.
+2. **The mock's own hand-tuned math (`SKY_KEYS`, `orbitXY`, `TERRAIN`, `skyFor`) is
+   ported VERBATIM, not reinterpreted through `world/sun.js`'s differently-calibrated
+   elevation model.** A deliberate risk call: matching art the author has already approved
+   across many logged mock-refinement rounds exactly is safer than an independently
+   "improved" version that risks becoming a SECOND mismatch. Node-tested against known
+   keyframe outputs (`skyFor(12).top` = `[42,111,188]`, etc.) rather than only eyeballed.
+3. **The old debug panel's own `createAstrolabe()` call is completely untouched**,
+   confirmed by grep before and after — this round is a genuine side-by-side addition
+   (only the Remote's `mountAstrolabeDial` callback changed), not a blind replacement,
+   matching this whole migration's standing discipline. Because both components can now
+   be mounted simultaneously, `astrolabe-dial.js` mints its own per-instance `nextUid()`
+   suffix for every gradient/mask `id` — without it, two live instances' `url(#id)`
+   references would resolve against whichever instance's element happened to render last.
+4. ⚠️ **CAUGHT DURING VERIFICATION, NOT BY EYE: a second, independent mismatch.** Live DOM
+   measurement showed the corner clusters sitting 36px outside the dial's own edge instead
+   of flush with it, because `.msa-astro-dial-host` still carried a `padding:36px` left
+   over from the old component's larger, differently-proportioned footprint — the mock's
+   own `#astro` has zero surrounding padding. Fixed by removing the padding entirely;
+   re-measured at (0,0) relative to the dial's own edge, not assumed fixed from the CSS
+   change alone.
+5. **Explicitly NOT ported this round, named rather than silently dropped** (full
+   reasoning lives in the file's own header): the scene's animated weather overlays
+   (rain/snow/ash streaks, fog haze), cloud SHAPE variation (opacity still reacts to real
+   cover; shape stays fixed), real lunar phase (`moonAge` fixed at 0.4 — `world/calendar/
+   moon.js#moonPhaseAt` exists and is real, but wiring it needs the Almanac's own live
+   moon config, not reached for here), and wind's mock-only decorative "auto-drift" (the
+   mock's own demo-keeps-moving flourish, never a real engine behind it in either place).
+   Date text shows an honest `—` — no real date-formatting source exists in `boot.js` to
+   read from yet.
+6. **The preview harness needed its own small, honest fix, separate from the production
+   bug.** `tools/remote-preview/preview.js`'s simulated drag correctly computed the right
+   hour and `committed` flag, but the handle/clock didn't visually move, because the
+   harness — unlike production's real `pumpAstrolabe`, which repaints continuously at
+   ~10Hz off the live viewer's own env snapshot — only called `.update()` at mount time.
+   Added a `pushUpdate()` helper invoked synchronously inside `onTimeChange`; a harness
+   limitation, not evidence of a second production bug.
+
+*Verification note: `npx eslint` clean (exit 0, zero output) on every file touched.
+`npx prettier --check` flagged `astrolabe-dial.js` alone on first pass; `--write` fixed it,
+re-verified clean. `node tools/run-tests.mjs`: 27 suites, 11446 passed, 0 failed, ALL GREEN
+(+24 over P20 — the new `astrolabe-dial.test.mjs` suite: `skyFor`/`orbitXY`/
+`terrainColorFor`/`elevationFactors`/`rgb` against known keyframe values). `node tools/
+verify-structure.mjs`: the same two pre-existing violations only (`no-gpu-readback`,
+`time/one-clock`'s ratchet at 41 against a bound of 38), no new violation — confirmed
+`astrolabe-dial.js` reaches `boot.js` cleanly through `ui/index.js`'s barrel, unlike U7's
+own first-pass miss (P20, finding 2). Confirmed by grep: `tools/studio-preview/preview.js`
+has no astrolabe dial to update (Studio never had one). Live-verified against the standalone
+preview harness only — DOM/CSS inspection (exact box-shadow strings, exact gradient stop
+RGB values cross-checked against the ported `skyFor` math, exact 340×340px sizing) plus a
+simulated drag interaction, since `computer{action:"screenshot"}` continues to fail with
+"the Browser pane is not displayed" in this environment regardless of whether the tick is
+autonomous or the author is actively engaged — this round confirms that limitation is not
+specific to backgrounded contexts, as previously assumed. **Not verified, and cannot be
+from this session's tooling: the fix's appearance inside the author's own real, live
+Foundry session** — the author's own report was against that live surface, this round's
+proof is against the standalone harness plus exact numeric CSS/SVG cross-checks against the
+mock, and per this project's own standing rule, the author's live eyes are what promotes
+this from `BUILT` to `LIVE`, not this note. The concurrent water-flow session's own files
+(`water-body*`/`water-flow*`/`water-render.js`/`water-shore.js`/`water-surface-subsystem.js`/
+`water.js`, `vt-pan-viewer.js`'s own further edits, their new
+`water-flow-subsystem.test.mjs`, `docs/planning/Water-Simulation-Turn.md`,
+`tools/shader-lab/bench-water.js`) remain completely untouched, confirmed by diffing every
+touched file individually before staging.*
+
+---
+
 ## 13. STATUS LOG
 
 - **2026-08-17** — Testament created by Claude Fable 5 at the author's command. Sources

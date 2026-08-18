@@ -434,6 +434,7 @@ import {
   installAnchorViewMode,
   createAstrolabe,
   buildAstrolabeDial,
+  phaseDisplayName,
   showPerfProgress,
   hidePerfProgress,
   formatPerfProgressText,
@@ -7388,6 +7389,37 @@ function install() {
     void writeFadeState(fadeState);
   }
 
+  /**
+   * The Remote's "Now Playing" label (2026-08-18 fix). Two real gaps closed
+   * at once, found while investigating: `shell.js#updateNowPlaying` has been
+   * fully built and exposed since U2 but grepping boot.js found zero call
+   * sites — the label sat frozen at its hardcoded "Steady" default forever,
+   * live, in production; separately, `fade-engine.js`'s own `FadeEntry.label`
+   * doc already named this exact destination ("shown on the Now Playing
+   * ring's hover") but nothing ever read it back out for that purpose either.
+   *
+   * Deliberately narrower than the mock's own richer composition (a whole-day
+   * "Passage" sweep state, Drift-mode climate phrasing, a precip-description
+   * "weatherWord" taxonomy) — `state.passage` has no real production
+   * equivalent (grepped, none), and the precip-phrase taxonomy is its own
+   * scoped follow-up, not invented here. Two real states only: a weather
+   * archetype fade genuinely in flight, or the settled default.
+   * @param {{phase?: string, rising?: boolean}} dial - pumpAstrolabe's own payload.
+   * @param {number} nowMs
+   * @returns {string}
+   */
+  function buildNowPlayingLabel(dial, nowMs) {
+    const fading = Object.entries(fadeState).find(
+      ([key, e]) => key.startsWith('weather.') && !isEntryExpired(e, nowMs)
+    );
+    if (fading) {
+      const entry = fading[1];
+      const remainS = Math.max(0, Math.round((entry.startedAtMs + entry.overMs - nowMs) / 1000));
+      return `Fading to ${entry.label ?? 'a new sky'} — ${remainS}s left`;
+    }
+    return `Holding — ${phaseDisplayName(dial.phase, dial.rising)}`;
+  }
+
   // ══════════════════════════════════════════════════════════════════════
   // CUES (U3, docs/holy/UI-Testament.md §4.3) — console-first engine wiring.
   // No Studio capture flow or Remote deck yet (a natural follow-up, the
@@ -8092,6 +8124,11 @@ function install() {
           // corner's own clicks (2026-08-18 fix, shell.js's own note on
           // syncAstrolabePanel).
           MapShine.__remote?.syncAstrolabePanel?.();
+          // Now Playing (2026-08-18 fix) — updateNowPlaying has existed
+          // since U2 with zero callers; see buildNowPlayingLabel's own doc
+          // for the full story. Riding the same ~10Hz throttle as the dial
+          // itself, not a second timer.
+          MapShine.__remote?.updateNowPlaying?.({ label: buildNowPlayingLabel(payload, nowMs) });
         }
       }
     }

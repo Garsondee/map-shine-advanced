@@ -1001,7 +1001,7 @@ export function createAstrolabe(opts) {
 }
 
 /** @param {string} phase @param {boolean} rising @returns {string} */
-function phaseDisplayName(phase, rising) {
+export function phaseDisplayName(phase, rising) {
   const names = {
     night: 'Night',
     astronomical: rising ? 'Astronomical dawn' : 'Astronomical dusk',

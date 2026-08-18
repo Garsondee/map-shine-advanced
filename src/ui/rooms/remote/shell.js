@@ -133,9 +133,21 @@ function injectStyle() {
 #${ROOM_ID} .msa-corner-tr{top:0; right:0; grid-template-areas:"a b" ". c"}
 #${ROOM_ID} .msa-corner-bl{bottom:0; left:0; grid-template-areas:"a ." "b c"}
 #${ROOM_ID} .msa-corner-br{bottom:0; right:0; grid-template-areas:". a" "b c"}
-#${ROOM_ID} .msa-corner button:nth-child(1){grid-area:a}
-#${ROOM_ID} .msa-corner button:nth-child(2){grid-area:b}
-#${ROOM_ID} .msa-corner button:nth-child(3){grid-area:c}
+/* "> :nth-child(N)", NOT "button:nth-child(N)" (2026-08-18 fix; author
+   report: "top right section of three buttons isn't currently correct") —
+   TR's own children are buildImpulseButton()'s span.wrap (needed so the
+   suppression badge can position:absolute against it), never bare buttons.
+   The old selector required the CHILD ITSELF to be a button element, so it
+   silently never matched TR at all — its three items fell through to the
+   grid's own auto-placement instead, which fills cells in DOM order
+   INCLUDING the area's own "." gap, landing the 3rd item (wind) at
+   bottom-LEFT instead of the intended bottom-right. TL/BL/BR never showed
+   this bug because every button there is built directly via iconBtn() —
+   confirmed live (getComputedStyle(el).gridArea read back "auto" on every
+   TR child, not a/b/c), not assumed from the CSS alone. */
+#${ROOM_ID} .msa-corner > :nth-child(1){grid-area:a}
+#${ROOM_ID} .msa-corner > :nth-child(2){grid-area:b}
+#${ROOM_ID} .msa-corner > :nth-child(3){grid-area:c}
 #${ROOM_ID} .msa-corner button{position:relative; width:26px; height:26px; display:grid; place-items:center;
   border-radius:8px; color:var(--ink2); background:var(--bg2); border:1px solid var(--line); cursor:pointer;
   pointer-events:auto; box-shadow:0 2px 6px rgba(0,0,0,.35)}
@@ -164,18 +176,33 @@ function injectStyle() {
 #${ROOM_ID} .msa-jump-menu button:hover{background:var(--bg3)}
 #${ROOM_ID} .msa-astro-status{min-height:14px; font-size:.68rem; color:var(--ink2); text-align:center}
 #${ROOM_ID} .msa-remote-sep{height:1px; background:var(--line); margin:2px 0}
-#${ROOM_ID} .msa-wx-host{display:flex; flex-direction:column; gap:10px}
+#${ROOM_ID} .msa-wx-host{display:flex; flex-direction:column; gap:12px}
+/* THE BLOCK LABELS (2026-08-18 fix; author report: "Fade time isn't added
+   yet" / "lots of UI elements aren't in place yet") — ported from the
+   mock's own .blocklabel, one small header per weather-board section
+   (Fade Time / Moods-Climates / Channels), matching its exact DOM order:
+   Fade Time first, THEN Moods, THEN Channels (production had Moods first —
+   a real ordering miss, not just missing labels). */
+#${ROOM_ID} .msa-wx-blocklabel{font-size:.64rem; letter-spacing:.22em; text-transform:uppercase;
+  color:var(--ink2); display:flex; align-items:center; gap:6px; margin-bottom:6px}
+#${ROOM_ID} .msa-wx-blocklabel .ico{color:var(--shine); width:12px; height:12px; display:flex}
+#${ROOM_ID} .msa-wx-hint{margin-left:auto; letter-spacing:.02em; text-transform:none; color:var(--ink2); opacity:.8}
 #${ROOM_ID} .msa-fade-time{display:grid; grid-template-columns:repeat(6, 1fr); gap:4px}
 #${ROOM_ID} .msa-fade-time button{padding:5px 4px; border-radius:7px; border:1px solid var(--line);
   background:var(--bg2); color:var(--ink2); font-size:.68rem; cursor:pointer; pointer-events:auto}
 #${ROOM_ID} .msa-fade-time button:hover{background:var(--bg3); color:var(--ink0)}
 #${ROOM_ID} .msa-fade-time button[aria-pressed="true"]{background:color-mix(in oklab, var(--shine) 16%, transparent);
   border-color:var(--shine); color:var(--shine)}
-#${ROOM_ID} .msa-wx-modeseg{display:grid; grid-template-columns:1fr 1fr; gap:4px}
-#${ROOM_ID} .msa-wx-modeseg button{padding:6px; border-radius:7px; border:1px solid var(--line); background:var(--bg2);
-  color:var(--ink2); font-size:.72rem; font-weight:600; cursor:pointer; pointer-events:auto}
-#${ROOM_ID} .msa-wx-modeseg button[aria-pressed="true"]{background:color-mix(in oklab, var(--c-atmos) 18%, transparent);
-  border-color:var(--c-atmos); color:var(--c-atmos)}
+/* Now INLINE in the Moods/Climates blocklabel row (mock: #wxTitle +
+   .modeseg share one line via margin-left:auto below), not its own
+   full-width row above the chips — a compact pill, not two equal-width
+   buttons filling the room. */
+#${ROOM_ID} .msa-wx-modeseg{display:inline-flex; margin-left:auto; background:var(--bg2);
+  border:1px solid var(--line); border-radius:999px; padding:2px; gap:2px}
+#${ROOM_ID} .msa-wx-modeseg button{padding:2px 10px; border-radius:999px; border:none; background:none;
+  color:var(--ink2); font-size:.62rem; font-weight:600; letter-spacing:.1em; text-transform:uppercase;
+  cursor:pointer; pointer-events:auto}
+#${ROOM_ID} .msa-wx-modeseg button[aria-pressed="true"]{background:var(--shine-soft); color:var(--shine)}
 #${ROOM_ID} .msa-wx-chips{display:flex; flex-wrap:wrap; gap:5px}
 #${ROOM_ID} .msa-wx-chip{padding:5px 9px; border-radius:999px; border:1px solid var(--line); background:var(--bg2);
   color:var(--ink1); font-size:.7rem; cursor:pointer; pointer-events:auto}
@@ -433,8 +460,14 @@ export function installRemote(opts = {}) {
     }
 
     if (opts.debugStrip) {
+      // 2026-08-18 fix (author report: "buttons/sections are touching each
+      // other") — weather/cues both get their own .msa-remote-sep divider
+      // above; the debug strip never did, so it visually ran into the cues
+      // section above it despite body's own gap.
+      const sep4 = document.createElement('div');
+      sep4.className = 'msa-remote-sep';
       const debugHost = document.createElement('div');
-      body.append(debugHost);
+      body.append(sep4, debugHost);
       debugStripHandle = renderDebugStrip(debugHost, opts.debugStrip);
     }
   }

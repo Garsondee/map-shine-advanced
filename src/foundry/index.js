@@ -170,6 +170,11 @@ export {
 // and writes, mirroring sky-persistence.js's own shape.
 export { readFadeState, writeFadeState, watchFadeState } from './fade-persistence.js';
 
+// CUE PERSISTENCE (U3, docs/holy/UI-Testament.md §4.3) — one scene flag,
+// the authored cue stack. core/cues-schema.js validates; this only reads
+// and writes, mirroring fade-persistence.js's own shape.
+export { readCueStack, writeCueStack, watchCueStack } from './cues-persistence.js';
+
 // THE LIGHT-SOURCE READER — feeds light.accumulate's point-light illumination
 // rung; the one place canvas.effects.lightSources is read. Also the scene's
 // own Global Illumination config (canvas.scene.environment.globalLight) —

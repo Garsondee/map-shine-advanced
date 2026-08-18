@@ -12,12 +12,20 @@
  * True fuzzy matching and a glossary layer are open gaps, named rather than
  * quietly built beyond what was actually validated — see Petition P10.
  *
+ * The overlay SHELL itself (2026-08-18 fix) now lives in
+ * `ui/widgets/search-overlay.js` — this file used to inject its own copy of
+ * the mock's `.searchOverlay` CSS, with its own header noting "only this
+ * module's own consumer exists in src/ so far." `weather-picker.js` is now
+ * the second real consumer, so the shell got promoted to the canon rather
+ * than copied a second time. Only the `.hl` flash-animation stays here — it
+ * highlights a found PARAM ROW, a Studio/EFFECTS-department concept the
+ * overlay shell itself knows nothing about.
+ *
  * @module ui/rooms/studio/search-palette
  */
 
-import { iconMarkup } from '../../widgets/icon-sprite.js';
+import { buildSearchOverlay } from '../../widgets/search-overlay.js';
 
-const OVERLAY_ID = 'msa-studio-palette';
 const STYLE_ID = 'msa-studio-palette-style';
 const EMPTY_QUERY_BROWSE_COUNT = 8;
 const MAX_RESULTS = 12;
@@ -26,24 +34,7 @@ function injectStyle() {
   if (document.getElementById(STYLE_ID)) return;
   const el = document.createElement('style');
   el.id = STYLE_ID;
-  // Ported verbatim from the mock's .searchOverlay rules — shared shell
-  // shape; only this module's own consumer exists in src/ so far.
   el.textContent = `
-#${OVERLAY_ID}{position:fixed; inset:0; z-index:350; display:none; align-items:flex-start;
-  justify-content:center; padding-top:14vh; background:rgba(6,8,14,.45)}
-#${OVERLAY_ID}.open{display:flex}
-#${OVERLAY_ID} .box{width:560px; max-width:92vw; background:var(--glass);
-  backdrop-filter:blur(var(--glass-blur)); border:1px solid var(--line-strong);
-  border-radius:14px; box-shadow:var(--shadow3); overflow:hidden}
-#${OVERLAY_ID} .pin{display:flex; gap:9px; align-items:center; padding:12px 16px;
-  border-bottom:1px solid var(--line)}
-#${OVERLAY_ID} .pin input{flex:1; background:none; border:none; font-size:.95rem; color:var(--ink0); pointer-events:auto}
-#${OVERLAY_ID} .results{max-height:380px; overflow-y:auto; padding:6px; scrollbar-width:thin}
-#${OVERLAY_ID} .hit{display:flex; align-items:center; gap:9px; padding:7px 11px; border-radius:8px;
-  width:100%; text-align:left; color:var(--ink1); font-size:.78rem; pointer-events:auto}
-#${OVERLAY_ID} .hit:hover, #${OVERLAY_ID} .hit.sel{background:var(--bg2); color:var(--ink0)}
-#${OVERLAY_ID} .hit .crumb{margin-left:auto; color:var(--ink2); font-size:.64rem}
-#${OVERLAY_ID} .hit .dot{width:7px; height:7px; border-radius:50%; background:var(--acc); flex:none}
 .msa-param-row.hl{animation:msaSearchHl 1.6s cubic-bezier(.22,.7,.3,1)}
 @keyframes msaSearchHl{0%{background:var(--shine-soft); box-shadow:0 0 0 4px var(--shine-soft)}
   100%{background:transparent; box-shadow:none}}
@@ -89,22 +80,7 @@ export function buildSearchIndex(effectCardFactories) {
 export function installSearchPalette({ buildIndex, onOpenCard }) {
   injectStyle();
 
-  const overlay = document.createElement('div');
-  overlay.id = OVERLAY_ID;
-  overlay.setAttribute('role', 'dialog');
-  overlay.setAttribute('aria-label', 'Search everything');
-  overlay.innerHTML = `
-    <div class="box">
-      <div class="pin">${iconMarkup('search', 'style="color:var(--ink2)"')}
-        <input placeholder="Search every control — try “opacity”, “glow”, “direction”…" autocomplete="off">
-        <kbd>esc</kbd></div>
-      <div class="results"></div>
-    </div>`;
-  document.body.appendChild(overlay);
-  const input = overlay.querySelector('input');
-  const results = overlay.querySelector('.results');
-
-  function drawHits(q) {
+  function drawHits(q, results) {
     results.innerHTML = '';
     const ql = q.trim().toLowerCase();
     const index = buildIndex();
@@ -125,23 +101,23 @@ export function installSearchPalette({ buildIndex, onOpenCard }) {
       btn.className = 'hit' + (i === 0 ? ' sel' : '');
       btn.innerHTML = `<span class="dot" style="--acc:${h.acc}"></span><b>${h.label}</b><span style="color:var(--ink2)">· ${h.effectTitle}</span><span class="crumb">${h.category}</span>`;
       btn.addEventListener('click', () => {
-        controller.close();
+        overlay.close();
         controller.flashParam(h.effectId, h.paramId);
       });
       results.append(btn);
     });
   }
 
+  const overlay = buildSearchOverlay({
+    ariaLabel: 'Search everything',
+    placeholder: 'Search every control — try “opacity”, “glow”, “direction”…',
+    onQuery: drawHits,
+  });
+  document.body.appendChild(overlay.root);
+
   const controller = {
-    open(q = '') {
-      overlay.classList.add('open');
-      if (document.activeElement !== input) input.value = q;
-      input.focus();
-      drawHits(input.value);
-    },
-    close() {
-      overlay.classList.remove('open');
-    },
+    open: overlay.open,
+    close: overlay.close,
     /**
      * Switch to the target card and, once it's actually in the DOM (a room
      * switch is a synchronous rebuild, but this module doesn't own that
@@ -165,11 +141,6 @@ export function installSearchPalette({ buildIndex, onOpenCard }) {
       });
     },
   };
-
-  input.addEventListener('input', (e) => drawHits(e.target.value));
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && overlay.classList.contains('open')) controller.close();
-  });
 
   return controller;
 }

@@ -28,6 +28,7 @@ import {
   buildHistogram,
   buildOffenderSummary,
   buildPerfReport,
+  buildUiPerfSection,
   buildZoneRows,
   classifyAgreement,
   classifyBottleneck,
@@ -1335,12 +1336,53 @@ export function run(t) {
   }
 
   // ======================================================================
+  // buildUiPerfSection — Law 11's row (docs/holy/UI-Testament.md §9, U6)
+  // ======================================================================
+  {
+    ok(
+      'no uiPerf at all is an honest unmeasured, not a silently omitted row',
+      buildUiPerfSection(null).verdict === 'unmeasured'
+    );
+    ok(
+      'unmeasured has no mean/max, never 0',
+      buildUiPerfSection(null).meanMs === null && buildUiPerfSection(null).maxMs === null
+    );
+    ok(
+      "a snapshot that already says 'unmeasured' passes through as unmeasured",
+      buildUiPerfSection({ verdict: 'unmeasured', count: 0, meanMs: null, maxMs: null, budgetMs: 0.3 }).verdict ===
+        'unmeasured'
+    );
+
+    const within = buildUiPerfSection({ verdict: 'within', count: 40, meanMs: 0.12, maxMs: 0.28, budgetMs: 0.3 });
+    ok("a mean under budget is 'within'", within.verdict === 'within');
+    ok('within carries no note (nothing to flag)', within.note === null);
+    ok('within carries the real count through', within.count === 40);
+
+    const over = buildUiPerfSection({ verdict: 'over', count: 40, meanMs: 0.45, maxMs: 0.9, budgetMs: 0.3 });
+    ok("a mean over budget is 'over'", over.verdict === 'over');
+    ok('over explains itself in the note, by name', typeof over.note === 'string' && over.note.includes('0.45'));
+  }
+
+  // ======================================================================
   // End to end — including the all-empty case, which must not invent numbers
   // ======================================================================
   {
     const empty = buildPerfReport({ generatedAt: '2026-07-27T00:00:00.000Z', zones: ZONES, manifests: [] });
     ok('an empty report still identifies itself', empty.report === 'perf-profile');
     ok('an empty report has a stable formatVersion', empty.formatVersion === 1);
+    ok(
+      'empty: uiPerf is unmeasured when nobody wired it in, not a fabricated 0ms',
+      empty.uiPerf.verdict === 'unmeasured'
+    );
+
+    const withUiPerf = buildPerfReport({
+      generatedAt: '2026-07-27T00:00:00.000Z',
+      zones: ZONES,
+      manifests: [],
+      uiPerf: { verdict: 'within', count: 12, meanMs: 0.05, maxMs: 0.11, budgetMs: 0.3 },
+    });
+    ok('a report built WITH a real uiPerf snapshot carries it through', withUiPerf.uiPerf.verdict === 'within');
+    ok('...with the real count', withUiPerf.uiPerf.count === 12);
     ok('empty: frame GPU is null, not 0', empty.attribution.frameGpuMs === null);
     ok('empty: coverage is null, not 0', empty.attribution.coverage === null);
     ok("empty: verdict is 'unmeasured'", empty.attribution.verdict === 'unmeasured');

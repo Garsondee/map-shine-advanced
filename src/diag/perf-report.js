@@ -664,6 +664,42 @@ export function compareToManifest(measuredMsPerMp, manifest) {
 }
 
 /**
+ * Law 11's row (docs/holy/UI-Testament.md §9, U6): "Steady-state panel cost
+ * ≤ 0.3 ms... The UI's own cost is a row in the perf report — an instrument
+ * that exempts itself is lying." `uiPerf` is `diag/ui-perf.js#getUiPerf
+ * Snapshot()`'s own output, handed in as plain data — this file stays clock-
+ * free per its own header, it never calls that module itself.
+ *
+ * Absent/unmeasured is its own real verdict, matching `compareToManifest`'s
+ * vocabulary exactly rather than inventing a second one for the same idea —
+ * a report built without wiring `uiPerf` in says so, it does not silently
+ * omit the row or print a misleading 0ms.
+ */
+export function buildUiPerfSection(uiPerf) {
+  if (!uiPerf || uiPerf.verdict === 'unmeasured' || !Number.isFinite(uiPerf.meanMs)) {
+    return {
+      count: uiPerf?.count ?? 0,
+      meanMs: null,
+      maxMs: null,
+      budgetMs: uiPerf?.budgetMs ?? null,
+      verdict: 'unmeasured',
+      note: 'No Studio/Remote UI tick recorded this window — an instrument that exempts itself from measurement is lying (Law 11).',
+    };
+  }
+  return {
+    count: uiPerf.count,
+    meanMs: uiPerf.meanMs,
+    maxMs: uiPerf.maxMs,
+    budgetMs: uiPerf.budgetMs,
+    verdict: uiPerf.verdict,
+    note:
+      uiPerf.verdict === 'over'
+        ? `Studio/Remote steady-state cost measured ${uiPerf.meanMs}ms mean over ${uiPerf.count} ticks, above the ${uiPerf.budgetMs}ms Law 11 budget.`
+        : null,
+  };
+}
+
+/**
  * Roll zone rows up per effect, and cross-check against the sweep.
  *
  * `method` is the load-bearing field. An effect that draws inside somebody
@@ -2104,6 +2140,7 @@ export function buildPerfReport({
   passSlotStats = null,
   windowDiagnostics = null,
   geometryComposition = null,
+  uiPerf = null,
 } = {}) {
   const frames = Number.isFinite(win.frames) ? win.frames : 0;
   const megapixels =
@@ -2314,6 +2351,11 @@ export function buildPerfReport({
       loop: win.loop ?? 'viewer',
     },
     frame: frameBlock,
+    // Law 11's row (docs/holy/UI-Testament.md §9, U6) — the Studio/Remote
+    // UI's OWN steady-state cost, off the render-frame loop entirely
+    // (`boot.js#pumpAstrolabe` is a separate rAF registration — see diag/
+    // ui-perf.js's own header for why this is not a `zones` entry).
+    uiPerf: buildUiPerfSection(uiPerf),
     // WHERE THE FRAME WENT, as a verdict rather than as two numbers the reader
     // is told to divide. Sits beside `attribution` on purpose: attribution
     // partitions the GPU time we CAN see, this one says how much of the frame

@@ -64,12 +64,36 @@ function blockLabel(icon, titleEl, trailingEl) {
   return label;
 }
 
-/** The two, and only two, live-today channels. Adding a third is a schema
- * change in world/weather.js (flip consumerStatus, wire a real consumer)
- * BEFORE it is a UI change here — never the other way round. */
+/** The two, and only two, live-today WEATHER channels (their own commit
+ * path, `ctx.onAxisCommit`, also stamps `weatherArchetype:'custom'` — right
+ * for these, wrong for the two env channels below). Adding a third is a
+ * schema change in world/weather.js (flip consumerStatus, wire a real
+ * consumer) BEFORE it is a UI change here — never the other way round. */
 const LIVE_CHANNELS = Object.freeze([
   { axis: 'cloudCover01', label: 'Clouds', help: 'How much sky is covered.' },
   { axis: 'precip01', label: 'Rain', help: 'How hard it is coming down.' },
+]);
+
+/** Sky Light + Atmosphere (2026-08-18 fix — gap-audit against the old
+ * astrolabe.js's own tuning-drawer sliders, entirely missing from the new
+ * Remote before this). NOT weather axes — no archetype/biome relationship,
+ * so each gets its own `ctx` getter/commit pair rather than folding into
+ * `LIVE_CHANNELS`/`onAxisCommit` above. */
+const ENV_CHANNELS = Object.freeze([
+  {
+    key: 'skyRealism',
+    label: 'Sky light',
+    help: 'How much the sky itself lights the scene.',
+    getValue: 'getSkyRealism',
+    onCommit: 'onSkyRealismCommit',
+  },
+  {
+    key: 'atmosphere',
+    label: 'Atmosphere',
+    help: 'Environmental colour-grade strength.',
+    getValue: 'getGradeEnvStrength',
+    onCommit: 'onGradeEnvStrengthCommit',
+  },
 ]);
 
 function chip(text, title, onClick) {
@@ -110,6 +134,10 @@ function driftBracket(biome, axisName) {
  *   fadeToArchetype: (archetypeId: string, overMs: number) => void,
  *   getAxisValue: (axisName: string) => number,
  *   onAxisCommit: (axisName: string, value: number) => void,
+ *   getWeatherVolatility?: () => number, onWeatherVolatilityCommit?: (v: number) => void,
+ *   getSkyRealism?: () => number, onSkyRealismCommit?: (v: number) => void,
+ *   getGradeEnvStrength?: () => number, onGradeEnvStrengthCommit?: (v: number) => void,
+ *   getSceneOverride?: () => boolean, onSceneOverrideCommit?: (enabled: boolean) => void,
  * }} ctx
  * @returns {{ getFadeOverMs: () => number, refresh: () => void }}
  */
@@ -159,8 +187,14 @@ export function renderWeatherBoard(container, ctx) {
   modeRow.append(directBtn, driftBtn);
   const chipRow = document.createElement('div');
   chipRow.className = 'msa-wx-chips';
+  // Pace (2026-08-18 fix) — the old astrolabe.js's own weatherVolatility
+  // slider, which sat right beside its Climate select in the tuning
+  // drawer. Meaningless in Direct mode (nothing is walking on its own to
+  // pace), so it only renders in Drift, same conditional shape
+  // renderFaders() already uses for the drift-bracket notes.
+  const paceHost = document.createElement('div');
   const moodsBlock = document.createElement('div');
-  moodsBlock.append(blockLabel('cloud', moodsTitle, modeRow), chipRow);
+  moodsBlock.append(blockLabel('cloud', moodsTitle, modeRow), chipRow, paceHost);
 
   // ---- CHANNELS block — label is real regardless of how many of the 7
   // mock channels have live backing today (LIVE_CHANNELS, above): "Channels"
@@ -185,11 +219,13 @@ export function renderWeatherBoard(container, ctx) {
     ctx.onWeatherModeChange('director');
     paintMode();
     renderChips();
+    renderPace();
   });
   driftBtn.addEventListener('click', () => {
     ctx.onWeatherModeChange('almanac');
     paintMode();
     renderChips();
+    renderPace();
   });
 
   function renderChips() {
@@ -248,11 +284,60 @@ export function renderWeatherBoard(container, ctx) {
       }
       faderHost.appendChild(row);
     }
+    // Sky Light + Atmosphere (2026-08-18 fix) — own commit path per channel
+    // (ctx[channel.getValue]/ctx[channel.onCommit]), never ctx.onAxisCommit,
+    // since these aren't weather axes and must NOT stamp
+    // weatherArchetype:'custom' the way LIVE_CHANNELS' own commit does.
+    for (const channel of ENV_CHANNELS) {
+      const decl = { type: 'float', min: 0, max: 1, step: 0.01, default: 0, label: channel.label, help: channel.help };
+      const getValue = ctx[channel.getValue];
+      const onCommit = ctx[channel.onCommit];
+      if (typeof getValue !== 'function') continue;
+      faderHost.appendChild(
+        buildParamControl(channel.key, decl, { value: getValue(), onChange: (v) => onCommit?.(v) })
+      );
+    }
+    // Scene override (2026-08-18 fix) — the old astrolabe.js's own "this
+    // scene has its own sky" checkbox. Real bool param via the SAME
+    // buildParamControl door every other row here uses, not a hand-built
+    // checkbox.
+    if (typeof ctx.getSceneOverride === 'function') {
+      faderHost.appendChild(
+        buildParamControl(
+          'sceneOverride',
+          { type: 'bool', label: 'This scene has its own sky', help: 'Per-scene sky, not the world default.' },
+          { value: ctx.getSceneOverride(), onChange: (v) => ctx.onSceneOverrideCommit?.(v) }
+        )
+      );
+    }
+  }
+
+  /** Pace, own function since it's gated on mode alone (unlike renderChips/
+   * renderFaders, it never needs to re-run on a chip click). */
+  function renderPace() {
+    paceHost.innerHTML = '';
+    if (ctx.getWeatherMode() !== 'almanac' || typeof ctx.getWeatherVolatility !== 'function') return;
+    const decl = {
+      type: 'float',
+      min: 0.25,
+      max: 4,
+      step: 0.25,
+      default: 1,
+      label: 'Pace',
+      help: 'How fast the climate wanders on its own in Drift mode.',
+    };
+    paceHost.appendChild(
+      buildParamControl('weatherVolatility', decl, {
+        value: ctx.getWeatherVolatility(),
+        onChange: (v) => ctx.onWeatherVolatilityCommit?.(v),
+      })
+    );
   }
 
   paintMode();
   renderChips();
   renderFaders();
+  renderPace();
 
   return {
     getFadeOverMs: fadeTime.getOverMs,
@@ -260,6 +345,7 @@ export function renderWeatherBoard(container, ctx) {
       paintMode();
       renderChips();
       renderFaders();
+      renderPace();
     },
   };
 }

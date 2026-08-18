@@ -1117,6 +1117,25 @@ function install() {
       fadeToArchetype: (archetypeId, overMs) => fadeWeatherToArchetype(archetypeId, overMs),
       getAxisValue: (axisName) => fadeSourceRegistry.readLive(`weather.${axisName}`),
       onAxisCommit: (axisName, value) => void editSky({ [axisName]: value, weatherArchetype: 'custom' }),
+      // Pace, Sky Light, Atmosphere, Scene override (2026-08-18 fix —
+      // gap-audit against the old astrolabe.js's own tuning-drawer sliders,
+      // entirely missing from the new Remote before this). Same real
+      // functions the old panel's own instance already calls — see this
+      // exact wiring a few hundred lines down at `buildAstrolabeOptions`'s
+      // own `onWeatherVolatilityChange`/`onSkyRealismChange`/
+      // `onGradeEnvChange`/`onSceneOverrideChange`, never a second path.
+      getWeatherVolatility: () => skyScope.sky?.weatherVolatility ?? 1,
+      onWeatherVolatilityCommit: (v) => void editSky({ weatherVolatility: v }),
+      getSkyRealism: () => skyScope.sky?.realism01 ?? 0,
+      onSkyRealismCommit: (v) => void editSky({ realism01: v }),
+      getGradeEnvStrength: () => skyScope.sky?.gradeEnvStrength ?? 0,
+      onGradeEnvStrengthCommit: (v) => void editSky({ gradeEnvStrength: v }),
+      getSceneOverride: () => skyScope.sceneOverrides === true,
+      onSceneOverrideCommit: async (enabled) => {
+        const result = await setSceneSkyOverride(enabled, skyScope.sky);
+        if (!result.ok) log.warn(`scene sky override not changed: ${result.reason}`);
+        resolveAndApplySky();
+      },
     },
     onBaseline: (overMs) => fadeWeatherToBaseline(overMs),
     // THE CUE DECK (U3) — same closure-reference safety as weatherBoard

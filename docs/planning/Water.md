@@ -1,5 +1,11 @@
 # WATER — the pure-TSL/WebGPU design, tiers 0–8
 
+> **⚠️ 2026-08-16 — THE CAMPAIGN PLAN NOW LIVES IN `docs/holy/Water-Testament.md`** (Fable 5,
+> at the author's command): the full research digest (bodies/depth/wind/foam/refraction/
+> shafts/sediment/swell), the species doctrine, the revised ladder, and the W0–W12 checklist.
+> THIS file remains the spec of record for the BUILT tiers and its **12 locked corrections
+> remain law** — but new work is sequenced by the Testament, not by §10 below.
+
 **Status:** DESIGN SPEC, 2026-07-25. Supersedes §5–§7 of the 2026-07-16 research seed; §1–§4 below are that seed's measured findings, kept and extended.
 **Pass:** `surface.water` (seam today — `src/effects/water/water-pass.js`), plus a new `sims.water`.
 **Why water:** Keyhole §4.4 names it the honest hard case and the FIRST Stage 6 port; Keyhole §9 lists it as risk 4; `Effects.md` uses it as the tier ladder's worked example throughout; `Effects-API.md` §6 says the reads/writes/`build(ctx)` contract is deliberately unbuilt and **waits for water to define it**.
@@ -180,7 +186,7 @@ Cost classes per `Effects.md` Law 3.
 | **0** | `placement` | C4 | The water mask, tinted, in the right place on the right floor — cross-floor borrow + the `attr` punch. **Never gated.** |
 | **1** | `volume` | C1 | Beer–Lambert absorption over depth (`exp(−σd)`) so deep reads deep and shallow reads sandy, plus the wet-ground band outside the shoreline. Pure ALU on reads tier 0 already paid for. |
 | **2** | `motion` | C2 | A resident seamless tiling slope+foam texture, scrolled and blended at two scales **along the flow vector**. It stops being a decal. |
-| **3** | `light` | C3 | GGX specular + Fresnel-weighted sky reflection from the **sky handle**, gated by `buf:scene.illum` and `buf:scene.vis`. No new bandwidth. |
+| **3** | `light` | C3 | GGX specular + Fresnel-weighted sky reflection from the **sky handle**, gated by `buf:scene.illum` and `buf:scene.vis`. No new bandwidth. **The `buf:scene.vis` half finally landed 2026-08-16** — see below. |
 | **4** | `shore` | C4 | SDF-driven shoreline detail — foam filaments along the bank, wave shoaling toward shore — and **caustics from the field's Jacobian** projected onto the bed. |
 | **5** | `refraction` | C5 | Dependent read of `buf:scene.color` offset by slope × thickness, with a land-validity test, plus chromatic dispersion on the same offset. |
 | **6** | `reflection` | C6 | A short screen-space march along the wave normal for shoreline objects and tokens, over the sky handle's base. First rung with a VRAM line in the ledger. |
@@ -195,6 +201,20 @@ Rungs 1–8 are a clean `C1 → C8` staircase.
 - **Tier 7 ADDS to the tier-2 field, it does not replace it.** Law 2 forbids substitution — a rung may never swap the technique behind an existing term. The resident tiling base keeps contributing at every tier; the sim adds structure noise cannot have (correct dispersion, banks reflecting, rain rings, wakes, flow-coherent crests). This is also simply true of real water: broadband chop *plus* coherent structure.
 
 **Tiers 0–3 are nearly free and carry nearly the whole look.** That asymmetry is not luck — it is what Law 3 *is*. A weak machine gets water a player would describe as water, not as "missing effects".
+
+### 6.1 ⚠️ A ROW OF THIS TABLE WENT UNBUILT FOR THREE WEEKS AND NOTHING NOTICED (2026-08-16)
+
+Tier 3's row above says **"gated by `buf:scene.illum` and `buf:scene.vis`"**, and §7 below lists **"sun occlusion → `buf:scene.vis`"** as one of water's seven handles. Tier 3 shipped 2026-07-26 with the *outdoors* gate only. The author found it by eye three weeks later — *"Sun glint needs to be defeated by shadows"* — and it is now built (`water-light.js`, `Bug-Tracker.md` #26).
+
+Recorded here rather than in a session log because the *shape* is what matters and it has now happened three times to this one effect. Every one of these was a row of a spec that read as done:
+
+| What the spec said | What shipped | Found by |
+| --- | --- | --- |
+| §2a: depth01 "authored where painted, **else derived from `\|SDF\|`**" | only the first half — so a silhouette mask gave a flat wash | author, "it looks like paint", ×4 |
+| §5.1: `bankInfluence = 1 − smoothstep(0, bankReachPx, \|sdf\|)` | the warp at full strength everywhere, including the medial axis | author, "hard edges that don't make sense" |
+| §6/§7: tier 3 "gated by `buf:scene.vis`" | the outdoors gate only | author, "glint needs to be defeated by shadows" |
+
+**The lesson is not "read the spec harder".** All three were *partial* builds of a compound sentence, and each looked complete from inside the code that implemented the other half — which is exactly why none of them tripped a test, a wall, or a status field. Where a spec line has an **"and"** or an **"else"** in it, the second clause needs its own checkable artefact (a test, a `getStatus()` field, a named constant) or it is not built, it is intended. The three fixes each shipped one: `WATER_TIER1_DEPTH_SCALE_PX`, `WATER_BANK_REACH_PX`, `getStatus().sunShadow.compiled`.
 
 **`deferredRungs` — recorded, not built:** compute-shader butterfly (gated on a measurement); two simultaneous water bodies visible through one hole; underwater depth-of-field; ice / lava / swamp material presets over the same field; authored flow painting through the Map Points successor (`Authoring-and-Distribution.md`).
 
@@ -240,6 +260,14 @@ V2's water is the largest single body of evidence in the repo, so it should leav
 ---
 
 ## 9. Module layout, contract, and registration
+
+⚠️ **This table is the PRE-BUILD sketch and has not tracked the real module
+split since** — it still names `water-pass.js`/`WATER_PRESETS` that were never
+built this shape, and is missing `water-body-subsystem.js`,
+`water-surface-subsystem.js`, `water-light.js` (tier 3), `water-shore.js` (tier
+4, 2026-08-16), `water-sampling.js`, `water-seams.js` and `water-registration.js`
+entirely. Left as historical record rather than silently rewritten while fixing
+something unrelated; `src/effects/water/` on disk is the actual authority.
 
 All new, all inside `SIZE_CAPS` (file ≤1000, fn ≤500) — **no new entries in `size-budgets.json`**.
 

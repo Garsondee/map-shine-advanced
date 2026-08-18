@@ -14,6 +14,7 @@ import { run as runLoadProgress } from './load-progress.test.mjs';
 import { run as runPerfProgressOverlay } from './perf-progress-overlay.test.mjs';
 import { run as runFloorTransition } from './floor-transition.test.mjs';
 import { run as runTokens } from './tokens.test.mjs';
+import { run as runAstrolabeDial } from './astrolabe-dial.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -54,6 +55,7 @@ const suites = [
   ['perf-progress-overlay', runPerfProgressOverlay],
   ['floor-transition', runFloorTransition],
   ['tokens', runTokens],
+  ['astrolabe-dial', runAstrolabeDial],
 ];
 
 for (const [name, fn] of suites) {

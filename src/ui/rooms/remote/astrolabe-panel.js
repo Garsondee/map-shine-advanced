@@ -69,6 +69,64 @@ function ghostSlotBtn(onClick) {
  * toggle below, matching TIME_RATE_STEPS' own "0 = paused" convention. */
 const FLOW_SPEED_STEPS = TIME_RATE_STEPS.filter((s) => s > 0);
 
+/** world/day-clock.js's own three postures (ALMANAC_POSTURES) — labels
+ * shortened from the old astrolabe.js's own <select> option text for a
+ * compact pill, tooltips keep the full wording. */
+const CLOCK_MODES = Object.freeze([
+  {
+    value: 'aesthetic',
+    label: 'Aesthetic',
+    title: 'Aesthetic — the dial sets the look; Play and Speed drive it directly.',
+  },
+  { value: 'follow', label: 'Follow', title: "Follow — Foundry's own world clock drives it." },
+  {
+    value: 'almanac',
+    label: 'Almanac',
+    title: 'Almanac — Foundry’s clock drives it, and the GM can advance it with Jump.',
+  },
+]);
+
+/**
+ * The Clock-mode control (2026-08-18 fix — gap-audit against the old
+ * astrolabe.js's own real `modeSelect`, which the new Remote never ported
+ * at all: `getPosture` was read-only everywhere in `ui/rooms/remote/`). A
+ * 3-way segmented pill, matching the Direct/Drift precedent already
+ * established in `weather-board.js` rather than the old system's native
+ * `<select>` — one real vocabulary (`world/day-clock.js`'s own three
+ * postures), a new LANTERN presentation. Sits ABOVE the dial, not folded
+ * into a drawer: almost everything else in this corner cluster (flow/speed
+ * below, Jump-to) depends on which mode is active, so it needs to be seen
+ * first.
+ * @param {{getPosture: () => string, onSetMode?: (mode: string) => void}} ctx
+ * @returns {{el: HTMLElement, sync: () => void}}
+ */
+function buildClockModeRow(ctx) {
+  const el = document.createElement('div');
+  el.className = 'msa-clock-mode';
+  el.setAttribute('role', 'group');
+  el.setAttribute('aria-label', 'Clock mode');
+  const buttons = CLOCK_MODES.map((m) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = m.label;
+    btn.title = m.title;
+    btn.addEventListener('click', () => {
+      ctx.onSetMode?.(m.value);
+      sync();
+    });
+    el.appendChild(btn);
+    return btn;
+  });
+  function sync() {
+    const posture = ctx.getPosture();
+    for (const [i, m] of CLOCK_MODES.entries()) {
+      buttons[i].setAttribute('aria-pressed', String(m.value === posture));
+    }
+  }
+  sync();
+  return { el, sync };
+}
+
 /**
  * TL — time progression: play/pause the flow, a speed picker, and jump
  * shortcuts wired to the REAL Almanac Pen. THE FIRST REAL UI CALLER of
@@ -100,7 +158,23 @@ function buildCornerTL(ctx) {
   const armed = () => isPenArmed(ctx.getPosture());
   const explainUnarmed = () =>
     ctx.onStatus(
-      `The Pen is not armed — set the Clock to "Almanac" on the astrolabe below first (posture is currently '${ctx.getPosture()}').`
+      `The Pen is not armed — set the Clock to "Almanac" above first (posture is currently '${ctx.getPosture()}').`
+    );
+  // ⚠️⚠️ 2026-08-18 fix — Play/pause and Speed drive `rateHoursPerMinute`,
+  // which `world/day-clock.js` only actually USES in 'aesthetic' mode
+  // (its own rate branch and `canSetHour` both gate on
+  // `currentMode==='aesthetic'`) — a DIFFERENT posture than Jump-to's own
+  // `isPenArmed()`/'almanac' requirement below. Gating flow/speed on
+  // `isPenArmed()` (this corner's own first build) meant both were
+  // non-functional in EVERY reachable state: blocked in Aesthetic (the
+  // default) by a check that doesn't apply to them, inert-even-if-reachable
+  // in Almanac (where rate drives nothing). Confirmed by reading
+  // day-clock.js directly during a full old-vs-new gap audit, not assumed
+  // from the old panel's own different gate.
+  const aestheticActive = () => ctx.getPosture() === 'aesthetic';
+  const explainNotAesthetic = () =>
+    ctx.onStatus(
+      `Time flow only runs in Aesthetic mode — the Clock above is set to '${ctx.getPosture()}'. Switch it to Aesthetic first.`
     );
 
   // Play/pause IS the rate: this system has no separate boolean — "paused"
@@ -111,7 +185,7 @@ function buildCornerTL(ctx) {
     ctx.isFlowPlaying() ? 'pause' : 'play',
     ctx.isFlowPlaying() ? 'Pause time flow' : 'Play time flow',
     () => {
-      if (!armed()) return explainUnarmed();
+      if (!aestheticActive()) return explainNotAesthetic();
       ctx.onFlowToggle();
       syncFlowBtn();
     }
@@ -134,7 +208,7 @@ function buildCornerTL(ctx) {
     speedBtn.textContent = `×${rate > 0 ? rate : FLOW_SPEED_STEPS[0]}`;
   }
   speedBtn.addEventListener('click', () => {
-    if (!armed()) return explainUnarmed();
+    if (!aestheticActive()) return explainNotAesthetic();
     const current = ctx.getFlowRate?.() ?? 0;
     const menu = document.createElement('div');
     menu.className = 'msa-jump-menu';
@@ -272,15 +346,17 @@ function buildCornerBR(onStatus) {
 /**
  * @param {HTMLElement} container
  * @param {{mountAstrolabeDial: (el: HTMLElement) => void, getPosture: () => string,
- *   isFlowPlaying: () => boolean, onFlowToggle: () => void, getFlowRate?: () => number,
+ *   onSetMode?: (mode: string) => void, isFlowPlaying: () => boolean,
+ *   onFlowToggle: () => void, getFlowRate?: () => number,
  *   onSetFlowRate?: (rate: number) => void,
  *   impulses?: Array<import('../../../core/impulse-schema.js').ImpulseDecl>}} ctx
  * @returns {{syncFlowState: () => void}} `syncFlowState` re-reads
- *   `isFlowPlaying`/`getFlowRate` and repaints the TL corner — boot.js's own
- *   `pumpAstrolabe` calls this every tick, the same "never polls on its own,
- *   it's told" shape `shell.js#refreshWeatherBoard`/`refreshCueDeck` already
- *   use, so the flow/speed buttons can't go stale when the rate changes from
- *   elsewhere (the old panel's own rate slider, another connected client).
+ *   `getPosture`/`isFlowPlaying`/`getFlowRate` and repaints the Clock-mode
+ *   row AND the TL corner — boot.js's own `pumpAstrolabe` calls this every
+ *   tick, the same "never polls on its own, it's told" shape
+ *   `shell.js#refreshWeatherBoard`/`refreshCueDeck` already use, so nothing
+ *   here can go stale when state changes from elsewhere (the old panel's
+ *   own controls, another connected client).
  */
 export function renderAstrolabePanel(container, ctx) {
   const wrap = document.createElement('div');
@@ -292,6 +368,8 @@ export function renderAstrolabePanel(container, ctx) {
     statusLine.textContent = text ?? '';
   };
 
+  const clockMode = buildClockModeRow(ctx);
+
   const dialHost = document.createElement('div');
   dialHost.className = 'msa-astro-dial-host';
   const cornerTL = buildCornerTL({ ...ctx, onStatus });
@@ -302,8 +380,13 @@ export function renderAstrolabePanel(container, ctx) {
   ctx.mountAstrolabeDial(dialSlot);
   dialHost.appendChild(dialSlot);
 
-  wrap.append(dialHost, statusLine);
+  wrap.append(clockMode.el, dialHost, statusLine);
   container.appendChild(wrap);
 
-  return { syncFlowState: cornerTL.sync };
+  return {
+    syncFlowState: () => {
+      clockMode.sync();
+      cornerTL.sync();
+    },
+  };
 }

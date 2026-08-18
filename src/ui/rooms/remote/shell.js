@@ -60,6 +60,17 @@ function injectStyle() {
   background:var(--bg2); border:1px solid var(--line); border-radius:999px; font-size:.74rem; color:var(--ink1)}
 #${ROOM_ID} .msa-now-playing .ico{color:var(--shine); width:16px; height:16px}
 #${ROOM_ID} .msa-astro-wrap{display:flex; flex-direction:column; gap:6px; align-items:center}
+/* THE CLOCK-MODE PILL (2026-08-18 fix) — a real gap-audit finding: the old
+   astrolabe.js has a live Aesthetic/Follow/Almanac <select> the new Remote
+   never ported at all. Full-width 3-way segmented control, same visual
+   family as weather-board.js's own Direct/Drift pill but sized for the
+   dial's own ~340px column rather than sharing a label row. */
+#${ROOM_ID} .msa-clock-mode{display:grid; grid-template-columns:repeat(3, 1fr); gap:2px;
+  width:100%; background:var(--bg2); border:1px solid var(--line); border-radius:999px; padding:2px}
+#${ROOM_ID} .msa-clock-mode button{padding:4px 6px; border-radius:999px; border:none; background:none;
+  color:var(--ink2); font-size:.64rem; font-weight:600; letter-spacing:.04em; cursor:pointer; pointer-events:auto}
+#${ROOM_ID} .msa-clock-mode button:hover{color:var(--ink0)}
+#${ROOM_ID} .msa-clock-mode button[aria-pressed="true"]{background:var(--shine-soft); color:var(--shine)}
 /* NO padding (2026-08-18 fix) — the mock's own #astro has none: the four
    corner clusters are OF the 340px box, geometrically confirmed clear of
    the ring itself (see astrolabe-dial.js's own header), not a margin
@@ -343,7 +354,8 @@ function plannedFooterBtn(text, plannedReason) {
 
 /**
  * @param {{debugPanel?: object, mountAstrolabeDial: (el: HTMLElement) => void,
- *   getPosture: () => string, isFlowPlaying: () => boolean, onFlowToggle: () => void,
+ *   getPosture: () => string, onSetMode?: (mode: string) => void,
+ *   isFlowPlaying: () => boolean, onFlowToggle: () => void,
  *   getFlowRate?: () => number, onSetFlowRate?: (rate: number) => void,
  *   weatherBoard?: object, onBaseline?: (overMs: number) => void, cueDeck?: object,
  *   debugStrip?: object,
@@ -435,6 +447,7 @@ export function installRemote(opts = {}) {
     astrolabePanelHandle = renderAstrolabePanel(body, {
       mountAstrolabeDial: opts.mountAstrolabeDial ?? (() => {}),
       getPosture: opts.getPosture ?? (() => 'director'),
+      onSetMode: opts.onSetMode ?? (() => {}),
       isFlowPlaying: opts.isFlowPlaying ?? (() => false),
       onFlowToggle: opts.onFlowToggle ?? (() => {}),
       getFlowRate: opts.getFlowRate ?? (() => 0),

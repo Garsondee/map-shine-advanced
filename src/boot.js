@@ -968,6 +968,13 @@ function install() {
     revertCueTest: () => revertCueTest(),
     isCueTestActive: () => isCueTestActive(),
     validateCue: (cue) => validateCue(cue, fadeSourceRegistry.typeOf),
+    // THE PAINTER DEPARTMENT (U4) — same closure-reference safety as CUES
+    // above. armBrush reuses paintAffordance's own onAdd rather than
+    // re-deriving which mask kind to open on, so the tile grid and the
+    // EFFECTS department's own 🖌 card button (water's, today) can never
+    // disagree about which kind a given effect opens.
+    listPaintableEffects: () => listPaintableEffects(),
+    armBrush: (effectId) => paintAffordance(effectId)?.onAdd?.(),
   });
   // THE REMOTE (U2, docs/holy/UI-Testament.md §4, §9) — side-by-side with
   // both the old panel and the Studio. Every callback below is a closure
@@ -5106,9 +5113,36 @@ function install() {
       label: suffixes.length === 1 ? `\u{1F58C} Paint ${suffixes[0]}` : '\u{1F58C} Paint',
       title:
         `Opens the brush on the floor you are viewing, with ${suffixes.join(' / ')} ready to paint. ` +
-        'Paint where the effect belongs; it reads the mask live.',
+        // ⚠️ CORRECTED (U4 research, 2026-08-18): this used to claim "it reads
+        // the mask live" — false. mask-authority.js's own ingest API has
+        // exactly two doors (real files on disk, and the VT pager's decoded-
+        // page stream); the painter's Save writes to a scene flag neither
+        // reads. Painting genuinely saves the stroke; nothing renders it yet.
+        'Paint where the effect belongs — this saves to the scene, but no effect reads a painted mask back live yet.',
       onAdd: () => MapShine.__painter?.enter({ kind: kinds[0] }),
     };
+  }
+
+  /**
+   * Every effect that declares `authoring.paint`, with per-tile mask-found
+   * status for the floor you are CURRENTLY viewing — the PAINTER
+   * department's own tile grid (U4). Read fresh on every call, never
+   * cached: a cached list would report whatever floor was active the last
+   * time the department opened, forever.
+   * @returns {{id: string, title: string, suffixes: string[], found: boolean}[]}
+   */
+  function listPaintableEffects() {
+    return effectRegistry
+      .list()
+      .filter((m) => m.authoring?.paint)
+      .map((m) => {
+        const kinds = Array.isArray(m.authoring.paint) ? m.authoring.paint : [m.authoring.paint];
+        const suffixes = kinds.map((k) => maskKindById(k)?.suffixes?.[0] ?? k);
+        const found = kinds.some(
+          (k) => maskAuthority.authoredStatus(activeFloorContext?.levelId, k)?.source === 'authored'
+        );
+        return { id: m.id, title: m.title ?? m.id, suffixes, found };
+      });
   }
 
   function buildCandlesPanel({ attachments } = {}) {

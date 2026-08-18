@@ -342,6 +342,15 @@ export function renderWeatherBoard(container, ctx) {
       }
     } else {
       const activeArchetype = ctx.getWeatherArchetype();
+      // Which chip (if any) a fade is currently heading toward (2026-08-18
+      // fix — author report: "mood buttons don't work yet"). Root cause:
+      // `weatherArchetype` flips to 'custom' the INSTANT a fade starts, so
+      // `archetype.id === activeArchetype` reads false for every chip
+      // including the one just clicked — the whole row visibly goes dark
+      // for the entire fade, no sign the click landed. `data-pending`
+      // fixes that honestly: it names the TARGET without claiming arrival
+      // (aria-pressed stays reserved for "this is what the sky IS").
+      const fadingId = ctx.getFadingArchetypeId?.() ?? null;
       const favourites = FAVOURITE_ARCHETYPE_IDS.map((id) => WEATHER_ARCHETYPES.find((a) => a.id === id)).filter(
         Boolean
       );
@@ -358,6 +367,7 @@ export function renderWeatherBoard(container, ctx) {
           renderChips();
         });
         btn.setAttribute('aria-pressed', String(archetype.id === activeArchetype));
+        if (archetype.id === fadingId) btn.dataset.pending = 'true';
         chipRow.appendChild(btn);
       }
     }

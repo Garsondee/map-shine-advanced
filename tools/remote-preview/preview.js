@@ -295,6 +295,16 @@ const remote = installRemote({
     },
     getWeatherArchetype: () => fakeSky.weatherArchetype,
     fadeToArchetype: (archetypeId, overMs) => fadeToArchetype(archetypeId, overMs),
+    // Mirrors boot.js's own getFadingArchetypeId exactly (2026-08-18 fix).
+    getFadingArchetypeId: () => {
+      const nowMs = performance.now();
+      for (const [key, entry] of Object.entries(fadeState)) {
+        if (key.startsWith('weather.') && !isEntryExpired(entry, nowMs)) {
+          return pendingCompletions.get(entry.id) ?? null;
+        }
+      }
+      return null;
+    },
     getAxisValue: (axisName) => fadeRegistry.readLive(`weather.${axisName}`),
     onAxisCommit: (axisName, value) => {
       fakeSky[axisName] = value;

@@ -240,6 +240,13 @@ function injectStyle() {
 #${ROOM_ID} .msa-wx-chip:hover{background:var(--bg3)}
 #${ROOM_ID} .msa-wx-chip[aria-pressed="true"]{background:color-mix(in oklab, var(--shine) 18%, transparent);
   border-color:var(--shine); color:var(--shine)}
+/* The fade TARGET, distinct from "this IS the sky" above (2026-08-18 fix —
+   author: "mood buttons don't work yet"; root cause was the whole row going
+   dark for the entire fade with no sign a click landed). Static — no
+   animation, matching the author's own separate "no animation, it's
+   distracting" note applied here too, not just at the GO button. */
+#${ROOM_ID} .msa-wx-chip[data-pending="true"]{background:color-mix(in oklab, var(--shine) 8%, transparent);
+  border-color:var(--shine); border-style:dashed; color:var(--ink0)}
 #${ROOM_ID} .msa-wx-faders{display:flex; flex-direction:column; gap:6px}
 #${ROOM_ID} .msa-wx-bracket{font-size:.62rem; color:var(--ink2); margin-left:6px; white-space:nowrap}
 #${ROOM_ID} .msa-wx-pin{flex:0 0 auto; margin-left:6px; padding:0 4px; font-size:.68rem; line-height:1;

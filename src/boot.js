@@ -1145,6 +1145,24 @@ function install() {
       // SAME function the old panel's own `onUnpinCloudCover` already calls.
       getCloudPinned: () => Boolean(getVtPanViewerTimeDialState()?.weatherPinnedAxes?.includes('cloudCover01')),
       onUnpinCloudCover: () => unpinVtPanViewerWeatherAxis('cloudCover01'),
+      // Which mood chip a fade is currently heading toward (2026-08-18 fix —
+      // author report: "mood buttons don't work yet"). Root cause, confirmed
+      // by reading fadeWeatherToArchetype: `weatherArchetype` flips to
+      // 'custom' THE INSTANT a fade starts, so `activeArchetype === id`
+      // (renderChips' own highlight check) goes false for every chip
+      // including the one just clicked — a GM watching a 10s fade sees the
+      // WHOLE row go dark with no sign their click landed. Same
+      // fadeState/pendingArchetypeCompletions buildNowPlayingLabel already
+      // reads, reused rather than a second tracking mechanism.
+      getFadingArchetypeId: () => {
+        const nowMs = wallClockMs();
+        for (const [key, entry] of Object.entries(fadeState)) {
+          if (key.startsWith('weather.') && !isEntryExpired(entry, nowMs)) {
+            return pendingArchetypeCompletions.get(entry.id) ?? null;
+          }
+        }
+        return null;
+      },
       onSceneOverrideCommit: async (enabled) => {
         const result = await setSceneSkyOverride(enabled, skyScope.sky);
         if (!result.ok) log.warn(`scene sky override not changed: ${result.reason}`);

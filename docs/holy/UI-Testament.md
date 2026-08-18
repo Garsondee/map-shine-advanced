@@ -1337,6 +1337,135 @@ climb.*
 
 ---
 
+**P10 — filed by Claude Sonnet 5, 2026-08-18 (worker tier; U1 — the Studio shell — is now
+BUILT, continuing straight from Petition P9 on the author's own "continue the UI migration
+please").** U1's own checklist (§9) is complete against its literal bullets. Several honest
+scope notes below, and one self-correction worth reading closely regardless of the rest.
+
+1. **Studio shell** — the department rail (EFFECTS·PAINTER·SCENE·CUES·SYSTEM·LAB), room
+   header, department switching, ported from the mock's `#studio` DOM shape and class names
+   verbatim so LANTERN's existing token rules apply unchanged. LAB is dev-gated on
+   `debugPanel.isGM()` — the OLD panel's own current real gate, not the fuller "debug dress"
+   flag §4.6 describes, which doesn't exist anywhere in `src/` yet. Parity with the existing
+   product, named as exactly that rather than either overstating it as the Testament's fuller
+   mechanism or silently shipping a gate weaker than what's already live.
+2. **EFFECTS department — real, but narrow: exactly ONE effect is wired.** `registerEffectCard`
+   exists at one call site in `boot.js` (water), against roughly seventeen `registerPanel`
+   call sites still serving the old panel (fire, lightning, vegetation, bloom, DOF, sun-
+   shadows, grade, albedo-clarity, and more). The card shell, widget canon, tier chip, mask
+   row, presets, and pop-out are all real against water's real functions
+   (`water.getReadout()`, `MapShine.setWater`, `maskAuthority.authoredStatus`,
+   `paintAffordance('water')?.onAdd`) — but the other ~16 effects are not reachable through
+   the Studio at all today. Wiring the rest is mechanical (the same block, once per effect)
+   and deliberately left for a focused follow-up rather than folded in here, so this petition
+   doesn't imply "EFFECTS department done" when what's actually true is "EFFECTS department
+   shell proven correct against one real, representative effect."
+3. **Search palette ports the mock's REAL behaviour, not the Testament's aspirational
+   text.** §7 describes "fuzzy-search[ing] every schema label, help string, and glossary
+   term"; the mock's actual, author-approved implementation is a plain lowercase `includes()`
+   substring test over label + effect title + help, with no category search and no glossary
+   layer. This module matches the mock exactly (U1's own "re-home, not a rewrite" rule) —
+   live-verified this round: searching "opacity" against the Studio's real water+bloom
+   schemas returned exactly one hit ("Opacity · Water · Look"), selecting it closed the
+   palette and switched to EFFECTS with the pin/filter state from before the search
+   untouched. True fuzzy matching and the glossary layer are named gaps, not silently skipped.
+4. **SCENE department** — Baseline and Scene Presets both wait on the Fade Engine (U2, not
+   built); Levels-editing has no confirmed `src/` hook this session traced for touching
+   `scene.levels` bands from a panel; Motion Tiles has no `src/` runtime at all (V2-only,
+   `legacy/scene/tile-motion-manager.js`) — all four ship as honest `status:'planned'` cards,
+   each with its own real, specific reason (verified live, exact rendered text): *"What
+   'Baseline' on the Remote fades back to — needs the Fade Engine (U2), not built yet,"* *"A
+   validated snapshot of the whole authored look — also waits on the Fade Engine (U2),"*
+   *"Floor-band authoring — no confirmed src/ hook traced yet,"* *"Motion Tiles has no src/
+   runtime yet... this card is chrome, not a working configurator."* A fifth, real card
+   ("Masks aboard") calls an optional `ctx.getMaskBoard?.()` this round didn't wire from
+   `boot.js` — confirmed it degrades honestly ("Mask board data not available") rather than
+   throwing, but the real wiring is still a follow-up, not done.
+5. **LAB department** mounts the OLD debug-panel's own report/action/panel registries whole,
+   via a new `debugPanel.renderLabBody({getStatusEl})` entry point — `diag/debug-panel.js`'s
+   `renderLab()` now builds into a local root and returns it instead of only ever appending to
+   its own closure's `bodyEl`, with an independently-scoped builder set when a host is passed
+   in. Zero behaviour change for the old panel's own standalone call, confirmed the same way
+   every refactor in this codebase has to be: the full suite stayed at 0 failed through the
+   change, not just "should still work."
+6. **Wall `ui/canon-only` + sabotage test**, live in `tools/verify-structure.mjs` — shipped as
+   a `ratchet`, not zero-tolerance, on purpose. The first, naive version of this wall (any
+   `.type = 'range'|'checkbox'|'color'` outside `ui/widgets/`) flagged 13 real hits that
+   aren't canon violations at all — camera-path-dialog's own settings checkboxes, the
+   astrolabe's toggles, `effect-controls.js`'s own enable checkbox — one-off UI choices with
+   no param schema behind them, which is exactly the category the wall's own `instead:` text
+   says doesn't need the canon. There's no syntactic tell that separates "checkbox bound to a
+   param" from "checkbox that's just a checkbox," so rather than chase an unachievable precise
+   regex, today's count (13) is frozen in `structure-ratchets.json` as the baseline — matching
+   the wall's own explicit "(U1, ratchet)" marking in §9's text, which this round read
+   carefully rather than defaulting to the zero-tolerance shape most other walls use.
+7. **Pop-out was built all the way through, not left half-wired.** `popOutCard` opens a real
+   floating window at a tracked position; `closeAllPopouts()` runs whenever the Studio itself
+   closes ("pop-outs are views — closing the Studio closes its children"); each pop-out
+   re-renders from a fresh `ctx.effectCardFactories.get(id)?.()` call rather than a cached
+   snapshot, the same `panels/no-captured-readout` discipline the rest of the canon already
+   follows.
+8. **`registerStudioButton` — a THIRD tool in the same `getSceneControlButtons` `tokens.tools`
+   record**, the identical mechanism `registerAnchorViewModeButton` already proved twice
+   (`order:102`, right after Anchor View's `101`). GM-only, side-by-side with the old panel's
+   own button — neither changes the other's behaviour. Its own toolbar tooltip says *"MSA
+   Studio (new UI, in progress)"* — the in-progress admission lives in the actual product
+   chrome, not just in this document.
+9. **`FILTER_CATEGORIES`** (gameplay/lighting/atmos/surface/particles/post) **is this
+   session's own proposal, not a taxonomy that exists anywhere in `src/` today** — worth an
+   explicit countersign on whether these six are the right buckets before more than one real
+   effect (water → surface) is classified into them.
+
+**A self-correction, filed the same round it was found, in the same spirit as P8's addendum.**
+Live-testing the theme switch in `tools/studio-preview/`, the rail's active-department colour
+appeared to freeze after clicking "Cycle theme." The first diagnosis (recorded in this
+session, then corrected before commit) was a CSS custom-property double-indirection bug: the
+rail button set `--dept-acc: var(--shine)` inline and read it back via `color: var(--dept-acc,
+var(--shine))` in a stylesheet rule, and the visible symptom looked exactly like that
+indirection failing to invalidate. It wasn't. Re-verified more thoroughly before writing it up:
+`.rail button` carries `transition:all`, and `element.getAnimations()` showed the `color` and
+`background-color` transitions stuck at `playState:"running"`, `currentTime:0` — this
+automated browser pane never composites frames while backgrounded
+([[feedback_sandboxed_browser_pane_lacks_os_focus]], the same limitation already on file for
+`requestAnimationFrame`, here reaching CSS transitions instead), so `getComputedStyle` was
+reporting each transition's START value forever. Forcing the stuck animations to finish
+(`el.getAnimations().forEach(a => a.finish())`) snapped the colour to the correct, live
+`var(--shine)` value immediately — proof the two-level chain had been resolving correctly the
+entire time, in both the old code and the new. The simplification (one direct stylesheet rule
+per accent, keyed by a `data-acc` attribute, instead of the `--dept-acc` indirection) is kept
+in the shipped code anyway, since it's a real reduction in moving parts and matches the
+one-level pattern already proven in `ui/widgets/param-control.js`'s `ACCENT`/`MUTED`
+constants — but it should be read as a simplification, not as a fix for a cross-browser bug,
+because there wasn't one. The code comment that originally asserted the wrong root cause as
+verified fact has been rewritten to the corrected account before this petition was filed, not
+left standing. Recorded here mainly because the instinct to stop at the first plausible
+explanation, once it survives one visual check, is exactly what this project's own memory
+already warns against — this time it was caught by testing the "fix" a second, more
+adversarial way instead of accepting the first one that visually looked right.
+
+**Exit gate — not self-certifiable, named rather than fudged.** §9 asks that "the author tunes
+water for one real session in the Studio and doesn't switch back," verified by comparing
+persisted scene-flag values between old and new panels — that requires the author's own live
+Foundry session and cannot be satisfied from this side. What IS verified this round, live, in
+`tools/studio-preview/` (served by the existing `tools/shader-lab/serve.mjs`, no second dev
+server): department switching and dev-gating; the EFFECTS department against two view-models
+(water — full schema/presets/mask/tier; bloom — minimal, proving the shell degrades cleanly
+when tier/mask/presets are absent); category filter chips (Surface shows only Water, Post
+shows only Bloom, All restores both); pin (re-orders the grid, survives a subsequent
+search-driven re-render); pop-out; the search palette end to end; SCENE department's five
+cards; the keydown `/`-to-search guard against a synthetic `document`-targeted event (a real,
+narrow crash this round caught live — `e.target.matches` isn't a function when `e.target` is
+`document` itself — fixed with an `instanceof Element` guard, confirmed live via a realistic
+dispatch afterward). Console stayed clean across all of it except one stale historical entry
+from before this round's fixes landed, confirmed dead by direct re-test.
+
+*Verification note: `node tools/run-tests.mjs` stayed at 0 failed throughout (27 suites, 11101
+assertions) — the water-flow work landing concurrently in this same tree this round was left
+untouched by every commit this petition describes, per [[feedback_git_staging_hazard]]'s own
+"never `git add -A`" rule.*
+
+---
+
 ## 13. STATUS LOG
 
 - **2026-08-17** — Testament created by Claude Fable 5 at the author's command. Sources

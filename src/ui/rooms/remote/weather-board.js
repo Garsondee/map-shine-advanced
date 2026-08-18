@@ -43,6 +43,26 @@
 import { WEATHER_ARCHETYPES, WEATHER_BIOMES } from '../../../world/index.js';
 import { buildParamControl } from '../../widgets/param-control.js';
 import { createFadeTimeControl } from './fade-time.js';
+import { iconMarkup } from '../../widgets/icon-sprite.js';
+
+/**
+ * The mock's own ".blocklabel" — icon + title + an optional right-aligned
+ * hint (2026-08-18 fix; author report: "Fade time isn't added yet" and
+ * "lots of UI elements aren't in place yet"). `titleEl` is handed in rather
+ * than built here so callers needing a LIVE title (Moods/Climates swapping
+ * with mode) can keep their own reference to update later.
+ * @param {string} icon @param {HTMLElement} titleEl @param {HTMLElement} [trailingEl]
+ */
+function blockLabel(icon, titleEl, trailingEl) {
+  const label = document.createElement('div');
+  label.className = 'msa-wx-blocklabel';
+  const iconSpan = document.createElement('span');
+  iconSpan.className = 'ico';
+  iconSpan.innerHTML = iconMarkup(icon);
+  label.append(iconSpan, titleEl);
+  if (trailingEl) label.appendChild(trailingEl);
+  return label;
+}
 
 /** The two, and only two, live-today channels. Adding a third is a schema
  * change in world/weather.js (flip consumerStatus, wire a real consumer)
@@ -97,6 +117,33 @@ export function renderWeatherBoard(container, ctx) {
   const wrap = document.createElement('div');
   wrap.className = 'msa-wx-board';
 
+  // ---- FADE TIME block (2026-08-18 fix) — matches the mock's own DOM
+  // order exactly: Fade Time first, THEN Moods, THEN Channels (production
+  // had Moods/mode-toggle first, Fade Time second — a real ordering miss,
+  // not just a missing label).
+  const fadeTitle = document.createElement('span');
+  fadeTitle.textContent = 'Fade time';
+  const fadeHint = document.createElement('span');
+  fadeHint.className = 'msa-wx-hint';
+  const fadeTime = createFadeTimeControl();
+  function syncFadeHint() {
+    const label = fadeTime.getLabel();
+    fadeHint.textContent = label === 'Now' ? 'changes cut instantly' : `changes ease over ${label}`;
+  }
+  syncFadeHint();
+  // Delegated, not owned: fade-time.js's own per-button listeners (added
+  // during createFadeTimeControl() above, so they run first) already update
+  // its internal index before this bubbles here — reading getLabel() after
+  // is safe, and fade-time.js stays free of a weather-board-specific hook.
+  fadeTime.root.addEventListener('click', syncFadeHint);
+  const fadeBlock = document.createElement('div');
+  fadeBlock.append(blockLabel('clock', fadeTitle, fadeHint), fadeTime.root);
+
+  // ---- MOODS/CLIMATES block — mode toggle now lives INSIDE the block
+  // label's own row (mock: #wxTitle + .modeseg share one line), not as its
+  // own separate full-width row above the chips.
+  const moodsTitle = document.createElement('span');
+  moodsTitle.textContent = 'Moods';
   const modeRow = document.createElement('div');
   modeRow.className = 'msa-wx-modeseg';
   modeRow.setAttribute('role', 'group');
@@ -110,20 +157,29 @@ export function renderWeatherBoard(container, ctx) {
   driftBtn.textContent = 'Drift';
   driftBtn.title = 'You set a climate — the sky wanders inside it on its own.';
   modeRow.append(directBtn, driftBtn);
-
   const chipRow = document.createElement('div');
   chipRow.className = 'msa-wx-chips';
-  const fadeTime = createFadeTimeControl();
+  const moodsBlock = document.createElement('div');
+  moodsBlock.append(blockLabel('cloud', moodsTitle, modeRow), chipRow);
+
+  // ---- CHANNELS block — label is real regardless of how many of the 7
+  // mock channels have live backing today (LIVE_CHANNELS, above): "Channels"
+  // names what the section IS, not how many rows happen to be in it.
+  const chanTitle = document.createElement('span');
+  chanTitle.textContent = 'Channels';
   const faderHost = document.createElement('div');
   faderHost.className = 'msa-wx-faders';
+  const chanBlock = document.createElement('div');
+  chanBlock.append(blockLabel('gauge', chanTitle), faderHost);
 
-  wrap.append(modeRow, chipRow, fadeTime.root, faderHost);
+  wrap.append(fadeBlock, moodsBlock, chanBlock);
   container.appendChild(wrap);
 
   function paintMode() {
     const mode = ctx.getWeatherMode();
     directBtn.setAttribute('aria-pressed', String(mode !== 'almanac'));
     driftBtn.setAttribute('aria-pressed', String(mode === 'almanac'));
+    moodsTitle.textContent = mode === 'almanac' ? 'Climates' : 'Moods';
   }
   directBtn.addEventListener('click', () => {
     ctx.onWeatherModeChange('director');

@@ -22,10 +22,12 @@
 
 import { installTokens } from '../../tokens.js';
 import { installIconSprite, iconMarkup } from '../../widgets/icon-sprite.js';
+import { makeDraggable } from '../../widgets/draggable.js';
 import { installCameraPathPopover } from './camera-path-popover.js';
 import { renderAstrolabePanel } from './astrolabe-panel.js';
 import { renderWeatherBoard } from './weather-board.js';
 import { renderCueDeck } from './cue-deck.js';
+import { renderDebugStrip } from './debug-strip.js';
 
 const ROOM_ID = 'msa-remote';
 const STYLE_ID = 'msa-remote-style';
@@ -42,7 +44,8 @@ function injectStyle() {
 #${ROOM_ID}[data-minimized="true"] .msa-remote-body,
 #${ROOM_ID}[data-minimized="true"] .msa-remote-foot{display:none}
 #${ROOM_ID} .msa-remote-head{display:flex; align-items:center; gap:var(--sp2); padding:8px 14px;
-  border-bottom:1px solid var(--line); flex:none}
+  border-bottom:1px solid var(--line); flex:none; cursor:grab; user-select:none}
+#${ROOM_ID} .msa-remote-head:active{cursor:grabbing}
 #${ROOM_ID} .msa-remote-title{font-weight:600; letter-spacing:.1em; font-size:.72rem; text-transform:uppercase;
   color:var(--ink1); display:flex; gap:8px; align-items:center}
 #${ROOM_ID} .msa-remote-title .ico{color:var(--shine)}
@@ -245,6 +248,26 @@ function injectStyle() {
 #${ROOM_ID} .msa-cue-listrow.done{opacity:.45; text-decoration:line-through}
 #${ROOM_ID} .msa-cue-listrow.next{color:var(--shine)}
 #${ROOM_ID} .msa-cue-dur{margin-left:auto; color:var(--ink2); font-size:.66rem}
+/* THE DEBUG ROW (2026-08-18 fix) — ported from the mock's own #debugStrip,
+   "equipment, not product chrome" (dashed border, monospace, --c-system
+   accent), same visual family as debug-panel.js's own .dbg class. */
+#${ROOM_ID} .msa-debug-strip{border:1px dashed color-mix(in oklab, var(--c-system) 45%, transparent);
+  border-radius:10px; padding:5px 11px; display:flex; align-items:center; gap:11px; flex-wrap:wrap;
+  row-gap:4px; font-family:var(--mono); font-size:.65rem; color:var(--ink2)}
+#${ROOM_ID} .msa-debug-tag{color:var(--c-system); letter-spacing:.18em; font-weight:700;
+  display:flex; gap:5px; align-items:center}
+#${ROOM_ID} .msa-debug-tag .ico{width:12px; height:12px}
+#${ROOM_ID} .msa-debug-stat b{color:var(--ink0); font-weight:600}
+#${ROOM_ID} .msa-debug-spacer{flex:1}
+#${ROOM_ID} .msa-debug-btn{padding:2px 9px; border:1px solid var(--line); border-radius:6px;
+  color:var(--ink1); background:none; font-family:var(--mono); font-size:.62rem; cursor:pointer; pointer-events:auto}
+#${ROOM_ID} .msa-debug-btn:hover{border-color:var(--c-system); color:var(--ink0)}
+#${ROOM_ID} .msa-debug-btn.msa-planned{border-style:dashed; border-color:var(--fail); color:var(--fail)}
+#${ROOM_ID} .msa-debug-spark{display:flex; align-items:flex-end; gap:1px; height:15px; width:52px; flex:none}
+#${ROOM_ID} .msa-debug-spark i{flex:1; min-width:1px; height:20%; border-radius:1px 1px 0 0;
+  background:var(--ok); transition:height .25s ease, background .25s ease}
+#${ROOM_ID} .msa-debug-spark i.warn{background:var(--warn)}
+#${ROOM_ID} .msa-debug-spark i.bad{background:var(--fail)}
 #${ROOM_ID} .msa-remote-foot{display:flex; gap:8px; flex-wrap:wrap; padding:10px 14px; border-top:1px solid var(--line); flex:none}
 #${ROOM_ID} .msa-remote-foot a, #${ROOM_ID} .msa-remote-foot button{flex:1 1 auto; min-width:0; text-align:center;
   padding:6px 8px; border-radius:8px; border:1px solid var(--line); background:var(--bg2); color:var(--ink1);
@@ -296,10 +319,12 @@ function plannedFooterBtn(text, plannedReason) {
  *   getPosture: () => string, isFlowPlaying: () => boolean, onFlowToggle: () => void,
  *   getFlowRate?: () => number, onSetFlowRate?: (rate: number) => void,
  *   weatherBoard?: object, onBaseline?: (overMs: number) => void, cueDeck?: object,
+ *   debugStrip?: object,
  *   impulses?: Array<import('../../../core/impulse-schema.js').ImpulseDecl>}} [opts]
- *   `weatherBoard`/`cueDeck`, when supplied, are passed straight through as
- *   `renderWeatherBoard`/`renderCueDeck`'s own `ctx` (weather-board.js,
- *   cue-deck.js) — this file never inspects their shape, only whether they
+ *   `weatherBoard`/`cueDeck`/`debugStrip`, when supplied, are passed straight
+ *   through as `renderWeatherBoard`/`renderCueDeck`/`renderDebugStrip`'s own
+ *   `ctx` (weather-board.js, cue-deck.js, debug-strip.js) — this file never
+ *   inspects their shape, only whether they
  *   exist. `impulses` (U7) is handed straight to `astrolabe-panel.js`'s own
  *   TR corner unchanged, same reasoning. `getFlowRate`/`onSetFlowRate`
  *   (2026-08-18 fix) back the TL corner's real speed popover — see
@@ -362,6 +387,8 @@ export function installRemote(opts = {}) {
   let cueDeckHandle = null;
   /** @type {{syncFlowState: () => void}|null} */
   let astrolabePanelHandle = null;
+  /** @type {{update: () => void}|null} */
+  let debugStripHandle = null;
 
   function buildBody() {
     if (bodyBuilt) return;
@@ -404,6 +431,12 @@ export function installRemote(opts = {}) {
       body.append(sep3, cueHost);
       cueDeckHandle = renderCueDeck(cueHost, opts.cueDeck);
     }
+
+    if (opts.debugStrip) {
+      const debugHost = document.createElement('div');
+      body.append(debugHost);
+      debugStripHandle = renderDebugStrip(debugHost, opts.debugStrip);
+    }
   }
 
   // ---- footer ------------------------------------------------------------
@@ -436,6 +469,7 @@ export function installRemote(opts = {}) {
 
   room.append(head, body, foot);
   document.body.appendChild(room);
+  makeDraggable(head, room);
 
   const openChangeListeners = new Set();
   const controller = {
@@ -496,6 +530,17 @@ export function installRemote(opts = {}) {
      * from elsewhere (the old panel's own rate slider, another client). */
     syncAstrolabePanel() {
       astrolabePanelHandle?.syncFlowState();
+    },
+    /** Re-paint the DEBUG row's fps/ms/vram/sparkline — boot.js's own
+     * heartbeat calls this every ~250ms with a fresh snapshot, right
+     * alongside the identical, pre-existing `MapShine.debug.updatePerfStrip`
+     * call the old panel's own strip already gets (same dual-dispatch shape
+     * `remoteAstrolabe.update` already uses next to `astrolabe.update`).
+     * No-op before the body exists or when no debug strip was supplied
+     * (opts.debugStrip).
+     * @param {object} snapshot */
+    updateDebugStrip(snapshot) {
+      debugStripHandle?.update(snapshot);
     },
   };
   room._msaRemoteController = controller;

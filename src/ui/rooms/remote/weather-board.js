@@ -201,6 +201,7 @@ function driftBracket(biome, axisName) {
  *   getGradeEnvStrength?: () => number, onGradeEnvStrengthCommit?: (v: number) => void,
  *   getSceneOverride?: () => boolean, onSceneOverrideCommit?: (enabled: boolean) => void,
  *   getCloudPinned?: () => boolean, onUnpinCloudCover?: () => void,
+ *   getForecast?: () => {archetypeId: string, atGameHoursFromNow: number}|null,
  * }} ctx
  * @returns {{ getFadeOverMs: () => number, refresh: () => void }}
  */
@@ -268,8 +269,20 @@ export function renderWeatherBoard(container, ctx) {
   // pace), so it only renders in Drift, same conditional shape
   // renderFaders() already uses for the drift-bracket notes.
   const paceHost = document.createElement('div');
+  // The Almanac forecast (2026-08-18 fix — gap-audit against the old
+  // astrolabe.js's own real `forecastRow`/`surpriseRow`, which never made it
+  // into the new Remote at all). Real data: `weather.forecast()`
+  // (world/weather.js) already projects the walk forward for free by
+  // cloning the live RNG, and `vt-pan-viewer.js`'s own `getTimeDialState()`
+  // already surfaces `.transitions[0]` as `weatherForecastNext` — boot.js's
+  // `ctx.getForecast()` just reads that existing door, no new engine work.
+  // Drift-mode-only, same gate as Pace just below: `forecast()`'s own FIRST
+  // check is `currentMode !== 'almanac'`, so the value is already always
+  // null outside Drift — this file's gate matches the data's own truth,
+  // not just a cosmetic mirror of it.
+  const forecastHost = document.createElement('div');
   const moodsBlock = document.createElement('div');
-  moodsBlock.append(blockLabel('cloud', moodsTitle, headerRight), chipRow, paceHost);
+  moodsBlock.append(blockLabel('cloud', moodsTitle, headerRight), chipRow, forecastHost, paceHost);
 
   // THE BROWSE OVERLAY — one instance per board, built here (not threaded
   // through ctx) same as fadeTime just above: a sibling-imported sub-widget
@@ -287,6 +300,7 @@ export function renderWeatherBoard(container, ctx) {
       ctx.onWeatherBiomeChange(id);
       renderChips();
       renderFaders();
+      renderForecast();
     },
   });
   browseBtn.addEventListener('click', () => weatherPicker.open());
@@ -320,6 +334,7 @@ export function renderWeatherBoard(container, ctx) {
     ctx.onWeatherModeChange('director');
     paintMode();
     renderChips();
+    renderForecast();
     renderPace();
     syncBrowseBtn();
     // 2026-08-18 fix, caught live while testing the cloud-pin glyph: neither
@@ -334,6 +349,7 @@ export function renderWeatherBoard(container, ctx) {
     ctx.onWeatherModeChange('almanac');
     paintMode();
     renderChips();
+    renderForecast();
     renderPace();
     syncBrowseBtn();
     renderFaders();
@@ -353,6 +369,14 @@ export function renderWeatherBoard(container, ctx) {
           ctx.onWeatherBiomeChange(biome.id);
           renderChips();
           renderFaders();
+          // 2026-08-18 fix, caught live testing the forecast port: the ONLY
+          // thing that flips weather.forecast() from unavailable ("no biome
+          // selected") to available is exactly this click, and neither
+          // biome-pick site here previously repainted anything forecast-
+          // shaped -- same missed-call-site shape P27 already found for
+          // Direct/Drift's own renderFaders() (this file's own comment on
+          // that fix, a few lines up, predates this one).
+          renderForecast();
         });
         btn.setAttribute('aria-pressed', String(biome.id === activeBiome));
         chipRow.appendChild(btn);
@@ -465,6 +489,66 @@ export function renderWeatherBoard(container, ctx) {
     }
   }
 
+  // ⚠️ LOCAL, SESSION-ONLY UI STATE, ported verbatim from the old astrolabe.js's
+  // own reasoning: whether a GM wants foreknowledge is a personal reading
+  // preference for a control they're looking at right now, not a fact about
+  // the SCENE the way the weather itself is. Never persisted, never routed
+  // through ctx — resets harmlessly to "visible" every load.
+  let surpriseMe = false;
+
+  /** The Almanac forecast row + "surprise me" toggle, own function for the
+   * same reason as renderPace just below (gated on mode alone). Faithful
+   * port of the old astrolabe.js's own `paintForecast` wording — see that
+   * file for the two collapsed cases (`forecast()` returns the identical
+   * `null` for "genuinely steady" and for "not available at all," e.g. no
+   * biome chosen yet; the old panel never distinguished them either, so
+   * this doesn't invent a distinction the underlying data can't back). */
+  function renderForecast() {
+    forecastHost.innerHTML = '';
+    if (ctx.getWeatherMode() !== 'almanac' || typeof ctx.getForecast !== 'function') return;
+    const text = document.createElement('div');
+    text.className = 'msa-wx-forecast-text';
+    if (surpriseMe) {
+      text.textContent = '🎲 —';
+    } else {
+      const next = ctx.getForecast();
+      if (!next) {
+        text.textContent = 'Forecast: steady for now';
+      } else {
+        const archetype = WEATHER_ARCHETYPES.find((a) => a.id === next.archetypeId);
+        const label = archetype ? `${archetype.icon} ${archetype.label}` : next.archetypeId;
+        const h = next.atGameHoursFromNow;
+        const eta = h < 1 ? `~${Math.max(1, Math.round(h * 60))}m` : `~${h < 10 ? h.toFixed(1) : Math.round(h)}h`;
+        text.textContent = `Forecast: → ${label} in ${eta}`;
+      }
+    }
+    forecastHost.appendChild(text);
+    // Through the SAME buildParamControl door every bool row in this file
+    // already uses (Scene override, above) — ui/canon-only's own ratchet
+    // (tools/verify-structure.mjs) counts every hand-rolled `input.type=
+    // 'checkbox'` outside it, and "surprise me" is not exempt just because
+    // it's client-only UI state rather than a schema value: the wall's own
+    // carve-out is for one-off UI CHOICES (a filter, a preset picker), and
+    // this is a persistent-looking toggle a GM revisits every session. Its
+    // own row() is already a full-width flex row (see param-control.js) —
+    // stacked as its own line below the text rather than forced inline
+    // beside it, the same shape every other control in this file already
+    // uses, not a special case fought into a tighter space.
+    forecastHost.appendChild(
+      buildParamControl(
+        'weatherForecastSurpriseMe',
+        { type: 'bool', label: 'Surprise me', help: 'Hide the forecast text — walk the climate blind.' },
+        {
+          value: surpriseMe,
+          onChange: (v) => {
+            surpriseMe = v;
+            renderForecast();
+          },
+        }
+      )
+    );
+  }
+
   /** Pace, own function since it's gated on mode alone (unlike renderChips/
    * renderFaders, it never needs to re-run on a chip click). */
   function renderPace() {
@@ -490,6 +574,7 @@ export function renderWeatherBoard(container, ctx) {
   paintMode();
   renderChips();
   renderFaders();
+  renderForecast();
   renderPace();
   syncBrowseBtn();
 
@@ -499,6 +584,7 @@ export function renderWeatherBoard(container, ctx) {
       paintMode();
       renderChips();
       renderFaders();
+      renderForecast();
       renderPace();
       syncBrowseBtn();
     },

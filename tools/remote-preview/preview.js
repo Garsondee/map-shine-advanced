@@ -318,6 +318,13 @@ const remote = installRemote({
       fakeSky.weatherVolatility = v;
       log(`pace -> x${v}`);
     },
+    // Honest static demo (2026-08-18 fix) -- this harness fakes weather
+    // state, it doesn't run the real RNG walk (world/weather.js#forecast),
+    // so there's nothing to genuinely project. Once a biome is picked, a
+    // fixed placeholder transition exercises the row's real formatting
+    // (icon+label lookup, the <1h-vs-hours ETA split) without pretending to
+    // simulate anything.
+    getForecast: () => (fakeSky.weatherBiome ? { archetypeId: 'thunderstorm', atGameHoursFromNow: 3.5 } : null),
     getSkyRealism: () => fakeSky.realism01 ?? 0,
     onSkyRealismCommit: (v) => {
       fakeSky.realism01 = v;

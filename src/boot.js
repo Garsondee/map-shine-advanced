@@ -1131,6 +1131,14 @@ function install() {
       // `onGradeEnvChange`/`onSceneOverrideChange`, never a second path.
       getWeatherVolatility: () => skyScope.sky?.weatherVolatility ?? 1,
       onWeatherVolatilityCommit: (v) => void editSky({ weatherVolatility: v }),
+      // The Almanac forecast (2026-08-18 fix — gap-audit against the old
+      // astrolabe.js's own real forecastRow, never ported to the new Remote
+      // at all). No new engine work: `weather.forecast()` already projects
+      // the walk forward for free (world/weather.js), and
+      // getVtPanViewerTimeDialState() already surfaces its next transition
+      // as `weatherForecastNext` — the SAME door `getCloudPinned` below
+      // already reaches through for a different field.
+      getForecast: () => getVtPanViewerTimeDialState()?.weatherForecastNext ?? null,
       getSkyRealism: () => skyScope.sky?.realism01 ?? 0,
       onSkyRealismCommit: (v) => void editSky({ realism01: v }),
       getGradeEnvStrength: () => skyScope.sky?.gradeEnvStrength ?? 0,

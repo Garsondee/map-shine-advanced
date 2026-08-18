@@ -247,6 +247,12 @@ function injectStyle() {
    distracting" note applied here too, not just at the GO button. */
 #${ROOM_ID} .msa-wx-chip[data-pending="true"]{background:color-mix(in oklab, var(--shine) 8%, transparent);
   border-color:var(--shine); border-style:dashed; color:var(--ink0)}
+/* The Almanac forecast text (2026-08-18 fix) -- a read-only caption, same
+   typography weight as .msa-wx-bracket just below it. Its own "surprise me"
+   toggle sits right under it as a normal buildParamControl bool row (see
+   weather-board.js), not styled here -- that widget owns its own look. */
+#${ROOM_ID} .msa-wx-forecast-text{font-size:.66rem; color:var(--ink2); padding:2px 0;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
 #${ROOM_ID} .msa-wx-faders{display:flex; flex-direction:column; gap:6px}
 #${ROOM_ID} .msa-wx-bracket{font-size:.62rem; color:var(--ink2); margin-left:6px; white-space:nowrap}
 #${ROOM_ID} .msa-wx-pin{flex:0 0 auto; margin-left:6px; padding:0 4px; font-size:.68rem; line-height:1;

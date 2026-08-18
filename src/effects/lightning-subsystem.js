@@ -246,11 +246,23 @@ export function createLightningSubsystem({
   /** Fast-forward every currently-tracked source's schedule so the very next
    * `sync(nowMs)` call spawns a burst immediately for each of them — reuses
    * `advanceSchedulesAndSpawn`'s own due-check (`nowMs < sched.nextBurstAtMs`)
-   * rather than duplicating spawn logic here. Used by both the Shader Lab
-   * driver's "force a strike now" control and boot.js's debug action. A
-   * source with no schedule yet (nothing has synced since it was added) has
-   * nothing to fast-forward — it already fires on its own staggered
-   * first-burst timer the moment sync() first sees it. */
+   * rather than duplicating spawn logic here. Used by the Shader Lab
+   * driver's own disconnected "force a strike now" control, and — since U7
+   * (docs/holy/UI-Testament.md §9) — re-exported from `vt-pan-viewer.js` as
+   * `forceLightningStrike` for the live viewer, which `boot.js#strikeLightning`
+   * wraps as the Remote's real "Strike" impulse.
+   *
+   * ⚠️ THIS COMMENT USED TO CLAIM "boot.js's debug action" ALREADY CALLED
+   * THIS — it did not; `src/` had zero real call sites outside this
+   * subsystem's own tests until U7 wired one. Corrected rather than left,
+   * per this project's own `feedback_instruments_must_not_lie` doctrine
+   * applied to a doc comment, not just a runtime instrument.
+   *
+   * A source with no schedule yet (nothing has synced since it was added)
+   * has nothing to fast-forward — it already fires on its own staggered
+   * first-burst timer the moment sync() first sees it. A scene with NO
+   * lightning start/end anchors placed at all has nothing tracked, so this
+   * is a safe, documented no-op — never a throw. */
   function forceStrike() {
     for (const sched of schedules.values()) {
       sched.nextBurstAtMs = -Infinity;

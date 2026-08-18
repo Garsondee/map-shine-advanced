@@ -68,6 +68,7 @@ export {
   setVtPanViewerPrecipitationTuning,
   rebakeVtPanViewerWindField,
   triggerVtPanViewerWindDoorImpulse,
+  forceVtPanViewerLightningStrike,
   setVtPanViewerWindForceThaw,
   getVtPanViewerWindSimStatus,
   resetVtPanViewerFrameStats,

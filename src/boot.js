@@ -161,6 +161,7 @@ import { createPerfHud } from './diag/perf-hud.js';
 import { createLogger } from './core/log.js';
 import { wallClockMs } from './core/frame-clock.js';
 import { validateCue, validateCueStack, orderedCues, cueToFadePatch } from './core/cues-schema.js';
+import { validateImpulseList } from './core/impulse-schema.js';
 import {
   ambientVectorFromWind,
   phaseBoundaryHours,
@@ -240,6 +241,7 @@ import {
   setVtPanViewerPrecipitationTuning,
   rebakeVtPanViewerWindField,
   triggerVtPanViewerWindDoorImpulse,
+  forceVtPanViewerLightningStrike,
   resetVtPanViewerFrameStats,
   setVtPanViewerIsolateItem,
   getVtPanViewerDrawListIds,
@@ -964,8 +966,54 @@ function install() {
   // only invokes these) on an actual user click into the CUES tab, long
   // after install() has finished running once — the identical pattern
   // installRemote's own weatherBoard ctx already uses just below.
+  // THE IMPULSES (U7, docs/holy/UI-Testament.md §9, §4.4) — declared ONCE,
+  // consumed identically by the Remote's curated TR corner (installRemote,
+  // below) and the Studio's full list (CUES department) — Law 1's "every
+  // control is a generated projection of a declaration", never two hand-
+  // built button sets that could quietly disagree about what exists. `fire`
+  // closes over `MapShine.strikeLightning`/`.gustWind` by NAME rather than
+  // capturing the function value here — both are assigned later in this
+  // same install() body, safe because neither button is clickable until
+  // long after install() has finished running once (the same closure-
+  // reference safety every other ctx function passed to installStudio/
+  // installRemote below already relies on).
+  const IMPULSES = [
+    {
+      id: 'strike',
+      label: 'Strike',
+      icon: 'bolt',
+      // lightning.js's own manifest declares a11y.photosensitive:true —
+      // this is what the (still-planned) suppression badge would watch.
+      flashClass: true,
+      fire: () => MapShine.strikeLightning(),
+    },
+    {
+      id: 'gust',
+      label: 'Gust',
+      icon: 'wind',
+      fire: () => MapShine.gustWind(),
+    },
+    {
+      id: 'thunder',
+      label: 'Thunder',
+      icon: 'cloud',
+      status: 'planned',
+      plannedReason:
+        'No audio subsystem exists anywhere in this codebase yet (checked before building, not assumed) — Thunder has nothing real to trigger.',
+    },
+  ];
+  // Fail loud at boot, not silently at first click — the same discipline
+  // `setWater`'s own unknown-key check already applies to a runtime write,
+  // applied here to a declaration instead. A typo'd status value or a
+  // future duplicate id is caught the moment this module loads.
+  {
+    const check = validateImpulseList(IMPULSES);
+    if (!check.ok) log.error('IMPULSES failed validateImpulseList:', check.errors);
+  }
+
   MapShine.__studio = installStudio({
     debugPanel: MapShine.debug,
+    impulses: IMPULSES,
     listCues: () => orderedCues(cueStack),
     captureCue: (name) => captureCueFromLive(name),
     updateCueFadeMs: (id, overMs) => updateCueFadeMs(id, overMs),
@@ -997,6 +1045,7 @@ function install() {
   // same closure) are fully initialized. See shell.js's own header for why
   // that deferral exists at all.
   MapShine.__remote = installRemote({
+    impulses: IMPULSES,
     mountAstrolabeDial: (container) => {
       remoteAstrolabe = createAstrolabe(buildAstrolabeOptions());
       container.appendChild(remoteAstrolabe.root);
@@ -2125,6 +2174,25 @@ function install() {
       }
     }
     return { ...lightningLiveOverride };
+  };
+
+  /**
+   * U7 (docs/holy/UI-Testament.md §9) — the Remote's real "Strike" impulse.
+   * `forceVtPanViewerLightningStrike()` fast-forwards every already-placed
+   * lightning anchor's own schedule; a scene with none placed on the
+   * current floor is a documented, safe no-op (lightning-subsystem.js#
+   * forceStrike's own doc/test) — stated here as a static caveat rather
+   * than a detected one (the viewer's own public API has no cheap way to
+   * report "anchor count" back through this seam yet).
+   * @returns {{ok: boolean, message: string}}
+   */
+  MapShine.strikeLightning = () => {
+    const result = forceVtPanViewerLightningStrike();
+    if (result.skipped) return { ok: false, message: `Strike skipped — ${result.reason}.` };
+    return {
+      ok: true,
+      message: 'Strike triggered (nothing visible happens if no lightning is placed on this floor).',
+    };
   };
 
   /**
@@ -8058,42 +8126,65 @@ function install() {
   });
   if (!doorGraphicsWatch.registered) log.warn(`door graphics auto-refresh not wired — ${doorGraphicsWatch.reason}`);
 
-  // A debug "test gust" — for verifying Tier 2 looks right WITHOUT needing a
-  // real door in a real scene (feedback_instruments_must_not_lie: give the
-  // author a way to trigger and SEE the thing being reported, not just trust
-  // the log line). Built as a short synthetic wall segment ORIENTED SQUARE TO
-  // the CURRENT ambient direction (a wall the wind blows straight at), so the
-  // test reliably produces a strong, visible impulse regardless of whichever
-  // compass setting is currently dialled in — never a coin-flip on whether
-  // the demo shows anything.
-  MapShine.debug.registerAction(
-    'wind-test-gust',
-    '🌬️ Trigger test gust',
-    () => {
-      const ambient = ambientVectorFromWind({
-        // Reads the astrolabe's own live values (2026-07-23) — these used to be
-        // the two deleted dropdowns' strings.
-        directionDeg: windDirectionDeg,
-        speed01: Math.max(0.35, windSpeed01 || 0), // never a silent no-op at Calm
-      });
-      const mag = Math.hypot(ambient.x, ambient.y) || 1;
-      // A wall PERPENDICULAR to the ambient direction — i.e. running along the
-      // ambient's own (x,y), so the door in it is square to the flow.
-      const ux = ambient.x / mag;
-      const uy = ambient.y / mag;
-      const halfLen = 80;
-      const cx = 0;
-      const cy = 0;
-      const wallSegment = {
-        x1: cx - ux * halfLen,
-        y1: cy - uy * halfLen,
-        x2: cx + ux * halfLen,
-        y2: cy + uy * halfLen,
-      };
-      return triggerVtPanViewerWindDoorImpulse(wallSegment);
-    },
-    { effect: 'wind' }
-  );
+  /**
+   * A synthetic "something the wind just blew past" gust — for verifying
+   * Tier 2 looks right WITHOUT needing a real door in a real scene
+   * (feedback_instruments_must_not_lie: give the author a way to trigger
+   * and SEE the thing being reported, not just trust the log line). Built
+   * as a short synthetic wall segment ORIENTED SQUARE TO the CURRENT
+   * ambient direction (a wall the wind blows straight at), so it reliably
+   * produces a strong, visible impulse regardless of whichever compass
+   * setting is currently dialled in — never a coin-flip on whether the
+   * demo shows anything.
+   *
+   * U7 (docs/holy/UI-Testament.md §9): this is ALSO the real "Gust"
+   * impulse's own `fire()` — extracted so the debug action and the
+   * Remote's own button call exactly one implementation, never two that
+   * could quietly drift (this project's own named-and-fixed shape,
+   * `feedback_hand_maintained_dispatch_list_forgets_new_effects`'s sibling
+   * problem one level over).
+   * @returns {{skipped: boolean, reason?: string}}
+   */
+  function gustWindFromAmbient() {
+    const ambient = ambientVectorFromWind({
+      // Reads the astrolabe's own live values (2026-07-23) — these used to be
+      // the two deleted dropdowns' strings.
+      directionDeg: windDirectionDeg,
+      speed01: Math.max(0.35, windSpeed01 || 0), // never a silent no-op at Calm
+    });
+    const mag = Math.hypot(ambient.x, ambient.y) || 1;
+    // A wall PERPENDICULAR to the ambient direction — i.e. running along the
+    // ambient's own (x,y), so the door in it is square to the flow.
+    const ux = ambient.x / mag;
+    const uy = ambient.y / mag;
+    const halfLen = 80;
+    const cx = 0;
+    const cy = 0;
+    const wallSegment = {
+      x1: cx - ux * halfLen,
+      y1: cy - uy * halfLen,
+      x2: cx + ux * halfLen,
+      y2: cy + uy * halfLen,
+    };
+    return triggerVtPanViewerWindDoorImpulse(wallSegment);
+  }
+
+  /**
+   * U7 — the Remote's real "Gust" impulse. Always succeeds in the sense
+   * that mattered to the debug action it's extracted from (a synthetic
+   * wall always exists to blow against) — `{skipped:true}` only if the
+   * viewer itself is not running at all.
+   * @returns {{ok: boolean, message: string}}
+   */
+  MapShine.gustWind = () => {
+    const result = gustWindFromAmbient();
+    if (result.skipped) return { ok: false, message: `Gust skipped — ${result.reason}.` };
+    return { ok: true, message: 'Gust triggered.' };
+  };
+
+  MapShine.debug.registerAction('wind-test-gust', '🌬️ Trigger test gust', () => gustWindFromAmbient(), {
+    effect: 'wind',
+  });
 
   // ('🌬️ Force sim running' and '🌬️ Wind sim status' were DELETED 2026-07-27.
   // Both existed to MEASURE the Tier-2 sim — one pinned it thawed so its GPU cost

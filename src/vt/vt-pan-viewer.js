@@ -2293,7 +2293,18 @@ export async function startVtPanViewer({
     // and the cross-floor borrow rule (Water.md §4) resolves identically
     // whether F is the UI's current floor or not.
     const waterBodiesByFloor = new Map();
-    function createWaterBodyForFloor() {
+    /**
+     * @param {number} floorIndex
+     * ⚠️ `waterSurface` is a LAZY reference — `getWaterSurfaceForFloor` is
+     * declared far below in this same function body, but as a hoisted
+     * `function` declaration it is safely callable from here because this
+     * closure is only ever INVOKED later, inside `maybeBake`'s own poll loop,
+     * long after both subsystems exist. It cannot be resolved eagerly: SURFACE
+     * itself depends on BODY (`waterBody: getWaterBodyForFloor(floorIndex)`,
+     * below), so building BODY's own constructor args from a fully-resolved
+     * surface object here would be circular.
+     */
+    function createWaterBodyForFloor(floorIndex) {
       return createWaterBodySubsystem({
         THREE,
         allocator,
@@ -2303,13 +2314,26 @@ export async function startVtPanViewer({
         renderWaterPass: renderSunShadowPass,
         // NEAREST — the seed pass needs a crisp water/land interface.
         createWaterMaskTexture: (data, w, h, filter) => createMaskDataTexture(data, w, h, filter),
+        // ⚠️ THE SMALL-OBSTACLE FIX (2026-08-18) — see water-body-subsystem.js's
+        // own header. Without this, the seed pass's presence data came from
+        // `getWaterMaskGrid`'s coarse, cross-effect derived grid (the SAME one
+        // `_Outdoors` etc. share, capped at `WATER_GRID_MAX_DIM`) — already
+        // downsampled and averaged BEFORE the seed pass ever saw it, so no
+        // amount of area-averaging inside the seed pass itself could recover
+        // detail that upstream step had already thrown away. `water-flow.js`
+        // solved this correctly for the FLOW field via this exact same
+        // accessor (`water-flow-subsystem.js`'s own `waterSurface` dependency)
+        // when it shipped; the body pack's SDF — the one that actually gates
+        // whether `shore.foam` fires at all near an obstacle — never got the
+        // same fix until now.
+        waterSurface: { getFullResMaskTexture: () => getWaterSurfaceForFloor(floorIndex)?.getFullResMaskTexture() ?? null },
       });
     }
     /** Lazily create-or-reuse this floor's own body pack. @param {number} floorIndex */
     function getWaterBodyForFloor(floorIndex) {
       let body = waterBodiesByFloor.get(floorIndex);
       if (!body) {
-        body = createWaterBodyForFloor();
+        body = createWaterBodyForFloor(floorIndex);
         waterBodiesByFloor.set(floorIndex, body);
       }
       return body;
@@ -16225,6 +16249,19 @@ export async function startVtPanViewer({
        * origin-flash lights live in the shared pool, freed by
        * disposePointLights — same split as the candle flame just above). */
       disposeLightning: lightningSubsystem.dispose,
+      /**
+       * U7 (docs/holy/UI-Testament.md §9) — the Remote's "Strike" impulse.
+       * `lightning-subsystem.js#forceStrike` itself has existed since the
+       * subsystem landed, but was never re-exported from here — its own
+       * JSDoc claimed it was "used by... boot.js's debug action", which was
+       * false (grepped every call site in `src/`; the only real one is the
+       * disconnected `tools/shader-lab/lightning-lab.js` harness). A safe,
+       * documented no-op on a scene with no lightning start/end anchors
+       * placed (its own test proves this) — boot.js's own `strikeLightning`
+       * wrapper turns that into an honest status message rather than a
+       * silent nothing.
+       */
+      forceLightningStrike: lightningSubsystem.forceStrike,
       disposeFire: fireSubsystem.dispose,
       /**
        * FIRE'S OWN PER-FRAME COUNTS — `{engines, fires, lights, spawnPoints}`
@@ -18588,6 +18625,24 @@ export function rebakeVtPanViewerWindField(triggerReason = 'manual') {
 export function triggerVtPanViewerWindDoorImpulse(wallSegment) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.triggerWindDoorImpulse(wallSegment);
+}
+
+/**
+ * U7 (docs/holy/UI-Testament.md §9) — the Remote's "Strike" impulse.
+ * No-op `{skipped:true, reason:'viewer not started'}` if nothing is
+ * running. If the viewer IS running but the current scene has no lightning
+ * start/end anchors placed, `forceLightningStrike` is STILL a safe no-op
+ * (lightning-subsystem.js#forceStrike's own doc/test) — this function has
+ * no cheap way to tell those two "nothing visibly happened" cases apart
+ * from here, so it reports only whether the call reached a live subsystem
+ * at all; `boot.js#strikeLightning` states the anchor caveat statically in
+ * its own status text instead of pretending to detect it.
+ * @returns {{skipped: boolean, reason?: string}}
+ */
+export function forceVtPanViewerLightningStrike() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  _active.forceLightningStrike();
+  return { skipped: false };
 }
 
 /**

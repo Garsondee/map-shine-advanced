@@ -166,7 +166,12 @@ function buildStudioEffectCard(model) {
   if (typeof model.onPaint === 'function') {
     const paintBtn = document.createElement('button');
     paintBtn.type = 'button';
-    paintBtn.title = `Paint ${model.title} on the map`;
+    // `paintVerb` (2026-08-19, effects-population round) -- most onPaint
+    // hooks open the mask brush ("Paint X"), but candle/lightning have no
+    // mask at all: their onPaint opens click-to-place ANCHOR mode instead.
+    // Defaults to the original wording so every already-shipped card (water
+    // included) is unaffected.
+    paintBtn.title = `${model.paintVerb ?? 'Paint'} ${model.title} on the map`;
     paintBtn.innerHTML = iconMarkup('brush');
     paintBtn.style.color = 'var(--ink2)';
     paintBtn.addEventListener('click', () => model.onPaint());
@@ -315,6 +320,8 @@ function buildStudioEffectCard(model) {
  * @property {(paramId:string,value:unknown)=>void} onChange
  * @property {boolean} [enabled] @property {(next:boolean)=>void} [onToggleEnabled]
  * @property {()=>void} [onPaint] @property {()=>void} [onPopOut]
+ * @property {string} [paintVerb] - overrides the paint button's "Paint" verb
+ *   (e.g. 'Place' for an anchor-placement onPaint rather than a mask brush).
  * @property {string|(()=>string)} [status]
  */
 

@@ -5380,6 +5380,35 @@ function install() {
       });
   }
 
+  // ENTER PLACEMENT MODE. Real clickable/draggable 🕯️ icons ARE the marker
+  // (ui/anchor-mode.js's own header explains why this replaced proximity
+  // hit-testing) — no need to separately arm the passive diagnostic overlay.
+  // Hoisted out of buildCandlesPanel (2026-08-19, effects-population round)
+  // — the Studio's own candleFlame card needs this exact function for its
+  // own "Place" button, and every reference here (anchorAuthority,
+  // activeFloorContext, addCandle/update/removeCandleAnchor,
+  // buildCandleEditForm) was already a shared, install()-level closure, not
+  // local to the old panel's builder — one function, never a second one
+  // that could drift.
+  const enterCandlePlacement = () => {
+    // Anchor View Mode shows every kind's icons at the SAME screen
+    // position/z-index this placement session draws its own — leaving
+    // both open at once would double-draw every candle icon. One replaces
+    // the other rather than stacking (mirrors enterAnchorViewMode's own
+    // matching guard, below).
+    if (MapShine.__anchorViewMode.isActive()) MapShine.__anchorViewMode.exit();
+    const result = MapShine.__anchorMode.enter({
+      kindLabel: 'candle',
+      icon: anchorKindById('candleFlame')?.icon,
+      listAnchors: () => anchorAuthority.anchorsForEffect('candleFlame', activeFloorContext),
+      addAnchor: (wx, wy) => addCandle(wx, wy),
+      updateAnchor: (id, patch) => updateCandleAnchor(id, patch),
+      removeAnchor: (id) => removeCandleAnchor(id),
+      buildEditForm: buildCandleEditForm,
+    });
+    if (!result?.ok) log.error('could not enter candle placement mode:', result?.reason);
+  };
+
   function buildCandlesPanel({ attachments } = {}) {
     const schema = CANDLE_FLAME_PARAMS;
     const getValue = (id) => {
@@ -5387,28 +5416,6 @@ function install() {
       return v !== undefined ? v : schema[id]?.default;
     };
     const onChange = (id, value) => MapShine.setCandle({ [id]: value });
-
-    // ENTER PLACEMENT MODE. Real clickable/draggable 🕯️ icons ARE the marker
-    // (ui/anchor-mode.js's own header explains why this replaced proximity
-    // hit-testing) — no need to separately arm the passive diagnostic overlay.
-    const enterCandlePlacement = () => {
-      // Anchor View Mode shows every kind's icons at the SAME screen
-      // position/z-index this placement session draws its own — leaving
-      // both open at once would double-draw every candle icon. One replaces
-      // the other rather than stacking (mirrors enterAnchorViewMode's own
-      // matching guard, below).
-      if (MapShine.__anchorViewMode.isActive()) MapShine.__anchorViewMode.exit();
-      const result = MapShine.__anchorMode.enter({
-        kindLabel: 'candle',
-        icon: anchorKindById('candleFlame')?.icon,
-        listAnchors: () => anchorAuthority.anchorsForEffect('candleFlame', activeFloorContext),
-        addAnchor: (wx, wy) => addCandle(wx, wy),
-        updateAnchor: (id, patch) => updateCandleAnchor(id, patch),
-        removeAnchor: (id) => removeCandleAnchor(id),
-        buildEditForm: buildCandleEditForm,
-      });
-      if (!result?.ok) log.error('could not enter candle placement mode:', result?.reason);
-    };
 
     return buildEffectCard({
       id: 'candleFlame',
@@ -5574,6 +5581,25 @@ function install() {
     return wrap;
   }
 
+  // Hoisted out of buildLightningPanel (2026-08-19, effects-population
+  // round), same reason and same closure-safety check as
+  // enterCandlePlacement just above — every reference here was already a
+  // shared, install()-level closure.
+  const enterLightningPlacement = () => {
+    if (MapShine.__anchorViewMode.isActive()) MapShine.__anchorViewMode.exit(); // see enterCandlePlacement's own note
+    const result = MapShine.__anchorMode.enter({
+      kindLabel: 'lightning bolt',
+      icon: lightningRoleIcon,
+      listAnchors: () => anchorAuthority.anchorsForEffect('lightning', activeFloorContext),
+      addAnchor: (wx, wy) => addLightningEndpoint(wx, wy),
+      updateAnchor: (id, patch) => updateLightningAnchor(id, patch),
+      removeAnchor: (id) => removeLightningAnchor(id),
+      buildEditForm: buildLightningEditForm,
+      linePairs: lightningLinePairs,
+    });
+    if (!result?.ok) log.error('could not enter lightning placement mode:', result?.reason);
+  };
+
   function buildLightningPanel({ attachments } = {}) {
     const schema = LIGHTNING_PARAMS;
     const getValue = (id) => {
@@ -5581,21 +5607,6 @@ function install() {
       return v !== undefined ? v : schema[id]?.default;
     };
     const onChange = (id, value) => MapShine.setLightning({ [id]: value });
-
-    const enterLightningPlacement = () => {
-      if (MapShine.__anchorViewMode.isActive()) MapShine.__anchorViewMode.exit(); // see enterCandlePlacement's own note
-      const result = MapShine.__anchorMode.enter({
-        kindLabel: 'lightning bolt',
-        icon: lightningRoleIcon,
-        listAnchors: () => anchorAuthority.anchorsForEffect('lightning', activeFloorContext),
-        addAnchor: (wx, wy) => addLightningEndpoint(wx, wy),
-        updateAnchor: (id, patch) => updateLightningAnchor(id, patch),
-        removeAnchor: (id) => removeLightningAnchor(id),
-        buildEditForm: buildLightningEditForm,
-        linePairs: lightningLinePairs,
-      });
-      if (!result?.ok) log.error('could not enter lightning placement mode:', result?.reason);
-    };
 
     return buildEffectCard({
       id: 'lightning',
@@ -6236,6 +6247,278 @@ function install() {
       onPaint: paintAffordance('water')?.onAdd,
       status: () => collapsedStatusLine({ enabled: readLive().enabled }),
     };
+  });
+
+  /**
+   * A Studio EffectCardModel factory for the common shape: schema +
+   * getValue/onChange off one readout + an enable toggle + (if the effect
+   * declares `authoring.paint`) a real mask row and paint button, derived
+   * from the SAME manifest `paintAffordance` already reads — never a second
+   * lookup that could disagree with it. Water's own card just above stays
+   * hand-written (dials, health, its own status) — this is for the rest:
+   * `registerEffectCard` had exactly one call site (water) despite 15
+   * registered effects and 12 already having a real, working old-panel
+   * card (2026-08-19 gap-audit — author: "Still no studio for editing
+   * effects. That's something very important to get right."; see the
+   * petition). Written once so ~10 near-identical ~15-line blocks can't
+   * drift the moment one gets a fix the others don't.
+   *
+   * ⚠️ NOT included, named rather than silently dropped:
+   *  - `health` — `getParamHealth(id, schema)` only means something once
+   *    `wrapForReadTracking` marks that effect's params read at its real
+   *    render seam; today only water's does. Passing it here for the other
+   *    12 would show a false 100%-orphaned reading — worse than the
+   *    badge's own honest "planned" default this omission leaves standing.
+   *  - `maxTier`/`source` on `tier` — captured for none of these effects
+   *    today (only bare `perfTier`, and only for some of them); a real,
+   *    scoped follow-up, not a blocker for shipping real param editing now.
+   * @param {string} id
+   * @param {{icon?: string, title: string, accVar?: string, filterCategory?: string,
+   *   schema: object, fohKeys: string[],
+   *   getReadout: () => {enabled: boolean, params: object, perfTier?: number},
+   *   setValue: (patch: object) => void, onPaint?: () => void, paintVerb?: string,
+   *   presets?: {table: object, pick: (name: string) => object},
+   *   status?: (readout: object) => string}} opts
+   */
+  function registerSimpleEffectCard(id, opts) {
+    MapShine.__studio?.registerEffectCard(id, () => {
+      // `readLive` stays a live ACCESSOR, called fresh at every field below
+      // — never captured into a `const readout = ...` snapshot closed over
+      // by getValue (tools/verify-structure.mjs#panels/no-captured-readout;
+      // caught by that exact wall on this file's first draft). `enabled`/
+      // `tier`/`status` are still one-time reads (their own model fields
+      // are plain values, not accessors, matching water's own card above),
+      // but `getValue` — the one thing something could call much later,
+      // long after this factory ran — re-reads live every single call.
+      const readLive = opts.getReadout;
+      const model = {
+        id,
+        icon: opts.icon,
+        title: opts.title,
+        accVar: opts.accVar,
+        filterCategory: opts.filterCategory,
+        schema: opts.schema,
+        fohKeys: opts.fohKeys,
+        getValue: (key) => readLive().params?.[key] ?? opts.schema[key]?.default,
+        onChange: (key, value) => opts.setValue({ [key]: value }),
+        enabled: readLive().enabled,
+        onToggleEnabled: (next) => opts.setValue({ enabled: next }),
+        status: opts.status ? opts.status(readLive()) : collapsedStatusLine({ enabled: readLive().enabled }),
+      };
+      if (Number.isFinite(readLive().perfTier)) model.tier = { tier: readLive().perfTier };
+      if (opts.onPaint) {
+        model.onPaint = opts.onPaint;
+        if (opts.paintVerb) model.paintVerb = opts.paintVerb;
+      } else {
+        const paintDecl = effectRegistry.get(id)?.manifest?.authoring?.paint;
+        if (paintDecl) {
+          const kind = Array.isArray(paintDecl) ? paintDecl[0] : paintDecl;
+          model.onPaint = paintAffordance(id)?.onAdd;
+          let found = false;
+          try {
+            found = maskAuthority.authoredStatus(activeFloorContext?.levelId, kind)?.source === 'authored';
+          } catch (_) {
+            found = false;
+          }
+          model.mask = { suffix: maskKindById(kind)?.suffixes?.[0], found };
+        }
+      }
+      if (opts.presets) {
+        model.presets = Object.keys(opts.presets.table);
+        model.onPresetPick = (name) => opts.setValue(opts.presets.pick(name));
+      }
+      return model;
+    });
+  }
+
+  // ---- the 12 ported cards, in registerPanel line order --------------------
+
+  registerSimpleEffectCard('candleFlame', {
+    icon: 'candle',
+    title: 'Candle flames',
+    accVar: '--c-lighting',
+    filterCategory: 'lighting',
+    schema: CANDLE_FLAME_PARAMS,
+    fohKeys: ['color', 'sizePx', 'lightRadiusPx'],
+    getReadout: () => candleReadout,
+    setValue: (patch) => MapShine.setCandle(patch),
+    // No `authoring.paint` at all (anchor-placed, not painted) — the
+    // generic mask-derived onPaint this helper builds for everyone else
+    // would silently do nothing here, so this card supplies its own,
+    // pointed at the SAME hoisted enterCandlePlacement the old panel uses.
+    onPaint: enterCandlePlacement,
+    paintVerb: 'Place',
+    status: (readout) =>
+      collapsedStatusLine({
+        enabled: readout.enabled,
+        count: anchorAuthority.anchorsForEffect('candleFlame', activeFloorContext).length,
+        noun: 'candle',
+      }),
+  });
+
+  registerSimpleEffectCard('lightning', {
+    icon: 'bolt',
+    title: 'Lightning',
+    accVar: '--c-lighting',
+    filterCategory: 'lighting',
+    schema: LIGHTNING_PARAMS,
+    fohKeys: ['outerColor', 'brightness', 'maxDelayMs', 'burstMaxStrikes', 'outsideFlashGain', 'originFlashEnabled'],
+    getReadout: () => lightningReadout,
+    setValue: (patch) => MapShine.setLightning(patch),
+    onPaint: enterLightningPlacement,
+    paintVerb: 'Place',
+    status: (readout) =>
+      collapsedStatusLine({
+        enabled: readout.enabled,
+        count: anchorAuthority.anchorsForEffect('lightning', activeFloorContext).length,
+        noun: 'endpoint',
+      }),
+  });
+
+  registerSimpleEffectCard('fire', {
+    icon: 'fire',
+    title: 'Fire',
+    accVar: '--c-particles',
+    filterCategory: 'particles',
+    schema: FIRE_PARAMS,
+    fohKeys: [
+      'flameCount',
+      'flameLifeScale',
+      'flameOpacity',
+      'flameColorAge',
+      'emberCount',
+      'smokeCount',
+      'maskSensitivity',
+    ],
+    getReadout: () => fireReadout,
+    setValue: (patch) => MapShine.setFire(patch),
+    // No `onPaint` override — fire DOES declare `authoring.paint`, so the
+    // helper's own generic mask-derived button applies. The old panel's
+    // own card has NO place button at all (fire's add/update/remove anchor
+    // helpers were never written — see its own comment a few hundred lines
+    // up), so this genuinely widens past old-panel parity on the paint
+    // half, which is real and already working either way.
+    status: (readout) => {
+      const state = getFireRenderState();
+      const painted = state.maskFireCount ?? 0;
+      const placed = anchorAuthority.anchorsForEffect('fire', activeFloorContext).length;
+      if (!readout.enabled) return 'off';
+      if (painted === 0 && placed === 0) return 'nothing painted or placed yet';
+      const parts = [];
+      if (painted) parts.push(`${painted} painted`);
+      if (placed) parts.push(`${placed} placed`);
+      return parts.join(' · ');
+    },
+  });
+
+  registerSimpleEffectCard('vegetation', {
+    title: 'Vegetation',
+    accVar: '--c-surface',
+    filterCategory: 'surface',
+    schema: VEGETATION_PARAMS,
+    fohKeys: ['intensity', 'windResponse', 'swayAmount', 'flutterAmount', 'shadowStrength'],
+    getReadout: () => vegetationReadout,
+    setValue: (patch) => MapShine.setVegetation(patch),
+  });
+
+  registerSimpleEffectCard('bloom', {
+    icon: 'bloom',
+    title: 'Bloom',
+    accVar: '--c-post',
+    filterCategory: 'post',
+    schema: BLOOM_PARAMS,
+    fohKeys: ['strength', 'threshold', 'coreStrength', 'atmoStrength', 'atmoTint', 'atmoSpread'],
+    getReadout: () => bloomReadout,
+    setValue: (patch) => MapShine.setBloom(patch),
+    presets: { table: BLOOM_PRESETS, pick: bloomPreset },
+  });
+
+  registerSimpleEffectCard('depthOfField', {
+    icon: 'eye',
+    title: 'Depth of Field',
+    accVar: '--c-post',
+    filterCategory: 'post',
+    schema: DOF_PARAMS,
+    fohKeys: ['strength', 'blurPerFloor', 'maxBlur'],
+    getReadout: () => dofReadout,
+    setValue: (patch) => MapShine.setDof(patch),
+    presets: { table: DOF_PRESETS, pick: dofPreset },
+  });
+
+  registerSimpleEffectCard('sunShadows', {
+    icon: 'sun',
+    title: 'Sun shadows',
+    accVar: '--c-lighting',
+    filterCategory: 'lighting',
+    schema: SUN_SHADOW_PARAMS,
+    fohKeys: ['strength01', 'dawnDuskLength', 'lengthScale', 'buildingHeightPx'],
+    getReadout: () => sunShadowReadout,
+    setValue: (patch) => MapShine.setSunShadows(patch),
+  });
+
+  registerSimpleEffectCard('grade', {
+    icon: 'palette',
+    title: 'Colour Grade',
+    accVar: '--c-post',
+    filterCategory: 'post',
+    schema: GRADE_LOOK_PARAMS,
+    fohKeys: ['exposure', 'contrast', 'saturation', 'temperature', 'vibrance', 'toneMapping'],
+    getReadout: () => gradeLookReadout,
+    setValue: (patch) => MapShine.setGrade(patch),
+    presets: { table: GRADE_PRESETS, pick: gradePreset },
+  });
+
+  registerSimpleEffectCard('fluid', {
+    icon: 'water',
+    title: 'Fluid',
+    // Matches water's own accVar choice (not 'surface', its filterCategory's
+    // own default) — a deliberate visual-identity call, same as water's,
+    // not an oversight; see that card's own accVar a few dozen lines up.
+    accVar: '--c-atmos',
+    filterCategory: 'surface',
+    schema: FLUID_PARAMS,
+    fohKeys: ['tint', 'glow', 'flowSpeed', 'iridescence'],
+    getReadout: () => fluid.getReadout(),
+    setValue: (patch) => MapShine.setFluid(patch),
+  });
+
+  registerSimpleEffectCard('specular', {
+    icon: 'gem',
+    title: 'Metal & shine',
+    accVar: '--c-surface',
+    filterCategory: 'surface',
+    schema: SPECULAR_PARAMS,
+    fohKeys: ['strength', 'incidentSteepness', 'shimmerGain', 'parallaxStrength', 'islandSpread'],
+    getReadout: () => specular.getReadout(),
+    setValue: (patch) => MapShine.setSpecular(patch),
+    // ⚠️ The old panel's own THREE independent shimmer-layer strips
+    // (SPECULAR_LAYER_PARAMS applied against specular.getLayers()[0..2] via
+    // MapShine.setSpecularLayer(i, ...)) are deliberately NOT ported here —
+    // one schema applied to three independent live value sets doesn't
+    // reduce to this card's flat shape, and EffectCardModel has no
+    // repeated-group field to hold it. A named, scoped follow-up; the 5
+    // core fohKeys above are real and live either way.
+  });
+
+  registerSimpleEffectCard('window', {
+    icon: 'frame',
+    title: 'Window light',
+    accVar: '--c-lighting',
+    filterCategory: 'lighting',
+    schema: WINDOW_PARAMS,
+    fohKeys: ['strength', 'contrast'],
+    getReadout: () => windowLight.getReadout(),
+    setValue: (patch) => MapShine.setWindowLight(patch),
+  });
+
+  registerSimpleEffectCard('apertureGobo', {
+    title: 'Window light pattern',
+    accVar: '--c-lighting',
+    filterCategory: 'lighting',
+    schema: APERTURE_GOBO_PARAMS,
+    fohKeys: ['strength', 'cols', 'rows', 'softness'],
+    getReadout: () => apertureGobo.getReadout(),
+    setValue: (patch) => MapShine.setApertureGobo(patch),
   });
 
   // THE CONTROL HEALTH REPORT (U6, docs/holy/UI-Testament.md §9) — what the

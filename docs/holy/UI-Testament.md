@@ -3643,6 +3643,74 @@ confirmed via `git status --porcelain` before staging.*
 
 ---
 
+**P33 — filed by Claude Sonnet 5, 2026-08-18 (worker tier; the second half
+of the same author message P32 covers).** Verbatim: *"Ideally the vertical
+sliders would appear soon."* No mock precedent, no prior Testament mention
+— a genuinely new ask, not a gap re-audit.
+
+1. **Scoped to the Remote's own Channels rack, not `buildRangeRow` itself.**
+   The shared dispatch table `buildParamControl` routes through is used by
+   every other room AND all 13 Studio effect cards P32 just populated — a
+   blanket orientation change there would have risked visually regressing
+   the dense, just-tested multi-row FOH strips this same session built out
+   hours earlier. `ui/widgets/vertical-fader.js` (new) is a SEPARATE widget,
+   the same relationship `dial-control.js` already has to
+   `buildRangeRow` (shares the `{value, onChange}` write contract, owns its
+   own visual shape) — only `weather-board.js`'s own `renderFaders()` calls
+   it; nothing else changed.
+2. **A real vertical `<input type="range">`, not a rotated horizontal one.**
+   `writing-mode: vertical-lr` + `direction: rtl` — min/max/step/value and
+   the `'input'`/`'change'` events all work completely unchanged, so this
+   is a presentation layer over the exact range-input contract
+   `buildRangeRow` already has, not a reimplementation. `direction: rtl`
+   specifically is what makes the BOTTOM read as minimum and the TOP read
+   as maximum (the "push up for more" feel every physical fader has) —
+   `vertical-lr` alone runs top-to-bottom, backwards from that.
+3. **Clouds, Rain, Sky Light, Atmosphere, Temperature now render as a
+   horizontal rack of 5 vertical faders** (`.msa-wx-fader-rack`) in place
+   of `LIVE_CHANNELS`/`ENV_CHANNELS`' own stacked horizontal rows. The
+   Scene-override checkbox deliberately stays a normal row below the rack,
+   not forced into fader shape — it is a bool, not a slider, and the
+   Testament's own widget-canon discipline is that a control's shape should
+   represent what it actually is.
+4. **The drift-bracket note and cloud-pin glyph both still attach** —
+   `fader.appendChild(...)`, the identical mechanism `renderFaders()`
+   already used for `buildParamControl`'s own rows, just landing as a
+   stacked block child under a vertical fader's label instead of an inline
+   span beside a horizontal one. `.msa-wx-bracket`/`.msa-wx-pin`'s own
+   `margin-left` (load-bearing for the old inline layout) was dropped as
+   part of the same edit — vestigial once centred in a 52px column, not a
+   second follow-up.
+5. ⚠️ **The one thing this round could NOT verify: how it actually looks.**
+   DOM/computed-style inspection confirms real vertical geometry
+   (`writing-mode: vertical-lr`, `direction: rtl`, a 6×96px bounding box —
+   tall and narrow, not a horizontal slider silently ignoring the CSS) and
+   a full functional round trip (drag → readout → commit), but this pane's
+   own screenshot tool times out on this room the same way it has all
+   session, and DOM inspection cannot confirm the fader READS as a clean
+   mixing-board row rather than something cramped or misaligned. Author's
+   own eyes matter more for this round than almost any other this session.
+
+*Verification note: `npx eslint`/`npx prettier --check` clean on all three
+touched files on the first pass. `node tools/run-tests.mjs`: 27 suites,
+11510 passed, 0 failed, unchanged — no test-covered logic touched, pure
+DOM/CSS. `node tools/verify-structure.mjs`: the same two pre-existing
+violations only. Live-verified in the browser via `tools/remote-preview/`:
+all 5 faders present with correct labels/values; the rack computes
+`display:flex; flex-direction:row`; a fader's own `<input>` computes
+`writing-mode:vertical-lr; direction:rtl` with a genuinely tall-narrow
+bounding box; a simulated drag commits end to end (readout and underlying
+value both update); switching to Drift + picking a climate renders the
+drift-bracket caption correctly under the Clouds fader; the Scene-override
+checkbox remains the rack's very next sibling, unchanged in shape. Console
+clean throughout. **Not verified: the author's own live Foundry session**,
+same standing gap as P21–P32 — and per item 5 above, the one this round
+needs most. The concurrent water-flow session's own files remain
+completely untouched, confirmed via `git status --porcelain` before
+staging.*
+
+---
+
 ## 13. STATUS LOG
 
 - **2026-08-17** — Testament created by Claude Fable 5 at the author's command. Sources

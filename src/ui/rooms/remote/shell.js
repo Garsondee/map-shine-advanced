@@ -254,8 +254,22 @@ function injectStyle() {
 #${ROOM_ID} .msa-wx-forecast-text{font-size:.66rem; color:var(--ink2); padding:2px 0;
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
 #${ROOM_ID} .msa-wx-faders{display:flex; flex-direction:column; gap:6px}
-#${ROOM_ID} .msa-wx-bracket{font-size:.62rem; color:var(--ink2); margin-left:6px; white-space:nowrap}
-#${ROOM_ID} .msa-wx-pin{flex:0 0 auto; margin-left:6px; padding:0 4px; font-size:.68rem; line-height:1;
+/* The Channels rack (2026-08-19 fix -- author: "Ideally the vertical
+   sliders would appear soon"). A horizontal row of ui/widgets/vertical-
+   fader.js's own faders, replacing buildParamControl's stacked horizontal
+   rows for LIVE_CHANNELS/ENV_CHANNELS specifically -- Scene-override stays
+   a normal row below the rack (a bool control, not a slider). Wraps as a
+   defensive safety net, not because 5 faders at their own width need it at
+   any real containment size (measured: well under the Remote's own budget). */
+#${ROOM_ID} .msa-wx-fader-rack{display:flex; flex-direction:row; flex-wrap:wrap;
+  gap:8px; justify-content:center; padding:2px 0}
+/* Both were an INLINE addition beside a horizontal row's label+value before
+   this fix; now they stack as ordinary block children below a vertical
+   fader's own label, where the old margin-left just nudges them slightly
+   off the column's own centred axis -- dropped, not replaced with
+   anything, since the parent's own align-items:center already centres them. */
+#${ROOM_ID} .msa-wx-bracket{font-size:.6rem; color:var(--ink2); white-space:nowrap}
+#${ROOM_ID} .msa-wx-pin{flex:0 0 auto; padding:0 4px; font-size:.68rem; line-height:1;
   cursor:pointer; border:none; background:transparent; color:var(--shine)}
 #${ROOM_ID} .msa-cue-deck{display:flex; flex-direction:column; gap:6px}
 #${ROOM_ID} .msa-cue-label{font-size:.64rem; letter-spacing:.22em; text-transform:uppercase;

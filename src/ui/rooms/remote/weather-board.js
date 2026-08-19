@@ -42,6 +42,7 @@
 // (zones/one-door, tools/verify-structure.mjs).
 import { WEATHER_ARCHETYPES, WEATHER_BIOMES } from '../../../world/index.js';
 import { buildParamControl } from '../../widgets/param-control.js';
+import { buildVerticalFader } from '../../widgets/vertical-fader.js';
 import { createFadeTimeControl } from './fade-time.js';
 import { iconMarkup } from '../../widgets/icon-sprite.js';
 import { installWeatherPicker, buildWeatherIndex } from './weather-picker.js';
@@ -418,9 +419,19 @@ export function renderWeatherBoard(container, ctx) {
     faderHost.innerHTML = '';
     const mode = ctx.getWeatherMode();
     const biome = mode === 'almanac' ? WEATHER_BIOMES.find((b) => b.id === ctx.getWeatherBiome()) : null;
+    // THE FADER RACK (2026-08-19 fix — author, verbatim: "Ideally the
+    // vertical sliders would appear soon"). LIVE_CHANNELS + ENV_CHANNELS
+    // render as a horizontal row of buildVerticalFader's own mixing-board
+    // faders instead of buildParamControl's stacked horizontal rows — the
+    // Scene-override checkbox below stays a normal row on purpose (it is a
+    // bool, not a slider, and forcing it into fader shape would be exactly
+    // the kind of control that represents nothing physical the Testament's
+    // own widget-canon discipline warns against).
+    const rack = document.createElement('div');
+    rack.className = 'msa-wx-fader-rack';
     for (const channel of LIVE_CHANNELS) {
       const decl = { type: 'float', min: 0, max: 1, step: 0.01, default: 0, label: channel.label, help: channel.help };
-      const row = buildParamControl(channel.axis, decl, {
+      const fader = buildVerticalFader(channel.axis, decl, {
         value: ctx.getAxisValue(channel.axis),
         onChange: (v) => ctx.onAxisCommit(channel.axis, v),
       });
@@ -429,9 +440,9 @@ export function renderWeatherBoard(container, ctx) {
         if (bracket) {
           const note = document.createElement('span');
           note.className = 'msa-wx-bracket';
-          note.textContent = `range ${bracket[0].toFixed(2)}–${bracket[1].toFixed(2)}`;
+          note.textContent = `${bracket[0].toFixed(2)}–${bracket[1].toFixed(2)}`;
           note.title = `${biome.label} can wander this ${channel.label.toLowerCase()} range on its own in Drift mode.`;
-          row.appendChild(note);
+          fader.appendChild(note);
         }
       }
       // THE CLOUD PIN GLYPH (2026-08-18 fix — gap-audit against the old
@@ -439,8 +450,8 @@ export function renderWeatherBoard(container, ctx) {
       // the Almanac can pin today (weather.js's own `pinnedAxes`) — visible
       // only in Drift mode while genuinely pinned, same two facts astrolabe.js
       // keys off, so it can't say "pinned" when Direct mode makes the concept
-      // meaningless. Same `row.appendChild` shape as the drift-bracket note
-      // just above, not a new attachment mechanism.
+      // meaningless. Same `fader.appendChild` shape as the drift-bracket
+      // note just above, not a new attachment mechanism.
       if (mode === 'almanac' && channel.axis === 'cloudCover01' && ctx.getCloudPinned?.()) {
         const pin = document.createElement('button');
         pin.type = 'button';
@@ -448,9 +459,9 @@ export function renderWeatherBoard(container, ctx) {
         pin.textContent = '📌';
         pin.title = 'Pinned — the Almanac will not change this. Click to release.';
         pin.addEventListener('click', () => ctx.onUnpinCloudCover?.());
-        row.appendChild(pin);
+        fader.appendChild(pin);
       }
-      faderHost.appendChild(row);
+      rack.appendChild(fader);
     }
     // Sky Light + Atmosphere (2026-08-18 fix) — own commit path per channel
     // (ctx[channel.getValue]/ctx[channel.onCommit]), never ctx.onAxisCommit,
@@ -461,10 +472,9 @@ export function renderWeatherBoard(container, ctx) {
       const getValue = ctx[channel.getValue];
       const onCommit = ctx[channel.onCommit];
       if (typeof getValue !== 'function') continue;
-      faderHost.appendChild(
-        buildParamControl(channel.key, decl, { value: getValue(), onChange: (v) => onCommit?.(v) })
-      );
+      rack.appendChild(buildVerticalFader(channel.key, decl, { value: getValue(), onChange: (v) => onCommit?.(v) }));
     }
+    faderHost.appendChild(rack);
     // Scene override — copy rewritten 2026-08-18 (author, verbatim: "'This
     // scene has it's own sky' is... esoteric. What the hell do you mean by
     // that?"). The control is real and needed (MSA sky settings live at

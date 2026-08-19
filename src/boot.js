@@ -1617,6 +1617,12 @@ function install() {
       servedCount: served.length,
       params: resolved.params,
       perfTier: resolved.perfTier,
+      // 2026-08-19 fix (gap-audit, P32's own "tier is partial" disclosure):
+      // `resolved` already carries these two alongside perfTier -- the
+      // registry resolves all three at the one door (registry.js's own
+      // ResolvedEffect typedef) -- nobody had copied them onto the readout.
+      maxPerfTier: resolved.maxPerfTier,
+      perfTierSource: resolved.perfTierSource,
     };
     // Keep the live-overlay registration's colour in sync with the resolved
     // look param on every apply (settings change, scene load, initial boot).
@@ -1634,6 +1640,9 @@ function install() {
       servedCount: served.length,
       params: resolved.params,
       perfTier: resolved.perfTier,
+      // Same fix as candleFlame's own readout above (2026-08-19).
+      maxPerfTier: resolved.maxPerfTier,
+      perfTierSource: resolved.perfTierSource,
     };
     registerLightningMarkerSource();
   });
@@ -1650,6 +1659,9 @@ function install() {
       servedCount: served.length,
       params: resolved.params,
       perfTier: resolved.perfTier,
+      // Same fix as candleFlame's own readout above (2026-08-19).
+      maxPerfTier: resolved.maxPerfTier,
+      perfTierSource: resolved.perfTierSource,
     };
   });
 
@@ -1661,7 +1673,15 @@ function install() {
   // effects/vegetation.js's own header for why one wind sample per mesh needs
   // no per-instance bookkeeping the way per-candle overrides do).
   effectRegistry.register(VEGETATION, (resolved) => {
-    vegetationReadout = { enabled: resolved.enabled, params: resolved.params, perfTier: resolved.perfTier };
+    // maxPerfTier/perfTierSource added 2026-08-19, same fix as candleFlame's
+    // own readout above.
+    vegetationReadout = {
+      enabled: resolved.enabled,
+      params: resolved.params,
+      perfTier: resolved.perfTier,
+      maxPerfTier: resolved.maxPerfTier,
+      perfTierSource: resolved.perfTierSource,
+    };
   });
 
   // BLOOM — MSA's fourth registered effect and its FIRST post-processing effect,
@@ -1669,7 +1689,17 @@ function install() {
   // whole-image screen pass, so `apply` only refreshes the shared readout the
   // viewer's runPostBloomPass reads each frame (see getBloomRenderState below).
   effectRegistry.register(BLOOM, (resolved) => {
-    bloomReadout = { enabled: resolved.enabled, params: resolved.params };
+    // perfTier/maxPerfTier/perfTierSource added 2026-08-19 -- this readout
+    // had NONE of the three before (unlike candleFlame's, which just had
+    // the first two): a purely visual post effect never needed its own
+    // rung before the Studio card started wanting to show one.
+    bloomReadout = {
+      enabled: resolved.enabled,
+      params: resolved.params,
+      perfTier: resolved.perfTier,
+      maxPerfTier: resolved.maxPerfTier,
+      perfTierSource: resolved.perfTierSource,
+    };
   });
 
   // DEPTH OF FIELD — MSA's SECOND post-processing effect, through the SAME
@@ -1678,7 +1708,15 @@ function install() {
   // refreshes the shared readout the viewer's runPostDofPass reads each frame
   // (see getDofRenderState below).
   effectRegistry.register(DEPTH_OF_FIELD, (resolved) => {
-    dofReadout = { enabled: resolved.enabled, params: resolved.params };
+    // perfTier/maxPerfTier/perfTierSource added 2026-08-19, same reason as
+    // bloom's own readout just above.
+    dofReadout = {
+      enabled: resolved.enabled,
+      params: resolved.params,
+      perfTier: resolved.perfTier,
+      maxPerfTier: resolved.maxPerfTier,
+      perfTierSource: resolved.perfTierSource,
+    };
   });
 
   // SUN SHADOWS (docs/planning/Sun-Shadows.md) — building + overhead +
@@ -1697,7 +1735,15 @@ function install() {
     // `layer-smear.js#layerSmearTierPlan` inside the subsystem. Below the
     // `performance` profile `resolved.enabled` is already false (the manifest's
     // own gate), and the subsystem then drops the layer field entirely.
-    sunShadowReadout = { enabled: resolved.enabled, params: resolved.params, perfTier: resolved.perfTier };
+    // maxPerfTier/perfTierSource added 2026-08-19, same fix as candleFlame's
+    // own readout above.
+    sunShadowReadout = {
+      enabled: resolved.enabled,
+      params: resolved.params,
+      perfTier: resolved.perfTier,
+      maxPerfTier: resolved.maxPerfTier,
+      perfTierSource: resolved.perfTierSource,
+    };
     const p = resolved.params ?? {};
     // ⚠️ THE DEBUG ISOLATION NO LONGER LIVES HERE (2026-08-02). It used to
     // restrict what the DERIVATION writes, which was right for the retired
@@ -1762,7 +1808,16 @@ function install() {
   // ENVIRONMENTAL grade stays on the astrolabe (Atmosphere).
   let gradeLookReadout = { enabled: false, params: null };
   effectRegistry.register(GRADE, (resolved) => {
-    gradeLookReadout = { enabled: resolved.enabled, params: resolved.params };
+    // perfTier/maxPerfTier/perfTierSource added 2026-08-19, same reason as
+    // bloom's own readout (a purely visual post effect never needed its
+    // own rung before the Studio card started wanting to show one).
+    gradeLookReadout = {
+      enabled: resolved.enabled,
+      params: resolved.params,
+      perfTier: resolved.perfTier,
+      maxPerfTier: resolved.maxPerfTier,
+      perfTierSource: resolved.perfTierSource,
+    };
   });
 
   // DOOR GRAPHICS — MSA's fifth registered effect, ported from V2's
@@ -6305,7 +6360,17 @@ function install() {
         onToggleEnabled: (next) => opts.setValue({ enabled: next }),
         status: opts.status ? opts.status(readLive()) : collapsedStatusLine({ enabled: readLive().enabled }),
       };
-      if (Number.isFinite(readLive().perfTier)) model.tier = { tier: readLive().perfTier };
+      // maxTier/source added 2026-08-19 alongside the readout fix that
+      // makes them real (see water-registration.js's own comment on the
+      // same gap) — matches water's own hand-written card a few dozen
+      // lines up, which has always read all three.
+      if (Number.isFinite(readLive().perfTier)) {
+        model.tier = {
+          tier: readLive().perfTier,
+          maxTier: readLive().maxPerfTier,
+          source: readLive().perfTierSource,
+        };
+      }
       if (opts.onPaint) {
         model.onPaint = opts.onPaint;
         if (opts.paintVerb) model.paintVerb = opts.paintVerb;

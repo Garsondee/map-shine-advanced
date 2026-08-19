@@ -103,7 +103,21 @@ export function createWaterRegistration({
     // effect at the registry door) is carried onto the readout the same way
     // candle's own registration carries it onto `candleReadout` — the surface
     // subsystem's material rebuild is what actually reads it.
-    readout = { enabled: resolved.enabled, params: resolved.params, perfTier: resolved.perfTier };
+    //
+    // `maxPerfTier`/`perfTierSource` added 2026-08-19 — the Studio water
+    // card (boot.js) has read `readLive().maxPerfTier`/`.perfTierSource`
+    // since U6 shipped it, but nothing had ever actually put those two
+    // fields on this readout: the tier badge has been silently showing
+    // "3" with no "of 4"/source tooltip since the card first went live.
+    // Same gap, same fix, now closed for all 13 effects' own readouts at
+    // once (see Petition P32's own honest disclosure of this).
+    readout = {
+      enabled: resolved.enabled,
+      params: resolved.params,
+      perfTier: resolved.perfTier,
+      maxPerfTier: resolved.maxPerfTier,
+      perfTierSource: resolved.perfTierSource,
+    };
   });
 
   function reapply() {

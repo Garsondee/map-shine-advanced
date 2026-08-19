@@ -73,7 +73,15 @@ export function createApertureGoboRegistration({
   let debugChannel = 'off';
 
   effectRegistry.register(APERTURE_GOBO, (resolved) => {
-    readout = { enabled: resolved.enabled, params: resolved.params };
+    // perfTier/maxPerfTier/perfTierSource added 2026-08-19, same fix as
+    // fluid-registration.js's own readout (see that file's comment).
+    readout = {
+      enabled: resolved.enabled,
+      params: resolved.params,
+      perfTier: resolved.perfTier,
+      maxPerfTier: resolved.maxPerfTier,
+      perfTierSource: resolved.perfTierSource,
+    };
   });
 
   function reapply() {

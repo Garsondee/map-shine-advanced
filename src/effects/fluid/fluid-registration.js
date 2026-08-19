@@ -53,7 +53,17 @@ export function createFluidRegistration({
   const liveOverride = {};
 
   effectRegistry.register(FLUID, (resolved) => {
-    readout = { enabled: resolved.enabled, params: resolved.params };
+    // perfTier/maxPerfTier/perfTierSource added 2026-08-19 (Studio
+    // effects-population gap-audit) -- `resolved` already carries all
+    // three (registry.js's own ResolvedEffect typedef); this readout had
+    // captured none of them before the Studio card started wanting one.
+    readout = {
+      enabled: resolved.enabled,
+      params: resolved.params,
+      perfTier: resolved.perfTier,
+      maxPerfTier: resolved.maxPerfTier,
+      perfTierSource: resolved.perfTierSource,
+    };
   });
 
   function reapply() {

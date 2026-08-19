@@ -1,12 +1,15 @@
 /**
  * Studio Preview — U1's own "cheap eyes before Foundry eyes" rung (matching
  * the widget gallery's role for U0). Mounts the REAL `installStudio()` with
- * two synthetic effect view-models — one shaped exactly like the real water
- * wiring this session added to boot.js (schema, presets, mask, tier,
- * fohKeys, live getValue/onChange), one simpler — and a fake `debugPanel`
- * stub standing in for `MapShine.debug` (LAB department needs SOMETHING to
- * mount; a live Foundry+effectRegistry session is what actually proves the
- * real wiring, not this file — see Petition P10's honesty note on that gap).
+ * three synthetic effect view-models — one shaped exactly like the real
+ * water wiring this session added to boot.js (schema, presets, mask, tier,
+ * fohKeys, live getValue/onChange), one simpler (bloom, no mask/presets/
+ * tier), one proving `paintVerb` (candleFlame, an anchor-placement onPaint
+ * rather than a mask brush) — and a fake `debugPanel` stub standing in for
+ * `MapShine.debug` (LAB department needs SOMETHING to mount; a live
+ * Foundry+effectRegistry session is what actually proves the real wiring
+ * for any of boot.js's own registerEffectCard calls, not this file — see
+ * Petition P10's honesty note on that gap, still standing).
  *
  * Run: node tools/shader-lab/serve.mjs, then open
  * http://localhost:8934/tools/studio-preview/index.html
@@ -352,6 +355,47 @@ studio.registerEffectCard('bloom', () => ({
     bloomState.enabled = next;
   },
   status: () => (bloomState.enabled ? '' : 'off'),
+}));
+
+// A third card proving `paintVerb` (2026-08-19, effects-population round) —
+// the one actual effects-department.js code change this round made: an
+// onPaint whose action is PLACEMENT (an anchor icon), not a mask brush, so
+// its button needs "Place X" wording rather than the default "Paint X".
+// Mirrors candleFlame's real shape in boot.js (schema + onPaint pointed at
+// a placement function + paintVerb:'Place'), minus the anchor system itself.
+const candleState = { enabled: true, params: { sizePx: 24 } };
+studio.registerEffectCard('candleFlame', () => ({
+  id: 'candleFlame',
+  icon: 'candle',
+  title: 'Candle flames',
+  accVar: '--c-lighting',
+  filterCategory: 'lighting',
+  schema: {
+    sizePx: {
+      type: 'float',
+      min: 4,
+      max: 64,
+      step: 1,
+      default: 24,
+      category: 'Look',
+      label: 'Size',
+      help: 'Flame size.',
+    },
+  },
+  fohKeys: ['sizePx'],
+  getValue: (id) => candleState.params[id],
+  onChange: (id, value) => {
+    candleState.params[id] = value;
+  },
+  enabled: candleState.enabled,
+  onToggleEnabled: (next) => {
+    candleState.enabled = next;
+  },
+  onPaint: () => {
+    document.getElementById('log').textContent = 'placement armed (fake)';
+  },
+  paintVerb: 'Place',
+  status: () => (candleState.enabled ? '' : 'off'),
 }));
 
 document.getElementById('toggleBtn').addEventListener('click', () => studio.toggle());

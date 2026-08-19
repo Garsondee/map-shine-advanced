@@ -3711,6 +3711,63 @@ staging.*
 
 ---
 
+**P34 — filed by Claude Sonnet 5, 2026-08-18 (worker tier; an autonomous-loop
+tick closing one of P32's own named follow-ups — no new author message,
+acting on the standing "keep working" authorization).** Picked the lowest-
+risk, most mechanical of P32's three honest omissions: `tier.maxTier`/
+`perfTierSource` were captured nowhere, water's own already-shipped card
+included.
+
+1. **Confirmed the data was already there before touching anything.**
+   `registry.js#resolveAndApply` computes `maxPerfTier`/`perfTierSource`
+   for EVERY effect at the one door (`ResolvedEffect`'s own typedef) — the
+   gap was never missing data, only that nobody had copied the two extra
+   fields from `resolved` onto the readout each effect's own `apply`
+   callback builds. A purely mechanical fix once traced, not a design call.
+2. **All 13 capture sites fixed** — 8 in `boot.js` (candleFlame, lightning,
+   fire, vegetation, bloom, depthOfField, sunShadows, grade) and 5 in their
+   own dedicated files (`fluid-registration.js`, `specular-registration.js`,
+   `window-registration.js`, `aperture-gobo-registration.js`, and
+   `water-registration.js` itself — the tier badge on the Studio's own
+   flagship, already-shipped water card has been silently showing a bare
+   number with no "of 4"/source tooltip since U6 shipped it).
+3. ⚠️ **The readout fix alone was not enough — caught before calling this
+   done.** `registerSimpleEffectCard`'s own `model.tier` assignment
+   (P32, boot.js) only ever read `readLive().perfTier`, never
+   `.maxPerfTier`/`.perfTierSource` — so the 12 non-water cards would have
+   kept showing a bare tier number even with the readout fully fixed. Found
+   by re-reading the full data path end to end rather than stopping at "the
+   source data is now correct." Fixed alongside the readout capture, not a
+   second round.
+4. Bloom/depthOfField/grade's readouts had captured NO tier fields at all
+   before this (not even bare `perfTier`) — post-processing effects never
+   needed their own rung until the Studio card started wanting to show one;
+   all three now match candle/lightning/fire/vegetation/sunShadows/water's
+   own already-partial capture, fully completed.
+
+*Verification note: `npx eslint`/`npx prettier --check` clean on all 6
+touched files. `node tools/run-tests.mjs`: 27 suites, 11509 passed, **1
+failed** — `src/effects/water/__tests__/run-tests.mjs`'s own
+`WATER_FLOW_SOLVE_ITERATIONS_PER_LEVEL` assertion, in a test file this
+round never touched and asserting a constant no file this round references
+at all (grepped explicitly). Confirmed via `git diff` that this round's
+own `water-registration.js` edit is exactly the 2-field readout addition,
+nothing else — the failure is the concurrent water-flow session's own
+in-flight tuning, caught mid-edit by this run, the same class of transient
+failure Round 13's own petition already named and correctly left alone.
+`node tools/verify-structure.mjs`: the same two pre-existing violations
+only. **Not live-verified**: this fix lives entirely inside `boot.js`'s
+own bootstrap closures (the readout variables, `registerSimpleEffectCard`)
+— the same structural gap P32 itself already disclosed (neither preview
+harness runs `boot.js`'s real `install()`), confirmed correct via full
+data-flow tracing and the (green, unrelated-to-this-fix) test suite rather
+than a live render. Author's own live Foundry eyes remain the standing
+gap, P21–P33 and now P34. The concurrent water-flow session's own files
+remain completely untouched otherwise, confirmed via `git status
+--porcelain` before staging.*
+
+---
+
 ## 13. STATUS LOG
 
 - **2026-08-17** — Testament created by Claude Fable 5 at the author's command. Sources

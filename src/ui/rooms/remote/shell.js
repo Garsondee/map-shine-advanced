@@ -263,6 +263,17 @@ function injectStyle() {
    any real containment size (measured: well under the Remote's own budget). */
 #${ROOM_ID} .msa-wx-fader-rack{display:flex; flex-direction:row; flex-wrap:wrap;
   gap:8px; justify-content:center; padding:2px 0}
+/* The track pseudo-elements ui/widgets/vertical-fader.js itself can't reach
+   (inline styles don't address pseudo-elements) -- accent-color alone only
+   paints the filled portion + thumb, leaving the unfilled groove at the
+   browser default, which reads as a near-invisible hairline on a dark theme
+   (author screenshot, 2026-08-19: thumbs read fine, the channel they sit in
+   didn't). --line-strong rather than a new rgba: it's already themed
+   across all 4 LANTERN modes -- including the high-contrast one, where it
+   jumps to .6 alpha -- and already covered by the U0 contrast-gate test, so
+   this groove inherits that guarantee instead of inventing an unchecked value. */
+#${ROOM_ID} .msa-vfader-input::-webkit-slider-runnable-track{background:var(--line-strong); border-radius:3px}
+#${ROOM_ID} .msa-vfader-input::-moz-range-track{background:var(--line-strong); border-radius:3px}
 /* Both were an INLINE addition beside a horizontal row's label+value before
    this fix; now they stack as ordinary block children below a vertical
    fader's own label, where the old margin-left just nudges them slightly

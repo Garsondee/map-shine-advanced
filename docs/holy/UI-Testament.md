@@ -3768,6 +3768,73 @@ remain completely untouched otherwise, confirmed via `git status
 
 ---
 
+**P35 — filed by Claude Sonnet 5, 2026-08-19 (worker tier; an autonomous-loop
+tick acting on the author's own critique request one turn prior — no new
+author message, standing "keep working" authorization).** The author asked
+for a detailed critique of the live Remote panel screenshot; finding #1 in
+that critique was concrete and self-contained enough to just fix rather than
+leave as a written note.
+
+1. **The bug, precisely.** `ui/widgets/vertical-fader.js` set only
+   `accentColor` on the range input — `accent-color` paints the *filled*
+   portion of the track plus the thumb, never the unfilled remainder, which
+   falls back to the browser's own UA default. On LANTERN's dark theme that
+   default renders as a near-invisible hairline — confirmed against the
+   author's own screenshot (2026-08-19): thumbs read fine, the channel they
+   sit in barely did.
+2. **Fix: explicit track pseudo-element rules, not a new inline style.**
+   Pseudo-elements aren't reachable from `Object.assign(el.style, ...)`, so
+   the input gets a `msa-vfader-input` class and `shell.js#injectStyle`
+   carries two rules — `::-webkit-slider-runnable-track` and
+   `::-moz-range-track` — both `background:var(--line-strong)`.
+   `--line-strong` over a new rgba: it's already themed across all 4 LANTERN
+   modes (jumping to .6 alpha in the high-contrast theme) and already
+   covered by the U0 contrast-gate test, so the groove inherits that
+   guarantee instead of shipping an unchecked value. Track width bumped
+   6px → 8px alongside it — a thin drag target on a mouse, worse on the
+   tablets GMs actually run Foundry on.
+3. ⚠️ **Self-inflicted bug, caught before verification, not after.** First
+   draft of the `shell.js` comment wrapped code references in markdown-style
+   backticks — inside a JS template literal, an unescaped backtick closes
+   the string early. `npm run lint` caught it immediately as a parse error
+   at the exact line (`Unexpected token ui`), which then cascaded into a
+   false `installRemote not found` import error in both `boot.js` and
+   `tools/remote-preview/preview.js` (the linter couldn't parse shell.js's
+   exports at all once the literal was broken). Every surrounding comment in
+   that file already avoids backticks for exactly this reason — should have
+   matched the convention on the first pass instead of reaching for markdown
+   habits inside a CSS-in-JS string.
+4. **Verified live, not just in source.** `tools/remote-preview/preview.js`'s
+   own accessibility tree confirms every claim from the critique against the
+   running DOM, not just the code: Director/Scene Health/Thunder/Motion-
+   tiles-gear/Safety all carry their `plannedReason` text verbatim in their
+   accessible name; Camera Path/Strike/Gust/Baseline carry none (real). The
+   fix itself was confirmed the more rigorous way once the sandboxed pane's
+   own known screenshot-compositing limit blocked a direct pixel check
+   (`feedback_sandboxed_browser_pane_lacks_os_focus`): walked
+   `document.styleSheets` for the live `CSSRule`, not just the raw `<style>`
+   text — `#msa-remote .msa-vfader-input::-webkit-slider-runnable-track` is
+   present, parsed, and active with the intended `background`/`border-radius`,
+   meaning the browser accepted and will paint the rule regardless of
+   `getComputedStyle`'s own well-known unreliability for this specific
+   legacy vendor pseudo-element.
+
+*Verification note: `npx eslint`/`npx prettier --check` clean on both
+touched files (`vertical-fader.js`, `shell.js`). `node tools/run-tests.mjs`:
+27 suites, **11515 passed, 0 failed** — fully green, no pre-existing failure
+this time. `node tools/verify-structure.mjs`: 2 pre-existing violations only
+(`no-gpu-readback` in `vision-mask-render.js`, `time/one-clock` ratchet in
+`boot.js`/`frame-graph.js`/`floor-transition.js`/`loading-screen.js`/
+`decode-pool.js`) — none in either file this round touched, none introduced
+by this round, left alone as concurrent work exactly as P13's own precedent
+established. Live-checked via `tools/remote-preview/preview.js`'s
+accessibility tree and live CSSOM (above) rather than a pixel screenshot,
+which the sandboxed Browser pane's own compositing limitation blocked twice.
+Author's own live Foundry eyes remain the standing gap, P21–P34 and now
+P35.*
+
+---
+
 ## 13. STATUS LOG
 
 - **2026-08-17** — Testament created by Claude Fable 5 at the author's command. Sources

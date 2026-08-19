@@ -75,15 +75,23 @@ export function buildVerticalFader(id, decl, { value, onChange }) {
     alignItems: 'center',
     justifyContent: 'center',
   });
+  // `accent-color` only paints the FILLED portion of the track plus the
+  // thumb — the unfilled remainder falls back to the browser's own default,
+  // which on a dark theme is a near-invisible hairline (confirmed live,
+  // author screenshot 2026-08-19: thumbs read fine, the channel they sit in
+  // barely does). `.msa-vfader-input`'s track pseudo-elements carry the
+  // actual fix (shell.js#injectStyle) since pseudo-elements can't be reached
+  // from an inline style object here.
   const input = styled('input', {
     writingMode: 'vertical-lr',
     direction: 'rtl',
     accentColor: ACCENT,
-    width: '6px',
+    width: '8px',
     height: '96px',
     margin: '0',
     pointerEvents: 'auto',
   });
+  input.className = 'msa-vfader-input';
   input.type = 'range';
   input.min = String(decl.min ?? 0);
   input.max = String(decl.max ?? 1);

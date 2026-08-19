@@ -3487,6 +3487,162 @@ staging.*
 
 ---
 
+**P32 — filed by Claude Sonnet 5, 2026-08-18 (worker tier; a live author
+report, and the biggest single gap this whole campaign has found).**
+Verbatim: *"I'm happy for you to make the calls and continue the work. We
+need to get rid of the old UI and replace it entirely with the new one.
+That's the goal, work towards that. Ideally the vertical sliders would
+appear soon. Still no studio for editing effects. That's something very
+important to get right."* This petition covers the Studio half; vertical
+sliders is a separate, smaller, still-open ask (see the report to the
+author for the honest split).
+
+1. ⚠️⚠️ **"STILL NO STUDIO FOR EDITING EFFECTS" WAS LITERALLY TRUE.**
+   `MapShine.__studio.registerEffectCard` — the ONLY door
+   `effects-department.js`'s real, working, schema-driven card renderer has
+   — had exactly ONE call site in the whole of `boot.js`: water. Every
+   other one of the 15 registered effects had ZERO cards in the Studio.
+   The toolbar button, the room shell, the department rail, the card
+   renderer itself — all real, all already shipped across U0–U1 — but the
+   one thing that actually needed to happen every effect, one at a time,
+   never did past the single effect (water) that doubled as U6's own
+   worked example. Confirmed by grep before writing a line of new code, not
+   assumed from the author's report.
+2. **A dedicated research pass** (general-purpose agent, full read of
+   `effect-controls.js`, `effects-department.js`, all 15
+   `effectRegistry.register(...)` sites, all 20 `registerPanel(...)` sites,
+   every manifest's `authoring.paint`) mapped the real shape of every
+   effect's existing OLD-panel wiring before any new code was written.
+   Headline finding: **all 12 missing panels are schema-driven via the
+   exact same `buildEffectCard({...})` water itself uses — there is no
+   bespoke panel among the 15 registered effects**, only small add-ons
+   (presets, debug-channel selects, specular's 3 shimmer-layer strips) and
+   candle/lightning's anchor-placement flow, which sits structurally
+   outside `buildEffectCard` entirely.
+3. **`registerSimpleEffectCard(id, opts)` (boot.js, new)** — a shared
+   factory for the common shape (schema + getValue/onChange off one live
+   readout + an enable toggle + a mask row/paint button DERIVED from the
+   same manifest `paintAffordance` already reads, never a second lookup
+   that could disagree with it + optional presets), written once so ~10
+   near-identical ~15-line blocks can't drift the moment one gets a fix the
+   others don't. Registered: candleFlame, lightning, fire, vegetation,
+   bloom, depthOfField, sunShadows, grade, fluid, specular, window,
+   apertureGobo — 12 real, working, live-editable cards, joining water for
+   **13 of 15** registered effects now genuinely editable in the Studio.
+4. ⚠️ **CAUGHT BY THE WALL, NOT BY EYE: the helper's first draft
+   reintroduced the exact captured-readout bug `panels/no-captured-readout`
+   exists to catch** (`const readout = opts.getReadout(); ... getValue: (k)
+   => readout.params?.[k]`) — a real regression, not a false positive: the
+   Studio's own department only re-renders on department-switch/filter/
+   pin/pop-out, not on every external change, so a param edited from
+   elsewhere (the old panel, the console) while a Studio card sat open
+   un-rerendered would have gone stale in `getValue` exactly the way the
+   wall's own history describes. Fixed to the wall's own prescribed shape:
+   `readLive` stays a live accessor, called fresh at `getValue`'s own call
+   site, never captured into a shared local first.
+5. **Two effects declared in `effectRegistry` have NO old-panel presence
+   at all — `uiWindowShadow` and `doorGraphics`** — confirmed by the same
+   research pass (exhaustive `registerPanel`/`registerSelect` search, zero
+   hits for either). Both are otherwise fully wired (real schemas, real
+   `MapShine.setUiShadow`/`setDoors` console setters) — genuinely NEW UI,
+   not a port, and deliberately NOT built this round: the author's own
+   words named this round "editing effects," and inventing two brand-new
+   cards with no prior UI to port risks a real design decision (fields,
+   defaults, whether either even wants FOH exposure) nobody asked for yet.
+   Left named, not silently dropped.
+6. ⚠️ **Three honest omissions, named rather than silently shipped:**
+   - **`health` is absent from all 12** — `getParamHealth(id, schema)`
+     only means something once `wrapForReadTracking` marks that effect's
+     params read at its real render seam; today only water's does.
+     Passing it here would show a false 100%-orphaned reading for effects
+     that render correctly every frame — worse than the badge's own honest
+     "planned" default this omission leaves standing.
+   - **`tier` is partial (bare `perfTier` only) for the effects that
+     capture it at all (candle/lightning/fire/vegetation/sunShadows), and
+     absent for the rest** — `maxPerfTier`/`perfTierSource` are captured
+     nowhere today, including water's own already-shipped card. A real,
+     scoped follow-up (touches each readout's own capture site), not a
+     blocker for shipping real param editing now.
+   - **Specular's own 3 independent shimmer-layer strips
+     (`SPECULAR_LAYER_PARAMS` applied against `specular.getLayers()[0..2]`
+     via `MapShine.setSpecularLayer(i, ...)`) are NOT ported** — one schema
+     applied to three live value sets doesn't reduce to this card's flat
+     shape, and `EffectCardModel` has no repeated-group field to hold it.
+     Its 5 core `fohKeys` shipped; the layer strips are a named, scoped
+     follow-up. Same story for window/specular/apertureGobo's own
+     debug-channel `<select>` add-ons — no `EffectCardModel` field exists
+     for them yet, deferred rather than forced into an ill-fitting one.
+7. **`enterCandlePlacement`/`enterLightningPlacement` hoisted** out of
+   `buildCandlesPanel`/`buildLightningPanel` (the old panel's own builders)
+   to shared, `install()`-level closures — every reference inside either
+   function (`anchorAuthority`, `activeFloorContext`,
+   `addCandle`/`updateCandleAnchor`/`removeCandleAnchor`,
+   `buildCandleEditForm`, and lightning's own equivalents) was ALREADY a
+   shared closure, not local to the old panel's builder, so this changes
+   nothing about the old panel's own behaviour — it just gives the new
+   Studio cards' own `onPaint` a real function to point at instead of a
+   second, drifting reimplementation. Candle/lightning declare no
+   `authoring.paint` at all (anchor-placed, not painted), so
+   `registerSimpleEffectCard`'s own generic mask-derived `onPaint` would
+   silently do nothing for them — both supply `onPaint` explicitly instead.
+8. **`effects-department.js` gained one real field: `paintVerb`** — the
+   paint button's tooltip was hardcoded `"Paint {title} on the map"`
+   regardless of what `onPaint` actually does; correct for every mask-brush
+   effect, actively wrong for candle/lightning's click-to-place anchors.
+   `model.paintVerb` (default `'Paint'`, candle/lightning pass `'Place'`)
+   fixes the wording without touching any already-shipped card's own
+   behaviour — water's own button is untouched (`paintVerb` absent →
+   defaults to the original text), confirmed via live DOM read, not
+   assumed from the diff.
+9. **`tools/studio-preview/preview.js` gained a third synthetic card**
+   (candleFlame-shaped: schema + an anchor-style `onPaint` + `paintVerb:
+   'Place'`) specifically to exercise the ONE new rendering path this round
+   actually touched in `effects-department.js` — the existing water/bloom
+   fakes already covered mask/presets/tier/plain-status rendering, so this
+   was the one genuinely uncovered case, not a blanket re-test of
+   everything.
+
+*Verification note: `npx eslint`/`npx prettier --check` clean on all four
+touched files (`boot.js`, `effects-department.js`,
+`tools/studio-preview/preview.js`, plus the prettier auto-format the
+preview harness needed after its own edit). `node tools/run-tests.mjs`: 27
+suites, 11510 passed, 0 failed — the −2 versus the prior round's 11512 is
+the CONCURRENT water-flow session's own uncommitted test-count drift,
+confirmed via `git status --porcelain` showing those test files dirty
+under a session that never touched `boot.js`/`effects-department.js`, not
+anything this round did. `node tools/verify-structure.mjs`: two rounds —
+first caught `panels/no-captured-readout` (item 4 above) as a genuine new
+violation, fixed, re-ran clean back to the same two pre-existing
+violations only (`no-gpu-readback`, `time/one-clock` at 41/38).
+Live-verified via `tools/studio-preview/` (`node tools/shader-lab/serve.mjs`
+→ `http://localhost:8934/tools/studio-preview/index.html`, DOM-read
+verification throughout — this pane's own screenshot tool timed out again,
+same standing limitation as prior rounds; one CONSOLE ERROR appeared and
+was confirmed STALE by the session's own established test (navigating to a
+bare directory listing still showed the identical error, alongside an
+unrelated 404, proving it survives navigation and is tooling residue, not
+current): all three studio-preview cards (water, bloom, candleFlame)
+render; candleFlame's paint button reads "Place Candle flames on the map"
+while water's unchanged button still reads "Paint Water on the map"; the
+candleFlame slider commits a dragged value end to end through the same
+`buildParamControl`/`buildRangeRow` widget every other card already uses;
+water's own mask row (`_Water`) and preset list
+(CalmLake/RagingRiver) render unchanged, confirming the `effects-
+department.js` edit didn't regress the two already-shipped fakes. **What
+this rung structurally CANNOT verify: boot.js's own 12 new
+`registerSimpleEffectCard` registrations themselves** — the studio-preview
+harness mounts `installStudio()` directly with its own synthetic models,
+never boot.js's real `install()`, so the actual closures
+(`candleReadout`, `MapShine.setFire`, `maskAuthority.authoredStatus`,
+etc.) have not run anywhere outside a careful manual re-read against the
+research pass's own findings. **Not verified: the author's own live
+Foundry session** — the standing gap for this entire campaign, P21–P31,
+and the one that matters most for this specific round given point above.
+The concurrent water-flow session's own files remain completely untouched,
+confirmed via `git status --porcelain` before staging.*
+
+---
+
 ## 13. STATUS LOG
 
 - **2026-08-17** — Testament created by Claude Fable 5 at the author's command. Sources

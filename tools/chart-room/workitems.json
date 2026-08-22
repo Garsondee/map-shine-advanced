@@ -5,31 +5,35 @@
     "requestedAt": "2026-08-22",
     "checklist": [
       {
-        "text": "Half-res copy pass of scene.color, restricted to water's own screen rect (Law 6 — bounded cost), taken from the PREVIOUS frame — water draws inside the pass that writes scene.color, so a same-pass read is undefined behaviour.",
+        "text": "REVISED SCOPE (investigated 2026-08-22): refraction needs buf:scene.color as a DEPENDENT read, which water's own drawable cannot do (same-pass read is undefined behaviour) — src/graph/passes.js's own note on surface.water says this pass stays 'seam' specifically until this rung. This is a pass-graph flip (seam -> live), not a shader-only change. Steps below reflect the real scope.",
+        "done": true
+      },
+      {
+        "text": "New subsystem (water-refraction-subsystem.js): a single half-resolution, screen-sized render target that captures buf:scene.color, scissored to water's current on-screen rect, once per frame, AFTER geometry.world finishes writing it. One-frame latency by design (the Testament's own accepted cost) -- water's tier-5 shader reads LAST frame's capture, never this frame's. DONE 2026-08-22: world-anchored (no camera-delta math -- capturedRect + positionWorld remap instead), target sized/bucketed to the body/view intersection (Law 6, specular-surface-subsystem.js's own precedent), 33 real tests (state machine + real TSL graph construction against the vendored THREE bundle), full water suite green (601/601).",
+        "done": true
+      },
+      {
+        "text": "Wire the subsystem into vt-pan-viewer.js's frame loop, positioned AFTER runGeometryWorldPass (not beside the sim/flow/body prep block, which runs BEFORE the draw) -- this is the actual 'real producer' location the pass-graph flip convention expects (see pass-seams.js's comments on the 5 prior flips, each pointing at 'a viewer closure... see graph/pass-impls.js').",
         "done": false
       },
       {
-        "text": "Reproject the copied UV by the camera delta between frames so panning doesn't smear the grab (one-frame latency — the same price every screen-space reflection ships with).",
+        "text": "Flip surface.water: status 'seam' -> 'live' in passes.js (add buf:scene.color to reads, declare the new capture resource in creates), remove the 'surface.water': buildWaterPass entry from pass-seams.js's PASS_SEAMS, delete the throwing door in water-pass.js -- matching the exact pattern of the 5 prior flips, never leaving a dead door beside working code.",
         "done": false
       },
       {
-        "text": "Offset the sample UV by the wave normal x strength, reusing tier 2's existing surface-field normal rather than a new fetch.",
+        "text": "Tier 5 TSL shader block in water-render.js, at the pre-existing landing strip (search 'TIERS 5-8 -- NOT YET BUILT'): offset screen UV by field.slope x thickness (reuse tier 2's existing slope, no new fetch), sample the new capture texture (remapped via the same uViewRect-based explicit UV technique water already uses for buf:scene.depth, never the shared screenUV() builtin -- feedback_shared_texture_node_carries_the_wrong_uv), validate against buf:scene.depth's rank (fall back to centre UV if occluded), chromatic fringe (+/-1 texel R/B split) gated to the top tier only.",
         "done": false
       },
       {
-        "text": "Validate every tap against buf:scene.depth's rank: a tap landing on something ABOVE the water falls back to the un-refracted centre UV (the classic foreground-smear artifact V2's own checklist named 'tap validation').",
+        "text": "Manifest: add tier 5 to WATER.tiers (n:5, name:'refraction', fromProfile:'quality', cost.class:'C5', estMsPerMp: an honest estimate, flagged unmeasured) and remove it from deferredRungs. While touching deferredRungs: also remove 'reflection' -- docs/holy/Water-Testament.md Sec3.6 (the newer, locked, authoritative ladder) explicitly deletes it from the plan; the manifest's deferredRungs still lists it from the older Water.md ladder, a real drift worth fixing since this array is already being edited.",
         "done": false
       },
       {
-        "text": "Chromatic fringe: +/-1 texel R/B channel split, gated to the top (quality+) tier only.",
+        "text": "Tests: extend water-render.test.mjs's tier-construction loop ([0,1,2,3,4] -> include 5) with a stub capture texture input and a structural gate assertion (a refractionCompiled-style boolean or direct node-null check, matching the existing bodyTexNode/normalCompiled pattern). New water-refraction-subsystem.test.mjs mirroring water-sim-subsystem's own test conventions. Update pass-seams.test.mjs / pass-impls.test.mjs expectations for the flip.",
         "done": false
       },
       {
-        "text": "Add the real tier entry (n: 5, name: 'refraction', fromProfile: 'quality', cost.class C5 for the read + a separate accounted C6 for the half-res copy) to WATER.tiers, moving it out of deferredRungs.",
-        "done": false
-      },
-      {
-        "text": "Bench via tools/shader-lab/bench-water.js and the water test suite; final confirmation is Ingram's own eyes in live Foundry, per the covenant — this checklist item is 'ready for your look', never 'done' on its own.",
+        "text": "Bench via tools/shader-lab/bench-water.js and the full water test suite; final confirmation is Ingram's own eyes in live Foundry, per the covenant -- this checklist item is 'ready for your look', never 'done' on its own.",
         "done": false
       }
     ]

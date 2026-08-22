@@ -899,8 +899,15 @@ export function run(t) {
     !html.includes('dataset.localOpen') && !html.includes('data-zone-toggle')
   );
   ok(
-    'a note is never open by default — 437 permanently-visible inputs was the first draft’s loudest fault',
-    !/<details class="note" open/.test(html)
+    // Was "never", full stop — now that real notes exist on disk (the local
+    // server's whole point), an EMPTY note still folds by default (437
+    // permanently-visible inputs was the first draft's loudest fault) but a
+    // note carrying real saved text is the one deliberate exception, proven
+    // exactly, by count, against whatever notes.json genuinely holds right
+    // now — never a blanket "zero open notes ever" claim that real usage
+    // would immediately falsify.
+    'exactly as many notes render OPEN as notes.json actually holds — no more (still-empty notes stay folded), no fewer (a saved note is never hidden)',
+    (html.match(/<details class="note" open>/g) ?? []).length === notesVerdict.resolved.length
   );
   // A note WITH a saved value is the one deliberate exception — proven with a
   // real render, not asserted in the abstract, since a hidden-by-default note

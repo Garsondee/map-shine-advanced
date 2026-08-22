@@ -5,5 +5,89 @@
     "gradedBy": "ingram",
     "gradedAt": "2026-08-22",
     "note": "Got some nice stuff happening but it's not complete yet."
+  },
+  {
+    "ref": "effect:fire",
+    "grade": "B",
+    "gradedBy": "ingram",
+    "gradedAt": "2026-08-22"
+  },
+  {
+    "ref": "effect:sunShadows",
+    "grade": "A",
+    "gradedBy": "ingram",
+    "gradedAt": "2026-08-22"
+  },
+  {
+    "ref": "effect:doorGraphics",
+    "grade": "B",
+    "gradedBy": "ingram",
+    "gradedAt": "2026-08-22"
+  },
+  {
+    "ref": "effect:grade",
+    "grade": "B",
+    "gradedBy": "ingram",
+    "gradedAt": "2026-08-22"
+  },
+  {
+    "ref": "effect:bloom",
+    "grade": "A",
+    "gradedBy": "ingram",
+    "gradedAt": "2026-08-22"
+  },
+  {
+    "ref": "effect:specular",
+    "grade": "B",
+    "gradedBy": "ingram",
+    "gradedAt": "2026-08-22"
+  },
+  {
+    "ref": "effect:lightning",
+    "grade": "A+",
+    "gradedBy": "ingram",
+    "gradedAt": "2026-08-22"
+  },
+  {
+    "ref": "effect:window",
+    "grade": "C",
+    "gradedBy": "ingram",
+    "gradedAt": "2026-08-22"
+  },
+  {
+    "ref": "effect:vegetation",
+    "grade": "A",
+    "gradedBy": "ingram",
+    "gradedAt": "2026-08-22"
+  },
+  {
+    "ref": "effect:depthOfField",
+    "grade": "B",
+    "gradedBy": "ingram",
+    "gradedAt": "2026-08-22"
+  },
+  {
+    "ref": "effect:candleFlame",
+    "grade": "A",
+    "gradedBy": "ingram",
+    "gradedAt": "2026-08-22"
+  },
+  {
+    "ref": "effect:apertureGobo",
+    "grade": "B",
+    "gradedBy": "ingram",
+    "gradedAt": "2026-08-22"
+  },
+  {
+    "ref": "effect:fluid",
+    "grade": "A",
+    "gradedBy": "ingram",
+    "gradedAt": "2026-08-22"
+  },
+  {
+    "ref": "effect:uiWindowShadow",
+    "grade": "B",
+    "gradedBy": "ingram",
+    "gradedAt": "2026-08-22"
   }
 ]

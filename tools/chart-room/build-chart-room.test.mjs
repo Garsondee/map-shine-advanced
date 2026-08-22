@@ -879,6 +879,30 @@ export function run(t) {
     }
   }
   ok('is self-contained — no external stylesheet, script or image', !/<(link|img)\b|<script[^>]+src=/i.test(html));
+  // A regression pin: a stray backtick pair typed into a CSS *comment* inside
+  // PAGE_CSS's own template literal once closed that literal early. The rest
+  // of the string became `TemplateLiteral < main > TemplateLiteral2` — valid
+  // JS, coerced through Function#toString and NaN, silently collapsing the
+  // WHOLE stylesheet to the boolean `false`. No test caught it because every
+  // other CSS-related assertion here checks class attributes on elements, not
+  // the actual <style> tag content — the page still had the right markup, it
+  // just had no styling at all. Caught only by a live author report ("the UI
+  // looks really messed up") and a computed-style check in the browser.
+  const styleTagBodies = [...html.matchAll(/<style>([\s\S]*?)<\/style>/g)].map((m) => m[1]);
+  ok('emits exactly two <style> tags — the tokens and the page CSS', styleTagBodies.length === 2);
+  ok(
+    'neither <style> tag ever collapses to a stray boolean/primitive — a real CSS block, every time',
+    styleTagBodies.every((s) => !/^(true|false|undefined|null|NaN|\d+)$/.test(s.trim()))
+  );
+  // Only the SECOND tag (PAGE_CSS, the module-level constant) is checked for
+  // real bulk — the first tag is `tokensCss`, which in this test fixture is
+  // deliberately a tiny stand-in (`:root{--bg0:#000}`), not the real ~4KB
+  // token sheet main() actually loads.
+  ok('the page CSS tag is a real, substantial stylesheet, not a truncated fragment', styleTagBodies[1].length > 1000);
+  ok(
+    'the page stylesheet actually styles body and main, not just :root tokens',
+    /body\{[^}]*background:var\(--bg0\)/.test(html) && /main\{[^}]*max-width:1280px/.test(html)
+  );
   ok(
     'the real, currently-open bugs are named on the page',
     btFindings.openBugs.every((b) => html.includes(`#${b.id}`))
@@ -1031,6 +1055,10 @@ export function run(t) {
   ok(
     'artifact and standalone carry the same content',
     artifactHtml.includes('Easy wins') && html.includes('Easy wins')
+  );
+  ok(
+    'artifact mode also gets a real page stylesheet, not a collapsed primitive',
+    [...artifactHtml.matchAll(/<style>([\s\S]*?)<\/style>/g)].map((m) => m[1])[1]?.length > 1000
   );
 
   // ── THE FRESHNESS GATE — the author's own ask: "worth a mechanism… it's

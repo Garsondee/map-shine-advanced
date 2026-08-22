@@ -1691,8 +1691,7 @@ const ARTIFACT_JS = SHARED_JS;
 /** Standalone only needs a default theme stamp; there is nothing else left to wire up. */
 const PAGE_JS = `document.documentElement.dataset.theme ||= 'dark';`;
 
-const PAGE_CSS =
-  `
+const PAGE_CSS = `
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg0);color:var(--ink0);font:14px/1.55 var(--font)}
 code{font-family:var(--mono);font-size:.92em;color:var(--ink1)}
@@ -1706,9 +1705,8 @@ h1,h2,h3{margin:0;font-weight:600;letter-spacing:.2px;text-wrap:balance}
 .meta{color:var(--ink2);font-size:12px}
 .fp{font-family:var(--mono);cursor:help;border-bottom:1px dotted var(--line-strong)}
 /* ONE continuous document — plain anchor links, no view state, nothing to
-   toggle. ` <
-  main >
-  ` just flows; the "single interface" ask needed no CSS. */
+   toggle. The anchors just scroll main into view; the "single interface" ask
+   needed no CSS. */
 .jump{margin-left:auto;display:flex;gap:var(--sp4)}
 .jump a{color:var(--ink1);font-size:var(--t3);text-decoration:none;border-bottom:1px solid transparent;
   transition:color var(--t-micro) var(--ease),border-color var(--t-micro) var(--ease)}

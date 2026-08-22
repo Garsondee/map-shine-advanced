@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>The Chart Room</title>
-<!-- chart-room-fingerprint: 785d2bc695e2 -->
+<!-- chart-room-fingerprint: 036c3ff10b7d -->
 <style>:root{--font:"Segoe UI", system-ui, -apple-system, sans-serif;--mono:"Cascadia Mono", ui-monospace, Consolas, monospace;--r-ctl:6px;--r-card:10px;--r-room:14px;--sp1:4px;--sp2:8px;--sp3:12px;--sp4:16px;--sp5:24px;--t-micro:120ms;--t-move:200ms;--t-room:320ms;--ease:cubic-bezier(.22,.7,.3,1);}
 html[data-theme="dark"]{--bg0:#14161d;--bg1:#191c25;--bg2:#20242f;--bg3:#272c3a;--line:rgba(196,208,232,.13);--line-strong:rgba(196,208,232,.24);--ink0:#ecEFf5;--ink1:#a8b1c2;--ink2:#78829a;--shine:#e7c368;--shine-soft:rgba(231,195,104,.16);--shine-glow:rgba(231,195,104,.38);--ok:#4bd48c;--warn:#edb64f;--fail:#ef6d5a;--info:#58a6f2;--c-gameplay:#3fd3b4;--c-lighting:#f0b64a;--c-atmos:#5aa9f2;--c-surface:#b48af5;--c-particles:#f28a4a;--c-post:#ef6aa8;--c-system:#8fa0b8;--glass:rgba(25,28,37,.86);--glass-blur:14px;--shadow1:0 2px 10px rgba(0,0,0,.35);--shadow2:0 8px 30px rgba(0,0,0,.45);--shadow3:0 18px 60px rgba(0,0,0,.55);--glow-on:1;--map-bright:1;}
 html[data-theme="light"]{--bg0:#e8eaf0;--bg1:#f2f4f8;--bg2:#ffffff;--bg3:#eef1f6;--line:rgba(30,42,70,.14);--line-strong:rgba(30,42,70,.28);--ink0:#1d2333;--ink1:#4c5670;--ink2:#7d869c;--shine:#876117;--shine-soft:rgba(135,97,23,.13);--shine-glow:rgba(135,97,23,.30);--ok:#178f55;--warn:#a97b14;--fail:#c44432;--info:#2a72c8;--c-gameplay:#0f9c80;--c-lighting:#b07f14;--c-atmos:#2a72c8;--c-surface:#7a4fd0;--c-particles:#c25c1a;--c-post:#c23a78;--c-system:#5d6c86;--glass:rgba(246,248,251,.92);--glass-blur:14px;--shadow1:0 2px 10px rgba(30,40,70,.14);--shadow2:0 8px 30px rgba(30,40,70,.18);--shadow3:0 18px 60px rgba(30,40,70,.22);--glow-on:1;--map-bright:1;}
@@ -17,12 +17,246 @@ html[data-reduce-motion="1"] *,html[data-reduce-motion="1"] *::before,html[data-
 @media (prefers-reduced-motion: reduce){*,*::before,*::after{animation-duration:0.001s !important;transition-duration:0.001s !important}}
 html[data-theme="dark"]{--bg0:#16130f;--bg1:#1d1915;--bg2:#26201a;--bg3:#302921;--line:rgba(235,220,195,.11);--line-strong:rgba(235,220,195,.20);--ink0:#f3eee5;--ink1:#c0b5a4;--ink2:#978d7e;--glass:rgba(29,25,21,.88)}
 html[data-theme="light"]{--bg0:#efe9de;--bg1:#f8f4ec;--bg2:#fffdf9;--bg3:#f1eae0;--line:rgba(74,58,36,.13);--line-strong:rgba(74,58,36,.26);--ink0:#241d14;--ink1:#564b3c;--ink2:#6b5f4d;--glass:rgba(248,244,236,.92)}</style>
-<style>false</style>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg0);color:var(--ink0);font:14px/1.55 var(--font)}
+code{font-family:var(--mono);font-size:.92em;color:var(--ink1)}
+h1,h2,h3{margin:0;font-weight:600;letter-spacing:.2px;text-wrap:balance}
+.top{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:var(--sp4);flex-wrap:wrap;
+  padding:var(--sp4) var(--sp5);background:var(--glass);backdrop-filter:blur(var(--glass-blur));
+  border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:var(--sp2)}
+.brand h1{font-size:var(--t1);font-weight:500;letter-spacing:.3px}
+.lamp{width:12px;height:12px;border-radius:50%;background:var(--shine);box-shadow:0 0 12px var(--shine-glow)}
+.meta{color:var(--ink2);font-size:12px}
+.fp{font-family:var(--mono);cursor:help;border-bottom:1px dotted var(--line-strong)}
+/* ONE continuous document — plain anchor links, no view state, nothing to
+   toggle. The anchors just scroll main into view; the "single interface" ask
+   needed no CSS. */
+.jump{margin-left:auto;display:flex;gap:var(--sp4)}
+.jump a{color:var(--ink1);font-size:var(--t3);text-decoration:none;border-bottom:1px solid transparent;
+  transition:color var(--t-micro) var(--ease),border-color var(--t-micro) var(--ease)}
+.jump a:hover{color:var(--shine);border-bottom-color:var(--shine)}
+main{padding:0 var(--sp5) var(--sp5);max-width:1280px;margin:0 auto}
+.alarm{margin:var(--sp4) var(--sp5);padding:var(--sp3) var(--sp4);border:1px solid var(--fail);
+  border-left-width:4px;border-radius:var(--r-card);background:color-mix(in oklab,var(--fail) 10%,transparent)}
+.alarm h2{color:var(--fail);font-size:15px;margin-bottom:var(--sp2)}
+.gauges{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:var(--sp4);margin-bottom:var(--sp5)}
+.gcard{border:1px solid var(--line);border-radius:var(--r-card);background:var(--bg1);padding:var(--sp4);
+  box-shadow:var(--shadow1)}
+.gcard.hero{border-color:var(--shine);box-shadow:var(--shadow2)}
+.gcard h2{font-size:15px}
+.sub{color:var(--ink2);font-size:12px;margin:2px 0 var(--sp3)}
+.gauge{display:block;width:132px;height:132px;margin:0 auto var(--sp2)}
+.gtrack{fill:none;stroke:var(--bg3);stroke-width:11}
+.gfill{fill:none;stroke-width:11;stroke-linecap:round;transform:rotate(-90deg);transform-origin:64px 64px}
+.gfill.gold{stroke:var(--shine)}.gfill.blue{stroke:var(--c-atmos)}.gfill.violet{stroke:var(--c-surface)}
+.gnum{fill:var(--ink0);font:600 30px/1 var(--font);text-anchor:middle}
+.gpc{font-size:15px;fill:var(--ink2)}
+.reading{margin:0;color:var(--ink1);font-size:12.5px;text-align:center}
+details{margin-top:var(--sp3);border-top:1px solid var(--line);padding-top:var(--sp2)}
+summary{cursor:pointer;color:var(--ink2);font-size:12px}
+summary:hover{color:var(--shine)}
+.work{width:100%;border-collapse:collapse;margin-top:var(--sp2);font-size:12px}
+.work th{text-align:left;color:var(--ink2);font-weight:500;padding:4px 6px;border-bottom:1px solid var(--line)}
+.work td{padding:4px 6px;border-bottom:1px solid var(--line);vertical-align:top}
+.work .num{text-align:right;font-family:var(--mono);color:var(--ink1)}
+.work tr.bydesign td{opacity:.55}
+.work tr.sub-row td{color:var(--ink2);font-size:11px;padding-top:0;border-bottom:1px solid var(--line)}
+.fine{color:var(--ink2);font-size:11.5px;margin:var(--sp2) 0 0}
+.strip{margin-bottom:var(--sp5)}
+.strip h2{font-size:16px;display:flex;align-items:center;gap:var(--sp2)}
+.count{font:500 11px/1 var(--mono);color:var(--ink2);border:1px solid var(--line);border-radius:99px;padding:3px 8px}
+.cards,.grid{display:grid;gap:var(--sp3)}
+.cards{grid-template-columns:repeat(auto-fill,minmax(310px,1fr))}
+.grid{grid-template-columns:repeat(auto-fill,minmax(260px,1fr))}
+.jcard,.ecard{border:1px solid var(--line);border-radius:var(--r-card);background:var(--bg1);padding:var(--sp3)}
+.jcard.unconfirmed{border-style:dashed}
+.resolved .jcard{border-color:color-mix(in oklab,var(--ok) 40%,var(--line));opacity:.82}
+.resolved .jcard .note{color:var(--ok)}
+.jcard header,.ecard header{display:flex;align-items:center;gap:var(--sp2);flex-wrap:wrap;margin-bottom:var(--sp2)}
+.ecard h3{font-size:13.5px}
+.ecard header code{margin-left:auto;color:var(--ink2);font-size:11px}
+.legs{margin:0 0 var(--sp1);font-size:12.5px;color:var(--ink0)}
+.note{margin:0;font-size:12px;color:var(--ink1)}
+.pending{margin:var(--sp2) 0 0;font-size:11px;color:var(--warn)}
+.chip{display:inline-block;font:500 10.5px/1 var(--font);text-transform:uppercase;letter-spacing:.4px;
+  padding:4px 8px;border-radius:99px;border:1px solid var(--line);color:var(--ink1)}
+.chips{margin:var(--sp2) 0 0;display:flex;gap:4px;flex-wrap:wrap}
+.e-quick,.e-moderate{border-color:var(--ok);color:var(--ok)}
+.e-hard,.e-epic{border-color:var(--warn);color:var(--warn)}
+.v-essential{border-color:var(--fail);color:var(--fail)}
+.v-strong{border-color:var(--shine);color:var(--shine)}
+.v-cut{border-color:var(--ink2);color:var(--ink2);text-decoration:line-through}
+.s-live,.g-AHEAD,.g-PAR,.s-LIVE,.s-CLOSED{border-color:var(--ok);color:var(--ok)}
+.s-seam,.g-TUNE,.s-BUILT{border-color:var(--warn);color:var(--warn)}
+.s-future,.g-MISSING,.g-PRIMITIVE,.s-OPEN{border-color:var(--fail);color:var(--fail)}
+.r-full{border-color:var(--ok);color:var(--ok)}
+.r-partial{border-color:var(--warn);color:var(--warn)}
+.bar{height:6px;border-radius:99px;background:var(--bg3);overflow:hidden;margin:var(--sp2) 0}
+.bar span{display:block;height:100%;background:var(--shine);border-radius:99px}
+.ecard .reading{text-align:left}
+.ecard .reading .num{float:right;font-family:var(--mono);color:var(--ink2)}
+.blind{margin:0;padding-left:var(--sp4);color:var(--ink1);font-size:12.5px;columns:2;column-gap:var(--sp5)}
+.blind li{margin-bottom:4px;break-inside:avoid}
+.empty{color:var(--ink2);font-size:12px;font-style:italic}
+/* A count, not an alarm — a solid red pill on a jump link shouts at you every
+   time you look at the page, which is not what eight known, tracked bugs
+   deserve. (The Board kanban this once lived on is gone — its own status is
+   visible in-place now: on the stranded-pass table, on Pipeline gaps, and on
+   every rung's own built/not-built chip.) */
+.tabbadge{font:600 var(--t5)/1 var(--mono);background:color-mix(in oklab,var(--fail) 22%,transparent);
+  color:var(--fail);border-radius:99px;padding:3px 7px;margin-left:5px}
+.strip h2{font-size:var(--t2)}
+.sub{font-size:var(--t4);line-height:1.6}
+/* ── A REAL TYPE SCALE ────────────────────────────────────────────────────
+   The first draft had TEN distinct font sizes and no scale, which reads as
+   noise rather than hierarchy. Five steps, and weight/colour carry the rest. */
+:root{--t1:19px;--t2:15px;--t3:13px;--t4:11.5px;--t5:10px}
+/* ── THE OPENER: orientation before detail ────────────────────────────────── */
+.opener{margin-bottom:var(--sp5)}
+.figures{display:flex;gap:var(--sp5);flex-wrap:wrap;margin-bottom:var(--sp4)}
+.fig{display:flex;flex-direction:column;gap:2px}
+.fig b{font:600 26px/1 var(--font);color:var(--ink0);font-variant-numeric:tabular-nums}
+.fig span{font-size:var(--t4);color:var(--ink2)}
+.fig.hot b{color:var(--fail)}
+.lede{margin:0 0 var(--sp3);max-width:62ch;font-size:var(--t3);line-height:1.65;color:var(--ink1)}
+.legend{display:flex;gap:var(--sp4);flex-wrap:wrap}
+.key{display:flex;align-items:center;gap:6px;font-size:var(--t4);color:var(--ink2)}
+.sw{width:10px;height:10px;border-radius:3px;flex:none}
+.sw.ok{background:var(--ok)}.sw.watch{background:var(--warn)}.sw.warn{background:var(--fail)}
+.sw.dash{border:1px dashed var(--line-strong);border-radius:3px}
+/* ── THE MOSAIC: block area ≈ code volume ─────────────────────────────────── */
+.mosaic{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));grid-auto-rows:auto;
+  gap:var(--sp3);margin-bottom:var(--sp5);align-items:start}
+/* No outline on a closed tile — the ground does the separating. A card only
+   grows a border when it is open and genuinely a container. */
+.zone{background:var(--bg1);border-radius:var(--r-card);border:1px solid transparent;
+  border-left:3px solid var(--line-strong);overflow:hidden;
+  transition:background var(--t-micro) var(--ease),border-color var(--t-micro) var(--ease)}
+.sp-xl{grid-column:span 3}
+.sp-lg{grid-column:span 2}
+.sp-sm{grid-column:span 1}
+.t-ok{border-left-color:color-mix(in oklab,var(--ok) 55%,transparent)}
+.t-watch{border-left-color:var(--warn)}
+.t-warn{border-left-color:var(--fail)}
+.zone:hover{background:var(--bg2)}
+.zone[open]{grid-column:1/-1;background:var(--bg1);border-color:var(--line);box-shadow:var(--shadow2)}
+.zhead{padding:var(--sp4);cursor:pointer;list-style:none;display:block}
+.zhead::-webkit-details-marker{display:none}
+.zrow{display:flex;align-items:baseline;gap:var(--sp2)}
+.zone h3{font:600 var(--t2)/1.2 var(--mono);color:var(--ink0);letter-spacing:0}
+.kindtag{margin-left:auto;font:500 var(--t5)/1 var(--font);text-transform:uppercase;letter-spacing:.6px;
+  color:var(--ink2)}
+.zmeta{margin:6px 0 var(--sp3);color:var(--ink2);font-size:var(--t4);font-variant-numeric:tabular-nums}
+.zblurb{margin:0;color:var(--ink1);font-size:var(--t4);line-height:1.6;
+  display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden}
+.sp-xl .zblurb{-webkit-line-clamp:3}
+.zone[open] .zblurb{-webkit-line-clamp:unset;display:block}
+.zfoot{margin-top:var(--sp3);display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.chev{margin-left:auto;font-size:var(--t5);color:var(--ink2);text-transform:uppercase;letter-spacing:.6px}
+.zone[open] .chev::after{content:' ▲'}
+.zone:not([open]) .chev::after{content:' ▼'}
+.dot{font:500 var(--t5)/1 var(--font);letter-spacing:.3px;padding:4px 8px;border-radius:99px;
+  background:var(--bg3);color:var(--ink2);cursor:help}
+.dot.watch{background:color-mix(in oklab,var(--warn) 18%,transparent);color:var(--warn)}
+.dot.warn{background:color-mix(in oklab,var(--fail) 18%,transparent);color:var(--fail)}
+.zbody{padding:0 var(--sp4) var(--sp4);border-top:1px solid var(--line)}
+/* Files: a list with a rule, not 18 nested boxes. */
+.files{list-style:none;margin:var(--sp3) 0 0;padding:0;display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:0 var(--sp5)}
+.file{padding:var(--sp3) 0 var(--sp3) var(--sp3);border-left:2px solid var(--line);
+  border-bottom:1px solid var(--line)}
+.file.flagged{border-left-color:var(--warn)}
+.frow{display:flex;gap:var(--sp2);align-items:baseline}
+.frow code{font-size:var(--t4);color:var(--ink0)}
+.flines{margin-left:auto;font:var(--t5) var(--mono);color:var(--ink2);font-variant-numeric:tabular-nums}
+.fsum{margin:5px 0 0;color:var(--ink2);font-size:var(--t4);line-height:1.55}
+/* ── THE WRITE-BACK CONTROL — folded until wanted ─────────────────────────── */
+.note{margin-top:var(--sp2);border:none;padding:0;font-size:var(--t4)}
+.notetab{list-style:none;cursor:pointer;font:500 var(--t5)/1 var(--font);text-transform:uppercase;
+  letter-spacing:.6px;color:var(--ink2);padding:5px 0;display:inline-block;
+  border-bottom:1px dotted transparent;transition:color var(--t-micro) var(--ease)}
+.notetab::-webkit-details-marker{display:none}
+.notetab::before{content:'✎ '}
+.notetab:hover{color:var(--shine);border-bottom-color:var(--shine)}
+.note[open] .notetab{color:var(--shine)}
+.notebody{padding-top:6px}
+.notein{margin:0;min-height:52px;padding:9px 11px;border:1px solid var(--line-strong);
+  border-radius:var(--r-ctl);font-size:var(--t3);line-height:1.6;color:var(--ink0);background:var(--bg0);
+  outline:none}
+.notein:focus{border-color:var(--shine);box-shadow:0 0 0 3px var(--shine-soft)}
+.notein:empty::before{content:attr(data-placeholder);color:var(--ink2)}
+.ticks{display:flex;gap:var(--sp4);flex-wrap:wrap;margin-top:var(--sp2)}
+.tick{font-size:var(--t4);color:var(--ink1);display:flex;align-items:center;gap:6px;cursor:pointer}
+.tick input{accent-color:var(--ok);margin:0;width:14px;height:14px}
+.tick.bad input{accent-color:var(--fail)}
+/* ── GAPS: dashed, quiet, grouped by kind ─────────────────────────────────── */
+.gapsec .sub{max-width:62ch}
+.gsub{font-size:var(--t3);color:var(--ink2);text-transform:uppercase;letter-spacing:.7px;
+  margin:var(--sp5) 0 var(--sp3);display:flex;align-items:center;gap:var(--sp2)}
+.gaps{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:var(--sp3)}
+.gaps.tight{grid-template-columns:repeat(auto-fill,minmax(260px,1fr))}
+.gap{border:1px dashed var(--line-strong);border-radius:var(--r-card);background:transparent;
+  padding:var(--sp3) var(--sp4)}
+.grow{display:flex;gap:var(--sp2);align-items:baseline}
+.grow code{font-size:var(--t4);color:var(--ink1)}
+.gw{margin-left:auto;font:var(--t5) var(--mono);color:var(--fail);white-space:nowrap}
+.gwhy{margin:6px 0 0;font-size:var(--t4);line-height:1.55;color:var(--ink1)}
+.gap .fsum{margin-top:5px}
+.s-deferred{border-color:var(--ink2);color:var(--ink2)}
+/* ── FEATURES: grade, checklist, one rung at a time ───────────────────────── */
+.effecthead{border-bottom:1px solid var(--line);padding-bottom:var(--sp3);margin-bottom:var(--sp3)}
+.gradewrap{display:flex;align-items:center;gap:var(--sp3);flex-wrap:wrap;margin-bottom:var(--sp2)}
+.glabel{font-size:var(--t4);color:var(--ink2)}
+.gradechip{font:600 var(--t5)/1 var(--mono);padding:4px 8px;border-radius:99px;border:1px solid}
+.gr-S,.gr-Ap,.gr-A{border-color:var(--ok);color:var(--ok)}
+.gr-B,.gr-C{border-color:var(--warn);color:var(--warn)}
+.gr-D,.gr-F{border-color:var(--fail);color:var(--fail)}
+/* Radio inputs styled as a compact letter-grade strip — the checked state on
+   one of these is captured by the live-doc runtime exactly like a checkbox
+   is, so a click here is a real edit reaching me with no extra mechanism. */
+.gradepick{display:inline-flex;gap:2px;border:1px solid var(--line);border-radius:99px;padding:2px}
+.gopt{position:relative;display:flex}
+.gopt input{position:absolute;opacity:0;width:100%;height:100%;margin:0;cursor:pointer}
+.gopt span{font:600 var(--t5)/1 var(--mono);padding:5px 8px;border-radius:99px;color:var(--ink2);
+  transition:background var(--t-micro) var(--ease),color var(--t-micro) var(--ease)}
+.gopt:hover span{color:var(--ink0)}
+.gopt input:checked+span{background:var(--shine-soft);color:var(--shine)}
+.fsub{font-size:var(--t3);color:var(--ink1);text-transform:uppercase;letter-spacing:.6px;
+  margin:var(--sp4) 0 var(--sp2);display:flex;align-items:center;gap:var(--sp2)}
+.rungs{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:var(--sp3);margin-bottom:var(--sp2)}
+.rung{border:1px solid var(--line);border-radius:var(--r-card);background:var(--bg0);padding:var(--sp3)}
+.rung.built{border-color:var(--line-strong)}
+.rrow{display:flex;align-items:center;gap:var(--sp2);flex-wrap:wrap;margin-bottom:6px}
+.rrow code{font-size:var(--t4);color:var(--ink0)}
+.checklist{margin:var(--sp2) 0;padding:var(--sp2) var(--sp3);background:var(--bg1);border-radius:var(--r-ctl)}
+.wistate{margin:0 0 4px;font:600 var(--t5)/1 var(--font);text-transform:uppercase;letter-spacing:.5px}
+.st-requested{color:var(--ink2)}
+.st-planned{color:var(--info)}
+.st-in-progress{color:var(--warn)}
+.st-awaiting-eyes{color:var(--shine)}
+.steps{margin:4px 0 0;padding:0;list-style:none;font-size:var(--t4);color:var(--ink1)}
+.steps li{padding:2px 0}
+.steps li.done{color:var(--ink2);text-decoration:line-through}
+/* Real numbers, honestly dated — never a live reading, said outright in the title tooltip. */
+.dot[title^="Measured"],.dot[title^="Declared"]{cursor:help}
+.bugcard.flagged{border-color:var(--fail)}
+.jcard.drift{border-color:var(--warn)}
+.jcard.drift .legs code{color:var(--warn)}
+.foot{max-width:1280px;margin:0 auto;padding:var(--sp4) var(--sp5) var(--sp5);color:var(--ink2);
+  font-size:11.5px;border-top:1px solid var(--line)}
+/* LAST, deliberately: .count and .gnum both set the `font:` SHORTHAND, which
+   resets font-variant-numeric to normal. Declared earlier this rule silently
+   loses the cascade — it did, and only a computed-style read caught it. */
+.num,.count,.gnum,.reading,.work td{font-variant-numeric:tabular-nums}
+@media (max-width:720px){main{padding:0 var(--sp3) var(--sp3)}.blind{columns:1}}
+</style>
 </head>
 <body>
 <header class="top">
 <div class="brand"><span class="lamp"></span><h1>The Chart Room</h1></div>
-<div class="meta">Map Shine Advanced · generated 2026-08-22 · <span class="fp" title="A hash of everything derived on this page. Two builds of the same reality produce the same fingerprint — ask me to compare this against a fresh run if you doubt it.">fp 785d2bc695e2</span></div>
+<div class="meta">Map Shine Advanced · generated 2026-08-22 · <span class="fp" title="A hash of everything derived on this page. Two builds of the same reality produce the same fingerprint — ask me to compare this against a fresh run if you doubt it.">fp 036c3ff10b7d</span></div>
 <nav class="jump">
 <a href="#module">Module</a>
 <a href="#worth-doing">Worth doing</a>

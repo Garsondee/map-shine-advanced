@@ -1,1 +1,37 @@
-[]
+[
+  {
+    "ref": "rung:water:refraction",
+    "ask": "Let's get refraction built.",
+    "requestedAt": "2026-08-22",
+    "checklist": [
+      {
+        "text": "Half-res copy pass of scene.color, restricted to water's own screen rect (Law 6 — bounded cost), taken from the PREVIOUS frame — water draws inside the pass that writes scene.color, so a same-pass read is undefined behaviour.",
+        "done": false
+      },
+      {
+        "text": "Reproject the copied UV by the camera delta between frames so panning doesn't smear the grab (one-frame latency — the same price every screen-space reflection ships with).",
+        "done": false
+      },
+      {
+        "text": "Offset the sample UV by the wave normal x strength, reusing tier 2's existing surface-field normal rather than a new fetch.",
+        "done": false
+      },
+      {
+        "text": "Validate every tap against buf:scene.depth's rank: a tap landing on something ABOVE the water falls back to the un-refracted centre UV (the classic foreground-smear artifact V2's own checklist named 'tap validation').",
+        "done": false
+      },
+      {
+        "text": "Chromatic fringe: +/-1 texel R/B channel split, gated to the top (quality+) tier only.",
+        "done": false
+      },
+      {
+        "text": "Add the real tier entry (n: 5, name: 'refraction', fromProfile: 'quality', cost.class C5 for the read + a separate accounted C6 for the half-res copy) to WATER.tiers, moving it out of deferredRungs.",
+        "done": false
+      },
+      {
+        "text": "Bench via tools/shader-lab/bench-water.js and the water test suite; final confirmation is Ingram's own eyes in live Foundry, per the covenant — this checklist item is 'ready for your look', never 'done' on its own.",
+        "done": false
+      }
+    ]
+  }
+]

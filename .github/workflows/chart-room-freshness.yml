@@ -1,0 +1,70 @@
+# THE CHART ROOM FRESHNESS GATE
+#
+# The author's own words, verbatim, are why this file exists: "worth a
+# mechanism. this whole thing is worthless if it can be ignored or grow
+# stale. it's either a control panel or it's a useless piece of outdated
+# artwork."
+#
+# `tools/chart-room/build-chart-room.mjs --check` never writes — it recomputes
+# the fingerprint every derived field on the page hashes to, reads the
+# checked-in page's OWN embedded fingerprint, and fails if they disagree. That
+# already fails `npm test`/`npm run verify` locally (this project's own
+# pre-commit gate). This workflow is the backstop for the case that check
+# exists to cover: nobody ran it before pushing. A red check on the PR/commit
+# is a signal that cannot be quietly skipped the way a local command can.
+#
+# Deliberately narrow: this does NOT run lint/format/the full structure wall/
+# the 11,000-assertion suite — this repo has no general push/PR CI at all
+# (`main.yml` only runs on a published GitHub Release), and standing up a full
+# CI pipeline is a bigger, repo-wide decision than keeping one generated page
+# honest. If broader CI is ever wanted, it is its own decision, not a side
+# effect of this one.
+name: Chart Room freshness
+
+on:
+  push:
+    paths:
+      - "src/**"
+      - "docs/holy/**"
+      - "docs/planning/**"
+      - "tools/chart-room/**"
+      - "tools/uniform-budgets.json"
+  pull_request:
+    paths:
+      - "src/**"
+      - "docs/holy/**"
+      - "docs/planning/**"
+      - "tools/chart-room/**"
+      - "tools/uniform-budgets.json"
+  # Lets it be re-run by hand from the Actions tab without a matching push —
+  # useful right after adding this workflow, before anything else has changed.
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The freshness check reads git history (gitLastTouchedAll) for the
+          # "last touched" date shown per zone and per holy doc — a shallow
+          # checkout would answer that differently than a local full clone
+          # does, which would make this job disagree with `--check` run
+          # locally for a reason that has nothing to do with real staleness.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "npm"
+
+      # The chart-room tool itself has no bare (node_modules) imports — but it
+      # transitively imports large parts of src/ (passes.js, every effect
+      # manifest, tokens.js) to derive real data from them, and tracing every
+      # one of THOSE files' own imports by hand to prove none ever gained a
+      # dependency is not a bet worth making. Installing is cheap; a red build
+      # for the wrong reason erodes exactly the trust this gate exists to earn.
+      - run: npm ci
+
+      - name: node tools/chart-room/build-chart-room.mjs --check
+        run: node tools/chart-room/build-chart-room.mjs --check

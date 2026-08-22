@@ -33,6 +33,10 @@ main{padding:0 var(--sp5) var(--sp5);max-width:1280px;margin:0 auto}
 .alarm{margin:var(--sp4) var(--sp5);padding:var(--sp3) var(--sp4);border:1px solid var(--fail);
   border-left-width:4px;border-radius:var(--r-card);background:color-mix(in oklab,var(--fail) 10%,transparent)}
 .alarm h2{color:var(--fail);font-size:15px;margin-bottom:var(--sp2)}
+.syncnote{margin:0 0 var(--sp4);padding:var(--sp3) var(--sp4);border:1px solid var(--line);
+  border-left:3px solid var(--info);border-radius:var(--r-card);background:var(--bg1);
+  color:var(--ink1);font-size:var(--t3);line-height:1.6}
+.syncnote b{color:var(--ink0);font-weight:600}
 .gauges{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:var(--sp4);margin-bottom:var(--sp5)}
 .gcard{border:1px solid var(--line);border-radius:var(--r-card);background:var(--bg1);padding:var(--sp4);
   box-shadow:var(--shadow1)}
@@ -255,6 +259,7 @@ summary:hover{color:var(--shine)}
 </nav>
 </header>
 <main>
+<p class="syncnote">📝 Notes and grades below save to this page automatically, but nothing here pings me the moment you leave one — I read them next time I open it. For something you want acted on now, use this page's <b>Comments</b> and mention <b>@claude</b> — that reaches me live.</p>
 <section class="gauges">
 <div class="gcard hero">
 <h2>V2 parity</h2><p class="sub">as the 13 pillars grade themselves</p>

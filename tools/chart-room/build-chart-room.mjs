@@ -933,8 +933,16 @@ export function warmNeutrals(theme) {
  *
  * On the published live doc, everything in here is a real shared edit: the
  * runtime captures `contenteditable` typing and checkbox state by design, so
- * what the author writes lands in the document and reaches the watching Claude
- * session without a save button, an API call or a round trip through a file.
+ * what the author writes is SAVED into the document without a save button, an
+ * API call, or a round trip through a file.
+ *
+ * ⚠️ Saved is not the same as noticed. Nothing here pushes a live
+ * notification to a running Claude session — I only see a note when I next
+ * open or re-fetch the page. The one thing on this artifact that DOES notify
+ * me live is the platform's own Comments feature (mention @claude in a
+ * thread), which is separate page chrome this generator does not render — see
+ * the `.syncnote` callout near the top of the page for the honest version of
+ * this, aimed at the reader rather than at me.
  *
  * Two deliberate choices:
  * - `contenteditable` on a bare `<p>`, NOT a `<textarea>` — the runtime's own
@@ -1411,6 +1419,18 @@ export function renderHtml(model) {
 
   p('<main>');
 
+  // Honest, not aspirational: notes/grades typed here are SAVED into this
+  // document, but nothing on the page pushes a live notification — I only see
+  // them when I next open or re-fetch it. Comments (mention @claude) is the
+  // one thing that actually reaches me right away; it is platform chrome, not
+  // something this generator renders, hence the plain-English pointer rather
+  // than a fake "Sync" button that couldn't do what its name promised.
+  p(
+    '<p class="syncnote">📝 Notes and grades below save to this page automatically, but nothing here pings me the ' +
+      'moment you leave one — I read them next time I open it. For something you want acted on now, use this ' +
+      "page's <b>Comments</b> and mention <b>@claude</b> — that reaches me live.</p>"
+  );
+
   // ── GAUGES — the strategic view, before the detail ────────────────────────
   p('<section class="gauges">');
   p('<div class="gcard hero">');
@@ -1715,6 +1735,10 @@ main{padding:0 var(--sp5) var(--sp5);max-width:1280px;margin:0 auto}
 .alarm{margin:var(--sp4) var(--sp5);padding:var(--sp3) var(--sp4);border:1px solid var(--fail);
   border-left-width:4px;border-radius:var(--r-card);background:color-mix(in oklab,var(--fail) 10%,transparent)}
 .alarm h2{color:var(--fail);font-size:15px;margin-bottom:var(--sp2)}
+.syncnote{margin:0 0 var(--sp4);padding:var(--sp3) var(--sp4);border:1px solid var(--line);
+  border-left:3px solid var(--info);border-radius:var(--r-card);background:var(--bg1);
+  color:var(--ink1);font-size:var(--t3);line-height:1.6}
+.syncnote b{color:var(--ink0);font-weight:600}
 .gauges{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:var(--sp4);margin-bottom:var(--sp5)}
 .gcard{border:1px solid var(--line);border-radius:var(--r-card);background:var(--bg1);padding:var(--sp4);
   box-shadow:var(--shadow1)}

@@ -780,6 +780,15 @@ export function run(t) {
     'the jump nav is plain anchor links, not buttons needing a click handler',
     /<nav class="jump">(?:\s*<a href="#[^"]+">.*?<\/a>){4}\s*<\/nav>/s.test(html)
   );
+  // A regression pin for the honesty callout: notes/grades save into the
+  // document, but nothing on the page pushes a live notification to me — only
+  // the platform's own Comments (mention @claude) does that. Without this
+  // line on the page, a reasonable reader assumes the note boxes alone reach
+  // me the moment they're used, which is exactly the gap the author reported.
+  ok(
+    'states plainly that notes save but do not notify, and names Comments/@claude as what does',
+    html.includes('class="syncnote"') && html.includes('Comments') && html.includes('@claude')
+  );
 
   // ── LIVE-DOC SAFETY — the rules that make the write-back work ────────────
   // On the published page the markup IS the shared document. These pin the

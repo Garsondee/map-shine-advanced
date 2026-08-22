@@ -1,5 +1,5 @@
 <title>The Chart Room</title>
-<!-- chart-room-fingerprint: a1562c20069f -->
+<!-- chart-room-fingerprint: 362217540474 -->
 <style>.ico{width:1.1em;height:1.1em;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;vertical-align:-0.18em;flex:none}
 .num{font-variant-numeric:tabular-nums}
 :focus-visible{outline:2px solid var(--shine, #e7c368);outline-offset:2px;border-radius:4px}
@@ -29,6 +29,23 @@ h1,h2,h3{margin:0;font-weight:600;letter-spacing:.2px;text-wrap:balance}
 .jump a{color:var(--ink1);font-size:var(--t3);text-decoration:none;border-bottom:1px solid transparent;
   transition:color var(--t-micro) var(--ease),border-color var(--t-micro) var(--ease)}
 .jump a:hover{color:var(--shine);border-bottom-color:var(--shine)}
+/* THE SYNC BAR — server mode only. Edits accumulate locally (localStorage);
+   this is the one control that actually writes them to disk, so it stays
+   visually distinct (a solid, warm button, not another quiet chip) and grows
+   a glow the moment anything is pending, so "have I synced yet" is never a
+   guess. */
+.syncbar{display:flex;align-items:center;gap:var(--sp3);margin-left:var(--sp3);padding:6px 10px;
+  border:1px solid var(--line);border-radius:99px;background:var(--bg1)}
+.syncbar.has-pending{border-color:var(--shine);box-shadow:0 0 0 3px var(--shine-soft)}
+#syncCount{font-size:var(--t4);color:var(--ink2);white-space:nowrap}
+.syncbar.has-pending #syncCount{color:var(--shine)}
+#syncBtn{font:600 var(--t4)/1 var(--font);padding:7px 12px;border-radius:99px;border:1px solid var(--shine);
+  background:var(--shine-soft);color:var(--shine);cursor:pointer;white-space:nowrap;
+  transition:background var(--t-micro) var(--ease)}
+#syncBtn:hover{background:var(--shine-glow)}
+#syncBtn:disabled{opacity:.6;cursor:wait}
+.syncstatus{font-size:var(--t4);color:var(--ok);white-space:nowrap}
+.syncstatus.err{color:var(--fail)}
 main{padding:0 var(--sp5) var(--sp5);max-width:1280px;margin:0 auto}
 .alarm{margin:var(--sp4) var(--sp5);padding:var(--sp3) var(--sp4);border:1px solid var(--fail);
   border-left-width:4px;border-radius:var(--r-card);background:color-mix(in oklab,var(--fail) 10%,transparent)}
@@ -255,7 +272,7 @@ summary:hover{color:var(--shine)}
 </style>
 <header class="top">
 <div class="brand"><span class="lamp"></span><h1>The Chart Room</h1></div>
-<div class="meta">Map Shine Advanced · generated 2026-08-22 · <span class="fp" title="A hash of everything derived on this page. Two builds of the same reality produce the same fingerprint — ask me to compare this against a fresh run if you doubt it.">fp a1562c20069f</span></div>
+<div class="meta">Map Shine Advanced · generated 2026-08-22 · <span class="fp" title="A hash of everything derived on this page. Two builds of the same reality produce the same fingerprint — ask me to compare this against a fresh run if you doubt it.">fp 362217540474</span></div>
 <nav class="jump">
 <a href="#effects">Effects</a>
 <a href="#module">Module</a>

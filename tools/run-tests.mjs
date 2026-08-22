@@ -70,6 +70,7 @@ import { run as runReachability } from './reachability.test.mjs';
 import { run as runTraceAnalyze } from './trace-analyze.test.mjs';
 import { run as runChartRoom } from './chart-room/build-chart-room.test.mjs';
 import { run as runChartRoomSync } from './chart-room/sync-from-artifact.test.mjs';
+import { run as runChartRoomServer } from './chart-room/server.test.mjs';
 
 // fileURLToPath, not URL.pathname — the repo path contains spaces, which
 // pathname percent-encodes into %20 and fs then cannot find.
@@ -144,6 +145,7 @@ function main() {
     runInProcess('tools/trace-analyze.test.mjs', runTraceAnalyze),
     runInProcess('tools/chart-room/build-chart-room.test.mjs', runChartRoom),
     runInProcess('tools/chart-room/sync-from-artifact.test.mjs', runChartRoomSync),
+    runInProcess('tools/chart-room/server.test.mjs', runChartRoomServer),
   ];
 
   const suites = discoverSuites();

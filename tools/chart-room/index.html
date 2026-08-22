@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>The Chart Room</title>
-<!-- chart-room-fingerprint: a1562c20069f -->
+<!-- chart-room-fingerprint: 362217540474 -->
 <style>:root{--font:"Segoe UI", system-ui, -apple-system, sans-serif;--mono:"Cascadia Mono", ui-monospace, Consolas, monospace;--r-ctl:6px;--r-card:10px;--r-room:14px;--sp1:4px;--sp2:8px;--sp3:12px;--sp4:16px;--sp5:24px;--t-micro:120ms;--t-move:200ms;--t-room:320ms;--ease:cubic-bezier(.22,.7,.3,1);}
 html[data-theme="dark"]{--bg0:#14161d;--bg1:#191c25;--bg2:#20242f;--bg3:#272c3a;--line:rgba(196,208,232,.13);--line-strong:rgba(196,208,232,.24);--ink0:#ecEFf5;--ink1:#a8b1c2;--ink2:#78829a;--shine:#e7c368;--shine-soft:rgba(231,195,104,.16);--shine-glow:rgba(231,195,104,.38);--ok:#4bd48c;--warn:#edb64f;--fail:#ef6d5a;--info:#58a6f2;--c-gameplay:#3fd3b4;--c-lighting:#f0b64a;--c-atmos:#5aa9f2;--c-surface:#b48af5;--c-particles:#f28a4a;--c-post:#ef6aa8;--c-system:#8fa0b8;--glass:rgba(25,28,37,.86);--glass-blur:14px;--shadow1:0 2px 10px rgba(0,0,0,.35);--shadow2:0 8px 30px rgba(0,0,0,.45);--shadow3:0 18px 60px rgba(0,0,0,.55);--glow-on:1;--map-bright:1;}
 html[data-theme="light"]{--bg0:#e8eaf0;--bg1:#f2f4f8;--bg2:#ffffff;--bg3:#eef1f6;--line:rgba(30,42,70,.14);--line-strong:rgba(30,42,70,.28);--ink0:#1d2333;--ink1:#4c5670;--ink2:#7d869c;--shine:#876117;--shine-soft:rgba(135,97,23,.13);--shine-glow:rgba(135,97,23,.30);--ok:#178f55;--warn:#a97b14;--fail:#c44432;--info:#2a72c8;--c-gameplay:#0f9c80;--c-lighting:#b07f14;--c-atmos:#2a72c8;--c-surface:#7a4fd0;--c-particles:#c25c1a;--c-post:#c23a78;--c-system:#5d6c86;--glass:rgba(246,248,251,.92);--glass-blur:14px;--shadow1:0 2px 10px rgba(30,40,70,.14);--shadow2:0 8px 30px rgba(30,40,70,.18);--shadow3:0 18px 60px rgba(30,40,70,.22);--glow-on:1;--map-bright:1;}
@@ -37,6 +37,23 @@ h1,h2,h3{margin:0;font-weight:600;letter-spacing:.2px;text-wrap:balance}
 .jump a{color:var(--ink1);font-size:var(--t3);text-decoration:none;border-bottom:1px solid transparent;
   transition:color var(--t-micro) var(--ease),border-color var(--t-micro) var(--ease)}
 .jump a:hover{color:var(--shine);border-bottom-color:var(--shine)}
+/* THE SYNC BAR — server mode only. Edits accumulate locally (localStorage);
+   this is the one control that actually writes them to disk, so it stays
+   visually distinct (a solid, warm button, not another quiet chip) and grows
+   a glow the moment anything is pending, so "have I synced yet" is never a
+   guess. */
+.syncbar{display:flex;align-items:center;gap:var(--sp3);margin-left:var(--sp3);padding:6px 10px;
+  border:1px solid var(--line);border-radius:99px;background:var(--bg1)}
+.syncbar.has-pending{border-color:var(--shine);box-shadow:0 0 0 3px var(--shine-soft)}
+#syncCount{font-size:var(--t4);color:var(--ink2);white-space:nowrap}
+.syncbar.has-pending #syncCount{color:var(--shine)}
+#syncBtn{font:600 var(--t4)/1 var(--font);padding:7px 12px;border-radius:99px;border:1px solid var(--shine);
+  background:var(--shine-soft);color:var(--shine);cursor:pointer;white-space:nowrap;
+  transition:background var(--t-micro) var(--ease)}
+#syncBtn:hover{background:var(--shine-glow)}
+#syncBtn:disabled{opacity:.6;cursor:wait}
+.syncstatus{font-size:var(--t4);color:var(--ok);white-space:nowrap}
+.syncstatus.err{color:var(--fail)}
 main{padding:0 var(--sp5) var(--sp5);max-width:1280px;margin:0 auto}
 .alarm{margin:var(--sp4) var(--sp5);padding:var(--sp3) var(--sp4);border:1px solid var(--fail);
   border-left-width:4px;border-radius:var(--r-card);background:color-mix(in oklab,var(--fail) 10%,transparent)}
@@ -265,7 +282,7 @@ summary:hover{color:var(--shine)}
 <body>
 <header class="top">
 <div class="brand"><span class="lamp"></span><h1>The Chart Room</h1></div>
-<div class="meta">Map Shine Advanced · generated 2026-08-22 · <span class="fp" title="A hash of everything derived on this page. Two builds of the same reality produce the same fingerprint — ask me to compare this against a fresh run if you doubt it.">fp a1562c20069f</span></div>
+<div class="meta">Map Shine Advanced · generated 2026-08-22 · <span class="fp" title="A hash of everything derived on this page. Two builds of the same reality produce the same fingerprint — ask me to compare this against a fresh run if you doubt it.">fp 362217540474</span></div>
 <nav class="jump">
 <a href="#effects">Effects</a>
 <a href="#module">Module</a>

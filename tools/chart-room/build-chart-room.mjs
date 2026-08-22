@@ -65,6 +65,7 @@ const JUDGEMENTS_FILE = join(HERE, 'judgements.json');
 const WORKITEMS_FILE = join(HERE, 'workitems.json');
 const GRADES_FILE = join(HERE, 'grades.json');
 const CONFIRMATIONS_FILE = join(HERE, 'confirmations.json');
+const NOTES_FILE = join(HERE, 'notes.json');
 const OUT_FILE = join(HERE, 'index.html');
 const ARTIFACT_FILE = join(HERE, 'chart-room.artifact.html');
 const TESTAMENT_FILE = join(ROOT, 'docs', 'holy', 'V4-Testament.md');
@@ -600,6 +601,49 @@ export function evaluateWorkItems(items, known) {
 }
 
 /**
+ * `notes.json` — a passing comment against ANY addressable block (a zone, a
+ * file, a gap, a rung, an effect), the direct storage for what the server
+ * build's note boxes actually save. Deliberately the lightest-validated of
+ * the four hand-written files: a note can legitimately land on any of the
+ * five ref shapes this page addresses, and re-resolving a file path or a gap
+ * id here would mean threading the whole survey/gap list through every
+ * caller for a low-stakes case — an orphaned note on a renamed file is a
+ * stale comment to clean up, not a false claim the way a bogus grade or
+ * confirmation would be. Shape-checked, not resolved.
+ *
+ * @param {Array<object>} notes
+ * @returns {{ok: boolean, errors: string[], resolved: Array<object>}}
+ */
+export function evaluateNotes(notes) {
+  const errors = [];
+  const resolved = [];
+  if (!Array.isArray(notes)) return { ok: false, errors: ['notes.json must be an array'], resolved };
+  const seen = new Set();
+  notes.forEach((n, i) => {
+    const at = `notes[${i}]`;
+    if (!n || typeof n !== 'object' || Array.isArray(n)) {
+      errors.push(`${at} must be an object`);
+      return;
+    }
+    const ref = n.ref;
+    if (typeof ref !== 'string' || !/^(zone|file|gap|rung|effect):.+$/.test(ref)) {
+      errors.push(`${at}.ref ${JSON.stringify(ref)} must be namespaced (zone:/file:/gap:/rung:/effect:).`);
+      return;
+    }
+    if (seen.has(ref)) errors.push(`${at}.ref '${ref}' has two notes — merge them into one.`);
+    seen.add(ref);
+    if (typeof n.text !== 'string' || n.text.trim().length === 0) {
+      errors.push(`${at}.text must be a non-empty string.`);
+    }
+    if (typeof n.updatedAt !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(n.updatedAt)) {
+      errors.push(`${at}.updatedAt must be a YYYY-MM-DD date.`);
+    }
+    resolved.push(n);
+  });
+  return { ok: errors.length === 0, errors, resolved };
+}
+
+/**
  * The state of one work item — DERIVED from its checklist, never stored, so it
  * can never disagree with the checklist it describes.
  *
@@ -1036,14 +1080,17 @@ export function warmNeutrals(theme) {
  *
  * @param {string} id - the block's stable id (a zone name, file path, or gap id).
  * @param {string} placeholder
- * @param {{withTicks?: boolean}} [opts] - `withTicks: false` for a ref that
- *   already carries the dedicated, always-visible `confirmPicker` next to its
- *   grade — an effect or a built rung. Two "have you seen this working?"
- *   checkboxes for the SAME ref, one folded in here and one sitting next to
- *   the grade, would be two places to disagree with itself.
+ * @param {{withTicks?: boolean, value?: string}} [opts] - `withTicks: false`
+ *   for a ref that already carries the dedicated, always-visible
+ *   `confirmPicker` next to its grade — an effect or a built rung. Two "have
+ *   you seen this working?" checkboxes for the SAME ref, one folded in here
+ *   and one sitting next to the grade, would be two places to disagree with
+ *   itself. `value` pre-fills a note already on record (server mode, read
+ *   back from `notes.json`) — the fold starts OPEN in that case, since a
+ *   saved note hidden by default reads as if it never saved at all.
  */
 export function noteBox(id, placeholder, opts = {}) {
-  const { withTicks = true } = opts;
+  const { withTicks = true, value = '' } = opts;
   // FOLDED AWAY BY DEFAULT, and `<details>` is the mechanism for a specific
   // reason: the live-doc contract lists `open` on `<details>` among the handful
   // of things that stay the viewer's own and are never journaled. So the fold
@@ -1051,10 +1098,10 @@ export function noteBox(id, placeholder, opts = {}) {
   // and removes 437 permanently-open input boxes from the page — which was the
   // single loudest thing about the first draft.
   return [
-    `<details class="note">`,
-    `<summary class="notetab">Leave a note</summary>`,
+    `<details class="note"${value ? ' open' : ''}>`,
+    `<summary class="notetab">${value ? 'Note' : 'Leave a note'}</summary>`,
     `<div class="notebody">`,
-    `<p class="notein" contenteditable="true" data-block="${esc(id)}" data-placeholder="${esc(placeholder)}"></p>`,
+    `<p class="notein" contenteditable="true" data-block="${esc(id)}" data-placeholder="${esc(placeholder)}">${esc(value)}</p>`,
     withTicks
       ? `<div class="ticks">` +
         `<label class="tick"><input type="checkbox" data-seen="${esc(id)}"><span>I've seen this working</span></label>` +
@@ -1156,7 +1203,7 @@ function zoneBlock(z, total, ctx) {
  * page.
  *
  * @param {object} e - one row of `measureEffectRungs(manifests).rows`.
- * @param {{rungsByEffect: Map<string,Array>, workitemByRef: Map<string,object>, gradeByRef: Map<string,object>, confirmByRef: Map<string,object>, perfByEffect: Record<string,object>, perfCapturedAt: string|null}} ctx
+ * @param {{rungsByEffect: Map<string,Array>, workitemByRef: Map<string,object>, gradeByRef: Map<string,object>, confirmByRef: Map<string,object>, noteByRef: Map<string,object>, perfByEffect: Record<string,object>, perfCapturedAt: string|null}} ctx
  */
 function effectCard(e, ctx) {
   const grade = ctx.gradeByRef.get(`effect:${e.id}`);
@@ -1182,7 +1229,12 @@ function effectCard(e, ctx) {
   L.push(gradePicker(`effect:${e.id}`, grade?.grade ?? null));
   L.push(confirmPicker(`effect:${e.id}`, confirm));
   L.push(`</div>`);
-  L.push(noteBox(`effect:${e.id}`, 'What should change about this effect as a whole?', { withTicks: false }));
+  L.push(
+    noteBox(`effect:${e.id}`, 'What should change about this effect as a whole?', {
+      withTicks: false,
+      value: ctx.noteByRef.get(`effect:${e.id}`)?.text ?? '',
+    })
+  );
   L.push(`</div>`);
   if (rungs.length) {
     L.push(`<h4 class="fsub">Features <span class="count">${rungs.length}</span></h4>`);
@@ -1193,6 +1245,7 @@ function effectCard(e, ctx) {
           workitem: ctx.workitemByRef.get(r.ref),
           grade: ctx.gradeByRef.get(r.ref),
           confirm: ctx.confirmByRef.get(r.ref),
+          note: ctx.noteByRef.get(r.ref),
         })
       );
     }
@@ -1315,7 +1368,7 @@ function checklistView(item) {
  * type a note."
  *
  * @param {{ref: string, name: string, built: boolean, note: string}} r
- * @param {{workitem?: object, grade?: object, confirm?: object}} ctx
+ * @param {{workitem?: object, grade?: object, confirm?: object, note?: object}} ctx
  */
 function rungBlock(r, ctx) {
   const L = [`<div class="rung${r.built ? ' built' : ''}">`];
@@ -1333,6 +1386,7 @@ function rungBlock(r, ctx) {
   L.push(
     noteBox(r.ref, ctx.workitem ? "Add to what's already asked for" : `Want ${r.name}? Say what it should do.`, {
       withTicks: !r.built,
+      value: ctx.note?.text ?? '',
     })
   );
   L.push('</div>');
@@ -1509,12 +1563,14 @@ export function renderHtml(model) {
     grades,
     workitems,
     confirmations,
+    notes,
     perf,
   } = model;
   const artifact = model.mode === 'artifact';
   const gradeByRef = new Map(grades.map((g) => [g.ref, g]));
   const workitemByRef = new Map(workitems.map((w) => [w.ref, w]));
   const confirmByRef = new Map(confirmations.map((c) => [c.ref, c]));
+  const noteByRef = new Map(notes.map((n) => [n.ref, n]));
   const rungsByEffect = new Map();
   for (const r of rungs) {
     if (!rungsByEffect.has(r.effectId)) rungsByEffect.set(r.effectId, []);
@@ -1525,6 +1581,7 @@ export function renderHtml(model) {
     workitemByRef,
     gradeByRef,
     confirmByRef,
+    noteByRef,
     perfByEffect: perf.byEffect,
     perfCapturedAt: perf.capturedAt,
   };
@@ -1585,6 +1642,17 @@ export function renderHtml(model) {
   );
   p('<a href="#signals">Signals</a>');
   p('</nav>');
+  // The real "press a button and have it output something you can eventually
+  // read" mechanism — only in server mode, since only server.mjs has an
+  // `/api/sync` endpoint to receive it. Nothing here in artifact/page mode:
+  // no fake button that looks actionable and does nothing.
+  if (model.mode === 'server') {
+    p('<div class="syncbar" id="syncbar">');
+    p('<span class="syncstatus" id="syncStatus"></span>');
+    p('<span id="syncCount">0 pending changes</span>');
+    p('<button type="button" id="syncBtn">🔄 Sync</button>');
+    p('</div>');
+  }
   p('</header>');
 
   if (ledgerErrors.length) {
@@ -1874,7 +1942,7 @@ export function renderHtml(model) {
   );
   p('</footer>');
 
-  const js = artifact ? ARTIFACT_JS : PAGE_JS;
+  const js = artifact ? ARTIFACT_JS : model.mode === 'server' ? SERVER_JS : PAGE_JS;
   if (js) p(`<script>${js}</script>`);
   if (!artifact) p('</body></html>');
   return L.join('\n');
@@ -1904,6 +1972,188 @@ const ARTIFACT_JS = SHARED_JS;
 /** Standalone only needs a default theme stamp; there is nothing else left to wire up. */
 const PAGE_JS = `document.documentElement.dataset.theme ||= 'dark';`;
 
+/**
+ * THE SERVER BUILD'S REAL INTERACTIVITY — the direct answer to *"I make my
+ * changes, I grade, I make comments, I hit sync to save everything."* This
+ * mode is served by `server.mjs`, a plain local page with no platform
+ * capability wrapper and none of its constraints (no textarea ban, no
+ * class-toggle-gets-journaled rule) — ordinary DOM events and `fetch()`.
+ *
+ * Deliberately a BATCH model, not autosave-on-every-click: edits accumulate
+ * in `pending` (mirrored to `localStorage` so a refresh never loses work) and
+ * only reach disk when the Sync button is pressed, matching the author's own
+ * mental model exactly rather than a live-doc journal he cannot see the edge
+ * of.
+ *
+ * ⚠️ Written with NO backticks anywhere in this string — it lives inside a
+ * backtick template literal in THIS file (`SERVER_JS = \`...\``), and a
+ * stray pair once silently collapsed `PAGE_CSS` to the boolean `false` (see
+ * that fix's own commit). Template literals in the CLIENT script below are
+ * therefore avoided on purpose; string concatenation only.
+ */
+const SERVER_JS = `document.documentElement.dataset.theme ||= 'dark';
+(function () {
+  var DRAFT_KEY = 'chartroom-draft-v1';
+  var pending = { grades: {}, confirmations: {}, notes: {} };
+
+  function loadDraft() {
+    try {
+      var raw = localStorage.getItem(DRAFT_KEY);
+      if (!raw) return;
+      var parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        pending.grades = parsed.grades || {};
+        pending.confirmations = parsed.confirmations || {};
+        pending.notes = parsed.notes || {};
+      }
+    } catch (e) {}
+  }
+
+  function saveDraft() {
+    try {
+      localStorage.setItem(DRAFT_KEY, JSON.stringify(pending));
+    } catch (e) {}
+    updateBar();
+  }
+
+  function pendingCount() {
+    return (
+      Object.keys(pending.grades).length +
+      Object.keys(pending.confirmations).length +
+      Object.keys(pending.notes).length
+    );
+  }
+
+  function setStatus(text, isError) {
+    var el = document.getElementById('syncStatus');
+    if (!el) return;
+    el.textContent = text;
+    el.className = isError ? 'syncstatus err' : 'syncstatus';
+  }
+
+  function updateBar() {
+    var bar = document.getElementById('syncbar');
+    var count = document.getElementById('syncCount');
+    if (!bar || !count) return;
+    var n = pendingCount();
+    count.textContent = n === 1 ? '1 pending change' : n + ' pending changes';
+    if (n > 0) bar.classList.add('has-pending');
+    else bar.classList.remove('has-pending');
+  }
+
+  function applyDraftToDom() {
+    for (var ref in pending.grades) {
+      var radios = document.querySelectorAll('input[name="grade-' + ref + '"]');
+      radios.forEach(function (r) {
+        r.checked = r.value === pending.grades[ref];
+      });
+    }
+    for (var ref2 in pending.confirmations) {
+      var c = pending.confirmations[ref2];
+      var seenBox = document.querySelector('input[data-confirm-seen="' + ref2 + '"]');
+      var wrongBox = document.querySelector('input[data-confirm-wrong="' + ref2 + '"]');
+      if (seenBox) seenBox.checked = !!c.seenWorking;
+      if (wrongBox) wrongBox.checked = !!c.wrong;
+    }
+    for (var ref3 in pending.notes) {
+      var el = document.querySelector('p.notein[data-block="' + ref3 + '"]');
+      if (el) el.textContent = pending.notes[ref3];
+    }
+  }
+
+  loadDraft();
+  document.addEventListener('DOMContentLoaded', function () {
+    applyDraftToDom();
+    updateBar();
+
+    document.querySelectorAll('input[type="radio"][name^="grade-"]').forEach(function (radio) {
+      radio.addEventListener('change', function () {
+        var ref = radio.name.slice('grade-'.length);
+        if (radio.checked) pending.grades[ref] = radio.value;
+        saveDraft();
+      });
+    });
+
+    document.querySelectorAll('input[data-confirm-seen], input[data-confirm-wrong]').forEach(function (box) {
+      box.addEventListener('change', function () {
+        var ref = box.getAttribute('data-confirm-seen') || box.getAttribute('data-confirm-wrong');
+        var seenBox = document.querySelector('input[data-confirm-seen="' + ref + '"]');
+        var wrongBox = document.querySelector('input[data-confirm-wrong="' + ref + '"]');
+        var seenWorking = !!(seenBox && seenBox.checked);
+        var wrong = !!(wrongBox && wrongBox.checked);
+        if (seenWorking || wrong) pending.confirmations[ref] = { seenWorking: seenWorking, wrong: wrong };
+        else delete pending.confirmations[ref];
+        saveDraft();
+      });
+    });
+
+    document.querySelectorAll('p.notein[contenteditable]').forEach(function (note) {
+      note.addEventListener('input', function () {
+        var ref = note.getAttribute('data-block');
+        var text = note.textContent.trim();
+        if (text) pending.notes[ref] = text;
+        else delete pending.notes[ref];
+        saveDraft();
+      });
+    });
+
+    var syncBtn = document.getElementById('syncBtn');
+    if (syncBtn) {
+      syncBtn.addEventListener('click', function () {
+        var n = pendingCount();
+        if (n === 0) {
+          setStatus('Nothing pending.', false);
+          return;
+        }
+        syncBtn.disabled = true;
+        setStatus('Syncing...', false);
+        var payload = {
+          grades: Object.keys(pending.grades).map(function (ref) {
+            return { ref: ref, grade: pending.grades[ref] };
+          }),
+          confirmations: Object.keys(pending.confirmations).map(function (ref) {
+            return { ref: ref, seenWorking: pending.confirmations[ref].seenWorking, wrong: pending.confirmations[ref].wrong };
+          }),
+          notes: Object.keys(pending.notes).map(function (ref) {
+            return { ref: ref, text: pending.notes[ref] };
+          }),
+        };
+        fetch('/api/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        })
+          .then(function (res) {
+            return res.json().then(function (body) {
+              return { ok: res.ok, body: body };
+            });
+          })
+          .then(function (result) {
+            syncBtn.disabled = false;
+            if (!result.ok || !result.body.ok) {
+              var msg = (result.body && result.body.errors && result.body.errors.join(' | ')) || 'sync failed';
+              setStatus('Error: ' + msg, true);
+              return;
+            }
+            pending = { grades: {}, confirmations: {}, notes: {} };
+            try {
+              localStorage.removeItem(DRAFT_KEY);
+            } catch (e) {}
+            var r = result.body.receipt;
+            setStatus('Synced ' + r.grades + ' grade(s), ' + r.confirmations + ' confirmation(s), ' + r.notes + ' note(s). Reloading...', false);
+            setTimeout(function () {
+              window.location.reload();
+            }, 700);
+          })
+          .catch(function (err) {
+            syncBtn.disabled = false;
+            setStatus('Error: ' + err.message, true);
+          });
+      });
+    }
+  });
+})();`;
+
 const PAGE_CSS = `
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg0);color:var(--ink0);font:14px/1.55 var(--font)}
@@ -1924,6 +2174,23 @@ h1,h2,h3{margin:0;font-weight:600;letter-spacing:.2px;text-wrap:balance}
 .jump a{color:var(--ink1);font-size:var(--t3);text-decoration:none;border-bottom:1px solid transparent;
   transition:color var(--t-micro) var(--ease),border-color var(--t-micro) var(--ease)}
 .jump a:hover{color:var(--shine);border-bottom-color:var(--shine)}
+/* THE SYNC BAR — server mode only. Edits accumulate locally (localStorage);
+   this is the one control that actually writes them to disk, so it stays
+   visually distinct (a solid, warm button, not another quiet chip) and grows
+   a glow the moment anything is pending, so "have I synced yet" is never a
+   guess. */
+.syncbar{display:flex;align-items:center;gap:var(--sp3);margin-left:var(--sp3);padding:6px 10px;
+  border:1px solid var(--line);border-radius:99px;background:var(--bg1)}
+.syncbar.has-pending{border-color:var(--shine);box-shadow:0 0 0 3px var(--shine-soft)}
+#syncCount{font-size:var(--t4);color:var(--ink2);white-space:nowrap}
+.syncbar.has-pending #syncCount{color:var(--shine)}
+#syncBtn{font:600 var(--t4)/1 var(--font);padding:7px 12px;border-radius:99px;border:1px solid var(--shine);
+  background:var(--shine-soft);color:var(--shine);cursor:pointer;white-space:nowrap;
+  transition:background var(--t-micro) var(--ease)}
+#syncBtn:hover{background:var(--shine-glow)}
+#syncBtn:disabled{opacity:.6;cursor:wait}
+.syncstatus{font-size:var(--t4);color:var(--ok);white-space:nowrap}
+.syncstatus.err{color:var(--fail)}
 main{padding:0 var(--sp5) var(--sp5);max-width:1280px;margin:0 auto}
 .alarm{margin:var(--sp4) var(--sp5);padding:var(--sp3) var(--sp4);border:1px solid var(--fail);
   border-left-width:4px;border-radius:var(--r-card);background:color-mix(in oklab,var(--fail) 10%,transparent)}
@@ -2189,7 +2456,17 @@ export function gitLastTouchedAll(paths) {
   return out;
 }
 
-async function main() {
+/**
+ * Everything main() and the local server (`server.mjs`) both need: the full
+ * model `renderHtml` renders, and the `known` ref-resolution table that
+ * validates a NEW grade/confirmation/work-item write before it lands. One
+ * function, so the CLI build and a live edit from the server can never
+ * compute two different realities from the same source tree — the exact
+ * drift class Health.md exists to prevent, one level up.
+ *
+ * @returns {Promise<{model: object, known: object, judgementsVerdict: object}>}
+ */
+export async function buildChartRoomModel() {
   const { PASSES } = await import(new URL('../../src/graph/passes.js', import.meta.url).href);
   const effectsDoor = await import(new URL('../../src/effects/index.js', import.meta.url).href);
   const { tokensCSS, getThemeTokens } = await import(new URL('../../src/ui/tokens.js', import.meta.url).href);
@@ -2224,11 +2501,14 @@ async function main() {
   const gradesVerdict = evaluateGrades(gradesRaw, known);
   const confirmationsRaw = existsSync(CONFIRMATIONS_FILE) ? JSON.parse(readFileSync(CONFIRMATIONS_FILE, 'utf8')) : [];
   const confirmationsVerdict = evaluateConfirmations(confirmationsRaw, known);
+  const notesRaw = existsSync(NOTES_FILE) ? JSON.parse(readFileSync(NOTES_FILE, 'utf8')) : [];
+  const notesVerdict = evaluateNotes(notesRaw);
   const ledgerErrorsAll = [
     ...verdict.errors.map((e) => `judgements.json: ${e}`),
     ...workitemsVerdict.errors.map((e) => `workitems.json: ${e}`),
     ...gradesVerdict.errors.map((e) => `grades.json: ${e}`),
     ...confirmationsVerdict.errors.map((e) => `confirmations.json: ${e}`),
+    ...notesVerdict.errors.map((e) => `notes.json: ${e}`),
   ];
 
   // THE LATEST PERF CAPTURE — whichever dated file sorts last. Never a live
@@ -2323,8 +2603,28 @@ async function main() {
     grades: gradesVerdict.resolved,
     workitems: workitemsVerdict.resolved,
     confirmations: confirmationsVerdict.resolved,
+    notes: notesVerdict.resolved,
     perf,
   };
+  return { model, known, judgementsVerdict: verdict, tokensCSS, getThemeTokens };
+}
+
+async function main() {
+  const { model, judgementsVerdict: verdict, tokensCSS, getThemeTokens } = await buildChartRoomModel();
+  const {
+    pillarScore,
+    passCov,
+    effects,
+    blind,
+    survey,
+    gaps,
+    bugs,
+    nothingBuiltDrift,
+    rungs,
+    perf,
+    doneSince,
+    ledgerErrors,
+  } = model;
   // `--check`: THE STANDALONE FRESHNESS GATE — the mechanism the author asked
   // for directly ("worth a mechanism… otherwise it's useless outdated
   // artwork"). Answers exactly one question, fast, without pulling in the
@@ -2385,12 +2685,12 @@ async function main() {
   console.log(`  drift found: ${driftCount}`);
   console.log(
     `  rungs: ${rungs.length} addressable (${rungs.filter((r) => r.built).length} built) · ` +
-      `workitems: ${workitemsVerdict.resolved.length} · grades: ${gradesVerdict.resolved.length} · ` +
-      `confirmations: ${confirmationsVerdict.resolved.length}` +
+      `workitems: ${model.workitems.length} · grades: ${model.grades.length} · ` +
+      `confirmations: ${model.confirmations.length} · notes: ${model.notes.length}` +
       (perf.capturedAt ? ` · perf captured ${perf.capturedAt}` : ' · no perf capture found')
   );
-  for (const e of ledgerErrorsAll) console.error(`  ERROR ${e}`);
-  if (ledgerErrorsAll.length) process.exitCode = 1;
+  for (const e of ledgerErrors) console.error(`  ERROR ${e}`);
+  if (ledgerErrors.length) process.exitCode = 1;
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) main();

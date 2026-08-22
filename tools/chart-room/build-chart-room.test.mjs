@@ -29,6 +29,7 @@ import {
   evaluateJudgements,
   evaluateGrades,
   evaluateConfirmations,
+  evaluateNotes,
   evaluateWorkItems,
   deriveWorkItemState,
   derivePerfByEffect,
@@ -94,6 +95,7 @@ const baseModel = (over) => ({
   grades: [],
   workitems: [],
   confirmations: [],
+  notes: [],
   perf: { byEffect: {}, capturedAt: null, msaVersion: null },
   ...over,
 });
@@ -385,6 +387,23 @@ export function run(t) {
       !evaluateConfirmations([okConfirmation({ [key]: 'anything' })], known).ok
     );
   }
+
+  // ── notes.json — the server build's real note storage, shape-checked only ──
+  const okNote = (over) => ({ ref: 'zone:water', text: 'A real note.', updatedAt: '2026-08-22', ...over });
+  const realNotes = JSON.parse(readFileSync(join(HERE, 'notes.json'), 'utf8'));
+  const notesVerdict = evaluateNotes(realNotes);
+  ok(`the real notes.json resolves clean (${notesVerdict.errors.join(' | ')})`, notesVerdict.ok);
+  ok(
+    'accepts every real namespace a note can address',
+    ['zone', 'file', 'gap', 'rung', 'effect'].every((ns) => evaluateNotes([okNote({ ref: `${ns}:x` })]).ok)
+  );
+  ok('refuses an un-namespaced ref', !evaluateNotes([okNote({ ref: 'water' })]).ok);
+  ok('refuses an unknown namespace', !evaluateNotes([okNote({ ref: 'sprint:3' })]).ok);
+  ok('refuses empty text', !evaluateNotes([okNote({ text: '' })]).ok);
+  ok('refuses whitespace-only text', !evaluateNotes([okNote({ text: '   ' })]).ok);
+  ok('refuses a malformed updatedAt', !evaluateNotes([okNote({ updatedAt: 'today' })]).ok);
+  ok('refuses the same ref noted twice', !evaluateNotes([okNote({}), okNote({})]).ok);
+  ok('accepts two different refs', evaluateNotes([okNote({ ref: 'zone:water' }), okNote({ ref: 'zone:fire' })]).ok);
 
   // ── workitems.json — the checklist Claude authors and ticks ─────────────────
   const someRung = describedRungs[0];
@@ -823,6 +842,7 @@ export function run(t) {
       grades: gradesVerdict.resolved,
       workitems: workitemsVerdict.resolved,
       confirmations: confirmationsVerdict.resolved,
+      notes: notesVerdict.resolved,
       perf,
     })
   );
@@ -881,6 +901,28 @@ export function run(t) {
   ok(
     'a note is never open by default — 437 permanently-visible inputs was the first draft’s loudest fault',
     !/<details class="note" open/.test(html)
+  );
+  // A note WITH a saved value is the one deliberate exception — proven with a
+  // real render, not asserted in the abstract, since a hidden-by-default note
+  // that actually has text in it would read as if it never saved.
+  const withNoteHtml = renderHtml(
+    baseModel({
+      pillars,
+      pillarScore: score,
+      passes: PASSES,
+      passCov: cov,
+      effects: rungs,
+      tri,
+      blind,
+      ledgerErrors: [],
+      survey: surveyed,
+      rungs: describedRungs,
+      notes: [{ ref: 'effect:water', text: 'A real saved note.', updatedAt: '2026-08-22' }],
+    })
+  );
+  ok(
+    'a note carrying a saved value renders OPEN, pre-filled, with its own contenteditable text',
+    /<details class="note" open>/.test(withNoteHtml) && withNoteHtml.includes('>A real saved note.</p>')
   );
   const gapPassesOnly = foundGaps.filter((g) => g.kind === 'pass');
   ok(
@@ -1169,6 +1211,7 @@ export function run(t) {
     ...workitemsVerdict.errors.map((e) => `workitems.json: ${e}`),
     ...gradesVerdict.errors.map((e) => `grades.json: ${e}`),
     ...confirmationsVerdict.errors.map((e) => `confirmations.json: ${e}`),
+    ...notesVerdict.errors.map((e) => `notes.json: ${e}`),
   ];
   const fullModel = {
     pillars,
@@ -1189,6 +1232,7 @@ export function run(t) {
     grades: gradesVerdict.resolved,
     workitems: workitemsVerdict.resolved,
     confirmations: confirmationsVerdict.resolved,
+    notes: notesVerdict.resolved,
     perf,
   };
   const freshFingerprint = computeFingerprint(fullModel);

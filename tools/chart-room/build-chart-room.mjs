@@ -64,6 +64,7 @@ const HERE = fileURLToPath(new URL('.', import.meta.url));
 const JUDGEMENTS_FILE = join(HERE, 'judgements.json');
 const WORKITEMS_FILE = join(HERE, 'workitems.json');
 const GRADES_FILE = join(HERE, 'grades.json');
+const CONFIRMATIONS_FILE = join(HERE, 'confirmations.json');
 const OUT_FILE = join(HERE, 'index.html');
 const ARTIFACT_FILE = join(HERE, 'chart-room.artifact.html');
 const TESTAMENT_FILE = join(ROOT, 'docs', 'holy', 'V4-Testament.md');
@@ -132,6 +133,17 @@ export const GRADED_BY = Object.freeze(['ingram']);
 export const FORBIDDEN_GRADE_KEYS = Object.freeze(['checklist', 'state', 'done', 'status', 'effort', 'value']);
 /** Keys a workitem may never carry — the grade lives in grades.json, not here. */
 export const FORBIDDEN_WORKITEM_KEYS = Object.freeze(['grade', 'gradedBy', 'gradedAt']);
+/** Keys a confirmation may never carry — same boundary as a grade, narrower content. */
+export const FORBIDDEN_CONFIRMATION_KEYS = Object.freeze([
+  'grade',
+  'gradedBy',
+  'gradedAt',
+  'checklist',
+  'state',
+  'status',
+  'effort',
+  'value',
+]);
 
 // A status cell/line carries OTHER backtick-quoted text too — doc filenames in
 // a `**Docs:**` field, code identifiers in the prose (`_Water`, `placementKey`,
@@ -448,6 +460,74 @@ export function evaluateGrades(grades, known) {
       errors.push(`${at}.gradedAt must be a YYYY-MM-DD date — when the verdict was actually given.`);
     }
     resolved.push({ ...g, isEffect, id });
+  });
+  return { ok: errors.length === 0, errors, resolved };
+}
+
+/**
+ * `confirmations.json` — the narrower, binary verdict underneath a grade:
+ * *"You can only confirm that you built something, I am the only one capable
+ * of confirming if it really landed."* A grade is a quality judgement on
+ * something already known to work; this is the prerequisite check — has
+ * Ingram actually watched this run on a real scene, at all — recorded
+ * separately so he can tick "seen working" the moment he confirms it, before
+ * (or instead of) settling on a letter grade.
+ *
+ * Same ref/authority rules as `grades.json` (only a BUILT effect or rung can
+ * be confirmed — nothing to watch run otherwise), and the same
+ * anti-self-grading boundary: `checklist`/`state`/`effort`/`value` belong to
+ * `workitems.json`, a grade letter belongs to `grades.json`, not here.
+ *
+ * @param {Array<object>} confirmations
+ * @param {{effects: Set<string>, builtRungs: Set<string>}} known
+ * @returns {{ok: boolean, errors: string[], resolved: Array<object>}}
+ */
+export function evaluateConfirmations(confirmations, known) {
+  const errors = [];
+  const resolved = [];
+  if (!Array.isArray(confirmations)) {
+    return { ok: false, errors: ['confirmations.json must be an array'], resolved };
+  }
+  const seen = new Set();
+  confirmations.forEach((c, i) => {
+    const at = `confirmations[${i}]`;
+    if (!c || typeof c !== 'object' || Array.isArray(c)) {
+      errors.push(`${at} must be an object`);
+      return;
+    }
+    for (const k of FORBIDDEN_CONFIRMATION_KEYS) {
+      if (k in c) errors.push(`${at} carries '${k}', which belongs in grades.json or workitems.json, not here.`);
+    }
+    const ref = c.ref;
+    if (typeof ref !== 'string' || !/^(effect|rung):.+$/.test(ref)) {
+      errors.push(`${at}.ref ${JSON.stringify(ref)} must be 'effect:<id>' or 'rung:<effectId>:<name>'.`);
+      return;
+    }
+    if (seen.has(ref)) errors.push(`${at}.ref '${ref}' is confirmed twice — one entry per thing.`);
+    seen.add(ref);
+    const isEffect = ref.startsWith('effect:');
+    const id = ref.slice(ref.indexOf(':') + 1);
+    const table = isEffect ? known.effects : known.builtRungs;
+    if (!table.has(id)) {
+      errors.push(
+        `${at}.ref '${ref}' does not resolve against a BUILT thing — there is nothing on a real scene yet to have ` +
+          'watched run.'
+      );
+      return;
+    }
+    if (typeof c.seenWorking !== 'boolean' || typeof c.wrong !== 'boolean') {
+      errors.push(`${at}.seenWorking and .wrong must both be booleans.`);
+    }
+    if (c.seenWorking === true && c.wrong === true) {
+      errors.push(`${at} claims BOTH seen-working and wrong — pick one; they contradict each other.`);
+    }
+    if (c.seenWorking !== true && c.wrong !== true) {
+      errors.push(`${at} sets neither seenWorking nor wrong — an unconfirmed entry records nothing, remove it.`);
+    }
+    if (typeof c.confirmedAt !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(c.confirmedAt)) {
+      errors.push(`${at}.confirmedAt must be a YYYY-MM-DD date — when the verdict was actually given.`);
+    }
+    resolved.push({ ...c, isEffect, id });
   });
   return { ok: errors.length === 0, errors, resolved };
 }
@@ -956,8 +1036,14 @@ export function warmNeutrals(theme) {
  *
  * @param {string} id - the block's stable id (a zone name, file path, or gap id).
  * @param {string} placeholder
+ * @param {{withTicks?: boolean}} [opts] - `withTicks: false` for a ref that
+ *   already carries the dedicated, always-visible `confirmPicker` next to its
+ *   grade — an effect or a built rung. Two "have you seen this working?"
+ *   checkboxes for the SAME ref, one folded in here and one sitting next to
+ *   the grade, would be two places to disagree with itself.
  */
-function noteBox(id, placeholder) {
+export function noteBox(id, placeholder, opts = {}) {
+  const { withTicks = true } = opts;
   // FOLDED AWAY BY DEFAULT, and `<details>` is the mechanism for a specific
   // reason: the live-doc contract lists `open` on `<details>` among the handful
   // of things that stay the viewer's own and are never journaled. So the fold
@@ -969,10 +1055,13 @@ function noteBox(id, placeholder) {
     `<summary class="notetab">Leave a note</summary>`,
     `<div class="notebody">`,
     `<p class="notein" contenteditable="true" data-block="${esc(id)}" data-placeholder="${esc(placeholder)}"></p>`,
-    `<div class="ticks">`,
-    `<label class="tick"><input type="checkbox" data-seen="${esc(id)}"><span>I've seen this working</span></label>`,
-    `<label class="tick bad"><input type="checkbox" data-wrong="${esc(id)}"><span>Something's wrong</span></label>`,
-    `</div></div></details>`,
+    withTicks
+      ? `<div class="ticks">` +
+        `<label class="tick"><input type="checkbox" data-seen="${esc(id)}"><span>I've seen this working</span></label>` +
+        `<label class="tick bad"><input type="checkbox" data-wrong="${esc(id)}"><span>Something's wrong</span></label>` +
+        `</div>`
+      : '',
+    `</div></details>`,
   ].join('');
 }
 
@@ -1032,29 +1121,15 @@ function zoneBlock(z, total, ctx) {
 
   L.push(`<div class="zbody">`);
 
-  // ── FEATURES — every rung this effect has or wants, each its own address.
-  if (z.effectId) {
-    const rungs = ctx.rungsByEffect.get(z.effectId) ?? [];
-    L.push(`<div class="effecthead">`);
-    L.push(`<div class="gradewrap"><span class="glabel">Grade the effect as a whole</span>`);
-    L.push(gradePicker(`effect:${z.effectId}`, effectGrade?.grade ?? null));
-    L.push(`</div>`);
-    L.push(noteBox(`zone:${z.name}`, 'What should change about this effect as a whole?'));
-    L.push(`</div>`);
-    if (rungs.length) {
-      const built = rungs.filter((r) => r.built);
-      const deferred = rungs.filter((r) => !r.built);
-      L.push(`<h4 class="fsub">Features <span class="count">${rungs.length}</span></h4>`);
-      L.push(`<div class="rungs">`);
-      for (const r of [...built, ...deferred]) {
-        L.push(rungBlock(r, { workitem: ctx.workitemByRef.get(r.ref), grade: ctx.gradeByRef.get(r.ref) }));
-      }
-      L.push(`</div>`);
-    }
-    L.push(`<h4 class="fsub">Files</h4>`);
-  } else {
-    L.push(noteBox(`zone:${z.name}`, 'What should change about this area?'));
-  }
+  // Grading and the rung/feature ladder live in the dedicated EFFECTS section
+  // now, addressed by `effect:<id>`/`rung:<id>:<name>` directly rather than
+  // routed through a zone match — a zone is a fact about a DIRECTORY, and 9 of
+  // 15 effects are root-level files with no directory of their own, so tying
+  // grading to zone membership left them permanently ungradeable. A zone note
+  // stays here for code-structure concerns (this directory, these files), a
+  // different question from "is this effect any good".
+  if (z.effectId) L.push(`<p class="zblurb">Grade this effect and its features under Effects, above.</p>`);
+  L.push(noteBox(`zone:${z.name}`, `What should change about ${z.effectId ? 'this directory' : 'this area'}?`));
 
   L.push(`<ol class="files">`);
   for (const f of z.files) {
@@ -1069,6 +1144,61 @@ function zoneBlock(z, total, ctx) {
     L.push(`</li>`);
   }
   L.push(`</ol></div></details>`);
+  return L.join('');
+}
+
+/**
+ * ONE EFFECT, addressable regardless of whether it owns a directory of its
+ * own — the direct fix for *"this needs to be for all effects and even all
+ * parts of all effects"*. Iterates `measureEffectRungs`'s own rows, which
+ * cover every manifest the effects door discovers (15, currently), so a 16th
+ * effect needs no edit here — same discovery rule as everywhere else on this
+ * page.
+ *
+ * @param {object} e - one row of `measureEffectRungs(manifests).rows`.
+ * @param {{rungsByEffect: Map<string,Array>, workitemByRef: Map<string,object>, gradeByRef: Map<string,object>, confirmByRef: Map<string,object>, perfByEffect: Record<string,object>, perfCapturedAt: string|null}} ctx
+ */
+function effectCard(e, ctx) {
+  const grade = ctx.gradeByRef.get(`effect:${e.id}`);
+  const confirm = ctx.confirmByRef.get(`effect:${e.id}`);
+  const rungs = ctx.rungsByEffect.get(e.id) ?? [];
+  const built = rungs.filter((r) => r.built);
+  const deferred = rungs.filter((r) => !r.built);
+  const perf = ctx.perfByEffect[e.id];
+  // Tone the tile by the grade, if one exists — an ungraded effect gets the
+  // neutral border every closed tile starts with, not a false "ok".
+  const tone = grade ? gradeTone(grade.grade) : '';
+  const L = [`<details class="zone sp-sm${tone ? ` t-${tone}` : ''}">`];
+  L.push(`<summary class="zhead">`);
+  L.push(`<div class="zrow"><h3>${esc(e.title)}</h3><span class="kindtag">${esc(e.id)}</span></div>`);
+  L.push(`<p class="zmeta">${e.built} built · ${e.deferred} deferred rung${e.deferred === 1 ? '' : 's'}</p>`);
+  const flags = [grade ? gradeChip(grade.grade) : '', perfChip(perf, ctx.perfCapturedAt)].filter(Boolean);
+  L.push(`<div class="zfoot">${flags.join('')}<span class="chev">open</span></div>`);
+  L.push(`</summary>`);
+
+  L.push(`<div class="zbody">`);
+  L.push(`<div class="effecthead">`);
+  L.push(`<div class="gradewrap"><span class="glabel">Grade the effect as a whole</span>`);
+  L.push(gradePicker(`effect:${e.id}`, grade?.grade ?? null));
+  L.push(confirmPicker(`effect:${e.id}`, confirm));
+  L.push(`</div>`);
+  L.push(noteBox(`effect:${e.id}`, 'What should change about this effect as a whole?', { withTicks: false }));
+  L.push(`</div>`);
+  if (rungs.length) {
+    L.push(`<h4 class="fsub">Features <span class="count">${rungs.length}</span></h4>`);
+    L.push(`<div class="rungs">`);
+    for (const r of [...built, ...deferred]) {
+      L.push(
+        rungBlock(r, {
+          workitem: ctx.workitemByRef.get(r.ref),
+          grade: ctx.gradeByRef.get(r.ref),
+          confirm: ctx.confirmByRef.get(r.ref),
+        })
+      );
+    }
+    L.push(`</div>`);
+  }
+  L.push(`</div></details>`);
   return L.join('');
 }
 
@@ -1118,7 +1248,7 @@ function gradeChip(g) {
  * @param {string} ref - 'effect:water' or 'rung:water:refraction'.
  * @param {string|null} current - the currently-recorded grade, if any.
  */
-function gradePicker(ref, current) {
+export function gradePicker(ref, current) {
   const opts = GRADES.map(
     (g) =>
       `<label class="gopt gr-${gradeSlug(g)}"><input type="radio" name="grade-${esc(ref)}" value="${esc(g)}"${
@@ -1126,6 +1256,34 @@ function gradePicker(ref, current) {
       }><span>${esc(g)}</span></label>`
   ).join('');
   return `<div class="gradepick" role="radiogroup" aria-label="Grade ${esc(ref)}">${opts}</div>`;
+}
+
+/**
+ * THE AUTHORITY LINE, as a control: *"You can only confirm that you built
+ * something, I am the only one capable of confirming if it really landed."*
+ * A grade is a quality verdict; this is the narrower, binary one underneath
+ * it — has Ingram actually watched this run in a real scene at all — and it
+ * sits directly beside the grade picker rather than folded inside a note, so
+ * it is never mistaken for a lower-stakes "I glanced at the code" checkbox.
+ *
+ * Two checkboxes, not one three-state control: "not yet looked at", "seen
+ * working", and "seen, and it's wrong" are three real states, and a single
+ * checkbox can only ever hold two.
+ *
+ * @param {string} ref - 'effect:water' or 'rung:water:refraction'.
+ * @param {{seenWorking?: boolean, wrong?: boolean}|null} current
+ */
+export function confirmPicker(ref, current) {
+  const seen = current?.seenWorking === true;
+  const wrong = current?.wrong === true;
+  return (
+    `<div class="ticks confirmwrap">` +
+    `<label class="tick"><input type="checkbox" data-confirm-seen="${esc(ref)}"${seen ? ' checked' : ''}>` +
+    `<span>✓ Live confirmed working</span></label>` +
+    `<label class="tick bad"><input type="checkbox" data-confirm-wrong="${esc(ref)}"${wrong ? ' checked' : ''}>` +
+    `<span>✕ Not working</span></label>` +
+    `</div>`
+  );
 }
 
 const WORKITEM_STATE_LABEL = Object.freeze({
@@ -1157,7 +1315,7 @@ function checklistView(item) {
  * type a note."
  *
  * @param {{ref: string, name: string, built: boolean, note: string}} r
- * @param {{workitem?: object, grade?: object}} ctx
+ * @param {{workitem?: object, grade?: object, confirm?: object}} ctx
  */
 function rungBlock(r, ctx) {
   const L = [`<div class="rung${r.built ? ' built' : ''}">`];
@@ -1168,8 +1326,15 @@ function rungBlock(r, ctx) {
   );
   if (r.note) L.push(`<p class="fsum">${esc(r.note.slice(0, 220))}${r.note.length > 220 ? '…' : ''}</p>`);
   if (ctx.workitem) L.push(checklistView(ctx.workitem));
-  if (r.built) L.push(gradePicker(r.ref, ctx.grade?.grade ?? null));
-  L.push(noteBox(r.ref, ctx.workitem ? "Add to what's already asked for" : `Want ${r.name}? Say what it should do.`));
+  if (r.built) {
+    L.push(gradePicker(r.ref, ctx.grade?.grade ?? null));
+    L.push(confirmPicker(r.ref, ctx.confirm ?? null));
+  }
+  L.push(
+    noteBox(r.ref, ctx.workitem ? "Add to what's already asked for" : `Want ${r.name}? Say what it should do.`, {
+      withTicks: !r.built,
+    })
+  );
   L.push('</div>');
   return L.join('');
 }
@@ -1343,16 +1508,26 @@ export function renderHtml(model) {
     rungs,
     grades,
     workitems,
+    confirmations,
     perf,
   } = model;
   const artifact = model.mode === 'artifact';
   const gradeByRef = new Map(grades.map((g) => [g.ref, g]));
   const workitemByRef = new Map(workitems.map((w) => [w.ref, w]));
+  const confirmByRef = new Map(confirmations.map((c) => [c.ref, c]));
   const rungsByEffect = new Map();
   for (const r of rungs) {
     if (!rungsByEffect.has(r.effectId)) rungsByEffect.set(r.effectId, []);
     rungsByEffect.get(r.effectId).push(r);
   }
+  const effectCtx = {
+    rungsByEffect,
+    workitemByRef,
+    gradeByRef,
+    confirmByRef,
+    perfByEffect: perf.byEffect,
+    perfCapturedAt: perf.capturedAt,
+  };
   const zoneCtx = {
     rungsByEffect,
     workitemByRef,
@@ -1402,6 +1577,7 @@ export function renderHtml(model) {
       `<span class="fp" title="A hash of everything derived on this page. Two builds of the same reality produce the same fingerprint — ask me to compare this against a fresh run if you doubt it.">fp ${fingerprint}</span></div>`
   );
   p('<nav class="jump">');
+  p('<a href="#effects">Effects</a>');
   p('<a href="#module">Module</a>');
   p('<a href="#worth-doing">Worth doing</a>');
   p(
@@ -1502,6 +1678,23 @@ export function renderHtml(model) {
     p('</div></section>');
   }
 
+  // ── EFFECTS — every effect, addressable regardless of directory shape ─────
+  // "This needs to be for all effects and even all parts of all effects" —
+  // every row `measureEffectRungs` discovers gets its own card here, whether
+  // or not it owns a directory a zone can key off. Ordered by visualWeight,
+  // same as the gauge's own "what to defend first" logic.
+  p('<section id="effects" class="strip">');
+  p(`<h2>Effects <span class="count">${effects.rows.length}</span></h2>`);
+  p(
+    '<p class="sub">Grade any effect, or any of its built features, and mark whether you\'ve actually watched it ' +
+      'run on a real scene — the grade is a quality call, the confirm buttons are the narrower "I saw this ' +
+      'happen" one underneath it. Click a card open for its checklist and its own note.</p>'
+  );
+  p('<div class="mosaic">');
+  for (const e of effects.rows) p(effectCard(e, effectCtx));
+  p('</div>');
+  p('</section>');
+
   // ── MODULE — the project as it lives, click in, grade what's done ─────────
   p('<section id="module" class="strip">');
   p('<div class="figures">');
@@ -1513,9 +1706,9 @@ export function renderHtml(model) {
   );
   p('</div>');
   p(
-    `<p class="lede">Each block is an area of the module, sized by how much code is in it. An effect's own block ` +
-      `opens onto its FEATURES — click one, read its checklist, leave a note, or grade it if it's built. Every ` +
-      `description is the file's <em>own</em> header, never written here.</p>`
+    `<p class="lede">Each block is an area of the module, sized by how much code is in it — click one open for ` +
+      `its files and a note about the directory itself. Grading and features live under Effects, above; this is ` +
+      `the code, not the feature list. Every description is the file's <em>own</em> header, never written here.</p>`
   );
   p('<div class="legend">');
   p('<span class="key"><i class="sw ok"></i>nothing flagged</span>');
@@ -1921,6 +2114,11 @@ summary:hover{color:var(--shine)}
   transition:background var(--t-micro) var(--ease),color var(--t-micro) var(--ease)}
 .gopt:hover span{color:var(--ink0)}
 .gopt input:checked+span{background:var(--shine-soft);color:var(--shine)}
+/* THE CONFIRM CONTROL — sits beside the grade, never folded into a note: "I
+   built it" (mine) and "it really landed" (his, and only his) are different
+   claims and read as visually different weight — plain checkboxes, not a
+   pill strip, so they never look like a second grade. */
+.confirmwrap{margin-top:0}
 .fsub{font-size:var(--t3);color:var(--ink1);text-transform:uppercase;letter-spacing:.6px;
   margin:var(--sp4) 0 var(--sp2);display:flex;align-items:center;gap:var(--sp2)}
 .rungs{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:var(--sp3);margin-bottom:var(--sp2)}
@@ -2024,10 +2222,13 @@ async function main() {
   const workitemsVerdict = evaluateWorkItems(workitemsRaw, known);
   const gradesRaw = existsSync(GRADES_FILE) ? JSON.parse(readFileSync(GRADES_FILE, 'utf8')) : [];
   const gradesVerdict = evaluateGrades(gradesRaw, known);
+  const confirmationsRaw = existsSync(CONFIRMATIONS_FILE) ? JSON.parse(readFileSync(CONFIRMATIONS_FILE, 'utf8')) : [];
+  const confirmationsVerdict = evaluateConfirmations(confirmationsRaw, known);
   const ledgerErrorsAll = [
     ...verdict.errors.map((e) => `judgements.json: ${e}`),
     ...workitemsVerdict.errors.map((e) => `workitems.json: ${e}`),
     ...gradesVerdict.errors.map((e) => `grades.json: ${e}`),
+    ...confirmationsVerdict.errors.map((e) => `confirmations.json: ${e}`),
   ];
 
   // THE LATEST PERF CAPTURE — whichever dated file sorts last. Never a live
@@ -2121,6 +2322,7 @@ async function main() {
     rungs,
     grades: gradesVerdict.resolved,
     workitems: workitemsVerdict.resolved,
+    confirmations: confirmationsVerdict.resolved,
     perf,
   };
   // `--check`: THE STANDALONE FRESHNESS GATE — the mechanism the author asked
@@ -2183,7 +2385,8 @@ async function main() {
   console.log(`  drift found: ${driftCount}`);
   console.log(
     `  rungs: ${rungs.length} addressable (${rungs.filter((r) => r.built).length} built) · ` +
-      `workitems: ${workitemsVerdict.resolved.length} · grades: ${gradesVerdict.resolved.length}` +
+      `workitems: ${workitemsVerdict.resolved.length} · grades: ${gradesVerdict.resolved.length} · ` +
+      `confirmations: ${confirmationsVerdict.resolved.length}` +
       (perf.capturedAt ? ` · perf captured ${perf.capturedAt}` : ' · no perf capture found')
   );
   for (const e of ledgerErrorsAll) console.error(`  ERROR ${e}`);

@@ -28,6 +28,7 @@ import {
   describeRungs,
   evaluateJudgements,
   evaluateGrades,
+  evaluateConfirmations,
   evaluateWorkItems,
   deriveWorkItemState,
   derivePerfByEffect,
@@ -50,6 +51,7 @@ import {
   GRADES,
   GRADED_BY,
   FORBIDDEN_GRADE_KEYS,
+  FORBIDDEN_CONFIRMATION_KEYS,
   FORBIDDEN_WORKITEM_KEYS,
   EFFORTS,
   VALUES,
@@ -91,6 +93,7 @@ const baseModel = (over) => ({
   rungs: [],
   grades: [],
   workitems: [],
+  confirmations: [],
   perf: { byEffect: {}, capturedAt: null, msaVersion: null },
   ...over,
 });
@@ -327,6 +330,59 @@ export function run(t) {
     ok(
       `forbids a '${key}' field on a grade — that belongs in judgements.json or workitems.json, not here`,
       !evaluateGrades([okGrade({ [key]: 'anything' })], known).ok
+    );
+  }
+
+  // ── confirmations.json — "I built it" vs "it really landed", his call ───────
+  const builtRungRef = describedRungs.find((r) => r.built).ref;
+  const deferredRungRef = describedRungs.find((r) => !r.built).ref;
+  const okConfirmation = (over) => ({
+    ref: 'effect:water',
+    seenWorking: true,
+    wrong: false,
+    confirmedAt: '2026-08-22',
+    ...over,
+  });
+  const realConfirmations = JSON.parse(readFileSync(join(HERE, 'confirmations.json'), 'utf8'));
+  const confirmationsVerdict = evaluateConfirmations(realConfirmations, known);
+  ok(
+    `the real confirmations.json resolves clean (${confirmationsVerdict.errors.join(' | ')})`,
+    confirmationsVerdict.ok
+  );
+  ok(
+    'refuses a ref that is not effect: or rung:',
+    !evaluateConfirmations([okConfirmation({ ref: 'pass:post.grade' })], known).ok
+  );
+  ok(
+    'refuses a rung ref that is still deferred — nothing built yet to have watched run',
+    !evaluateConfirmations([okConfirmation({ ref: deferredRungRef })], known).ok
+  );
+  ok(
+    'accepts a rung ref that is actually built',
+    evaluateConfirmations([okConfirmation({ ref: builtRungRef })], known).ok
+  );
+  ok(
+    'refuses claiming BOTH seen-working and wrong at once — they contradict',
+    !evaluateConfirmations([okConfirmation({ seenWorking: true, wrong: true })], known).ok
+  );
+  ok(
+    'refuses an entry that confirms neither state — nothing recorded, remove it',
+    !evaluateConfirmations([okConfirmation({ seenWorking: false, wrong: false })], known).ok
+  );
+  ok(
+    'accepts wrong-only, no seenWorking required alongside it',
+    evaluateConfirmations([okConfirmation({ seenWorking: false, wrong: true })], known).ok
+  );
+  ok('refuses a non-boolean seenWorking', !evaluateConfirmations([okConfirmation({ seenWorking: 'yes' })], known).ok);
+  ok('refuses a malformed confirmedAt', !evaluateConfirmations([okConfirmation({ confirmedAt: 'today' })], known).ok);
+  ok(
+    'refuses the same ref confirmed twice',
+    !evaluateConfirmations([okConfirmation({}), okConfirmation({})], known).ok
+  );
+  for (const key of FORBIDDEN_CONFIRMATION_KEYS) {
+    ok(
+      `forbids a '${key}' field on a confirmation — that belongs in grades.json or workitems.json, not here`,
+      !evaluateConfirmations([okConfirmation({ [key]: 'anything' })], known).ok
     );
   }
 
@@ -766,6 +822,7 @@ export function run(t) {
       rungs: describedRungs,
       grades: gradesVerdict.resolved,
       workitems: workitemsVerdict.resolved,
+      confirmations: confirmationsVerdict.resolved,
       perf,
     })
   );
@@ -826,12 +883,11 @@ export function run(t) {
     !/<details class="note" open/.test(html)
   );
   const gapPassesOnly = foundGaps.filter((g) => g.kind === 'pass');
-  const rungsInZonedEffects = describedRungs.filter((r) => effectsWithOwnZone.has(r.effectId));
   ok(
-    'every zone, every pass-gap, and every rung of a zoned effect can be written back to',
+    'every zone, every pass-gap, and EVERY rung of EVERY effect can be written back to — not just zoned effects',
     surveyed.zones.every((z) => html.includes(`data-block="zone:${z.name}"`)) &&
       gapPassesOnly.every((g) => html.includes(`data-block="gap:${escapeHtml(g.id)}"`)) &&
-      rungsInZonedEffects.every((r) => html.includes(`data-block="${escapeHtml(r.ref)}"`))
+      describedRungs.every((r) => html.includes(`data-block="${escapeHtml(r.ref)}"`))
   );
   ok(
     'every surveyed file carries its own note box',
@@ -922,8 +978,25 @@ export function run(t) {
     pillars.every((p) => html.includes(escapeHtml(p.name)))
   );
   ok(
-    'names every effect that owns its own zone — each carries its own effect-level grade control',
-    rungs.rows.filter((r) => effectsWithOwnZone.has(r.id)).every((r) => html.includes(`name="grade-effect:${r.id}"`))
+    // The direct regression pin for the author's own report: "this needs to be
+    // for all effects and even all parts of all effects." Nine of fifteen
+    // effects are root-level files with no directory a zone can key off
+    // (effectsWithOwnZone below proves that), so grading MUST NOT be gated on
+    // zone membership — the dedicated Effects section covers every discovered
+    // manifest directly.
+    'names EVERY discovered effect, not just the ones that happen to own a directory — each carries its own grade control',
+    rungs.rows.every((r) => html.includes(`name="grade-effect:${r.id}"`))
+  );
+  ok(
+    'proves the fix is real: at least one effect WITHOUT its own zone still gets a grade control',
+    rungs.rows.some((r) => !effectsWithOwnZone.has(r.id)) &&
+      rungs.rows.filter((r) => !effectsWithOwnZone.has(r.id)).every((r) => html.includes(`name="grade-effect:${r.id}"`))
+  );
+  ok(
+    'the confirm control sits beside every BUILT rung/effect grade, and only there',
+    describedRungs.filter((r) => r.built).every((r) => html.includes(`data-confirm-seen="${escapeHtml(r.ref)}"`)) &&
+      html.includes('data-confirm-seen="effect:water"') &&
+      describedRungs.filter((r) => !r.built).every((r) => !html.includes(`data-confirm-seen="${escapeHtml(r.ref)}"`))
   );
   ok(
     'escapes markup rather than emitting it raw',
@@ -1095,6 +1168,7 @@ export function run(t) {
     ...verdict.errors.map((e) => `judgements.json: ${e}`),
     ...workitemsVerdict.errors.map((e) => `workitems.json: ${e}`),
     ...gradesVerdict.errors.map((e) => `grades.json: ${e}`),
+    ...confirmationsVerdict.errors.map((e) => `confirmations.json: ${e}`),
   ];
   const fullModel = {
     pillars,
@@ -1114,6 +1188,7 @@ export function run(t) {
     rungs: describedRungs,
     grades: gradesVerdict.resolved,
     workitems: workitemsVerdict.resolved,
+    confirmations: confirmationsVerdict.resolved,
     perf,
   };
   const freshFingerprint = computeFingerprint(fullModel);
@@ -1155,8 +1230,8 @@ export function run(t) {
     onDisk.includes(`>${score.pct.toFixed(0)}<`)
   );
   ok(
-    'the checked-in page carries a grade control for every effect that owns its own zone',
-    rungs.rows.filter((r) => effectsWithOwnZone.has(r.id)).every((r) => onDisk.includes(`name="grade-effect:${r.id}"`))
+    'the checked-in page carries a grade control for EVERY effect, zoned or not',
+    rungs.rows.every((r) => onDisk.includes(`name="grade-effect:${r.id}"`))
   );
   ok(
     'the checked-in page carries the same open-bug count the code computes right now',

@@ -215,7 +215,7 @@ export function createWaterBodySubsystem({
    * the same choice sun-shadows made for its own empty caster field, and for
    * the same reason (a placeholder whose failure is invisible beats one whose
    * failure is the whole screen). */
-  let maskTexture = createWaterMaskTexture(new Uint8Array([0, 0, 0, 255]), 1, 1, WATER_MASK_FILTER);
+  const maskTexture = createWaterMaskTexture(new Uint8Array([0, 0, 0, 255]), 1, 1, WATER_MASK_FILTER);
   let maskRect = { minX: 0, minY: 0, maxX: 1, maxY: 1 };
 
   /** The water's own world AABB (Law 6 — the surface mesh is cropped to THIS,

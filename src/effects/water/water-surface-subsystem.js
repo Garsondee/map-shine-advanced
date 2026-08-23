@@ -199,6 +199,19 @@ export function createWaterSurfaceSubsystem({
    * `setFlowPackTexture`'s own doc. Starts equal to the placeholder so the
    * FIRST real bake is correctly seen as a change. */
   let boundFlowPackTexture = flowPackPlaceholder;
+  /** A 1×1 "no foam" placeholder for `res:waterSim` (S5, 2026-08-18) — same
+   * contract as `flowPackPlaceholder` immediately above: `waterSimTexture`
+   * must NEVER be JS `null` (`buildWaterSurfaceMaterial`'s own doc). R=0
+   * reads as "no foam" after the display-time `smoothstep(WATER_SIM_CLUMP_LO,
+   * …)` transform that function applies, for any non-negative `CLUMP_LO` —
+   * the same "one byte pattern, correct silent default" property
+   * `flowPackPlaceholder`'s own comment names. GBA are unused by this pack
+   * today (reserved for S7/S8) so their bytes do not matter; zero for the
+   * same "quiet, invisible failure" reasoning throughout this file. */
+  const waterSimPlaceholder = createMaskTexture(new Uint8Array([0, 0, 0, 0]), 1, 1, 'linear');
+  /** Same bind-by-identity discipline as `boundFlowPackTexture` — see
+   * `setWaterSimTexture`'s own doc. */
+  let boundWaterSimTexture = waterSimPlaceholder;
   /** The bake generation the geometry was cropped for (-1 = never). */
   let builtForBake = -1;
   /** The resolved-params signature last pushed, so a quiet frame is one string
@@ -314,6 +327,11 @@ export function createWaterSurfaceSubsystem({
       // `buildWaterSurfaceMaterial`'s own `flowPackTexture` doc for why this
       // one does NOT follow `bodyTexture`'s "null compiles it out" shape.
       flowPackTexture: boundFlowPackTexture,
+      // `res:waterSim` (S5, 2026-08-18) — same shape as `flowPackTexture`
+      // immediately above: ALWAYS a real texture, starting at
+      // `waterSimPlaceholder` and re-pointed by `setWaterSimTexture` on its
+      // own (per-frame) cadence, independent of this rebuild.
+      waterSimTexture: boundWaterSimTexture,
       // THE CAST-SHADOW GATE (2026-08-16). ⚠️ THIS DECIDES ONLY WHETHER THE
       // LOOKUP EXISTS IN THE COMPILED SHADER — it is NOT the field this floor
       // reads. That is a per-frame push (`syncSunShadow` below), because which
@@ -415,6 +433,60 @@ export function createWaterSurfaceSubsystem({
     if (t === boundFlowPackTexture) return;
     boundFlowPackTexture = t;
     if (surface.flowPackTexNode) surface.flowPackTexNode.value = t;
+  }
+
+  /**
+   * Point the `simFoamRaw`/`simFoam` debug channels — AND, since S5, the
+   * ACTUAL VISIBLE WATER — at THIS floor's own sim pack texture. Called from
+   * the frame loop right after `waterSim.tick(dtSec)`, every frame,
+   * unconditionally — same shape as `setFlowPackTexture` immediately above,
+   * a THIRD independent re-point cadence (the sim pack ticks every frame,
+   * not on a bake) alongside the mask's, the body pack's, and the flow
+   * pack's own.
+   *
+   * `texture ?? waterSimPlaceholder`, never a bare `null` re-point — same
+   * reasoning as `setFlowPackTexture`'s own doc: `waterSimTexture` is never
+   * JS `null` by contract, because nothing gates this material's own
+   * visibility on a completed sim tick the way `bodyTexNode` is gated on a
+   * completed body bake.
+   * @param {*|null|undefined} texture
+   */
+  function setWaterSimTexture(texture) {
+    const t = texture ?? waterSimPlaceholder;
+    if (t === boundWaterSimTexture) return;
+    boundWaterSimTexture = t;
+    if (surface.waterSimTexNode) surface.waterSimTexNode.value = t;
+  }
+
+  /**
+   * Push THIS floor's sim grid dimensions to the material's smooth-texel
+   * reconstruction (`water-render.js#setWaterSimTexSize`) — the C2-eased UV
+   * remap (`buildSmoothTexelUv`) needs the real texel pitch of whatever
+   * `sim.texture` currently is, or it degrades to a no-op identity remap and
+   * the sim foam reads blocky at zoom. Same per-frame cadence as
+   * `setWaterSimTexture` immediately above — called right alongside it in
+   * `vt-pan-viewer.js` — and just as cheap: a uniform `.set()`, not a shader
+   * rebuild.
+   * @param {number} w
+   * @param {number} h
+   */
+  function setWaterSimTexSize(w, h) {
+    surface.setWaterSimTexSize?.(w, h);
+  }
+
+  /**
+   * Same contract as `setWaterSimTexSize` immediately above, for the flow
+   * pack's own smooth-texel reconstruction (2026-08-19) —
+   * `water-render.js#setFlowPackTexSize`'s own doc has the live-reported
+   * "pixelated texels" symptom this corrects. Called alongside
+   * `setFlowPackTexture` in `vt-pan-viewer.js`, same cadence (the flow
+   * pack's own bake, not every frame — its grid never changes between
+   * bakes, so pushing it more often would be pure cost for no benefit).
+   * @param {number} w
+   * @param {number} h
+   */
+  function setFlowPackTexSize(w, h) {
+    surface.setFlowPackTexSize?.(w, h);
   }
 
   /** The captured-refraction texture currently bound, by IDENTITY — same
@@ -585,7 +657,26 @@ export function createWaterSurfaceSubsystem({
       prev.inscatterMaterial?.dispose?.();
       prev.debugMaterial?.dispose?.(); // the THIRD material built every rebuild, same as the other two
       prev.refractMaterial?.dispose?.(); // the FOURTH — null below tier 5, so guarded like the others aren't
-      builtForTier = resolvedTier;
+      // ⚠️ `surface.tier`, NOT `resolvedTier` (2026-08-18) — a real, previously
+      // dormant bug this line's own neighbour (the `getStatus()` comment on
+      // `perfTier`/`builtForTier`, below) already documents the CONTRACT for:
+      // "they can disagree for at most one sync() between a resolve and its
+      // rebuild." That contract is only true if `builtForTier` records what
+      // the build ACTUALLY produced. `water-render.js`'s own gate clamps its
+      // internal `activeTier` below `tier` whenever `bodyTexture` is not yet
+      // ready (its own header explains why) — on any sync() where THIS
+      // rebuild races ahead of the body pack's first completed bake,
+      // `resolvedTier` and the material's real, compiled tier already
+      // disagree at the moment of the build itself, and recording the
+      // REQUESTED value here would make that disagreement permanent: no
+      // later sync() would ever see `resolvedTier !== builtForTier` again,
+      // so the degraded build would never be retried even once bodyTexture
+      // becomes available. Recording the ACTUAL tier instead means a raced
+      // first build keeps being seen as a mismatch on every subsequent
+      // sync() until a real rebuild at the real tier finally succeeds —
+      // self-correcting regardless of how the two subsystems happen to race,
+      // rather than depending on winning that race.
+      builtForTier = surface.tier;
       // Force every cached value below to re-push onto the FRESH material — it
       // starts back at its constructor defaults, and the key-based caches
       // below exist to skip REDUNDANT writes, not the first write to a new
@@ -700,6 +791,21 @@ export function createWaterSurfaceSubsystem({
       p.breakFoam,
       p.foamTrail,
       p.caustics,
+      // ROH TUNING (2026-08-19) — bankWarp/flowWarp + buildFoamCellularStructure's own knobs.
+      p.bankInfluence,
+      p.flowWarpInfluence,
+      p.foamFlowNudge,
+      p.foamEdgeFar,
+      p.foamEdgeAaPx,
+      p.foamBubbleAmount,
+      p.foamBubbleOctave,
+      p.foamBubbleTimeScale,
+      p.foamGrainAmount,
+      p.foamGrainOctave,
+      p.foamGrainTimeScale,
+      p.simClumpLo,
+      p.simClumpHi,
+      p.simClumpAaPx,
     ].join('|');
     if (key !== lastParamsKey) {
       lastParamsKey = key;
@@ -727,6 +833,20 @@ export function createWaterSurfaceSubsystem({
       if (Number.isFinite(p.breakFoam)) surface.setBreakFoam(p.breakFoam);
       if (Number.isFinite(p.foamTrail)) surface.setFoamTrail(p.foamTrail);
       if (Number.isFinite(p.caustics)) surface.setCaustics(p.caustics);
+      if (Number.isFinite(p.bankInfluence)) surface.setBankInfluence(p.bankInfluence);
+      if (Number.isFinite(p.flowWarpInfluence)) surface.setFlowWarpInfluence(p.flowWarpInfluence);
+      if (Number.isFinite(p.foamFlowNudge)) surface.setFoamFlowNudge(p.foamFlowNudge);
+      if (Number.isFinite(p.foamEdgeFar)) surface.setFoamEdgeFar(p.foamEdgeFar);
+      if (Number.isFinite(p.foamEdgeAaPx)) surface.setFoamEdgeAaPx(p.foamEdgeAaPx);
+      if (Number.isFinite(p.foamBubbleAmount)) surface.setFoamBubbleAmount(p.foamBubbleAmount);
+      if (Number.isFinite(p.foamBubbleOctave)) surface.setFoamBubbleOctave(p.foamBubbleOctave);
+      if (Number.isFinite(p.foamBubbleTimeScale)) surface.setFoamBubbleTimeScale(p.foamBubbleTimeScale);
+      if (Number.isFinite(p.foamGrainAmount)) surface.setFoamGrainAmount(p.foamGrainAmount);
+      if (Number.isFinite(p.foamGrainOctave)) surface.setFoamGrainOctave(p.foamGrainOctave);
+      if (Number.isFinite(p.foamGrainTimeScale)) surface.setFoamGrainTimeScale(p.foamGrainTimeScale);
+      if (Number.isFinite(p.simClumpLo)) surface.setSimClumpLo(p.simClumpLo);
+      if (Number.isFinite(p.simClumpHi)) surface.setSimClumpHi(p.simClumpHi);
+      if (Number.isFinite(p.simClumpAaPx)) surface.setSimClumpAaPx(p.simClumpAaPx);
       debugChannel = Number.isFinite(state.debugChannel) ? Math.max(0, Math.round(state.debugChannel)) : 0;
       surface.setDebugChannel(debugChannel);
       enabled = state.enabled !== false;
@@ -830,6 +950,9 @@ export function createWaterSurfaceSubsystem({
      */
     getFullResMaskTexture: () => (loadedUrl ? maskTexture : null),
     setFlowPackTexture,
+    setFlowPackTexSize,
+    setWaterSimTexture,
+    setWaterSimTexSize,
     /** For the `water-body` report — merged into the body pack's own status. */
     getStatus() {
       return {
@@ -932,6 +1055,7 @@ export function createWaterSurfaceSubsystem({
       refractPlaceholderMaterial.dispose(); // the ONE object never touched by a tier rebuild — freed here instead
       maskTexture?.dispose?.();
       flowPackPlaceholder?.dispose?.();
+      waterSimPlaceholder?.dispose?.();
     },
   };
 }

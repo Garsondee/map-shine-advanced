@@ -67,9 +67,10 @@
  * tube — where adjacent tubes MERGE into one component and no downstream code
  * can recover them.
  *
- * It is also, not by accident, the same figure water's supersampled flood
- * lands on (`WATER_BODY_SUPERSAMPLE` × 512), and it sits under the Keyhole
- * allocator's 2,048 px cap with no exception needed.
+ * It is also, not by accident, the same figure water's own body-pack flood
+ * lands on (`water-body.js#WATER_BODY_GRID_MAX_DIM`, water-owned, sized from
+ * the world rect the same way this file's own cap is), and it sits under the
+ * Keyhole allocator's 2,048 px cap with no exception needed.
  *
  * Cost at 1,536 × 714: ~1.1 M texels, RGBA16F = **~8.8 MB** resident, and a
  * measured ~365 ms of CPU once per mask version (never per frame).

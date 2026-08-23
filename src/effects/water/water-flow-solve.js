@@ -117,8 +117,47 @@ import { waterFlowVector } from './water-field.js';
  */
 export const WATER_FLOW_SOLVE_LEVEL_FRACTIONS = Object.freeze([1 / 16, 1 / 8, 1 / 4, 1 / 2, 1]);
 
-/** Water-Simulation-Turn.md §3's own number, verbatim ("~20 iterations per level"). */
-export const WATER_FLOW_SOLVE_ITERATIONS_PER_LEVEL = 20;
+/**
+ * Water-Simulation-Turn.md §3's own number was "~20 iterations per level",
+ * verbatim, sized for PLAIN JACOBI. Bumped 20→60 the same day
+ * {@link sorPressureStep} replaced Jacobi as the solve path — MEASURED, not
+ * guessed: a Node-side iteration sweep (20/40/80/160/320) on a fixture
+ * shaped like the live-reported failure showed SOR itself keeps improving
+ * through roughly 80 iterations then genuinely PLATEAUS (8.0% speed-up at
+ * 80, 8.1% at 320 — no further gain, and critically no oscillation or
+ * instability either, unlike a divergent solver would show at high counts).
+ * 60 captures nearly all of that available gain (7.9%, against the 8.0-8.1%
+ * ceiling) while stopping short of fully-plateaued, wasted iterations. This
+ * is a one-time BAKE cost (`docs/planning/Water-Simulation-Turn.md`'s own
+ * S3-continued entry — the author's own framing: "the flow of the river
+ * shouldn't change during the session... bake once"), so 3× the old count
+ * is not a real cost the way it would be for a per-frame solve.
+ */
+export const WATER_FLOW_SOLVE_ITERATIONS_PER_LEVEL = 60;
+
+/**
+ * The SOR over-relaxation factor (2026-08-19) — see {@link sorPressureStep}'s
+ * own doc for the full account of why plain Jacobi was replaced. `1 < omega
+ * < 2` extrapolates PAST the plain Gauss-Seidel-style update; `omega = 1`
+ * would be Gauss-Seidel with no extrapolation at all (still strictly better
+ * than Jacobi, from the checkerboard ordering alone); `omega >= 2` is
+ * unconditionally unstable for this class of system. 1.7 is a FIXED,
+ * documented-as-provisional value, comfortably inside the stable `(0,2)`
+ * range without sitting near its unstable edge — NOT the per-grid-size
+ * analytically optimal value (the closed-form formula, `2/(1+sin(pi/N))`,
+ * assumes a clean rectangular ALL-Dirichlet domain; this solver's own mixed
+ * Neumann/Dirichlet boundary and irregular, author-painted obstacle shapes
+ * have no equally clean closed form). Empirically checked, not just
+ * asserted: `water-flow-solve.test.mjs`'s own SOR-vs-Jacobi block measures
+ * this value converging faster than plain Jacobi at the SAME iteration
+ * count, on both the original circular-obstacle fixture and a NEW
+ * small-obstacle-in-open-water fixture shaped like the live-reported
+ * failure (`docs/planning/Water-Simulation-Turn.md`'s own S3-continued
+ * entry) — a future, more thorough per-level tuning pass is a reasonable
+ * follow-up, not a prerequisite for this being a real improvement over
+ * omega=1 (plain Jacobi).
+ */
+export const WATER_FLOW_SOLVE_OMEGA = 1.7;
 
 /** A level may not shrink below this on either axis — a 1×1 or 0-width Jacobi
  * grid is not a meaningful pressure solve, just a degenerate edge case a tiny
@@ -382,6 +421,68 @@ export function jacobiPressureStep(p, div, solid, w, h) {
 }
 
 /**
+ * B3 line 2, SOR VARIANT (2026-08-19) — replaces plain Jacobi as the
+ * PRODUCTION solve path (`solveVelocityLevel`'s own loop). `jacobiPressureStep`
+ * above is UNCHANGED and stays exported — still correct, still a useful
+ * reference/comparison point (`water-flow-solve.test.mjs`'s own SOR-vs-Jacobi
+ * block reads both), just no longer what actually ships.
+ *
+ * ⚠️ WHY: plain Jacobi's own convergence rate for the LOW-FREQUENCY error
+ * component — "route flow around an obstacle," a large-scale, whole-field
+ * correction — scales as `O(1/N^2)` in iteration count for an N-wide grid.
+ * This was measured, not assumed: on the real river, in the shader-lab bench,
+ * bumping the iteration budget 10× (20→200 per level) barely moved the
+ * result (a bend's own deflection went from −0.5° to −1.7°, nowhere near the
+ * ~16° a genuinely converged solve should show at that distance from an
+ * obstacle) — the classic signature of a solver that has already reached
+ * ITS OWN ceiling, not one that merely needs more time
+ * (`docs/planning/Water-Simulation-Turn.md`'s own S3-continued entry has the
+ * full account). Red-black SOR's own rate scales `O(1/N)` — an order better.
+ *
+ * HOW, without losing GPU parallelism: split the grid into a checkerboard
+ * (`(i+j) % 2`). In a 5-point stencil, every cell's four neighbours are
+ * ALWAYS the OPPOSITE colour from itself — so updating one whole colour has
+ * zero read/write conflicts (exactly as parallel as plain Jacobi), and
+ * because the OTHER colour was just refreshed on the PREVIOUS call, each
+ * colour reads fresher neighbour data than plain Jacobi ever does — the same
+ * mechanism that makes Gauss-Seidel converge roughly 2× faster than Jacobi
+ * on its own, before `omega` extrapolates further past it.
+ *
+ * `omega` EXTRAPOLATES the checkerboard Gauss-Seidel-style update in the
+ * same direction it was already moving: `next = centre + omega*(average −
+ * centre)`. See {@link WATER_FLOW_SOLVE_OMEGA}'s own doc for why 1.7 and not
+ * a per-grid analytically-derived value.
+ *
+ * @param {Float64Array} p @param {Float64Array} div @param {Float64Array} solid
+ * @param {number} w @param {number} h @param {number} omega
+ * @param {0|1} parity - which checkerboard colour to update THIS call — the
+ *   caller alternates 0 then 1 every iteration ({@link solveVelocityLevel}'s
+ *   own loop), so one "iteration" is still one full pass over the WHOLE
+ *   grid, matching {@link WATER_FLOW_SOLVE_ITERATIONS_PER_LEVEL}'s own
+ *   existing meaning — nothing downstream needs to know the pass happened
+ *   in two colour-restricted halves rather than one.
+ * @returns {Float64Array} a NEW array — cells of the INACTIVE parity are
+ *   copied through unchanged (this call has nothing new to say about them).
+ */
+export function sorPressureStep(p, div, solid, w, h, omega, parity) {
+  const next = new Float64Array(p);
+  for (let j = 0; j < h; j++) {
+    for (let i = 0; i < w; i++) {
+      if (((i + j) & 1) !== parity) continue;
+      const n = idx(i, j, w);
+      const centerP = p[n];
+      const pL = neighborPressureEffective(p, solid, w, h, i - 1, j, centerP);
+      const pR = neighborPressureEffective(p, solid, w, h, i + 1, j, centerP);
+      const pU = neighborPressureEffective(p, solid, w, h, i, j - 1, centerP);
+      const pD = neighborPressureEffective(p, solid, w, h, i, j + 1, centerP);
+      const jacobiAvg = 0.25 * (pL + pR + pU + pD - div[n]);
+      next[n] = centerP + omega * (jacobiAvg - centerP);
+    }
+  }
+  return next;
+}
+
+/**
  * B3 line 3 — the projection. `v -= grad(p)`, then re-masked by `(1 - solid)`
  * — the SAME zeroing {@link seedVelocity} applies, reapplied here because the
  * pressure gradient alone has no reason to land exactly on zero inside a
@@ -435,23 +536,40 @@ export function meanAbsDivergence(field) {
 }
 
 /**
- * ONE level's own solve: seed → divergence (once) → Jacobi ×`iterations` →
- * project (once) — Water-Simulation-Turn.md §3's own pseudocode, un-cascaded.
- * `initialPressure` is the upsampled result of the previous (coarser) level,
- * or `null` at the coarsest level (a zero field — no prior information exists).
+ * ONE level's own solve: seed → divergence (once) → red-black SOR
+ * ×`iterations` → project (once) — Water-Simulation-Turn.md §3's own
+ * pseudocode, un-cascaded, with {@link sorPressureStep} standing in for the
+ * plan's own literal "Jacobi" since 2026-08-19 (see that function's own doc
+ * for why). `initialPressure` is the upsampled result of the previous
+ * (coarser) level, or `null` at the coarsest level (a zero field — no prior
+ * information exists).
  * @param {object} args
  * @param {Float64Array} args.solid @param {number} args.width @param {number} args.height
  * @param {number} args.dirX @param {number} args.dirY
  * @param {Float64Array|null} args.initialPressure @param {number} args.iterations
+ * @param {number} [args.omega] - defaults to {@link WATER_FLOW_SOLVE_OMEGA}.
  * @returns {{vx: Float64Array, vy: Float64Array, p: Float64Array, divergenceBefore: Float64Array}}
  */
-export function solveVelocityLevel({ solid, width: w, height: h, dirX, dirY, initialPressure, iterations }) {
+export function solveVelocityLevel({
+  solid,
+  width: w,
+  height: h,
+  dirX,
+  dirY,
+  initialPressure,
+  iterations,
+  omega = WATER_FLOW_SOLVE_OMEGA,
+}) {
   const { vx: vx0, vy: vy0 } = seedVelocity(solid, w, h, dirX, dirY);
   const divergenceBefore = computeDivergence(vx0, vy0, w, h);
   let p = initialPressure ?? new Float64Array(w * h);
   const n = Math.max(1, iterations | 0);
   for (let it = 0; it < n; it++) {
-    p = jacobiPressureStep(p, divergenceBefore, solid, w, h);
+    // ONE "iteration" is still one full pass over the WHOLE grid — red half,
+    // then black half — matching WATER_FLOW_SOLVE_ITERATIONS_PER_LEVEL's own
+    // existing meaning (`sorPressureStep`'s own doc).
+    p = sorPressureStep(p, divergenceBefore, solid, w, h, omega, 0);
+    p = sorPressureStep(p, divergenceBefore, solid, w, h, omega, 1);
   }
   const { vx, vy } = subtractPressureGradient(vx0, vy0, p, solid, w, h);
   return { vx, vy, p, divergenceBefore };
@@ -477,6 +595,10 @@ export function solveVelocityLevel({ solid, width: w, height: h, dirX, dirY, ini
  *   {@link WATER_FLOW_SOLVE_LEVEL_FRACTIONS}.
  * @param {number} [args.iterationsPerLevel] - defaults to
  *   {@link WATER_FLOW_SOLVE_ITERATIONS_PER_LEVEL}.
+ * @param {number} [args.omega] - the SOR over-relaxation factor, defaults to
+ *   {@link WATER_FLOW_SOLVE_OMEGA}. Exposed mainly for tests that need to
+ *   compare against `omega=1` (plain checkerboard Gauss-Seidel, no
+ *   extrapolation) — production callers should leave this at its default.
  * @returns {{
  *   vx: Float64Array, vy: Float64Array, solid: Float64Array,
  *   width: number, height: number, dirX: number, dirY: number,
@@ -490,6 +612,7 @@ export function solveWaterFlowVelocity({
   bearingDeg,
   levelFractions = WATER_FLOW_SOLVE_LEVEL_FRACTIONS,
   iterationsPerLevel = WATER_FLOW_SOLVE_ITERATIONS_PER_LEVEL,
+  omega = WATER_FLOW_SOLVE_OMEGA,
 }) {
   const [dirX, dirY] = waterFlowVector(bearingDeg);
   let prevPressure = null;
@@ -514,6 +637,7 @@ export function solveWaterFlowVelocity({
       dirY,
       initialPressure,
       iterations: iterationsPerLevel,
+      omega,
     });
     levels.push({
       width: lw,

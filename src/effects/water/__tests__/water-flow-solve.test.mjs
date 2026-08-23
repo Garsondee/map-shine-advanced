@@ -10,12 +10,14 @@ import {
   seedVelocity,
   computeDivergence,
   jacobiPressureStep,
+  sorPressureStep,
   subtractPressureGradient,
   meanAbsDivergence,
   solveVelocityLevel,
   solveWaterFlowVelocity,
   WATER_FLOW_SOLVE_LEVEL_FRACTIONS,
   WATER_FLOW_SOLVE_ITERATIONS_PER_LEVEL,
+  WATER_FLOW_SOLVE_OMEGA,
 } from '../water-flow-solve.js';
 
 function idx(i, j, w) {
@@ -76,8 +78,10 @@ export function run(t) {
     WATER_FLOW_SOLVE_LEVEL_FRACTIONS.length === 5
   );
   ok(
-    "WATER_FLOW_SOLVE_ITERATIONS_PER_LEVEL is the plan's own '~20 iterations per level'",
-    WATER_FLOW_SOLVE_ITERATIONS_PER_LEVEL === 20
+    "WATER_FLOW_SOLVE_ITERATIONS_PER_LEVEL is 60 (2026-08-19: bumped from the plan's original 20 " +
+      'when Jacobi was replaced by SOR — measured to sit just past where SOR itself plateaus, ' +
+      "see that constant's own doc)",
+    WATER_FLOW_SOLVE_ITERATIONS_PER_LEVEL === 60
   );
 
   // ══ downsampleBoxAverage ════════════════════════════════════════════════
@@ -174,6 +178,28 @@ export function run(t) {
     ok(
       'one Jacobi step from p=0: every other cell stays 0 (no p to pull from yet)',
       p1[idx(0, 0, w)] === 0 && p1[idx(2, 2, w)] === 0
+    );
+
+    // ══ SAME FIXTURE, `sorPressureStep` — pins BOTH halves of the new
+    // function's own contract: the extrapolation math, and the checkerboard
+    // masking (`docs/planning/Water-Simulation-Turn.md`'s S3-continued entry
+    // names this file as where the fix is proven before the TSL port).
+    // Cell (1,1): i+j=2, parity 0 (even) — the SAME jacobiAvg as above (-1,
+    // all neighbours still 0 either way), but SOR EXTRAPOLATES past it:
+    // next = centre + omega*(jacobiAvg-centre) = 0 + omega*(-1-0) = -omega.
+    const pMatchingParity = sorPressureStep(p0, div, solid, w, h, WATER_FLOW_SOLVE_OMEGA, 0);
+    ok(
+      `SOR step, matching parity (0): the nonzero-div cell reads -omega = ${(-WATER_FLOW_SOLVE_OMEGA).toFixed(3)}, not plain Jacobi's -1`,
+      Math.abs(pMatchingParity[idx(1, 1, w)] - -WATER_FLOW_SOLVE_OMEGA) < 1e-9
+    );
+    // Same call, OPPOSITE parity: (1,1) is NOT this pass's colour, so it must
+    // be copied through unchanged — the actual mechanism that makes two
+    // alternating calls behave like checkerboard Gauss-Seidel rather than
+    // both colours silently overwriting each other's own turn.
+    const pOppositeParity = sorPressureStep(p0, div, solid, w, h, WATER_FLOW_SOLVE_OMEGA, 1);
+    ok(
+      "SOR step, OPPOSITE parity (1): that same cell is copied through UNCHANGED — not this pass's colour",
+      pOppositeParity[idx(1, 1, w)] === 0
     );
   }
 
@@ -282,6 +308,114 @@ export function run(t) {
       ok(
         `divergence away from the obstacle stays small — projection does not smear garbage across the field (mean |div| ${meanFar.toFixed(4)})`,
         meanFar < 0.02
+      );
+    }
+  }
+
+  // ══ SOR vs PLAIN JACOBI — the exact shape of the 2026-08-19 live-reported
+  // failure, reproduced and fixed at Node-test speed before ever touching the
+  // GPU. `docs/planning/Water-Simulation-Turn.md`'s own S3-continued entry:
+  // on the real river, a probe ~2.5 obstacle-radii from a SMALL obstacle's
+  // own centre showed under 2° of deflection and no narrow-vs-wide speed
+  // differential — potential-flow theory says that distance should show a
+  // clearly measurable effect. Reproduced here at CPU-test scale (the SAME
+  // ratio, not just a similarly-shaped fixture) against BOTH the OLD
+  // algorithm (a plain-Jacobi cascade, hand-assembled from the still-exported
+  // `jacobiPressureStep` so the "before" case does not depend on
+  // `solveVelocityLevel`'s own internals having changed) and the NEW one
+  // (`solveWaterFlowVelocity`, SOR since this fix).
+  {
+    /** A plain-Jacobi cascade, mirroring `solveWaterFlowVelocity`'s own
+     * structure exactly but calling `jacobiPressureStep` in the loop — the
+     * ALGORITHM this project shipped before 2026-08-19, kept alive here
+     * ONLY as this test's own "before" baseline, never as a second
+     * production code path. */
+    function legacyJacobiCascade({ solid, width, height, bearingDeg, levelFractions, iterationsPerLevel }) {
+      // `waterFlowVector` is not exported from water-flow-solve.js (it is
+      // re-exported FROM water-field.js, imported internally) — this test
+      // only ever uses bearing 90 (due east), so the unit vector is inlined
+      // rather than pulling in a second import path for one constant pair.
+      const dirX = Math.round(Math.sin((bearingDeg * Math.PI) / 180) * 1e9) / 1e9;
+      const dirY = Math.round(-Math.cos((bearingDeg * Math.PI) / 180) * 1e9) / 1e9;
+      let prevPressure = null;
+      let prevW = 0;
+      let prevH = 0;
+      let result = null;
+      let lw = width;
+      let lh = height;
+      for (const frac of levelFractions) {
+        lw = Math.max(2, Math.round(width * frac));
+        lh = Math.max(2, Math.round(height * frac));
+        const levelSolid = lw === width && lh === height ? solid : downsampleBoxAverage(solid, width, height, lw, lh);
+        const { vx: vx0, vy: vy0 } = seedVelocity(levelSolid, lw, lh, dirX, dirY);
+        const div = computeDivergence(vx0, vy0, lw, lh);
+        let p = prevPressure ? upsampleBilinear(prevPressure, prevW, prevH, lw, lh) : new Float64Array(lw * lh);
+        for (let it = 0; it < iterationsPerLevel; it++) p = jacobiPressureStep(p, div, levelSolid, lw, lh);
+        const projected = subtractPressureGradient(vx0, vy0, p, levelSolid, lw, lh);
+        result = { vx: projected.vx, vy: projected.vy };
+        prevPressure = p;
+        prevW = lw;
+        prevH = lh;
+      }
+      return { vx: result.vx, vy: result.vy, width: lw, height: lh };
+    }
+
+    // r=3 (small), probe at 8 cells from centre → r_probe/R ≈ 2.67, the SAME
+    // ballpark as the live island (~2.5 radii) — potential-flow theory:
+    // speedup ≈ 1 + 1/2.67² ≈ 14% at the abeam position.
+    const w = 64;
+    const h = 32;
+    const cx = 32;
+    const cy = 16;
+    const r = 3;
+    const probeDist = 8;
+    const solid = circleSolid(w, h, cx, cy, r);
+    const bearingDeg = 90; // due east, [1,0]
+
+    const before = legacyJacobiCascade({
+      solid,
+      width: w,
+      height: h,
+      bearingDeg,
+      levelFractions: WATER_FLOW_SOLVE_LEVEL_FRACTIONS,
+      iterationsPerLevel: WATER_FLOW_SOLVE_ITERATIONS_PER_LEVEL,
+    });
+    const after = solveWaterFlowVelocity({ solid, width: w, height: h, bearingDeg });
+
+    const northIdx = idx(cx, cy - probeDist, w);
+    const speedBefore = speed(before.vx, before.vy, northIdx);
+    const speedAfter = speed(after.vx, after.vy, northIdx);
+
+    ok(
+      `SOR shows a clearly measurable speed-up at 2.67 obstacle-radii (before ${speedBefore.toFixed(3)}, after ${speedAfter.toFixed(3)}) — theory predicts ~1.14`,
+      speedAfter > 1.05
+    );
+    ok(
+      `SOR's own speed-up at this distance is closer to the theoretical ~1.14 than plain Jacobi's was (before ${speedBefore.toFixed(3)}, after ${speedAfter.toFixed(3)})`,
+      speedAfter - 1 > (speedBefore - 1) * 1.5
+    );
+
+    // ══ NARROW GAP FASTER THAN WIDE GAP — the SPECIFIC check that FAILED on
+    // the real river (an off-centre obstacle in a wide-open channel, not a
+    // centred one — the live island's own actual topology). A solve that
+    // ignores the obstacle shows these roughly equal; a solve respecting it
+    // shows the narrow side faster (mass conservation through a tighter gap).
+    {
+      const cw = 80;
+      const ch = 40;
+      const occx = 26; // off-centre: narrow gap to the LEFT bank, wide gap to the right
+      const occy = 20;
+      const orad = 5;
+      const chSolid = circleSolid(cw, ch, occx, occy, orad);
+      const chBearing = 0; // due north, [0,-1] — flow travels along the channel's own long axis
+      const chAfter = solveWaterFlowVelocity({ solid: chSolid, width: cw, height: ch, bearingDeg: chBearing });
+      const leftGapX = Math.round(occx - orad - 6); // narrow: 6px of open water to the obstacle's own edge
+      const rightGapX = Math.round(occx + orad + 20); // wide: 20px of open water on the far side
+      const leftSpeed = speed(chAfter.vx, chAfter.vy, idx(leftGapX, occy, cw));
+      const rightSpeed = speed(chAfter.vx, chAfter.vy, idx(rightGapX, occy, cw));
+      ok(
+        `SOR: the narrow gap runs faster than the wide gap (left ${leftSpeed.toFixed(3)} vs right ${rightSpeed.toFixed(3)}) — the exact check that failed on the real river`,
+        leftSpeed > rightSpeed
       );
     }
   }

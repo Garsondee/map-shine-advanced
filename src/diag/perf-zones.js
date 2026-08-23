@@ -389,6 +389,26 @@ export const ZONES = Object.freeze(
       false,
       'waterFlow.maybeBake'
     ),
+    // 'conditional', NOT 'bake': unlike waterBodyBake/waterFlowBake above
+    // (rare, on a version/mask change — a median is ~always 0), this zone
+    // does REAL draw work on EVERY frame once flow+body are both ready —
+    // there is no "nothing changed" skip once running
+    // (`water-sim-subsystem.js`'s own header on why it is named `tick`, not
+    // `maybeBake`). It also is not unconditionally 'steady' from frame 1:
+    // before flow+body exist (waiting on the surface's own async mask
+    // load), it costs nothing at all — exactly "every frame the feature is
+    // on" (§ this file's own legend on 'conditional' vs 'steady').
+    z(
+      'light.waterSimTick',
+      'Water sim pack (foam memory) tick',
+      'lighting',
+      'light.accumulate',
+      'water',
+      'both',
+      'conditional',
+      false,
+      'waterSim.tick'
+    ),
     z(
       'light.fluidSurfaceSync',
       'Fluid surface sync',

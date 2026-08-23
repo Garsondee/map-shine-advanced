@@ -75,6 +75,7 @@
 
 import {
   buildWaterSoliditySeedMaterial,
+  buildWaterSolidityDownsampleMaterial,
   buildWaterVelocitySeedMaterial,
   buildWaterDivergenceMaterial,
   buildWaterJacobiStepMaterial,
@@ -85,6 +86,7 @@ import {
   WATER_FLOW_SOLVE_LEVEL_FRACTIONS,
   WATER_FLOW_SOLVE_ITERATIONS_PER_LEVEL,
   WATER_FLOW_SOLVE_MIN_LEVEL_DIM,
+  WATER_FLOW_SOLVE_OMEGA,
 } from './water-flow-solve.js';
 import { waterFlowVector } from './water-field.js';
 
@@ -106,10 +108,14 @@ function sizeFlowGrid(rect) {
 }
 
 /**
- * Every coarser level's own dimensions are a FRACTION of the finest level's
- * — never cascaded level-to-level (each level's solidity is re-derived fresh
- * from the ORIGINAL mask, `water-flow-solve.js`'s own CPU reference doc
- * explains why: "a coarse level's own blur never compounds into the next").
+ * Every coarser level's own DIMENSIONS are a FRACTION of the finest level's.
+ * ⚠️ Its SOLIDITY is a different question, and the two must not be confused
+ * — see `water-flow.js#buildWaterSolidityDownsampleMaterial`'s own header
+ * for a real, live-reported bug that came from conflating them: dimensions
+ * are computed independently per level (there is nothing to cascade, it is
+ * just arithmetic), but solidity IS cascaded — averaged down from the next
+ * finer level's own result — never independently re-sampled from the raw
+ * mask at a coarse level's own low resolution.
  * @param {number} finestW @param {number} finestH @param {number} fraction
  * @returns {{w:number,h:number}}
  */
@@ -178,6 +184,8 @@ export function createWaterFlowSubsystem({
 
   let boundMaskTexture = null;
   let boundBearingDeg = null;
+  let boundOmega = null;
+  let boundIterationsPerLevel = null;
 
   let bakes = 0;
   let polls = 0;
@@ -192,7 +200,7 @@ export function createWaterFlowSubsystem({
       allocator.dispose(level.pressurePingRt);
       allocator.dispose(level.pressurePongRt);
       allocator.dispose(level.packRt);
-      level.soliditySeed.material?.dispose?.();
+      level.soliditySource?.material?.dispose?.();
       level.velocitySeed.material?.dispose?.();
       level.divergence.material?.dispose?.();
       level.jacobi.material?.dispose?.();
@@ -202,41 +210,42 @@ export function createWaterFlowSubsystem({
   }
 
   /**
-   * Allocate this level's six targets and build its five materials, fresh —
-   * called once per level on every full rebuild (never re-pointed; see this
-   * module's own header for why).
-   * @param {number} index @param {number} w @param {number} h @param {*} maskTexture
+   * Allocate this level's six targets and build its FOUR solidity-independent
+   * materials (velocity seed, divergence, Jacobi step, project+pack) — called
+   * once per level on every full rebuild (never re-pointed; see this module's
+   * own header for why). Solidity is deliberately NOT built here — see
+   * `buildSolidityForLevel`'s own doc for why it needs every level's `w`/`h`
+   * already known and must run in a SEPARATE, fine-to-coarse pass.
+   * @param {number} index @param {number} w @param {number} h
    * @returns {object}
    */
-  function buildLevel(index, w, h, maskTexture) {
+  function buildLevel(index, w, h) {
     const name = (suffix) => `water.flow.L${index}.${suffix}`;
     // LINEAR throughout — every one of these six is a smoothly-varying
     // scalar/vector field (solidity, velocity, divergence, pressure, the
     // final pack), nothing like the body pack's own NEAREST JFA ping-pong
     // pair, which stores mid-flood offset VECTORS that must never blend.
     //
-    // ⚠️ FULL `FloatType`, NOT `HalfFloatType` — every other bake in this
+    // FULL `FloatType`, NOT `HalfFloatType` — every other bake in this
     // codebase uses half float and that is right for THEM (one pass, or a
     // handful of JFA rounds); this pack is different in a way that matters:
     // the pressure ping-pong reads-and-writes itself
     // `WATER_FLOW_SOLVE_ITERATIONS_PER_LEVEL` times PER LEVEL, and the
     // 5-level cascade then feeds each level's result into the next as an
     // initial guess — a hundred-odd read/round/write passes total, per bake.
-    // Live-suspected 2026-08-18: the author reported a faint but CONSISTENT
-    // directional tint on the `flowVelocity` debug channel, unrelated to any
-    // painted obstacle and unchanged at a different point on the same river
-    // — exactly the fingerprint of a numerical artifact baked into the solve
-    // itself rather than a local, geometry-driven one. The standard 5-point
-    // Jacobi stencil this solve uses has a well-known CHECKERBOARD null
-    // space (an alternating +/-δ pattern that the operator itself cannot
-    // see, so nothing damps it once seeded) — half float's own ~3-decimal-
-    // digit precision is a plausible seed for exactly that, repeated across
-    // ~100 passes. The CPU reference (`water-flow-solve.js`, full float64)
-    // was re-run at PRODUCTION scale (1024×476, a real obstacle) as part of
-    // diagnosing this and stayed completely clean — symmetric routing, zero
-    // drift far from the obstacle — which rules out the ALGORITHM and points
-    // at PRECISION specifically. Not yet confirmed live; this is the
-    // hypothesis this precision bump exists to test, not a proven fix.
+    //
+    // ⚠️ NOT THE FIX FOR THE 2026-08-18 DIRECTIONAL-TINT BUG — kept anyway,
+    // because more precision on an iterative solve is never wrong, just
+    // recorded honestly: a live A/B test (forced rebake, same scene, half
+    // vs full float) came back PIXEL-IDENTICAL, which is itself informative
+    // — a genuine rounding-noise artifact should have shifted at least
+    // slightly between the two, and it did not. That ruled precision out and
+    // pointed at something DETERMINISTIC instead — see
+    // `water-flow.js#buildWaterSolidityDownsampleMaterial`'s own header for
+    // what it actually was (undersampling the raw mask independently at
+    // each coarse level, rather than cascading solidity down from the
+    // finest level the way `water-flow-solve.js`'s own proven CPU reference
+    // already did).
     const describe = () => ({
       resolvedW: w,
       resolvedH: h,
@@ -255,7 +264,6 @@ export function createWaterFlowSubsystem({
     const pressurePongRt = allocator.create(name('pressurePong'), describe());
     const packRt = allocator.create(name('pack'), describe());
 
-    const soliditySeed = buildWaterSoliditySeedMaterial({ THREE, maskTexture, width: w, height: h });
     const velocitySeed = buildWaterVelocitySeedMaterial({ THREE, solidityTexture: solidityRt.texture, uDir });
     const divergence = buildWaterDivergenceMaterial({
       THREE,
@@ -296,7 +304,9 @@ export function createWaterFlowSubsystem({
       pressurePingRt,
       pressurePongRt,
       packRt,
-      soliditySeed,
+      // Filled in by `buildSolidityForLevel`, in the separate fine-to-coarse
+      // pass `runFullBake` runs AFTER every level's targets exist.
+      soliditySource: null,
       velocitySeed,
       divergence,
       jacobi,
@@ -305,9 +315,35 @@ export function createWaterFlowSubsystem({
   }
 
   /**
-   * Run ONE level end to end: solidity seed → velocity seed → divergence →
-   * `WATER_FLOW_SOLVE_ITERATIONS_PER_LEVEL` Jacobi iterations (ping-ponged,
-   * `water-body.js#runFlood`'s own loop shape) → project+pack.
+   * Build (and render) THIS level's own solidity — the fine-to-coarse pass
+   * `water-flow.js#buildWaterSolidityDownsampleMaterial`'s own header
+   * documents in full. The FINEST level (`finerLevel: null`) seeds directly
+   * from the raw mask (S2's own, already-correct area average); every
+   * coarser level averages DOWN from the next-finer level's own
+   * already-rendered `solidityRt`, never re-sampling the raw mask itself.
+   * @param {object} level @param {*} maskTexture @param {object|null} finerLevel
+   */
+  function buildSolidityForLevel(level, maskTexture, finerLevel) {
+    level.soliditySource = finerLevel
+      ? buildWaterSolidityDownsampleMaterial({
+          THREE,
+          sourceTexture: finerLevel.solidityRt.texture,
+          sourceWidth: finerLevel.w,
+          sourceHeight: finerLevel.h,
+        })
+      : buildWaterSoliditySeedMaterial({ THREE, maskTexture, width: level.w, height: level.h });
+    renderWaterPass(level.solidityRt, level.soliditySource.quad);
+  }
+
+  /**
+   * Run ONE level's own PRESSURE half end to end: velocity seed → divergence
+   * → `WATER_FLOW_SOLVE_ITERATIONS_PER_LEVEL` SOR iterations, each one TWO
+   * checkerboard-parity renders (ping-ponged, `water-body.js#runFlood`'s own
+   * loop shape, doubled — `buildWaterJacobiStepMaterial`'s own doc has the
+   * full account of why plain Jacobi was replaced 2026-08-19) → project+pack.
+   * Solidity is
+   * NOT rendered here — `buildSolidityForLevel` already ran, fine-to-coarse,
+   * for every level, before this coarse-to-fine pass starts.
    *
    * `initialPressureTexture` is either {@link zeroPressureTexture} (the
    * coarsest level) or the PREVIOUS level's own finished pack pressure — read
@@ -319,19 +355,35 @@ export function createWaterFlowSubsystem({
    * @returns {*} the texture this level's Jacobi loop actually finished on —
    *   the next level's own `initialPressureTexture`.
    */
-  function runLevel(level, initialPressureTexture) {
-    renderWaterPass(level.solidityRt, level.soliditySeed.quad);
+  function runLevel(level, initialPressureTexture, omega, iterationsPerLevel) {
     renderWaterPass(level.velocitySeedRt, level.velocitySeed.quad);
     renderWaterPass(level.divergenceRt, level.divergence.quad);
+    // ROH TUNING (2026-08-19) — `uOmega` was already a live uniform
+    // (`buildWaterJacobiStepMaterial`'s own doc); this is the first caller
+    // to actually vary it bake to bake rather than leaving it at its
+    // construction-time default.
+    level.jacobi.uOmega.value = omega;
 
+    // SOR (2026-08-19) — each caller-visible "iteration" is now TWO renders,
+    // checkerboard parity 0 then 1, matching `water-flow-solve.js#
+    // solveVelocityLevel`'s own updated loop shape exactly (one "iteration"
+    // is still one full pass over the WHOLE grid either way —
+    // `WATER_FLOW_SOLVE_ITERATIONS_PER_LEVEL` keeps its existing meaning).
+    // `uParity` is TOGGLED, not re-pointed — unlike `prevTexNodes`, which
+    // genuinely does need re-pointing every render (the ping-pong source
+    // texture object changes), the SAME two uniform nodes persist across
+    // every render this whole level ever does.
     let srcTexture = initialPressureTexture;
     let writeToPing = true;
-    for (let i = 0; i < WATER_FLOW_SOLVE_ITERATIONS_PER_LEVEL; i++) {
-      const dst = writeToPing ? level.pressurePingRt : level.pressurePongRt;
-      for (const node of level.jacobi.prevTexNodes) node.value = srcTexture;
-      renderWaterPass(dst, level.jacobi.quad);
-      srcTexture = dst.texture;
-      writeToPing = !writeToPing;
+    for (let i = 0; i < iterationsPerLevel; i++) {
+      for (const parity of [0, 1]) {
+        const dst = writeToPing ? level.pressurePingRt : level.pressurePongRt;
+        level.jacobi.uParity.value = parity;
+        for (const node of level.jacobi.prevTexNodes) node.value = srcTexture;
+        renderWaterPass(dst, level.jacobi.quad);
+        srcTexture = dst.texture;
+        writeToPing = !writeToPing;
+      }
     }
 
     // ONE re-point, not a ping-pong: the pack pass never writes to the
@@ -345,22 +397,38 @@ export function createWaterFlowSubsystem({
   }
 
   /**
-   * THE FULL CASCADE — every level, coarsest to finest, each seeding the
-   * next's Jacobi initial guess with its own converged pressure.
+   * THE FULL CASCADE, THREE PASSES:
+   *  1. Allocate every level's targets + build its solidity-independent
+   *     materials (order does not matter — nothing here depends on any
+   *     OTHER level yet).
+   *  2. Solidity, FINEST TO COARSEST — each coarser level depends on the
+   *     next FINER level's own already-rendered result.
+   *  3. The pressure solve, COARSEST TO FINEST — each finer level depends on
+   *     the previous COARSER level's own converged pressure (§1's own
+   *     bake-count discipline still applies: this whole function is one
+   *     bake, not five).
    * @param {*} maskTexture @param {number} bearingDeg @param {{w:number,h:number}} finestDims
+   * @param {number} omega @param {number} iterationsPerLevel
    */
-  function runFullBake(maskTexture, bearingDeg, finestDims) {
+  function runFullBake(maskTexture, bearingDeg, finestDims, omega, iterationsPerLevel) {
     disposeLevels();
     const [dirX, dirY] = waterFlowVector(bearingDeg);
     uDir.value.set(dirX, dirY);
 
-    let prevFinalPressure = zeroPressureTexture;
     const builtLevels = [];
     for (const fraction of WATER_FLOW_SOLVE_LEVEL_FRACTIONS) {
       const { w, h } = levelDims(finestDims.w, finestDims.h, fraction);
-      const level = buildLevel(builtLevels.length, w, h, maskTexture);
-      prevFinalPressure = runLevel(level, prevFinalPressure);
-      builtLevels.push(level);
+      builtLevels.push(buildLevel(builtLevels.length, w, h));
+    }
+
+    for (let i = builtLevels.length - 1; i >= 0; i--) {
+      const finerLevel = i === builtLevels.length - 1 ? null : builtLevels[i + 1];
+      buildSolidityForLevel(builtLevels[i], maskTexture, finerLevel);
+    }
+
+    let prevFinalPressure = zeroPressureTexture;
+    for (const level of builtLevels) {
+      prevFinalPressure = runLevel(level, prevFinalPressure, omega, iterationsPerLevel);
     }
     levels = builtLevels;
 
@@ -368,11 +436,15 @@ export function createWaterFlowSubsystem({
     pollsSinceLastBake = 0;
     boundMaskTexture = maskTexture;
     boundBearingDeg = bearingDeg;
+    boundOmega = omega;
+    boundIterationsPerLevel = iterationsPerLevel;
     gridKey = `${finestDims.w}x${finestDims.h}`;
     lastBake = {
       grid: gridKey,
       levels: levels.map((l) => `${l.w}x${l.h}`),
       bearingDeg,
+      omega,
+      iterationsPerLevel,
       atPoll: polls,
       ok: true,
     };
@@ -404,12 +476,20 @@ export function createWaterFlowSubsystem({
     const finestDims = sizeFlowGrid(rect);
     const newGridKey = `${finestDims.w}x${finestDims.h}`;
     const bearingDeg = getWaterRenderState()?.params?.flowAngleDeg ?? 0;
+    const omega = getWaterRenderState()?.params?.flowSolveOmega ?? WATER_FLOW_SOLVE_OMEGA;
+    const iterationsPerLevel =
+      getWaterRenderState()?.params?.flowSolveIterations ?? WATER_FLOW_SOLVE_ITERATIONS_PER_LEVEL;
 
-    const unchanged = maskTexture === boundMaskTexture && bearingDeg === boundBearingDeg && newGridKey === gridKey;
+    const unchanged =
+      maskTexture === boundMaskTexture &&
+      bearingDeg === boundBearingDeg &&
+      newGridKey === gridKey &&
+      omega === boundOmega &&
+      iterationsPerLevel === boundIterationsPerLevel;
     if (unchanged) return;
 
     try {
-      runFullBake(maskTexture, bearingDeg, finestDims);
+      runFullBake(maskTexture, bearingDeg, finestDims, omega, iterationsPerLevel);
     } catch (err) {
       lastBake = { skipped: true, reason: String(err?.message ?? err) };
     }
@@ -421,6 +501,19 @@ export function createWaterFlowSubsystem({
      * successful bake. */
     get texture() {
       return levels.length > 0 ? levels[levels.length - 1].packRt.texture : null;
+    },
+    /** The FINEST level's own texel dimensions — `null` until the first bake,
+     * exactly like `texture` above. Exists so a consumer that must match this
+     * grid EXACTLY (`water-sim-subsystem.js`'s own sim grid, S5) can read the
+     * real, already-resolved dimensions rather than re-running `sizeFlowGrid`
+     * independently — two independent computations of "the same" grid size
+     * risk landing one texel apart on a rounding edge case, which two
+     * differently-sized textures sampled together would not fail loudly. */
+    get width() {
+      return levels.length > 0 ? levels[levels.length - 1].w : null;
+    },
+    get height() {
+      return levels.length > 0 ? levels[levels.length - 1].h : null;
     },
     maybeBake,
     /** The debug-panel report. Same `bakes` vs `polls` exit criterion as

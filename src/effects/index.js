@@ -201,6 +201,14 @@ export { createWaterFlowSubsystem } from './water/water-flow-subsystem.js';
 // THE SIM PACK (docs/planning/Water-Simulation-Turn.md §3 Layer C / §4 S5) —
 // foam's own per-frame memory, ping-ponged. `water-sim.js` is its TSL half.
 export { createWaterSimSubsystem } from './water/water-sim-subsystem.js';
+// THE SIM PACK'S OWN FOAM-BAND REACH — pure, CPU-side, the SAME derivation
+// `water-render.js#setDepthScalePx` already applies to the surface material's
+// own `uFoamReachPx` (`water-sim-subsystem.js`'s own header: "pushed, not
+// pulled ... so the two can never disagree about the body's size"). The
+// caller wiring the sim subsystem in re-derives it from the identical
+// `depthScalePx` schema value and forwards it via `setReachPx`, never a
+// second independently-tracked constant.
+export { waterFoamReachPx } from './water/water-shore.js';
 // THE REFRACTION CAPTURE (docs/holy/Water-Testament.md §2.5, tier 5) — a
 // bounded, previous-frame copy of buf:scene.color, the one dependent read
 // tiers 0-4's own drawable cannot do itself. `water-refraction-subsystem.js`

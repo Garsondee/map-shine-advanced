@@ -29,6 +29,7 @@ import {
   WATER_TIER3_CHOP,
   WATER_BANK_REACH_PX,
   WATER_BANK_INFLUENCE,
+  WATER_FLOW_WARP_INFLUENCE,
   WATER_FOAM_SHORE_PX,
   WATER_SHOAL_REACH_PX,
   WATER_SHOAL_STRENGTH,
@@ -124,6 +125,29 @@ export function run(t) {
   ok(
     'and it dies out well inside a channel, where the medial axis makes the tangent meaningless',
     WATER_BANK_REACH_PX < 1000
+  );
+
+  // ── THE FLOW WARP'S OWN BOUNDS — bankWarp's sibling ────────────────────
+  // Same law, same reason: a domain offset bounded under one noise cell
+  // cannot separate two neighbouring pixels by more than that cap, whatever
+  // the real solve does between them and however long the scene runs. This
+  // is the constant that would have to grow past 1 (or start scaling by
+  // elapsed time) to reopen the exact barcode bug `WATER_BANK_INFLUENCE`
+  // already paid for once.
+  // ⚠️ NOT `< 1` any more (2026-08-19, raised 0.35→1.0 — see the constant's
+  // own doc for the live-reported "no evidence of flow going around
+  // objects" this answers). The safety property was never "stays under one
+  // cell" specifically — it is "a FIXED constant, never scaled by time or
+  // position" (`WATER_BANK_INFLUENCE`'s own docstring). A positive, finite
+  // number is the only thing that check can honestly require now that the
+  // two sibling terms are no longer required to match.
+  ok(
+    'the flow warp is a real, finite, positive weight',
+    WATER_FLOW_WARP_INFLUENCE > 0 && Number.isFinite(WATER_FLOW_WARP_INFLUENCE)
+  );
+  ok(
+    'the flow warp and bank warp are DELIBERATELY no longer required to match — only flowWarp was reported weak',
+    WATER_FLOW_WARP_INFLUENCE >= WATER_BANK_INFLUENCE
   );
 
   // ══ TIER 4 — WAVE SHOALING'S OWN CONSTANTS ═══════════════════════════════

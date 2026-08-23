@@ -27,15 +27,28 @@ import {
   WATER_FOAM_REACH_MIN_PX,
   WATER_FOAM_REACH_MAX_PX,
   WATER_FOAM_CELL_FRACTION,
-  WATER_FOAM_CELL_EDGE0,
-  WATER_FOAM_CELL_EDGE1,
+  WATER_FOAM_EDGE_NEAR,
+  WATER_FOAM_EDGE_FAR,
   WATER_FOAM_CELL_BITE,
+  WATER_FOAM_STREAK,
+  WATER_FOAM_FLOW_NUDGE,
+  WATER_FOAM_EDGE_AA_PX,
+  WATER_FOAM_BUBBLE_AMOUNT,
+  WATER_FOAM_BUBBLE_OCTAVE,
+  WATER_FOAM_BUBBLE_TIME_SCALE,
+  WATER_FOAM_GRAIN_AMOUNT,
+  WATER_FOAM_GRAIN_OCTAVE,
+  WATER_FOAM_GRAIN_TIME_SCALE,
   WATER_SWASH_BANDS,
   WATER_SWASH_SPEED,
   WATER_SWASH_WIDTH,
   WATER_BREAK_REACH_FRACTION,
+  WATER_LOCAL_SPEED01_BASELINE,
+  WATER_LOCAL_SPEED_AMP_MIN,
+  WATER_LOCAL_SPEED_AMP_MAX,
 } from '../water-shore.js';
 import { WATER_TIER1_DEPTH_SCALE_PX } from '../water-render.js';
+import { WATER_FLOW_SPEED01_HEADROOM } from '../water-flow.js';
 
 export function run(t) {
   const { ok } = t;
@@ -77,25 +90,69 @@ export function run(t) {
   );
   ok('a negative body scale cannot invert the band', waterFoamReachPx(-500) === WATER_FOAM_REACH_MIN_PX);
 
-  // ══ THE CELL CUT — pinned to a MEASURED distribution ════════════════════
-  // `mx_worley_noise_float(p, 1)` measured on this build's GPU (Water-Foam.md
-  // §2.6): p10 0.097, p50 0.298, p90 0.590, max ~1.18. The cut has to sit in the
-  // UPPER TAIL to light cell WALLS and leave cell interiors dark — that is the
-  // net-with-holes structure real foam has. A cut near the median would light
-  // half the field and reproduce the wash this rung already shipped once.
-  const WORLEY_MEASURED = { p10: 0.097, p50: 0.298, p90: 0.59, max: 1.18 };
-  ok('the cell cut is a real band, not a step', WATER_FOAM_CELL_EDGE0 < WATER_FOAM_CELL_EDGE1);
+  // ══ THE FLOW NUDGE'S OWN BOUNDS (2026-08-19) — bankWarp/flowWarp's sibling ══
+  // Same law: a domain offset bounded under one cell cannot separate two
+  // neighbouring pixels by more than that cap, whatever the real solve does
+  // between them. This is `buildFoamCellularStructure`'s fix for feeding a
+  // per-pixel direction into `WATER_FOAM_STREAK`'s rotation (which spiralled
+  // near small obstacles) — the nudge is how real local deflection reaches
+  // the cellular structure now, bounded rather than rotating anything.
   ok(
-    'the cut sits ABOVE the measured median — cell walls, not half the field',
-    WATER_FOAM_CELL_EDGE0 > WORLEY_MEASURED.p50
+    'the foam flow nudge stays UNDER one cell, same law as the bank/flow warps',
+    WATER_FOAM_FLOW_NUDGE > 0 && WATER_FOAM_FLOW_NUDGE < 1
+  );
+  ok('WATER_FOAM_STREAK itself is still a real stretch, not a no-op', WATER_FOAM_STREAK > 1);
+
+  // ── THE EDGE AA + BUBBLE CONSTANTS (2026-08-19) — live-reported "pixel
+  // hard binary edges... need noisy, grainy, evolving, bubbling, turbulent
+  // foam" ══════════════════════════════════════════════════════════════════
+  ok('the edge AA width is a real, positive screen-pixel count', WATER_FOAM_EDGE_AA_PX > 0);
+  ok(
+    'the bubble amount is small relative to the wall band it perturbs — it nudges the existing net, it does not invent a second one',
+    WATER_FOAM_BUBBLE_AMOUNT > 0 && WATER_FOAM_BUBBLE_AMOUNT < WATER_FOAM_EDGE_FAR
+  );
+  ok('the bubble noise runs at a genuinely higher frequency than the fine octave', WATER_FOAM_BUBBLE_OCTAVE > 1);
+  ok(
+    'the bubble clock runs (not frozen at zero, which would silently undo the whole "evolving" fix)',
+    WATER_FOAM_BUBBLE_TIME_SCALE > 0
   );
   ok(
-    '...and below the measured p90, so the walls are not so rare the net breaks into disconnected specks',
-    WATER_FOAM_CELL_EDGE0 < WORLEY_MEASURED.p90
+    'the bubble amount is now large enough to have been reported as visible (2026-08-19: raised 0.12→0.4 after "no sign of bubbles... at all")',
+    WATER_FOAM_BUBBLE_AMOUNT >= 0.4
+  );
+
+  // ── THE GRAIN — a second, independent mechanism, same live report ───────
+  ok(
+    'the grain amount is a real cut, less than the cellular bite (textures a wall, does not perforate it)',
+    WATER_FOAM_GRAIN_AMOUNT > 0 && WATER_FOAM_GRAIN_AMOUNT < WATER_FOAM_CELL_BITE
   );
   ok(
-    'the upper edge stays inside the field range, so the brightest walls actually reach full strength',
-    WATER_FOAM_CELL_EDGE1 < WORLEY_MEASURED.max
+    'the grain runs at a genuinely finer frequency than the bubble',
+    WATER_FOAM_GRAIN_OCTAVE > WATER_FOAM_BUBBLE_OCTAVE
+  );
+  ok(
+    'the grain clock runs, and runs FASTER than the bubble (fine churn vs. slower net reformation)',
+    WATER_FOAM_GRAIN_TIME_SCALE > WATER_FOAM_BUBBLE_TIME_SCALE
+  );
+
+  // ══ THE CELL CUT — F2−F1, structural checks only (2026-08-19) ═══════════
+  // `WATER_FOAM_CELL_EDGE0/1` (retired) thresholded raw F1 near its own
+  // measured upper tail and were checked the same way this block used to:
+  // against MEASURED marginal-distribution percentiles. That measurement
+  // was correct and the test passed, but a marginal distribution cannot see
+  // spatial CONNECTIVITY — a live, zoomed-in GPU render found the result was
+  // "disconnected specks," not a net, the exact failure this block's own
+  // prior comment worried about and could not actually detect. F2−F1
+  // (`buildFoamCellularStructure`) replaces the metric, not just the cut, so
+  // there is no comparable percentile table yet to pin against — these
+  // checks are the properties true BY CONSTRUCTION (F2 ≥ F1 always, so
+  // F2−F1 ≥ 0 always; zero sits exactly ON a cell edge) rather than a
+  // measured distribution, which a follow-up bench pass should still gather
+  // and pin here the same way the retired constants were.
+  ok('the cell cut is a real band, not a step', WATER_FOAM_EDGE_NEAR < WATER_FOAM_EDGE_FAR);
+  ok(
+    'the near edge sits at or above zero — F2−F1 cannot go negative, and zero IS the cell edge itself',
+    WATER_FOAM_EDGE_NEAR >= 0
   );
   // THE BITE. At 1 the cell interiors punch clean through to zero and the foam
   // reads as a stencil laid over water; foam should be thick in the walls and
@@ -170,4 +227,46 @@ export function run(t) {
     'break foam hugs the bank tighter than the swash reaches — a collar, not a band',
     WATER_BREAK_REACH_FRACTION > 0 && WATER_BREAK_REACH_FRACTION < 1
   );
+
+  // ══ S4 (2026-08-18) — LOCAL SPEED'S BOUNDED AMPLITUDE, reproduced in
+  // plain JS from the shader's own `clamp(local/baseline, MIN, MAX)`. The
+  // property under test is the SAME "never open-ended" shape every other
+  // clamp in this file already proves — a caller that reads local speed off
+  // a solve gone momentarily wrong (a stale bake, a NaN in flight) must still
+  // get a bounded multiplier, never a spike or a collapse to zero. ═════════
+  {
+    const speedAmp = (localSpeed01) =>
+      Math.min(
+        Math.max(localSpeed01 / WATER_LOCAL_SPEED01_BASELINE, WATER_LOCAL_SPEED_AMP_MIN),
+        WATER_LOCAL_SPEED_AMP_MAX
+      );
+    ok(
+      'the baseline IS exactly the free-stream speed01 (1/headroom) — the pack and the shore rung agree on what "normal" means',
+      Math.abs(WATER_LOCAL_SPEED01_BASELINE - 1 / WATER_FLOW_SPEED01_HEADROOM) < 1e-12
+    );
+    ok(
+      'at exactly the free-stream baseline, amplitude is exactly 1× — unchanged from pre-S4 output',
+      speedAmp(WATER_LOCAL_SPEED01_BASELINE) === 1
+    );
+    ok(
+      'a caller that never wires local speed at all also gets exactly 1× (the default IS the baseline)',
+      speedAmp(WATER_LOCAL_SPEED01_BASELINE) === 1
+    );
+    ok(
+      'dead-still local water does not collapse swash to zero — it floors at the authored minimum',
+      speedAmp(0) === WATER_LOCAL_SPEED_AMP_MIN
+    );
+    ok(
+      'an implausibly fast reading (a transient solve spike) is capped, never allowed to spike the visual',
+      speedAmp(100) === WATER_LOCAL_SPEED_AMP_MAX
+    );
+    ok(
+      'the min is genuinely below the max (an inverted clamp would pin every speed to one amplitude)',
+      WATER_LOCAL_SPEED_AMP_MIN < WATER_LOCAL_SPEED_AMP_MAX
+    );
+    ok(
+      'the minimum still shows SOME motion — real swash does not stop dead the instant current does',
+      WATER_LOCAL_SPEED_AMP_MIN > 0
+    );
+  }
 }

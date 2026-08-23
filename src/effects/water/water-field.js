@@ -265,6 +265,50 @@ export const WATER_BANK_INFLUENCE = 0.35;
  */
 export const WATER_BANK_REACH_PX = 180;
 
+/**
+ * How far the REAL solved flow's local direction may warp the noise domain
+ * away from `bankWarp` above, as a FRACTION OF ONE NOISE CELL — same unit,
+ * same law: `WATER_BANK_INFLUENCE`'s own docstring on why a fraction is the
+ * whole safety property applies here unchanged.
+ *
+ * This is `bankWarp`'s sibling, not a replacement — `bankWarp` bends the
+ * pattern along the STATIC shoreline shape (the tangent, cheap, always
+ * available); this bends it toward what the water is ACTUALLY doing right
+ * now (the S3 pressure solve's own local direction), which is the only
+ * thing that can make the base surface read as genuinely deflecting around
+ * a pier rather than merely hugging a bank. Both terms sum into the same
+ * `domainOffset` below.
+ *
+ * ⚠️ SAFE FOR THE SAME REASON `bankWarp` IS, NOT A NEW ARGUMENT: the input
+ * (`localFlowDir − current`, see below) is the difference of two UNIT
+ * vectors, magnitude-clamped to at most 1 before it ever reaches this
+ * multiply, and this multiply is the only place elapsed time could sneak
+ * back in — it never does. A future change that lets this term scale by
+ * `tSec` reintroduces the exact barcode bug `WATER_BANK_INFLUENCE`'s own
+ * docstring names.
+ *
+ * ⚠️ RAISED 0.35 → 1.0, 2026-08-19, live-reported: "the wake looks great
+ * downstream... but upstream there is no evidence of the water flow going
+ * AROUND objects" — a ship-bow-shaped splitter, arrows drawn curving around
+ * both sides. Measured root cause, not guessed: this term scales the S3
+ * solve's own real deviation, and on the bench's own gentle river bend that
+ * deviation is genuinely small (≈2.8° at the sharpest point measured, this
+ * file's own SOR account) — amplifying a weak signal only helps so much.
+ * But a bend is not a stagnation point: potential flow around an actual
+ * splitter/bow genuinely turns MUCH harder right at the point (real flow
+ * speed drops toward zero exactly on the splitting streamline and the
+ * local direction swings sharply either side of it), so the same solve is
+ * expected to already carry a stronger real signal there than the bend
+ * this constant was originally calibrated against — this raise is aimed at
+ * making THAT signal read clearly, not at inventing motion the solve does
+ * not have. Still bounded by construction regardless of the number chosen
+ * (the input is magnitude-clamped to at most 1 before this multiplies it),
+ * so raising it is a visual-weight decision, not a new safety question —
+ * unlike `WATER_BANK_INFLUENCE`/`WATER_FOAM_FLOW_NUDGE`, deliberately left
+ * at 0.35: neither one was the thing reported missing.
+ */
+export const WATER_FLOW_WARP_INFLUENCE = 1.0;
+
 /** How far from the bank foam has fully died away, world px. Foam is a
  * shoaling phenomenon — it breaks where the water shallows — so it is strongest
  * at the waterline and gone in the deep channel. */
@@ -415,8 +459,11 @@ export const WATER_CAUSTICS_DARK_MAX = 0.25;
  *   `foam` 0..1 (white surface coverage), `turbidity`
  *   roughly −1..1 (a MULTIPLIER offset on optical depth), `slope` a vec2 of
  *   surface gradient (rise/run) for tier 3's normal, `domainOffset` the
- *   already-safe drift+bank-warp vec2 tier 4's filament foam reuses so it can
- *   never sample a different domain than the surface it is decorating,
+ *   already-safe drift+bank-warp+flow-warp vec2 tier 4's filament foam
+ *   reuses so it can never sample a different domain than the surface it is
+ *   decorating, `flowWarp` the SAME term ALONE (not summed into anything),
+ *   for a debug channel to read directly — `domainOffset` on its own cannot
+ *   show it, since `drift` (unbounded, time-growing) dwarfs it instantly,
  *   `causticBrightness` an ADDITIVE excess over 1 (0 = no change) for the bed
  *   multiplier.
  */
@@ -434,8 +481,24 @@ export function buildWaterSurfaceField({
   uChop = null,
   shoaling = false,
   caustics = false,
+  // THE REAL SOLVED LOCAL DIRECTION (S3's pressure solve, already
+  // dead-zone-guarded by the caller — `water-render.js`'s own
+  // `localFlowDirSafe`, the SAME node shore foam's `localFlowDir` reads).
+  // Defaults to `null`, in which case `flowWarp` below degrades to exactly
+  // zero (see its own comment) — old callers, and any construction-only
+  // test that never learned about this argument, get byte-for-byte the old
+  // behaviour rather than a thrown "undefined is not a node" error.
+  localFlowDir = null,
+  // ROH TUNING (2026-08-19) — `bankWarp`/`flowWarp`'s own influence weights,
+  // author-adjustable uniforms now. `null` default falls back to the
+  // shipped constant, so an omitted argument (an old caller, or a
+  // construction-only test) is byte-for-byte the pre-param behaviour.
+  uBankInfluence = null,
+  uFlowWarpInfluence = null,
 }) {
-  const { vec2, vec3, float, max, min, abs, dot, clamp, smoothstep, mx_fractal_noise_vec3 } = TSL;
+  const { vec2, vec3, float, max, min, abs, dot, length, clamp, smoothstep, mx_fractal_noise_vec3 } = TSL;
+  const bankInfluenceNode = uBankInfluence ?? float(WATER_BANK_INFLUENCE);
+  const flowWarpInfluenceNode = uFlowWarpInfluence ?? float(WATER_FLOW_WARP_INFLUENCE);
 
   const tSec = timeMsNode.mul(float(1 / 1000));
 
@@ -506,16 +569,55 @@ export function buildWaterSurfaceField({
   // already multiplied by `inside` downstream.
   const bankInfluence = float(1).sub(smoothstep(float(0), float(WATER_BANK_REACH_PX), shoreDist));
   const alongBank = tangentXY.mul(dot(current, tangentXY)).mul(bankInfluence);
-  const bankWarp = alongBank.mul(uWaveScalePx.mul(float(WATER_BANK_INFLUENCE)));
+  const bankWarp = alongBank.mul(uWaveScalePx.mul(bankInfluenceNode));
 
-  // THE COMBINED, ALREADY-SAFE DOMAIN SHIFT — travel plus bank warp, together.
+  // FLOW WARP — `bankWarp`'s sibling, see `WATER_FLOW_WARP_INFLUENCE`'s own
+  // doc for the full safety argument. `localFlowDir` defaults to `null`
+  // (no caller yet, or a construction-only test) — `?? current` makes the
+  // deviation exactly the zero vector in that case, which is the ONLY
+  // reason this default is safe: it is not "point somewhere plausible", it
+  // is "contribute nothing", byte-for-byte the pre-flow-warp behaviour.
+  //
+  // Away from any obstacle the real solve settles toward the SAME free-
+  // stream heading `current` already is (both trace back to the author's
+  // one compass control), so `flowDeviation` is naturally ~0 there too —
+  // this term only wakes up close to something the water is genuinely
+  // going around, with no separate distance gate required.
+  const flowDir = localFlowDir ?? current;
+  const flowDeviation = flowDir.sub(current);
+  // Magnitude-clamped to at most 1 (two unit vectors can differ by at most
+  // 2, dead-on opposite) — the same "bounded by construction, not by
+  // guessing a small enough constant" property `bankWarp`'s own `tangentXY`
+  // already has for free by being a unit vector.
+  const flowDeviationSafe = flowDeviation.div(max(length(flowDeviation), float(1)));
+  // ⚠️ NEGATED (2026-08-19 fix, live-reported: "the flow seems to push the
+  // water INTO the stockwork... almost inverted from what it should do").
+  // `flowWarp` approximates the DIFFERENCE between what genuinely scrolling
+  // by the local direction would do and what `drift` (scrolling by the
+  // GLOBAL direction) already does — and `drift` itself is negated for a
+  // proven reason stated a few lines above this file's own `drift` line:
+  // "A PATTERN MOVES OPPOSITE TO ITS DOMAIN." A true local-direction drift
+  // would be `−localDir·speed·t`; the existing global one is `−current·
+  // speed·t`; their difference is `−(localDir−current)·(…)` =
+  // `−flowDeviation·(…)` — negative, not positive. The un-negated version
+  // shipped this same day and read as water being pulled TOWARD an
+  // obstacle instead of deflected away from it — this file's own established
+  // sign law, not applied consistently the first time. `bankWarp` above is
+  // NOT negated and that is correct, not inconsistent: its own job (bend
+  // the pattern to run ALONG the tangent) is sign-symmetric — "along +tangent"
+  // and "along −tangent" look identical — so it never exposed this bug.
+  // `flowWarp`'s job (deflect AWAY from an obstacle, a directional, sign-
+  // SENSITIVE claim) does not have that luxury.
+  const flowWarp = flowDeviationSafe.mul(uWaveScalePx.mul(flowWarpInfluenceNode)).negate();
+
+  // THE COMBINED, ALREADY-SAFE DOMAIN SHIFT — travel plus bank warp plus flow warp, together.
   // Returned to the caller (below) so TIER 4's filament foam
   // (`water-shore.js#buildWaterFilamentFoam`) can sample a DIFFERENT frequency
   // of noise through the exact same shift rather than re-deriving it: two
   // independent copies of "travel + bank warp" is exactly the shape that let
   // this file's own drift bug and Y-flip bug ship unnoticed once already
   // (`feedback_shared_field_two_meanings_two_registries`).
-  const domainOffset = drift.add(bankWarp);
+  const domainOffset = drift.add(bankWarp).add(flowWarp);
 
   // ONE fetch. `mx_fractal_noise_vec3` is three's own MaterialX fractal noise —
   // vendored, backend-neutral, and identical on WebGPU and WebGL2, which is why
@@ -698,7 +800,7 @@ export function buildWaterSurfaceField({
     );
   }
 
-  return { foam, turbidity, slope, domainOffset, causticBrightness };
+  return { foam, turbidity, slope, domainOffset, causticBrightness, flowWarp };
 }
 
 /**

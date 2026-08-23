@@ -9,12 +9,17 @@
  * appearing that don't make sense"* — traced in red as a stepped, staircase
  * line running through open water, following nothing the map contains.
  *
- * Water's body pack (`res:waterBody`) is a 512-long-side field
+ * Water's body pack (`res:waterBody`) was originally a 512-long-side field
  * (`WATER_BODY_SUPERSAMPLE = 1`) stretched across a map that can be 10,650 px
- * wide: **one texel is ~21 world px**. It is sampled LINEAR, which was itself a
- * live bug fix — NEAREST made the shoreline blocky. But linear interpolation is
- * only **C0**: the value is continuous across a texel boundary and its GRADIENT
- * is not. Every texel edge is a crease.
+ * wide — one texel ~21 world px — later raised to a water-owned 1,536
+ * (`WATER_BODY_GRID_MAX_DIM`, 2026-08-19), ~7 world px per texel on the same
+ * map. It is sampled LINEAR, which was itself a live bug fix — NEAREST made
+ * the shoreline blocky. But linear interpolation is only **C0**: the value is
+ * continuous across a texel boundary and its GRADIENT is not. Every texel
+ * edge is a crease, AT ANY RESOLUTION — this fix's own next paragraph is the
+ * reason raising the resolution alone (2026-08-19's own fix included) does
+ * not by itself remove the crease pattern; it only moves the creases closer
+ * together and shrinks their individual footprint.
  *
  * A crease is invisible while nothing amplifies it. Water amplifies it three
  * times over — a `smoothstep(0, 34px, sdf)` wet band that crosses its whole
@@ -24,13 +29,24 @@
  * creases stop being creases and become EDGES, running along the grid in the
  * diamond/staircase pattern bilinear interpolation has always had.
  *
- * ⚠️ **THE FIX IS NOT A FINER FIELD, AND THAT IS SETTLED HISTORY.**
+ * ⚠️ **THE FIX FOR CREASES IS NOT A FINER FIELD, AND THAT IS SETTLED HISTORY.**
  * `WATER_BODY_SUPERSAMPLE` went 1 → 3 → 1 in 2026-07-26 for exactly this
  * instinct, and its own doc now ends "a finer field will NOT sharpen an edge".
  * Raising it again would cost 9× the VRAM and 9× the bake to move the same
  * creases closer together. Nor is it a blur: blurring the RESULT smears the
  * distance field, which is the one thing every consumer depends on being
- * metric.
+ * metric. THIS FILE is that fix, and it is resolution-independent by design.
+ *
+ * ⚠️ `WATER_BODY_GRID_MAX_DIM` (2026-08-19, `water-body.js`) raising the
+ * flood's own resolution is NOT a reopening of this settled question — it is
+ * a fix for a DIFFERENT, later-diagnosed problem: the tangent field's own
+ * ANGULAR resolution near a small or closely-packed obstacle, where one texel
+ * can only ever hold one seed direction no matter how well this file smooths
+ * the reads between texels. A crease is an interpolation artefact this file
+ * removes at any resolution; an under-resolved tangent near a small obstacle
+ * is missing DATA this file cannot invent. Conflating the two — "we already
+ * proved resolution doesn't matter, so don't raise it again" — is the mistake
+ * to avoid here.
  *
  * ============================================================================
  * WHAT IT DOES INSTEAD — the standard smooth-bilinear remap

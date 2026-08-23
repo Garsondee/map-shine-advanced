@@ -38,8 +38,8 @@
  * file's own header if this is the first time you are meeting the pattern.
  *
  * ============================================================================
- * §3 — RESOLUTION: SUPERSAMPLED OVER THE MASK'S OWN GRID, AND WHY THIS
- * SECTION USED TO ARGUE THE OPPOSITE
+ * §3 — RESOLUTION: WATER-OWNED, SIZED FROM THE WORLD RECT, AND WHY THIS
+ * SECTION USED TO ARGUE THE OPPOSITE (TWICE)
  * ============================================================================
  * Water.md §5.1 specified a fixed 1024². This section originally corrected
  * that to "the pack is the size of its input" — the mask arrives at
@@ -61,21 +61,34 @@
  * problem (real-time SDF-from-low-res-coverage-mask generation always does
  * this) — not an invention.
  *
- * The fix, `WATER_BODY_SUPERSAMPLE = 3` (`water-body.js`): the flood's own
- * targets are `3×` the mask grid's width/height in EACH dimension — worst
- * case `512 × 3 = 1,536`, comfortably under the Keyhole allocator's 2,048px
- * cap with no exception, and 3 targets × 1,536×714 × RGBA16F ≈ 25 MB,
- * comfortably inside Keyhole §4.2's water/fog reservation with room for the
- * tier-7 field on top. (Read as a happy accident, not a coincidence: this
- * lands close to the ORIGINAL 1024² spec's own cost — Phase 2's correction
- * had gone one step too far, and this restores the missing step rather than
- * re-litigating the whole decision.) `WATER_MASK_FILTER` moved to `'linear'`
- * in the same fix — supersampling without it would sample the SAME coarse,
- * blocky mask more densely, which changes nothing.
+ * The FIRST fix, `WATER_BODY_SUPERSAMPLE = 3` (`water-body.js`), ran the
+ * flood at `3×` the coarse cross-effect derivation grid's own width/height —
+ * and was reverted the SAME DAY back to 1, because the derivation grid it was
+ * multiplying was itself POINT-sampled: supersampling a grid that already
+ * discarded sub-texel information cannot recover it, however densely you
+ * resample. `water-body.js#WATER_BODY_SUPERSAMPLE`'s own doc names this in
+ * full and is worth reading before touching this section again.
+ *
+ * The SECOND, water-owned fix (2026-08-19, `WATER_BODY_GRID_MAX_DIM`) is a
+ * different mechanism, not a retry of the first: it sizes the flood directly
+ * from the water body's OWN world rect (`sizeBodyGrid`, this file), the exact
+ * technique `water-flow.js#WATER_FLOW_GRID_MAX_DIM`/`sizeFlowGrid` already
+ * uses — never as a multiplier on the shared 512 grid. Combined with the seed
+ * pass's own 2026-08-18 fix (reading the FULL-RESOLUTION mask directly, area-
+ * averaged, never the coarse derived grid), the flood now both SEES the real
+ * mask at full detail AND has enough of its own output texels to place a
+ * distinct seed near small or closely-packed obstacles — the thing a bigger
+ * multiplier on an already-coarse grid could never have bought. 1,536 matches
+ * the flow pack's own cap exactly, comfortably under the Keyhole allocator's
+ * 2,048px cap with no exception claimed; 3 targets × 1,536×714 × RGBA16F ≈
+ * 25 MB, the same cost the (reverted) first attempt already budgeted for,
+ * comfortably inside Keyhole §4.2's water/fog reservation. `WATER_MASK_FILTER`
+ * stays `'linear'` — sampling the mask more densely only helps once the
+ * filter can actually interpolate between what it reads.
  *
  * ⚠️ The grid's dimensions change when the SCENE RECT's aspect changes, so the
- * targets are keyed by `WxH` (the FLOOD's own, post-supersample, dimensions)
- * and reallocated only on a genuine change — the same `gridKey` discipline
+ * targets are keyed by `WxH` (the FLOOD's own, water-owned dimensions) and
+ * reallocated only on a genuine change — the same `gridKey` discipline
  * `vt-pan-viewer.js` already uses for the wind sim's ping/pong pair, and for
  * the same reason (a per-bake realloc of megabytes is how a floor switch
  * turns into a device loss).
@@ -91,11 +104,30 @@ import {
   jfaStepCount,
   jfaStrideForStep,
   WATER_MASK_FILTER,
-  WATER_BODY_SUPERSAMPLE,
+  WATER_BODY_GRID_MAX_DIM,
 } from './water-body.js';
 import { resolveWaterFloor } from './water-floor.js';
 
 const log = createLogger('WaterBody');
+
+/**
+ * Size the flood's own grid over a world rect — the water-owned replacement
+ * for "supersample the coarse cross-effect derivation grid" (see
+ * `water-body.js#WATER_BODY_GRID_MAX_DIM`'s own doc for why that mechanism
+ * was superseded). Deliberately the SAME aspect-preserving formula
+ * `water-flow-subsystem.js#sizeFlowGrid` uses, duplicated rather than
+ * imported for the identical reason that function's own header states:
+ * effects-zone subsystems do not reach into each other's siblings for four
+ * lines of arithmetic.
+ * @param {{minX:number,minY:number,maxX:number,maxY:number}} rect
+ * @returns {{w:number,h:number}}
+ */
+function sizeBodyGrid(rect) {
+  const width = Math.max(1, rect.maxX - rect.minX);
+  const height = Math.max(1, rect.maxY - rect.minY);
+  const scale = WATER_BODY_GRID_MAX_DIM / Math.max(width, height);
+  return { w: Math.max(1, Math.round(width * scale)), h: Math.max(1, Math.round(height * scale)) };
+}
 
 /** Padding on the measured water AABB, world px — comfortably wider than
  * `WATER_TIER0_SHORE_SOFTNESS_PX` so the surface mesh never clips its own
@@ -143,6 +175,18 @@ export function clipRectToMask(padded, mask) {
  *   save/bind/render/restore triplet, defined in `vt/` (see §2).
  * @param {(data: Uint8Array, w: number, h: number, filter: string) => *} args.createWaterMaskTexture -
  *   the literal `new THREE.DataTexture(...)` + filter setup, defined in `vt/`.
+ *   Only builds the pre-first-load 1×1 placeholder now (2026-08-18) — the
+ *   seed/resolve passes' own mask comes from `waterSurface` below.
+ * @param {{getFullResMaskTexture: () => *|null}} args.waterSurface - THIS
+ *   floor's own `createWaterSurfaceSubsystem()` handle (2026-08-18, second
+ *   attempt — see `vt-pan-viewer.js#createWaterBodyForFloor`'s own comment
+ *   for why the first attempt regressed and what makes this one safe). The
+ *   SAME accessor `water-flow-subsystem.js` already depends on, and for the
+ *   identical reason: it is the only mask reference in this codebase that is
+ *   never downsampled before a shore/obstacle test reads it. A lazy
+ *   reference is required at the call site (`vt-pan-viewer.js`) — surface
+ *   itself depends on this subsystem's own `getRect()`, so resolving it
+ *   eagerly here would be circular.
  * @param {() => number|null} [args.getWaterFloorOverride] - the per-level pin
  *   (Water.md §4 rule 3). Absent/null = the normal borrow-from-below resolve.
  * @returns {{
@@ -161,6 +205,7 @@ export function createWaterBodySubsystem({
   getMaskAuthorityVersion,
   renderWaterPass,
   createWaterMaskTexture,
+  waterSurface,
   getWaterFloorOverride,
 }) {
   // ── STATE ───────────────────────────────────────────────────────────────
@@ -234,10 +279,10 @@ export function createWaterBodySubsystem({
     const describe = (filter) => ({
       resolvedW: w,
       resolvedH: h,
-      // Neither `screenSized` nor `allowWorldScale`: the mask grid is capped at
-      // MASK_GRID_MAX_DIM (512) on its long side, so this sails under the
-      // Keyhole law's plain 2048px cap with no exception claimed. O(1) in map
-      // size — a 12,000px map and a 2,000px map both get exactly this.
+      // Neither `screenSized` nor `allowWorldScale`: the flood is capped at
+      // WATER_BODY_GRID_MAX_DIM (1,536) on its long side, so this sails under
+      // the Keyhole law's plain 2048px cap with no exception claimed. O(1) in
+      // map size — a 12,000px map and a 2,000px map both get exactly this.
       screenSized: false,
       type: THREE.HalfFloatType,
       format: THREE.RGBAFormat,
@@ -314,28 +359,23 @@ export function createWaterBodySubsystem({
     const { w, h } = grid.spec;
     if (!(w > 0 && h > 0)) return { ok: false, reason: `degenerate grid ${w}x${h}` };
 
-    // RGBA/UnsignedByte to match every other DataTexture in this renderer; R
-    // is the only channel anything reads. NEAREST — see WATER_MASK_FILTER's
-    // own doc for why a soft edge would make the seed pass meaningless.
-    //
-    // THE SAME PASS ALSO MEASURES THE WATER'S WORLD AABB, because Law 6 is
-    // about bounded GEOMETRY and the surface mesh has to be cropped to
-    // something. Water.md's own worked example for that law is "a water pass
-    // that runs fullscreen while water covers 2% of the view"; a quad over the
-    // whole mask rect would BE that. One min/max while the bytes are already
-    // being walked costs nothing and is the only measurement of "where the
-    // water actually is" anyone has.
-    const data = new Uint8Array(w * h * 4);
+    // ⚠️ THE ACTUAL OBSTACLE-PRESENCE DATA (2026-08-18) — this coarse derived
+    // grid (`getWaterMaskGrid` → `maskAuthority.getDerived('water', …)`, the
+    // SAME cross-effect grid `_Outdoors` etc. share, capped at
+    // `WATER_GRID_MAX_DIM`) is STILL walked below for the water body's own
+    // world AABB (Law 6's crop rect) — a coarse approximation is fine for
+    // "roughly where does water exist". It is NO LONGER what the seed/resolve
+    // passes sample for PER-TEXEL presence — see this module's own header and
+    // `vt-pan-viewer.js#createWaterBodyForFloor` for the full account,
+    // including the live regression the first attempt at this shipped and
+    // the separate bookkeeping bug (`water-surface-subsystem.js#sync`) that
+    // fix required.
     let minTx = Infinity;
     let minTy = Infinity;
     let maxTx = -Infinity;
     let maxTy = -Infinity;
     for (let i = 0; i < w * h; i++) {
       const v = grid.data[i] ?? 0;
-      data[i * 4 + 0] = v;
-      data[i * 4 + 1] = v;
-      data[i * 4 + 2] = v;
-      data[i * 4 + 3] = 255;
       if (v > 0) {
         const tx = i % w;
         const ty = (i / w) | 0;
@@ -345,10 +385,17 @@ export function createWaterBodySubsystem({
         if (ty > maxTy) maxTy = ty;
       }
     }
-    const tex = createWaterMaskTexture(data, w, h, WATER_MASK_FILTER);
 
-    maskTexture?.dispose?.();
-    maskTexture = tex;
+    // The REAL mask, at its own native resolution — `water-surface-
+    // subsystem.js`'s already-loaded texture, borrowed not owned: this
+    // module must never dispose it, and must decline the bake (not
+    // substitute a placeholder) until it exists, exactly as
+    // `water-flow-subsystem.js#maybeBake` already does for the same texture.
+    // A decline here is now SAFE to retry indefinitely — see this module's
+    // own header on why the first attempt at this could get permanently
+    // stuck instead of actually retrying.
+    const tex = waterSurface.getFullResMaskTexture();
+    if (!tex) return { ok: false, reason: 'no full-resolution mask loaded for this floor yet' };
     maskRect = {
       minX: grid.spec.x,
       minY: grid.spec.y,
@@ -356,25 +403,33 @@ export function createWaterBodySubsystem({
       maxY: grid.spec.y + grid.spec.height,
     };
 
-    // THE FLOOD runs at `WATER_BODY_SUPERSAMPLE ×` the MASK's own grid — see
-    // §3. `maskTexture` above stays at the mask's native w×h; only the flood's
-    // own targets/materials are sized up, and the mask is sampled through them
-    // via UV (resolution-independent), never assumed to match 1:1.
-    const floodW = w * WATER_BODY_SUPERSAMPLE;
-    const floodH = h * WATER_BODY_SUPERSAMPLE;
+    // THE FLOOD runs at its OWN water-owned resolution (2026-08-19,
+    // `WATER_BODY_GRID_MAX_DIM`), sized from `maskRect` (just computed above)
+    // — see `water-body.js#WATER_BODY_GRID_MAX_DIM`'s own doc for why this
+    // replaced supersampling the coarse cross-effect derivation grid.
+    // `maskTexture` above stays at the coarse grid's native w×h (still used
+    // for the AABB scan below); only the flood's own targets/materials are
+    // sized to the water-owned grid, and the REAL full-resolution mask (`tex`)
+    // is sampled through them via UV — resolution-independent, never assumed
+    // to match either grid 1:1.
+    const { w: floodW, h: floodH } = sizeBodyGrid(maskRect);
     ensureTargets(floodW, floodH);
     ensureMaterials(floodW, floodH);
-    materials.seed.maskTexNode.value = tex;
+    // ⚠️ EVERY node in `maskTexNodes`, not `maskTexNode` alone
+    // (`feedback_texture_nodes_must_be_repointed_together`) — the seed
+    // pass's area-averaged boundary test (2026-08-18) samples the mask at
+    // many sub-positions per texel; each is its own `texture()` node, and a
+    // tap missed here samples whatever placeholder `ensureMaterials` first
+    // built the seed material against, forever.
+    for (const node of materials.seed.maskTexNodes) node.value = tex;
     materials.resolve.maskTexNode.value = tex;
-    // ONE FLOOD TEXEL is `1/WATER_BODY_SUPERSAMPLE` of a MASK texel in world
-    // px — the resolve pass converts the flood's own internal offsets (in
-    // FLOOD-texel units) to world px, so it must use the FLOOD's texel size,
-    // not the mask's, or every reported distance would be wrong by exactly
-    // this factor.
-    materials.resolve.setTexelWorld(
-      grid.spec.texelW / WATER_BODY_SUPERSAMPLE,
-      grid.spec.texelH / WATER_BODY_SUPERSAMPLE
-    );
+    // ONE FLOOD TEXEL is `(world rect width) / floodW` in world px — the
+    // resolve pass converts the flood's own internal offsets (in FLOOD-texel
+    // units) to world px, so it must use the FLOOD's own texel size, derived
+    // from the SAME world rect the flood was just sized against, not the
+    // coarse derivation grid's texel size (`grid.spec.texelW/H`, a different
+    // grid entirely as of this fix).
+    materials.resolve.setTexelWorld((maskRect.maxX - maskRect.minX) / floodW, (maskRect.maxY - maskRect.minY) / floodH);
     // "No shore anywhere" must read as further away than the map is wide, so
     // every distance consumer degrades continuously instead of special-casing.
     materials.resolve.setFarDistance(Math.hypot(grid.spec.width, grid.spec.height));
@@ -525,7 +580,8 @@ export function createWaterBodySubsystem({
     },
     /**
      * The pack's size IN TEXELS — the FLOOD's own dimensions, which is what the
-     * `bodyRt` texture actually is (`WATER_BODY_SUPERSAMPLE ×` the mask grid).
+     * `bodyRt` texture actually is (`sizeBodyGrid`'s own water-owned result,
+     * `WATER_BODY_GRID_MAX_DIM` on the long side — see this file's §3).
      *
      * Exposed for `water-sampling.js`'s smooth reconstruction, which is
      * phase-locked to the grid: it has to know where the texel centres are, and
@@ -567,10 +623,11 @@ export function createWaterBodySubsystem({
         bakes,
         polls,
         pollsSinceLastBake,
-        // The FLOOD's own resolution — `WATER_BODY_SUPERSAMPLE ×` whatever
-        // `lastBake.cols`×`lastBake.rows` (the MASK's native grid) reports.
-        // The two are deliberately different numbers; seeing 3x here vs the
-        // mask's own cols/rows is the supersample working, not a mismatch.
+        // The FLOOD's own water-owned resolution (`sizeBodyGrid`) — a
+        // DIFFERENT number from `lastBake.cols`×`lastBake.rows` (the coarse
+        // MASK's own native grid, still used for the AABB scan) on purpose;
+        // seeing them disagree is the water-owned grid working, not a
+        // mismatch (see this file's §3).
         grid: gridKey || 'not allocated',
         jfaSteps,
         rect: maskRect,

@@ -19,6 +19,7 @@
 import * as THREE from '../../../vendor/three/three.webgpu.js';
 import {
   buildWaterSoliditySeedMaterial,
+  buildWaterSolidityDownsampleMaterial,
   buildWaterVelocitySeedMaterial,
   buildWaterDivergenceMaterial,
   buildWaterJacobiStepMaterial,
@@ -59,6 +60,27 @@ export function run(t) {
     ok(`solidity ${label}: returns a material`, !!result?.material);
     ok(`solidity ${label}: material has a fragmentNode`, !!result?.material?.fragmentNode);
     ok(`solidity ${label}: returns a quad`, !!result?.quad);
+  }
+
+  // ── 2026-08-18 FIX: SOLIDITY DOWNSAMPLE (coarse levels cascade from the
+  // next-finer level, never re-sample the raw mask independently) ─────────
+  for (const [label, width, height] of SIZES) {
+    let result = null;
+    let err = null;
+    try {
+      result = buildWaterSolidityDownsampleMaterial({
+        THREE,
+        sourceTexture: stubTexture(),
+        sourceWidth: width * 2,
+        sourceHeight: height * 2,
+      });
+    } catch (e) {
+      err = e;
+    }
+    ok(`solidity downsample ${label}: constructs without throwing (${err?.stack ?? err})`, !err);
+    ok(`solidity downsample ${label}: returns a material`, !!result?.material);
+    ok(`solidity downsample ${label}: material has a fragmentNode`, !!result?.material?.fragmentNode);
+    ok(`solidity downsample ${label}: returns a quad`, !!result?.quad);
   }
 
   // ── S3: THE VELOCITY CASCADE — EVERY MATERIAL, AT EVERY ASPECT RATIO ─────
@@ -149,8 +171,11 @@ export function run(t) {
   // constant drifts without the comments following, so the values themselves
   // are pinned here rather than trusted to stay whatever the doc claims.
   ok('WATER_FLOW_SOLIDITY_SUBSAMPLES is 4 (4x4 = 16 sub-samples/texel)', WATER_FLOW_SOLIDITY_SUBSAMPLES === 4);
-  ok('WATER_FLOW_GRID_MAX_DIM is 1024 (coarser than the 2048 mask/SDF grid)', WATER_FLOW_GRID_MAX_DIM === 1024);
-  ok('flow grid is deliberately coarser than the mask/SDF derivation grid', WATER_FLOW_GRID_MAX_DIM < 2048);
+  ok(
+    "WATER_FLOW_GRID_MAX_DIM is 1536 (2026-08-19: raised from 1024, matches WATER_BODY_SUPERSAMPLE's own 512×3)",
+    WATER_FLOW_GRID_MAX_DIM === 1536
+  );
+  ok("flow grid still stays under the Keyhole allocator's 2048px cap", WATER_FLOW_GRID_MAX_DIM < 2048);
   ok(
     'WATER_FLOW_SPEED01_HEADROOM leaves real headroom above the free-stream speed of 1',
     WATER_FLOW_SPEED01_HEADROOM > 1 && WATER_FLOW_SPEED01_HEADROOM === 2.5

@@ -36,6 +36,7 @@
  */
 
 import { WATER_PRESENCE_EPS } from './water-body.js';
+import { WATER_FLOW_SOLVE_OMEGA } from './water-flow-solve.js';
 
 /** Sub-samples per texel side — 4×4 = 16 total. Matches `docs/planning/Water-
  * Simulation-Turn.md` §3 Layer B1's own worked example exactly; a change here
@@ -44,15 +45,39 @@ import { WATER_PRESENCE_EPS } from './water-body.js';
 export const WATER_FLOW_SOLIDITY_SUBSAMPLES = 4;
 
 /**
- * Longest side of the flow grid, in texels — deliberately COARSER than
- * `WATER_GRID_MAX_DIM` (2048, the mask/SDF derivation): velocity is a smooth,
- * low-frequency field by nature (it has no sharp edges except at obstacle
- * boundaries, which `WATER_FLOW_SOLIDITY_SUBSAMPLES`' area-average already
- * captures at whatever resolution IT runs at), so spending the same texel
- * budget on it would be VRAM the field cannot use. 1024 on a 10,650px-wide
- * map is ~10.4 world-px/texel — Water-Simulation-Turn.md §5's own budget.
+ * Longest side of the flow grid, in texels.
+ *
+ * ⚠️ RAISED 1024 → 1536, 2026-08-19 — live-reported: "Still lots of examples
+ * of horrible texels... sawtooth edges." The author was right and the
+ * presence-edge fix from the same round answered a different, already-fixed
+ * texture: the water/land BOUNDARY is the full-resolution mask (`mask-
+ * image.js`, `MASK_IMAGE_SCALE = 1`, a real, deliberate, dated fix for this
+ * EXACT symptom on that texture, 2026-07-26) and was never the bottleneck.
+ * This grid is. The reasoning that shipped 1024 — "velocity is a smooth,
+ * low-frequency field... no sharp edges except at obstacle boundaries" — was
+ * true of its ORIGINAL job (a gentle bend's own foam orientation) and is no
+ * longer the whole story now that this same field drives `flowWarp` and the
+ * foam flow-nudge (this same day, earlier), both explicitly meant to bend
+ * SHARPLY right at an obstacle edge — precisely the frequency this grid was
+ * deliberately under-built for. The exact shape of a bug this project has
+ * already paid for once, on a DIFFERENT texture (`water-body-subsystem.js`'s
+ * own §3: "an extremely pixelated mask which has been blurred... the
+ * shoreline looks like a square wave," fixed 2026-07-26 by moving the edge
+ * off a coarse derivation grid onto the real one) — the same lesson, one
+ * grid over, arriving a few weeks later once THIS grid became load-bearing
+ * for the same class of sharp detail.
+ *
+ * 1536, not full resolution — the author's own explicit instruction ("I'm
+ * not suggesting we make the texels full resolution... consider if maybe
+ * the current resolution is far too low"). Matches `WATER_BODY_SUPERSAMPLE`'s
+ * own already-shipped, already-safe operating point (`water-body.js`,
+ * 512×3=1,536) — comfortably under the Keyhole allocator's 2,048px cap with
+ * the same margin that grid already runs at, not a fresh, unprecedented
+ * number. 1,536 on a 10,650px-wide map is ~6.9 world-px/texel, down from
+ * ~10.4 — real cost, stated honestly in `docs/planning/Water-Simulation-
+ * Turn.md` §5's own updated budget table, not hidden.
  */
-export const WATER_FLOW_GRID_MAX_DIM = 1024;
+export const WATER_FLOW_GRID_MAX_DIM = 1536;
 
 /**
  * PASS — SOLIDITY. Samples the FULL-RESOLUTION mask (never the coarse
@@ -111,6 +136,77 @@ export function buildWaterSoliditySeedMaterial({ THREE, maskTexture, width, heig
   // velocity (RG) and speed01 (B) — declared here so the channel LAYOUT is
   // fixed from solidity's own first landing and S3 does not have to
   // renegotiate what R already means.
+  material.fragmentNode = vec4(solid, 0, 0, 1);
+  const quad = new THREE.QuadMesh(material);
+  return { material, quad };
+}
+
+/**
+ * PASS — SOLIDITY, COARSER LEVELS. A 2×2 box average of the NEXT-FINER
+ * level's own solidity — never a second independent re-sample of the raw
+ * mask at this level's own (coarser) resolution.
+ *
+ * ============================================================================
+ * ⚠️ WHY THIS EXISTS — A REAL BUG, LIVE-REPORTED 2026-08-18
+ * ============================================================================
+ * The FIRST version of the cascade re-ran {@link buildWaterSoliditySeedMaterial}
+ * independently at EVERY level's own resolution, each sampling the RAW mask
+ * image directly with the SAME fixed 16 sub-samples
+ * (`WATER_FLOW_SOLIDITY_SUBSAMPLES`). That sample count was sized for the
+ * FINEST level, where one flow texel covers a small patch of the mask. At
+ * the COARSEST level (1/16 the finest — e.g. 64px wide against a 1024px
+ * finest and a mask that may be several times finer STILL), one flow texel
+ * can cover a MUCH larger patch of the source mask, and 16 sparse samples
+ * across that much bigger footprint is a real undersampling — exactly the
+ * kind of thing that produces a coherent, repeating alias pattern rather
+ * than random noise, because the sample OFFSETS are locked to the texel
+ * grid itself. Author-reported: a faint but consistent directional tint on
+ * the `flowVelocity` debug channel, present broadly (not local to any
+ * painted obstacle) and unchanged at a different point on the same river —
+ * a signature that does not fit "responding to real geometry" (which should
+ * vary with position) and does not fit floating-point noise (unaffected by
+ * a half→full float precision change, tested live). It DOES fit a
+ * structural bias baked into the COARSEST level (which the whole cascade's
+ * pressure solve starts from as its initial guess, `water-flow-subsystem.js`'s
+ * own header) from undersampling that level's own, much larger, footprint.
+ *
+ * The fix matches `water-flow-solve.js#downsampleBoxAverage` — the CPU
+ * reference's OWN, already-proven approach — exactly: never re-sample the
+ * raw source at a coarse level's own low resolution; average DOWN from the
+ * next-finer level's own (properly-sampled) result instead. Because every
+ * cascade fraction is exactly half the next (`WATER_FLOW_SOLVE_LEVEL_
+ * FRACTIONS`), one destination texel's footprint in the finer source is
+ * EXACTLY a 2×2 block — an exhaustive, not sparse, average.
+ *
+ * @param {object} args
+ * @param {*} args.THREE
+ * @param {*} args.sourceTexture - the NEXT-FINER level's own solidity (R).
+ * @param {number} args.sourceWidth @param {number} args.sourceHeight - the
+ *   SOURCE's own texel dimensions (i.e. the finer level's, not this one's).
+ * @returns {{material:*, quad:*}}
+ */
+export function buildWaterSolidityDownsampleMaterial({ THREE, sourceTexture, sourceWidth, sourceHeight }) {
+  const { texture, uv, vec2, vec4, float } = THREE.TSL;
+  const texelU = 1 / Math.max(1, sourceWidth);
+  const texelV = 1 / Math.max(1, sourceHeight);
+  const uv0 = uv();
+
+  // The four SOURCE texel centres inside this (coarser) texel's own
+  // footprint — ±0.5 source-texels either side of this fragment's own UV,
+  // which is exactly right because the source is precisely 2× finer.
+  let sum = float(0);
+  for (const [ox, oy] of [
+    [-0.5, -0.5],
+    [0.5, -0.5],
+    [-0.5, 0.5],
+    [0.5, 0.5],
+  ]) {
+    const sampleUv = uv0.add(vec2(ox * texelU, oy * texelV));
+    sum = sum.add(texture(sourceTexture, sampleUv).r);
+  }
+  const solid = sum.div(float(4));
+
+  const material = new THREE.NodeMaterial();
   material.fragmentNode = vec4(solid, 0, 0, 1);
   const quad = new THREE.QuadMesh(material);
   return { material, quad };
@@ -342,40 +438,55 @@ export function buildWaterDivergenceMaterial({ THREE, velocityTexture, width, he
 }
 
 /**
- * B3 line 2 — ONE JACOBI ITERATION, run `WATER_FLOW_SOLVE_ITERATIONS_PER_LEVEL`
- * times per level with the pressure PING-PONGED between two targets — the
- * SAME shape `water-body.js#buildWaterJfaStepMaterial` uses for its own
- * flood rounds (one material, re-pointed and re-rendered N times, never N
- * materials). The TSL twin of `water-flow-solve.js#jacobiPressureStep`, via
- * {@link neighborForAxisGradient} with `solidityTex` given and
- * `offGridIsGhost: false` — this is deliberately the SIMPLER, value-only half
- * of that function (its `.distance` output is unused here): the CPU
- * reference's own investigation proved the plain Neumann/Dirichlet VALUE
- * substitution is exactly right for the Laplacian update — an exact algebraic
- * match against the reduced-divisor Neumann formula, confirmed to machine
- * precision — and it is ONLY the downstream GRADIENT (projection, below)
- * that needed distance-awareness.
+ * B3 line 2, SOR VARIANT (2026-08-19) — ONE CHECKERBOARD HALF-STEP, run
+ * TWICE per "iteration" (`uParity` 0 then 1) — the TSL twin of
+ * `water-flow-solve.js#sorPressureStep`. See that function's own doc for the
+ * full account of WHY (plain Jacobi's own convergence rate for large-scale,
+ * whole-field routing corrections scales `O(1/N^2)` — measured, not
+ * assumed, as the live-reported "10× more iterations, almost no change"
+ * symptom `docs/planning/Water-Simulation-Turn.md`'s S3-continued entry
+ * documents) and HOW (a 5-point stencil's own structure means every cell's
+ * four neighbours are ALWAYS the opposite checkerboard colour, so updating
+ * one whole colour per render has zero read/write conflicts — exactly as
+ * parallel as plain Jacobi, with the fresh-neighbour-data benefit
+ * checkerboard Gauss-Seidel has, before `uOmega` extrapolates further).
+ *
+ * ⚠️ NO `select()`, NO `.mix()` — this codebase's own named traps
+ * (`feedback_tsl_select_chain_strands_vars`,
+ * `reference_tsl_method_chaining_trap` — `a.mix(b,t)` computes `mix(b,t,a)`,
+ * backwards from what the receiver syntax suggests at a glance). The
+ * checkerboard mask is plain arithmetic instead: `isActive = 1 −
+ * |parity − uParity|` is exactly 1 when this texel's own `(x+y)%2` matches
+ * `uParity` and exactly 0 otherwise (both operands are always 0 or 1, so
+ * their difference is always 0 or ±1) — then `centre + (sorValue − centre) ×
+ * isActive` is `sorValue` when active and `centre` (copied through
+ * unchanged — this pass has nothing new to say about the OTHER colour) when
+ * not, with nothing to misremember about argument order.
  *
  * @param {object} args
  * @param {*} args.THREE
  * @param {*} args.prevPressureTexture - the ping-pong source for this
- *   iteration: THIS level's own other ping-pong target for iterations 1..N-1,
- *   or the PREVIOUS (coarser) level's finished pack for iteration 0 — sampled
- *   here by plain bilinear `texture()`, which is the entire multigrid
- *   "prolongation" step (no dedicated upsample pass exists or is needed: a
- *   GPU sampler upsamples for free when the source texture is smaller than
+ *   half-step: THIS level's own other ping-pong target for later half-steps,
+ *   or the PREVIOUS (coarser) level's finished pack for the very first one —
+ *   sampled here by plain bilinear `texture()`, which is the entire
+ *   multigrid "prolongation" step (no dedicated upsample pass exists or is
+ *   needed: a GPU sampler upsamples for free when its source is smaller than
  *   the render target it is being read into).
  * @param {*} args.divergenceTexture - fixed for the whole level (computed
- *   once, before the Jacobi loop starts).
+ *   once, before the SOR loop starts).
  * @param {*} args.solidityTexture - THIS level's own solidity pack (S2), also
  *   fixed for the whole level.
  * @param {number} args.width @param {number} args.height - THIS level's own
  *   texel dimensions.
- * @returns {{material:*, quad:*, prevTexNodes:Array<*>}} EVERY node in
- *   `prevTexNodes` (the centre read PLUS all 4 neighbour reads) must be
- *   re-pointed together before each render — `water-body.js`'s own
+ * @returns {{material:*, quad:*, prevTexNodes:Array<*>, uParity:*, uOmega:*}}
+ *   EVERY node in `prevTexNodes` (the centre read PLUS all 4 neighbour reads)
+ *   must be re-pointed together before each render — `water-body.js`'s own
  *   `prevTexNodes` doc has the full citation for why a single `.uv()` chain
  *   method does not exist on a TextureNode in this vendored build.
+ *   `uParity` MUST be set (0 then 1) before each of the two half-step
+ *   renders that make up one caller-visible "iteration"
+ *   (`water-flow-subsystem.js#runLevel`'s own loop) — unlike `prevTexNodes`,
+ *   it does not need re-pointing every render, only toggling.
  */
 export function buildWaterJacobiStepMaterial({
   THREE,
@@ -385,10 +496,12 @@ export function buildWaterJacobiStepMaterial({
   width,
   height,
 }) {
-  const { texture, uv, vec4, float } = THREE.TSL;
+  const { texture, uv, vec4, float, uniform, floor, abs } = THREE.TSL;
   const texelU = 1 / Math.max(1, width);
   const texelV = 1 / Math.max(1, height);
   const uv0 = uv();
+  const uOmega = uniform(float(WATER_FLOW_SOLVE_OMEGA));
+  const uParity = uniform(float(0));
 
   const centerNode = texture(prevPressureTexture, uv0);
   const prevTexNodes = [centerNode];
@@ -417,12 +530,23 @@ export function buildWaterJacobiStepMaterial({
   const pR = neighbor(1, 0);
   const pU = neighbor(0, -1);
   const pD = neighbor(0, 1);
-  const nextPressure = pL.add(pR).add(pU).add(pD).sub(divergence).mul(float(0.25));
+  const jacobiAvg = pL.add(pR).add(pU).add(pD).sub(divergence).mul(float(0.25));
+  const sorValue = centerP.add(jacobiAvg.sub(centerP).mul(uOmega));
+
+  // Pixel-centre sampling (`(x+0.5)/width`) means `uv0.x * width` never sits
+  // exactly on an integer boundary — `floor` recovers the true integer texel
+  // coordinate with no rounding hazard, the same trick this file's own
+  // neighbour-offset math already relies on via `texelU`/`texelV` steps.
+  const texelX = floor(uv0.x.mul(float(width)));
+  const texelY = floor(uv0.y.mul(float(height)));
+  const parity = texelX.add(texelY).mod(float(2));
+  const isActive = float(1).sub(abs(uParity.sub(parity)));
+  const nextPressure = centerP.add(sorValue.sub(centerP).mul(isActive));
 
   const material = new THREE.NodeMaterial();
   material.fragmentNode = vec4(nextPressure, 0, 0, 1);
   const quad = new THREE.QuadMesh(material);
-  return { material, quad, prevTexNodes };
+  return { material, quad, prevTexNodes, uParity, uOmega };
 }
 
 /** Ceiling `speed01` (B4's own packed channel) normalises against, as a

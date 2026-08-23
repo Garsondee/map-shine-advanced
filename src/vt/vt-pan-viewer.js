@@ -293,6 +293,7 @@ import {
   createWaterSurfaceSubsystem,
   createWaterFlowSubsystem,
   createWaterSimSubsystem,
+  waterFoamReachPx,
   createWaterRefractionSubsystem,
   createFluidSurfaceSubsystem,
   createSpecularSurfaceSubsystem,
@@ -5757,6 +5758,22 @@ export async function startVtPanViewer({
       for (const floor of waterFloors) {
         const sim = getWaterSimForFloor(floor.index);
         sim.tick(env.time?.dtSec ?? 0);
+        // ⚠️ THE FOAM-BAND REACH — genuinely missing until now, found while
+        // tidying: `water-sim-subsystem.js`'s own header documents this as
+        // PUSHED, not pulled ("so the two can never disagree about the
+        // body's size"), and its own `setReachPx` doc names `vt-pan-
+        // viewer.js` as "free to forward the identical value water-render.js
+        // already computed" — but nothing ever actually called it, so
+        // `uReachPx` sat frozen at its 64px fallback default regardless of
+        // the author's own `depthScalePx` setting, disagreeing with the
+        // visible shore foam's own band width. Same pure derivation
+        // (`waterFoamReachPx`) `water-render.js#setDepthScalePx` already
+        // applies to the surface material's `uFoamReachPx`, read fresh here
+        // from the SAME schema value via the SAME `getWaterRenderState()`
+        // accessor this whole loop family already uses — not a second,
+        // independently-tracked number, the identical pure function of the
+        // identical live-read input.
+        sim.setReachPx(waterFoamReachPx(getWaterRenderState()?.params?.depthScalePx));
         // THE `simFoamRaw`/`simFoam` DEBUG CHANNELS' OWN re-point, AND (S5)
         // the actual visible water's own foam source — same shape as the
         // flow pack's own re-point above (`setFlowPackTexture`), a THIRD

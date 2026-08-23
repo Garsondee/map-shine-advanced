@@ -20,7 +20,9 @@ import {
   WATER_PRESENCE_EPS,
   WATER_MASK_FILTER,
   WATER_BODY_SUPERSAMPLE,
+  WATER_BODY_GRID_MAX_DIM,
 } from '../water-body.js';
+import { WATER_FLOW_GRID_MAX_DIM } from '../water-flow.js';
 
 const near = (a, b, eps = 1e-6) => Math.abs(a - b) <= eps;
 
@@ -278,19 +280,25 @@ export async function run(t) {
   //
   // The resolution: tier 0's edge does not come from the SDF at all. It comes
   // from the mask FILE at its authored resolution (vt/mask-image.js), and the
-  // SDF keeps only distance-derived, genuinely low-frequency work. So the
-  // supersample went back to 1 and the assertions below pin the CURRENT
-  // contract — deliberately including the one that would fail if someone
-  // "fixed" blockiness by turning it up again.
+  // SDF keeps only distance-derived work. So the supersample-the-coarse-grid
+  // multiplier went back to 1 and stays there — the assertions below pin the
+  // CURRENT contract — deliberately including the one that would fail if
+  // someone "fixed" blockiness by turning it up again.
   t.ok('the mask is sampled LINEAR (the flood reads it via UV, at any resolution)', WATER_MASK_FILTER === 'linear');
   t.ok(
-    'the flood runs 1:1 with the mask grid — a finer distance field does NOT sharpen an edge, ' +
-      'and the edge is not the SDF`s job (water-render.js)',
+    'WATER_BODY_SUPERSAMPLE stays frozen at 1 — supersampling the coarse cross-effect ' +
+      'derivation grid does NOT sharpen an edge, and the edge is not the SDF`s job (water-render.js). ' +
+      'See water-body.js`s own doc for why this is a DIFFERENT question from the flood`s own ' +
+      'water-owned resolution (WATER_BODY_GRID_MAX_DIM, below)',
     WATER_BODY_SUPERSAMPLE === 1
   );
   t.ok(
-    'whatever the supersample, the worst case (MASK_GRID_MAX_DIM=512) stays under the Keyhole 2048px cap',
-    512 * WATER_BODY_SUPERSAMPLE < 2048
+    'the flood`s own water-owned resolution cap sits under the Keyhole 2048px allocator limit',
+    WATER_BODY_GRID_MAX_DIM < 2048
+  );
+  t.ok(
+    'the body pack`s own grid cap matches the flow pack`s own cap (2026-08-19: the two used to drift apart)',
+    WATER_BODY_GRID_MAX_DIM === WATER_FLOW_GRID_MAX_DIM
   );
 
   // --- the flow model ------------------------------------------------------

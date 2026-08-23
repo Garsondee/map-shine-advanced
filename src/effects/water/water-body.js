@@ -131,8 +131,46 @@ export const WATER_PRESENCE_EPS = 1 / 510;
  * Kept as a named constant rather than deleted: if a future rung ever wants a
  * finer distance field, this is the one number, and its own history is the
  * warning that a finer field will NOT sharpen an edge.
+ *
+ * ⚠️ SUPERSEDED AS THE GRID-SIZING MECHANISM (2026-08-19) — `WATER_BODY_
+ * GRID_MAX_DIM` below now sizes the flood directly from the water body's own
+ * WORLD RECT, the same way `water-flow.js#WATER_FLOW_GRID_MAX_DIM` already
+ * does, rather than as a multiplier on the coarse cross-effect derivation
+ * grid (`scene/mask-derive.js#MASK_GRID_MAX_DIM`, 512, shared with fire/
+ * specular/wind). This constant stays frozen at 1 and this doc's own history
+ * stays true to what it tested — but read its "the mask grid's own
+ * resolution is genuinely sufficient" line narrowly: that conclusion was
+ * measured by supersampling an already-coarse, then-POINT-sampled derived
+ * grid more densely, which cannot manufacture data that was never captured.
+ * It predates two later fixes that changed what the flood's SEED actually
+ * sees — the seed pass's own 4×4 area-averaged read of the FULL-RESOLUTION
+ * mask (2026-08-18, this file's `buildWaterSeedMaterial`) and now a genuinely
+ * finer OUTPUT grid (2026-08-19) — neither of which this constant's own
+ * experiment exercised. A small obstacle's boundary can now be correctly
+ * DETECTED at 512 texels; it still only gets ONE seed position to represent
+ * it in the tangent field at that resolution, however accurately that one
+ * position was measured — which is the real, distinct reason the tangent
+ * (bank-bend/flow-bend direction near small or closely-packed obstacles,
+ * live-reported as flow not visibly routing around a splitter) benefits from
+ * more OUTPUT texels, independent of whether the crease-interpolation
+ * problem `water-sampling.js` already fixed is present.
  */
 export const WATER_BODY_SUPERSAMPLE = 1;
+
+/**
+ * The flood's own long-side resolution cap, WATER-OWNED — sized from the
+ * water body's own world rect (`water-body-subsystem.js#sizeBodyGrid`), the
+ * exact technique `water-flow.js#WATER_FLOW_GRID_MAX_DIM`/`sizeFlowGrid`
+ * already uses, and for the same reason: the shared cross-effect derivation
+ * grid (`scene/mask-derive.js#MASK_GRID_MAX_DIM`, 512) is sized for every
+ * mask consumer at once (fire, specular, wind, water's own coarse AABB scan),
+ * never for water's own tangent-field needs specifically. 1,536 matches the
+ * flow pack's own cap exactly (2026-08-19, `docs/planning/Water-Simulation-
+ * Turn.md`'s own note on the two grids drifting apart) and sits comfortably
+ * under the Keyhole allocator's 2,048px cap with no exception needed — the
+ * same headroom `WATER_FLOW_GRID_MAX_DIM`'s own doc already spends.
+ */
+export const WATER_BODY_GRID_MAX_DIM = 1536;
 
 /**
  * The mask texture's filter, stated here because the seed pass's correctness
@@ -238,7 +276,84 @@ export function buildWaterSeedMaterial({ THREE, maskTexture, width, height }) {
 
   const uv0 = uv();
   const maskTexNode = texture(maskTexture, uv0);
+  // Kept as a single point-sample — this is what every OTHER consumer of
+  // `maskTexNode` (tier 0's own depth/edge read, elsewhere in the pipeline)
+  // already expects a plain texture node to mean. Only the BOUNDARY DECISION
+  // below needs area-averaging; the returned node's contract is unchanged.
   const isWaterHere = step(float(WATER_PRESENCE_EPS), maskTexNode.r);
+
+  /** ⚠️ EVERY `texture(maskTexture, …)` node this function creates, `maskTexNode`
+   * itself first (`feedback_texture_nodes_must_be_repointed_together`) — the
+   * exact bug this same session already found and fixed twice elsewhere in
+   * this file's own neighbourhood, reproduced a third time by this function's
+   * own first draft: `water-body-subsystem.js` re-pointed only `maskTexNode`
+   * on a real mask load, so the sub-sample nodes below sampled the 1×1
+   * all-land placeholder FOREVER — which, worked through, seeds every single
+   * water texel as a false boundary (placeholder reads land at every
+   * sub-sample, so `hereFraction` is stuck at 0, and `selfStraddle` fires
+   * wherever the REAL point-sample reads water). Caught by the author asking
+   * for exactly this file's own re-pointing contract check, not by the
+   * synthetic GPU test that first proved the area-averaging logic itself
+   * correct — that test built the material with the real texture from
+   * construction and never exercised the placeholder-then-swap path at all. */
+  const maskTexNodes = [maskTexNode];
+
+  /**
+   * ⚠️ AREA-AVERAGED PRESENCE FOR THE BOUNDARY TEST (2026-08-18) — the actual
+   * fix for a "big" rock producing NO shore response at all, live-reported
+   * AFTER `water-flow.js`'s S2 solidity (area-averaged, 16 sub-samples) had
+   * already shipped and was assumed to have covered this class of bug.
+   * It had not: `water-flow.js`'s own header names the exact failure mode —
+   * "a POINT sample at a texel centre either lands on a small feature or it
+   * doesn't, at ANY resolution" — and applied the fix to the FLOW field's
+   * solidity only. This SEED pass, which is what `shoreDist`/tangent (and
+   * therefore every `shore.foam` term's PRESENCE, not just its direction)
+   * actually depends on, was left running the original point-sample test.
+   * A rock smaller than roughly one derivation-grid texel (`getWaterMaskGrid`,
+   * capped well below the mask's own native resolution) could sit entirely
+   * between four texel centres and never register a transition at all — not
+   * "faint", not "underrepresented", genuinely invisible to the flood, no
+   * matter how large the rock reads in world px.
+   *
+   * The fix mirrors `water-flow.js#buildWaterSoliditySeedMaterial` exactly: a
+   * 4×4 sub-grid across THIS texel's own footprint (matching
+   * `WATER_FLOW_SOLIDITY_SUBSAMPLES`'s value, not its symbol — importing it
+   * here would reach back into `water-flow.js`, which itself imports FROM
+   * this file, `feedback_...` circular-import shape), averaged into a
+   * continuous presence FRACTION rather than a single hard sample. A rock
+   * covering any part of a texel's footprint moves that fraction off 0/1,
+   * which is then thresholded down to a clean seed/no-seed decision
+   * (`WATER_SEED_BOUNDARY_EPS`) — so the material's own OUTPUT CONTRACT is
+   * unchanged (B is still exactly 0 or 1, never a partial "weak seed" that
+   * `buildWaterJfaStepMaterial`'s `mix(..., candValid)` chain would otherwise
+   * discount against a stronger, more distant seed); only the INPUT the
+   * decision is based on got more honest.
+   */
+  const SEED_SUBSAMPLES = 4;
+  const seedFraction = (centerUv) => {
+    let sum = float(0);
+    for (let sy = 0; sy < SEED_SUBSAMPLES; sy++) {
+      for (let sx = 0; sx < SEED_SUBSAMPLES; sx++) {
+        const offsetU = ((sx + 0.5) / SEED_SUBSAMPLES - 0.5) * texelX;
+        const offsetV = ((sy + 0.5) / SEED_SUBSAMPLES - 0.5) * texelY;
+        const sampleUv = clamp(centerUv.add(vec2(offsetU, offsetV)), vec2(0, 0), vec2(1, 1));
+        // ⚠️ PUSHED to `maskTexNodes` before anything else touches it — see
+        // that array's own comment, just above. A sub-sample tap added here
+        // without this line is the exact regression this comment prevents.
+        const tapTexNode = texture(maskTexture, sampleUv);
+        maskTexNodes.push(tapTexNode);
+        sum = sum.add(step(float(WATER_PRESENCE_EPS), tapTexNode.r));
+      }
+    }
+    return sum.div(float(SEED_SUBSAMPLES * SEED_SUBSAMPLES));
+  };
+
+  /** Presence-fraction difference a boundary must clear to seed — far below
+   * "half the texel", since even a sliver of a small rock overlapping one
+   * sub-sample corner is exactly the case this fix exists for. */
+  const WATER_SEED_BOUNDARY_EPS = 1 / (SEED_SUBSAMPLES * SEED_SUBSAMPLES * 4);
+
+  const hereFraction = seedFraction(uv0);
 
   // Four-neighbour interface test. `clamp` pins the sample inside the grid, so
   // a texel on the map edge compares against ITSELF there — i.e. the map
@@ -251,19 +366,30 @@ export function buildWaterSeedMaterial({ THREE, maskTexture, width, height }) {
     [0, 1],
     [0, -1],
   ];
-  let boundary = float(0);
+  let maxDelta = float(0);
   for (const [dx, dy] of NEIGHBORS) {
     const nUv = clamp(uv0.add(vec2(dx * texelX, dy * texelY)), vec2(0, 0), vec2(1, 1));
-    const isWaterN = step(float(WATER_PRESENCE_EPS), texture(maskTexture, nUv).r);
-    boundary = max(boundary, abs(isWaterHere.sub(isWaterN)));
+    const neighborFraction = seedFraction(nUv);
+    maxDelta = max(maxDelta, abs(hereFraction.sub(neighborFraction)));
   }
+  // Also seed a texel whose OWN footprint straddles the interface even if
+  // every neighbour's own averaged fraction looks similar — e.g. a rock
+  // small enough to sit fully inside one texel without ever reaching a
+  // neighbour's footprint at all. `isWaterHere` is the original point-sample
+  // (0 or 1); a fraction that disagrees with it means the texel's interior is
+  // mixed.
+  const selfStraddle = abs(hereFraction.sub(isWaterHere));
+  const boundary = step(float(WATER_SEED_BOUNDARY_EPS), max(maxDelta, selfStraddle));
 
   const material = new THREE.NodeMaterial();
   // A seed's offset to itself is (0,0) — that is the whole seed condition, and
   // it is why the flood needs no separate "am I a seed" channel.
   material.fragmentNode = vec4(0, 0, boundary, 0);
   const quad = new THREE.QuadMesh(material);
-  return { material, quad, maskTexNode };
+  // `maskTexNode` kept alongside `maskTexNodes` for callers that only ever
+  // wanted the single point-sample (none currently do, post-fix, but the
+  // shape stays backward-compatible rather than a silent breaking change).
+  return { material, quad, maskTexNode, maskTexNodes };
 }
 
 /**

@@ -320,6 +320,219 @@ export const WATER_PARAMS = Object.freeze({
     label: 'Caustics',
     help: 'The shifting net of bright light patches on the riverbed you get from sunlight refracting through a moving surface — strongest in clear, shallow water, and gone wherever the bed is too deep, murky or foam-covered to see at all. Turn it down for a stiller, less busy bed; 0 removes it entirely.',
   },
+  // ── Flow tuning (2026-08-19) — live uniforms, no rebake needed ─────────────
+  bankInfluence: {
+    type: 'float',
+    min: 0,
+    max: 3,
+    step: 0.01,
+    default: 0.35,
+    category: 'Motion',
+    label: 'Bank bend',
+    help: "How hard the surface pattern bends to run along the shoreline's own shape. 0 leaves the pattern ignoring the bank entirely; past 1 the bend becomes very pronounced. Independent of Flow bend below — this one follows the bank's own outline, not the solved current.",
+  },
+  flowWarpInfluence: {
+    type: 'float',
+    min: 0,
+    max: 3,
+    step: 0.01,
+    default: 1.0,
+    category: 'Motion',
+    label: 'Flow bend',
+    help: "How hard the surface pattern bends around obstacles the water is actually solved to be flowing around — the control most responsible for whether the river reads as pushing past rocks and piers, or just running straight through them. 0 removes the effect entirely; raise it if the bend still isn't obvious near a real obstacle.",
+  },
+  // ── Flow SOLVE tuning (2026-08-19) — these two rebake the whole pressure
+  // solve (`water-flow-subsystem.js#maybeBake`), same gate as `flowAngleDeg`.
+  // A slider drag only commits on release, so the rebake only fires once. ──
+  flowSolveOmega: {
+    type: 'float',
+    // SOR is only stable for 0 < omega < 2; the ceiling is kept a hair under
+    // that hard wall rather than exactly on it, matching WATER_FLOW_SOLVE_OMEGA's
+    // own header in water-flow-solve.js.
+    min: 0.1,
+    max: 1.95,
+    step: 0.01,
+    default: 1.7,
+    category: 'Motion',
+    label: 'Flow solve strength (SOR)',
+    help: 'How aggressively the pressure solve corrects itself each iteration (successive over-relaxation). Higher pushes the solve toward the correct answer faster and gives sharper deflection around obstacles, but push it too close to 2 and the solve can start oscillating instead of converging — if the river starts looking noisy or broken near obstacles after raising this, back it off. Triggers a one-time rebake on release.',
+  },
+  flowSolveIterations: {
+    type: 'float',
+    min: 5,
+    max: 200,
+    step: 1,
+    default: 60,
+    category: 'Motion',
+    label: 'Flow solve iterations',
+    help: 'How many correction passes the pressure solve runs per level before the flow field is considered final. More iterations let the solve reach further around obstacles and settle more precisely, at the cost of a longer rebake. Fewer iterations bake faster but may leave the flow looking under-solved right at obstacle edges. Triggers a one-time rebake on release.',
+  },
+  // ── Foam tuning (2026-08-19) — buildFoamCellularStructure's own knobs,
+  // shared by shore foam and the sim-driven wake. Live uniforms, no rebake. ──
+  foamFlowNudge: {
+    type: 'float',
+    min: 0,
+    max: 3,
+    step: 0.01,
+    default: 0.35,
+    category: 'Motion',
+    label: 'Foam flow nudge',
+    help: "How far the foam's own cellular pattern shifts toward real obstacle deflection, separate from the base surface's own Flow bend above. 0 leaves the foam net static regardless of what the current is doing nearby.",
+  },
+  foamEdgeFar: {
+    type: 'float',
+    min: 0.02,
+    max: 3,
+    step: 0.01,
+    default: 0.7,
+    category: 'Shape',
+    label: 'Foam wall thickness',
+    help: 'How thick the bright walls of the foam net read, before anti-aliasing. Small values give thin wiry lines; large values thicken the walls until the holes between them close up entirely.',
+  },
+  foamEdgeAaPx: {
+    type: 'float',
+    min: 0,
+    max: 12,
+    step: 0.1,
+    default: 1.5,
+    category: 'Shape',
+    label: 'Foam edge softness',
+    help: "How many screen pixels wide the foam net's own edges are smoothed over, on top of Foam wall thickness — this is what stops the net aliasing into a hard, pixelated edge when the camera is close. 0 turns antialiasing off entirely (not recommended except to see the raw edge for comparison); push it up for a softer, less graphic net.",
+  },
+  foamBubbleAmount: {
+    type: 'float',
+    min: 0,
+    max: 2,
+    step: 0.01,
+    default: 0.4,
+    category: 'Motion',
+    label: 'Foam bubble amount',
+    help: "How much the foam net's own walls wobble and reform over time, independent of the current carrying the whole pattern along. 0 makes the net a static shape that only ever translates; high values make individual cells visibly boil and reappear.",
+  },
+  foamBubbleOctave: {
+    type: 'float',
+    min: 0.5,
+    max: 30,
+    step: 0.1,
+    default: 5.2,
+    category: 'Shape',
+    label: 'Foam bubble scale',
+    help: "How fine the bubbling detail is, relative to the foam net's own cell size. Low values bubble in broad patches; high values bubble in fine, busy speckles.",
+  },
+  foamBubbleTimeScale: {
+    type: 'float',
+    min: 0,
+    max: 5,
+    step: 0.01,
+    default: 0.35,
+    category: 'Motion',
+    label: 'Foam bubble speed',
+    help: 'How fast the bubbling itself evolves. 0 freezes it into a static (but still displaced) pattern; high values churn fast enough to read as agitated, turbulent water.',
+  },
+  foamGrainAmount: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.45,
+    category: 'Shape',
+    label: 'Foam grain amount',
+    help: "How gritty the foam's own surface reads, on top of the net shape itself — a fine brightness texture rather than a shape change, the difference between a flat white shape and one with real internal detail. 0 removes it; 1 lets the grain darken a wall almost to nothing at its darkest points.",
+  },
+  foamGrainOctave: {
+    type: 'float',
+    min: 0.5,
+    max: 40,
+    step: 0.1,
+    default: 11,
+    category: 'Shape',
+    label: 'Foam grain scale',
+    help: 'How fine the grain texture is. Low values read as coarse mottling; high values read as fine, sandy grit.',
+  },
+  foamGrainTimeScale: {
+    type: 'float',
+    min: 0,
+    max: 5,
+    step: 0.01,
+    default: 0.9,
+    category: 'Motion',
+    label: 'Foam grain speed',
+    help: 'How fast the grain itself churns, independent of the bubbling above — this is what makes the foam read as actively fizzing rather than just displaced. 0 freezes the grain in place.',
+  },
+  // ── Sim-pack tuning (2026-08-19) — `water-sim.js`'s own per-frame memory
+  // buffer (foam that genuinely advects, decays and rides the current). All
+  // seven are live uniforms read fresh every frame or every display sample —
+  // no rebake, a change reaches the water on the very next frame. ──
+  simFoamDecaySec: {
+    type: 'float',
+    min: 0.1,
+    max: 20,
+    step: 0.1,
+    default: 1.6,
+    category: 'Motion',
+    label: 'Sim foam lifetime',
+    help: "How long a patch of the flowing, current-carried foam survives before fading to nothing, in seconds. Short values make foam vanish almost as fast as it's born — a clean, sparse look. Long values let foam pile up and drift far downstream before it fades, at the cost of a busier, foam-heavy river. This is the memory buffer's own decay — separate from the older, always-on shore swash/break foam, which does not use this buffer.",
+  },
+  simDiffuse: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.35,
+    category: 'Shape',
+    label: 'Sim foam spread',
+    help: 'How much each frame blends a patch of foam toward its own neighbourhood average before decay and new foam are added. 0 keeps foam pixel-sharp and grainy forever; 1 spreads it into a soft, smeared blur every single frame. Higher values read as foam that is actively dissolving into the water around it rather than holding a hard shape.',
+  },
+  simShearGain: {
+    type: 'float',
+    min: 0,
+    max: 20,
+    step: 0.1,
+    default: 3.0,
+    category: 'Motion',
+    label: 'Sim shear foam strength',
+    help: 'How much foam gets thrown off where the current itself is changing sharply from one spot to the next — the turbulent wake line beside a rock, not the rock face itself. 0 removes this source of foam entirely, leaving only the upstream-face and shoreline swash sources; raise it for a river that reads as visibly churned along every current boundary, not just at obstacles head-on.',
+  },
+  simNearSolidGain: {
+    type: 'float',
+    min: 0.5,
+    max: 30,
+    step: 0.1,
+    default: 8.0,
+    category: 'Shape',
+    label: 'Sim obstacle foam sharpness',
+    help: 'How quickly foam switches fully on as the current approaches a solid edge — a rock, pier, or bank. Low values need a broad, gradual approach to a solid edge before foam appears at full strength; high values snap on right at the edge itself, reading as a crisper, more sudden bow wave.',
+  },
+  simClumpLo: {
+    type: 'float',
+    min: 0,
+    max: 2,
+    step: 0.005,
+    default: 0.03,
+    category: 'Shape',
+    label: 'Sim foam appears at',
+    help: "The accumulated foam level (from the memory buffer above) below which nothing is visible yet — the floor of the reveal band. Lower this if foam feels like it takes too long to show up after being emitted; raise it if faint, barely-there foam is showing where you'd rather see clean water. Must stay below 'Sim foam solid at' or the band inverts.",
+  },
+  simClumpHi: {
+    type: 'float',
+    min: 0.01,
+    max: 3,
+    step: 0.005,
+    default: 0.15,
+    category: 'Shape',
+    label: 'Sim foam solid at',
+    help: "The accumulated foam level at and above which foam reads fully opaque white — the ceiling of the reveal band. Lower this to make foam saturate to full white sooner (a punchier, more graphic look); raise it for a longer, softer climb from faint to solid. Must stay above 'Sim foam appears at' or the band inverts.",
+  },
+  simClumpAaPx: {
+    type: 'float',
+    min: 0,
+    max: 12,
+    step: 0.1,
+    default: 1.5,
+    category: 'Shape',
+    label: 'Sim foam edge softness',
+    help: 'How many screen pixels wide the transition is between "not foam" and "solid foam" at minimum, regardless of how tightly the appear/solid band above is set. 0 allows a hard, aliased edge on close zoom; higher values keep the edge visibly soft no matter how far in you zoom.',
+  },
 });
 
 /**
@@ -726,9 +939,11 @@ export const WATER_DEBUG_CHANNELS = Object.freeze([
     label: '10 · Cellular structure (Worley lace)',
     reads:
       'The net-with-holes pattern alone, independent of shore distance or direction — should look like a ' +
-      'foam texture (bright walls, darker cell interiors) tiling the WHOLE water, not just the shore. Flat ' +
-      'grey means the Worley cut (`WATER_FOAM_CELL_EDGE0/1`) is not landing where the real distribution puts ' +
-      'it, or the cell scale is too fine/coarse to resolve at this zoom.',
+      'foam texture (bright walls, darker cell interiors) tiling the WHOLE water, not just the shore. As of ' +
+      '2026-08-19 this reads F2−F1 (`buildFoamCellularStructure`), not raw F1 — connected cell EDGES, not ' +
+      'isolated vertex blobs. Flat grey means the cut (`WATER_FOAM_EDGE_NEAR/FAR`) is not landing where the ' +
+      'real distribution puts it, or the cell scale is too fine/coarse to resolve at this zoom; scattered ' +
+      'disconnected specks with no connecting lines would mean the metric regressed back to raw F1.',
   }),
   Object.freeze({
     n: 11,
@@ -820,31 +1035,6 @@ export const WATER_DEBUG_CHANNELS = Object.freeze([
       '`getStatus().floorGateCompiled` and `expectedDepth`.',
   }),
   Object.freeze({
-    n: 20,
-    id: 'obstacleFoam',
-    label: '19 · Obstacle proximity (depth-buffer ring, size-independent)',
-    reads:
-      'Fraction of an 8-tap ring around this pixel that found something ranked above water in `buf:scene.' +
-      'depth` (`water-render.js#WATER_OBSTACLE_RING_TAPS`) — a SEPARATE detector from the mask-SDF shore foam ' +
-      'above, sourced from what actually rendered this frame rather than the painted water mask, so a small ' +
-      'rock the mask derivation missed still lights this up. White in a ring around ANY solid item sitting ' +
-      'on or near water; flat black everywhere (including right beside a visible obstacle) below tier 4, or ' +
-      'if `depthTexture`/`uViewRect` never reached this material (`getStatus().floorGateCompiled`).',
-  }),
-  Object.freeze({
-    n: 21,
-    id: 'maskProximityFoam',
-    label: '20 · Mask proximity (full-res direct read, no derivation)',
-    reads:
-      'Fraction of the SAME 8-tap ring reading LAND in the full-resolution painted water mask directly — ' +
-      'never the coarse derived grid `shore`/`shoreDist` above read from. THE decisive channel for "the mask ' +
-      'clearly has a hole here, why is nothing foaming": if this is white around a painted feature while ' +
-      'channels 2-14 (the derivation-grid-driven ones) are flat, the derivation grid lost that feature — this ' +
-      'ring did not, because it never asked the derivation grid anything. Flat black below tier 4, or if this ' +
-      'reads black RIGHT ON TOP of a visibly painted hole, the world→mask-UV mapping itself is wrong — compare ' +
-      'against channel 2 at the same point, which shares the identical `uMaskRect` formula.',
-  }),
-  Object.freeze({
     n: 22,
     id: 'flowSolidity',
     label: '21 · Flow pack solidity (S2, docs/planning/Water-Simulation-Turn.md)',
@@ -862,20 +1052,101 @@ export const WATER_DEBUG_CHANNELS = Object.freeze([
   Object.freeze({
     n: 23,
     id: 'flowVelocity',
-    label: '22 · Flow pack velocity — direction=hue, speed=value (S3 ★ KEYSTONE)',
+    label: '22 · Flow pack velocity — deviation from bulk flow (S3 ★ KEYSTONE)',
     reads:
       "`res:waterFlow`'s own finished pack, RG (velocity, normalised — free-stream speed = 1.0) and B " +
       '(speed01) — the coarse-to-fine pressure-projection solve`s own output ' +
       '(`docs/planning/Water-Simulation-Turn.md` §3 B3, `water-flow-solve.js``s CPU-proven algorithm, ' +
-      'ported function-for-function). Colour IS the reading: hue is the flow`s own direction ' +
-      '(`atan(vy,vx)`, wrapped to [0,1] — NOT a display remap, this channel doubles as a real compass), ' +
-      'brightness is local speed relative to the free-stream (dim near a stagnation point upstream of an ' +
-      'obstacle, BRIGHT beside it where the plan`s own "constriction speed-up" shows, black inside solid ' +
-      'or wherever the pack has not baked). THE PROOF LINE THIS CHANNEL EXISTS FOR: hue should visibly BEND ' +
-      'around a painted rock — flow arriving from upstream curving to pass alongside it — not point straight ' +
-      'through as if the rock were not there. If the hue field looks uniform (no bend, no brightening beside ' +
-      'obstacles), the routing solve is not reaching this pixel; cross-check channel 21 first (is solidity ' +
-      'even correctly placed there) before suspecting the velocity solve itself.',
+      'ported function-for-function). ⚠️ REDESIGNED 2026-08-18 — the first version (absolute direction ' +
+      'as hue) was numerically correct but visually near-uniform on a real river, because a river`s bulk ' +
+      'direction is the same almost everywhere BY CONSTRUCTION; routing is a small local perturbation on ' +
+      'top of that, and absolute-hue spent the whole colour wheel on a signal that barely moved. This ' +
+      'channel now shows DEVIATION from the river`s own bulk compass (`flowAngleDeg`), not absolute ' +
+      'direction: CYAN = bent one way, ORANGE = bent the other, GREY/WHITE = flowing with the bulk ' +
+      '(no deviation — correctly the common case, away from any obstacle), BLACK = inside solid or not ' +
+      'yet baked. Brightness still carries local speed. THE PROOF LINE THIS CHANNEL EXISTS FOR: a clean ' +
+      'grey/white field should show a cyan/orange FRINGE right at a painted rock`s edges — flow splitting ' +
+      'around it — confirmed live against the real Underground river ' +
+      '(`tools/shader-lab/bench-water.js#real-underground-river-flow`). A field that stays grey ' +
+      'everywhere, even right beside a rock, means the routing solve is not reaching this pixel; ' +
+      'cross-check channel 21 first (is solidity even correctly placed there) before suspecting the ' +
+      'velocity solve itself.',
+  }),
+  Object.freeze({
+    n: 24,
+    id: 'simFoamRaw',
+    label: '23 · Sim pack foam — RAW accumulator, unclamped (S5)',
+    reads:
+      "`res:waterSim`'s own ping-ponged buffer (`water-sim.js`+`water-sim-subsystem.js`, S5, " +
+      '`docs/planning/Water-Simulation-Turn.md` §3 Layer C), R channel, BEFORE the display-time clump ' +
+      'threshold — the actual stored state a future frame reads back as "what was here a moment ago". ' +
+      'Flat black everywhere means the sim subsystem has not ticked yet for this floor (check ' +
+      "`getWaterBodyInfo()[floor].sim` — `'not ticked'` or `lastStatus` names why; waiting on the flow " +
+      'AND body packs both being baked first is normal and temporary). A grey/white smear that never ' +
+      'settles or grows unbounded is the finding channel 25 cannot show on its own — this one is the ' +
+      'RAW number, not what the water actually displays.',
+  }),
+  Object.freeze({
+    n: 25,
+    id: 'simFoam',
+    label: '24 · Sim pack foam — display-clamped, what the water shows (S5 ★ KEYSTONE)',
+    reads:
+      'Channel 24, run through the SAME `smoothstep(WATER_SIM_CLUMP_LO, WATER_SIM_CLUMP_HI, …)` the ' +
+      'visible water itself applies — this is the actual number added into `totalFoam`. THE PROOF LINE ' +
+      'THIS CHANNEL EXISTS FOR: watch one obstacle over a few real seconds — foam should visibly APPEAR ' +
+      'at its upstream face, then DRIFT downstream while fading, never sit as a static, perfectly ' +
+      "regular ring (that shape was the whole complaint S5 exists to fix; see `water-sim.js`'s own " +
+      'header for the proof this looks right against the real Underground river ' +
+      '(`tools/shader-lab/bench-water.js#real-underground-river-sim`). Flat black despite channel 24 ' +
+      'showing real signal means the clump band (`WATER_SIM_CLUMP_LO`/`_HI`) is miscalibrated for this ' +
+      "map's own emission magnitudes, not that the simulation itself is broken.",
+  }),
+  Object.freeze({
+    n: 26,
+    id: 'simFoamStructure',
+    label: '25 · Sim pack foam — cellular structure mask ALONE, no accumulator (S5)',
+    reads:
+      "`buildFoamCellularStructure`'s (`water-shore.js`) `.structure` output — the SAME Worley " +
+      '"net with holes" texture shore foam has used since W4, now reused rather than duplicated ' +
+      "(author, live: \"Real foam is complex stringy mess, it's not a 'glow' effect\"). This channel " +
+      'has NO sim buffer in it at all — it is the raw cellular mask covering the whole water body, so ' +
+      'an author can judge cell size/streak stretch/hole density on their own, independent of where ' +
+      'the sim happens to be bright this frame. Should read as a static (non-animated) net of bright ' +
+      'walls and dark holes, elongated along the local current — NOT a repeating single-size pattern ' +
+      "(two Worley octaves multiply on purpose; see `WATER_FOAM_FINE_OCTAVE`'s own doc if it reads " +
+      'as one anyway). Flat white or flat black both mean something upstream is degenerate — check ' +
+      'channel 23 (`flowVelocity`) for a real local direction first.',
+  }),
+  Object.freeze({
+    n: 27,
+    id: 'simFoamStructured',
+    label: '26 · Sim pack foam — structured, what actually reaches the water (S5 ★ KEYSTONE)',
+    reads:
+      'Channel 24 (the display-clamped accumulator) MULTIPLIED by channel 25 (the cellular structure ' +
+      'mask) — this exact product is what `totalFoam` combines against `field.foam` via `max`. THE ' +
+      'PROOF LINE THIS CHANNEL EXISTS FOR: the wake should read as a ragged, cellular cluster of ' +
+      "foam patches trailing an obstacle — SOME of channel 24's own bright wake shape showing " +
+      'through (never the WHOLE smooth shape, that would mean channel 25 is reading as flat white) ' +
+      'and never a uniform glow. If this channel looks identical to channel 24, channel 25 is likely ' +
+      "flat white for this water body's own scale/reach; if this channel is flat black despite both " +
+      '24 and 25 showing real signal independently, the two are failing to reach the same pixels — ' +
+      "check `field.domainOffset`/`localFlowDirSafe` are the SAME nodes both this channel's own " +
+      'structure call and the tier-4 shore call use, not two independently-derived copies.',
+  }),
+  Object.freeze({
+    n: 28,
+    id: 'flowWarp',
+    label: '27 · Base-surface flow warp, SIGN PROOF LINE (2026-08-19)',
+    reads:
+      '`field.flowWarp` ALONE (`water-field.js`) — NOT summed with `drift`/`bankWarp` (domainOffset ' +
+      'itself cannot show this: drift dwarfs it within seconds). R/G mid-grey (128) means zero; ' +
+      'brighter than mid-grey means positive X/Y, darker means negative — divided by 10 world-px for ' +
+      "display, not the term's own much larger safety cap, so ordinary values sit well inside range. " +
+      'THE PROOF LINE THIS CHANNEL EXISTS FOR (2026-08-19 sign fix, live-reported "the flow seems to ' +
+      'push the water INTO the stockwork"): pick a point just upstream of a real obstacle where the ' +
+      "solved flow visibly bends one way — this channel's own colour at that point should point AWAY " +
+      'from the obstacle, matching the bend, never toward it. Flat mid-grey everywhere means either no ' +
+      'real local deflection reached this pixel (open water, expected) or the flow pack has not baked.',
   }),
 ]);
 
@@ -956,6 +1227,26 @@ export const WATER_PRESETS = Object.freeze({
     breakFoam: 1,
     foamTrail: 0.8,
     caustics: 0.33,
+    bankInfluence: 0.35,
+    flowWarpInfluence: 1.0,
+    flowSolveOmega: 1.7,
+    flowSolveIterations: 60,
+    foamFlowNudge: 0.35,
+    foamEdgeFar: 0.7,
+    foamEdgeAaPx: 1.5,
+    foamBubbleAmount: 0.4,
+    foamBubbleOctave: 5.2,
+    foamBubbleTimeScale: 0.35,
+    foamGrainAmount: 0.45,
+    foamGrainOctave: 11,
+    foamGrainTimeScale: 0.9,
+    simFoamDecaySec: 1.6,
+    simDiffuse: 0.35,
+    simShearGain: 3.0,
+    simNearSolidGain: 8.0,
+    simClumpLo: 0.03,
+    simClumpHi: 0.15,
+    simClumpAaPx: 1.5,
   },
 });
 

@@ -662,6 +662,46 @@ export const WATER_TIER5_FRINGE_SPECULAR_LO = 1.0;
 export const WATER_TIER5_FRINGE_SPECULAR_HI = 3.0;
 
 /**
+ * ⚠️ TEMPORARY SAFETY SLIDE (2026-08-23) — tier 5 (refraction) clamped OFF
+ * regardless of what's requested, until its own architecture is fixed.
+ * `feedback_safety_slide_outranks_doctrine`: staying off beats staying on
+ * and visibly broken.
+ *
+ * Confirmed, not guessed: `water-refraction-subsystem.js#tick()` captures
+ * `buf:scene.color` AFTER `runGeometryWorldPass` finishes — which means
+ * THIS SAME FRAME's own tier-5 mesh (drawn inside that pass, renderOrder
+ * 0.52, last of the three) is already baked into what gets captured for
+ * the NEXT frame's own tier-5 read. Tier 5 genuinely reads a buffer
+ * containing its own past output, every frame, forever. Author, live,
+ * after two narrower fixes (bounding the offset magnitude, f4bd218;
+ * suppressing the chromatic fringe on specular, cfbdfa2) both failed to
+ * resolve it: "It's like the water is sampling itself and then producing
+ * visual feedback noise which is compounding." Confirmed architecturally
+ * correct on inspection — this is a different, more fundamental problem
+ * than either shipped fix targeted: the self-reference itself, not any
+ * one term's magnitude.
+ *
+ * The correct fix is giving tier 5 its own separate draw that runs AFTER
+ * the capture, so it never feeds itself — a real frame-graph change (a
+ * new pass; needs its own depth-authority-based occlusion too, since
+ * `configureShared`'s own doctrine below is "paint order only, never
+ * depth" — mesh 3 currently has NO occlusion protection beyond that paint
+ * order, unlike mesh 1/2's `notOccluded`). Not a same-session patch.
+ *
+ * ⚠️ NOT read inside `buildWaterSurfaceMaterial` itself — this function's
+ * job is honestly constructing whatever tier it is ASKED for (every test
+ * in this file's own "TIER 5" section depends on genuine tier-5
+ * construction staying testable in isolation). `water-surface-
+ * subsystem.js#sync()` reads this constant and clamps the REQUESTED tier
+ * there, before it ever reaches this function — a production-wiring
+ * decision, not a construction-time one.
+ *
+ * Flip back to `false` only once the capture excludes tier 5's own output
+ * — not before, and not just because the symptom looks quieter.
+ */
+export const WATER_TIER5_DISABLED_PENDING_SELF_CAPTURE_FIX = true;
+
+/**
  * The tier-0 surface material.
  *
  * @param {object} args
@@ -853,6 +893,14 @@ export function buildWaterSurfaceMaterial({
   // Falls back to 4, not 0: tiers 1-4 read nothing this subsystem provides,
   // so there is no reason to darken the whole surface while only the newest
   // rung waits on its own producer to warm up.
+  //
+  // ⚠️ Deliberately NOT where `WATER_TIER5_DISABLED_PENDING_SELF_CAPTURE_FIX`
+  // is applied — that constant's own doc explains why: this function's job
+  // is honestly constructing whatever tier it is ASKED for (every test in
+  // this file's own "TIER 5" section depends on that staying true), and the
+  // safety slide is a PRODUCTION WIRING decision, not a construction-time
+  // one. `water-surface-subsystem.js#sync()` is where the real caller's
+  // requested tier gets clamped before it ever reaches here.
   const activeTier = bodyTexture ? (requestedTier >= 5 && !capturedTexture ? 4 : requestedTier) : 0;
   const {
     texture,

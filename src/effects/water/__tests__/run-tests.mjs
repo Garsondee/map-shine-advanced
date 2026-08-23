@@ -28,6 +28,7 @@ import { run as runWaterSampling } from './water-sampling.test.mjs';
 import { run as runWaterBounds } from './water-bounds.test.mjs';
 import { run as runWaterShore } from './water-shore.test.mjs';
 import { run as runWaterRegistration } from './water-registration.test.mjs';
+import { run as runWaterSurfaceSubsystem } from './water-surface-subsystem.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -67,6 +68,7 @@ const suites = [
   ['water-sampling', runWaterSampling],
   ['water-shore', runWaterShore],
   ['water-light', runWaterLight],
+  ['water-surface-subsystem', runWaterSurfaceSubsystem],
   // LAST, because these are the only suites that import the real THREE
   // bundle — keeping them at the end means a failure in the pure-arithmetic
   // suites is reported before the heavyweight ones even load.

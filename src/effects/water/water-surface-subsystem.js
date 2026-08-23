@@ -47,11 +47,30 @@
  */
 
 import { createLogger } from '../../core/log.js';
-import { buildWaterSurfaceMaterial, WATER_DEFAULT_TIER } from './water-render.js';
+import {
+  buildWaterSurfaceMaterial,
+  WATER_DEFAULT_TIER,
+  WATER_TIER5_DISABLED_PENDING_SELF_CAPTURE_FIX,
+} from './water-render.js';
 import { waterKeyLightDirection } from './water-light.js';
 import { QUAD_UVS, QUAD_INDICES, buildQuadPositions } from '../../scene/index.js';
 
 const log = createLogger('WaterSurface');
+
+/**
+ * The safety-slide tier gate, pulled out as a pure function so it is
+ * directly testable — `water-surface-subsystem.js` otherwise has NO
+ * dedicated test file at all (a real, pre-existing coverage gap this
+ * doesn't attempt to close wholesale), and this is genuinely safety-
+ * critical: `sync()`'s own tier resolution below depends on it clamping
+ * correctly every time, not just when eyeballed once. See
+ * `WATER_TIER5_DISABLED_PENDING_SELF_CAPTURE_FIX`'s own doc (water-
+ * render.js) for WHY tier 5 is clamped; this is only the WHERE/HOW.
+ * @param {number} rawTier @returns {number}
+ */
+export function resolveGatedWaterTier(rawTier) {
+  return rawTier >= 5 && WATER_TIER5_DISABLED_PENDING_SELF_CAPTURE_FIX ? 4 : rawTier;
+}
 
 /**
  * @param {object} args
@@ -646,7 +665,13 @@ export function createWaterSurfaceSubsystem({
     // Rebuilding is the only way to actually change the compiled shader; a
     // uniform cannot (Law 4's own test — water-render.js's header). Mirrors
     // candle flame's material rebuild on a quality-tier change.
-    const resolvedTier = Number.isFinite(state.perfTier) ? state.perfTier : WATER_DEFAULT_TIER;
+    // ⚠️ SAFETY SLIDE (2026-08-23) — `resolveGatedWaterTier`'s own doc,
+    // above, and `WATER_TIER5_DISABLED_PENDING_SELF_CAPTURE_FIX`'s (water-
+    // render.js) explain why: tier 5 reads a buffer that already contains
+    // its own previous frame's output, live-reported as compounding visual
+    // noise, not yet architecturally fixed.
+    const rawResolvedTier = Number.isFinite(state.perfTier) ? state.perfTier : WATER_DEFAULT_TIER;
+    const resolvedTier = resolveGatedWaterTier(rawResolvedTier);
     if (resolvedTier !== builtForTier) {
       const prev = surface;
       surface = buildSurfaceForTier(resolvedTier);

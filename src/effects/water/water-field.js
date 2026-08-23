@@ -312,8 +312,39 @@ export const WATER_BANK_REACH_PX = 180;
  * so raising it is a visual-weight decision, not a new safety question —
  * unlike `WATER_BANK_INFLUENCE`/`WATER_FOAM_FLOW_NUDGE`, deliberately left
  * at 0.35: neither one was the thing reported missing.
+ *
+ * ⚠️ THAT LAST CLAIM STOPPED BEING TRUE THE MOMENT THIS WENT TO 3 (2026-08-23,
+ * the author's own tuned preset). "Bounded by construction" was reasoning
+ * about the DIRECTION-deviation input alone (correctly capped at length 1) —
+ * it says nothing about the OUTPUT's size relative to the noise domain's own
+ * cell, which is exactly what governs whether two adjacent pixels can sample
+ * unrelated noise (`WATER_TIER2_WAVE_SCALE_PX`'s own file-header warning,
+ * this rung's oldest and most-repeated lesson). At influence=1 the output cap
+ * (`waveScalePx·influence` = 152px) never exceeds one noise cell — measured
+ * against the real Tower Bridge mask, only 2.4% of solid-boundary texels
+ * ever cross even 100px, none cross 200px. At influence=3 the SAME real
+ * boundary texels: mean shift 67px (3×, as expected), but now 8.6% exceed
+ * 200px and 2.4% exceed 300px — up to 456px at the worst point, three full
+ * noise cells, right at a real pier. `WATER_FLOW_WARP_CAP_CELLS` below is the
+ * fix: a ceiling on the FINAL warp vector's length, independent of how high
+ * influence goes, so influence keeps controlling how MANY boundary pixels
+ * reach a strong bend (the author's own intent — a wider, more assertive
+ * response to real solve signal) without any of them individually shifting
+ * far enough to decorrelate from their own neighbours.
  */
 export const WATER_FLOW_WARP_INFLUENCE = 1.0;
+
+/** ⚠️ SEE THE WARNING ABOVE — added 2026-08-23 alongside it, not before.
+ * Caps `flowWarp`'s own final length to this many `WATER_TIER2_WAVE_SCALE_PX`
+ * cells, no matter how large `WATER_FLOW_WARP_INFLUENCE` is dialled. 1.0 was
+ * chosen because it is a no-op against every previously-shipped/verified
+ * default (influence=1 already never exceeded one cell — this only starts
+ * clamping once influence pushes past it, exactly the regime this doc's own
+ * measurement above shows first goes wrong). Bounding by CELLS, not a raw
+ * px constant, keeps this correct if `waveScalePx` itself is ever retuned —
+ * the safety question is always "relative to the pattern's own scale", never
+ * an absolute pixel count. */
+export const WATER_FLOW_WARP_CAP_CELLS = 1.0;
 
 /** How far from the bank foam has fully died away, world px. Foam is a
  * shoaling phenomenon — it breaks where the water shallows — so it is strongest
@@ -614,7 +645,23 @@ export function buildWaterSurfaceField({
   // and "along −tangent" look identical — so it never exposed this bug.
   // `flowWarp`'s job (deflect AWAY from an obstacle, a directional, sign-
   // SENSITIVE claim) does not have that luxury.
-  const flowWarp = flowDeviationSafe.mul(uWaveScalePx.mul(flowWarpInfluenceNode)).negate();
+  const flowWarpRaw = flowDeviationSafe.mul(uWaveScalePx.mul(flowWarpInfluenceNode)).negate();
+  // ⚠️ INDEPENDENT SAFETY CAP (2026-08-23) — see `WATER_FLOW_WARP_CAP_CELLS`'s
+  // own doc for the measured numbers this responds to. `flowDeviationSafe`
+  // above only bounds the DIRECTION-deviation input to length ≤1; it says
+  // nothing about how large the OUTPUT gets once `flowWarpInfluenceNode` is
+  // dialled well past 1 — and an output shift approaching or exceeding one
+  // noise CELL (`uWaveScalePx`) is exactly the "adjacent pixels sample
+  // unrelated noise" failure this file's own header already named once, one
+  // level up (the drift/ray-fan bug). Clamped by RESCALING the raw vector
+  // (never `min` on a per-axis basis, which would distort direction) so the
+  // cap only ever shortens an over-length vector, never touches one already
+  // inside it — a no-op at every previously-shipped default, confirmed: at
+  // influence=1 this never engages (measured max 152px == exactly the cap).
+  const flowWarpCapPx = uWaveScalePx.mul(float(WATER_FLOW_WARP_CAP_CELLS));
+  const flowWarpLen = length(flowWarpRaw);
+  const flowWarpCapScale = min(float(1), flowWarpCapPx.div(max(flowWarpLen, float(1e-4))));
+  const flowWarp = flowWarpRaw.mul(flowWarpCapScale);
 
   // THE COMBINED, ALREADY-SAFE DOMAIN SHIFT — travel plus bank warp plus flow warp, together.
   // Returned to the caller (below) so TIER 4's filament foam

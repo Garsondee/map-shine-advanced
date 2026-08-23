@@ -84,6 +84,7 @@ import {
   WATER_TIER2_FOAM,
   WATER_TIER3_CHOP,
   WATER_FLOW_WARP_INFLUENCE,
+  WATER_FLOW_WARP_CAP_CELLS,
   waterFlowVector,
 } from '../../src/effects/water/water-field.js';
 import {
@@ -2789,7 +2790,11 @@ export function createWaterBench({ THREE, renderer, log }) {
       // HEADROOM-relative gauge channel B). Mixing the two up here would
       // silently test a different formula than the one that ships.
       const bulkDirXY = waterFlowVector(bearingDeg);
-      function flowWarpPxAt(sample) {
+      // ⚠️ TWO CAPS NOW (2026-08-23) — see `WATER_FLOW_WARP_CAP_CELLS`'s own
+      // doc, `water-field.js`. The influence-scaled magnitude AND the
+      // independent per-cell ceiling both apply; the SMALLER one wins,
+      // exactly mirroring the real shader's `min(1, capPx/warpLen)` rescale.
+      function flowWarpPxAt(sample, influence = WATER_FLOW_WARP_INFLUENCE) {
         const [cx, cy] = bulkDirXY;
         const useReal = sample.mag >= 0.02;
         const dx = useReal ? sample.vx / sample.mag : cx;
@@ -2798,13 +2803,21 @@ export function createWaterBench({ THREE, renderer, log }) {
         const devY = dy - cy;
         const devLen = Math.hypot(devX, devY);
         const clampScale = devLen > 1 ? 1 / devLen : 1;
-        const warpX = devX * clampScale * WATER_TIER2_WAVE_SCALE_PX * WATER_FLOW_WARP_INFLUENCE;
-        const warpY = devY * clampScale * WATER_TIER2_WAVE_SCALE_PX * WATER_FLOW_WARP_INFLUENCE;
+        let warpX = devX * clampScale * WATER_TIER2_WAVE_SCALE_PX * influence;
+        let warpY = devY * clampScale * WATER_TIER2_WAVE_SCALE_PX * influence;
+        const rawMag = Math.hypot(warpX, warpY);
+        const capPx = WATER_TIER2_WAVE_SCALE_PX * WATER_FLOW_WARP_CAP_CELLS;
+        const capScale = Math.min(1, capPx / Math.max(rawMag, 1e-4));
+        warpX *= capScale;
+        warpY *= capScale;
         return { warpX, warpY, mag: Math.hypot(warpX, warpY) };
       }
       const warpBend1 = flowWarpPxAt(sBend1);
       const warpBend2 = flowWarpPxAt(sBend2);
-      const warpCapPx = WATER_TIER2_WAVE_SCALE_PX * WATER_FLOW_WARP_INFLUENCE;
+      const warpCapPx = Math.min(
+        WATER_TIER2_WAVE_SCALE_PX * WATER_FLOW_WARP_INFLUENCE,
+        WATER_TIER2_WAVE_SCALE_PX * WATER_FLOW_WARP_CAP_CELLS
+      );
 
       // ── WIDE VISUAL — channel 23 (`flowVelocity`, hue = deviation from the
       // bulk compass) over the WHOLE fixture, the same already-live-
@@ -3077,6 +3090,31 @@ export function createWaterBench({ THREE, renderer, log }) {
               "— the bounded-fraction-of-one-cell safety property `WATER_BANK_INFLUENCE`'s own doc requires of " +
               'anything added to `domainOffset`, checked against REAL baked deflection rather than just the constant in isolation',
           })),
+          // ⚠️ 2026-08-23 — the check above is a no-op proof at the bench's own
+          // default influence (1.0): both caps already coincide there, so it
+          // cannot tell "capped correctly" apart from "never needed capping".
+          // Author's own tuned preset raised WATER_FLOW_WARP_INFLUENCE to 3 —
+          // measured live against the REAL Tower Bridge mask (not this
+          // fixture) before this fix shipped: up to 456px (3 full noise
+          // cells) at solid-boundary texels, the mechanism behind the
+          // "flow emerges from the stonework's own normal" report. This
+          // check re-evaluates the SAME two real baked points at influence=3
+          // and demands `WATER_FLOW_WARP_CAP_CELLS` still holds regardless —
+          // the one property this whole fix exists to guarantee.
+          evaluate('the-flow-warp-cap-holds-even-at-3x-the-shipped-default-influence', () => {
+            const boosted = 3;
+            const boostedCapPx = WATER_TIER2_WAVE_SCALE_PX * WATER_FLOW_WARP_CAP_CELLS;
+            const b1 = flowWarpPxAt(sBend1, boosted);
+            const b2 = flowWarpPxAt(sBend2, boosted);
+            return {
+              ok: b1.mag <= boostedCapPx + 1e-6 && b2.mag <= boostedCapPx + 1e-6,
+              measured: { warpBend1PxAtInfluence3: b1.mag, warpBend2PxAtInfluence3: b2.mag, boostedCapPx },
+              expected:
+                `neither point exceeds ${boostedCapPx.toFixed(2)}px (WATER_TIER2_WAVE_SCALE_PX × WATER_FLOW_WARP_CAP_CELLS) ` +
+                'even with influence tripled — the cap is independent of influence BY DESIGN, not a coincidence of ' +
+                'the shipped default; a regression here would mean the cap stopped applying, not just that influence changed',
+            };
+          }),
           evaluate('the-rendered-flow-warp-sign-matches-the-real-deflection-not-its-opposite', () => ({
             ok:
               (expectedSignX === 0 || Math.sign(renderedFlowWarpX) === expectedSignX) &&

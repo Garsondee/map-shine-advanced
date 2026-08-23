@@ -599,6 +599,58 @@ export const WATER_TIER4_CAUSTICS = 0.33;
 export const WATER_TIER4_FOAM_TRAIL = 0.85;
 
 /**
+ * ============================================================================
+ * FOAM'S OWN EDGE-SHARPNESS GATE (2026-08-24)
+ * ============================================================================
+ * Live-reported, right after the soft-mask-bleed fix (`0b1ab2d`) landed:
+ * *"Currently the foam that we've been working on appears on all shores, but
+ * could we add a slider so that it only appears from sharp black/white
+ * transitions and actually doesn't happen when there is a smoother edge?"*
+ * A genuinely new capability, not a bug — every foam source this effect has
+ * (`field.foam`'s shore-proximity crest, the sim-driven wake) fires near ANY
+ * shore, with no notion of whether the author painted that shore hard or
+ * soft.
+ *
+ * THE MEASUREMENT: how fast the RAW mask value changes per world px, sampled
+ * as a central difference at a FIXED WORLD-SPACE offset
+ * (`WATER_FOAM_EDGE_SHARPNESS_TAP_PX`) — deliberately NOT `fwidth()` (that is
+ * a SCREEN-space derivative, confounded with camera zoom; this needs a
+ * property of the AUTHORED ART, independent of how close the camera happens
+ * to be). A hard-painted edge changes the full 0→1 range within about one
+ * native mask texel, so two taps straddling it read close to the full jump;
+ * a wide, deliberately soft gradient spreads that same 0→1 change across
+ * many texels, so the SAME two taps see only a small fraction of it. The two
+ * cases differ by roughly an order of magnitude at this tap distance —
+ * confirmed on real GPU data against both a synthetic hard edge and the
+ * same wide gradient fixture the soft-mask-bleed fix was verified against.
+ *
+ * ⚠️ **THE THRESHOLD ITSELF STAYS A CONSTANT; THE AUTHOR-FACING SLIDER IS
+ * `WATER_PARAMS.foamEdgeSharpness`, A BLEND, NOT A RECALIBRATION.** The
+ * shader computes `gate = smoothstep(GRAD_LO, GRAD_HI, gradMag)` once, then
+ * `sharpnessFactor = mix(1, gate, foamEdgeSharpness)` — at `foamEdgeSharpness
+ * = 0` (the schema default) this is EXACTLY 1 everywhere, so a map that
+ * never touches this new slider gets byte-identical foam to before this
+ * fix, matching every other opt-in threshold change this session
+ * (`shorelineDepth`'s own two rounds). Raising it interpolates toward the
+ * full gate, so the author controls how STRICTLY this applies rather than
+ * needing to guess a correct absolute gradient value themselves.
+ */
+export const WATER_FOAM_EDGE_SHARPNESS_TAP_PX = 16;
+/** Below this measured gradient (mask value change per world px), an edge
+ * reads as fully SOFT — the gate contributes nothing there once raised.
+ * Calibrated against the same 256-world-px-wide gradient fixture used to
+ * verify `shorelineDepth`'s own body-pack fix: that gradient measures
+ * ~0.004 at this tap distance, comfortably below this floor. */
+export const WATER_FOAM_EDGE_SHARPNESS_GRAD_LO = 0.006;
+/** At or above this measured gradient, an edge reads as fully SHARP — the
+ * gate contributes its full value there. Calibrated against a synthetic
+ * hard (source-texel-width) edge at the same tap distance, which measures
+ * ~0.03 — comfortably above this ceiling, with headroom for a hard edge
+ * that has been softened by a texel or two of the mask's own bilinear
+ * filtering (`WATER_MASK_FILTER`, `water-body.js`) without falling short. */
+export const WATER_FOAM_EDGE_SHARPNESS_GRAD_HI = 0.018;
+
+/**
  * `capturedRect`'s own default — a degenerate-but-safe 1×1 world rect at the
  * origin, used ONLY before `water-refraction-subsystem.js` has ever
  * completed a real capture (`setCapturedRect` re-points it the moment one
@@ -884,6 +936,14 @@ export function buildWaterSurfaceMaterial({
   breakFoam = WATER_TIER4_BREAK_FOAM,
   caustics = WATER_TIER4_CAUSTICS,
   foamTrail = WATER_TIER4_FOAM_TRAIL,
+  // ⚠️ LIVE PARAM (2026-08-24) — live-reported: foam appears on every shore
+  // regardless of how the author painted the bank, and a softly-feathered
+  // bank should read differently from a hard-edged one. See
+  // `WATER_FOAM_EDGE_SHARPNESS_GRAD_LO/HI`'s own doc for the mechanism.
+  // Default 0 — this multiplies a `mix(1, gate, this)` blend, so 0 is
+  // BYTE-IDENTICAL to every previously-shipped map (the gate never engages
+  // at all); only turning it up starts requiring a sharper local mask edge.
+  foamEdgeSharpness = 0,
   // ── TIER 5 — REFRACTION (2026-08-23, Water-Testament.md §2.5) ───────────
   // `capturedTexture` follows the SAME "caller always supplies a real, if
   // 1×1 placeholder, texture object" contract `waterSimTexture` above already
@@ -1074,6 +1134,7 @@ export function buildWaterSurfaceMaterial({
   const uBreakFoam = uniform(float(breakFoam));
   const uCaustics = uniform(float(caustics));
   const uFoamTrail = uniform(float(foamTrail));
+  const uFoamEdgeSharpness = uniform(float(foamEdgeSharpness));
   // THE FOAM BAND's REACH, derived from the author's own `depthScalePx` on the
   // CPU — see `water-shore.js#WATER_FOAM_SHORE_FRACTION` for why a fraction of a
   // body-scale length rather than a bare pixel constant is the entire answer to
@@ -1895,7 +1956,61 @@ export function buildWaterSurfaceMaterial({
   });
   const simFoamStructure = simFoamStructureBuild.structure;
   const waterSimFoamStructured = waterSimFoam.mul(simFoamStructure);
-  const totalFoam = min(max(field.foam, waterSimFoamStructured), float(1));
+
+  // ── FOAM EDGE-SHARPNESS GATE — see `WATER_FOAM_EDGE_SHARPNESS_TAP_PX`'s
+  // own doc (above the constant, this file) for the full mechanism. Reads
+  // the RAW mask (`maskTexture`, the same source `maskTexNode` above
+  // samples), not the baked body pack — this is a property of the AUTHORED
+  // ART, and the body pack's own SDF is already smoothed by the flood.
+  //
+  // ⚠️ EVERY ONE OF THESE FOUR TAPS PUSHED TO `maskTexNodes`
+  // (`feedback_texture_nodes_must_be_repointed_together`, THIS SAME FILE's
+  // own loud warning six lines above `maskTexNodes`' own declaration) — live-
+  // reported, 2026-08-24, no wiring gap needed to notice it: "I see no
+  // difference between the highest and lowest setting." Without this, all
+  // four taps sample the 1×1 construction-time placeholder FOREVER — a 1×1
+  // texture has no spatial variation, so the gradient below is identically
+  // ZERO on every real map regardless of what is painted, and the gate never
+  // reflects reality no matter where the slider sits.
+  //
+  // GATED TO TIER 4+ (unlike most of this file's other unconditional-below-
+  // their-tier terms) — the request this answers is specifically about
+  // `shore`'s own foam ("the foam we've been working on"), which does not
+  // exist before tier 4 either. Keeping this out of tiers 0-3 also keeps
+  // `maskTexNodes`' own count at exactly 1 below tier 4, the invariant
+  // `water-render.test.mjs`'s own removal guard already pins (the OLD
+  // 8-tap obstacle ring's ghost).
+  let foamSharpnessGate = float(1);
+  let foamSharpnessFactor = float(1);
+  if (activeTier >= 4) {
+    const tapWorld = float(WATER_FOAM_EDGE_SHARPNESS_TAP_PX);
+    const sampleMaskAt = (worldOffsetX, worldOffsetY) => {
+      const u = positionWorld.x.add(worldOffsetX).sub(uMaskRect.x).div(spanX);
+      const v = positionWorld.y.add(worldOffsetY).sub(uMaskRect.y).div(spanY);
+      const tapNode = texture(maskTexture, vec2(clamp(u, 0, 1), clamp(v, 0, 1)));
+      maskTexNodes.push(tapNode);
+      return tapNode.r;
+    };
+    const maskGradX = sampleMaskAt(tapWorld, float(0))
+      .sub(sampleMaskAt(tapWorld.negate(), float(0)))
+      .div(tapWorld.mul(float(2)));
+    const maskGradY = sampleMaskAt(float(0), tapWorld)
+      .sub(sampleMaskAt(float(0), tapWorld.negate()))
+      .div(tapWorld.mul(float(2)));
+    const maskGradMag = length(vec2(maskGradX, maskGradY));
+    foamSharpnessGate = smoothstep(
+      float(WATER_FOAM_EDGE_SHARPNESS_GRAD_LO),
+      float(WATER_FOAM_EDGE_SHARPNESS_GRAD_HI),
+      maskGradMag
+    );
+    // `foamEdgeSharpness = 0` (the schema default) makes this EXACTLY 1 —
+    // see the constant block's own doc for why that is load-bearing, not
+    // incidental: every map that has never touched this slider gets
+    // byte-identical foam to before this fix.
+    foamSharpnessFactor = mix(float(1), foamSharpnessGate, uFoamEdgeSharpness);
+  }
+
+  const totalFoam = min(max(field.foam, waterSimFoamStructured), float(1)).mul(foamSharpnessFactor);
 
   // ── TIER 4: CAUSTICS' OWN AUTHOR-FACING GAIN ─────────────────────────────
   // `field.causticBrightness` already carries the calibrated
@@ -2346,6 +2461,16 @@ export function buildWaterSurfaceMaterial({
       clamp(field.flowWarp.y.div(float(10)).add(float(0.5)), float(0), float(1)),
       float(0.5)
     ),
+    // THE RAW GATE (2026-08-24), NOT `foamSharpnessFactor` — isolating "how
+    // sharp does this pixel's local mask edge measure" from "is the slider
+    // even turned on", the same split every OTHER gate in this list draws.
+    // White = a sharp, hard-painted edge; black = a soft, gradual one;
+    // mid-grey = ambiguous, between the two calibrated bounds. Flat white
+    // (or flat black) everywhere on a mask with BOTH edge styles painted
+    // means `WATER_FOAM_EDGE_SHARPNESS_TAP_PX`'s own calibration needs
+    // revisiting for that map's own resolution, not that the mechanism is
+    // broken.
+    foamEdgeSharpness: vec3(foamSharpnessGate, foamSharpnessGate, foamSharpnessGate),
   };
   // ⚠️ ARITHMETIC, NOT `select()` — see `effects/debug-channel-select.js`'s
   // header for the twelve specular rounds this trap cost before anyone dumped
@@ -2553,6 +2678,13 @@ export function buildWaterSurfaceMaterial({
      * moved and was saved, and nothing downstream ever heard about it. */
     setFoamTrail(v) {
       uFoamTrail.value = v;
+    },
+    /** WATER_PARAMS `foamEdgeSharpness` — see `WATER_FOAM_EDGE_SHARPNESS_TAP_PX`'s
+     * own doc for the full mechanism. 0 = every shore shows foam exactly as
+     * before this control existed; 1 = only edges the mask itself paints
+     * sharply. */
+    setFoamEdgeSharpness(v) {
+      uFoamEdgeSharpness.value = v;
     },
     /** WATER_PARAMS `caustics` — a gain on top of the calibrated
      * `WATER_CAUSTICS_K`, never the constant itself (see that constant's own

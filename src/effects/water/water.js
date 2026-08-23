@@ -281,6 +281,16 @@ export const WATER_PARAMS = Object.freeze({
     label: 'Shoreline threshold',
     help: 'How deep the painted mask must be before water is fully opaque. Everything shallower fades out, which is what antialiases the shoreline — turning this to its minimum gives a hard, jagged edge, and very high values erase shallow water entirely. Raise it if your mask paints shallows you would rather not see — a wide, softly-painted bank needs a much higher value than a mostly-hard-edged one before the fade stops reading as "water" partway through.',
   },
+  foamEdgeSharpness: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0,
+    category: 'Shape',
+    label: 'Foam edge sharpness',
+    help: 'Restricts shore/wake foam to places the mask paints a genuinely SHARP black/white edge, fading it out wherever the bank is a soft, gradual transition instead. At 0 (default) foam behaves exactly as before — it appears on every shore regardless of how the edge was painted. Raise it to keep foam on hard-edged banks (piers, stonework, cliffs) while suppressing it on softly-feathered ones (grassy slopes, sandy shallows) — a mask that only ever paints hard edges will look identical at any value.',
+  },
   // ── TIER 4 (2026-08-16) ────────────────────────────────────────────────────
   swashFoam: {
     type: 'float',
@@ -1214,6 +1224,19 @@ export const WATER_DEBUG_CHANNELS = Object.freeze([
       'from the obstacle, matching the bend, never toward it. Flat mid-grey everywhere means either no ' +
       'real local deflection reached this pixel (open water, expected) or the flow pack has not baked.',
   }),
+  Object.freeze({
+    n: 29,
+    id: 'foamEdgeSharpness',
+    label: '28 · Foam edge-sharpness gate (2026-08-24)',
+    reads:
+      'The RAW gate `foamEdgeSharpness` (WATER_PARAMS) multiplies into total foam once turned up — NOT ' +
+      'scaled by the live slider itself, this is the underlying measurement alone. White = the local mask ' +
+      'edge reads as sharp/hard-painted; black = soft/gradual; mid-grey = ambiguous, between the two ' +
+      'calibrated bounds (`WATER_FOAM_EDGE_SHARPNESS_GRAD_LO/HI`, water-render.js). Flat black or flat ' +
+      'white across a mask that visibly has BOTH edge styles painted means the tap distance (`WATER_FOAM_' +
+      "EDGE_SHARPNESS_TAP_PX`) is miscalibrated for this map's own resolution, not that the gate itself " +
+      'is dead — check against a known hard edge and a known soft one before concluding either.',
+  }),
 ]);
 
 // ===========================================================================
@@ -1293,6 +1316,9 @@ export const WATER_PRESETS = Object.freeze({
     wetBandPx: 26,
     wetStrength: 0.2,
     shorelineDepth: 0.5,
+    // NEW (2026-08-24) — matches the schema default; no author-tuned value
+    // of its own yet (see WATER_PARAMS.foamEdgeSharpness's own doc).
+    foamEdgeSharpness: 0,
     swashFoam: 1,
     breakFoam: 1,
     foamTrail: 0.85,

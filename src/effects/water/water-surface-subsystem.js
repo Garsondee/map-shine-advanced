@@ -838,6 +838,7 @@ export function createWaterSurfaceSubsystem({
       p.foamTrail,
       p.caustics,
       p.refractStrengthPx,
+      p.foamEdgeSharpness,
       // ROH TUNING (2026-08-19) — bankWarp/flowWarp + buildFoamCellularStructure's own knobs.
       p.bankInfluence,
       p.flowWarpInfluence,
@@ -881,6 +882,7 @@ export function createWaterSurfaceSubsystem({
       if (Number.isFinite(p.foamTrail)) surface.setFoamTrail(p.foamTrail);
       if (Number.isFinite(p.caustics)) surface.setCaustics(p.caustics);
       if (Number.isFinite(p.refractStrengthPx)) surface.setRefractStrengthPx(p.refractStrengthPx);
+      if (Number.isFinite(p.foamEdgeSharpness)) surface.setFoamEdgeSharpness(p.foamEdgeSharpness);
       if (Number.isFinite(p.bankInfluence)) surface.setBankInfluence(p.bankInfluence);
       if (Number.isFinite(p.flowWarpInfluence)) surface.setFlowWarpInfluence(p.flowWarpInfluence);
       if (Number.isFinite(p.foamFlowNudge)) surface.setFoamFlowNudge(p.foamFlowNudge);

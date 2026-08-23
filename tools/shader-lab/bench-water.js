@@ -271,6 +271,13 @@ const CHAIN = [
   // channel). Unlike `simFoamStructured` below (INFORMATIONAL): THAT one
   // also multiplies in the accumulator, which IS placeholder-zero here.
   'simFoamStructure',
+  // `foamEdgeSharpness` (2026-08-24) belongs here for the SAME reason
+  // `worleyLace`/`simFoamStructure` do — it reads the raw mask alone
+  // (`WATER_FOAM_EDGE_SHARPNESS_TAP_PX`'s own doc), never a flow/sim bake,
+  // so it is well-defined and genuinely non-constant against ANY painted
+  // fixture: `paintRiver`'s own hard edges should read close to fully
+  // sharp right at the shoreline and zero in open water/deep land.
+  'foamEdgeSharpness',
   'totalFoam',
   'reflection',
   'absorbFinal',

@@ -301,6 +301,7 @@ export function run(t) {
     'setSwashFoam',
     'setBreakFoam',
     'setCaustics',
+    'setFoamEdgeSharpness',
     'setCapturedRect',
     'setCapturedTexSize',
     'setDebugChannel',
@@ -332,6 +333,7 @@ export function run(t) {
       b.setSwashFoam(0.3);
       b.setBreakFoam(0.7);
       b.setCaustics(1);
+      b.setFoamEdgeSharpness(0.5);
     } catch (e) {
       err = e;
     }
@@ -453,6 +455,7 @@ export function run(t) {
         b.setSwashFoam(0.5);
         b.setBreakFoam(0.6);
         b.setCaustics(0.7);
+        b.setFoamEdgeSharpness(0.4);
       } catch (e) {
         setErr = e;
       }
@@ -558,9 +561,18 @@ export function run(t) {
   // repeated request; see water-render.js's own removal note). The
   // underlying discipline this test guards outlives the ring: `maskTexNodes`
   // must still contain the exact node the shader reads, for whatever gets
-  // added to tier 4 next. Re-checking the count at tier 4 (not just below
-  // it) now doubles as a removal guard — if it ever drifts off 1 again,
-  // something is sampling the mask without registering for re-pointing.
+  // added to tier 4 next.
+  //
+  // ⚠️ THE COUNT AT TIER 4 CHANGED, ON PURPOSE, 2026-08-24 — this test's own
+  // discipline (never just "> 1", always an EXACT count) is exactly what
+  // caught the foam edge-sharpness gate's own four taps shipping the SAME
+  // bug this test exists for: they were built and never pushed here, so
+  // they sampled the placeholder forever and the live-reported symptom was
+  // "no difference between the highest and lowest setting" — the gate was
+  // computing against a texture with no spatial variation at all. Fixed
+  // (`sampleMaskAt` in water-render.js now pushes each tap), and the exact
+  // count moved from 1 to 5 (base + four gradient taps) because that fix is
+  // real, not because this guard got looser.
   {
     const belowRing = buildWaterSurfaceMaterial(args({ tier: 3 }));
     ok('maskTexNodes is an array', Array.isArray(belowRing.maskTexNodes));
@@ -568,12 +580,15 @@ export function run(t) {
       "maskTexNodes[0] IS maskTexNode (same node, not a copy) — the subsystem's re-point loop must reach the exact object the shader reads",
       belowRing.maskTexNodes[0] === belowRing.maskTexNode
     );
-    ok('below tier 4, only the base sample exists', belowRing.maskTexNodes.length === 1);
+    ok(
+      'below tier 4, only the base sample exists — the edge-sharpness gate has nothing to gate yet',
+      belowRing.maskTexNodes.length === 1
+    );
 
     const atTier4 = buildWaterSurfaceMaterial(args({ tier: 4 }));
     ok(
-      `at tier 4, still only the base sample — the 8-tap ring is gone (got ${atTier4.maskTexNodes.length})`,
-      atTier4.maskTexNodes.length === 1
+      `at tier 4: base sample + the edge-sharpness gate's own four gradient taps, exactly (got ${atTier4.maskTexNodes.length})`,
+      atTier4.maskTexNodes.length === 5
     );
   }
 

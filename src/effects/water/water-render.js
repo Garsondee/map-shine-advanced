@@ -623,6 +623,45 @@ export const WATER_TIER5_REFRACT_PX = 6;
 export const WATER_TIER5_MAX_ALPHA = 0.85;
 
 /**
+ * The chromatic fringe's own OFF/ON luminance band, measured on
+ * `specular.reflection` (water-light.js) at THIS SAME fragment, THIS SAME
+ * frame — not the captured (previous-frame) texture the fringe itself reads.
+ *
+ * ⚠️ LIVE-REPORTED (2026-08-23), two screenshots: a field of small rainbow
+ * chevrons scattered across open water, author's own diagnosis verbatim —
+ * "The specular is strongly getting folded into the refraction's chromatic
+ * aberration which isn't actually physically sensible. The specular
+ * highlight sits on the surface of the water, only air between it and the
+ * camera. The bottom of the lake is where we want the chromatic aberration,
+ * not the surface." Root cause: `capturedTexture` is last frame's FINISHED
+ * `buf:scene.color` (`water-refraction-subsystem.js`'s own header — tiers
+ * 0-4 draw inside the same pass that writes it), which already has
+ * `specular.reflection` baked in additively (`inscatterMaterial`'s own
+ * `reflection` term, below) — so the fringe's ±1-texel R/B split was
+ * splitting the sun-glint sparkle itself into colour, not just the bed
+ * colour it is meant to disperse. Correct fix architecturally is keeping
+ * reflection out of what gets captured at all (its own pass, after the
+ * capture) — a real frame-graph change, not attempted here; this is the
+ * same-session, no-new-pass mitigation: gate the fringe OFF wherever THIS
+ * fragment is currently a strong specular highlight, using the exact same
+ * `specular.reflection` node tier 3+ already computes for THIS pixel this
+ * frame (not a brightness guess against the stale capture).
+ *
+ * Thresholds are luminance multiples of the render's own white point, reused
+ * from `water-light.js#sunSpec`'s own documented magnitude language ("a lobe
+ * that reaches ten times the buffer's white point is still blown out after a
+ * 0.3× ambient") — LO sits clearly above ordinary lit water (which reads
+ * nowhere near white-point brightness) so the smoothstep starts inside the
+ * glint's own spatial footprint, not just its single brightest texel; HI
+ * sits well under the sun disc's ~10× extreme peak so genuinely broad,
+ * moderate brightness (a sunlit shallow, sky sheen) is never mistaken for
+ * the glint. Unmeasured against the real map — an honest first estimate in
+ * the same spirit as `WATER_TIER5_REFRACT_PX`'s own, pending a live look.
+ */
+export const WATER_TIER5_FRINGE_SPECULAR_LO = 1.0;
+export const WATER_TIER5_FRINGE_SPECULAR_HI = 3.0;
+
+/**
  * The tier-0 surface material.
  *
  * @param {object} args
@@ -838,6 +877,7 @@ export function buildWaterSurfaceMaterial({
     abs,
     length,
     fwidth,
+    luminance,
   } = THREE.TSL;
 
   const uMaskRect = uniform(vec4(maskRect.minX, maskRect.minY, maskRect.maxX, maskRect.maxY));
@@ -1854,7 +1894,24 @@ export function buildWaterSurfaceMaterial({
     // together the moment a real capture lands — re-pointing only the first
     // is exactly `feedback_texture_nodes_must_be_repointed_together`'s own
     // scar (a channel silently frozen on the 1×1 placeholder forever).
-    const fringeUv = vec2(uCapturedTexelUv.x, float(0));
+    //
+    // ⚠️ SUPPRESSED WHERE THIS FRAGMENT IS CURRENTLY A SUN-GLINT SPARKLE —
+    // see WATER_TIER5_FRINGE_SPECULAR_LO/HI's own doc for the live-reported
+    // bug this closes ("rainbow chevrons" scattered across open water:
+    // specular.reflection is baked into the buf:scene.color this fringe
+    // reads, one frame stale, and was getting split into colour right along
+    // with the bed). `specular.reflection` here is THIS fragment's own,
+    // THIS-FRAME value (tier 3's own live node, not a read of the stale
+    // capture) — a strong, cheap, physically-grounded proxy for "the
+    // captured pixel here is dominated by a mirror reflection, not bed
+    // colour", without a new pass or a new render target.
+    const specularLuma = luminance(specular.reflection);
+    const fringeSuppress = smoothstep(
+      float(WATER_TIER5_FRINGE_SPECULAR_LO),
+      float(WATER_TIER5_FRINGE_SPECULAR_HI),
+      specularLuma
+    );
+    const fringeUv = vec2(uCapturedTexelUv.x, float(0)).mul(float(1).sub(fringeSuppress));
     const refractRNode = texture(capturedTexture, tapUv.add(fringeUv));
     const refractGNode = texture(capturedTexture, tapUv);
     const refractBNode = texture(capturedTexture, tapUv.sub(fringeUv));

@@ -396,6 +396,25 @@ export const WATER_TIER1_POLLUTION = 0.6;
  * the Beer–Lambert behaviour tier 1 will do properly. Only a mask painted
  * almost black throughout would look wrong, and that is indistinguishable from
  * "no water painted" at 8-bit quantisation anyway.
+ *
+ * ⚠️ **`EDGE1`'s own SCHEMA CEILING WAS TOO LOW FOR A WIDE, SOFTLY-PAINTED
+ * BANK (2026-08-23) — live-reported: "water is extending OUTSIDE of the white
+ * parts of the mask... only at soft transitions, not hard ones."** The math
+ * explains it exactly: `smoothstep(EDGE0≈0, 0.5, x)` already puts a mask value
+ * of 0.2 (a dark, mostly-black-looking grey) at ~34% opacity and 0.3 at ~65% —
+ * clearly VISIBLE water at brightness levels a viewer calls "basically land".
+ * That is invisible on a mask whose only soft region is ONE bilinear-filtered
+ * texel at a hard-painted edge (too narrow spatially to ever look like a
+ * problem) and glaring on a WIDE, deliberately soft brush stroke, which spends
+ * a meaningful spatial distance sitting in that same 0.2–0.3 range. `EDGE1` is
+ * exactly the control for this (`WATER_PARAMS.shorelineDepth`, "raise it if
+ * your mask paints shallows you would rather not see") — but its schema `max`
+ * was capped at 0.5, the SAME as the default, so an author hitting this
+ * symptom had no room to raise it at all. Raised to 0.98 (never a literal 1,
+ * matching `EDGE0`'s own non-zero floor, so the ramp cannot invert into a
+ * step function at the extreme). Deliberately NOT touched: the DEFAULT stays
+ * 0.5, so nothing changes for a map that never turns this dial — this is an
+ * opt-in ceiling raise, not a recalibration of the shipped look.
  */
 export const WATER_PRESENCE_EDGE0 = 2 / 255;
 export const WATER_PRESENCE_EDGE1 = 0.5;

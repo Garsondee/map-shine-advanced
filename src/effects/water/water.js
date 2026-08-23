@@ -274,12 +274,12 @@ export const WATER_PARAMS = Object.freeze({
   shorelineDepth: {
     type: 'float',
     min: 0.004,
-    max: 0.5,
+    max: 0.98,
     step: 0.004,
     default: 0.5,
     category: 'Shape',
     label: 'Shoreline threshold',
-    help: 'How deep the painted mask must be before water is fully opaque. Everything shallower fades out, which is what antialiases the shoreline — turning this to its minimum gives a hard, jagged edge, and very high values erase shallow water entirely. Raise it if your mask paints shallows you would rather not see.',
+    help: 'How deep the painted mask must be before water is fully opaque. Everything shallower fades out, which is what antialiases the shoreline — turning this to its minimum gives a hard, jagged edge, and very high values erase shallow water entirely. Raise it if your mask paints shallows you would rather not see — a wide, softly-painted bank needs a much higher value than a mostly-hard-edged one before the fade stops reading as "water" partway through.',
   },
   // ── TIER 4 (2026-08-16) ────────────────────────────────────────────────────
   swashFoam: {

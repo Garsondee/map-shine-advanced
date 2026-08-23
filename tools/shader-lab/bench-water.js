@@ -115,6 +115,11 @@ import { loadMaskImageTexture } from '../../src/vt/mask-image.js';
 import TOWER_BRIDGE from './fixtures/tower-bridge.js';
 import { createWaterFlowSubsystem } from '../../src/effects/water/water-flow-subsystem.js';
 import { createWaterSimSubsystem } from '../../src/effects/water/water-sim-subsystem.js';
+// THE SELF-CAPTURE FIX (2026-08-23) — REAL `createWaterRefractionSubsystem`,
+// never a stub, for `tier5-refraction-does-not-capture-itself` below. See
+// that scenario's own header for why this is the one thing worth a real,
+// permanent bench proof rather than a one-off script.
+import { createWaterRefractionSubsystem } from '../../src/effects/water/water-refraction-subsystem.js';
 // THE RENDERER-GLOBAL MRT BASE (`scene-attr.js`'s own header — "THE MRT
 // MECHANISM"). `absorbMaterial`/`inscatterMaterial`/`debugMaterial` each
 // declare their OWN `material.mrtNode = mrt({ attr: ... })` (water-render.js),
@@ -1161,6 +1166,160 @@ export function createWaterBench({ THREE, renderer, log }) {
         ],
         inputs: { tier: state.tier, flowAngleDeg: state.flowAngleDeg, flowSpeedPx: state.flowSpeedPx },
         stats: { totalFoam: totalFoamStats, breakFoam: breakFoamStats },
+        artifacts: png ? [png] : [],
+      };
+    },
+  });
+
+  scenarios.set('tier5-refraction-does-not-capture-itself', {
+    name: 'tier5-refraction-does-not-capture-itself',
+    summary:
+      "THE SELF-CAPTURE FIX (2026-08-23, water-render.js#WATER_TIER5_DISABLED_PENDING_SELF_CAPTURE_FIX's " +
+      'own doc has the live-reported bug). Mesh 3 (refraction) now draws in its OWN scene, in its own pass, ' +
+      "AFTER water-refraction-subsystem.js's own capture — never inside `scene` itself, so it can never be " +
+      'baked into what the capture reads. Proof: over a STATIC fixture (fixed camera, fixed params, no ' +
+      "animation), the captured content read back BEFORE mesh 3's own draw must be byte-identical every " +
+      'single iteration of a real capture-then-draw loop — a genuinely excluded mesh cannot make the ' +
+      'thing that excludes it drift, no matter how many times the loop runs. Under the OLD, buggy ' +
+      "architecture (mesh 3 sharing `scene`) this same check would fail: mesh 3's own chromatically- " +
+      'fringed output would be captured, re-fringed, and blended back in again every single iteration.',
+    async run({ runId }) {
+      const calOk = await selfTest();
+      applyFixture(paintRiver);
+      bakeBody();
+      state.tier = 5;
+      state.sunGlint = 2;
+      state.chop = 0.86;
+      state.debugChannel = 0;
+
+      // ⚠️ `meshRefract` is a SHARED object, constructed once at bench
+      // startup and left permanently inside the shared `scene` (matching
+      // this file's own general "one bench, one scene, one everything"
+      // shape — see the module header). Pulling it OUT here, into a
+      // scenario-local `refractScene`, and putting it BACK before this
+      // scenario returns, is what keeps this from corrupting any OTHER
+      // scenario that runs later in the same bench instance.
+      const wasInScene = meshRefract.parent === scene;
+      if (wasInScene) scene.remove(meshRefract);
+      const refractScene = new THREE.Scene();
+      refractScene.add(meshRefract);
+
+      // A REAL `createWaterRefractionSubsystem`, own local allocator — same
+      // minimal-allocator shape `real-underground-river-flow`'s own
+      // `localAllocator` already proves out for a sibling subsystem, never
+      // the shared bench-wide allocator (this scenario owns its targets
+      // outright and disposes them itself, below).
+      const localAllocator = {
+        create(name, descriptor) {
+          const filter = descriptor.filter === 'linear' ? THREE.LinearFilter : THREE.NearestFilter;
+          const target = new THREE.RenderTarget(descriptor.resolvedW, descriptor.resolvedH, {
+            type: descriptor.type,
+            format: descriptor.format,
+            colorSpace: descriptor.colorSpace,
+            depthBuffer: !!descriptor.depth,
+            minFilter: filter,
+            magFilter: filter,
+          });
+          target.texture.name = name;
+          return target;
+        },
+        dispose(target) {
+          target?.dispose?.();
+        },
+      };
+      const refraction = createWaterRefractionSubsystem({
+        THREE,
+        allocator: localAllocator,
+        renderWaterPass: renderQuadPass,
+      });
+
+      const v = viewRect();
+      const ITERATIONS = 6;
+      const preDrawFrames = [];
+      for (let i = 0; i < ITERATIONS; i++) {
+        // HALF ONE — the geometry pass equivalent: mesh 1 + mesh 2 ONLY,
+        // freshly cleared (`render()`'s own default autoClear), since
+        // `meshRefract` no longer lives in `scene` at all.
+        await render();
+        // HALF TWO — the capture, reading THIS iteration's just-drawn,
+        // mesh-3-free `rt`.
+        refraction.tick({
+          bodyRect: quadWorld,
+          viewRect: v,
+          canvasW: rt.width,
+          canvasH: rt.height,
+          sceneColorTexture: rt.texture,
+        });
+        // Read back BEFORE mesh 3 draws — THIS is "what got captured this
+        // iteration". A static fixture (no time/camera change across the
+        // loop) means this must read the SAME every time, if and only if
+        // nothing from a PRIOR iteration's mesh-3 draw leaked into it.
+        preDrawFrames.push(await readFrame());
+
+        // Re-point tier 5's own taps + rect/size — the SAME thing
+        // `water-surface-subsystem.js#syncCapturedRefraction` does in
+        // production, transcribed here (this bench builds
+        // `buildWaterSurfaceMaterial` directly, never through that
+        // subsystem — see the module header's own §6 rule on why real
+        // production code is imported, not re-implemented, everywhere
+        // ELSE in this file; this one small piece genuinely has no
+        // subsystem-level home to import from without dragging in a real
+        // mask/body dependency graph this scenario doesn't otherwise need).
+        for (const node of surface.capturedTexNodes) node.value = refraction.texture;
+        if (Number.isFinite(refraction.width) && Number.isFinite(refraction.height)) {
+          surface.setCapturedTexSize?.(refraction.width, refraction.height);
+        }
+        if (refraction.capturedRect) surface.setCapturedRect?.(refraction.capturedRect);
+
+        // HALF THREE — the draw, mirroring `vt-pan-viewer.js#
+        // runWaterRefractionCapturePass`'s own save/set/restore exactly:
+        // same target, same MRT base, NO clear (lands on top of what HALF
+        // ONE already put there this iteration).
+        const prevTarget = renderer.getRenderTarget();
+        const prevMrt = renderer.getMRT();
+        const prevAutoClearColor = renderer.autoClearColor;
+        renderer.setMRT(waterZeroMrt);
+        renderer.setRenderTarget(rt);
+        renderer.autoClearColor = false;
+        renderer.render(refractScene, camera);
+        renderer.autoClearColor = prevAutoClearColor;
+        renderer.setRenderTarget(prevTarget);
+        renderer.setMRT(prevMrt);
+      }
+
+      let maxDiff = 0;
+      for (let i = 1; i < preDrawFrames.length; i++) {
+        const a = preDrawFrames[0];
+        const b = preDrawFrames[i];
+        for (let p = 0; p < a.length; p++) {
+          const d = Math.abs(a[p] - b[p]);
+          if (d > maxDiff) maxDiff = d;
+        }
+      }
+      const png = await saveCanvasPngSafe(runId, 'tier5-self-capture-fix.png');
+
+      // Cleanup — `meshRefract` goes back where every OTHER scenario in
+      // this bench expects to find it. `refraction.dispose()` frees its
+      // OWN capture target through `localAllocator` itself — nothing else
+      // to tear down here.
+      refractScene.remove(meshRefract);
+      if (wasInScene) scene.add(meshRefract);
+      refraction.dispose?.();
+
+      return {
+        calibration: calOk ? 'OK' : 'FAILED',
+        checks: [
+          evaluate('captured-content-is-stable-across-a-real-capture-then-draw-loop', () => ({
+            ok: maxDiff < 1e-3,
+            measured: Number(maxDiff.toFixed(6)),
+            expected: '< 0.001 (float tolerance — exact 0 across a real GPU pipeline is not a safe bar)',
+            note:
+              'nonzero means mesh 3 (refraction) is STILL reaching what gets captured for its own next ' +
+              'read — the self-capture fix did not take, or regressed',
+          })),
+        ],
+        inputs: { tier: state.tier, iterations: ITERATIONS, chop: state.chop, sunGlint: state.sunGlint },
+        stats: { maxDiff, iterations: ITERATIONS },
         artifacts: png ? [png] : [],
       };
     },

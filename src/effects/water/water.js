@@ -756,7 +756,7 @@ export const WATER = Object.freeze({
       name: 'refraction',
       // FIRST RUNG THAT IS A DEPENDENT READ, NOT A DRAWABLE (2026-08-23) —
       // tiers 0-4 all live inside `geometry.world` as a plain drawable mesh;
-      // this one needs LAST frame's buf:scene.color, which a same-pass
+      // this one needs a capture of buf:scene.color, which a same-pass
       // drawable cannot read (undefined behaviour on the GPU), so it is the
       // reason `graph/passes.js#surface.water` flipped from 'seam' to 'live'
       // — see that pass's own note. `estMsPerMp` is an honest first estimate
@@ -765,16 +765,32 @@ export const WATER = Object.freeze({
       // genuinely more texture traffic than anything below it), NOT a real
       // GPU sweep — `tools/shader-lab/bench-water.js` owns turning this into
       // a measured number.
+      //
+      // ⚠️ WAS one-frame-stale, NOW zero (2026-08-23, THE SELF-CAPTURE FIX
+      // — water-render.js#WATER_TIER5_DISABLED_PENDING_SELF_CAPTURE_FIX's
+      // own doc has the full story). This rung's own mesh used to share
+      // `geometry.world`'s scene, which meant its own output was already
+      // baked into the buffer it captured for its NEXT read — a real,
+      // live-reported self-reference bug, not the intentional one-frame
+      // SSR-style latency this comment used to describe. Fixed by giving
+      // this rung its own separate draw, in its own scene, run by
+      // `surface.water` itself AFTER that same pass's own capture —
+      // strictly BETTER than the original design, not just corrected: zero
+      // latency, and no "did the camera move between capture and read"
+      // question left to answer.
       fromProfile: 'quality',
       cost: Object.freeze({ class: 'C5', estMsPerMp: 0.18 }),
       adds:
-        'Refraction — the water surface bends what is beneath it. A world-anchored, one-frame-stale ' +
-        'capture of buf:scene.color (water-refraction-subsystem.js), sampled through a UV offset by ' +
-        'tier 2`s own slope field × depth (no new fetch for the offset itself), validated against ' +
-        'buf:scene.depth`s rank so a token or wall standing where the bend would look falls back to the ' +
-        'centre, unrefracted sample (V2`s own "tap validation"), finished with a ±1-texel R/B chromatic ' +
-        'fringe. World-anchored on purpose: the capture remembers the WORLD rect its own UV space maps ' +
-        'across, so this frame`s position remaps through it with no camera-delta math at all.',
+        'Refraction — the water surface bends what is beneath it. A world-anchored capture of ' +
+        'buf:scene.color (water-refraction-subsystem.js), read the SAME frame it is captured (no cross- ' +
+        'frame latency), sampled through a UV offset by tier 2`s own slope field × depth (no new fetch ' +
+        'for the offset itself), validated against buf:scene.depth`s rank so a token or wall standing ' +
+        'where the bend would look falls back to the centre, unrefracted sample (V2`s own "tap ' +
+        'validation"), finished with a ±1-texel R/B chromatic fringe (suppressed where the fragment is ' +
+        'itself a strong specular highlight — a mirror reflection never travelled through the water, so ' +
+        'it has no business dispersing). World-anchored on purpose: the capture remembers the WORLD rect ' +
+        'its own UV space maps across, so this frame`s position remaps through it with no camera-delta ' +
+        'math at all.',
     }),
   ]),
   // Recorded, NOT built — honest rungs (Effects.md §0), the ladder

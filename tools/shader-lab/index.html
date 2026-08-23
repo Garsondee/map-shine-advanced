@@ -737,8 +737,7 @@
             ring, droplets, inner puddle — re-authored as one continuous per-fragment shape.
           </div>
           <label style="display: flex; gap: 6px; align-items: center"
-            >show the falling curtain
-            <input type="checkbox" id="precipShowFall" style="flex: 0" checked
+            >show the falling curtain <input type="checkbox" id="precipShowFall" style="flex: 0" checked
           /></label>
           <label style="display: flex; gap: 6px; align-items: center"
             >show the splashes <input type="checkbox" id="precipShowArrival" style="flex: 0" checked
@@ -751,8 +750,8 @@
             ><input type="range" id="precipSplashRate" min="0" max="4" step="0.05" value="1"
           /></label>
           <div class="hint" style="margin-bottom: 6px">
-            Multiplies the row's <code>splashesPerMegapixel</code> (42). Per-AREA, not a flat count: zooming out
-            reveals more splashes over more ground rather than spreading the same few thinner.
+            Multiplies the row's <code>splashesPerMegapixel</code> (42). Per-AREA, not a flat count: zooming out reveals
+            more splashes over more ground rather than spreading the same few thinner.
           </div>
           <label
             >splash size ×<span id="precipSplashSizeVal"></span
@@ -771,9 +770,9 @@
             ><input type="range" id="precipSplashSmear" min="0" max="3" step="0.05" value="1"
           /></label>
           <div class="hint">
-            "Cannot stay round" means ASYMMETRIC, not elongated: from directly above a splash is a stationary impact,
-            so wind throws its crown downwind (off-centre + a brighter downwind rim) rather than motion-blurring it.
-            A full gale widens the footprint only ~1.35×.
+            "Cannot stay round" means ASYMMETRIC, not elongated: from directly above a splash is a stationary impact, so
+            wind throws its crown downwind (off-centre + a brighter downwind rim) rather than motion-blurring it. A full
+            gale widens the footprint only ~1.35×.
           </div>
         </fieldset>
       </div>
@@ -784,6 +783,7 @@
             <option value="river-bake-produces-real-sdf" selected>river-bake-produces-real-sdf</option>
             <option value="tier4-gate-ladder-no-dead-term">tier4-gate-ladder-no-dead-term</option>
             <option value="shore-foam-has-real-coverage">shore-foam-has-real-coverage</option>
+            <option value="tier5-refraction-does-not-capture-itself">tier5-refraction-does-not-capture-itself</option>
           </select>
           <button id="waterRun">Run scenario</button>
           <button id="waterLadder">Run gate ladder (console)</button>
@@ -791,7 +791,9 @@
         <fieldset>
           <legend>Debug channel — WATER_DEBUG_CHANNELS 1-18, computation order</legend>
           <select id="waterChannel"></select>
-          <div class="hint">The first BLACK channel (or, for a remapped one, the first away from 0.5 grey) is the culprit.</div>
+          <div class="hint">
+            The first BLACK channel (or, for a remapped one, the first away from 0.5 grey) is the culprit.
+          </div>
         </fieldset>
         <fieldset>
           <legend>Depth / volume</legend>

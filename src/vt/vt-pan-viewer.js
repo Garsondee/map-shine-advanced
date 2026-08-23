@@ -8248,6 +8248,17 @@ export async function startVtPanViewer({
 
     const scene = new THREE.Scene();
 
+    // TIER 5's OWN SCENE (2026-08-23, the self-capture fix — see
+    // `water-render.js#WATER_TIER5_DISABLED_PENDING_SELF_CAPTURE_FIX`'s own
+    // doc for the live-reported bug this closes). Water's refraction mesh
+    // (`water-surface-subsystem.js`'s own `meshes[2]`) is added HERE, never
+    // to `scene` above — `runGeometryWorldPass` never renders this scene, so
+    // whatever draws into it can never reach `buf:scene.color` before
+    // `runWaterRefractionCapturePass` has already captured it for the frame.
+    // Drawn explicitly, ONCE, by that same pass — AFTER its own per-floor
+    // capture loop — never by `runGeometryWorldPass`.
+    const waterRefractScene = new THREE.Scene();
+
     // buf:scene.depth's OWN scene — proxy meshes, never the production meshes
     // above ([[feedback_diagnostic_must_not_render_production_materials_elsewhere]]:
     // rendering a production mesh through a second material PERMANENTLY
@@ -8323,6 +8334,7 @@ export async function startVtPanViewer({
       return createWaterSurfaceSubsystem({
         THREE,
         scene,
+        refractScene: waterRefractScene,
         waterBody: getWaterBodyForFloor(floorIndex),
         getWaterMaskUrl,
         createMaskTexture: createMaskDataTexture,
@@ -8498,14 +8510,27 @@ export async function startVtPanViewer({
 
     /**
      * `passImpls['surface.water']` — the REAL per-frame work behind that
-     * pass's live claim. Deliberately narrow: tiers 0-4 are UNCHANGED, still a
-     * drawable inside `runGeometryWorldPass`'s own scene — this only runs the
-     * ONE thing a drawable cannot do itself, a dependent capture of the
-     * FINISHED `buf:scene.color`. Must run AFTER `runGeometryWorldPass` (the
-     * frame-graph's own job, via `framePlan.ids`' declared order — see
-     * graph/passes.js's `reads` on this pass and `run-frame.js`'s own header
-     * on why array order IS frame order); this function does not itself
-     * enforce that ordering, only relies on it.
+     * pass's live claim. Tiers 0-4 are UNCHANGED, still a drawable inside
+     * `runGeometryWorldPass`'s own scene. Tier 5 (refraction) is fully owned
+     * HERE as of 2026-08-23 (the self-capture fix), in two halves, in this
+     * order: (1) capture THIS FRAME's finished `buf:scene.color` — the ONE
+     * thing a drawable cannot do itself — per floor; (2) draw tier 5's own
+     * mesh for every floor, ONCE, reading what (1) JUST produced. Must run
+     * AFTER `runGeometryWorldPass` (the frame-graph's own job, via
+     * `framePlan.ids`' declared order — see graph/passes.js's `reads` on
+     * this pass and `run-frame.js`'s own header on why array order IS frame
+     * order); this function does not itself enforce that ordering, only
+     * relies on it.
+     *
+     * ⚠️ ZERO-FRAME LATENCY, NOT ONE — a change from tier 5's own original
+     * design. Splitting capture and draw across two frames was ONLY ever
+     * necessary because the drawable used to live inside `scene` itself,
+     * reading a target its own pass was mid-writing (real UB). Now that the
+     * draw is a separate step, later in this SAME pass, it can safely read
+     * what THIS frame's own capture just produced — no reprojection lag, no
+     * "camera moved between capture and read" question left to answer.
+     * `water-refraction-subsystem.js`'s own header still describes the OLD,
+     * one-frame-stale design; read this comment as the current one.
      *
      * Resolves its OWN `getActiveSceneFloors` call rather than reaching for
      * `runLightAccumulatePass`'s own `floorsResultForFrame` — that variable is
@@ -8543,7 +8568,42 @@ export async function startVtPanViewer({
           canvasH,
           sceneColorTexture: sceneColor.texture,
         });
+        // ⚠️ THE SELF-CAPTURE FIX'S OWN SECOND HALF (2026-08-23). The tick
+        // above just captured THIS FRAME's own buf:scene.color — which, now
+        // that meshes[2] draws in `waterRefractScene` instead of `scene`,
+        // holds ONLY terrain/tokens/mesh-1/mesh-2, never a prior frame's own
+        // refracted overlay. Re-pushing here (rather than trusting `sync()`'s
+        // own earlier call, from the frame loop's 'light.accumulate' stage,
+        // BEFORE this tick ran) is what makes the draw below read THIS
+        // frame's capture, not last frame's — see `syncCapturedRefraction`'s
+        // own doc (water-surface-subsystem.js) for the full reasoning.
+        getWaterSurfaceForFloor(floor.index).syncCapturedRefraction?.();
       }
+      // THE DRAW HALF — tier 5's own mesh, for every active floor, in ONE
+      // call (`waterRefractScene` already holds all of them, one per floor,
+      // added once at construction and never re-parented). Mirrors
+      // `runGeometryWorldPass`'s own save/set/restore around its render call
+      // (the renderer-global MRT/target state this whole renderer shares),
+      // but does NOT clear `sceneColor` first — this must land ON TOP of
+      // what `runGeometryWorldPass` (terrain, tokens, mesh 1/2) already put
+      // there this frame, the same "composite over the map, not cleared"
+      // shape `renderDoorGraphicsInto` already uses one call up — the only
+      // reason this needs its own explicit setRenderTarget/setMRT at all,
+      // unlike that function, is that `runGeometryWorldPass` has already
+      // restored both to their PRE-pass values by the time this runs.
+      const prevTarget = renderer.getRenderTarget();
+      const previousMRT = renderer.getMRT();
+      const prevAutoClearColor = renderer.autoClearColor;
+      const prevAutoClearDepth = renderer.autoClearDepth;
+      renderer.setMRT(sceneAttrZeroMrt);
+      renderer.setRenderTarget(sceneColor);
+      renderer.autoClearColor = false;
+      renderer.autoClearDepth = false;
+      renderer.render(waterRefractScene, camera);
+      renderer.autoClearColor = prevAutoClearColor;
+      renderer.autoClearDepth = prevAutoClearDepth;
+      renderer.setRenderTarget(prevTarget);
+      renderer.setMRT(previousMRT);
     }
 
     // ── FLUID, tiers 0-4 (docs/planning/Fluid.md) ──────────────────────────

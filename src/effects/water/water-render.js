@@ -662,44 +662,53 @@ export const WATER_TIER5_FRINGE_SPECULAR_LO = 1.0;
 export const WATER_TIER5_FRINGE_SPECULAR_HI = 3.0;
 
 /**
- * ⚠️ TEMPORARY SAFETY SLIDE (2026-08-23) — tier 5 (refraction) clamped OFF
- * regardless of what's requested, until its own architecture is fixed.
- * `feedback_safety_slide_outranks_doctrine`: staying off beats staying on
- * and visibly broken.
+ * ⚠️ THE SAFETY SLIDE THIS CONSTANT USED TO PULL (2026-08-23) — kept as
+ * `false`, not deleted, because the STORY explains real, load-bearing
+ * decisions elsewhere in this file and `water-surface-subsystem.js` that
+ * would otherwise look unmotivated.
  *
- * Confirmed, not guessed: `water-refraction-subsystem.js#tick()` captures
- * `buf:scene.color` AFTER `runGeometryWorldPass` finishes — which means
- * THIS SAME FRAME's own tier-5 mesh (drawn inside that pass, renderOrder
- * 0.52, last of the three) is already baked into what gets captured for
- * the NEXT frame's own tier-5 read. Tier 5 genuinely reads a buffer
+ * Root cause, confirmed not guessed: `water-refraction-subsystem.js#tick()`
+ * captures `buf:scene.color` AFTER `runGeometryWorldPass` finishes — and
+ * tier 5's own mesh USED TO draw inside that very pass (renderOrder 0.52,
+ * last of the three), so its own output was already baked into what got
+ * captured for its OWN next read. Tier 5 was genuinely reading a buffer
  * containing its own past output, every frame, forever. Author, live,
  * after two narrower fixes (bounding the offset magnitude, f4bd218;
  * suppressing the chromatic fringe on specular, cfbdfa2) both failed to
  * resolve it: "It's like the water is sampling itself and then producing
- * visual feedback noise which is compounding." Confirmed architecturally
- * correct on inspection — this is a different, more fundamental problem
- * than either shipped fix targeted: the self-reference itself, not any
- * one term's magnitude.
+ * visual feedback noise which is compounding." Correct, and a different,
+ * more fundamental problem than either shipped fix targeted — the self-
+ * reference itself, not any one term's magnitude.
  *
- * The correct fix is giving tier 5 its own separate draw that runs AFTER
- * the capture, so it never feeds itself — a real frame-graph change (a
- * new pass; needs its own depth-authority-based occlusion too, since
- * `configureShared`'s own doctrine below is "paint order only, never
- * depth" — mesh 3 currently has NO occlusion protection beyond that paint
- * order, unlike mesh 1/2's `notOccluded`). Not a same-session patch.
+ * ⚠️ THE ACTUAL FIX (2026-08-23, same day, author: "Go ahead and build the
+ * proper fix now") — tier 5's mesh now draws in `waterRefractScene`
+ * (`vt-pan-viewer.js`), a SEPARATE scene `runGeometryWorldPass` never
+ * touches, drawn explicitly by `runWaterRefractionCapturePass` itself —
+ * AFTER that same pass's own per-floor capture loop, same frame, reading
+ * what THAT capture just produced (ZERO-frame latency now, not one — a
+ * strict improvement, not just a fix; see that pass's own updated header).
+ * `notOccluded` — the SAME depth-authority value mesh 1/2 already trust —
+ * now gates `refractAlpha` too, since the mesh lost the free painter's-
+ * algorithm occlusion that came from sharing `scene`.
  *
- * ⚠️ NOT read inside `buildWaterSurfaceMaterial` itself — this function's
- * job is honestly constructing whatever tier it is ASKED for (every test
- * in this file's own "TIER 5" section depends on genuine tier-5
- * construction staying testable in isolation). `water-surface-
- * subsystem.js#sync()` reads this constant and clamps the REQUESTED tier
- * there, before it ever reaches this function — a production-wiring
- * decision, not a construction-time one.
+ * Verified via a REAL shader-lab scenario, not reasoning alone:
+ * `tier5-refraction-does-not-capture-itself` (bench-water.js) runs a genuine
+ * multi-iteration capture-then-draw loop against a real WebGPU device and
+ * demands the captured content be byte-identical every iteration over a
+ * static fixture — `measured: 0` divergence, exactly, reproduced twice. The
+ * three pre-existing water scenarios still pass unchanged after this one's
+ * own scene-juggling cleanup.
  *
- * Flip back to `false` only once the capture excludes tier 5's own output
- * — not before, and not just because the symptom looks quieter.
+ * `water-surface-subsystem.js#sync()` reads this constant via
+ * `resolveGatedWaterTier` — a production-wiring decision, never read inside
+ * `buildWaterSurfaceMaterial` itself, so every tier-5 construction test in
+ * this file's own "TIER 5" section stayed valid and testable throughout.
+ *
+ * If this ever needs to go back to `true` (a live regression this
+ * architecture didn't anticipate), that is a real, worth-a-Petition
+ * decision — not a quiet revert.
  */
-export const WATER_TIER5_DISABLED_PENDING_SELF_CAPTURE_FIX = true;
+export const WATER_TIER5_DISABLED_PENDING_SELF_CAPTURE_FIX = false;
 
 /**
  * The tier-0 surface material.
@@ -1867,6 +1876,46 @@ export function buildWaterSurfaceMaterial({
   // AT THAT TIME. This frame's `positionWorld` maps through the SAME formula
   // regardless of how far the camera has panned since — a texel's world
   // position never moves, so there is nothing to reproject.
+  // ── THE DEPTH-AUTHORITY GATE (2026-08-15) — see the module header ────────
+  // A JS-time branch: with no depth texture OR no view rect, the whole lookup
+  // is compiled OUT rather than multiplied by a one (Effects.md Law 4 /
+  // `tsl/no-uniform-gates`), so an unwired caller (the torture fixture, a
+  // material built before envLight's view rect exists) pays nothing extra and
+  // renders exactly as it did before this migration — paint order alone.
+  //
+  // Screen UV comes from `positionWorld` mapped through the SAME `uViewRect`
+  // the geometry pass wrote `buf:scene.depth` against — byte-for-byte
+  // `window-render.js`'s own floor-gate mapping, so the two agree about where
+  // a world point lands on screen without a second derivation. NOT `uv()` or
+  // the built-in `screenUV()`: this quad is a world-space AABB crop, not a
+  // fullscreen pass (`feedback_shared_texture_node_carries_the_wrong_uv`).
+  //
+  // ⚠️ MOVED HERE, ABOVE tier 5 (2026-08-23) — was declared just above "MESH
+  // 1", too late for tier 5's own `refractAlpha` to read it. Tier 5's mesh
+  // draws in ITS OWN separate pass now (`WATER_TIER5_DISABLED_PENDING_SELF_
+  // CAPTURE_FIX`'s own doc has the full story of why), which means it no
+  // longer gets occlusion for free from paint order the way mesh 1/2 still
+  // do — this is the ONLY thing standing between it and drawing over content
+  // that should hide it (a token, an upper floor), so it reads this SAME
+  // depth-authority value mesh 1/2 already trust, not a separate check.
+  let notOccluded = float(1);
+  let floorGateCompiled = false;
+  if (depthTexture && uViewRect) {
+    const viewSpanX = max(uViewRect.z.sub(uViewRect.x), float(1));
+    const viewSpanY = max(uViewRect.w.sub(uViewRect.y), float(1));
+    const screenU = positionWorld.x.sub(uViewRect.x).div(viewSpanX);
+    const screenV = positionWorld.y.sub(uViewRect.y).div(viewSpanY);
+    const screenUv = vec2(clamp(screenU, 0, 1), clamp(screenV, 0, 1));
+    const depthHere = texture(depthTexture, screenUv);
+    // `step(edge,x) = x>=edge ? 1:0`, so this reads "is the stored depth at
+    // this pixel AT OR ABOVE my own floor's rank" — 1 unless something ranked
+    // strictly higher (a Tile, a roof, a floor above) is drawn over it. The
+    // SAME single ordinal comparison every other depth-authority consumer
+    // already uses; no tolerance/softness needed, a real rank is exact.
+    notOccluded = step(uExpectedDepth, depthHere);
+    floorGateCompiled = true;
+  }
+
   let refractMaterial = null;
   /** Every `texture(capturedTexture, …)` node tier 5 builds — see the fringe
    * comment below for why re-pointing needs all three, always this array,
@@ -1983,7 +2032,17 @@ export function buildWaterSurfaceMaterial({
     // (matching absorbMaterial's OWN "white is safe" instinct) rather than
     // an unexamined default. NOT verified against a real fog/vision scene
     // yet — named here as the one thing most worth checking first, live.
-    const refractAlpha = inside.mul(float(WATER_TIER5_MAX_ALPHA));
+    //
+    // ⚠️ `.mul(notOccluded)` ADDED (2026-08-23) — this mesh now draws in its
+    // own separate pass (see the self-capture fix's own account), so it no
+    // longer gets occlusion for free from paint order the way mesh 1/2
+    // still do inside `scene`. Without this, a token or upper-floor tile
+    // that should hide the water beneath it would no longer hide THIS
+    // mesh's own refracted overlay, regardless of what it does to mesh 1/2
+    // — the exact "water renders above things that should mask it" shape
+    // this file's own module header already names as a real, once-shipped
+    // regression class.
+    const refractAlpha = inside.mul(notOccluded).mul(float(WATER_TIER5_MAX_ALPHA));
     refractMaterial = new THREE.NodeMaterial();
     refractMaterial.colorNode = vec4(refractColor, refractAlpha);
     configureShared(refractMaterial);
@@ -2052,37 +2111,6 @@ export function buildWaterSurfaceMaterial({
     // statement about coverage. `Zero·src + One·dst` is the identity on it.
     material.blendSrcAlpha = THREE.ZeroFactor;
     material.blendDstAlpha = THREE.OneFactor;
-  }
-
-  // ── THE DEPTH-AUTHORITY GATE (2026-08-15) — see the module header ────────
-  // A JS-time branch: with no depth texture OR no view rect, the whole lookup
-  // is compiled OUT rather than multiplied by a one (Effects.md Law 4 /
-  // `tsl/no-uniform-gates`), so an unwired caller (the torture fixture, a
-  // material built before envLight's view rect exists) pays nothing extra and
-  // renders exactly as it did before this migration — paint order alone.
-  //
-  // Screen UV comes from `positionWorld` mapped through the SAME `uViewRect`
-  // the geometry pass wrote `buf:scene.depth` against — byte-for-byte
-  // `window-render.js`'s own floor-gate mapping, so the two agree about where
-  // a world point lands on screen without a second derivation. NOT `uv()` or
-  // the built-in `screenUV()`: this quad is a world-space AABB crop, not a
-  // fullscreen pass (`feedback_shared_texture_node_carries_the_wrong_uv`).
-  let notOccluded = float(1);
-  let floorGateCompiled = false;
-  if (depthTexture && uViewRect) {
-    const viewSpanX = max(uViewRect.z.sub(uViewRect.x), float(1));
-    const viewSpanY = max(uViewRect.w.sub(uViewRect.y), float(1));
-    const screenU = positionWorld.x.sub(uViewRect.x).div(viewSpanX);
-    const screenV = positionWorld.y.sub(uViewRect.y).div(viewSpanY);
-    const screenUv = vec2(clamp(screenU, 0, 1), clamp(screenV, 0, 1));
-    const depthHere = texture(depthTexture, screenUv);
-    // `step(edge,x) = x>=edge ? 1:0`, so this reads "is the stored depth at
-    // this pixel AT OR ABOVE my own floor's rank" — 1 unless something ranked
-    // strictly higher (a Tile, a roof, a floor above) is drawn over it. The
-    // SAME single ordinal comparison every other depth-authority consumer
-    // already uses; no tolerance/softness needed, a real rank is exact.
-    notOccluded = step(uExpectedDepth, depthHere);
-    floorGateCompiled = true;
   }
 
   // ── MESH 1: ABSORPTION ───────────────────────────────────────────────────

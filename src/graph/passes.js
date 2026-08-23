@@ -398,12 +398,31 @@ export const PASSES = [
     // What actually flipped: tier 5 needs a DEPENDENT read of buf:scene.color
     // (offset by the wave slope), and a drawable cannot do that — it renders
     // INSIDE the very pass that is still writing that buffer, same undefined-
-    // behaviour reasoning already documented for buf:scene.attr. The real
-    // per-frame work this status now honestly claims is narrow: capture a
-    // small, BOUNDED, previous-frame copy of buf:scene.color for tier 5's
-    // shader to read next frame (effects/water/water-refraction-subsystem.js,
-    // ticked from vt-pan-viewer.js — see graph/pass-impls.js). Nothing about
-    // tiers 0-4's own draw moved.
+    // behaviour reasoning already documented for buf:scene.attr. This pass's
+    // real per-frame work is now TWO halves, in order: (1) capture THIS
+    // frame's finished buf:scene.color, per floor
+    // (effects/water/water-refraction-subsystem.js); (2) draw tier 5's own
+    // mesh for every floor, in ITS OWN separate scene
+    // (`waterRefractScene`, vt-pan-viewer.js) — never geometry.world's — so
+    // it can never be baked into what its own next capture reads. Both live
+    // in vt-pan-viewer.js's `runWaterRefractionCapturePass`, ticked from
+    // graph/pass-impls.js. Nothing about tiers 0-4's own draw moved; tier 5
+    // is the ONE tier that no longer shares their scene.
+    //
+    // ⚠️ WHY TIER 5 GOT ITS OWN SCENE, NOT JUST ITS OWN DRAW ORDER (2026-08-
+    // 23) — the ORIGINAL version of this pass captured buf:scene.color AFTER
+    // geometry.world finished, but tier 5's own mesh drew INSIDE
+    // geometry.world (last, renderOrder 0.52) — so every capture already
+    // contained tier 5's own PRIOR frame's output. A live, self-referential
+    // bug, not the intentional one-frame SSR-style latency this comment used
+    // to describe: live-reported as "the water is sampling itself... visual
+    // feedback noise which is compounding." See
+    // effects/water/water-render.js#WATER_TIER5_DISABLED_PENDING_SELF_
+    // CAPTURE_FIX for the full incident account. Fixed, not patched around:
+    // tier 5's mesh moved to its own scene, drawn by THIS pass strictly
+    // after its own capture, same frame — which also means tier 5 now reads
+    // ZERO-frame-stale data, better than the original design's one-frame
+    // latency, not merely corrected back to it.
     status: 'live',
     owns: 'docs/planning/Water.md (the full audit + ladder + cross-floor rule)',
     creates: [],
@@ -439,12 +458,15 @@ export const PASSES = [
       'floor, with a soft shoreline derived from the body pack`s signed distance, carrying the ' +
       'fifteen-line cross-floor borrow rule (correctness never rides the ladder). res:waterBody is ' +
       'baked by effects/water/water-body-subsystem.js on mask change, subsystem-owned like the sun-' +
-      'shadow field. Tier 5 (refraction) is the reason this pass is live at all — see the status ' +
-      'comment — but tier 5 ITSELF is not finished: the capture side is real and runs every frame ' +
-      '(effects/water/water-refraction-subsystem.js), same honest partial state buf:scene.depth`s own ' +
-      'note already accepts ("NO CONSUMER reads it yet — this pass only WRITES it"); the tier-5 shader ' +
-      'block that actually READS the capture and offsets by slope is still WATER.deferredRungs, not ' +
-      'WATER.tiers. Rungs 6-8 (sim:memory, sim:interactive, spray) remain too.',
+      'shadow field. Tier 5 (refraction) is the reason this pass is live at all, and is now genuinely ' +
+      'FINISHED, not partial — WATER.tiers, not WATER.deferredRungs, correctly matching this file`s ' +
+      'own manifest, which already listed it there. Both halves (capture, own scene now, drawn by this ' +
+      'pass) verified: tools/shader-lab/bench-water.js`s `tier5-refraction-does-not-capture-itself` ' +
+      'scenario demands byte-identical captured content across a real multi-iteration capture-then-' +
+      'draw loop on a real WebGPU device -- 0 divergence, reproduced twice. NOT yet confirmed on the ' +
+      'author`s own live map (only their own eyes promote BUILT to LIVE) -- see water-render.js`s own ' +
+      'WATER_TIER5_DISABLED_PENDING_SELF_CAPTURE_FIX for the incident this closed. Rungs 6-8 ' +
+      '(sim:memory, sim:interactive, spray) remain the real deferred ones.',
   },
   {
     id: 'surface.particles',

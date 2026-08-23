@@ -138,6 +138,12 @@ export function resolveGatedWaterTier(rawTier) {
  *   Absent = today's pre-tier-5 behaviour: `water-render.js`'s own build-time
  *   clamp (`capturedTexture` missing) holds the compiled tier at 4 forever,
  *   the same "torture fixture" posture every other optional seam here takes.
+ * @param {*} [args.refractScene] - tier 5's OWN scene (2026-08-23, the self-
+ *   capture fix) — `meshes[2]` goes here, never into `args.scene`, so it can
+ *   never be baked into what `water-refraction-subsystem.js` captures FROM.
+ *   Absent falls back to `args.scene` itself (pre-fix behaviour) — see the
+ *   mesh-creation code's own comment for why that's safe for an unwired
+ *   caller.
  * @param {(floorIndex: number) => {texture: *, rect: object}|null} [args.getSunShadowSlot] -
  *   THE CAST-SHADOW SEAM (2026-08-16). Given the floor this instance draws on,
  *   the sun-shadow field currently baked FOR that floor, or `null` when no slot
@@ -173,6 +179,16 @@ export function createWaterSurfaceSubsystem({
   sunShadowTexture = null,
   getSunShadowSlot,
   waterRefraction = null,
+  // ⚠️ TIER 5's OWN SCENE (2026-08-23, the self-capture fix) — see
+  // `water-render.js#WATER_TIER5_DISABLED_PENDING_SELF_CAPTURE_FIX`'s own
+  // doc. `meshes[2]` (refraction) is added to THIS scene, never `scene`,
+  // so `runGeometryWorldPass`'s own draw of `scene` (the thing
+  // `water-refraction-subsystem.js` captures FROM) can never include it.
+  // Optional, defaulting to `scene` itself — an unwired caller (the torture
+  // fixture, any test that doesn't care about this distinction) renders
+  // exactly as it did before this fix existed, same convention every other
+  // optional dependency here follows.
+  refractScene = null,
 }) {
   // Default-off shape matching every other effect seam: an un-wired caller
   // (the torture fixture) renders exactly as it did before water existed.
@@ -578,6 +594,11 @@ export function createWaterSurfaceSubsystem({
   // but it is the physical order and it costs nothing to be right); refraction
   // draws LAST because Effects.md Law 2 makes it an ADDITION on top of the
   // already-shipped tinted-bed look, never a replacement for it.
+  // ⚠️ `meshes[2]` goes into `refractMeshScene`, NOT `scene` — see
+  // `refractScene`'s own doc above (the constructor param). Falls back to
+  // `scene` when unwired, so an un-migrated caller sees the OLD behaviour
+  // (all three meshes, one scene) rather than a silently-never-drawn mesh.
+  const refractMeshScene = refractScene ?? scene;
   const meshes = [
     Object.assign(new THREE.Mesh(geometry, surface.absorbMaterial), { renderOrder: 0.5 }),
     Object.assign(new THREE.Mesh(geometry, surface.inscatterMaterial), { renderOrder: 0.51 }),
@@ -585,10 +606,10 @@ export function createWaterSurfaceSubsystem({
       renderOrder: 0.52,
     }),
   ];
-  for (const m of meshes) {
+  for (const [i, m] of meshes.entries()) {
     m.frustumCulled = false; // world-space; the camera rect moves every frame
     m.visible = false; // until BOTH a bake and the hi-res mask land
-    scene.add(m);
+    (i === 2 ? refractMeshScene : scene).add(m);
   }
 
   /**
@@ -916,6 +937,19 @@ export function createWaterSurfaceSubsystem({
 
   return {
     sync,
+    /** Re-push `capturedTexNodes`/`capturedRect`/`capturedTexSize` from THIS
+     * floor's `waterRefraction` handle — the SAME function `sync()` already
+     * calls, exposed separately (2026-08-23, the self-capture fix) so
+     * `runWaterRefractionCapturePass` can call it a SECOND time, right after
+     * this floor's own `tick()`, immediately before drawing `refractScene`.
+     * `sync()`'s own call (from the frame loop's earlier 'light.accumulate'
+     * stage, BEFORE this frame's capture has even run) is otherwise pushing
+     * LAST frame's `capturedRect`/texture identity — harmless in the common
+     * case (both are usually unchanged frame to frame) but a real, if rare,
+     * source of a one-frame rect/content mismatch during a reallocation or a
+     * fast camera pan. Idempotent and cheap either way — see the function's
+     * own doc for why calling it twice a frame costs nothing extra. */
+    syncCapturedRefraction,
     /**
      * FLOOR-PREPARE HOOK (2026-08-16, live author report on window light's
      * OWN copy of this fix — same effect shape, same gap here). Starts the
@@ -1071,7 +1105,11 @@ export function createWaterSurfaceSubsystem({
       };
     },
     dispose() {
-      for (const m of meshes) scene.remove(m);
+      // ⚠️ `meshes[2]` lives in `refractMeshScene`, not `scene` — removing it
+      // from the wrong scene is a silent no-op (`Object3D.remove()` checks
+      // membership first), which would leak it in `refractMeshScene` forever
+      // rather than throw. See the mesh-creation loop's own comment above.
+      for (const [i, m] of meshes.entries()) (i === 2 ? refractMeshScene : scene).remove(m);
       geometry.dispose(); // shared by both meshes — disposed once, not per mesh
       surface.absorbMaterial?.dispose?.();
       surface.inscatterMaterial?.dispose?.();

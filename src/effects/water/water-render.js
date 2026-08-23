@@ -616,13 +616,23 @@ export const WATER_TIER4_FOAM_TRAIL = 0.85;
  * (`WATER_FOAM_EDGE_SHARPNESS_TAP_PX`) — deliberately NOT `fwidth()` (that is
  * a SCREEN-space derivative, confounded with camera zoom; this needs a
  * property of the AUTHORED ART, independent of how close the camera happens
- * to be). A hard-painted edge changes the full 0→1 range within about one
- * native mask texel, so two taps straddling it read close to the full jump;
- * a wide, deliberately soft gradient spreads that same 0→1 change across
- * many texels, so the SAME two taps see only a small fraction of it. The two
- * cases differ by roughly an order of magnitude at this tap distance —
- * confirmed on real GPU data against both a synthetic hard edge and the
- * same wide gradient fixture the soft-mask-bleed fix was verified against.
+ * to be).
+ *
+ * ⚠️ **A CENTRAL DIFFERENCE CANNOT DISTINGUISH TWO EDGES BOTH NARROWER THAN
+ * ITS OWN SAMPLING SPAN — THE TAP DISTANCE IS THE WHOLE CALIBRATION, NOT A
+ * DETAIL.** The full 0→1 rise happens SOMEWHERE inside a `2×TAP_PX`-wide
+ * window either way, so a source-texel-hard edge and a moderately soft
+ * (tens of world px) edge read IDENTICALLY once both are narrower than that
+ * window. The first shipped version used a 16px tap (32px span) and shipped
+ * exactly this failure: edges from ~1.5px through 20px are mathematically
+ * indistinguishable at that span (verified by hand-deriving the formula's
+ * own output, not just reasoning about it) — a real, deliberately-feathered
+ * bank reads as "just as sharp as a pier" the whole time, so raising the
+ * slider visibly does nothing. `WATER_FOAM_EDGE_SHARPNESS_TAP_PX` is now 4:
+ * narrow enough that a 20-80px soft edge spends only a FRACTION of the
+ * sampling span crossing the ramp, giving a genuinely smaller reading than
+ * a true hard edge, which crosses its own much-narrower transition entirely
+ * within the same span regardless.
  *
  * ⚠️ **THE THRESHOLD ITSELF STAYS A CONSTANT; THE AUTHOR-FACING SLIDER IS
  * `WATER_PARAMS.foamEdgeSharpness`, A BLEND, NOT A RECALIBRATION.** The
@@ -635,20 +645,19 @@ export const WATER_TIER4_FOAM_TRAIL = 0.85;
  * full gate, so the author controls how STRICTLY this applies rather than
  * needing to guess a correct absolute gradient value themselves.
  */
-export const WATER_FOAM_EDGE_SHARPNESS_TAP_PX = 16;
+export const WATER_FOAM_EDGE_SHARPNESS_TAP_PX = 4;
 /** Below this measured gradient (mask value change per world px), an edge
- * reads as fully SOFT — the gate contributes nothing there once raised.
- * Calibrated against the same 256-world-px-wide gradient fixture used to
- * verify `shorelineDepth`'s own body-pack fix: that gradient measures
- * ~0.004 at this tap distance, comfortably below this floor. */
-export const WATER_FOAM_EDGE_SHARPNESS_GRAD_LO = 0.006;
-/** At or above this measured gradient, an edge reads as fully SHARP — the
- * gate contributes its full value there. Calibrated against a synthetic
- * hard (source-texel-width) edge at the same tap distance, which measures
- * ~0.03 — comfortably above this ceiling, with headroom for a hard edge
- * that has been softened by a texel or two of the mask's own bilinear
- * filtering (`WATER_MASK_FILTER`, `water-body.js`) without falling short. */
-export const WATER_FOAM_EDGE_SHARPNESS_GRAD_HI = 0.018;
+ * reads as fully SOFT. At the 4px tap above, an 80px-wide ramp measures
+ * ~0.0125 (comfortably below) and a 160px+ ramp measures well under that —
+ * both fully suppressed once the slider is raised. */
+export const WATER_FOAM_EDGE_SHARPNESS_GRAD_LO = 0.015;
+/** At or above this measured gradient, an edge reads as fully SHARP. At the
+ * 4px tap above, a true hard (source-texel-width, ~1-2px) edge measures
+ * ~0.125 and a still-fairly-crisp 10px edge measures ~0.1 — both
+ * comfortably above this ceiling. A 20px edge (~0.05) sits mid-band on
+ * purpose: "moderately soft" should read as partially suppressed, not a
+ * hard on/off flip. */
+export const WATER_FOAM_EDGE_SHARPNESS_GRAD_HI = 0.08;
 
 /**
  * `capturedRect`'s own default — a degenerate-but-safe 1×1 world rect at the

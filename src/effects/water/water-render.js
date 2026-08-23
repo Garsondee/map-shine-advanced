@@ -572,8 +572,12 @@ export const WATER_TIER4_CAUSTICS = 0.33;
  * (`water-shore.js#WATER_TAIL_TAPS`) — the stateless stand-in for the foam
  * MEMORY the Water Testament names as its single highest-value finding.
  * Matches `WATER_PARAMS.foamTrail`; a Node test pins the two equal.
+ *
+ * ⚠️ RAISED 0.8→0.85 (2026-08-23, author's own live tuning pass, alongside
+ * `WATER_TIER3_CHOP`'s own identical-shape update) — matching the schema
+ * default's own change, same value, never a second one.
  */
-export const WATER_TIER4_FOAM_TRAIL = 0.8;
+export const WATER_TIER4_FOAM_TRAIL = 0.85;
 
 /**
  * `capturedRect`'s own default — a degenerate-but-safe 1×1 world rect at the

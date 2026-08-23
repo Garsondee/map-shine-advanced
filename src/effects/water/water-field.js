@@ -210,8 +210,14 @@ export const WATER_TIER2_FOAM = 1;
  * the lab measures the true RMS and it differs, this is the constant to move —
  * and the optimum's SHAPE (a peak, then decline) is the robust finding, not
  * its exact location.
+ *
+ * ⚠️ RAISED 0.86→1.26 (2026-08-23, author's own live tuning pass, delivered
+ * as a full new-defaults preset after tier 5 refraction went live) — past
+ * the measured sparkle optimum on purpose, per this doc's own §193 above: a
+ * duller, more storm-tossed surface is a real, deliberately chosen look here,
+ * not a value that drifted past the optimum by accident.
  */
-export const WATER_TIER3_CHOP = 0.86;
+export const WATER_TIER3_CHOP = 1.26;
 
 /**
  * How far the bank's tangent may warp the noise domain, as a FRACTION OF ONE

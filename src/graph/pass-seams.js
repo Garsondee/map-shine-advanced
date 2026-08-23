@@ -20,7 +20,7 @@
 
 // Through the DOORS, exemplifying zones/one-door: the wiring registry imports
 // each zone's index.js, never its internals.
-import { buildLightVisibilityPass, buildGradePass, buildWaterPass, buildFluidSimPass } from '../effects/index.js';
+import { buildLightVisibilityPass, buildGradePass, buildFluidSimPass } from '../effects/index.js';
 
 /**
  * Every 'seam'-status pass MUST appear here; every entry here MUST be a
@@ -51,11 +51,17 @@ import { buildLightVisibilityPass, buildGradePass, buildWaterPass, buildFluidSim
  * tickWindSim) and the instanced draw runs as a viewer closure. The old shared
  * `registerParticleSystem` door is gone (particle-engine.js now opens onto the
  * engine). First slice: ambient dust on the wind field.
+ *
+ * 'surface.water' is NOT here either (2026-08-23): it flipped to 'live' (tier
+ * 5, refraction) — see graph/pass-impls.js. Its throwing door
+ * (`buildWaterPass`) is deleted from effects/water/water-pass.js; a real
+ * producer (`runWaterRefractionCapturePass`) runs in vt-pan-viewer.js.
+ * Tiers 0-4 stay exactly what they were — a drawable inside geometry.world —
+ * this only adds the ONE per-frame capture a drawable cannot do itself.
  * @type {Record<string, (ctx: object) => never>}
  */
 export const PASS_SEAMS = Object.freeze({
   'sims.fluids': buildFluidSimPass,
   'light.visibility': buildLightVisibilityPass,
-  'surface.water': buildWaterPass,
   'post.grade': buildGradePass,
 });

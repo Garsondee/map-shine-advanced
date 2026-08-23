@@ -13,12 +13,12 @@
         "done": true
       },
       {
-        "text": "Wire the subsystem into vt-pan-viewer.js's frame loop, positioned AFTER runGeometryWorldPass (not beside the sim/flow/body prep block, which runs BEFORE the draw) -- this is the actual 'real producer' location the pass-graph flip convention expects (see pass-seams.js's comments on the 5 prior flips, each pointing at 'a viewer closure... see graph/pass-impls.js').",
-        "done": false
+        "text": "Wire the subsystem into vt-pan-viewer.js's frame loop, positioned AFTER runGeometryWorldPass (not beside the sim/flow/body prep block, which runs BEFORE the draw) -- this is the actual 'real producer' location the pass-graph flip convention expects (see pass-seams.js's comments on the 5 prior flips, each pointing at 'a viewer closure... see graph/pass-impls.js'). DONE 2026-08-23: runWaterRefractionCapturePass (per-floor, mirrors the sim-tick factory pattern exactly), registered in passImpls['surface.water'], stale-floor disposal wired alongside sim/flow/body. Frame ORDER is the frame-graph's own job (array position in passes.js), not manually placed -- confirmed via graph/__tests__/run-frame.test.mjs, not assumed.",
+        "done": true
       },
       {
-        "text": "Flip surface.water: status 'seam' -> 'live' in passes.js (add buf:scene.color to reads, declare the new capture resource in creates), remove the 'surface.water': buildWaterPass entry from pass-seams.js's PASS_SEAMS, delete the throwing door in water-pass.js -- matching the exact pattern of the 5 prior flips, never leaving a dead door beside working code.",
-        "done": false
+        "text": "Flip surface.water: status 'seam' -> 'live' in passes.js (add buf:scene.color to reads, declare the new capture resource in creates), remove the 'surface.water': buildWaterPass entry from pass-seams.js's PASS_SEAMS, delete the throwing door in water-pass.js -- matching the exact pattern of the 5 prior flips, never leaving a dead door beside working code. DONE 2026-08-23: also added buf:scene.depth to reads (a pre-existing, previously-undeclared read tier 0 already makes); the new capture resource is deliberately NOT declared as a graph resource (same reasoning res:waterBody/res:waterSim already established -- a same-pass, cross-FRAME producer/consumer has no honest reads-before-creates shape). New PASS_IMPLS entry added (mechanically required, pass-impls.test.mjs enforces exact coverage). validatePassGraph + the full graph suite (282/282) + the full repo suite (11,874) all green.",
+        "done": true
       },
       {
         "text": "Tier 5 TSL shader block in water-render.js, at the pre-existing landing strip (search 'TIERS 5-8 -- NOT YET BUILT'): offset screen UV by field.slope x thickness (reuse tier 2's existing slope, no new fetch), sample the new capture texture (remapped via the same uViewRect-based explicit UV technique water already uses for buf:scene.depth, never the shared screenUV() builtin -- feedback_shared_texture_node_carries_the_wrong_uv), validate against buf:scene.depth's rank (fall back to centre UV if occluded), chromatic fringe (+/-1 texel R/B split) gated to the top tier only.",
@@ -29,7 +29,7 @@
         "done": false
       },
       {
-        "text": "Tests: extend water-render.test.mjs's tier-construction loop ([0,1,2,3,4] -> include 5) with a stub capture texture input and a structural gate assertion (a refractionCompiled-style boolean or direct node-null check, matching the existing bodyTexNode/normalCompiled pattern). New water-refraction-subsystem.test.mjs mirroring water-sim-subsystem's own test conventions. Update pass-seams.test.mjs / pass-impls.test.mjs expectations for the flip.",
+        "text": "Tests: extend water-render.test.mjs's tier-construction loop ([0,1,2,3,4] -> include 5) with a stub capture texture input and a structural gate assertion (a refractionCompiled-style boolean or direct node-null check, matching the existing bodyTexNode/normalCompiled pattern) -- STILL OPEN, tied to the shader block itself (previous item). New water-refraction-subsystem.test.mjs: DONE (33 tests). pass-seams.test.mjs / pass-impls.test.mjs needed NO edits -- confirmed by actually running them, not assumed: both are generic/data-driven (walk PASS_SEAMS/PASS_IMPLS/PASSES directly), so the seam removal + new PASS_IMPLS entry were validated automatically. Also fixed two real, unrelated-looking test breaks the live flip surfaced: run-frame.test.mjs's exact frame-order string (surface.water now genuinely appears in it), and a chart-room test that assumed zero judgements would ever graduate to 'done since judged' -- pass:surface.water just became the first one ever, on real data, proving that anti-drift mechanism actually works.",
         "done": false
       },
       {

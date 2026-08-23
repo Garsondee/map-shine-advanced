@@ -384,23 +384,27 @@ export const PASSES = [
     id: 'surface.water',
     stage: 'surface',
     kind: 'gpu',
-    // STILL A SEAM — and that is the honest status even though TIER 0 SHIPPED
-    // AND RENDERS as of 2026-07-26. Water's surface is a DRAWABLE, not a pass:
-    // it is a bounded world quad inside geometry.world's own flat sort list
-    // (renderOrder 0.5, immediately above the floor background), exactly like
-    // the door leaves and for the same two dividends — the painter's-algorithm
-    // order occludes it under upper art for free (that IS "the punch", see
-    // effects/water/water-render.js), and the renderer-global zero-attr MRT
-    // gives it B0-3's `gAttr = vec4(0)` contract for free. Sun shadows sit the
-    // same way: real GPU work owned by a subsystem, not a declared pass.
+    // LIVE as of 2026-08-23 (tier 5, refraction) — but read this before
+    // assuming more moved than actually did. Tiers 0-4 (placement, volume,
+    // motion, light, shore) are UNCHANGED: still a DRAWABLE inside
+    // geometry.world's own flat sort list (renderOrder 0.5, immediately above
+    // the floor background), still earning the same two dividends — free
+    // painter's-algorithm occlusion under upper art, and the renderer-global
+    // zero-attr MRT giving it B0-3's `gAttr = vec4(0)` contract for free.
+    // Giving water its own scene/render call for those five tiers would have
+    // cost both dividends and bought nothing — the reasoning this status
+    // comment used to reject going live at all.
     //
-    // THIS PASS BECOMES REAL at the first rung that needs a DEPENDENT READ of
-    // buf:scene.color — tier 5, refraction — because that cannot be done from
-    // inside the pass that is still writing it. Tiers 1-4 (volume, motion,
-    // light, shore) all stay drawables. Flipping this to `live` before then
-    // would mean giving water its own scene and render call, which would cost
-    // exactly the two dividends above and buy nothing.
-    status: 'seam',
+    // What actually flipped: tier 5 needs a DEPENDENT read of buf:scene.color
+    // (offset by the wave slope), and a drawable cannot do that — it renders
+    // INSIDE the very pass that is still writing that buffer, same undefined-
+    // behaviour reasoning already documented for buf:scene.attr. The real
+    // per-frame work this status now honestly claims is narrow: capture a
+    // small, BOUNDED, previous-frame copy of buf:scene.color for tier 5's
+    // shader to read next frame (effects/water/water-refraction-subsystem.js,
+    // ticked from vt-pan-viewer.js — see graph/pass-impls.js). Nothing about
+    // tiers 0-4's own draw moved.
+    status: 'live',
     owns: 'docs/planning/Water.md (the full audit + ladder + cross-floor rule)',
     creates: [],
     // The aspirational list, kept for the rungs that will genuinely read them.
@@ -408,25 +412,39 @@ export const PASSES = [
     // unproduced read is precisely pass-health.js's STARVED — better removed
     // now than the day this flips.
     //
-    // `res:waterBody` is deliberately NOT listed. The body pack is a
-    // PRECOMPUTE, not a frame resource: it is baked on mask-version change by
-    // effects/water/water-body-subsystem.js, exactly as the sun-shadow height
-    // field is baked by its own subsystem — and the sun-shadow field appears
-    // nowhere in this file either. The graph declares the per-frame DAG; a
-    // resource whose producer is not a frame pass has no honest place in it,
-    // and inventing a producer entry to satisfy the reads-before-creates
-    // validator would be a declaration that describes nothing.
-    reads: ['vt:masks', 'buf:scene.illum', 'buf:scene.attr', 'res:env'],
+    // `res:waterBody` is deliberately NOT listed, same reasoning as always: the
+    // body pack is a PRECOMPUTE (baked on mask-version change by
+    // effects/water/water-body-subsystem.js), not a frame resource — a
+    // resource whose producer is not a frame pass has no honest place here.
+    // The NEW capture buffer (water-refraction-subsystem.js) is the identical
+    // shape ONE LEVEL UP: it updates every frame like res:waterSim's own
+    // ping-pong, but both its producer AND its only consumer are THIS pass
+    // (this frame writes it, next frame's own drawable reads it) — declaring
+    // it as a normal reads/creates pair would fail the reads-before-creates
+    // check for a same-pass, cross-FRAME relationship the validator has no
+    // concept of, and inventing a workaround would be exactly the kind of
+    // declaration that describes nothing this comment already warns against.
+    //
+    // `buf:scene.color` and `buf:scene.depth` ARE listed below, genuinely new:
+    // tier 5's capture reads the FINISHED buf:scene.color (geometry.world's
+    // own `creates`), and its tap-validation reads buf:scene.depth — which
+    // tier 0's own cross-floor occlusion check already samples today
+    // (water-render.js), a pre-existing read this list never named until now.
+    reads: ['vt:masks', 'buf:scene.illum', 'buf:scene.attr', 'buf:scene.color', 'buf:scene.depth', 'res:env'],
     modifies: ['buf:scene.color'],
     absorbs: ['WaterEffectV2', 'water-shader.js(look, harvested)'],
     note:
-      'TIER 0 IS LIVE (2026-07-26) but renders inside geometry.world — see the status comment above ' +
-      'for why this entry stays `seam` rather than lying in either direction. What ships: the mask, ' +
-      'tinted, in the right place on the right floor, with a soft shoreline derived from the body ' +
-      'pack`s signed distance, carrying the fifteen-line cross-floor borrow rule (correctness never ' +
-      'rides the ladder). res:waterBody is baked by effects/water/water-body-subsystem.js on mask ' +
-      'change, subsystem-owned like the sun-shadow field. Rungs 1-8 (volume, motion, light, shore, ' +
-      'refraction, reflection, sim, spray) remain. First Stage 6 port.',
+      'Tiers 0-4 are LIVE but still render inside geometry.world — see the status comment above for ' +
+      'why that stays true even now. What ships: the mask, tinted, in the right place on the right ' +
+      'floor, with a soft shoreline derived from the body pack`s signed distance, carrying the ' +
+      'fifteen-line cross-floor borrow rule (correctness never rides the ladder). res:waterBody is ' +
+      'baked by effects/water/water-body-subsystem.js on mask change, subsystem-owned like the sun-' +
+      'shadow field. Tier 5 (refraction) is the reason this pass is live at all — see the status ' +
+      'comment — but tier 5 ITSELF is not finished: the capture side is real and runs every frame ' +
+      '(effects/water/water-refraction-subsystem.js), same honest partial state buf:scene.depth`s own ' +
+      'note already accepts ("NO CONSUMER reads it yet — this pass only WRITES it"); the tier-5 shader ' +
+      'block that actually READS the capture and offsets by slope is still WATER.deferredRungs, not ' +
+      'WATER.tiers. Rungs 6-8 (sim:memory, sim:interactive, spray) remain too.',
   },
   {
     id: 'surface.particles',

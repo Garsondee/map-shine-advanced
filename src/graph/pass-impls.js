@@ -200,6 +200,20 @@ export const PASS_IMPLS = Object.freeze({
       'exist until light.accumulate has run. Skips entirely (JS early-return, no GPU work) when the ' +
       'effect is off or no specular mask has loaded. Same invocability caveat as geometry.world.',
   },
+  'surface.water': {
+    fn: startVtPanViewer,
+    module: 'vt/index.js',
+    export: 'startVtPanViewer',
+    separatelyInvocable: false,
+    note:
+      'REAL as of 2026-08-23 (tier 5, refraction): runWaterRefractionCapturePass (a closure inside ' +
+      'startVtPanViewer, in the local passImpls map runPassPlan walks) ticks each floor`s own ' +
+      'water-refraction-subsystem.js instance, capturing buf:scene.color into a small, bounded, ' +
+      'previous-frame buffer for tier 5`s dependent read next frame. Tiers 0-4 STAY drawables inside ' +
+      'geometry.world — this pass adds the ONE thing a drawable genuinely cannot do (a same-pass read), ' +
+      'nothing else moves. Same invocability caveat as surface.response: the loop lives inside ' +
+      'startVtPanViewer, driven by the same local passImpls/framePlan graph/run-frame.js walks.',
+  },
   'post.bloom': {
     fn: startVtPanViewer,
     module: 'vt/index.js',

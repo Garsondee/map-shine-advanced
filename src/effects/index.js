@@ -173,7 +173,7 @@ export {
   MAX_REGION_POLYGON_POINTS,
 } from './lighting/region-darkness.js';
 export { buildGradePass } from './grade/grade-pass.js';
-export { buildWaterPass, buildFluidSimPass } from './water/water-pass.js';
+export { buildFluidSimPass } from './water/water-pass.js';
 export { WATER, WATER_PARAMS, WATER_DIALS, WATER_DEBUG_CHANNELS, WATER_PRESETS, waterPreset } from './water/water.js';
 export { resolveWaterFloor } from './water/water-floor.js';
 // THE BODY PACK (docs/planning/Water.md §5.1) — one jump-flood signed distance
@@ -198,6 +198,14 @@ export { createWaterSurfaceSubsystem } from './water/water-surface-subsystem.js'
 // area-averaged solidity over the SAME full-resolution mask the surface pack
 // loads, baked once that texture exists. `water-flow.js` is its TSL half.
 export { createWaterFlowSubsystem } from './water/water-flow-subsystem.js';
+// THE SIM PACK (docs/planning/Water-Simulation-Turn.md §3 Layer C / §4 S5) —
+// foam's own per-frame memory, ping-ponged. `water-sim.js` is its TSL half.
+export { createWaterSimSubsystem } from './water/water-sim-subsystem.js';
+// THE REFRACTION CAPTURE (docs/holy/Water-Testament.md §2.5, tier 5) — a
+// bounded, previous-frame copy of buf:scene.color, the one dependent read
+// tiers 0-4's own drawable cannot do itself. `water-refraction-subsystem.js`
+// is its own TSL half.
+export { createWaterRefractionSubsystem } from './water/water-refraction-subsystem.js';
 export { createWaterSeams } from './water/water-seams.js';
 export { createWaterRegistration } from './water/water-registration.js';
 // SHINE (docs/planning/Specular.md) — `surface.response`. An ANIMATED FIELD of
@@ -309,6 +317,7 @@ export {
   WATER_PRESENCE_EPS,
   WATER_MASK_FILTER,
   WATER_BODY_SUPERSAMPLE,
+  WATER_BODY_GRID_MAX_DIM,
 } from './water/water-body.js';
 // `buildSurfaceResponsePass` is GONE (2026-07-26) — surface.response is live
 // (tiers 0-2, docs/planning/Specular.md) and its NotBuilt door was deleted with

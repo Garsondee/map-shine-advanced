@@ -571,8 +571,14 @@ export function run(t) {
     tri.easyWins.every((j) => !tri.grind.includes(j))
   );
   ok(
-    'every judgement lands in exactly one of the four value buckets',
-    verdict.resolved.length === tri.easyWins.length + tri.grind.length + tri.cutList.length + tri.pile.length
+    // Against stillOpen, NOT verdict.resolved — a judgement whose subject has
+    // already shipped since it was written graduates into doneSince first
+    // (findResolvedSinceJudged, above) and never reaches triage() at all.
+    // This was untriggered until a real one actually graduated for the first
+    // time (pass:surface.water going live) — the exact anti-drift mechanism
+    // this file's own "THE ANTI-DRIFT CHECK" section exists to prove works.
+    'every STILL-OPEN judgement lands in exactly one of the four value buckets',
+    stillOpen.length === tri.easyWins.length + tri.grind.length + tri.cutList.length + tri.pile.length
   );
   ok(
     'unconfirmed holds everything the author has not personally graded',

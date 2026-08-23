@@ -1,13 +1,20 @@
 /**
- * SEAMS: `surface.water` + `sims.fluids` — the first Stage 6 port, by design.
+ * SEAM: `sims.fluids` — `surface.water` flipped to `live` 2026-08-23 (tier 5,
+ * refraction — see `graph/passes.js`'s own entry for the full reasoning). Its
+ * throwing door used to live here; it is deleted, not left beside the real
+ * code, matching every prior seam→live flip in this codebase (`graph/pass-
+ * seams.js`'s own header lists the other five). The real producer is
+ * `effects/water/water-refraction-subsystem.js` (the per-frame capture) plus
+ * the tier-gated shader block in `water-render.js`, driven from a viewer
+ * closure in `vt-pan-viewer.js` — see `graph/pass-impls.js` for the pointer.
  *
  * The full audit lives in docs/planning/Water.md: V2's water family was 14,850
  * lines of which the LOOK (the author's 2,835-line shader, 324 uniforms) was
  * 19% — the other 81% was plumbing this architecture derives. The tier ladder
  * runs from "the mask, tinted blue, in the right place" (tier 0 — always
  * affordable, never gated) up through waves, GGX specular, foam (cheap! the
- * shore band is already packed in the mask's G channel), refraction,
- * reflection, and finally the fluid sim.
+ * shore band is already packed in the mask's G channel), refraction, and
+ * finally the fluid sim.
  *
  * THE CROSS-FLOOR RULE — Keyhole's named risk #4, audited down to fifteen clear
  * lines — rides at TIER 0, because correctness never rides the ladder: a floor
@@ -19,24 +26,6 @@
  */
 
 import { NotBuiltError } from '../../core/not-built.js';
-
-/**
- * Build the water surface pass. Once real: reads vt:masks + illum + attr + env
- * (+ res:fluidSim at top tiers), modifies `buf:scene.color`.
- * @param {object} ctx
- * @returns {never}
- * @throws {NotBuiltError}
- */
-export function buildWaterPass(ctx) {
-  void ctx;
-  throw new NotBuiltError('surface.water', {
-    owns: 'docs/planning/Water.md (audit + ladder + declaration sketch) + graph/passes.js',
-    gate: 'Stage 6 first port. Needs: lighting live (for tier 3+), the VT water pack format (R=coverage, G=shore band — decided), the tier governor for rungs above 4.',
-    instead:
-      'Write the declaration against Water.md §6 first. Harvest the look values from water-shader.js; the ' +
-      '324 uniforms become the params schema + tier-gated node-graph constants — never 324 live uniforms.',
-  });
-}
 
 /**
  * Build the fluid/fire sim step. Once real: reads env/view/masks, creates

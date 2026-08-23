@@ -88,7 +88,13 @@ export function run(t) {
     // light.accumulate and surface.particles — which is not a detail: it MUST
     // sit after the pass that writes buf:scene.illum, because reading the
     // illumination is the whole reason it is a pass rather than a drawable in
-    // geometry.world the way water's surface is.
+    // geometry.world.
+    // `surface.water` joined 2026-08-23 (tier 5, refraction), right after
+    // surface.response — its OWN drawable (tiers 0-4) still lives inside
+    // geometry.world, unchanged; this pass is only the per-frame capture of
+    // buf:scene.color tier 5 depends on, and it must run after geometry.world
+    // has actually finished writing that buffer (the same reasoning ANY
+    // dependent-read pass in this list already follows).
     // `post.dof` joined 2026-08-06 (Depth-of-Field.md), between post.bloom and
     // present.composite (post.grade is still a seam, so it never appears in a
     // LIVE plan) — it reads buf:scene.depth, which is unaffected by ordering
@@ -104,11 +110,15 @@ export function run(t) {
     // included), and BEFORE the vision gate because MSA owns vision now and
     // rain must never leak into unexplored fog (Precipitation.md §3.5).
     const expected =
-      'masks.occlusion,geometry.world,light.accumulate,surface.response,surface.particles,surface.precipitation,vision.gate,post.bloom,post.dof,present.composite';
+      'masks.occlusion,geometry.world,light.accumulate,surface.response,surface.water,surface.particles,surface.precipitation,vision.gate,post.bloom,post.dof,present.composite';
     ok(`today's real masks..present plan is exactly [${expected}] (got: ${ids.join(',')})`, ids.join(',') === expected);
     ok(
       'surface.response is planned AFTER light.accumulate — it reads what that pass writes',
       ids.indexOf('surface.response') > ids.indexOf('light.accumulate')
+    );
+    ok(
+      'surface.water is planned AFTER geometry.world — its capture reads buf:scene.color, which that pass creates',
+      ids.indexOf('surface.water') > ids.indexOf('geometry.world')
     );
     // ⚠️ THESE TWO PIN A PLAYER-SAFETY ORDERING, NOT A PREFERENCE (Law 7).
     // A live run with the gate inside the composite material showed the map

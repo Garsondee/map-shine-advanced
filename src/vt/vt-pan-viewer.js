@@ -292,6 +292,8 @@ import {
   createWaterBodySubsystem,
   createWaterSurfaceSubsystem,
   createWaterFlowSubsystem,
+  createWaterSimSubsystem,
+  createWaterRefractionSubsystem,
   createFluidSurfaceSubsystem,
   createSpecularSurfaceSubsystem,
   createWindowSurfaceSubsystem,
@@ -2303,6 +2305,17 @@ export async function startVtPanViewer({
      * itself depends on BODY (`waterBody: getWaterBodyForFloor(floorIndex)`,
      * below), so building BODY's own constructor args from a fully-resolved
      * surface object here would be circular.
+     *
+     * ⚠️ SECOND ATTEMPT (2026-08-18) — the first shipped a live-only
+     * regression: making body's bake wait on this texture, on its own, left
+     * water permanently stuck at a degraded tier with no error and no
+     * warning whenever the race went the wrong way, because
+     * `water-surface-subsystem.js#sync` recorded the REQUESTED tier as
+     * `builtForTier` rather than what the material actually compiled. That
+     * bookkeeping bug is now fixed at its own source (see `sync`'s own
+     * comment) — a raced build is now self-correcting on a later sync()
+     * instead of silent and permanent, which is what makes depending on this
+     * accessor safe this time.
      */
     function createWaterBodyForFloor(floorIndex) {
       return createWaterBodySubsystem({
@@ -2326,7 +2339,9 @@ export async function startVtPanViewer({
         // when it shipped; the body pack's SDF — the one that actually gates
         // whether `shore.foam` fires at all near an obstacle — never got the
         // same fix until now.
-        waterSurface: { getFullResMaskTexture: () => getWaterSurfaceForFloor(floorIndex)?.getFullResMaskTexture() ?? null },
+        waterSurface: {
+          getFullResMaskTexture: () => getWaterSurfaceForFloor(floorIndex)?.getFullResMaskTexture() ?? null,
+        },
       });
     }
     /** Lazily create-or-reuse this floor's own body pack. @param {number} floorIndex */
@@ -5672,6 +5687,10 @@ export async function startVtPanViewer({
       const liveWaterFloorIndices = new Set(waterFloors.map((f) => f.index));
       for (const [floorIndex, body] of waterBodiesByFloor) {
         if (!liveWaterFloorIndices.has(floorIndex)) {
+          waterSimsByFloor.get(floorIndex)?.dispose();
+          waterSimsByFloor.delete(floorIndex);
+          waterRefractionsByFloor.get(floorIndex)?.dispose();
+          waterRefractionsByFloor.delete(floorIndex);
           waterFlowsByFloor.get(floorIndex)?.dispose();
           waterFlowsByFloor.delete(floorIndex);
           waterSurfacesByFloor.get(floorIndex)?.dispose();
@@ -5711,9 +5730,49 @@ export async function startVtPanViewer({
         // inside), and independent of both the mask-load re-point and the
         // body-pack re-point above; see
         // `water-surface-subsystem.js#setFlowPackTexture`'s own doc.
-        getWaterSurfaceForFloor(floor.index).setFlowPackTexture(flow.texture);
+        const floorSurfaceForFlow = getWaterSurfaceForFloor(floor.index);
+        floorSurfaceForFlow.setFlowPackTexture(flow.texture);
+        // The smooth-texel reconstruction (`buildSmoothTexelUv`, added
+        // 2026-08-19 for the same "pixelated at zoom" report the sim pack's
+        // own fix already answered) needs the REAL texel pitch of whatever
+        // `flow.texture` is right now — `flow.width`/`flow.height`
+        // (`water-flow-subsystem.js`'s own getters, the finest level's real
+        // dimensions). Pushed right alongside the texture, same bake
+        // cadence — the grid never changes between bakes, so this is not a
+        // per-frame cost the way the sim pack's own push is.
+        floorSurfaceForFlow.setFlowPackTexSize(flow.width, flow.height);
       }
       profiler?.end(Z.lightWaterFlowBake);
+      // THE SIM PACK — runs AFTER flow's own (maybe) bake above, same floor,
+      // same iteration: it reads whatever `flow.texture` IS this frame,
+      // fresh or unchanged either way. Genuinely UNCONDITIONAL, every floor,
+      // every frame — unlike every `maybeBake` call above, this one is not a
+      // "might skip" question (`water-sim-subsystem.js`'s own header on why
+      // it is named `tick`, not `maybeBake`). Wired here rather than beside
+      // `tickWindSim`/`tickFluidSim` in `renderFrame` because THIS sim is
+      // per-floor like flow/body/surface, and `env` (for `dtSec`) is already
+      // in scope at this exact point — see that module's own header for the
+      // full reasoning.
+      profiler?.begin(Z.lightWaterSimTick);
+      for (const floor of waterFloors) {
+        const sim = getWaterSimForFloor(floor.index);
+        sim.tick(env.time?.dtSec ?? 0);
+        // THE `simFoamRaw`/`simFoam` DEBUG CHANNELS' OWN re-point, AND (S5)
+        // the actual visible water's own foam source — same shape as the
+        // flow pack's own re-point above (`setFlowPackTexture`), a THIRD
+        // independent cadence (`water-surface-subsystem.js#setWaterSimTexture`'s
+        // own doc).
+        const floorSurface = getWaterSurfaceForFloor(floor.index);
+        floorSurface.setWaterSimTexture(sim.texture);
+        // The smooth-texel reconstruction (`buildSmoothTexelUv`, added to fix
+        // the author's live "when I zoom in you can see a pixelated look"
+        // report) needs the REAL texel pitch of whatever `sim.texture` is
+        // THIS frame — `sim.width`/`sim.height` (`water-sim-subsystem.js`'s
+        // own getters). Pushed every frame, right alongside the texture
+        // itself, same cadence: cheap (a uniform `.set()`, not a rebuild).
+        floorSurface.setWaterSimTexSize(sim.width, sim.height);
+      }
+      profiler?.end(Z.lightWaterSimTick);
       // FLUID: same cadence, same shape — cheap to call, one string compare when
       // nothing changed, and it owns its own mask-url change detection.
       profiler?.begin(Z.lightFluidSync);
@@ -6589,6 +6648,7 @@ export async function startVtPanViewer({
       'geometry.world': runGeometryWorldPass,
       'light.accumulate': runLightAccumulatePass,
       'surface.response': runSurfaceResponsePass,
+      'surface.water': runWaterRefractionCapturePass,
       'surface.particles': runSurfaceParticlesPass,
       'surface.precipitation': runSurfacePrecipitationPass,
       'vision.gate': runVisionGatePass,
@@ -8352,6 +8412,108 @@ export async function startVtPanViewer({
         waterFlowsByFloor.set(floorIndex, flow);
       }
       return flow;
+    }
+
+    // ── THE WATER SIM PACK (docs/planning/Water-Simulation-Turn.md §3 Layer
+    // C / §4 S5): `res:waterSim` — foam's own per-frame memory, ping-ponged.
+    // ONE INSTANCE PER FLOOR, same reason as every other water subsystem
+    // above. Constructed with THIS floor's own `waterFlow`/`waterBody`
+    // handles already resolved — mirrors the flow block just above exactly,
+    // one level further down the dependency chain (sim reads flow's finished
+    // pack + body's own SDF; it never touches the mask or the surface
+    // directly). `timeMsNode: uGlobalTimeMs` — the SAME shared clock every
+    // other viewer-level consumer uses, handed in once here rather than
+    // re-pushed per frame (`water-sim.js`'s own doc on why this is
+    // build-time, matching `water-render.js`'s own convention).
+    const waterSimsByFloor = new Map();
+    function createWaterSimForFloor(floorIndex) {
+      return createWaterSimSubsystem({
+        THREE,
+        allocator,
+        waterFlow: getWaterFlowForFloor(floorIndex),
+        waterBody: getWaterBodyForFloor(floorIndex),
+        renderWaterPass: renderSunShadowPass,
+        getWaterRenderState,
+        timeMsNode: uGlobalTimeMs,
+      });
+    }
+    /** Lazily create-or-reuse this floor's own sim pack. @param {number} floorIndex */
+    function getWaterSimForFloor(floorIndex) {
+      let sim = waterSimsByFloor.get(floorIndex);
+      if (!sim) {
+        sim = createWaterSimForFloor(floorIndex);
+        waterSimsByFloor.set(floorIndex, sim);
+      }
+      return sim;
+    }
+
+    // ── THE REFRACTION CAPTURE (docs/holy/Water-Testament.md §2.5, tier 5):
+    // `surface.water`'s own live claim, since 2026-08-23 — see graph/passes.js
+    // for the full reasoning. ONE INSTANCE PER FLOOR, same reason as every
+    // other water subsystem above. Unlike sim/flow/body (which only need this
+    // floor's own handles), the capture also needs the CURRENT VIEW and the
+    // drawing buffer's own device px — both read fresh inside
+    // `runWaterRefractionCapturePass` below, never cached here, because both
+    // change continuously as the author pans/zooms.
+    const waterRefractionsByFloor = new Map();
+    function createWaterRefractionForFloor() {
+      return createWaterRefractionSubsystem({ THREE, allocator, renderWaterPass: renderSunShadowPass });
+    }
+    /** Lazily create-or-reuse this floor's own refraction capture. @param {number} floorIndex */
+    function getWaterRefractionForFloor(floorIndex) {
+      let refraction = waterRefractionsByFloor.get(floorIndex);
+      if (!refraction) {
+        refraction = createWaterRefractionForFloor();
+        waterRefractionsByFloor.set(floorIndex, refraction);
+      }
+      return refraction;
+    }
+
+    /**
+     * `passImpls['surface.water']` — the REAL per-frame work behind that
+     * pass's live claim. Deliberately narrow: tiers 0-4 are UNCHANGED, still a
+     * drawable inside `runGeometryWorldPass`'s own scene — this only runs the
+     * ONE thing a drawable cannot do itself, a dependent capture of the
+     * FINISHED `buf:scene.color`. Must run AFTER `runGeometryWorldPass` (the
+     * frame-graph's own job, via `framePlan.ids`' declared order — see
+     * graph/passes.js's `reads` on this pass and `run-frame.js`'s own header
+     * on why array order IS frame order); this function does not itself
+     * enforce that ordering, only relies on it.
+     *
+     * Resolves its OWN `getActiveSceneFloors` call rather than reaching for
+     * `runLightAccumulatePass`'s own `floorsResultForFrame` — that variable is
+     * genuinely local to that function's own body (the "resolved ONCE, shared
+     * by four readers" comment there describes readers NESTED inside it, not
+     * separately-registered sibling passes like this one; confirmed the hard
+     * way, via a real `no-undef` from this file's own lint pass, not assumed).
+     * A fifth per-frame call is the honest cost of this being a genuinely
+     * separate pass now.
+     */
+    function runWaterRefractionCapturePass() {
+      let floorsResultForRefraction;
+      try {
+        floorsResultForRefraction = getActiveSceneFloors(globalThis.canvas?.scene ?? null);
+      } catch (err) {
+        log.error('runWaterRefractionCapturePass: getActiveSceneFloors failed — falling back to the viewed floor:', err);
+        floorsResultForRefraction = { ok: false };
+      }
+      const refractionFloors =
+        floorsResultForRefraction.ok && floorsResultForRefraction.floors.length > 0
+          ? floorsResultForRefraction.floors
+          : [{ index: view?.floorIndex ?? 0 }];
+      const viewRect = view ? viewToWorldRect(view, canvasW / canvasH) : null;
+      if (!viewRect) return;
+      for (const floor of refractionFloors) {
+        const refraction = getWaterRefractionForFloor(floor.index);
+        const body = getWaterBodyForFloor(floor.index);
+        refraction.tick({
+          bodyRect: body.getRect?.() ?? null,
+          viewRect,
+          canvasW,
+          canvasH,
+          sceneColorTexture: sceneColor.texture,
+        });
+      }
     }
 
     // ── FLUID, tiers 0-4 (docs/planning/Fluid.md) ──────────────────────────
@@ -11689,6 +11851,7 @@ export async function startVtPanViewer({
       lightWaterBake: profiler?.indexOf('light.waterBodyBake') ?? -1,
       lightWaterSync: profiler?.indexOf('light.waterSurfaceSync') ?? -1,
       lightWaterFlowBake: profiler?.indexOf('light.waterFlowBake') ?? -1,
+      lightWaterSimTick: profiler?.indexOf('light.waterSimTick') ?? -1,
       lightFluidSync: profiler?.indexOf('light.fluidSurfaceSync') ?? -1,
       lightRegions: profiler?.indexOf('light.regionSetup') ?? -1,
       lightPointUpdate: profiler?.indexOf('light.pointLightUpdate') ?? -1,
@@ -16196,6 +16359,8 @@ export async function startVtPanViewer({
        * in this list — three RGBA16F world-space targets, per floor, is the
        * largest single allocation water makes. */
       disposeWaterBody() {
+        for (const sim of waterSimsByFloor.values()) sim.dispose();
+        waterSimsByFloor.clear();
         for (const flow of waterFlowsByFloor.values()) flow.dispose();
         waterFlowsByFloor.clear();
         for (const surface of waterSurfacesByFloor.values()) surface.dispose();
@@ -17438,6 +17603,16 @@ export async function startVtPanViewer({
             // full-resolution texture — see `water-flow-subsystem.js`), not
             // that anything is broken.
             flow: waterFlowsByFloor.get(floorIndex)?.getStatus() ?? 'not baked',
+            // THE SIM PACK's own state (2026-08-18, S5) — `not ticked` here
+            // with a healthy `flow` above means this floor's sim subsystem
+            // simply has not been constructed yet (rare — the same floor
+            // list drives it and `flow`); `sim.lastStatus: 'waiting on the
+            // flow pack'`/`'waiting on the body pack'` is normal and
+            // temporary, the same "waiting on an async load" shape `flow`
+            // itself reports against `surface`. Once running, `sim.steps`
+            // tracking `sim.ticks` 1:1 is EXPECTED (unlike `bakes` vs
+            // `polls` above) — see `water-sim-subsystem.js`'s own header.
+            sim: waterSimsByFloor.get(floorIndex)?.getStatus() ?? 'not ticked',
           })),
       /**
        * THE CURRENT CAMERA'S WORLD RECT (2026-08-17) — for any diagnostic that

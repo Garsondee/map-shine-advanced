@@ -105,10 +105,44 @@ import {
   jfaStrideForStep,
   WATER_MASK_FILTER,
   WATER_BODY_GRID_MAX_DIM,
+  WATER_PRESENCE_EPS,
 } from './water-body.js';
+import { WATER_PRESENCE_EDGE1 } from './water-render.js';
 import { resolveWaterFloor } from './water-floor.js';
 
 const log = createLogger('WaterBody');
+
+/**
+ * Turn `WATER_PARAMS.shorelineDepth` into the body pack's OWN membership
+ * threshold — a SEPARATE question from what it already controlled (tier 0's
+ * `inside` alpha ramp, `water-render.js`), and one this project's own live
+ * report (2026-08-23) found `shorelineDepth` had NO effect on at all: *"Shore
+ * threshold does push some things back, but not everything... foam... is
+ * appearing far outside the white part of _Water."* Root cause, traced to the
+ * actual formula: shore/swash/break/filament foam all read `shoreDist01`,
+ * which comes from THIS module's own body-pack SDF — seeded and signed by
+ * `WATER_PRESENCE_EPS` (`water-body.js`, ~0.002, "any nonzero paint is
+ * water"), a threshold `shorelineDepth` never touched.
+ *
+ * ⚠️ **NOT a direct reuse of `shorelineDepth`'s own value** — that would
+ * silently retune the body pack's membership boundary for every existing map
+ * the instant this shipped, since `shorelineDepth`'s default (0.5,
+ * `WATER_PRESENCE_EDGE1`) is nowhere near `WATER_PRESENCE_EPS` (0.002).
+ * Instead: identity up to and including the legacy default (`shorelineDepth
+ * <= WATER_PRESENCE_EDGE1` returns exactly `WATER_PRESENCE_EPS`, so a floor
+ * that has never touched the (newly-raised, `a21df2e`) upper half of the
+ * slider's range sees BYTE-IDENTICAL body-pack behaviour to before this
+ * fix) — and only once an author pushes PAST that legacy ceiling does the
+ * body pack's own threshold start rising too, one-for-one with the excess.
+ * Purely additive: it can only ever make the shore/foam boundary tighten
+ * from where it already was, never loosen it.
+ * @param {number} shorelineDepth
+ * @returns {number}
+ */
+export function deriveBodyPresenceThreshold(shorelineDepth) {
+  const safe = Number.isFinite(shorelineDepth) ? shorelineDepth : WATER_PRESENCE_EDGE1;
+  return Math.max(WATER_PRESENCE_EPS, safe - WATER_PRESENCE_EDGE1);
+}
 
 /**
  * Size the flood's own grid over a world rect — the water-owned replacement
@@ -207,6 +241,11 @@ export function createWaterBodySubsystem({
   createWaterMaskTexture,
   waterSurface,
   getWaterFloorOverride,
+  // `shorelineDepth` reader — `deriveBodyPresenceThreshold`'s own doc has the
+  // full mechanism. Defaults to "no params yet", the SAME shape
+  // `vt-pan-viewer.js#getWaterRenderState`'s own fallback uses, so a caller
+  // that predates this dependency (any construction-only test) still builds.
+  getWaterRenderState = () => ({ params: {} }),
 }) {
   // ── STATE ───────────────────────────────────────────────────────────────
   /** A 1×1 all-land mask: no water, and therefore no interface, so the flood
@@ -238,6 +277,10 @@ export function createWaterBodySubsystem({
   let bakedVersion = -1;
   let bakedFloor = -1;
   let bakedOverride = null;
+  /** The `shorelineDepth` value THIS bake's seed/resolve thresholds were set
+   * from — `NaN` so the very first bake's own comparison never accidentally
+   * reads as "unchanged" against a real number. See `deriveBodyPresenceThreshold`. */
+  let bakedShorelineDepth = NaN;
   let lastBake = null;
   let lastResolve = null;
 
@@ -538,14 +581,25 @@ export function createWaterBodySubsystem({
 
     const version = getMaskAuthorityVersion();
     const overrideKey = getWaterFloorOverride ? getWaterFloorOverride() : null;
-    const unchanged = version === bakedVersion && resolved.floorIndex === bakedFloor && overrideKey === bakedOverride;
+    // `shorelineDepth` joins the comparison (2026-08-23) — `flowSolveOmega`/
+    // `flowSolveIterations`'s own sibling pattern (`water-flow-subsystem.js`):
+    // a param that only takes effect through a REBAKE, not a per-frame
+    // uniform poke, so it has to be checked here or turning the slider would
+    // silently do nothing until something ELSE (a mask edit, a floor switch)
+    // happened to trigger the next real bake.
+    const shorelineDepth = getWaterRenderState()?.params?.shorelineDepth;
+    const unchanged =
+      version === bakedVersion &&
+      resolved.floorIndex === bakedFloor &&
+      overrideKey === bakedOverride &&
+      shorelineDepth === bakedShorelineDepth;
     if (unchanged) return;
 
     // Captured BEFORE the assignments below — reading `bakedVersion` after
     // writing it would make the reason string say 'mask/floor change' on the
     // very first bake of every session, which is the mild kind of lying
     // instrument that makes a report worthless when it matters.
-    const reason = bakes === 0 ? 'first' : 'mask or floor changed';
+    const reason = bakes === 0 ? 'first' : 'mask, floor, or shoreline threshold changed';
 
     // No floor in the scene has water at all. Nothing to bake, and nothing to
     // clear: the body pack keeps whatever it last held, and `lastResolve`
@@ -558,6 +612,7 @@ export function createWaterBodySubsystem({
       bakedVersion = version;
       bakedFloor = resolved.floorIndex;
       bakedOverride = overrideKey;
+      bakedShorelineDepth = shorelineDepth;
       lastBake = { reason: 'no water in this scene', floorIndex: null, skipped: true };
       return;
     }
@@ -582,10 +637,22 @@ export function createWaterBodySubsystem({
       lastBake = { reason: upload.reason, floorIndex: resolved.floorIndex, skipped: true };
       return;
     }
+    // ⚠️ SET BEFORE `runFlood`, NOT AFTER — the seed pass's boundary test and
+    // the resolve pass's sign test both read this uniform the moment their
+    // own quad renders, which `runFlood` triggers immediately below.
+    // `deriveBodyPresenceThreshold`'s own doc has the full mechanism; BOTH
+    // setters get the SAME derived value, never independently, or the seed's
+    // idea of "where is the interface" and the resolve's idea of "which side
+    // of it is inside" desync.
+    const presenceThreshold = deriveBodyPresenceThreshold(shorelineDepth);
+    materials.seed.setPresenceThreshold(presenceThreshold);
+    materials.resolve.setPresenceThreshold(presenceThreshold);
+
     bakedVersion = version;
     bakedFloor = resolved.floorIndex;
     bakedOverride = overrideKey;
-    lastBake = { ...runFlood(reason, resolved.floorIndex), ...upload };
+    bakedShorelineDepth = shorelineDepth;
+    lastBake = { ...runFlood(reason, resolved.floorIndex), ...upload, presenceThreshold };
   }
 
   return {

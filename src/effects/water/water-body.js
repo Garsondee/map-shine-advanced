@@ -265,14 +265,24 @@ export function jfaStrideForStep(i, steps) {
  *   here via UV, so it is resolution-independent of `width`/`height` below.
  * @param {number} args.width @param {number} args.height - the FLOOD's own
  *   grid, texels — `WATER_BODY_SUPERSAMPLE ×` `maskTexture`'s native size.
- * @returns {{material:*, quad:*, maskTexNode:*}} `maskTexNode.value` is
- *   re-pointed when the mask rebakes; the material is NOT rebuilt.
+ * @returns {{material:*, quad:*, maskTexNode:*, setPresenceThreshold:(v:number)=>void}}
+ *   `maskTexNode.value` is re-pointed when the mask rebakes; the material is
+ *   NOT rebuilt. `setPresenceThreshold` re-points the LIVE uniform behind the
+ *   boundary test below — see its own call site (`water-body-subsystem.js`)
+ *   for why this needs a REBAKE (a JFA flood, not a per-frame poke) to take
+ *   effect, unlike every other live water uniform.
  */
 export function buildWaterSeedMaterial({ THREE, maskTexture, width, height }) {
-  const { texture, uv, vec2, vec4, float, step, abs, max, clamp } = THREE.TSL;
+  const { texture, uv, vec2, vec4, float, uniform, step, abs, max, clamp } = THREE.TSL;
 
   const texelX = 1 / Math.max(1, width);
   const texelY = 1 / Math.max(1, height);
+
+  // ⚠️ A LIVE UNIFORM, NOT A BAKED-IN CONSTANT (2026-08-23) — see
+  // `WATER_PRESENCE_SOFT_MASK_FLOOR`'s own doc for why this exists and why
+  // its DEFAULT still equals `WATER_PRESENCE_EPS` exactly (byte-identical
+  // behaviour for a floor that never touches `shorelineDepth`'s upper range).
+  const uPresenceThreshold = uniform(float(WATER_PRESENCE_EPS));
 
   const uv0 = uv();
   const maskTexNode = texture(maskTexture, uv0);
@@ -280,7 +290,7 @@ export function buildWaterSeedMaterial({ THREE, maskTexture, width, height }) {
   // `maskTexNode` (tier 0's own depth/edge read, elsewhere in the pipeline)
   // already expects a plain texture node to mean. Only the BOUNDARY DECISION
   // below needs area-averaging; the returned node's contract is unchanged.
-  const isWaterHere = step(float(WATER_PRESENCE_EPS), maskTexNode.r);
+  const isWaterHere = step(uPresenceThreshold, maskTexNode.r);
 
   /** ⚠️ EVERY `texture(maskTexture, …)` node this function creates, `maskTexNode`
    * itself first (`feedback_texture_nodes_must_be_repointed_together`) — the
@@ -342,7 +352,7 @@ export function buildWaterSeedMaterial({ THREE, maskTexture, width, height }) {
         // without this line is the exact regression this comment prevents.
         const tapTexNode = texture(maskTexture, sampleUv);
         maskTexNodes.push(tapTexNode);
-        sum = sum.add(step(float(WATER_PRESENCE_EPS), tapTexNode.r));
+        sum = sum.add(step(uPresenceThreshold, tapTexNode.r));
       }
     }
     return sum.div(float(SEED_SUBSAMPLES * SEED_SUBSAMPLES));
@@ -389,7 +399,15 @@ export function buildWaterSeedMaterial({ THREE, maskTexture, width, height }) {
   // `maskTexNode` kept alongside `maskTexNodes` for callers that only ever
   // wanted the single point-sample (none currently do, post-fix, but the
   // shape stays backward-compatible rather than a silent breaking change).
-  return { material, quad, maskTexNode, maskTexNodes };
+  return {
+    material,
+    quad,
+    maskTexNode,
+    maskTexNodes,
+    setPresenceThreshold(v) {
+      uPresenceThreshold.value = Number.isFinite(v) ? v : WATER_PRESENCE_EPS;
+    },
+  };
 }
 
 /**
@@ -531,9 +549,17 @@ export function buildWaterBodyResolveMaterial({
 
   const uTexelWorld = uniform(vec2(texelWorldW, texelWorldH));
   const uFarDistance = uniform(float(farDistancePx));
+  // ⚠️ MUST TRACK THE SEED PASS'S OWN THRESHOLD (2026-08-23) — see
+  // `buildWaterSeedMaterial`'s own `setPresenceThreshold` doc. A mismatch
+  // between the two would seed the flood's zero-distance boundary at one
+  // mask value while flipping this SIGN test at another, which desyncs
+  // `shoreDist01` from the interface it is supposed to be measured against —
+  // the caller is responsible for calling both setters with the same value,
+  // every bake (`water-body-subsystem.js#uploadMask` does).
+  const uPresenceThreshold = uniform(float(WATER_PRESENCE_EPS));
 
   const depth01 = maskTexNode.r;
-  const isWater = step(float(WATER_PRESENCE_EPS), depth01);
+  const isWater = step(uPresenceThreshold, depth01);
   // +1 outside water, −1 inside. Negative-inside is the SDF convention every
   // consumer below assumes, and it is what makes the wet band OUTSIDE the
   // shoreline free: the same field, positive side.
@@ -568,6 +594,9 @@ export function buildWaterBodyResolveMaterial({
     },
     setFarDistance(px) {
       uFarDistance.value = px;
+    },
+    setPresenceThreshold(v) {
+      uPresenceThreshold.value = Number.isFinite(v) ? v : WATER_PRESENCE_EPS;
     },
   };
 }

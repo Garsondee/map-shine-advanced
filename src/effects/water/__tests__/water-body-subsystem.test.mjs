@@ -25,7 +25,9 @@
  * `retries a declined bake` block below is the permanent guard.
  */
 import * as THREE from '../../../vendor/three/three.webgpu.js';
-import { createWaterBodySubsystem } from '../water-body-subsystem.js';
+import { createWaterBodySubsystem, deriveBodyPresenceThreshold } from '../water-body-subsystem.js';
+import { WATER_PRESENCE_EPS } from '../water-body.js';
+import { WATER_PRESENCE_EDGE1 } from '../water-render.js';
 
 function fakeAllocator() {
   let created = 0;
@@ -76,7 +78,7 @@ function fakeMaskGrid(w = 4, h = 4) {
   };
 }
 
-function buildHarness({ maskTextureAvailable = true } = {}) {
+function buildHarness({ maskTextureAvailable = true, getWaterRenderState } = {}) {
   const allocator = fakeAllocator();
   const pass = fakeRenderPass();
   let fullResTexture = maskTextureAvailable ? { name: 'full-res-mask', isTextureNode: false } : null;
@@ -94,6 +96,7 @@ function buildHarness({ maskTextureAvailable = true } = {}) {
       return t;
     },
     waterSurface: { getFullResMaskTexture: () => fullResTexture },
+    getWaterRenderState,
   });
   return {
     subsystem,
@@ -203,6 +206,75 @@ export function run(t) {
     ok(
       'no water in the scene: the resolve reason says so plainly',
       String(status.resolve?.reason ?? '').includes('no floor in this scene')
+    );
+  }
+
+  // ══ `deriveBodyPresenceThreshold` — the soft-mask-bleed fix's own formula
+  // (live-reported 2026-08-23: "shore threshold does push some things back,
+  // but not everything... foam is appearing far outside the white part of
+  // _Water") ═══════════════════════════════════════════════════════════════
+  {
+    ok(
+      'at or below the legacy default, the derived threshold is EXACTLY WATER_PRESENCE_EPS — zero behaviour ' +
+        'change for a floor that never touches the newly-raised (a21df2e) upper half of the slider',
+      deriveBodyPresenceThreshold(WATER_PRESENCE_EDGE1) === WATER_PRESENCE_EPS &&
+        deriveBodyPresenceThreshold(0.1) === WATER_PRESENCE_EPS &&
+        deriveBodyPresenceThreshold(0) === WATER_PRESENCE_EPS
+    );
+    ok(
+      'above the legacy default, the derived threshold rises one-for-one with the excess',
+      Math.abs(deriveBodyPresenceThreshold(0.9) - (0.9 - WATER_PRESENCE_EDGE1)) < 1e-9
+    );
+    ok(
+      'at the schema max, the derived threshold is meaningfully tighter than the old EPS',
+      deriveBodyPresenceThreshold(0.98) > 0.4
+    );
+    ok(
+      'never finite but degenerate input throws or NaNs — falls back to the legacy default',
+      deriveBodyPresenceThreshold(undefined) === WATER_PRESENCE_EPS
+    );
+    ok(
+      'monotonic — never DECREASES as shorelineDepth rises',
+      deriveBodyPresenceThreshold(0.7) <= deriveBodyPresenceThreshold(0.8)
+    );
+  }
+
+  // ══ `shorelineDepth` triggers a REBAKE, not just a live uniform poke — the
+  // integration half of the same fix: mask/floor/version all unchanged, only
+  // the shoreline slider moves, and that alone must still bake again ═══════
+  {
+    let params = { shorelineDepth: WATER_PRESENCE_EDGE1 };
+    const { subsystem, pass } = buildHarness({ getWaterRenderState: () => ({ params }) });
+
+    subsystem.maybeBake(0);
+    const bakesAfterFirst = subsystem.getStatus().bakes;
+    ok('first bake at the legacy default succeeds', bakesAfterFirst === 1);
+    const firstThreshold = subsystem.getStatus().lastBake?.presenceThreshold;
+    ok(
+      'at the legacy default, the baked threshold IS WATER_PRESENCE_EPS',
+      Math.abs(firstThreshold - WATER_PRESENCE_EPS) < 1e-9
+    );
+
+    // Poll again, nothing changed at all — must NOT rebake (the existing
+    // gate's own positive case, unaffected by this fix).
+    const rendersBeforeQuietPoll = pass.calls;
+    subsystem.maybeBake(0);
+    ok('an unchanged shorelineDepth does not trigger a second bake', subsystem.getStatus().bakes === bakesAfterFirst);
+    ok('an unchanged shorelineDepth renders nothing new', pass.calls === rendersBeforeQuietPoll);
+
+    // NOW move only the slider — mask authority version, floor, and override
+    // all stay exactly as they were.
+    params = { shorelineDepth: 0.9 };
+    subsystem.maybeBake(0);
+    ok(
+      'raising shorelineDepth ALONE triggers a real rebake — this is the actual fix, the mask/floor gate ' +
+        'alone would have silently done nothing forever',
+      subsystem.getStatus().bakes === bakesAfterFirst + 1
+    );
+    const secondThreshold = subsystem.getStatus().lastBake?.presenceThreshold;
+    ok(
+      'the rebake used the NEW derived threshold, tighter than before',
+      secondThreshold > firstThreshold && Math.abs(secondThreshold - (0.9 - WATER_PRESENCE_EDGE1)) < 1e-9
     );
   }
 

@@ -2326,6 +2326,11 @@ export async function startVtPanViewer({
         getFloorsWithWater,
         getMaskAuthorityVersion,
         renderWaterPass: renderSunShadowPass,
+        // `shorelineDepth` now ALSO governs the body pack's own membership
+        // threshold (`deriveBodyPresenceThreshold`'s own doc,
+        // water-body-subsystem.js) — the SAME accessor the flow subsystem
+        // and sim subsystem already read, below in this file.
+        getWaterRenderState,
         // NEAREST — the seed pass needs a crisp water/land interface.
         createWaterMaskTexture: (data, w, h, filter) => createMaskDataTexture(data, w, h, filter),
         // ⚠️ THE SMALL-OBSTACLE FIX (2026-08-18) — see water-body-subsystem.js's

@@ -586,6 +586,17 @@ export const WATER_TIER4_FOAM_TRAIL = 0.8;
 export const WATER_TIER5_PLACEHOLDER_RECT = Object.freeze({ minX: 0, minY: 0, maxX: 1, maxY: 1 });
 
 /**
+ * ⚠️ NO LONGER THE ONLY PLACE A SCALE ENTERS (2026-08-23) — this is now just
+ * the DEFAULT for `WATER_PARAMS.refractStrengthPx` (water.js), a live,
+ * wide-range author control (`buildWaterSurfaceMaterial`'s own
+ * `refractStrengthPx` constructor param, `setRefractStrengthPx`). Kept as a
+ * named export because a torture-fixture/unwired caller still needs SOME
+ * default. See that param's own doc for the full story of why a fixed
+ * constant here was the wrong shape once it became clear the visible
+ * effect was crushed by TWO other factors (`field.slope`'s own measured,
+ * always-small magnitude; `depth01`'s own measured low range) that this
+ * constant alone could never account for.
+ *
  * World-space UNITS (not texels — the offset is computed before the world→UV
  * remap) the refracted sample point shifts by, at `field.slope`'s own
  * BOUNDED unit-length direction (see `refractOffsetWorld`'s own comment at
@@ -604,10 +615,15 @@ export const WATER_TIER5_PLACEHOLDER_RECT = Object.freeze({ minX: 0, minY: 0, ma
  * as decorrelated noise, not a bend — the shader-lab bench's own synthetic
  * fixture reproduced a milder version of this at the SAME chop, checkerboard
  * squares visibly displaced rather than shattered; the live map's own real
- * wave field apparently reaches this regime harder. 6 is a smaller, still
- * unmeasured, but now BOUNDED-input estimate — see the clamp this rung's own
- * call site now applies before this constant is the only place a scale
- * enters at all.
+ * wave field apparently reaches this regime harder.
+ *
+ * ⚠️ THEN LIVE-REPORTED AGAIN, THE OPPOSITE PROBLEM (2026-08-23, same day):
+ * "Nothing. No sign of distortion. Assume it's broken, not subtle." 6 was
+ * chosen to be safely small against the (now-fixed) unbounded-slope bug,
+ * but never re-measured against how small `field.slope` and `depth01`
+ * actually run in practice — see `refractOffsetWorld`'s own call-site
+ * comment for the measured numbers. This constant alone was never going to
+ * be enough at ANY single fixed value; hence the live param.
  */
 export const WATER_TIER5_REFRACT_PX = 6;
 
@@ -855,6 +871,10 @@ export function buildWaterSurfaceMaterial({
   capturedTexture,
   capturedRect = WATER_TIER5_PLACEHOLDER_RECT,
   capturedTexSize = { width: 1, height: 1 },
+  // ⚠️ LIVE PARAM (2026-08-23) — was the baked WATER_TIER5_REFRACT_PX
+  // constant; see WATER_PARAMS.refractStrengthPx's own doc (water.js) for
+  // why this needed to become author-tunable, not just a bigger guess.
+  refractStrengthPx = WATER_TIER5_REFRACT_PX,
   // ── THE INSTRUMENT (2026-08-16, Water-Testament W0) ─────────────────────
   debugChannel = 0,
 }) {
@@ -947,6 +967,10 @@ export function buildWaterSurfaceMaterial({
   const uCapturedTexelUv = uniform(
     vec2(1 / Math.max(1, capturedTexSize.width), 1 / Math.max(1, capturedTexSize.height))
   );
+  // ⚠️ LIVE (2026-08-23) — see `refractStrengthPx`'s own constructor-param
+  // doc, a few lines up, and `WATER_PARAMS.refractStrengthPx` (water.js)
+  // for why this stopped being the baked `WATER_TIER5_REFRACT_PX` constant.
+  const uRefractStrengthPx = uniform(float(refractStrengthPx));
   const uTint = uniform(vec3(tint[0], tint[1], tint[2]));
   const uOpacity = uniform(float(opacity));
   const uDepth = uniform(float(depth));
@@ -1926,23 +1950,35 @@ export function buildWaterSurfaceMaterial({
     // ⚠️ BOUND THE SLOPE'S OWN MAGNITUDE BEFORE USING IT AS AN OFFSET — real
     // bug, live-reported as "oil spill" chaos (2026-08-23), fixed here.
     // `field.slope` is a rise/run gradient (unitless), and the FIRST version
-    // of this rung multiplied it by `WATER_TIER5_REFRACT_PX` completely
-    // unclamped — so a steep wave crest, or simply a per-pixel-noisy slope
-    // reading above magnitude 1, pushed the SAMPLE POSITION arbitrarily far
-    // from its true spot, and a per-pixel-varying offset with no ceiling is
-    // exactly what turns a coherent bend into decorrelated noise between
-    // neighbouring pixels — the same failure shape this effect has already
-    // scarred on twice: a per-pixel spiral (`WATER_FOAM_FLOW_NUDGE`'s own
-    // doc comment) and a runaway warp (`water-field.js#flowDeviationSafe`)
-    // — both of which ALREADY normalise-then-scale for this exact reason, a
-    // discipline this rung skipped the first time. `div(max(length, 1))` leaves a
-    // GENTLE slope (magnitude ≤ 1) untouched and only clamps a STEEP one
-    // down to unit length, so `WATER_TIER5_REFRACT_PX` is now a true,
-    // provable ceiling on the offset's own magnitude (at full depth),
-    // never a multiplier on an unbounded input.
+    // of this rung multiplied it by a bare constant completely unclamped —
+    // so a steep wave crest, or simply a per-pixel-noisy slope reading above
+    // magnitude 1, pushed the SAMPLE POSITION arbitrarily far from its true
+    // spot, and a per-pixel-varying offset with no ceiling is exactly what
+    // turns a coherent bend into decorrelated noise between neighbouring
+    // pixels — the same failure shape this effect has already scarred on
+    // twice: a per-pixel spiral (`WATER_FOAM_FLOW_NUDGE`'s own doc comment)
+    // and a runaway warp (`water-field.js#flowDeviationSafe`) — both of
+    // which ALREADY normalise-then-scale for this exact reason, a
+    // discipline this rung skipped the first time. `div(max(length, 1))`
+    // leaves a GENTLE slope (magnitude ≤ 1) untouched and only clamps a
+    // STEEP one down to unit length.
+    //
+    // ⚠️ WORTH KNOWING (2026-08-23, the invisible-refraction investigation)
+    // — in practice this clamp almost NEVER engages. `field.slope`'s own
+    // magnitude is a MEASURED physical quantity, not an arbitrary one — see
+    // `water-field.js#WATER_TIER3_CHOP`'s own Cox-Munk citation: real RMS
+    // slope runs ~0.055 (dead calm) to ~0.28 (a stiff breeze), nowhere near
+    // the magnitude-1 ceiling this clamp guards against. Combined with
+    // `depth01` (measured 0.10-0.17 across a real river in the shader-lab
+    // bench), the ACTUAL offset this whole expression produces is a small
+    // FRACTION of `refractStrengthPx`, not a value anywhere close to it —
+    // which is why the old fixed constant (24, then 6) read as invisible on
+    // a live map rather than merely subtle, and why this is a live,
+    // wide-range param now (`WATER_PARAMS.refractStrengthPx`, water.js)
+    // instead of a constant to keep re-guessing.
     const slopeMagnitude = length(field.slope);
     const slopeBounded = field.slope.div(max(slopeMagnitude, float(1)));
-    const refractOffsetWorld = slopeBounded.mul(depth01).mul(float(WATER_TIER5_REFRACT_PX));
+    const refractOffsetWorld = slopeBounded.mul(depth01).mul(uRefractStrengthPx);
     const refractedWorldXY = vec2(positionWorld.x, positionWorld.y).add(refractOffsetWorld);
 
     const capturedSpanX = max(uCapturedRect.z.sub(uCapturedRect.x), float(1));
@@ -2516,6 +2552,12 @@ export function buildWaterSurfaceMaterial({
      * @param {number} w @param {number} h */
     setCapturedTexSize(w, h) {
       uCapturedTexelUv.value.set(1 / (Number.isFinite(w) && w > 0 ? w : 1), 1 / (Number.isFinite(h) && h > 0 ? h : 1));
+    },
+    /** `WATER_PARAMS.refractStrengthPx` (water.js) — see that entry's own
+     * doc for why this is a wide-range live param now, not the baked
+     * `WATER_TIER5_REFRACT_PX` constant. @param {number} v */
+    setRefractStrengthPx(v) {
+      uRefractStrengthPx.value = v;
     },
     // ── TIER 3 ────────────────────────────────────────────────────────────
     /** The camera's world rect centre — pushed per frame, never gated. */

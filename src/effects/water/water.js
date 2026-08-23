@@ -327,6 +327,49 @@ export const WATER_PARAMS = Object.freeze({
     label: 'Caustics',
     help: 'The shifting net of bright light patches on the riverbed you get from sunlight refracting through a moving surface — strongest in clear, shallow water, and gone wherever the bed is too deep, murky or foam-covered to see at all. Turn it down for a stiller, less busy bed; 0 removes it entirely.',
   },
+  // ⚠️ NEW (2026-08-23) — was a baked module constant (WATER_TIER5_REFRACT_PX,
+  // water-render.js) for tier 5's whole first day; author, live: "give me
+  // some damn controls with wide ranges, at the moment I can't change the
+  // refraction because you haven't given me any controls." A real, wide-
+  // range LIVE param now, exactly for that reason — no rebuild, no reload,
+  // just this slider.
+  //
+  // WHY THE RANGE IS THIS WIDE: the offset this scales is
+  // `field.slope × depth01 × refractStrengthPx`, and NEITHER of the other
+  // two factors is anywhere near 1 in practice — `field.slope`'s own doc
+  // (water-field.js#WATER_TIER3_CHOP) cites the MEASURED Cox-Munk RMS-slope
+  // range, ~0.055 (dead calm) to ~0.28 (a stiff breeze), and `depth01`
+  // measured 0.10-0.17 across a real river in the shader-lab bench. Both
+  // factors together crush a "reasonable-sounding" constant like the
+  // original 24 (or the since-lowered 6) down to a small FRACTION of a
+  // world pixel — genuinely invisible, not merely subtle, which is exactly
+  // what got live-reported same day: "Nothing. No sign of distortion.
+  // Assume it's broken, not subtle." A default in the same ballpark as the
+  // old constants would very likely repeat that report.
+  //
+  // ⚠️ CONFIRMED WORKING, NOT A DEEPER BUG (2026-08-23, same day) — before
+  // settling on 80 as the default, values up to 300 and 600 were checked
+  // directly (shader-lab bench, real WebGPU, checkerboard capture): sampled
+  // points that used to land in one hue cluster land in a DIFFERENT one at
+  // higher strength, real and substantial, not degenerate. An earlier
+  // reading of "worse at high values" during THIS SAME investigation was a
+  // measurement-tool artifact (an adjacent-pixel jump detector blind to a
+  // bend gradual enough to spread across many pixels rather than jump in
+  // one), not a real rendering fault — corrected here rather than left
+  // standing. 80 is a reasoned "should show something out of the box"
+  // starting point, still well under the ceiling — this is the live-
+  // tunable control the measurement gap above calls for, not a claim that
+  // 80 is the "right" look.
+  refractStrengthPx: {
+    type: 'float',
+    min: 0,
+    max: 600,
+    step: 2,
+    default: 80,
+    category: 'Shape',
+    label: 'Refraction strength',
+    help: 'How far tier 5 bends the sampled riverbed under the water surface, in world pixels at full wave slope and full depth — 0 is a flat, unrefracted surface (a straight look-through), higher values bend the bed more visibly as the surface tilts. Real per-pixel bend is always LESS than this, scaled down by how steep the local wave actually is and how deep the water reads there — shallow water and calm chop both pull the visible effect well below this number, which is why the range goes as high as it does.',
+  },
   // ── Flow tuning (2026-08-19) — live uniforms, no rebake needed ─────────────
   bankInfluence: {
     type: 'float',
@@ -1254,6 +1297,11 @@ export const WATER_PRESETS = Object.freeze({
     breakFoam: 1,
     foamTrail: 0.8,
     caustics: 0.33,
+    // NEW (2026-08-23) — matches the schema default; this preset predates
+    // refraction becoming a live param and has no author-tuned value of its
+    // own yet (see WATER_PARAMS.refractStrengthPx's own doc for why a
+    // single "right" number doesn't exist here either).
+    refractStrengthPx: 80,
     bankInfluence: 0.35,
     flowWarpInfluence: 1.0,
     flowSolveOmega: 1.7,

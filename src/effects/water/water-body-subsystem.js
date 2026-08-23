@@ -546,23 +546,45 @@ export function createWaterBodySubsystem({
     // very first bake of every session, which is the mild kind of lying
     // instrument that makes a report worthless when it matters.
     const reason = bakes === 0 ? 'first' : 'mask or floor changed';
-    bakedVersion = version;
-    bakedFloor = resolved.floorIndex;
-    bakedOverride = overrideKey;
 
     // No floor in the scene has water at all. Nothing to bake, and nothing to
     // clear: the body pack keeps whatever it last held, and `lastResolve`
     // says why. A consumer gates on `hasWater`, never on the pack's contents.
+    // This IS a stable terminal state (retrying costs nothing to skip and
+    // buys nothing either), so it is one of the two places this function
+    // stamps `bakedVersion`/`bakedFloor`/`bakedOverride` — see the OTHER one,
+    // below, for the one place it deliberately does NOT.
     if (resolved.floorIndex == null) {
+      bakedVersion = version;
+      bakedFloor = resolved.floorIndex;
+      bakedOverride = overrideKey;
       lastBake = { reason: 'no water in this scene', floorIndex: null, skipped: true };
       return;
     }
 
     const upload = uploadMask(resolved.floorIndex);
     if (!upload.ok) {
+      // ⚠️ DO NOT STAMP `bakedVersion`/`bakedFloor`/`bakedOverride` HERE —
+      // real, live-reported regression (2026-08-23), water silently never
+      // rendering on any map. This branch means `water-surface-subsystem.js`
+      // #ensureMaskImage's own async fetch has not resolved yet — which is
+      // NOT a mask-authority version change and therefore never re-trips the
+      // `unchanged` gate above on its own. Stamping here (as this function
+      // used to, unconditionally, before the two early-returns) made
+      // `unchanged` read true on every subsequent poll even though nothing
+      // had ever actually baked: the very first poll of a session almost
+      // always races ahead of a real image fetch+decode, fails once, and
+      // then — with the OLD code — never tries again for the rest of the
+      // session, silently. This module's own header calls a decline here
+      // "safe to retry indefinitely"; leaving the stamp out is what actually
+      // delivers that, matching `water-flow-subsystem.js#maybeBake`'s own
+      // identical-shaped decline for the exact same texture one module over.
       lastBake = { reason: upload.reason, floorIndex: resolved.floorIndex, skipped: true };
       return;
     }
+    bakedVersion = version;
+    bakedFloor = resolved.floorIndex;
+    bakedOverride = overrideKey;
     lastBake = { ...runFlood(reason, resolved.floorIndex), ...upload };
   }
 

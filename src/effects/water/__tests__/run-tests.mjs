@@ -18,6 +18,7 @@ import { run as runWaterFlowSolve } from './water-flow-solve.test.mjs';
 import { run as runWaterLight } from './water-light.test.mjs';
 import { run as runWaterRender } from './water-render.test.mjs';
 import { run as runWaterFlow } from './water-flow.test.mjs';
+import { run as runWaterBodySubsystem } from './water-body-subsystem.test.mjs';
 import { run as runWaterFlowSubsystem } from './water-flow-subsystem.test.mjs';
 import { run as runWaterSim } from './water-sim.test.mjs';
 import { run as runWaterSimSubsystem } from './water-sim-subsystem.test.mjs';
@@ -71,6 +72,7 @@ const suites = [
   // suites is reported before the heavyweight ones even load.
   ['water-render', runWaterRender],
   ['water-flow', runWaterFlow],
+  ['water-body-subsystem', runWaterBodySubsystem],
   ['water-flow-subsystem', runWaterFlowSubsystem],
   ['water-sim', runWaterSim],
   ['water-sim-subsystem', runWaterSimSubsystem],

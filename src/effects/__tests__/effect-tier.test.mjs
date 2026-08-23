@@ -340,13 +340,14 @@ export function run(t) {
     resolveEffectTier(WATER, { profile: 'standard' }).tier === 3 && WATER_DEFAULT_TIER === 3
   );
   ok(
-    'quality buys tier 4 (shore) — the FIRST rung to give quality/extreme a water of their own ' +
-      "(2026-08-16; Water.md's remaining deferred rungs 5-8 — refraction/reflection/sim/spray — are what " +
-      'would push extreme past quality some day, and today do not)',
-    resolveEffectTier(WATER, { profile: 'quality' }).tier === 4
+    'quality buys tier 5 (refraction) — the FIRST rung to give quality/extreme a water of their own ' +
+      '(2026-08-16, shore; joined 2026-08-23 by refraction, also fromProfile quality — Water-Testament.md ' +
+      "§3.6's remaining deferred rungs 6-8 — sim:memory/sim:interactive/spray — are what would push " +
+      'extreme past quality some day, and today do not)',
+    resolveEffectTier(WATER, { profile: 'quality' }).tier === 5
   );
   ok(
-    "water's ladder tops out at tier 4 today — extreme buys nothing MORE than quality yet",
+    "water's ladder tops out at tier 5 today — extreme buys nothing MORE than quality yet",
     resolveEffectTier(WATER, { profile: 'extreme' }).tier === resolveEffectTier(WATER, { profile: 'quality' }).tier
   );
   ok(

@@ -105,6 +105,20 @@ const log = createLogger('WaterSurface');
  *   branch). Never the field this floor actually reads — see
  *   `args.getSunShadowSlot` for that, and `buildSurfaceForTier` for why
  *   building against "my own floor's slot" would be the worse bug.
+ * @param {*} [args.waterRefraction] - THIS FLOOR's own
+ *   `water-refraction-subsystem.js` handle (2026-08-23, tier 5) — a stable
+ *   per-floor object, injected exactly like `waterBody`, never an accessor
+ *   function: unlike the sun-shadow slots (a SHARED array reassigned across
+ *   floors at runtime), each floor owns one refraction subsystem for its own
+ *   lifetime. `.texture`/`.capturedRect`/`.width`/`.height` are read LIVE,
+ *   both at build time (`buildSurfaceForTier`) and every frame
+ *   (`syncCapturedRefraction`) — never snapshotted — because all four are
+ *   `null` until the subsystem's first successful capture and can change
+ *   IDENTITY later too (a zoom/pan crossing a bucket boundary reallocates the
+ *   capture target, same race class `setFlowPackTexture`'s own doc names).
+ *   Absent = today's pre-tier-5 behaviour: `water-render.js`'s own build-time
+ *   clamp (`capturedTexture` missing) holds the compiled tier at 4 forever,
+ *   the same "torture fixture" posture every other optional seam here takes.
  * @param {(floorIndex: number) => {texture: *, rect: object}|null} [args.getSunShadowSlot] -
  *   THE CAST-SHADOW SEAM (2026-08-16). Given the floor this instance draws on,
  *   the sun-shadow field currently baked FOR that floor, or `null` when no slot
@@ -139,6 +153,7 @@ export function createWaterSurfaceSubsystem({
   resolveExpectedDepth,
   sunShadowTexture = null,
   getSunShadowSlot,
+  waterRefraction = null,
 }) {
   // Default-off shape matching every other effect seam: an un-wired caller
   // (the torture fixture) renders exactly as it did before water existed.
@@ -234,13 +249,23 @@ export function createWaterSurfaceSubsystem({
    * (`water-render.js`), so the swap needs nothing beyond the assignment
    * itself. At channel 0 `surface.debugMaterial` is attached to no mesh,
    * which is what makes the instrument genuinely free rather than merely
-   * cheap. */
+   * cheap.
+   *
+   * `meshes[2]` (tier 5+ refraction, 2026-08-23) hides during a debug channel
+   * too, same reasoning as `meshes[0]`: the instrument reads one isolated
+   * quantity cleanly, and an alpha-blended sample on top would muddy it. It
+   * ALSO hides whenever `surface.refractMaterial` is null (below tier 5, or a
+   * tier 5 build that clamped down for want of a captured texture yet) —
+   * `!!surface.refractMaterial` is the SAME structural (not uniform) gate
+   * `bodyTexNode !== null` already is for tier 1, so a mesh with nothing real
+   * to draw is never merely dim, it is absent. */
   function refreshVisibility() {
     const bakedReady = enabled && !!waterBody.getWaterBounds() && !!loadedUrl && lastExpectedDepth !== null;
     const showDebug = bakedReady && debugChannel > 0;
     meshes[0].visible = bakedReady && !showDebug;
     meshes[1].material = showDebug ? surface.debugMaterial : surface.inscatterMaterial;
     meshes[1].visible = bakedReady;
+    meshes[2].visible = bakedReady && !showDebug && !!surface.refractMaterial;
   }
 
   /** Build (or, called again from `sync`, REBUILD) the two tier-gated
@@ -301,6 +326,21 @@ export function createWaterSurfaceSubsystem({
       // allocated once, all the same format and size, so re-pointing between
       // them is a bind-group update and never a pipeline rebuild.
       sunShadowTexture,
+      // TIER 5 — REFRACTION (2026-08-23). `waterRefraction` is `null` for an
+      // unwired caller (the torture fixture) and its own three fields are
+      // `null` until its FIRST successful capture even when wired — see
+      // `args.waterRefraction`'s own doc above for why this rebuild-time read
+      // is deliberately live, never cached. `capturedRect`/`capturedTexSize`
+      // fall through to `undefined` (never a bare `null`) so `water-render.js`'s
+      // own default-parameter placeholders apply — that file's two uniforms
+      // built from them are UNCONDITIONAL (every tier, not just tier 5), and a
+      // literal `null` there would throw at construction, not merely at tier 5.
+      capturedTexture: waterRefraction?.texture ?? null,
+      capturedRect: waterRefraction?.capturedRect ?? undefined,
+      capturedTexSize:
+        Number.isFinite(waterRefraction?.width) && Number.isFinite(waterRefraction?.height)
+          ? { width: waterRefraction.width, height: waterRefraction.height }
+          : undefined,
     });
   }
 
@@ -377,20 +417,82 @@ export function createWaterSurfaceSubsystem({
     if (surface.flowPackTexNode) surface.flowPackTexNode.value = t;
   }
 
+  /** The captured-refraction texture currently bound, by IDENTITY — same
+   * discipline as `boundFlowPackTexture`/`boundWaterSimTexture` above.
+   * Starts `null` (unlike those two) because, unlike their placeholders,
+   * `waterRefraction.texture` is genuinely absent — not merely a stand-in —
+   * until the subsystem's first successful capture; see `args.waterRefraction`'s
+   * own doc for why. */
+  let boundCapturedTexture = null;
+
+  /**
+   * Point tier 5's three chromatic-fringe taps (`capturedTexNodes`) and its
+   * world-rect/texel-size uniforms at THIS floor's own refraction capture —
+   * called from the frame loop every frame, unconditionally, same shape as
+   * `setFlowPackTexture`/`setWaterSimTexture` above: a FOURTH independent
+   * re-point cadence (the capture's own tick, gated on the body/view
+   * intersection and any zoom-driven reallocation — neither of which is a
+   * water-surface bake or a tier change).
+   *
+   * ⚠️ WHY THE TEXTURE RE-POINT CANNOT WAIT FOR A TIER-MISMATCH REBUILD.
+   * `water-render.js`'s own build-time clamp (`activeTier >= 5 && !capturedTexture
+   * ? 4 : requestedTier`) self-corrects the COLD-START race (captured texture
+   * was null, is now real) because the mismatch between `resolvedTier` and
+   * `builtForTier` keeps retrying every sync() until it converges. But once
+   * converged, `resolvedTier === builtForTier` and NO further rebuild fires —
+   * so a WARM-path identity change (the SAME tier, a DIFFERENT texture object,
+   * e.g. a zoom crossing a bucket boundary reallocates `waterRefraction`'s own
+   * capture target) would leave `capturedTexNodes` sampling a stale, possibly
+   * already-disposed texture forever without this explicit re-point, exactly
+   * `feedback_texture_nodes_must_be_repointed_together`'s own scar one level up.
+   *
+   * `capturedRect` is pushed unconditionally, never gated on identity — same
+   * reasoning as `setViewCentre` above: the world rect a capture covers shifts
+   * on ordinary panning even without a reallocation.
+   */
+  function syncCapturedRefraction() {
+    if (!waterRefraction) return;
+    const t = waterRefraction.texture;
+    if (t && t !== boundCapturedTexture) {
+      boundCapturedTexture = t;
+      for (const node of surface.capturedTexNodes) node.value = t;
+      if (Number.isFinite(waterRefraction.width) && Number.isFinite(waterRefraction.height)) {
+        surface.setCapturedTexSize?.(waterRefraction.width, waterRefraction.height);
+      }
+    }
+    if (waterRefraction.capturedRect) surface.setCapturedRect?.(waterRefraction.capturedRect);
+  }
+
   let surface = buildSurfaceForTier(builtForTier);
-  // TWO meshes over ONE geometry — water is a multiply THEN an add, and blend
-  // state is per-material (see `water-render.js`'s header for why one alpha
-  // blend cannot be both). They share the geometry object, so the AABB crop
-  // below still writes exactly one position buffer.
+  /** A cheap, permanently-inert stand-in for `meshes[2].material` whenever
+   * `surface.refractMaterial` is `null` (below tier 5) — `THREE.Mesh` always
+   * wants a real material object, and this is the SAME "always a real
+   * object, gated by JS visibility, never a conditionally-absent slot"
+   * discipline `flowPackPlaceholder`/`waterSimPlaceholder` already use for
+   * their own textures. Never drawn: `refreshVisibility` hides `meshes[2]`
+   * whenever `refractMaterial` is null, so this empty `colorNode`-less
+   * material is never actually sampled by the GPU. Created once, disposed
+   * once, in `dispose()` below — never per tier-rebuild. */
+  const refractPlaceholderMaterial = new THREE.NodeMaterial();
+  // THREE meshes over ONE geometry — water is a multiply, THEN an add, THEN
+  // (tier 5+) an alpha-blended refraction sample, and blend state is per-
+  // material (see `water-render.js`'s header for why one alpha blend cannot
+  // be all three). They share the geometry object, so the AABB crop below
+  // still writes exactly one position buffer.
   //
-  // 0.5 / 0.51 — fractional on purpose, since `sortByLayer` owns the integers:
-  // both sit above the floor background (0) and below every token and roof
-  // (1..N-1), and absorption strictly precedes in-scatter. The order matters
-  // less than it looks (multiply and add commute over a bed) but it is the
-  // physical order and it costs nothing to be right.
+  // 0.5 / 0.51 / 0.52 — fractional on purpose, since `sortByLayer` owns the
+  // integers: all three sit above the floor background (0) and below every
+  // token and roof (1..N-1). Absorption strictly precedes in-scatter (the
+  // order matters less than it looks — multiply and add commute over a bed —
+  // but it is the physical order and it costs nothing to be right); refraction
+  // draws LAST because Effects.md Law 2 makes it an ADDITION on top of the
+  // already-shipped tinted-bed look, never a replacement for it.
   const meshes = [
     Object.assign(new THREE.Mesh(geometry, surface.absorbMaterial), { renderOrder: 0.5 }),
     Object.assign(new THREE.Mesh(geometry, surface.inscatterMaterial), { renderOrder: 0.51 }),
+    Object.assign(new THREE.Mesh(geometry, surface.refractMaterial ?? refractPlaceholderMaterial), {
+      renderOrder: 0.52,
+    }),
   ];
   for (const m of meshes) {
     m.frustumCulled = false; // world-space; the camera rect moves every frame
@@ -478,9 +580,11 @@ export function createWaterSurfaceSubsystem({
       surface = buildSurfaceForTier(resolvedTier);
       meshes[0].material = surface.absorbMaterial;
       meshes[1].material = surface.inscatterMaterial;
+      meshes[2].material = surface.refractMaterial ?? refractPlaceholderMaterial;
       prev.absorbMaterial?.dispose?.(); // free the superseded materials on a tier change
       prev.inscatterMaterial?.dispose?.();
       prev.debugMaterial?.dispose?.(); // the THIRD material built every rebuild, same as the other two
+      prev.refractMaterial?.dispose?.(); // the FOURTH — null below tier 5, so guarded like the others aren't
       builtForTier = resolvedTier;
       // Force every cached value below to re-push onto the FRESH material — it
       // starts back at its constructor defaults, and the key-based caches
@@ -495,6 +599,12 @@ export function createWaterSurfaceSubsystem({
       // change (`feedback_new_effect_forgotten`'s shape, one object over).
       boundShadowTexture = null;
       boundShadowRectKey = '';
+      // ⚠️ SAME REASONING, ONE RUNG UP (2026-08-23) — a fresh `surface` means
+      // fresh (placeholder-valued) `capturedTexNodes`, so the identity check
+      // in `syncCapturedRefraction` must be forced to re-push onto THEM, not
+      // trust that the OLD surface's nodes already match `waterRefraction`'s
+      // current texture (they never do — they're different node objects).
+      boundCapturedTexture = null;
     }
 
     // THE DEPTH-AUTHORITY GATE's OWN EXPECTED DEPTH (2026-08-15). Pushed
@@ -520,6 +630,13 @@ export function createWaterSurfaceSubsystem({
     // above: an input that changes on the depth authority's/residency pass's
     // own clock, never on water's.
     syncSunShadow(floorIndex);
+
+    // TIER 5's OWN CAPTURE — same cadence again: `water-refraction-
+    // subsystem.js` ticks on the frame loop's own clock (and can reallocate
+    // on a zoom/pan independent of any water-surface bake or tier change), so
+    // this reads it fresh every sync() too, never gated on the bake or params
+    // keys below.
+    syncCapturedRefraction();
 
     // THE EYE. Pushed every frame and NEVER gated on anything — mirrors
     // `specular-surface-subsystem.js`'s identical reasoning: this is the whole
@@ -787,6 +904,16 @@ export function createWaterSurfaceSubsystem({
         // floor has no baked field right now, so it is deliberately passing
         // full sun. `feedback_identical_symptom_two_gates_needs_a_discriminator`.
         sunShadow: { compiled: surface.sunShadowCompiled, slot: boundShadowRectKey || 'not synced' },
+        // TIER 5 — REFRACTION (2026-08-23). `compiled` false means either the
+        // tier is below 5, or it clamped back down to 4 at build time for
+        // want of a captured texture yet (`water-render.js`'s own clamp) —
+        // either way there is nothing to draw and `meshes[2]` stays hidden.
+        // `capture` is the subsystem's OWN status report, unwrapped one level
+        // so a live scene shows WHY there is nothing yet ('no water body rect
+        // for this floor', 'water fully off-screen this frame', etc.) rather
+        // than a bare boolean that cannot distinguish "never wired" from
+        // "wired but waiting its first frame".
+        refraction: { compiled: !!surface.refractMaterial, capture: waterRefraction?.getStatus?.() ?? 'not wired' },
         // The raw (possibly-null) resolve — `null` means this floor's own
         // background item has no rank right now (not currently composited, or
         // a transient residency-pass race), and IS why `visible` reads false
@@ -801,6 +928,8 @@ export function createWaterSurfaceSubsystem({
       surface.absorbMaterial?.dispose?.();
       surface.inscatterMaterial?.dispose?.();
       surface.debugMaterial?.dispose?.();
+      surface.refractMaterial?.dispose?.();
+      refractPlaceholderMaterial.dispose(); // the ONE object never touched by a tier rebuild — freed here instead
       maskTexture?.dispose?.();
       flowPackPlaceholder?.dispose?.();
     },

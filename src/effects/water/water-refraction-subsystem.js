@@ -139,6 +139,8 @@ export function computeCaptureTargetSize(regionRect, viewRect, canvasW, canvasH)
  * @returns {{
  *   texture: *|null,
  *   capturedRect: {minX:number,minY:number,maxX:number,maxY:number}|null,
+ *   width: number|null,
+ *   height: number|null,
  *   tick: (args: {bodyRect: object|null, viewRect: object, canvasW: number, canvasH: number, sceneColorTexture: *|null}) => void,
  *   getStatus: () => object,
  *   dispose: () => void,
@@ -261,6 +263,17 @@ export function createWaterRefractionSubsystem({ THREE, allocator, renderWaterPa
     /** The world rect `texture`'s own UV space maps across — `null` until the first successful capture. Consumed by `water-render.js` tier 5 to reproject its OWN current-frame world position into this texture, with no camera-delta math needed (this module's own header). */
     get capturedRect() {
       return capturedRect;
+    },
+    /** The capture target's own texel dimensions — `null` until the first
+     * allocation, same contract as `texture`/`capturedRect` above. Feeds
+     * `water-render.js#setCapturedTexSize`'s chromatic-fringe texel pitch;
+     * same reasoning as `water-sim-subsystem.js`'s own `width`/`height`
+     * getters, which this pair mirrors exactly. */
+    get width() {
+      return captureRt ? captureRt.width : null;
+    },
+    get height() {
+      return captureRt ? captureRt.height : null;
     },
     tick,
     getStatus() {

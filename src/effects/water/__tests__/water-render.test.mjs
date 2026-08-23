@@ -34,6 +34,13 @@
  * type mismatch TSL rejects at construction, and a null that only one tier's
  * branch can reach.
  *
+ * Tier 5 (refraction, 2026-08-23) joined the ladder as a FIFTH structurally
+ * different graph, same reasoning as tiers 0-3 above: it is the first rung
+ * whose own unconditional `texture()` fetch reads a caller-supplied texture
+ * that is genuinely `null` on a real session's opening frames
+ * (`water-refraction-subsystem.js`'s own capture-not-ready state) — exactly
+ * the `bodyTexture` race this file already guards below, one rung narrower.
+ *
  * WHAT IT DOES **NOT** PROVE, stated plainly so a green run is never mistaken
  * for more: nothing about the emitted WGSL, nothing about what any of it looks
  * like, nothing about performance. The graph is built, not compiled and not
@@ -42,8 +49,15 @@
  */
 import * as THREE from '../../../vendor/three/three.webgpu.js';
 import { buildWorldSpaceOutdoorsGate } from '../../lighting/environmental-light.js';
-import { buildWaterSurfaceMaterial, WATER_DEFAULT_TIER } from '../water-render.js';
+import {
+  buildWaterSurfaceMaterial,
+  WATER_DEFAULT_TIER,
+  WATER_PRESENCE_EDGE0,
+  WATER_PRESENCE_EDGE1,
+  WATER_PRESENCE_EDGE_AA_PX,
+} from '../water-render.js';
 import { WATER_DEBUG_CHANNELS } from '../water.js';
+import { buildFoamCellularStructure } from '../water-shore.js';
 
 /** A 1×1 texture — enough for a node to reference; never sampled here. */
 function stubTexture() {
@@ -66,6 +80,9 @@ function args(overrides = {}) {
     maskRect: RECT,
     bodyTexture: stubTexture(),
     bodyRect: RECT,
+    capturedTexture: stubTexture(),
+    capturedRect: RECT,
+    capturedTexSize: { width: 512, height: 512 },
     timeMsNode: uniform(float(0)),
     uViewRect: uniform(vec4(0, 0, 1000, 1000)),
     uOutdoorsRect: uniform(vec4(0, 0, 1000, 1000)),
@@ -80,7 +97,7 @@ export function run(t) {
 
   // ── EVERY RUNG CONSTRUCTS — the reason this file exists ─────────────────
   const built = {};
-  for (const tier of [0, 1, 2, 3, 4]) {
+  for (const tier of [0, 1, 2, 3, 4, 5]) {
     let result = null;
     let err = null;
     try {
@@ -91,14 +108,14 @@ export function run(t) {
     ok(`tier ${tier}: the TSL graph CONSTRUCTS without throwing (${err ? err.message : 'clean'})`, err === null);
     built[tier] = result;
   }
-  if (!built[4]) return; // everything below would cascade meaninglessly
+  if (!built[5]) return; // everything below would cascade meaninglessly
 
   // ── WATER IS TWO MESHES AT EVERY TIER ──────────────────────────────────
   // Half a water surface (absorption with no in-scatter, or the reverse) is a
   // far worse failure than none and reads as a shader bug — the subsystem's
   // own `refreshVisibility` says so. A tier that dropped one would be exactly
   // that, silently.
-  for (const tier of [0, 1, 2, 3, 4]) {
+  for (const tier of [0, 1, 2, 3, 4, 5]) {
     const b = built[tier];
     ok(`tier ${tier}: returns BOTH materials`, !!b.absorbMaterial && !!b.inscatterMaterial);
     ok(
@@ -114,6 +131,29 @@ export function run(t) {
       !!b.absorbMaterial.mrtNode
     );
     ok(`tier ${tier}: reports the tier it was actually built at`, b.tier === tier);
+  }
+
+  // ── A NULL bodyTexture CLAMPS THE ACTUAL TIER TO 0 (2026-08-18) ─────────
+  // The loop above never catches this: it always passes a real stub
+  // texture, so `tier === tier` trivially held even before this fix existed.
+  // The regression this guards against: `water-surface-subsystem.js#sync`
+  // stores THIS return value as `builtForTier`, documented as reflecting
+  // what actually compiled, not what was merely requested. `bodyTexture` is
+  // genuinely null on the very first sync() of a session, before the body
+  // pack's own first bake completes, and every tier ≥1 rung reads it
+  // unconditionally. Without this clamp, a build racing ahead of that first
+  // bake either throws (`texture(null, …)`, live-reported the same day) or,
+  // worse, silently compiles at tier 0 while claiming a higher tier — which
+  // permanently starves every later sync() of the "resolved tier differs
+  // from built tier" mismatch it needs to ever retry. Live-reported as "MSA
+  // breaks entirely, no error, no warning" the same day this shipped without
+  // the assertions below.
+  {
+    const noBody = buildWaterSurfaceMaterial(args({ tier: 4, bodyTexture: null }));
+    ok('a null bodyTexture clamps the ACTUAL tier to 0, whatever tier was requested', noBody.tier === 0);
+    ok('…and therefore never creates the body-pack fetch either', noBody.bodyTexNode === null);
+    const withBody = buildWaterSurfaceMaterial(args({ tier: 4 }));
+    ok('a real bodyTexture reaches the actually-requested tier', withBody.tier === 4);
   }
 
   // ── THE GATE ACTUALLY GATES (Effects.md Law 4's own test) ──────────────
@@ -146,7 +186,7 @@ export function run(t) {
   // this file now has: `floorGateCompiled` is the one structural consequence
   // Node can observe (same reasoning as `bodyTexNode === null` above — a
   // uniform-based "gate" could not produce a JS-visible false here).
-  for (const tier of [0, 1, 2, 3, 4]) {
+  for (const tier of [0, 1, 2, 3, 4, 5]) {
     let err = null;
     let withDepth = null;
     try {
@@ -261,9 +301,11 @@ export function run(t) {
     'setSwashFoam',
     'setBreakFoam',
     'setCaustics',
+    'setCapturedRect',
+    'setCapturedTexSize',
     'setDebugChannel',
   ];
-  for (const tier of [0, 1, 2, 3, 4]) {
+  for (const tier of [0, 1, 2, 3, 4, 5]) {
     const b = built[tier];
     const missing = SETTERS.filter((k) => typeof b[k] !== 'function');
     ok(
@@ -418,16 +460,96 @@ export function run(t) {
     }
   }
 
+  // ══ TIER 5 — REFRACTION (2026-08-23, Water-Testament.md §2.5) ═══════════
+  // Same "THE GATE ACTUALLY GATES" proof tier 1's `bodyTexNode` got: below
+  // tier 5 there is no third mesh to draw, and it is JS-absent, not merely
+  // hidden, because a uniform-based "gate" could not produce a null here
+  // (`tsl/no-uniform-gates`).
+  ok('tier 5 builds the third mesh', built[5].refractMaterial !== null);
+  ok(
+    'tiers below 5 build no refraction mesh at all — nothing to draw, nothing to bind',
+    built[0].refractMaterial === null &&
+      built[1].refractMaterial === null &&
+      built[2].refractMaterial === null &&
+      built[3].refractMaterial === null &&
+      built[4].refractMaterial === null
+  );
+  ok(
+    'the refraction mesh is a real NodeMaterial with a colorNode',
+    built[5].refractMaterial.isNodeMaterial && !!built[5].refractMaterial.colorNode
+  );
+  ok(
+    'the refraction mesh blends via SrcAlpha/OneMinusSrcAlpha — a real sample, not a multiplicative tint',
+    built[5].refractMaterial.blendSrc === THREE.SrcAlphaFactor &&
+      built[5].refractMaterial.blendDst === THREE.OneMinusSrcAlphaFactor
+  );
+  ok(
+    'the refraction mesh ALSO overrides its attr MRT — same reasoning as absorbMaterial/debugMaterial',
+    !!built[5].refractMaterial.mrtNode
+  );
+
+  // ── `capturedTexNodes` MUST CONTAIN EVERY `texture(capturedTexture, …)`
+  // NODE, same discipline `maskTexNodes` enforces below and for the same
+  // reason: three DIFFERENT UVs (the chromatic fringe's R/B split) means
+  // three DIFFERENT nodes, and a caller re-pointing only the first would
+  // leave two channels sampling the 1×1 placeholder forever
+  // (`feedback_texture_nodes_must_be_repointed_together`). ──────────────────
+  ok('capturedTexNodes is an array', Array.isArray(built[5].capturedTexNodes));
+  ok('below tier 5, no captured-texture node exists yet', built[4].capturedTexNodes.length === 0);
+  ok(
+    `tier 5 builds exactly the three chromatic-fringe taps (got ${built[5].capturedTexNodes.length})`,
+    built[5].capturedTexNodes.length === 3
+  );
+  ok(
+    'every captured-texture node is a genuine re-pointable TextureNode, not a derived expression',
+    built[5].capturedTexNodes.every((n) => n.isTextureNode === true)
+  );
+
+  // ── A MISSING `capturedTexture` CLAMPS THE ACTUAL TIER TO 4, MIRRORING
+  // `bodyTexture`'s OWN CLAMP TO 0 ABOVE — the same startup race
+  // (`water-refraction-subsystem.js` returns `texture: null` before its
+  // first successful capture), one rung narrower. ──────────────────────────
+  {
+    const noCapture = buildWaterSurfaceMaterial(args({ tier: 5, capturedTexture: null }));
+    ok('a null capturedTexture clamps the ACTUAL tier to 4, whatever tier was requested', noCapture.tier === 4);
+    ok('…and therefore never creates the refraction mesh either', noCapture.refractMaterial === null);
+    ok('…nor any of the chromatic-fringe taps', noCapture.capturedTexNodes.length === 0);
+    ok(
+      'tiers 1-4 are UNAFFECTED by the missing capture — they read nothing from this subsystem',
+      !!noCapture.bodyTexNode && noCapture.normalCompiled === true
+    );
+    const withCapture = buildWaterSurfaceMaterial(args({ tier: 5 }));
+    ok('a real capturedTexture reaches the actually-requested tier', withCapture.tier === 5);
+  }
+
+  // ── THE TWO NEW SETTERS ARE CALLABLE AT EVERY TIER, INCLUDING BELOW 5 —
+  // same reasoning as the tier-3 lobe's own setters: the subsystem pushes
+  // every param every time the key changes, without asking the tier first.
+  {
+    let err = null;
+    try {
+      built[0].setCapturedRect({ minX: 100, minY: 200, maxX: 900, maxY: 800 });
+      built[0].setCapturedTexSize(256, 128);
+    } catch (e) {
+      err = e;
+    }
+    ok(`tier 0 tolerates both tier-5 setters being called on it (${err ? err.message : 'clean'})`, err === null);
+  }
+
   // ══ `maskTexNodes` MUST CONTAIN EVERY `texture(maskTexture, …)` NODE
   // (2026-08-17, `feedback_texture_nodes_must_be_repointed_together`) ═══════
   // The live incident this guards: the material is built against a 1×1
-  // placeholder, the real image re-points exactly the nodes in THIS array,
-  // and the mask-proximity ring (tier 4) once created 8 nodes that were
-  // never added to it — they sampled the placeholder forever and turned the
-  // author's whole river white. This does not catch every possible future
-  // instance of the mistake (a ninth tap someone forgets to push would still
-  // slip past a length check), but it does pin the two facts that make the
-  // CURRENT fix real: the array exists and grows with the ring that needs it.
+  // placeholder, and the real image re-points exactly the nodes in THIS
+  // array. The mask-proximity 8-tap ring (tier 4) is what originally exposed
+  // the gap — it once created 8 nodes that were never added here, so they
+  // sampled the placeholder forever and turned the author's whole river
+  // white — but that ring itself was removed 2026-08-18 (author's explicit
+  // repeated request; see water-render.js's own removal note). The
+  // underlying discipline this test guards outlives the ring: `maskTexNodes`
+  // must still contain the exact node the shader reads, for whatever gets
+  // added to tier 4 next. Re-checking the count at tier 4 (not just below
+  // it) now doubles as a removal guard — if it ever drifts off 1 again,
+  // something is sampling the mask without registering for re-pointing.
   {
     const belowRing = buildWaterSurfaceMaterial(args({ tier: 3 }));
     ok('maskTexNodes is an array', Array.isArray(belowRing.maskTexNodes));
@@ -435,12 +557,12 @@ export function run(t) {
       "maskTexNodes[0] IS maskTexNode (same node, not a copy) — the subsystem's re-point loop must reach the exact object the shader reads",
       belowRing.maskTexNodes[0] === belowRing.maskTexNode
     );
-    ok('below tier 4, only the base sample exists — the ring has not built yet', belowRing.maskTexNodes.length === 1);
+    ok('below tier 4, only the base sample exists', belowRing.maskTexNodes.length === 1);
 
-    const atRing = buildWaterSurfaceMaterial(args({ tier: 4 }));
+    const atTier4 = buildWaterSurfaceMaterial(args({ tier: 4 }));
     ok(
-      `at tier 4, the base sample PLUS all 8 ring taps are present (got ${atRing.maskTexNodes.length})`,
-      atRing.maskTexNodes.length === 9
+      `at tier 4, still only the base sample — the 8-tap ring is gone (got ${atTier4.maskTexNodes.length})`,
+      atTier4.maskTexNodes.length === 1
     );
   }
 
@@ -451,13 +573,115 @@ export function run(t) {
   {
     const noFlowArg = buildWaterSurfaceMaterial(args({ tier: 0 }));
     ok('flowPackTexNode exists even at tier 0 (unconditional, not tier-gated)', !!noFlowArg.flowPackTexNode);
+    // ⚠️ `isTextureNode === true`, HARD requirement, NOT `|| !!node` — LIVE
+    // REGRESSION, 2026-08-18, SAME DAY THE `inRect` GATE SHIPPED. This
+    // assertion USED TO read `!!node.isTextureNode || !!node` — which passes
+    // for ANY truthy node, texture or not, and so passed even after the gate
+    // was written as `texture(...).mul(inRect)` and assigned back to
+    // `flowPackTexNode` — a `.mul()` result is a plain arithmetic node (a
+    // `VarNode` in the vendored three.webgpu.js, confirmed empirically), NOT
+    // a `TextureNode`, and critically: assigning `.value = someTexture` on it
+    // SUCCEEDS as an ordinary JS property write and reads back correctly —
+    // it just has ZERO effect on the compiled shader, because a `VarNode`'s
+    // `.value` property is not consulted by anything. That is precisely why
+    // `water-surface-subsystem.js#setFlowPackTexture`'s own
+    // `surface.flowPackTexNode.value = t` went from a real re-point to a
+    // silent no-op: production kept sampling the 1×1 placeholder forever,
+    // which reads as solid black (this channel's own "value=0 is black
+    // regardless of hue" property). Author's live report: "The flow pack
+    // velocity debug layer is black for me." `isTextureNode` is the cheapest
+    // available Node-level (no GPU) discriminator between "a real, re-
+    // pointable texture reference" and "a derived expression that merely
+    // LOOKS like one from the outside" — any future gate/derived term
+    // applied to a re-pointed node MUST land on a SEPARATE variable, never
+    // reassign the re-pointed name itself, and this test is what catches it
+    // if that discipline slips again.
     ok(
-      'flowPackTexNode still constructs cleanly with no flowPackTexture argument at all',
-      !!noFlowArg.flowPackTexNode.isTextureNode || !!noFlowArg.flowPackTexNode
+      'flowPackTexNode is a genuine re-pointable TextureNode, not a derived expression',
+      noFlowArg.flowPackTexNode.isTextureNode === true
     );
 
     const withFlowArg = buildWaterSurfaceMaterial(args({ tier: 4, flowPackTexture: stubTexture() }));
     ok('flowPackTexNode exists at tier 4 too', !!withFlowArg.flowPackTexNode);
+    ok(
+      'flowPackTexNode stays a genuine TextureNode at tier 4 too, with a real texture supplied',
+      withFlowArg.flowPackTexNode.isTextureNode === true
+    );
+    // ⚠️ DELIBERATELY NOT TESTED HERE: whether `.value = x` re-pointing
+    // actually changes what gets SAMPLED. A `.value` round-trip
+    // (`node.value = x; assert node.value === x`) was tried and REJECTED —
+    // it passes identically on a broken `VarNode` (confirmed empirically:
+    // plain JS property assignment always round-trips, texture node or not)
+    // and would have been exactly the kind of test that LOOKS like it proves
+    // the wiring while proving nothing (`feedback_instruments_must_not_lie`).
+    // `isTextureNode === true`, above, is the strongest claim Node can make
+    // honestly. Whether a re-point actually reaches the GPU sampler is a
+    // render+readback question — `bench-water.js`'s own re-point scenario is
+    // where that gets proven, not here.
+  }
+
+  // ══ THE PRESENCE EDGE'S OWN AA FLOOR (2026-08-19) — third independent
+  // fix for a symptom this exact edge has now had twice before (ramp width,
+  // then mask resolution) — see `WATER_PRESENCE_EDGE_AA_PX`'s own doc ═════
+  ok('the presence edge AA width is a real, positive screen-pixel count', WATER_PRESENCE_EDGE_AA_PX > 0);
+  ok(
+    'the presence edge band is still a real band, not inverted or collapsed',
+    WATER_PRESENCE_EDGE0 < WATER_PRESENCE_EDGE1
+  );
+
+  // ══ `buildFoamCellularStructure` — THE SPIRAL FIX (2026-08-19) ══════════
+  // The bug: `WATER_FOAM_STREAK`'s rotation used to be fed a per-pixel
+  // direction directly as `flowDir`, which warped it into a spiral near
+  // obstacles. The fix separates "what rotates" (must stay global) from
+  // "what nudges" (the real per-pixel signal, bounded and additive) into
+  // two distinct parameters — this only constructs cleanly if that
+  // separation is real, not just documented.
+  {
+    const { uniform, vec2, float } = THREE.TSL;
+    const worldXY = uniform(vec2(400, 250));
+    const domainOffset = uniform(vec2(0, 0));
+    const globalDir = uniform(vec2(0, 1)); // due south, same as the shipped default
+    const uReachPx = uniform(float(180));
+
+    const noLocal = buildFoamCellularStructure({ TSL: THREE.TSL, worldXY, domainOffset, flowDir: globalDir, uReachPx });
+    ok('constructs with no localFlowDir at all (the null-safe default)', !!noLocal.structure && !!noLocal.cell);
+
+    // A DIFFERENT node than `flowDir` — this is the case that used to matter:
+    // a genuinely per-pixel-varying direction, distinct from the global one.
+    const localDir = uniform(vec2(0.6, 0.8));
+    const withLocal = buildFoamCellularStructure({
+      TSL: THREE.TSL,
+      worldXY,
+      domainOffset,
+      flowDir: globalDir,
+      localFlowDir: localDir,
+      uReachPx,
+    });
+    ok('constructs with a real, different localFlowDir supplied too', !!withLocal.structure && !!withLocal.cell);
+    ok(
+      'the two builds are independent objects, not the same node reused (a real second construction ran, not a cached no-op)',
+      withLocal.structure !== noLocal.structure
+    );
+  }
+
+  // ══ `waterSimTexNode` IS NEVER NULL EITHER (2026-08-18, S5) — SAME rule,
+  // SAME live-regression scar, as `flowPackTexNode` immediately above: the
+  // clump-threshold gate (`waterSimFoam`) MUST land on a separate variable,
+  // never get assigned back onto `waterSimTexNode` itself. ══════════════════
+  {
+    const noSimArg = buildWaterSurfaceMaterial(args({ tier: 0 }));
+    ok('waterSimTexNode exists even at tier 0 (unconditional, not tier-gated)', !!noSimArg.waterSimTexNode);
+    ok(
+      'waterSimTexNode is a genuine re-pointable TextureNode, not a derived expression',
+      noSimArg.waterSimTexNode.isTextureNode === true
+    );
+
+    const withSimArg = buildWaterSurfaceMaterial(args({ tier: 4, waterSimTexture: stubTexture() }));
+    ok('waterSimTexNode exists at tier 4 too', !!withSimArg.waterSimTexNode);
+    ok(
+      'waterSimTexNode stays a genuine TextureNode at tier 4 too, with a real texture supplied',
+      withSimArg.waterSimTexNode.isTextureNode === true
+    );
   }
 
   // ══ THE DEBUG CHANNELS (2026-08-16, Water-Testament W0) — THE INSTRUMENT
@@ -504,7 +728,7 @@ export function run(t) {
     typeof built[4].setDebugChannel === 'function'
   );
 
-  for (const tier of [0, 1, 2, 3, 4]) {
+  for (const tier of [0, 1, 2, 3, 4, 5]) {
     let debugSetterError = null;
     try {
       for (const ch of WATER_DEBUG_CHANNELS) built[tier].setDebugChannel(ch.n);

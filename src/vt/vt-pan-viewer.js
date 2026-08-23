@@ -8364,6 +8364,16 @@ export async function startVtPanViewer({
           }
           return null;
         },
+        // TIER 5 — REFRACTION (2026-08-23). THIS floor's own refraction
+        // subsystem, resolved (created on first ask) exactly like `waterBody`
+        // just above — a stable per-floor object, not an accessor, since
+        // (unlike the sun-shadow slots) refraction is never reassigned across
+        // floors at runtime. Safe to call here even though
+        // `waterRefractionsByFloor` is declared further down this same
+        // function: this factory only ever RUNS lazily, from the frame loop,
+        // long after every top-level const in `startVtPanViewer` has already
+        // initialized — see `getWaterRefractionForFloor`'s own doc.
+        waterRefraction: getWaterRefractionForFloor(floorIndex),
       });
     }
     /** Lazily create-or-reuse this floor's own surface. @param {number} floorIndex */
@@ -8494,7 +8504,10 @@ export async function startVtPanViewer({
       try {
         floorsResultForRefraction = getActiveSceneFloors(globalThis.canvas?.scene ?? null);
       } catch (err) {
-        log.error('runWaterRefractionCapturePass: getActiveSceneFloors failed — falling back to the viewed floor:', err);
+        log.error(
+          'runWaterRefractionCapturePass: getActiveSceneFloors failed — falling back to the viewed floor:',
+          err
+        );
         floorsResultForRefraction = { ok: false };
       }
       const refractionFloors =

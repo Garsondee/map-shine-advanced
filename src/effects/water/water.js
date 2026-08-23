@@ -422,10 +422,12 @@ export const WATER_DIALS = Object.freeze({
 /**
  * The manifest — the effect as data (Effects.md §2 shape). `tiers` lists only
  * what is ACTUALLY BUILT (mirrors bloom.js's own precedent: tier 0 there,
- * nothing further, until later tiers land for real). Tiers 1–8 are recorded
- * as `deferredRungs` — named, ordered, but not yet real code — matching the
- * ladder `docs/planning/Water.md` §6 designs in full, without the manifest
- * claiming more exists than does.
+ * nothing further, until later tiers land for real) — as of 2026-08-23 that
+ * is rungs 0-5, refraction included. Rungs 6-8 are recorded as
+ * `deferredRungs` — named, ordered, but not yet real code — matching
+ * `docs/holy/Water-Testament.md` §3.6, the newer LOCKED ladder (NOT
+ * `docs/planning/Water.md` §6, which still lists a now-deleted `reflection`
+ * rung), without the manifest claiming more exists than does.
  *
  * `visualWeight: 0.8` — a landscape focal feature, defended well under
  * budget (matches the pre-Phase-0 Water.md sketch's own number, still
@@ -529,25 +531,48 @@ export const WATER = Object.freeze({
         'Filaments genuinely ADD a fetch (C4, real cost); shoaling and caustics ride tier 2`s own fetch ' +
         'and its two extra taps, which is why this rung is priced by the taps, not by a new VT read.',
     }),
+    Object.freeze({
+      n: 5,
+      name: 'refraction',
+      // FIRST RUNG THAT IS A DEPENDENT READ, NOT A DRAWABLE (2026-08-23) —
+      // tiers 0-4 all live inside `geometry.world` as a plain drawable mesh;
+      // this one needs LAST frame's buf:scene.color, which a same-pass
+      // drawable cannot read (undefined behaviour on the GPU), so it is the
+      // reason `graph/passes.js#surface.water` flipped from 'seam' to 'live'
+      // — see that pass's own note. `estMsPerMp` is an honest first estimate
+      // (this rung's own C5 sibling in tier 4 measures 0.12; three co-located
+      // chromatic-fringe taps plus one conditional depth-validation tap is
+      // genuinely more texture traffic than anything below it), NOT a real
+      // GPU sweep — `tools/shader-lab/bench-water.js` owns turning this into
+      // a measured number.
+      fromProfile: 'quality',
+      cost: Object.freeze({ class: 'C5', estMsPerMp: 0.18 }),
+      adds:
+        'Refraction — the water surface bends what is beneath it. A world-anchored, one-frame-stale ' +
+        'capture of buf:scene.color (water-refraction-subsystem.js), sampled through a UV offset by ' +
+        'tier 2`s own slope field × depth (no new fetch for the offset itself), validated against ' +
+        'buf:scene.depth`s rank so a token or wall standing where the bend would look falls back to the ' +
+        'centre, unrefracted sample (V2`s own "tap validation"), finished with a ±1-texel R/B chromatic ' +
+        'fringe. World-anchored on purpose: the capture remembers the WORLD rect its own UV space maps ' +
+        'across, so this frame`s position remaps through it with no camera-delta math at all.',
+    }),
   ]),
-  // Recorded, NOT built — honest rungs (Effects.md §0), the full ladder
-  // Water.md §6 designs. Each becomes a real `tiers` entry, with its own
-  // cost class and its own phase's render code, in build order.
+  // Recorded, NOT built — honest rungs (Effects.md §0), the ladder
+  // Water-Testament.md §3.6 (the newer, LOCKED table — NOT Water.md §6, which
+  // still lists a now-deleted `reflection` rung between refraction and sim;
+  // see §3.6's own "C6 SSR-style reflection is DELETED from the ladder"). Each
+  // becomes a real `tiers` entry, with its own cost class and its own phase's
+  // render code, in build order.
   deferredRungs: Object.freeze([
     Object.freeze({
-      name: 'refraction',
-      note: 'Dependent read of buf:scene.color offset by slope × thickness, plus chromatic dispersion.',
+      name: 'sim:memory',
+      note: 'Foam advect/decay buffer + wetness watermark + convergence scum. Coverage- and zoom-gated.',
     }),
     Object.freeze({
-      name: 'reflection',
-      note: 'Short screen-space march along the wave normal for shoreline objects and tokens.',
-    }),
-    Object.freeze({
-      name: 'sim',
+      name: 'sim:interactive',
       note:
-        'Spectral cascade + interactive ripple integrator + flow advection, ADDED into the tier-2 ' +
-        'field (never substituted for it). Rain rings, token wakes, waves reflecting off banks. ' +
-        'Coverage- and zoom-gated.',
+        'Interactive ripple integrator, wakes, rain rings — ADDED into the tier-2 field (never ' +
+        'substituted for it), never a readback.',
     }),
     Object.freeze({
       name: 'spray',

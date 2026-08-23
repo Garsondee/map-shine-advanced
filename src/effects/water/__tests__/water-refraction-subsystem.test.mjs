@@ -30,7 +30,11 @@ function fakeAllocator() {
   return {
     create(name, describe) {
       created++;
-      return { name, describe, texture: { name }, dispose() {} };
+      // width/height mirror the real allocator's own render-target shape
+      // (`three-allocator.js`), which `water-sim-subsystem.js`'s own
+      // `width`/`height` getters already depend on — this subsystem's
+      // matching pair needs the same fake shape to be testable at all.
+      return { name, describe, texture: { name }, width: describe.resolvedW, height: describe.resolvedH, dispose() {} };
     },
     dispose(rt) {
       if (rt) disposed++;
@@ -147,6 +151,10 @@ export function run(t) {
     });
     ok('no body rect: texture stays null', subsystem.texture === null);
     ok('no body rect: capturedRect stays null', subsystem.capturedRect === null);
+    ok(
+      'no body rect: width/height stay null too — nothing has ever allocated',
+      subsystem.width === null && subsystem.height === null
+    );
     ok('no body rect: never renders', pass.calls === 0);
     ok('no body rect: status says so, not a generic failure', subsystem.getStatus().lastStatus.includes('body rect'));
   }
@@ -196,6 +204,13 @@ export function run(t) {
     ok(
       'capturedRect is the body/view INTERSECTION, not the raw body rect',
       subsystem.capturedRect.maxX === 500 && subsystem.capturedRect.minX === 0
+    );
+    ok(
+      'width/height are now populated too, real positive bucketed pixel counts',
+      Number.isFinite(subsystem.width) &&
+        subsystem.width > 0 &&
+        Number.isFinite(subsystem.height) &&
+        subsystem.height > 0
     );
     ok('status reports ok', subsystem.getStatus().lastStatus === 'ok');
     ok(
@@ -293,6 +308,7 @@ export function run(t) {
       'dispose clears capturedRect too — a disposed subsystem claims no valid capture',
       subsystem.capturedRect === null
     );
+    ok('dispose clears width/height too', subsystem.width === null && subsystem.height === null);
     ok('dispose resets the status counters', subsystem.getStatus().ticks === 0 && subsystem.getStatus().captures === 0);
     ok('dispose is itself reported in status, not silently invisible', subsystem.getStatus().lastStatus === 'disposed');
   }

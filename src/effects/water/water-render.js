@@ -264,6 +264,8 @@ import {
   WATER_TIER2_FLOW_ANGLE_DEG,
   WATER_TIER2_FOAM,
   WATER_TIER3_CHOP,
+  WATER_BANK_INFLUENCE,
+  WATER_FLOW_WARP_INFLUENCE,
 } from './water-field.js';
 import {
   buildWaterSpecular,
@@ -274,7 +276,21 @@ import {
   WATER_TIER3_SHADOW_RESPONSE,
 } from './water-light.js';
 import { buildSmoothTexelUv } from './water-sampling.js';
-import { buildWaterShoreFoam, waterFoamReachPx } from './water-shore.js';
+import {
+  buildWaterShoreFoam,
+  waterFoamReachPx,
+  buildFoamCellularStructure,
+  WATER_FOAM_FLOW_NUDGE,
+  WATER_FOAM_EDGE_FAR,
+  WATER_FOAM_EDGE_AA_PX,
+  WATER_FOAM_BUBBLE_AMOUNT,
+  WATER_FOAM_BUBBLE_OCTAVE,
+  WATER_FOAM_BUBBLE_TIME_SCALE,
+  WATER_FOAM_GRAIN_AMOUNT,
+  WATER_FOAM_GRAIN_OCTAVE,
+  WATER_FOAM_GRAIN_TIME_SCALE,
+} from './water-shore.js';
+import { WATER_SIM_CLUMP_LO, WATER_SIM_CLUMP_HI, WATER_SIM_CLUMP_AA_PX } from './water-sim.js';
 import { buildDebugChannelColor } from '../debug-channel-select.js';
 import { WATER_DEBUG_CHANNELS } from './water.js';
 // Intra-zone: the ONE hex→byte decoder, already shared by the candle and by
@@ -376,6 +392,22 @@ export const WATER_TIER1_POLLUTION = 0.6;
  */
 export const WATER_PRESENCE_EDGE0 = 2 / 255;
 export const WATER_PRESENCE_EDGE1 = 0.5;
+
+/**
+ * The presence edge's own screen-space anti-aliasing width, in SCREEN
+ * PIXELS — `water-shore.js#WATER_FOAM_EDGE_AA_PX`'s exact sibling and
+ * technique. This edge has ALREADY been the site of two independent,
+ * VALUE-space fixes for the identical "pixelated shoreline" symptom
+ * (`WATER_PRESENCE_EDGE1`'s own doc, immediately above: the ramp width,
+ * then the mask's own upload resolution) — both real, both insufficient on
+ * their own, because neither addresses the actual variable: a FIXED
+ * value-space ramp still compresses into fewer and fewer screen pixels as
+ * either the camera moves or a fine authored detail in the mask itself
+ * gets crossed, at any resolution. Same `fwidth()`-based floor as the foam
+ * edges: never narrower than a few real screen pixels, whatever the
+ * camera or the source art is doing.
+ */
+export const WATER_PRESENCE_EDGE_AA_PX = 1.5;
 
 /**
  * TIER 1 — ABSORPTION. How fast light is lost with depth (Beer–Lambert's σ,
@@ -537,6 +569,36 @@ export const WATER_TIER4_CAUSTICS = 0.33;
 export const WATER_TIER4_FOAM_TRAIL = 0.8;
 
 /**
+ * `capturedRect`'s own default — a degenerate-but-safe 1×1 world rect at the
+ * origin, used ONLY before `water-refraction-subsystem.js` has ever
+ * completed a real capture (`setCapturedRect` re-points it the moment one
+ * lands). Every UV built from it clamps to [0,1] regardless, so the worst
+ * this default can do is sample one corner texel of the 1×1 placeholder
+ * texture — never a NaN, never an out-of-range read.
+ */
+export const WATER_TIER5_PLACEHOLDER_RECT = Object.freeze({ minX: 0, minY: 0, maxX: 1, maxY: 1 });
+
+/**
+ * World-space UNITS (not texels — the offset is computed before the world→UV
+ * remap) the refracted sample point shifts by, at `field.slope` == 1 and full
+ * depth. Chosen to read as a visible bend at a typical Foundry zoom without a
+ * real GPU sweep to calibrate against yet — this file's own convention for an
+ * honest first estimate, not a measured constant.
+ */
+export const WATER_TIER5_REFRACT_PX = 24;
+
+/**
+ * The hard ceiling on tier 5's own alpha, strictly below 1.0. `attr`'s MRT
+ * write during the refraction mesh's pass is the multiplicative identity
+ * (`vec4(1,1,1,1)`), and a REPLACE-style alpha blend has no value that leaves
+ * `buf:scene.attr` unchanged at alpha==1 (see `debugMaterial`'s own comment
+ * on this exact constraint) — capping alpha below 1 guarantees some of
+ * whatever `attr` already held always survives the lerp. Flagged as an
+ * imperfect, pragmatic tradeoff pending a live look, not a solved problem.
+ */
+export const WATER_TIER5_MAX_ALPHA = 0.85;
+
+/**
  * The tier-0 surface material.
  *
  * @param {object} args
@@ -574,15 +636,42 @@ export const WATER_TIER4_FOAM_TRAIL = 0.8;
  * @param {*} [args.flowPackTexture] - `res:waterFlow`'s own finished pack
  *   (`water-flow.js`, S2 solidity + S3 velocity/speed01 — RG velocity
  *   normalised to a free-stream speed of 1, B speed01, A solidity), for the
- *   `flowSolidity`/`flowVelocity` debug channels ONLY — nothing downstream
- *   reads this yet. Unlike `depthTexture`, absent/null does NOT compile the
- *   read out: the caller (`water-surface-subsystem.js`) always supplies a
- *   real (if 1×1 placeholder) texture object here, the same contract
- *   `maskTexture` itself already keeps, because this reads at EVERY tier and
- *   has no JS-time fact to gate on the way a tier number or an optional pass
- *   attachment does.
+ *   `flowSolidity`/`flowVelocity` debug channels AND (S4) the shore-foam
+ *   terms' own local direction/speed. Unlike `depthTexture`, absent/null
+ *   does NOT compile the read out: the caller (`water-surface-subsystem.js`)
+ *   always supplies a real (if 1×1 placeholder) texture object here, the
+ *   same contract `maskTexture` itself already keeps, because this reads at
+ *   EVERY tier and has no JS-time fact to gate on the way a tier number or
+ *   an optional pass attachment does.
+ * @param {*} [args.waterSimTexture] - `res:waterSim`'s own ping-ponged pack
+ *   (`water-sim.js`+`water-sim-subsystem.js`, S5, 2026-08-18) — R is the RAW
+ *   foam accumulator, NOT display-ready (see that module's own header on why
+ *   the clump/break threshold is deliberately NOT baked into the stored
+ *   state). This function applies `smoothstep(WATER_SIM_CLUMP_LO,
+ *   WATER_SIM_CLUMP_HI, …)` itself, once, at read time — see `waterSimFoam`
+ *   below. Same "always a real, if placeholder, texture" contract as
+ *   `flowPackTexture` — never compiled out by tier.
+ * @param {readonly [number, number]|null} [args.flowPackTexSize] - the flow
+ *   pack's own finest-level texel dimensions, `[width, height]` — SAME
+ *   reason `waterSimTexSize` immediately below exists. Live-reported
+ *   2026-08-19, once `flowWarp`/the foam flow-nudge made this pack's own
+ *   coarse grid load-bearing for the base surface (not just foam shape,
+ *   which was a more forgiving consumer): "pixelated texels in the overall
+ *   appearance." Same fix, same file, same author-reported shape as
+ *   `waterSimTexSize`'s own scar one entry below — `buildSmoothTexelUv`
+ *   needs the real texel pitch or it degrades to a no-op identity remap.
+ * @param {readonly [number, number]|null} [args.waterSimTexSize] - the sim
+ *   grid's own texel dimensions, `[width, height]` — SAME reason
+ *   `bodyTexSize`/`uBodyTexSize` exists: the sim grid is coarse relative to
+ *   the mask (matching the flow pack's own finest level, ~10 world-px/texel
+ *   on a real map), and after the display-time clump threshold above, foam
+ *   is a SHARP-edged field, not a smooth one — plain bilinear sampling of a
+ *   coarse texture through a sharp threshold reads as visibly blocky when
+ *   zoomed in (live-reported the same day: "when I zoom in you can see a
+ *   pixelated look"). `buildSmoothTexelUv` (the SAME C2 reconstruction the
+ *   body pack already uses, for the same reason) needs this to correct it.
  * @returns {{absorbMaterial:*, inscatterMaterial:*, debugMaterial:*, maskTexNode:*, maskTexNodes:Array<*>,
- *   bodyTexNode:*|null, flowPackTexNode:*,
+ *   bodyTexNode:*|null, flowPackTexNode:*, waterSimTexNode:*,
  *   setMaskRect:(r:object)=>void, setTint:(rgb:readonly number[])=>void,
  *   setOpacity:(v:number)=>void, setDepth:(v:number)=>void, setPollution:(v:number)=>void,
  *   setExpectedDepth:(v:number)=>void,
@@ -593,7 +682,8 @@ export const WATER_TIER4_FOAM_TRAIL = 0.8;
  *   `absorbMaterial` first, then `inscatterMaterial`. `bodyTexNode` is `null` below
  *   tier 1 (never sampled, so nothing to re-point on a bake regrid — callers must
  *   guard the same way `water-surface-subsystem.js#sync` does). `flowPackTexNode`
- *   is NEVER null (unlike `bodyTexNode`) — see `args.flowPackTexture`'s own doc.
+ *   and `waterSimTexNode` are NEVER null (unlike `bodyTexNode`) — see their own
+ *   `args.flowPackTexture`/`args.waterSimTexture` doc.
  */
 export function buildWaterSurfaceMaterial({
   THREE,
@@ -634,11 +724,25 @@ export function buildWaterSurfaceMaterial({
   sunShadowTexture = null,
   // ── THE FLOW PACK'S PREVIEW (2026-08-17, S2 solidity + S3 velocity) ────────
   flowPackTexture = null,
+  flowPackTexSize = null,
+  // ── THE SIM PACK — foam's own ping-ponged memory (2026-08-18, S5) ──────────
+  waterSimTexture = null,
+  waterSimTexSize = null,
   // ── TIER 4 (2026-08-16) ─────────────────────────────────────────────────
   swashFoam = WATER_TIER4_SWASH_FOAM,
   breakFoam = WATER_TIER4_BREAK_FOAM,
   caustics = WATER_TIER4_CAUSTICS,
   foamTrail = WATER_TIER4_FOAM_TRAIL,
+  // ── TIER 5 — REFRACTION (2026-08-23, Water-Testament.md §2.5) ───────────
+  // `capturedTexture` follows the SAME "caller always supplies a real, if
+  // 1×1 placeholder, texture object" contract `waterSimTexture` above already
+  // documents — never null. `capturedRect`/`capturedTexSize` describe what
+  // world rect that texture's own UV space maps across and its own texel
+  // pitch, exactly the `bodyRect`/`bodyTexSize` shape one level up, because
+  // it is the SAME kind of fact about a DIFFERENT texture.
+  capturedTexture,
+  capturedRect = WATER_TIER5_PLACEHOLDER_RECT,
+  capturedTexSize = { width: 1, height: 1 },
   // ── THE INSTRUMENT (2026-08-16, Water-Testament W0) ─────────────────────
   debugChannel = 0,
 }) {
@@ -650,7 +754,43 @@ export function buildWaterSurfaceMaterial({
   // cumulative rule (Effects.md §2: a rung may not depend on one above it)
   // true BY CONSTRUCTION rather than by trusting the resolver's contract a
   // second time.
-  const activeTier = Number.isFinite(tier) ? Math.max(0, Math.floor(tier)) : WATER_DEFAULT_TIER;
+  const requestedTier = Number.isFinite(tier) ? Math.max(0, Math.floor(tier)) : WATER_DEFAULT_TIER;
+  // ⚠️ ALSO CLAMPED TO 0 WHENEVER `bodyTexture` ISN'T READY YET (2026-08-18)
+  // — live-reported the same day as the fix that caused it. Tier 1's own
+  // block below calls `texture(bodyTexture, …)` unconditionally once
+  // `activeTier >= 1`, and tier 4's `sampleBodyAt` closure does the same for
+  // shore foam; `texture(null, …)` throws a construction-time NodeError that
+  // does not just make ONE term degenerate — it fails the whole material's
+  // build, and because a rebuild only fires on a TIER CHANGE
+  // (`water-surface-subsystem.js`'s own `builtForTier` check), a material
+  // built once against a still-loading body pack stays permanently broken
+  // for the rest of the session even after the real bake lands, with no
+  // further tier change ever occurring to trigger a rebuild. This became
+  // reachable the same day `water-body-subsystem.js` started requiring the
+  // surface's own full-resolution mask before its first bake — a genuinely
+  // slower dependency than the coarse-grid copy it replaced, which widened
+  // an already-existing but previously narrow race into one hit on every
+  // frame. Clamping here (the ONE place every rung's own gate already reads)
+  // is the same "fail toward tier 0, never toward a broken shader" contract
+  // this function already promises for a non-finite tier, extended to a
+  // second precondition tier 1+ genuinely needs. See
+  // `feedback_check_console_before_theorizing` — the identical NodeError
+  // shape, from a different missing texture, cost a long detour earlier
+  // this same session.
+  // ⚠️ TIER 5 GETS THE SAME TREATMENT, ONE RUNG NARROWER (2026-08-23) —
+  // `capturedTexture` is genuinely `null` before `water-refraction-
+  // subsystem.js` completes its first capture (that module's own JSDoc says
+  // so: "the most recently captured colour, or null before the first
+  // successful capture") — the exact same startup race `bodyTexture` just
+  // got clamped against, one paragraph up, for the exact same reason:
+  // tier 5's block below calls `texture(capturedTexture, …)` three times,
+  // unconditionally, once `activeTier >= 5`, and `texture(null, …)` throws a
+  // construction-time error that leaves the material permanently broken
+  // until the next TIER CHANGE, not the next frame a real capture lands.
+  // Falls back to 4, not 0: tiers 1-4 read nothing this subsystem provides,
+  // so there is no reason to darken the whole surface while only the newest
+  // rung waits on its own producer to warm up.
+  const activeTier = bodyTexture ? (requestedTier >= 5 && !capturedTexture ? 4 : requestedTier) : 0;
   const {
     texture,
     vec2,
@@ -670,10 +810,22 @@ export function buildWaterSurfaceMaterial({
     step,
     mix,
     atan,
+    pow,
+    abs,
+    length,
+    fwidth,
   } = THREE.TSL;
 
   const uMaskRect = uniform(vec4(maskRect.minX, maskRect.minY, maskRect.maxX, maskRect.maxY));
   const uBodyRect = uniform(vec4(bodyRect.minX, bodyRect.minY, bodyRect.maxX, bodyRect.maxY));
+  // TIER 5 — the world rect `capturedTexture`'s own UV space maps across
+  // (`water-refraction-subsystem.js#capturedRect`, one frame stale by
+  // design — see that module's header on why that needs no camera-delta
+  // math), and its texel pitch, for the chromatic fringe's ±1-texel offset.
+  const uCapturedRect = uniform(vec4(capturedRect.minX, capturedRect.minY, capturedRect.maxX, capturedRect.maxY));
+  const uCapturedTexelUv = uniform(
+    vec2(1 / Math.max(1, capturedTexSize.width), 1 / Math.max(1, capturedTexSize.height))
+  );
   const uTint = uniform(vec3(tint[0], tint[1], tint[2]));
   const uOpacity = uniform(float(opacity));
   const uDepth = uniform(float(depth));
@@ -716,6 +868,14 @@ export function buildWaterSurfaceMaterial({
   const sigmaColorSource = mix(derivedDeepColor, uTint, float(WATER_TINT_TRIM_WEIGHT));
   const uWaveScalePx = uniform(float(waveScalePx));
   const uFlowSpeedPx = uniform(float(flowSpeedPx));
+  // ROH TUNING (2026-08-19) — `bankWarp`/`flowWarp`'s own influence weights,
+  // now author-adjustable rather than baked-in constants. See
+  // `WATER_BANK_INFLUENCE`/`WATER_FLOW_WARP_INFLUENCE`'s own doc
+  // (`water-field.js`) for the safety argument this does not change: both
+  // stay a FIXED per-frame multiplier, never scaled by time, whatever value
+  // the slider holds.
+  const uBankInfluence = uniform(float(WATER_BANK_INFLUENCE));
+  const uFlowWarpInfluence = uniform(float(WATER_FLOW_WARP_INFLUENCE));
   // THE FLOW, AS A VECTOR — converted from the author's compass bearing on the
   // CPU (`waterFlowVector`), never as `cos`/`sin` in the shader. That is where a
   // Y-flip hides, and this project has paid for one five times; a plain JS
@@ -729,6 +889,16 @@ export function buildWaterSurfaceMaterial({
   // on every regrid; 1×1 is only ever the pre-first-bake placeholder, which is
   // never sampled because the mesh is hidden until a bake lands.
   const uBodyTexSize = uniform(vec2(bodyTexSize?.[0] ?? 1, bodyTexSize?.[1] ?? 1));
+  // THE FLOW PACK's OWN SIZE IN TEXELS (2026-08-19) — same reasoning as
+  // `uBodyTexSize`/`uWaterSimTexSize`, for the same C2 reconstruction —
+  // `flowPackTexSize` param's own doc has the live-reported symptom.
+  const uFlowPackTexSize = uniform(vec2(flowPackTexSize?.[0] ?? 1, flowPackTexSize?.[1] ?? 1));
+  // THE SIM PACK's OWN SIZE IN TEXELS (S5, 2026-08-18) — same reasoning as
+  // `uBodyTexSize` immediately above, for the same C2 reconstruction, now
+  // that the pack it corrects is read post-threshold (see `waterSimTexSize`
+  // param's own doc for why a coarse grid needed this only once foam became
+  // sharp-edged rather than smooth).
+  const uWaterSimTexSize = uniform(vec2(waterSimTexSize?.[0] ?? 1, waterSimTexSize?.[1] ?? 1));
   const uChop = uniform(float(chop));
   const uTurbidity = uniform(float(WATER_TIER2_TURBIDITY));
   // ── TIER 4 (2026-08-16) ─────────────────────────────────────────────────
@@ -742,6 +912,36 @@ export function buildWaterSurfaceMaterial({
   // "ponds through ocean shorelines". Re-derived in `setDepthScalePx` so the two
   // can never disagree about the body's size.
   const uFoamReachPx = uniform(float(waterFoamReachPx(depthScalePx)));
+  // ROH TUNING (2026-08-19) — `buildFoamCellularStructure`'s own knobs, one
+  // shared set of uniforms feeding BOTH shore foam and sim-foam structure
+  // (the same "one registry, not two independently-drifting copies" rule
+  // `field.domainOffset` itself already follows).
+  const uFoamFlowNudge = uniform(float(WATER_FOAM_FLOW_NUDGE));
+  const uFoamEdgeFar = uniform(float(WATER_FOAM_EDGE_FAR));
+  const uFoamEdgeAaPx = uniform(float(WATER_FOAM_EDGE_AA_PX));
+  const uFoamBubbleAmount = uniform(float(WATER_FOAM_BUBBLE_AMOUNT));
+  const uFoamBubbleOctave = uniform(float(WATER_FOAM_BUBBLE_OCTAVE));
+  const uFoamBubbleTimeScale = uniform(float(WATER_FOAM_BUBBLE_TIME_SCALE));
+  const uFoamGrainAmount = uniform(float(WATER_FOAM_GRAIN_AMOUNT));
+  const uFoamGrainOctave = uniform(float(WATER_FOAM_GRAIN_OCTAVE));
+  const uFoamGrainTimeScale = uniform(float(WATER_FOAM_GRAIN_TIME_SCALE));
+  const foamStructureUniforms = {
+    uFlowNudge: uFoamFlowNudge,
+    uEdgeFar: uFoamEdgeFar,
+    uEdgeAaPx: uFoamEdgeAaPx,
+    uBubbleAmount: uFoamBubbleAmount,
+    uBubbleOctave: uFoamBubbleOctave,
+    uBubbleTimeScale: uFoamBubbleTimeScale,
+    uGrainAmount: uFoamGrainAmount,
+    uGrainOctave: uFoamGrainOctave,
+    uGrainTimeScale: uFoamGrainTimeScale,
+  };
+  // ROH TUNING (2026-08-19) — the sim-foam clump/break threshold, display-
+  // time only (`water-sim.js`'s own header on why these are never fed back
+  // into the stored accumulator).
+  const uSimClumpLo = uniform(float(WATER_SIM_CLUMP_LO));
+  const uSimClumpHi = uniform(float(WATER_SIM_CLUMP_HI));
+  const uSimClumpAaPx = uniform(float(WATER_SIM_CLUMP_AA_PX));
   const uWetBandPx = uniform(float(wetBandPx));
   const uWetStrength = uniform(float(wetStrength));
   // THE INSTRUMENT's OWN SELECTOR — never a param (see `water.js#
@@ -816,16 +1016,147 @@ export function buildWaterSurfaceMaterial({
     .mul(step(float(0), maskV))
     .mul(step(maskV, float(1)));
 
+  // ── FLOW PACK: `res:waterFlow` (2026-08-17, S2 solidity + S3 velocity) ──
+  // The finished pack — RG velocity (normalised, free-stream speed = 1.0), B
+  // speed01, A solidity — baked at the flow grid's own (coarser) resolution.
+  // Sampled ONCE, HERE, moved up from beside the debug channels (2026-08-18,
+  // S4) so S4's real consumers (swash/break/streak, tier 4 below) and the
+  // flowSolidity/flowVelocity debug channels read the IDENTICAL fetch, never
+  // two independently-drifting copies
+  // (`feedback_shared_field_two_meanings_two_registries`).
+  //
+  // SAME world→UV formula as `maskU`/`maskV`: the flow grid covers the
+  // IDENTICAL rect the mask image does (`water-flow-subsystem.js` bakes over
+  // `waterBody.getRect()`, the exact rect `uMaskRect` already holds).
+  //
+  // ⚠️ `flowPackTexNode` MUST STAY A RAW `texture()` NODE, NEVER a derived
+  // expression under this same name — LIVE REGRESSION, 2026-08-18: a
+  // `.mul(inRect)` membership gate was once assigned back onto this exact
+  // name and silently broke `water-surface-subsystem.js#setFlowPackTexture`'s
+  // own re-point (`.mul()` returns a node with no real `.value` setter —
+  // production sampled the placeholder forever, reading black; author: "The
+  // flow pack velocity debug layer is black for me"). The membership gate
+  // lives on the SEPARATE `flowPackGated` below instead — every consumer
+  // that must respect "is this pixel actually inside the water body's own
+  // rect" reads `flowPackGated`, never `flowPackTexNode` directly. (S4's own
+  // terms below are already shore-gated by `insideWater`/`d01` independently
+  // — reading the gated pack too is defensive belt-and-braces, not load-
+  // bearing, since a shore-band pixel is inside this same rect by
+  // construction.)
+  // ⚠️ C2 SMOOTH-TEXEL RECONSTRUCTION (2026-08-19) — the SAME `buildSmoothTexelUv`
+  // fix `waterSimTexNode` below already needed for the identical author-reported
+  // symptom, applied here for the identical reason: plain bilinear was fine while
+  // this pack only fed foam SHAPE (a forgiving consumer), but `flowWarp`/the foam
+  // flow-nudge (`water-field.js`/`water-shore.js`, same day) now perturb the base
+  // surface and foam sample POSITION directly from this coarse grid, which is
+  // exactly what makes a coarse texture's own texel grid visible at zoom. Still a
+  // raw `texture()` node — the UV argument is transformed, not the return value —
+  // so `setFlowPackTexture`'s own re-point (this exact node's `.value` setter)
+  // stays intact, the same non-negotiable property its own header above states.
+  const flowPackTexNode = texture(
+    flowPackTexture,
+    buildSmoothTexelUv(THREE.TSL, {
+      uvNode: vec2(clamp(maskU, 0, 1), clamp(maskV, 0, 1)),
+      uTexSize: uFlowPackTexSize,
+    })
+  );
+  const flowPackGated = flowPackTexNode.mul(inRect);
+
+  // ── SIM PACK: `res:waterSim` (2026-08-18, S5) ───────────────────────────
+  // Foam's own per-frame memory — R is the RAW accumulator this pass reads
+  // and ping-pongs every frame (`water-sim.js`'s own header on why it is
+  // stored unclamped, not display-ready). SAME world→UV formula as
+  // `maskU`/`maskV`/`flowPackTexNode`: the sim grid matches the flow pack's
+  // own finest level exactly (`water-sim-subsystem.js`'s own citation),
+  // which covers the IDENTICAL rect the mask image does.
+  //
+  // ⚠️ SMOOTH (C2) RECONSTRUCTION, NOT PLAIN BILINEAR LIKE `flowPackTexNode`
+  // — live-reported the same day: "when I zoom in you can see a pixelated
+  // look". `flowPackTexNode` gets away with a bare bilinear sample because
+  // velocity is a smooth field with no sharp edges away from a solid
+  // boundary (`water-flow.js`'s own header); THIS pack, read post-threshold
+  // (`waterSimFoam` below), is not — a `smoothstep` deliberately produces a
+  // sharp-edged clumpy field, and sampling a coarse grid's sharp edges with
+  // plain bilinear is exactly what reads as blocky when the camera is close.
+  // `buildSmoothTexelUv` is the SAME C2 fix `bodyTexNode` already uses for
+  // its own coarse grid, reused rather than re-derived.
+  //
+  // ⚠️ `waterSimTexNode` MUST STAY A RAW `texture()` NODE, NEVER a derived
+  // expression under this same name — same rule, same live-regression scar,
+  // as `flowPackTexNode` immediately above: `water-surface-subsystem.js
+  // #setWaterSimTexture`'s own re-point needs a real `.value` setter, which
+  // only a bare `texture()` node has. Every transform (the membership gate,
+  // the display-time clump threshold) lives on `waterSimFoam` below instead
+  // — the smooth reconstruction is safe to bake into the UV itself, same as
+  // `bodyTexNode`'s own `bodyUv`, because it only reshapes WHERE inside the
+  // texture is sampled, never wraps the sampled RESULT in a derived node.
+  const waterSimTexNode = texture(
+    waterSimTexture,
+    buildSmoothTexelUv(THREE.TSL, {
+      uvNode: vec2(clamp(maskU, 0, 1), clamp(maskV, 0, 1)),
+      uTexSize: uWaterSimTexSize,
+    })
+  );
+  // THE CLUMP/BREAK THRESHOLD, APPLIED HERE — this is the "whichever CONSUMER
+  // reads this pack for display" `water-sim.js`'s own header names as the
+  // threshold's rightful home, now that it exists. `smoothstep` turns the
+  // raw, smoothly-accumulating memory into the clumpy, torn-apart look the
+  // author asked for; `inRect` is the SAME membership gate `flowPackGated`
+  // already applies, for the same reason (belt-and-braces against a stray
+  // sample beyond the water body's own rect).
+  // ⚠️ ANTI-ALIASED (2026-08-19) — `WATER_SIM_CLUMP_AA_PX`'s own doc, same
+  // technique and reason as `water-shore.js#WATER_FOAM_EDGE_AA_PX`. The
+  // band's own CENTRE never moves — only its half-width, floored by
+  // `fwidth`, so the clump/break threshold's own calibrated MIDPOINT is
+  // unchanged and only the transition's screen-space smoothness improves.
+  const clumpCenter = uSimClumpLo.add(uSimClumpHi).mul(float(0.5));
+  const clumpHalfWidth = max(
+    uSimClumpHi.sub(uSimClumpLo).mul(float(0.5)),
+    fwidth(waterSimTexNode.r).mul(uSimClumpAaPx.mul(float(0.5)))
+  );
+  const waterSimFoam = smoothstep(
+    clumpCenter.sub(clumpHalfWidth),
+    clumpCenter.add(clumpHalfWidth),
+    waterSimTexNode.r
+  ).mul(inRect);
+
+  // The raw local direction plus a DIVIDE-BY-ZERO-GUARDED unit direction.
+  const localVel = vec2(flowPackGated.r, flowPackGated.g);
+  const localSpeed = length(localVel);
+  const localDirSafe = localVel.div(max(localSpeed, float(1e-4)));
+  // ⚠️ NO FALLBACK TO THE GLOBAL BULK DIRECTION (removed 2026-08-19, author's
+  // explicit, repeated instruction: "get rid of the escape hatch... either
+  // flow works or breaks, no fallbacks"). This USED TO `mix` back to
+  // `uFlowDir` below a small dead-zone on normalised local speed — real
+  // river speeds measured comfortably clear of it (0.8-0.98 on the bench's
+  // own synthetic river, ~40-50x the old 0.02 threshold), so the fallback
+  // was already a rare-case safety net, not the common path. Now every S4
+  // consumer (shore foam, sim-foam structure, `flowWarp`) reads the SOLVE
+  // directly, always. Honest cost, not hidden: at a texel where local
+  // velocity is exactly/near zero — dead centre of a solid, or a texel the
+  // bake has not reached yet — `localDirSafe` reads as a degenerate
+  // near-zero vector rather than gracefully defaulting to the compass. In
+  // practice this mostly lands on pixels already masked out elsewhere
+  // (solid/obstacle texels do not render as open foam), but it is a real
+  // behaviour change, on the record rather than papered over.
+  const localFlowDirSafe = localDirSafe;
+
   // THE SHORELINE. A narrow threshold on the LINEAR-filtered high-res mask, so
   // the crispness is the file's own and the ramp is whatever the author
   // painted — see WATER_PRESENCE_EDGE0/1 for why this is a threshold rather
   // than using the value directly.
   //
+  // ⚠️ SCREEN-SPACE AA FLOOR (2026-08-19) — `WATER_PRESENCE_EDGE_AA_PX`'s own
+  // doc: the upper edge is never narrower than a few real screen pixels,
+  // whichever is wider, the author's own calibrated ramp or what THIS frame's
+  // zoom needs. Never narrower than `uPresenceEdge1` itself — only ever widens.
+  const presenceEdge1AA = max(uPresenceEdge1, fwidth(maskTexNode.r).mul(float(WATER_PRESENCE_EDGE_AA_PX)));
+  //
   // `inRect` multiplies in HERE, at the single definition of "is there water at
   // this pixel", rather than at the two composites — so every downstream term
   // (depth, foam, in-scatter, the reflection, and the wet band via `1 − inside`)
   // inherits the boundary from one place instead of four that could drift.
-  const inside = smoothstep(float(WATER_PRESENCE_EDGE0), uPresenceEdge1, maskTexNode.r).mul(inRect);
+  const inside = smoothstep(float(WATER_PRESENCE_EDGE0), presenceEdge1AA, maskTexNode.r).mul(inRect);
 
   // WORLD → body-pack UV, and AT MOST one fetch of it (tier 1+ only, see
   // below). The body pack's R is the SIGNED distance to shore in world px —
@@ -976,6 +1307,7 @@ export function buildWaterSurfaceMaterial({
     turbidity: float(0),
     slope: null,
     domainOffset: vec2(0, 0),
+    flowWarp: vec2(0, 0),
     causticBrightness: float(0),
   };
   if (activeTier >= 2) {
@@ -995,6 +1327,16 @@ export function buildWaterSurfaceMaterial({
       // rather than inside the tier-3 block below because the FETCH belongs to
       // tier 2; only its third reading is tier 3's.
       uChop,
+      // THE REAL SOLVED LOCAL DIRECTION, already computed above (with the
+      // dead-zone fallback baked in) for shore foam's own `localFlowDir` —
+      // reused here rather than re-derived, same discipline as
+      // `field.domainOffset` itself being reused by tier 4's filament foam.
+      // This is what lets `buildWaterSurfaceField`'s new `flowWarp`
+      // (`WATER_FLOW_WARP_INFLUENCE`'s own doc) bend the BASE surface near
+      // an obstacle instead of only foam's shape/orientation.
+      localFlowDir: localFlowDirSafe,
+      uBankInfluence,
+      uFlowWarpInfluence,
       // TIER 4's SHOALING AND CAUSTICS ALSO RIDE TIER 2's FETCH — see
       // `water-field.js`'s own header on why both must live inside this call
       // rather than in a separate `if (activeTier >= 4)` block: shoaling has to
@@ -1159,12 +1501,20 @@ export function buildWaterSurfaceMaterial({
       // built `bodyTexNode`.
       tangentXY: vec2(bodyTexNode.b, bodyTexNode.a),
       flowDir: uFlowDir,
+      // S4 (2026-08-18) — the REAL solved local direction/speed, already
+      // sampled once above (with the bank/solid fallback baked in) and
+      // reused here rather than re-derived. See `water-shore.js`'s own S4
+      // header block for exactly which three terms this reaches and why the
+      // rest (the domain offset, the tail's march) deliberately stay global.
+      localFlowDir: localFlowDirSafe,
+      localSpeed01: flowPackGated.b,
       shoreDist,
       insideWater: inside,
       uReachPx: uFoamReachPx,
       uSwash: uSwashFoam,
       uBreak: uBreakFoam,
       uTrail: uFoamTrail,
+      foamStructureUniforms,
       // THE TAIL'S BODY-PACK TAP. Built HERE because this is where the body
       // rect, the grid size and the smooth (C2) reconstruction all already
       // live — `water-shore.js` re-deriving any of that would be a second copy
@@ -1190,181 +1540,194 @@ export function buildWaterSurfaceMaterial({
       },
     });
   }
-  // ── OBSTACLE-PROXIMITY FOAM (2026-08-17) — LOCAL disturbance from ANY solid
-  // thing near this water pixel, read straight off `buf:scene.depth` — the
-  // ALREADY-EXISTING depth authority every occlusion test in this file
-  // already samples, never a new scheme
-  // (`keyhole-depth-authority-sole-system-decision`).
+  // ⚠️ BOTH 8-TAP OBSTACLE-RING SYSTEMS REMOVED 2026-08-18, author's explicit
+  // repeated request ("get rid of the damn eight tap... I keep asking you to
+  // get rid of it and you don't"). First round removed only `obstacleFoam`
+  // (read `buf:scene.depth`, so it lit up around overhead tiles too) and kept
+  // this one — `maskProximityFoam` — reasoning it couldn't react to tiles
+  // since it read the water's own mask, not the depth buffer. That reasoning
+  // was true but beside the point: the author reported "still the same 8 tap
+  // white edges" AFTER that removal, with browser caching explicitly ruled
+  // out on their end, and their own live session confirmed running at the
+  // `extreme` profile — so tier 4 was active and this block had been
+  // rendering, completely unchanged, through the whole first round. Same
+  // visual signature (a ring around every obstacle painted into the water
+  // mask, piers included), different data source, same "eight tap" the
+  // author was naming. Gone now, along with `WATER_OBSTACLE_RING_TAPS`/
+  // `WATER_OBSTACLE_REACH_PX`, which had no other consumer.
   //
-  // WHY THIS EXISTS: the mask-SDF shore foam above only knows about shapes
-  // the AUTHORED WATER MASK captures, at whatever resolution it derives at
-  // — and a raster mask, at ANY resolution, can miss a small isolated
-  // obstacle a point-sample grid simply never lands on
-  // (`WATER_GRID_MAX_DIM`'s own doc has the live incident this session: a
-  // rock, correctly painted, still produced zero shore-foam because the
-  // derivation grid's point-samples kept missing it). The depth buffer has
-  // no such limit — it is whatever the renderer actually drew there THIS
-  // FRAME, at full resolution: a rock, a crate, a token, anything the depth
-  // authority already ranks above water. Sampling it directly makes
-  // obstacle detection EXACT and SIZE-INDEPENDENT instead of raster-
-  // resolution-limited, and it needs no mask authoring at all.
-  //
-  // WHY A FIXED RING OF TAPS, NEVER A DYNAMIC LOOP OVER ITEM DATA: this
-  // project has one CONFIRMED, still-unexplained, LIVE-FOUNDRY failure from
-  // exactly that shape — a `uniformArray` read through a `Loop` in the
-  // FRAGMENT stage turned the entire scene solid black, root cause never
-  // found (`keyhole-uniformarray-indexed-read-unexplained-failures`;
-  // `docs/planning/Point-Light-Batching-Design.md` §0 rule 1, and its own §2:
-  // "the two lawful carriers" are packed attributes or A BAKED TEXTURE
-  // SAMPLED BY COMPUTED UV — `buf:scene.depth` already IS that texture,
-  // built for occlusion, reused here rather than inventing a second one).
-  // `WATER_OBSTACLE_RING_TAPS` taps at FIXED, JS-computed angles is the
-  // exact same "unrolled at build time" shape `water-shore.js#WATER_TAIL_
-  // TAPS` already uses safely, four screens up this same file's own
-  // sibling module — no `Loop()`, no dynamic index, nothing this project
-  // has ever seen fail.
-  const WATER_OBSTACLE_RING_TAPS = 8;
-  /** World px from this pixel to each ring tap — deliberately NOT tied to
-   * `depthScalePx` (unlike the shore reach above): a rock's own local wake
-   * does not get physically bigger because the river it sits in is wider.
-   * Small on purpose — this is "right next to something solid", not a wide
-   * splash zone. */
-  const WATER_OBSTACLE_REACH_PX = 56;
-  let obstacleFoam = float(0);
-  if (activeTier >= 4 && depthTexture && uViewRect) {
-    const viewSpanX = max(uViewRect.z.sub(uViewRect.x), float(1));
-    const viewSpanY = max(uViewRect.w.sub(uViewRect.y), float(1));
-    let hits = float(0);
-    for (let i = 0; i < WATER_OBSTACLE_RING_TAPS; i++) {
-      const angle = (i / WATER_OBSTACLE_RING_TAPS) * Math.PI * 2;
-      const tapWorldX = positionWorld.x.add(float(Math.cos(angle) * WATER_OBSTACLE_REACH_PX));
-      const tapWorldY = positionWorld.y.add(float(Math.sin(angle) * WATER_OBSTACLE_REACH_PX));
-      const tapU = clamp(tapWorldX.sub(uViewRect.x).div(viewSpanX), float(0), float(1));
-      const tapV = clamp(tapWorldY.sub(uViewRect.y).div(viewSpanY), float(0), float(1));
-      const depthAtTap = texture(depthTexture, vec2(tapU, tapV));
-      // Inverted from the occlusion gate's own `notOccluded` test below: THIS
-      // asks "did something rank above water AT THE TAP" — the opposite
-      // question, at an offset point instead of this pixel's own.
-      const occludedAtTap = float(1).sub(step(uExpectedDepth, depthAtTap));
-      hits = hits.add(occludedAtTap);
-    }
-    // Fraction of the ring that found something solid, 0..1. Gated by
-    // `inside` alone, deliberately NOT by this pixel's own occlusion — a
-    // wake sits ON the water NEXT TO an obstacle, not under one, so this
-    // pixel being itself unoccluded is the case that matters, not a
-    // precondition to check.
-    obstacleFoam = hits.div(float(WATER_OBSTACLE_RING_TAPS)).mul(inside);
-  }
+  // The one thing this genuinely bought — catching a painted hole smaller
+  // than the derivation grid's own resolution — has no replacement in place.
+  // If a rock that thin needs to foam again, that is a new, deliberate ask,
+  // not a silent gap: `shore.foam`'s SDF-based break/swash terms below still
+  // answer "something solid is near here" for anything the derivation grid
+  // actually resolved.
 
-  // ── MASK-PROXIMITY FOAM (2026-08-17) — the DIRECT fix for a painted hole a
-  // downsampled derivation grid can miss, at ANY resolution: read the SAME
-  // full-resolution mask image tier 0 already samples (`maskTexNode`, above
-  // — the author's own `.webp`, `WATER_GRID_MAX_DIM`'s coarse derivation
-  // never touches this one), in a ring, instead of asking the coarse body-
-  // pack SDF "is there a shore nearby". A hole in this texture is real,
-  // full-resolution, painted data — bilinear-sampled, so even a feature
-  // smaller than one ring step still contributes SOME signal instead of
-  // being silently skipped between taps. This is what makes a rock a few
-  // texels across in the DERIVED grid — and therefore invisible to
-  // `shore`/`obstacleFoam` above — still register: this ring never asks the
-  // derivation grid a question at all.
+  // ── FLOW PACK — `flowPackTexNode`/`flowPackGated`/`localVel`/`localSpeed`/
+  // `localDirSafe`/`localFlowDirSafe` MOVED EARLIER, 2026-08-18 (S4), to
+  // right after `inRect` — see that block for the full history. S4's
+  // swash/break/streak below need them BEFORE this point in the function;
+  // the flowVelocity debug channel's own deviation math, right below, reads
+  // the SAME fetch rather than a second independent one
+  // (`feedback_shared_field_two_meanings_two_registries` is the bug class
+  // that split exists to prevent).
+  // ══════════════════════════════════════════════════════════════════════
+  // DEVIATION-FROM-BULK-DIRECTION, not absolute direction — REDESIGNED
+  // 2026-08-18 after the FIRST version (absolute direction → hue, speed →
+  // value, both proven correct via `bench-water.js#real-underground-river-
+  // flow` against the real Underground river) still read as a near-uniform
+  // flat colour in the saved picture. The reason: a real river's bulk flow
+  // is the SAME direction almost everywhere by construction — routing
+  // around an obstacle is a SMALL local perturbation on top of that bulk
+  // direction, so absolute-direction-as-hue spends the entire hue wheel on
+  // a signal that barely moves. The fix is not a brighter version of the
+  // same idea — it's a different question: not "which way is this pixel
+  // flowing" but "how far does THIS pixel's flow differ from the RIVER'S
+  // OWN bulk direction" — which is near-zero almost everywhere (correctly)
+  // and spikes exactly where an obstacle is actually doing something.
   //
-  // Deliberately NOT gated on `depthTexture`/`uViewRect` (unlike the block
-  // above) — it needs neither, so a floor with the depth-authority gate
-  // unwired for any reason still gets this from tier 4 alone.
+  // `uFlowDir` (built above, `waterFlowVector(flowAngleDeg)`) IS the bulk
+  // direction — the IDENTICAL bearing→vector conversion
+  // `water-flow-subsystem.js`'s own `uDir` seeds the solve from, off the
+  // SAME `flowAngleDeg` render-state field (DIRECTION AUTHORITY doctrine:
+  // one compass, never two independently-derived ones). `sinDev`/`cosDev`
+  // are the sine/cosine of the SIGNED angle between local and bulk
+  // direction (2-D cross/dot of two unit vectors — no trig function calls
+  // needed for either), and `atan(sinDev, cosDev)` recovers that signed
+  // angle directly, positive one way round, negative the other.
   //
-  // ⚠️⚠️ RE-ENABLED 2026-08-17, ROOT CAUSE FOUND AND FIXED. Was disabled the
-  // same day after the author reported the water rendering ENTIRELY WHITE —
-  // `maskProximityFoam` read EXACTLY equal to `inside` at every point, which
-  // meant `maskHits.div(N)` was a CONSTANT 1 regardless of any tap. The
-  // threshold formula below (a crisp `step` at the presence floor) was
-  // already correct; the actual defect was structural and one layer up:
-  // EVERY one of these 8 taps is its OWN `texture(maskTexture, …)` node, and
-  // the material is built against a 1×1 BLACK PLACEHOLDER
-  // (`water-surface-subsystem.js`) — the real image re-points exactly ONE
-  // node (`maskTexNode.value`) when it loads. These 8 were never in that
-  // list, so they sampled the placeholder forever: R=0 at every tap, every
-  // pixel, always "land" (`feedback_texture_nodes_must_be_repointed_
-  // together`). Fixed by pushing every tap's own node into `maskTexNodes`
-  // (declared beside `maskTexNode`, above) so the subsystem re-points all of
-  // them together — see that array's own comment for the full account.
-  let maskProximityFoam = float(0);
-  if (activeTier >= 4) {
-    let maskHits = float(0);
-    for (let i = 0; i < WATER_OBSTACLE_RING_TAPS; i++) {
-      const angle = (i / WATER_OBSTACLE_RING_TAPS) * Math.PI * 2;
-      const tapWorldX = positionWorld.x.add(float(Math.cos(angle) * WATER_OBSTACLE_REACH_PX));
-      const tapWorldY = positionWorld.y.add(float(Math.sin(angle) * WATER_OBSTACLE_REACH_PX));
-      // SAME world→mask-UV formula as `maskU`/`maskV` above, at the tap's
-      // offset position instead of this fragment's own.
-      const tapMaskU = clamp(tapWorldX.sub(uMaskRect.x).div(spanX), float(0), float(1));
-      const tapMaskV = clamp(tapWorldY.sub(uMaskRect.y).div(spanY), float(0), float(1));
-      // ⚠️ PUSHED to `maskTexNodes` BEFORE anything else touches it — see that
-      // array's own header. A tap added here without this line is the exact
-      // regression this comment exists to prevent.
-      const tapMaskTexNode = texture(maskTexture, vec2(tapMaskU, tapMaskV));
-      maskTexNodes.push(tapMaskTexNode);
-      const tapMaskR = tapMaskTexNode.r;
-      // `WATER_PRESENCE_EDGE0` ALONE, a crisp `step` — NOT `uPresenceEdge1`
-      // (`shorelineDepth`, the WIDTH of the soft antialiased ramp AT the
-      // actual shore edge — unrelated to "is this land"; a wide-ramp version
-      // of this line was a SECOND, now-moot bug found and fixed the same day
-      // before the re-pointing defect was isolated as the real cause).
-      const tapIsLand = float(1).sub(step(float(WATER_PRESENCE_EDGE0), tapMaskR));
-      maskHits = maskHits.add(tapIsLand);
-    }
-    maskProximityFoam = maskHits.div(float(WATER_OBSTACLE_RING_TAPS)).mul(inside);
-  }
-
-  // ── FLOW PACK: DEBUG PREVIEW (2026-08-17, S2 solidity + S3 velocity,
-  // water-flow.js) ──────────────────────────────────────────────────────────
-  // `res:waterFlow`'s own finished pack — RG velocity (normalised, free-
-  // stream speed = 1.0), B speed01, A solidity — baked at the flow grid's own
-  // (coarser) resolution. Read here ONLY for the `flowSolidity`/`flowVelocity`
-  // debug channels (`water.js#WATER_DEBUG_CHANNELS`) — nothing downstream
-  // consumes it yet; S4 is the phase that gives it a real, visible consumer
-  // (swash/break/streak rewired onto real velocity). Un-gated by tier (unlike
-  // the two rings above): the pack is not a foam-ladder concept, it exists at
-  // every tier's own underlying bake, so there is no tier number this could
-  // meaningfully wait for.
-  //
-  // SAME world→UV formula as `maskU`/`maskV`, reused rather than re-derived:
-  // the flow grid covers the IDENTICAL rect the mask image does
-  // (`water-flow-subsystem.js` bakes over `waterBody.getRect()`, the exact
-  // rect `uMaskRect` already holds), so no separate rect uniform is needed.
-  //
-  // ⚠️ THIS IS NOT `maskTexNodes` — it samples a DIFFERENT texture
-  // (`flowPackTexture`, not `maskTexture`), re-pointed on a DIFFERENT
-  // cadence (the flow pack's own bake, not the mask's load). It gets its OWN
-  // placeholder-then-re-point discipline, one level up
-  // (`water-surface-subsystem.js#setFlowPackTexture`) — see
-  // `args.flowPackTexture`'s own doc for why the caller must always supply a
-  // real texture object here, never JS `null`.
-  const flowPackTexNode = texture(flowPackTexture, vec2(clamp(maskU, 0, 1), clamp(maskV, 0, 1)));
-  // Direction → hue, speed01 → value (HSV, full saturation) — `hsb2rgb` is
-  // this project's own tested wrapper around the vendored `mx_hsvtorgb`
-  // (`tsl-noise-toolkit.js`), reused rather than a second hue-sector formula.
-  // `atan(vy, vx)` is TSL's own 2-argument form, verified elsewhere in this
-  // codebase to compile to `atan2` (`region-darkness.js`'s own citation) —
-  // `(angle + π) / 2π` wraps it into hue's own [0,1] range. Inside solid,
-  // velocity is forced to exactly (0,0) (B2's own `×(1−solid)` mask), so
-  // `atan(0,0)` is a defined-but-arbitrary hue that never shows: `value`
-  // (speed01) is ALSO exactly 0 there, and HSV value 0 is black regardless of
-  // hue — no special-casing needed for the "inside a rock" case.
-  const flowVelocityHue = atan(flowPackTexNode.g, flowPackTexNode.r)
-    .add(float(Math.PI))
-    .div(float(Math.PI * 2));
-  const flowVelocityColor = hsb2rgb(THREE.TSL, flowVelocityHue, float(1), flowPackTexNode.b);
+  // Inside solid, velocity is forced to exactly (0,0) (B2's own
+  // `×(1−solid)` mask) — `localSpeed` floors at the `max(.,1e-4)` guard
+  // below, so direction is defined-but-arbitrary there, same as the
+  // previous design's `atan(0,0)` case, and just as harmless: `value` below
+  // is ALSO ~0 there, and HSV value 0 is black regardless of hue/saturation.
+  // `localVel`/`localSpeed`/`localDirSafe` are computed EARLIER now (right
+  // after `inRect`, S4) — reused here rather than re-derived, same reasoning
+  // as the pointer comment above this block.
+  const cosDev = dot(localDirSafe, uFlowDir);
+  const sinDev = uFlowDir.x.mul(localDirSafe.y).sub(uFlowDir.y.mul(localDirSafe.x));
+  const deviationRad = atan(sinDev, cosDev);
+  // Fully saturated by a ~29° (0.5 rad) local bend — a genuine routing
+  // event right beside an obstacle, not a threshold tuned to any specific
+  // fixture's numbers. LINEAR in angle (not `1-cos`, which is quadratic and
+  // therefore LEAST sensitive exactly at the small deviations this channel
+  // most needs to reveal).
+  const MAX_BEND_RAD = 0.5;
+  const deviationMag01 = clamp(abs(deviationRad).div(float(MAX_BEND_RAD)), 0, 1);
+  // A DIVERGING pair, not a hue sweep: cyan = bent one way, orange = bent
+  // the other, chosen for contrast (never adjacent on the wheel) and
+  // colour-blind legibility (never a red/green pair). `mix(...,
+  // step(0,x))` is a HARD switch between exactly these two fixed hues, not
+  // a blend THROUGH the wheel between them — the wheel-crawl is exactly
+  // what made the previous design illegible, so this deliberately never
+  // interpolates hue at all, only saturation.
+  const HUE_BENT_NEGATIVE = 0.53; // cyan
+  const HUE_BENT_POSITIVE = 0.08; // orange
+  const flowVelocityHue = mix(float(HUE_BENT_NEGATIVE), float(HUE_BENT_POSITIVE), step(float(0), deviationRad));
+  // Saturation carries the SIGNAL (how much this pixel deviates from the
+  // river's own bulk direction) — zero deviation reads as GREY/WHITE
+  // (hue irrelevant at s=0), so "nothing interesting is happening here" is
+  // visually silent, and colour only appears where routing genuinely does
+  // something. Value still carries speed (`pow(.,0.4)`, the 2026-08-18
+  // legibility fix, kept — real speeds land at 10-30% of
+  // `WATER_FLOW_SPEED01_HEADROOM`'s own generous headroom and read as
+  // near-black without it), so a fast, undeviated stretch of open river
+  // still reads as bright white rather than a flat mid-grey.
+  const flowVelocityColor = hsb2rgb(THREE.TSL, flowVelocityHue, deviationMag01, pow(flowPackGated.b, float(0.4)));
 
   // THE ONE FOAM TOTAL every downstream term reads from here on — tier 2's
-  // crest foam PLUS tier 4's shoreline foam, clamped once. Law 2: an ADD, never
-  // a substitution; `field.foam` itself is untouched, so a caller that only
-  // wants tier 2's own number still has it. `shore.foam`/`obstacleFoam`/
-  // `maskProximityFoam` are MAX'd together first, not added: all three answer
-  // "is something solid near here", just from three different sources
-  // (painted-mask SDF, depth buffer, painted-mask direct read) — where a rock
-  // happens to be caught by more than one, that is one obstacle, not several.
-  const totalFoam = min(field.foam.add(max(max(shore.foam, obstacleFoam), maskProximityFoam)), float(1));
+  // crest foam PLUS the SIM PACK's own shoreline/wake foam, clamped once.
+  // Law 2: an ADD, never a substitution; `field.foam` itself is untouched,
+  // so a caller that only wants tier 2's own number still has it.
+  //
+  // ⚠️ `waterSimFoam`, NOT `shore.foam` (2026-08-18, S5) — THE ACTUAL
+  // COLLAPSE `docs/planning/Water-Simulation-Turn.md` §3/§6 describes. The
+  // author's own complaint about the PREVIOUS source (`shore.foam`'s
+  // swash/break/tail): *"the concentric circles radiating outwards are very
+  // predictable and artificial... they aren't currently being changed by
+  // the surface of the water."* That was a structural property of a pure
+  // function of (position, clock) with zero memory between frames — no
+  // amount of retuning could have fixed it, only a genuinely stateful
+  // buffer could (`water-sim.js`'s own header). `shore` (below) is STILL
+  // built, unchanged, for its own diagnostic channels
+  // (`foamD01`/`worleyLace`/`swashBand`/`breakFacing`/`breakFoam`/
+  // `foamTail`) — those keep answering "is this term individually
+  // healthy", same as always — but `shore.foam` itself no longer reaches
+  // the visible water.
+  //
+  // ⚠️ `max`, NOT `add` (2026-08-18, SAME DAY, live-reported) — author,
+  // looking at the real map with channel 24 (`simFoamRaw`) selected:
+  // *"The debug channel shows the correct wake structure but the actual
+  // foam at the moment is happening in a roughly even area around the
+  // whole circumference of the things that create wakes... If we can get
+  // the foam to appear only in the sim pack foam whiter areas that would
+  // be a good way to make it look better."* Root cause: `field.foam` (tier
+  // 2's own crest foam, `water-field.js`) is gated by `shoreGate` — a HARD
+  // "within `WATER_FOAM_SHORE_PX` of ANY shore or obstacle" cutoff with NO
+  // directionality at all, by construction the "roughly even... whole
+  // circumference" shape the author named exactly. `ADD`ing that to the
+  // sim's own correctly wake-shaped signal does what this codebase already
+  // learned once, for the OLD swash/break/tail terms, not to do: it drives
+  // every overlap toward the clamp and ERASES the very structure the sim
+  // buffer exists to provide (`water-shore.js#buildWaterShoreFoam`'s own
+  // header: "they are three views of ONE substance... summing would erase
+  // exactly the structure"). Same fix, same reasoning, new terms: `MAX`,
+  // so the sim's own bright wake pixels stand at their OWN full value
+  // rather than a diluted sum, and tier 2's own near-shore crest foam only
+  // shows through where the sim genuinely has nothing to say (open water
+  // far from any wake). `field.foam`'s own `shoreGate` is deliberately
+  // NOT touched here — it is also what keeps `WATER_BANK_REACH_PX`'s own
+  // domain-warp safety margin valid (that constant's own header: sized to
+  // stay "a little past `WATER_FOAM_SHORE_PX`, so the warp is still fully
+  // present everywhere foam CAN appear") — widening where tier-2 foam can
+  // fire would need that margin re-examined too, a separate change from
+  // fixing how two ALREADY-BOUNDED sources combine.
+  //
+  // ── SIM FOAM STRUCTURE (2026-08-19) — "real foam is complex stringy
+  // mess, it's not a 'glow' effect" (author, live, once the calibration fix
+  // above finally made the wake's SHAPE visible at all). `waterSimFoam` is
+  // the sim buffer's own accumulator, correctly shaped and sized now, but
+  // still a smoothly-diffused field — smoothness a display-time CLAMP
+  // cannot fix, because the accumulator has no internal structure to clamp
+  // into; a brighter smooth gradient is still a smooth gradient, which is
+  // exactly what reads as a glow. `buildFoamCellularStructure` is the SAME
+  // Worley "net with holes" texture shore foam already uses
+  // (`water-shore.js`'s own header: real foam is cellular, not a gradient)
+  // — reused rather than grown a second time
+  // (`feedback_shared_field_two_meanings_two_registries`). `.structure`, NOT
+  // `.lace`: the wake is meant to read as DISCRETE patches that can
+  // genuinely vanish between clumps ("foam might break off and flow
+  // downstream"), not a continuous sheet merely thinned in the middle —
+  // `.lace`'s softening exists for shore foam's different, continuous-sheet
+  // case. Reuses `localFlowDirSafe`/`field.domainOffset`/`uFoamReachPx` —
+  // all already computed above, none sim-specific, so cells read at the
+  // same size/orientation convention as shore foam's own.
+  //
+  // ⚠️ FIXED 2026-08-19 — this used to pass `localFlowDirSafe` (the REAL,
+  // per-pixel-varying solved direction) as `flowDir`, which rotated the
+  // Worley query by a spatially-varying angle and warped it into a literal
+  // spiral near small obstacles (author, live, zoomed: "26 shows concentric
+  // poles of almost magnetic like rings"). `WATER_FOAM_FLOW_NUDGE`'s own doc
+  // (`water-shore.js`) has the full story: `flowDir` must be the GLOBAL
+  // uniform (`buildFoamCellularStructure`'s own restored contract), and the
+  // real per-pixel signal now reaches this the SAFE way, as `localFlowDir` —
+  // a bounded additive nudge to the sample point, never a rotation. Shore
+  // foam's already-shipped `worleyLace` shared this exact bug (confirmed
+  // showing the identical artifact) and is fixed by the same change, in the
+  // one shared function, not twice.
+  const simFoamStructureBuild = buildFoamCellularStructure({
+    TSL: THREE.TSL,
+    worldXY: vec2(positionWorld.x, positionWorld.y),
+    domainOffset: field.domainOffset,
+    flowDir: uFlowDir,
+    localFlowDir: localFlowDirSafe,
+    uReachPx: uFoamReachPx,
+    timeMsNode,
+    ...foamStructureUniforms,
+  });
+  const simFoamStructure = simFoamStructureBuild.structure;
+  const waterSimFoamStructured = waterSimFoam.mul(simFoamStructure);
+  const totalFoam = min(max(field.foam, waterSimFoamStructured), float(1));
 
   // ── TIER 4: CAUSTICS' OWN AUTHOR-FACING GAIN ─────────────────────────────
   // `field.causticBrightness` already carries the calibrated
@@ -1378,33 +1741,142 @@ export function buildWaterSurfaceMaterial({
   const causticExcess = field.causticBrightness.mul(causticGain);
 
   // ============================================================================
-  // TIERS 5-8 — NOT YET BUILT. THIS IS WHERE THEY GO (Effects.md §0 / §2)
+  // TIER 5 — REFRACTION (C5, Water-Testament.md §2.5) — landed 2026-08-23
+  // ============================================================================
+  // The dependent read the whole pass-graph flip (graph/passes.js#surface.water)
+  // exists for. `capturedTexture` is a PREVIOUS frame's own `buf:scene.color`,
+  // bounded to water's own screen rect (`water-refraction-subsystem.js`) — a
+  // drawable genuinely cannot read the buffer it is still helping to write, so
+  // this samples what was there a frame ago instead, same price every
+  // screen-space-reflection technique pays.
+  //
+  // WORLD-ANCHORED, NOT SCREEN-ANCHORED (no camera-delta math): `uCapturedRect`
+  // is the world rect `capturedTexture`'s own UV space maps across, captured
+  // AT THAT TIME. This frame's `positionWorld` maps through the SAME formula
+  // regardless of how far the camera has panned since — a texel's world
+  // position never moves, so there is nothing to reproject.
+  let refractMaterial = null;
+  /** Every `texture(capturedTexture, …)` node tier 5 builds — see the fringe
+   * comment below for why re-pointing needs all three, always this array,
+   * never empty-then-populated-elsewhere (a caller checking `.length` before
+   * a rebuild would see a stale answer otherwise). */
+  const capturedTexNodes = [];
+  if (activeTier >= 5) {
+    // `field.slope` is a rise/run gradient (unitless) — `WATER_TIER5_REFRACT_PX`
+    // is the only place a real scale enters, chosen to read as a visible bend
+    // at a typical zoom without a real GPU sweep to calibrate against yet
+    // (this file's own convention for an honest first estimate).
+    const refractOffsetWorld = field.slope.mul(depth01).mul(float(WATER_TIER5_REFRACT_PX));
+    const refractedWorldXY = vec2(positionWorld.x, positionWorld.y).add(refractOffsetWorld);
+
+    const capturedSpanX = max(uCapturedRect.z.sub(uCapturedRect.x), float(1));
+    const capturedSpanY = max(uCapturedRect.w.sub(uCapturedRect.y), float(1));
+    const centerUv = vec2(
+      clamp(positionWorld.x.sub(uCapturedRect.x).div(capturedSpanX), 0, 1),
+      clamp(positionWorld.y.sub(uCapturedRect.y).div(capturedSpanY), 0, 1)
+    );
+    const refractedUv = vec2(
+      clamp(refractedWorldXY.x.sub(uCapturedRect.x).div(capturedSpanX), 0, 1),
+      clamp(refractedWorldXY.y.sub(uCapturedRect.y).div(capturedSpanY), 0, 1)
+    );
+
+    // TAP VALIDATION — the SAME buf:scene.depth idiom the floor gate below
+    // already uses (byte-for-byte the `uViewRect`-based explicit remap,
+    // never the shared `screenUV()` builtin —
+    // `feedback_shared_texture_node_carries_the_wrong_uv`), sampled at the
+    // REFRACTED position instead of water's own: a tap landing on something
+    // that ranks ABOVE water there (a token standing where the bend would
+    // look) falls back to the CENTRE, unrefracted UV — V2's own checklist
+    // named this exact artifact "tap validation".
+    let tapUv = refractedUv;
+    if (depthTexture && uViewRect) {
+      const tapViewSpanX = max(uViewRect.z.sub(uViewRect.x), float(1));
+      const tapViewSpanY = max(uViewRect.w.sub(uViewRect.y), float(1));
+      const refractedScreenUv = vec2(
+        clamp(refractedWorldXY.x.sub(uViewRect.x).div(tapViewSpanX), 0, 1),
+        clamp(refractedWorldXY.y.sub(uViewRect.y).div(tapViewSpanY), 0, 1)
+      );
+      const depthAtRefraction = texture(depthTexture, refractedScreenUv);
+      const tapValid = step(uExpectedDepth, depthAtRefraction);
+      tapUv = mix(centerUv, refractedUv, tapValid);
+    }
+
+    // CHROMATIC FRINGE — ±1 texel R/B split, the top tier's own signature (no
+    // dedicated author param yet: a fixed, small technique, not a tunable —
+    // see WATER_TIER5_REFRACT_PX's own note on why the offset itself is a
+    // constant for now too).
+    //
+    // ⚠️ THREE bare `texture()` nodes, not one re-derived expression — the
+    // SAME trap `waterSimTexNode`'s own header names above: a texture node
+    // re-pointed for the caller needs a real `.value` setter, which only a
+    // bare node has, and R/G/B each need their OWN UV here, so one shared
+    // node cannot serve all three. Tracked in `capturedTexNodes` (plural,
+    // mirroring `maskTexNodes`) so the caller re-points every one of them
+    // together the moment a real capture lands — re-pointing only the first
+    // is exactly `feedback_texture_nodes_must_be_repointed_together`'s own
+    // scar (a channel silently frozen on the 1×1 placeholder forever).
+    const fringeUv = vec2(uCapturedTexelUv.x, float(0));
+    const refractRNode = texture(capturedTexture, tapUv.add(fringeUv));
+    const refractGNode = texture(capturedTexture, tapUv);
+    const refractBNode = texture(capturedTexture, tapUv.sub(fringeUv));
+    capturedTexNodes.push(refractRNode, refractGNode, refractBNode);
+    const refractColor = vec3(refractRNode.r, refractGNode.g, refractBNode.b);
+
+    // ⚠️ THE ATTR TRADE-OFF, MADE CONSCIOUSLY — read before touching this.
+    // This mesh REPLACES colour via an ALPHA blend (`SrcAlpha,
+    // OneMinusSrcAlpha`), not a multiply like `absorbMaterial` — refraction
+    // is a real texture SAMPLE, not a tint, so there is no multiplicative
+    // "neutral value" to fall back on. Where `refractAlpha` is 0 (outside
+    // water, or wherever this mesh does not draw), the blend correctly
+    // leaves `attr` untouched — but wherever it is NOT 0, `attr` gets
+    // lerped toward this material's OWN `attr` output, and (per
+    // `debugMaterial`'s own header, a few hundred lines below: "blend state
+    // is not per-attachment... there is no 'don't touch it' available on
+    // either backend") there is no value that preserves the REAL attr data
+    // underneath at full alpha — this mesh cannot read `attr_dst` any more
+    // than it can read `scene.color_dst`. Capped well under 1.0 so SOME of
+    // the real destination always survives the lerp, and `vec4(1,1,1,1)`
+    // (matching absorbMaterial's OWN "white is safe" instinct) rather than
+    // an unexamined default. NOT verified against a real fog/vision scene
+    // yet — named here as the one thing most worth checking first, live.
+    const refractAlpha = inside.mul(float(WATER_TIER5_MAX_ALPHA));
+    refractMaterial = new THREE.NodeMaterial();
+    refractMaterial.colorNode = vec4(refractColor, refractAlpha);
+    configureShared(refractMaterial);
+    refractMaterial.blendSrc = THREE.SrcAlphaFactor;
+    refractMaterial.blendDst = THREE.OneMinusSrcAlphaFactor;
+    refractMaterial.blendSrcAlpha = THREE.OneFactor;
+    refractMaterial.blendDstAlpha = THREE.ZeroFactor;
+    refractMaterial.mrtNode = mrt({ attr: vec4(1, 1, 1, 1) });
+  }
+
+  // ============================================================================
+  // TIERS 6-8 — NOT YET BUILT. THIS IS WHERE THEY GO (Effects.md §0 / §2)
   // ============================================================================
   // Named, ordered and costed in `WATER.deferredRungs` (water.js) and
-  // `Water.md` §6; nothing below is code, only the landing strip a real rung
-  // gets the day its own module lands. Each becomes an
-  // `if (activeTier >= N) { ... }` block in this exact position, CUMULATIVE
-  // with everything above it — tiers 1-4 just established the pattern.
+  // `docs/holy/Water-Testament.md` §3.6 (the newer, LOCKED ladder — NOT
+  // `Water.md` §6, which still lists a now-deleted `reflection` rung between
+  // these two; see that Testament section for why). Nothing below is code,
+  // only the landing strip a real rung gets the day its own module lands.
+  // Each becomes an `if (activeTier >= N) { ... }` block in this exact
+  // position, CUMULATIVE with everything above it — tier 5 just established
+  // the "a rung's own coordinate can come from another read" pattern.
   //
-  //   tier 5  refraction  C5  DEPENDENT read of buf:scene.color, offset by
-  //                           slope × thickness — the first rung whose
-  //                           coordinate comes from another read
-  //   tier 6  reflection  C6  short screen-space march along the wave normal
-  //                           for shoreline objects and tokens — the first
-  //                           rung with its own VRAM cost (Effects.md §4.6)
-  //   tier 7  sim         C7  spectral cascade + interactive ripple integrator,
-  //                           ADDED into tier 2's field, never substituted for
-  //                           it — ticks whether seen or not, so it needs a
-  //                           coverage/zoom gate too (Effects.md Law 7), tier
-  //                           alone is not enough
-  //   tier 8  spray       C8  splash/spray particles through the one particle
-  //                           engine — geometry, the top of the ladder
+  //   tier 6  sim:memory       C7  foam advect/decay buffer + wetness
+  //                                watermark + convergence scum
+  //                                (coverage/zoom gated, Effects.md Law 7)
+  //   tier 7  sim:interactive  C7  ripple integrator, wakes, rain rings —
+  //                                ADDED into tier 2's field, never
+  //                                substituted for it
+  //   tier 8  spray            C8  splash/spray particles through the one
+  //                                particle engine — geometry, the top of
+  //                                the ladder
   //
-  // None of the four has a `fromProfile` yet — that is a real design decision
-  // for whoever builds it, not a placeholder to guess at here. Tier 4
-  // (`fromProfile: 'quality'`, water.js) is the first rung to buy `quality`/
-  // `extreme` a water of their own; the first of THESE four to declare
-  // `'extreme'` on its own account is what gives extreme a look past tier 4.
+  // None of the three has a `fromProfile` yet — real design decisions for
+  // whoever builds them, not placeholders to guess at here. Tier 5
+  // (`fromProfile: 'quality'`, water.js) is the first of tiers 5+ to declare
+  // one; the first of THESE three to declare `'extreme'` on its own account
+  // is what gives extreme a look past tier 5.
   // ============================================================================
 
   // Shared by both meshes. Split out so the two materials cannot drift apart on
@@ -1609,15 +2081,39 @@ export function buildWaterSurfaceMaterial({
     reflection: specular.reflection,
     absorbFinal: absorbFinalColor,
     inscatterFinal: inscatterFinalColor,
-    obstacleFoam: vec3(obstacleFoam, obstacleFoam, obstacleFoam),
-    maskProximityFoam: vec3(maskProximityFoam, maskProximityFoam, maskProximityFoam),
     // `.a`, NOT `.r` — S3's pack moved solidity to the ALPHA channel to make
     // room for RG velocity + B speed01 (`buildWaterProjectPackMaterial`'s own
     // B4 doc); reading `.r` here now would show VELOCITY-X mislabelled as
     // solidity, exactly the kind of channel-layout drift this project's own
     // `feedback_shared_field_two_meanings_two_registries` bug class names.
-    flowSolidity: vec3(flowPackTexNode.a, flowPackTexNode.a, flowPackTexNode.a),
+    flowSolidity: vec3(flowPackGated.a, flowPackGated.a, flowPackGated.a),
     flowVelocity: flowVelocityColor,
+    // RAW accumulator (no clump threshold) — deliberately the UNCLAMPED
+    // value, same "isolate the source from its own gate" split channels 7
+    // and 12 already draw: `simFoam` below shows what actually reaches the
+    // water, this shows what the buffer itself actually contains.
+    simFoamRaw: vec3(waterSimTexNode.r, waterSimTexNode.r, waterSimTexNode.r),
+    simFoam: vec3(waterSimFoam, waterSimFoam, waterSimFoam),
+    // The cellular "net with holes" mask ALONE (2026-08-19) — no accumulator
+    // involved, so an author can judge the texture itself (cell size, streak
+    // stretch, hole density) independent of where the sim buffer happens to
+    // be bright this frame. `simFoamStructured` (below) is what actually
+    // reaches the water: this × `simFoam` above.
+    simFoamStructure: vec3(simFoamStructure, simFoamStructure, simFoamStructure),
+    simFoamStructured: vec3(waterSimFoamStructured, waterSimFoamStructured, waterSimFoamStructured),
+    // `flowWarp` ALONE (`field.flowWarp`, `water-field.js`) — NOT `domainOffset`,
+    // which this channel could not use even if it wanted to: `drift` (unbounded,
+    // growing with elapsed time) dwarfs `flowWarp` within seconds of scene load,
+    // so anything summed with it reads as flat/saturated almost immediately.
+    // Existence proof for the 2026-08-19 sign fix: R/G > 0.5 means the warp
+    // points +X/+Y; divided by 10 (a display range picked to keep typical
+    // measured magnitudes, a few world-px, comfortably inside [0,1] without
+    // saturating) rather than the term's own (much larger) safety cap.
+    flowWarp: vec3(
+      clamp(field.flowWarp.x.div(float(10)).add(float(0.5)), float(0), float(1)),
+      clamp(field.flowWarp.y.div(float(10)).add(float(0.5)), float(0), float(1)),
+      float(0.5)
+    ),
   };
   // ⚠️ ARITHMETIC, NOT `select()` — see `effects/debug-channel-select.js`'s
   // header for the twelve specular rounds this trap cost before anyone dumped
@@ -1658,6 +2154,12 @@ export function buildWaterSurfaceMaterial({
     absorbMaterial,
     inscatterMaterial,
     debugMaterial,
+    /** Tier 5's own third mesh — `null` below tier 5 (the same convention
+     * `bodyTexNode` uses), a real `THREE.NodeMaterial` at tier >= 5. Callers
+     * add/remove this from the draw list on a tier rebuild exactly like the
+     * other two, never gated by a separate flag — the null check IS the
+     * gate. */
+    refractMaterial,
     maskTexNode,
     /** EVERY `texture(maskTexture, …)` node this material built, `maskTexNode`
      * included (always first) — the caller re-points ALL of them together
@@ -1665,6 +2167,11 @@ export function buildWaterSurfaceMaterial({
      * own declaration for why one node re-pointed and the rest forgotten is
      * exactly the bug that shipped. */
     maskTexNodes,
+    /** EVERY `texture(capturedTexture, …)` node tier 5 built — always a real
+     * (possibly empty, below tier 5) array, same reasoning as `maskTexNodes`:
+     * the caller re-points all three chromatic-fringe taps together the
+     * moment a real capture lands, never just the first. */
+    capturedTexNodes,
     bodyTexNode,
     /** The `flowSolidity`/`flowVelocity` debug channels' shared single fetch
      * — NEVER `null` (contrast `bodyTexNode`), because `flowPackTexture` is
@@ -1672,6 +2179,11 @@ export function buildWaterSurfaceMaterial({
      * doc. The caller re-points this via `setFlowPackTexture`, on its own
      * cadence, independent of every `maskTexNodes` re-point. */
     flowPackTexNode,
+    /** `res:waterSim`'s own raw-accumulator fetch — NEVER `null`, same reason
+     * as `flowPackTexNode` (see `args.waterSimTexture`'s own doc). The
+     * caller re-points this via `setWaterSimTexture`, on its own cadence
+     * (per-frame, unlike the flow pack's own bake-on-change cadence). */
+    waterSimTexNode,
     /** The rung this material graph was actually BUILT at (Effects.md Law 4) —
      * for the debug report and for the caller's own rebuild-on-change check
      * (`water-surface-subsystem.js`). */
@@ -1689,6 +2201,18 @@ export function buildWaterSurfaceMaterial({
      * @param {number} w @param {number} h */
     setBodyTexSize(w, h) {
       uBodyTexSize.value.set(Number.isFinite(w) && w > 0 ? w : 1, Number.isFinite(h) && h > 0 ? h : 1);
+    },
+    /** Same contract as `setBodyTexSize` above, for the flow pack's own
+     * smooth-texel reconstruction (2026-08-19).
+     * @param {number} w @param {number} h */
+    setFlowPackTexSize(w, h) {
+      uFlowPackTexSize.value.set(Number.isFinite(w) && w > 0 ? w : 1, Number.isFinite(h) && h > 0 ? h : 1);
+    },
+    /** Same contract as `setBodyTexSize` above, for the sim pack's own
+     * smooth-texel reconstruction (S5, 2026-08-18).
+     * @param {number} w @param {number} h */
+    setWaterSimTexSize(w, h) {
+      uWaterSimTexSize.value.set(Number.isFinite(w) && w > 0 ? w : 1, Number.isFinite(h) && h > 0 ? h : 1);
     },
     setAbsorption(v) {
       uAbsorption.value = v;
@@ -1708,6 +2232,48 @@ export function buildWaterSurfaceMaterial({
     },
     setWaveScalePx(v) {
       uWaveScalePx.value = v;
+    },
+    setBankInfluence(v) {
+      uBankInfluence.value = v;
+    },
+    setFlowWarpInfluence(v) {
+      uFlowWarpInfluence.value = v;
+    },
+    setFoamFlowNudge(v) {
+      uFoamFlowNudge.value = v;
+    },
+    setFoamEdgeFar(v) {
+      uFoamEdgeFar.value = v;
+    },
+    setFoamEdgeAaPx(v) {
+      uFoamEdgeAaPx.value = v;
+    },
+    setFoamBubbleAmount(v) {
+      uFoamBubbleAmount.value = v;
+    },
+    setFoamBubbleOctave(v) {
+      uFoamBubbleOctave.value = v;
+    },
+    setFoamBubbleTimeScale(v) {
+      uFoamBubbleTimeScale.value = v;
+    },
+    setFoamGrainAmount(v) {
+      uFoamGrainAmount.value = v;
+    },
+    setFoamGrainOctave(v) {
+      uFoamGrainOctave.value = v;
+    },
+    setFoamGrainTimeScale(v) {
+      uFoamGrainTimeScale.value = v;
+    },
+    setSimClumpLo(v) {
+      uSimClumpLo.value = v;
+    },
+    setSimClumpHi(v) {
+      uSimClumpHi.value = v;
+    },
+    setSimClumpAaPx(v) {
+      uSimClumpAaPx.value = v;
     },
     setFlowSpeedPx(v) {
       uFlowSpeedPx.value = v;
@@ -1761,6 +2327,23 @@ export function buildWaterSurfaceMaterial({
      * doc for why it is measured, not authored). */
     setCaustics(v) {
       uCaustics.value = v;
+    },
+    // ── TIER 5 ────────────────────────────────────────────────────────────
+    /** THE CAPTURE'S OWN WORLD RECT (`water-refraction-subsystem.js`'s
+     * `capturedRect`) — pushed every tick, since a capture can move
+     * (rebucket, floor switch) on any frame the body/view intersection
+     * changes. See this material's own tier-5 header for why remapping THIS
+     * frame's `positionWorld` through LAST frame's rect is correct with no
+     * camera-delta math at all. */
+    setCapturedRect(r) {
+      uCapturedRect.value.set(r.minX, r.minY, r.maxX, r.maxY);
+    },
+    /** The capture texture's size IN TEXELS — feeds the chromatic fringe's
+     * ±1-texel R/B split (`uCapturedTexelUv`). Same guard convention as
+     * `setBodyTexSize`: never zero, never non-finite.
+     * @param {number} w @param {number} h */
+    setCapturedTexSize(w, h) {
+      uCapturedTexelUv.value.set(1 / (Number.isFinite(w) && w > 0 ? w : 1), 1 / (Number.isFinite(h) && h > 0 ? h : 1));
     },
     // ── TIER 3 ────────────────────────────────────────────────────────────
     /** The camera's world rect centre — pushed per frame, never gated. */

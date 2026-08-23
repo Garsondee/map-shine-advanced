@@ -313,7 +313,7 @@ export function createWaterBench({ THREE, renderer, log }) {
     swashFoam: WATER_TIER4_SWASH_FOAM,
     breakFoam: WATER_TIER4_BREAK_FOAM,
     caustics: WATER_TIER4_CAUSTICS,
-    tier: WATER_DEFAULT_TIER >= 4 ? WATER_DEFAULT_TIER : 4,
+    tier: WATER_DEFAULT_TIER >= 5 ? WATER_DEFAULT_TIER : 5,
     debugChannel: 0,
     timeMs: 0,
     zoom: 1,
@@ -464,6 +464,21 @@ export function createWaterBench({ THREE, renderer, log }) {
     // compiles the gate OUT (Effects.md Law 4), so water always draws
     // unoccluded, exactly the "torture fixture" shape `water-render.test.mjs`
     // already proves safe.
+    // TIER 5 — REFRACTION (2026-08-23). A SOLID, saturated placeholder — a
+    // brand-new colour nowhere else in this scene (bed/tint/foam are all in
+    // the brown/teal family), so a screenshot alone shows whether the
+    // refraction mesh is drawing SOMETHING and roughly where, at a glance,
+    // with no separate readback. This is not a correctness check (a formal
+    // gate-ladder scenario, matching `tier4-gate-ladder-no-dead-term`'s own
+    // rigor, is still a real gap — noted, not built here) — only a real-GPU
+    // construction+render smoke test: does the whole tier-5 graph compile,
+    // bind, and draw without throwing or reading back as NaN/garbage.
+    // `capturedRect` == the whole world rect: the simplest input for which
+    // "this frame's positionWorld remapped through it" is trivially correct
+    // by construction, same reasoning `WATER_TIER5_PLACEHOLDER_RECT` uses.
+    capturedTexture: makeTex(new Uint8Array([255, 0, 200, 255]), 1, 1, 'linear'),
+    capturedRect: WATER_RECT,
+    capturedTexSize: { width: 1, height: 1 },
     tier: state.tier,
     debugChannel: 0,
   });
@@ -496,8 +511,19 @@ export function createWaterBench({ THREE, renderer, log }) {
     renderOrder: 0.51,
     frustumCulled: false,
   });
+  // TIER 5 — REFRACTION (2026-08-23). `surface.refractMaterial` is `null`
+  // below tier 5 (or if `capturedTexture` had been missing above) — this
+  // bench's own `state.tier` default is now 5, so on a stock run this IS a
+  // real material, but the null-guard mirrors production's own
+  // `refractPlaceholderMaterial` fallback (`water-surface-subsystem.js`)
+  // for the same reason: `THREE.Mesh` always wants a real material object.
+  const meshRefract = Object.assign(new THREE.Mesh(geometry, surface.refractMaterial ?? new THREE.NodeMaterial()), {
+    renderOrder: 0.52,
+    frustumCulled: false,
+    visible: !!surface.refractMaterial,
+  });
   const scene = new THREE.Scene();
-  scene.add(meshAbsorb, meshInscatter);
+  scene.add(meshAbsorb, meshInscatter, meshRefract);
 
   const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1000, 1000);
   /** The renderer-global MRT base every `render()` call scopes in and out —
@@ -514,6 +540,7 @@ export function createWaterBench({ THREE, renderer, log }) {
     meshAbsorb.visible = !showDebug;
     meshInscatter.material = showDebug ? surface.debugMaterial : surface.inscatterMaterial;
     meshInscatter.visible = true;
+    meshRefract.visible = !showDebug && !!surface.refractMaterial;
   }
 
   /** The camera rect currently on screen — zoom 1 is the whole world rect. */

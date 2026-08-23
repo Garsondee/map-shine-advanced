@@ -2051,24 +2051,6 @@ export function buildWaterSurfaceMaterial({
     capturedTexNodes.push(refractRNode, refractGNode, refractBNode);
     const refractColor = vec3(refractRNode.r, refractGNode.g, refractBNode.b);
 
-    // ⚠️ THE ATTR TRADE-OFF, MADE CONSCIOUSLY — read before touching this.
-    // This mesh REPLACES colour via an ALPHA blend (`SrcAlpha,
-    // OneMinusSrcAlpha`), not a multiply like `absorbMaterial` — refraction
-    // is a real texture SAMPLE, not a tint, so there is no multiplicative
-    // "neutral value" to fall back on. Where `refractAlpha` is 0 (outside
-    // water, or wherever this mesh does not draw), the blend correctly
-    // leaves `attr` untouched — but wherever it is NOT 0, `attr` gets
-    // lerped toward this material's OWN `attr` output, and (per
-    // `debugMaterial`'s own header, a few hundred lines below: "blend state
-    // is not per-attachment... there is no 'don't touch it' available on
-    // either backend") there is no value that preserves the REAL attr data
-    // underneath at full alpha — this mesh cannot read `attr_dst` any more
-    // than it can read `scene.color_dst`. Capped well under 1.0 so SOME of
-    // the real destination always survives the lerp, and `vec4(1,1,1,1)`
-    // (matching absorbMaterial's OWN "white is safe" instinct) rather than
-    // an unexamined default. NOT verified against a real fog/vision scene
-    // yet — named here as the one thing most worth checking first, live.
-    //
     // ⚠️ `.mul(notOccluded)` ADDED (2026-08-23) — this mesh now draws in its
     // own separate pass (see the self-capture fix's own account), so it no
     // longer gets occlusion for free from paint order the way mesh 1/2
@@ -2086,7 +2068,26 @@ export function buildWaterSurfaceMaterial({
     refractMaterial.blendDst = THREE.OneMinusSrcAlphaFactor;
     refractMaterial.blendSrcAlpha = THREE.OneFactor;
     refractMaterial.blendDstAlpha = THREE.ZeroFactor;
-    refractMaterial.mrtNode = mrt({ attr: vec4(1, 1, 1, 1) });
+    // ⚠️ NO `mrtNode` HERE — REAL BUG, FOUND AND FIXED (2026-08-23, live-
+    // reported: "Refraction strength at 600, full, no sign of any
+    // refraction at all. It's. Broken."). Tier 5 used to share mesh 1/2's
+    // OWN `attr`-writing `mrtNode` (an `mrt({attr:...})` struct, written
+    // here at CONSTRUCTION time before this fix) because it used to draw
+    // into `buf:scene.color` (`sceneColor`) alongside them — a genuine
+    // multi-attachment target with a real `attr` channel. Once the self-
+    // capture fix (same day, earlier) moved this mesh to draw in its OWN
+    // pass, it targets `sceneLit` instead (`vt-pan-viewer.js#runWater
+    // RefractionCapturePass` — see that pass's own comment for WHY:
+    // `sceneColor` is a pre-lighting input `light.accumulate` consumes, not
+    // the buffer that reaches the screen). `sceneLit` is deliberately
+    // SINGLE-attachment (`describeSceneColor()`, not `describeSceneColorMrt()`
+    // — vt-pan-viewer.js's own comment there already names the exact WGSL
+    // failure this would hit: "structures must have at least one member").
+    // The `mrtNode` this mesh used to carry pointed at an attachment name
+    // that does not exist on its new target — a real, live-reported,
+    // completely-invisible-regardless-of-any-uniform bug, not merely a
+    // magnitude problem. Removed, not merely disabled: this mesh has no
+    // `attr` to write any more, on ANY target it now draws to.
   }
 
   // ============================================================================

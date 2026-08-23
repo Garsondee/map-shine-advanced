@@ -484,8 +484,19 @@ export function run(t) {
       built[5].refractMaterial.blendDst === THREE.OneMinusSrcAlphaFactor
   );
   ok(
-    'the refraction mesh ALSO overrides its attr MRT — same reasoning as absorbMaterial/debugMaterial',
-    !!built[5].refractMaterial.mrtNode
+    // ⚠️ INVERTED (2026-08-23) — this mesh USED TO carry an attr-writing
+    // mrtNode, matching absorbMaterial/debugMaterial, because it used to
+    // draw into buf:scene.color (a real attr-attachment target) alongside
+    // them. A real, live-reported bug: once the self-capture fix moved it
+    // to draw into scene.lit instead (vt-pan-viewer.js#runWaterRefraction
+    // CapturePass's own account has the full story — scene.lit has NO attr
+    // attachment at all), an mrtNode pointing at a channel that does not
+    // exist on the bound target is exactly the "structures must have at
+    // least one member" WGSL failure this codebase already named once
+    // elsewhere. Removed, not merely left inert — this mesh has nothing to
+    // write to attr any more, on ANY target it draws to now.
+    'the refraction mesh carries NO mrtNode any more — it no longer draws into an attr-attachment target',
+    !built[5].refractMaterial.mrtNode
   );
 
   // ── `capturedTexNodes` MUST CONTAIN EVERY `texture(capturedTexture, …)`

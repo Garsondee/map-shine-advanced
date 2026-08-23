@@ -8532,6 +8532,17 @@ export async function startVtPanViewer({
      * `water-refraction-subsystem.js`'s own header still describes the OLD,
      * one-frame-stale design; read this comment as the current one.
      *
+     * ⚠️ THE DRAW HALF TARGETS `sceneLit`, NOT `sceneColor` — a real bug in
+     * THIS pass's own first version, found the same day it shipped
+     * (live-reported: refraction pushed to its own maximum strength, zero
+     * visible change). `sceneColor` is `light.accumulate`'s own INPUT, not
+     * the buffer that reaches the screen; that pass already ran by the time
+     * this one does, so a first version that drew into `sceneColor` here
+     * was real, correct GPU work that nothing downstream ever looked at
+     * again. See the draw half's own comment, below, for the full account
+     * and the two sibling passes (`runSurfaceResponsePass`,
+     * `runSurfacePrecipitationPass`) that already had this right.
+     *
      * Resolves its OWN `getActiveSceneFloors` call rather than reaching for
      * `runLightAccumulatePass`'s own `floorsResultForFrame` — that variable is
      * genuinely local to that function's own body (the "resolved ONCE, shared
@@ -8581,29 +8592,40 @@ export async function startVtPanViewer({
       }
       // THE DRAW HALF — tier 5's own mesh, for every active floor, in ONE
       // call (`waterRefractScene` already holds all of them, one per floor,
-      // added once at construction and never re-parented). Mirrors
-      // `runGeometryWorldPass`'s own save/set/restore around its render call
-      // (the renderer-global MRT/target state this whole renderer shares),
-      // but does NOT clear `sceneColor` first — this must land ON TOP of
-      // what `runGeometryWorldPass` (terrain, tokens, mesh 1/2) already put
-      // there this frame, the same "composite over the map, not cleared"
-      // shape `renderDoorGraphicsInto` already uses one call up — the only
-      // reason this needs its own explicit setRenderTarget/setMRT at all,
-      // unlike that function, is that `runGeometryWorldPass` has already
-      // restored both to their PRE-pass values by the time this runs.
-      const prevTarget = renderer.getRenderTarget();
-      const previousMRT = renderer.getMRT();
-      const prevAutoClearColor = renderer.autoClearColor;
-      const prevAutoClearDepth = renderer.autoClearDepth;
-      renderer.setMRT(sceneAttrZeroMrt);
-      renderer.setRenderTarget(sceneColor);
+      // added once at construction and never re-parented).
+      //
+      // ⚠️ TARGETS `sceneLit`, NOT `sceneColor` — REAL BUG, FOUND AND FIXED
+      // (2026-08-23, live-reported: refraction strength pushed to its own
+      // MAXIMUM produced zero visible change — not subtle, structurally
+      // invisible). `sceneColor` (`buf:scene.color`) is a PRE-LIGHTING
+      // buffer: `light.accumulate` (the pass immediately before this one)
+      // reads it as its OWN albedo input and produces `sceneLit`, which is
+      // what every later pass — including `present.composite`, the one
+      // that actually reaches the screen — builds on instead.
+      // `light.accumulate` does not run again this frame, so anything
+      // written into `sceneColor` AFTER it has already run (which is
+      // exactly when this pass runs) is real, correctly-rendered GPU work
+      // that nothing downstream ever looks at again — technically
+      // successful, invisibly so. `water-render.js#refractMaterial`'s own
+      // comment (where its now-removed `mrtNode` used to be) has the
+      // matching half of this account.
+      //
+      // `runSurfaceResponsePass` (specular/shine) and
+      // `runSurfacePrecipitationPass`, the two other 'surface'-stage passes
+      // that ALSO run after `light.accumulate`, already solved this
+      // correctly — both draw into `sceneLit`, no MRT touch at all (single-
+      // attachment target, no `attr` channel to bind against). Matched here
+      // exactly rather than reinvented: `autoClearColor` guarded false so
+      // this lands ON TOP of what `light.accumulate` just composited (Law 2
+      // — refraction is an ADDITION to the already-shipped tinted-bed look,
+      // never a replacement for it), render target restored to `null`
+      // after, same as both siblings.
+      const previousAutoClearColor = renderer.autoClearColor;
+      renderer.setRenderTarget(sceneLit);
       renderer.autoClearColor = false;
-      renderer.autoClearDepth = false;
       renderer.render(waterRefractScene, camera);
-      renderer.autoClearColor = prevAutoClearColor;
-      renderer.autoClearDepth = prevAutoClearDepth;
-      renderer.setRenderTarget(prevTarget);
-      renderer.setMRT(previousMRT);
+      renderer.autoClearColor = previousAutoClearColor;
+      renderer.setRenderTarget(null);
     }
 
     // ── FLUID, tiers 0-4 (docs/planning/Fluid.md) ──────────────────────────

@@ -8572,12 +8572,26 @@ export async function startVtPanViewer({
       for (const floor of refractionFloors) {
         const refraction = getWaterRefractionForFloor(floor.index);
         const body = getWaterBodyForFloor(floor.index);
+        // ⚠️ `sceneLit.texture`, NOT `sceneColor.texture` — REAL BUG, FOUND
+        // AND FIXED (2026-08-23, live-reported: "your changes broke shadows
+        // effecting water"). `sceneColor` is PRE-lighting — capturing it
+        // means tier 5 refracts the riverbed as it looked BEFORE
+        // `light.accumulate` applied any shadow/lighting at all, then
+        // blends that UNSHADOWED sample on top of the correctly-shadowed
+        // `sceneLit` the rest of the frame is built from. Wherever
+        // refraction showed, it visually erased whatever shadow should
+        // have been there. `sceneLit` is already fully composited (this
+        // frame's `light.accumulate` + `surface.response`) by the time
+        // THIS pass's own capture runs — see `passImpls`'s own declared
+        // order, a few hundred lines up — so capturing it here is exactly
+        // as safe from self-reference as capturing `sceneColor` was: still
+        // strictly BEFORE this same pass's own draw half, below.
         refraction.tick({
           bodyRect: body.getRect?.() ?? null,
           viewRect,
           canvasW,
           canvasH,
-          sceneColorTexture: sceneColor.texture,
+          sceneColorTexture: sceneLit.texture,
         });
         // ⚠️ THE SELF-CAPTURE FIX'S OWN SECOND HALF (2026-08-23). The tick
         // above just captured THIS FRAME's own buf:scene.color — which, now

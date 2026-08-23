@@ -1,8 +1,26 @@
 /**
- * THE REFRACTION CAPTURE SUBSYSTEM — water tier 5's own private, PREVIOUS-
- * FRAME copy of `buf:scene.color`, bounded to water's own on-screen rect
+ * THE REFRACTION CAPTURE SUBSYSTEM — water tier 5's own private copy of a
+ * finished scene buffer, bounded to water's own on-screen rect
  * (`docs/holy/Water-Testament.md` §2.5, Law 6 — `docs/planning/Effects.md`).
  *
+ * ⚠️ TWO THINGS BELOW ARE NOW HISTORICAL, NOT CURRENT (2026-08-23) — kept
+ * because the REASONING still explains real decisions elsewhere, but read
+ * `vt-pan-viewer.js#runWaterRefractionCapturePass`'s own header for the
+ * CURRENT shape: (1) "one frame of latency" — the self-capture fix (same
+ * day) made the draw a separate step in the SAME pass as this capture, so
+ * it is genuinely zero-frame-stale now, not one; (2) "`buf:scene.color`" —
+ * the CALLER (`vt-pan-viewer.js`) now passes `sceneLit.texture`, not
+ * `sceneColor.texture`, as `tick()`'s own `sceneColorTexture` argument (kept
+ * that name here — this module itself is agnostic to WHICH finished buffer
+ * it is handed, it only cares that whichever one it is has already finished
+ * writing for the frame). Live-reported, real bug: capturing the PRE-
+ * lighting `sceneColor` meant refraction showed the riverbed as it looked
+ * BEFORE shadows/lighting were applied at all, visually erasing shadow
+ * wherever it was visible — fixed by capturing `sceneLit` (post-lighting)
+ * instead, the same buffer this subsystem's OWN "escape hatch" reasoning
+ * below already argues for wanting "a FINISHED frame's colour".
+ *
+
  * ============================================================================
  * WHY THIS EXISTS AT ALL — THE SAME-PASS PROBLEM
  * ============================================================================

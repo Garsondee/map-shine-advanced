@@ -71,7 +71,14 @@ export const WATER_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 1,
+    // ⚠️ LOWERED 1→0.15, author's own live judgment (2026-08-23): "Water
+    // opacity should be 0.15 ideally, that's more realistic too." Real
+    // shallow-to-moderate water reads mostly by what tints/absorbs the bed
+    // beneath it, not as a near-opaque surface — a low default is what
+    // actually lets the depth/absorption/inscatter terms (and tier 5's own
+    // refraction) do the work they exist for, rather than being visually
+    // buried under a near-solid multiply.
+    default: 0.15,
     category: 'Look',
     label: 'Opacity',
     help: 'How much of the riverbed painted underneath still reads through. Below 1 on purpose: the map art beneath is doing the work a proper volume/absorption rung will do later.',
@@ -1206,7 +1213,11 @@ export const WATER_PRESETS = Object.freeze({
     depth: 0.5,
     pollution: 0.75,
     tint: '#173d47',
-    opacity: 1,
+    // Lowered 1→0.15 alongside the schema default's own identical change
+    // (2026-08-23, author's own live judgment) — this preset is this
+    // author's own river, and this value change came from watching it,
+    // not a generic re-tune.
+    opacity: 0.15,
     absorption: 3.2,
     inscatter: 0.18,
     sunGlint: 2,

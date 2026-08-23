@@ -393,6 +393,32 @@ export function createWaterBench({ THREE, renderer, log }) {
     return t;
   };
   const solidTex = (r, g, b, a) => makeTex(new Uint8Array([r, g, b, a]), 1, 1, 'nearest');
+  /** A high-contrast checkerboard, `cell` px per square — DIAGNOSTIC, see the
+   * tier-5 `capturedTexture` call site's own comment. Distinct hues per
+   * square (not just light/dark) so a bend that SWAPS which square a pixel
+   * reads is as visible as one that merely shifts within the same square. */
+  function makeCheckerTex(w, h, cell) {
+    const data = new Uint8Array(w * h * 4);
+    const hues = [
+      [230, 60, 60],
+      [60, 200, 90],
+      [70, 110, 230],
+      [230, 200, 60],
+    ];
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const cx = (x / cell) | 0;
+        const cy = (y / cell) | 0;
+        const [r, g, b] = hues[(cx + cy * 2) % hues.length];
+        const i = (y * w + x) * 4;
+        data[i] = r;
+        data[i + 1] = g;
+        data[i + 2] = b;
+        data[i + 3] = 255;
+      }
+    }
+    return makeTex(data, w, h, 'nearest');
+  }
 
   let maskTexture = solidTex(0, 0, 0, 255);
   const outdoorsTexture = solidTex(255, 255, 255, 255); // a river reads fully outdoors
@@ -563,9 +589,20 @@ export function createWaterBench({ THREE, renderer, log }) {
     // `capturedRect` == the whole world rect: the simplest input for which
     // "this frame's positionWorld remapped through it" is trivially correct
     // by construction, same reasoning `WATER_TIER5_PLACEHOLDER_RECT` uses.
-    capturedTexture: makeTex(new Uint8Array([255, 0, 200, 255]), 1, 1, 'linear'),
+    // KEPT PERMANENTLY (2026-08-23, live-reported "oil spill" chaos) — a
+    // real checkerboard, not a solid colour: a flat colour cannot show
+    // whether the sample point is bending SMOOTHLY (a checker square stays
+    // a recognisable square, just shifted/warped) or CHAOTICALLY
+    // (neighbouring pixels land on unrelated, far-apart squares — the
+    // actual look of the live report). This is strictly more capable than
+    // the 1×1 solid colour it replaces — still catches a throw/NaN/garbage
+    // construction failure, AND is the only fixture in this bench that can
+    // ever reveal a distortion-coherence bug like this one. No automated
+    // test in `tools/shader-lab/` depends on the old fixture's colour or
+    // size, so there is no reason to revert.
+    capturedTexture: makeCheckerTex(64, 64, 8),
     capturedRect: WATER_RECT,
-    capturedTexSize: { width: 1, height: 1 },
+    capturedTexSize: { width: 64, height: 64 },
     tier: state.tier,
     debugChannel: 0,
   });
@@ -1811,7 +1848,11 @@ export function createWaterBench({ THREE, renderer, log }) {
         return {
           calibration: 'FAILED',
           checks: [
-            evaluate('real-mask-loads', () => ({ ok: false, measured: 'fetch/decode failed', expected: 'a real texture' })),
+            evaluate('real-mask-loads', () => ({
+              ok: false,
+              measured: 'fetch/decode failed',
+              expected: 'a real texture',
+            })),
           ],
           inputs: { scale },
           stats: {},
@@ -1823,7 +1864,11 @@ export function createWaterBench({ THREE, renderer, log }) {
         return {
           calibration: 'FAILED',
           checks: [
-            evaluate('real-mask-has-content', () => ({ ok: false, measured: 'no painted texels', expected: 'a real river' })),
+            evaluate('real-mask-has-content', () => ({
+              ok: false,
+              measured: 'no painted texels',
+              expected: 'a real river',
+            })),
           ],
           inputs: { scale, mw, mh },
           stats: {},
@@ -2132,9 +2177,21 @@ export function createWaterBench({ THREE, renderer, log }) {
           }
         }
         const { totalFoam, downstreamProjectionPx } = centroidAndProjection(grid);
-        samples.push({ atSec: (s + 1) * ticksPerSample * dtSec, totalFoam: Number(totalFoam.toFixed(4)), downstreamProjectionPx });
+        samples.push({
+          atSec: (s + 1) * ticksPerSample * dtSec,
+          totalFoam: Number(totalFoam.toFixed(4)),
+          downstreamProjectionPx,
+        });
         if (s === 0 || s === sampleCount - 1) {
-          artifacts.push(await saveFoamPng(grid.foam, grid.w, grid.h, runId, `real-sim-foam-t${Math.round((s + 1) * ticksPerSample * dtSec)}s.png`));
+          artifacts.push(
+            await saveFoamPng(
+              grid.foam,
+              grid.w,
+              grid.h,
+              runId,
+              `real-sim-foam-t${Math.round((s + 1) * ticksPerSample * dtSec)}s.png`
+            )
+          );
         }
       }
       const simStatus = sim.getStatus();
@@ -2160,9 +2217,7 @@ export function createWaterBench({ THREE, renderer, log }) {
       // this backend — mirrored here, not re-invented.
       const { uniform: uniformFnSim2, vec4: vec4FnSim2 } = THREE.TSL;
       const simRealTimeMs = uniformFnSim2(0);
-      const simRealViewRect = uniformFnSim2(
-        vec4FnSim2(worldRect.minX, worldRect.minY, worldRect.maxX, worldRect.maxY)
-      );
+      const simRealViewRect = uniformFnSim2(vec4FnSim2(worldRect.minX, worldRect.minY, worldRect.maxX, worldRect.maxY));
       const simRealOutdoorsRect = uniformFnSim2(
         vec4FnSim2(worldRect.minX, worldRect.minY, worldRect.maxX, worldRect.maxY)
       );
@@ -2374,7 +2429,7 @@ export function createWaterBench({ THREE, renderer, log }) {
     summary:
       "The REAL createWaterFlowSubsystem bake against the shader lab's OWN default synthetic " +
       'bend+island river (`paintRiver`) — never flow-baked before. Samples the solved velocity at ' +
-      "points either side of the island and checks the current genuinely SPLITS and reroutes, not " +
+      'points either side of the island and checks the current genuinely SPLITS and reroutes, not ' +
       'just a uniform bulk-direction field painted over the mask.',
     async run({ runId }) {
       const { data: maskBytes, w: mw, h: mh } = rasterMask(paintRiver);
@@ -2684,7 +2739,8 @@ export function createWaterBench({ THREE, renderer, log }) {
       renderer.setMRT(previousMRT);
       const turbidityBuf = await renderer.readRenderTargetPixelsAsync(synRt, 0, 0, SYN_DIM, SYN_DIM);
       const turbidityRaw = turbidityBuf instanceof Promise ? await turbidityBuf : turbidityBuf;
-      const turbidityBytes = turbidityRaw instanceof Uint8Array ? turbidityRaw : new Uint8Array(turbidityRaw.buffer ?? turbidityRaw);
+      const turbidityBytes =
+        turbidityRaw instanceof Uint8Array ? turbidityRaw : new Uint8Array(turbidityRaw.buffer ?? turbidityRaw);
       artifacts.push(await saveDebugPngGeneric(turbidityBytes, SYN_DIM, runId, 'synthetic-river-turbidity-wide.png'));
 
       // ── THE SIGN PROOF LINE (2026-08-19) — channel 28 (`flowWarp` alone),
@@ -2807,18 +2863,28 @@ export function createWaterBench({ THREE, renderer, log }) {
           evaluate('no-sample-point-landed-on-solid-land', () => ({
             ok: [sBend1, sBend2, sLeft, sRight, sTail].every((s) => s.mag > 0 || s.speed01 >= 0),
             measured: { sBend1, sBend2, sLeft, sRight, sTail },
-            expected: 'every marked point resolves to a real (non-NaN) reading — a NaN/undefined here means a point was mis-placed on land, not that the solver failed',
+            expected:
+              'every marked point resolves to a real (non-NaN) reading — a NaN/undefined here means a point was mis-placed on land, not that the solver failed',
           })),
           evaluate('the-narrow-side-of-the-island-runs-faster-than-the-wide-side', () => ({
             ok: sLeft.speed01 > sRight.speed01,
-            measured: { leftSpeed01: sLeft.speed01, rightSpeed01: sRight.speed01, leftGapWorldPx: islandLeftEdgeX - islandLeftBankX, rightGapWorldPx: islandRightBankX - islandRightEdgeX },
+            measured: {
+              leftSpeed01: sLeft.speed01,
+              rightSpeed01: sRight.speed01,
+              leftGapWorldPx: islandLeftEdgeX - islandLeftBankX,
+              rightGapWorldPx: islandRightBankX - islandRightEdgeX,
+            },
             expected:
               'left (narrow gap) speed > right (wide gap) speed — real incompressible flow speeds up through a ' +
               'narrower opening; a solve that ignored the island entirely would show these roughly EQUAL instead',
           })),
           evaluate('the-second-bend-genuinely-deflects-off-the-bulk-compass', () => ({
             ok: Math.abs(sBend2.angleDeg - bearingDeg) > 3,
-            measured: { angleDeg: sBend2.angleDeg, bulkBearingDeg: bearingDeg, deviationDeg: Number((sBend2.angleDeg - bearingDeg).toFixed(1)) },
+            measured: {
+              angleDeg: sBend2.angleDeg,
+              bulkBearingDeg: bearingDeg,
+              deviationDeg: Number((sBend2.angleDeg - bearingDeg).toFixed(1)),
+            },
             expected:
               '> 3° off the bulk compass at the sharpest bend — a uniform field with no real routing would sit ' +
               'exactly on the bulk bearing everywhere, never deviating',
@@ -2833,9 +2899,14 @@ export function createWaterBench({ THREE, renderer, log }) {
           })),
           evaluate('the-flow-warp-term-responds-more-at-the-sharper-bend', () => ({
             ok: warpBend2.mag > warpBend1.mag,
-            measured: { warpBend1Px: warpBend1.mag, warpBend2Px: warpBend2.mag, bend1AngleDeg: sBend1.angleDeg, bend2AngleDeg: sBend2.angleDeg },
+            measured: {
+              warpBend1Px: warpBend1.mag,
+              warpBend2Px: warpBend2.mag,
+              bend1AngleDeg: sBend1.angleDeg,
+              bend2AngleDeg: sBend2.angleDeg,
+            },
             expected:
-              "bend 2 (the sharper lateral swing, already measured further off the bulk compass above) should " +
+              'bend 2 (the sharper lateral swing, already measured further off the bulk compass above) should ' +
               "warp the base surface's own noise domain MORE than bend 1 (the milder bend) — the new " +
               '`buildWaterSurfaceField` term (`WATER_FLOW_WARP_INFLUENCE`) tracking real deflection, not a flat constant',
           })),
@@ -2844,26 +2915,34 @@ export function createWaterBench({ THREE, renderer, log }) {
             measured: { warpBend1Px: warpBend1.mag, warpBend2Px: warpBend2.mag, warpCapPx },
             expected:
               `neither point exceeds ${warpCapPx.toFixed(2)}px (WATER_TIER2_WAVE_SCALE_PX × WATER_FLOW_WARP_INFLUENCE) ` +
-              '— the bounded-fraction-of-one-cell safety property `WATER_BANK_INFLUENCE`\'s own doc requires of ' +
+              "— the bounded-fraction-of-one-cell safety property `WATER_BANK_INFLUENCE`'s own doc requires of " +
               'anything added to `domainOffset`, checked against REAL baked deflection rather than just the constant in isolation',
           })),
           evaluate('the-rendered-flow-warp-sign-matches-the-real-deflection-not-its-opposite', () => ({
             ok:
               (expectedSignX === 0 || Math.sign(renderedFlowWarpX) === expectedSignX) &&
               (expectedSignY === 0 || Math.sign(renderedFlowWarpY) === expectedSignY),
-            measured: { renderedFlowWarpX, renderedFlowWarpY, expectedSignX, expectedSignY, bend2DirX, bend2DirY, bulkDirXY },
+            measured: {
+              renderedFlowWarpX,
+              renderedFlowWarpY,
+              expectedSignX,
+              expectedSignY,
+              bend2DirX,
+              bend2DirY,
+              bulkDirXY,
+            },
             expected:
               'THE 2026-08-19 SIGN FIX, PROVEN AGAINST THE ACTUAL COMPILED SHADER, not just a JS mirror of it ' +
               '(a JS-only check could carry the identical sign mistake and still pass) — channel 28, read back at a ' +
               'single point where the real bake has a known, non-trivial deflection, must point AWAY from the ' +
-              'obstacle side the deflection is pushing water toward, matching `WATER_FLOW_WARP_INFLUENCE`\'s own ' +
+              "obstacle side the deflection is pushing water toward, matching `WATER_FLOW_WARP_INFLUENCE`'s own " +
               'derivation, never the un-negated (and live-reported "pushes water INTO the obstacle") version',
           })),
           evaluate('the-foam-structure-genuinely-changes-over-time-not-just-translates', () => ({
             ok: animMeanAbsDiff > 3,
             measured: { animMeanAbsDiffOn0to255Scale: animMeanAbsDiff, framesComparedMsApart: 4000 },
             expected:
-              "> 3 (on a 0..255 channel scale) — the SAME crop, only `tSec` changed: THE bubble nudge and grain " +
+              '> 3 (on a 0..255 channel scale) — the SAME crop, only `tSec` changed: THE bubble nudge and grain ' +
               'multiply (`WATER_FOAM_BUBBLE_AMOUNT`/`WATER_FOAM_GRAIN_AMOUNT`, `water-shore.js`) are the only things ' +
               'that can move a pixel here without the camera or the obstacle moving too — a value near 0 would mean ' +
               'the "evolving, bubbling" fix compiles but produces no real motion, exactly the live-reported symptom ' +

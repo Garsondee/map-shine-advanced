@@ -311,8 +311,15 @@ export const WATER_TIER0_TINT = Object.freeze([0.09, 0.24, 0.28]);
 
 /** Tier 0's surface opacity. Below 1 so the riverbed art painted underneath
  * still reads through — the map's own bed is doing the work a volume rung will
- * later do properly. */
-export const WATER_TIER0_OPACITY = 1;
+ * later do properly.
+ *
+ * ⚠️ LOWERED 1→0.15 (2026-08-23, author's own live judgment — "Water
+ * opacity should be 0.15 ideally, that's more realistic too") — this
+ * doc's own "below 1" claim was true in name only until now; the shipped
+ * constant had stayed at the fully-opaque fallback since tier 0's own
+ * first version. Matches `WATER_PARAMS.opacity`'s own identical default
+ * change (`water.js`) — this is the same value, never a second one. */
+export const WATER_TIER0_OPACITY = 0.15;
 
 /**
  * THE DEPTH×POLLUTION COLOUR REFERENCE (2026-08-17, Water-Testament S1) — four
@@ -580,12 +587,29 @@ export const WATER_TIER5_PLACEHOLDER_RECT = Object.freeze({ minX: 0, minY: 0, ma
 
 /**
  * World-space UNITS (not texels — the offset is computed before the world→UV
- * remap) the refracted sample point shifts by, at `field.slope` == 1 and full
- * depth. Chosen to read as a visible bend at a typical Foundry zoom without a
- * real GPU sweep to calibrate against yet — this file's own convention for an
- * honest first estimate, not a measured constant.
+ * remap) the refracted sample point shifts by, at `field.slope`'s own
+ * BOUNDED unit-length direction (see `refractOffsetWorld`'s own comment at
+ * the call site for why the raw vector is normalised first) and full depth.
+ *
+ * ⚠️ LOWERED 24→6, LIVE-REPORTED (2026-08-23): the author's own words,
+ * "weird oil spill like patterns," at the schema DEFAULT chop (0.86) — the
+ * original 24 was an unbounded guess, multiplying an UNCLAMPED `field.slope`
+ * (this rung's own first bug: nothing capped its magnitude before using it
+ * as a sample-position offset, unlike every other slope/deviation-driven
+ * term in this effect — `WATER_FOAM_FLOW_NUDGE`'s own `deviationSafe`,
+ * `water-field.js`'s own `flowDeviationSafe`, both normalise-then-scale for
+ * exactly this reason). A steep or noisy per-pixel slope could push the
+ * sample arbitrarily far from its true position, and a REFRACTED position
+ * that jumps by more than a texel or two between neighbouring pixels reads
+ * as decorrelated noise, not a bend — the shader-lab bench's own synthetic
+ * fixture reproduced a milder version of this at the SAME chop, checkerboard
+ * squares visibly displaced rather than shattered; the live map's own real
+ * wave field apparently reaches this regime harder. 6 is a smaller, still
+ * unmeasured, but now BOUNDED-input estimate — see the clamp this rung's own
+ * call site now applies before this constant is the only place a scale
+ * enters at all.
  */
-export const WATER_TIER5_REFRACT_PX = 24;
+export const WATER_TIER5_REFRACT_PX = 6;
 
 /**
  * The hard ceiling on tier 5's own alpha, strictly below 1.0. `attr`'s MRT
@@ -1762,11 +1786,26 @@ export function buildWaterSurfaceMaterial({
    * a rebuild would see a stale answer otherwise). */
   const capturedTexNodes = [];
   if (activeTier >= 5) {
-    // `field.slope` is a rise/run gradient (unitless) — `WATER_TIER5_REFRACT_PX`
-    // is the only place a real scale enters, chosen to read as a visible bend
-    // at a typical zoom without a real GPU sweep to calibrate against yet
-    // (this file's own convention for an honest first estimate).
-    const refractOffsetWorld = field.slope.mul(depth01).mul(float(WATER_TIER5_REFRACT_PX));
+    // ⚠️ BOUND THE SLOPE'S OWN MAGNITUDE BEFORE USING IT AS AN OFFSET — real
+    // bug, live-reported as "oil spill" chaos (2026-08-23), fixed here.
+    // `field.slope` is a rise/run gradient (unitless), and the FIRST version
+    // of this rung multiplied it by `WATER_TIER5_REFRACT_PX` completely
+    // unclamped — so a steep wave crest, or simply a per-pixel-noisy slope
+    // reading above magnitude 1, pushed the SAMPLE POSITION arbitrarily far
+    // from its true spot, and a per-pixel-varying offset with no ceiling is
+    // exactly what turns a coherent bend into decorrelated noise between
+    // neighbouring pixels — the same failure shape this effect has already
+    // scarred on twice: a per-pixel spiral (`WATER_FOAM_FLOW_NUDGE`'s own
+    // doc comment) and a runaway warp (`water-field.js#flowDeviationSafe`)
+    // — both of which ALREADY normalise-then-scale for this exact reason, a
+    // discipline this rung skipped the first time. `div(max(length, 1))` leaves a
+    // GENTLE slope (magnitude ≤ 1) untouched and only clamps a STEEP one
+    // down to unit length, so `WATER_TIER5_REFRACT_PX` is now a true,
+    // provable ceiling on the offset's own magnitude (at full depth),
+    // never a multiplier on an unbounded input.
+    const slopeMagnitude = length(field.slope);
+    const slopeBounded = field.slope.div(max(slopeMagnitude, float(1)));
+    const refractOffsetWorld = slopeBounded.mul(depth01).mul(float(WATER_TIER5_REFRACT_PX));
     const refractedWorldXY = vec2(positionWorld.x, positionWorld.y).add(refractOffsetWorld);
 
     const capturedSpanX = max(uCapturedRect.z.sub(uCapturedRect.x), float(1));

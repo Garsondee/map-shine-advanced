@@ -1247,6 +1247,7 @@ function install() {
   MapShine.__painter = installPainter(MapShine, {
     onFloorChanged: syncActiveFloorContext,
     onLayersChanged: (layersByKey) => ingestPaintedLayers(layersByKey),
+    onRequestFloorSwitch: switchToPreparedFloor,
   });
   // ANCHOR MODE (2026-07-22) — click-to-place/click-to-edit for discrete point
   // effects (candles today). Installed once, entered per-effect via the
@@ -2025,6 +2026,121 @@ function install() {
         log.error(`${name} reapply (${when}) failed:`, err);
       }
     }
+  }
+
+  /**
+   * PREPARE, THEN COMMIT a same-scene floor switch (2026-08-15, unified
+   * 2026-08-24 — see [[feedback_direct_floor_switch_caller_skips_context_sync]]
+   * and [[keyhole-skyreach-per-floor-rebake]] for what happened the last
+   * two times a call site reimplemented a partial copy of this sequence
+   * instead of sharing it). The old floor stays fully drawn — nothing
+   * below `beginFloorTransition` and above the commit block touches
+   * `activeFloorContext`, doors, or `view.floorIndex` — while
+   * `prepareVtPanViewerFloor` loads and BC-compresses the target floor's
+   * art, prefetches its water/window masks, AND warms the GPU pipelines
+   * its whole-image meshes need (see `prepareFloor`'s own doc,
+   * vt-pan-viewer.js, PHASE 4). Front-loading this is what stops a
+   * half-built upper floor ever being visible, or its first frame ever
+   * paying for a cold shader compile: it is not a new visibility gate, it
+   * is making sure the EXISTING hide/show pass has nothing left to wait
+   * for — and nothing left to compile — by the time it runs.
+   *
+   * No curtain, no deadline, no escalation — the author's explicit call:
+   * however long a cold floor takes, the OLD floor is what stays on
+   * screen. `ui/floor-transition.js`'s own Cancel button is the only way
+   * out (`cancelVtPanViewerFloorPrepare` — a second call to this function
+   * for a DIFFERENT floor already invalidates the first prepare the same
+   * way, since `prepareFloor`'s generation counter bumps on every call
+   * regardless of who's calling).
+   *
+   * THE ONE SHARED ENTRY POINT for every real floor-switch trigger (native
+   * Foundry's `canvasReady` same-scene branch, and the in-app painter's own
+   * Floor stepper via `onRequestFloorSwitch` — see the `installPainter(...)`
+   * call below) — a floor switch that skips this function skips prepare,
+   * the progress bar, `reapplyAll`, `syncInterfaceSeam` and the
+   * adjacent-floor prewarm, all at once. Route any FUTURE floor-switch
+   * trigger through this, never through `setVtPanViewerFloor` directly.
+   *
+   * Defined here, at `install()`'s own top level, rather than inside the
+   * `if (typeof Hooks !== 'undefined') {...}` block its own `canvasReady`
+   * caller lives in — a block is a nested SCOPE (ES-module strict mode
+   * block-scopes `function` declarations) and `installPainter(...)`, a few
+   * hundred lines above that block, needs to reach this same function too.
+   *
+   * @param {number} targetFloorIndex
+   * @returns {Promise<{ok:boolean, reason?:string, result?:*}>}
+   */
+  async function switchToPreparedFloor(targetFloorIndex) {
+    // `fromFloorIndex` is `activeFloorContext?.floorIndex` READ HERE,
+    // BEFORE anything below moves it — by the time a NATIVE Foundry floor
+    // switch reaches this function, Foundry's OWN `canvas.level` has
+    // already moved to the target floor (confirmed by reading
+    // `Scene#view`/`canvas.draw` — this is WHY the held-floor's
+    // placeables can look mismatched during a slow prepare, a known,
+    // not-yet-built follow-up), so `activeFloorContext` is the only thing
+    // in this file still honestly pointing at the floor still on screen.
+    beginFloorTransition({
+      fromFloorIndex: activeFloorContext?.floorIndex ?? null,
+      toFloorIndex: targetFloorIndex,
+      onCancel: cancelVtPanViewerFloorPrepare,
+    });
+    const prepared = await prepareVtPanViewerFloor(targetFloorIndex, (p) => {
+      log.debug?.(`floor ${targetFloorIndex} prepare: ${p.phase} ${p.done}/${p.total}`);
+      // Read from THE READINESS SIGNAL (MapShine.getSceneReady), not from
+      // `p` — `p` is prepareFloor's own coarse phase/count, but
+      // `waitingFor` is the SAME named-blocker list the cold-load curtain
+      // shows, already human-labelled ("textures still being
+      // GPU-compressed (3)") by vt/settle.js. Reusing it here means this
+      // overlay never invents its own second vocabulary for the same
+      // facts.
+      updateFloorTransitionProgress(MapShine.getSceneReady?.().waitingFor ?? []);
+    });
+    endFloorTransition(); // always — success, failure, or cancel all end here the same way
+    if (!prepared.ok) {
+      // Superseded by a newer floor-switch request (a rapid second call),
+      // or cancelled via the overlay's own button — the newer request (or
+      // the author's own choice to stay put) owns this outcome, so this
+      // call simply stops here. The old floor is untouched; there is
+      // nothing to undo.
+      log.info(`floor ${targetFloorIndex} prepare did not complete (${prepared.reason}) — leaving floor as-is.`);
+      return prepared;
+    }
+
+    // COMMIT — everything floor N needs is already GPU-resident (art,
+    // masks AND compiled shader pipelines — see prepareFloor's PHASE 4),
+    // so every step below is fast and, per prepareFloor's own analysis,
+    // the hide/show swap lands within one synchronous pass with nothing
+    // left to await, and no new pipeline left to compile on this frame.
+    // `activeFloorContext` and `view.floorIndex` move together here (via
+    // `syncActiveFloorContext`, the same fresh-derive-from-`canvas.scene`
+    // helper the painter's own stepper already uses), with no `await`
+    // between them — moving `activeFloorContext` any earlier would
+    // re-point every per-frame anchor filter (fire/candle/lightning) and
+    // door scoping at floor N while floor M's art was still what the user
+    // was looking at, for however long prepare took.
+    syncActiveFloorContext(targetFloorIndex);
+    const result = await setVtPanViewerFloor(targetFloorIndex);
+    // EFFECT_REAPPLIERS — per-floor correctness rests entirely on each
+    // effect's own per-frame memo re-reading `activeFloorContext` by
+    // closure; every entry already tolerates being called with nothing to
+    // do (reapplyAll's own try/catch-per-entry).
+    reapplyAll('floor switch');
+    log.info(`real-scene VT viewer synced to floor ${targetFloorIndex}.`, result);
+    syncInterfaceSeam('floor switch');
+
+    // CONTINUOUS PREWARM, RE-SCOPED TO THE NEW FLOOR (2026-08-15, now also
+    // warms GPU pipelines, not just textures — see prepareFloor's PHASE 4).
+    // The startup-only ±1 prewarm loop is keyed to whichever floor was
+    // active at BOOT — after 0→1, floor 2 was never prewarmed and stayed
+    // cold forever. Re-running it here, now scoped to the floor we just
+    // committed to, is what keeps "switch to an adjacent floor" fast on
+    // the SECOND hop too, not just the first. Fire-and-forget, same
+    // posture as the original: a background prewarm succeeding or failing
+    // must never affect this (already-completed) switch.
+    prewarmVtPanViewerAdjacentFloors(targetFloorIndex).catch((err) =>
+      log.warn(`adjacent-floor prewarm from floor ${targetFloorIndex} failed:`, err)
+    );
+    return { ok: true, result };
   }
 
   // ---------------------------------------------------------------------------
@@ -11078,6 +11194,15 @@ function install() {
     // whole family beats guessing which single one is authoritative.
     for (const hook of ['moveToken', 'stopToken', 'pauseToken']) redrawOn(hook);
 
+    // `switchToPreparedFloor` — the shared prepare-then-commit floor-switch
+    // orchestrator this same-scene branch calls below — is defined up at
+    // `install()`'s own top level (beside `reapplyAll`/`syncActiveFloorContext`,
+    // its two main dependencies), NOT in this `if` block: this block's body
+    // is a nested scope (ES-module strict mode block-scopes `function`
+    // declarations), and `ui/paint-mode.js`'s Floor stepper needs to reach
+    // the SAME function from `installPainter(...)` above — outside this
+    // block entirely. See its own doc, near `reapplyAll`, for the full
+    // reasoning.
     Hooks.on('canvasReady', async (canvasRef) => {
       try {
         const sceneDoc = canvasRef?.scene ?? null;
@@ -11161,101 +11286,13 @@ function install() {
 
         if (lastRealSceneId === sceneDoc.id && getVtPanViewerDiagnostics().active) {
           // A floor switch. No curtain is raised for it and none is lifted —
-          // beginSceneLoad already declined, so there is nothing here to undo.
-          // "Floor changes without loading screens" is this branch existing.
-          //
-          // PREPARE, THEN COMMIT (2026-08-15). The old floor stays fully drawn
-          // — nothing below this comment and above the commit block touches
-          // `activeFloorContext`, doors, or `view.floorIndex` — while
-          // `prepareVtPanViewerFloor` loads and BC-compresses the target
-          // floor's art. See `prepareFloor`'s own doc (vt-pan-viewer.js) for
-          // why front-loading this is what stops a half-built upper floor
-          // ever being visible: it is not a new visibility gate, it is making
-          // sure the EXISTING hide/show pass has nothing left to wait for by
-          // the time it runs.
-          //
-          // No curtain, no deadline, no escalation — the author's explicit
-          // call (this session): however long a cold floor takes, the OLD
-          // floor is what stays on screen. `ui/floor-transition.js`'s own
-          // Cancel button is the only way out (`cancelVtPanViewerFloorPrepare`
-          // — an in-progress `canvasReady` firing a second time for a
-          // DIFFERENT floor already invalidates the first prepare the same
-          // way, since `prepareFloor`'s generation counter bumps on every
-          // call regardless of who's calling).
-          //
-          // `fromFloorIndex` is `activeFloorContext?.floorIndex` READ HERE,
-          // BEFORE anything below moves it — by the time this hook fires,
-          // Foundry's OWN `canvas.level` has already moved to the target
-          // floor (confirmed by reading `Scene#view`/`canvas.draw` — this is
-          // WHY the held-floor's placeables can look mismatched during a slow
-          // prepare, a known, not-yet-built follow-up), so `activeFloorContext`
-          // is the only thing in this file still honestly pointing at the
-          // floor still on screen.
-          beginFloorTransition({
-            fromFloorIndex: activeFloorContext?.floorIndex ?? null,
-            toFloorIndex: targetFloorIndex,
-            onCancel: cancelVtPanViewerFloorPrepare,
-          });
-          const prepared = await prepareVtPanViewerFloor(targetFloorIndex, (p) => {
-            log.debug?.(`floor ${targetFloorIndex} prepare: ${p.phase} ${p.done}/${p.total}`);
-            // Read from THE READINESS SIGNAL (MapShine.getSceneReady, task 3),
-            // not from `p` — `p` is prepareFloor's own coarse phase/count, but
-            // `waitingFor` is the SAME named-blocker list the cold-load curtain
-            // shows, already human-labelled ("textures still being
-            // GPU-compressed (3)") by vt/settle.js. Reusing it here means this
-            // overlay never invents its own second vocabulary for the same
-            // facts.
-            updateFloorTransitionProgress(MapShine.getSceneReady?.().waitingFor ?? []);
-          });
-          endFloorTransition(); // always — success, failure, or cancel all end here the same way
-          if (!prepared.ok) {
-            // Superseded by a newer floor-switch request (a rapid second
-            // `canvasReady`), or cancelled via the overlay's own button — the
-            // newer request (or the author's own choice to stay put) owns
-            // this outcome, so this firing simply stops here. The old floor
-            // is untouched; there is nothing to undo.
-            log.info(`floor ${targetFloorIndex} prepare did not complete (${prepared.reason}) — leaving floor as-is.`);
-            return;
-          }
-
-          // COMMIT — everything floor N needs is already GPU-resident, so
-          // every step below is fast and, per prepareFloor's own analysis, the
-          // hide/show swap lands within one synchronous pass with nothing left
-          // to await. `activeFloorContext` and `view.floorIndex` move together
-          // here, in this order, with no `await` between them — moving
-          // `activeFloorContext` any earlier (the ordering this branch used
-          // BEFORE this fix) would re-point every per-frame anchor
-          // filter (fire/candle/lightning) and door scoping at floor N while
-          // floor M's art was still what the user was looking at, for however
-          // long prepare took — invisible today only because there was no
-          // prepare step to expose the gap.
-          updateActiveFloorContext(floorsResult.floors, targetFloorIndex);
-          refreshDoors();
-          const result = await setVtPanViewerFloor(targetFloorIndex);
-          // EFFECT_REAPPLIERS NEVER RAN ON A FLOOR SWITCH BEFORE THIS (its own
-          // four triggers were 'ready' / 'scene load' / 'settings change' /
-          // 'perf tier report restore') — per-floor correctness rested
-          // entirely on each effect's own per-frame memo re-reading
-          // `activeFloorContext` by closure. Added here rather than left as a
-          // gap: a floor switch is exactly the kind of state change this list
-          // exists to react to, and every entry already tolerates being
-          // called with nothing to do (reapplyAll's own try/catch-per-entry).
-          reapplyAll('floor switch');
-          log.info(`real-scene VT viewer synced to floor ${targetFloorIndex} (same scene).`, result);
-          syncInterfaceSeam('floor switch');
-
-          // CONTINUOUS PREWARM, RE-SCOPED TO THE NEW FLOOR (2026-08-15). The
-          // startup-only ±1 prewarm loop (see startVtPanViewer's own comment)
-          // is keyed to whichever floor was active at BOOT — after 0→1, floor
-          // 2 was never prewarmed and stayed cold forever. Re-running it here,
-          // now scoped to the floor we just committed to, is what keeps
-          // "switch to an adjacent floor" fast on the SECOND hop too, not just
-          // the first. Fire-and-forget, same posture as the original: a
-          // background prewarm succeeding or failing must never affect this
-          // (already-completed) switch.
-          prewarmVtPanViewerAdjacentFloors(targetFloorIndex).catch((err) =>
-            log.warn(`adjacent-floor prewarm from floor ${targetFloorIndex} failed:`, err)
-          );
+          // beginSceneLoad already declined, so there is nothing here to
+          // undo. "Floor changes without loading screens" is this branch
+          // existing. See `switchToPreparedFloor`'s own doc (above) for the
+          // full prepare/commit sequence — the SAME sequence every other
+          // real floor-switch trigger (e.g. the painter's Floor stepper)
+          // now shares, rather than each reimplementing its own partial copy.
+          await switchToPreparedFloor(targetFloorIndex);
           return;
         }
 

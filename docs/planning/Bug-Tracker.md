@@ -60,6 +60,7 @@ building on any of this.
 | **27** | **The flow direction control was neither a compass nor pointing the right way — every river ran backwards** | water / tier 2 / params UI | `BUILT (unverified)` 2026-08-16 — compass `angle` type + a Node-pinned heading→vector helper |
 | **28** | **A small painted fire blob near a bigger one could be silently suppressed to zero — peak separation pooled across unrelated blobs instead of scoping per component** | fire / mask extraction | `BUILT (unverified)` 2026-08-16 — Node-tested; bug #19's floor-specific ingest asymmetry is separate and still open |
 | **29** | **Only 3/20 painted fires produced flames (sensitivity too strict for real small/faint paint); fixing that made fires read diffuse with no hot core (cohesion rebuilt on connected-component identity)** | fire / mask sensitivity / cohesion | `LIVE` — author-confirmed 2026-08-17, `maskSensitivity` default 0.2→0.05, `flameCohesion` default 0→0.5 |
+| **30** | **Floor switches can freeze the interface for over a minute with no preload ever attempted — a built GPU pipeline warm-up mechanism was never wired to the floor-switch path, and two real UI triggers skip prepare entirely** | floor transitions / GPU pipelines / interface seam | `BUILT (unverified)` 2026-08-24 — Node lint/format/full test suite green (11,939 tests); needs the author's own eyes on a real floor switch |
 
 ---
 
@@ -2665,3 +2666,161 @@ assertions, 0 failed). Lint clean, format clean on every touched file.
 Already fixed — author confirmed live 2026-08-17: every torch on the Tower
 Bridge scene fires, and cohesion at its new default gives each one a visible
 bright core without any of them smearing toward or merging with a neighbour.
+
+---
+
+## 30. Floor switches can freeze the interface for over a minute — no preload ever attempted
+
+**Status:** `BUILT (unverified)` · **Reported:** 2026-08-24 · **Docs:** this
+file, `keyhole-skyreach-per-floor-rebake` (a related earlier fix to the same
+neighbourhood), `feedback_direct_floor_switch_caller_skips_context_sync`
+
+### Symptom, in the author's own words
+
+*"When we change floors currently there is never a successful attempt to
+preload/prewarm the floor change. That means that sometimes loading an upper
+floor takes over a minute of the interface being completely frozen."* Flagged
+as high priority, with fog-of-war concealment named explicitly as the
+guardrail that must never regress while fixing it.
+
+### Root cause — CONFIRMED against current source (two focused investigation
+passes plus direct reads), not a hypothesis
+
+A "prepare, then commit" floor-switch split already existed
+(`prepareFloor()`/`setVtPanViewerFloor()`, `vt/vt-pan-viewer.js`, built
+2026-08-15/16) specifically to front-load texture streaming/BC-compression
+before a new floor becomes visible, gated by a real progress bar
+(`ui/floor-transition.js`). It was never live-verified and never fully closed
+the gap it was built for. Four confirmed mechanisms explain why:
+
+1. **The actual fix already existed and was never called.**
+   `warmUpDrawState({includePresent:false})` (`vt-pan-viewer.js`) runs MSA's
+   whole custom render-pass pipeline off-screen specifically to force GPU
+   shader-pipeline compilation to happen as a measured stall *during* prepare
+   rather than invisibly on the commit frame — its own doc names floor-prepare
+   as the intended caller. It had exactly one call site in the whole codebase,
+   in the cold-boot sequence, with `includePresent:true`. The
+   `includePresent:false` branch had zero callers.
+2. **Confirmed why nothing warmed it**: verified against the vendored WebGPU
+   renderer (`src/vendor/three/three.webgpu.js`) that both `renderer.render()`
+   and `renderer.compileAsync()` gate scene traversal on `object.visible ===
+   false` and prune the whole subtree (`_projectObject`) — a floor's meshes
+   stay `visible:false` until commit, so nothing before commit ever reaches
+   `device.createRenderPipeline` for them.
+3. **`reapplyAll('floor switch')`** (`boot.js`) fires 16 effect reappliers —
+   including specular, fire, lightning, vegetation, sun-shadows — synchronously,
+   immediately AFTER commit, several building materials for the first time
+   this session. `prepareFloor`'s own comment already documented this as a
+   deliberate gap: several of these subsystems are shared, not per-floor,
+   instances (specular named explicitly), so warming floor N's copy while
+   floor M is still displayed risks a visible flicker on the still-shown old
+   floor. Water/window already dodged this by being converted to per-floor
+   instances; the others were not, and still are not (see "Explicitly
+   deferred" below).
+4. **Two real floor-switch triggers skipped `prepareFloor` entirely**:
+   `ui/paint-mode.js#changeFloor` (the in-app painter's own Floor stepper, a
+   shipped GM-facing control) called `setVtPanViewerFloor()` directly — no
+   prepare, no progress bar, no post-commit `reapplyAll`/`syncInterfaceSeam`
+   either. The perf-report tool's own multi-floor sweep did the same
+   (diagnostic-only, lower priority).
+
+### Fog-of-war — traced in full, NOT found to be at risk; one secondary
+performance gap closed as insurance
+
+Two independent, layered concealment mechanisms exist: Foundry's own
+`canvas.visibility` PIXI group (untouched by any of this, a passive DOM-layer
+backstop that doesn't depend on MSA's state) and MSA's own `vision.gate` pass
+(confirmed default-**on** in current code, re-asserted every frame, fails
+closed for non-GMs, hands control back to Foundry on any internal error). No
+source-supported reveal path was found — even a genuine main-thread freeze
+doesn't open one, since Foundry's own ticker is blocked on the same thread and
+the compositor just keeps showing the last (already correctly gated) frame.
+
+One real, secondary regression WAS confirmed: the art-suppression levers
+(`canvas.primary.renderable` etc., `src/foundry/canvas-compositing.js`) were
+only reasserted by `syncInterfaceSeam('floor switch')` AFTER commit, unlike
+vision suppression, which rides the `visibilityRefresh` hook every canvas
+draw. Foundry's own `canvas.draw()` is understood (per
+`src/foundry/canvas-lifecycle.js`'s own header) to tear down and rebuild these
+groups on every floor switch — meaning Foundry likely re-rendered its own
+full map every frame for the ENTIRE prepare window, reintroducing the exact
+cost Bug #21 measured (37.1ms vs 8.35ms/frame). A perf regression, not a
+secrets leak (Foundry's own fog stayed consistent with Foundry's own art
+throughout) — closed anyway as cheap insurance (see below).
+
+### What was built — 2026-08-24
+
+1. **Unified the floor-switch entry points.** `boot.js`'s `canvasReady`
+   same-scene branch is now a named, shared function,
+   `switchToPreparedFloor(targetFloorIndex)` (defined at `install()`'s own top
+   level, beside `reapplyAll`/`syncActiveFloorContext`). `ui/paint-mode.js`'s
+   Floor stepper now calls it too (injected as `onRequestFloorSwitch`,
+   falling back to the old direct call only if absent) instead of reaching
+   `setVtPanViewerFloor` directly — closing gap #4 above structurally, the
+   same "one shared function, every call site goes through it" shape already
+   proven for `rebakePerFloorMasks` (`keyhole-skyreach-per-floor-rebake`).
+2. **The main fix — a new PHASE 4 in `prepareFloor()`.** Collects the
+   incoming floor's already-built whole-image meshes
+   (`itemStates.get(item.id)?.wholeImage?.tiles[].mesh`, the same lookup
+   `captureMapOnlySnapshot` already uses), flips them `visible:true`, calls
+   `warmUpDrawState({includePresent:false})`, restores their visibility — all
+   in one synchronous block (verified: `mesh.visible` is a plain data
+   property, `runPassPlan` is a plain synchronous loop, `warmUpDrawState`
+   itself is non-async — no `await` between flip and restore, so no real
+   frame can ever observe the transient state). Closes gaps #1-2 for the
+   dominant visual mass of a floor (whole-image background/overhead/foreground
+   art). Deliberately does NOT reach: vegetation overlays, the depth/
+   depthPrepass proxy pass's own materials (only built post-commit by
+   residency), or any shared per-effect subsystem's own scene (specular,
+   candle, particles, doors) — named explicitly in the code as a bounded,
+   known gap, not a silent one; gap #3 above is unchanged by this pass.
+3. **Art suppression now rides the same per-frame hook as the fog base.**
+   `applyArtSuppression()` joined the existing `visibilityRefresh` hook
+   (`canvas-compositing.js`) alongside `applyExploredFogBase()`. Gained a
+   `{silent:true}` option so this high-frequency caller doesn't spam a
+   console warning during legitimate "not suppressing" states (safety slide
+   engaged, MSA inactive) the way the rare `scene load`/`floor switch`
+   callers should.
+4. **The existing adjacent-floor prewarm now does the FULL job.**
+   `prewarmAdjacentFloors` previously only loaded item metadata and kicked
+   off (never awaited) compression for ±1 floors. It now runs adjacent floors
+   through the complete `prepareFloor` (textures, masks, AND the new pipeline
+   warm-up), sequentially rather than in parallel — deliberately, since
+   `prepareFloor` shares its staleness generation counter with every real
+   user-triggered prepare, and firing two calls in the same tick would have
+   the second immediately mark the first "superseded" before it reached its
+   own expensive phases.
+
+### Verification so far
+
+Lint clean (0 errors), Prettier clean, full Node suite green (11,939 passed,
+1 pre-existing unrelated failure — `tools/chart-room`'s build fingerprint,
+confirmed stale on `master` BEFORE this change too via `git stash` A/B, not
+caused by this work). `verify:structure` currently fails on THREE violations
+(`vision-mask-render.js`'s GPU readback, the `time/one-clock` ratchet across
+several unrelated files, `water-render.js`'s uniform budget) — all three
+confirmed, by the same stash A/B, to be pre-existing on `master` and unrelated
+to this change; none touch floor-switching.
+
+No unit-test harness exists for the four files this fix touches
+(`vt-pan-viewer.js`/`boot.js` have none at all; `canvas-compositing.js`'s own
+existing test file states explicitly that everything reading live
+`canvas`/`Hooks` state is deliberately verified in-browser instead, not in
+Node) — consistent with this subsystem's established pattern elsewhere in
+this tracker, not a gap introduced here.
+
+### Fixed when
+
+On a real multi-floor scene, cold session: switching to a never-visited floor
+via BOTH the native Foundry level control and the in-app painter's Floor
+stepper shows the same progress bar and stays responsive (no dead-input
+freeze) for the whole wait; a second/third visit to the same floor is fast;
+`warmUpMs`/`warmUpPipelinesCreated` (surfaced in
+`MapShine.getVtPanViewerDiagnostics()`) show real pipeline compiles happening
+DURING the bar, not after; `getCanvasCompositingReport()` shows
+`primaryRenderable:false` held throughout prepare, not just after commit. And
+the mission-critical check regardless of how confident the source trace is: a
+two-client GM+player session, player with explored-but-not-currently-visible
+territory, floor switch during a slow cold-cache prepare — no reveal at any
+point. This exact scenario is named in existing project memory as never yet
+run.

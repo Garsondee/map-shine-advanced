@@ -667,16 +667,27 @@ export function getExploredFogBase() {
  * Apply (or refuse) art suppression, from measured facts. Idempotent — safe to
  * call on every canvasReady.
  *
+ * @param {{silent?: boolean}} [opts] - `silent:true` skips the refusal
+ *   console.warn below. For the RARE callers (scene load, floor-switch
+ *   commit, the debug-panel A/B toggle) a refusal is worth announcing loudly
+ *   — per feedback_safety_slide_outranks_doctrine, never a silent fallback.
+ *   For a FREQUENT reassertion caller (the `visibilityRefresh` hook,
+ *   registered below — same per-canvas-draw cadence as `applyExploredFogBase`)
+ *   a legitimate, steady-state "not suppressing" (safety slide engaged, MSA
+ *   not active) would otherwise spam the console on every fog/vision update
+ *   for the whole time that state holds. The suppress/decision LOGIC is
+ *   identical either way — only whether a refusal announces itself changes.
  * @returns {{applied: boolean, code: string, reason: string, facts: object}}
  */
-export function applyArtSuppression() {
+export function applyArtSuppression({ silent = false } = {}) {
   const facts = readCompositingFacts();
   const decision = decideArtSuppression(facts);
 
   if (!decision.suppress) {
-    // ANNOUNCE, ALWAYS — never a silent fallback (feedback_safety_slide_outranks_doctrine).
+    // ANNOUNCE, ALWAYS (unless `silent` — see param doc above) — never a
+    // silent fallback (feedback_safety_slide_outranks_doctrine).
     // 'no-render-targets' is the one benign case: it just means no scene is drawn yet.
-    if (decision.code !== 'no-render-targets') {
+    if (!silent && decision.code !== 'no-render-targets') {
       console.warn(
         `[MSA] interface seam: NOT suppressing Foundry's art (${decision.code}) — ${decision.reason} ` +
           'Foundry is rendering the scene normally; MSA is underneath and invisible.'
@@ -832,16 +843,30 @@ export function registerCanvasCompositing() {
     reassertClearAlpha();
   });
 
-  // §3 — re-assert MSA's explored-fog base. `CanvasVisibility#_draw()` builds a
-  // BRAND NEW VisibilityFilter (groups/visibility.mjs:331) on every canvas draw
-  // and hands it `canvas.primary.renderTexture`, so a one-shot assignment would
-  // be silently reverted by the next scene load or canvas redraw — and the
-  // symptom would be a perf regression nobody could see, which is precisely how
-  // this cost hid for two days. `visibilityRefresh` fires from the group's own
-  // refresh (groups/visibility.mjs:635); the handler is a reference compare on
-  // the already-applied path, so riding a frequent hook is deliberate and cheap.
+  // §3 — re-assert MSA's explored-fog base AND art suppression. `CanvasVisibility
+  // #_draw()` builds a BRAND NEW VisibilityFilter (groups/visibility.mjs:331) on
+  // every canvas draw and hands it `canvas.primary.renderTexture`, so a one-shot
+  // assignment would be silently reverted by the next scene load or canvas
+  // redraw — and the symptom would be a perf regression nobody could see, which
+  // is precisely how this cost hid for two days. `visibilityRefresh` fires from
+  // the group's own refresh (groups/visibility.mjs:635); each handler is a cheap
+  // reference-compare/boolean-write on the already-applied path, so riding a
+  // frequent hook is deliberate and cheap.
+  //
+  // applyArtSuppression joined this hook 2026-08-24: `syncInterfaceSeam`'s own
+  // call only ran AFTER a floor-switch commits, leaving Foundry's `primary`/
+  // `effects` groups at PIXI's own default (`renderable:true`) for the entire
+  // — potentially tens-of-seconds — prepare window beforehand, which Foundry's
+  // OWN `canvas.draw()` is believed to reset on every floor switch the same way
+  // it resets the fog filter. That's the measured Bug #21 cost (37ms vs 8.35ms
+  // per frame) recurring for the whole prepare window, on top of everything
+  // else. `{silent:true}` — see `applyArtSuppression`'s own param doc — this
+  // hook must not spam a console warning every fog/vision update for as long as
+  // the safety slide (or MSA simply not being active) makes suppression a
+  // legitimate, steady-state "no".
   Hooks.on('visibilityRefresh', () => {
     applyExploredFogBase();
+    applyArtSuppression({ silent: true });
   });
 
   // §4 — uncap Foundry's own ticker once, the first time its canvas is ready

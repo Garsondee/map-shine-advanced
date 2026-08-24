@@ -98,7 +98,18 @@ const PAINTABLE_KINDS = MASK_KINDS.filter((k) => Array.isArray(k.suffixes) && k.
  *   painter (and the live view) on ahead of it (found live, 2026-08-12: fire
  *   kept burning on the floor below, the newly-painted floor's own region
  *   never ignited). Optional so tests/tools that construct the painter
- *   without a full boot() still work.
+ *   without a full boot() still work. Superseded for real callers by
+ *   `onRequestFloorSwitch` below (2026-08-24) — kept as a fallback path only.
+ * @param {(floorIndex:number)=>Promise<{ok:boolean,reason?:string}>} [deps.onRequestFloorSwitch] -
+ *   boot.js's `switchToPreparedFloor` (2026-08-24) — the SAME prepare-then-
+ *   commit sequence (progress bar, GPU pipeline warm-up, `reapplyAll`,
+ *   `syncInterfaceSeam`, adjacent-floor prewarm) native Foundry floor
+ *   navigation already gets, injected here so the Floor stepper stops being
+ *   a second, partial reimplementation of it (see
+ *   `feedback_direct_floor_switch_caller_skips_context_sync` for the last
+ *   time that gap was found live). Falls back to a bare `setVtPanViewerFloor`
+ *   call — today's behaviour — when absent, so tests/tools that construct
+ *   the painter without a full boot() still work.
  * @param {(layersByKey: Record<string, import('../scene/mask-derive.js').MaskGrid>)=>void} [deps.onLayersChanged] -
  *   THE BRUSH→RENDER BRIDGE (2026-08-18) — told the CURRENT, COMPLETE
  *   in-memory layer set (every `"<kind>::<floor>"` key this painter knows
@@ -115,7 +126,10 @@ const PAINTABLE_KINDS = MASK_KINDS.filter((k) => Array.isArray(k.suffixes) && k.
  *   why live, mid-stroke ingest is a deliberately separate, not-yet-built
  *   follow-up.
  */
-export function installPainter(MapShine, { onFloorChanged = null, onLayersChanged = null } = {}) {
+export function installPainter(
+  MapShine,
+  { onFloorChanged = null, onLayersChanged = null, onRequestFloorSwitch = null } = {}
+) {
   const state = {
     active: false,
     ctx: null,
@@ -200,25 +214,31 @@ export function installPainter(MapShine, { onFloorChanged = null, onLayersChange
   // independently (Shapes-and-Regions.md / Authoring-and-Distribution.md).
   //
   // This ALSO drives the live 3D view to floor N (author ask: the stepper must
-  // actually swap floors, not just retarget painting) via vt/'s own
-  // `setVtPanViewerFloor` — the same cheap, no-restart path Foundry's native
-  // floor navigation already uses (boot.js's canvasReady handler), not a new
-  // one. That call is best-effort: mask editing is authoritative regardless of
+  // actually swap floors, not just retarget painting) via `onRequestFloorSwitch`
+  // — boot.js's `switchToPreparedFloor`, the SAME prepare-then-commit sequence
+  // (progress bar, GPU pipeline warm-up, `reapplyAll`, `syncInterfaceSeam`,
+  // adjacent-floor prewarm) Foundry's own native floor navigation gets
+  // (boot.js's canvasReady handler) — genuinely the same path now, not just a
+  // comment claiming parity (2026-08-24: before this, this stepper called
+  // `setVtPanViewerFloor` directly and skipped prepare/reapply/interface-seam
+  // entirely — see `feedback_direct_floor_switch_caller_skips_context_sync`).
+  // That call is best-effort: mask editing is authoritative regardless of
   // whether the live view can follow (feedback_safety_slide_outranks_doctrine
   // — painting must not depend on the renderer being up), so a failed/absent
   // viewer still lets you paint floor N's mask, just without the live picture.
-  // One switch in flight at a time — rapid clicking floors is a KNOWN trigger
-  // for a still-open residency bug (keyhole-device-loss-large-map.md).
+  // A `{ok:false}` result (prepare superseded/cancelled, e.g. by a fast native
+  // Foundry floor change racing this stepper) is treated the SAME way — not
+  // an error, just proceed, matching the authoritative-painting posture. One
+  // switch in flight at a time — rapid clicking floors is a KNOWN trigger for
+  // a still-open residency bug (keyhole-device-loss-large-map.md); this is
+  // ALSO what keeps `onRequestFloorSwitch`'s own internal generation counter
+  // from ever seeing two overlapping requests from this specific caller.
   //
-  // ⚠️ `setVtPanViewerFloor` MOVES THE PICTURE, NOT `activeFloorContext` —
-  // `onFloorChanged` (boot.js's `syncActiveFloorContext`) is the other half
-  // `canvasReady`'s own same-scene branch gets for free and this stepper did
-  // not: without it, fire/candle/lightning's floor-scoped reads and door
-  // scoping stayed on whatever floor was active when `canvasReady` last ran,
-  // silently disagreeing with the floor this stepper (and the live view) had
-  // already moved to. Called unconditionally alongside `state.floor`, even on
-  // a failed/absent live view — the same "mask editing is authoritative"
-  // posture, applied to which floor's CONTENT the rest of the app renders.
+  // ⚠️ `onRequestFloorSwitch` MOVES `activeFloorContext` TOO (internally, via
+  // the same `syncActiveFloorContext` `onFloorChanged` used to call
+  // separately) — so `onFloorChanged` below is now a REDUNDANT, defensive
+  // second call for the common case, and the ONLY sync that happens at all
+  // on the fallback (no-`onRequestFloorSwitch`) path.
   async function changeFloor(delta) {
     if (state.floorSwitching) return;
     const max = Math.max(0, (state.ctx?.floorCount ?? 21) - 1);
@@ -228,7 +248,15 @@ export function installPainter(MapShine, { onFloorChanged = null, onLayersChange
     state.floorSwitching = true;
     state.refreshToolbar?.();
     try {
-      await setVtPanViewerFloor(next);
+      if (onRequestFloorSwitch) {
+        // A `{ok:false}` result (superseded/cancelled prepare) is not an
+        // error — `switchToPreparedFloor` already logs it on the boot.js
+        // side. Nothing further to do here; fall through to the same
+        // authoritative-painting bookkeeping as a successful switch.
+        await onRequestFloorSwitch(next);
+      } else {
+        await setVtPanViewerFloor(next);
+      }
     } catch (err) {
       notify(
         `Map Shine: live view couldn't follow to floor ${next} (${err?.message || err}) — painting it anyway.`,

@@ -14453,7 +14453,7 @@ export async function startVtPanViewer({
      * to the same unobservable single JS tick.
      *
      * @param {number} floorIndex
-     * @param {(p: {phase:'items'|'compress', done:number, total:number}) => void} [onProgress]
+     * @param {(p: {phase:'items'|'compress'|'masks'|'warmup', done:number, total:number}) => void} [onProgress]
      * @returns {Promise<{ok:boolean, reason?:string}>}
      */
     async function prepareFloor(floorIndex, onProgress) {
@@ -14547,11 +14547,73 @@ export async function startVtPanViewer({
       onProgress?.({ phase: 'masks', done: maskWaits.length, total: maskWaits.length });
       if (isStale()) return { ok: false, reason: 'superseded' };
 
+      // PHASE 4 (added 2026-08-24, live report: "changing floors freezes the
+      // interface for over a minute"). Force GPU shader-pipeline compilation
+      // for floor N's whole-image art NOW, off-screen, while the OLD floor
+      // is still what's on screen — instead of letting it happen
+      // synchronously and unbounded on the commit frame, invisible to the
+      // user because the progress bar has already disappeared by then.
+      //
+      // WHY A VISIBILITY FLIP IS REQUIRED, NOT OPTIONAL: verified against the
+      // vendored WebGPU renderer (`vendor/three/three.webgpu.js`) that BOTH
+      // `renderer.render()` (what every real pass uses) and
+      // `renderer.compileAsync()` gate their scene traversal on
+      // `object.visible === false` and prune the whole subtree
+      // (`_projectObject`) — there is no way to warm a hidden mesh's
+      // pipeline without making it visible for the traversal. Every item
+      // built by PHASE 1/2 above defaults to `mesh.visible = false`
+      // (`ensureWholeImageMeshes`'s own doc) and nothing before commit ever
+      // flips that — this phase is the first thing that does, deliberately
+      // and temporarily.
+      //
+      // SAFE BECAUSE IT IS ONE SYNCHRONOUS BLOCK: `mesh.visible` is a plain
+      // data property (no interception anywhere in this codebase),
+      // `runPassPlan` is a plain synchronous loop, and `warmUpDrawState`
+      // itself is non-async and swallows its own errors — so there is no
+      // `await`/yield point between the flip and the restore below, which
+      // means no real animation frame can ever observe the transient
+      // visible=true state. `includePresent:false` is the second, redundant
+      // safety net: even if something DID sneak in, nothing this call draws
+      // ever reaches the swapchain. Same save-flip-render-restore shape (and
+      // the same `itemStates.get(item.id)?.wholeImage?.tiles[].mesh` lookup)
+      // `captureMapOnlySnapshot` already uses elsewhere in this file — not a
+      // new technique.
+      const warmUpRestore = [];
+      for (const item of items) {
+        const state = itemStates.get(item.id);
+        const tiles = state?.wholeImage?.tiles;
+        if (!tiles) continue;
+        for (const t of tiles) {
+          if (t.mesh) {
+            warmUpRestore.push([t.mesh, t.mesh.visible]);
+            t.mesh.visible = true;
+          }
+          if (t.shadow?.mesh) {
+            warmUpRestore.push([t.shadow.mesh, t.shadow.mesh.visible]);
+            t.shadow.mesh.visible = true;
+          }
+        }
+      }
+      onProgress?.({ phase: 'warmup', done: 0, total: 1 });
+      if (warmUpRestore.length > 0) warmUpDrawState({ includePresent: false });
+      for (const [mesh, wasVisible] of warmUpRestore) mesh.visible = wasVisible;
+      onProgress?.({ phase: 'warmup', done: 1, total: 1 });
+      // Restoring visibility unconditionally, before this check, is
+      // deliberate — this phase must always leave every mesh exactly as it
+      // found it, even for a request a newer one has already superseded.
+      // Only the return value (whether the caller treats floor N as ready to
+      // commit) reacts to staleness here.
+      if (isStale()) return { ok: false, reason: 'superseded' };
+
       // ⚠ KNOWN, DOCUMENTED GAP, not a silent omission: vegetation overlays
       // (`ensureVegetationOverlay`/`refreshVegetationOverlay`) and per-effect
       // lazy work (specular's island bake, the sun-shadow smear, fire/
-      // lightning's material/engine construction) are NOT front-loaded here.
-      // Vegetation overlays are already counted by `vt/settle.js`
+      // lightning's material/engine construction) are NOT front-loaded here,
+      // and their own GPU pipelines are therefore NOT covered by PHASE 4
+      // above either — PHASE 4 only ever makes VISIBLE the meshes THIS
+      // function already built (whole-image tile art + Case-1 vegetation
+      // shadows), so anything with no mesh yet stays structurally unreached
+      // by it. Vegetation overlays are already counted by `vt/settle.js`
       // (`vegetationOverlaysLoading`) and will still stream in after commit,
       // same as today. The per-effect bakes are all SYNCHRONOUS (no in-flight
       // window to front-load into — see each manifest's own `readiness.why`
@@ -14564,6 +14626,16 @@ export async function startVtPanViewer({
       // (PHASE 3) precisely because their subsystems ARE per-floor — this
       // gap is what's left once that distinction is applied; it is not a
       // catch-all "everything else is fine".
+      //
+      // Also structurally out of PHASE 4's reach for the same "mesh doesn't
+      // exist yet" reason: the depth/depthPrepass proxy pass's own materials
+      // (`runSceneDepthPass`) are only built by the POST-COMMIT residency
+      // pass (`rebuildSceneDepthProxies`, called solely from
+      // `updateResidencyUnguarded`), which this function deliberately never
+      // invokes early — that IS the commit step, not something to front-run.
+      // Lower residual risk than it sounds: the depth-writer shader is much
+      // simpler than the whole-image colour shader PHASE 4 already covers,
+      // so a cold compile there is comparatively cheap.
       return { ok: true };
     }
 
@@ -15033,19 +15105,52 @@ export async function startVtPanViewer({
     // `ensureWholeImageMeshes`) are safe to race against a real prepare
     // regardless (the SECOND caller to reach an item just finds it already
     // loading/loaded and does nothing further).
+    /**
+     * Background, fire-and-forget prewarm from `centerFloorIndex` (2026-08-24:
+     * adjacent floors now get the FULL `prepareFloor` treatment — textures,
+     * masks AND GPU pipeline warm-up — not just item metadata + a compression
+     * kick-off, so a real switch to one is instant rather than merely faster).
+     * Every other floor still only gets cheap item metadata (dimensions/
+     * placement) — worth knowing before the author scrolls there, not worth
+     * the GPU/VRAM cost of a full prepare for a floor nobody is near.
+     *
+     * Adjacent floors are prepared ONE AT A TIME, deliberately, not in
+     * parallel: `prepareFloor` shares its staleness generation counter with
+     * every real, user-triggered prepare (`floorPrepareGeneration`), so
+     * firing two `prepareFloor` calls in the same synchronous tick would
+     * have the second immediately mark the first "superseded" before it
+     * ever reaches its own expensive phases — an ordering artifact of this
+     * function calling itself twice, not a real supersession. Sequencing
+     * them avoids that self-stomp. A genuine user-triggered switch still
+     * supersedes whichever one is running, exactly as intended, and nothing
+     * already kicked off (a texture fetch, a compression job) is wasted
+     * even when it does — see `prepareFloor`'s own doc.
+     */
     function prewarmAdjacentFloors(centerFloorIndex) {
+      const adjacentFloors = [];
       for (let f = 0; f < floorCount; f++) {
         if (f === centerFloorIndex) continue;
-        const adjacent = Math.abs(f - centerFloorIndex) === 1;
+        if (Math.abs(f - centerFloorIndex) === 1) {
+          adjacentFloors.push(f);
+          continue;
+        }
         Promise.resolve()
           .then(async () => {
             for (const item of buildItems(f)) {
-              const state = await ensureItemLoaded(item);
-              if (adjacent) ensureWholeImageMeshes(state, item);
+              await ensureItemLoaded(item);
             }
           })
           .catch((err) => log.warn(`prewarm floor ${f} failed:`, err));
       }
+      (async () => {
+        for (const f of adjacentFloors) {
+          try {
+            await prepareFloor(f);
+          } catch (err) {
+            log.warn(`prewarm floor ${f} failed:`, err);
+          }
+        }
+      })();
     }
     prewarmAdjacentFloors(clampedInitialFloor);
 

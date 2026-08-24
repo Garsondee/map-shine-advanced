@@ -61,7 +61,7 @@ export const WATER_PARAMS = Object.freeze({
     space: 'srgb',
     // A muted blue-green with a deliberate green bias: pure blue reads as
     // swimming-pool. Matches WATER_TIER0_TINT in water-render.js.
-    default: '#173d47',
+    default: '#282006',
     category: 'Look',
     label: 'Colour trim',
     help: "A hand-tune nudge blended a minority share into the colour Depth/Pollution derive — for the rare map whose river needs to lean a little off the physical reference without fighting it outright. Was the water's ONLY colour source before Depth/Pollution existed; if the water reads oddly tinted after raising Pollution, this is the first thing to bring back toward neutral.",
@@ -78,7 +78,7 @@ export const WATER_PARAMS = Object.freeze({
     // actually lets the depth/absorption/inscatter terms (and tier 5's own
     // refraction) do the work they exist for, rather than being visually
     // buried under a near-solid multiply.
-    default: 0.19,
+    default: 0.11,
     category: 'Look',
     label: 'Opacity',
     help: 'How much of the riverbed painted underneath still reads through. Below 1 on purpose: the map art beneath is doing the work a proper volume/absorption rung will do later.',
@@ -88,7 +88,7 @@ export const WATER_PARAMS = Object.freeze({
     min: 0.2,
     max: 8,
     step: 0.1,
-    default: 3.2,
+    default: 8,
     category: 'Look',
     label: 'Depth falloff',
     help: 'How quickly the water hides the riverbed as it deepens. Low = a clear stream you can see the bottom of everywhere; high = shallows read sandy and the deep channel reads solid water. Push this too high and the bed disappears entirely, at which point the water stops looking like water and starts looking like a flat wash of colour — if that happens, this is the slider to bring back down.',
@@ -98,7 +98,7 @@ export const WATER_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.18,
+    default: 0.29,
     category: 'Look',
     label: 'Own colour',
     help: 'How much colour the water shows in its own right, as opposed to only tinting what lies beneath it. At 0 the water is a pure coloured filter — the ground shows through, shifted toward your water colour. Turn it up for silty, turbid or stylised water. Turn it up too far and the water reads as paint laid over the map rather than a body you can see into.',
@@ -119,7 +119,7 @@ export const WATER_PARAMS = Object.freeze({
     min: 0,
     max: 2,
     step: 0.02,
-    default: 0.54,
+    default: 2,
     category: 'Light',
     label: 'Sky sheen',
     help: 'A soft, broad reflection of the sky itself across the whole surface — the reason still water looks pale near the horizon and darker overhead. Subtler and steadier than the sun glint; turn it down for water that reads as its own colour rather than a mirror.',
@@ -148,7 +148,7 @@ export const WATER_PARAMS = Object.freeze({
     // than a bug: on a dark, heavily-absorbing river the author wants hard
     // bright specks, not a broad sheen, and a look parameter's shipped value is
     // the author's call. A Node test pins this equal to the code constant.
-    default: 0.911,
+    default: 0.91,
     category: 'Light',
     label: 'Glossiness',
     help: 'How mirror-like the surface is, at scales too fine to see individually — the polish BETWEEN the wavelets. High values give a tight, hard sparkle; low values spread the same light into a duller, broader sheen. This is not the same as how choppy the water is: Surface chop sets how much the wavelets themselves lean, and that is what decides where the sparkles land.',
@@ -158,7 +158,7 @@ export const WATER_PARAMS = Object.freeze({
     min: 0.3,
     max: 6,
     step: 0.05,
-    default: 1,
+    default: 0.3,
     category: 'Light',
     label: 'Reflection sensitivity',
     help: 'How dramatically the sun glint sweeps as you pan or zoom, expressed as how high overhead the eye sits relative to what is on screen. Lower values sweep more; higher values hold a steadier, calmer highlight. Rarely needs touching — it is here to fix a scene where the glint feels either too twitchy or too static.',
@@ -191,7 +191,7 @@ export const WATER_PARAMS = Object.freeze({
     min: 0,
     max: 400,
     step: 5,
-    default: 65,
+    default: 70,
     category: 'Motion',
     label: 'Flow speed',
     help: 'How fast the surface travels downstream, in canvas pixels per second. 0 for a still pond or lake; a lazy river is around 40–80, rapids much higher.',
@@ -222,7 +222,7 @@ export const WATER_PARAMS = Object.freeze({
     min: 32,
     max: 1024,
     step: 8,
-    default: 152,
+    default: 88,
     category: 'Motion',
     label: 'Surface scale',
     help: 'How big the surface structure is, in canvas pixels. Small values look like fine ripples or noise; large values like slow, broad swells. Scale it to your map — a value that reads well on a stream looks like stains on a lake.',
@@ -235,7 +235,7 @@ export const WATER_PARAMS = Object.freeze({
     // Matches WATER_TIER3_CHOP (water-field.js), which carries the Cox-Munk
     // sea-surface slope statistics this number is calibrated against AND the
     // measured reason it is not higher.
-    default: 1.26,
+    default: 0.31,
     category: 'Motion',
     label: 'Surface chop',
     help: 'How steeply the wavelets lean — and therefore how hard the water sparkles in sunlight. This is the control that decides whether a river glitters. At 0 the surface is mirror-flat and catches the sun in one place or not at all. The default is a light breeze, and is close to where sparkle is strongest: pushing it much higher does NOT keep adding sparkle, it tips the wavelets so far past the sun that the surface goes broad and dull again — which is a real look if you want a churned, storm-tossed river, but not a brighter one. If your water looks dead in daylight, start here.',
@@ -332,7 +332,7 @@ export const WATER_PARAMS = Object.freeze({
     max: 1,
     step: 0.01,
     // Matches WATER_TIER4_CAUSTICS (water-render.js).
-    default: 0.33,
+    default: 1,
     category: 'Light',
     label: 'Caustics',
     help: 'The shifting net of bright light patches on the riverbed you get from sunlight refracting through a moving surface — strongest in clear, shallow water, and gone wherever the bed is too deep, murky or foam-covered to see at all. Turn it down for a stiller, less busy bed; 0 removes it entirely.',
@@ -1294,24 +1294,24 @@ export const WATER_PRESETS = Object.freeze({
   pollutedTownRiver: {
     depth: 0.53,
     pollution: 1,
-    tint: '#173d47',
+    tint: '#282006',
     // Lowered 1→0.15 alongside the schema default's own identical change
     // (2026-08-23, author's own live judgment) — this preset is this
     // author's own river, and this value change came from watching it,
     // not a generic re-tune.
-    opacity: 0.19,
-    absorption: 3.2,
-    inscatter: 0.18,
+    opacity: 0.11,
+    absorption: 8,
+    inscatter: 0.29,
     sunGlint: 2,
-    skySheen: 0.54,
-    glossiness: 0.911,
-    viewerHeight: 1,
+    skySheen: 2,
+    glossiness: 0.91,
+    viewerHeight: 0.3,
     shadowResponse: 1,
     foam: 0.75,
-    flowSpeedPx: 65,
+    flowSpeedPx: 70,
     flowAngleDeg: 180,
-    waveScalePx: 152,
-    chop: 1.26,
+    waveScalePx: 88,
+    chop: 0.31,
     depthScalePx: 32,
     wetBandPx: 26,
     wetStrength: 0.2,
@@ -1322,7 +1322,7 @@ export const WATER_PRESETS = Object.freeze({
     swashFoam: 1,
     breakFoam: 1,
     foamTrail: 0.85,
-    caustics: 0.33,
+    caustics: 1,
     // NEW (2026-08-23) — matches the schema default; this preset predates
     // refraction becoming a live param and has no author-tuned value of its
     // own yet (see WATER_PARAMS.refractStrengthPx's own doc for why a

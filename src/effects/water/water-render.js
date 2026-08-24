@@ -583,8 +583,12 @@ export const WATER_TIER4_BREAK_FOAM = 1;
 /** TIER 4 — the default caustics strength, as a fraction of
  * `WATER_CAUSTICS_K`'s own calibrated value. 1.0 is the measured operating
  * point (`water-field.js#WATER_CAUSTICS_K`'s own doc has the sweep); this is a
- * MULTIPLIER an author can pull back for a stiller, less busy bed. */
-export const WATER_TIER4_CAUSTICS = 0.33;
+ * MULTIPLIER an author can pull back for a stiller, less busy bed.
+ *
+ * ⚠️ RAISED 0.33→1 (2026-08-24, author's own live tuning pass) — back to the
+ * measured operating point itself; the previous default was a deliberate
+ * pull-back, not a calibration this value corrects. */
+export const WATER_TIER4_CAUSTICS = 1;
 
 /**
  * How strongly break foam STREAMS DOWNSTREAM from where it was made

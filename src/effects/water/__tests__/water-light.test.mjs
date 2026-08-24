@@ -208,9 +208,17 @@ export function run(t) {
     'the glossiness ceiling is DERIVED from the roughness floor — no inert top to the slider',
     Math.abs(WATER_PARAMS.glossiness.max - (1 - WATER_MIN_ROUGHNESS)) < 1e-9
   );
+  // ⚠️ WAS an exact equality ("...the shipped default is exactly that
+  // ceiling, not a value past it") until 2026-08-24: the author's own next
+  // tuning round moved the default a hair below the ceiling on purpose,
+  // deliberately leaving a sliver of the slider's top end still meaningfully
+  // reachable above it. The ceiling itself (checked above, independent of
+  // this constant) is unmoved — a physical fact about the roughness formula,
+  // not an author preference. What stays true, and worth pinning, is that
+  // the default never exceeds it.
   ok(
-    '...and the shipped default is exactly that ceiling, not a value past it',
-    WATER_TIER3_GLOSSINESS === WATER_PARAMS.glossiness.max
+    '...and the shipped default sits AT OR BELOW that ceiling, never past it',
+    WATER_TIER3_GLOSSINESS <= WATER_PARAMS.glossiness.max
   );
 
   // === 🔒 TWO PLACES STORE ONE NUMBER ======================================

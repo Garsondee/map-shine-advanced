@@ -216,8 +216,16 @@ export const WATER_TIER2_FOAM = 1;
  * the measured sparkle optimum on purpose, per this doc's own §193 above: a
  * duller, more storm-tossed surface is a real, deliberately chosen look here,
  * not a value that drifted past the optimum by accident.
+ *
+ * ⚠️ LOWERED 1.26→0.31 (2026-08-24, next round of the same live tuning
+ * pass) — a reversal, not a continuation: this sits MUCH closer to the
+ * measured 0.40 sparkle peak than either prior value did, favouring a
+ * livelier, glitterier surface over the storm-tossed look the previous
+ * round chose. Both are legitimate points on the same documented curve;
+ * this file's own measured optimum (§193) still explains why 0.31 reads
+ * brighter than 1.26 did, not why it is somehow "more correct".
  */
-export const WATER_TIER3_CHOP = 1.26;
+export const WATER_TIER3_CHOP = 0.31;
 
 /**
  * How far the bank's tangent may warp the noise domain, as a FRACTION OF ONE

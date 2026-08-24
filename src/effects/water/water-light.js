@@ -187,8 +187,18 @@ export const WATER_TIER3_SKY_SHEEN = 0.54;
  * (`water.js`), which is what a scene actually ships with. A Node test pins
  * them equal; specular shipped that exact drift once (`SPECULAR_DEFAULT_
  * SHIMMER_GAIN`) and it is why the test exists.
+ *
+ * ⚠️ LOWERED 0.911→0.91 (2026-08-24, author's own live tuning pass) — a
+ * DELIBERATE step back from the derived ceiling (`WATER_PARAMS.glossiness.max`
+ * stays `1 − WATER_MIN_ROUGHNESS`, unmoved — that is a physical fact about
+ * the roughness formula, not an author preference). The shipped default
+ * used to sit EXACTLY at that ceiling (`water-light.test.mjs` once pinned
+ * `WATER_TIER3_GLOSSINESS === WATER_PARAMS.glossiness.max` for exactly that
+ * reason); it no longer does, on purpose — the author's new default leaves
+ * a hair of the slider's own top end still meaningfully reachable above it,
+ * where the old default consumed the whole thing.
  */
-export const WATER_TIER3_GLOSSINESS = 0.911;
+export const WATER_TIER3_GLOSSINESS = 0.91;
 
 /** THE EYE HEIGHT, as a multiple of the VISIBLE WIDTH — never world px. Same
  * quantity, same reasoning, and the same default as

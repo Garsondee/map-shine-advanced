@@ -163,26 +163,63 @@ export function run(t) {
   }
 
   // ======================================================================
-  // waterBodyBakeGate — bakes vs polls, the same gate doctrine as
-  // maskAuthorityBakeGate above
+  // waterBodyBakeGate — bakes vs polls, SUMMED ACROSS A PER-FLOOR ARRAY
+  // (getWaterBodyInfo's real shape since its 2026-08-15 single-object ->
+  // array migration; this fixture used to feed the pre-migration shape and
+  // stayed green while the real adapter silently read undefined off an
+  // array for ten days — see waterBodyBakeGate's own comment).
   // ======================================================================
   {
     const rows = buildCacheRows({
       cacheStats: {
-        start: { waterBodyBakeGate: { bakes: 1, polls: 40 } },
-        end: { waterBodyBakeGate: { bakes: 2, polls: 3000 } },
+        start: {
+          waterBodyBakeGate: [
+            { floorIndex: 0, bakes: 1, polls: 40 },
+            { floorIndex: 1, bakes: 0, polls: 10 },
+          ],
+        },
+        end: {
+          waterBodyBakeGate: [
+            { floorIndex: 0, bakes: 2, polls: 3000 },
+            { floorIndex: 1, bakes: 0, polls: 50 },
+          ],
+        },
       },
     });
     const r = rows.find((x) => x.id === 'waterBodyBakeGate');
     ok('waterBodyBakeGate is owned by water', r.ownerEffectId === 'water');
-    ok('waterBodyBakeGate.misses is the bakes delta (2-1=1)', r.misses === 1);
-    ok('waterBodyBakeGate.hits is polls-delta minus bakes-delta ((3000-40)-1=2959)', r.hits === 2959);
+    ok('waterBodyBakeGate.misses is the summed bakes delta ((2+0)-(1+0)=1)', r.misses === 1);
+    ok(
+      'waterBodyBakeGate.hits is summed-polls-delta minus summed-bakes-delta (((3000+50)-(40+10))-1=2999)',
+      r.hits === 2999
+    );
     ok('a healthy water bake gate reads a very high hit rate', r.hitRatePct > 99);
   }
 
   // ======================================================================
+  // waterBodyBakeGate — a floor tracking its poll count 1:1 in bakes (the
+  // exact ae737ff regression shape) reads a LOW hit rate, not a null one —
+  // this is the whole point of fixing the adapter to read the real shape.
+  // ======================================================================
+  {
+    const rows = buildCacheRows({
+      cacheStats: {
+        start: { waterBodyBakeGate: [{ floorIndex: 0, bakes: 1, polls: 40 }] },
+        end: { waterBodyBakeGate: [{ floorIndex: 0, bakes: 601, polls: 640 }] },
+      },
+    });
+    const r = rows.find((x) => x.id === 'waterBodyBakeGate');
+    ok('a broken water bake gate (bakes tracking polls) reads a low hit rate', r.hitRatePct < 50);
+    const flagged = findLowHitRateCaches(rows);
+    ok(
+      'findLowHitRateCaches actually catches the broken water bake gate',
+      flagged.some((c) => c.id === 'waterBodyBakeGate')
+    );
+  }
+
+  // ======================================================================
   // waterBodyBakeGate — {available:false} (defensive shape for no live
-  // viewer) produces no row, never a row full of nulls
+  // viewer, when _active is null) produces no row, never a row full of nulls
   // ======================================================================
   {
     const rows = buildCacheRows({
@@ -193,6 +230,23 @@ export function run(t) {
     });
     ok(
       'waterBodyBakeGate:{available:false} produces no row',
+      rows.every((r) => r.id !== 'waterBodyBakeGate')
+    );
+  }
+
+  // ======================================================================
+  // waterBodyBakeGate — [] (viewer started, no floor has synced water yet)
+  // also produces no row, never a row full of nulls
+  // ======================================================================
+  {
+    const rows = buildCacheRows({
+      cacheStats: {
+        start: { waterBodyBakeGate: [] },
+        end: { waterBodyBakeGate: [] },
+      },
+    });
+    ok(
+      'waterBodyBakeGate:[] produces no row',
       rows.every((r) => r.id !== 'waterBodyBakeGate')
     );
   }

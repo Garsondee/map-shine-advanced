@@ -140,6 +140,18 @@ function sumFloorBakeGateField(snapshot, field) {
   return snapshot.floors.reduce((acc, f) => acc + (Number.isFinite(f?.bakeGate?.[field]) ? f.bakeGate[field] : 0), 0);
 }
 
+/** Sum one field (`bakes`/`polls`) across `getWaterBodyInfo`'s own per-floor
+ * array (water-body-subsystem.js's `getStatus()`, one entry per floor that
+ * has ever synced) — the water equivalent of `sumFloorBakeGateField` just
+ * above, for a flat array rather than a `{floors:[...]}` wrapper. `null`
+ * when the snapshot itself is not an array (viewer never started, or the
+ * `{available:false}` fallback), never 0 for that absence — only for "array
+ * present, every floor summed to zero". */
+function sumWaterBodyField(snapshot, field) {
+  if (!Array.isArray(snapshot)) return null;
+  return snapshot.reduce((acc, f) => acc + (Number.isFinite(f?.[field]) ? f[field] : 0), 0);
+}
+
 /**
  * Adapters keyed by the SAME id `boot.js`'s `readCacheStats()` hook uses.
  * Each takes this window's (start, end) pair for that one key and returns a
@@ -240,11 +252,22 @@ const RAW_CACHE_ADAPTERS = {
         'point-in-time counts, not part of this hit/miss pair.',
     });
   },
+  /** `end` is an ARRAY, one entry per floor that has ever synced
+   * (`getWaterBodyInfo`'s 2026-08-15 migration off a single object, to
+   * mirror `getWindowLightInfo`'s shape) — this adapter still read
+   * `end.bakes`/`end.polls`/`end.available` directly, the pre-migration
+   * shape. An array has none of those own properties, so both deltas came
+   * back `null` on every run since, `hitRatePct` stayed null, and
+   * `findLowHitRateCaches` filters null-rate rows out by construction — this
+   * row has reported nothing, silently, for ten days while still appearing
+   * in `caches[]` looking present. Fixed by summing the field across every
+   * floor instead, the same shape `sumFloorBakeGateField` already uses for
+   * sun-shadow's own `{floors:[...]}` snapshot below. */
   waterBodyBakeGate(start, end) {
-    if (!end || isSkipped(end) || end.available === false) return null;
-    const validStart = start && start.available !== false ? start : null;
-    const bakeDelta = delta(validStart?.bakes, end.bakes);
-    const pollDelta = delta(validStart?.polls, end.polls);
+    if (!Array.isArray(end) || end.length === 0) return null;
+    const validStart = Array.isArray(start) ? start : null;
+    const bakeDelta = delta(sumWaterBodyField(validStart, 'bakes'), sumWaterBodyField(end, 'bakes'));
+    const pollDelta = delta(sumWaterBodyField(validStart, 'polls'), sumWaterBodyField(end, 'polls'));
     return row({
       id: 'waterBodyBakeGate',
       label: 'Water body jump-flood bake gate (mask/floor version poll)',
@@ -253,9 +276,10 @@ const RAW_CACHE_ADAPTERS = {
       misses: bakeDelta,
       note:
         'hits = polls that found the mask version and resolved floor unchanged (skipped the flood); misses = ' +
-        'bakes — a real jump-flood recompute ran. Same bake-vs-poll doctrine as maskAuthorityBakeGate above: if ' +
-        'misses tracks the poll count 1:1 this window, the version check is broken and every poll is paying ' +
-        "for a full flood — water-body-subsystem.js's own §1 exit criterion.",
+        'bakes — a real jump-flood recompute ran. Summed across every floor with a synced body pack. Same ' +
+        'bake-vs-poll doctrine as maskAuthorityBakeGate above: if misses tracks the poll count 1:1 this window, ' +
+        "the version check is broken and every poll is paying for a full flood — water-body-subsystem.js's own " +
+        '§1 exit criterion. Per-floor breakdown is in instrument.cacheStats.waterBodyBakeGate[].',
     });
   },
   // BAKE-GATE SITES (cache-completeness pass, 2026-08-12) — bakeRuns/

@@ -283,6 +283,33 @@ export function createWaterBodySubsystem({
   let bakedShorelineDepth = NaN;
   let lastBake = null;
   let lastResolve = null;
+  /** Wall-clock ms of the last COMPLETED bake, `-Infinity` so the very first
+   * real bake of a session is never throttled. Compared only against a
+   * caller-supplied `nowMs` — this module samples no clock of its own
+   * (`run-frame.js`'s own header: `core/frame-clock.js` is the one clock). */
+  let lastBakeWallClockMs = -Infinity;
+  /**
+   * §5.8 of the 2026-08 perf audit MECHANICALLY CONFIRMED water's `bakedVersion`
+   * check reads mask-authority's ONE scene-wide `productsVersion` counter —
+   * the SAME counter sun-shadows and the wind-rebake poll read. Dragging a
+   * slider with nothing to do with water (wall height, a region edit, another
+   * floor's paint) still bumps it, so `unchanged` above reads "changed" on
+   * every one of those edits too, not just a real water-mask change. That
+   * check is correct and stays O(1) — the thing that is NOT safe to pay for
+   * on every one of those bumps is `uploadMask` + the jump flood itself
+   * (~90ms measured live, chrome://tracing, 2026-08-25: `uploadMask` alone
+   * was 47.9% self-time of a captured frame). Mirrors
+   * `vt-pan-viewer.js#pollMaskAuthorityForWindRebake`'s own throttle, except
+   * THAT one gates the (cheap) version CHECK — this one has to gate the
+   * (expensive) BAKE, because the check here is already cheap and already
+   * correct; throttling the check would just delay noticing a real change
+   * for no reason. 150ms, not wind's 500ms — water's own header (below) is
+   * explicit that a mask repaint must feel live while the author paints, so
+   * this stays well under half of one perceptible frame at a comfortable
+   * painting cadence. A tuning starting point, not a measured optimum —
+   * retune once someone can watch it live.
+   */
+  const BAKE_THROTTLE_MS = 150;
 
   /**
    * Allocate (or reallocate) the three targets for a grid of this size.
@@ -402,6 +429,27 @@ export function createWaterBodySubsystem({
     const { w, h } = grid.spec;
     if (!(w > 0 && h > 0)) return { ok: false, reason: `degenerate grid ${w}x${h}` };
 
+    // THE REAL MASK, AT ITS OWN NATIVE RESOLUTION — checked BEFORE the AABB
+    // scan below, not after (2026-08-25 reorder; the scan and this check used
+    // to run in the other order, so every poll that declined here — routine
+    // right after a scene/floor load, while `ensureMaskImage`'s own async
+    // fetch is still in flight — paid for a full `w*h` walk of `grid.data`
+    // it immediately threw away). `water-surface-subsystem.js`'s already-
+    // loaded texture, borrowed not owned: this module must never dispose it,
+    // and must decline the bake (not substitute a placeholder) until it
+    // exists, exactly as `water-flow-subsystem.js#maybeBake` already does for
+    // the same texture. A decline here is SAFE to retry indefinitely — see
+    // this module's own header on why the first attempt at this could get
+    // permanently stuck instead of actually retrying.
+    const tex = waterSurface.getFullResMaskTexture();
+    if (!tex) return { ok: false, reason: 'no full-resolution mask loaded for this floor yet' };
+    maskRect = {
+      minX: grid.spec.x,
+      minY: grid.spec.y,
+      maxX: grid.spec.x + grid.spec.width,
+      maxY: grid.spec.y + grid.spec.height,
+    };
+
     // ⚠️ THE ACTUAL OBSTACLE-PRESENCE DATA (2026-08-18) — this coarse derived
     // grid (`getWaterMaskGrid` → `maskAuthority.getDerived('water', …)`, the
     // SAME cross-effect grid `_Outdoors` etc. share, capped at
@@ -428,23 +476,6 @@ export function createWaterBodySubsystem({
         if (ty > maxTy) maxTy = ty;
       }
     }
-
-    // The REAL mask, at its own native resolution — `water-surface-
-    // subsystem.js`'s already-loaded texture, borrowed not owned: this
-    // module must never dispose it, and must decline the bake (not
-    // substitute a placeholder) until it exists, exactly as
-    // `water-flow-subsystem.js#maybeBake` already does for the same texture.
-    // A decline here is now SAFE to retry indefinitely — see this module's
-    // own header on why the first attempt at this could get permanently
-    // stuck instead of actually retrying.
-    const tex = waterSurface.getFullResMaskTexture();
-    if (!tex) return { ok: false, reason: 'no full-resolution mask loaded for this floor yet' };
-    maskRect = {
-      minX: grid.spec.x,
-      minY: grid.spec.y,
-      maxX: grid.spec.x + grid.spec.width,
-      maxY: grid.spec.y + grid.spec.height,
-    };
 
     // THE FLOOD runs at its OWN water-owned resolution (2026-08-19,
     // `WATER_BODY_GRID_MAX_DIM`), sized from `maskRect` (just computed above)
@@ -563,8 +594,15 @@ export function createWaterBodySubsystem({
    * rebake would leave the author's brushstrokes invisible until they panned.
    *
    * @param {number} viewedFloorIndex
+   * @param {number} [nowMs] - wall-clock ms (`env.time.realMs`, never a fresh
+   *   `performance.now()` — see `lastBakeWallClockMs`'s own doc), used only to
+   *   throttle the actual bake. Optional and defaults to "never throttle" —
+   *   the same "predates this dependency, still builds" shape
+   *   `getWaterRenderState`'s own default already uses just above — so every
+   *   caller that predates this parameter (every test in this file included)
+   *   keeps its exact old behaviour with no change required.
    */
-  function maybeBake(viewedFloorIndex) {
+  function maybeBake(viewedFloorIndex, nowMs) {
     polls++;
     pollsSinceLastBake++;
 
@@ -617,6 +655,29 @@ export function createWaterBodySubsystem({
       return;
     }
 
+    // THE THROTTLE — see `lastBakeWallClockMs`'s own doc for the full "shared
+    // version counter" mechanism this defends against. `Number.isFinite`
+    // guards a caller that never passes `nowMs` at all (see this function's
+    // own JSDoc): `undefined - anything` is `NaN`, and `NaN < BAKE_THROTTLE_MS`
+    // is `false`, so that alone would already never throttle — the explicit
+    // check just says so, rather than relying on a NaN comparison's own
+    // silent behaviour to carry the intent.
+    //
+    // Deliberately NOT stamping bakedVersion/bakedFloor/bakedOverride/
+    // bakedShorelineDepth here — same "safe to retry indefinitely" discipline
+    // the decline branch below already uses for the exact same reason: the
+    // change is real and must not be forgotten, only deferred, so the very
+    // next poll past the window bakes for real (§1 stays true: THIS poll
+    // costs one integer compare and a subtraction, not a flood).
+    if (Number.isFinite(nowMs) && nowMs - lastBakeWallClockMs < BAKE_THROTTLE_MS) {
+      lastBake = {
+        reason: 'a real change is pending, throttled to protect this frame — retries next poll',
+        floorIndex: resolved.floorIndex,
+        skipped: true,
+      };
+      return;
+    }
+
     const upload = uploadMask(resolved.floorIndex);
     if (!upload.ok) {
       // ⚠️ DO NOT STAMP `bakedVersion`/`bakedFloor`/`bakedOverride` HERE —
@@ -652,6 +713,11 @@ export function createWaterBodySubsystem({
     bakedFloor = resolved.floorIndex;
     bakedOverride = overrideKey;
     bakedShorelineDepth = shorelineDepth;
+    // Stamped even when `nowMs` is undefined (→ NaN): a NaN here reproduces
+    // today's untimed behaviour exactly, since `nowMs - NaN` is NaN on every
+    // later poll too and the throttle's own `Number.isFinite(nowMs)` guard
+    // already keeps a clockless caller out of this comparison entirely.
+    lastBakeWallClockMs = nowMs;
     lastBake = { ...runFlood(reason, resolved.floorIndex), ...upload, presenceThreshold };
   }
 

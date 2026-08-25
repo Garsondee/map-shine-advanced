@@ -278,6 +278,62 @@ export function run(t) {
     );
   }
 
+  // ══ THE BAKE ITSELF IS THROTTLED, NOT THE POLL (2026-08-25) — a burst of
+  // real changes landing faster than BAKE_THROTTLE_MS (e.g. dragging ANY
+  // slider that bumps mask-authority's shared version counter, not just a
+  // water one — see `lastBakeWallClockMs`'s own doc) must not pay for a full
+  // bake on every single poll, but must never lose the change either ═══════
+  {
+    let params = { shorelineDepth: WATER_PRESENCE_EDGE1 };
+    const { subsystem, pass } = buildHarness({ getWaterRenderState: () => ({ params }) });
+
+    subsystem.maybeBake(0, 1000);
+    ok('first timed bake is never throttled', subsystem.getStatus().bakes === 1);
+
+    // A real change lands 50ms later — well inside the 150ms window.
+    params = { shorelineDepth: 0.6 };
+    subsystem.maybeBake(0, 1050);
+    ok('a real change inside the throttle window does not bake immediately', subsystem.getStatus().bakes === 1);
+    ok(
+      'the throttled poll names itself, not a generic skip',
+      String(subsystem.getStatus().lastBake?.reason ?? '').includes('throttled')
+    );
+    const rendersWhileThrottled = pass.calls;
+
+    // Still inside the window — must keep declining, not get stuck.
+    subsystem.maybeBake(0, 1100);
+    ok('still inside the window on a later poll keeps declining', subsystem.getStatus().bakes === 1);
+    ok('nothing rendered while throttled', pass.calls === rendersWhileThrottled);
+
+    // Past the window — the SAME pending change must now bake for real, with
+    // no further slider movement needed to "notice" it again.
+    subsystem.maybeBake(0, 1200);
+    ok('past the throttle window, the deferred change finally bakes', subsystem.getStatus().bakes === 2);
+    ok('the deferred bake actually rendered', pass.calls > rendersWhileThrottled);
+    const deferredThreshold = subsystem.getStatus().lastBake?.presenceThreshold;
+    ok(
+      'the deferred bake used the CURRENT value, never a stale snapshot from when it was first deferred',
+      Math.abs(deferredThreshold - (0.6 - WATER_PRESENCE_EDGE1)) < 1e-9
+    );
+  }
+
+  // ══ `nowMs` IS OPTIONAL — every caller that predates the throttle (every
+  // OTHER block in this file) must see byte-identical behaviour to before it
+  // existed ═════════════════════════════════════════════════════════════════
+  {
+    let params = { shorelineDepth: WATER_PRESENCE_EDGE1 };
+    const { subsystem } = buildHarness({ getWaterRenderState: () => ({ params }) });
+
+    subsystem.maybeBake(0); // no nowMs at all
+    ok('no nowMs: first bake still succeeds', subsystem.getStatus().bakes === 1);
+    params = { shorelineDepth: 0.6 };
+    subsystem.maybeBake(0); // immediately again — inside any real throttle window
+    ok(
+      'no nowMs: a real change bakes immediately, exactly like before the throttle existed',
+      subsystem.getStatus().bakes === 2
+    );
+  }
+
   // ══ dispose — the same clean-state contract every sibling subsystem has ══
   {
     const { subsystem, allocator, setFullResTexture } = buildHarness({ maskTextureAvailable: false });

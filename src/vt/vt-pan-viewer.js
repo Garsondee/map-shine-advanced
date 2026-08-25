@@ -5705,7 +5705,15 @@ export async function startVtPanViewer({
           waterBodiesByFloor.delete(floorIndex);
         }
       }
-      for (const floor of waterFloors) getWaterBodyForFloor(floor.index).maybeBake(floor.index);
+      // `env.time?.realMs` — the SAME wall clock (never a fresh
+      // `performance.now()`) `pollMaskAuthorityForWindRebake` already uses
+      // for its own poll throttle, `?? 0` for the identical reason: an early
+      // frame before the env snapshot exists must not throttle, only a
+      // legitimately-ticking clock should (see `maybeBake`'s own
+      // `lastBakeWallClockMs` doc, `water-body-subsystem.js`, for why the
+      // bake itself now needs a throttle at all).
+      const waterBakeNowMs = env.time?.realMs ?? 0;
+      for (const floor of waterFloors) getWaterBodyForFloor(floor.index).maybeBake(floor.index, waterBakeNowMs);
       profiler?.end(Z.lightWaterBake);
       // Re-crop each floor's own tier-0 surface quad to ITS water's AABB —
       // gated on that floor's own bake generation, so a quiet frame costs one

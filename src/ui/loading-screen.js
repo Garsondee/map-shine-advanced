@@ -60,6 +60,7 @@ import {
   hardRevealDue,
   shouldShowForScene,
 } from './load-progress.js';
+import { perfNowMs } from '../core/frame-clock.js';
 
 const OVERLAY_ID = 'msa-loading-screen';
 
@@ -97,7 +98,7 @@ const MAX_BLOCKERS_SHOWN = 4;
  *
  * @returns {number}
  */
-const now = () => performance.now();
+const now = perfNowMs;
 
 /** The scene whose load was last STARTED — the floor-switch guard's memory. */
 let lastStartedSceneId = null;

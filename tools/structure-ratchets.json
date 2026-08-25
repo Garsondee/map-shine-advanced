@@ -4,7 +4,7 @@
   "no-silent-catch": 27,
   "foundry/adapter-only": 12,
   "log/one-door": 30,
-  "time/one-clock": 38,
+  "time/one-clock": 0,
   "zones/one-door": 8,
   "graph/reachable-from-boot": 2,
   "params/one-owner": 0,

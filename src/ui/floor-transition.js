@@ -45,6 +45,8 @@
  * @module ui/floor-transition
  */
 
+import { perfNowMs } from '../core/frame-clock.js';
+
 const OVERLAY_ID = 'msa-floor-transition';
 
 /** How long a prepare must run before the bar appears. Below this, a floor
@@ -214,7 +216,7 @@ function buildOverlay(headline) {
  */
 export function beginFloorTransition({ fromFloorIndex = null, toFloorIndex = null, onCancel: cancelFn } = {}) {
   endFloorTransition(); // never stack two overlays, same discipline loading-screen.js's beginSceneLoad uses
-  startedAtMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
+  startedAtMs = perfNowMs();
   onCancel = typeof cancelFn === 'function' ? cancelFn : null;
   lastBlockersText = '';
   const headline = formatFloorTransitionHeadline(fromFloorIndex, toFloorIndex);

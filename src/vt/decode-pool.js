@@ -48,6 +48,7 @@
  */
 
 import { pageStoreKey, getPageBlob, putPageBlob } from './pyramid-store.js';
+import { perfNowMs } from '../core/frame-clock.js';
 // The pure half of this module (byte-header parsing, page geometry, URL
 // normalization, a streaming byte reader, a generic semaphore) moved to
 // decode-primitives.js on 2026-07-25 (size-ratchet god-object reversal) —
@@ -463,7 +464,7 @@ async function acquireSliceSource(url) {
   }
 
   let bitmap;
-  const acquireStartMs = performance.now();
+  const acquireStartMs = perfNowMs();
   try {
     let p = _sliceInflight.get(url);
     if (!p) {
@@ -476,7 +477,7 @@ async function acquireSliceSource(url) {
     _sliceInflight.delete(url);
     throw err;
   }
-  const acquireMs = performance.now() - acquireStartMs;
+  const acquireMs = perfNowMs() - acquireStartMs;
   _decodeStats.lastSourceAcquireMs = Math.round(acquireMs);
   _decodeStats.maxSourceAcquireMs = Math.max(_decodeStats.maxSourceAcquireMs, Math.round(acquireMs));
   _sliceInflight.delete(url);
@@ -494,10 +495,10 @@ async function acquireSliceSource(url) {
 /** Time one page's synchronous decode (drawImage crop + createImageBitmap) — records the max/last
  * single-page cost so a giant first-drawImage realization of a fresh 144MP source is visible in stats. */
 async function timedDecodePage(source, rect, pageSizePx) {
-  const t0 = performance.now();
+  const t0 = perfNowMs();
   const canvas = decodePageToCanvas(source, rect, pageSizePx);
   const bitmap = await createImageBitmap(canvas);
-  const ms = performance.now() - t0;
+  const ms = perfNowMs() - t0;
   _decodeStats.lastSinglePageMs = Math.round(ms);
   _decodeStats.maxSinglePageMs = Math.max(_decodeStats.maxSinglePageMs, Math.round(ms));
   return { canvas, bitmap };
@@ -888,7 +889,7 @@ export async function acquirePages(url, table, pages, opts = {}) {
       // FALLBACK — the original main-thread slice path (still correct, just
       // with the giant-source freeze the worker exists to remove).
       const { source, done } = await acquireSliceSource(url);
-      let lastYieldMs = performance.now();
+      let lastYieldMs = perfNowMs();
       try {
         for (const page of misses) {
           const rect = pageWorldRect(table, page.mip, page.px, page.py, { borderPx });
@@ -896,10 +897,10 @@ export async function acquirePages(url, table, pages, opts = {}) {
           results.push({ page, bitmap });
           _decodeStats.idbSlices++;
           persistPage(pageStoreKey(keyUrl, page.mip, page.px, page.py), canvas);
-          const now = performance.now();
+          const now = perfNowMs();
           if (shouldYieldByTime(now - lastYieldMs, MAX_MS_PER_DECODE_CHUNK)) {
             await yieldToMain();
-            lastYieldMs = performance.now();
+            lastYieldMs = perfNowMs();
           }
         }
       } finally {
@@ -1146,17 +1147,17 @@ export async function acquirePackedPages(packId, channelUrls, table, pages, opts
       const channelPixels = {}; // 'r'|'g'|'b' -> Map<pageKey, Uint8ClampedArray>
       for (const ch of /** @type {const} */ (['r', 'g', 'b'])) {
         const { source, done } = await acquireSliceSource(channelUrls[ch]);
-        let lastYieldMs = performance.now();
+        let lastYieldMs = perfNowMs();
         try {
           const perPage = new Map();
           for (const page of misses) {
             const rect = pageWorldRect(table, page.mip, page.px, page.py, { borderPx });
             const canvas = decodePageToCanvas(source, rect, pageSizePx);
             perPage.set(page.key, canvas.getContext('2d').getImageData(0, 0, pageSizePx, pageSizePx).data);
-            const now = performance.now();
+            const now = perfNowMs();
             if (shouldYieldByTime(now - lastYieldMs, MAX_MS_PER_DECODE_CHUNK)) {
               await yieldToMain();
-              lastYieldMs = performance.now();
+              lastYieldMs = perfNowMs();
             }
           }
           channelPixels[ch] = perPage;
@@ -1165,7 +1166,7 @@ export async function acquirePackedPages(packId, channelUrls, table, pages, opts
         }
       }
 
-      let lastYieldMs = performance.now();
+      let lastYieldMs = perfNowMs();
       for (const page of misses) {
         const canvas = new OffscreenCanvas(pageSizePx, pageSizePx);
         const ctx = canvas.getContext('2d');
@@ -1178,10 +1179,10 @@ export async function acquirePackedPages(packId, channelUrls, table, pages, opts
         results.push({ page, bitmap: await createImageBitmap(canvas) });
         _decodeStats.idbSlices++;
         persistPage(pageStoreKey(keyPackId, page.mip, page.px, page.py), canvas);
-        const now = performance.now();
+        const now = perfNowMs();
         if (shouldYieldByTime(now - lastYieldMs, MAX_MS_PER_DECODE_CHUNK)) {
           await yieldToMain();
-          lastYieldMs = performance.now();
+          lastYieldMs = perfNowMs();
         }
       }
     }

@@ -820,44 +820,6 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
     };
   }
 
-  /**
-   * ONE real pixel out of `exploredSnapshotTarget`, at a given WORLD
-   * position — added 2026-08-16 chasing a live report of "explored areas
-   * still render solid black" AFTER `snapshotPublishCount` already proved
-   * the publish draw runs, every ~250ms, with no thrown error. That only
-   * proves the DRAW CALL executes, not that it writes anything a player
-   * would see — `feedback_measure_the_output_not_the_equation`'s own
-   * lesson, hit again one layer deeper. This measures the actual buffer.
-   *
-   * ⚠️ THE SAME px/py MAPPING AS THE GATE'S OWN `eu`/`ev` (re-derived
-   * independently here, from the camera's own OrthographicCamera(left=
-   * minX, right=maxX, TOP=minY, BOTTOM=maxY, ...) construction in
-   * `setExploredRect` — worldY=minY is the camera's TOP, and WebGPU's raw
-   * `readRenderTargetPixelsAsync` copy is ALSO top-origin row 0
-   * (`vt-pan-viewer.js`'s own proven PROBE_CORNERS finding) — so DIRECT,
-   * un-flipped, agrees with the shader's texture sample by construction, not
-   * by assumption. `UnsignedByteType` returns plain 0-255 bytes, no
-   * half-float decode needed (same as `vt-pan-viewer.js`'s own depth
-   * self-test query target, `type: THREE.UnsignedByteType` too).
-   *
-   * Deliberately NOT wired into any per-frame path — a GPU readback is a
-   * real, if small, stall, so this is called from an already-throttled,
-   * even-slower diagnostic tick, never from the render loop itself.
-   *
-   * @param {object} args
-   * @param {*} args.renderer @param {number} args.worldX @param {number} args.worldY
-   * @returns {Promise<{r:number,g:number,b:number,readAt:{x:number,y:number}}>}
-   */
-  async function probeSnapshotColor({ renderer, worldX, worldY }) {
-    const [minX, minY, maxX, maxY] = exploredRect;
-    const eu = Math.min(1, Math.max(0, (worldX - minX) / (maxX - minX)));
-    const ev = Math.min(1, Math.max(0, (worldY - minY) / (maxY - minY)));
-    const px = Math.round(eu * (exploredSnapshotTarget.width - 1));
-    const py = Math.round(ev * (exploredSnapshotTarget.height - 1));
-    const raw = await renderer.readRenderTargetPixelsAsync(exploredSnapshotTarget, px, py, 1, 1, 0, 0);
-    return { r: raw[0], g: raw[1], b: raw[2], readAt: { x: px, y: py } };
-  }
-
   return {
     scene,
     renderTarget,
@@ -866,7 +828,6 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
     },
     sync,
     resize,
-    probeSnapshotColor,
     setExploredRect,
     getExploredRect,
     resetExploration,
@@ -875,6 +836,16 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
     },
     get exploredSnapshotTexture() {
       return exploredSnapshotTarget.texture;
+    },
+    // The RAW render target (not just its `.texture`) — a one-pixel diagnostic
+    // readback needs `.width`/`.height` plus the target itself for
+    // `renderer.readRenderTargetPixelsAsync(target, ...)`. Only `vt/` may call
+    // that API directly (`no-gpu-readback`, tools/verify-structure.mjs); this
+    // effect module may not, so the readback itself lives at the call site
+    // (`vt-pan-viewer.js`'s `probeExploredSnapshotColor`, next to its sibling
+    // `probeMapOnlyGrid`) and this getter is the one door it reads through.
+    get exploredSnapshotTarget() {
+      return exploredSnapshotTarget;
     },
     dispose,
     getInfo,

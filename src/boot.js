@@ -2181,7 +2181,11 @@ function install() {
   /** Place a new candle at a world position, bound to whichever floor is
    * currently being viewed (fail-open to all-levels if that is unknown). */
   function addCandle(x, y) {
-    const id = `authored:${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    // `crypto.randomUUID()`, NOT `Date.now()` — same fix as `addLightningEndpoint`
+    // below (this was the one remaining call site): a uniqueness source, not a
+    // clock sample, and a UUID is a genuinely better id (no collision window at
+    // all, vs. millisecond-resolution + a short random suffix).
+    const id = `authored:${crypto.randomUUID()}`;
     const raw = {
       id,
       kind: 'candleFlame',

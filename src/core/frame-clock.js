@@ -93,6 +93,32 @@ export function wallClockMs() {
   return Date.now();
 }
 
+/**
+ * MONOTONIC wall time — the OTHER sanctioned door, for the "hitch detection,
+ * poll throttles, the GPU probe" callers this file's own header already names
+ * (line ~42), plus a class it did not originally enumerate: off-main-thread
+ * decode/worker latency (`vt/decode-pool.js`, its `.worker.js`, and the live
+ * decode report) and UI-chrome duration-since-started reads (a floor
+ * transition or loading curtain's own timeout watch). None of these feed
+ * ANIMATION state — the one thing `time/one-clock` actually polices — so none
+ * of them belong on `env.time`; they need a raw elapsed-ms reading, on their
+ * own schedule, sometimes before a frame clock exists at all (a loading
+ * curtain can show before the first tick) or entirely outside this thread (a
+ * Worker has no frame loop to be handed a snapshot from).
+ *
+ * Unlike `wallClockMs()`, this does NOT survive a reload or a second client —
+ * it is `performance.now()`, monotonic and immune to system-clock jumps
+ * within THIS session, which is the correct property for a duration-since-
+ * started read and the wrong one for a cross-client timestamp (see this
+ * file's header, "TWO TIMES"). Use `wallClockMs()` instead when the value
+ * must mean the same thing after an F5 or on someone else's screen.
+ * @returns {number} milliseconds, monotonic, relative to this page's (or
+ *   worker's) own navigation/start — meaningless compared across reloads.
+ */
+export function perfNowMs() {
+  return performance.now();
+}
+
 /** Below this the world counts as stopped (`paused` true, `tMs` effectively frozen). */
 const STOPPED_EPSILON = 1e-6;
 

@@ -31,6 +31,8 @@
  * @module compositor-v3/FrameGraph
  */
 
+import { perfNowMs } from '../core/frame-clock.js';
+
 /**
  * @typedef {object} ResourceDescriptor
  * @property {'screen'|[number, number]} size - `'screen'` tracks the frame's
@@ -87,12 +89,15 @@
  * @typedef {ResourceDescriptor & {resolvedW: number, resolvedH: number}} ResolvedDescriptor
  */
 
+// `perfNowMs` (core/frame-clock.js) IS `performance.now()` — this module stays
+// THREE-free and Node-testable (its own design-constraint header, above) by
+// importing only that one pure, dependency-free file, never `three`.
 const DEFAULT_NOW = () => {
-  // performance.now in browser/Node; Date-free fallback keeps the module usable
-  // in the workflow-script sandbox that forbids Date.now().
+  // Date-free fallback keeps the module usable in the workflow-script sandbox
+  // that forbids Date.now() — perfNowMs() never touches it either way.
   try {
     if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
-      return performance.now();
+      return perfNowMs();
     }
   } catch (_) {}
   return 0;

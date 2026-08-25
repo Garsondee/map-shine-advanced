@@ -314,7 +314,7 @@ import {
   GLOBAL_SETTING_KEYS,
   extractDripEdges,
 } from '../effects/index.js';
-import { makeFrameClock, DEFAULT_PAUSE_RAMP_SEC } from '../core/frame-clock.js';
+import { makeFrameClock, DEFAULT_PAUSE_RAMP_SEC, perfNowMs } from '../core/frame-clock.js';
 import {
   computeWindOverlayGridFromBake,
   buildWindOverlayGeometry,
@@ -2390,7 +2390,8 @@ export async function startVtPanViewer({
     /** Non-null once the gate has failed and fog was handed back to Foundry —
      *  surfaced in the report so a silent fallback is never invisible. */
     let lastVisionGateError = null;
-    /** `performance.now()` of the last map-only capture + snapshot publish —
+    /**
+     *  `performance.now()` of the last map-only capture + snapshot publish —
      *  see `SNAPSHOT_PUBLISH_INTERVAL_MS`'s own note for why this is
      *  throttled rather than run every frame. Starts at 0 so the FIRST vision
      *  frame always publishes immediately, not after one full interval. */
@@ -2405,7 +2406,7 @@ export async function startVtPanViewer({
      *  silent failure of THIS specific mechanism is distinguishable from
      *  "never ran" and from "ran fine" purely by reading the report. */
     let lastSnapshotError = null;
-    /** Most recent `visionMask.probeSnapshotColor()` result (or an error
+    /** Most recent `probeExploredSnapshotColor()` result (or an error
      *  string) — a REAL pixel read, not just "the draw ran". Updated
      *  fire-and-forget, roughly every 2.5s (see its own call site), never
      *  awaited from the render loop — a GPU readback is a real stall, this
@@ -5503,7 +5504,7 @@ export async function startVtPanViewer({
      * fine but the publish/reprojection step loses it" — this settles which.
      *
      * ⚠️ DELIBERATELY SCREEN-CENTRE-RELATIVE, NOT WORLD-POSITION-TARGETED —
-     * unlike `probeSnapshotColor` (which needs an exact world→buffer mapping
+     * unlike `probeExploredSnapshotColor` (which needs an exact world→buffer mapping
      * and therefore inherits that mapping's Y-convention risk), this only
      * needs to answer "is ANYTHING non-black in the current capture", so it
      * samples fixed screen UVs (0.5,0.5 plus the four quarter-points) where a
@@ -5538,6 +5539,52 @@ export async function startVtPanViewer({
         samples.push({ name: p.name, rgb: [+r.toFixed(3), +g.toFixed(3), +b.toFixed(3)] });
       }
       return samples;
+    }
+
+    /**
+     * ONE real pixel out of the vision mask's `exploredSnapshotTarget`, at a
+     * given WORLD position — added 2026-08-16 chasing a live report of
+     * "explored areas still render solid black" AFTER `snapshotPublishCount`
+     * already proved the publish draw runs, every ~250ms, with no thrown
+     * error. That only proves the DRAW CALL executes, not that it writes
+     * anything a player would see — `feedback_measure_the_output_not_the_
+     * equation`'s own lesson, hit again one layer deeper. This measures the
+     * actual buffer.
+     *
+     * Lives here, not on the vision-mask module itself, for the same reason
+     * `probeMapOnlyGrid` (just above) does: `no-gpu-readback` (tools/verify-
+     * structure.mjs) restricts `readRenderTargetPixelsAsync` to `vt/` (this
+     * file) and `diag/` — an effect module under `src/effects/` may not call
+     * it directly. `visionMask.exploredSnapshotTarget` and `.getExploredRect()`
+     * are the two doors it reads through.
+     *
+     * ⚠️ THE SAME px/py MAPPING AS THE GATE'S OWN `eu`/`ev` (re-derived
+     * independently here, from the camera's own OrthographicCamera(left=
+     * minX, right=maxX, TOP=minY, BOTTOM=maxY, ...) construction in
+     * `setExploredRect` — worldY=minY is the camera's TOP, and WebGPU's raw
+     * `readRenderTargetPixelsAsync` copy is ALSO top-origin row 0 (this
+     * file's own proven PROBE_CORNERS finding) — so DIRECT, un-flipped,
+     * agrees with the shader's texture sample by construction, not by
+     * assumption. `UnsignedByteType` returns plain 0-255 bytes, no
+     * half-float decode needed (same as this file's own depth self-test
+     * query target, `type: THREE.UnsignedByteType` too).
+     *
+     * Deliberately NOT wired into any per-frame path — a GPU readback is a
+     * real, if small, stall, so this is called from an already-throttled,
+     * even-slower diagnostic tick, never from the render loop itself.
+     *
+     * @param {number} worldX @param {number} worldY
+     * @returns {Promise<{r:number,g:number,b:number,readAt:{x:number,y:number}}>}
+     */
+    async function probeExploredSnapshotColor(worldX, worldY) {
+      const [minX, minY, maxX, maxY] = visionMask.getExploredRect();
+      const eu = Math.min(1, Math.max(0, (worldX - minX) / (maxX - minX)));
+      const ev = Math.min(1, Math.max(0, (worldY - minY) / (maxY - minY)));
+      const target = visionMask.exploredSnapshotTarget;
+      const px = Math.round(eu * (target.width - 1));
+      const py = Math.round(ev * (target.height - 1));
+      const raw = await renderer.readRenderTargetPixelsAsync(target, px, py, 1, 1, 0, 0);
+      return { r: raw[0], g: raw[1], b: raw[2], readAt: { x: px, y: py } };
     }
 
     function runPresentCompositePass() {
@@ -6174,7 +6221,7 @@ export async function startVtPanViewer({
         // be false everywhere anyway, so the capture would cost a full extra
         // world-draw for zero writes.
         if (exploredDraw?.camera && gating.gate && visionDraw.drawn > 0) {
-          const now = performance.now();
+          const now = perfNowMs();
           if (now - lastSnapshotPublishAt >= SNAPSHOT_PUBLISH_INTERVAL_MS) {
             lastSnapshotPublishAt = now;
             // ⚠️ ISOLATED, NEVER LEFT SILENT. This is new, unverified-live
@@ -6219,8 +6266,7 @@ export async function startVtPanViewer({
               // right now".
               if (snapshotPublishCount % 10 === 0 && visionRead.sources[0]) {
                 const probeSrc = visionRead.sources[0];
-                visionMask
-                  .probeSnapshotColor({ renderer, worldX: probeSrc.x, worldY: probeSrc.y })
+                probeExploredSnapshotColor(probeSrc.x, probeSrc.y)
                   .then((result) => {
                     lastSnapshotPixelProbe = { ...result, sampledAt: { x: probeSrc.x, y: probeSrc.y }, ok: true };
                   })
@@ -12082,7 +12128,7 @@ export async function startVtPanViewer({
       // config's felt phase specifically to keep this throttling from
       // smearing into felt readings).
       if (gpuProbe.isActive() && gpuProbe.isMeasuring()) return;
-      const now = nowMs ?? performance.now();
+      const now = nowMs ?? perfNowMs();
 
       // VIDEO-CAPTURE FRAME CAP (2026-08-10) — the author records promotional
       // videos externally at 30fps; rendering faster than that while the
@@ -12167,7 +12213,7 @@ export async function startVtPanViewer({
       profiler?.begin(Z.tickEnv);
       updateEnvSnapshot();
       profiler?.end(Z.tickEnv);
-      const t0 = performance.now();
+      const t0 = perfNowMs();
       // GPU probe (perf lab only; inert otherwise) — mark the render start so
       // endFrame below can time to GPU completion. See diag/gpu-probe.js.
       gpuProbe.beginFrame();
@@ -12331,7 +12377,7 @@ export async function startVtPanViewer({
       // is instrumented for free and no second copy of the frame order exists.
       lastFramePlanRan = runPassPlan(framePlan.ids, passImpls, {}, profiler?.passHooks);
 
-      frameTimes.push(performance.now() - t0);
+      frameTimes.push(perfNowMs() - t0);
       if (frameTimes.length > 120) frameTimes.shift();
       // SCENE SETTLE — counted every frame (so "is the renderer actually
       // drawing" is answerable), sampled on a cadence (so reading the counters
@@ -13157,9 +13203,9 @@ export async function startVtPanViewer({
       const ids = includePresent ? framePlan.ids : framePlan.ids.filter((id) => id !== 'present.composite');
       const before = readPipelineCount();
       try {
-        const t0 = performance.now();
+        const t0 = perfNowMs();
         runPassPlan(ids, passImpls, {}, undefined);
-        warmUpMs = Math.round(performance.now() - t0);
+        warmUpMs = Math.round(perfNowMs() - t0);
       } catch (err) {
         log.warn('warm-up draw failed — pipelines will compile lazily on first real draw:', err);
         warmUpMs = null;
@@ -14934,9 +14980,9 @@ export async function startVtPanViewer({
     // A worker cannot help with either — GL programs belong to the context that
     // made them, so a worker's program is unusable here (Shaders.md §2).
     try {
-      const t0 = performance.now();
+      const t0 = perfNowMs();
       await renderer.compileAsync(scene, camera);
-      shaderCompileMs = Math.round(performance.now() - t0);
+      shaderCompileMs = Math.round(perfNowMs() - t0);
     } catch (err) {
       // Precompiling is an optimisation; failing to precompile must never cost a
       // scene. The programs will compile lazily on first draw exactly as before.
@@ -17370,11 +17416,10 @@ export async function startVtPanViewer({
         //     (an exception on some LATER frame, or the gate stopped passing)
         //   snapshotError non-null             → the most recent attempt threw
         snapshotPublishCount,
-        snapshotPublishMsSinceLast:
-          lastSnapshotPublishAt > 0 ? Math.round(performance.now() - lastSnapshotPublishAt) : null,
+        snapshotPublishMsSinceLast: lastSnapshotPublishAt > 0 ? Math.round(perfNowMs() - lastSnapshotPublishAt) : null,
         snapshotError: lastSnapshotError,
         // A REAL pixel out of exploredSnapshotTarget, not just proof the
-        // publish draw executed — see `probeSnapshotColor`'s own doc.
+        // publish draw executed — see `probeExploredSnapshotColor`'s own doc.
         // {r,g,b} all near 0 at a position that's revealed RIGHT NOW means
         // the WRITE path is broken; a report where this is real colour but
         // the player still sees black means the READ path (the dim quad) is

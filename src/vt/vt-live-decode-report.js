@@ -13,13 +13,14 @@
 
 import { PageTable } from './page-table.js';
 import { getSourceBitmap, decodePage, pageWorldRect } from './decode-pool.js';
+import { perfNowMs } from '../core/frame-clock.js';
 
 /**
  * @param {string} url - module-relative path to a torture fixture image,
  *   e.g. "modules/map-shine-advanced/assets/torture/torture_floor0.png".
  */
 export async function runVtLiveDecodeTest(url) {
-  const t0 = performance.now();
+  const t0 = perfNowMs();
   let sourceBitmap;
   try {
     sourceBitmap = await getSourceBitmap(url);
@@ -30,7 +31,7 @@ export async function runVtLiveDecodeTest(url) {
       error: `getSourceBitmap failed: ${err?.message || err}. Is ${url} actually synced to this Foundry install?`,
     };
   }
-  const decodeMs = Math.round(performance.now() - t0);
+  const decodeMs = Math.round(perfNowMs() - t0);
 
   const table = new PageTable({
     id: 'live:decodeTest',
@@ -56,7 +57,7 @@ export async function runVtLiveDecodeTest(url) {
   const pageResults = [];
   for (const sample of samplePages) {
     const worldRect = pageWorldRect(table, sample.mip, sample.px, sample.py);
-    const tPage0 = performance.now();
+    const tPage0 = perfNowMs();
     try {
       const pageBitmap = await decodePage(sourceBitmap, worldRect);
       pageResults.push({
@@ -64,7 +65,7 @@ export async function runVtLiveDecodeTest(url) {
         worldRect,
         decodedSizePx: { width: pageBitmap.width, height: pageBitmap.height },
         correctSize: pageBitmap.width === 256 && pageBitmap.height === 256,
-        ms: Math.round(performance.now() - tPage0),
+        ms: Math.round(perfNowMs() - tPage0),
       });
       pageBitmap.close?.(); // this is a self-test — don't hold GPU/CPU memory after reading the result
     } catch (err) {

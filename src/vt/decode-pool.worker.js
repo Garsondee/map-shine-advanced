@@ -36,6 +36,7 @@
 
 import { pageWorldRect, decodePageToCanvas, DEFAULT_BORDER_PX, compositePackedTexels } from './decode-pool.js';
 import { pageStoreKey, putPageBlob } from './pyramid-store.js';
+import { perfNowMs } from '../core/frame-clock.js';
 
 /** Fetch + fully decode one source image. This is the expensive op we moved off the main thread. */
 function fetchAndDecode(url) {
@@ -76,18 +77,18 @@ async function handleSlice(msg) {
   const borderPx = msg.borderPx ?? DEFAULT_BORDER_PX;
   const table = { payloadPx, worldWidthPx, worldHeightPx };
 
-  const t0 = performance.now();
+  const t0 = perfNowMs();
   const source = await fetchAndDecode(url);
-  const sourceAcquireMs = performance.now() - t0;
+  const sourceAcquireMs = perfNowMs() - t0;
 
   const results = [];
   const transfer = [];
   let maxSinglePageMs = 0;
   try {
     for (const page of pages) {
-      const p0 = performance.now();
+      const p0 = perfNowMs();
       const { bitmap, canvas } = await slicePage(source, table, page, borderPx, pageSizePx);
-      maxSinglePageMs = Math.max(maxSinglePageMs, performance.now() - p0);
+      maxSinglePageMs = Math.max(maxSinglePageMs, perfNowMs() - p0);
       results.push({ key: page.key, bitmap });
       transfer.push(bitmap);
       persist(pageStoreKey(url, page.mip, page.px, page.py), canvas);
@@ -122,9 +123,9 @@ async function handleSlicePacked(msg) {
   let sourceAcquireMs = 0;
   const channelPixels = { r: new Map(), g: new Map(), b: new Map() };
   for (const ch of ['r', 'g', 'b']) {
-    const t0 = performance.now();
+    const t0 = perfNowMs();
     const source = await fetchAndDecode(channelUrls[ch]);
-    sourceAcquireMs += performance.now() - t0;
+    sourceAcquireMs += perfNowMs() - t0;
     try {
       for (const page of pages) {
         const rect = pageWorldRect(table, page.mip, page.px, page.py, { borderPx });
@@ -142,7 +143,7 @@ async function handleSlicePacked(msg) {
   const transfer = [];
   let maxSinglePageMs = 0;
   for (const page of pages) {
-    const p0 = performance.now();
+    const p0 = perfNowMs();
     const rPix = channelPixels.r.get(page.key);
     const gPix = channelPixels.g.get(page.key);
     const bPix = channelPixels.b.get(page.key);
@@ -152,7 +153,7 @@ async function handleSlicePacked(msg) {
     compositePackedTexels(out.data, rPix, gPix, bPix, channelPolicy);
     ctx.putImageData(out, 0, 0);
     const bitmap = await createImageBitmap(canvas);
-    maxSinglePageMs = Math.max(maxSinglePageMs, performance.now() - p0);
+    maxSinglePageMs = Math.max(maxSinglePageMs, perfNowMs() - p0);
     results.push({ key: page.key, bitmap });
     transfer.push(bitmap);
     persist(pageStoreKey(packId, page.mip, page.px, page.py), canvas);
@@ -174,9 +175,9 @@ async function handleSlicePacked(msg) {
  * immediately — never holds it, never slices a page from it.
  */
 async function handleDimensions(msg) {
-  const t0 = performance.now();
+  const t0 = perfNowMs();
   const source = await fetchAndDecode(msg.url);
-  const sourceAcquireMs = performance.now() - t0;
+  const sourceAcquireMs = perfNowMs() - t0;
   const width = source.width;
   const height = source.height;
   source.close?.();

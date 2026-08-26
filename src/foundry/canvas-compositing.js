@@ -318,8 +318,8 @@ export function decideArtSuppression({ contextAlpha, clearAlpha, groupsPresent }
  * @returns {{contextAlpha: boolean|null, clearAlpha: number|null,
  *   primaryPresent: boolean, primarySpritePresent: boolean, effectsPresent: boolean,
  *   groupsPresent: boolean, primarySpriteRenderable: boolean|null,
- *   effectsRenderable: boolean|null, foundryArtRenderable: boolean|null,
- *   readErrors: string[]}}
+ *   effectsRenderable: boolean|null, primaryRenderable: boolean|null,
+ *   foundryArtRenderable: boolean|null, readErrors: string[]}}
  */
 export function readCompositingFacts() {
   const readErrors = [];
@@ -369,6 +369,23 @@ export function readCompositingFacts() {
     readErrors.push(`reading canvas.effects.renderable threw: ${err?.message ?? err}`);
   }
 
+  // THE THIRD LEVER's own fact (Bug #21, 2026-08-15) — a DIFFERENT question
+  // from primarySpriteRenderable/effectsRenderable above (those answer "is
+  // Foundry's art SHOWING"; this answers "is Foundry's own renderer still
+  // silently re-drawing the whole map every frame underneath"). Read here,
+  // not only inside getFoundryRendererCensus() below, because this file's own
+  // "GROUND TRUTH" facts function is the one place every consumer — including
+  // the routine getCanvasCompositingReport() debug-panel report — should be
+  // able to trust for "is the seam actually healthy". Before this, the only
+  // place this specific fact surfaced was the TEMPORARY, ~4s Reckoning Report,
+  // which nobody reaches for on an ordinary health check.
+  let primaryRenderable = null;
+  try {
+    if (primary && typeof primary.renderable === 'boolean') primaryRenderable = primary.renderable;
+  } catch (err) {
+    readErrors.push(`reading canvas.primary.renderable threw: ${err?.message ?? err}`);
+  }
+
   // Single combined signal, mirroring the pre-2026-08-13 `environmentRenderable`
   // shape for callers that just want "is Foundry's own art currently showing" —
   // true only when BOTH halves genuinely read true; any false or unread (null)
@@ -389,6 +406,7 @@ export function readCompositingFacts() {
     groupsPresent,
     primarySpriteRenderable,
     effectsRenderable,
+    primaryRenderable,
     foundryArtRenderable,
     readErrors,
   };
@@ -895,17 +913,23 @@ export function getCanvasCompositingReport() {
     effectsPresent: facts.effectsPresent,
     primarySpriteRenderable: facts.primarySpriteRenderable,
     effectsRenderable: facts.effectsRenderable,
+    primaryRenderable: facts.primaryRenderable,
     foundryArtRenderable: facts.foundryArtRenderable,
     readErrors: facts.readErrors,
     decision,
     msaOwnedGroups: [...MSA_OWNED_GROUPS],
     interpretation:
       'HEALTHY = contextAlpha:true, clearAlpha:0, foundryArtRenderable:false (i.e. ' +
-      'primarySpriteRenderable:false AND effectsRenderable:false). That means the PIXI canvas is ' +
-      "genuinely transparent, Foundry's art output is off (though canvas.primary's own internal cache " +
-      "keeps refreshing every frame — deliberate, see the header's PRIMARY-CACHE-FREEZE FIX section — " +
-      "so Foundry's own fog shader still reads a live snapshot), and its interface chrome (selection " +
-      'borders, grid, walls, control icons, rulers) is drawing on top of MSA. ' +
+      'primarySpriteRenderable:false AND effectsRenderable:false) AND primaryRenderable:false. ' +
+      "The first three mean the PIXI canvas is genuinely transparent, Foundry's own art output is " +
+      'off, and its interface chrome (selection borders, grid, walls, control icons, rulers) is ' +
+      'drawing on top of MSA. primaryRenderable:false is a SEPARATE, THIRD lever (Bug #21, ' +
+      '2026-08-15): it means Foundry has ALSO stopped re-rendering the entire map into its own ' +
+      "cache texture every frame in its own GL context — a real GPU cost MSA's own perf zones can " +
+      'never see, since it runs on a different renderer entirely. primaryRenderable:true alongside ' +
+      'everything else healthy means that THIRD lever specifically has regressed or never engaged ' +
+      '— Foundry is silently doing full-map work every frame for a texture nothing reads any more ' +
+      '(measured 2026-08-15: a 4.4× frame-time cost on its own). ' +
       'contextAlpha:false is UNRECOVERABLE this session — the canvasConfig hook did not run in time. ' +
       'clearAlpha:1 with contextAlpha:true means Foundry re-clobbered the alpha and the ' +
       'initializeCanvasEnvironment re-assert is not firing. ' +

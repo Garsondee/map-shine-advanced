@@ -66,6 +66,7 @@ import {
   sortFindingsBySeverity,
   floorStructuralAbFindings,
   editCascadeStressFinding,
+  structuralAbFindingsFor,
 } from './diag/perf-report.js';
 import { buildVramInventory } from './diag/vram-inventory.js';
 import { buildPerfStripModel } from './diag/perf-strip.js';
@@ -4975,6 +4976,26 @@ function install() {
         };
       }
       lastPerfProfile.sharpeningAB = sharpeningAB;
+      // FOLD INTO findings[] (2026-08-26) — same doctrine as floorStructuralAB
+      // above: without this, a real, hard-won result (4 viewer restarts to
+      // get an isolated shader-graph A/B) would sit in a raw field a reader
+      // following the report's own "scan findings[] first" instruction would
+      // never see. `sharpening-ab` idPrefix so this can never collide with
+      // the main-window `structural-ab:`/`structural-ab-floors:` ids. Own
+      // try/catch so a finding-building bug can never cost the measurement.
+      try {
+        if (sharpeningAB?.ran === true) {
+          const newFindings = structuralAbFindingsFor(sharpeningAB.toggles, { idPrefix: 'sharpening-ab' });
+          if (newFindings.length > 0) {
+            lastPerfProfile.findings = sortFindingsBySeverity([...(lastPerfProfile.findings ?? []), ...newFindings]);
+          }
+        }
+      } catch (err) {
+        log.error(
+          'perf report: folding sharpeningAB into findings[] failed (the measurement above is still valid):',
+          err
+        );
+      }
 
       // PHASE 5: TIER SWEEP FOLD-IN (2026-08-26, author's own direct answer
       // when asked "should this fold into the main button, or stay opt-in":
@@ -8223,7 +8244,22 @@ function install() {
       diagnostics: attachments,
       icon: '🔎',
       title: 'Sharpening',
-      subtitle: 'CAS contrast restore for zoomed-out art (Albedo Clarity)',
+      // 2026-08-26: this used to just name the effect. Extended after Ingram
+      // reported "I toggle this off and performance doesn't change" — true,
+      // and worth saying plainly rather than leaving her to rediscover it:
+      // the switch changes the on-screen look instantly (a live uniform),
+      // but the GPU cost is baked into the compiled shader at material-build
+      // time and only updates on the next scene/floor reload — the same
+      // reason a live perf-tier change doesn't retroactively cheapen an
+      // already-built material. A real isolated A/B that same day (4 forced
+      // viewer restarts, `perf-sharpening-ab.js`) measured the actual cost as
+      // statistically indistinguishable from zero on real map content
+      // (0.05ms delta against a 0.19ms noise floor) — so there is no
+      // meaningful GPU win being left on the table either way; this is a
+      // look control, not a performance lever.
+      subtitle:
+        'CAS contrast restore for zoomed-out art (Albedo Clarity) — this switch changes the look ' +
+        'instantly; measured GPU cost is negligible either way, so it is not a performance lever.',
       status: () => collapsedStatusLine({ enabled: getAlbedoClarity().enabled }),
       schema,
       // The one control worth touching mid-session — would the author drag

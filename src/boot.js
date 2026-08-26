@@ -43,6 +43,7 @@ import { createPerfLab, runSweep, runSweepStructuralAB } from './diag/perf-lab.j
 // 12+ viewer restarts. Called once, as its own Phase 4, after every sweep in
 // the perf-run-full action body below. See that file's own header.
 import { runSharpeningAB } from './diag/perf-sharpening-ab.js';
+import { runShaderVariantAB } from './diag/perf-shader-variant-ab.js';
 import { describeWindBake } from './diag/wind-probe.js';
 // THE PERFORMANCE INSTRUMENT (docs/planning/Performance.md). The taxonomy and
 // the report brain are pure and land ahead of the profiler that will feed them,
@@ -292,6 +293,10 @@ import {
   ALBEDO_CLARITY_PARAMS,
   setVtPanViewerAlbedoClarityForce,
   getVtPanViewerAlbedoClarityForce,
+  setVtPanViewerMaskNodeOffForce,
+  getVtPanViewerMaskNodeOffForce,
+  setVtPanViewerOpaqueBlendOffForce,
+  getVtPanViewerOpaqueBlendOffForce,
   setUiShadow,
   getUiShadow,
   sampleVtPanViewerIllumPixel,
@@ -3962,6 +3967,20 @@ function install() {
     sharpeningAbEnabled = on === true;
     return { enabled: sharpeningAbEnabled };
   };
+  // SHADER-VARIANT A/B KILL SWITCH (2026-08-26) — same reasoning as
+  // sharpeningAbEnabled just above, applied to two MORE never-yet-measured
+  // restart-costly toggles (maskNode, opaqueBlendOff — diag/perf-shader-
+  // variant-ab.js). A separate switch from sharpeningAbEnabled on purpose:
+  // CAS is already proven safe to run; these two are not, and bundling them
+  // would force an all-or-nothing choice neither toggle's own risk profile
+  // earns on its own. `runShaderVariantAB`'s own `toggleIds` filter lets a
+  // caller run just one catalog entry — this switch only decides whether the
+  // PHASE runs at all, not which toggle(s) within it.
+  let shaderVariantAbEnabled = false;
+  MapShine.setShaderVariantAbEnabled = (on) => {
+    shaderVariantAbEnabled = on === true;
+    return { enabled: shaderVariantAbEnabled };
+  };
   // TIER-SWEEP KILL SWITCH (2026-08-26) — unlike sharpeningAbEnabled just
   // above, this DEFAULTS ON, per the author's own direct instruction after
   // being asked the tradeoff explicitly ("test every performance tier for
@@ -4270,7 +4289,69 @@ function install() {
       await pause(FLOOR_CHANGE_SETTLE_BUFFER_MS);
       return result;
     },
+    // SHADER-VARIANT A/B (2026-08-26, diag/perf-shader-variant-ab.js) — a
+    // SEPARATE, generic id-dispatched pair for `maskNode`/`opaqueBlendOff`,
+    // deliberately NOT folded into `restartViewerWithAlbedoClarityForce`
+    // above: that hook is proven and already live-run once; this file's own
+    // standing discipline (see perf-sharpening-ab.js's own header on why it
+    // doesn't share runStructuralAB's loop either) is not to reshape a working
+    // path to make a new one prettier. `restartRealSceneViewerAndSettle`
+    // below is the SAME stop/start/settle/buffer sequence as the CAS hook's
+    // own body, factored out fresh rather than extracted FROM it, so the CAS
+    // path stays byte-for-byte untouched.
+    readForcedShaderVariant: (id) => {
+      if (id === 'maskNode') return getVtPanViewerMaskNodeOffForce()?.forced ?? null;
+      if (id === 'opaqueBlendOff') return getVtPanViewerOpaqueBlendOffForce()?.forced ?? null;
+      return null;
+    },
+    /**
+     * @param {'maskNode'|'opaqueBlendOff'} id
+     * @param {boolean|null} mode
+     * @returns {Promise<{ok: boolean, error?: string}>}
+     */
+    restartViewerWithForcedShaderVariant: async (id, mode) => {
+      if (id === 'maskNode') setVtPanViewerMaskNodeOffForce(mode);
+      else if (id === 'opaqueBlendOff') setVtPanViewerOpaqueBlendOffForce(mode);
+      else return { ok: false, error: `unknown forced shader variant id: ${id}` };
+      return restartRealSceneViewerAndSettle(`${id} A/B`);
+    },
   };
+
+  /**
+   * Restart the real-scene viewer on the CURRENTLY VIEWED floor and wait for
+   * it to genuinely settle — the shared mechanics behind every forced-
+   * shader-variant restart (CAS's own `restartViewerWithAlbedoClarityForce`
+   * above has an inline copy of this exact sequence; this is a fresh
+   * extraction for the two NEW callers, not a refactor of that proven path).
+   * Caller sets whichever module-level force flag it needs BEFORE calling
+   * this — never after, `startRealSceneViewer` reads it during construction.
+   * @param {string} progressLabel - shown in the perf-progress line while
+   *   settling, e.g. 'maskNode A/B'.
+   * @returns {Promise<{ok: boolean, error?: string}>}
+   */
+  async function restartRealSceneViewerAndSettle(progressLabel) {
+    const sceneDoc = getActiveSceneDoc();
+    const floorsResult = getActiveSceneFloors(sceneDoc);
+    if (!floorsResult.ok) {
+      return { ok: false, error: floorsResult.error ?? 'could not read this scene’s floors' };
+    }
+    const floorIndex = resolveFloorDescriptor(sceneDoc, floorsResult.floors);
+    stopVtPanViewer();
+    const result = await startRealSceneViewer(floorIndex);
+    if (result?.ok === false) return result;
+    // Same event-driven-wait-then-fixed-buffer shape as every other restart
+    // in this file — see restartViewerWithAlbedoClarityForce's own comment
+    // for why a full restart earns at least the same buffer a floor switch
+    // gets, never less (it reconstructs strictly more).
+    await waitForSceneSettled({
+      onProgress: (s) =>
+        showPerfProgress(
+          `${progressLabel} — viewer restarted, settling (${(s?.waitingFor ?? []).join(', ') || 'starting'})`
+        ),
+    }).catch(() => {});
+    await pause(FLOOR_CHANGE_SETTLE_BUFFER_MS);
+    return result;
+  }
 
   const perfHud = createPerfHud({
     profiler: perfProfiler,
@@ -4993,6 +5074,64 @@ function install() {
       } catch (err) {
         log.error(
           'perf report: folding sharpeningAB into findings[] failed (the measurement above is still valid):',
+          err
+        );
+      }
+
+      // PHASE 4B: SHADER-VARIANT A/B (2026-08-26, diag/perf-shader-variant-ab.js)
+      // — same restart-based family as Phase 4 just above (grouped with it,
+      // not renumbered into it: two toggles this time, maskNode and
+      // opaqueBlendOff, both never-yet-measured — see
+      // shaderVariantAbEnabled's own declaration for why this is a SEPARATE
+      // kill switch from sharpeningAbEnabled). Positioned before Phase 5 (the
+      // tier sweep) for the same reason Phase 4 is: every phase before the
+      // tier sweep should keep measuring the author's REAL, currently-
+      // configured tier, not one the tier sweep is mid-way through forcing.
+      let shaderVariantAB = null;
+      if (shaderVariantAbEnabled) {
+        try {
+          showPerfProgress(
+            'shader-variant A/B — restarting the viewer to compare maskNode/opaqueBlendOff (this is slow)…'
+          );
+          shaderVariantAB = await runShaderVariantAB(profileHarness, {
+            onProgress: (phase, detail) => {
+              log.info(`perf report: ${phase}${detail ? ` — ${detail}` : ''}`);
+              showPerfProgress(formatPerfProgressText(phase, detail));
+            },
+          });
+        } catch (err) {
+          log.error('perf report: shader-variant A/B phase failed — everything above is still valid:', err);
+          shaderVariantAB = {
+            ran: false,
+            skipped: 'threw',
+            note: `shader-variant A/B phase threw: ${err?.message ?? err}`,
+            toggles: [],
+          };
+        } finally {
+          hidePerfProgress();
+        }
+      } else {
+        shaderVariantAB = {
+          ran: false,
+          skipped: 'disabled-by-default',
+          note: 'Off by default — the real cost of up to 8 viewer restarts (2 toggles x 4 each) has never been timed live. Enable with MapShine.setShaderVariantAbEnabled(true) before running perf-run-full — recommend running one toggle at a time first via the console (runShaderVariantAB(harness, {toggleIds:["maskNode"]})) before an unattended full sweep.',
+          toggles: [],
+        };
+      }
+      lastPerfProfile.shaderVariantAB = shaderVariantAB;
+      // FOLD INTO findings[] — same doctrine as sharpeningAB just above.
+      // `shader-variant-ab` idPrefix so this can never collide with
+      // `structural-ab:`/`structural-ab-floors:`/`sharpening-ab:` ids.
+      try {
+        if (shaderVariantAB?.ran === true) {
+          const newFindings = structuralAbFindingsFor(shaderVariantAB.toggles, { idPrefix: 'shader-variant-ab' });
+          if (newFindings.length > 0) {
+            lastPerfProfile.findings = sortFindingsBySeverity([...(lastPerfProfile.findings ?? []), ...newFindings]);
+          }
+        }
+      } catch (err) {
+        log.error(
+          'perf report: folding shaderVariantAB into findings[] failed (the measurement above is still valid):',
           err
         );
       }

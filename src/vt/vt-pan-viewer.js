@@ -79,6 +79,7 @@ import {
   buildCoverageCellMask,
   buildCoverageIndices,
   splitCoverageCellMask,
+  summarizeTileCoverage,
   COVERAGE_MESH_CELLS,
 } from './coverage-mesh.js';
 import {
@@ -632,6 +633,17 @@ function disposeActive() {
         // tile.
         t.splitInteriorMaterial?.dispose();
         t.tex?.dispose();
+        // Case-1 vegetation ground shadow (`vegetation-shadow-subsystem.js#
+        // attachTileShadow`) — a REAL second geometry + material twinning this
+        // tile's own, stored on `t.shadow` (see that function's own header).
+        // Missed here until now (found auditing this loop against Case-2's
+        // sibling below, which already disposes `entry.shadow.*` — the exact
+        // "third mesh location the cleanup forgot" bug class already fixed
+        // once for Case-2, reproduced for Case-1). Without this, every
+        // self-shadowing tile leaked one geometry + one NodeMaterial into
+        // VRAM on every scene switch.
+        t.shadow?.geometry?.dispose();
+        t.shadow?.material?.dispose();
       } catch (_) {
         // A handle already freed (or a texture that never finished uploading)
         // can throw on dispose; renderer.dispose() below frees the backend
@@ -3391,24 +3403,29 @@ export async function startVtPanViewer({
       // bug. Two states, one number, no way to tell them apart: the same
       // instrument gap that hid sky-reach for three rounds
       // (feedback_instruments_must_not_lie).
-      lastRegionGating = {
+      //
+      // RAW ingredients only, stored — not the full `bands` breakdown (2026-08-
+      // 25). `bands` is a `.map()` building one wrapper object per region, and
+      // this function runs every frame via `runLightAccumulatePass` whether or
+      // not `getRegionDarknessInfo` (the debug panel's on-demand reader, the
+      // ONLY consumer) is ever called. `regions` is safe to hold a bare
+      // reference to: `readActiveDarknessRegions` (foundry/scene-regions.js)
+      // allocates a brand-new array + adjuster objects every call, never
+      // mutates a previous one, so this can never go stale-in-place under the
+      // reader.
+      lastRegionGatingRaw = {
         floorIndex: view?.floorIndex ?? null,
-        floorBand: { bottom: floorBottom, top: floorTop },
-        failedOpen: floorBottom === null && floorTop === null,
-        total: regions.length,
-        kept: filtered.length,
-        dropped: regions.length - filtered.length,
-        bands: regions.map((r) => ({
-          key: r.key,
-          bottom: r.elevationBottom ?? null,
-          top: r.elevationTop ?? null,
-          kept: regionOverlapsElevationBand(r.elevationBottom, r.elevationTop, floorBottom, floorTop),
-        })),
+        floorBottom,
+        floorTop,
+        regions,
+        filteredCount: filtered.length,
       };
       return { regions: filtered, currentFloor };
     }
-    /** The last elevation-gating decision, verbatim — see its assignment above. */
-    let lastRegionGating = null;
+    /** The last elevation-gating decision's raw ingredients — see the
+     * assignment above. `getRegionDarknessInfo` builds the full `bands`
+     * breakdown from this lazily, on read, instead of every frame. */
+    let lastRegionGatingRaw = null;
 
     function updateRegionDarknessMeshes(darkness01, activeRegions) {
       for (let i = 0; i < activeRegions.length; i++) {
@@ -5693,10 +5710,19 @@ export async function startVtPanViewer({
         // its own header. A lookup failure must not silently stop casting
         // shadows on the one floor the viewer definitely knows about.
         const floorsResultForSunShadows = floorsResultForFrame;
+        // `env.time?.realMs` — the SAME wall clock (never a fresh
+        // `performance.now()`) the water bake below and
+        // `pollMaskAuthorityForWindRebake` already use, `?? 0` for the
+        // identical reason: an early frame before the env snapshot exists
+        // must not throttle, only a legitimately-ticking clock should. Throttles
+        // the ACTUAL bake only, never the cheap version check — see
+        // `sun-shadow-subsystem.js`'s own `SUN_SHADOW_BAKE_THROTTLE_MS` doc,
+        // mirrored from water's `lastBakeWallClockMs` (`water-body-subsystem.js`).
+        const sunShadowBakeNowMs = env.time?.realMs ?? 0;
         if (floorsResultForSunShadows.ok && floorsResultForSunShadows.floors.length > 0) {
-          for (const floor of floorsResultForSunShadows.floors) sunShadows.maybeBake(floor.index);
+          for (const floor of floorsResultForSunShadows.floors) sunShadows.maybeBake(floor.index, sunShadowBakeNowMs);
         } else {
-          sunShadows.maybeBake(view?.floorIndex ?? 0);
+          sunShadows.maybeBake(view?.floorIndex ?? 0, sunShadowBakeNowMs);
         }
       }
       // Every frame, for every SLOT, not just on a real rebake: a slot's
@@ -9033,9 +9059,14 @@ export async function startVtPanViewer({
      * camera, which is both cheaper and impossible to compound (the exact bug
      * class the deleted reframe path produced live on 2026-07-15).
      */
-    function updateCamera() {
+    function updateCamera(precomputedRect) {
       if (!view) return;
-      const rect = viewToWorldRect(view, canvasW / canvasH);
+      // `renderFrame` already computes this exact rect (same `view`/`canvasW`/
+      // `canvasH`, unchanged since) to share with `windSpawnRect` and
+      // `envLight.setViewRect` — accepting it here avoids a third identical
+      // `viewToWorldRect` call/allocation every frame (2026-08-25). Falls back
+      // to computing it locally so this function stays correct standalone.
+      const rect = precomputedRect ?? viewToWorldRect(view, canvasW / canvasH);
       const f = computeCameraFrustum(rect);
       camera.left = f.left;
       camera.right = f.right;
@@ -10443,6 +10474,14 @@ export async function startVtPanViewer({
         }
         t.segments = 1;
         t.coverageSig = 'quad';
+        // Numeric siblings of `coverageSig` (2026-08-25, PERF INSTRUMENT) — a
+        // plain quad has exactly one logical cell, always fully drawn.
+        // `getGeometryComposition`'s coverage summary reads these directly
+        // rather than parsing the signature string; `t.coverageGrid` (set
+        // above) is what actually distinguishes "never evaluated" from
+        // "evaluated, found fully dense" for this tile.
+        t.coverageCells = 1;
+        t.coverageOccupied = 1;
         // A single un-tessellated quad has no cells to split; make sure a tile
         // that USED to carry a split does not keep stale groups (a placement
         // change can drop a tile from meshed to quad).
@@ -10518,6 +10557,14 @@ export async function startVtPanViewer({
         }
         t.coverageSig = fullSig;
       }
+      // Numeric siblings of `coverageSig` (2026-08-25, PERF INSTRUMENT) — see
+      // the `n<=1` branch above for why these exist beside the string. `mask`
+      // truthy always means `occupiedCount < n*n` (buildCoverageCellMask's own
+      // "nothing to gain" contract returns null otherwise), so `occupied` here
+      // reliably tells `summarizeTileCoverage` a real reduction happened
+      // without re-deriving it from the signature.
+      t.coverageCells = n * n;
+      t.coverageOccupied = mask ? mask.occupiedCount : n * n;
       t.segments = n;
     }
 
@@ -10750,6 +10797,13 @@ export async function startVtPanViewer({
                 floorAttrUniforms: floorAttrUniforms ?? null,
                 floorAttrItem: floorAttrItem ?? null,
                 uExpectedDepth: uExpectedDepth ?? null,
+                // Which material family this tile actually draws with — read
+                // by `getGeometryComposition`'s coverage/material summary
+                // (2026-08-25) so it can split owned triangles between the
+                // cheap `buildWholeImageMaterial` path and the pricier
+                // curl-noise+wind `buildVegetationMaterial` one, per-tile,
+                // without re-deriving it from `item.src`/effect state later.
+                vegActive,
               };
               // ⚠️ SET ON `wi` BEFORE `setTileGeometry` BELOW, NOT AFTER (fixed
               // 2026-08-13 — the S1a min-grid split was structurally unable to
@@ -10919,6 +10973,8 @@ export async function startVtPanViewer({
               floorAttrUniforms: floorAttrUniforms ?? null,
               floorAttrItem: floorAttrItem ?? null,
               uExpectedDepth: uExpectedDepth ?? null,
+              // See the compressed-path sibling above for why this is kept.
+              vegActive,
             };
             setTileGeometry(t, state.placement, imageW, imageH, vegSegments);
             const mesh = new THREE.Mesh(geometry, material);
@@ -11562,31 +11618,41 @@ export async function startVtPanViewer({
       // must reach this gate the same frame it reaches sway/flutter, not wait
       // for a residency pass the way render-order placement legitimately does.
       const vegState = getVegetationRenderState();
+      // TWO shared scratch args objects, mutated per item rather than a fresh
+      // literal allocated per call (2026-08-25 — this loop runs every frame
+      // over every tile/overlay on the map, e.g. 500+ allocations/frame on a
+      // busy scene for objects immediately thrown away). Safe because
+      // `refreshItemFloorAttrUniforms`/`computeFloorAttrValues` (scene-attr.js)
+      // only ever READ these fields synchronously within the call — neither
+      // stashes the args object itself anywhere. TWO instances, not one, so a
+      // vegetation call's `receiverHeightFt` can never leak into a plain
+      // tile's call on a later iteration (`computeFloorAttrValues` gates on
+      // `Number.isFinite(receiverHeightFt)`, so a stale non-finite value would
+      // silently change which floor-membership answer a tile gets).
+      const tileArgs = { item: null, viewedFloorIndex: view.floorIndex, sceneDoc, floorsResult, logError: log.error };
+      const vegArgs = {
+        item: null,
+        viewedFloorIndex: view.floorIndex,
+        sceneDoc,
+        floorsResult,
+        logError: log.error,
+        receiverHeightFt: undefined,
+      };
       for (const state of itemStates.values()) {
         if (state.wholeImage) {
           for (const t of state.wholeImage.tiles) {
             if (!t.floorAttrUniforms) continue;
-            refreshItemFloorAttrUniforms(t.floorAttrUniforms, {
-              item: t.floorAttrItem,
-              viewedFloorIndex: view.floorIndex,
-              sceneDoc,
-              floorsResult,
-              logError: log.error,
-            });
+            tileArgs.item = t.floorAttrItem;
+            refreshItemFloorAttrUniforms(t.floorAttrUniforms, tileArgs);
           }
         }
         if (state.vegetationOverlays) {
           for (const kind of VEGETATION_KINDS) {
             const entry = state.vegetationOverlays[kind.id];
             if (!entry || entry.status !== 'ready' || !entry.floorAttrUniforms) continue;
-            refreshItemFloorAttrUniforms(entry.floorAttrUniforms, {
-              item: entry.floorAttrItem,
-              viewedFloorIndex: view.floorIndex,
-              sceneDoc,
-              floorsResult,
-              logError: log.error,
-              receiverHeightFt: vegetationHeightFt(kind, vegState.params),
-            });
+            vegArgs.item = entry.floorAttrItem;
+            vegArgs.receiverHeightFt = vegetationHeightFt(kind, vegState.params);
+            refreshItemFloorAttrUniforms(entry.floorAttrUniforms, vegArgs);
           }
         }
       }
@@ -11823,8 +11889,16 @@ export async function startVtPanViewer({
     // use (matching the self-test's own lazy-allocation pattern) so a normal
     // session never pays for them.
     let debugFirstRenderProbeEnabled = false;
-    let debugForceMaskNodeOff = false;
-    let debugForceOpaqueBlendOff = false;
+    // SEEDED FROM THE MODULE-LEVEL PENDING FORCE (2026-08-26), same shape as
+    // `_albedoClarityForce` — see `_maskNodeOffForce`'s own header comment for
+    // why an instance-scoped flag alone has no way to receive a value set
+    // BEFORE this exact construction runs. `=== true` (not `?? false`): an
+    // unset (`null`) or explicit `false` pending both mean "start at today's
+    // ordinary default", the same default this line already had before this
+    // change — a normal `startVtPanViewer()` call with no A/B in flight is
+    // completely unaffected.
+    let debugForceMaskNodeOff = _maskNodeOffForce === true;
+    let debugForceOpaqueBlendOff = _opaqueBlendOffForce === true;
     let debugProbeScene = null;
     let debugProbeCamera = null;
     let debugProbeTarget = null;
@@ -11922,14 +11996,15 @@ export async function startVtPanViewer({
 
     /**
      * STAGE 2's revert flag (S2.4, `docs/planning/Point-Light-Batching-
-     * Design.md` §8's rollout order). Default OFF: nothing reads this yet
-     * (S2.5, "pool integration", is its first real caller — the same
-     * "wall built before the room it governs" shape S2.2's bucket module
-     * already used, `docs/holy/V4-Testament.md`'s S2.2 entry). Unlike
-     * `earlyZComposition`, flipping it needs no `scheduleResidencyUpdate()`
+     * Design.md` §8's rollout order). ⚠️ Default is `true` — flipped
+     * 2026-08-12 at the author's own direction once S2.5-S2.7 landed and
+     * passed their pixel gate ("make the fix from your previous output ON
+     * by default"); this doc comment had drifted stale, corrected 2026-08-26.
+     * Unlike `earlyZComposition`, flipping it needs no `scheduleResidencyUpdate()`
      * nudge: point lights fully reconcile every frame regardless (`point-
      * light-pool.js#update`), so the very next frame after a flip already
-     * reads the new value.
+     * reads the new value — which is also why its structural A/B entry
+     * (`diag/perf-structural-ab.js`) needs no `settleFrames` override.
      */
     let pointLightBatching = true;
 
@@ -12269,7 +12344,20 @@ export async function startVtPanViewer({
       // now computes openness within, so a mote can never exist somewhere
       // wind was never even calculated for. Computed ONCE and shared by both
       // engines below — identical expression, one clamp, not two.
-      const windSpawnRect = clampRectToBounds(viewToWorldRect(view, canvasW / canvasH), dimensions.sceneRect);
+      //
+      // `currentViewRect` (2026-08-25): the raw, UNCLAMPED rect this expression
+      // wraps is ALSO what `updateCamera` and `envLight.setViewRect` need below
+      // — same `view`/`canvasW`/`canvasH`, provably unchanged between here and
+      // there (nothing in between reassigns any of the three; `updateCamera`
+      // only ever WRITES `camera`/`depthCamera`, never `view` itself). Computed
+      // once here and threaded through both call sites instead of each calling
+      // `viewToWorldRect` again for an identical result. This must stay BEFORE
+      // the pass plan (below), exactly like the old per-call-site placement —
+      // see the `envLight.setViewRect` call's own header for why that ordering
+      // (not which line computes the value) is what the 2026-08-15 one-frame-
+      // stale-water fix actually depends on.
+      const currentViewRect = viewToWorldRect(view, canvasW / canvasH);
+      const windSpawnRect = clampRectToBounds(currentViewRect, dimensions.sceneRect);
       if (windParticlesEnabled && view && particleEngine) {
         profiler?.begin(Z.simsDust);
         particleEngine.step(renderer, {
@@ -12329,7 +12417,7 @@ export async function startVtPanViewer({
       // a drag track the cursor at display rate without waiting on streaming,
       // and it is the single place the Y-flip is applied (see updateCamera).
       profiler?.begin(Z.tickCamera);
-      updateCamera();
+      updateCamera(currentViewRect);
       // envLight's SHARED screen→world rect — MOVED HERE 2026-08-15, one call
       // ahead of the pass plan below, not left beside `setAmbient` inside
       // `runLightAccumulatePass` where it used to live. THE BUG THIS FIXES:
@@ -12352,7 +12440,7 @@ export async function startVtPanViewer({
       // ONE shared push earlier fixes it for every consumer, present and
       // future, rather than special-casing water's own earlier pass — see
       // `keyhole-water-depth-authority-migration.md` for the fuller account.
-      if (view) envLight.setViewRect(viewToWorldRect(view, canvasW / canvasH));
+      if (view) envLight.setViewRect(currentViewRect);
       profiler?.end(Z.tickCamera);
 
       // TWO PASSES, FOR REAL (2026-07-17), NOW GRAPH-DRIVEN (2026-07-18).
@@ -13441,24 +13529,47 @@ export async function startVtPanViewer({
           // `t.mesh?.visible` — cheap, and an invisible tile's uniform
           // should not be allowed to go stale for whenever it next shows.
           if (t.uExpectedDepth) t.uExpectedDepth.value = computeTieSafeExpectedDepth(rank, maxRank);
-          // STAGE-0 A/B (2026-08-10, debug-only, OFF by default): measures the
-          // rgba16f MRT read-modify-write tax `light.accumulate`'s blend pays
-          // for opaque colour-pass draws that don't need it. Gated on the SAME
-          // `alwaysOpaque` signal buildSceneDepthWriterMaterial already trusts
-          // (real decoded source alpha, every texel >= threshold) — for those
-          // items blending is a mathematical no-op (src·1 + dst·0 = src), so
-          // this should be visually lossless, not a "wrong pixels" experiment
-          // like the maskNode one above. `needsUpdate` forces the NodeMaterial
-          // to recompile its pipeline with the new blend state.
-          if (debugForceOpaqueBlendOff && alwaysOpaque && t.material && t.material.transparent !== false) {
-            t.material.transparent = false;
-            t.material.needsUpdate = true;
-          }
           // STAGE 1 — composition state for THIS tile, before the visibility
           // check below: an invisible tile must already be in the right state
           // for the frame it becomes visible again, the same reason
-          // `uExpectedDepth` above is refreshed unconditionally.
+          // `uExpectedDepth` above is refreshed unconditionally. MOVED AHEAD OF
+          // the STAGE-0 A/B block below (2026-08-26) — that block needs this
+          // call's own `t.earlyZReason` write to be FRESH for the current
+          // pass, not last pass's value; see that block's own comment.
           applyEarlyZTileState(t, alphaStats, z);
+          // STAGE-0 A/B (2026-08-10, debug-only, OFF by default): measures the
+          // rgba16f MRT read-modify-write tax opaque colour-pass draws pay for
+          // blending they don't strictly need. Gated on the SAME `alwaysOpaque`
+          // signal `buildSceneDepthWriterMaterial` already trusts (real decoded
+          // source alpha, every texel >= threshold) — but that alone is NOT
+          // sufficient for this to be lossless, and originally shipped without
+          // the three checks below (found 2026-08-26, reading the code for the
+          // first restart-based A/B around this flag): a tile can have a
+          // 100%-opaque TEXTURE while still being DESIGNED to fade — a live
+          // occlusion-responsive roof, an authored `uAlpha` animation, or a
+          // vegetation tile's own dynamic system. Forcing `transparent:false`
+          // on one of those doesn't just mis-measure, it disables blending
+          // outright regardless of what the shader computes for alpha that
+          // frame — the roof gets stuck fully opaque for as long as the flag
+          // is armed. `earlyZInteriorVerdict` (just run, above) already solved
+          // exactly this exclusion for Stage 1's own 'interior' fast path —
+          // reusing its `t.earlyZReason` here, rather than re-deriving the
+          // same three checks a second time, is what keeps the two mechanisms
+          // from being able to drift apart on what "safe to force" means.
+          // `needsUpdate` forces the NodeMaterial to recompile its pipeline
+          // with the new blend state.
+          if (
+            debugForceOpaqueBlendOff &&
+            alwaysOpaque &&
+            t.earlyZReason !== 'vegetation' &&
+            t.earlyZReason !== 'occlusionResponsive' &&
+            t.earlyZReason !== 'authoredAlpha' &&
+            t.material &&
+            t.material.transparent !== false
+          ) {
+            t.material.transparent = false;
+            t.material.needsUpdate = true;
+          }
           if (!t.mesh?.visible) continue;
           const writerArgs = {
             THREE,
@@ -16080,12 +16191,32 @@ export async function startVtPanViewer({
       setDebugForceMaskNodeOff(on) {
         debugForceMaskNodeOff = !!on;
       },
+      /** Read-back for `setDebugForceMaskNodeOff` — added 2026-08-26 so the
+       * maskNode structural A/B (`diag/perf-shader-variant-ab.js`) can read
+       * the state it is about to restore into a viewer restart, the same
+       * "never flip a switch blind" discipline every other forced-variant
+       * override in this codebase already follows (see
+       * `getVtPanViewerAlbedoClarityForce`'s own doc). */
+      getDebugForceMaskNodeOff() {
+        return { debugForceMaskNodeOff };
+      },
       /** Stage-0 A/B: forces blending off on colour-pass tiles the engine
        * already knows are fully opaque. Mutates already-built materials live
        * on the next residency pass (no reload required), matching how
-       * `uExpectedDepth` itself is kept live. */
+       * `uExpectedDepth` itself is kept live. Nudges residency explicitly
+       * (2026-08-26, same reasoning as `setEarlyZComposition`) — without it,
+       * a PARKED structural-AB measurement (the camera never moves, so
+       * nothing else would trigger a residency pass) could sit flipped with
+       * no material ever actually re-checking it. */
       setDebugForceOpaqueBlendOff(on) {
-        debugForceOpaqueBlendOff = !!on;
+        const next = !!on;
+        if (next === debugForceOpaqueBlendOff) return { debugForceOpaqueBlendOff, changed: false };
+        debugForceOpaqueBlendOff = next;
+        scheduleResidencyUpdate();
+        return { debugForceOpaqueBlendOff, changed: true };
+      },
+      getDebugForceOpaqueBlendOff() {
+        return { debugForceOpaqueBlendOff };
       },
       /**
        * STAGE 1's revert flag (see `earlyZComposition`'s own declaration).
@@ -18033,7 +18164,31 @@ export async function startVtPanViewer({
           // floor's darkness lands on the one you are looking at, in building-
           // shaped patches that read exactly like a broken shadow. `dropped: 0`
           // with `failedOpen: false` is the healthy single-floor answer.
-          elevationGating: lastRegionGating ?? 'not yet evaluated',
+          // Built lazily from the raw ingredients `readElevationFilteredDarkness
+          // Regions` stashes every frame — see `lastRegionGatingRaw`'s own doc
+          // for why the `.map()` moved here instead of running unconditionally
+          // on the hot path.
+          elevationGating: lastRegionGatingRaw
+            ? {
+                floorIndex: lastRegionGatingRaw.floorIndex,
+                floorBand: { bottom: lastRegionGatingRaw.floorBottom, top: lastRegionGatingRaw.floorTop },
+                failedOpen: lastRegionGatingRaw.floorBottom === null && lastRegionGatingRaw.floorTop === null,
+                total: lastRegionGatingRaw.regions.length,
+                kept: lastRegionGatingRaw.filteredCount,
+                dropped: lastRegionGatingRaw.regions.length - lastRegionGatingRaw.filteredCount,
+                bands: lastRegionGatingRaw.regions.map((r) => ({
+                  key: r.key,
+                  bottom: r.elevationBottom ?? null,
+                  top: r.elevationTop ?? null,
+                  kept: regionOverlapsElevationBand(
+                    r.elevationBottom,
+                    r.elevationTop,
+                    lastRegionGatingRaw.floorBottom,
+                    lastRegionGatingRaw.floorTop
+                  ),
+                })),
+              }
+            : 'not yet evaluated',
           // The shared uniforms EVERY region's material actually reads —
           // if either of these is near [0,0,0], that alone is the bug
           // (a region overwrites its footprint with mix(daylight,darkness,
@@ -18208,8 +18363,11 @@ export async function startVtPanViewer({
        * 10ms number into "here's what's actually in it" — real information the
        * perf report currently has none of.
        * @returns {{byKind: Array<{kind:string, items:number, meshes:number,
-       *   trianglesOwned:number, unresolvedItems:number}>, totalTriangles:number,
-       *   totalMeshes:number, totalItems:number, note:string}}
+       *   trianglesOwned:number, unresolvedItems:number,
+       *   coverage?: ReturnType<typeof summarizeTileCoverage>}>,
+       *   totalTriangles:number, totalMeshes:number, totalItems:number,
+       *   coverageMeshSummary: ReturnType<typeof summarizeTileCoverage>&{note:string},
+       *   note:string}}
        */
       getGeometryComposition: () => {
         const countMeshTriangles = (mesh) => {
@@ -18223,11 +18381,19 @@ export async function startVtPanViewer({
         const groupFor = (kind) => {
           let g = groups.get(kind);
           if (!g) {
-            g = { kind, items: 0, meshes: 0, triangles: 0, unresolvedItems: 0 };
+            // `tiles` is bookkeeping ONLY — accumulated so `summarizeTileCoverage`
+            // (2026-08-25) can run once per kind below, then stripped before
+            // this function returns (see byKind's own .map). Never serialized.
+            g = { kind, items: 0, meshes: 0, triangles: 0, unresolvedItems: 0, tiles: [] };
             groups.set(kind, g);
           }
           return g;
         };
+        // Flat across every whole-image kind, for the top-level summary below —
+        // a SEPARATE array from each group's own `g.tiles` (same tile objects,
+        // just also collected here) rather than concatenating the groups later,
+        // so a kind with zero tiles doesn't need special-casing either place.
+        const allWholeImageTiles = [];
         for (const item of lastItems) {
           const kind = item.kind ?? 'unknown';
           const g = groupFor(kind);
@@ -18242,6 +18408,8 @@ export async function startVtPanViewer({
               continue;
             }
             for (const t of tiles) {
+              g.tiles.push(t);
+              allWholeImageTiles.push(t);
               if (!t.mesh?.visible) continue;
               g.meshes += 1;
               g.triangles += countMeshTriangles(t.mesh);
@@ -18275,13 +18443,45 @@ export async function startVtPanViewer({
           }
         }
         const byKind = [...groups.values()]
-          .map(({ triangles, ...rest }) => ({ ...rest, trianglesOwned: Math.round(triangles) }))
+          .map(({ triangles, tiles, ...rest }) => ({
+            ...rest,
+            trianglesOwned: Math.round(triangles),
+            // Only whole-image kinds accumulated tiles above; a kind with none
+            // (vegetationOverlay/token/unknown) gets no `coverage` key at all
+            // rather than a zeroed-out one that would read as "evaluated, found
+            // nothing" — that would be Rule-1's fabricated-zero mistake one
+            // level up (`feedback_instruments_must_not_lie`).
+            ...(tiles.length > 0 ? { coverage: summarizeTileCoverage(tiles) } : {}),
+          }))
           .sort((a, b) => b.trianglesOwned - a.trianglesOwned);
         return {
           byKind,
           totalTriangles: byKind.reduce((sum, g) => sum + g.trianglesOwned, 0),
           totalMeshes: byKind.reduce((sum, g) => sum + g.meshes, 0),
           totalItems: lastItems.length,
+          // COVERAGE-MESH EFFECTIVENESS, ACROSS EVERY WHOLE-IMAGE KIND
+          // (2026-08-25, Testament Pillar-1-adjacent PERF INSTRUMENT — see
+          // `summarizeTileCoverage`'s own header in coverage-mesh.js). Answers
+          // "is coverage meshing actually reaching this map's art, and how much
+          // is it cutting" directly, where before the only way to find out was
+          // reading `t.coverageSig` off a live tile record by hand.
+          coverageMeshSummary: {
+            ...summarizeTileCoverage(allWholeImageTiles),
+            note:
+              'neverEvaluated tiles are drawing an un-reduced quad/tessellation purely ' +
+              "because their coverage grid hasn't arrived yet (or never resolved) — not " +
+              'because meshing looked and found nothing to cut. A large count here in a ' +
+              'STEADY-STATE capture (not just moments after load) means content is paying ' +
+              'full fill rate for a reason that has nothing to do with how much of it is ' +
+              'actually painted. fullyDense tiles were evaluated and correctly left ' +
+              'un-reduced (near-100% painted, or the grid was unusable for some other ' +
+              'fail-open reason) — not a gap. plainTriangles vs vegetationTriangles splits ' +
+              'owned triangles by material family: a vegetation-tessellated tile ' +
+              '(curl-noise + wind-sampled buildVegetationMaterial) was independently ' +
+              "measured at up to 97% of geometry.worldDraw's cost on its own in one prior " +
+              'investigation, a fault line the levelBackground/tile/levelForeground kind ' +
+              'split above does not follow.',
+          },
           note:
             'Counts triangles a mesh OWNS, not what the GPU actually had to paint: an ' +
             'off-screen or fully-overlapped item still counts fully, and see-through ' +
@@ -18842,6 +19042,58 @@ export function getVtPanViewerAlbedoClarityForce() {
 }
 
 /**
+ * DIAGNOSTIC-ONLY (2026-08-26), SAME SHAPE AND SAME REASON AS `_albedoClarityForce`
+ * ABOVE — read this file's own header comment on that variable before touching
+ * either of these two. `debugForceMaskNodeOff`/`debugForceOpaqueBlendOff` (both
+ * declared inside `startVtPanViewer`, instance-scoped) have NO seed path from
+ * outside: the console setters on the active instance either mutate the
+ * instance about to be torn down (before a restart) or race the new one still
+ * loading tiles (after) — the exact "wiring gap, not a measurement result"
+ * class of problem `runSharpeningAB` already checks for. These two module-level
+ * pendings are read once, at construction, by the two `let` seeds inside
+ * `startVtPanViewer` — see those declarations' own comments — so a restart
+ * genuinely picks up the forced value instead of silently keeping the default.
+ * `diag/perf-shader-variant-ab.js` is the only intended caller.
+ * @type {boolean|null}
+ */
+let _maskNodeOffForce = null;
+/** @type {boolean|null} */
+let _opaqueBlendOffForce = null;
+
+/**
+ * Force `material.maskNode` (the depth-authority discard) present or absent
+ * for the NEXT material build. `true` = OFF (no discard — WRONG PIXELS while
+ * armed, overdraw a higher-ranked layer would normally reject now survives to
+ * shading; see `material.maskNode`'s own comment in `buildWholeImageMaterial`),
+ * `false` = present (today's normal behaviour), `null` = clear (resolve to the
+ * ordinary default, `false`). Changes nothing on screen by itself — only the
+ * next viewer restart's freshly-built materials see it.
+ * @param {boolean|null} mode
+ */
+export function setVtPanViewerMaskNodeOffForce(mode) {
+  _maskNodeOffForce = mode === true || mode === false ? mode : null;
+}
+/** @returns {{forced: boolean|null}} */
+export function getVtPanViewerMaskNodeOffForce() {
+  return { forced: _maskNodeOffForce };
+}
+
+/**
+ * Force `debugForceOpaqueBlendOff` for the NEXT material build — see that
+ * flag's own doc inside `startVtPanViewer` for what it does and the safety
+ * guard (`UNSAFE_TO_FORCE_OPAQUE_REASONS`) that scopes it. `true` = forced on,
+ * `false` = forced off (today's normal behaviour), `null` = clear.
+ * @param {boolean|null} mode
+ */
+export function setVtPanViewerOpaqueBlendOffForce(mode) {
+  _opaqueBlendOffForce = mode === true || mode === false ? mode : null;
+}
+/** @returns {{forced: boolean|null}} */
+export function getVtPanViewerOpaqueBlendOffForce() {
+  return { forced: _opaqueBlendOffForce };
+}
+
+/**
  * A 2³ identity 3D LUT texture — the placeholder the Colour Grade's LUT sampler
  * always compiles against, so `setLut` can later swap in a real `.cube` without
  * a shader rebuild. An identity LUT is a mathematical no-op, so it is invisible
@@ -19388,10 +19640,10 @@ export function getVtPanViewerReckoningCensus() {
 
 /**
  * STAGE 2's revert flag — point-light batching (S2.4,
- * `docs/planning/Point-Light-Batching-Design.md`). Default OFF; ON, lights
- * sharing one compiled material draw as ONE merged mesh instead of one draw
- * per light. Nothing reads this yet — S2.5 (pool integration) is its first
- * real consumer. Call as `MapShine.setPointLightBatching(true)`.
+ * `docs/planning/Point-Light-Batching-Design.md`). Default `true` (since
+ * 2026-08-12) — lights sharing one compiled material draw as ONE merged
+ * mesh instead of one draw per light, live in production. Call as
+ * `MapShine.setPointLightBatching(false)` to revert to the per-light path.
  */
 export function setVtPanViewerPointLightBatching(on) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };

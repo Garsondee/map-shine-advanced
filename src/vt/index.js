@@ -141,6 +141,12 @@ export {
   // albedo-clarity.js) — this one needs a viewer restart to take effect.
   setVtPanViewerAlbedoClarityForce,
   getVtPanViewerAlbedoClarityForce,
+  // SAME SHAPE, 2026-08-26 — see setVtPanViewerMaskNodeOffForce's own header
+  // in vt-pan-viewer.js for why these two also need a restart, not a live set.
+  setVtPanViewerMaskNodeOffForce,
+  getVtPanViewerMaskNodeOffForce,
+  setVtPanViewerOpaqueBlendOffForce,
+  getVtPanViewerOpaqueBlendOffForce,
   setUiShadow,
   getUiShadow,
 } from './vt-pan-viewer.js';

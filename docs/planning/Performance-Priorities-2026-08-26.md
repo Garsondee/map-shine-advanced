@@ -79,12 +79,51 @@ now that the measured cost is confirmed negligible, spending a 15-20s reload on 
 chase a ~0.05ms saving is a bad trade; the honest-labeling fix addresses the actual complaint
 (confusing UX) without the disruptive cost.
 
-**Net effect: two of the four Bug-#21/CAS-adjacent hypotheses for `geometry.worldDraw`'s cost are
-now eliminated with real, direct measurements — not theory.** Combined with the two Priority-3-era
-eliminations already logged above (not vegetation, not under-culled tiles), FOUR real hypotheses are
-now ruled out. `geometry.worldDraw`'s true cause is still genuinely unexplained — this is real
-progress (eliminating wrong answers), not a dead end, but the next lever is not yet identified and
-would need fresh investigation, not something already sitting diagnosed in the corpus.
+**Priority 2b — CLOSED, measured, NOT a real cost (either one).** Ingram ran the new shader-variant
+A/B (`MapShine.setShaderVariantAbEnabled(true)` + `perf-run-full`, `generatedAt
+2026-08-26T18:27:42.703Z`, 8 real viewer restarts total) built specifically to answer the "overdraw"
+and "alpha-blend cost" questions the base-map-art audit raised. Both came back negative:
+- **`maskNode`** (removes the depth-authority discard entirely, so every fragment survives to
+  shading regardless of what's already covered): `verdict: 'pays-for-itself'`, but the magnitude is
+  tiny — `deltaGpuMs: -0.096ms` against a `0.053ms` noise floor (clears it, but only just). The
+  discard is worth keeping, but it is NOT hiding a large population of wasted, overdrawn fragments on
+  this content — if it were, removing it would have cost far more than a tenth of a millisecond.
+  **Overdraw is ruled out as `geometry.worldDraw`'s dominant cost.**
+- **`opaqueBlendOff`** (forces `transparent:false`, skipping the alpha-blend read-modify-write, on
+  tiles already certified fully opaque): `verdict: 'within-noise'` — `deltaGpuMs: 0.042ms` against a
+  `0.071ms` floor, does not clear it. **Alpha-blend mode is ruled out as a measurable cost at all**,
+  on this content.
+
+Bonus, found while wiring the tool up (not from this live run): a real, independent correctness bug
+in the pre-existing `debugForceOpaqueBlendOff` debug flag — it never checked the same three
+structural exclusions Stage 1's own classifier already established (`vegetation` /
+`occlusionResponsive` / `authoredAlpha`), so it could have forced opaque blending on a tile designed
+to fade (a live occlusion-responsive roof, an authored alpha animation), visibly breaking it. Fixed
+(`2e1d6ff`) by reusing the already-computed `t.earlyZReason` rather than re-deriving the same check;
+never reachable from the new A/B either way, since that tool is restart-based, not a live toggle.
+
+**Net effect: overdraw, alpha-blend cost, CAS sharpening, and Bug #21's second-renderer contention
+are now FOUR real, direct-measurement eliminations for `geometry.worldDraw`'s cost, on top of the two
+Priority-3-era eliminations already logged above (not vegetation, not under-culled tiles) — SIX total
+hypotheses ruled out.** `geometry.worldDraw`'s true cause is still genuinely unexplained, and the
+character of what's left has changed: every cheap, flag-flippable "are we doing wasted work"
+hypothesis has now been tested and closed negative. What remains is very likely real, substantive
+per-fragment shading cost — the actual arithmetic cost of `buildWholeImageMaterial`'s ~9 texture
+samples across 4 textures, run once per surviving fragment, at the frame's real fill area — not
+overhead this instrument's restart-based A/B pattern can isolate any further. Answering that needs a
+different kind of tool: either a literal GPU capture with per-shader-instruction timing (WebGPU
+Inspector, with the known caveat it breaks the Foundry visibility group —
+`reference_webgpu_inspector_breaks_foundry_visibility_group`), or a source-level pass counting and
+trimming exactly which of those ~9 samples are load-bearing per fragment vs. skippable in the common
+case. Both are real changes to the shader itself, not another debug-flag A/B — worth a decision
+before starting, not another silent build.
+
+**Bonus finding, same live capture, unrelated to the overdraw/blend question:** the main-window
+`pointLightBatching` A/B read `costs-more-than-it-saves` again (`deltaGpuMs: 0.052ms` clearing a
+`0.011ms` floor) — a FIFTH data point, and it fits the exact pattern Priority 4 below already
+diagnosed: `geometry.worldDraw` is the #1 mover (+0.047ms of the +0.052ms total), not any point-light
+zone. This confirms Priority 4's methodology finding again rather than adding new information — see
+that section, not a new investigation.
 
 ## Priority 1 — Confirm Bug #21's fix is actually engaged on this content (zero code, do this first)
 
@@ -155,15 +194,19 @@ either closes a standing `high`-severity finding or catches something worth know
 
 ## Priority 4 (methodology finding, not a code target) — point-light batching's A/B is testing the wrong axis on the wrong map
 
-Three consecutive structural-AB reads on this map, three different(-looking) verdicts:
-`within-noise` (13:25Z main), `within-noise` (13:25Z Roof), `within-noise` (14:06Z Roof), and
-**`costs-more-than-it-saves`** (14:06Z main, `deltaGpuMs: 0.144ms` clearing a `0.036ms` noise
-floor). Read the LAST one's own evidence before trusting the verdict: **`geometry.worldDraw` is
-the #1 mover (+0.096ms of the +0.144ms total) — not any point-light zone.** `light.
-drawPointLights` itself moved -0.003ms; `light.pointLightBatchReconcile` (the actual Stage-2
-mechanism) is CPU-only (`kind:'cpu'`, `gpuAbsentByDeclaration:true`) and structurally **cannot
-appear in a GPU-ms comparison at all** — its entire cost (0.03ms mean) is invisible to this test by
-construction.
+Five structural-AB reads on this map now, most `within-noise`, two `costs-more-than-it-saves`:
+`within-noise` (13:25Z main), `within-noise` (13:25Z Roof), `within-noise` (14:06Z Roof),
+`costs-more-than-it-saves` (14:06Z main, `deltaGpuMs: 0.144ms` clearing a `0.036ms` noise floor), and
+**`costs-more-than-it-saves`** again (18:27Z main, `deltaGpuMs: 0.052ms` clearing a `0.011ms` floor).
+Read both "costs more" reads' own evidence before trusting the verdict: in both, **`geometry.
+worldDraw` is the #1 mover** (+0.096ms of +0.144ms at 14:06Z; +0.047ms of +0.052ms at 18:27Z) — not
+any point-light zone. `light.drawPointLights` itself moved -0.003ms/-0.001ms respectively;
+`light.pointLightBatchReconcile` (the actual Stage-2 mechanism) is CPU-only (`kind:'cpu'`,
+`gpuAbsentByDeclaration:true`) and structurally **cannot appear in a GPU-ms comparison at all** —
+its entire cost (0.03ms mean) is invisible to this test by construction. Two "costs more" reads out
+of five is consistent with `geometry.worldDraw`'s own known 0.1–0.7ms run-to-run jitter deciding the
+verdict at random, not with a real, repeatable point-light cost — exactly what this section already
+predicted before either "costs more" read existed.
 
 **Two structural reasons this toggle can't get a clean answer on this map, neither of which is a
 code defect:**
@@ -231,9 +274,17 @@ resident already). Leave deferred.
 
 ## What the NEXT live capture should specifically re-check
 
-1. `interface-seam`/Reckoning `primaryRenderable` field, live, with a controlled token (Priority 1).
-2. A `MapShine.setSharpeningAbEnabled(true)` run, if Priority 1 doesn't fully explain worldDraw
-   (Priority 2) — the only way to see CAS sharpening's real cost through this instrument.
-3. Whether `window`'s declared budget was updated or the implementation re-checked (Priority 3).
-4. If point-light batching is ever tested again, do it on the Mansion, not Town River Bridge
-   (Priority 4) — or build the CPU-side A/B this toggle actually needs.
+Priorities 1, 2, and 2b are now CLOSED (Bug #21 confirmed engaged; CAS sharpening, overdraw, and
+alpha-blend cost all measured negligible) — no further re-checking needed on any of the three.
+
+1. Whether `window`'s declared budget was updated or the implementation re-checked (Priority 3) —
+   still open, still small, still low urgency.
+2. If point-light batching is ever tested again, do it on the Mansion, not Town River Bridge
+   (Priority 4) — or build the CPU-side A/B this toggle actually needs. Two `costs-more-than-saves`
+   reads out of five on this map is noise, not a signal — stop re-spending cycles on the existing
+   test here.
+3. **The real open question now**: `geometry.worldDraw`'s ~25ms cost is very likely genuine
+   per-fragment shading arithmetic (see Priority 2b's "Net effect"), not wasted/skippable work — the
+   next real lever needs either a per-instruction GPU capture or a source-level audit of which of
+   `buildWholeImageMaterial`'s ~9 texture samples are actually load-bearing per fragment. This is a
+   real-shader-change decision, not a flag to flip, and is worth Ingram's go-ahead before starting.

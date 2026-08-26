@@ -165,6 +165,154 @@ export function createSceneSettleWaiter({
 }
 
 /**
+ * THE REFUSAL GUARD, extracted 2026-08-26 so a second call site (the
+ * floor-wide structural-AB sweep, `boot.js`) can check the SAME thing
+ * `runProfileSession` already checks before it, rather than hand-duplicating
+ * the check or skipping it. Pure extraction — the two throws below are
+ * byte-identical in substance to what `runProfileSession` threw inline
+ * before this date, just parameterized by `callerName` so a caller other
+ * than `runProfileSession` gets an error naming itself, not a lie.
+ *
+ * @param {ProfileHarness} harness
+ * @param {string} [callerName]
+ */
+export function assertProfilerAvailable(harness, callerName = 'runProfileSession') {
+  // See this file's header, "THE ONE THING THAT MUST NEVER HAPPEN". Refusing
+  // loudly beats producing a report whose every occurrence rate is wrong by a
+  // factor nobody can recover.
+  if (harness.isGpuProbeArmed()) {
+    throw new Error(
+      `${callerName}: the whole-frame GPU probe is armed. It throttles the render loop (renderFrame ` +
+        'early-returns while it measures), so frames would be skipped without opening any zone and every ' +
+        'occurrence rate in the resulting report would be silently wrong. Finish or cancel the sweep first.'
+    );
+  }
+
+  // THE HUD OWNS THE PROFILER WHILE IT IS VISIBLE, and re-arms it every 250ms to
+  // keep a rolling window — which resets the very frame counters a measurement
+  // waits on. Live, 2026-07-27, that presented as "waited 30s for 30 frames but
+  // only 4 were counted" on a viewer rendering perfectly well. The symptom
+  // pointed at the renderer; the cause was two instruments sharing one.
+  const busyOwner = harness.profilerOwner?.() ?? null;
+  if (busyOwner && busyOwner !== 'session') {
+    throw new Error(
+      `${callerName}: the profiler is already owned by '${busyOwner}'` +
+        (busyOwner === 'hud'
+          ? ' — the live zone HUD is on. It re-arms the profiler four times a second for its rolling window, ' +
+            "which would reset this run's frame counter mid-window. Toggle the HUD off and run again."
+          : '. Stop it before profiling.')
+    );
+  }
+}
+
+/** How often {@link createVramSampler} polls `readVram()` during a capture
+ * window. Matches the always-on debug heartbeat's own proven cadence
+ * (`boot.js`'s heartbeat throttles `buildVramInventory` to ~4Hz: "often
+ * enough to read, rare enough that the monitor never becomes the thing worth
+ * monitoring") — reused here rather than re-derived. */
+export const DEFAULT_VRAM_SAMPLE_INTERVAL_MS = 250;
+/** Cap on retained series points before adjacent pairs start coarsening —
+ * keeps a long capture's series bounded without ever truncating away the
+ * start of the window (see `stop()`'s own coarsening comment below). */
+export const DEFAULT_VRAM_SERIES_CAP = 240;
+
+/**
+ * VRAM PEAK-OVER-WINDOW TRACKING (2026-08-26) — `vram` (built elsewhere in
+ * this file) is a single END-of-window snapshot; a mid-capture spike (a fresh
+ * floor's texture upload burst, a residency-pass allocation storm) is
+ * invisible to it by construction. This samples `readVram()` repeatedly
+ * across the whole armed window instead, DI-shaped like
+ * `createSceneSettleWaiter` above (real browser primitives as defaults,
+ * everything overridable for a Node test).
+ *
+ * @param {object} args
+ * @param {() => object|null} args.readVram same accessor `runProfileSession`
+ *   already calls once at the end of a window
+ * @param {(fn: () => void, ms: number) => any} [args.setIntervalFn]
+ * @param {(handle: any) => void} [args.clearIntervalFn]
+ * @param {() => number} [args.now]
+ * @param {number} [args.intervalMs]
+ * @param {number} [args.maxSeriesPoints]
+ */
+export function createVramSampler({
+  readVram,
+  setIntervalFn = (fn, ms) => setInterval(fn, ms),
+  clearIntervalFn = (h) => clearInterval(h),
+  now = () => performance.now(),
+  intervalMs = DEFAULT_VRAM_SAMPLE_INTERVAL_MS,
+  maxSeriesPoints = DEFAULT_VRAM_SERIES_CAP,
+} = {}) {
+  let handle = null;
+  /** @type {Array<{atMs:number, estimatedTotalMb:number, headroomFraction:number|null, verdict:string|null}>} */
+  let series = [];
+  let bucketWidthMs = intervalMs;
+  let peak = null;
+  const startedAt = now();
+
+  const sample = () => {
+    const v = readVram?.();
+    const mb = v?.estimatedTotalMb;
+    // Absence stays absence — a harness mid-teardown or a `readVram` that
+    // returned null this tick must not read as "0 MB used".
+    if (!Number.isFinite(mb)) return;
+    const point = {
+      atMs: Math.round(now() - startedAt),
+      estimatedTotalMb: mb,
+      headroomFraction: Number.isFinite(v.headroomFraction) ? v.headroomFraction : null,
+      verdict: typeof v.verdict === 'string' ? v.verdict : null,
+    };
+    if (!peak || mb > peak.estimatedTotalMb) peak = point;
+    series.push(point);
+    // COARSEN, NEVER TRUNCATE, once the cap is hit — the same fix this file's
+    // own header already prescribes for the viewer's 300-sample frame-gap
+    // ring ("fine live, useless for a 60s route... describe only the last
+    // 12%"), applied to VRAM instead: collapse adjacent pairs into their
+    // mean so the series always spans the WHOLE window, just at coarser
+    // resolution, rather than silently losing its own opening half.
+    if (series.length > maxSeriesPoints) {
+      const merged = [];
+      for (let i = 0; i < series.length; i += 2) {
+        const a = series[i];
+        const b = series[i + 1];
+        if (!b) {
+          merged.push(a);
+        } else {
+          merged.push({
+            atMs: b.atMs,
+            estimatedTotalMb: round2((a.estimatedTotalMb + b.estimatedTotalMb) / 2),
+            headroomFraction:
+              Number.isFinite(a.headroomFraction) && Number.isFinite(b.headroomFraction)
+                ? round2((a.headroomFraction + b.headroomFraction) / 2)
+                : (a.headroomFraction ?? b.headroomFraction ?? null),
+            // A merged bucket may straddle a verdict change — the LATER
+            // (more recent) reading wins, matching how a reader would want
+            // "what does this bucket represent now" answered.
+            verdict: b.verdict ?? a.verdict ?? null,
+          });
+        }
+      }
+      series = merged;
+      bucketWidthMs *= 2;
+    }
+  };
+
+  return {
+    start() {
+      sample(); // one immediate point, not just the first interval tick
+      handle = setIntervalFn(sample, intervalMs);
+    },
+    /** @returns {{peak: object|null, series: object[], sampleCount: number, intervalMs: number, bucketWidthMs: number}} */
+    stop() {
+      if (handle !== null) clearIntervalFn(handle);
+      handle = null;
+      return { peak, series, sampleCount: series.length, intervalMs, bucketWidthMs };
+    },
+  };
+}
+
+const round2 = (v) => (Number.isFinite(v) ? Math.round(v * 100) / 100 : v);
+
+/**
  * @typedef {object} ProfileHarness
  * @property {() => boolean} isGpuProbeArmed
  * @property {(opts: object) => void} armProfiler
@@ -196,6 +344,14 @@ export async function runProfileSession(harness, opts = {}) {
     // it answers — three short parked blocks against the sweep's 18 configs —
     // and every capture to date has left the question it settles open.
     includeStructuralAB = true,
+    // Forwarded to runStructuralAB verbatim when defined (2026-08-26) — left
+    // undefined by default so this session's own defaults never override
+    // that module's own (a `cycles: undefined` in an options object still
+    // falls through to that function's own default parameter, same as
+    // omitting the key entirely). The `perf-run-full` call site is what
+    // actually opts into more diligence here; this session stays neutral.
+    structuralAbCycles = undefined,
+    structuralAbMeasureFrames = undefined,
     verbosity = 'default',
     route = null,
     /** A promise that resolves when the workload ends; replaces `measureFrames`. */
@@ -207,31 +363,11 @@ export async function runProfileSession(harness, opts = {}) {
     measuringTickIntervalMs = 1000,
   } = opts;
 
-  // See this file's header. Refusing loudly beats producing a report whose every
-  // occurrence rate is wrong by a factor nobody can recover.
-  if (harness.isGpuProbeArmed()) {
-    throw new Error(
-      'runProfileSession: the whole-frame GPU probe is armed. It throttles the render loop (renderFrame ' +
-        'early-returns while it measures), so frames would be skipped without opening any zone and every ' +
-        'occurrence rate in the resulting report would be silently wrong. Finish or cancel the sweep first.'
-    );
-  }
-
-  // THE HUD OWNS THE PROFILER WHILE IT IS VISIBLE, and re-arms it every 250ms to
-  // keep a rolling window — which resets the very frame counters this session
-  // waits on. Live, 2026-07-27, that presented as "waited 30s for 30 frames but
-  // only 4 were counted" on a viewer rendering perfectly well. The symptom
-  // pointed at the renderer; the cause was two instruments sharing one.
-  const busyOwner = harness.profilerOwner?.() ?? null;
-  if (busyOwner && busyOwner !== 'session') {
-    throw new Error(
-      `runProfileSession: the profiler is already owned by '${busyOwner}'` +
-        (busyOwner === 'hud'
-          ? ' — the live zone HUD is on. It re-arms the profiler four times a second for its rolling window, ' +
-            "which would reset this run's frame counter mid-window. Toggle the HUD off and run again."
-          : '. Stop it before profiling.')
-    );
-  }
+  // See assertProfilerAvailable's own doc — extracted 2026-08-26 so the
+  // floor-wide structural-AB sweep (a second, direct runStructuralAB call
+  // site in boot.js) can check the identical thing before it starts,
+  // without hand-duplicating these two throws.
+  assertProfilerAvailable(harness, 'runProfileSession');
 
   const say = (phase, detail) => {
     if (typeof onProgress === 'function') onProgress(phase, detail);
@@ -256,10 +392,30 @@ export async function runProfileSession(harness, opts = {}) {
   // pipelineStats/depthProxyPoolStats immediately above, declared here for
   // the same reason: needed again after `finally` runs.
   let cacheStatsStart = null;
+  // VRAM PEAK-OVER-WINDOW (2026-08-26) — same before/after-the-window
+  // declaration reason as pipelineStatsStart etc. above: the sampler object
+  // itself is created inside the try block (needs `armed` to be true first,
+  // so its own samples don't include pre-arm noise) but its final result is
+  // read again after the whole try/finally completes, when the report gets
+  // assembled.
+  let vramSampler = null;
+  let vramWindowResult = null;
   try {
     harness.resetFrameStats();
     harness.armProfiler({ settleFrames });
     armed = true;
+
+    // Started right after arming, BEFORE settling — deliberately wider scope
+    // than progressTimer below (which only covers the measure phase): settle
+    // is exactly where a fresh floor's texture-upload spike would show up,
+    // and catching that is the whole point of "peak", not just "steady
+    // state". Optional, matching every other capability-gated hook in this
+    // file (`typeof harness.readPipelineStats === 'function' ? ... : null`
+    // a few lines below is the established idiom here).
+    if (typeof harness.readVram === 'function') {
+      vramSampler = createVramSampler({ readVram: () => harness.readVram() });
+      vramSampler.start();
+    }
 
     // HIDE-WHILE-MEASURING (Testament Stage 4, 2026-08-11) — before settling
     // even starts, so the settle window ALSO runs with the UI hidden, not
@@ -368,6 +524,10 @@ export async function runProfileSession(harness, opts = {}) {
       if (progressTimer) clearInterval(progressTimer);
     }
   } finally {
+    // Stopped first, unconditionally — paired with the sampler's own start()
+    // above. A throw anywhere in the try block above must not leave a live
+    // setInterval running past this function's own return.
+    if (vramSampler) vramWindowResult = vramSampler.stop();
     // ALWAYS, on every path. The GPU timer holds a vendor-internal flag on and a
     // query pool that three never prunes; leaving either armed after a thrown
     // error would leak for the rest of the session.
@@ -472,7 +632,12 @@ export async function runProfileSession(harness, opts = {}) {
     for (const z of profile.zoneStats ?? []) {
       if (z?.gpu && Number.isFinite(z.gpu.sumMs) && profile.frames > 0) routeZones[z.id] = z.gpu.sumMs / profile.frames;
     }
-    structuralAB = await runStructuralAB(harness, { routeZones, onProgress });
+    structuralAB = await runStructuralAB(harness, {
+      routeZones,
+      onProgress,
+      ...(structuralAbCycles !== undefined ? { cycles: structuralAbCycles } : {}),
+      ...(structuralAbMeasureFrames !== undefined ? { measureFrames: structuralAbMeasureFrames } : {}),
+    });
   }
 
   say('building', 'assembling the report');
@@ -546,6 +711,11 @@ export async function runProfileSession(harness, opts = {}) {
     manifests: harness.getManifests(),
     enabledEffects: context.enabledEffects ?? null,
     vram: harness.readVram?.() ?? null,
+    // PEAK-OVER-WINDOW, sibling to the single end-of-window snapshot above,
+    // NOT a replacement for it (2026-08-26) — see createVramSampler's own
+    // header. Null when the harness does not implement readVram, exactly
+    // like `vram` itself just above.
+    vramWindow: vramWindowResult,
     budgetMs: FRAME_BUDGET_MS,
     verbosity,
     // Anomalies the profiler itself detected. Attached rather than folded into

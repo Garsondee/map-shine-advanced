@@ -1029,6 +1029,7 @@ export function deriveFindings({
   sweepNoiseFloorMs = null,
   sweepRejectedCount = 0,
   caches = [],
+  geometryComposition = null,
 }) {
   const out = [];
 
@@ -1491,6 +1492,69 @@ export function deriveFindings({
       text: `${top.id} (${top.label}) is the single largest attributed zone at ${top.gpuMs.amortisedMsPerFrame}ms, ${share}% of frame GPU${top.drawCalls ? ` from ${top.drawCalls} draw calls` : ''}.`,
       evidence: { zone: top.id, gpuMs: top.gpuMs.amortisedMsPerFrame, pctOfFrameGpu: share, drawCalls: top.drawCalls },
     });
+  }
+
+  // WHAT'S ACTUALLY INSIDE geometry.worldDraw (2026-08-25) — that zone is one
+  // `renderer.render()` call with no internal timing seam (see
+  // `getGeometryComposition`'s own doc, vt-pan-viewer.js), so this cannot say
+  // WHERE its GPU ms went. What it CAN say, from data that already exists and
+  // was previously never surfaced: how much of the map's art is still paying
+  // full fill rate because coverage meshing hasn't reached it yet, and how
+  // much of the owned geometry runs the pricier vegetation shader instead of
+  // the plain one. Two independent signals, reported together because they
+  // answer the same question ("why is worldDraw this expensive") from two
+  // different angles; either alone can fire without the other.
+  const covSummary = geometryComposition?.coverageMeshSummary ?? null;
+  if (covSummary) {
+    const evaluatedTotal = covSummary.neverEvaluated + covSummary.meshed + covSummary.fullyDense;
+    if (evaluatedTotal > 0 && covSummary.neverEvaluated > 0) {
+      const neverPct = pct((covSummary.neverEvaluated / evaluatedTotal) * 100);
+      out.push({
+        severity: neverPct >= 25 ? 'medium' : 'low',
+        id: 'coverage-mesh-never-evaluated',
+        text: `${covSummary.neverEvaluated} of ${evaluatedTotal} whole-image tiles (${neverPct}%) have never received a coverage grid — they are drawing an un-reduced quad/tessellation not because meshing found nothing to cut, but because the async grid fetch hasn't landed (or never resolved). In a steady-state capture this should be rare; a large count here means real content is paying full fill rate for a reason unrelated to how much of it is actually painted.`,
+        evidence: {
+          neverEvaluated: covSummary.neverEvaluated,
+          evaluatedTotal,
+          neverEvaluatedPct: neverPct,
+          meshed: covSummary.meshed,
+          fullyDense: covSummary.fullyDense,
+        },
+      });
+    }
+    if (
+      covSummary.meshed > 0 &&
+      Number.isFinite(covSummary.rasterizedFractionPct) &&
+      covSummary.rasterizedFractionPct >= 60
+    ) {
+      out.push({
+        severity: 'low',
+        id: 'coverage-mesh-low-yield',
+        text: `Coverage meshing is reaching this content (${covSummary.meshed} tile(s) evaluated) but only cutting it down to ${covSummary.rasterizedFractionPct}% of cells kept — this map's art may simply be dense enough that there is little empty canvas left to drop, unlike the mansion map the feature was originally tuned against.`,
+        evidence: {
+          meshed: covSummary.meshed,
+          cellsTotal: covSummary.cellsTotal,
+          cellsKept: covSummary.cellsKept,
+          rasterizedFractionPct: covSummary.rasterizedFractionPct,
+        },
+      });
+    }
+    const materialTotal = covSummary.plainTriangles + covSummary.vegetationTriangles;
+    if (materialTotal > 0 && covSummary.vegetationTriangles > 0) {
+      const vegPct = pct((covSummary.vegetationTriangles / materialTotal) * 100);
+      if (vegPct >= 20) {
+        out.push({
+          severity: vegPct >= 50 ? 'medium' : 'low',
+          id: 'geometry-vegetation-material-share',
+          text: `${vegPct}% of geometry.worldDraw's owned triangles (${covSummary.vegetationTriangles} of ${materialTotal}) run the pricier curl-noise + wind-sampled vegetation material rather than the plain whole-image one. Triangle share is not GPU-time share, but a prior investigation independently measured a single vegetation-tessellated item at up to 97% of this zone's cost on its own — worth checking directly if this map's dominant cost traces back to vegetation content rather than plain background/tile/foreground art.`,
+          evidence: {
+            vegetationTriangles: covSummary.vegetationTriangles,
+            plainTriangles: covSummary.plainTriangles,
+            vegetationTrianglePct: vegPct,
+          },
+        });
+      }
+    }
   }
 
   // Sparse spikes: cheap on average, brutal on the one frame they land.
@@ -2128,6 +2192,7 @@ export function buildPerfReport({
   manifests = [],
   enabledEffects = null,
   vram = null,
+  vramWindow = null,
   budgetMs = null,
   verbosity = 'default',
   profilerAnomalies = null,
@@ -2285,6 +2350,7 @@ export function buildPerfReport({
     sweepNoiseFloorMs,
     sweepRejectedCount,
     caches,
+    geometryComposition,
   });
 
   // STRIP cpuEarlyMs FROM EVERY ZONE THE temporal-shape FINDING DID NOT FLAG
@@ -2407,6 +2473,15 @@ export function buildPerfReport({
     // choice actually needs to read.
     structuralAB,
     vram,
+    // PEAK-OVER-WINDOW, sibling to `vram` above, not a replacement for it
+    // (2026-08-26) — `vram` is a single end-of-window snapshot; this is
+    // sampled repeatedly across the whole armed window (settle included), so
+    // a mid-capture spike a snapshot would never see (a fresh floor's
+    // texture-upload burst, a residency-pass allocation storm) is visible
+    // here as `vramWindow.peak`. `null` means the harness in use does not
+    // implement `readVram`, exactly like `vram` itself. See
+    // `diag/perf-session.js#createVramSampler` for the sampler.
+    vramWindow,
     // INSTRUMENT HEALTH, kept separate from the measurements on purpose. An
     // unbalanced bracket or an overflowed query pool is a fault in the tool, and
     // reading it as a property of the renderer would send someone hunting a bug
@@ -2609,6 +2684,97 @@ export function summarizeTierComparison(tierResults) {
 
   return { frame, perTierHealth, ranked };
 }
+
+/**
+ * THE FLOOR-WIDE STRUCTURAL-AB ROLLUP (2026-08-26) — "does Shade Once (or
+ * point-light batching) actually help, floor by floor", the direct answer to
+ * the author's own ask: *"You can include Shade Once pro and con tests for
+ * every floor on a map."* Boot's own floor-sweep loop (see `boot.js`'s
+ * floorStructuralAB phase) calls `runStructuralAB` once per floor and passes
+ * the resulting `perFloor[]` array here — this function only ROLLS UP verdicts
+ * already computed elsewhere, it makes no measurement decision of its own,
+ * same "pure, deliberately dumb about meaning" posture as
+ * `summarizeTierComparison` above.
+ *
+ * @param {Array<{floorIndex:number, structuralAB: {toggles: Array<{id:string, verdict:string}>}|null}>} perFloor
+ * @returns {{byToggle: Record<string, {floorsWithVerdict: Record<string,string>, agreement: 'consistent'|'mixed'|'insufficient-data', note: string}>}}
+ */
+export function summarizeFloorStructuralAB(perFloor) {
+  const floors = Array.isArray(perFloor) ? perFloor : [];
+  /** @type {Map<string, Record<string, string>>} */
+  const byToggleFloors = new Map();
+  for (const f of floors) {
+    const toggles = f?.structuralAB?.toggles;
+    if (!Array.isArray(toggles)) continue;
+    for (const t of toggles) {
+      if (!t || typeof t.id !== 'string' || typeof t.verdict !== 'string') continue;
+      if (!byToggleFloors.has(t.id)) byToggleFloors.set(t.id, {});
+      byToggleFloors.get(t.id)[String(f.floorIndex)] = t.verdict;
+    }
+  }
+
+  const byToggle = {};
+  for (const [id, floorsWithVerdict] of byToggleFloors) {
+    const verdicts = Object.values(floorsWithVerdict);
+    // Only these two verdicts are DECISIVE — 'within-noise'/'unmeasured' mean
+    // that floor could not tell, not that it agrees with "no effect".
+    const decisive = verdicts.filter((v) => v === 'pays-for-itself' || v === 'costs-more-than-it-saves');
+    const uniqueDecisive = new Set(decisive);
+    let agreement;
+    let note;
+    if (verdicts.length === 0) {
+      agreement = 'insufficient-data';
+      note = 'No floor produced a verdict for this toggle.';
+    } else if (decisive.length === 0) {
+      agreement = 'insufficient-data';
+      note = `Every floor that measured this toggle came back within-noise or unmeasured (${verdicts.length} floor(s)) — no floor could tell either way.`;
+    } else if (uniqueDecisive.size === 1) {
+      agreement = 'consistent';
+      note = `Every floor that reached a verdict agreed: ${[...uniqueDecisive][0]} (${decisive.length} of ${verdicts.length} floor(s) decisive).`;
+    } else {
+      agreement = 'mixed';
+      note =
+        `Floors DISAGREE on this toggle — some say pays-for-itself, others say costs-more-than-it-saves ` +
+        `(${decisive.length} of ${verdicts.length} floor(s) decisive). This is a real, reportable finding: the ` +
+        `trade's value genuinely differs by floor, not an instrument fault.`;
+    }
+    byToggle[id] = { floorsWithVerdict, agreement, note };
+  }
+  return { byToggle };
+}
+
+/**
+ * KNOWN, HAND-MAINTAINED GAPS in what the tier sweep (`runAllTiersPerfReport`)
+ * can actually observe (2026-08-26). `forcePerformanceProfile()` — what the
+ * sweep uses to flip tiers — is deliberately transient and never calls
+ * `writeSetting`; a gate that reads the REAL persisted setting directly, at
+ * material-build time, never sees the transient override and shows the same
+ * material unchanged across every tier. Confirmed present for one real gate
+ * by direct source read; whether any OTHER effect has a similarly-shaped gate
+ * is UNVERIFIED — this is a hand-maintained list of confirmed cases, not a
+ * closed/exhaustive one, the same "must be added here by hand or this report
+ * goes silently dishonest about it again" discipline `structuralToggleHooks`'
+ * own id-dispatch (boot.js) already carries for structural toggles.
+ */
+export const TIER_SWEEP_COVERAGE_CAVEATS = Object.freeze([
+  Object.freeze({
+    affects: 'albedoClarity',
+    gate:
+      'shouldUseFullAlbedoClarity() (vt-pan-viewer.js) — read once, at material-build time, during ' +
+      "startVtPanViewer's own construction",
+    why:
+      'forcePerformanceProfile() (what this sweep uses to flip tiers) is deliberately transient and never calls ' +
+      'writeSetting, and this gate reads the REAL persisted setting directly — so a transient profile override ' +
+      'never reaches it. Every tier in this sweep shows the CAS/sharpening material completely unchanged. This ' +
+      'is a real, structural instrument gap, not measurement noise. A bare viewer restart per tier would NOT ' +
+      'fix this either — it would rebuild the material against whatever tier is genuinely SAVED, not the tier ' +
+      'being swept, which is silently wrong in a new way, not fixed.',
+    useInstead:
+      'MapShine.setSharpeningAbEnabled(true), then re-run the performance report — that phase already does a ' +
+      'real viewer restart with the diagnostic-only override (setVtPanViewerAlbedoClarityForce) built ' +
+      'specifically to avoid this trap, for exactly this comparison.',
+  }),
+]);
 
 /** `v` if it is a finite number, else `null` — never `NaN`/`undefined` leaking into a report. */
 function numOrNull(v) {

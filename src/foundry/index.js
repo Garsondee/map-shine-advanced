@@ -68,6 +68,10 @@ export { discoverAuthoredMasks } from './mask-discovery.js';
 // Token documents -> drawables.
 export { collectTokens, diagnoseTokens, TOKEN_DOCUMENTS, tokenFootprint } from './scene-tokens.js';
 
+// Tile document access for the editing-cadence perf stress test ONLY — see
+// scene-tiles.js's own header. Nothing here draws anything.
+export { pickStressTestTile, pingStressTestTile, unpingStressTestTile } from './scene-tiles.js';
+
 // VRAM severance — feed PIXI <=1024px proxies so Foundry never decodes the real file.
 export {
   registerPixiProxy,

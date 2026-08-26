@@ -64,6 +64,35 @@
  *    a rendering regression appearing from nowhere, hours later, with no clue
  *    pointing back here.
  *
+ * ============================================================================
+ * 2026-08-26 — MULTIPLE CYCLES, AN AMBIENT-NOISE PRE-CHECK, A SECOND TOGGLE
+ * ============================================================================
+ *
+ * Added at the author's own direction ("add more settle time if that helps")
+ * after `earlyZComposition` came back `within-noise` on real map content in
+ * every live capture that ever tried it there. Three additions, all opt-in at
+ * the library level (a caller passing no new opts gets byte-identical
+ * behaviour to before this date — see `buildAbSequence`/`aggregateAbCycles`'s
+ * own doc for the proof), on by default at the `perf-run-full` call site:
+ *
+ * - **Multiple ON→OFF→ON cycles** (`cycles` opt) — more independent samples of
+ *   the same trade, sharing each cycle's closing ON block with the next
+ *   cycle's opening one, the same efficiency trick the original on1/on2
+ *   averaging already used. The combined delta AVERAGES across cycles; the
+ *   combined noise floor does NOT — see `aggregateAbCycles`'s own header for
+ *   why an average there would manufacture false confidence.
+ * - **An ambient-noise pre-check** (`measureAmbientNoiseFloor`, on by default)
+ *   — measures whatever state the viewer is ALREADY in, twice back to back,
+ *   with no toggle touched at all. Its own disagreement is this run's ambient
+ *   jitter, independent of any one toggle's settle mechanics, so every
+ *   toggle's own floor can be read against it.
+ * - **`pointLightBatching`** joins `STRUCTURAL_TOGGLES` — Stage 2's own formal
+ *   acceptance gate (S2.9, "does batching pay for itself") was designed but
+ *   never actually run; this closes that gap using the same mechanism
+ *   `earlyZComposition` already proved out, since the flag is the same live,
+ *   per-frame-read shape (confirmed against `vt-pan-viewer.js` directly, not
+ *   guessed) — no residency nudge needed, unlike earlyZComposition.
+ *
  * @module diag/perf-structural-ab
  */
 
@@ -72,8 +101,17 @@ export const AB_SEQUENCE = Object.freeze(['on', 'off', 'on']);
 
 /** Frames discarded after a toggle flips, before measurement starts. */
 export const DEFAULT_AB_SETTLE_FRAMES = 60;
-/** Frames measured per state. */
-export const DEFAULT_AB_MEASURE_FRAMES = 180;
+/** Frames measured per state. Raised 180→300 (2026-08-26): more independent
+ * frame samples of the same steady state shrinks the standard error of each
+ * block's own mean directly — this does not fix systematic drift (that's what
+ * `cycles`/the ambient check target), only per-block sampling noise. */
+export const DEFAULT_AB_MEASURE_FRAMES = 300;
+/** How many ON→OFF→ON cycles `runStructuralAB` walks by default, when the
+ * caller passes no `cycles` opt. Kept at 1 — byte-identical to the original
+ * single-cycle behaviour — so every existing caller/test is unaffected; the
+ * `perf-run-full` call site opts into more (2) explicitly, the same shape
+ * `settleFrames: 90` already uses there over the library's own default. */
+export const DEFAULT_AB_CYCLES = 1;
 /**
  * A delta must clear the measured noise floor by this factor to earn a verdict.
  * 1.0 would call a delta exactly equal to the run's own drift a result.
@@ -115,11 +153,51 @@ export const STRUCTURAL_TOGGLES = Object.freeze([
     // the `feedback_arm_once_call_races_lazy_singleton` shape.
     settleFrames: 120,
   }),
+  Object.freeze({
+    id: 'pointLightBatching',
+    label: 'Point-light batching (Stage 2)',
+    question:
+      'Stage 2 merges lights sharing a compiled material into ONE drawn mesh per (bucket × channel) instead of one draw per light. Does the batching/reconcile overhead cost less than the draw calls it removes?',
+    watchZones: Object.freeze([
+      // The batching bookkeeping's OWN cost, zoned separately from the
+      // draw-call reduction it's meant to buy — perf-zones.js's own
+      // declaration: "so its own overhead should be independently visible and
+      // comparable, not folded into the loop it is meant to be cheaper than."
+      'light.pointLightBatchReconcile',
+      // The unbatched per-light path — should shrink as more lights admit
+      // into buckets.
+      'light.pointLightReconcile',
+      // The actual draws, batched or not — both channels share these zones.
+      'light.drawPointLights',
+      'light.drawColoration',
+    ]),
+    // NO settleFrames override, unlike earlyZComposition — point-light-pool.js
+    // #update() re-reads the flag fresh every frame (confirmed at
+    // vt-pan-viewer.js's own `setPointLightBatching` doc: "No residency nudge
+    // needed... runs every frame regardless and will read the new value on
+    // its very next call"), so the default settle is already enough.
+  }),
 ]);
 
 /** @param {string} id @returns {object|null} */
 export function toggleById(id) {
   return STRUCTURAL_TOGGLES.find((t) => t.id === id) ?? null;
+}
+
+/**
+ * Build the ON/OFF walk for N cycles. `cycles:1` reproduces `AB_SEQUENCE`
+ * exactly (`['on','off','on']`) — this is not a special case, it is just N=1
+ * of the general pattern. `cycles:2` walks `['on','off','on','off','on']`,
+ * SHARING the middle 'on' block between both cycles — the same efficiency
+ * trick the original on1/on2 averaging already relied on, extended.
+ * @param {number} [cycles]
+ * @returns {string[]}
+ */
+export function buildAbSequence(cycles = DEFAULT_AB_CYCLES) {
+  const n = Math.max(1, Math.floor(cycles) || 1);
+  const seq = ['on'];
+  for (let i = 0; i < n; i++) seq.push('off', 'on');
+  return seq;
 }
 
 /**
@@ -258,6 +336,193 @@ export function compareAbBlocks({ on1, off, on2, watchZones = [], routeZones = n
 }
 
 /**
+ * Combine 1+ independent `{on1,off,on2}` windows into one verdict.
+ *
+ * **For a single window this returns EXACTLY `compareAbBlocks(window)`, plus
+ * a `cycles` field** — `cycles:1` is not a special case internally, it is
+ * just this general path with one window, which is what makes raising
+ * `DEFAULT_AB_CYCLES` later a safe, purely-additive change: every existing
+ * caller already gets this function's single-window branch today, unlabelled.
+ *
+ * For multiple windows, the delta AVERAGES across them — legitimate, since
+ * each window is an independent sample of the same underlying trade, and
+ * averaging independent samples of the same quantity tightens the estimate.
+ * **The noise floor does NOT average.** It is `Math.max` of (a) the mean of
+ * each window's own on1-vs-on2 bracket and (b) the SPREAD between the
+ * windows' own deltas. If repeated windows disagree with each other by more
+ * than any single window's own bracket suggested, that disagreement IS the
+ * more honest floor — silently shrinking it via averaging would manufacture
+ * false confidence, exactly the failure this file's own header already
+ * guards against for the single-window case (rule 1).
+ */
+export function aggregateAbCycles({ windows = [], watchZones = [], routeZones = null } = {}) {
+  const list = Array.isArray(windows) ? windows.filter(Boolean) : [];
+  if (list.length === 0) {
+    return {
+      verdict: 'unmeasured',
+      onGpuMs: null,
+      offGpuMs: null,
+      deltaGpuMs: null,
+      noiseFloorMs: null,
+      perZone: [],
+      representative: null,
+      perCycle: [],
+      note: 'No A/B windows were measured at all, so no comparison is possible.',
+    };
+  }
+
+  const perCycle = list.map((w) => compareAbBlocks({ ...w, watchZones, routeZones }));
+  if (perCycle.length === 1) return { ...perCycle[0], perCycle };
+
+  const measured = perCycle.filter((c) => Number.isFinite(c.deltaGpuMs));
+  if (measured.length === 0) {
+    return {
+      verdict: 'unmeasured',
+      onGpuMs: null,
+      offGpuMs: null,
+      deltaGpuMs: null,
+      noiseFloorMs: null,
+      perZone: [],
+      representative: null,
+      perCycle,
+      note: `Every one of ${perCycle.length} A/B cycles this run attempted came back unmeasured — see perCycle[] for which block was missing in each.`,
+    };
+  }
+
+  const avg = (arr) => arr.reduce((s, v) => s + v, 0) / arr.length;
+  const deltaGpuMs = ms(avg(measured.map((c) => c.deltaGpuMs)));
+  const onGpuMs = ms(avg(measured.map((c) => c.onGpuMs)));
+  const offGpuMs = ms(avg(measured.map((c) => c.offGpuMs)));
+  const withinCycleFloor = avg(measured.map((c) => c.noiseFloorMs ?? 0));
+  const crossCycleSpread =
+    measured.length > 1
+      ? Math.max(...measured.map((c) => c.deltaGpuMs)) - Math.min(...measured.map((c) => c.deltaGpuMs))
+      : 0;
+  // ⚠️ Math.max, NEVER an average and never the smaller of the two — see this
+  // function's own header. A combined floor smaller than either honest
+  // component would be a shrunk floor manufacturing a verdict neither
+  // component earned on its own.
+  const noiseFloorMs = ms(Math.max(withinCycleFloor, crossCycleSpread));
+  const significant = Math.abs(deltaGpuMs) > noiseFloorMs * AB_SIGNIFICANCE_FACTOR;
+
+  // Per-zone: average each zone's onMs/offMs/deltaMs across the cycles that
+  // actually reported it, same "biggest mover first" sort as compareAbBlocks.
+  const zoneIds = new Set(measured.flatMap((c) => c.perZone.map((z) => z.id)));
+  const perZone = [...zoneIds]
+    .map((id) => {
+      const rows = measured.map((c) => c.perZone.find((z) => z.id === id)).filter(Boolean);
+      const avgField = (key) => ms(avg(rows.map((r) => r[key] ?? 0)));
+      return {
+        id,
+        watched: watchZones.includes(id),
+        onMs: avgField('onMs'),
+        offMs: avgField('offMs'),
+        deltaMs: avgField('deltaMs'),
+      };
+    })
+    .sort((a, b) => Math.abs(b.deltaMs) - Math.abs(a.deltaMs));
+
+  // Representativeness: every cycle flips the SAME toggle against the SAME
+  // routeZones, so they agree by construction — reuse the first measured
+  // cycle's own check rather than recomputing (and re-printing) the same
+  // answer `measured.length` times.
+  const representative = measured[0].representative;
+
+  return {
+    verdict: !significant ? 'within-noise' : deltaGpuMs < 0 ? 'pays-for-itself' : 'costs-more-than-it-saves',
+    onGpuMs,
+    offGpuMs,
+    deltaGpuMs,
+    noiseFloorMs,
+    significanceFactor: AB_SIGNIFICANCE_FACTOR,
+    perZone,
+    representative,
+    perCycle,
+    note: !significant
+      ? `NO VERDICT across ${measured.length} cycles: the averaged ON/OFF difference (${ms(Math.abs(deltaGpuMs))}ms) does not clear the combined noise floor (${ms(noiseFloorMs)}ms — the larger of the average within-cycle drift and the spread between cycles' own deltas) by the required ${AB_SIGNIFICANCE_FACTOR}×. Re-run with more cycles or more measured frames before concluding either way.`
+      : deltaGpuMs < 0
+        ? `PAYS FOR ITSELF across ${measured.length} cycles: ${ms(Math.abs(deltaGpuMs))}ms/frame cheaper on average (${onGpuMs}ms vs ${offGpuMs}ms), clearing the ${ms(noiseFloorMs)}ms combined noise floor.`
+        : `COSTS MORE THAN IT SAVES across ${measured.length} cycles: ${ms(deltaGpuMs)}ms/frame more expensive on average (${onGpuMs}ms vs ${offGpuMs}ms), clearing the ${ms(noiseFloorMs)}ms combined noise floor.`,
+  };
+}
+
+/**
+ * How much does THIS machine jitter right now, with no toggle touched at
+ * all? Measures whatever state is already live, twice back to back, using
+ * the exact same settle→arm→measure shape every toggle block already uses.
+ * The two readings' disagreement is this run's own ambient noise — a rough
+ * "how noisy is the machine right now" signal every toggle's own floor can
+ * be read against, not a fixed baseline (it measures whichever state
+ * happens to be live when the run starts, so it is not strictly comparable
+ * across two runs that started from different live states — see its own
+ * `note`).
+ *
+ * Deliberately cheap and run ONCE per `runStructuralAB()` call, before any
+ * toggle is touched — reuses the harness's own `armProfiler`/`waitFrames`/
+ * `setGpuZoneTimer`/`readProfile`/`getGpuZoneStatus`/`disarmProfiler`, the
+ * same contract every toggle block already depends on, so no new harness
+ * method is required of any caller.
+ *
+ * @param {object} harness the same profile harness `perf-session.js` uses
+ * @param {object} [opts]
+ * @param {number} [opts.settleFrames]
+ * @param {number} [opts.measureFrames]
+ */
+export async function measureAmbientNoiseFloor(harness, { settleFrames = 30, measureFrames = 120 } = {}) {
+  harness.resetFrameStats?.();
+  harness.armProfiler({ settleFrames });
+  let a = null;
+  let b = null;
+  try {
+    await harness.waitFrames(settleFrames);
+    const timer1 = harness.setGpuZoneTimer(true);
+    try {
+      await harness.waitFrames(measureFrames);
+      a = summariseAbBlock({ profile: harness.readProfile(), gpuStatus: harness.getGpuZoneStatus() });
+      a.gpuTimer = timer1 ?? null;
+    } finally {
+      harness.setGpuZoneTimer(false);
+    }
+    // Second reading, same armed window — no re-settle, this is deliberately
+    // "right after" the first, not a second independent arm.
+    harness.resetFrameStats?.();
+    const timer2 = harness.setGpuZoneTimer(true);
+    try {
+      await harness.waitFrames(measureFrames);
+      b = summariseAbBlock({ profile: harness.readProfile(), gpuStatus: harness.getGpuZoneStatus() });
+      b.gpuTimer = timer2 ?? null;
+    } finally {
+      harness.setGpuZoneTimer(false);
+    }
+  } finally {
+    harness.disarmProfiler();
+  }
+
+  const av = Number.isFinite(a?.attributedGpuMs) ? a.attributedGpuMs : null;
+  const bv = Number.isFinite(b?.attributedGpuMs) ? b.attributedGpuMs : null;
+  if (av === null || bv === null) {
+    return {
+      measured: false,
+      ambientNoiseMs: null,
+      note: 'At least one ambient-check block produced no attributed GPU time, so ambient jitter could not be measured this run — this is an ABSENCE, not "zero jitter".',
+    };
+  }
+  return {
+    measured: true,
+    ambientNoiseMs: ms(Math.abs(av - bv)),
+    aGpuMs: ms(av),
+    bGpuMs: ms(bv),
+    settleFrames,
+    measureFrames,
+    note:
+      'Two back-to-back measurements of whatever state was live when this run started, with no toggle flipped. ' +
+      "Their disagreement is this run's own ambient jitter. A rough baseline, not a fixed one — it reflects " +
+      'whichever state happened to be live, so is not strictly comparable to this same field from a run that ' +
+      'started with a different live toggle state.',
+  };
+}
+
+/**
  * Run the A/B live. Sequential and slow by nature — each block needs its own
  * settle and its own armed window — but bounded and announced.
  *
@@ -267,9 +532,23 @@ export function compareAbBlocks({ on1, off, on2, watchZones = [], routeZones = n
  *   the harness reports it can actually flip
  * @param {Record<string, number>|null} [opts.routeZones] main-window per-frame
  *   zone GPU, for the representativeness check
+ * @param {number} [opts.measureFrames]
+ * @param {number} [opts.cycles] how many ON→OFF→ON cycles to walk per toggle —
+ *   see `buildAbSequence`/`aggregateAbCycles`. Defaults to 1 (unchanged
+ *   behaviour for any existing caller).
+ * @param {boolean} [opts.includeAmbientCheck] run `measureAmbientNoiseFloor`
+ *   once before the toggle loop. Defaults to true — cheap (~2s) relative to
+ *   what it answers.
  */
 export async function runStructuralAB(harness, opts = {}) {
-  const { toggleIds = null, routeZones = null, measureFrames = DEFAULT_AB_MEASURE_FRAMES, onProgress = null } = opts;
+  const {
+    toggleIds = null,
+    routeZones = null,
+    measureFrames = DEFAULT_AB_MEASURE_FRAMES,
+    cycles = DEFAULT_AB_CYCLES,
+    includeAmbientCheck = true,
+    onProgress = null,
+  } = opts;
 
   const say = (phase, detail) => {
     if (typeof onProgress === 'function') onProgress(phase, detail);
@@ -304,6 +583,26 @@ export async function runStructuralAB(harness, opts = {}) {
     };
   }
 
+  // AMBIENT-NOISE PRE-CHECK (2026-08-26) — see measureAmbientNoiseFloor's own
+  // header. Runs BEFORE any toggle is touched (so it reads whatever state the
+  // viewer was already in) and before hideLiveUi (so its own cost is visible
+  // like any other measurement, not hidden). Optional only in the sense that
+  // a harness with no armProfiler could not run it — every real harness has
+  // one, this guard exists only for a minimal test double.
+  let ambientCheck = null;
+  if (includeAmbientCheck && typeof harness.armProfiler === 'function') {
+    say('structural-ab', 'ambient noise pre-check (no toggle flipped)');
+    try {
+      ambientCheck = await measureAmbientNoiseFloor(harness);
+    } catch (err) {
+      ambientCheck = {
+        measured: false,
+        ambientNoiseMs: null,
+        note: `ambient pre-check threw, continuing without it: ${err?.message ?? err}`,
+      };
+    }
+  }
+
   // ⚠️ THE LIVE HUD WILL FIGHT THIS FOR THE PROFILER IF IT IS VISIBLE.
   //
   // `runProfileSession` hides the debug UI for the ROUTE and restores it in its
@@ -323,17 +622,22 @@ export async function runStructuralAB(harness, opts = {}) {
   // test fake) simply measures with the UI as it finds it.
   harness.hideLiveUi?.();
 
+  const sequence = buildAbSequence(cycles);
   const results = [];
   try {
     for (const toggle of wanted) {
       const original = harness.readStructuralToggle(toggle.id);
       const settleFrames = toggle.settleFrames ?? DEFAULT_AB_SETTLE_FRAMES;
-      const blocks = {};
+      // An ORDERED array, not a fixed {on1,off,on2} object — walks whatever
+      // length `sequence` is, one measured block per step, in order. Cycle i's
+      // window slides across it: {on1:blocksArray[2i], off:blocksArray[2i+1],
+      // on2:blocksArray[2i+2]} — see the window-derivation just below the loop.
+      const blocksArray = [];
       try {
-        for (let step = 0; step < AB_SEQUENCE.length; step++) {
-          const state = AB_SEQUENCE[step];
+        for (let step = 0; step < sequence.length; step++) {
+          const state = sequence[step];
           const on = state === 'on';
-          say('structural-ab', `${toggle.label} — ${state.toUpperCase()} (${step + 1}/${AB_SEQUENCE.length})`);
+          say('structural-ab', `${toggle.label} — ${state.toUpperCase()} (${step + 1}/${sequence.length})`);
           harness.setStructuralToggle(toggle.id, on);
           harness.resetFrameStats();
           // ⚠️ ARM BEFORE WAITING, ALWAYS — fixed 2026-08-12 after a live
@@ -374,9 +678,7 @@ export async function runStructuralAB(harness, opts = {}) {
                 gpuStatus: harness.getGpuZoneStatus(),
               });
               block.gpuTimer = timer ?? null;
-              // ON is measured twice; keep both, keyed so compareAbBlocks can
-              // use their disagreement as the floor.
-              blocks[step === 0 ? 'on1' : step === 1 ? 'off' : 'on2'] = block;
+              blocksArray.push(block);
             } finally {
               harness.setGpuZoneTimer(false);
             }
@@ -390,6 +692,12 @@ export async function runStructuralAB(harness, opts = {}) {
         harness.setStructuralToggle(toggle.id, original);
       }
 
+      const windows = [];
+      for (let i = 0; i + 2 < blocksArray.length; i += 2) {
+        windows.push({ on1: blocksArray[i], off: blocksArray[i + 1], on2: blocksArray[i + 2] });
+      }
+      const combined = aggregateAbCycles({ windows, watchZones: toggle.watchZones, routeZones });
+
       results.push({
         id: toggle.id,
         label: toggle.label,
@@ -397,8 +705,20 @@ export async function runStructuralAB(harness, opts = {}) {
         liveState: original,
         settleFrames,
         measureFrames,
-        blocks,
-        ...compareAbBlocks({ ...blocks, watchZones: toggle.watchZones, routeZones }),
+        cycles: windows.length,
+        blocks: blocksArray,
+        // How this toggle's own combined floor compares to the machine's
+        // ambient jitter (measured once, above, before any toggle moved).
+        // ~1 => the machine itself is the limiting factor; well above 1 =>
+        // this toggle's own settle mechanics are adding variance beyond
+        // ambient, worth a look. Null when either side is unmeasured.
+        noiseFloorVsAmbientRatio:
+          Number.isFinite(combined.noiseFloorMs) &&
+          Number.isFinite(ambientCheck?.ambientNoiseMs) &&
+          ambientCheck.ambientNoiseMs > 0
+            ? round(combined.noiseFloorMs / ambientCheck.ambientNoiseMs, 2)
+            : null,
+        ...combined,
       });
     }
   } finally {
@@ -410,9 +730,199 @@ export async function runStructuralAB(harness, opts = {}) {
   return {
     ran: true,
     skipped: null,
-    method: `${AB_SEQUENCE.join('→')}, ${measureFrames} measured frames per block, profiler armed per block`,
+    method: `${sequence.join('→')}, ${measureFrames} measured frames per block, profiler armed per block${
+      cycles > 1 ? ` (${cycles} cycles)` : ''
+    }`,
     cameraNote:
       "Measured with the camera PARKED at wherever the benchmark route ended, not moving along it. That removes camera motion — the largest source of frame-to-frame variance, and most of why this resolves what the whole-frame effect sweep cannot — at the cost of measuring one view rather than the map. See each toggle's `representative` block for whether that view stood in for the route.",
+    ambientCheck,
     toggles: results,
+  };
+}
+
+/**
+ * ============================================================================
+ * EDITING-CADENCE STRESS TEST (2026-08-26) — DOES AN UNRELATED EDIT FORCE A
+ * REAL REBAKE?
+ * ============================================================================
+ *
+ * `boot.js`'s `redrawOn(hook)` registers an ARITY-1 Foundry hook callback —
+ * `Hooks.on(hook, (doc) => {...})` — that discards the real
+ * `(document, change, options, userId)` signature Foundry actually calls it
+ * with. So any write to any Tile/Level document, REGARDLESS OF WHAT CHANGED,
+ * runs `refreshMaskAuthorityItems`, which re-collects the mask authority's
+ * whole item set and calls `maskAuthority.setItems(...)` unconditionally.
+ *
+ * `refreshMaskAuthorityItems` itself has NO zone — it runs from a Foundry hook
+ * callback, off the render loop entirely, never from inside any per-frame
+ * profiled pass, so the zone profiler is structurally blind to its own CPU
+ * cost. What the profiler CAN see, and what this function watches instead: the
+ * downstream subsystems whose own 'bake' gate reads a mask-authority VERSION
+ * counter. Source-verified, not assumed — `sun-shadow-subsystem.js:1368`:
+ * `version = getMaskAuthorityVersion(); versionChanged = !casterFieldLoaded ||
+ * version !== casterFieldVersion;` and `versionChanged` alone forces
+ * `needsBake`. If `setItems` bumps that counter on every call — which an
+ * unconditional re-collection, called on every edit no matter how irrelevant,
+ * would do — every one of those subsystems re-bakes on the next frame whether
+ * or not anything it actually cares about changed. `EDIT_CASCADE_WATCH_ZONES`
+ * below is every 'bake'-cadence zone perf-zones.js declares that is reachable
+ * this way. Fire is deliberately absent: `light.fireSync` is 'conditional'
+ * cadence (a continuous per-frame sim once lit, confirmed at its own
+ * declaration), not 'bake' — it has no version-gated rebuild for a
+ * mask-authority refresh to force, so watching it here would only ever read
+ * zero and call that a result.
+ *
+ * MECHANISM: reuses `compareAbBlocks`/`aggregateAbCycles` — the exact same
+ * ON→OFF→ON bracketing and noise-floor honesty `runStructuralAB` already
+ * proved out — with a different idea of what "ON" means. There is no boolean
+ * to flip here; "ON" is a window where `opts.triggerEdit()` fires
+ * `opts.pings` times (each call is a full ping-then-unset cycle, so the
+ * scoped flag this touches is never left set between edits, and a throw
+ * partway through a burst leaves at most one edit unreverted for the caller's
+ * own outer `finally` to catch); "OFF" is an equal-length window where nothing
+ * touches any document at all. The two ON windows bracketing OFF measure this
+ * run's own drift exactly like every other A/B in this file, for the same
+ * reason: a delta smaller than that drift is not a result.
+ *
+ * DELIBERATELY DOES NOT KNOW WHAT A "TILE" IS. `opts.triggerEdit` is injected
+ * — `boot.js` supplies the real `pickStressTestTile`/`pingStressTestTile`/
+ * `unpingStressTestTile` (`src/foundry/scene-tiles.js`) call; this module stays
+ * exactly as Foundry-agnostic and Node-testable as `runStructuralAB` already
+ * is, with a fake `triggerEdit` standing in for the real document write.
+ */
+
+/** Full ping-then-unset cycles fired inside each burst ("ON") window. */
+export const DEFAULT_EDIT_CASCADE_PINGS = 15;
+/** Frames waited between one cycle's end and the next one starting — enough
+ * for `redrawOn`'s fire-and-forget hook handler to actually run and for
+ * whatever it triggers to land inside a profiled frame, not a wall-clock
+ * delay (this module has no timer of its own — see this file's header on why
+ * every wait already goes through the harness's own `waitFrames`). */
+export const DEFAULT_EDIT_CASCADE_GAP_FRAMES = 6;
+
+/**
+ * Every 'bake'-cadence zone (`perf-zones.js`) reachable from a mask-authority
+ * version bump — see this section's own header for the source-verified chain.
+ * Not a filter (every zone in a block is still recorded); this is what the
+ * result leads with.
+ */
+export const EDIT_CASCADE_WATCH_ZONES = Object.freeze([
+  'tick.windRebakePoll',
+  'sims.windBake',
+  'light.sunShadowBake',
+  'light.waterBodyBake',
+  'light.waterFlowBake',
+  'light.fluidNetBake',
+  'surface.specularIslandBake',
+]);
+
+/**
+ * Run the editing-cadence stress test live.
+ *
+ * @param {object} harness the same profile harness `runStructuralAB` uses
+ * @param {object} opts
+ * @param {() => Promise<void>} opts.triggerEdit fires ONE ping-then-unset
+ *   cycle. Required — with no injected edit trigger there is nothing to
+ *   burst, and this returns `skipped`, never a fabricated zero-cost result.
+ * @param {number} [opts.pings]
+ * @param {number} [opts.gapFrames]
+ * @param {number} [opts.settleFrames]
+ * @param {number} [opts.cycles] see `buildAbSequence`/`aggregateAbCycles`.
+ * @param {Record<string, number>|null} [opts.routeZones] main-window per-frame
+ *   zone GPU, for the same representativeness check `compareAbBlocks` already does.
+ */
+export async function runEditCascadeStress(harness, opts = {}) {
+  const {
+    triggerEdit,
+    pings = DEFAULT_EDIT_CASCADE_PINGS,
+    gapFrames = DEFAULT_EDIT_CASCADE_GAP_FRAMES,
+    settleFrames = DEFAULT_AB_SETTLE_FRAMES,
+    cycles = DEFAULT_AB_CYCLES,
+    routeZones = null,
+    onProgress = null,
+  } = opts;
+
+  const say = (phase, detail) => {
+    if (typeof onProgress === 'function') onProgress(phase, detail);
+  };
+
+  if (typeof triggerEdit !== 'function') {
+    return {
+      ran: false,
+      skipped: 'no-edit-trigger',
+      note: 'No triggerEdit function was supplied, so no edit-cascade burst is possible. That is a wiring gap (or, at the boot.js call site, an honestly-reported "this scene has no tile to ping"), not a measurement result.',
+      result: null,
+    };
+  }
+
+  const windowFrames = pings * gapFrames;
+
+  const measureBlock = async (withBurst, label) => {
+    harness.resetFrameStats();
+    harness.armProfiler({ settleFrames });
+    try {
+      await harness.waitFrames(settleFrames);
+      const timer = harness.setGpuZoneTimer(true);
+      try {
+        if (withBurst) {
+          for (let i = 0; i < pings; i++) {
+            say('edit-cascade-stress', `${label} — edit ${i + 1}/${pings}`);
+            await triggerEdit();
+            await harness.waitFrames(gapFrames);
+          }
+        } else {
+          say('edit-cascade-stress', `${label} — quiet, no edits`);
+          await harness.waitFrames(windowFrames);
+        }
+        const block = summariseAbBlock({ profile: harness.readProfile(), gpuStatus: harness.getGpuZoneStatus() });
+        block.gpuTimer = timer ?? null;
+        return block;
+      } finally {
+        harness.setGpuZoneTimer(false);
+      }
+    } finally {
+      harness.disarmProfiler();
+    }
+  };
+
+  harness.hideLiveUi?.();
+  const sequence = buildAbSequence(cycles);
+  const blocksArray = [];
+  try {
+    for (let step = 0; step < sequence.length; step++) {
+      const state = sequence[step];
+      const withBurst = state === 'on';
+      blocksArray.push(await measureBlock(withBurst, withBurst ? 'BURST' : 'QUIET'));
+    }
+  } finally {
+    harness.restoreLiveUi?.();
+  }
+
+  const windows = [];
+  for (let i = 0; i + 2 < blocksArray.length; i += 2) {
+    windows.push({ on1: blocksArray[i], off: blocksArray[i + 1], on2: blocksArray[i + 2] });
+  }
+  const combined = aggregateAbCycles({ windows, watchZones: EDIT_CASCADE_WATCH_ZONES, routeZones });
+
+  return {
+    ran: true,
+    skipped: null,
+    method: `${sequence.join('→').replace(/on/g, 'burst').replace(/off/g, 'quiet')}, ${pings} edits/burst window (${gapFrames} frames apart), profiler armed per block${
+      cycles > 1 ? ` (${cycles} cycles)` : ''
+    }`,
+    pings,
+    gapFrames,
+    cycles: windows.length,
+    blocks: blocksArray,
+    verdict: combined.verdict,
+    burstGpuMs: combined.onGpuMs,
+    quietGpuMs: combined.offGpuMs,
+    deltaGpuMs: combined.deltaGpuMs,
+    noiseFloorMs: combined.noiseFloorMs,
+    significanceFactor: combined.significanceFactor,
+    perZone: combined.perZone,
+    representative: combined.representative,
+    perCycle: combined.perCycle,
+    note: combined.note,
   };
 }

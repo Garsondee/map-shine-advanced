@@ -46,7 +46,9 @@ import {
   statFrom,
   summariseFrameRate,
   summariseSamples,
+  summarizeFloorStructuralAB,
   summarizeTierComparison,
+  TIER_SWEEP_COVERAGE_CAVEATS,
 } from '../perf-report.js';
 
 const acc = (sumMs, count, maxMs) => ({ sumMs, count, maxMs });
@@ -1005,6 +1007,175 @@ export function run(t) {
     ok('its evidence carries the peak pending size', enriched.evidence.maxPendingSize === 1847);
     ok('...and the peak resolve-skip streak', enriched.evidence.maxResolveSkipStreak === 22);
 
+    // GEOMETRY COMPOSITION findings (2026-08-25) — what's actually inside
+    // geometry.worldDraw, surfaced from data getGeometryComposition already
+    // computes. `geometryComposition` is optional and every existing call
+    // above omits it — confirm that stays silent, not an accidental crash.
+    ok(
+      'no geometryComposition at all: none of the three new findings fire',
+      !findings.some((f) => f.id.startsWith('coverage-mesh-') || f.id === 'geometry-vegetation-material-share')
+    );
+    ok(
+      'a geometryComposition with no coverageMeshSummary is also silent (defensive, not a crash)',
+      !deriveFindings({
+        attribution,
+        rows,
+        effects,
+        frame: {},
+        method: { gpu: 'timestamp-query' },
+        budgetMs: 8.33,
+        geometryComposition: {},
+      }).some((f) => f.id.startsWith('coverage-mesh-'))
+    );
+
+    const coverageBase = {
+      neverEvaluated: 0,
+      meshed: 0,
+      fullyDense: 0,
+      cellsTotal: 0,
+      cellsKept: 0,
+      rasterizedFractionPct: null,
+      plainTriangles: 0,
+      vegetationTriangles: 0,
+    };
+    {
+      // 30 of 100 tiles never evaluated (30%) — over the 25% medium threshold.
+      const gc = { coverageMeshSummary: { ...coverageBase, neverEvaluated: 30, meshed: 40, fullyDense: 30 } };
+      const f = deriveFindings({
+        attribution,
+        rows,
+        effects,
+        frame: {},
+        method: { gpu: 'timestamp-query' },
+        budgetMs: 8.33,
+        geometryComposition: gc,
+      });
+      const finding = f.find((x) => x.id === 'coverage-mesh-never-evaluated');
+      ok('a large never-evaluated share fires the finding', finding !== undefined);
+      ok('severity escalates to medium at/above 25%', finding.severity === 'medium');
+      ok(
+        'evidence carries the raw counts and the computed percentage',
+        finding.evidence.neverEvaluated === 30 && finding.evidence.neverEvaluatedPct === 30
+      );
+    }
+    {
+      // Same shape but only 5% never-evaluated — real, but stays low severity.
+      const gc = { coverageMeshSummary: { ...coverageBase, neverEvaluated: 5, meshed: 45, fullyDense: 50 } };
+      const f = deriveFindings({
+        attribution,
+        rows,
+        effects,
+        frame: {},
+        method: { gpu: 'timestamp-query' },
+        budgetMs: 8.33,
+        geometryComposition: gc,
+      });
+      const finding = f.find((x) => x.id === 'coverage-mesh-never-evaluated');
+      ok('a small never-evaluated share still fires...', finding !== undefined);
+      ok('...but stays low severity under 25%', finding.severity === 'low');
+    }
+    ok(
+      'zero never-evaluated tiles: no finding at all (nothing to report)',
+      !deriveFindings({
+        attribution,
+        rows,
+        effects,
+        frame: {},
+        method: { gpu: 'timestamp-query' },
+        budgetMs: 8.33,
+        geometryComposition: { coverageMeshSummary: { ...coverageBase, meshed: 10, fullyDense: 5 } },
+      }).some((f) => f.id === 'coverage-mesh-never-evaluated')
+    );
+    {
+      // Real content, but coverage meshing is only cutting it to 85% kept —
+      // low yield, worth naming even though nothing here is "broken".
+      const gc = {
+        coverageMeshSummary: {
+          ...coverageBase,
+          meshed: 4,
+          cellsTotal: 1000,
+          cellsKept: 850,
+          rasterizedFractionPct: 85,
+        },
+      };
+      const f = deriveFindings({
+        attribution,
+        rows,
+        effects,
+        frame: {},
+        method: { gpu: 'timestamp-query' },
+        budgetMs: 8.33,
+        geometryComposition: gc,
+      });
+      const finding = f.find((x) => x.id === 'coverage-mesh-low-yield');
+      ok('a high kept-fraction on real meshed content fires low-yield', finding !== undefined);
+      ok('stays low severity — this is informational, not alarming', finding.severity === 'low');
+    }
+    ok(
+      'a genuinely effective cut (20% kept) does not fire low-yield',
+      !deriveFindings({
+        attribution,
+        rows,
+        effects,
+        frame: {},
+        method: { gpu: 'timestamp-query' },
+        budgetMs: 8.33,
+        geometryComposition: {
+          coverageMeshSummary: {
+            ...coverageBase,
+            meshed: 4,
+            cellsTotal: 1000,
+            cellsKept: 200,
+            rasterizedFractionPct: 20,
+          },
+        },
+      }).some((f) => f.id === 'coverage-mesh-low-yield')
+    );
+    {
+      // Vegetation material dominates the owned triangle count (60% > 50%
+      // medium threshold) — directly tests the Performance-Insights.md
+      // "one vegetation item was 97% of the cost" hypothesis against today's
+      // composition data.
+      const gc = { coverageMeshSummary: { ...coverageBase, plainTriangles: 400, vegetationTriangles: 600 } };
+      const f = deriveFindings({
+        attribution,
+        rows,
+        effects,
+        frame: {},
+        method: { gpu: 'timestamp-query' },
+        budgetMs: 8.33,
+        geometryComposition: gc,
+      });
+      const finding = f.find((x) => x.id === 'geometry-vegetation-material-share');
+      ok('a majority-vegetation triangle split fires the finding', finding !== undefined);
+      ok('severity is medium at/above 50%', finding.severity === 'medium');
+      ok('evidence names the exact percentage', finding.evidence.vegetationTrianglePct === 60);
+    }
+    ok(
+      'a small vegetation share (under 20%) does not fire the finding',
+      !deriveFindings({
+        attribution,
+        rows,
+        effects,
+        frame: {},
+        method: { gpu: 'timestamp-query' },
+        budgetMs: 8.33,
+        geometryComposition: { coverageMeshSummary: { ...coverageBase, plainTriangles: 950, vegetationTriangles: 50 } },
+      }).some((f) => f.id === 'geometry-vegetation-material-share')
+    );
+    ok(
+      'zero triangles of either family: no finding, no division-by-zero NaN',
+      !deriveFindings({
+        attribution,
+        rows,
+        effects,
+        frame: {},
+        method: { gpu: 'timestamp-query' },
+        budgetMs: 8.33,
+        geometryComposition: { coverageMeshSummary: { ...coverageBase } },
+      }).some((f) => f.id === 'geometry-vegetation-material-share')
+    );
+
     // PIPELINE GROWTH (2026-08-09) — a steady pan-only window recompiling
     // shader pipelines it should already have cached.
     const pipelineGrew = deriveFindings({
@@ -1766,6 +1937,109 @@ export function run(t) {
     ok(
       'an entry missing its report is skipped, not crashed on',
       Object.keys(summarizeTierComparison([{ profile: 'low' }]).frame).length === 0
+    );
+  }
+
+  // ======================================================================
+  // summarizeFloorStructuralAB (2026-08-26) — "does Shade Once actually
+  // help, floor by floor", the direct rollup of a floor-wide sweep
+  // ======================================================================
+  {
+    const toggleResult = (id, verdict) => ({ id, verdict });
+    const floor = (floorIndex, toggles) => ({
+      floorIndex,
+      structuralAB: toggles ? { toggles } : null,
+    });
+
+    // Every floor agrees the trade pays for itself.
+    const consistent = summarizeFloorStructuralAB([
+      floor(0, [toggleResult('earlyZComposition', 'pays-for-itself')]),
+      floor(1, [toggleResult('earlyZComposition', 'pays-for-itself')]),
+      floor(2, [toggleResult('earlyZComposition', 'pays-for-itself')]),
+    ]);
+    ok('every floor agreeing reads as consistent', consistent.byToggle.earlyZComposition.agreement === 'consistent');
+    ok(
+      'the floor->verdict map carries every floor by index',
+      consistent.byToggle.earlyZComposition.floorsWithVerdict['0'] === 'pays-for-itself' &&
+        consistent.byToggle.earlyZComposition.floorsWithVerdict['2'] === 'pays-for-itself'
+    );
+
+    // Floors genuinely disagree — a real, reportable finding, not noise.
+    const mixed = summarizeFloorStructuralAB([
+      floor(0, [toggleResult('earlyZComposition', 'pays-for-itself')]),
+      floor(1, [toggleResult('earlyZComposition', 'costs-more-than-it-saves')]),
+    ]);
+    ok(
+      'genuinely disagreeing floors read as mixed, not averaged away',
+      mixed.byToggle.earlyZComposition.agreement === 'mixed'
+    );
+    ok('...and the note says so in plain terms', mixed.byToggle.earlyZComposition.note.includes('DISAGREE'));
+
+    // Every floor came back within-noise — nobody could tell, which is a
+    // DIFFERENT finding from "everyone agrees it doesn't help".
+    const inconclusive = summarizeFloorStructuralAB([
+      floor(0, [toggleResult('earlyZComposition', 'within-noise')]),
+      floor(1, [toggleResult('earlyZComposition', 'unmeasured')]),
+    ]);
+    ok(
+      'a run where nothing was decisive reads as insufficient-data, not consistent or mixed',
+      inconclusive.byToggle.earlyZComposition.agreement === 'insufficient-data'
+    );
+
+    // A floor already covered by a full report (source:'full-report') has no
+    // structuralAB of its own to fold in here — must not crash on the null.
+    const withFullReportFloor = summarizeFloorStructuralAB([
+      floor(0, null), // the start floor — covered elsewhere, nothing to roll up
+      floor(1, [toggleResult('pointLightBatching', 'pays-for-itself')]),
+    ]);
+    ok(
+      'a floor with no structuralAB (already covered by a full report) is skipped, not crashed on',
+      withFullReportFloor.byToggle.pointLightBatching.agreement === 'consistent'
+    );
+
+    // Two DIFFERENT toggles must not bleed into each other's rollup.
+    const twoToggles = summarizeFloorStructuralAB([
+      floor(0, [
+        toggleResult('earlyZComposition', 'pays-for-itself'),
+        toggleResult('pointLightBatching', 'within-noise'),
+      ]),
+    ]);
+    ok(
+      'each toggle id gets its own independent rollup',
+      Object.keys(twoToggles.byToggle).sort().join(',') === 'earlyZComposition,pointLightBatching'
+    );
+    ok(
+      "...so one toggle's verdict never contaminates the other's",
+      twoToggles.byToggle.earlyZComposition.agreement === 'consistent' &&
+        twoToggles.byToggle.pointLightBatching.agreement === 'insufficient-data'
+    );
+
+    ok(
+      'malformed input produces an empty rollup, never a throw',
+      Object.keys(summarizeFloorStructuralAB(null).byToggle).length === 0
+    );
+    ok(
+      'an empty array is the same as malformed input here',
+      Object.keys(summarizeFloorStructuralAB([]).byToggle).length === 0
+    );
+  }
+
+  // ======================================================================
+  // TIER_SWEEP_COVERAGE_CAVEATS (2026-08-26) — the tier sweep's own
+  // hand-maintained honesty list: what it CANNOT see, and why
+  // ======================================================================
+  {
+    ok('at least the known CAS/albedo-clarity gap is catalogued', TIER_SWEEP_COVERAGE_CAVEATS.length > 0);
+    const cas = TIER_SWEEP_COVERAGE_CAVEATS.find((c) => c.affects === 'albedoClarity');
+    ok(
+      'the CAS caveat exists and names the real gate it cannot see through',
+      !!cas && cas.gate.includes('shouldUseFullAlbedoClarity')
+    );
+    ok('...explains WHY (forcePerformanceProfile never writes the real setting)', cas.why.includes('writeSetting'));
+    ok('...and points at the tool that DOES answer this correctly', cas.useInstead.includes('setSharpeningAbEnabled'));
+    ok(
+      'the list is frozen — a hand-maintained catalog, not something a caller can mutate by accident',
+      Object.isFrozen(TIER_SWEEP_COVERAGE_CAVEATS)
     );
   }
 

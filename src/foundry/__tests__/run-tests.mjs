@@ -32,6 +32,7 @@ import { run as runSceneOcclusionSources } from './scene-occlusion-sources.test.
 import { run as runSceneGeometry } from './scene-geometry.test.mjs';
 import { run as runSceneLayers } from './scene-layers.test.mjs';
 import { run as runSceneTokens } from './scene-tokens.test.mjs';
+import { run as runSceneTiles } from './scene-tiles.test.mjs';
 import { run as runV2AnchorImport } from './v2-anchor-import.test.mjs';
 import { run as runSettingsAdapter } from './settings-adapter.test.mjs';
 
@@ -94,6 +95,7 @@ const suites = [
   ['scene-geometry', runSceneGeometry],
   ['scene-layers', runSceneLayers],
   ['scene-tokens', runSceneTokens],
+  ['scene-tiles', runSceneTiles],
   ['v2-anchor-import', runV2AnchorImport],
   ['settings-adapter', runSettingsAdapter],
 ];

@@ -15,8 +15,14 @@ import {
   AB_REPRESENTATIVE_TOLERANCE,
   AB_SEQUENCE,
   AB_SIGNIFICANCE_FACTOR,
+  DEFAULT_AB_CYCLES,
+  EDIT_CASCADE_WATCH_ZONES,
   STRUCTURAL_TOGGLES,
+  aggregateAbCycles,
+  buildAbSequence,
   compareAbBlocks,
+  measureAmbientNoiseFloor,
+  runEditCascadeStress,
   runStructuralAB,
   summariseAbBlock,
   toggleById,
@@ -114,6 +120,16 @@ export function run(t) {
     ok('at least one structural toggle is catalogued', STRUCTURAL_TOGGLES.length > 0);
     ok('toggleById finds a real one', toggleById('earlyZComposition')?.id === 'earlyZComposition');
     ok('toggleById returns null, never undefined, for a miss', toggleById('nope') === null);
+    // Stage 2's own formal acceptance gate (S2.9) was designed but never run —
+    // this closes that gap using the same mechanism earlyZComposition proved.
+    ok(
+      'point-light batching (Stage 2) is also catalogued',
+      toggleById('pointLightBatching')?.id === 'pointLightBatching'
+    );
+    ok(
+      'point-light batching needs no settle-time override, unlike earlyZComposition',
+      toggleById('pointLightBatching').settleFrames === undefined
+    );
 
     // EVERY watched zone must be a REAL declared zone. A typo here produces a
     // silently empty comparison — the toggle would report "no movers" and read
@@ -130,6 +146,19 @@ export function run(t) {
     ok(
       'earlyZComposition settles longer than the default, because it applies asynchronously',
       toggleById('earlyZComposition').settleFrames >= 120
+    );
+
+    // EDIT_CASCADE_WATCH_ZONES is not a STRUCTURAL_TOGGLES entry (there is no
+    // boolean to flip) but it is the same kind of contract with the zone
+    // taxonomy, and just as easy to typo into a silently-empty comparison.
+    ok('at least one edit-cascade watch zone is catalogued', EDIT_CASCADE_WATCH_ZONES.length > 0);
+    for (const z of EDIT_CASCADE_WATCH_ZONES) {
+      ok(`edit-cascade stress watches a zone that actually exists: ${z}`, declared.has(z));
+    }
+    ok(
+      'fire is deliberately absent — light.fireSync is "conditional" cadence, not "bake", so it has no ' +
+        'version-gated rebuild for a mask-authority bump to force',
+      !EDIT_CASCADE_WATCH_ZONES.includes('light.fireSync')
     );
   }
 
@@ -278,13 +307,96 @@ export function run(t) {
   }
 
   // ======================================================================
+  // buildAbSequence: cycles:1 is byte-identical to the original AB_SEQUENCE
+  // ======================================================================
+  {
+    ok('cycles:1 (the default) reproduces AB_SEQUENCE exactly', buildAbSequence(1).join(',') === AB_SEQUENCE.join(','));
+    ok('...and so does calling with no argument at all', buildAbSequence().join(',') === AB_SEQUENCE.join(','));
+    ok('the library default is 1, unchanged behaviour for any existing caller', DEFAULT_AB_CYCLES === 1);
+    ok(
+      'cycles:2 walks 5 blocks, sharing the middle ON between both cycles',
+      buildAbSequence(2).join(',') === 'on,off,on,off,on'
+    );
+    ok('cycles:3 walks 7 blocks', buildAbSequence(3).length === 7);
+    ok(
+      'a non-positive cycles count still yields at least one real cycle',
+      buildAbSequence(0).join(',') === 'on,off,on'
+    );
+  }
+
+  // ======================================================================
+  // aggregateAbCycles: one window matches compareAbBlocks EXACTLY; multiple
+  // windows use Math.max for the combined floor, never an average
+  // ======================================================================
+  {
+    const w1 = {
+      on1: block({ a: 40 }),
+      off: block({ a: 60 }),
+      on2: block({ a: 41 }),
+    };
+    const direct = compareAbBlocks({ ...w1, watchZones: ['a'] });
+    const single = aggregateAbCycles({ windows: [w1], watchZones: ['a'] });
+    ok(
+      'a single window reproduces compareAbBlocks verbatim',
+      single.verdict === direct.verdict && single.deltaGpuMs === direct.deltaGpuMs
+    );
+    ok(
+      '...plus a perCycle[] field carrying that same one result',
+      single.perCycle.length === 1 && single.perCycle[0].verdict === direct.verdict
+    );
+
+    // Two cycles that individually agree closely (small within-cycle floors)
+    // but whose OWN deltas disagree with each other by a lot — the combined
+    // floor must reflect that cross-cycle disagreement, not the small
+    // within-cycle numbers alone.
+    const cycleA = {
+      on1: block({ a: 40 }),
+      off: block({ a: 60 }), // delta = 40.5 - 60 = -19.5
+      on2: block({ a: 41 }),
+    };
+    const cycleB = {
+      on1: block({ a: 41 }),
+      off: block({ a: 42 }), // delta = 40.5 - 42 = -1.5, a much smaller trade
+      on2: block({ a: 40 }),
+    };
+    const multi = aggregateAbCycles({ windows: [cycleA, cycleB], watchZones: ['a'] });
+    const withinFloorAvg =
+      (compareAbBlocks({ ...cycleA, watchZones: ['a'] }).noiseFloorMs +
+        compareAbBlocks({ ...cycleB, watchZones: ['a'] }).noiseFloorMs) /
+      2;
+    const crossSpread = Math.abs(-19.5 - -1.5); // 18
+    ok(
+      'the combined floor is the LARGER of within-cycle drift and cross-cycle spread',
+      multi.noiseFloorMs === Math.max(withinFloorAvg, crossSpread)
+    );
+    ok(
+      '...which here is the cross-cycle spread, not the (smaller) within-cycle average',
+      multi.noiseFloorMs === crossSpread
+    );
+    ok('the combined delta is the mean of both cycles', multi.deltaGpuMs === (-19.5 + -1.5) / 2);
+    ok('perCycle[] keeps both individual results, not just the combined one', multi.perCycle.length === 2);
+
+    const empty = aggregateAbCycles({ windows: [] });
+    ok('zero windows yields "unmeasured", not a fabricated comparison', empty.verdict === 'unmeasured');
+  }
+
+  // ======================================================================
   // LIVE RUN: ordering, restore, and refusal
   // ======================================================================
   return (async () => {
     {
+      // includeAmbientCheck:false — this block pins TOGGLE flip/restore/count
+      // mechanics specifically; the ambient pre-check (on by default) has its
+      // own dedicated coverage further down and would otherwise shift this
+      // fake's blockIndex-driven waitCalls count for no reason relevant here.
       const h = fakeHarness({ toggles: { earlyZComposition: true } });
-      const r = await runStructuralAB(h, { toggleIds: ['earlyZComposition'], measureFrames: 10 });
+      const r = await runStructuralAB(h, {
+        toggleIds: ['earlyZComposition'],
+        measureFrames: 10,
+        includeAmbientCheck: false,
+      });
       ok('a live A/B reports that it ran', r.ran === true);
+      ok('...with no ambient check when disabled', r.ambientCheck === null);
       ok('...it flipped on, off, on, then restored', h.flips.map(([, v]) => (v ? 1 : 0)).join('') === '1011');
       ok('...leaving the viewer in the state it found it', h.state.earlyZComposition === true);
       ok('...and it says the camera was parked, not routing', r.cameraNote.includes('PARKED'));
@@ -304,10 +416,18 @@ export function run(t) {
     // Restore is in a `finally`. This is the block that matters most: a throw
     // must not strand the renderer in the OFF state.
     {
+      // includeAmbientCheck:false — same reasoning as the block above: this
+      // test's `throwOnBlock:1` targets the TOGGLE's own second block by
+      // blockIndex, and the ambient pre-check's own two readProfile() calls
+      // would shift that index before the toggle loop ever starts.
       const h = fakeHarness({ toggles: { earlyZComposition: true }, throwOnBlock: 1 });
       let threw = false;
       try {
-        await runStructuralAB(h, { toggleIds: ['earlyZComposition'], measureFrames: 10 });
+        await runStructuralAB(h, {
+          toggleIds: ['earlyZComposition'],
+          measureFrames: 10,
+          includeAmbientCheck: false,
+        });
       } catch {
         threw = true;
       }
@@ -317,11 +437,64 @@ export function run(t) {
       ok('...and the debug UI comes back even on the throw path', h.uiEvents.join(',') === 'hide,restore');
     }
 
-    // A viewer that starts with the toggle OFF must be restored to OFF.
+    // A viewer that starts with the toggle OFF must be restored to OFF. Left
+    // with the ambient check at its real default (on) — this doubles as
+    // coverage that the pre-check doesn't disturb ordinary restore behaviour.
     {
       const h = fakeHarness({ toggles: { earlyZComposition: false } });
       await runStructuralAB(h, { toggleIds: ['earlyZComposition'], measureFrames: 10 });
       ok('an originally-OFF toggle is restored to OFF, not to the default', h.state.earlyZComposition === false);
+    }
+
+    // MULTIPLE CYCLES: a 2-cycle run walks 5 blocks (10 waitFrames calls, two
+    // per block) and shares the middle ON between both cycles.
+    {
+      const h = fakeHarness({ toggles: { earlyZComposition: true } });
+      const r = await runStructuralAB(h, {
+        toggleIds: ['earlyZComposition'],
+        measureFrames: 10,
+        cycles: 2,
+        includeAmbientCheck: false,
+      });
+      ok('cycles:2 flips on,off,on,off,on then restores', h.flips.map(([, v]) => (v ? 1 : 0)).join('') === '101011');
+      ok('...five measured blocks, ten waitFrames calls (settle+measure per block)', h.waitCalls.length === 10);
+      ok('...reported back as 2 cycles', r.toggles[0].cycles === 2);
+      ok('...method names the cycle count', r.method.includes('2 cycles'));
+    }
+
+    // A default (cycles:1) run's method string stays exactly as it always
+    // was — no "(N cycles)" suffix for the common case.
+    {
+      const h = fakeHarness({ toggles: { earlyZComposition: true } });
+      const r = await runStructuralAB(h, {
+        toggleIds: ['earlyZComposition'],
+        measureFrames: 10,
+        includeAmbientCheck: false,
+      });
+      ok('a single-cycle run does not mention cycles in its method string', !r.method.includes('cycles'));
+    }
+
+    // THE AMBIENT-NOISE PRE-CHECK, live: runs once before any toggle flip,
+    // and every toggle carries a ratio against it.
+    {
+      const h = fakeHarness({ toggles: { earlyZComposition: true } });
+      const r = await runStructuralAB(h, { toggleIds: ['earlyZComposition'], measureFrames: 10 });
+      ok('the ambient check ran by default', r.ambientCheck?.measured === true);
+      ok('...before the first real toggle flip', h.flips[0][0] === 'earlyZComposition');
+      ok(
+        'the toggle carries a ratio against the ambient floor',
+        r.toggles[0].noiseFloorVsAmbientRatio === null || Number.isFinite(r.toggles[0].noiseFloorVsAmbientRatio)
+      );
+    }
+
+    // measureAmbientNoiseFloor in isolation: two back-to-back readings of the
+    // SAME (unflipped) state, no setStructuralToggle call at all.
+    {
+      const h = fakeHarness({ toggles: { earlyZComposition: true } });
+      const r = await measureAmbientNoiseFloor(h, { settleFrames: 5, measureFrames: 10 });
+      ok('a real measurement comes back', r.measured === true);
+      ok('...as a non-negative jitter figure', r.ambientNoiseMs >= 0);
+      ok('...having touched no toggle at all', h.flips.length === 0);
     }
 
     // Refusals must be NAMED, so "not supported" never reads as "found nothing".
@@ -334,6 +507,71 @@ export function run(t) {
       const unreadable = await runStructuralAB({ setStructuralToggle: () => {}, readStructuralToggle: () => null }, {});
       ok('a toggle that cannot be READ is never flipped', unreadable.ran === false);
       ok('...because there would be nothing to restore it to', unreadable.skipped === 'no-readable-toggles');
+    }
+
+    // ====================================================================
+    // EDIT-CASCADE STRESS: no boolean to flip — "on" is a burst of injected
+    // edits, "off" is an equal-length window where nothing is touched.
+    // ====================================================================
+    {
+      const none = await runEditCascadeStress({}, {});
+      ok('no triggerEdit -> refuses rather than fabricating a result', none.ran === false);
+      ok('...and names the gap', none.skipped === 'no-edit-trigger');
+      ok('...never a measurement result', none.note.includes('not a measurement result'));
+    }
+
+    {
+      const editCalls = [];
+      const triggerEdit = async () => {
+        editCalls.push(true);
+      };
+      // blockIndex 0 and 2 are the two BURST blocks (cycles:1 -> on,off,on);
+      // 1 is the QUIET block in between. Bake zones fire large during a
+      // burst and sit at zero at rest — the shape a real mask-authority
+      // version bump forcing unnecessary rebakes would actually produce.
+      const h = fakeHarness({
+        zonesFor: (blockIndex) =>
+          blockIndex % 2 === 0
+            ? { 'light.sunShadowBake': { sumMs: 180 }, 'light.waterBodyBake': { sumMs: 360 } }
+            : { 'light.sunShadowBake': { sumMs: 0 }, 'light.waterBodyBake': { sumMs: 0 } },
+      });
+      const r = await runEditCascadeStress(h, { triggerEdit, pings: 3, gapFrames: 2, settleFrames: 5 });
+
+      ok('a live run reports that it ran', r.ran === true);
+      ok('triggerEdit fired pings × (number of burst blocks), never during the quiet block', editCalls.length === 6);
+      ok('burst reads measurably more expensive than quiet here', r.verdict === 'costs-more-than-it-saves');
+      ok('...burstGpuMs is the elevated per-frame reading (1+2ms across the two watched zones)', r.burstGpuMs === 3);
+      ok('...quietGpuMs is genuinely zero, not merely small', r.quietGpuMs === 0);
+      ok('...delta is signed burst minus quiet', r.deltaGpuMs === 3);
+      ok(
+        'pings and gapFrames are echoed back for the report to show its own method',
+        r.pings === 3 && r.gapFrames === 2
+      );
+      ok(
+        'the method string speaks burst/quiet, not the shared on/off vocabulary',
+        r.method.startsWith('burst→quiet→burst')
+      );
+      ok('no routeZones were supplied, so representativeness is null, not assumed', r.representative === null);
+      ok('a single default cycle is reported', r.cycles === 1 && r.perCycle.length === 1);
+      // Same UI/timing discipline runStructuralAB already proved live —
+      // reused, not reinvented, for this second A/B-shaped mechanism.
+      ok('the live UI is hidden for the run and restored after, even here', h.uiEvents.join(',') === 'hide,restore');
+      ok('every waitFrames call happened while armed', h.waitCalls.length === 10 && h.waitCalls.every((c) => c.armed));
+    }
+
+    // A quiet run (triggerEdit exists but the zones never move) must earn
+    // NO verdict, not a false "nothing to see here" pass silently treated
+    // the same as "measurably safe" — within-noise is its own honest state.
+    {
+      const h = fakeHarness({ zonesFor: () => ({ 'light.sunShadowBake': { sumMs: 0 } }) });
+      const r = await runEditCascadeStress(h, {
+        triggerEdit: async () => {},
+        pings: 2,
+        gapFrames: 2,
+        settleFrames: 5,
+      });
+      ok('zero movement in either state is a real, honest zero delta', r.deltaGpuMs === 0);
+      ok('...reported as within-noise, not "pays for itself"', r.verdict === 'within-noise');
     }
   })();
 }

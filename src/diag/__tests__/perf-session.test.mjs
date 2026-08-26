@@ -16,6 +16,7 @@ import {
   DEFAULT_MEASURE_FRAMES,
   createProfiledFrameWaiter,
   createSceneSettleWaiter,
+  createVramSampler,
   runProfileSession,
 } from '../perf-session.js';
 
@@ -763,7 +764,13 @@ export async function run(t) {
       return realClearInterval(...a);
     };
     try {
-      const h = fakeHarness();
+      // readVram:undefined — this block's global setInterval/clearInterval
+      // interception is testing the MEASURING-TICK timer specifically; the
+      // VRAM sampler (2026-08-26) creates its own, orthogonal interval
+      // whenever a harness implements readVram at all, which would double
+      // these counts for a reason unrelated to what this test checks. See
+      // the dedicated VRAM-sampler block further down for ITS coverage.
+      const h = fakeHarness({ readVram: undefined });
       await runProfileSession(h, {
         settleFrames: 1,
         measureFrames: 1,
@@ -787,12 +794,127 @@ export async function run(t) {
       return realSetInterval(...a);
     };
     try {
-      const h = fakeHarness();
+      // readVram:undefined — same reasoning as the block above.
+      const h = fakeHarness({ readVram: undefined });
       await runProfileSession(h, { settleFrames: 1, measureFrames: 1 });
     } finally {
       globalThis.setInterval = realSetInterval;
     }
     ok('no timer is created at all without an onProgress callback', intervalsCreated === 0);
+  }
+
+  // ---- VRAM PEAK-OVER-WINDOW: its own interval, independent of onProgress --
+  {
+    let intervalsCreated = 0;
+    let intervalsCleared = 0;
+    const realSetInterval = globalThis.setInterval;
+    const realClearInterval = globalThis.clearInterval;
+    globalThis.setInterval = (...a) => {
+      intervalsCreated++;
+      return realSetInterval(...a);
+    };
+    globalThis.clearInterval = (...a) => {
+      intervalsCleared++;
+      return realClearInterval(...a);
+    };
+    try {
+      // No onProgress at all — the VRAM sampler must still run; it is not
+      // gated on anyone listening for progress text, unlike progressTimer.
+      // A real 250ms interval has no reason to fire even once inside this
+      // near-instant fake session, so this only asserts what's GUARANTEED:
+      // start() takes one immediate sample. Peak-tracking across MULTIPLE
+      // ticks and decimation get their own direct, timer-controlled unit
+      // test below, not this real-clock integration path.
+      const h = fakeHarness({ readVram: () => ({ estimatedTotalMb: 17 }) });
+      const report = await runProfileSession(h, { settleFrames: 1, measureFrames: 1 });
+      ok('a VRAM-capable harness gets its own interval even with no onProgress', intervalsCreated >= 1);
+      ok('...cleared again before the session returns', intervalsCleared === intervalsCreated);
+      ok('the immediate sample at start() is captured', report.vramWindow?.peak?.estimatedTotalMb === 17);
+      ok('...with at least one point in the series', report.vramWindow?.sampleCount >= 1);
+      ok(
+        'the single end-of-window snapshot still works too, a sibling field not a replacement',
+        report.vram?.estimatedTotalMb === 17
+      );
+    } finally {
+      globalThis.setInterval = realSetInterval;
+      globalThis.clearInterval = realClearInterval;
+    }
+  }
+
+  // ---- VRAM sampler: absence stays absence, series decimates not truncates -
+  {
+    // readVram:undefined — no capability at all, must not fabricate a window.
+    const h = fakeHarness({ readVram: undefined });
+    const report = await runProfileSession(h, { settleFrames: 1, measureFrames: 1 });
+    ok('no readVram at all means no vramWindow, never a fabricated empty one', report.vramWindow === null);
+  }
+
+  // ---- createVramSampler, in isolation, with timer control ------------------
+  // Injected setIntervalFn/clearIntervalFn — same DI pattern as
+  // createSceneSettleWaiter's own wait/now overrides — so "tick" can be
+  // driven manually and synchronously instead of racing a real 250ms clock.
+  {
+    let tickFn = null;
+    let clears = 0;
+    const readings = [10, 12, 40, 15, 9]; // a real spike, then it settles back down
+    let i = 0;
+    const sampler = createVramSampler({
+      readVram: () => ({
+        estimatedTotalMb: readings[Math.min(i++, readings.length - 1)],
+        headroomFraction: 0.5,
+        verdict: 'ok',
+      }),
+      setIntervalFn: (fn) => {
+        tickFn = fn;
+        return 'fake-handle';
+      },
+      clearIntervalFn: () => {
+        clears++;
+      },
+      now: () => i * 100, // monotonic, deterministic
+      maxSeriesPoints: 3,
+    });
+    sampler.start();
+    ok('start() takes one immediate sample, before any tick', i === 1);
+    tickFn(); // reading[1] = 12
+    tickFn(); // reading[2] = 40 — the spike
+    tickFn(); // reading[3] = 15
+    tickFn(); // reading[4] = 9
+    const result = sampler.stop();
+    ok('the interval is cleared on stop()', clears === 1);
+    ok('peak tracks the TRUE max across every tick, not the last one', result.peak.estimatedTotalMb === 40);
+    ok('the series stays within its cap even though 5 samples were taken', result.series.length <= 3);
+    ok(
+      "...by COARSENING (merging pairs into their mean), not truncating away the window's own start — the " +
+        'oldest surviving point is a merge, not a raw first-tick reading',
+      result.series[0].estimatedTotalMb !== 10
+    );
+    ok('sampleCount matches the (possibly coarsened) series length', result.sampleCount === result.series.length);
+
+    // A reading that is non-finite (harness mid-teardown, a bad read) must be
+    // skipped, never recorded as a false "0 MB".
+    let badI = 0;
+    const badReadings = [20, null, undefined, 25];
+    const sampler2 = createVramSampler({
+      readVram: () => ({ estimatedTotalMb: badReadings[Math.min(badI++, badReadings.length - 1)] }),
+      setIntervalFn: (fn) => {
+        tickFn = fn;
+        return 'h2';
+      },
+      clearIntervalFn: () => {},
+      now: () => badI,
+    });
+    sampler2.start();
+    tickFn();
+    tickFn();
+    tickFn();
+    const result2 = sampler2.stop();
+    ok(
+      'non-finite readings are skipped, not recorded as zero',
+      result2.series.every((p) => Number.isFinite(p.estimatedTotalMb))
+    );
+    ok('...so only the two real readings survive', result2.series.length === 2);
+    ok('...and the peak is still correct despite the gaps', result2.peak.estimatedTotalMb === 25);
   }
 
   // ---- defaults ------------------------------------------------------------

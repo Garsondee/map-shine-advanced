@@ -53,6 +53,11 @@ import { DEFAULT_PASS_BUDGET_MS, PASS_ZONE_PREFIX, isSparseCadence } from './per
 import { estimateSweepNoiseFloor } from './perf-lab.js';
 export { estimateSweepNoiseFloor };
 import { buildCacheRows, findLowHitRateCaches } from './cache-report.js';
+// Reused, not reinvented (2026-08-26) — the tier sweep's own noise-floor
+// significance test is the SAME "clear the floor by this factor" rule
+// structural-AB already proved out; a second constant here could drift from
+// it silently.
+import { AB_SIGNIFICANCE_FACTOR } from './perf-structural-ab.js';
 
 /** Coverage at or above this and the per-zone breakdown is trustworthy. */
 export const COVERAGE_GOOD = 0.85;
@@ -999,6 +1004,70 @@ export function collapseInsignificant(
 }
 
 /**
+ * One structural-AB toggle result -> one finding. Extracted 2026-08-26
+ * (previously inline in deriveFindings) so the floor-wide sweep's own rollup
+ * (floorStructuralAbFindings, below) drives findings through the SAME
+ * severity/text mapping the main window's own structuralAB already uses,
+ * instead of a second copy that could silently drift from this one.
+ *
+ * @param {object} t a toggle result, structuralAB.toggles[] shape
+ * @param {object} [opts]
+ * @param {string} [opts.idPrefix] — default reproduces the original ids
+ *   (`structural-ab:<id>` / `structural-ab-unmeasured:<id>`) byte-for-byte.
+ *   The floor-sweep caller passes `'structural-ab-floors'` so a floor-level
+ *   finding can NEVER collide with the main window's own finding for the
+ *   same toggle id, both of which can exist in the same report.
+ * @returns {object} a Finding
+ */
+export function structuralAbToggleFinding(t, { idPrefix = 'structural-ab' } = {}) {
+  if (t.verdict === 'unmeasured') {
+    return {
+      severity: 'medium',
+      id: `${idPrefix}-unmeasured:${t.id}`,
+      text: `The ${t.label} A/B ran but produced no comparable GPU numbers, so the trade is still unmeasured. ${t.note}`,
+      evidence: { toggle: t.id },
+    };
+  }
+  const viewLocal = t.representative?.verdict === 'view-local';
+  return {
+    // 'within-noise' is not a null result to bury — it means the experiment
+    // ran and could not decide, which is exactly when someone would otherwise
+    // read the raw delta and believe it.
+    severity: t.verdict === 'costs-more-than-it-saves' ? 'high' : t.verdict === 'within-noise' ? 'medium' : 'low',
+    id: `${idPrefix}:${t.id}`,
+    text:
+      `${t.label} — ${t.note}` +
+      (t.perZone?.length
+        ? ` Biggest movers: ${t.perZone
+            .slice(0, 3)
+            .map((z) => `${z.id} ${z.deltaMs >= 0 ? '+' : ''}${z.deltaMs}ms`)
+            .join(', ')}.`
+        : '') +
+      (t.representative?.note ? ` ${t.representative.note}` : '') +
+      ` The question this answers: ${t.question}`,
+    evidence: {
+      toggle: t.id,
+      verdict: t.verdict,
+      liveState: t.liveState,
+      onGpuMs: t.onGpuMs,
+      offGpuMs: t.offGpuMs,
+      deltaGpuMs: t.deltaGpuMs,
+      noiseFloorMs: t.noiseFloorMs,
+      representative: t.representative?.verdict ?? null,
+      viewLocal,
+      topMovers: (t.perZone ?? []).slice(0, 5),
+    },
+  };
+}
+
+/** Maps structuralAbToggleFinding over a toggles[] array. `toggles` may be
+ * null/undefined (a harness that couldn't run the A/B at all) — always
+ * returns an array, never throws. */
+export function structuralAbFindingsFor(toggles, opts) {
+  return (toggles ?? []).map((t) => structuralAbToggleFinding(t, opts));
+}
+
+/**
  * The ranked "so what". A report that lists 24 numbers and no conclusion has
  * moved the work of reading it onto the reader; this is the part that answers
  * "where do I optimise?" in the order it should be answered.
@@ -1059,6 +1128,31 @@ export function deriveFindings({
       id: `zone-kind-contradiction:${r.id}`,
       text: `${r.id} is declared kind:'cpu' (gpuAbsentByDeclaration: true, meaning "this zone contains no draw calls at all") yet carries ${gpu}ms/frame of real GPU time. Both cannot be true. Either the declaration is wrong, or a GPU timestamp landed here because this zone was the innermost bracket open around somebody else's renderer.render() call — in which case that GPU time belongs to an ancestor and the ancestor is reporting a misleading gpuMs: null.`,
       evidence: { zone: r.id, gpuMsPerFrame: gpu, site: r.site, parent: r.parent },
+    });
+  }
+
+  // ATTRIBUTED GPU TIME EXCEEDING THE FRAME'S OWN GPU TOTAL IS IMPOSSIBLE
+  // (2026-08-26). `computeAttribution`'s `coverage = attributed / frameGpuMs`
+  // has no upper clamp — a numerator that outgrows its own denominator would
+  // read `coverage > 1`, a negative `residualGpuMs`, and STILL report
+  // `verdict:'good'` (the threshold check is a bare `>=`). This is exactly
+  // the failure the RENDER/COMPUTE dual-resolve fix (gpu-zone-timer.js, same
+  // date) was built to prevent — folding compute-zone GPU time into
+  // `attributed` while `frameGpuMs` stayed render-only would have shipped
+  // precisely this contradiction, silently, the first time a session ran
+  // real TSL compute work. Kept here as the GUARD that stays behind, same
+  // posture as the zone-kind-contradiction check just above.
+  if (Number.isFinite(attribution?.coverage) && attribution.coverage > 1) {
+    out.push({
+      severity: 'high',
+      id: 'attribution-coverage-exceeds-total',
+      text: `attribution.coverage reads ${attribution.coverage} (attributed ${attribution.attributedGpuMs}ms vs frameGpuMs ${attribution.frameGpuMs}ms) — attributed GPU time cannot exceed the frame's own GPU total. This is an instrument fault, not a renderer finding: either a zone's GPU time is being double-counted, or frameGpuMs is missing a source of real GPU work that attributed time already includes.`,
+      evidence: {
+        coverage: attribution.coverage,
+        attributedGpuMs: attribution.attributedGpuMs,
+        frameGpuMs: attribution.frameGpuMs,
+        residualGpuMs: attribution.residualGpuMs,
+      },
     });
   }
 
@@ -1379,47 +1473,12 @@ export function deriveFindings({
   // rather than by reading one state — and because the question it settles
   // (Stage 1's early-Z prepass, ~18ms/frame) has been open, explicitly
   // "recommended next step, not buildable from this chair", since P-008.
-  for (const t of structuralAB?.toggles ?? []) {
-    if (t.verdict === 'unmeasured') {
-      out.push({
-        severity: 'medium',
-        id: `structural-ab-unmeasured:${t.id}`,
-        text: `The ${t.label} A/B ran but produced no comparable GPU numbers, so the trade is still unmeasured. ${t.note}`,
-        evidence: { toggle: t.id },
-      });
-      continue;
-    }
-    const viewLocal = t.representative?.verdict === 'view-local';
-    out.push({
-      // 'within-noise' is not a null result to bury — it means the experiment
-      // ran and could not decide, which is exactly when someone would otherwise
-      // read the raw delta and believe it.
-      severity: t.verdict === 'costs-more-than-it-saves' ? 'high' : t.verdict === 'within-noise' ? 'medium' : 'low',
-      id: `structural-ab:${t.id}`,
-      text:
-        `${t.label} — ${t.note}` +
-        (t.perZone?.length
-          ? ` Biggest movers: ${t.perZone
-              .slice(0, 3)
-              .map((z) => `${z.id} ${z.deltaMs >= 0 ? '+' : ''}${z.deltaMs}ms`)
-              .join(', ')}.`
-          : '') +
-        (t.representative?.note ? ` ${t.representative.note}` : '') +
-        ` The question this answers: ${t.question}`,
-      evidence: {
-        toggle: t.id,
-        verdict: t.verdict,
-        liveState: t.liveState,
-        onGpuMs: t.onGpuMs,
-        offGpuMs: t.offGpuMs,
-        deltaGpuMs: t.deltaGpuMs,
-        noiseFloorMs: t.noiseFloorMs,
-        representative: t.representative?.verdict ?? null,
-        viewLocal,
-        topMovers: (t.perZone ?? []).slice(0, 5),
-      },
-    });
-  }
+  //
+  // The per-toggle mapping itself lives in structuralAbToggleFinding (below,
+  // exported) — extracted 2026-08-26 so the floor-wide sweep's own rollup
+  // (floorStructuralAbFindings) drives findings through the SAME severity/text
+  // logic instead of a second copy that could drift from this one.
+  out.push(...structuralAbFindingsFor(structuralAB?.toggles));
 
   // THE SAME GEOMETRY SUBMITTED TWICE (2026-08-12). Two zones reporting the same
   // draw-call AND triangle counts are drawing the same thing — which is
@@ -1963,8 +2022,23 @@ export function deriveFindings({
     });
   }
 
+  return sortFindingsBySeverity(out);
+}
+
+/**
+ * Sorts IN PLACE and returns the same array — matches `Array#sort`'s own
+ * contract, since this replaces a bare `out.sort(...)` that every existing
+ * caller already relied on returning the identical reference. Extracted
+ * 2026-08-26 so a caller appending findings AFTER deriveFindings has already
+ * returned (boot.js's later phases, which compute floorStructuralAB/
+ * editCascadeStress well after the main report exists) can re-sort the
+ * combined list through the exact same rule `findings[]`'s own
+ * "sorted by severity" promise (see this report's `interpretation` field)
+ * depends on, rather than inventing a second comparator that could disagree.
+ */
+export function sortFindingsBySeverity(findings) {
   const order = { high: 0, medium: 1, low: 2 };
-  return out.sort((a, b) => order[a.severity] - order[b.severity]);
+  return findings.sort((a, b) => order[a.severity] - order[b.severity]);
 }
 
 /**
@@ -2686,6 +2760,97 @@ export function summarizeTierComparison(tierResults) {
 }
 
 /**
+ * THE TIER SWEEP'S OWN NOISE FLOOR (2026-08-26). Every other measurement in
+ * this instrument — structural-AB's on1/on2 bracketing, the ambient-noise
+ * pre-check — uses "measure twice, the disagreement IS the floor". The tier
+ * sweep had none of that: one sample per tier, no way to tell a real
+ * regression from thermal/clock jitter. The first live report showed
+ * `extreme` reading very slightly CHEAPER than `quality` with no way to say
+ * whether that was real.
+ *
+ * CHOSEN DESIGN (author's own direct choice, asked, since this is a genuine
+ * cost/rigor fork — the full per-tier-bracket alternative would have roughly
+ * DOUBLED the sweep's own runtime): bracket ONE reference tier — the caller
+ * re-runs its route a second time — and apply that single scalar floor
+ * uniformly to every row below. Coarser than a true per-tier bracket (see
+ * `noiseFloor.note` in the return value for the honest caveat), still
+ * strictly more honest than the zero protection this had before.
+ *
+ * Stays as dumb about MEANING as `summarizeTierComparison` itself: this
+ * function does not choose the reference tier or measure it — the caller
+ * does (see `boot.js`'s tier-sweep phase) and passes the resulting
+ * `noiseFloorMs` in.
+ *
+ * @param {{frame: object, perTierHealth: object, ranked: Array}} comparison
+ *   `summarizeTierComparison`'s own return value.
+ * @param {object} opts
+ * @param {number|null} opts.noiseFloorMs `Math.abs` of two readings of the
+ *   SAME reference tier's own `frame.gpuMs.p50` — null if the reference
+ *   bracket could not be measured this run (never fabricated as 0).
+ * @param {string|null} [opts.referenceProfile] which tier was bracketed.
+ * @param {string[]} opts.tierOrder the REAL tier ladder, in its intended
+ *   order (the caller passes `PERFORMANCE_PROFILES` — this file imports
+ *   nothing from `effects/`, keep it that way).
+ * @param {number} [opts.significanceFactor]
+ * @returns {object} `comparison`, plus `noiseFloor`, `frameLadder`, and each
+ *   `ranked[]` row extended with its own `adjacentDeltas`.
+ */
+export function annotateTierComparisonNoise(
+  comparison,
+  { noiseFloorMs = null, referenceProfile = null, tierOrder = [], significanceFactor = AB_SIGNIFICANCE_FACTOR } = {}
+) {
+  const order = Array.isArray(tierOrder) ? tierOrder : [];
+  const floor = Number.isFinite(noiseFloorMs) ? noiseFloorMs : null;
+
+  // 'cheaper-than-expected' is its OWN verdict, not folded into 'costlier's
+  // opposite — there IS an existing test (effect-tier.test.mjs) asserting the
+  // tier ladder is monotonically ordered by cost, so a decrease outside the
+  // floor is a violation of that designed invariant, not just "a difference".
+  const verdictFor = (deltaMs) => {
+    if (floor === null || !Number.isFinite(deltaMs)) return 'unmeasured';
+    if (Math.abs(deltaMs) <= floor * significanceFactor) return 'within-noise';
+    return deltaMs < 0 ? 'cheaper-than-expected' : 'costlier';
+  };
+
+  const deltasAcrossLadder = (getValue) => {
+    const out = [];
+    for (let i = 0; i + 1 < order.length; i++) {
+      const fromProfile = order[i];
+      const toProfile = order[i + 1];
+      const fromMs = getValue(fromProfile);
+      const toMs = getValue(toProfile);
+      const deltaMs = Number.isFinite(fromMs) && Number.isFinite(toMs) ? round(toMs - fromMs, 3) : null;
+      out.push({ fromProfile, toProfile, deltaMs, noiseFloorMs: floor, verdict: verdictFor(deltaMs) });
+    }
+    return out;
+  };
+
+  return {
+    ...comparison,
+    noiseFloor: {
+      method: floor === null ? 'unmeasured' : 'single-reference-tier-bracket',
+      referenceProfile,
+      noiseFloorMs: floor,
+      significanceFactor,
+      note:
+        floor === null
+          ? 'No reference-tier bracket was measured this run, so no tier-to-tier delta below can be told apart from noise — every adjacentDeltas verdict reads "unmeasured", not a silent pass.'
+          : `Measured by running ${referenceProfile}'s own route TWICE and taking the disagreement — a SINGLE ` +
+            'frame-level scalar floor applied uniformly to every row below, coarser than a true per-tier ' +
+            "bracket (offered, and explicitly not chosen, for cost — see this instrument's own build notes). " +
+            'A small effect/zone\'s own delta will often read "within-noise" even when it genuinely moved, ' +
+            "since this floor reflects the WHOLE frame's own jitter, not that zone's — still strictly more " +
+            'honest than no floor at all.',
+    },
+    frameLadder: deltasAcrossLadder((p) => comparison.frame?.[p]?.gpuMsP50 ?? null),
+    ranked: (comparison.ranked ?? []).map((r) => ({
+      ...r,
+      adjacentDeltas: deltasAcrossLadder((p) => r.byProfile?.[p] ?? null),
+    })),
+  };
+}
+
+/**
  * THE FLOOR-WIDE STRUCTURAL-AB ROLLUP (2026-08-26) — "does Shade Once (or
  * point-light batching) actually help, floor by floor", the direct answer to
  * the author's own ask: *"You can include Shade Once pro and con tests for
@@ -2741,6 +2906,131 @@ export function summarizeFloorStructuralAB(perFloor) {
     byToggle[id] = { floorsWithVerdict, agreement, note };
   }
   return { byToggle };
+}
+
+/**
+ * ONE finding per toggle in `floorStructuralAB.byToggle` — deliberately NOT
+ * one per floor-per-toggle. A floors×toggles loop would emit near-duplicate
+ * text per floor, exactly the shape this file's own "TRIVIAL... folded into
+ * ONE finding instead of one verbose finding per pair" doctrine (see the
+ * zone-collapse finding above deriveFindings) already argues against.
+ * `byToggle` itself only ever carries verdicts (see
+ * `summarizeFloorStructuralAB`'s own doc) — `label`/`question`/per-floor
+ * `deltaGpuMs` are pulled from `perFloor[].structuralAB.toggles[]` for
+ * drill-down evidence, since the catalog fields are identical across every
+ * floor that measured a given toggle.
+ *
+ * @param {object|null} floorStructuralAB the report's own `.floorStructuralAB`
+ *   field (already carries `...summarizeFloorStructuralAB(perFloor)`'s spread
+ *   — see `boot.js`'s floor-sweep phase)
+ * @returns {Array<object>} Finding[]
+ */
+export function floorStructuralAbFindings(floorStructuralAB) {
+  const byToggle = floorStructuralAB?.byToggle;
+  const perFloor = Array.isArray(floorStructuralAB?.perFloor) ? floorStructuralAB.perFloor : [];
+  if (!byToggle || typeof byToggle !== 'object') return [];
+
+  return Object.entries(byToggle).map(([toggleId, { floorsWithVerdict, agreement, note }]) => {
+    let label = toggleId;
+    let question = null;
+    const deltaGpuMsByFloor = {};
+    for (const f of perFloor) {
+      const t = f?.structuralAB?.toggles?.find((tog) => tog?.id === toggleId);
+      if (!t) continue;
+      label = t.label ?? label;
+      question = question ?? t.question ?? null;
+      deltaGpuMsByFloor[String(f.floorIndex)] = t.deltaGpuMs ?? null;
+    }
+
+    const decisiveVerdicts = new Set(
+      Object.values(floorsWithVerdict).filter((v) => v === 'pays-for-itself' || v === 'costs-more-than-it-saves')
+    );
+    const severity =
+      agreement === 'mixed'
+        ? 'high'
+        : agreement === 'insufficient-data'
+          ? 'medium'
+          : decisiveVerdicts.has('costs-more-than-it-saves')
+            ? 'high'
+            : 'low';
+
+    return {
+      severity,
+      id: `structural-ab-floors:${toggleId}`,
+      // `note` is already purpose-written prose FOR this floor-rollup context
+      // (unlike editCascadeStressFinding's own note below, which is generated
+      // for a generic ON/OFF toggle and would read wrong reused here).
+      text: `${label}, across every floor — ${note}${question ? ` The question this answers: ${question}` : ''}`,
+      evidence: { toggle: toggleId, agreement, floorsWithVerdict, deltaGpuMsByFloor },
+    };
+  });
+}
+
+/**
+ * ONE finding for the editing-cadence stress test. No catalog entry backs
+ * this (unlike a structural toggle), so there's no label/question to draw
+ * on, and its text is written fresh for what this phase actually tests —
+ * does an edit with nothing masking-relevant in it force real bake work —
+ * rather than reused from the shared A/B primitive's own generic ON/OFF
+ * wording ("PAYS FOR ITSELF"/"COSTS MORE THAN IT SAVES"), which reads as
+ * evaluating a keep-or-discard trade, and this isn't one (see
+ * `perf-structural-ab.js#runEditCascadeStress`'s own header for the real
+ * framing this text echoes).
+ *
+ * @param {object|null} editCascadeStress the report's own `.editCascadeStress` field
+ * @returns {object|null} a Finding, or null when this phase produced no real
+ *   measurement (disabled, no tile to ping, threw) — those cases already
+ *   explain themselves via `editCascadeStress.reason` elsewhere in the
+ *   report; this never fabricates a finding for an absence.
+ */
+export function editCascadeStressFinding(editCascadeStress) {
+  if (!editCascadeStress || editCascadeStress.measured !== true) return null;
+  const { verdict, deltaGpuMs, noiseFloorMs, burstGpuMs, quietGpuMs, perZone, maskAuthorityBakeDelta, pings } =
+    editCascadeStress;
+  if (verdict === 'unmeasured') {
+    return {
+      severity: 'medium',
+      id: 'edit-cascade-stress-unmeasured',
+      text: `The edit-cascade stress test ran but produced no comparable GPU numbers. ${editCascadeStress.note ?? ''}`.trim(),
+      evidence: { pings },
+    };
+  }
+  const bakeRuns = maskAuthorityBakeDelta?.bakeRuns ?? null;
+  const movers = (perZone ?? [])
+    .slice(0, 3)
+    .map((z) => `${z.id} ${z.deltaMs >= 0 ? '+' : ''}${z.deltaMs}ms`)
+    .join(', ');
+  const text =
+    verdict === 'within-noise'
+      ? `A burst of ${pings ?? '?'} scoped, otherwise-irrelevant document edits could NOT be told apart from ` +
+        `this run's own noise (${deltaGpuMs}ms delta vs a ${noiseFloorMs}ms floor) — the arity-1 hook bug this ` +
+        `test targets may still be real, this run just could not confirm it either way.`
+      : verdict === 'pays-for-itself'
+        ? `A burst of ${pings ?? '?'} scoped, otherwise-irrelevant document edits measured CHEAPER than quiet ` +
+          `(${deltaGpuMs}ms/frame, ${burstGpuMs}ms burst vs ${quietGpuMs}ms quiet) — surprising for a test built ` +
+          `to expose a cost, not a saving. Worth a second look before trusting it: nothing about pinging an ` +
+          `inert flag should plausibly make the frame faster.`
+        : `A burst of ${pings ?? '?'} scoped, otherwise-irrelevant document edits forced ${deltaGpuMs}ms/frame of ` +
+          `EXTRA GPU cost (${burstGpuMs}ms during the burst vs ${quietGpuMs}ms at rest)` +
+          (bakeRuns !== null
+            ? `, and the mask authority actually re-derived its floor products ${bakeRuns} time(s) as a direct result`
+            : '') +
+          ` — direct, live confirmation of the redrawOn arity-1 hook bug (any Tile/Level write force-recomputes ` +
+          `mask authority regardless of what changed).`;
+  return {
+    severity: verdict === 'costs-more-than-it-saves' ? 'high' : verdict === 'within-noise' ? 'medium' : 'low',
+    id: 'edit-cascade-stress',
+    text: text + (movers ? ` Biggest movers: ${movers}.` : ''),
+    evidence: {
+      verdict,
+      deltaGpuMs,
+      noiseFloorMs,
+      burstGpuMs,
+      quietGpuMs,
+      maskAuthorityBakeDelta,
+      topMovers: (perZone ?? []).slice(0, 5),
+    },
+  };
 }
 
 /**

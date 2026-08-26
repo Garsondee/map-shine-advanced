@@ -24,6 +24,7 @@ import {
   SHAPE_BUCKETS,
   TRIVIAL_GEOMETRY_TRIANGLE_CEILING,
   annotatePassResiduals,
+  annotateTierComparisonNoise,
   attributeZonesToEffects,
   buildHistogram,
   buildOffenderSummary,
@@ -40,10 +41,15 @@ import {
   condenseFrameHistory,
   dedupeHitchContext,
   deriveFindings,
+  editCascadeStressFinding,
   estimateSweepNoiseFloor,
   findHangs,
+  floorStructuralAbFindings,
   formatOffenderSummaryText,
+  sortFindingsBySeverity,
   statFrom,
+  structuralAbFindingsFor,
+  structuralAbToggleFinding,
   summariseFrameRate,
   summariseSamples,
   summarizeFloorStructuralAB,
@@ -1941,6 +1947,91 @@ export function run(t) {
   }
 
   // ======================================================================
+  // annotateTierComparisonNoise (2026-08-26) — the tier sweep's own noise
+  // floor. A ladder walk across 4 tiers hits all three non-null verdicts:
+  // a clear increase, a small move inside the floor, and a clear DECREASE
+  // (the ladder-monotonicity-violation case, its own verdict).
+  // ======================================================================
+  {
+    const tierOrder = ['low', 'standard', 'quality', 'extreme'];
+    const comparison = {
+      frame: {
+        low: { gpuMsP50: 20 },
+        standard: { gpuMsP50: 25 }, // low->standard: +5, clears the floor -> costlier
+        quality: { gpuMsP50: 25.5 }, // standard->quality: +0.5, inside the floor -> within-noise
+        extreme: { gpuMsP50: 20 }, // quality->extreme: -5.5, clears the floor, negative -> cheaper-than-expected
+      },
+      perTierHealth: {},
+      ranked: [],
+    };
+    // significanceFactor defaults to 1.5, so a floor of 1 means +/-1.5 is the clearance line.
+    const noiseFloorMs = 1;
+
+    const annotated = annotateTierComparisonNoise(comparison, {
+      noiseFloorMs,
+      referenceProfile: 'standard',
+      tierOrder,
+    });
+    ok('one adjacentDeltas entry per adjacent pair — 4 tiers, 3 pairs', annotated.frameLadder.length === 3);
+    ok('a clear increase reads costlier', annotated.frameLadder[0].verdict === 'costlier');
+    ok(
+      'a small move inside the floor reads within-noise, not costlier',
+      annotated.frameLadder[1].verdict === 'within-noise'
+    );
+    ok(
+      "a clear DECREASE gets its OWN verdict, not folded into costlier's opposite",
+      annotated.frameLadder[2].verdict === 'cheaper-than-expected'
+    );
+    ok(
+      'noiseFloor names its own method, reference tier and measured value',
+      annotated.noiseFloor.method === 'single-reference-tier-bracket' &&
+        annotated.noiseFloor.referenceProfile === 'standard' &&
+        annotated.noiseFloor.noiseFloorMs === 1
+    );
+    ok('the original comparison fields pass through untouched', annotated.frame === comparison.frame);
+
+    // A row's own adjacentDeltas are computed the SAME way, independently of
+    // the frame-level ladder — a zone can move differently from the frame.
+    const withRow = annotateTierComparisonNoise(
+      { ...comparison, ranked: [{ id: 'z', byProfile: { low: 5, standard: 5.2, quality: 5.3, extreme: 5.25 } }] },
+      { noiseFloorMs, referenceProfile: 'standard', tierOrder }
+    );
+    ok(
+      'each ranked row gets its own adjacentDeltas, same shape as frameLadder',
+      withRow.ranked[0].adjacentDeltas.length === 3
+    );
+    ok(
+      'a genuinely tiny zone-level move reads within-noise even where the frame-level move that same tick was costlier',
+      withRow.ranked[0].adjacentDeltas[0].verdict === 'within-noise'
+    );
+
+    // No reference bracket measured this run -> every verdict is honestly
+    // 'unmeasured', never a silent pass or a fabricated floor of 0.
+    const unmeasured = annotateTierComparisonNoise(comparison, {
+      noiseFloorMs: null,
+      referenceProfile: 'standard',
+      tierOrder,
+    });
+    ok(
+      'a null noise floor produces "unmeasured" verdicts throughout, not a silent pass',
+      unmeasured.frameLadder.every((d) => d.verdict === 'unmeasured')
+    );
+    ok('...and noiseFloor.method says so plainly', unmeasured.noiseFloor.method === 'unmeasured');
+
+    // A tier missing from `frame` (never measured, or the ladder names one
+    // this comparison doesn't have) must not crash — null delta, unmeasured verdict.
+    const missingTier = annotateTierComparisonNoise(comparison, {
+      noiseFloorMs,
+      referenceProfile: 'standard',
+      tierOrder: ['low', 'nonexistent'],
+    });
+    ok(
+      'a tier absent from frame{} yields a null delta and an unmeasured verdict, never a throw',
+      missingTier.frameLadder[0].deltaMs === null && missingTier.frameLadder[0].verdict === 'unmeasured'
+    );
+  }
+
+  // ======================================================================
   // summarizeFloorStructuralAB (2026-08-26) — "does Shade Once actually
   // help, floor by floor", the direct rollup of a floor-wide sweep
   // ======================================================================
@@ -2022,6 +2113,198 @@ export function run(t) {
       'an empty array is the same as malformed input here',
       Object.keys(summarizeFloorStructuralAB([]).byToggle).length === 0
     );
+  }
+
+  // ======================================================================
+  // structuralAbToggleFinding / structuralAbFindingsFor (2026-08-26) —
+  // extracted from deriveFindings' own inline loop. Direct tests since this
+  // mapping previously had NONE of its own, only indirect coverage through
+  // deriveFindings' much larger fixtures.
+  // ======================================================================
+  {
+    const toggle = (over) => ({
+      id: 'earlyZComposition',
+      label: 'Early-Z composition',
+      question: 'Does the rejection it buys cost less than the extra submission it pays?',
+      verdict: 'costs-more-than-it-saves',
+      note: 'COSTS MORE THAN IT SAVES: 2ms/frame more expensive.',
+      liveState: true,
+      onGpuMs: 32,
+      offGpuMs: 30,
+      deltaGpuMs: 2,
+      noiseFloorMs: 0.5,
+      representative: { verdict: 'representative', note: 'generalises fine' },
+      perZone: [{ id: 'geometry.worldDraw', deltaMs: 1.8 }],
+      ...over,
+    });
+
+    const unmeasured = structuralAbToggleFinding(toggle({ verdict: 'unmeasured' }));
+    ok('unmeasured verdict -> medium severity', unmeasured.severity === 'medium');
+    ok(
+      'default idPrefix reproduces the original inline id byte-for-byte',
+      unmeasured.id === 'structural-ab-unmeasured:earlyZComposition'
+    );
+
+    const costly = structuralAbToggleFinding(toggle());
+    ok('costs-more-than-it-saves -> high severity', costly.severity === 'high');
+    ok(
+      'default idPrefix reproduces the original inline id byte-for-byte',
+      costly.id === 'structural-ab:earlyZComposition'
+    );
+    ok('text carries the question', costly.text.includes('extra submission'));
+    ok('text carries the biggest mover', costly.text.includes('geometry.worldDraw'));
+
+    ok(
+      'within-noise -> medium severity, not silently dropped',
+      structuralAbToggleFinding(toggle({ verdict: 'within-noise' })).severity === 'medium'
+    );
+    ok(
+      'pays-for-itself -> low severity',
+      structuralAbToggleFinding(toggle({ verdict: 'pays-for-itself' })).severity === 'low'
+    );
+
+    ok(
+      'a custom idPrefix produces a different namespace than the default',
+      structuralAbToggleFinding(toggle(), { idPrefix: 'structural-ab-floors' }).id ===
+        'structural-ab-floors:earlyZComposition'
+    );
+
+    const many = structuralAbFindingsFor([
+      toggle({ verdict: 'pays-for-itself' }),
+      toggle({ id: 'pointLightBatching', verdict: 'within-noise' }),
+    ]);
+    ok('structuralAbFindingsFor maps one finding per toggle', many.length === 2);
+    ok('structuralAbFindingsFor(null) is an empty array, never throws', structuralAbFindingsFor(null).length === 0);
+    ok(
+      'structuralAbFindingsFor(undefined) is an empty array, never throws',
+      structuralAbFindingsFor(undefined).length === 0
+    );
+  }
+
+  // ======================================================================
+  // floorStructuralAbFindings (2026-08-26) — ONE finding per toggle across
+  // every floor, not one per floor-per-toggle; drives off byToggle, pulls
+  // label/question/deltaGpuMs from perFloor for drill-down evidence.
+  // ======================================================================
+  {
+    const t = (id, verdict, over = {}) => ({
+      id,
+      label: `Label for ${id}`,
+      question: `Question for ${id}`,
+      verdict,
+      deltaGpuMs: 1.5,
+      ...over,
+    });
+    const floor = (floorIndex, toggles) => ({ floorIndex, structuralAB: toggles ? { toggles } : null });
+    const reportFor = (perFloor) => ({ perFloor, ...summarizeFloorStructuralAB(perFloor) });
+
+    const consistentPerFloor = [
+      floor(0, [t('earlyZComposition', 'pays-for-itself')]),
+      floor(1, [t('earlyZComposition', 'pays-for-itself', { deltaGpuMs: -2 })]),
+    ];
+    const findingsConsistent = floorStructuralAbFindings(reportFor(consistentPerFloor));
+    ok('one finding per toggle across every floor, not per floor-per-toggle', findingsConsistent.length === 1);
+    ok('a consistent pays-for-itself verdict earns low severity', findingsConsistent[0].severity === 'low');
+    ok(
+      "id namespace never collides with the main window's own structural-ab: id",
+      findingsConsistent[0].id === 'structural-ab-floors:earlyZComposition'
+    );
+    ok(
+      'label/question are pulled from perFloor, not left as the bare toggle id',
+      findingsConsistent[0].text.includes('Label for earlyZComposition') &&
+        findingsConsistent[0].text.includes('Question for earlyZComposition')
+    );
+    ok(
+      'per-floor deltaGpuMs reaches evidence for drill-down',
+      findingsConsistent[0].evidence.deltaGpuMsByFloor['1'] === -2
+    );
+
+    const mixedPerFloor = [
+      floor(0, [t('earlyZComposition', 'pays-for-itself')]),
+      floor(1, [t('earlyZComposition', 'costs-more-than-it-saves')]),
+    ];
+    ok(
+      'floors genuinely disagreeing is ALWAYS high severity, regardless of which verdicts split',
+      floorStructuralAbFindings(reportFor(mixedPerFloor))[0].severity === 'high'
+    );
+
+    const insufficientPerFloor = [floor(0, [t('earlyZComposition', 'within-noise')])];
+    ok(
+      'insufficient-data is medium severity, not silently dropped or under-ranked as low',
+      floorStructuralAbFindings(reportFor(insufficientPerFloor))[0].severity === 'medium'
+    );
+
+    ok('a null floorStructuralAB produces no findings, never throws', floorStructuralAbFindings(null).length === 0);
+    ok('a floorStructuralAB with no byToggle produces no findings', floorStructuralAbFindings({}).length === 0);
+  }
+
+  // ======================================================================
+  // editCascadeStressFinding (2026-08-26) — bespoke text, NOT the shared A/B
+  // primitive's generic "PAYS FOR ITSELF"/"COSTS MORE THAN IT SAVES" wording,
+  // since this isn't evaluating a keep-or-discard trade.
+  // ======================================================================
+  {
+    ok(
+      'measured:false produces no finding at all',
+      editCascadeStressFinding({ measured: false, reason: 'no tile' }) === null
+    );
+    ok('a null editCascadeStress produces no finding', editCascadeStressFinding(null) === null);
+
+    const base = {
+      measured: true,
+      pings: 15,
+      burstGpuMs: 86.8,
+      quietGpuMs: 27.2,
+      deltaGpuMs: 59.6,
+      noiseFloorMs: 4.6,
+      maskAuthorityBakeDelta: { bakeRuns: 78, bakeSkips: 17069 },
+      perZone: [{ id: 'light.sunShadowBake', deltaMs: 29.1 }],
+    };
+
+    const costly = editCascadeStressFinding({ ...base, verdict: 'costs-more-than-it-saves' });
+    ok('a real forced cost is high severity', costly.severity === 'high');
+    ok(
+      'text does NOT reuse the toggle-vocabulary wording',
+      !costly.text.includes('PAYS FOR ITSELF') && !costly.text.includes('COSTS MORE THAN IT SAVES')
+    );
+    ok('text names the real mechanism', costly.text.includes('mask authority'));
+    ok('text carries the bakeRuns count', costly.text.includes('78'));
+    ok('text carries the biggest mover', costly.text.includes('light.sunShadowBake'));
+
+    const noisy = editCascadeStressFinding({ ...base, verdict: 'within-noise' });
+    ok('within-noise is medium severity, honestly "could not tell", not silently dropped', noisy.severity === 'medium');
+    ok('text says the bug may still be real', noisy.text.includes('may still be real'));
+
+    const cheaper = editCascadeStressFinding({ ...base, verdict: 'pays-for-itself', deltaGpuMs: -3 });
+    ok('a surprising "cheaper" result is still reported, not swallowed', cheaper !== null);
+    ok('...and flagged as surprising, worth a second look', cheaper.text.includes('second look'));
+
+    const unmeasuredResult = editCascadeStressFinding({
+      measured: true,
+      verdict: 'unmeasured',
+      pings: 15,
+      note: 'no attributed GPU time',
+    });
+    ok(
+      'an unmeasured (but ran) result still produces a finding, medium severity',
+      unmeasuredResult.severity === 'medium' && unmeasuredResult.id === 'edit-cascade-stress-unmeasured'
+    );
+  }
+
+  // ======================================================================
+  // sortFindingsBySeverity (2026-08-26) — extracted so a caller appending
+  // findings AFTER deriveFindings already returned can re-sort through the
+  // exact same rule, not a second comparator that could disagree.
+  // ======================================================================
+  {
+    const findings = [
+      { severity: 'low', id: 'a' },
+      { severity: 'high', id: 'b' },
+      { severity: 'medium', id: 'c' },
+    ];
+    const sorted = sortFindingsBySeverity(findings);
+    ok('high sorts before medium sorts before low', sorted.map((f) => f.severity).join(',') === 'high,medium,low');
+    ok("sorts and returns the SAME array reference, matching Array#sort's own contract", sorted === findings);
   }
 
   // ======================================================================
@@ -2610,6 +2893,52 @@ export function run(t) {
     ok(
       'the two tiny quads in the SAME run still fold into the one consolidated finding',
       mixedFindings.some((f) => f.id === 'duplicate-geometry-fullscreen-quads' && f.evidence.pairs.length === 1)
+    );
+  }
+
+  // ======================================================================
+  // attribution-coverage-exceeds-total (2026-08-26) — the guard against the
+  // exact self-contradiction the gpu-zone-timer render+compute fix, landed
+  // the same day, was built to avoid: attributed GPU time outgrowing the
+  // frame's own GPU total.
+  // ======================================================================
+  {
+    const minimal = { rows: [], effects: [], frame: {}, method: {}, budgetMs: 8.33 };
+
+    const broken = deriveFindings({
+      ...minimal,
+      attribution: { coverage: 1.4, attributedGpuMs: 42, frameGpuMs: 30, residualGpuMs: -12 },
+    });
+    const found = broken.find((f) => f.id === 'attribution-coverage-exceeds-total');
+    ok('coverage > 1 is flagged, never silently accepted as verdict:good', found !== undefined);
+    ok('...at high severity — the report cannot be trusted while this is true', found.severity === 'high');
+    ok(
+      '...evidence carries the negative residual, not a hidden/clamped positive one',
+      found.evidence.residualGpuMs === -12
+    );
+
+    const healthy = deriveFindings({
+      ...minimal,
+      attribution: { coverage: 0.97, attributedGpuMs: 29, frameGpuMs: 30, residualGpuMs: 1 },
+    });
+    ok(
+      'coverage <= 1 never raises this finding',
+      healthy.every((f) => f.id !== 'attribution-coverage-exceeds-total')
+    );
+
+    const exactlyOne = deriveFindings({
+      ...minimal,
+      attribution: { coverage: 1, attributedGpuMs: 30, frameGpuMs: 30, residualGpuMs: 0 },
+    });
+    ok(
+      'coverage exactly 1.0 (fully explained, not over) is not a contradiction',
+      exactlyOne.every((f) => f.id !== 'attribution-coverage-exceeds-total')
+    );
+
+    const unmeasured = deriveFindings({ ...minimal, attribution: { coverage: null, verdict: 'unmeasured' } });
+    ok(
+      'a null coverage (nothing measured) never crashes or fires this guard',
+      unmeasured.every((f) => f.id !== 'attribution-coverage-exceeds-total')
     );
   }
 

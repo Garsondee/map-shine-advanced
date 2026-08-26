@@ -134,7 +134,6 @@ export function createGpuZoneTimer({ renderer, InspectorBase, profiler }) {
   let armed = false;
   let installed = null;
   let previousInspector = null;
-  let resolveInFlight = false;
   let folded = 0;
   let missed = 0;
   let unattributed = 0;
@@ -144,16 +143,38 @@ export function createGpuZoneTimer({ renderer, InspectorBase, profiler }) {
   // the line; it says nothing about how CLOSE a non-overflowing run came, or
   // what the pool was doing in the frames leading up to a crossing. Two live
   // reports have shown `poolOverflowed: true` with no named cause anywhere in
-  // this codebase — a leading hypothesis is `renderFrame`'s own GPU-probe
-  // throttle (vt-pan-viewer.js: `if (gpuProbe.isActive() && gpuProbe
-  // .isMeasuring()) return`) blocking `collect()` for several consecutive
-  // ticks while a PRIOR `resolveTimestampsAsync` is still stuck awaiting
-  // `resultBuffer.mapAsync` — plausibly the same GPU backlog that also causes
-  // frame hitches, not an independent fault. Unconfirmed without a live run;
-  // these two counters are what the NEXT one needs to confirm or refute it.
+  // this codebase — a leading hypothesis was `renderFrame`'s own GPU-probe
+  // throttle blocking `collect()` for several consecutive ticks while a PRIOR
+  // `resolveTimestampsAsync` is still stuck awaiting `resultBuffer.mapAsync`.
+  //
+  // ⚠️ REFUTED, 2026-08-26 (docs/planning perf-report round 2) — the first
+  // live capture long enough to overflow (`maxPendingSize: 2017`, crossing
+  // `PENDING_UID_ALARM`) showed `maxResolveSkipStreak: 3` — far too short a
+  // streak to support "stuck for many consecutive ticks". The real mechanism,
+  // confirmed against the vendored three.webgpu.js directly: this file only
+  // ever called `resolveTimestampsAsync('render')` — never `'compute'` — so
+  // every `c:`-prefixed uid from a TSL compute dispatch (this project runs
+  // wind/fluid compute EVERY frame) landed in `pending` via `beginCompute`
+  // and could NEVER resolve, accumulating one-or-more per frame for the whole
+  // window until crossing the alarm. Not a stall; a steady, silent leak of an
+  // entire query TYPE. Fixed below by resolving both types independently,
+  // each with its OWN skip-streak tracking (`resolveState`) so a stuck
+  // resolve on one type can never block the other from being attempted.
   let maxPendingSize = 0;
-  let resolveSkipStreak = 0;
-  let maxResolveSkipStreak = 0;
+  /** Per-type resolve bookkeeping — `poolFor(type)` already indexes pools
+   * this way; resolve scheduling now mirrors it. */
+  const resolveState = {
+    render: { inFlight: false, skipStreak: 0, maxSkipStreak: 0 },
+    compute: { inFlight: false, skipStreak: 0, maxSkipStreak: 0 },
+  };
+  // The latest known COMPUTE-pass frame total, folded into the next RENDER-
+  // driven frameGpuSamples push (see resolveType's own doc) rather than
+  // requiring both types to report before any sample is pushed at all — a
+  // build/session with no active compute work would otherwise starve
+  // frameGpuMs entirely, which is worse than the render-only number this
+  // file already produced before this fix. Frame-or-two-stale by nature,
+  // same tolerance this file's own header already states for uid resolution.
+  let lastComputeFrameTotal = 0;
   /**
    * Whole-frame GPU samples, free of charge. `Backend.resolveTimestampsAsync`
    * writes the frame's TOTAL pass duration into `renderer.info.render.timestamp`
@@ -236,6 +257,60 @@ export function createGpuZoneTimer({ renderer, InspectorBase, profiler }) {
     }
   }
 
+  /**
+   * Resolve+fold ONE query type. Independent per-type in-flight/skip-streak
+   * state (`resolveState[type]`) means a stuck resolve on `'render'` can
+   * never block `'compute'` from being attempted next tick, and vice versa —
+   * the actual guarantee the 2026-08-26 fix (see this file's own state-
+   * declaration comment) exists to provide. Safe to call every tick for BOTH
+   * types even when only one is doing real work:
+   * `WebGPUTimestampQueryPool#resolveQueriesAsync` early-exits cheaply when
+   * its own pool saw zero queries that round.
+   * @param {'render'|'compute'} type
+   */
+  function resolveType(type) {
+    const st = resolveState[type];
+    if (st.inFlight) {
+      // A run of these immediately BEFORE an overflow WOULD be the signature
+      // of a stuck resolve — this file's own state-declaration comment
+      // explains why the 2026-08-26 live data refuted that as the actual
+      // cause of the overflow it was measured against, but the tracking
+      // stays: it is real, useful evidence either way, for whichever type.
+      st.skipStreak++;
+      if (st.skipStreak > st.maxSkipStreak) st.maxSkipStreak = st.skipStreak;
+      return;
+    }
+    st.skipStreak = 0;
+    if (typeof renderer.resolveTimestampsAsync !== 'function') return;
+    st.inFlight = true;
+    Promise.resolve(renderer.resolveTimestampsAsync(type))
+      .then(() => {
+        foldResolved();
+        const total = renderer.info?.[type]?.timestamp;
+        const value = Number.isFinite(total) && total > 0 ? total : 0;
+        if (type === 'compute') {
+          // NOT pushed on its own — folded into the next RENDER-driven push
+          // below, so a session with zero active compute work degrades
+          // exactly to this file's original render-only behaviour, never to
+          // "no sample at all" (see `lastComputeFrameTotal`'s own doc).
+          lastComputeFrameTotal = value;
+          return;
+        }
+        const combined = value + lastComputeFrameTotal;
+        if (combined > 0) {
+          frameGpuSamples.push(combined);
+          if (frameGpuSamples.length > MAX_FRAME_SAMPLES) frameGpuSamples.shift();
+        }
+      })
+      .catch((err) => {
+        resolveErrors++;
+        log.error(`resolveTimestampsAsync('${type}') rejected — GPU zone samples dropped for this frame:`, err);
+      })
+      .finally(() => {
+        st.inFlight = false;
+      });
+  }
+
   return {
     support,
 
@@ -262,8 +337,9 @@ export function createGpuZoneTimer({ renderer, InspectorBase, profiler }) {
       overflowed = false;
       resolveErrors = 0;
       maxPendingSize = 0;
-      resolveSkipStreak = 0;
-      maxResolveSkipStreak = 0;
+      resolveState.render = { inFlight: false, skipStreak: 0, maxSkipStreak: 0 };
+      resolveState.compute = { inFlight: false, skipStreak: 0, maxSkipStreak: 0 };
+      lastComputeFrameTotal = 0;
       armed = true;
       return true;
     },
@@ -307,38 +383,19 @@ export function createGpuZoneTimer({ renderer, InspectorBase, profiler }) {
       // it is synchronous and cheap — and doing it unconditionally means a
       // timestamp that resolved during a previous frame lands immediately
       // instead of waiting behind whatever resolve is currently in flight. The
-      // first version guarded the whole method on `resolveInFlight` and could
-      // therefore stall folding indefinitely on a slow readback, which showed up
-      // as zones that simply never got a GPU number.
+      // first version guarded the whole method on a single in-flight flag and
+      // could therefore stall folding indefinitely on a slow readback, which
+      // showed up as zones that simply never got a GPU number. Type-agnostic
+      // already (poolFor(type) inside foldResolved dispatches per uid), so this
+      // one call covers both of resolveType's independent resolve paths below.
       foldResolved();
-      if (resolveInFlight) {
-        // A run of these immediately BEFORE an overflow is the signature of
-        // the hypothesis in this file's own state-declaration comment: the
-        // pool only grows because a resolve is stuck, not because collect()
-        // stopped being called.
-        resolveSkipStreak++;
-        if (resolveSkipStreak > maxResolveSkipStreak) maxResolveSkipStreak = resolveSkipStreak;
-        return;
-      }
-      resolveSkipStreak = 0;
-      if (typeof renderer.resolveTimestampsAsync !== 'function') return;
-      resolveInFlight = true;
-      Promise.resolve(renderer.resolveTimestampsAsync('render'))
-        .then(() => {
-          foldResolved();
-          const total = renderer.info?.render?.timestamp;
-          if (Number.isFinite(total) && total > 0) {
-            frameGpuSamples.push(total);
-            if (frameGpuSamples.length > MAX_FRAME_SAMPLES) frameGpuSamples.shift();
-          }
-        })
-        .catch((err) => {
-          resolveErrors++;
-          log.error('resolveTimestampsAsync rejected — GPU zone samples dropped for this frame:', err);
-        })
-        .finally(() => {
-          resolveInFlight = false;
-        });
+      // BOTH TYPES, EVERY TICK (2026-08-26) — resolveType's own doc explains
+      // why calling both unconditionally is safe and why this is the actual
+      // fix for the pool-overflow class of bug this file used to only guess
+      // at. Independent in-flight state per type, so neither call can starve
+      // the other.
+      resolveType('render');
+      resolveType('compute');
     },
 
     /** Everything the report needs to say how much of the GPU story is real. */
@@ -356,25 +413,49 @@ export function createGpuZoneTimer({ renderer, InspectorBase, profiler }) {
         poolOverflowed: overflowed,
         // OVERFLOW DIAGNOSTICS — see this factory's own state-declaration
         // comment. `maxPendingSize` shows how close a run got even when it
-        // never crossed PENDING_UID_ALARM; `maxResolveSkipStreak` shows the
-        // longest run of consecutive collect() calls that found a PRIOR
-        // resolve still in flight and had to skip requesting a new one — a
-        // large streak right before `poolOverflowed: true` would confirm the
-        // "a stuck resolve, not a missed collect() call" hypothesis.
+        // never crossed PENDING_UID_ALARM. `maxResolveSkipStreak` (combined
+        // across both types, for backward compatibility with existing
+        // consumers that read it as a plain number — e.g. the
+        // `timestamp-pool-overflow` finding) is the larger of the two types'
+        // own streaks; `maxResolveSkipStreakByType`/`pendingUidsByType` give
+        // the per-type split this bug class actually needs to diagnose — a
+        // large RENDER streak points at a stuck GPU readback, a large or
+        // ever-growing COMPUTE `pendingUids` with a near-zero skip streak
+        // points at the 2026-08-26 leak class this file's own header
+        // documents (a type simply never being resolved at all).
         maxPendingSize,
-        maxResolveSkipStreak,
-        // The denominator for attribution.coverage. Labelled, not called "the frame".
+        maxResolveSkipStreak: Math.max(resolveState.render.maxSkipStreak, resolveState.compute.maxSkipStreak),
+        maxResolveSkipStreakByType: {
+          render: resolveState.render.maxSkipStreak,
+          compute: resolveState.compute.maxSkipStreak,
+        },
+        pendingUidsByType: (() => {
+          const byType = { render: 0, compute: 0 };
+          for (const uid of pending.keys()) {
+            byType[parseTimestampUid(uid)?.type === 'compute' ? 'compute' : 'render']++;
+          }
+          return byType;
+        })(),
+        // The denominator for attribution.coverage. Labelled, not called "the
+        // frame". RENDER AND COMPUTE, summed (2026-08-26) — before this fix,
+        // compute-pass GPU time was simply never resolved at all, so it never
+        // reached `attributed` either; the two stayed accidentally consistent.
+        // Once compute uids started folding, leaving this render-only would
+        // have let `attribution.coverage` silently exceed 1.0 with no clamp
+        // anywhere in computeAttribution — this is the other half of that fix,
+        // not a separate concern.
         frameGpuMs: frameGpuSamples.length
           ? {
               p50: percentileOf(frameGpuSamples, 0.5),
               p95: percentileOf(frameGpuSamples, 0.95),
               max: Math.round(Math.max(...frameGpuSamples) * 100) / 100,
               sampleCount: frameGpuSamples.length,
-              basis: 'sum of timestamped render passes per frame (renderer.info.render.timestamp)',
+              basis:
+                'sum of timestamped render AND compute passes per frame (renderer.info.{render,compute}.timestamp)',
               caveat:
-                'NOT the whole GPU frame: mipmap generation, presentation and any work outside a render pass ' +
-                'are not counted. Coverage against this measures "of the pass time we can see, how much did we ' +
-                'attribute to a declared zone" — a real question, but a narrower one than "where did the frame go".',
+                'NOT the whole GPU frame: mipmap generation, presentation and any work outside a render/compute ' +
+                'pass are not counted. Coverage against this measures "of the pass time we can see, how much did ' +
+                'we attribute to a declared zone" — a real question, but a narrower one than "where did the frame go".',
             }
           : null,
         note: overflowed

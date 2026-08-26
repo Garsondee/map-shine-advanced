@@ -59,9 +59,13 @@ import {
 import {
   buildPerfReport,
   summarizeTierComparison,
+  annotateTierComparisonNoise,
   summarizeFloorStructuralAB,
   TIER_SWEEP_COVERAGE_CAVEATS,
   formatOffenderSummaryText,
+  sortFindingsBySeverity,
+  floorStructuralAbFindings,
+  editCascadeStressFinding,
 } from './diag/perf-report.js';
 import { buildVramInventory } from './diag/vram-inventory.js';
 import { buildPerfStripModel } from './diag/perf-strip.js';
@@ -71,6 +75,7 @@ import {
   assertProfilerAvailable,
   createProfiledFrameWaiter,
   createSceneSettleWaiter,
+  createVramSampler,
   runProfileSession,
 } from './diag/perf-session.js';
 // FLOOR-WIDE STRUCTURAL A/B (2026-08-26) — the only direct import of this
@@ -4313,11 +4318,14 @@ function install() {
     // minutes on a cold floor, see their own phase headers below for why
     // that is correct, not a regression — AND a full 5-tier sweep
     // (2026-08-26, unconditional per the author's own instruction) that
-    // replays the base route once per performance tier, AND (Phase 6,
-    // 2026-08-26) an editing-cadence stress test — a few dozen seconds, small
-    // next to the rest, but a real Tile document write/revert, not just a
-    // read or a toggle. A multi-floor scene can genuinely take 20+ minutes
-    // end to end; the label says so honestly rather than undersell what one
+    // replays the base route once per performance tier PLUS one more for its
+    // own noise-floor bracket (2026-08-26, Round 2 — one reference tier
+    // measured twice, so a tier-to-tier delta can be told apart from thermal/
+    // clock jitter), AND (Phase 6, 2026-08-26) an editing-cadence stress
+    // test — a few dozen seconds, small next to the rest, but a real Tile
+    // document write/revert, not just a read or a toggle. A multi-floor
+    // scene can genuinely take 20+ minutes end to end; the label says so
+    // honestly rather than undersell what one
     // click is about to do.
     '🔬 Performance Report (this scene, CPU + GPU + every tier, ~5 min single floor, 20+ min multi-floor)',
     async () => {
@@ -4428,6 +4436,22 @@ function install() {
             // doors stayed scoped to floor 1's level — see `syncActiveFloorContext`'s
             // own header for the general gap this closes.
             if (switchResult.changed) syncActiveFloorContext(nextFloor.index);
+            // FLOOR-SWITCH VRAM SAMPLING (2026-08-26, Round 2) — createVramSampler
+            // was originally scoped entirely inside runProfileSession, which
+            // starts AFTER this whole switch/settle sequence — meaning the real
+            // texture-streaming spike this sampler exists to catch always
+            // happened outside its coverage. A SEPARATE instance here, wrapping
+            // the settle wait AND the buffer pause below (not stopped the
+            // instant waitForSceneSettled resolves — FLOOR_CHANGE_SETTLE_BUFFER_MS
+            // exists specifically because loading-adjacent hitches were observed
+            // to continue past that point, see its own doc a few lines down), is
+            // a pure addition: separate field, zero change to runProfileSession's
+            // own contract or its own vramWindow.
+            const floorSwitchVramSampler =
+              switchResult.changed && typeof profileHarness.readVram === 'function'
+                ? createVramSampler({ readVram: () => profileHarness.readVram() })
+                : null;
+            floorSwitchVramSampler?.start();
             // EVENT-DRIVEN, NOT A GUESSED SLEEP — waitForSceneSettled polls
             // vt/settle.js's real "is everything actually on screen yet?"
             // signal, exactly why that module exists (its own header: "every
@@ -4451,6 +4475,7 @@ function install() {
             // MIN_ACTION_PAUSE_MS floor instead.
             showPerfProgress(switchResult.changed ? 'floor settled — extra settle margin…' : 'preparing…');
             await pause(switchResult.changed ? FLOOR_CHANGE_SETTLE_BUFFER_MS : MIN_ACTION_PAUSE_MS);
+            const floorSwitchVram = floorSwitchVramSampler?.stop() ?? null;
 
             const path2 = buildBenchmarkPath();
             const playing2 = playCameraPath(path2, { capFrameRate: false }).catch((err) => {
@@ -4500,6 +4525,14 @@ function install() {
                 timedOut: settleInfo?.timedOut ?? false,
                 blockersAtEnd: settleInfo?.blockers ?? [],
               },
+              // VRAM DURING THE SWITCH ITSELF (2026-08-26, Round 2) — a SEPARATE
+              // sampler from runProfileSession's own vramWindow below (which only
+              // ever covers steady-state cruising on floor 2) — see
+              // floorSwitchVramSampler's own doc a few lines up for why this is
+              // the field that actually answers "did the texture-streaming spike
+              // this instrument exists to catch happen". null when the floor
+              // never changed (nothing to sample) or readVram isn't available.
+              floorSwitchVram,
               note:
                 'The FULL second-floor report is not nested here — call MapShine.getMultiFloorReport() from the ' +
                 "console for it, without paying for a second run. 'ranked' below is the direct answer to 'which " +
@@ -4731,6 +4764,7 @@ function install() {
                 floorId: floor.id ?? null,
                 source: 'full-report',
                 switchTransient: null,
+                floorSwitchVram: null,
                 structuralAB: null,
                 note:
                   "Already covered by a full run this same report — see this report's own top level (the start " +
@@ -4754,6 +4788,7 @@ function install() {
                 floorId: floor.id ?? null,
                 source: 'structural-ab-only',
                 switchTransient: null,
+                floorSwitchVram: null,
                 structuralAB: null,
                 note: `Skipped — ${err?.message ?? err}`,
               });
@@ -4761,6 +4796,11 @@ function install() {
             }
 
             let switchTransient = { switchMs: 0, settled: true, timedOut: false, blockersAtEnd: [] };
+            // See Phase 2's own floorSwitchVramSampler doc for why this is a
+            // SEPARATE sampler from runStructuralAB's own measurement, not
+            // folded into it — this one covers the switch/settle itself, the
+            // moment the real texture-streaming spike happens.
+            let floorSwitchVram = null;
             if (floor.index !== floorSweepCurrentIndex) {
               log.info(
                 `perf report: switching floor ${floorSweepCurrentIndex} -> ${floor.index} for the floor-wide structural A/B sweep`
@@ -4770,6 +4810,11 @@ function install() {
               if (switchResult.changed) {
                 syncActiveFloorContext(floor.index);
                 floorSweepCurrentIndex = floor.index;
+                const floorSwitchVramSampler =
+                  typeof profileHarness.readVram === 'function'
+                    ? createVramSampler({ readVram: () => profileHarness.readVram() })
+                    : null;
+                floorSwitchVramSampler?.start();
                 const settleInfo = await waitForSceneSettled({
                   onProgress: (s) =>
                     showPerfProgress(
@@ -4778,6 +4823,7 @@ function install() {
                 });
                 showPerfProgress('floor settled — extra settle margin…');
                 await pause(FLOOR_CHANGE_SETTLE_BUFFER_MS);
+                floorSwitchVram = floorSwitchVramSampler?.stop() ?? null;
                 switchTransient = {
                   switchMs: settleInfo?.elapsedMs ?? null,
                   settled: settleInfo?.settled ?? true,
@@ -4814,6 +4860,7 @@ function install() {
               floorId: floor.id ?? null,
               source: 'structural-ab-only',
               switchTransient,
+              floorSwitchVram,
               structuralAB,
             });
           }
@@ -4867,6 +4914,27 @@ function install() {
         hidePerfProgress();
       }
       lastPerfProfile.floorStructuralAB = floorStructuralAB;
+      // FOLD INTO findings[] (2026-08-26, Round 2) — the report's own
+      // `interpretation` field tells a reader to scan findings[] top-down
+      // FIRST ("sorted by severity"); without this, the floor-wide sweep's own
+      // results would never reach that list, and a reader following the
+      // report's own instructions would miss them entirely. Own try/catch so a
+      // finding-building bug can never cost the measurement already recorded
+      // above it — see floorStructuralAbFindings' own header (perf-report.js)
+      // for why this rolls up PER TOGGLE, not per floor-per-toggle.
+      try {
+        if (floorStructuralAB?.measured === true) {
+          const newFindings = floorStructuralAbFindings(floorStructuralAB);
+          if (newFindings.length > 0) {
+            lastPerfProfile.findings = sortFindingsBySeverity([...(lastPerfProfile.findings ?? []), ...newFindings]);
+          }
+        }
+      } catch (err) {
+        log.error(
+          'perf report: folding floorStructuralAB into findings[] failed (the sweep result above is still valid):',
+          err
+        );
+      }
 
       // PHASE 4: SHARPENING A/B (2026-08-15) — same shape as multiFloor/
       // rapidStressSweep above (runs once, AFTER every runProfileSession
@@ -4932,7 +5000,15 @@ function install() {
             onProgress: (phase, detail) => showPerfProgress(formatPerfProgressText(phase, detail)),
           });
           lastAllTiersReports = Object.fromEntries(tierResults.map(({ profile, report }) => [profile, report]));
-          lastTierComparison = summarizeTierComparison(tierResults);
+          showPerfProgress('tier sweep — bracketing a reference tier for a noise floor…');
+          const noiseFloor = await measureTierNoiseFloor({
+            onProgress: (phase, detail) => showPerfProgress(formatPerfProgressText(phase, detail)),
+          });
+          lastTierComparison = annotateTierComparisonNoise(summarizeTierComparison(tierResults), {
+            noiseFloorMs: noiseFloor.noiseFloorMs,
+            referenceProfile: noiseFloor.referenceProfile,
+            tierOrder: PERFORMANCE_PROFILES,
+          });
           tierComparison = {
             measured: true,
             tiersRun: tierResults.map((t) => t.profile),
@@ -5049,6 +5125,21 @@ function install() {
         }
       }
       lastPerfProfile.editCascadeStress = editCascadeStress;
+      // FOLD INTO findings[] (2026-08-26, Round 2) — same reasoning as
+      // floorStructuralAB's own fold above: without this, the single most
+      // expensive result the whole report can produce never reaches the list
+      // its own `interpretation` field tells a reader to check first.
+      try {
+        const editCascadeFinding = editCascadeStressFinding(editCascadeStress);
+        if (editCascadeFinding) {
+          lastPerfProfile.findings = sortFindingsBySeverity([...(lastPerfProfile.findings ?? []), editCascadeFinding]);
+        }
+      } catch (err) {
+        log.error(
+          'perf report: folding editCascadeStress into findings[] failed (the stress-test result above is still valid):',
+          err
+        );
+      }
 
       // Feed the sweep's OWN rich per-effect table (perf-lab.js's tested
       // renderer) from the SAME run, via the raw sweep buildPerfReport echoes
@@ -5343,6 +5434,72 @@ function install() {
     return { path, generatedAt, tierResults, tiersFailed };
   }
 
+  // THE TIER SWEEP'S OWN NOISE FLOOR (2026-08-26, author's own direct choice
+  // when asked, given the genuine cost/rigor fork this represents — the full
+  // per-tier-bracket alternative would have roughly DOUBLED runTierSweep's own
+  // runtime): bracket ONE reference tier by playing its route TWICE, back to
+  // back, and hand the disagreement to annotateTierComparisonNoise
+  // (perf-report.js) as a single scalar floor applied uniformly to every
+  // tier-to-tier delta. See that function's own doc for the honest caveat
+  // this coarser choice carries. Extracted alongside runTierSweep itself,
+  // same "one dispatcher, not two hand-kept copies" reasoning — both
+  // runAllTiersPerfReport and Phase 5 below call this exact function.
+  //
+  // 'quality', not the tier measured first (which would be the "free" one to
+  // re-run) — deliberately: 'low' has the smallest absolute GPU numbers of
+  // the five tiers, and if thermal/clock jitter scales with GPU load
+  // (plausible, unconfirmed either way), a floor measured there would
+  // UNDERSTATE the real noise at the top of the ladder — precisely where the
+  // first live report's own anomaly (quality vs extreme) actually lived.
+  // Bracketing 'quality' costs the exact same one extra route-length run
+  // either way; there is no reason to pick the option that generalises worse
+  // for free.
+  const TIER_NOISE_FLOOR_REFERENCE_PROFILE = 'quality';
+
+  async function measureTierNoiseFloor({ onProgress = null } = {}) {
+    const path = buildBenchmarkPath();
+    const profile = TIER_NOISE_FLOOR_REFERENCE_PROFILE;
+    const readings = [];
+    try {
+      for (let i = 0; i < 2; i++) {
+        forcePerformanceProfile(profile);
+        const playing = playCameraPath(path, { capFrameRate: false }).catch((err) => {
+          log.error(`perf report (tier noise floor): camera path playback failed (reading ${i + 1}/2):`, err);
+        });
+        try {
+          const report = await runProfileSession(profileHarness, {
+            generatedAt: new Date().toISOString(),
+            measureUntil: playing,
+            settleFrames: TIER_SETTLE_FRAMES,
+            route: `n_to_s:${path.keyframes.length}kf/${BENCHMARK_SWEEP_MS}ms:tier=${profile}:noise-floor-${i + 1}of2`,
+            onProgress: (phase, detail) => {
+              if (typeof onProgress === 'function') {
+                onProgress(phase, `[noise floor ${i + 1}/2] ${detail ?? ''}`.trim());
+              }
+            },
+          });
+          readings.push(Number.isFinite(report?.frame?.gpuMs?.p50) ? report.frame.gpuMs.p50 : null);
+        } finally {
+          stopCameraPath();
+          await playing;
+        }
+      }
+    } catch (err) {
+      log.error('perf report (tier noise floor): reference-tier bracket failed:', err);
+      return { referenceProfile: profile, noiseFloorMs: null };
+    } finally {
+      // ALWAYS, matching runTierSweep's own non-negotiable restore discipline.
+      forcePerformanceProfile(null);
+    }
+    const [a, b] = readings;
+    return {
+      referenceProfile: profile,
+      // null, never 0, when either reading came back unmeasured — an absence
+      // here must not read as "the machine is perfectly noise-free".
+      noiseFloorMs: Number.isFinite(a) && Number.isFinite(b) ? Math.abs(a - b) : null,
+    };
+  }
+
   // THE ULTIMATE BUTTON (author, 2026-07-29): "make it do the full test at each
   // performance tier ... one big ultimate 'Performance Report' button which
   // does everything ... I don't mind if it takes longer, we can give things
@@ -5373,7 +5530,16 @@ function install() {
     // (the ~300KB v1). Console-reachable via MapShine.getTierReport below,
     // without paying for a second run.
     lastAllTiersReports = Object.fromEntries(tierResults.map(({ profile, report }) => [profile, report]));
-    lastTierComparison = summarizeTierComparison(tierResults);
+    showPerfProgress('bracketing a reference tier for a noise floor…');
+    const noiseFloor = await measureTierNoiseFloor({
+      onProgress: (phase, detail) => showPerfProgress(formatPerfProgressText(phase, detail)),
+    });
+    hidePerfProgress();
+    lastTierComparison = annotateTierComparisonNoise(summarizeTierComparison(tierResults), {
+      noiseFloorMs: noiseFloor.noiseFloorMs,
+      referenceProfile: noiseFloor.referenceProfile,
+      tierOrder: PERFORMANCE_PROFILES,
+    });
     lastPerfProfile = {
       report: 'perf-tier-comparison',
       formatVersion: 2, // v1 nested full per-tier reports here; see lastAllTiersReports' doc for why that's gone

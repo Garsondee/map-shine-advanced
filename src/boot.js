@@ -233,6 +233,9 @@ import {
   // setting and its live state (settings-panel row + diagnostics readout).
   setVtPanViewerRenderScaleSetting,
   getVtPanViewerRenderScaleState,
+  // TIER-COUPLED BUDGET (2026-08-27) — re-resolves the governor's Auto
+  // target from the player's CURRENT performance-profile tier.
+  setVtPanViewerRenderScaleProfile,
   readVtPanViewerRenderInfo,
   readVtPanViewerDrawCallsOnly,
   readVtPanViewerTriangleCountOnly,
@@ -12350,6 +12353,13 @@ function install() {
             // own `renderScaleSetting` constructor param, so a change that
             // lands before any scene has loaded is never lost, just moot.
             setVtPanViewerRenderScaleSetting(readSetting(MODULE_ID, GLOBAL_SETTING_KEYS.renderScale));
+            // TIER-COUPLED BUDGET (2026-08-27) — the profile setting may be
+            // what just changed (this callback fires on ANY settings change,
+            // not just its own); re-resolves the profile itself internally,
+            // so it's correct whether or not `profile` was the field that
+            // actually moved. No-ops the same way the line above does if no
+            // viewer is active yet.
+            setVtPanViewerRenderScaleProfile();
             MapShine.__player?.refresh();
           },
         });

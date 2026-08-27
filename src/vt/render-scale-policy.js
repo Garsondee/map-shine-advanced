@@ -80,3 +80,58 @@ export function resolveInternalScale(userSetting, governorScale, allowedScales) 
   const ladder = Array.isArray(allowedScales) ? allowedScales : [];
   return Number.isFinite(parsed) && ladder.some((s) => Math.abs(s - parsed) < 1e-9) ? parsed : 1;
 }
+
+/**
+ * Per-performance-tier frame-budget targets for the render-scale governor's
+ * Auto mode (2026-08-27). Direct response to Ingram's own live test of
+ * Phase 2: a single 60fps (`FRAME_BUDGET_MS`, 16.6ms) budget for EVERY tier
+ * meant every tier's own measured native cost (`low` ~21ms through
+ * `extreme` ~32ms — Performance-Ceiling-Analysis-2026-08-26.md's tier
+ * sweep) sat above the governor's downscale trigger (`budget × highWater`,
+ * 1.2), so Auto always hunted toward the ladder floor regardless of which
+ * visual-fidelity tier a player had actually chosen — *"not enough force
+ * pushing it towards higher quality,"* his own words, and *"if I'm in
+ * extreme mode then naturally I'd want native resolution."*
+ *
+ * Each target fps is the SAME trade a player already made by picking that
+ * tier in the first place — a speed-priority tier (`low`) chases a high
+ * fps and so tolerates aggressive downscale; a fidelity-priority tier
+ * (`extreme`) tolerates almost none. This extends that one existing
+ * trade-off to also govern internal resolution rather than inventing a
+ * second, competing one. `extreme`'s 30fps target (33.3ms) sits just above
+ * its own measured native cost (~32ms), so a normal frame never crosses
+ * `budget × highWater` (40ms) and Auto behaves like a Fixed 100% choice —
+ * until something genuinely pushes the frame past it, at which point it
+ * still protects the player exactly as the governor always has.
+ *
+ * Hand-typed rather than derived from `effects/effect-cascade.js`'s
+ * `PERFORMANCE_PROFILES` (this module stays dependency-free by design —
+ * see its own header) — coverage of all five tiers is pinned by this
+ * module's own test instead of an import, the same tradeoff
+ * `PASS_BUDGETS_MS` (`graph/v3-perf.js`) already makes for its own
+ * hand-curated per-pass table.
+ * @type {Record<string, number>}
+ */
+export const RENDER_SCALE_TIER_TARGET_FPS = {
+  low: 60,
+  performance: 55,
+  standard: 45,
+  quality: 36,
+  extreme: 30,
+};
+
+/**
+ * Resolve the render-scale governor's frame budget (ms) for a performance
+ * profile tier. An unrecognised/missing profile resolves to `standard`'s
+ * own target — the same "unknown profile behaves as standard" contract
+ * `effects/effect-cascade.js#profileRank` already promises for every other
+ * tiered consumer, kept here as a literal (see this module's own
+ * dependency-free note above) rather than importing that function for a
+ * single string constant.
+ * @param {string} profile
+ * @returns {number} ms
+ */
+export function resolveRenderScaleFrameBudgetMs(profile) {
+  const fps = RENDER_SCALE_TIER_TARGET_FPS[profile] ?? RENDER_SCALE_TIER_TARGET_FPS.standard;
+  return 1000 / fps;
+}

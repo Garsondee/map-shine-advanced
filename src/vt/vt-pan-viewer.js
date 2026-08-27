@@ -161,7 +161,11 @@ import {
   FRAME_BUDGET_MS,
   createFrameCostSignal,
 } from '../graph/index.js';
-import { resolvePresentPixelRatio, resolveInternalScale } from './render-scale-policy.js';
+import {
+  resolvePresentPixelRatio,
+  resolveInternalScale,
+  resolveRenderScaleFrameBudgetMs,
+} from './render-scale-policy.js';
 import { PROBE_CORNERS, classifyPixel, diagnoseOrientation } from '../diag/orientation-probe.js';
 import { decodeHalfFloatRgba, decodeByteRgba, diffProbeBuffers } from '../diag/pixel-probe.js';
 import { createGpuProbe } from '../diag/gpu-probe.js';
@@ -1561,7 +1565,32 @@ export async function startVtPanViewer({
     // frame one, never a placeholder waiting on a live settings change to
     // correct it. Live changes after this still reach it via
     // `setVtPanViewerRenderScaleSetting` (boot.js's settings `onChange`).
-    const renderScaleGovernor = new RenderScaleGovernor({ frameBudgetMs: FRAME_BUDGET_MS });
+    //
+    // TIER-COUPLED BUDGET (2026-08-27) — Ingram's own direct feedback after
+    // testing Auto: a single 60fps budget for every performance-profile tier
+    // meant `extreme` got squeezed toward the ladder floor for barely any
+    // real saving (most of its cost sits downstream of internal resolution),
+    // while giving no signal that a HIGHER tier should mean a stronger pull
+    // back toward native. `resolveRenderScaleFrameBudgetMs`
+    // (`render-scale-policy.js`) is the fix: each tier gets its own target
+    // fps, the SAME speed-vs-fidelity trade a player already made by
+    // picking that tier. Mirrors `shouldUseFullAlbedoClarity`'s own
+    // self-contained `readSetting` + fail-open shape (same file, same
+    // profile key) rather than threading a new constructor param through —
+    // this reads live at construction AND again from `setRenderScaleProfile`
+    // below, so it has no reason to be a one-shot param.
+    function resolveRenderScaleFrameBudget() {
+      try {
+        return resolveRenderScaleFrameBudgetMs(readSetting(MODULE_ID, GLOBAL_SETTING_KEYS.profile));
+      } catch {
+        // Settings read failed before Foundry's own registry is ready (the
+        // shader-lab bench, a probe built before `game.settings` exists) —
+        // fall open to the original flat reference budget, same direction
+        // every other fail-open in this codebase points.
+        return FRAME_BUDGET_MS;
+      }
+    }
+    const renderScaleGovernor = new RenderScaleGovernor({ frameBudgetMs: resolveRenderScaleFrameBudget() });
     // Fed from `renderFrame`'s own `gapMs` (see `render-cost-signal.js`'s own
     // header for why THAT signal, and not the real per-pass GPU zone timers).
     const renderScaleCostSignal = createFrameCostSignal();
@@ -16687,6 +16716,22 @@ export async function startVtPanViewer({
         requestInternalRescale();
         return { userSetting: renderScaleUserSetting, resolvedInternalScale: resolveCurrentInternalScale() };
       },
+      /**
+       * TIER-COUPLED BUDGET (2026-08-27) — push a fresh frame budget into the
+       * governor when the player's performance-profile tier changes.
+       * `resolveRenderScaleFrameBudget` re-reads it directly rather than
+       * trusting a passed-through value, same reasoning as
+       * `resolveCurrentInternalScale`'s own live re-resolve; `setFrameBudgetMs`
+       * itself is a no-op for an unchanged/invalid value. Does NOT request a
+       * rescale on its own — a wider/narrower budget only changes how FUTURE
+       * frames judge against `highWater`/`lowWater`, it does not mean the
+       * current rung is already wrong (unlike `setRenderScaleSetting`, whose
+       * value directly determines the resolved scale).
+       */
+      setRenderScaleProfile() {
+        renderScaleGovernor.setFrameBudgetMs(resolveRenderScaleFrameBudget());
+        return { frameBudgetMs: renderScaleGovernor.state().frameBudgetMs };
+      },
       /** Perf/diagnostics: the render-scale governor's current state plus the
        * present/internal sizes actually in effect right now. */
       getRenderScaleState() {
@@ -19012,6 +19057,24 @@ export function getVtPanViewerGpuZoneStatus() {
 export function setVtPanViewerRenderScaleSetting(value) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.setRenderScaleSetting(value);
+}
+
+/**
+ * Re-resolve the render-scale governor's frame budget from the player's
+ * CURRENT performance-profile tier (2026-08-27 — see
+ * `render-scale-policy.js#resolveRenderScaleFrameBudgetMs`'s own header for
+ * why Auto is tier-coupled at all). Takes no argument — reads the live
+ * setting itself, same self-contained shape `shouldUseFullAlbedoClarity`
+ * already uses for this exact setting. Call whenever the profile setting
+ * might have changed (boot.js's settings `onChange` fires this
+ * unconditionally, same as it already does for `setVtPanViewerRenderScaleSetting`
+ * just above); a no-op `{skipped:true}` if nothing is running — a fresh
+ * viewer always resolves its OWN starting budget itself, so a call that
+ * lands before any scene has loaded is never lost, just moot.
+ */
+export function setVtPanViewerRenderScaleProfile() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setRenderScaleProfile();
 }
 
 /** The render-scale governor's current state + the present/internal sizes

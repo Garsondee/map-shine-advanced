@@ -201,4 +201,41 @@ export function run(t) {
     for (let i = 0; i < 10; i++) g3.update(10);
     ok('componentless prediction stays conservative', g3.scale === 0.85);
   }
+
+  // setFrameBudgetMs — live tier-coupled budget updates (2026-08-27, feeds
+  // Ingram's Auto-mode-should-follow-the-performance-tier request).
+  {
+    const gov = new RenderScaleGovernor({ frameBudgetMs: 16.6, warmupFrames: 0, highWater: 1.2, downFrames: 10 });
+    ok('starts at the constructed budget', gov.state().frameBudgetMs === 16.6);
+
+    // Build a real, partial over-streak under the OLD budget.
+    gov.update(25); // 25 > 16.6*1.2=19.92
+    gov.update(25);
+    gov.update(25);
+    ok('an over-streak accumulates before any change', gov.state().overStreak === 3);
+
+    gov.setFrameBudgetMs(33.3);
+    ok('budget updates to the new value', gov.state().frameBudgetMs === 33.3);
+    ok('rung is untouched by a budget change alone — only future judging changes', gov.scale === 1.0);
+    ok(
+      'the in-flight over-streak is cleared — those frames were judged against a budget that no longer applies',
+      gov.state().overStreak === 0
+    );
+
+    gov.setFrameBudgetMs(NaN);
+    ok('a non-finite value is a no-op', gov.state().frameBudgetMs === 33.3);
+    gov.setFrameBudgetMs(0);
+    ok('zero is a no-op', gov.state().frameBudgetMs === 33.3);
+    gov.setFrameBudgetMs(-5);
+    ok('a negative value is a no-op', gov.state().frameBudgetMs === 33.3);
+
+    // Setting the IDENTICAL value must be a true no-op — must not reset a
+    // real, still-valid in-flight streak just because the setter was called.
+    gov.update(90); // 90 > 33.3*1.2=39.96 — a fresh streak under the CURRENT budget
+    gov.update(90);
+    const before = gov.state().overStreak;
+    ok('a fresh streak accumulates under the current budget', before === 2);
+    gov.setFrameBudgetMs(33.3); // identical to the current value
+    ok('an unchanged value leaves an in-flight streak alone', gov.state().overStreak === before);
+  }
 }

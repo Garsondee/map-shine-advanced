@@ -300,6 +300,24 @@ export class RenderScaleGovernor {
   }
 
   /**
+   * Update the frame budget live (2026-08-27 — e.g. the player's own
+   * performance-profile tier changed mid-session). Clears in-flight streak
+   * evidence: frames counted against the OLD budget are not valid evidence
+   * for a step judged against the NEW one. Leaves the current rung,
+   * cooldown, and warmup/settle counters alone — a budget change does not
+   * itself mean "a reallocation just happened" or "the scene just loaded,"
+   * only "re-judge future frames differently." A no-op for a non-finite/
+   * non-positive value or one identical to the current budget.
+   * @param {number} ms
+   */
+  setFrameBudgetMs(ms) {
+    if (!Number.isFinite(ms) || ms <= 0 || ms === this._budget) return;
+    this._budget = ms;
+    this._overStreak = 0;
+    this._underStreak = 0;
+  }
+
+  /**
    * Suspend/resume the control loop. While held the scale is frozen and no
    * streak evidence accumulates (load-time frames are not steady-state
    * evidence). Releasing imposes a settle cooldown. Idempotent per state.

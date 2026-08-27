@@ -2,7 +2,12 @@
  * Node tests for vt/render-scale-policy.js — the present/internal resolution
  * combining formula. Pure arithmetic; no THREE, no Foundry, no mocks.
  */
-import { resolvePresentPixelRatio, resolveInternalScale } from '../render-scale-policy.js';
+import {
+  resolvePresentPixelRatio,
+  resolveInternalScale,
+  RENDER_SCALE_TIER_TARGET_FPS,
+  resolveRenderScaleFrameBudgetMs,
+} from '../render-scale-policy.js';
 
 const LADDER = [1.0, 0.85, 0.7, 0.6, 0.5];
 
@@ -42,5 +47,52 @@ export function run(t) {
     ok('a value NOT on the ladder is rejected, not trusted', resolveInternalScale('0.33', 1, LADDER) === 1);
     ok('a non-numeric setting string is rejected', resolveInternalScale('bogus', 1, LADDER) === 1);
     ok('an empty ladder rejects every fixed choice', resolveInternalScale('0.5', 1, []) === 1);
+  }
+
+  // RENDER_SCALE_TIER_TARGET_FPS / resolveRenderScaleFrameBudgetMs (2026-08-27)
+  // — tier-coupled Auto budgets.
+  {
+    const TIERS = ['low', 'performance', 'standard', 'quality', 'extreme'];
+    ok(
+      'covers exactly the five real performance-profile tiers, no more, no less',
+      Object.keys(RENDER_SCALE_TIER_TARGET_FPS).length === 5 && TIERS.every((t) => t in RENDER_SCALE_TIER_TARGET_FPS)
+    );
+    ok(
+      'every target fps is a positive finite number',
+      TIERS.every((t) => Number.isFinite(RENDER_SCALE_TIER_TARGET_FPS[t]) && RENDER_SCALE_TIER_TARGET_FPS[t] > 0)
+    );
+    ok(
+      'MONOTONIC: a higher tier never asks for a HIGHER target fps than a lower one — ' +
+        'the whole point is fidelity tiers get MORE budget room, not less',
+      TIERS.every((t, i) => i === 0 || RENDER_SCALE_TIER_TARGET_FPS[t] <= RENDER_SCALE_TIER_TARGET_FPS[TIERS[i - 1]])
+    );
+    ok(
+      "extreme's target sits ABOVE its own measured native cost (~32ms/~31fps, " +
+        'Performance-Ceiling-Analysis-2026-08-26.md) — Auto must not fight a normal extreme frame',
+      resolveRenderScaleFrameBudgetMs('extreme') > 32
+    );
+
+    for (const tier of TIERS) {
+      ok(
+        `resolveRenderScaleFrameBudgetMs('${tier}') matches 1000/fps exactly`,
+        Math.abs(resolveRenderScaleFrameBudgetMs(tier) - 1000 / RENDER_SCALE_TIER_TARGET_FPS[tier]) < 1e-9
+      );
+    }
+    ok(
+      'an unrecognised profile resolves to standard — same fallback profileRank itself promises',
+      resolveRenderScaleFrameBudgetMs('bogus-tier') === resolveRenderScaleFrameBudgetMs('standard')
+    );
+    ok(
+      'a missing profile resolves to standard',
+      resolveRenderScaleFrameBudgetMs(undefined) === resolveRenderScaleFrameBudgetMs('standard')
+    );
+    ok(
+      'low asks for the tightest budget (most willing to downscale) of all five tiers',
+      TIERS.every((t) => resolveRenderScaleFrameBudgetMs('low') <= resolveRenderScaleFrameBudgetMs(t))
+    );
+    ok(
+      'extreme asks for the most generous budget (least willing to downscale) of all five tiers',
+      TIERS.every((t) => resolveRenderScaleFrameBudgetMs('extreme') >= resolveRenderScaleFrameBudgetMs(t))
+    );
   }
 }

@@ -6850,6 +6850,12 @@ export async function startVtPanViewer({
       u.strength.value = dofNum(p.strength, 1.0);
       u.blurPerFloor.value = dofNum(p.blurPerFloor, 1.2);
       u.maxBlur.value = dofNum(p.maxBlur, 1.0);
+      // BOKEH SHAPE (2026-08-27) — mip0's OWN current texel size, re-pushed
+      // every frame (cheap: two divisions + a Vector2.set()) rather than
+      // only on resize, matching this block's own existing pattern for the
+      // three lines just above. Always current even through a render-scale
+      // governor step: dofMipW/H already read live internalW/H.
+      u.mip0InvTexel.value.set(1 / dofMipW(0), 1 / dofMipH(0));
       profiler?.end(Z.dofUniforms);
 
       // DOWNSAMPLE — scene.lit → mip0 → mip1 → mip2 → mip3, each a plain

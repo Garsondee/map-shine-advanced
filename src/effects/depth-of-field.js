@@ -43,7 +43,13 @@ export const DOF_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.5,
+    // 2026-08-27 — was 0.5, ~4x too strong per Ingram's own live read (even
+    // ONE floor below already reached lod~0.6 of a 3-level ramp against the
+    // old default; see DOF_PRESETS' own note just below for the matching
+    // preset rescale). `strength` is a clean multiplier on the blur RADIUS
+    // (computeDofMipSample, depth-of-field-blur.js) with no other coupling,
+    // so a straight divide-by-4 is the correct, isolated fix.
+    default: 0.125,
     category: 'Look',
     label: 'Strength',
     help: "Overall amount of blur applied to floors below the one you're viewing — scales the blur radius, not its opacity. 0 = no extra blur (floors below sample the least-blurred mip); 1 = the full ramp set by Blur per floor and Maximum blur. A below-floor pixel is always a full replace, never a sharp/blurred cross-fade.",
@@ -81,11 +87,18 @@ export const DOF_PARAMS = Object.freeze({
  *
  * @type {Record<string, Record<string, number>>}
  */
+// 2026-08-27 — `strength` rescaled ÷4 in step with the schema default above
+// (each was already `strength.default`-relative when authored: subtle
+// 0.55 ≈ 1.1× the old 0.5 default, moderate 0.85 ≈ 1.7×, heavy 1.0 = 2×) —
+// same ÷4, so "subtle" still reads as gentler than the new 0.125 default and
+// the ladder's own relative spacing survives untouched. `blurPerFloor`/
+// `maxBlur` are unaffected — Ingram's own report was about overall blur
+// AMOUNT (strength), not how fast it ramps per floor or where it caps.
 export const DOF_PRESETS = Object.freeze({
   none: {},
-  subtle: { strength: 0.55, blurPerFloor: 0.7, maxBlur: 0.6 },
-  moderate: { strength: 0.85, blurPerFloor: 1.2, maxBlur: 0.85 },
-  heavy: { strength: 1.0, blurPerFloor: 2.2, maxBlur: 1.0 },
+  subtle: { strength: 0.14, blurPerFloor: 0.7, maxBlur: 0.6 },
+  moderate: { strength: 0.21, blurPerFloor: 1.2, maxBlur: 0.85 },
+  heavy: { strength: 0.25, blurPerFloor: 2.2, maxBlur: 1.0 },
 });
 
 /** The schema defaults as a flat object — the base a preset diffs over. */

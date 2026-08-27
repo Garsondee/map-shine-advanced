@@ -16,8 +16,17 @@
  *   scene.lit ──[downsample ×N, plain 13-tap]──▶ mip0 mip1 mip2 mip3
  *   [composite]: per pixel, floorsBelow = viewedFloorIndex − floorIndexHere
  *                (from buf:scene.depth's colour payload), mapped to a
- *                fractional LOD across the mip chain, mixed and written back
- *                with NormalBlending — alpha=0 wherever floorsBelow<=0.
+ *                fractional LOD across the mip chain, RING-sampled (8 taps
+ *                per mip, 2026-08-27 — see "BOKEH SHAPE" below) and mixed,
+ *                written back with NormalBlending — alpha=0 wherever
+ *                floorsBelow<=0.
+ *
+ * BOKEH SHAPE (2026-08-27): the composite used to read each mip at a single
+ * point, which just showed the downsample pyramid's own square/diamond
+ * 13-tap grid pattern directly — square bokeh. `pickFromRing`/`ringSample`
+ * (below) average a small ring of samples per mip instead, the standard
+ * cheap real-time "fake bokeh" fix. See their own doc comments for the full
+ * account, including why this needed no new TSL trig/pow nodes.
  *
  * ⚠️ THE COMPOSITE NEVER SAMPLES `scene.lit` ITSELF — only the blurred mips
  * and the (separate) depth colour texture, both different render targets.
@@ -121,9 +130,70 @@ export function buildDofMaterials({ THREE, depthColorTexture, mipTextures }) {
   const uStrength = uniform(1.0);
   const uBlurPerFloor = uniform(1.2);
   const uMaxBlur = uniform(1.0);
+  // BOKEH SHAPE (2026-08-27) — 1 texel in UV space AT MIP 0's resolution.
+  // Refreshed every frame in `runPostDofPass` from mip0's own live width/
+  // height (which already tracks internalW/H, the render-scale governor's
+  // own tier — see vt-pan-viewer.js), so a resize never leaves this stale;
+  // no separate resize hook needed, same "just re-push every frame" pattern
+  // `uStrength`/`uBlurPerFloor`/`uMaxBlur` already use.
+  const uMip0InvTexel = uniform(new THREE.Vector2(1, 1));
+
+  // ── BOKEH SHAPE: a small ring of samples per mip, not one point ──────────
+  // Ingram's own live read: the blur "always produces square bokeh." Root
+  // cause, confirmed: a single point-sample here just showed the downsample
+  // pyramid's own 13-tap grid pattern directly (a square/diamond footprint,
+  // no aperture shape at all) — invisible on Bloom (the identical pyramid,
+  // additively blended UNDER a sharp image) but fully exposed here
+  // (NormalBlending, a hard 0/1 replace — nothing sharp left underneath to
+  // hide the shape behind, see this file's own header). Fix: average
+  // `RING_TAPS` points arranged in a circle around the sample point instead
+  // of reading just one — the standard cheap "fake bokeh" technique.
+  //
+  // Radius DOUBLES each mip step (`2**mipIdx`) rather than staying constant:
+  // each mip is itself a half-res downsample of the last, so "one texel"
+  // doubles in UV-space size every step too — a constant UV radius would
+  // cover fewer and fewer effective texels at the coarser (already blurriest,
+  // most square-looking) mips, exactly backwards from where rounding the
+  // shape matters most. `mipIdx` is always a plain JS loop index below
+  // (0..mipCount-1), never a TSL runtime value, so `2**mipIdx` is a normal
+  // JS number baked in at build time — no `pow()` node needed. Same reason
+  // the 8 ring angles are pre-computed with `Math.cos`/`Math.sin` in JS, not
+  // a TSL trig node: the angles never change, so there is nothing to gain
+  // from computing them on the GPU every fragment.
+  const RING_TAPS = 8;
+  // At mip0; doubles per mip step below. The mechanism that actually rounds
+  // the shape isn't "how big one radius is" — each mip is already a softened
+  // (13-tap) image, not a sharp one, so 8 offset already-soft sample centers
+  // combine into a visibly rounder COMBINED footprint even at a modest
+  // radius. 2 texels is a deliberately conservative starting point; this is
+  // the one constant to nudge up if a live look still reads too square, or
+  // down if it reads noticeably softer than before.
+  const RING_RADIUS_TEXELS = 2.0;
+  const RING_OFFSETS = Array.from({ length: RING_TAPS }, (_, t) => {
+    const angle = (t / RING_TAPS) * Math.PI * 2;
+    return [Math.cos(angle) * RING_RADIUS_TEXELS, Math.sin(angle) * RING_RADIUS_TEXELS];
+  });
+  /** One mip's ring-averaged color at `uv()`. @param {*} texNode @param {number} mipIdx */
+  const ringSample = (texNode, mipIdx) => {
+    const texelScale = 2 ** mipIdx; // mip0=1x, mip1=2x, mip2=4x, mip3=8x
+    const rx = uMip0InvTexel.x.mul(texelScale);
+    const ry = uMip0InvTexel.y.mul(texelScale);
+    const [ox0, oy0] = RING_OFFSETS[0];
+    let sum = texNode.sample(uv().add(vec2(rx.mul(ox0), ry.mul(oy0)))).rgb;
+    for (let t = 1; t < RING_TAPS; t++) {
+      const [ox, oy] = RING_OFFSETS[t];
+      sum = sum.add(texNode.sample(uv().add(vec2(rx.mul(ox), ry.mul(oy)))).rgb);
+    }
+    return sum.mul(1 / RING_TAPS);
+  };
+  // One ring-sample PER MIP, computed ONCE and shared by both the lod0 and
+  // lod1 picks below (`pickFromRing`) — half the tap count a "ring inside
+  // pickMip, called twice" version would cost: mipCount×RING_TAPS total
+  // texture reads (32 at the shipped 4-mip/8-tap settings), not ×2 again.
+  const ringMips = mipTexNodes.map((tex, idx) => ringSample(tex, idx));
 
   /**
-   * Pick `mipTexNodes[floor(indexNode)]`, clamped into `0..mipCount-1`, via a
+   * Pick `ringMips[floor(indexNode)]`, clamped into `0..mipCount-1`, via a
    * static (unrolled) `select` cascade — the standard TSL idiom for "a small,
    * FIXED candidate list, chosen by a RUNTIME value" (no dynamic indexing
    * exists). Walking idx upward and always overriding on `>=` means the
@@ -131,10 +201,10 @@ export function buildDofMaterials({ THREE, depthColorTexture, mipTextures }) {
    * for any indexNode this composite ever computes (already clamped to
    * `[0, topLod]` before this is called).
    */
-  const pickMip = (indexNode) => {
-    let result = mipTexNodes[0].sample(uv()).rgb;
+  const pickFromRing = (indexNode) => {
+    let result = ringMips[0];
     for (let idx = 1; idx < mipCount; idx++) {
-      result = select(indexNode.greaterThanEqual(float(idx)), mipTexNodes[idx].sample(uv()).rgb, result);
+      result = select(indexNode.greaterThanEqual(float(idx)), ringMips[idx], result);
     }
     return result;
   };
@@ -161,7 +231,7 @@ export function buildDofMaterials({ THREE, depthColorTexture, mipTextures }) {
     const lod0 = lod.floor();
     const lod1 = lod0.add(1.0).min(float(topLod));
     const frac = lod.sub(lod0);
-    const blurredColor = mix(pickMip(lod0), pickMip(lod1), frac);
+    const blurredColor = mix(pickFromRing(lod0), pickFromRing(lod1), frac);
 
     // Mirrors computeDofAlpha — a hard cut (0 or 1), never a ramp and never
     // `strength`-scaled: a below-floor pixel is always a full replace by ONE
@@ -187,6 +257,7 @@ export function buildDofMaterials({ THREE, depthColorTexture, mipTextures }) {
       strength: uStrength,
       blurPerFloor: uBlurPerFloor,
       maxBlur: uMaxBlur,
+      mip0InvTexel: uMip0InvTexel,
     },
   };
 }

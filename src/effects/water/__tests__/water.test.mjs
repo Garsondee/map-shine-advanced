@@ -30,6 +30,7 @@ import {
   WATER_CAUSTICS_EVOLVE_SPEED,
   WATER_CAUSTICS_JUNCTION_FRACTION,
   WATER_CAUSTICS_LINE_FLOOR,
+  WATER_CAUSTICS_SPECULAR_INFLUENCE,
 } from '../water-field.js';
 import { WATER_TIER3_SHADOW_RESPONSE, WATER_TIER3_GLOSSINESS, WATER_MIN_ROUGHNESS } from '../water-light.js';
 import { WATER_TIER4_SWASH_FOAM, WATER_TIER4_BREAK_FOAM, WATER_TIER4_CAUSTICS } from '../water-render.js';
@@ -270,6 +271,8 @@ export function run(t) {
     ['causticEvolveSpeed', WATER_CAUSTICS_EVOLVE_SPEED, 'WATER_CAUSTICS_EVOLVE_SPEED'],
     ['causticJunctionWidth', WATER_CAUSTICS_JUNCTION_FRACTION, 'WATER_CAUSTICS_JUNCTION_FRACTION'],
     ['causticLineFloor', WATER_CAUSTICS_LINE_FLOOR, 'WATER_CAUSTICS_LINE_FLOOR'],
+    // === round 7 (2026-08-27) — the caustic-specular A/B test. ===
+    ['causticSpecularInfluence', WATER_CAUSTICS_SPECULAR_INFLUENCE, 'WATER_CAUSTICS_SPECULAR_INFLUENCE'],
   ]) {
     ok(`${key} is declared as a plain float`, WATER_PARAMS[key].type === 'float');
     ok(

@@ -443,7 +443,7 @@ export const WATER_SHOAL_STRENGTH = 0.4;
  * not blobs) but too many, too-small cells competing for attention. 0.5,
  * checked the same way, produces cleaner, larger, more distinct cells much
  * closer to the reference. */
-export const WATER_CAUSTICS_SCALE = 0.5;
+export const WATER_CAUSTICS_SCALE = 0.44;
 
 /** TIER 4 — CAUSTICS' SHARPNESS, author-facing, 0..1: how wide the bright
  * band around each Worley cell edge reads, interpolating between
@@ -451,7 +451,7 @@ export const WATER_CAUSTICS_SCALE = 0.5;
  * EDGE_FAR_MIN` (1, hairline-thin — close to the author's own reference
  * image). Free — no extra fetch, just which threshold the already-computed
  * F2−F1 field is cut at. */
-export const WATER_CAUSTICS_SHARPNESS = 0.75;
+export const WATER_CAUSTICS_SHARPNESS = 0.28;
 
 /** TIER 4 — the WIDEST the bright band around a cell edge may read
  * (`causticSharpness = 0`), in F2−F1 units. Roughly matches
@@ -491,7 +491,7 @@ export const WATER_CAUSTICS_MAX = 1.6;
  * richness. Lowered alongside the scale increase — a coarser primary net
  * needs less second-layer contribution to still read as "several ripple
  * scales", not more. */
-export const WATER_CAUSTICS_NETTING = 0.15;
+export const WATER_CAUSTICS_NETTING = 0.3;
 
 /** The second layer's own scale, as a fraction of the FIRST layer's
  * (already-independent) `WATER_CAUSTICS_SCALE` domain — so NETTING always
@@ -524,27 +524,29 @@ export const WATER_CAUSTICS_NET_SCALE_RATIO = 2.6;
 /** How strongly `slope` displaces the Worley query point, before the cap
  * below engages — in CELL UNITS per unit of `slope`'s own magnitude.
  *
- * ⚠️ MEASURED, NOT GUESSED (2026-08-27, shader lab, debug channel 16). A
- * first reasoned guess of 4 — meant to read as "roughly half a cell of
- * displacement at typical chop" — turned out to tear the net apart on a
- * real render: thin connected lines dissolved into a thick, blobby mess,
- * and even the shore boundary read as noisy rather than clean, because the
- * Worley query was being pushed well past its own neighbouring cells. 0.6,
- * checked the same way, keeps the net genuinely connected while still
- * visibly rippling its edges — confirmed via a real pixel diff between two
- * renders 4 seconds apart (28% of pixels changed by more than a rounding
- * step, mean delta ~10/255), not just eyeballed. */
-export const WATER_CAUSTICS_WAVE_WARP_STRENGTH = 0.6;
+ * ⚠️ ROUND 3 shader-lab-measured this at 0.6 (a first guess of 4 tore the
+ * net apart on a real render — see that round's own account in the water
+ * testament for the full story). ⚠️ ROUND 7 (2026-08-27) — the author's OWN
+ * live-tuned value, set directly via the newly-exposed slider and reported
+ * back as the value to ship: 6, TEN TIMES round 3's shader-lab-safe number
+ * — meaning `WATER_CAUSTICS_WAVE_WARP_CELLS` below (also lowered the same
+ * round, to 0.18) is now doing essentially ALL of the real limiting; at
+ * this strength the raw warp saturates its own cap almost everywhere,
+ * which is presumably the point — a strong, consistently-capped distortion
+ * rather than a gentle, rarely-capped one. */
+export const WATER_CAUSTICS_WAVE_WARP_STRENGTH = 6;
 
 /** The hard ceiling on the warp above, in CELL UNITS, however extreme
  * `chop` gets — same "rescale, never per-axis-clamp" safety shape
  * `WATER_FLOW_WARP_CAP_CELLS` already uses. Past a full cell's own width the
  * Worley query would start reading a NEIGHBOURING cell's own feature as if
  * it were local, which reads as the net breaking apart rather than
- * rippling. Lowered alongside `_STRENGTH` above, same shader-lab check —
- * 0.4 keeps even an extreme-chop patch from crossing into a neighbour's own
- * territory. */
-export const WATER_CAUSTICS_WAVE_WARP_CELLS = 0.4;
+ * rippling. ⚠️ ROUND 7 (2026-08-27) — the author's own live-tuned value,
+ * LOWERED from round 3's shader-lab-checked 0.4 to 0.18, paired with
+ * `_STRENGTH` above raised to 6 — the strength now routinely exceeds this
+ * cap, so this constant is what actually shapes the warp's real range in
+ * practice. */
+export const WATER_CAUSTICS_WAVE_WARP_CELLS = 0.18;
 
 /**
  * ============================================================================
@@ -578,7 +580,7 @@ export const WATER_CAUSTICS_WAVE_WARP_CELLS = 0.4;
  * the potential field spans SEVERAL cells. A single cell breathing in
  * isolation would not read as "pulling its neighbours"; several cells
  * caught in the same rise and fall does. */
-export const WATER_CAUSTICS_GROWTH_FREQ = 0.35;
+export const WATER_CAUSTICS_GROWTH_FREQ = 0.39;
 
 /** The finite-difference step used to estimate `∇φ`, in the SAME
  * frequency-scaled coordinate space `WATER_CAUSTICS_GROWTH_FREQ` maps into
@@ -599,14 +601,14 @@ export const WATER_CAUSTICS_GROWTH_STRENGTH = 0.3;
 
 /** The hard ceiling on the growth warp, in CELL UNITS — same rescale-not-
  * clamp safety shape every other warp in this block already uses. */
-export const WATER_CAUSTICS_GROWTH_CELLS = 0.45;
+export const WATER_CAUSTICS_GROWTH_CELLS = 0.78;
 
 /** How fast the growth potential's OWN peaks and troughs migrate, in
  * noise-cycles per second — slow and deliberate (a genuine "breathing"
  * rhythm, not a churn); independent of `WATER_CAUSTICS_EVOLVE_SPEED` below,
  * which drives the Worley lattice's own topology change, a different
  * mechanism entirely reading a different noise fetch. */
-export const WATER_CAUSTICS_GROWTH_TIME_SCALE = 0.05;
+export const WATER_CAUSTICS_GROWTH_TIME_SCALE = 1.2;
 
 /** How fast TIME advances as the Worley lattice's own THIRD AXIS, in
  * lattice-units per second — NOT a scroll speed. One full unit crosses into
@@ -614,7 +616,7 @@ export const WATER_CAUSTICS_GROWTH_TIME_SCALE = 0.05;
  * the net's own topology meaningfully reshuffles," not "how fast a pattern
  * slides." Slow enough that cells read as smoothly growing/shrinking/
  * merging rather than flickering between unrelated states. */
-export const WATER_CAUSTICS_EVOLVE_SPEED = 0.12;
+export const WATER_CAUSTICS_EVOLVE_SPEED = 1.62;
 
 /** The SECOND (netting) layer's own evolution runs at
  * `WATER_CAUSTICS_NET_SCALE_RATIO`× this speed already (finer scale,
@@ -631,14 +633,56 @@ export const WATER_CAUSTICS_NET_TIME_PHASE = 41.7;
  * instead of letting them drift apart at extreme settings. Tighter than 1
  * (the edge test's own implicit ceiling) because a genuine multi-cell
  * junction is a rarer, smaller feature than an ordinary edge crossing. */
-export const WATER_CAUSTICS_JUNCTION_FRACTION = 0.55;
+export const WATER_CAUSTICS_JUNCTION_FRACTION = 0.54;
+
+/**
+ * ============================================================================
+ * SHARED SHAPE, SHARED SURFACE (round 7, 2026-08-27) — the SAME caustic net
+ * also modulates the specular reflection, an A/B-testable idea, off by
+ * default
+ * ============================================================================
+ * Author, live: *"The actual shape that we've created could actually be a
+ * good thing to use for the actual surface of the water too, the specular
+ * highlights layer, as something to break that up a bit. If we use the same
+ * pattern twice then it could help to make the surface look a bit more
+ * noisy and realistic and also keeps the two elements tied together which
+ * makes physical sense. Give me a slider to A/B test this idea."*
+ *
+ * Physically apt, not just a texture trick: a caustic net and a specular
+ * highlight are both consequences of the SAME wave curvature concentrating
+ * light — a real bed that shows a tight caustic knot sits under water whose
+ * surface, at that same spot, is genuinely more sharply curved, which is
+ * exactly where a specular highlight would ALSO want to sparkle harder.
+ * Reusing one pattern for both is not decorative doubling, it is reading
+ * the same physical fact twice.
+ *
+ * Applied in `water-render.js`, not here — the modulation multiplies
+ * `specular.reflection` (tier 3's own output) using `causticExcess` (the
+ * ALREADY fully-composed, already-gain-scaled, already-shadow-suppressed
+ * signal this same round's shadow fix produces), not a fresh, independent
+ * sample of `causticBrightness`. That reuse is what makes "tied together"
+ * literal rather than aspirational: turn caustics off (`causticGain=0`) or
+ * step into a cast shadow, and this modulation goes inert in the SAME
+ * instant, automatically, because it reads the exact value that already
+ * carries both those gates — no second copy of either to keep in sync.
+ */
+
+/** How strongly the caustic net's own pattern modulates specular
+ * intensity — 0 leaves specular completely untouched (byte-identical to
+ * before this round); at 1, a full-brightness net line/junction roughly
+ * doubles the reflection there while a bare cell interior roughly halves
+ * it; past 1 the interior can go fully dark. An experimental idea, not
+ * (yet) a considered default — ships OFF so the existing look never
+ * changes unless this is deliberately turned up. */
+export const WATER_CAUSTICS_SPECULAR_INFLUENCE = 0;
 
 /** How dim an ordinary two-cell edge (no nearby junction) reads, relative to
- * a full junction's own brightness of 1. Author, live: "it should be
- * concentrated into the intersections and grow weak in the middle parts of
- * the lines" — 0.3 keeps a plain edge visibly part of the net (not erased)
- * while making a junction read as unmistakably the brighter feature. */
-export const WATER_CAUSTICS_LINE_FLOOR = 0.3;
+ * a full junction's own brightness of 1. Author, live (round 4): "it should
+ * be concentrated into the intersections and grow weak in the middle parts
+ * of the lines". ⚠️ ROUND 7 — the author's own live-tuned value, LOWERED
+ * from round 4's reasoned 0.3 to 0.14: plain edges read close to invisible,
+ * junctions unmistakably the whole story. */
+export const WATER_CAUSTICS_LINE_FLOOR = 0.14;
 
 /**
  * Build tier 2's surface field. One fractal-noise fetch, THREE readings of it.

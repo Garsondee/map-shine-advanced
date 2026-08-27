@@ -269,6 +269,7 @@ import {
   WATER_CAUSTICS_SHARPNESS,
   WATER_CAUSTICS_SCALE,
   WATER_CAUSTICS_NETTING,
+  WATER_CAUSTICS_MAX,
   WATER_CAUSTICS_WAVE_WARP_STRENGTH,
   WATER_CAUSTICS_WAVE_WARP_CELLS,
   WATER_CAUSTICS_GROWTH_STRENGTH,
@@ -278,6 +279,7 @@ import {
   WATER_CAUSTICS_EVOLVE_SPEED,
   WATER_CAUSTICS_JUNCTION_FRACTION,
   WATER_CAUSTICS_LINE_FLOOR,
+  WATER_CAUSTICS_SPECULAR_INFLUENCE,
 } from './water-field.js';
 import {
   buildWaterSpecular,
@@ -1183,6 +1185,9 @@ export function buildWaterSurfaceMaterial({
   const uCausticEvolveSpeed = uniform(float(WATER_CAUSTICS_EVOLVE_SPEED));
   const uCausticJunctionWidth = uniform(float(WATER_CAUSTICS_JUNCTION_FRACTION));
   const uCausticLineFloor = uniform(float(WATER_CAUSTICS_LINE_FLOOR));
+  // A/B TEST (round 7) — see WATER_CAUSTICS_SPECULAR_INFLUENCE's own doc.
+  // Ships at 0 (off, byte-identical reflection to before this round).
+  const uCausticSpecularInfluence = uniform(float(WATER_CAUSTICS_SPECULAR_INFLUENCE));
   const uFoamTrail = uniform(float(foamTrail));
   const uFoamEdgeSharpness = uniform(float(foamEdgeSharpness));
   // THE FOAM BAND's REACH, derived from the author's own `depthScalePx` on the
@@ -1706,6 +1711,10 @@ export function buildWaterSurfaceMaterial({
   // — two dot products, a sqrt, a division — never runs below this tier.
   let specular = {
     reflection: vec3(0, 0, 0),
+    // Same fail-open polarity `water-light.js`'s own real `sunVis` commits
+    // to: no shadow data (or, here, tier 3 not even built yet) must read as
+    // full sun, never as full shadow.
+    sunVis: float(1),
     setViewCentre() {},
     setSky() {},
     setSunGlint() {},
@@ -2083,7 +2092,18 @@ export function buildWaterSurfaceMaterial({
   // brightening into darkening and darkening into brightening, which is not
   // "less caustics", it is a different, wrong effect.
   const causticGain = max(uCaustics, float(0));
-  const causticExcess = field.causticBrightness.mul(causticGain);
+  // ⚠️ SUPPRESSED IN CAST SHADOW (round 7, 2026-08-27) — author: "Ideally
+  // you need to suppress all caustics where shadows are." Physically real,
+  // not just tidy: a caustic net is refracted DIRECT sunlight; a patch of
+  // riverbed a building's shadow already blocks from that same sun has no
+  // direct light left to focus. Reuses `specular.sunVis` — the SAME raw
+  // cast-shadow sample tier 3's own sun disc is already gated by — rather
+  // than a second, independently-drifting shadow lookup (this file's own
+  // established law: one signal, one register, never two copies of the
+  // same physical fact). Deliberately the RAW sample, not `sunShadowFactor`
+  // (which `shadowResponse` can soften) — "suppress ALL caustics" reads as
+  // unconditional, not a dial shared with glint's own artistic softness.
+  const causticExcess = field.causticBrightness.mul(causticGain).mul(specular.sunVis);
 
   // ============================================================================
   // TIER 5 — REFRACTION (C5, Water-Testament.md §2.5) — landed 2026-08-23
@@ -2415,12 +2435,29 @@ export function buildWaterSurfaceMaterial({
   // `src + dst`, premultiplied — the light the volume sends back. Zero outside
   // the water by construction (bedTransmit is 1 there), so it needs no gate.
   const inscatterMaterial = new THREE.NodeMaterial();
+  // ⚠️ A/B TEST (round 7) — SHARED SHAPE, SHARED SURFACE. Reuses
+  // `causticExcess` (already fully composed above: gain-scaled, shadow-
+  // suppressed) as a specular modulation source — see
+  // `water-field.js#WATER_CAUSTICS_SPECULAR_INFLUENCE`'s own doc for the
+  // physical reasoning and why reusing the ALREADY-GATED signal, not a
+  // fresh sample, is what makes "tied together" literal. Normalised to
+  // roughly 0..1 (0 = a bare cell interior, 1 = a bright net line/junction)
+  // against the SAME ceiling the caustics composition itself uses, then
+  // mapped through `1 + influence·(norm − 0.5)` — a no-op at influence=0
+  // (exactly 1, byte-identical to before this round), symmetrically
+  // brightening net lines and dimming cell interiors as influence rises.
+  // `max(0, …)`: past influence≈2 the formula alone could go negative,
+  // which would invert the reflection's own colour — nonsensical, not just
+  // "too strong" — so the floor is a hard clamp, not a hope the range never
+  // reaches it.
+  const causticNetNorm = clamp(causticExcess.div(float(WATER_CAUSTICS_MAX)), float(0), float(1));
+  const causticSpecularMod = max(float(0), float(1).add(uCausticSpecularInfluence.mul(causticNetNorm.sub(float(0.5)))));
   // The reflection is gated by `inside` (no glint on dry land — the same
   // antialiased shoreline every other term already uses) and by `foamHide`
   // (broken, foamy water scatters light, it does not mirror it — reusing the
   // exact factor that already suppresses the bed and the in-scatter, rather
   // than adding a second foam interaction to reason about).
-  const reflection = specular.reflection.mul(inside).mul(foamHide);
+  const reflection = specular.reflection.mul(causticSpecularMod).mul(inside).mul(foamHide);
 
   // The water's own returned light, itself occluded by foam, PLUS the foam,
   // PLUS the sun/sky reflection. 0.85 rather than pure white on the foam term:
@@ -2859,6 +2896,15 @@ export function buildWaterSurfaceMaterial({
      * concentration effectively off). */
     setCausticLineFloor(v) {
       uCausticLineFloor.value = v;
+    },
+    /** WATER_PARAMS `causticSpecularInfluence` — A/B test: how strongly the
+     * caustic net's own pattern modulates specular intensity (round 7's
+     * "reuse the same shape twice, ties the two elements together" idea).
+     * 0 = specular completely untouched. See
+     * `water-field.js#WATER_CAUSTICS_SPECULAR_INFLUENCE`'s own doc for the
+     * physical reasoning. */
+    setCausticSpecularInfluence(v) {
+      uCausticSpecularInfluence.value = v;
     },
     // ── TIER 5 ────────────────────────────────────────────────────────────
     /** THE CAPTURE'S OWN WORLD RECT (`water-refraction-subsystem.js`'s

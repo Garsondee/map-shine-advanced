@@ -313,6 +313,7 @@ export function run(t) {
     'setCausticEvolveSpeed',
     'setCausticJunctionWidth',
     'setCausticLineFloor',
+    'setCausticSpecularInfluence',
     'setFoamEdgeSharpness',
     'setCapturedRect',
     'setCapturedTexSize',
@@ -357,6 +358,7 @@ export function run(t) {
       b.setCausticEvolveSpeed(0.2);
       b.setCausticJunctionWidth(0.6);
       b.setCausticLineFloor(0.2);
+      b.setCausticSpecularInfluence(1.5);
       b.setFoamEdgeSharpness(0.5);
     } catch (e) {
       err = e;

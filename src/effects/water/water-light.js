@@ -510,6 +510,17 @@ export function buildWaterSpecular({
 
   return {
     reflection,
+    /** 1 = this pixel sees the sun, 0 = fully shadowed — the SAME cast-shadow
+     * sample the sun disc above is already gated by (`sunShadowFactor`'s own
+     * unresponse-weighted half), exposed RAW (not softened by
+     * `shadowResponse`) so a caller with its own reason to want unconditional
+     * shadow suppression — tier 4's caustics: no direct sunlight reaching the
+     * bed, no caustics, full stop, not an artistic dial the way glint's own
+     * softness is — can reuse the identical sample rather than re-deriving
+     * it. Fails to `float(1)` (full sun) with no shadow data bound, the same
+     * polarity this function's own cast-shadow-gate comment already commits
+     * to: an unresolved floor must never read as full shadow. */
+    sunVis,
     /** The camera's world rect centre — pushed per frame, never gated (this is
      * the whole reason the highlight moves as the author pans). */
     setViewCentre(cx, cy) {

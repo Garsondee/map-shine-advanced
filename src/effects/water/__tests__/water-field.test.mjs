@@ -264,8 +264,12 @@ export function run(t) {
     WATER_CAUSTICS_GROWTH_STRENGTH <= WATER_CAUSTICS_WAVE_WARP_STRENGTH
   );
   ok(
-    'WATER_CAUSTICS_GROWTH_TIME_SCALE is positive but gentle — a breathing rhythm, not a strobe',
-    WATER_CAUSTICS_GROWTH_TIME_SCALE > 0 && WATER_CAUSTICS_GROWTH_TIME_SCALE < 1
+    // ⚠️ Widened >1 (round 7) — the author's own live-tuned default (1.2)
+    // is genuinely faster than the "gentle rhythm" this bound originally
+    // assumed; the schema's own 0..2 range is the real ceiling now, not a
+    // guess made before anyone had looked at it moving.
+    'WATER_CAUSTICS_GROWTH_TIME_SCALE is a real, positive rate, inside its own schema range',
+    WATER_CAUSTICS_GROWTH_TIME_SCALE > 0 && WATER_CAUSTICS_GROWTH_TIME_SCALE <= 2
   );
   ok(
     'WATER_CAUSTICS_EVOLVE_SPEED is strictly positive — zero would silently disable all lattice evolution, the round`s own headline ask',

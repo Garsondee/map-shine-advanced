@@ -1506,9 +1506,16 @@ export async function startVtPanViewer({
     // display now shades 4x the pixels through MSA's full effects pipeline
     // (region darkness, point lights, illumination); 3x is 9x. That is the
     // SAME cost PIXI already pays at ITS default setting, not a new one MSA
-    // introduces — but if frame rate suffers, Foundry's own "Disable
-    // Resolution Scaling" client setting is the lever, exactly as it would
-    // be for Foundry's own canvas.
+    // introduces. ⚠️ 2026-08-27 — this used to say "if frame rate suffers,
+    // Foundry's own 'Disable Resolution Scaling' client setting is the
+    // lever" — now stale: `boot.js`'s own `ready` hook FORCES that setting
+    // off for every player (Ingram's own explicit call — see that hook's
+    // own comment for the full account), so `foundryResolution` should read
+    // 1 for everyone by the time this runs, not just for a player who found
+    // and flipped the checkbox themselves. The read here stays defensive
+    // regardless (a player CAN still re-enable it in Foundry's settings
+    // screen after MSA's forced write; this cap and the render-scale
+    // governor both still protect against that case either way).
     //
     // ⚠️ CEILING, NOT JUST A MIRROR (2026-08-27) — see MAX_PIXEL_RATIO's own
     // comment above. `Math.min(foundryResolution, MAX_PIXEL_RATIO)` mirrors

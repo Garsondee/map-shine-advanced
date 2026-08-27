@@ -12477,6 +12477,47 @@ function install() {
       MapShine.__player?.onOpenChange((open) => syncPlayerButtonState(open));
     });
     Hooks.once('ready', () => {
+      // FORCE FOUNDRY'S "DISABLE RESOLUTION SCALING" OFF (2026-08-27) —
+      // Ingram's own explicit, considered call, made AFTER the trade-off
+      // below was raised and weighed. `core.pixelRatioResolutionScaling`
+      // (Foundry's OWN client setting, ships `initial:true` — see the
+      // PIXEL-RATIO PARITY comment in vt-pan-viewer.js) drives
+      // `canvas.app.renderer.resolution` to `window.devicePixelRatio` by
+      // DEFAULT on every fresh install; on any scaled/Retina display that
+      // can tank frame rate — Ingram's own measured case, 30fps→55-60fps
+      // from flipping JUST this one Foundry checkbox, is what started this
+      // whole session's render-scale work
+      // ([[project_render_scale_governor_2026-08-27]]). The governor built
+      // this session softens the cost but does not remove the discovery
+      // problem: most players will never find Foundry's own Configure
+      // Settings screen, let alone realise THIS specific checkbox is the
+      // lever — his own words, verbatim: "we risk people using the module
+      // and never realising (like I did) that they could massively improve
+      // performance for minimal loss of rendering quality."
+      //
+      // ⚠️ DELIBERATELY REACHES OUTSIDE MSA's OWN SETTINGS NAMESPACE —
+      // `writeSetting`'s `namespace` param is generic, not MODULE_ID-only,
+      // and this is the FIRST place this project has ever used that for a
+      // namespace it doesn't own. This is a GLOBAL Foundry client setting,
+      // not scene- or MSA-scoped: forcing it also lowers Foundry's OWN
+      // canvas resolution in any context, including with MSA fully disabled
+      // — a deliberately bigger reach than "MSA owns the map render," made
+      // with Ingram's explicit sign-off after that exact trade-off was
+      // named to him.
+      //
+      // Read-then-conditionally-write: skips the redundant
+      // `game.settings.set` call (and whatever `onChange` Foundry's own
+      // registration carries) on every repeat session once it is already
+      // correct, not just the first time ever.
+      try {
+        if (readSetting('core', 'pixelRatioResolutionScaling') !== false) {
+          Promise.resolve(writeSetting('core', 'pixelRatioResolutionScaling', false)).catch((err) =>
+            log.error('forcing core.pixelRatioResolutionScaling off failed:', err)
+          );
+        }
+      } catch (err) {
+        log.error('reading core.pixelRatioResolutionScaling failed:', err);
+      }
       // A `ready`-time safety net for the calendar install above: by `ready`,
       // game.time definitely exists AND every other module's `init` (pf2e's
       // included) has definitely already registered its own settings — an

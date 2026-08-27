@@ -547,6 +547,82 @@ export const WATER_CAUSTICS_WAVE_WARP_STRENGTH = 0.6;
 export const WATER_CAUSTICS_WAVE_WARP_CELLS = 0.4;
 
 /**
+ * ============================================================================
+ * ORGANIC SHAPE + GENUINE EVOLUTION (round 4, 2026-08-27) — the net now
+ * CURVES independent of the wave field and its own LATTICE changes over
+ * time, rather than a fixed 2-D pattern being pushed/scrolled around
+ * ============================================================================
+ * Author, live, on round 3's wave-warped-but-still-2-D net: *"No evolution
+ * happening. It's a distorting scrolling texture currently... The shapes are
+ * angular and sharp, not smooth wispy and fluid/liquid... The actual cells
+ * don't evolve, they don't shrink and expand, they don't evolve at all."*
+ * See the caustics block's own inline header (where these constants are
+ * consumed) for the full mechanism each one drives. ⚠️ NOT re-verified via
+ * the shader lab this round — the author asked for the tool to be set aside
+ * ("I'll examine what you produce when you are finished") — every value
+ * below is a reasoned first pass, honestly labelled as such, not a measured
+ * one the way `_WAVE_WARP_STRENGTH` above was.
+ */
+
+/** How high a spatial frequency the organic warp noise reads at, as a
+ * multiplier on the ALREADY cell-normalised coordinate — intentionally
+ * higher than 1 (one full primary cell) so the warp's own features are
+ * SMALLER than a cell, curving a single edge's length rather than shoving
+ * whole cells around the way the (lower-frequency, physically-tied) wave
+ * warp does. */
+export const WATER_CAUSTICS_ORGANIC_WARP_FREQ = 2.5;
+
+/** How strongly the organic noise displaces the query point, in CELL UNITS,
+ * before the cap below engages. Deliberately smaller than
+ * `WATER_CAUSTICS_WAVE_WARP_STRENGTH` — this warp's whole job is fine
+ * curvature WITHIN an edge, not gross relocation of it. */
+export const WATER_CAUSTICS_ORGANIC_WARP_STRENGTH = 0.35;
+
+/** The hard ceiling on the organic warp, in CELL UNITS — same rescale-not-
+ * clamp safety shape `_WAVE_WARP_CELLS`/`WATER_FLOW_WARP_CAP_CELLS` already
+ * use. Kept under half a cell so curvature cannot by itself push the query
+ * into unrelated neighbouring territory. */
+export const WATER_CAUSTICS_ORGANIC_WARP_CELLS = 0.3;
+
+/** How fast the organic warp's OWN noise evolves, in noise-cycles per
+ * second — slow and gentle on purpose (a "flowing" quality, not a churn);
+ * independent of `WATER_CAUSTICS_EVOLVE_SPEED` below, which drives the
+ * lattice's own topology change, a different mechanism entirely. */
+export const WATER_CAUSTICS_ORGANIC_WARP_TIME_SCALE = 0.08;
+
+/** How fast TIME advances as the Worley lattice's own THIRD AXIS, in
+ * lattice-units per second — NOT a scroll speed. One full unit crosses into
+ * an entirely new neighbour layer of the 3-D search, so this is "how often
+ * the net's own topology meaningfully reshuffles," not "how fast a pattern
+ * slides." Slow enough that cells read as smoothly growing/shrinking/
+ * merging rather than flickering between unrelated states. */
+export const WATER_CAUSTICS_EVOLVE_SPEED = 0.12;
+
+/** The SECOND (netting) layer's own evolution runs at
+ * `WATER_CAUSTICS_NET_SCALE_RATIO`× this speed already (finer scale,
+ * proportionally faster — the same cascade real turbulence shows), offset
+ * by this many lattice-units of fixed TIME PHASE so the two layers never
+ * evolve in lockstep. An arbitrary-feeling number on purpose, matching this
+ * file's own "non-round ratio avoids periodic re-alignment" reasoning
+ * applied to a time axis instead of a spatial one. */
+export const WATER_CAUSTICS_NET_TIME_PHASE = 41.7;
+
+/** Where the JUNCTION test (`F3−F2`) is cut into "bright", as a FRACTION of
+ * `edgeFarBase` — reusing the sharpness-driven edge threshold rather than an
+ * independent constant, so `causticSharpness` sharpens both tests together
+ * instead of letting them drift apart at extreme settings. Tighter than 1
+ * (the edge test's own implicit ceiling) because a genuine multi-cell
+ * junction is a rarer, smaller feature than an ordinary edge crossing. */
+export const WATER_CAUSTICS_JUNCTION_FRACTION = 0.55;
+
+/** How dim an ordinary two-cell edge (no nearby junction) reads, relative to
+ * a full junction's own brightness of 1. Author, live: "it should be
+ * concentrated into the intersections and grow weak in the middle parts of
+ * the lines" — 0.3 keeps a plain edge visibly part of the net (not erased)
+ * while making a junction read as unmistakably the brighter feature. */
+export const WATER_CAUSTICS_LINE_FLOOR = 0.3;
+
+/**
  * Build tier 2's surface field. One fractal-noise fetch, THREE readings of it.
  *
  * @param {object} args
@@ -661,7 +737,7 @@ export function buildWaterSurfaceField({
     mix,
     fwidth,
     mx_fractal_noise_vec3,
-    mx_worley_noise_vec2,
+    mx_worley_noise_vec3,
   } = TSL;
   const bankInfluenceNode = uBankInfluence ?? float(WATER_BANK_INFLUENCE);
   const flowWarpInfluenceNode = uFlowWarpInfluence ?? float(WATER_FLOW_WARP_INFLUENCE);
@@ -980,20 +1056,79 @@ export function buildWaterSurfaceField({
     const waveWarpCapScale = min(float(1), float(WATER_CAUSTICS_WAVE_WARP_CELLS).div(max(waveWarpLen, float(1e-4))));
     const waveWarp = waveWarpRaw.mul(waveWarpCapScale);
 
-    const netCell = worldXY.add(domainOffset).div(cellPx).add(waveWarp);
+    const netCellPreOrganic = worldXY.add(domainOffset).div(cellPx).add(waveWarp);
 
-    /** F2−F1 for one Worley layer at `cellCoord` — zero exactly on a cell
-     * edge, growing toward each cell's own interior. See this block's own
-     * header for why F2−F1, not F1 alone. `mx_worley_noise_vec2`'s second
-     * arg is jitter (1 = fully randomised cell centres), the same value
-     * `buildFoamCellularStructure` already uses. */
-    const edgeDistAt = (cellCoord) => {
-      const ranks = mx_worley_noise_vec2(vec2(cellCoord.x, cellCoord.y), float(1));
-      return ranks.y.sub(ranks.x);
-    };
+    // ============================================================================
+    // ROUND 4 (2026-08-27) — ORGANIC SHAPE + GENUINE EVOLUTION, not a
+    // scrolling/distorting texture over a fixed lattice
+    // ============================================================================
+    // Author, live, on round 3's wave-warped-but-still-2-D net: *"No
+    // evolution happening. It's a distorting scrolling texture currently...
+    // The shapes are angular and sharp, not smooth wispy and fluid/liquid...
+    // The actual cells don't evolve, they don't shrink and expand, they
+    // don't evolve at all."* Correct on both counts, and they are TWO
+    // DIFFERENT problems needing two different fixes:
+    //
+    //   SHAPE      round 3's `slope`-warp only bends the net as smoothly as
+    //              the WAVE FIELD itself does — coarse relative to a
+    //              filament's own fine structure, and a straight Voronoi
+    //              edge pushed by a smooth field is still a (bent) straight
+    //              line, not an organic curve. Fixed below by a SECOND,
+    //              independent, higher-frequency domain warp sourced from
+    //              noise, not physics — the standard "warp a geometric
+    //              pattern by noise" technique for making it read as fluid.
+    //   EVOLUTION  no amount of warping the QUERY POINT can make one Voronoi
+    //              cell genuinely grow at a neighbour's expense, split, or
+    //              merge — the underlying LATTICE (the set of feature
+    //              points) never changes; only where you sample it does.
+    //              Fixed below by making TIME a genuine THIRD AXIS of the
+    //              lattice itself (`mx_worley_noise_vec3`'s own vec3-position
+    //              overload — confirmed by reading its source: a real 3×3×3
+    //              neighbour search, not a 2-D search with time bolted on),
+    //              so animating it is slicing a moving plane through an
+    //              actually-3-D cellular structure — the standard real-time
+    //              technique for genuinely evolving organic cells.
+    //
+    // ORGANIC WARP — independent of `slope` on purpose: `slope` ties
+    // distortion to the water's PHYSICAL state (round 3's own ask); this
+    // ties it to nothing physical at all, deliberately, because real
+    // caustic filaments curve at a finer scale than a wave field resolves.
+    // Reuses `mx_fractal_noise_vec3`, the SAME primitive tier 2's own fetch
+    // already uses (Law 8: no hand-written twin) — two of its three
+    // channels read as a 2-vector, exactly like `slope` above does.
+    // Capped the SAME rescale-not-clamp way `flowWarp`/`waveWarp` already
+    // are — this file's one law against unbounded per-pixel domain shear,
+    // applied a third time, not re-invented.
+    const organicNoise = mx_fractal_noise_vec3(
+      vec3(
+        netCellPreOrganic.x.mul(float(WATER_CAUSTICS_ORGANIC_WARP_FREQ)),
+        netCellPreOrganic.y.mul(float(WATER_CAUSTICS_ORGANIC_WARP_FREQ)),
+        tSec.mul(float(WATER_CAUSTICS_ORGANIC_WARP_TIME_SCALE))
+      ),
+      2,
+      2.0,
+      0.5
+    );
+    const organicWarpRaw = vec2(organicNoise.x, organicNoise.y).mul(float(WATER_CAUSTICS_ORGANIC_WARP_STRENGTH));
+    const organicWarpLen = length(organicWarpRaw);
+    const organicWarpCapScale = min(
+      float(1),
+      float(WATER_CAUSTICS_ORGANIC_WARP_CELLS).div(max(organicWarpLen, float(1e-4)))
+    );
+    const netCell = netCellPreOrganic.add(organicWarpRaw.mul(organicWarpCapScale));
+
+    // EVOLUTION's own clock — Z is a real lattice axis, not "2-D result at
+    // time T"; see the header above.
+    const zTimePrimary = tSec.mul(float(WATER_CAUSTICS_EVOLVE_SPEED));
+
+    /** F1/F2/F3 for one Worley layer at `(cellCoord, zTime)` — a genuine
+     * 3-D lattice sample, sorted nearest-to-farthest. `mx_worley_noise_vec3`'s
+     * second arg is jitter (1 = fully randomised feature points), the same
+     * value `buildFoamCellularStructure` already uses for its own 2-D call. */
+    const worleyAt = (cellCoord, zTime) => mx_worley_noise_vec3(vec3(cellCoord.x, cellCoord.y, zTime), float(1));
 
     // SHARPNESS — how WIDE the bright band around each edge is allowed to
-    // read, NOT a post-hoc contrast curve (that was the first version's
+    // read, NOT a post-hoc contrast curve (that was the FIRST version's
     // mistake — reshaping a blob's OUTPUT can't change its SHAPE). 0 = a
     // thick, lacy net (`WATER_CAUSTICS_EDGE_FAR_MAX`); 1 = a hairline net
     // (`WATER_CAUSTICS_EDGE_FAR_MIN`), close to the author's own reference
@@ -1006,28 +1141,56 @@ export function buildWaterSurfaceField({
       float(WATER_CAUSTICS_EDGE_FAR_MIN),
       causticSharpnessNode
     );
-    const netAt = (cellCoord) => {
-      const edgeDist = edgeDistAt(cellCoord);
+
+    /** One layer's brightness — an EDGE test (`F2−F1`, as before) times a
+     * NEW JUNCTION test (`F3−F2`) that concentrates full brightness only
+     * where a THIRD feature point is ALSO nearly equidistant (a genuine
+     * multi-cell junction) and lets a plain two-cell edge fall to a dim
+     * floor. Author, live: *"the effect produces a brightening effect but
+     * it's uniform, it should be concentrated into the intersections and
+     * grow weak in the middle parts of the lines."* Physically apt, not
+     * just aesthetic — real caustic brightness concentrates at
+     * higher-order fold intersections (catastrophe theory's cusps), not
+     * uniformly along a single fold's own length. Reuses `edgeFarBase` (a
+     * FRACTION of it) rather than a new independent threshold, so
+     * `causticSharpness` sharpens the junction test in step with the edge
+     * test instead of the two drifting apart at extreme settings. */
+    const netAt = (cellCoord, zTime) => {
+      const ranks = worleyAt(cellCoord, zTime);
+      const edgeDist = ranks.y.sub(ranks.x);
+      const junctionGap = ranks.z.sub(ranks.y);
+
       const edgeFarAA = max(edgeFarBase, fwidth(edgeDist).mul(float(WATER_CAUSTICS_EDGE_AA_PX)));
       // Bright NEAR an edge (edgeDist≈0), dark toward a cell's interior —
       // `1 −` the ramp, not a reversed-argument smoothstep (undefined for
       // edge0 > edge1), same construction `buildFoamCellularStructure` uses.
-      return float(1).sub(smoothstep(float(0), edgeFarAA, edgeDist));
+      const edgeMask = float(1).sub(smoothstep(float(0), edgeFarAA, edgeDist));
+
+      const junctionFar = edgeFarBase.mul(float(WATER_CAUSTICS_JUNCTION_FRACTION));
+      const junctionFarAA = max(junctionFar, fwidth(junctionGap).mul(float(WATER_CAUSTICS_EDGE_AA_PX)));
+      const junctionMask = float(1).sub(smoothstep(float(0), junctionFarAA, junctionGap));
+
+      const lineBrightness = mix(float(WATER_CAUSTICS_LINE_FLOOR), float(1), junctionMask);
+      return edgeMask.mul(lineBrightness);
     };
 
-    const primaryNet = netAt(netCell);
+    const primaryNet = netAt(netCell, zTimePrimary);
 
-    // NETTING — a SECOND layer at `WATER_CAUSTICS_NET_SCALE_RATIO`× FINER,
-    // blended via `max()` so two independent, ALREADY-CONNECTED nets overlay
-    // into a visibly richer, denser net — never `average`, which would only
-    // dim wherever the two layers' edges do not coincide (rare, since they
-    // are unrelated scales) and undo the point of adding a second layer at
-    // all. Same non-round ratio reasoning `WATER_FOAM_FINE_OCTAVE` already
-    // uses: an integer ratio would make the two layers' cell boundaries
-    // periodically coincide, reinstating the regularity a second octave is
-    // meant to break.
+    // NETTING — a SECOND layer at `WATER_CAUSTICS_NET_SCALE_RATIO`× FINER
+    // in SPACE (unchanged from round 2) and now ALSO `NET_SCALE_RATIO`×
+    // FASTER in its own evolution — a finer scale evolving proportionally
+    // faster is the same cascade real turbulence shows (small structures
+    // change faster than large ones), not an arbitrary second choice — plus
+    // a fixed TIME PHASE offset so it never evolves in lockstep with the
+    // primary layer. Blended via `max()` so two independent, already-
+    // connected nets overlay into a visibly richer net — never `average`,
+    // which would only dim wherever the two layers' edges do not coincide
+    // and undo the point of a second layer entirely.
     const fineCell = netCell.mul(float(WATER_CAUSTICS_NET_SCALE_RATIO));
-    const fineNet = netAt(fineCell);
+    const zTimeFine = tSec
+      .mul(float(WATER_CAUSTICS_EVOLVE_SPEED).mul(float(WATER_CAUSTICS_NET_SCALE_RATIO)))
+      .add(float(WATER_CAUSTICS_NET_TIME_PHASE));
+    const fineNet = netAt(fineCell, zTimeFine);
     const combinedNet = mix(primaryNet, max(primaryNet, fineNet), causticNettingNode);
 
     // PHYSICAL PLAUSIBILITY, CHEAPLY — dead-calm water (`chop=0`) shows no

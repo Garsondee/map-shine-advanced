@@ -41,6 +41,14 @@ import {
   WATER_CAUSTICS_NET_SCALE_RATIO,
   WATER_CAUSTICS_WAVE_WARP_STRENGTH,
   WATER_CAUSTICS_WAVE_WARP_CELLS,
+  WATER_CAUSTICS_ORGANIC_WARP_FREQ,
+  WATER_CAUSTICS_ORGANIC_WARP_STRENGTH,
+  WATER_CAUSTICS_ORGANIC_WARP_CELLS,
+  WATER_CAUSTICS_ORGANIC_WARP_TIME_SCALE,
+  WATER_CAUSTICS_EVOLVE_SPEED,
+  WATER_CAUSTICS_NET_TIME_PHASE,
+  WATER_CAUSTICS_JUNCTION_FRACTION,
+  WATER_CAUSTICS_LINE_FLOOR,
 } from '../water-field.js';
 
 /** The renderer's world space is Y-DOWN (`vt-pan-viewer.js#updateCamera`: the
@@ -230,6 +238,40 @@ export function run(t) {
   ok(
     'WATER_CAUSTICS_WAVE_WARP_CELLS is a real, bounded cap, not zero (no warp) and not unbounded (the domain-shear failure this file has already paid for once)',
     WATER_CAUSTICS_WAVE_WARP_CELLS > 0 && WATER_CAUSTICS_WAVE_WARP_CELLS <= 2
+  );
+  // ── ORGANIC SHAPE + GENUINE EVOLUTION (round 4) — author, live: "No
+  // evolution happening... shapes are angular and sharp, not smooth wispy
+  // and fluid... cells don't evolve... it should be concentrated into the
+  // intersections and grow weak in the middle parts of the lines."
+  ok(
+    'WATER_CAUSTICS_ORGANIC_WARP_FREQ samples finer than one whole cell — this warp curves an edge`s own length, it does not relocate whole cells',
+    WATER_CAUSTICS_ORGANIC_WARP_FREQ > 1
+  );
+  ok(
+    'WATER_CAUSTICS_ORGANIC_WARP_STRENGTH/_CELLS are strictly positive, bounded values — the same rescale-not-clamp safety shape as the wave warp',
+    WATER_CAUSTICS_ORGANIC_WARP_STRENGTH > 0 &&
+      WATER_CAUSTICS_ORGANIC_WARP_CELLS > 0 &&
+      WATER_CAUSTICS_ORGANIC_WARP_CELLS <= 2
+  );
+  ok(
+    'WATER_CAUSTICS_ORGANIC_WARP_TIME_SCALE is positive but gentle — a flowing quality, not a strobe',
+    WATER_CAUSTICS_ORGANIC_WARP_TIME_SCALE > 0 && WATER_CAUSTICS_ORGANIC_WARP_TIME_SCALE < 1
+  );
+  ok(
+    'WATER_CAUSTICS_EVOLVE_SPEED is strictly positive — zero would silently disable all lattice evolution, the round`s own headline ask',
+    WATER_CAUSTICS_EVOLVE_SPEED > 0
+  );
+  ok(
+    'WATER_CAUSTICS_NET_TIME_PHASE is not zero — an un-phased second layer would evolve in lockstep with the first, undoing the point of a fixed offset',
+    WATER_CAUSTICS_NET_TIME_PHASE !== 0
+  );
+  ok(
+    'WATER_CAUSTICS_JUNCTION_FRACTION sits strictly inside (0, 1] of the edge threshold — a junction is a TIGHTER feature than a plain edge, never a wider or inverted one',
+    WATER_CAUSTICS_JUNCTION_FRACTION > 0 && WATER_CAUSTICS_JUNCTION_FRACTION <= 1
+  );
+  ok(
+    'WATER_CAUSTICS_LINE_FLOOR keeps a plain edge visibly PART of the net (not erased) while staying meaningfully dimmer than a junction`s own ceiling of 1',
+    WATER_CAUSTICS_LINE_FLOOR > 0 && WATER_CAUSTICS_LINE_FLOOR < 1
   );
   ok(
     'WATER_CAUSTICS_SHARPNESS/_NETTING are valid author-facing 0..1 values, not internal-only leftovers',

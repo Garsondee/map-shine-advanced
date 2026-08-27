@@ -20,6 +20,7 @@ import { run as runPackedTrioAlpha } from './packed-trio-alpha.test.mjs';
 import { run as runVtPanViewerDiagnostics } from './vt-pan-viewer-diagnostics.test.mjs';
 import { run as runSceneDepth } from './scene-depth.test.mjs';
 import { run as runCoverageMesh } from './coverage-mesh.test.mjs';
+import { run as runRenderScalePolicy } from './render-scale-policy.test.mjs';
 import { run as runSettle } from './settle.test.mjs';
 import { run as runCompressedTextures } from './compressed-textures.test.mjs';
 import { run as runDepthProxyMaterialPool } from './depth-proxy-material-pool.test.mjs';
@@ -72,6 +73,7 @@ const suites = [
   ['vt-pan-viewer-diagnostics', runVtPanViewerDiagnostics],
   ['scene-depth', runSceneDepth],
   ['coverage-mesh', runCoverageMesh],
+  ['render-scale-policy', runRenderScalePolicy],
   ['settle', runSettle],
   ['compressed-textures', runCompressedTextures],
   ['depth-proxy-material-pool', runDepthProxyMaterialPool],

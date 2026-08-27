@@ -457,6 +457,86 @@ export const WATER_CAUSTICS_MAX = 1.6;
 export const WATER_CAUSTICS_DARK_MAX = 0.25;
 
 /**
+ * ============================================================================
+ * TIER 4 — CAUSTICS' OWN LOOK CONTROLS (2026-08-27)
+ * ============================================================================
+ * `WATER_CAUSTICS_K`'s own sweep table (above) is the reason caustics read as
+ * BLOBBY rather than as the thin, connected filament net real shallow water
+ * shows: at the chosen operating point, 41% of the surface carries a soft,
+ * barely-visible lift and only 8% crosses into "a real caustic" — a wide soft
+ * shoulder with a small bright core is, by definition, a glow, not a line.
+ * Real caustics are mathematically the SINGULARITIES of the ray-mapping
+ * Jacobian (envelope curves — `det → 0` on a 1-D set, not a filled region), so
+ * the fix is not a bigger `K`, it is shaping the RESPONSE around that
+ * singularity to be narrow, and giving the Jacobian genuine fine-scale
+ * curvature to be narrow ABOUT. Three independent knobs, each addressing a
+ * different reason a single smooth noise field reads as a blob:
+ *
+ *   SHARPNESS  contrast on the focus response itself — the 41%-soft/8%-sharp
+ *              split above, compressed toward the sharp end.
+ *   SCALE      the caustics' own noise domain, independent of the visible
+ *              chop's `waveScalePx` — real caustic nets are far finer-grained
+ *              than the swell that makes them; locking the two together caps
+ *              how thin the result can ever read regardless of SHARPNESS.
+ *   NETTING    a second, finer-scale Jacobian layer blended in — one
+ *              frequency of noise reads as a single wavy line at any
+ *              sharpness; real caustics cross because real water carries
+ *              several overlapping ripple scales at once.
+ */
+
+/** TIER 4 — CAUSTICS' SCALE, author-facing: a fraction of `uWaveScalePx` used
+ * for the caustics-only noise domain (NOT the visible chop's own domain,
+ * which is untouched). 1 reproduces the pre-2026-08-27 shape (caustics tied
+ * to the same cell size as the visible waves); the shipped default sits well
+ * below 1 because a real caustic net's cells are much smaller than the swell
+ * carrying them. Costs the Jacobian's own CENTRE sample as a genuine third
+ * fetch (previously borrowed for free from tier 2's own `shoaledY`/
+ * `shoaledZ` — only possible when the two domains were forced to match) —
+ * see the caustics block's own header for the full accounting. */
+export const WATER_CAUSTICS_SCALE = 0.4;
+
+/** TIER 4 — CAUSTICS' SHARPNESS, author-facing, 0..1: how strongly the focus
+ * response is contrast-shaped before it paints the bed. 0 reproduces the
+ * pre-2026-08-27 response (the broad soft lift `WATER_CAUSTICS_K`'s own sweep
+ * measured at 41% coverage); 1 uses the full `WATER_CAUSTICS_SHARPNESS_
+ * EXPONENT_MAX` curve, which compresses everything short of the true
+ * near-singular zone toward zero. Free — a reshape of a value already
+ * computed, no extra fetch. */
+export const WATER_CAUSTICS_SHARPNESS = 0.6;
+
+/** Internal only — never a schema default. The exponent `WATER_CAUSTICS_
+ * SHARPNESS = 1` maps to; picked by the same "measure, then choose the
+ * optimum, not the extreme" discipline as `WATER_CAUSTICS_K` rather than a
+ * round number — 4 was the point past which the shaping curve's own output
+ * stopped visibly changing for typical excess values in a GPU sweep at the
+ * shipped `WATER_CAUSTICS_SCALE`/`_MAX`, i.e. the response was already
+ * saturated, so a higher ceiling would only widen the slider's dead zone. */
+export const WATER_CAUSTICS_SHARPNESS_EXPONENT_MAX = 4;
+
+/** TIER 4 — CAUSTICS' NETTING, author-facing, 0..1: how much a SECOND,
+ * finer-scale Jacobian layer blends into the first via `max()` (not an
+ * average — two independent bright-line fields should ADD coverage where
+ * they cross, never dim each other where they don't). 0 is byte-identical to
+ * the single-layer field. ⚠️ Costs three more fetches (its own centre + two
+ * taps) whenever tier 4 caustics is active, REGARDLESS of this uniform's
+ * value — Effects.md Law 4 gates construction on the `caustics` JS boolean,
+ * not on a live uniform a slider can move at any time, the same reason
+ * `uCaustics` itself is never construction-gated either. Real, and worth
+ * knowing before raising the shipped default further. */
+export const WATER_CAUSTICS_NETTING = 0.3;
+
+/** Internal only — the second layer's own scale, as a fraction of the
+ * FIRST layer's (already-independent) `WATER_CAUSTICS_SCALE` domain — so
+ * NETTING always adds a genuinely finer net on top, never a coarser,
+ * redundant copy of the same one. 2.6 (not a round 2 or 3): a plain integer
+ * ratio between two octaves of the SAME noise's own lacunarity (2.0, tier
+ * 2's own fetch) risks the two layers' features periodically re-aligning
+ * into visible beating; an irrational-feeling ratio avoids that for the same
+ * reason `mx_fractal_noise_vec3`'s own lacunarity/gain pair was never chosen
+ * as a round number either. */
+export const WATER_CAUSTICS_NET_SCALE_RATIO = 2.6;
+
+/**
  * Build tier 2's surface field. One fractal-noise fetch, THREE readings of it.
  *
  * @param {object} args
@@ -497,6 +577,15 @@ export const WATER_CAUSTICS_DARK_MAX = 0.25;
  *   CONSTRUCTED, not merely multiplied by zero) and `causticBrightness` is a
  *   literal `float(0)`. See the caustics block below for why this reads
  *   `slope` AFTER shoaling has amplified it, not the raw noise.
+ * @param {*} [args.uCausticSharpness] - float uniform, `WATER_PARAMS.
+ *   causticSharpness`. Contrast-shapes the focus response; `null` falls back
+ *   to `WATER_CAUSTICS_SHARPNESS`.
+ * @param {*} [args.uCausticScale] - float uniform, `WATER_PARAMS.
+ *   causticScale`. The caustics-only noise domain, independent of
+ *   `uWaveScalePx`; `null` falls back to `WATER_CAUSTICS_SCALE`.
+ * @param {*} [args.uCausticNetting] - float uniform, `WATER_PARAMS.
+ *   causticNetting`. Blend weight for a second, finer Jacobian layer;
+ *   `null` falls back to `WATER_CAUSTICS_NETTING`.
  * @returns {{foam: *, turbidity: *, slope: *, domainOffset: *,
  *   causticBrightness: *}} ⚠️ `foam` and `causticBrightness` are BOTH contracted
  *   to be exactly ZERO OUTSIDE THE WATER — not merely small, zero — because
@@ -540,10 +629,22 @@ export function buildWaterSurfaceField({
   // construction-only test) is byte-for-byte the pre-param behaviour.
   uBankInfluence = null,
   uFlowWarpInfluence = null,
+  // ROH TUNING (2026-08-27) — caustics' own look controls (`WATER_CAUSTICS_
+  // SCALE`/`_SHARPNESS`/`_NETTING`'s own docs have the mechanism each drives).
+  // Same "`null` falls back to the shipped constant" contract as
+  // `uBankInfluence`/`uFlowWarpInfluence` immediately above, for the same
+  // reason: an old construction-only test that never learned about these
+  // arguments gets the shipped look, not a thrown "undefined is not a node".
+  uCausticSharpness = null,
+  uCausticScale = null,
+  uCausticNetting = null,
 }) {
-  const { vec2, vec3, float, max, min, abs, dot, length, clamp, smoothstep, mx_fractal_noise_vec3 } = TSL;
+  const { vec2, vec3, float, max, min, abs, dot, length, clamp, smoothstep, mix, pow, mx_fractal_noise_vec3 } = TSL;
   const bankInfluenceNode = uBankInfluence ?? float(WATER_BANK_INFLUENCE);
   const flowWarpInfluenceNode = uFlowWarpInfluence ?? float(WATER_FLOW_WARP_INFLUENCE);
+  const causticSharpnessNode = uCausticSharpness ?? float(WATER_CAUSTICS_SHARPNESS);
+  const causticScaleNode = uCausticScale ?? float(WATER_CAUSTICS_SCALE);
+  const causticNettingNode = uCausticNetting ?? float(WATER_CAUSTICS_NETTING);
 
   const tSec = timeMsNode.mul(float(1 / 1000));
 
@@ -788,54 +889,104 @@ export function buildWaterSurfaceField({
   // ordinary texture-adjacent noise calls, nothing GPU-derivative about it, and
   // therefore just as legal inside `if (activeTier >= 4)` as everything above.
   //
-  // Reads the SHOALED `n.y`/`n.z` (not the raw noise) so a shoaling coastline's
-  // caustics genuinely sharpen as the wave field there is really doing —
-  // exactly the same physical fact tier 2's foam/slope already share, read a
-  // third way.
+  // ⚠️ 2026-08-27 — NO LONGER "reads the SHOALED n.y/n.z FOR FREE FROM TIER 2".
+  // `WATER_CAUSTICS_SCALE`'s own doc explains why: the caustic net needs its
+  // OWN, independently-scaled noise domain to ever read as fine filaments
+  // rather than the same cell size as the visible chop, and a shared centre
+  // sample only works when the two domains are forced to match. So this block
+  // is now fully self-contained (`sampleCausticLayer`, below) and pays for its
+  // own centre sample — one more fetch than the old 2-tap version, in exchange
+  // for a genuinely independent pattern scale. Still reads the SHOALED pair
+  // (`shoalGate` applied inside the helper, exactly as tier 2 does it), so a
+  // shoaling coastline's caustics still sharpen as the wave field there really
+  // does.
   let causticBrightness = float(0);
   if (caustics) {
-    const epsPx = max(uWaveScalePx.mul(float(WATER_CAUSTICS_EPS_FRACTION)), float(0.5));
-    /** One more reading of the SAME safe, already-warped domain this fetch
-     * used for its own centre sample — never a fresh unbounded projection (see
-     * the header above on why `dot(worldXY, tangentXY)` would NOT be safe
-     * here: `domainOffset` is already bounded exactly the way `drift`+
-     * `bankWarp` are individually, so reusing it for a tiny `eps`-away tap
-     * inherits that safety for free). */
-    const sampleShoaledY = (worldXYTap) => {
-      const cellTap = worldXYTap.add(domainOffset).div(max(uWaveScalePx, float(1)));
-      const nTap = mx_fractal_noise_vec3(vec3(cellTap.x, cellTap.y, tSec.mul(float(0.15))), 3, 2.0, 0.5);
-      return { y: nTap.y.mul(float(1).add(shoalGate)), z: nTap.z.mul(float(1).add(shoalGate)) };
-    };
-    const tapX = sampleShoaledY(worldXY.add(vec2(epsPx, 0)));
-    const tapY = sampleShoaledY(worldXY.add(vec2(0, epsPx)));
+    /** One Jacobian evaluation of the shoaled slope field at `layerWaveScalePx`
+     * — the caustics-only counterpart of tier 2's own `cell`/`n` fetch above,
+     * parametrised so NETTING (below) can call it a second time at a finer
+     * scale without duplicating the finite-difference math. Reads
+     * `domainOffset` — the SAME safe, already-bounded drift+bankWarp+flowWarp
+     * this fetch's own centre sample used (see the header above on why a
+     * fresh `dot(worldXY, tangentXY)` here would NOT be safe) — so a tiny
+     * eps-away tap inherits that safety for free, exactly as the pre-existing
+     * version already reasoned.
+     * @returns {*} `focus = 1/max(|det|, WATER_CAUSTICS_MIN_DET)` — 1 where
+     *   the surface has no curvature at all, growing without bound toward a
+     *   true singularity. */
+    const sampleCausticLayer = (layerWaveScalePx) => {
+      const epsPx = max(layerWaveScalePx.mul(float(WATER_CAUSTICS_EPS_FRACTION)), float(0.5));
+      const sampleAt = (worldXYTap) => {
+        const cellTap = worldXYTap.add(domainOffset).div(layerWaveScalePx);
+        const nTap = mx_fractal_noise_vec3(vec3(cellTap.x, cellTap.y, tSec.mul(float(0.15))), 3, 2.0, 0.5);
+        return { y: nTap.y.mul(float(1).add(shoalGate)), z: nTap.z.mul(float(1).add(shoalGate)) };
+      };
+      const centre = sampleAt(worldXY);
+      const tapX = sampleAt(worldXY.add(vec2(epsPx, 0)));
+      const tapY = sampleAt(worldXY.add(vec2(0, epsPx)));
 
-    // Finite-difference Jacobian of the SHOALED-BUT-NOT-YET-CHOPPED slope
-    // field, world-px⁻¹. `uChop` is folded into `k` just below rather than
-    // applied to `tapX`/`tapY`/`shoaledY`/`shoaledZ` here — algebraically
-    // identical (differentiation is linear, so `chop·J(slope) == J(chop·slope)`
-    // for a CONSTANT chop) and cheaper: two fewer multiplies, since it is
-    // applied once to `k` instead of four times to the taps.
-    const invEps = float(1).div(epsPx);
-    const j00 = tapX.y.sub(shoaledY).mul(invEps); // ∂slope.x/∂x
-    const j01 = tapY.y.sub(shoaledY).mul(invEps); // ∂slope.x/∂y
-    const j10 = tapX.z.sub(shoaledZ).mul(invEps); // ∂slope.y/∂x
-    const j11 = tapY.z.sub(shoaledZ).mul(invEps); // ∂slope.y/∂y
-    // ⚠️ WHERE chop MAY NOT MOVE TO: past this line. `det()` combines j00/j01/
-    // j10/j11 NONLINEARLY (a product and a cross term), so folding chop in
-    // AFTER det() — e.g. scaling the finished `causticBrightness` by chop —
-    // would NOT be the same number. It has to multiply the Jacobian, which is
-    // exactly what happens here, once, via `k`.
-    const chopScale = uChop ?? float(0);
-    const k = float(WATER_CAUSTICS_K).mul(chopScale);
-    const det = float(1)
-      .add(k.mul(j00))
-      .mul(float(1).add(k.mul(j11)))
-      .sub(k.mul(j01).mul(k).mul(j10));
-    const focus = float(1).div(max(abs(det), float(WATER_CAUSTICS_MIN_DET)));
-    // `focus − 1`: zero on an undisturbed patch (det≈1), so the caller's
-    // `1 + causticBrightness` bed multiplier is a provable no-op wherever the
-    // surface has no curvature at all — the same "absent → identity" contract
-    // every other tier-gated term in this file keeps.
+      // Finite-difference Jacobian of the SHOALED-BUT-NOT-YET-CHOPPED slope
+      // field, world-px⁻¹. `uChop` is folded into `k` just below rather than
+      // applied to the taps here — algebraically identical (differentiation
+      // is linear, so `chop·J(slope) == J(chop·slope)` for a CONSTANT chop)
+      // and cheaper: two fewer multiplies, applied once to `k` instead of
+      // four times to the taps.
+      const invEps = float(1).div(epsPx);
+      const j00 = tapX.y.sub(centre.y).mul(invEps); // ∂slope.x/∂x
+      const j01 = tapY.y.sub(centre.y).mul(invEps); // ∂slope.x/∂y
+      const j10 = tapX.z.sub(centre.z).mul(invEps); // ∂slope.y/∂x
+      const j11 = tapY.z.sub(centre.z).mul(invEps); // ∂slope.y/∂y
+      // ⚠️ WHERE chop MAY NOT MOVE TO: past this line — see this block's own
+      // original warning, unchanged: `det()` combines j00/j01/j10/j11
+      // NONLINEARLY, so folding chop in AFTER det() would not be the same
+      // number. It has to multiply the Jacobian, which is exactly what
+      // happens here, once, via `k`.
+      const chopScale = uChop ?? float(0);
+      const k = float(WATER_CAUSTICS_K).mul(chopScale);
+      const det = float(1)
+        .add(k.mul(j00))
+        .mul(float(1).add(k.mul(j11)))
+        .sub(k.mul(j01).mul(k).mul(j10));
+      return float(1).div(max(abs(det), float(WATER_CAUSTICS_MIN_DET)));
+    };
+
+    const causticWaveScalePx = max(uWaveScalePx.mul(causticScaleNode), float(1));
+    const focusPrimary = sampleCausticLayer(causticWaveScalePx);
+
+    // NETTING — a SECOND layer at a FINER scale
+    // (`WATER_CAUSTICS_NET_SCALE_RATIO` × smaller), blended via `max()` so two
+    // independent bright-line fields ADD coverage where they cross rather
+    // than dimming each other where they don't. One frequency of noise, at
+    // any sharpness, reads as a single wavy line — real caustics look like a
+    // NET because real water carries several overlapping ripple scales at
+    // once; this is the analytic version of the standard real-time fake (two
+    // independently-scrolling caustic textures, blended the same way — see
+    // the research this whole round started from).
+    const netWaveScalePx = max(causticWaveScalePx.div(float(WATER_CAUSTICS_NET_SCALE_RATIO)), float(1));
+    const focusSecondary = sampleCausticLayer(netWaveScalePx);
+    const excessPrimary = max(focusPrimary.sub(float(1)), float(0));
+    const excessSecondary = max(focusSecondary.sub(float(1)), float(0));
+    const excessNetted = mix(excessPrimary, max(excessPrimary, excessSecondary), causticNettingNode);
+
+    // SHARPNESS — contrast on the BRIGHTENING excess only (the darkening half
+    // below stays the original linear response: real caustics read as bright
+    // lines on an unremarkable field, and that half was never the "blobby"
+    // complaint). `focusNorm` normalises against the ceiling so `pow` operates
+    // on a clean, always-non-negative 0..1 domain — never a negative base,
+    // never a value the exponent could blow up. At `causticSharpness = 0`
+    // (`exponent = 1`), `pow(x, 1) == x`, so this reproduces the
+    // pre-2026-08-27 linear response exactly — the same "control at its
+    // origin reproduces the old shape" contract `foamEdgeSharpness` uses.
+    const exponent = float(1).add(causticSharpnessNode.mul(float(WATER_CAUSTICS_SHARPNESS_EXPONENT_MAX - 1)));
+    const focusNorm = clamp(excessNetted.div(float(WATER_CAUSTICS_MAX)), float(0), float(1));
+    const excessShaped = pow(focusNorm, exponent).mul(float(WATER_CAUSTICS_MAX));
+    const darkExcess = min(focusPrimary.sub(float(1)), float(0));
+
+    // `excess`: zero on an undisturbed patch (det≈1 at every layer), so the
+    // caller's `1 + causticBrightness` bed multiplier is a provable no-op
+    // wherever the surface has no curvature at all — the same
+    // "absent → identity" contract every other tier-gated term in this file
+    // keeps.
     //
     // ⚠️ **`insideWater` IS LOAD-BEARING HERE AND ITS ABSENCE SHIPPED A LIVE
     // BUG (2026-08-16, author: *"moving patterns across the whole ground floor,
@@ -856,9 +1007,11 @@ export function buildWaterSurfaceField({
     // downstream) and this one was written as if the flatness test substituted
     // for it. It does not. See `feedback_blend_neutral_element_is_per_blend`
     // and correction #9.
-    causticBrightness = clamp(focus.sub(float(1)), float(-WATER_CAUSTICS_DARK_MAX), float(WATER_CAUSTICS_MAX)).mul(
-      insideWater
-    );
+    causticBrightness = clamp(
+      excessShaped.add(darkExcess),
+      float(-WATER_CAUSTICS_DARK_MAX),
+      float(WATER_CAUSTICS_MAX)
+    ).mul(insideWater);
   }
 
   return { foam, turbidity, slope, domainOffset, causticBrightness, flowWarp };
@@ -894,6 +1047,14 @@ export function buildWaterSurfaceField({
  *   bug (see the TSL block). A twin that omitted it could never fail the test
  *   that would have caught it — `feedback_smooth_output_hides_ported_bugs` in
  *   its most literal form.
+ * @param {number} [a.sharpness] - `WATER_PARAMS.causticSharpness`, 0..1. Only
+ *   shapes the BRIGHTENING half (matches the TSL block: the darkening half is
+ *   deliberately left linear). 0 (the default here) reproduces the pre-
+ *   2026-08-27 formula bit for bit — every pre-existing call site in this
+ *   file's own test suite omits this argument and must keep passing unchanged.
+ *   Does NOT model NETTING or SCALE: those vary WHICH noise is sampled, not
+ *   this det→brightness formula, so they are GPU/bench-verified only, the
+ *   same boundary `WATER_SHOAL_STRENGTH`/bank-warp already draw in this file.
  * @returns {number} the ADDITIVE excess over 1 for the bed multiplier; 0 = no
  *   change, clamped to `[-WATER_CAUSTICS_DARK_MAX, WATER_CAUSTICS_MAX]`, and
  *   exactly 0 wherever `insideWater` is 0.
@@ -906,10 +1067,19 @@ export function waterCausticsCpu({
   chop = WATER_TIER3_CHOP,
   k = WATER_CAUSTICS_K,
   insideWater = 1,
+  sharpness = 0,
 }) {
   const kEff = k * chop;
   const det = (1 + kEff * j00) * (1 + kEff * j11) - kEff * j01 * kEff * j10;
   const focus = 1 / Math.max(Math.abs(det), WATER_CAUSTICS_MIN_DET);
-  const excess = Math.max(-WATER_CAUSTICS_DARK_MAX, Math.min(WATER_CAUSTICS_MAX, focus - 1));
+  const rawExcess = focus - 1;
+  let brightExcess = Math.max(rawExcess, 0);
+  if (brightExcess > 0) {
+    const exponent = 1 + sharpness * (WATER_CAUSTICS_SHARPNESS_EXPONENT_MAX - 1);
+    const norm = Math.min(brightExcess / WATER_CAUSTICS_MAX, 1);
+    brightExcess = Math.pow(norm, exponent) * WATER_CAUSTICS_MAX;
+  }
+  const darkExcess = Math.min(rawExcess, 0);
+  const excess = Math.max(-WATER_CAUSTICS_DARK_MAX, Math.min(WATER_CAUSTICS_MAX, brightExcess + darkExcess));
   return excess * insideWater;
 }

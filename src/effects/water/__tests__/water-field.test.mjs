@@ -37,6 +37,11 @@ import {
   WATER_CAUSTICS_MAX,
   WATER_CAUSTICS_DARK_MAX,
   WATER_CAUSTICS_K,
+  WATER_CAUSTICS_SHARPNESS,
+  WATER_CAUSTICS_SHARPNESS_EXPONENT_MAX,
+  WATER_CAUSTICS_SCALE,
+  WATER_CAUSTICS_NETTING,
+  WATER_CAUSTICS_NET_SCALE_RATIO,
 } from '../water-field.js';
 
 /** The renderer's world space is Y-DOWN (`vt-pan-viewer.js#updateCamera`: the
@@ -301,5 +306,90 @@ export function run(t) {
   ok(
     'WATER_CAUSTICS_MIN_DET is small — it exists to catch a genuine near-zero determinant, not to suppress ordinary curvature',
     WATER_CAUSTICS_MIN_DET > 0 && WATER_CAUSTICS_MIN_DET < 0.5
+  );
+
+  // ══ TIER 4 — CAUSTICS' OWN LOOK CONTROLS (2026-08-27) ════════════════════
+  // Live report: the pattern read as blobby soft glows, not the thin filament
+  // net real shallow water shows. `sharpness` is the one piece of the new
+  // machinery this CPU twin can actually exercise — NETTING and SCALE vary
+  // WHICH noise gets sampled, not this det→brightness formula, so they stay
+  // GPU/bench-verified only (the same boundary `WATER_SHOAL_STRENGTH`/bank
+  // warp already draw in this file — see `waterCausticsCpu`'s own doc).
+  ok(
+    'sharpness=0 (the CPU-twin default) reproduces the pre-2026-08-27 formula exactly, at rest',
+    waterCausticsCpu({ j00: 0, j01: 0, j10: 0, j11: 0, sharpness: 0 }) === 0
+  );
+  {
+    const kEff = WATER_CAUSTICS_K * WATER_TIER3_CHOP;
+    const focusing = { j00: -1 / kEff, j01: 0, j10: 0, j11: 0 };
+    ok(
+      'sharpness=0 still pegs the exact same brightening ceiling as before this round',
+      waterCausticsCpu({ ...focusing, sharpness: 0 }) === WATER_CAUSTICS_MAX
+    );
+    ok(
+      'sharpness=1 ALSO pegs the ceiling at the same fully-focused point — sharpening compresses the MIDDLE of the range, not its extreme',
+      waterCausticsCpu({ ...focusing, sharpness: 1 }) === WATER_CAUSTICS_MAX
+    );
+  }
+  {
+    // A MID-RANGE convergence — bright, but nowhere near the determinant
+    // floor — is exactly where sharpening is supposed to bite: real caustics
+    // are a small, bright MINORITY of the surface, not a wide "somewhat lit"
+    // majority (`WATER_CAUSTICS_K`'s own sweep: 41% soft lift, only 8% "a
+    // real caustic").
+    const kEff = WATER_CAUSTICS_K * WATER_TIER3_CHOP;
+    const midCurvature = { j00: -0.3 / kEff, j01: 0, j10: 0, j11: 0 };
+    const unsharpened = waterCausticsCpu({ ...midCurvature, sharpness: 0 });
+    const sharpened = waterCausticsCpu({ ...midCurvature, sharpness: 1 });
+    ok(
+      'a mid-range convergence is genuinely bright before sharpening — the case the blob complaint was actually about',
+      unsharpened > 0.05
+    );
+    ok(
+      'sharpening pulls that SAME mid-range convergence toward zero — the soft shoulder collapsing, blob becoming filament',
+      sharpened < unsharpened
+    );
+  }
+  ok(
+    'sharpness never touches the DARKENING half — that was never the "blobby" complaint',
+    waterCausticsCpu({ j00: 0.02, j01: 0, j10: 0, j11: 0.02, sharpness: 0 }) ===
+      waterCausticsCpu({ j00: 0.02, j01: 0, j10: 0, j11: 0.02, sharpness: 1 })
+  );
+  ok(
+    'sharpness is monotone: more sharpening never brightens a mid-range patch further',
+    (() => {
+      const kEff = WATER_CAUSTICS_K * WATER_TIER3_CHOP;
+      const midCurvature = { j00: -0.3 / kEff, j01: 0, j10: 0, j11: 0 };
+      let prev = waterCausticsCpu({ ...midCurvature, sharpness: 0 });
+      for (let s = 0.1; s <= 1; s += 0.1) {
+        const cur = waterCausticsCpu({ ...midCurvature, sharpness: s });
+        if (cur > prev + 1e-9) return false;
+        prev = cur;
+      }
+      return true;
+    })()
+  );
+  ok(
+    'WATER_CAUSTICS_SHARPNESS_EXPONENT_MAX is a genuine curve, not a no-op — greater than 1',
+    WATER_CAUSTICS_SHARPNESS_EXPONENT_MAX > 1
+  );
+  ok(
+    'WATER_CAUSTICS_SCALE keeps the caustic net finer than the visible chop by default — the whole point of decoupling the two domains',
+    WATER_CAUSTICS_SCALE > 0 && WATER_CAUSTICS_SCALE < 1
+  );
+  ok(
+    'WATER_CAUSTICS_NETTING ships on (not zero) — the second layer is part of the improved default look, not opt-in-only',
+    WATER_CAUSTICS_NETTING > 0 && WATER_CAUSTICS_NETTING <= 1
+  );
+  ok(
+    'WATER_CAUSTICS_NET_SCALE_RATIO makes the second layer genuinely FINER, never coarser or identical',
+    WATER_CAUSTICS_NET_SCALE_RATIO > 1
+  );
+  ok(
+    'WATER_CAUSTICS_SHARPNESS/_NETTING are valid author-facing 0..1 values, not internal-only leftovers',
+    WATER_CAUSTICS_SHARPNESS >= 0 &&
+      WATER_CAUSTICS_SHARPNESS <= 1 &&
+      WATER_CAUSTICS_NETTING >= 0 &&
+      WATER_CAUSTICS_NETTING <= 1
   );
 }

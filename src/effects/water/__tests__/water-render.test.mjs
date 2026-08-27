@@ -301,6 +301,9 @@ export function run(t) {
     'setSwashFoam',
     'setBreakFoam',
     'setCaustics',
+    'setCausticSharpness',
+    'setCausticScale',
+    'setCausticNetting',
     'setFoamEdgeSharpness',
     'setCapturedRect',
     'setCapturedTexSize',
@@ -333,6 +336,9 @@ export function run(t) {
       b.setSwashFoam(0.3);
       b.setBreakFoam(0.7);
       b.setCaustics(1);
+      b.setCausticSharpness(0.8);
+      b.setCausticScale(0.5);
+      b.setCausticNetting(0.6);
       b.setFoamEdgeSharpness(0.5);
     } catch (e) {
       err = e;

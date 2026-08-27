@@ -266,6 +266,9 @@ import {
   WATER_TIER3_CHOP,
   WATER_BANK_INFLUENCE,
   WATER_FLOW_WARP_INFLUENCE,
+  WATER_CAUSTICS_SHARPNESS,
+  WATER_CAUSTICS_SCALE,
+  WATER_CAUSTICS_NETTING,
 } from './water-field.js';
 import {
   buildWaterSpecular,
@@ -1146,6 +1149,13 @@ export function buildWaterSurfaceMaterial({
   const uSwashFoam = uniform(float(swashFoam));
   const uBreakFoam = uniform(float(breakFoam));
   const uCaustics = uniform(float(caustics));
+  // ROH TUNING (2026-08-27) — caustics' own look controls, live uniforms, no
+  // rebake needed, same shape as `uBankInfluence`/`uFlowWarpInfluence` above.
+  // See `water-field.js#WATER_CAUSTICS_SCALE`/`_SHARPNESS`/`_NETTING`'s own
+  // docs for the mechanism each one drives.
+  const uCausticSharpness = uniform(float(WATER_CAUSTICS_SHARPNESS));
+  const uCausticScale = uniform(float(WATER_CAUSTICS_SCALE));
+  const uCausticNetting = uniform(float(WATER_CAUSTICS_NETTING));
   const uFoamTrail = uniform(float(foamTrail));
   const uFoamEdgeSharpness = uniform(float(foamEdgeSharpness));
   // THE FOAM BAND's REACH, derived from the author's own `depthScalePx` on the
@@ -1579,6 +1589,9 @@ export function buildWaterSurfaceMaterial({
       localFlowDir: localFlowDirSafe,
       uBankInfluence,
       uFlowWarpInfluence,
+      uCausticSharpness,
+      uCausticScale,
+      uCausticNetting,
       // TIER 4's SHOALING AND CAUSTICS ALSO RIDE TIER 2's FETCH — see
       // `water-field.js`'s own header on why both must live inside this call
       // rather than in a separate `if (activeTier >= 4)` block: shoaling has to
@@ -2704,6 +2717,27 @@ export function buildWaterSurfaceMaterial({
      * doc for why it is measured, not authored). */
     setCaustics(v) {
       uCaustics.value = v;
+    },
+    /** WATER_PARAMS `causticSharpness` — contrast on the focus response's
+     * brightening half. See `water-field.js#WATER_CAUSTICS_SHARPNESS_
+     * EXPONENT_MAX`'s own doc for the curve; 0 = the pre-2026-08-27 broad
+     * soft lift, 1 = the full contrast curve. */
+    setCausticSharpness(v) {
+      uCausticSharpness.value = v;
+    },
+    /** WATER_PARAMS `causticScale` — the caustics-only noise domain, as a
+     * fraction of `waveScalePx`, independent of the visible chop's own
+     * scale. See `water-field.js#WATER_CAUSTICS_SCALE`'s own doc for why
+     * this is what actually makes "thin" achievable at all. */
+    setCausticScale(v) {
+      uCausticScale.value = v;
+    },
+    /** WATER_PARAMS `causticNetting` — blend weight for a second, finer
+     * Jacobian layer (`WATER_CAUSTICS_NET_SCALE_RATIO`), so the pattern
+     * crosses into a net instead of reading as one wavy line. 0 = the
+     * single-layer field. */
+    setCausticNetting(v) {
+      uCausticNetting.value = v;
     },
     // ── TIER 5 ────────────────────────────────────────────────────────────
     /** THE CAPTURE'S OWN WORLD RECT (`water-refraction-subsystem.js`'s

@@ -15,7 +15,13 @@ import { validateEffectManifest } from '../../effect-manifest.js';
 import { createEffectRegistry } from '../../registry.js';
 import { resolveEffectEnabled } from '../../effect-cascade.js';
 import { WATER, WATER_PARAMS, WATER_DIALS, WATER_PRESETS, waterPreset } from '../water.js';
-import { WATER_BANK_INFLUENCE, WATER_TIER2_FLOW_ANGLE_DEG } from '../water-field.js';
+import {
+  WATER_BANK_INFLUENCE,
+  WATER_TIER2_FLOW_ANGLE_DEG,
+  WATER_CAUSTICS_SHARPNESS,
+  WATER_CAUSTICS_SCALE,
+  WATER_CAUSTICS_NETTING,
+} from '../water-field.js';
 import { WATER_TIER3_SHADOW_RESPONSE, WATER_TIER3_GLOSSINESS, WATER_MIN_ROUGHNESS } from '../water-light.js';
 import { WATER_TIER4_SWASH_FOAM, WATER_TIER4_BREAK_FOAM, WATER_TIER4_CAUSTICS } from '../water-render.js';
 
@@ -230,6 +236,30 @@ export function run(t) {
     '...and the gain stays inside its own declared range, so the calibrated K is never scaled past it',
     WATER_TIER4_CAUSTICS >= WATER_PARAMS.caustics.min && WATER_TIER4_CAUSTICS <= WATER_PARAMS.caustics.max
   );
+  // === CAUSTICS' OWN LOOK CONTROLS (2026-08-27) — same "one number, two
+  // homes" discipline as `caustics` itself, just against water-field.js
+  // instead of water-render.js (that is where these three constants live —
+  // see WATER_CAUSTICS_SHARPNESS's own doc for why). ===
+  for (const [key, constant, name] of [
+    ['causticSharpness', WATER_CAUSTICS_SHARPNESS, 'WATER_CAUSTICS_SHARPNESS'],
+    ['causticScale', WATER_CAUSTICS_SCALE, 'WATER_CAUSTICS_SCALE'],
+    ['causticNetting', WATER_CAUSTICS_NETTING, 'WATER_CAUSTICS_NETTING'],
+  ]) {
+    ok(`${key} is declared as a plain float`, WATER_PARAMS[key].type === 'float');
+    ok(
+      `${key} schema default matches ${name} (water-field.js) — one number, two homes`,
+      WATER_PARAMS[key].default === constant
+    );
+    ok(
+      `${key}'s default stays inside its own declared range`,
+      constant >= WATER_PARAMS[key].min && constant <= WATER_PARAMS[key].max
+    );
+    ok(`${key} is categorised under Light, beside caustics itself`, WATER_PARAMS[key].category === 'Light');
+    ok(
+      `${key} has real help text, not a placeholder`,
+      typeof WATER_PARAMS[key].help === 'string' && WATER_PARAMS[key].help.length > 20
+    );
+  }
   // === 🎨 NAMED PRESETS ====================================================
   // A preset is raw param data with no schema behind it, which makes it the
   // easiest thing in this effect to rot silently: rename a param, retype one,

@@ -80,7 +80,18 @@ function writeGradeUniforms(u, params) {
  * @param {*} [args.uViewRect] @param {*} [args.uOutdoorsRect] - the SHARED gate uniforms.
  * @param {*} [args.lutTexture] - a placeholder identity 3D LUT texture, so the
  *   LUT node always compiles; `setLut` swaps its `.value` in. Omit → no LUT node.
- * @returns {{ material, presentTexNode, setEnvGrade, setArtGrade, setLut, rebindLit, gateCompiled }}
+ * @param {(THREE:*, tex:*, uvNode:*) => {rgb:*, a:*}} [args.buildPostUpscaleSharpenNode] -
+ *   INJECTED, never imported directly (`vt/albedo-clarity.js#buildPostUpscaleSharpenNode`)
+ *   — `vt/` already legitimately imports `effects/` (`scene-attr.js`,
+ *   `vt-pan-viewer.js`), so an `effects/` file importing back from `vt/`
+ *   would be a genuine circular zone dependency, not just a `zones/one-door`
+ *   paperwork violation (confirmed: `effects/index.js` already re-exports
+ *   THIS function, so the cycle would be immediate). `vt-pan-viewer.js`
+ *   passes the real builder in — same shape `outdoorsTexNode` etc. already
+ *   use for "this material needs something from outside its own zone."
+ *   Omit → the render-scale governor's post-upscale sharpen never compiles
+ *   in, same as never calling `setPostUpscaleSharpenActive`.
+ * @returns {{ material, presentTexNode, setEnvGrade, setArtGrade, setLut, setPostUpscaleSharpenActive, rebindLit, gateCompiled }}
  */
 export function buildGradePresentMaterial({
   THREE,
@@ -89,9 +100,10 @@ export function buildGradePresentMaterial({
   uViewRect,
   uOutdoorsRect,
   lutTexture,
+  buildPostUpscaleSharpenNode,
 }) {
   const TSL = THREE.TSL;
-  const { texture, vec4, mix } = TSL;
+  const { texture, vec4, mix, uv } = TSL;
 
   const presentTexNode = texture(litTexture);
   const uEnv = makeGradeUniforms(TSL, false);
@@ -107,11 +119,31 @@ export function buildGradePresentMaterial({
   /** The tone-map curve currently BAKED into the fragment (a compile-time
    * choice — see the header). Rebuilt when it changes. */
   let currentToneMapping = 'none';
+  /** Are the render-scale governor's post-upscale sharpen taps currently
+   * COMPILED IN (2026-08-27)? A structural choice, same shape as
+   * `currentToneMapping` — see `setPostUpscaleSharpenActive`'s own doc.
+   * Ships `false`: neutral until the governor ever actually renders below
+   * native, matching this whole file's "ships neutral" header promise. */
+  let sharpenActive = false;
 
-  /** (Re)build the fragment node for the current tone-map selection. The env
-   * grade and the LUT are unaffected (they are uniform/texture-driven). */
+  /** (Re)build the fragment node for the current tone-map selection AND the
+   * current post-upscale-sharpen active state. The env grade and the LUT are
+   * unaffected (they are uniform/texture-driven). */
   function rebuildFragment() {
-    const lit = presentTexNode.rgb; // linear
+    // POST-UPSCALE SHARPEN (2026-08-27) — sharpens the RAW present-resolution
+    // image BEFORE any grading, so colour grading applies on top unchanged
+    // (see buildPostUpscaleSharpenNode's own header for why this repair
+    // exists at all). Reads `presentTexNode.value` (the texture it is
+    // CURRENTLY bound to, kept current by `rebindLit` below), not the
+    // `litTexture` closure param directly — a resize that ever changed the
+    // underlying texture object's identity between rebuilds must not leave
+    // these taps sampling a stale reference the way a captured `litTexture`
+    // could. Native path (`sharpenActive` false) pays NOTHING extra: `lit`
+    // is `presentTexNode.rgb` exactly as before this feature existed.
+    const lit =
+      sharpenActive && buildPostUpscaleSharpenNode
+        ? buildPostUpscaleSharpenNode(THREE, presentTexNode.value, uv()).rgb
+        : presentTexNode.rgb; // linear
     // ENVIRONMENTAL grade, outdoor-gated. No tail on this scope (Grade.md §13).
     const gradedEnv = buildGradeNode(TSL, lit, uEnv);
     const afterEnv = outdoors ? mix(lit, gradedEnv, outdoors) : lit;
@@ -150,10 +182,37 @@ export function buildGradePresentMaterial({
     setLut: (tex) => {
       if (lutTexNode && tex) lutTexNode.value = tex;
     },
+    /**
+     * Turn the render-scale governor's post-upscale sharpen taps on/off
+     * (2026-08-27) — a STRUCTURAL choice (are the extra samples even
+     * compiled in), not the strength itself (a separate live uniform inside
+     * `buildPostUpscaleSharpenNode`'s own shared state — see that function's
+     * header for why the two are split). Rebuilds ONLY when the active state
+     * actually flips, the SAME "compile-time, rebuilt on change" mechanism
+     * `setArtGrade`'s own tone-map handling already uses — the native
+     * (inactive) path stays exactly as cheap as it always was. A no-op
+     * (never activates) if this material was built without a
+     * `buildPostUpscaleSharpenNode` injected.
+     * @param {boolean} active
+     */
+    setPostUpscaleSharpenActive: (active) => {
+      const next = !!active && !!buildPostUpscaleSharpenNode;
+      if (next !== sharpenActive) {
+        sharpenActive = next;
+        rebuildFragment();
+      }
+    },
     /** Re-point at a freshly-allocated lit target (resize). */
     rebindLit: (tex) => {
       presentTexNode.value = tex;
       material.needsUpdate = true;
+      // If the post-upscale sharpen is active, its own taps were built
+      // against whatever `presentTexNode.value` was at the LAST rebuild —
+      // force a fresh one so they never sample a stale texture object
+      // identity a resize could (rarely, but see rebuildFragment's own
+      // comment) have changed. The native path (sharpenActive false) is
+      // untouched: this is a no-op call that costs nothing extra.
+      if (sharpenActive) rebuildFragment();
     },
     gateCompiled: !!outdoors,
   };

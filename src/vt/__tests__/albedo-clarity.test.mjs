@@ -12,6 +12,9 @@ import {
   getAlbedoClarity,
   resetAlbedoClarity,
   isAlbedoClarityEnabled,
+  resolvePostUpscaleSharpenStrength,
+  setPostUpscaleSharpenStrength,
+  getPostUpscaleSharpenStrength,
 } from '../albedo-clarity.js';
 
 export function run(t) {
@@ -103,6 +106,61 @@ export function run(t) {
     ok('reset restores the shipped sharpness', d.sharpness === 0.22);
     ok('reset restores the shipped gateLo', d.gateLo === 1.0);
     ok('reset restores enabled:true, even from a disabled state', d.enabled === true);
+  }
+
+  // ==========================================================================
+  // resolvePostUpscaleSharpenStrength — internalScale -> sharpen strength
+  // ==========================================================================
+  {
+    ok(
+      'scale 1.0 (native) resolves to EXACTLY 0 — the free path must cost nothing',
+      resolvePostUpscaleSharpenStrength(1.0) === 0
+    );
+    ok(
+      'a hair below 1.0 still snaps to 0 (the >=0.9995 identity guard)',
+      resolvePostUpscaleSharpenStrength(0.9997) === 0
+    );
+    ok(
+      'scale 0.5 (the ladder floor) resolves to the full maxStrength (0.12)',
+      Math.abs(resolvePostUpscaleSharpenStrength(0.5) - 0.12) < 1e-9
+    );
+    const mid = resolvePostUpscaleSharpenStrength(0.75); // halfway between 1.0 and 0.5
+    ok('a mid-ladder scale resolves to roughly half of maxStrength (linear ramp)', Math.abs(mid - 0.06) < 1e-9);
+    ok(
+      'strictly monotonic: a lower scale never resolves to a LOWER strength',
+      resolvePostUpscaleSharpenStrength(0.6) >= resolvePostUpscaleSharpenStrength(0.8)
+    );
+    ok(
+      'a scale ABOVE 1 (should never happen, but) clamps rather than going negative-strength',
+      resolvePostUpscaleSharpenStrength(1.5) === 0
+    );
+    ok(
+      'a scale BELOW the ladder floor clamps to the floor’s own strength, not beyond it',
+      resolvePostUpscaleSharpenStrength(0.1) === resolvePostUpscaleSharpenStrength(0.5)
+    );
+    ok('garbage input (NaN) resolves to 0, the native-path-safe answer', resolvePostUpscaleSharpenStrength(NaN) === 0);
+    ok('missing input resolves to 0', resolvePostUpscaleSharpenStrength(undefined) === 0);
+  }
+
+  // ==========================================================================
+  // setPostUpscaleSharpenStrength / getPostUpscaleSharpenStrength
+  // ==========================================================================
+  {
+    setPostUpscaleSharpenStrength(0);
+    ok('starts/resets at 0', getPostUpscaleSharpenStrength() === 0);
+    setPostUpscaleSharpenStrength(0.05);
+    ok('a value inside range is stored exactly', getPostUpscaleSharpenStrength() === 0.05);
+    setPostUpscaleSharpenStrength(999);
+    ok(
+      'clamps to maxStrength (0.12), never a player-facing sharpness-scale number',
+      getPostUpscaleSharpenStrength() === 0.12
+    );
+    setPostUpscaleSharpenStrength(-5);
+    ok('clamps to 0, never negative', getPostUpscaleSharpenStrength() === 0);
+    setPostUpscaleSharpenStrength(NaN);
+    ok('garbage input stores as 0, not NaN', getPostUpscaleSharpenStrength() === 0);
+    // Leave it at 0 (the native-path default) for whichever suite runs next.
+    setPostUpscaleSharpenStrength(0);
   }
 
   // Leave global state at the shipped default for whichever suite runs next

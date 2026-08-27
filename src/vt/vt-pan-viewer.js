@@ -64,6 +64,15 @@ import { mipChainByteLength } from './block-compress.js';
 // the shader lab (which cannot load this file's Foundry-coupled transitive
 // imports) can import the real node-building functions directly. Intra-zone.
 import { buildAlbedoClarityNode, buildFlatAlbedoNode, isAlbedoClarityEnabled } from './albedo-clarity.js';
+// POST-UPSCALE SHARPEN (2026-08-27) — the render-scale governor's own repair
+// for its free bilinear upscale's softness. Injected into grade-present.js
+// (never imported there directly — a real circular zone dependency; see
+// buildGradePresentMaterial's own param doc) rather than shipped inert.
+import {
+  buildPostUpscaleSharpenNode,
+  resolvePostUpscaleSharpenStrength,
+  setPostUpscaleSharpenStrength,
+} from './albedo-clarity.js';
 // The BC-compression client (worker + IndexedDB cache). Opaque whole images come
 // back as BC1 blocks (8× smaller), alpha images as BC7 (4×, carries the alpha) —
 // the WebGPU-memory-ceiling fix; any failure returns null and the loader keeps
@@ -5303,7 +5312,25 @@ export async function startVtPanViewer({
       uViewRect: envLight.uViewRect,
       uOutdoorsRect: envLight.uOutdoorsRect,
       lutTexture: lutPlaceholder,
+      // INJECTED, not imported by grade-present.js itself — see that
+      // function's own param doc for why (a real circular zone dependency,
+      // not just a door-rule technicality).
+      buildPostUpscaleSharpenNode,
     });
+    // INITIAL STATE (2026-08-27) — a fresh viewer's `internalScale` may
+    // ALREADY be below 1.0 at this point (a player's persisted setting can
+    // be a fixed low rung, read at construction — see `renderScaleSetting`'s
+    // own param doc), and `resizeInternalTargets` (where this normally gets
+    // pushed) won't run until the first resize/governor step, which a fixed
+    // setting may never trigger. Push it once, right here, the same
+    // "correct from frame one, not waiting on an event that might not come"
+    // reasoning `internalW`/`internalH`'s own initial computation already
+    // follows.
+    {
+      const initialInternalScale = resolveCurrentInternalScale();
+      setPostUpscaleSharpenStrength(resolvePostUpscaleSharpenStrength(initialInternalScale));
+      gradePresent.setPostUpscaleSharpenActive(initialInternalScale < 0.9995);
+    }
     const presentMaterial = gradePresent.material;
     const presentQuad = new THREE.QuadMesh(presentMaterial);
 
@@ -15006,9 +15033,18 @@ export async function startVtPanViewer({
      * microtask (mirrors `onResize`'s pending-flag pattern one section down).
      */
     async function resizeInternalTargets() {
-      const resized = computeRenderSize(drawBufW, drawBufH, resolveCurrentInternalScale());
+      const internalScale = resolveCurrentInternalScale();
+      const resized = computeRenderSize(drawBufW, drawBufH, internalScale);
       internalW = resized.width;
       internalH = resized.height;
+      // POST-UPSCALE SHARPEN (2026-08-27) — the SAME `internalScale` that
+      // just decided the internal tier's own size also decides how hard to
+      // repair the free bilinear upscale back up to present resolution (see
+      // `resolvePostUpscaleSharpenStrength`'s own header). Pushed here,
+      // exactly where the size itself changes, rather than a separate call
+      // site that could drift out of sync with it.
+      setPostUpscaleSharpenStrength(resolvePostUpscaleSharpenStrength(internalScale));
+      gradePresent.setPostUpscaleSharpenActive(internalScale < 0.9995);
       // buf:scene.color tracks the INTERNAL tier — that IS what screenSized
       // means now (see "THE INTERNAL TIER" block, near drawBufW/H's own
       // declaration, for the present-vs-internal split this answers).

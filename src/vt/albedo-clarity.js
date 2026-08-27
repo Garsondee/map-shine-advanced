@@ -280,6 +280,46 @@ export function isAlbedoClarityEnabled() {
 }
 
 /**
+ * THE CAS (Contrast Adaptive Sharpening) CORE — five ALREADY GAMMA-2.0-ENCODED
+ * samples (center + 4 neighbours) in, sharpened linear rgb out. Extracted
+ * 2026-08-27 (previously inlined at the tail of `buildAlbedoClarityNode`) so
+ * `buildPostUpscaleSharpenNode` below can share the identical algorithm — same
+ * ⚠️ KNOWN, CHARACTERISED, NOT YET FIXED per-channel rainbow-fringing caveat
+ * `buildAlbedoClarityNode`'s own inline doc describes in full — defined once,
+ * so that caveat can never silently drift between two copies.
+ *
+ * @param {*} THREE
+ * @param {{eC:*, eL:*, eR:*, eU:*, eD:*}} samples - gamma-2.0-encoded center +
+ *   four neighbour samples (rgb only — alpha is each caller's own concern).
+ * @param {*} strengthNode - the EFFECTIVE per-fragment sharpen weight, already
+ *   combining whatever gating/strength uniform the caller uses (e.g.
+ *   `buildAlbedoClarityNode`'s `uSharpen * gate`; `buildPostUpscaleSharpenNode`'s
+ *   plain external strength, no per-pixel gate at all — see its own header).
+ * @returns {*} vec3 LINEAR rgb (the gamma-2.0 → linear round trip is done here,
+ *   inside this shared core — neither caller repeats it).
+ */
+function sharpenCasCore(THREE, { eC, eL, eR, eU, eD }, strengthNode) {
+  const TSL = THREE.TSL;
+  const { vec3 } = TSL;
+  // `amp` is the ringing brake: it falls to zero as the neighbourhood
+  // approaches black OR white, so a solid ink line next to bare paper — the
+  // highest-contrast case there is — gets restored without gaining a halo.
+  const mn = TSL.min(eC, TSL.min(TSL.min(eL, eR), TSL.min(eU, eD)));
+  const mx = TSL.max(eC, TSL.max(TSL.max(eL, eR), TSL.max(eU, eD)));
+  const amp = TSL.saturate(TSL.min(mn, vec3(1).sub(mx)).div(TSL.max(mx, vec3(1e-4)))).sqrt();
+
+  // w is NEGATIVE (neighbours subtracted) and the reciprocal renormalises, so a
+  // flat neighbourhood comes through exactly unchanged: (e + 4ew)/(1+4w) = e.
+  const w = amp.mul(strengthNode).negate();
+  const rcp = vec3(1).div(w.mul(4).add(1));
+  const sharpened = eC.add(eL.add(eR).add(eU).add(eD).mul(w)).mul(rcp);
+
+  // Gamma-2.0 → linear. Downstream sees exactly the units it always did.
+  const lin = TSL.max(sharpened, vec3(0));
+  return lin.mul(lin);
+}
+
+/**
  * Sample `tex` through the clarity filter: five screen-space taps, CAS in a
  * perceptual space, gated to minification. See this module's header for why
  * each of those three clauses is load-bearing.
@@ -333,21 +373,22 @@ export function buildAlbedoClarityNode(THREE, tex, uvNode, uTexSizeNode) {
   const eU = enc(sU);
   const eD = enc(sD);
 
-  // CAS. `amp` is the ringing brake: it falls to zero as the neighbourhood
-  // approaches black OR white, so a solid ink line next to bare paper — the
-  // highest-contrast case there is — gets restored without gaining a halo.
+  // CAS, via the shared core (sharpenCasCore, above) — combining `uSharpen`
+  // (the player's own Sharpness control) with `gate` (the per-pixel
+  // minification ramp computed above) into the ONE effective strength the
+  // core expects.
   //
   // ⚠️ KNOWN, CHARACTERISED, NOT YET FIXED (2026-08-15, author report: "too
-  // harsh / ringing, worse at some zoom levels"). `mn`/`mx`/`amp`/`w` below
-  // are all `vec3` — R, G and B each get their OWN independently-computed
-  // sharpen weight from their OWN local min/max, because `eC` etc. are
-  // per-channel gamma-2.0 values, not a shared luma. On a COLOURED edge
-  // (this guard's own doc example, "dark ink on light paper", is grayscale
-  // and cannot reveal this) each channel's local contrast differs, so each
-  // gets pushed by a different amount — a HUE shift at the edge, not just a
-  // brightness one, i.e. chromatic/rainbow fringing rather than neutral
-  // ringing. CONFIRMED two ways: (1) shader-lab bench
-  // (`tools/shader-lab/bench-albedo-clarity.js`), a real BC1-encoded
+  // harsh / ringing, worse at some zoom levels"). Inside the shared core,
+  // `mn`/`mx`/`amp`/`w` are all `vec3` — R, G and B each get their OWN
+  // independently-computed sharpen weight from their OWN local min/max,
+  // because `eC` etc. are per-channel gamma-2.0 values, not a shared luma.
+  // On a COLOURED edge (this guard's own doc example, "dark ink on light
+  // paper", is grayscale and cannot reveal this) each channel's local
+  // contrast differs, so each gets pushed by a different amount — a HUE
+  // shift at the edge, not just a brightness one, i.e. chromatic/rainbow
+  // fringing rather than neutral ringing. CONFIRMED two ways: (1) shader-lab
+  // bench (`tools/shader-lab/bench-albedo-clarity.js`), a real BC1-encoded
   // tan/wine-red edge at the shipped default (sharpness 0.22) — measured
   // R/G/B changing by -43%/-83%/-53% at the same boundary texel; (2) the
   // real bench Mansion at sharpness 0.4 shows the effect dramatically
@@ -364,20 +405,11 @@ export function buildAlbedoClarityNode(THREE, tex, uvNode, uTexSizeNode) {
   // not safer than the known, characterised bug) — the shipped default is
   // not dramatically affected, and the Make-panel Sharpening card now gives
   // a live Sharpness slider so the effect can be tuned to taste directly
-  // against a real scene while a real fix is designed.
-  const mn = TSL.min(eC, TSL.min(TSL.min(eL, eR), TSL.min(eU, eD)));
-  const mx = TSL.max(eC, TSL.max(TSL.max(eL, eR), TSL.max(eU, eD)));
-  const amp = TSL.saturate(TSL.min(mn, vec3(1).sub(mx)).div(TSL.max(mx, vec3(1e-4)))).sqrt();
-
-  // w is NEGATIVE (neighbours subtracted) and the reciprocal renormalises, so a
-  // flat neighbourhood comes through exactly unchanged: (e + 4ew)/(1+4w) = e.
-  const w = amp.mul(uSharpen).mul(gate).negate();
-  const rcp = vec3(1).div(w.mul(4).add(1));
-  const sharpened = eC.add(eL.add(eR).add(eU).add(eD).mul(w)).mul(rcp);
-
-  // Gamma-2.0 → linear. Downstream sees exactly the units it always did.
-  const lin = TSL.max(sharpened, vec3(0));
-  return { rgb: lin.mul(lin), a: c.a };
+  // against a real scene while a real fix is designed. `buildPostUpscale
+  // SharpenNode` below inherits this SAME caveat via the shared core — it is
+  // not a new bug introduced by that function, it is this one, shared.
+  const lin = sharpenCasCore(THREE, { eC, eL, eR, eU, eD }, uSharpen.mul(gate));
+  return { rgb: lin, a: c.a };
 }
 
 /**
@@ -399,4 +431,164 @@ export function buildFlatAlbedoNode(THREE, tex, uvNode) {
   const { vec3, texture, max } = THREE.TSL;
   const c = texture(tex, uvNode);
   return { rgb: max(c.rgb, vec3(0)), a: c.a };
+}
+
+/**
+ * ===========================================================================
+ * POST-UPSCALE SHARPEN (2026-08-27) — a DIFFERENT problem than the rest of
+ * this file, sharing the SAME algorithm.
+ * ===========================================================================
+ *
+ * `buildAlbedoClarityNode` above repairs texture MINIFICATION — detail lost
+ * because a source texel maps to less than one screen pixel. The render-scale
+ * governor (`graph/v3-perf.js`, `vt/render-scale-policy.js`) introduces the
+ * opposite case: MSA now sometimes renders at fewer pixels than it presents,
+ * and the free bilinear upscale that recovers the display size (`grade-
+ * present.js` sampling `scene.lit`) blurs exactly the way any bilinear
+ * upscale does — a `Performance-Ceiling-Analysis-2026-08-26.md`-documented,
+ * live-confirmed cost of the governor's own win (author, 2026-08-26: "the
+ * slightly mushy graphics are a bit of a shame"). Nothing existed to repair
+ * THIS blur before the governor did, because there was nothing to upscale.
+ *
+ * STRENGTH IS NOT A PER-PIXEL GATE, unlike `buildAlbedoClarityNode`'s own
+ * `texelsPerPixel` ramp. That gate exists because a SINGLE material can show
+ * both sharp and blurry regions in the same frame (a zoomed map has near and
+ * far texels on screen at once) — the present pass has no such variation:
+ * every fragment is upscaled by the exact same `internalScale`, so "how much
+ * sharpening" has exactly one right answer per frame, known in advance the
+ * instant the governor picks a scale. `resolvePostUpscaleSharpenStrength`
+ * computes that answer; `setPostUpscaleSharpenStrength` pushes it as a plain
+ * uniform, never re-derived per-pixel.
+ *
+ * DELIBERATELY NOT INDEPENDENTLY TUNED AGAINST THE EXISTING PASS STACKING
+ * ON TOP OF IT. Both this and `buildAlbedoClarityNode` are the same
+ * contrast-boost algorithm, and both can be active on the same frame (this
+ * one repairs the upscale; that one still repairs whatever texture
+ * minification remains even at a reduced internal resolution). Two
+ * contrast boosts in a row risk compounding into something too harsh —
+ * `POST_UPSCALE_SHARPEN_DEFAULTS.maxStrength` sits deliberately BELOW
+ * `ALBEDO_CLARITY_DEFAULTS.sharpness`'s own shipped default for exactly this
+ * reason. This is a FLAGGED risk, not a solved one: it needs a live visual
+ * check stacking both passes on real art, not a static guess.
+ * ===========================================================================
+ */
+
+const POST_UPSCALE_SHARPEN_DEFAULTS = Object.freeze({
+  /** Strength at the governor's LOWEST rung (`SCALE_LADDER`'s smallest
+   * value). Same units as `ALBEDO_CLARITY_DEFAULTS.sharpness` (0 = off, 0.2 =
+   * stock FidelityFX CAS max) — deliberately BELOW that constant's own 0.22
+   * shipped default, for the stacking risk this section's own header names. */
+  maxStrength: 0.12,
+});
+
+/** Live post-upscale sharpen strength — a single scalar, not a settings-style
+ * object like `_albedoClarity`: this is DERIVED (`resolvePostUpscaleSharpen
+ * Strength`), never a player-facing control of its own. */
+let _postUpscaleSharpenStrength = 0;
+/** @type {{ strength: any }|null} */
+let _postUpscaleSharpenUniforms = null;
+
+/** The shared strength uniform, created on first use — same lazy-creation
+ * reasoning `albedoClarityUniforms` gives (THREE arrives by parameter). */
+function postUpscaleSharpenUniforms(THREE) {
+  if (_postUpscaleSharpenUniforms === null) {
+    const { uniform, float } = THREE.TSL;
+    _postUpscaleSharpenUniforms = { strength: uniform(float(_postUpscaleSharpenStrength)) };
+  }
+  return _postUpscaleSharpenUniforms;
+}
+
+/**
+ * Map the render-scale governor's `internalScale` to a post-upscale sharpen
+ * strength. `1.0` (no upscale at all) → exactly `0` — the native path must
+ * cost nothing; `grade-present.js` uses this comparison to decide whether to
+ * even COMPILE the sharpen taps in at all, not merely to gate them at zero
+ * (the SAME "removed, not multiplied by zero" argument `buildFlatAlbedoNode`'s
+ * own doc makes, one level up). Below 1.0, ramps LINEARLY to `maxStrength` at
+ * the ladder's lowest rung (`0.5`) — deliberately simple; the right curve
+ * needs live tuning against real art, not a guess baked in on day one.
+ * @param {number} internalScale
+ * @returns {number}
+ */
+export function resolvePostUpscaleSharpenStrength(internalScale) {
+  const s = Number.isFinite(internalScale) ? Math.max(0.5, Math.min(1, internalScale)) : 1;
+  if (s >= 0.9995) return 0;
+  const t = (1 - s) / 0.5; // 0 at scale 1.0, 1 at scale 0.5 (SCALE_LADDER's lowest rung)
+  return Math.max(0, Math.min(1, t)) * POST_UPSCALE_SHARPEN_DEFAULTS.maxStrength;
+}
+
+/**
+ * Push the post-upscale sharpen strength live (clamped to
+ * `[0, POST_UPSCALE_SHARPEN_DEFAULTS.maxStrength]`) — called by
+ * `vt-pan-viewer.js` whenever the governor's `internalScale` changes, with
+ * `resolvePostUpscaleSharpenStrength`'s own output. The uniform write alone
+ * is enough to change what's on screen next frame; `grade-present.js`'s own,
+ * separate, coarser decision (whether the sharpen taps are compiled in AT
+ * ALL) is made by comparing THIS value to zero, not driven from here.
+ * @param {number} strength
+ * @returns {number} the clamped value actually stored.
+ */
+export function setPostUpscaleSharpenStrength(strength) {
+  const clamped = Number.isFinite(strength)
+    ? Math.max(0, Math.min(POST_UPSCALE_SHARPEN_DEFAULTS.maxStrength, strength))
+    : 0;
+  _postUpscaleSharpenStrength = clamped;
+  if (_postUpscaleSharpenUniforms) _postUpscaleSharpenUniforms.strength.value = clamped;
+  return clamped;
+}
+
+/** @returns {number} the current post-upscale sharpen strength (diagnostics —
+ * mirrors `getAlbedoClarity`'s own "current value, plus whether it's bound to
+ * a live material yet" shape, minus the `applied` half since this value is
+ * meaningful even before any material reads it). */
+export function getPostUpscaleSharpenStrength() {
+  return _postUpscaleSharpenStrength;
+}
+
+/**
+ * The post-upscale sharpen itself: five screen-space taps of an ALREADY
+ * upscaled image (present resolution, after the governor's free bilinear
+ * upscale from its internal target), the SAME CAS core
+ * `buildAlbedoClarityNode` uses (see this section's own header for why there
+ * is no per-pixel gate here). Reaches into the SAME shared, module-level
+ * uniform `setPostUpscaleSharpenStrength` writes — the caller never passes a
+ * strength value in, exactly like `buildAlbedoClarityNode` reaches into its
+ * own shared `albedoClarityUniforms` rather than taking one by parameter.
+ *
+ * @param {*} THREE
+ * @param {*} tex - the present-resolution colour texture (`grade-present.js`'s
+ *   own `presentTexNode`'s source, `scene.lit`).
+ * @param {*} uvNode - the FINAL uv node.
+ * @returns {{rgb:any, a:any}} SAME shape as `buildAlbedoClarityNode`'s own.
+ */
+export function buildPostUpscaleSharpenNode(THREE, tex, uvNode) {
+  const TSL = THREE.TSL;
+  const { vec3, texture, dFdx, dFdy } = TSL;
+  const { strength } = postUpscaleSharpenUniforms(THREE);
+
+  // UNIFORM CONTROL FLOW: nothing may branch above these two lines — same
+  // requirement `buildAlbedoClarityNode`'s own comment states. A full-screen
+  // present quad's own UV derivative is exactly one PRESENT pixel, so this is
+  // the identical technique, self-adapting to whatever resolution THIS pass
+  // renders at, with no manual texel-size computation needed.
+  const duvdx = dFdx(uvNode).toVar();
+  const duvdy = dFdy(uvNode).toVar();
+
+  const c = texture(tex, uvNode).toVar();
+  const sL = texture(tex, uvNode.sub(duvdx));
+  const sR = texture(tex, uvNode.add(duvdx));
+  const sU = texture(tex, uvNode.sub(duvdy));
+  const sD = texture(tex, uvNode.add(duvdy));
+
+  // Linear → gamma-2.0, same perceptual-space reasoning as
+  // `buildAlbedoClarityNode`'s own `enc` — see this file's header §3.
+  const enc = (s) => TSL.max(s.rgb, vec3(0)).sqrt();
+  const eC = enc(c).toVar();
+  const eL = enc(sL);
+  const eR = enc(sR);
+  const eU = enc(sU);
+  const eD = enc(sD);
+
+  const rgb = sharpenCasCore(THREE, { eC, eL, eR, eU, eD }, strength);
+  return { rgb, a: c.a };
 }

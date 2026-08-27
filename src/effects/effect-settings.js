@@ -16,6 +16,14 @@
  */
 
 import { PERFORMANCE_PROFILES, ENABLE_OVERRIDES, DEFAULT_PERFORMANCE_PROFILE } from './effect-cascade.js';
+// Through graph/'s own door (graph/index.js) — zones/one-door allows this
+// exact shape. SCALE_LADDER is the render-scale governor's real ladder
+// (graph/v3-perf.js); the render-scale choices below are DERIVED from it,
+// never a second, hand-typed list — the same "validate against the real
+// ladder, don't keep a parallel one that can drift" discipline
+// `vt/render-scale-policy.js#resolveInternalScale` already applies on the
+// read side.
+import { SCALE_LADDER } from '../graph/index.js';
 
 /** The three GLOBAL (not per-effect) setting keys. */
 export const GLOBAL_SETTING_KEYS = Object.freeze({
@@ -42,6 +50,19 @@ export const GLOBAL_SETTING_KEYS = Object.freeze({
   /** The LANTERN theme (client) — one of `ui/tokens.js#THEMES`. Drives
    * `html[data-theme]`, which every room's own injected CSS already keys off. */
   theme: 'uiTheme',
+  /** RENDER-SCALE (client, 2026-08-27) — `'auto'` (the render-scale governor
+   * decides, live, frame to frame) or a fixed rung matching one of
+   * `SCALE_LADDER`'s own values as a string (e.g. `'0.75'`). See
+   * `vt/render-scale-policy.js`'s own header for the present/internal
+   * resolution split this feeds, and `MAX_PIXEL_RATIO`'s comment
+   * (`vt-pan-viewer.js`) for the incident that made this a client-facing
+   * setting in the first place: a per-player Foundry setting that could
+   * tank a player's frame rate with zero involvement from MSA's own
+   * judgment. A FIXED choice here makes the governor fully inert for that
+   * player — a genuine promise, not a suggestion the governor can override —
+   * while `MAX_PIXEL_RATIO` still protects them from Foundry's own opaque
+   * value regardless of which mode they pick. */
+  renderScale: 'renderScale',
 });
 
 /**
@@ -61,6 +82,24 @@ export function effectEnableKey(effectId, who) {
 function titleCase(s) {
   const str = String(s ?? '');
   return str.length ? str[0].toUpperCase() + str.slice(1) : str;
+}
+
+/**
+ * The render-scale setting's choices — DERIVED from `SCALE_LADDER`
+ * (`graph/v3-perf.js`, the real ladder the governor steps through), never a
+ * second, hand-typed list. `choiceLabels()`'s plain `titleCase` can't produce
+ * "100% — Native"/"85%" from a bare numeric string, so this is its own small
+ * builder rather than a `choiceLabels(SCALE_LADDER)` call.
+ * @returns {Record<string, string>}
+ */
+export function renderScaleChoices() {
+  const choices = { auto: 'Auto (recommended)' };
+  SCALE_LADDER.forEach((scale, i) => {
+    const pct = Math.round(scale * 100);
+    const suffix = i === 0 ? ' — Native' : i === SCALE_LADDER.length - 1 ? ' — Lowest' : '';
+    choices[String(scale)] = `${pct}%${suffix}`;
+  });
+  return choices;
 }
 
 /**
@@ -112,6 +151,16 @@ export function describeEffectSettings(manifests = []) {
       config: true,
       name: 'Map Shine — Performance profile',
       hint: 'Overall graphics quality for YOUR machine. Higher looks better and costs more GPU. Individual effects can still be toggled below.',
+    },
+    {
+      key: GLOBAL_SETTING_KEYS.renderScale,
+      scope: 'client',
+      kind: 'enum',
+      choices: renderScaleChoices(),
+      default: 'auto',
+      config: true,
+      name: 'Map Shine — Render resolution',
+      hint: 'Auto lets Map Shine automatically balance sharpness against your frame rate — it can never be pushed higher than a safe ceiling, regardless of your own display or Foundry resolution setting. A fixed value locks the render resolution and turns automatic adjustment off.',
     },
     {
       key: GLOBAL_SETTING_KEYS.reducePhotosensitive,

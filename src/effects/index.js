@@ -518,6 +518,7 @@ export {
   effectEnableKey,
   choiceLabels,
   GLOBAL_SETTING_KEYS,
+  renderScaleChoices,
 } from './effect-settings.js';
 
 // LIGHTNING (docs/planning/Lightning.md) — the forked-bolt strike effect

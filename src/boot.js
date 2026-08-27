@@ -229,6 +229,10 @@ import {
   setVtPanViewerGpuProbe,
   setVtPanViewerGpuZoneTimer,
   getVtPanViewerGpuZoneStatus,
+  // RENDER-SCALE GOVERNOR (2026-08-27) — the player's Render Resolution
+  // setting and its live state (settings-panel row + diagnostics readout).
+  setVtPanViewerRenderScaleSetting,
+  getVtPanViewerRenderScaleState,
   readVtPanViewerRenderInfo,
   readVtPanViewerDrawCallsOnly,
   readVtPanViewerTriangleCountOnly,
@@ -368,6 +372,7 @@ import {
   PERFORMANCE_PROFILES,
   ENABLE_OVERRIDES,
   choiceLabels,
+  renderScaleChoices,
   resolveAnchorSizePx,
   resolveAnchorLightRadiusPx,
   resolveAnchorElevationWorldUnits,
@@ -836,6 +841,14 @@ MapShine.getPointLightMrtMerge = getVtPanViewerPointLightMrtMerge;
 // `pointLightMeshPools` field); this is the same function, just also given
 // its own door.
 MapShine.getPointLightMeshPoolStats = getVtPanViewerPointLightMeshPoolStats;
+// RENDER-SCALE GOVERNOR (2026-08-27) — the live console readout: current
+// setting (Auto/fixed), the governor's own state (scale, streaks, hold
+// reason if any, last change), and the present/internal sizes actually in
+// effect right now. Reach for this FIRST on any "is the resolution thing
+// actually doing anything" question — matches the "diagnostic tool as the
+// first stop" convention every other subsystem in this project follows
+// (getWaterHealthReport, getSceneSettle, etc., immediately below).
+MapShine.getRenderScaleState = getVtPanViewerRenderScaleState;
 // SCENE SETTLE (2026-08-11, author: the 12k² upper floor "takes an extremely
 // long time to appear which causes confusion for you and me... we currently
 // don't correctly track when the system is actually finished loading"). ONE
@@ -10300,6 +10313,11 @@ function install() {
         // canvas.stage instead of tracking its own camera. The torture fixture
         // keeps its own camera — it has no Foundry scene to follow.
         followFoundryCamera: true,
+        // RENDER-SCALE SETTING (2026-08-27) — the REAL, persisted value, read
+        // here so a fresh viewer starts correct from frame one rather than at
+        // the safe-but-possibly-wrong 'auto' default until a live settings
+        // change happens to fire. See startVtPanViewer's own param doc.
+        renderScaleSetting: readSetting(MODULE_ID, GLOBAL_SETTING_KEYS.renderScale),
         // Per-zone timing (docs/planning/Performance.md). Inert until armed; the
         // torture fixture below deliberately does not pass it, so a soak run
         // never profiles.
@@ -10698,6 +10716,11 @@ function install() {
     value,
     label,
   }));
+  // RENDER-SCALE CHOICE LIST (2026-08-27) — SAME derive-from-canonical-source
+  // shape as PROFILE_CHOICE_LIST just above, from `renderScaleChoices()`
+  // (`effect-settings.js`, itself derived from `SCALE_LADDER` — never a
+  // second, hand-typed list that could drift from the governor's real ladder).
+  const RENDER_SCALE_CHOICE_LIST = Object.entries(renderScaleChoices()).map(([value, label]) => ({ value, label }));
   MapShine.debug.registerPanel(
     'graphics-settings',
     'Graphics & Performance',
@@ -10706,7 +10729,9 @@ function install() {
         msaEnabledKey: GLOBAL_SETTING_KEYS.msaEnabled,
         profileKey: GLOBAL_SETTING_KEYS.profile,
         a11yKey: GLOBAL_SETTING_KEYS.reducePhotosensitive,
+        renderScaleKey: GLOBAL_SETTING_KEYS.renderScale,
         profiles: PROFILE_CHOICE_LIST,
+        renderScaleChoices: RENDER_SCALE_CHOICE_LIST,
         enableChoices: ENABLE_CHOICE_LIST,
         effectRows: effectRegistry.list().map((m) => ({
           id: m.id,
@@ -10741,6 +10766,7 @@ function install() {
       read: (key) => readSetting(MODULE_ID, key),
       write: (key, value) => writeSetting(MODULE_ID, key, value),
       profiles: PROFILE_CHOICE_LIST,
+      renderScaleChoices: RENDER_SCALE_CHOICE_LIST,
       enableChoices: ENABLE_CHOICE_LIST,
       effectRows: effectRegistry.list().map((m) => ({
         id: m.id,
@@ -10755,6 +10781,13 @@ function install() {
         reducePhotosensitive: GLOBAL_SETTING_KEYS.reducePhotosensitive,
         reducedMotion: GLOBAL_SETTING_KEYS.reducedMotion,
         theme: GLOBAL_SETTING_KEYS.theme,
+        // Plumbed for the Remote/Studio SYSTEM department's own future row —
+        // deferred this landing (that room re-implements its rows without
+        // importing diag/settings-panel.js, per its own header), but the data
+        // is ready the moment someone builds it. See docs/planning/
+        // Performance-Ceiling-Analysis-2026-08-26.md and the render-scale
+        // governor plan for the full account.
+        renderScale: GLOBAL_SETTING_KEYS.renderScale,
       },
     };
   }
@@ -12309,6 +12342,14 @@ function install() {
             // rendered map — so they get their own explicit re-apply here
             // rather than silently riding along inside reapplyAll.
             applyUiPreferences();
+            // RENDER SCALE (2026-08-27) — same reasoning as applyUiPreferences
+            // just above: not an EFFECT_REAPPLIERS entry (it's a global render
+            // knob, not a per-effect one), so it gets its own explicit push.
+            // No-ops safely (`{skipped:true}`) if no viewer is active yet —
+            // the freshly-started viewer reads the real value itself via its
+            // own `renderScaleSetting` constructor param, so a change that
+            // lands before any scene has loaded is never lost, just moot.
+            setVtPanViewerRenderScaleSetting(readSetting(MODULE_ID, GLOBAL_SETTING_KEYS.renderScale));
             MapShine.__player?.refresh();
           },
         });

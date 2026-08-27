@@ -27,6 +27,7 @@ import {
   DEFAULT_PERFORMANCE_PROFILE,
 } from '../effect-cascade.js';
 import { createEffectRegistry } from '../registry.js';
+import { SCALE_LADDER } from '../../graph/index.js';
 import {
   describeEffectSettings,
   deriveEffectLayers,
@@ -380,7 +381,7 @@ export function run(t) {
     const descriptors = describeEffectSettings([UI_WINDOW_SHADOW]);
     const byKey = (k) => descriptors.find((d) => d.key === k);
 
-    ok('one effect → 5 global + 2 per-effect descriptors', descriptors.length === 7);
+    ok('one effect → 6 global + 2 per-effect descriptors', descriptors.length === 8);
 
     const master = byKey(GLOBAL_SETTING_KEYS.msaEnabled);
     ok(
@@ -422,6 +423,24 @@ export function run(t) {
         ['dark', 'light', 'hc', 'soft'].every((t) => t in theme.choices)
     );
 
+    const renderScale = byKey(GLOBAL_SETTING_KEYS.renderScale);
+    ok(
+      'render-scale is a client enum defaulting to auto',
+      renderScale?.scope === 'client' && renderScale?.kind === 'enum' && renderScale?.default === 'auto'
+    );
+    ok(
+      'render-scale choices are auto plus every SCALE_LADDER rung, as numeric strings — nothing hand-typed and drifted',
+      renderScale &&
+        'auto' in renderScale.choices &&
+        SCALE_LADDER.every((s) => String(s) in renderScale.choices) &&
+        Object.keys(renderScale.choices).length === SCALE_LADDER.length + 1
+    );
+    ok(
+      'the native (scale 1) choice label calls out "Native"; the lowest rung calls out "Lowest"',
+      renderScale?.choices?.['1']?.includes('Native') &&
+        renderScale?.choices?.[String(SCALE_LADDER[SCALE_LADDER.length - 1])]?.includes('Lowest')
+    );
+
     const gm = byKey(effectEnableKey('uiWindowShadow', 'gm'));
     ok('the GM enable is WORLD-scoped, defaulting to auto', gm?.scope === 'world' && gm?.default === 'auto');
     const player = byKey(effectEnableKey('uiWindowShadow', 'player'));
@@ -438,7 +457,7 @@ export function run(t) {
       'every descriptor is config:true (shows in Foundry Settings)',
       descriptors.every((d) => d.config === true)
     );
-    ok('no manifests → just the 5 global descriptors', describeEffectSettings([]).length === 5);
+    ok('no manifests → just the 6 global descriptors', describeEffectSettings([]).length === 6);
     ok(
       'the master off-switch exists even with zero effects registered — it gates BEFORE the cascade',
       describeEffectSettings([]).some((d) => d.key === GLOBAL_SETTING_KEYS.msaEnabled)

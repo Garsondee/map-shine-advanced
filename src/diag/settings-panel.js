@@ -251,7 +251,9 @@ function buildDropdown(label, options, value, onChange, opts = {}) {
  *
  * @param {object} deps
  * @param {string} deps.msaEnabledKey @param {string} deps.profileKey @param {string} deps.a11yKey
+ * @param {string} deps.renderScaleKey
  * @param {Array<{value:string,label:string}>} deps.profiles
+ * @param {Array<{value:string,label:string}>} deps.renderScaleChoices - Auto + every `SCALE_LADDER` rung.
  * @param {Array<{value:string,label:string}>} deps.enableChoices - Auto/On/Off
  * @param {Array<{id:string,title:string,photosensitive?:boolean,playerKey:string,gmKey:string}>} deps.effectRows
  * @param {(key:string)=>unknown} deps.read
@@ -261,7 +263,20 @@ function buildDropdown(label, options, value, onChange, opts = {}) {
  * @returns {HTMLElement}
  */
 export function buildSettingsPanel(deps) {
-  const { msaEnabledKey, profileKey, a11yKey, profiles, enableChoices, effectRows, read, write, isGM, refresh } = deps;
+  const {
+    msaEnabledKey,
+    profileKey,
+    a11yKey,
+    renderScaleKey,
+    profiles,
+    renderScaleChoices,
+    enableChoices,
+    effectRows,
+    read,
+    write,
+    isGM,
+    refresh,
+  } = deps;
 
   const root = document.createElement('div');
   Object.assign(root.style, { display: 'flex', flexDirection: 'column', gap: '9px', width: '100%' });
@@ -329,7 +344,33 @@ export function buildSettingsPanel(deps) {
     ])
   );
 
-  // 3. ACCESSIBILITY.
+  // 3. RENDER RESOLUTION (2026-08-27) — Auto (the render-scale governor,
+  // client-side, live) or a fixed rung. Sits right after Graphics Quality:
+  // both are "how much GPU does this cost me" knobs, and this one is the
+  // direct answer to the incident that motivated it — see MAX_PIXEL_RATIO's
+  // own comment in vt-pan-viewer.js. A ceiling still applies underneath
+  // EITHER choice; this dropdown only controls what happens BELOW that
+  // ceiling.
+  const renderScaleValue = read(renderScaleKey) ?? 'auto';
+  root.appendChild(
+    section([
+      buildDropdown(
+        'Render Resolution',
+        renderScaleChoices,
+        renderScaleValue,
+        (v) => {
+          write(renderScaleKey, v);
+          refresh();
+        },
+        { big: true }
+      ),
+      hint(
+        'Auto automatically balances sharpness against your frame rate — it can never be pushed above a safe ceiling, regardless of your display or Foundry’s own resolution setting. A fixed value locks the resolution and turns automatic adjustment off.'
+      ),
+    ])
+  );
+
+  // 4. ACCESSIBILITY.
   const reducePhotosensitive = read(a11yKey) === true;
   root.appendChild(
     section([
@@ -343,7 +384,7 @@ export function buildSettingsPanel(deps) {
     ])
   );
 
-  // 4. PER-EFFECT TOGGLES — under everything above, per the directive.
+  // 5. PER-EFFECT TOGGLES — under everything above, per the directive.
   root.appendChild(sectionLabel('Effects'));
   const rows = describeEffectRows(effectRows, reducePhotosensitive);
   const list = document.createElement('div');
@@ -365,7 +406,7 @@ export function buildSettingsPanel(deps) {
   }
   root.appendChild(section([list]));
 
-  // 5. GM-ONLY: table defaults. Same effect set, the WORLD key instead — a
+  // 6. GM-ONLY: table defaults. Same effect set, the WORLD key instead — a
   // second section, never a second layout (Control-Panel.md §2's "permission
   // is a filter, not a fork" applied inside one panel, not just across zones).
   if (isGM()) {

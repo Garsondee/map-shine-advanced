@@ -943,6 +943,16 @@ export function stopVtPanViewer() {
 export async function startVtPanViewer({
   THREE,
   followFoundryCamera = false,
+  // RENDER-SCALE SETTING (2026-08-27) — the player's REAL, persisted choice
+  // (`'auto'` or a fixed `SCALE_LADDER` rung as a string), read by boot.js
+  // from `game.settings` (this file never touches `game.settings` itself —
+  // `foundry/adapter-only`) and handed in at construction so a fresh viewer
+  // starts CORRECT from frame one, not at the safe-but-possibly-wrong 'auto'
+  // default until the next live settings change happens to fire. Defaulted
+  // to `'auto'` for the torture/soak fixture, which passes no setting at all
+  // — and 'auto' unseeded is also the correct safe default there, same
+  // reasoning "THE INTERNAL TIER" block's own comment gives.
+  renderScaleSetting = 'auto',
   // PER-ZONE TIMING (docs/planning/Performance.md). Owned by boot.js and handed
   // in, exactly like `gpuProbe` is constructed here: the clock lives in `diag/`
   // because `time/one-clock` allows it there and nowhere near this file. Null on
@@ -1537,16 +1547,16 @@ export async function startVtPanViewer({
     // GPU/DOM) and starts at the TOP of its ladder (scale 1.0 = internal ==
     // present, no resampling softness) — a fresh session's worst case is bounded
     // by MAX_PIXEL_RATIO alone until real frames accumulate, never unbounded.
-    // `renderScaleUserSetting` seeds 'auto' and is pushed the real persisted
-    // value by `setVtPanViewerRenderScaleSetting` shortly after boot (mirrors
-    // how every other live-settable knob in this file starts at a safe default
-    // and gets corrected once boot.js reads the real setting) — never left
-    // unseeded, since 'auto' unseeded is ALSO the correct safe default.
+    // `renderScaleUserSetting` seeds from the REAL persisted setting
+    // (`renderScaleSetting`, this function's own param, above) — correct from
+    // frame one, never a placeholder waiting on a live settings change to
+    // correct it. Live changes after this still reach it via
+    // `setVtPanViewerRenderScaleSetting` (boot.js's settings `onChange`).
     const renderScaleGovernor = new RenderScaleGovernor({ frameBudgetMs: FRAME_BUDGET_MS });
     // Fed from `renderFrame`'s own `gapMs` (see `render-cost-signal.js`'s own
     // header for why THAT signal, and not the real per-pass GPU zone timers).
     const renderScaleCostSignal = createFrameCostSignal();
-    let renderScaleUserSetting = 'auto';
+    let renderScaleUserSetting = typeof renderScaleSetting === 'string' ? renderScaleSetting : 'auto';
     /** @returns {number} the scale `resizeInternalTargets` should use RIGHT NOW. */
     const resolveCurrentInternalScale = () =>
       resolveInternalScale(renderScaleUserSetting, renderScaleGovernor.scale, SCALE_LADDER);

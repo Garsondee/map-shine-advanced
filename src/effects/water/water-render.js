@@ -2421,11 +2421,17 @@ export function buildWaterSurfaceMaterial({
   //
   // Three channels are DISPLAY-REMAPPED so a value outside [0,1] reads as a
   // picture instead of clipping silently: `depth01` can exceed 1 once
-  // turbidity brightens it, and `turbidity`/`causticExcess` are SIGNED around
-  // a "no effect" zero — both biased so 0.5 grey means neutral, then clamped
-  // so the bias itself cannot invert past white/black. Every other channel
-  // below is its raw node, unclamped, on purpose: a value legitimately
-  // outside [0,1] on one of THOSE is itself the finding.
+  // turbidity brightens it, `turbidity` is SIGNED around a "no effect" zero,
+  // and `causticExcess` (2026-08-27: always ≥0 since the Worley-net rebuild —
+  // there is no "darkening" case any more) keeps the SAME 0.5-is-neutral
+  // remap anyway, for one honest reason: a bare `clamp(causticExcess, 0, 1)`
+  // would visually flatten every value past 1 (a common case — the net's own
+  // ceiling is `WATER_CAUSTICS_MAX = 1.6`) to identical white, hiding exactly
+  // the "is a bright line pegged at the ceiling or just bright" question a
+  // debug channel exists to answer; the same half-scale remap answers it for
+  // free without needing two different formulas for two display channels.
+  // Every other channel below is its raw node, unclamped, on purpose: a value
+  // legitimately outside [0,1] on one of THOSE is itself the finding.
   const depth01Display = clamp(depth01, float(0), float(1));
   const bedVisibility = dot(bedTransmit, vec3(1 / 3, 1 / 3, 1 / 3));
   const turbidityDisplay = clamp(field.turbidity.mul(float(0.5)).add(float(0.5)), float(0), float(1));
@@ -2718,24 +2724,23 @@ export function buildWaterSurfaceMaterial({
     setCaustics(v) {
       uCaustics.value = v;
     },
-    /** WATER_PARAMS `causticSharpness` — contrast on the focus response's
-     * brightening half. See `water-field.js#WATER_CAUSTICS_SHARPNESS_
-     * EXPONENT_MAX`'s own doc for the curve; 0 = the pre-2026-08-27 broad
-     * soft lift, 1 = the full contrast curve. */
+    /** WATER_PARAMS `causticSharpness` — how WIDE the bright band around
+     * each Worley cell edge reads (`water-field.js#WATER_CAUSTICS_EDGE_FAR_
+     * MIN/MAX`'s own doc). 0 = a thick, lacy net, 1 = a hairline net. */
     setCausticSharpness(v) {
       uCausticSharpness.value = v;
     },
-    /** WATER_PARAMS `causticScale` — the caustics-only noise domain, as a
-     * fraction of `waveScalePx`, independent of the visible chop's own
-     * scale. See `water-field.js#WATER_CAUSTICS_SCALE`'s own doc for why
-     * this is what actually makes "thin" achievable at all. */
+    /** WATER_PARAMS `causticScale` — the caustics Worley net's own cell
+     * size, as a fraction of `waveScalePx`, independent of the visible
+     * chop's own scale. See `water-field.js#WATER_CAUSTICS_SCALE`'s own doc
+     * for why this is what actually makes "thin" achievable at all. */
     setCausticScale(v) {
       uCausticScale.value = v;
     },
     /** WATER_PARAMS `causticNetting` — blend weight for a second, finer
-     * Jacobian layer (`WATER_CAUSTICS_NET_SCALE_RATIO`), so the pattern
-     * crosses into a net instead of reading as one wavy line. 0 = the
-     * single-layer field. */
+     * Worley layer (`WATER_CAUSTICS_NET_SCALE_RATIO`), so the net reads as
+     * several overlapping cell sizes rather than one uniform mesh. 0 = the
+     * single-layer net. */
     setCausticNetting(v) {
       uCausticNetting.value = v;
     },

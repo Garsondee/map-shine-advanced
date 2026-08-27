@@ -24,21 +24,18 @@
  */
 import {
   waterFlowVector,
-  waterCausticsCpu,
   WATER_TIER2_FLOW_ANGLE_DEG,
-  WATER_TIER3_CHOP,
   WATER_BANK_REACH_PX,
   WATER_BANK_INFLUENCE,
   WATER_FLOW_WARP_INFLUENCE,
   WATER_FOAM_SHORE_PX,
   WATER_SHOAL_REACH_PX,
   WATER_SHOAL_STRENGTH,
-  WATER_CAUSTICS_MIN_DET,
   WATER_CAUSTICS_MAX,
-  WATER_CAUSTICS_DARK_MAX,
-  WATER_CAUSTICS_K,
   WATER_CAUSTICS_SHARPNESS,
-  WATER_CAUSTICS_SHARPNESS_EXPONENT_MAX,
+  WATER_CAUSTICS_EDGE_FAR_MIN,
+  WATER_CAUSTICS_EDGE_FAR_MAX,
+  WATER_CAUSTICS_EDGE_AA_PX,
   WATER_CAUSTICS_SCALE,
   WATER_CAUSTICS_NETTING,
   WATER_CAUSTICS_NET_SCALE_RATIO,
@@ -169,212 +166,43 @@ export function run(t) {
     WATER_SHOAL_STRENGTH > 0 && WATER_SHOAL_STRENGTH < 1
   );
 
-  // ══ TIER 4 — CAUSTICS: THE FORMULA, MEASURED IN SHAPE ════════════════════
-  // `waterCausticsCpu` is the CPU twin of the shader's own
-  // `det(I + k·J)` block — see `water-field.js#WATER_CAUSTICS_K`'s own doc for
-  // the REAL GPU sweep this was calibrated against (65,536 live samples of the
-  // actual `mx_fractal_noise_vec3` Jacobian). What is pinned HERE is the
-  // formula's SHAPE, which holds for any `k` and therefore survives a future
-  // re-calibration: identity at rest, correct sign either side of it, both
-  // clamps engage, and a `chop` of 0 turns the whole rung off (no wave field,
-  // no curvature to have caustics from).
+  // ══ TIER 4 — CAUSTICS: A WORLEY F2−F1 CELL-EDGE NET (rebuilt 2026-08-27) ═
+  // The original Jacobian-focus mechanism (and its `waterCausticsCpu` CPU
+  // twin, tested here through several prior rounds) was REPLACED, not
+  // retuned — a live screenshot at maximum sharpening AND maximum netting was
+  // still soft round blobs, not filaments, next to the author's own reference
+  // image (an unmistakable Worley/Voronoi cell-edge net). See
+  // `water-field.js`'s own "CAUSTICS, A WORLEY F2−F1 CELL-EDGE NET" header for
+  // the full diagnosis. The new mechanism's SHAPE (a spatial Worley pattern)
+  // is not a pure function of a few scalars the way the old Jacobian formula
+  // was, so it is not CPU-unit-testable the same way — the same GPU/bench-only
+  // boundary `buildFoamCellularStructure`'s own Worley machinery already
+  // draws in this file's sibling module. What IS pinned here, in plain Node,
+  // is every constant's own SHAPE — the relationships that must hold for the
+  // sliders to do what their help text promises, regardless of the exact
+  // numbers a future tuning pass picks.
   ok(
-    'a flat patch (no curvature at all) contributes exactly ZERO — the identity a caller can trust',
-    waterCausticsCpu({ j00: 0, j01: 0, j10: 0, j11: 0 }) === 0
+    'the sharpest edge setting is genuinely NARROWER than the softest — the slider has real range',
+    WATER_CAUSTICS_EDGE_FAR_MIN < WATER_CAUSTICS_EDGE_FAR_MAX
   );
   ok(
-    'a CONVERGING patch (negative trace) brightens the bed',
-    waterCausticsCpu({ j00: -0.01, j01: 0, j10: 0, j11: -0.01 }) > 0
+    'both edge-width bounds are positive — a zero or negative band width is not a valid threshold',
+    WATER_CAUSTICS_EDGE_FAR_MIN > 0 && WATER_CAUSTICS_EDGE_FAR_MAX > 0
   );
   ok(
-    'a DIVERGING patch (positive trace) darkens it, never brightens',
-    waterCausticsCpu({ j00: 0.01, j01: 0, j10: 0, j11: 0.01 }) < 0
+    'the hairline end is a GENUINE hairline — well under shore foam`s own thinnest lace setting, not just "a bit less"',
+    WATER_CAUSTICS_EDGE_FAR_MIN < 0.2
   );
   ok(
-    'brightening never exceeds the declared ceiling, however extreme the curvature',
-    waterCausticsCpu({ j00: -50, j01: 0, j10: 0, j11: -50 }) <= WATER_CAUSTICS_MAX
+    'the screen-space AA width is positive and modest — a few pixels, not a fraction of the screen',
+    WATER_CAUSTICS_EDGE_AA_PX > 0 && WATER_CAUSTICS_EDGE_AA_PX < 10
   );
   ok(
-    'darkening never exceeds the declared floor either — no black holes in the bed',
-    waterCausticsCpu({ j00: 50, j01: 0, j10: 0, j11: 50 }) >= -WATER_CAUSTICS_DARK_MAX
+    'the brightening ceiling is a real, positive excess — 0 would make caustics permanently invisible',
+    WATER_CAUSTICS_MAX > 0
   );
   ok(
-    'the brightening ceiling is meaningfully higher than the darkening floor — real caustics read as bright lines on an unremarkable field, not as symmetric bright/dark pairs',
-    WATER_CAUSTICS_MAX > WATER_CAUSTICS_DARK_MAX * 2
-  );
-  ok(
-    'chop=0 (no wave field at all) silences caustics completely, at ANY curvature',
-    waterCausticsCpu({ j00: -0.5, j01: 0, j10: 0, j11: -0.5, chop: 0 }) === 0
-  );
-
-  // ⚠️ THE REGRESSION GUARD — this shipped live and the author saw it as
-  // *"moving patterns across the whole ground floor, indoors and outside...
-  // everywhere that isn't water too"* (2026-08-16).
-  //
-  // The noise this Jacobian differentiates is a WORLD-SPACE function: it is
-  // defined and curved on every pixel of the map. `causticBrightness` is
-  // consumed as `1 + it` on the ABSORPTION mesh — a `dst · src` multiply whose
-  // neutral element is exactly 1 — over a quad spanning the water's whole AABB.
-  // So "zero where the surface is flat" was never the promise that mattered;
-  // "zero outside the water" is, and only an explicit `insideWater` gate gives
-  // it. Asserted at FULL curvature, because the failure was loudest exactly
-  // where the term was largest.
-  ok(
-    'OUTSIDE the water, caustics are EXACTLY zero — not small, zero (the multiply mesh needs a literal 1)',
-    waterCausticsCpu({ j00: -0.02, j01: 0.01, j10: 0.01, j11: -0.02, insideWater: 0 }) === 0
-  );
-  {
-    // A genuinely FOCUSING patch — `k·j00 = −1` drives `det` to 0, which is the
-    // configuration that pegs the brightening ceiling. (Cranking both diagonals
-    // to −50 instead makes `det` enormous, i.e. strongly DIVERGING, and
-    // correctly clamps to the dark floor — worth stating because it is the
-    // obvious "extreme value" to reach for and it tests the opposite thing.)
-    const kEff = WATER_CAUSTICS_K * WATER_TIER3_CHOP;
-    const focusing = { j00: -1 / kEff, j01: 0, j10: 0, j11: 0 };
-    ok(
-      '...even at the curvature that pegs the brightening ceiling inside the water',
-      waterCausticsCpu({ ...focusing, insideWater: 0 }) === 0
-    );
-    ok(
-      '...while the SAME curvature inside the water still produces its full effect',
-      waterCausticsCpu({ ...focusing, insideWater: 1 }) === WATER_CAUSTICS_MAX
-    );
-  }
-  ok(
-    'the antialiased shoreline ramp scales caustics proportionally rather than popping',
-    Math.abs(
-      waterCausticsCpu({ j00: -0.01, j01: 0, j10: 0, j11: -0.01, insideWater: 0.5 }) -
-        waterCausticsCpu({ j00: -0.01, j01: 0, j10: 0, j11: -0.01, insideWater: 1 }) * 0.5
-    ) < 1e-12
-  );
-  {
-    // Constructed to drive `det` to EXACTLY 0 via the trace term:
-    // `k·j00 = -1` makes `(1 + k·j00) = 0`, so the whole product is 0.
-    const kEff = WATER_CAUSTICS_K * WATER_TIER3_CHOP;
-    const b = waterCausticsCpu({ j00: -1 / kEff, j01: 0, j10: 0, j11: 0 });
-    ok('a determinant driven to exactly 0 (via the trace) is finite, not Infinity/NaN', Number.isFinite(b));
-    ok('...and lands exactly at the brightening ceiling, not one unit past it', b === WATER_CAUSTICS_MAX);
-  }
-  {
-    // Constructed to drive `det` to EXACTLY 0 via the CROSS term instead —
-    // `j00 = j11 = 0` so the trace half is 1, and `(k·j01)(k·j10) = 1` cancels
-    // it. Exercises the OTHER half of the formula the trace-only case above
-    // does not reach.
-    const kEff = WATER_CAUSTICS_K * WATER_TIER3_CHOP;
-    const b = waterCausticsCpu({ j00: 0, j01: 1 / kEff, j10: 1 / kEff, j11: 0 });
-    ok(
-      'a determinant driven to exactly 0 via the CROSS term is also finite and clamped',
-      Number.isFinite(b) && b === WATER_CAUSTICS_MAX
-    );
-  }
-  // MONOTONE THROUGH THE IDENTITY — a brightness curve that oscillated on its
-  // way from converging to diverging would read as a bug (a faint DARK ring
-  // around every bright caustic line, which real light does not do at this
-  // level of approximation). Sweep a small range either side of "flat" —
-  // narrow enough to stay on the FIRST branch of `(1+kt)²` each side of its
-  // zero, so the only crossing possible is the genuine converging→diverging
-  // one — and confirm the sign changes EXACTLY ONCE, not zero times (which
-  // would mean the sweep never actually reached both regimes) and not more
-  // than once (which would mean it oscillates).
-  //
-  // ⚠️ THE SWEEP IS DERIVED FROM `kEff`, NOT A FIXED ±0.05 (2026-08-17). It was
-  // a hardcoded range, and that quietly encoded an assumption about a DEFAULT:
-  // `kEff = WATER_CAUSTICS_K × chop`, so when the author's own tuning raised
-  // `chop` 0.4 → 0.86 the same ±0.05 window stopped being "narrow enough to
-  // stay on the FIRST branch" — its own stated premise — and the test failed
-  // for a reason that had nothing to do with the property it defends. Solving
-  // for the branch instead of guessing a number makes it correct at ANY chop:
-  // `1 + kEff·t` stays in [0.5, 1.5] across this range by construction, so the
-  // determinant cannot change sign and the ONLY crossing available is the real
-  // convergent→divergent one at t = 0.
-  {
-    const kEff = WATER_CAUSTICS_K * WATER_TIER3_CHOP;
-    const halfSpan = 0.5 / kEff;
-    let signFlips = 0;
-    let prevSign = 0;
-    for (let t = -halfSpan; t <= halfSpan; t += halfSpan / 10) {
-      const b = waterCausticsCpu({ j00: t, j01: 0, j10: 0, j11: t });
-      const sign = b > 1e-9 ? 1 : b < -1e-9 ? -1 : 0;
-      if (sign !== 0 && prevSign !== 0 && sign !== prevSign) signFlips++;
-      if (sign !== 0) prevSign = sign;
-    }
-    ok(
-      'brightness crosses zero EXACTLY ONCE as curvature sweeps convergent→flat→divergent, never oscillating',
-      signFlips === 1
-    );
-  }
-  ok(
-    'WATER_CAUSTICS_MIN_DET is small — it exists to catch a genuine near-zero determinant, not to suppress ordinary curvature',
-    WATER_CAUSTICS_MIN_DET > 0 && WATER_CAUSTICS_MIN_DET < 0.5
-  );
-
-  // ══ TIER 4 — CAUSTICS' OWN LOOK CONTROLS (2026-08-27) ════════════════════
-  // Live report: the pattern read as blobby soft glows, not the thin filament
-  // net real shallow water shows. `sharpness` is the one piece of the new
-  // machinery this CPU twin can actually exercise — NETTING and SCALE vary
-  // WHICH noise gets sampled, not this det→brightness formula, so they stay
-  // GPU/bench-verified only (the same boundary `WATER_SHOAL_STRENGTH`/bank
-  // warp already draw in this file — see `waterCausticsCpu`'s own doc).
-  ok(
-    'sharpness=0 (the CPU-twin default) reproduces the pre-2026-08-27 formula exactly, at rest',
-    waterCausticsCpu({ j00: 0, j01: 0, j10: 0, j11: 0, sharpness: 0 }) === 0
-  );
-  {
-    const kEff = WATER_CAUSTICS_K * WATER_TIER3_CHOP;
-    const focusing = { j00: -1 / kEff, j01: 0, j10: 0, j11: 0 };
-    ok(
-      'sharpness=0 still pegs the exact same brightening ceiling as before this round',
-      waterCausticsCpu({ ...focusing, sharpness: 0 }) === WATER_CAUSTICS_MAX
-    );
-    ok(
-      'sharpness=1 ALSO pegs the ceiling at the same fully-focused point — sharpening compresses the MIDDLE of the range, not its extreme',
-      waterCausticsCpu({ ...focusing, sharpness: 1 }) === WATER_CAUSTICS_MAX
-    );
-  }
-  {
-    // A MID-RANGE convergence — bright, but nowhere near the determinant
-    // floor — is exactly where sharpening is supposed to bite: real caustics
-    // are a small, bright MINORITY of the surface, not a wide "somewhat lit"
-    // majority (`WATER_CAUSTICS_K`'s own sweep: 41% soft lift, only 8% "a
-    // real caustic").
-    const kEff = WATER_CAUSTICS_K * WATER_TIER3_CHOP;
-    const midCurvature = { j00: -0.3 / kEff, j01: 0, j10: 0, j11: 0 };
-    const unsharpened = waterCausticsCpu({ ...midCurvature, sharpness: 0 });
-    const sharpened = waterCausticsCpu({ ...midCurvature, sharpness: 1 });
-    ok(
-      'a mid-range convergence is genuinely bright before sharpening — the case the blob complaint was actually about',
-      unsharpened > 0.05
-    );
-    ok(
-      'sharpening pulls that SAME mid-range convergence toward zero — the soft shoulder collapsing, blob becoming filament',
-      sharpened < unsharpened
-    );
-  }
-  ok(
-    'sharpness never touches the DARKENING half — that was never the "blobby" complaint',
-    waterCausticsCpu({ j00: 0.02, j01: 0, j10: 0, j11: 0.02, sharpness: 0 }) ===
-      waterCausticsCpu({ j00: 0.02, j01: 0, j10: 0, j11: 0.02, sharpness: 1 })
-  );
-  ok(
-    'sharpness is monotone: more sharpening never brightens a mid-range patch further',
-    (() => {
-      const kEff = WATER_CAUSTICS_K * WATER_TIER3_CHOP;
-      const midCurvature = { j00: -0.3 / kEff, j01: 0, j10: 0, j11: 0 };
-      let prev = waterCausticsCpu({ ...midCurvature, sharpness: 0 });
-      for (let s = 0.1; s <= 1; s += 0.1) {
-        const cur = waterCausticsCpu({ ...midCurvature, sharpness: s });
-        if (cur > prev + 1e-9) return false;
-        prev = cur;
-      }
-      return true;
-    })()
-  );
-  ok(
-    'WATER_CAUSTICS_SHARPNESS_EXPONENT_MAX is a genuine curve, not a no-op — greater than 1',
-    WATER_CAUSTICS_SHARPNESS_EXPONENT_MAX > 1
-  );
-  ok(
-    'WATER_CAUSTICS_SCALE keeps the caustic net finer than the visible chop by default — the whole point of decoupling the two domains',
+    'WATER_CAUSTICS_SCALE keeps the caustic net finer than the visible wave scale by default — the whole point of decoupling the two domains',
     WATER_CAUSTICS_SCALE > 0 && WATER_CAUSTICS_SCALE < 1
   );
   ok(
@@ -384,6 +212,10 @@ export function run(t) {
   ok(
     'WATER_CAUSTICS_NET_SCALE_RATIO makes the second layer genuinely FINER, never coarser or identical',
     WATER_CAUSTICS_NET_SCALE_RATIO > 1
+  );
+  ok(
+    'WATER_CAUSTICS_NET_SCALE_RATIO is not a round integer — an integer ratio risks the two layers` cell edges periodically re-aligning',
+    !Number.isInteger(WATER_CAUSTICS_NET_SCALE_RATIO)
   );
   ok(
     'WATER_CAUSTICS_SHARPNESS/_NETTING are valid author-facing 0..1 values, not internal-only leftovers',

@@ -337,12 +337,18 @@ export const WATER_PARAMS = Object.freeze({
     label: 'Caustics',
     help: 'The shifting net of bright light patches on the riverbed you get from sunlight refracting through a moving surface — strongest in clear, shallow water, and gone wherever the bed is too deep, murky or foam-covered to see at all. Turn it down for a stiller, less busy bed; 0 removes it entirely.',
   },
-  // ⚠️ NEW (2026-08-27) — caustics' own look controls, added after a live
-  // report that the pattern read as blobby soft glows rather than the thin
-  // net of filaments real shallow water shows. See water-field.js's own
-  // "CAUSTICS' OWN LOOK CONTROLS" header for the physics/mechanism each one
-  // addresses. All three are ROH — genuinely technical, each can make the
-  // effect look wrong at an extreme, exactly `feedback_foh_roh_must_differ`'s
+  // ⚠️ NEW (2026-08-27), REBUILT SAME DAY — caustics' own look controls. The
+  // first version (a contrast curve over the wave field's own Jacobian) shipped
+  // and the author reported it was STILL soft round blobs even at maximum
+  // sharpness/netting, next to a reference image that was unmistakably a
+  // Worley/Voronoi cell-edge net. Root cause: no contrast curve can turn a
+  // smooth noise field's isolated round extrema into a connected net — that is
+  // a NOISE-BASIS problem, not a tuning problem. Rebuilt the same day around
+  // the Worley F2−F1 cell-edge technique this project already proved for shore
+  // foam (`water-shore.js#buildFoamCellularStructure`) — see water-field.js's
+  // own "CAUSTICS, A WORLEY F2−F1 CELL-EDGE NET" header for the mechanism each
+  // control now drives. All three are ROH — genuinely technical, each can make
+  // the effect look wrong at an extreme, exactly `feedback_foh_roh_must_differ`'s
   // own test for what belongs here rather than on the front strip.
   causticSharpness: {
     type: 'float',
@@ -350,21 +356,21 @@ export const WATER_PARAMS = Object.freeze({
     max: 1,
     step: 0.01,
     // Matches WATER_CAUSTICS_SHARPNESS (water-field.js).
-    default: 0.6,
+    default: 0.75,
     category: 'Light',
     label: 'Caustic sharpness',
-    help: 'How hard the caustic pattern is contrast-pushed toward thin bright lines rather than a soft glow. 0 is the original broad, low-contrast lift; higher values squeeze that lift toward its brightest points, which is what makes the pattern read as filaments instead of blobs. Very high values can start to look sparse or flickery on a calm surface — pair with Chop if that happens.',
+    help: 'How thin the bright lines of the caustic net read. 0 is a thick, lacy net; 1 is a hairline net, close to a real caustic photograph. This directly controls line WIDTH, not a brightness curve, so it stays effective across the whole slider — nothing to pair it with.',
   },
   causticScale: {
     type: 'float',
-    min: 0.1,
-    max: 1.5,
+    min: 0.05,
+    max: 1,
     step: 0.01,
     // Matches WATER_CAUSTICS_SCALE (water-field.js).
-    default: 0.4,
+    default: 0.5,
     category: 'Light',
     label: 'Caustic scale',
-    help: "The size of the caustic net's own cells, as a fraction of Wave scale — independent of how big the visible waves themselves look. Real caustics are much finer-grained than the swell that makes them, so this defaults well below 1. Raise it for a coarser, larger-celled net; lower it for a finer mesh (costs a little more to render the finer it gets).",
+    help: "The size of the caustic net's own cells, as a fraction of Wave scale — independent of how big the visible waves themselves look. Real caustics are much finer-grained than the swell that makes them, so this defaults well below 1. Raise it for a coarser, larger-celled net; lower it for a finer mesh.",
   },
   causticNetting: {
     type: 'float',
@@ -372,10 +378,10 @@ export const WATER_PARAMS = Object.freeze({
     max: 1,
     step: 0.01,
     // Matches WATER_CAUSTICS_NETTING (water-field.js).
-    default: 0.3,
+    default: 0.15,
     category: 'Light',
     label: 'Caustic netting',
-    help: 'Blends in a second, finer caustic layer so the pattern genuinely crosses itself into a net rather than reading as one wavy bright line — real shallow water shows several overlapping ripple scales at once. 0 is a single layer only. Costs extra render time whenever caustics are on, regardless of this value, so pull it back first if caustics ever need to be cheaper.',
+    help: 'Blends in a second, finer caustic net so the pattern reads as several overlapping cell sizes rather than one uniform mesh — real shallow water shows several overlapping ripple scales at once. 0 is a single layer only. Costs extra render time whenever caustics are on, regardless of this value, so pull it back first if caustics ever need to be cheaper.',
   },
   // ⚠️ NEW (2026-08-23) — was a baked module constant (WATER_TIER5_REFRACT_PX,
   // water-render.js) for tier 5's whole first day; author, live: "give me
@@ -1367,9 +1373,9 @@ export const WATER_PRESETS = Object.freeze({
     // caustics' own look controls and has no author-tuned value of its own
     // yet (see WATER_PARAMS.causticSharpness/causticScale/causticNetting's
     // own docs).
-    causticSharpness: 0.6,
-    causticScale: 0.4,
-    causticNetting: 0.3,
+    causticSharpness: 0.75,
+    causticScale: 0.5,
+    causticNetting: 0.15,
     // NEW (2026-08-23) — matches the schema default; this preset predates
     // refraction becoming a live param and has no author-tuned value of its
     // own yet (see WATER_PARAMS.refractStrengthPx's own doc for why a

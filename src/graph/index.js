@@ -53,3 +53,4 @@ export { evaluatePassHealth, breakerCircuits } from './pass-health.js';
 export { ThreeAllocator, LAW_MAX_WORLD_RES_DIM, LAW_MAX_SCREEN_DIM } from './three-allocator.js';
 export { planFrame, runPassPlan } from './run-frame.js';
 export { RenderScaleGovernor, computeRenderSize, SCALE_LADDER, FRAME_BUDGET_MS } from './v3-perf.js';
+export { createFrameCostSignal } from './render-cost-signal.js';

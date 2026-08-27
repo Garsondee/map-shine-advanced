@@ -31,6 +31,10 @@ export {
   // it; this one reads the GPU's own timestamps per render pass and does not.
   setVtPanViewerGpuZoneTimer,
   getVtPanViewerGpuZoneStatus,
+  // RENDER-SCALE GOVERNOR (2026-08-27) — the player's own resolution-quality
+  // setting (Auto = governor-controlled, or a fixed rung) and its live state.
+  setVtPanViewerRenderScaleSetting,
+  getVtPanViewerRenderScaleState,
   readVtPanViewerRenderInfo,
   readVtPanViewerDrawCallsOnly,
   readVtPanViewerTriangleCountOnly,

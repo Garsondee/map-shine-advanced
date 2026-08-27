@@ -141,7 +141,18 @@ import {
   DEPTH_PASS_FAR,
 } from './scene-depth.js';
 import { computeDepthProxyMaterialSignature, createDepthProxyMaterialPool } from './depth-proxy-material-pool.js';
-import { ThreeAllocator, PASSES, planFrame, runPassPlan } from '../graph/index.js';
+import {
+  ThreeAllocator,
+  PASSES,
+  planFrame,
+  runPassPlan,
+  RenderScaleGovernor,
+  computeRenderSize,
+  SCALE_LADDER,
+  FRAME_BUDGET_MS,
+  createFrameCostSignal,
+} from '../graph/index.js';
+import { resolvePresentPixelRatio, resolveInternalScale } from './render-scale-policy.js';
 import { PROBE_CORNERS, classifyPixel, diagnoseOrientation } from '../diag/orientation-probe.js';
 import { decodeHalfFloatRgba, decodeByteRgba, diffProbeBuffers } from '../diag/pixel-probe.js';
 import { createGpuProbe } from '../diag/gpu-probe.js';
@@ -1482,8 +1493,7 @@ export async function startVtPanViewer({
     // player's own Foundry setting can lower it further (still respected —
     // this is a ceiling, never a floor) but can never push MSA past it.
     const foundryResolution = globalThis.canvas?.app?.renderer?.resolution;
-    const pixelRatio =
-      Number.isFinite(foundryResolution) && foundryResolution > 0 ? Math.min(foundryResolution, MAX_PIXEL_RATIO) : 1;
+    const pixelRatio = resolvePresentPixelRatio(foundryResolution, MAX_PIXEL_RATIO);
     renderer.setPixelRatio(pixelRatio);
     renderer.setSize(canvasW, canvasH, false);
 
@@ -1512,6 +1522,42 @@ export async function startVtPanViewer({
     const drawBufSize = renderer.getDrawingBufferSize(new THREE.Vector2());
     let drawBufW = drawBufSize.width;
     let drawBufH = drawBufSize.height;
+
+    // ============================================================================
+    // THE INTERNAL TIER — RENDER-SCALE GOVERNOR (2026-08-27, see MAX_PIXEL_RATIO's
+    // own comment above for the incident this answers)
+    // ============================================================================
+    // Two tiers, not one: PRESENT (drawBufW/H, just above — the real drawing
+    // buffer, Foundry-mirrored, capped, never touched again after startup/resize)
+    // vs INTERNAL (internalW/H, here — what MSA actually renders before the
+    // present pass's already-free bilinear upscale). `render-scale-policy.js`'s
+    // own header has the full account of why this split exists at all.
+    //
+    // The governor is constructed unconditionally (cheap — pure JS state, no
+    // GPU/DOM) and starts at the TOP of its ladder (scale 1.0 = internal ==
+    // present, no resampling softness) — a fresh session's worst case is bounded
+    // by MAX_PIXEL_RATIO alone until real frames accumulate, never unbounded.
+    // `renderScaleUserSetting` seeds 'auto' and is pushed the real persisted
+    // value by `setVtPanViewerRenderScaleSetting` shortly after boot (mirrors
+    // how every other live-settable knob in this file starts at a safe default
+    // and gets corrected once boot.js reads the real setting) — never left
+    // unseeded, since 'auto' unseeded is ALSO the correct safe default.
+    const renderScaleGovernor = new RenderScaleGovernor({ frameBudgetMs: FRAME_BUDGET_MS });
+    // Fed from `renderFrame`'s own `gapMs` (see `render-cost-signal.js`'s own
+    // header for why THAT signal, and not the real per-pass GPU zone timers).
+    const renderScaleCostSignal = createFrameCostSignal();
+    let renderScaleUserSetting = 'auto';
+    /** @returns {number} the scale `resizeInternalTargets` should use RIGHT NOW. */
+    const resolveCurrentInternalScale = () =>
+      resolveInternalScale(renderScaleUserSetting, renderScaleGovernor.scale, SCALE_LADDER);
+    const initialInternalSize = computeRenderSize(drawBufW, drawBufH, resolveCurrentInternalScale());
+    /** Device pixels — what every INTERNAL-tier target (scene.color, scene.
+     * illum, scene.lit, scene.coloration, scene.colorMapOnly, scene.
+     * pointLightMerged, scene.depth, occlusion.mask, vision.mask, the bloom/DOF
+     * mip chains) is actually sized to. Distinct from drawBufW/H (the PRESENT
+     * tier, just above) — see this block's own header. */
+    let internalW = initialInternalSize.width;
+    let internalH = initialInternalSize.height;
 
     // The texture cap the device ACTUALLY granted (see resolveRendererRequiredLimits
     // above + texture-limits.js). Whole-image mode plans each image into tiles
@@ -1782,11 +1828,12 @@ export async function startVtPanViewer({
       },
     });
     const describeSceneColor = () => ({
-      // Device pixels (drawBufW/H), NOT CSS pixels (canvasW/H) — see this
-      // function's siting, right after where drawBufW/H is computed, for why
-      // the distinction is load-bearing (the pixel-ratio-parity fix).
-      resolvedW: drawBufW,
-      resolvedH: drawBufH,
+      // INTERNAL tier — device pixels at the render-scale governor's CURRENT
+      // scale, NOT the drawing buffer (present tier) and NOT CSS pixels
+      // (canvasW/H). See the "THE INTERNAL TIER" block above internalW/H's own
+      // declaration for the full account of why this split exists.
+      resolvedW: internalW,
+      resolvedH: internalH,
       // O(screen), not O(world) — sized from the drawing buffer, so it scales
       // with the player's monitor and never with the map. See the allocator's
       // own note on why this is NOT `allowWorldScale`.
@@ -1816,7 +1863,7 @@ export async function startVtPanViewer({
     // attachment cannot affect a single pixel; depth state is orthogonal to
     // colour output when both are off.
     const describeSceneColorMrt = () => ({
-      ...describeSceneAttrMrt({ THREE, resolvedW: drawBufW, resolvedH: drawBufH }),
+      ...describeSceneAttrMrt({ THREE, resolvedW: internalW, resolvedH: internalH }),
       depthTexture: true,
       depthTextureType: THREE.FloatType,
     });
@@ -1827,7 +1874,7 @@ export async function startVtPanViewer({
     // never sharing scene.color's attachments — see `runSceneDepthPass`'s own
     // header for why this pass needs a REAL depth TEST, which the rest of
     // this renderer deliberately runs with `depthTest:false` everywhere.
-    const describeSceneDepth = () => describeSceneDepthTarget({ THREE, resolvedW: drawBufW, resolvedH: drawBufH });
+    const describeSceneDepth = () => describeSceneDepthTarget({ THREE, resolvedW: internalW, resolvedH: internalH });
     const sceneDepth = allocator.create('scene.depth', describeSceneDepth());
     // Renderer-global safe default: every material that doesn't declare its
     // own `mrtNode` writes `attr = vec4(0,0,0,0)` for free — zero changes to
@@ -1872,7 +1919,7 @@ export async function startVtPanViewer({
     // existence cannot affect a single pixel.
     const scenePointLightMerged = allocator.create(
       'scene.pointLightMerged',
-      describePointLightMergedMrt({ THREE, resolvedW: drawBufW, resolvedH: drawBufH })
+      describePointLightMergedMrt({ THREE, resolvedW: internalW, resolvedH: internalH })
     );
 
     // `scene.colorMapOnly` — the dim-explored-zone slice's map-only capture.
@@ -1892,7 +1939,7 @@ export async function startVtPanViewer({
     // gives this target a second, real 'attr' attachment so the match
     // succeeds; its contents are simply never read by anything.
     const describeSceneColorMapOnlyMrt = () =>
-      describeSceneAttrMrt({ THREE, resolvedW: drawBufW, resolvedH: drawBufH });
+      describeSceneAttrMrt({ THREE, resolvedW: internalW, resolvedH: internalH });
     const sceneColorMapOnly = allocator.create('scene.colorMapOnly', describeSceneColorMapOnlyMrt());
 
     // ========================================================================
@@ -2461,7 +2508,7 @@ export async function startVtPanViewer({
     // subsystem's own 1×1 default — a screenSized target with no real size at
     // create() renders nothing useful until its first resize() call, and (see
     // reallocateScreenSizedTargets below) had none at all until 2026-08-15.
-    const visionMask = createVisionMaskSubsystem({ THREE, allocator, resolvedW: drawBufW, resolvedH: drawBufH });
+    const visionMask = createVisionMaskSubsystem({ THREE, allocator, resolvedW: internalW, resolvedH: internalH });
     /** The world rect the explored buffer covers, pushed to the gate shader.
      *  Kept in lockstep with `visionMask.setExploredRect` — two copies of one
      *  rect is exactly how a sampling offset gets born, so both are written
@@ -2743,9 +2790,10 @@ export async function startVtPanViewer({
       filter: 'linear',
       depth: false,
     });
-    // Mip k covers ceil(drawBuf / 2^(k+1)): m0 = half-res, each step halves again.
-    const bloomMipW = (k) => Math.max(1, Math.ceil(drawBufW / 2 ** (k + 1)));
-    const bloomMipH = (k) => Math.max(1, Math.ceil(drawBufH / 2 ** (k + 1)));
+    // Mip k covers ceil(internal / 2^(k+1)): m0 = half-res, each step halves
+    // again — INTERNAL tier, tracks the governor, not the drawing buffer.
+    const bloomMipW = (k) => Math.max(1, Math.ceil(internalW / 2 ** (k + 1)));
+    const bloomMipH = (k) => Math.max(1, Math.ceil(internalH / 2 ** (k + 1)));
     const bloomMips = [];
     for (let k = 0; k < BLOOM_MIP_COUNT; k++) {
       bloomMips.push(allocator.create(`bloom.mip${k}`, describeBloomMip(bloomMipW(k), bloomMipH(k))));
@@ -2793,10 +2841,11 @@ export async function startVtPanViewer({
       filter: 'linear',
       depth: false,
     });
-    // Mip k covers ceil(drawBuf / 2^(k+1)): m0 = half-res, each step halves
-    // again — the SAME sizing convention bloom's own mip chain uses.
-    const dofMipW = (k) => Math.max(1, Math.ceil(drawBufW / 2 ** (k + 1)));
-    const dofMipH = (k) => Math.max(1, Math.ceil(drawBufH / 2 ** (k + 1)));
+    // Mip k covers ceil(internal / 2^(k+1)): m0 = half-res, each step halves
+    // again — the SAME sizing convention bloom's own mip chain uses, INTERNAL
+    // tier (tracks the governor, not the drawing buffer).
+    const dofMipW = (k) => Math.max(1, Math.ceil(internalW / 2 ** (k + 1)));
+    const dofMipH = (k) => Math.max(1, Math.ceil(internalH / 2 ** (k + 1)));
     const dofMips = [];
     for (let k = 0; k < DOF_MIP_COUNT; k++) {
       dofMips.push(allocator.create(`dof.mip${k}`, describeDofMip(dofMipW(k), dofMipH(k))));
@@ -7543,9 +7592,9 @@ export async function startVtPanViewer({
     //   G = written per-frame by real token discs.
     //   B/A = 1 always (VISION/SURFACE not built) -> step() -> never occluded.
     const describeOcclusionMask = () => ({
-      // Device pixels — see describeSceneColor's note (same pixel-ratio-parity fix).
-      resolvedW: drawBufW,
-      resolvedH: drawBufH,
+      // INTERNAL tier — see describeSceneColor's note (same render-scale split).
+      resolvedW: internalW,
+      resolvedH: internalH,
       screenSized: true,
       type: THREE.UnsignedByteType,
       colorSpace: THREE.NoColorSpace,
@@ -12255,6 +12304,48 @@ export async function startVtPanViewer({
         // sample landing after a long stall could find its own window's worst
         // frame already shifted out.
         if (gapMs > maxFrameGapSinceSettleSampleMs) maxFrameGapSinceSettleSampleMs = gapMs;
+        // RENDER-SCALE GOVERNOR FEED (2026-08-27) — see MAX_PIXEL_RATIO's own
+        // comment (near drawBufW/H) and render-cost-signal.js's own header for
+        // the full account of why `gapMs`, not the real per-pass GPU zone
+        // timers. HELD (frozen, no streak evidence accumulated, AND the cost
+        // EMA is not fed at all — see below) whenever the scene itself isn't
+        // settled yet — `settleTracker` is already sampled every
+        // SETTLE_SAMPLE_EVERY_FRAMES frames by `sampleSceneSettle` below for
+        // exactly this "is it safe to trust a measurement right now" question;
+        // reusing it here rather than hand-wiring setHold() at every
+        // floor-switch/scene-load call site. `null` (before the tracker's own
+        // first sample) reads as held — conservative by default, matching a
+        // fresh session's governor starting at the SAFE top of its ladder
+        // (internalW/H's own comment) rather than an unproven low one.
+        //
+        // TAB-BACKGROUNDING is folded in HERE, as a plain synchronous
+        // `document.hidden` read on the SAME per-frame call site — NOT a
+        // second, independent `visibilitychange`-driven `setHold()` call. Two
+        // callers racing to set the SAME hold flag would fight every frame
+        // (this per-frame call would immediately un-hold whatever a separate
+        // event handler just set the instant settleState next reads settled).
+        // One caller, one combined condition, every frame — no race possible.
+        const settleState = settleTracker.read();
+        const tabHidden = document.hidden === true;
+        const renderScaleHeld = tabHidden || !settleState?.settled;
+        renderScaleGovernor.setHold(
+          renderScaleHeld,
+          tabHidden ? 'tab-hidden' : (settleState?.waitingFor?.[0] ?? 'settling')
+        );
+        // The EMA itself is only fed while NOT held — a tab returning from
+        // hours backgrounded produces a `gapMs` in the SECONDS, and folding
+        // that into the cost signal would poison it for many frames after
+        // hold releases, even though the governor's own `update()` already
+        // ignores `cost` while held (its `_holdActive` early-return, before
+        // `cost` is ever read) — this guard keeps the EMA itself honest too,
+        // not just the governor's momentary decision.
+        if (!renderScaleHeld) {
+          renderScaleCostSignal.update(gapMs);
+          const renderScaleStep = renderScaleGovernor.update(renderScaleCostSignal.costMs());
+          if (renderScaleStep.changed) requestInternalRescale();
+        } else {
+          renderScaleGovernor.update(0); // keeps streak/cooldown bookkeeping current; cost is ignored while held
+        }
         if (gapMs > HITCH_THRESHOLD_MS) {
           hitchLog.push({
             atMs: Math.round(now),
@@ -14894,9 +14985,99 @@ export async function startVtPanViewer({
     // handler is cheap and resize events are coarse.
     let resizePending = false;
     /**
-     * Re-derive the drawing buffer from the CURRENT canvasW/canvasH +
-     * pixelRatio and resize every screen-sized target to match. Called from
-     * `onResize`'s queued microtask below.
+     * Recompute internalW/H from the CURRENT drawBufW/H + the CURRENT render-
+     * scale setting/governor decision, and resize every INTERNAL-tier target to
+     * match. Split out from `reallocateScreenSizedTargets` (2026-08-27) so a
+     * governor-driven scale step — no CSS resize, `drawBufW/H` unchanged — can
+     * resize the internal tier WITHOUT paying `renderer.setSize()`'s own cost,
+     * which belongs to the present tier and has nothing to do with a scale-only
+     * change. Called from `reallocateScreenSizedTargets` below (after IT
+     * refreshes drawBufW/H) and from `requestInternalRescale`'s own queued
+     * microtask (mirrors `onResize`'s pending-flag pattern one section down).
+     */
+    async function resizeInternalTargets() {
+      const resized = computeRenderSize(drawBufW, drawBufH, resolveCurrentInternalScale());
+      internalW = resized.width;
+      internalH = resized.height;
+      // buf:scene.color tracks the INTERNAL tier — that IS what screenSized
+      // means now (see "THE INTERNAL TIER" block, near drawBufW/H's own
+      // declaration, for the present-vs-internal split this answers).
+      // `allocator.resize()` re-enforces the law on the new size (its own doc:
+      // "a resize storm can't smuggle a world-res target past the law that
+      // create() already enforced"). `RenderTarget.setSize()` only mutates
+      // width/height on the EXISTING texture array (verified against the
+      // vendored source) — it never reconstructs attachments or re-reads
+      // `desc.attachments`, so this resize keeps attachment 1's name/type/
+      // filter exactly as `create()` set them. The MRT descriptor is passed
+      // anyway (not the plain single-attachment one) so the keyhole-law check
+      // sees the SAME shape this target was actually created with.
+      allocator.resize(sceneColor, internalW, internalH, describeSceneColorMrt());
+      // buf:scene.depth tracks the internal tier too — same screenSized law.
+      // The depth TEXTURE's own dimensions are NOT touched by
+      // `RenderTarget#setSize()` directly (verified against the vendored
+      // source — it only mutates `this.textures[]`, never `this.depthTexture`),
+      // but the WebGPU backend re-reads the render target's OWN current
+      // width/height and re-syncs the depth texture's `.image` dimensions
+      // to match, lazily, the next time this target is actually rendered to
+      // (three.webgpu.js's own render-target-preparation code) — so this
+      // resize call is still sufficient, just via a different mechanism
+      // than the eager one the colour attachment gets.
+      allocator.resize(sceneDepth, internalW, internalH, describeSceneDepth());
+      // light.accumulate's targets track the internal tier too (same
+      // screenSized law). setSize mutates textures in place, so the samplers
+      // stay valid; rebind* only flag needsUpdate.
+      allocator.resize(sceneIllum, internalW, internalH, describeSceneColor());
+      allocator.resize(sceneLit, internalW, internalH, describeSceneColor());
+      allocator.resize(sceneColoration, internalW, internalH, describeSceneColor());
+      allocator.resize(sceneColorMapOnly, internalW, internalH, describeSceneColorMapOnlyMrt());
+      allocator.resize(
+        scenePointLightMerged,
+        internalW,
+        internalH,
+        describePointLightMergedMrt({ THREE, resolvedW: internalW, resolvedH: internalH })
+      );
+      // post.bloom's mip chain tracks the internal tier too — each mip a
+      // fixed fraction of it. setSize mutates the SAME texture object in place
+      // (as for scene.color above), so the composite material's baked
+      // texture(bloomMips[0/3].texture) nodes stay valid — no rebind needed.
+      for (let k = 0; k < BLOOM_MIP_COUNT; k++) {
+        allocator.resize(bloomMips[k], bloomMipW(k), bloomMipH(k), describeBloomMip(bloomMipW(k), bloomMipH(k)));
+      }
+      // post.dof's mip chain tracks the internal tier too — same reasoning
+      // as bloom's own mip chain just above (setSize mutates the SAME
+      // texture object in place, so the composite material's baked mip
+      // texture nodes stay valid — no rebind needed).
+      for (let k = 0; k < DOF_MIP_COUNT; k++) {
+        allocator.resize(dofMips[k], dofMipW(k), dofMipH(k), describeDofMip(dofMipW(k), dofMipH(k)));
+      }
+      rebindPresent();
+      rebindLighting();
+      // buf:occlusion tracks the internal tier too — same reasoning. No
+      // rebind needed afterward: RenderTarget#setSize (three.webgpu.js:4934)
+      // mutates the SAME texture object's .image dimensions in place rather
+      // than replacing it, so every material's already-baked `texture(
+      // occlusionMask.texture, screenUV)` node keeps pointing at the right
+      // object — verified against the vendored source before relying on it.
+      allocator.resize(occlusionMask.rt, internalW, internalH, describeOcclusionMask());
+      // buf:scene.visionMask tracks the internal tier too (screenSized:
+      // true, same law) — the subsystem owns its own descriptor, so this is
+      // a one-line call rather than a hand-copied describe*() here. Found
+      // missing 2026-08-15 while chasing a live report of the gate going
+      // solid black after the player panned/zoomed: every OTHER
+      // screen-sized target above was already in this list, this one never
+      // was, so it stayed frozen at whatever size existed when the viewer
+      // first constructed while everything it composites against moved on.
+      visionMask.resize(internalW, internalH);
+      await scheduleResidencyUpdate().catch((err) => console.error('[vt-pan-viewer] resize residency failed:', err));
+    }
+    /**
+     * Re-derive the drawing buffer (PRESENT tier) from the CURRENT
+     * canvasW/canvasH + pixelRatio, then resize every internal-tier target to
+     * match via `resizeInternalTargets`. Called from `onResize`'s queued
+     * microtask below — a REAL CSS resize, the only thing that changes
+     * drawBufW/H. A governor-driven scale-only change (drawBufW/H unchanged)
+     * goes through `requestInternalRescale` instead, which skips
+     * `renderer.setSize()` entirely — see `resizeInternalTargets`'s own header.
      */
     async function reallocateScreenSizedTargets() {
       renderer.setSize(canvasW, canvasH, false);
@@ -14906,76 +15087,21 @@ export async function startVtPanViewer({
       const resized = renderer.getDrawingBufferSize(new THREE.Vector2());
       drawBufW = resized.width;
       drawBufH = resized.height;
-      // buf:scene.color tracks the drawing buffer — that IS what screenSized
-      // means. `allocator.resize()` re-enforces the law on the new size
-      // (its own doc: "a resize storm can't smuggle a world-res target past
-      // the law that create() already enforced"). Device pixels (drawBufW/H),
-      // matching describeSceneColorMrt's own resolvedW/H — see its note.
-      // `RenderTarget.setSize()` only mutates width/height on the EXISTING
-      // texture array (verified against the vendored source) — it never
-      // reconstructs attachments or re-reads `desc.attachments`, so this
-      // resize keeps attachment 1's name/type/filter exactly as `create()`
-      // set them. The MRT descriptor is passed anyway (not the plain
-      // single-attachment one) so the keyhole-law check sees the SAME
-      // shape this target was actually created with.
-      allocator.resize(sceneColor, drawBufW, drawBufH, describeSceneColorMrt());
-      // buf:scene.depth tracks the drawing buffer too — same screenSized
-      // law. The depth TEXTURE's own dimensions are NOT touched by
-      // `RenderTarget#setSize()` directly (verified against the vendored
-      // source — it only mutates `this.textures[]`, never `this.depthTexture`),
-      // but the WebGPU backend re-reads the render target's OWN current
-      // width/height and re-syncs the depth texture's `.image` dimensions
-      // to match, lazily, the next time this target is actually rendered to
-      // (three.webgpu.js's own render-target-preparation code) — so this
-      // resize call is still sufficient, just via a different mechanism
-      // than the eager one the colour attachment gets.
-      allocator.resize(sceneDepth, drawBufW, drawBufH, describeSceneDepth());
-      // light.accumulate's targets track the drawing buffer too (same
-      // screenSized law). setSize mutates textures in place, so the samplers
-      // stay valid; rebind* only flag needsUpdate.
-      allocator.resize(sceneIllum, drawBufW, drawBufH, describeSceneColor());
-      allocator.resize(sceneLit, drawBufW, drawBufH, describeSceneColor());
-      allocator.resize(sceneColoration, drawBufW, drawBufH, describeSceneColor());
-      allocator.resize(sceneColorMapOnly, drawBufW, drawBufH, describeSceneColorMapOnlyMrt());
-      allocator.resize(
-        scenePointLightMerged,
-        drawBufW,
-        drawBufH,
-        describePointLightMergedMrt({ THREE, resolvedW: drawBufW, resolvedH: drawBufH })
-      );
-      // post.bloom's mip chain tracks the drawing buffer too — each mip a
-      // fixed fraction of it. setSize mutates the SAME texture object in place
-      // (as for scene.color above), so the composite material's baked
-      // texture(bloomMips[0/3].texture) nodes stay valid — no rebind needed.
-      for (let k = 0; k < BLOOM_MIP_COUNT; k++) {
-        allocator.resize(bloomMips[k], bloomMipW(k), bloomMipH(k), describeBloomMip(bloomMipW(k), bloomMipH(k)));
-      }
-      // post.dof's mip chain tracks the drawing buffer too — same reasoning
-      // as bloom's own mip chain just above (setSize mutates the SAME
-      // texture object in place, so the composite material's baked mip
-      // texture nodes stay valid — no rebind needed).
-      for (let k = 0; k < DOF_MIP_COUNT; k++) {
-        allocator.resize(dofMips[k], dofMipW(k), dofMipH(k), describeDofMip(dofMipW(k), dofMipH(k)));
-      }
-      rebindPresent();
-      rebindLighting();
-      // buf:occlusion tracks the drawing buffer too — same reasoning. No
-      // rebind needed afterward: RenderTarget#setSize (three.webgpu.js:4934)
-      // mutates the SAME texture object's .image dimensions in place rather
-      // than replacing it, so every material's already-baked `texture(
-      // occlusionMask.texture, screenUV)` node keeps pointing at the right
-      // object — verified against the vendored source before relying on it.
-      allocator.resize(occlusionMask.rt, drawBufW, drawBufH, describeOcclusionMask());
-      // buf:scene.visionMask tracks the drawing buffer too (screenSized:
-      // true, same law) — the subsystem owns its own descriptor, so this is
-      // a one-line call rather than a hand-copied describe*() here. Found
-      // missing 2026-08-15 while chasing a live report of the gate going
-      // solid black after the player panned/zoomed: every OTHER
-      // screen-sized target above was already in this list, this one never
-      // was, so it stayed frozen at whatever size existed when the viewer
-      // first constructed while everything it composites against moved on.
-      visionMask.resize(drawBufW, drawBufH);
-      await scheduleResidencyUpdate().catch((err) => console.error('[vt-pan-viewer] resize residency failed:', err));
+      await resizeInternalTargets();
+    }
+    /** Pending flag for a governor-driven scale step — mirrors `resizePending`/
+     * `onResize` exactly, just triggered by `internalScale` changing instead of
+     * the CSS box. Fire-and-forget from `renderFrame` whenever
+     * `renderScaleGovernor.update(...)` reports `changed:true`. */
+    let internalRescalePending = false;
+    function requestInternalRescale() {
+      if (internalRescalePending || !_active) return;
+      internalRescalePending = true;
+      queueMicrotask(async () => {
+        internalRescalePending = false;
+        if (!_active) return;
+        await resizeInternalTargets();
+      });
     }
     function onResize() {
       if (resizePending || !_active) return;
@@ -16498,6 +16624,36 @@ export async function startVtPanViewer({
       /** Perf profile: what the GPU zone timer can and did measure. */
       getGpuZoneStatus() {
         return gpuZoneTimer ? gpuZoneTimer.getStatus() : { method: 'none', capable: false, reason: 'no profiler seam' };
+      },
+      /**
+       * RENDER-SCALE SETTING (2026-08-27) — the player's own choice: `'auto'`
+       * (governor-controlled, the default) or a fixed rung matching one of
+       * `SCALE_LADDER`'s values as a string (e.g. `'0.75'`). Validated by
+       * `resolveInternalScale` (`render-scale-policy.js`) on every read — an
+       * invalid/tampered value never reaches the renderer, it just falls back
+       * to native (scale 1), same defensive posture as `pixelRatio`'s own
+       * `resolvePresentPixelRatio` fallback. Live-apply, no restart needed:
+       * requests its own reallocation immediately, the same path a governor
+       * step uses.
+       */
+      setRenderScaleSetting(value) {
+        renderScaleUserSetting = typeof value === 'string' ? value : 'auto';
+        requestInternalRescale();
+        return { userSetting: renderScaleUserSetting, resolvedInternalScale: resolveCurrentInternalScale() };
+      },
+      /** Perf/diagnostics: the render-scale governor's current state plus the
+       * present/internal sizes actually in effect right now. */
+      getRenderScaleState() {
+        return {
+          userSetting: renderScaleUserSetting,
+          resolvedInternalScale: resolveCurrentInternalScale(),
+          governor: renderScaleGovernor.state(),
+          internalW,
+          internalH,
+          drawBufW,
+          drawBufH,
+          pixelRatio,
+        };
       },
       /**
        * SHADER-REBUILD PROBE arm/disarm (diag/shader-rebuild-probe.js).
@@ -18794,6 +18950,29 @@ export function setVtPanViewerGpuZoneTimer(on) {
 export function getVtPanViewerGpuZoneStatus() {
   if (!_active) return { method: 'none', capable: false, reason: 'viewer not started' };
   return _active.getGpuZoneStatus();
+}
+
+/**
+ * Set the player's own render-scale choice (2026-08-27): `'auto'`
+ * (governor-controlled — the default) or a fixed rung as a string
+ * (e.g. `'0.75'`), matching one of `SCALE_LADDER`'s values. See
+ * `render-scale-policy.js`'s own header for the present/internal split this
+ * feeds. No-op `{skipped:true}` if nothing is running — the SAME value is
+ * re-applied once a fresh viewer starts via `boot.js`'s existing
+ * settings-`onChange` wiring, so a call that lands while nothing is active
+ * is never lost, just deferred to the next start.
+ * @param {string} value
+ */
+export function setVtPanViewerRenderScaleSetting(value) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setRenderScaleSetting(value);
+}
+
+/** The render-scale governor's current state + the present/internal sizes
+ * actually in effect right now — diagnostics/settings-panel readout. */
+export function getVtPanViewerRenderScaleState() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.getRenderScaleState();
 }
 
 /** `renderer.info` draw-call/triangle counters + drawing-buffer size. */

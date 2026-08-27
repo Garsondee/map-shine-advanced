@@ -18,6 +18,7 @@ import { run as runPassHealth } from './pass-health.test.mjs';
 import { run as runPassImpls } from './pass-impls.test.mjs';
 import { run as runRunFrame } from './run-frame.test.mjs';
 import { run as runV3Perf } from './v3-perf.test.mjs';
+import { run as runRenderCostSignal } from './render-cost-signal.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -61,6 +62,7 @@ const suites = [
   ['pass-impls', runPassImpls],
   ['run-frame', runRunFrame],
   ['v3-perf', runV3Perf],
+  ['render-cost-signal', runRenderCostSignal],
 ];
 
 for (const [name, fn] of suites) {

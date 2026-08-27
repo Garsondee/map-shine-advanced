@@ -840,6 +840,15 @@ export function createWaterSurfaceSubsystem({
       p.causticSharpness,
       p.causticScale,
       p.causticNetting,
+      p.causticWaveWarp,
+      p.causticWaveWarpCap,
+      p.causticGrowth,
+      p.causticGrowthCap,
+      p.causticGrowthScale,
+      p.causticGrowthSpeed,
+      p.causticEvolveSpeed,
+      p.causticJunctionWidth,
+      p.causticLineFloor,
       p.refractStrengthPx,
       p.foamEdgeSharpness,
       // ROH TUNING (2026-08-19) — bankWarp/flowWarp + buildFoamCellularStructure's own knobs.
@@ -887,6 +896,15 @@ export function createWaterSurfaceSubsystem({
       if (Number.isFinite(p.causticSharpness)) surface.setCausticSharpness(p.causticSharpness);
       if (Number.isFinite(p.causticScale)) surface.setCausticScale(p.causticScale);
       if (Number.isFinite(p.causticNetting)) surface.setCausticNetting(p.causticNetting);
+      if (Number.isFinite(p.causticWaveWarp)) surface.setCausticWaveWarp(p.causticWaveWarp);
+      if (Number.isFinite(p.causticWaveWarpCap)) surface.setCausticWaveWarpCap(p.causticWaveWarpCap);
+      if (Number.isFinite(p.causticGrowth)) surface.setCausticGrowth(p.causticGrowth);
+      if (Number.isFinite(p.causticGrowthCap)) surface.setCausticGrowthCap(p.causticGrowthCap);
+      if (Number.isFinite(p.causticGrowthScale)) surface.setCausticGrowthScale(p.causticGrowthScale);
+      if (Number.isFinite(p.causticGrowthSpeed)) surface.setCausticGrowthSpeed(p.causticGrowthSpeed);
+      if (Number.isFinite(p.causticEvolveSpeed)) surface.setCausticEvolveSpeed(p.causticEvolveSpeed);
+      if (Number.isFinite(p.causticJunctionWidth)) surface.setCausticJunctionWidth(p.causticJunctionWidth);
+      if (Number.isFinite(p.causticLineFloor)) surface.setCausticLineFloor(p.causticLineFloor);
       if (Number.isFinite(p.refractStrengthPx)) surface.setRefractStrengthPx(p.refractStrengthPx);
       if (Number.isFinite(p.foamEdgeSharpness)) surface.setFoamEdgeSharpness(p.foamEdgeSharpness);
       if (Number.isFinite(p.bankInfluence)) surface.setBankInfluence(p.bankInfluence);

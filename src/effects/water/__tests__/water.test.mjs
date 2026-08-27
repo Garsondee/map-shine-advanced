@@ -21,6 +21,15 @@ import {
   WATER_CAUSTICS_SHARPNESS,
   WATER_CAUSTICS_SCALE,
   WATER_CAUSTICS_NETTING,
+  WATER_CAUSTICS_WAVE_WARP_STRENGTH,
+  WATER_CAUSTICS_WAVE_WARP_CELLS,
+  WATER_CAUSTICS_GROWTH_STRENGTH,
+  WATER_CAUSTICS_GROWTH_CELLS,
+  WATER_CAUSTICS_GROWTH_FREQ,
+  WATER_CAUSTICS_GROWTH_TIME_SCALE,
+  WATER_CAUSTICS_EVOLVE_SPEED,
+  WATER_CAUSTICS_JUNCTION_FRACTION,
+  WATER_CAUSTICS_LINE_FLOOR,
 } from '../water-field.js';
 import { WATER_TIER3_SHADOW_RESPONSE, WATER_TIER3_GLOSSINESS, WATER_MIN_ROUGHNESS } from '../water-light.js';
 import { WATER_TIER4_SWASH_FOAM, WATER_TIER4_BREAK_FOAM, WATER_TIER4_CAUSTICS } from '../water-render.js';
@@ -40,8 +49,13 @@ export function run(t) {
     const dialsResult = validateDialsSchema(WATER_DIALS, WATER_PARAMS);
     ok(`WATER_DIALS validates against WATER_PARAMS (${dialsResult.errors.join('; ')})`, dialsResult.ok);
     ok(
-      'WATER_DIALS declares between 3 and 5 dials (U6 exit gate)',
-      Object.keys(WATER_DIALS).length >= 3 && Object.keys(WATER_DIALS).length <= 5
+      // ⚠️ RAISED 5 → 6 (2026-08-27, round 6) — a deliberate exception to
+      // U6's own "five dials" curation cap, not a silent creep: the author
+      // was explicitly offered "replace an existing dial" and "ROH only"
+      // as alternatives and chose "add a sixth" for Caustics. See
+      // `WATER_DIALS.caustics`'s own doc for the full reasoning.
+      'WATER_DIALS declares between 3 and 6 dials (U6 exit gate, +1 author-approved exception)',
+      Object.keys(WATER_DIALS).length >= 3 && Object.keys(WATER_DIALS).length <= 6
     );
   }
   ok("the effect's id is water", WATER.id === 'water');
@@ -244,6 +258,18 @@ export function run(t) {
     ['causticSharpness', WATER_CAUSTICS_SHARPNESS, 'WATER_CAUSTICS_SHARPNESS'],
     ['causticScale', WATER_CAUSTICS_SCALE, 'WATER_CAUSTICS_SCALE'],
     ['causticNetting', WATER_CAUSTICS_NETTING, 'WATER_CAUSTICS_NETTING'],
+    // === round 6 (2026-08-27) — the rest of caustics' mechanics, promoted
+    // to live wide-range sliders on the author's own "give me plenty of
+    // controls" request. Same one-number-two-homes discipline. ===
+    ['causticWaveWarp', WATER_CAUSTICS_WAVE_WARP_STRENGTH, 'WATER_CAUSTICS_WAVE_WARP_STRENGTH'],
+    ['causticWaveWarpCap', WATER_CAUSTICS_WAVE_WARP_CELLS, 'WATER_CAUSTICS_WAVE_WARP_CELLS'],
+    ['causticGrowth', WATER_CAUSTICS_GROWTH_STRENGTH, 'WATER_CAUSTICS_GROWTH_STRENGTH'],
+    ['causticGrowthCap', WATER_CAUSTICS_GROWTH_CELLS, 'WATER_CAUSTICS_GROWTH_CELLS'],
+    ['causticGrowthScale', WATER_CAUSTICS_GROWTH_FREQ, 'WATER_CAUSTICS_GROWTH_FREQ'],
+    ['causticGrowthSpeed', WATER_CAUSTICS_GROWTH_TIME_SCALE, 'WATER_CAUSTICS_GROWTH_TIME_SCALE'],
+    ['causticEvolveSpeed', WATER_CAUSTICS_EVOLVE_SPEED, 'WATER_CAUSTICS_EVOLVE_SPEED'],
+    ['causticJunctionWidth', WATER_CAUSTICS_JUNCTION_FRACTION, 'WATER_CAUSTICS_JUNCTION_FRACTION'],
+    ['causticLineFloor', WATER_CAUSTICS_LINE_FLOOR, 'WATER_CAUSTICS_LINE_FLOOR'],
   ]) {
     ok(`${key} is declared as a plain float`, WATER_PARAMS[key].type === 'float');
     ok(

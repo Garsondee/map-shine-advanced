@@ -269,6 +269,15 @@ import {
   WATER_CAUSTICS_SHARPNESS,
   WATER_CAUSTICS_SCALE,
   WATER_CAUSTICS_NETTING,
+  WATER_CAUSTICS_WAVE_WARP_STRENGTH,
+  WATER_CAUSTICS_WAVE_WARP_CELLS,
+  WATER_CAUSTICS_GROWTH_STRENGTH,
+  WATER_CAUSTICS_GROWTH_CELLS,
+  WATER_CAUSTICS_GROWTH_FREQ,
+  WATER_CAUSTICS_GROWTH_TIME_SCALE,
+  WATER_CAUSTICS_EVOLVE_SPEED,
+  WATER_CAUSTICS_JUNCTION_FRACTION,
+  WATER_CAUSTICS_LINE_FLOOR,
 } from './water-field.js';
 import {
   buildWaterSpecular,
@@ -1156,6 +1165,24 @@ export function buildWaterSurfaceMaterial({
   const uCausticSharpness = uniform(float(WATER_CAUSTICS_SHARPNESS));
   const uCausticScale = uniform(float(WATER_CAUSTICS_SCALE));
   const uCausticNetting = uniform(float(WATER_CAUSTICS_NETTING));
+  // ROH TUNING (2026-08-27, round 6) — the remaining caustics mechanics from
+  // rounds 3-5 (wave-linked distortion, growth/pull warp, lattice evolution
+  // speed, junction-brightness shaping), promoted from baked internal
+  // constants to live uniforms on the author's own explicit request ("give
+  // me controls for the ROH and FOH... plenty of controls with wide
+  // ranges") — the SAME request that put wide-range refraction controls in
+  // 2026-08-23 (see `causticSharpness`'s own schema neighbour above). See
+  // `water-field.js`'s own per-constant docs for the mechanism each one
+  // drives; the schema (`water.js`) carries the wide, explorable ranges.
+  const uCausticWaveWarp = uniform(float(WATER_CAUSTICS_WAVE_WARP_STRENGTH));
+  const uCausticWaveWarpCap = uniform(float(WATER_CAUSTICS_WAVE_WARP_CELLS));
+  const uCausticGrowth = uniform(float(WATER_CAUSTICS_GROWTH_STRENGTH));
+  const uCausticGrowthCap = uniform(float(WATER_CAUSTICS_GROWTH_CELLS));
+  const uCausticGrowthScale = uniform(float(WATER_CAUSTICS_GROWTH_FREQ));
+  const uCausticGrowthSpeed = uniform(float(WATER_CAUSTICS_GROWTH_TIME_SCALE));
+  const uCausticEvolveSpeed = uniform(float(WATER_CAUSTICS_EVOLVE_SPEED));
+  const uCausticJunctionWidth = uniform(float(WATER_CAUSTICS_JUNCTION_FRACTION));
+  const uCausticLineFloor = uniform(float(WATER_CAUSTICS_LINE_FLOOR));
   const uFoamTrail = uniform(float(foamTrail));
   const uFoamEdgeSharpness = uniform(float(foamEdgeSharpness));
   // THE FOAM BAND's REACH, derived from the author's own `depthScalePx` on the
@@ -1592,6 +1619,15 @@ export function buildWaterSurfaceMaterial({
       uCausticSharpness,
       uCausticScale,
       uCausticNetting,
+      uCausticWaveWarp,
+      uCausticWaveWarpCap,
+      uCausticGrowth,
+      uCausticGrowthCap,
+      uCausticGrowthScale,
+      uCausticGrowthSpeed,
+      uCausticEvolveSpeed,
+      uCausticJunctionWidth,
+      uCausticLineFloor,
       // TIER 4's SHOALING AND CAUSTICS ALSO RIDE TIER 2's FETCH — see
       // `water-field.js`'s own header on why both must live inside this call
       // rather than in a separate `if (activeTier >= 4)` block: shoaling has to
@@ -2743,6 +2779,86 @@ export function buildWaterSurfaceMaterial({
      * single-layer net. */
     setCausticNetting(v) {
       uCausticNetting.value = v;
+    },
+    /** WATER_PARAMS `causticWaveWarp` — how strongly the ACTUAL wave `slope`
+     * displaces the net's own query point (round 3's fix for "isn't
+     * distorted by the refraction"). 0 = no wave-linked distortion at all.
+     * `water-field.js#WATER_CAUSTICS_WAVE_WARP_STRENGTH`'s own doc has the
+     * one shader-lab-confirmed-safe value (0.6) this defaults to — past
+     * roughly 4 the net tore apart on a real render, so treat values much
+     * higher than the default as genuinely exploratory. */
+    setCausticWaveWarp(v) {
+      uCausticWaveWarp.value = v;
+    },
+    /** WATER_PARAMS `causticWaveWarpCap` — the hard ceiling on the warp
+     * above, in Worley CELL UNITS, however extreme `causticWaveWarp` and
+     * `chop` get together. Raising this past ~1 risks the query reading a
+     * NEIGHBOURING cell's own feature as if it were local — the net
+     * breaking apart rather than rippling, the same failure a too-high
+     * `causticWaveWarp` alone can cause. */
+    setCausticWaveWarpCap(v) {
+      uCausticWaveWarpCap.value = v;
+    },
+    /** WATER_PARAMS `causticGrowth` — how strongly cells expand/contract and
+     * pull on their neighbours (round 5's ask, a warp built as the GRADIENT
+     * of a smooth scalar field — see `water-field.js`'s own hand-derived
+     * doc for why that specific construction couples neighbouring cells).
+     * 0 = no breathing at all, a static net. */
+    setCausticGrowth(v) {
+      uCausticGrowth.value = v;
+    },
+    /** WATER_PARAMS `causticGrowthCap` — the hard ceiling on the growth warp
+     * above, in Worley CELL UNITS. Same role as `causticWaveWarpCap`, for
+     * the growth mechanism instead of the wave-linked one. */
+    setCausticGrowthCap(v) {
+      uCausticGrowthCap.value = v;
+    },
+    /** WATER_PARAMS `causticGrowthScale` — the growth potential field's own
+     * spatial frequency. LOW values (well under 1) make one peak/trough
+     * pair span several cells, so a growing cell visibly compresses a
+     * DIFFERENT neighbour — the "pull" the mechanism is named for. HIGH
+     * values shrink the potential down toward one cell's own size, which
+     * reads as each cell breathing in isolation rather than pulling
+     * anything. */
+    setCausticGrowthScale(v) {
+      uCausticGrowthScale.value = v;
+    },
+    /** WATER_PARAMS `causticGrowthSpeed` — how fast the growth potential's
+     * OWN peaks and troughs migrate, i.e. how quickly which cells are
+     * "currently growing" changes. 0 freezes the breathing pattern in
+     * place (still spatially varied, just not animating). */
+    setCausticGrowthSpeed(v) {
+      uCausticGrowthSpeed.value = v;
+    },
+    /** WATER_PARAMS `causticEvolveSpeed` — how fast TIME advances as the
+     * Worley lattice's OWN third axis (round 4's fix for "cells don't
+     * evolve"), i.e. how often the net's topology genuinely reshuffles —
+     * cells merging, splitting, reforming — as opposed to simply
+     * translating. 0 freezes the lattice (still 3-D under the hood, just
+     * sliced at a fixed Z). Push well past the default to see the net
+     * reform faster than a real wave field plausibly would — useful for
+     * finding the setting fast, even if the final choice is more modest. */
+    setCausticEvolveSpeed(v) {
+      uCausticEvolveSpeed.value = v;
+    },
+    /** WATER_PARAMS `causticJunctionWidth` — how wide the "near a genuine
+     * multi-cell junction" test reads, as a fraction of the edge width
+     * itself (round 4's fix for "brightness should concentrate at
+     * intersections"). Wider values light up more of each edge at full
+     * brightness, narrowing the CONTRAST between a junction and a plain
+     * edge stretch; push it toward `causticSharpness`'s own ceiling to make
+     * nearly the whole net read as "junction-bright". */
+    setCausticJunctionWidth(v) {
+      uCausticJunctionWidth.value = v;
+    },
+    /** WATER_PARAMS `causticLineFloor` — how dim an ordinary two-cell edge
+     * reads, relative to a full junction's own brightness of 1. 0 makes a
+     * plain edge invisible (only junctions show at all — a sparse net of
+     * bright points and the threads connecting them fade to nothing); 1
+     * makes the whole net read uniformly bright again (junction
+     * concentration effectively off). */
+    setCausticLineFloor(v) {
+      uCausticLineFloor.value = v;
     },
     // ── TIER 5 ────────────────────────────────────────────────────────────
     /** THE CAPTURE'S OWN WORLD RECT (`water-refraction-subsystem.js`'s

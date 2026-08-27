@@ -383,6 +383,115 @@ export const WATER_PARAMS = Object.freeze({
     label: 'Caustic netting',
     help: 'Blends in a second, finer caustic net so the pattern reads as several overlapping cell sizes rather than one uniform mesh — real shallow water shows several overlapping ripple scales at once. 0 is a single layer only. Costs extra render time whenever caustics are on, regardless of this value, so pull it back first if caustics ever need to be cheaper.',
   },
+  // ⚠️ NEW (2026-08-27, round 6) — the rest of caustics' own mechanics
+  // (rounds 3-5: wave-linked distortion, growth/pull breathing, lattice
+  // evolution speed, junction-brightness shaping), promoted from baked
+  // internal constants to live wide-range ROH sliders on the author's own
+  // explicit request: "give me controls for the ROH and FOH so that I can
+  // fine tune the caustics. Give me plenty of controls with wide ranges."
+  // Every one of these was shipped as a reasoned-but-unverified constant
+  // (the shader lab was explicitly set aside for rounds 4-5) — these
+  // sliders are what let the author himself find the right numbers rather
+  // than asking for another round each time a value turns out wrong.
+  causticWaveWarp: {
+    type: 'float',
+    min: 0,
+    max: 6,
+    step: 0.05,
+    // Matches WATER_CAUSTICS_WAVE_WARP_STRENGTH (water-field.js).
+    default: 0.6,
+    category: 'Light',
+    label: 'Caustic wave warp',
+    help: "How strongly the water's own real wave slope distorts the caustic net — this is what ties the net to the surface's actual motion rather than letting it read as a decal. 0 removes the link entirely (net ignores the waves). The shipped default (0.6) is the one value in this whole control group that has been checked against a real render; pushing well past it is genuinely exploratory — past roughly 4 the net can tear apart into a blobby mess instead of rippling. Caustic wave warp cap sets the hard ceiling this can't cross.",
+  },
+  causticWaveWarpCap: {
+    type: 'float',
+    min: 0.05,
+    max: 2,
+    step: 0.01,
+    // Matches WATER_CAUSTICS_WAVE_WARP_CELLS (water-field.js).
+    default: 0.4,
+    category: 'Light',
+    label: 'Caustic wave warp cap',
+    help: "The hard ceiling on Caustic wave warp's own displacement, in units of one caustic cell, however strong that slider or Surface chop get. Past roughly 1 the net's query point can start reading a neighbouring cell's own feature as if it were local, which reads as the net breaking apart rather than rippling — raise this only alongside a real check that it still looks like a net.",
+  },
+  causticGrowth: {
+    type: 'float',
+    min: 0,
+    max: 4,
+    step: 0.05,
+    // Matches WATER_CAUSTICS_GROWTH_STRENGTH (water-field.js).
+    default: 0.3,
+    category: 'Light',
+    label: 'Caustic growth',
+    help: 'How strongly caustic cells breathe — expanding at one point and visibly pulling territory from their neighbours as they do, the way real biological or foam cells compete for space. 0 is a static net that never breathes. This is NOT shader-lab verified at any value above the shipped default — it is a reasoned first pass, so treat pushing it hard as genuine exploration, not a known-safe range.',
+  },
+  causticGrowthCap: {
+    type: 'float',
+    min: 0.05,
+    max: 2,
+    step: 0.01,
+    // Matches WATER_CAUSTICS_GROWTH_CELLS (water-field.js).
+    default: 0.45,
+    category: 'Light',
+    label: 'Caustic growth cap',
+    help: "The hard ceiling on Caustic growth's own displacement, in units of one caustic cell. Same role as Caustic wave warp cap, for the breathing/pulling mechanism instead of the wave-linked one — raise it to let strong growth settings push further before being reined in.",
+  },
+  causticGrowthScale: {
+    type: 'float',
+    min: 0.05,
+    max: 3,
+    step: 0.01,
+    // Matches WATER_CAUSTICS_GROWTH_FREQ (water-field.js).
+    default: 0.35,
+    category: 'Light',
+    label: 'Caustic growth scale',
+    help: "How large an area breathes together. LOW values (well under 1) make one growing patch span several caustic cells, so a cell visibly growing at its neighbour's expense is easy to see — this is what makes Caustic growth read as cells PULLING on each other rather than each one just quietly wobbling alone. HIGH values shrink that patch down toward a single cell's own size, which reads as isolated breathing instead.",
+  },
+  causticGrowthSpeed: {
+    type: 'float',
+    min: 0,
+    max: 2,
+    step: 0.01,
+    // Matches WATER_CAUSTICS_GROWTH_TIME_SCALE (water-field.js).
+    default: 0.05,
+    category: 'Light',
+    label: 'Caustic growth speed',
+    help: 'How fast the breathing pattern itself migrates — which cells are currently growing versus shrinking keeps changing at this rate. 0 freezes which cells are growing (the net still looks breathed-on, it just stops changing which parts are doing the breathing). Kept slow by default on purpose: real cell growth reads as a rhythm, not a flicker.',
+  },
+  causticEvolveSpeed: {
+    type: 'float',
+    min: 0,
+    max: 3,
+    step: 0.01,
+    // Matches WATER_CAUSTICS_EVOLVE_SPEED (water-field.js).
+    default: 0.12,
+    category: 'Light',
+    label: 'Caustic evolve speed',
+    help: "How often the caustic net's own topology genuinely reshuffles — cells merging, splitting and reforming, not just sliding around. 0 freezes the net's shape entirely (it can still ripple via Caustic wave warp/growth, but the underlying cell layout stops changing). Push this well above the default to make the net reform fast enough to see the mechanism clearly, then pull it back to whatever reads as a plausible pace for real water.",
+  },
+  causticJunctionWidth: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    // Matches WATER_CAUSTICS_JUNCTION_FRACTION (water-field.js).
+    default: 0.55,
+    category: 'Light',
+    label: 'Caustic junction width',
+    help: "How much of each line, measured out from a genuine multi-cell junction, reads at full brightness before falling back to Caustic line floor's own dim level. Wider values blur the contrast between a junction and a plain edge stretch; narrow it toward 0 to make ONLY the tightest intersections pop, matching how real caustic light concentrates.",
+  },
+  causticLineFloor: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    // Matches WATER_CAUSTICS_LINE_FLOOR (water-field.js).
+    default: 0.3,
+    category: 'Light',
+    label: 'Caustic line floor',
+    help: "How dim a plain stretch of caustic line reads, away from any junction, relative to a junction's own full brightness of 1. 0 makes plain edges vanish entirely — only the brightest intersections and the faint threads between them show. 1 removes the concentration effect altogether, back to a uniformly bright net.",
+  },
   // ⚠️ NEW (2026-08-23) — was a baked module constant (WATER_TIER5_REFRACT_PX,
   // water-render.js) for tier 5's whole first day; author, live: "give me
   // some damn controls with wide ranges, at the moment I can't change the
@@ -734,6 +843,26 @@ export const WATER_DIALS = Object.freeze({
     default: 90,
     drives: {
       flowSpeedPx: { to: [0, 400], curve: 'linear' },
+    },
+  },
+  // SIXTH DIAL (2026-08-27, round 6) — a deliberate exception to the U6
+  // "five dials" cap above, added on the author's own explicit choice when
+  // asked how to expose caustics on the front strip (the alternative
+  // options — replace an existing dial, or ROH-only — were both offered and
+  // declined). `caustics` (the base gain) is the one caustics value simple
+  // and safe enough for FOH — it cannot make the net look structurally
+  // wrong the way sharpness/scale/growth/evolve-speed can, only stronger or
+  // weaker, which is exactly the "reach for it mid-session" test this
+  // file's own dial doctrine applies. The other twelve caustics params
+  // (three from round 1, nine from round 6) stay ROH-only on purpose —
+  // genuinely technical, most still not shader-lab-verified.
+  caustics: {
+    label: 'Caustics',
+    help: 'How much the shifting net of light plays across the riverbed — from none at all to a bright, busy net. The finer shape of the net (line thinness, cell size, how it breathes and evolves) lives in Advanced.',
+    range: [0, 1],
+    default: 1,
+    drives: {
+      caustics: { to: [0, 1], curve: 'linear' },
     },
   },
 });
@@ -1376,6 +1505,18 @@ export const WATER_PRESETS = Object.freeze({
     causticSharpness: 0.75,
     causticScale: 0.5,
     causticNetting: 0.15,
+    // NEW (2026-08-27, round 6) — matches the schema defaults; this preset
+    // predates the wave-warp/growth/evolution/junction controls and has no
+    // author-tuned values of its own yet.
+    causticWaveWarp: 0.6,
+    causticWaveWarpCap: 0.4,
+    causticGrowth: 0.3,
+    causticGrowthCap: 0.45,
+    causticGrowthScale: 0.35,
+    causticGrowthSpeed: 0.05,
+    causticEvolveSpeed: 0.12,
+    causticJunctionWidth: 0.55,
+    causticLineFloor: 0.3,
     // NEW (2026-08-23) — matches the schema default; this preset predates
     // refraction becoming a live param and has no author-tuned value of its
     // own yet (see WATER_PARAMS.refractStrengthPx's own doc for why a

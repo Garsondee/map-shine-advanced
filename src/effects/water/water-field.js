@@ -690,6 +690,34 @@ export const WATER_CAUSTICS_LINE_FLOOR = 0.3;
  * @param {*} [args.uCausticNetting] - float uniform, `WATER_PARAMS.
  *   causticNetting`. Blend weight for a second, finer Worley layer; `null`
  *   falls back to `WATER_CAUSTICS_NETTING`.
+ * @param {*} [args.uCausticWaveWarp] - float uniform, `WATER_PARAMS.
+ *   causticWaveWarp`. Strength of the wave-`slope`-linked distortion (round
+ *   3); `null` falls back to `WATER_CAUSTICS_WAVE_WARP_STRENGTH`.
+ * @param {*} [args.uCausticWaveWarpCap] - float uniform, `WATER_PARAMS.
+ *   causticWaveWarpCap`. Hard ceiling on the above, in cell units; `null`
+ *   falls back to `WATER_CAUSTICS_WAVE_WARP_CELLS`.
+ * @param {*} [args.uCausticGrowth] - float uniform, `WATER_PARAMS.
+ *   causticGrowth`. Strength of the gradient-of-a-potential growth/pull warp
+ *   (round 5); `null` falls back to `WATER_CAUSTICS_GROWTH_STRENGTH`.
+ * @param {*} [args.uCausticGrowthCap] - float uniform, `WATER_PARAMS.
+ *   causticGrowthCap`. Hard ceiling on the above, in cell units; `null`
+ *   falls back to `WATER_CAUSTICS_GROWTH_CELLS`.
+ * @param {*} [args.uCausticGrowthScale] - float uniform, `WATER_PARAMS.
+ *   causticGrowthScale`. The growth potential's own spatial frequency;
+ *   `null` falls back to `WATER_CAUSTICS_GROWTH_FREQ`.
+ * @param {*} [args.uCausticGrowthSpeed] - float uniform, `WATER_PARAMS.
+ *   causticGrowthSpeed`. How fast the growth potential's peaks/troughs
+ *   migrate; `null` falls back to `WATER_CAUSTICS_GROWTH_TIME_SCALE`.
+ * @param {*} [args.uCausticEvolveSpeed] - float uniform, `WATER_PARAMS.
+ *   causticEvolveSpeed`. How fast TIME advances as the Worley lattice's own
+ *   third axis (round 4); `null` falls back to `WATER_CAUSTICS_EVOLVE_SPEED`.
+ * @param {*} [args.uCausticJunctionWidth] - float uniform, `WATER_PARAMS.
+ *   causticJunctionWidth`. Width of the "near a genuine junction" test, as
+ *   a fraction of the edge width; `null` falls back to
+ *   `WATER_CAUSTICS_JUNCTION_FRACTION`.
+ * @param {*} [args.uCausticLineFloor] - float uniform, `WATER_PARAMS.
+ *   causticLineFloor`. How dim a plain edge reads relative to a junction's
+ *   own ceiling of 1; `null` falls back to `WATER_CAUSTICS_LINE_FLOOR`.
  * @returns {{foam: *, turbidity: *, slope: *, domainOffset: *,
  *   causticBrightness: *}} ⚠️ `foam` and `causticBrightness` are BOTH contracted
  *   to be exactly ZERO OUTSIDE THE WATER — not merely small, zero — because
@@ -742,6 +770,20 @@ export function buildWaterSurfaceField({
   uCausticSharpness = null,
   uCausticScale = null,
   uCausticNetting = null,
+  // ROH TUNING (2026-08-27, round 6) — the rest of caustics' mechanics
+  // (rounds 3-5), promoted from baked constants to live uniforms on the
+  // author's own request for "plenty of controls with wide ranges". Same
+  // `null`-falls-back-to-the-shipped-constant contract as every other ROH
+  // param in this function.
+  uCausticWaveWarp = null,
+  uCausticWaveWarpCap = null,
+  uCausticGrowth = null,
+  uCausticGrowthCap = null,
+  uCausticGrowthScale = null,
+  uCausticGrowthSpeed = null,
+  uCausticEvolveSpeed = null,
+  uCausticJunctionWidth = null,
+  uCausticLineFloor = null,
 }) {
   const {
     vec2,
@@ -762,6 +804,15 @@ export function buildWaterSurfaceField({
   const causticSharpnessNode = uCausticSharpness ?? float(WATER_CAUSTICS_SHARPNESS);
   const causticScaleNode = uCausticScale ?? float(WATER_CAUSTICS_SCALE);
   const causticNettingNode = uCausticNetting ?? float(WATER_CAUSTICS_NETTING);
+  const causticWaveWarpNode = uCausticWaveWarp ?? float(WATER_CAUSTICS_WAVE_WARP_STRENGTH);
+  const causticWaveWarpCapNode = uCausticWaveWarpCap ?? float(WATER_CAUSTICS_WAVE_WARP_CELLS);
+  const causticGrowthNode = uCausticGrowth ?? float(WATER_CAUSTICS_GROWTH_STRENGTH);
+  const causticGrowthCapNode = uCausticGrowthCap ?? float(WATER_CAUSTICS_GROWTH_CELLS);
+  const causticGrowthScaleNode = uCausticGrowthScale ?? float(WATER_CAUSTICS_GROWTH_FREQ);
+  const causticGrowthSpeedNode = uCausticGrowthSpeed ?? float(WATER_CAUSTICS_GROWTH_TIME_SCALE);
+  const causticEvolveSpeedNode = uCausticEvolveSpeed ?? float(WATER_CAUSTICS_EVOLVE_SPEED);
+  const causticJunctionWidthNode = uCausticJunctionWidth ?? float(WATER_CAUSTICS_JUNCTION_FRACTION);
+  const causticLineFloorNode = uCausticLineFloor ?? float(WATER_CAUSTICS_LINE_FLOOR);
 
   const tSec = timeMsNode.mul(float(1 / 1000));
 
@@ -1069,9 +1120,9 @@ export function buildWaterSurfaceField({
     // (never per-axis-clamped, which would distort direction) so however
     // extreme `chop` gets, this can perturb the query by a bounded number
     // of cells, never shear it unpredictably.
-    const waveWarpRaw = slope.mul(float(WATER_CAUSTICS_WAVE_WARP_STRENGTH));
+    const waveWarpRaw = slope.mul(causticWaveWarpNode);
     const waveWarpLen = length(waveWarpRaw);
-    const waveWarpCapScale = min(float(1), float(WATER_CAUSTICS_WAVE_WARP_CELLS).div(max(waveWarpLen, float(1e-4))));
+    const waveWarpCapScale = min(float(1), causticWaveWarpCapNode.div(max(waveWarpLen, float(1e-4))));
     const waveWarp = waveWarpRaw.mul(waveWarpCapScale);
 
     const netCellPreOrganic = worldXY.add(domainOffset).div(cellPx).add(waveWarp);
@@ -1161,11 +1212,11 @@ export function buildWaterSurfaceField({
     // a miss in this direction reads as "too subtle", the safe failure mode,
     // where a miss in the other direction reads as "net destroyed", round
     // 3's own `WAVE_WARP_STRENGTH=4` first guess.
-    const growthFreq = float(WATER_CAUSTICS_GROWTH_FREQ);
+    const growthFreq = causticGrowthScaleNode;
     const growthEps = float(WATER_CAUSTICS_GROWTH_EPS);
     const potentialAt = (p) =>
       mx_fractal_noise_vec3(
-        vec3(p.x.mul(growthFreq), p.y.mul(growthFreq), tSec.mul(float(WATER_CAUSTICS_GROWTH_TIME_SCALE))),
+        vec3(p.x.mul(growthFreq), p.y.mul(growthFreq), tSec.mul(causticGrowthSpeedNode)),
         2,
         2.0,
         0.5
@@ -1174,14 +1225,14 @@ export function buildWaterSurfaceField({
     const potentialX = potentialAt(netCellPreOrganic.add(vec2(growthEps, 0)));
     const potentialY = potentialAt(netCellPreOrganic.add(vec2(0, growthEps)));
     const growthGradient = vec2(potentialX.sub(potentialCentre), potentialY.sub(potentialCentre)).div(growthEps);
-    const growthWarpRaw = growthGradient.mul(float(WATER_CAUSTICS_GROWTH_STRENGTH));
+    const growthWarpRaw = growthGradient.mul(causticGrowthNode);
     const growthWarpLen = length(growthWarpRaw);
-    const growthWarpCapScale = min(float(1), float(WATER_CAUSTICS_GROWTH_CELLS).div(max(growthWarpLen, float(1e-4))));
+    const growthWarpCapScale = min(float(1), causticGrowthCapNode.div(max(growthWarpLen, float(1e-4))));
     const netCell = netCellPreOrganic.add(growthWarpRaw.mul(growthWarpCapScale));
 
     // EVOLUTION's own clock — Z is a real lattice axis, not "2-D result at
     // time T"; see the header above.
-    const zTimePrimary = tSec.mul(float(WATER_CAUSTICS_EVOLVE_SPEED));
+    const zTimePrimary = tSec.mul(causticEvolveSpeedNode);
 
     /** F1/F2/F3 for one Worley layer at `(cellCoord, zTime)` — a genuine
      * 3-D lattice sample, sorted nearest-to-farthest. `mx_worley_noise_vec3`'s
@@ -1228,11 +1279,11 @@ export function buildWaterSurfaceField({
       // edge0 > edge1), same construction `buildFoamCellularStructure` uses.
       const edgeMask = float(1).sub(smoothstep(float(0), edgeFarAA, edgeDist));
 
-      const junctionFar = edgeFarBase.mul(float(WATER_CAUSTICS_JUNCTION_FRACTION));
+      const junctionFar = edgeFarBase.mul(causticJunctionWidthNode);
       const junctionFarAA = max(junctionFar, fwidth(junctionGap).mul(float(WATER_CAUSTICS_EDGE_AA_PX)));
       const junctionMask = float(1).sub(smoothstep(float(0), junctionFarAA, junctionGap));
 
-      const lineBrightness = mix(float(WATER_CAUSTICS_LINE_FLOOR), float(1), junctionMask);
+      const lineBrightness = mix(causticLineFloorNode, float(1), junctionMask);
       return edgeMask.mul(lineBrightness);
     };
 
@@ -1250,7 +1301,7 @@ export function buildWaterSurfaceField({
     // and undo the point of a second layer entirely.
     const fineCell = netCell.mul(float(WATER_CAUSTICS_NET_SCALE_RATIO));
     const zTimeFine = tSec
-      .mul(float(WATER_CAUSTICS_EVOLVE_SPEED).mul(float(WATER_CAUSTICS_NET_SCALE_RATIO)))
+      .mul(causticEvolveSpeedNode.mul(float(WATER_CAUSTICS_NET_SCALE_RATIO)))
       .add(float(WATER_CAUSTICS_NET_TIME_PHASE));
     const fineNet = netAt(fineCell, zTimeFine);
     const combinedNet = mix(primaryNet, max(primaryNet, fineNet), causticNettingNode);

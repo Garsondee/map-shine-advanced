@@ -304,6 +304,15 @@ export function run(t) {
     'setCausticSharpness',
     'setCausticScale',
     'setCausticNetting',
+    'setCausticWaveWarp',
+    'setCausticWaveWarpCap',
+    'setCausticGrowth',
+    'setCausticGrowthCap',
+    'setCausticGrowthScale',
+    'setCausticGrowthSpeed',
+    'setCausticEvolveSpeed',
+    'setCausticJunctionWidth',
+    'setCausticLineFloor',
     'setFoamEdgeSharpness',
     'setCapturedRect',
     'setCapturedTexSize',
@@ -339,6 +348,15 @@ export function run(t) {
       b.setCausticSharpness(0.8);
       b.setCausticScale(0.5);
       b.setCausticNetting(0.6);
+      b.setCausticWaveWarp(0.9);
+      b.setCausticWaveWarpCap(0.6);
+      b.setCausticGrowth(0.5);
+      b.setCausticGrowthCap(0.6);
+      b.setCausticGrowthScale(0.4);
+      b.setCausticGrowthSpeed(0.1);
+      b.setCausticEvolveSpeed(0.2);
+      b.setCausticJunctionWidth(0.6);
+      b.setCausticLineFloor(0.2);
       b.setFoamEdgeSharpness(0.5);
     } catch (e) {
       err = e;

@@ -21,12 +21,22 @@
  *                written back with NormalBlending — alpha=0 wherever
  *                floorsBelow<=0.
  *
- * BOKEH SHAPE (2026-08-27): the composite used to read each mip at a single
- * point, which just showed the downsample pyramid's own square/diamond
- * 13-tap grid pattern directly — square bokeh. `pickFromRing`/`ringSample`
- * (below) average a small ring of samples per mip instead, the standard
- * cheap real-time "fake bokeh" fix. See their own doc comments for the full
- * account, including why this needed no new TSL trig/pow nodes.
+ * BOKEH SHAPE (2026-08-27, two rounds): the composite used to read each mip
+ * at a single point, which just showed the downsample pyramid's own
+ * square/diamond 13-tap grid pattern directly — square bokeh. Round 1:
+ * `pickFromRing`/`ringSample` average a ring of samples per mip instead of
+ * one point. Round 2 (Ingram's own live read of round 1: "bubble shaped"):
+ * a RING alone, with nothing at the center, is a hollow-annulus kernel —
+ * `CENTER_WEIGHT` blends in a weighted center tap so it reads as a filled
+ * disc. See their own doc comments for the full account.
+ *
+ * TAP SPREAD (2026-08-27, round 3): Ingram's own live read — "still very
+ * strong by default... controls aren't reliable." `uTapSpread` (downsample
+ * material) scales the SAME 13-tap downsample pattern's footprint smaller
+ * for the scene.lit→mip0 step only, so the LEAST-blurred rung this effect
+ * can ever show is genuinely subtle instead of already-quite-blurred — see
+ * its own doc comment for the full account of why this, not a formula
+ * change, is the real fix.
  *
  * ⚠️ THE COMPOSITE NEVER SAMPLES `scene.lit` ITSELF — only the blurred mips
  * and the (separate) depth colour texture, both different render targets.
@@ -86,13 +96,34 @@ export function buildDofMaterials({ THREE, depthColorTexture, mipTextures }) {
   // own plain downsample uses.
   const inputNode = texture(null);
   const uInvTexel = uniform(new THREE.Vector2(1, 1));
+  // TAP SPREAD (2026-08-27, round 3) — Ingram's own live read: "still very
+  // strong by default... the controls around strength/blur amount aren't
+  // reliable." Root cause: mip0 (the LEAST-blurred rung this whole effect
+  // can ever show) was already a fairly heavy blur — the SAME wide 13-tap
+  // pattern used for every downsample step, unscaled. That makes the
+  // strength/blurPerFloor sliders feel like an on/off switch, not a dial:
+  // the moment `lod` crosses 0, a below-floor pixel jumps straight from
+  // byte-identical (alpha=0) to "at least mip0-blurry" (alpha=1, see
+  // computeDofAlpha's own doc for why alpha itself can't be softened here —
+  // a smooth alpha ramp was tried before and rejected for producing a
+  // sharp/blurred GHOSTING double-image, not less blur). The real fix is
+  // giving mip0 itself real headroom to be SUBTLE: this uniform scales the
+  // SAME 13-tap pattern's footprint (multiplies `uInvTexel`, the tap
+  // spacing) rather than being a second shader — the viewer sets it small
+  // for the scene.lit→mip0 step only and 1.0 (unscaled, today's exact
+  // behavior) for every later step, so the top of the pyramid (deep floors
+  // below) keeps its existing strong blur while the FLOOR of the ramp
+  // (one floor below, low strength) gets genuinely gentle. Defaults to 1.0
+  // — the ORIGINAL, unscaled behavior — so this uniform being un-set (a
+  // shader-lab bench, e.g.) never silently changes anything.
+  const uTapSpread = uniform(1.0);
   const downsampleMaterial = new THREE.NodeMaterial();
   downsampleMaterial.depthTest = false;
   downsampleMaterial.depthWrite = false;
   downsampleMaterial.fragmentNode = Fn(() => {
     const base = uv();
-    const x = uInvTexel.x;
-    const y = uInvTexel.y;
+    const x = uInvTexel.x.mul(uTapSpread);
+    const y = uInvTexel.y.mul(uTapSpread);
     const S = (ox, oy) => inputNode.sample(base.add(vec2(x.mul(ox), y.mul(oy)))).rgb;
     // a b c / j k / d e f / l m / g h i — the same 13-tap pattern
     // bloom-render.js's own "plain" downsample proves looks good, without its
@@ -169,22 +200,38 @@ export function buildDofMaterials({ THREE, depthColorTexture, mipTextures }) {
   // the one constant to nudge up if a live look still reads too square, or
   // down if it reads noticeably softer than before.
   const RING_RADIUS_TEXELS = 2.0;
+  // 2026-08-27, round 2 — Ingram's own live read of the ring-only version:
+  // "no longer square but now 'bubble' shaped." Root cause: a ring of
+  // samples with NOTHING at the center is, mathematically, a hollow-annulus
+  // kernel — literally the same shape a catadioptric/mirror lens produces
+  // (a physical secondary mirror blocks its own aperture center), which is
+  // exactly what photographers call "donut" or "soap-bubble" bokeh. The fix
+  // is not a bigger/smaller ring, it's giving the CENTER real weight so the
+  // combined kernel reads as a filled disc instead of a hollow ring — one
+  // more tap (the un-offset `uv()` point, weight `CENTER_WEIGHT`), the ring
+  // average taking the rest.
+  const CENTER_WEIGHT = 0.5;
   const RING_OFFSETS = Array.from({ length: RING_TAPS }, (_, t) => {
     const angle = (t / RING_TAPS) * Math.PI * 2;
     return [Math.cos(angle) * RING_RADIUS_TEXELS, Math.sin(angle) * RING_RADIUS_TEXELS];
   });
-  /** One mip's ring-averaged color at `uv()`. @param {*} texNode @param {number} mipIdx */
+  /** One mip's disc-averaged color at `uv()` — a weighted center tap plus
+   * the ring average, NOT the ring alone (see `CENTER_WEIGHT`'s own doc just
+   * above for why a ring alone reads as a hollow bubble, not a filled disc).
+   * @param {*} texNode @param {number} mipIdx */
   const ringSample = (texNode, mipIdx) => {
     const texelScale = 2 ** mipIdx; // mip0=1x, mip1=2x, mip2=4x, mip3=8x
     const rx = uMip0InvTexel.x.mul(texelScale);
     const ry = uMip0InvTexel.y.mul(texelScale);
+    const center = texNode.sample(uv()).rgb;
     const [ox0, oy0] = RING_OFFSETS[0];
-    let sum = texNode.sample(uv().add(vec2(rx.mul(ox0), ry.mul(oy0)))).rgb;
+    let ringSum = texNode.sample(uv().add(vec2(rx.mul(ox0), ry.mul(oy0)))).rgb;
     for (let t = 1; t < RING_TAPS; t++) {
       const [ox, oy] = RING_OFFSETS[t];
-      sum = sum.add(texNode.sample(uv().add(vec2(rx.mul(ox), ry.mul(oy)))).rgb);
+      ringSum = ringSum.add(texNode.sample(uv().add(vec2(rx.mul(ox), ry.mul(oy)))).rgb);
     }
-    return sum.mul(1 / RING_TAPS);
+    const ringAvg = ringSum.mul(1 / RING_TAPS);
+    return center.mul(CENTER_WEIGHT).add(ringAvg.mul(1 - CENTER_WEIGHT));
   };
   // One ring-sample PER MIP, computed ONCE and shared by both the lod0 and
   // lod1 picks below (`pickFromRing`) — half the tap count a "ring inside
@@ -248,7 +295,7 @@ export function buildDofMaterials({ THREE, depthColorTexture, mipTextures }) {
 
   return {
     downsampleMaterial,
-    downsample: { inputNode, uInvTexel },
+    downsample: { inputNode, uInvTexel, uTapSpread },
     compositeMaterial,
     // Uniform handles the viewer writes each frame from the resolved params
     // (+ view.floorIndex for viewedFloorIndex).

@@ -2879,6 +2879,15 @@ export async function startVtPanViewer({
     // (screenSized).
     // ========================================================================
     const DOF_MIP_COUNT = 4;
+    // TAP SPREAD (2026-08-27) — see depth-of-field-render.js's uTapSpread
+    // for the full account. Shrinks the scene.lit→mip0 downsample step's
+    // kernel footprint to this fraction of its normal (1.0) spread, so the
+    // LEAST-blurred rung this effect can ever show reads as genuinely
+    // subtle rather than already-quite-blurred. Every later step (mip0→mip1
+    // etc.) stays at the original, unscaled spread. The one constant to
+    // nudge if a live look still shows a jarring jump at low
+    // strength/blurPerFloor, or if it now reads as barely-there at all.
+    const DOF_MIP0_TAP_SPREAD = 0.35;
     const dofNum = (x, d) => (Number.isFinite(Number(x)) ? Number(x) : d);
     const describeDofMip = (w, h) => ({
       resolvedW: Math.max(1, w),
@@ -6866,6 +6875,13 @@ export async function startVtPanViewer({
         const src = k === 0 ? sceneLit : dofMips[k - 1];
         dof.downsample.inputNode.value = src.texture;
         dof.downsample.uInvTexel.value.set(1 / src.width, 1 / src.height);
+        // TAP SPREAD (2026-08-27) — see uTapSpread's own doc in
+        // depth-of-field-render.js. Only the FIRST step (scene.lit → mip0,
+        // the least-blurred rung this whole effect can ever show) shrinks
+        // the kernel's footprint; every later step keeps the original,
+        // unscaled 1.0 spread, so the top of the pyramid (deep floors below)
+        // still reaches the same strong blur it always has.
+        dof.downsample.uTapSpread.value = k === 0 ? DOF_MIP0_TAP_SPREAD : 1.0;
         renderer.setRenderTarget(dofMips[k]);
         dofDownQuad.render(renderer);
       }

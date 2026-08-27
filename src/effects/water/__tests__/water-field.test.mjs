@@ -39,6 +39,8 @@ import {
   WATER_CAUSTICS_SCALE,
   WATER_CAUSTICS_NETTING,
   WATER_CAUSTICS_NET_SCALE_RATIO,
+  WATER_CAUSTICS_WAVE_WARP_STRENGTH,
+  WATER_CAUSTICS_WAVE_WARP_CELLS,
 } from '../water-field.js';
 
 /** The renderer's world space is Y-DOWN (`vt-pan-viewer.js#updateCamera`: the
@@ -216,6 +218,18 @@ export function run(t) {
   ok(
     'WATER_CAUSTICS_NET_SCALE_RATIO is not a round integer — an integer ratio risks the two layers` cell edges periodically re-aligning',
     !Number.isInteger(WATER_CAUSTICS_NET_SCALE_RATIO)
+  );
+  // ── WAVE-LINKED DISTORTION (round 3) — ties the net to the water's own
+  // actual wave state instead of decorating independently of it. Author,
+  // live: "they don't animate, they aren't distorted by the refraction...
+  // we need to link the two things together."
+  ok(
+    'WATER_CAUSTICS_WAVE_WARP_STRENGTH is strictly positive — zero would silently disable the whole wave-link',
+    WATER_CAUSTICS_WAVE_WARP_STRENGTH > 0
+  );
+  ok(
+    'WATER_CAUSTICS_WAVE_WARP_CELLS is a real, bounded cap, not zero (no warp) and not unbounded (the domain-shear failure this file has already paid for once)',
+    WATER_CAUSTICS_WAVE_WARP_CELLS > 0 && WATER_CAUSTICS_WAVE_WARP_CELLS <= 2
   );
   ok(
     'WATER_CAUSTICS_SHARPNESS/_NETTING are valid author-facing 0..1 values, not internal-only leftovers',

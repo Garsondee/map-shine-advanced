@@ -503,6 +503,50 @@ export const WATER_CAUSTICS_NETTING = 0.15;
 export const WATER_CAUSTICS_NET_SCALE_RATIO = 2.6;
 
 /**
+ * ============================================================================
+ * WAVE-LINKED DISTORTION (round 3, 2026-08-27) — the net now WARPS with the
+ * water's own actual wave state, not just a decoration on top of it
+ * ============================================================================
+ * Author, live, on the un-warped Worley net: *"they don't animate, they
+ * aren't distorted by the refraction (big mistake)... think about how the
+ * caustics would mirror the scale and the state of animation of the surface
+ * of the water, we need to link the two things together."* Confirmed by
+ * research this round started from: the physically-correct real-time
+ * technique computes caustics FROM the water's own instantaneous normal
+ * field directly (a light-accumulation pass over a normal map baked from the
+ * live mesh — out of this architecture's scope), and the standard cheaper
+ * real-time approximation "domain-warps" a caustic/Voronoi pattern's sample
+ * point by that same normal/height field. Both agree on the same principle
+ * this file's own `slope` (tier 2's shoaled, chopped wave vector, already
+ * computed, no new fetch) is the honest analytic version of.
+ */
+
+/** How strongly `slope` displaces the Worley query point, before the cap
+ * below engages — in CELL UNITS per unit of `slope`'s own magnitude.
+ *
+ * ⚠️ MEASURED, NOT GUESSED (2026-08-27, shader lab, debug channel 16). A
+ * first reasoned guess of 4 — meant to read as "roughly half a cell of
+ * displacement at typical chop" — turned out to tear the net apart on a
+ * real render: thin connected lines dissolved into a thick, blobby mess,
+ * and even the shore boundary read as noisy rather than clean, because the
+ * Worley query was being pushed well past its own neighbouring cells. 0.6,
+ * checked the same way, keeps the net genuinely connected while still
+ * visibly rippling its edges — confirmed via a real pixel diff between two
+ * renders 4 seconds apart (28% of pixels changed by more than a rounding
+ * step, mean delta ~10/255), not just eyeballed. */
+export const WATER_CAUSTICS_WAVE_WARP_STRENGTH = 0.6;
+
+/** The hard ceiling on the warp above, in CELL UNITS, however extreme
+ * `chop` gets — same "rescale, never per-axis-clamp" safety shape
+ * `WATER_FLOW_WARP_CAP_CELLS` already uses. Past a full cell's own width the
+ * Worley query would start reading a NEIGHBOURING cell's own feature as if
+ * it were local, which reads as the net breaking apart rather than
+ * rippling. Lowered alongside `_STRENGTH` above, same shader-lab check —
+ * 0.4 keeps even an extreme-chop patch from crossing into a neighbour's own
+ * territory. */
+export const WATER_CAUSTICS_WAVE_WARP_CELLS = 0.4;
+
+/**
  * Build tier 2's surface field. One fractal-noise fetch, THREE readings of it.
  *
  * @param {object} args
@@ -889,7 +933,54 @@ export function buildWaterSurfaceField({
     // be tuned far finer than the visible chop ever needs to be — a real
     // caustic net's cells are much smaller than the swell that makes them.
     const cellPx = max(uWaveScalePx.mul(causticScaleNode), float(4));
-    const netCell = worldXY.add(domainOffset).div(cellPx);
+
+    // WAVE-LINKED DISTORTION — ties the net's own local shape to the water's
+    // ACTUAL current wave state, not an independent decoration on top of it.
+    // Real-time caustics shaders get this by "domain warping": distort the
+    // Voronoi/caustic sample point by the surface's own normal/height field,
+    // a cheap analytic stand-in for "light bending through the ACTUAL
+    // instantaneous surface" (a full light-accumulation pass off a real
+    // normal map — the physically-correct version — is out of this
+    // architecture's scope; reading the SAME `slope` every other shaded term
+    // here already reads is the honest cheap version of the same idea).
+    // Author, live, on the un-warped version: *"they don't animate, they
+    // aren't distorted by the refraction (big mistake)... think about how
+    // the caustics would mirror the scale and the state of animation of the
+    // surface of the water."*
+    //
+    // Reads `slope` (ALREADY COMPUTED just above — tier 2's own shoaled,
+    // chopped wave vector) — no new fetch. `slope` is exactly zero at
+    // chop=0, so this warp (and the organic distortion/animation it drives)
+    // vanishes automatically on dead-calm water, the same "no wave field, no
+    // effect" contract `chopGate` below already keeps for brightness.
+    // `slope` ALSO already animates in place over time (its own `n.y`/`n.z`
+    // read a fractal noise whose third coordinate is `tSec` — see tier 2's
+    // fetch above) — this is what actually answers "they don't animate":
+    // `domainOffset`'s own `drift` only TRANSLATES the whole net as one
+    // rigid sheet, which barely reads as motion; a warp sourced from a
+    // field that itself continuously reshapes makes the net's OWN edges
+    // visibly ripple and reform.
+    //
+    // Expressed and capped in CELL UNITS (not world px) so the SAME warp
+    // vector, added once here, carries correctly into BOTH layers below:
+    // `fineCell` is `netCell` re-expressed at `NET_SCALE_RATIO`× the
+    // resolution, so the identical real-world-px displacement this warp
+    // represents is automatically `NET_SCALE_RATIO`× LARGER in fine-cell
+    // units — exactly the correct geometry (the same physical ripple is a
+    // bigger fraction of a smaller cell), not a bug needing a per-layer
+    // recompute.
+    //
+    // Capped the SAME way `flowWarp` above already is (this file's own
+    // established law, `WATER_FLOW_WARP_CAP_CELLS`'s own doc): RESCALED
+    // (never per-axis-clamped, which would distort direction) so however
+    // extreme `chop` gets, this can perturb the query by a bounded number
+    // of cells, never shear it unpredictably.
+    const waveWarpRaw = slope.mul(float(WATER_CAUSTICS_WAVE_WARP_STRENGTH));
+    const waveWarpLen = length(waveWarpRaw);
+    const waveWarpCapScale = min(float(1), float(WATER_CAUSTICS_WAVE_WARP_CELLS).div(max(waveWarpLen, float(1e-4))));
+    const waveWarp = waveWarpRaw.mul(waveWarpCapScale);
+
+    const netCell = worldXY.add(domainOffset).div(cellPx).add(waveWarp);
 
     /** F2−F1 for one Worley layer at `cellCoord` — zero exactly on a cell
      * edge, growing toward each cell's own interior. See this block's own

@@ -548,47 +548,65 @@ export const WATER_CAUSTICS_WAVE_WARP_CELLS = 0.4;
 
 /**
  * ============================================================================
- * ORGANIC SHAPE + GENUINE EVOLUTION (round 4, 2026-08-27) — the net now
- * CURVES independent of the wave field and its own LATTICE changes over
- * time, rather than a fixed 2-D pattern being pushed/scrolled around
+ * ORGANIC SHAPE + GENUINE EVOLUTION (round 4) + GROWTH/PULL (round 5,
+ * 2026-08-27) — the net now CURVES, its own LATTICE changes over time
+ * instead of a fixed 2-D pattern being pushed/scrolled around, AND cells
+ * visibly expand/contract at their NEIGHBOURS' expense
  * ============================================================================
- * Author, live, on round 3's wave-warped-but-still-2-D net: *"No evolution
- * happening. It's a distorting scrolling texture currently... The shapes are
- * angular and sharp, not smooth wispy and fluid/liquid... The actual cells
- * don't evolve, they don't shrink and expand, they don't evolve at all."*
- * See the caustics block's own inline header (where these constants are
- * consumed) for the full mechanism each one drives. ⚠️ NOT re-verified via
- * the shader lab this round — the author asked for the tool to be set aside
- * ("I'll examine what you produce when you are finished") — every value
- * below is a reasoned first pass, honestly labelled as such, not a measured
- * one the way `_WAVE_WARP_STRENGTH` above was.
+ * Round 4, author: *"No evolution happening. It's a distorting scrolling
+ * texture currently... The shapes are angular and sharp, not smooth wispy
+ * and fluid/liquid... The actual cells don't evolve, they don't shrink and
+ * expand, they don't evolve at all."* Round 5, on round 4's result: *"Much
+ * better, looks much more organic... cells should expand and contract.
+ * Cells should pull on the ones around them when they do this."* See the
+ * caustics block's own inline header (where these constants are consumed)
+ * for the full mechanism each one drives — the growth/pull constants below
+ * REPLACED round 4's plain organic-warp ones (`WATER_CAUSTICS_ORGANIC_
+ * WARP_*`, removed, not left as dead code) because a proper GRADIENT
+ * displacement does everything the old one-off noise-pair warp did (curve
+ * the edges) plus the new expand/contract/pull property the old one
+ * structurally could not have. ⚠️ NOT re-verified via the shader lab this
+ * round either — the author asked for the tool to be set aside ("I'll
+ * examine what you produce when you are finished") — every value below is a
+ * reasoned first pass, deliberately conservative, not a measured one the
+ * way `_WAVE_WARP_STRENGTH` above was.
  */
 
-/** How high a spatial frequency the organic warp noise reads at, as a
- * multiplier on the ALREADY cell-normalised coordinate — intentionally
- * higher than 1 (one full primary cell) so the warp's own features are
- * SMALLER than a cell, curving a single edge's length rather than shoving
- * whole cells around the way the (lower-frequency, physically-tied) wave
- * warp does. */
-export const WATER_CAUSTICS_ORGANIC_WARP_FREQ = 2.5;
+/** The growth potential's own spatial frequency, as a multiplier on the
+ * ALREADY cell-normalised coordinate — deliberately BELOW 1 (unlike round
+ * 4's organic-warp frequency, which was above 1) so one peak/trough pair of
+ * the potential field spans SEVERAL cells. A single cell breathing in
+ * isolation would not read as "pulling its neighbours"; several cells
+ * caught in the same rise and fall does. */
+export const WATER_CAUSTICS_GROWTH_FREQ = 0.35;
 
-/** How strongly the organic noise displaces the query point, in CELL UNITS,
- * before the cap below engages. Deliberately smaller than
- * `WATER_CAUSTICS_WAVE_WARP_STRENGTH` — this warp's whole job is fine
- * curvature WITHIN an edge, not gross relocation of it. */
-export const WATER_CAUSTICS_ORGANIC_WARP_STRENGTH = 0.35;
+/** The finite-difference step used to estimate `∇φ`, in the SAME
+ * frequency-scaled coordinate space `WATER_CAUSTICS_GROWTH_FREQ` maps into
+ * — small enough to approximate a true gradient against that field's own
+ * feature size (~1 unit, by construction of a frequency-1 noise call), not
+ * a step so large it samples an unrelated neighbouring feature. */
+export const WATER_CAUSTICS_GROWTH_EPS = 0.3;
 
-/** The hard ceiling on the organic warp, in CELL UNITS — same rescale-not-
- * clamp safety shape `_WAVE_WARP_CELLS`/`WATER_FLOW_WARP_CAP_CELLS` already
- * use. Kept under half a cell so curvature cannot by itself push the query
- * into unrelated neighbouring territory. */
-export const WATER_CAUSTICS_ORGANIC_WARP_CELLS = 0.3;
+/** How strongly `∇φ` displaces the query point, in CELL UNITS per unit of
+ * the raw finite-difference gradient's own magnitude, before the cap below
+ * engages. ⚠️ DELIBERATELY CONSERVATIVE, UNMEASURED — chosen well under
+ * `WATER_CAUSTICS_WAVE_WARP_STRENGTH`'s own shader-lab-CONFIRMED-safe value
+ * on the reasoning that an under-strength miss here reads as "too subtle"
+ * (the safe failure mode) where an over-strength miss reads as "net
+ * destroyed" (round 3's own `WAVE_WARP_STRENGTH=4` first guess, corrected
+ * only because it WAS checked before shipping). */
+export const WATER_CAUSTICS_GROWTH_STRENGTH = 0.3;
 
-/** How fast the organic warp's OWN noise evolves, in noise-cycles per
- * second — slow and gentle on purpose (a "flowing" quality, not a churn);
- * independent of `WATER_CAUSTICS_EVOLVE_SPEED` below, which drives the
- * lattice's own topology change, a different mechanism entirely. */
-export const WATER_CAUSTICS_ORGANIC_WARP_TIME_SCALE = 0.08;
+/** The hard ceiling on the growth warp, in CELL UNITS — same rescale-not-
+ * clamp safety shape every other warp in this block already uses. */
+export const WATER_CAUSTICS_GROWTH_CELLS = 0.45;
+
+/** How fast the growth potential's OWN peaks and troughs migrate, in
+ * noise-cycles per second — slow and deliberate (a genuine "breathing"
+ * rhythm, not a churn); independent of `WATER_CAUSTICS_EVOLVE_SPEED` below,
+ * which drives the Worley lattice's own topology change, a different
+ * mechanism entirely reading a different noise fetch. */
+export const WATER_CAUSTICS_GROWTH_TIME_SCALE = 0.05;
 
 /** How fast TIME advances as the Worley lattice's own THIRD AXIS, in
  * lattice-units per second — NOT a scroll speed. One full unit crosses into
@@ -1074,9 +1092,12 @@ export function buildWaterSurfaceField({
     //              filament's own fine structure, and a straight Voronoi
     //              edge pushed by a smooth field is still a (bent) straight
     //              line, not an organic curve. Fixed below by a SECOND,
-    //              independent, higher-frequency domain warp sourced from
-    //              noise, not physics — the standard "warp a geometric
-    //              pattern by noise" technique for making it read as fluid.
+    //              independent domain warp sourced from noise, not physics
+    //              — the standard "warp a geometric pattern by noise"
+    //              technique for making it read as fluid. (Round 5 REPLACED
+    //              this warp's own internals with a gradient-of-a-potential
+    //              construction — see that round's own header just below —
+    //              which still curves edges the same way, plus more.)
     //   EVOLUTION  no amount of warping the QUERY POINT can make one Voronoi
     //              cell genuinely grow at a neighbour's expense, split, or
     //              merge — the underlying LATTICE (the set of feature
@@ -1089,33 +1110,74 @@ export function buildWaterSurfaceField({
     //              actually-3-D cellular structure — the standard real-time
     //              technique for genuinely evolving organic cells.
     //
-    // ORGANIC WARP — independent of `slope` on purpose: `slope` ties
-    // distortion to the water's PHYSICAL state (round 3's own ask); this
-    // ties it to nothing physical at all, deliberately, because real
-    // caustic filaments curve at a finer scale than a wave field resolves.
-    // Reuses `mx_fractal_noise_vec3`, the SAME primitive tier 2's own fetch
-    // already uses (Law 8: no hand-written twin) — two of its three
-    // channels read as a 2-vector, exactly like `slope` above does.
-    // Capped the SAME rescale-not-clamp way `flowWarp`/`waveWarp` already
-    // are — this file's one law against unbounded per-pixel domain shear,
-    // applied a third time, not re-invented.
-    const organicNoise = mx_fractal_noise_vec3(
-      vec3(
-        netCellPreOrganic.x.mul(float(WATER_CAUSTICS_ORGANIC_WARP_FREQ)),
-        netCellPreOrganic.y.mul(float(WATER_CAUSTICS_ORGANIC_WARP_FREQ)),
-        tSec.mul(float(WATER_CAUSTICS_ORGANIC_WARP_TIME_SCALE))
-      ),
-      2,
-      2.0,
-      0.5
-    );
-    const organicWarpRaw = vec2(organicNoise.x, organicNoise.y).mul(float(WATER_CAUSTICS_ORGANIC_WARP_STRENGTH));
-    const organicWarpLen = length(organicWarpRaw);
-    const organicWarpCapScale = min(
-      float(1),
-      float(WATER_CAUSTICS_ORGANIC_WARP_CELLS).div(max(organicWarpLen, float(1e-4)))
-    );
-    const netCell = netCellPreOrganic.add(organicWarpRaw.mul(organicWarpCapScale));
+    // ============================================================================
+    // ROUND 5 (2026-08-27) — GROWTH/PULL WARP, replacing round 4's plain
+    // organic warp
+    // ============================================================================
+    // Author, live, on round 4's result: *"Much better, looks much more
+    // organic... One important improvement, cells should expand and
+    // contract. Cells should pull on the ones around them when they do
+    // this."*
+    //
+    // Round 4's organic warp read two INDEPENDENT channels of the same
+    // noise fetch as a 2-vector — a generic displacement field with no
+    // controlled relationship between neighbouring points, so it curved
+    // edges (a real, kept benefit) but had no reason to make one cell grow
+    // while its neighbour shrinks. **A displacement built as the GRADIENT of
+    // a single smooth scalar field does**, and the reason is a standard
+    // piece of vector calculus, not a guess: warping the query by `x' = x +
+    // ε·∇φ(x)` has Jacobian `I + ε·Hφ` to first order, whose determinant is
+    // `≈ 1 + ε·∇²φ` (the LAPLACIAN of φ) — so the local area-scaling of the
+    // warp is governed by the SAME scalar field's own curvature. Checked by
+    // hand on `φ(x) = −x²` (a single peak at the origin): the warp reduces
+    // to `x' = x·(1 − 2ε)`, a uniform contraction of the QUERY mapping
+    // toward the peak. A contracting QUERY mapping means many nearby world
+    // positions all sample a narrow range of the underlying pattern, which
+    // is what MAGNIFIES that part of the pattern in the rendered image —
+    // so a peak of φ reads as a locally EXPANDING cell, and by the same
+    // argument a trough reads as a locally CONTRACTING one. Because ONE
+    // continuous field drives both, they are coupled BY CONSTRUCTION: a
+    // smooth, band-limited field cannot have an unbounded peak with no
+    // compensating trough nearby, which is the mechanism the author asked
+    // for in plain language ("pull on the ones around them") stated in the
+    // vocabulary of the field that produces it.
+    //
+    // `φ` reuses `mx_fractal_noise_vec3` (Law 8) at a LOWER spatial
+    // frequency than the cells themselves (`WATER_CAUSTICS_GROWTH_FREQ` <
+    // 1), so one peak/trough pair spans SEVERAL cells — a single cell
+    // breathing in isolation would not read as "pulling its neighbours";
+    // several cells caught in the same rise-and-fall does. `∇φ` is a real
+    // finite difference (three taps: centre + one each axis), not a second
+    // pair of unrelated channels — the property above depends on it
+    // actually being a gradient. Time enters as φ's own noise-time
+    // coordinate, so the peaks and troughs THEMSELVES migrate — different
+    // cells take turns growing and shrinking rather than one fixed set
+    // breathing forever. Capped the SAME rescale-not-clamp way every other
+    // warp in this block already is.
+    //
+    // ⚠️ NOT SHADER-LAB VERIFIED — same standing instruction as round 4.
+    // The strength/cap below are deliberately conservative (well under
+    // round 3's own confirmed-safe `WAVE_WARP` magnitude) precisely because
+    // a miss in this direction reads as "too subtle", the safe failure mode,
+    // where a miss in the other direction reads as "net destroyed", round
+    // 3's own `WAVE_WARP_STRENGTH=4` first guess.
+    const growthFreq = float(WATER_CAUSTICS_GROWTH_FREQ);
+    const growthEps = float(WATER_CAUSTICS_GROWTH_EPS);
+    const potentialAt = (p) =>
+      mx_fractal_noise_vec3(
+        vec3(p.x.mul(growthFreq), p.y.mul(growthFreq), tSec.mul(float(WATER_CAUSTICS_GROWTH_TIME_SCALE))),
+        2,
+        2.0,
+        0.5
+      ).x;
+    const potentialCentre = potentialAt(netCellPreOrganic);
+    const potentialX = potentialAt(netCellPreOrganic.add(vec2(growthEps, 0)));
+    const potentialY = potentialAt(netCellPreOrganic.add(vec2(0, growthEps)));
+    const growthGradient = vec2(potentialX.sub(potentialCentre), potentialY.sub(potentialCentre)).div(growthEps);
+    const growthWarpRaw = growthGradient.mul(float(WATER_CAUSTICS_GROWTH_STRENGTH));
+    const growthWarpLen = length(growthWarpRaw);
+    const growthWarpCapScale = min(float(1), float(WATER_CAUSTICS_GROWTH_CELLS).div(max(growthWarpLen, float(1e-4))));
+    const netCell = netCellPreOrganic.add(growthWarpRaw.mul(growthWarpCapScale));
 
     // EVOLUTION's own clock — Z is a real lattice axis, not "2-D result at
     // time T"; see the header above.

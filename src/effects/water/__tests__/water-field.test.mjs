@@ -41,10 +41,11 @@ import {
   WATER_CAUSTICS_NET_SCALE_RATIO,
   WATER_CAUSTICS_WAVE_WARP_STRENGTH,
   WATER_CAUSTICS_WAVE_WARP_CELLS,
-  WATER_CAUSTICS_ORGANIC_WARP_FREQ,
-  WATER_CAUSTICS_ORGANIC_WARP_STRENGTH,
-  WATER_CAUSTICS_ORGANIC_WARP_CELLS,
-  WATER_CAUSTICS_ORGANIC_WARP_TIME_SCALE,
+  WATER_CAUSTICS_GROWTH_FREQ,
+  WATER_CAUSTICS_GROWTH_EPS,
+  WATER_CAUSTICS_GROWTH_STRENGTH,
+  WATER_CAUSTICS_GROWTH_CELLS,
+  WATER_CAUSTICS_GROWTH_TIME_SCALE,
   WATER_CAUSTICS_EVOLVE_SPEED,
   WATER_CAUSTICS_NET_TIME_PHASE,
   WATER_CAUSTICS_JUNCTION_FRACTION,
@@ -243,19 +244,28 @@ export function run(t) {
   // evolution happening... shapes are angular and sharp, not smooth wispy
   // and fluid... cells don't evolve... it should be concentrated into the
   // intersections and grow weak in the middle parts of the lines."
+  // ── GROWTH/PULL WARP (round 5) — replaces round 4's plain organic warp.
+  // Author, live: "cells should expand and contract. Cells should pull on
+  // the ones around them when they do this."
   ok(
-    'WATER_CAUSTICS_ORGANIC_WARP_FREQ samples finer than one whole cell — this warp curves an edge`s own length, it does not relocate whole cells',
-    WATER_CAUSTICS_ORGANIC_WARP_FREQ > 1
+    'WATER_CAUSTICS_GROWTH_FREQ samples COARSER than one whole cell — a peak/trough pair must span several cells for growth to visibly pull a neighbour, not just breathe alone',
+    WATER_CAUSTICS_GROWTH_FREQ > 0 && WATER_CAUSTICS_GROWTH_FREQ < 1
   );
   ok(
-    'WATER_CAUSTICS_ORGANIC_WARP_STRENGTH/_CELLS are strictly positive, bounded values — the same rescale-not-clamp safety shape as the wave warp',
-    WATER_CAUSTICS_ORGANIC_WARP_STRENGTH > 0 &&
-      WATER_CAUSTICS_ORGANIC_WARP_CELLS > 0 &&
-      WATER_CAUSTICS_ORGANIC_WARP_CELLS <= 2
+    'WATER_CAUSTICS_GROWTH_EPS is a real, small, positive finite-difference step — zero would divide-by-zero the gradient, and a large step would sample an unrelated feature',
+    WATER_CAUSTICS_GROWTH_EPS > 0 && WATER_CAUSTICS_GROWTH_EPS < 1
   );
   ok(
-    'WATER_CAUSTICS_ORGANIC_WARP_TIME_SCALE is positive but gentle — a flowing quality, not a strobe',
-    WATER_CAUSTICS_ORGANIC_WARP_TIME_SCALE > 0 && WATER_CAUSTICS_ORGANIC_WARP_TIME_SCALE < 1
+    'WATER_CAUSTICS_GROWTH_STRENGTH/_CELLS are strictly positive, bounded values — the same rescale-not-clamp safety shape as the wave warp',
+    WATER_CAUSTICS_GROWTH_STRENGTH > 0 && WATER_CAUSTICS_GROWTH_CELLS > 0 && WATER_CAUSTICS_GROWTH_CELLS <= 2
+  );
+  ok(
+    'WATER_CAUSTICS_GROWTH_STRENGTH is deliberately conservative — at or under the shader-lab-CONFIRMED-safe WAVE_WARP_STRENGTH, since this round shipped unverified',
+    WATER_CAUSTICS_GROWTH_STRENGTH <= WATER_CAUSTICS_WAVE_WARP_STRENGTH
+  );
+  ok(
+    'WATER_CAUSTICS_GROWTH_TIME_SCALE is positive but gentle — a breathing rhythm, not a strobe',
+    WATER_CAUSTICS_GROWTH_TIME_SCALE > 0 && WATER_CAUSTICS_GROWTH_TIME_SCALE < 1
   );
   ok(
     'WATER_CAUSTICS_EVOLVE_SPEED is strictly positive — zero would silently disable all lattice evolution, the round`s own headline ask',

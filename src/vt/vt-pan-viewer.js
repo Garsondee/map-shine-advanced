@@ -408,6 +408,22 @@ const MAX_WHOLE_TILE_DIM = 8192;
  * in a worker-less environment (safety slide: degrade, never detonate). */
 const MAX_RAW_FALLBACK_DIM = 4096;
 
+/** RENDER-SCALE SAFETY CEILING (2026-08-27) — the sanity bound on how far
+ * Foundry's own CLIENT-scoped "Disable Resolution Scaling" setting is allowed
+ * to push MSA's present resolution. Previously `4` (device-allocation sanity
+ * only, per PIXEL-RATIO PARITY's own comment below — "no real display exceeds
+ * this today"). Live-measured 2026-08-26: a real map at pixelRatio 1.5 ran a
+ * stuttering ~30fps; pixelRatio 1.0 on the SAME map ran a stable 55-60fps. A
+ * per-player Foundry setting that no GM controls should never be able to
+ * single-handedly tank a player's performance the way it did here — this
+ * ceiling is MSA's own answer, independent of whatever any player's display
+ * or Foundry preference reports. `1.5` is not a guess: it is the highest value
+ * this project has direct live evidence causes trouble. Revisit once the
+ * present/internal render-resolution split lands (`render-scale-policy.js`) —
+ * this number was measured against the OLD, unsplit architecture, where
+ * pixelRatio alone drove the entire pipeline's cost. */
+const MAX_PIXEL_RATIO = 1.5;
+
 /**
  * WHOLE-IMAGE RENDER MODE (2026-07-17 — the "load images like PIXI" path the
  * author chose after the tile-streaming/virtual-texture architecture kept
@@ -1459,8 +1475,15 @@ export async function startVtPanViewer({
     // introduces — but if frame rate suffers, Foundry's own "Disable
     // Resolution Scaling" client setting is the lever, exactly as it would
     // be for Foundry's own canvas.
+    //
+    // ⚠️ CEILING, NOT JUST A MIRROR (2026-08-27) — see MAX_PIXEL_RATIO's own
+    // comment above. `Math.min(foundryResolution, MAX_PIXEL_RATIO)` mirrors
+    // Foundry's value only up to a value THIS PROJECT has proven safe; a
+    // player's own Foundry setting can lower it further (still respected —
+    // this is a ceiling, never a floor) but can never push MSA past it.
     const foundryResolution = globalThis.canvas?.app?.renderer?.resolution;
-    const pixelRatio = Number.isFinite(foundryResolution) && foundryResolution > 0 ? Math.min(foundryResolution, 4) : 1;
+    const pixelRatio =
+      Number.isFinite(foundryResolution) && foundryResolution > 0 ? Math.min(foundryResolution, MAX_PIXEL_RATIO) : 1;
     renderer.setPixelRatio(pixelRatio);
     renderer.setSize(canvasW, canvasH, false);
 

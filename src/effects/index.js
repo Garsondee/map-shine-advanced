@@ -193,7 +193,13 @@ export {
   WATER_PRESENCE_EDGE1,
   WATER_DEFAULT_TIER,
 } from './water/water-render.js';
-export { createWaterSurfaceSubsystem } from './water/water-surface-subsystem.js';
+export {
+  createWaterSurfaceSubsystem,
+  // DIAGNOSTIC-ONLY (2026-08-27) — `diag/perf-shader-variant-ab.js`'s own
+  // `waterCaustics` toggle. See `setWaterCausticsGateForce`'s own doc.
+  setWaterCausticsGateForce,
+  getWaterCausticsGateForce,
+} from './water/water-surface-subsystem.js';
 // THE FLOW PACK (docs/planning/Water-Simulation-Turn.md §3 Layer B / §4 S2) —
 // area-averaged solidity over the SAME full-resolution mask the surface pack
 // loads, baked once that texture exists. `water-flow.js` is its TSL half.

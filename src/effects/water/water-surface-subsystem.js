@@ -73,6 +73,42 @@ export function resolveGatedWaterTier(rawTier) {
 }
 
 /**
+ * DIAGNOSTIC-ONLY (2026-08-27) — a build-time force for JUST the caustics
+ * half of tier 4, for `diag/perf-shader-variant-ab.js`'s own restart-based
+ * A/B measurement of what the Worley-net block costs `geometry.worldDraw`.
+ * MODULE-LEVEL, same reason `vt-pan-viewer.js#_maskNodeOffForce` is: the
+ * diagnostic sets this BEFORE a restart tears down and rebuilds the whole
+ * water subsystem from scratch, so whichever fresh instance's `sync()`
+ * reads it next must see the SAME value no matter which instance that
+ * turns out to be — a closure-scoped variable inside one
+ * `createWaterSurfaceSubsystem()` call could never be reached from outside
+ * it. `null` = ordinary `activeTier >= 4` behaviour (every caller before
+ * this diagnostic existed, and every construction-only test).
+ * @type {boolean|null}
+ */
+let _causticsGateForce = null;
+
+/**
+ * Force caustics on/off independent of tier for the NEXT water material
+ * build (`buildSurfaceForTier`, below) — `shoaling`, tier 4's own sibling
+ * gate, is untouched, so this isolates caustics' own marginal cost with
+ * everything else tier 4 adds held fixed. Changes nothing on screen by
+ * itself; the next `sync()` that notices this differs from what the
+ * CURRENT materials were built with is what actually rebuilds — see that
+ * check, inside `createWaterSurfaceSubsystem`, for why a live-uniform
+ * shortcut cannot substitute (Effects.md Law 4: `caustics` is a JS branch
+ * baked into the compiled shader graph, not a value a uniform can flip).
+ * @param {boolean|null} mode
+ */
+export function setWaterCausticsGateForce(mode) {
+  _causticsGateForce = mode === true || mode === false ? mode : null;
+}
+/** @returns {{forced: boolean|null}} */
+export function getWaterCausticsGateForce() {
+  return { forced: _causticsGateForce };
+}
+
+/**
  * @param {object} args
  * @param {*} args.THREE - injected, never imported.
  * @param {*} args.scene - the MAIN scene. Must already exist (see header).
@@ -269,6 +305,11 @@ export function createWaterSurfaceSubsystem({
    * the FIRST build (below, before any `sync()` has resolved a real tier)
    * shows today's shipped look, same reasoning as `WATER_DEFAULT_TIER` itself. */
   let builtForTier = WATER_DEFAULT_TIER;
+  /** The `_causticsGateForce` value the CURRENT materials were built with —
+   * same reasoning as `builtForTier` immediately above, tracked separately
+   * because a diagnostic force change must trigger the identical rebuild
+   * path WITHOUT the resolved tier itself having moved at all. */
+  let builtForCausticsGateForce = getWaterCausticsGateForce().forced;
   /** The last value `resolveExpectedDepth` actually returned (raw, BEFORE
    * `setExpectedDepth`'s own null→0 coercion) — see `refreshVisibility`'s own
    * use of it, and `resolveExpectedDepth`'s doc above for why `null` must hide
@@ -350,6 +391,10 @@ export function createWaterSurfaceSubsystem({
       outdoorsTexNode,
       buildOutdoorsGate,
       tier,
+      // DIAGNOSTIC-ONLY — see `setWaterCausticsGateForce`'s own doc above.
+      // Read FRESH on every build (never captured earlier), same discipline
+      // `waterBody`/`maskTexture` right above already follow.
+      causticsGateForce: getWaterCausticsGateForce().forced,
       // THE DEPTH-AUTHORITY GATE (2026-08-15) — floor-INDEPENDENT (the SAME
       // `buf:scene.depth` attachment every instance reads), so it rebuilds
       // fine on a tier change like everything else here; only `uExpectedDepth`
@@ -693,7 +738,14 @@ export function createWaterSurfaceSubsystem({
     // noise, not yet architecturally fixed.
     const rawResolvedTier = Number.isFinite(state.perfTier) ? state.perfTier : WATER_DEFAULT_TIER;
     const resolvedTier = resolveGatedWaterTier(rawResolvedTier);
-    if (resolvedTier !== builtForTier) {
+    // ⚠️ DIAGNOSTIC FORCE-CHANGE ALSO REBUILDS (2026-08-27) — same `!==`
+    // shape as the tier check, so `diag/perf-shader-variant-ab.js` flipping
+    // `setWaterCausticsGateForce` gets picked up by the very next ordinary
+    // sync() with NO restart required — water's own material rebuild is
+    // already cheap (this whole block), unlike the whole-image compositing
+    // materials that toggle need a full viewer restart to reach.
+    const resolvedCausticsGateForce = getWaterCausticsGateForce().forced;
+    if (resolvedTier !== builtForTier || resolvedCausticsGateForce !== builtForCausticsGateForce) {
       const prev = surface;
       surface = buildSurfaceForTier(resolvedTier);
       meshes[0].material = surface.absorbMaterial;
@@ -723,6 +775,7 @@ export function createWaterSurfaceSubsystem({
       // self-correcting regardless of how the two subsystems happen to race,
       // rather than depending on winning that race.
       builtForTier = surface.tier;
+      builtForCausticsGateForce = resolvedCausticsGateForce;
       // Force every cached value below to re-push onto the FRESH material — it
       // starts back at its constructor defaults, and the key-based caches
       // below exist to skip REDUNDANT writes, not the first write to a new

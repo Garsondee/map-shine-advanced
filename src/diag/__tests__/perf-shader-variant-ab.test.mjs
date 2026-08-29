@@ -89,8 +89,14 @@ export function run(t) {
       }
       ok(`${toggle.id} watches geometry.worldDraw`, toggle.watchZones.includes('geometry.worldDraw'));
     }
-    ok('two catalog entries: maskNode, opaqueBlendOff', SHADER_VARIANT_TOGGLES.length === 2);
+    // ⚠️ RAISED 2 → 3 (2026-08-27) — `waterCaustics` added, see that entry's
+    // own comment in perf-shader-variant-ab.js for why it exists.
+    ok('three catalog entries: maskNode, opaqueBlendOff, waterCaustics', SHADER_VARIANT_TOGGLES.length === 3);
     ok('shaderVariantToggleById finds a real entry', shaderVariantToggleById('maskNode')?.id === 'maskNode');
+    ok(
+      'shaderVariantToggleById finds the new water entry too',
+      shaderVariantToggleById('waterCaustics')?.id === 'waterCaustics'
+    );
     ok('shaderVariantToggleById returns null for an unknown id', shaderVariantToggleById('nope') === null);
   }
 
@@ -118,12 +124,44 @@ export function run(t) {
     }
 
     // ========================================================================
+    // waterCaustics — the NO-RESTART toggle (2026-08-27). Same generic
+    // dispatch shape (`readForcedShaderVariant`/`restartViewerWithForced
+    // ShaderVariant`), same AB_SEQUENCE, same restore contract as the other
+    // two — this fake harness has no notion of "restart" vs "flip a flag",
+    // it only records what it was called with, so this block genuinely
+    // proves the toggle behaves like an ordinary catalog entry to every
+    // caller, whatever water's OWN dispatch case does internally in
+    // production (boot.js's own `waterCaustics` branch returns `{ok:true}`
+    // without a real restart — this test cannot see that difference, by
+    // design, since `runShaderVariantAB` must not care how a toggle takes
+    // effect, only that it does).
+    // ========================================================================
+    {
+      const h = fakeHarness({ initialForce: { waterCaustics: null } });
+      const r = await runShaderVariantAB(h, { measureFrames: 10, toggleIds: ['waterCaustics'] });
+      ok(
+        'waterCaustics ran on its own',
+        r.ran === true && r.toggles.length === 1 && r.toggles[0].id === 'waterCaustics'
+      );
+      ok(
+        'same on/off/on/restore sequence as every other catalog entry',
+        h.restarts.map((x) => `${x.id}:${x.mode}`).join(',') ===
+          'waterCaustics:true,waterCaustics:false,waterCaustics:true,waterCaustics:null'
+      );
+      ok('restored to its own original (null)', h.getForce('waterCaustics') === null);
+    }
+
+    // ========================================================================
     // BOTH TOGGLES IN ONE CALL — the real reason this file exists rather than
-    // being a copy-paste of the sharpening one
+    // being a copy-paste of the sharpening one. Explicitly scoped to these
+    // two (not "run every catalog entry") so this test's own exact-order/
+    // exact-count assertions stay meaningful regardless of how many more
+    // toggles the catalog grows to — `waterCaustics`'s own coverage lives in
+    // its dedicated block below instead.
     // ========================================================================
     {
       const h = fakeHarness({ initialForce: { maskNode: false, opaqueBlendOff: true } });
-      const r = await runShaderVariantAB(h, { measureFrames: 10 });
+      const r = await runShaderVariantAB(h, { measureFrames: 10, toggleIds: ['maskNode', 'opaqueBlendOff'] });
       ok(
         'both catalog toggles ran, in catalog order',
         r.toggles.map((x) => x.id).join(',') === 'maskNode,opaqueBlendOff'

@@ -44,6 +44,12 @@ import { summariseAbBlock, compareAbBlocks, AB_SEQUENCE, DEFAULT_AB_MEASURE_FRAM
  * `SHARPENING_WATCH_ZONES`. */
 const WORLD_DRAW_WATCH_ZONES = Object.freeze(['geometry.worldDraw', 'geometry.depthDraw', 'geometry.earlyZPrepass']);
 
+/** Water's own surface draw is inside `geometry.worldDraw` (the shared,
+ * un-zoned world-scene pass — see `waterCaustics`'s own catalog entry
+ * below), the SAME reason `WORLD_DRAW_WATCH_ZONES` exists for the other two
+ * toggles; no water-specific zone exists to bracket instead. */
+const WATER_WATCH_ZONES = WORLD_DRAW_WATCH_ZONES;
+
 /**
  * THE CATALOG. Same spirit as `STRUCTURAL_TOGGLES`
  * (`perf-structural-ab.js`) — kept here, Node-testable, each toggle's own
@@ -63,6 +69,26 @@ export const SHADER_VARIANT_TOGGLES = Object.freeze([
     question:
       'For tiles already certified fully opaque, does forcing transparent:false (a plain overwrite instead of a read-modify-write blend) save real GPU time over the default blended draw?',
     watchZones: WORLD_DRAW_WATCH_ZONES,
+  }),
+  // WATER CAUSTICS (2026-08-27) — author: "we need to set which parts of the
+  // effect are in which performance tiers but in order to do that we need
+  // data." Currently `caustics` is bundled into tier 4 ("shore") alongside
+  // shore-foam filaments and wave shoaling (`WATER.tiers`, water.js) with no
+  // separate cost-class of its own; this toggle isolates JUST the Worley-net
+  // block's own marginal cost, everything else tier 4 adds held fixed
+  // (`shoaling` is untouched — see `causticsGateForce`'s own doc,
+  // water-render.js). ⚠️ 'on' here means "caustics FORCED ON" (the opposite
+  // convention from `maskNode`/`opaqueBlendOff`, whose 'on' leg is the
+  // non-default diagnostic state) — deliberately, because caustics' own
+  // DEFAULT-for-quality-tier state IS forced-on already, and the honest
+  // question is "does the shipping feature cost anything", not "does
+  // removing it save anything" phrased backwards.
+  Object.freeze({
+    id: 'waterCaustics',
+    label: 'Water tier 4 caustics (the Worley cell-edge net)',
+    question:
+      "What does tier 4's caustic net (2 Worley layers, the wave/growth domain warps, the junction-brightness test) cost geometry.worldDraw, with shoaling and shore foam held fixed? Answers whether caustics deserves its own cost class/tier rather than sharing tier 4's.",
+    watchZones: WATER_WATCH_ZONES,
   }),
 ]);
 

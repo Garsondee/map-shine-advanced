@@ -962,6 +962,16 @@ export function buildWaterSurfaceMaterial({
   swashFoam = WATER_TIER4_SWASH_FOAM,
   breakFoam = WATER_TIER4_BREAK_FOAM,
   caustics = WATER_TIER4_CAUSTICS,
+  // DIAGNOSTIC-ONLY (2026-08-27) — a build-time OVERRIDE of the `activeTier
+  // >= 4` gate JUST for caustics (never `shoaling`, its own tier-4 sibling),
+  // for `diag/perf-shader-variant-ab.js`'s own restart-based A/B measurement
+  // — see that file's `waterCaustics` toggle for the only intended caller.
+  // `null` (every ordinary caller, including every construction-only test)
+  // reproduces `activeTier >= 4` exactly, byte for bit; `true`/`false` force
+  // the Worley-net block constructed/skipped regardless of tier, to measure
+  // what it costs `geometry.worldDraw` on a real GPU with everything else
+  // (shoaling, shore foam) held fixed.
+  causticsGateForce = null,
   foamTrail = WATER_TIER4_FOAM_TRAIL,
   // ⚠️ LIVE PARAM (2026-08-24) — live-reported: foam appears on every shore
   // regardless of how the author painted the bank, and a softly-feathered
@@ -1640,7 +1650,7 @@ export function buildWaterSurfaceMaterial({
       // the SAME warped domain plus two more taps of it. Plain JS booleans,
       // Effects.md Law 4 — below tier 4 neither branch is even entered.
       shoaling: activeTier >= 4,
-      caustics: activeTier >= 4,
+      caustics: causticsGateForce ?? activeTier >= 4,
     });
   }
 

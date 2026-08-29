@@ -511,6 +511,8 @@ import {
   WATER_DEBUG_CHANNELS,
   WATER_PRESETS,
   waterPreset,
+  setWaterCausticsGateForce,
+  getWaterCausticsGateForce,
   createFluidSeams,
   createFluidRegistration,
   FLUID_PARAMS,
@@ -4318,17 +4320,32 @@ function install() {
     readForcedShaderVariant: (id) => {
       if (id === 'maskNode') return getVtPanViewerMaskNodeOffForce()?.forced ?? null;
       if (id === 'opaqueBlendOff') return getVtPanViewerOpaqueBlendOffForce()?.forced ?? null;
+      if (id === 'waterCaustics') return getWaterCausticsGateForce()?.forced ?? null;
       return null;
     },
     /**
-     * @param {'maskNode'|'opaqueBlendOff'} id
+     * @param {'maskNode'|'opaqueBlendOff'|'waterCaustics'} id
      * @param {boolean|null} mode
      * @returns {Promise<{ok: boolean, error?: string}>}
      */
     restartViewerWithForcedShaderVariant: async (id, mode) => {
       if (id === 'maskNode') setVtPanViewerMaskNodeOffForce(mode);
       else if (id === 'opaqueBlendOff') setVtPanViewerOpaqueBlendOffForce(mode);
-      else return { ok: false, error: `unknown forced shader variant id: ${id}` };
+      else if (id === 'waterCaustics') {
+        // ⚠️ NO RESTART (2026-08-27) — deliberately DIFFERENT from the two
+        // legs above. `caustics` is a JS-boolean-baked-at-material-build
+        // gate exactly like `maskNode`/`opaqueBlendOff` are, but water's OWN
+        // material already rebuilds cheaply in place on a tier/force change
+        // (`water-surface-subsystem.js`'s own `sync()`) — it does not need
+        // the whole-image compositing materials' full stop/start/tile-
+        // reload sequence to pick up a fresh build. Setting the flag here
+        // and returning immediately is safe because the caller's own
+        // post-toggle settle window (`POST_RESTART_PROFILER_SETTLE_FRAMES`,
+        // `perf-shader-variant-ab.js`) already discards far more frames than
+        // the single ordinary sync() the rebuild actually needs.
+        setWaterCausticsGateForce(mode);
+        return { ok: true };
+      } else return { ok: false, error: `unknown forced shader variant id: ${id}` };
       return restartRealSceneViewerAndSettle(`${id} A/B`);
     },
   };

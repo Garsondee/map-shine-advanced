@@ -241,4 +241,20 @@ export const PASS_IMPLS = Object.freeze({
       'return, no GPU work) when the effect is disabled or the viewed floor is the ground floor. Same ' +
       'invocability caveat as geometry.world — the loop lives inside startVtPanViewer.',
   },
+  'post.taaResolve': {
+    fn: startVtPanViewer,
+    module: 'vt/index.js',
+    export: 'startVtPanViewer',
+    separatelyInvocable: false,
+    note:
+      'REAL as of 2026-08-30 (project_albedo_zoom_out_clarity_audit_2026-08-30 Stage 5): ' +
+      'runPostTaaResolvePass (a closure inside startVtPanViewer, in the local passImpls map ' +
+      'runPassPlan walks) reads scene.lit + a ping-ponged history buffer pair (allocator-owned, ' +
+      "vt/taa-resolve.js builds the TSL), clamps the reprojected history into the current frame's " +
+      "own neighbourhood, and redirects present.composite's read target to the freshly-written " +
+      'buffer (grade-present.js#setLitSource — a value swap, no rebuild). A TRUE no-op every frame ' +
+      'while the setting is off (default), except the exact frame it turns off, which un-redirects ' +
+      'present exactly once. Same invocability caveat as geometry.world — the loop lives inside ' +
+      'startVtPanViewer.',
+  },
 });

@@ -214,6 +214,27 @@ export function buildGradePresentMaterial({
       // untouched: this is a no-op call that costs nothing extra.
       if (sharpenActive) rebuildFragment();
     },
+    /**
+     * Re-point at a DIFFERENT, ALREADY-SAME-SHAPE texture, EVERY FRAME — no
+     * `needsUpdate`, no rebuild (2026-08-30, TAA — Stage 5.6). Deliberately
+     * distinct from `rebindLit` just above: that one exists for a RESIZE
+     * (rare, the underlying texture's own dimensions changed, worth paying a
+     * rebuild to be safe) — this one exists for the TAA resolve pass
+     * re-pointing present at whichever history buffer it just wrote,
+     * EVERY SINGLE FRAME, where a rebuild would be the exact "wasteful if
+     * reused for a per-frame ping-pong swap" cost `taa-resolve.js`'s own
+     * header names. Same identically-shaped/-formatted internal-tier
+     * HalfFloat target either way (`scene.lit` or a TAA history buffer, both
+     * built from `describeSceneColor()`), so a bare `.value =` is genuinely
+     * sufficient — verified against the same "RenderTarget#setSize mutates
+     * the SAME texture object in place" class of guarantee this file's own
+     * `rebindLit` already leans on, just without the dimension change that
+     * function exists to handle.
+     * @param {*} tex
+     */
+    setLitSource: (tex) => {
+      presentTexNode.value = tex;
+    },
     gateCompiled: !!outdoors,
   };
 }

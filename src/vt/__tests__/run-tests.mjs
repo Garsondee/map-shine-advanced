@@ -25,6 +25,7 @@ import { run as runSettle } from './settle.test.mjs';
 import { run as runCompressedTextures } from './compressed-textures.test.mjs';
 import { run as runDepthProxyMaterialPool } from './depth-proxy-material-pool.test.mjs';
 import { run as runAlbedoClarity } from './albedo-clarity.test.mjs';
+import { run as runTaaResolve } from './taa-resolve.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -78,6 +79,7 @@ const suites = [
   ['compressed-textures', runCompressedTextures],
   ['depth-proxy-material-pool', runDepthProxyMaterialPool],
   ['albedo-clarity', runAlbedoClarity],
+  ['taa-resolve', runTaaResolve],
 ];
 
 for (const [name, fn] of suites) {

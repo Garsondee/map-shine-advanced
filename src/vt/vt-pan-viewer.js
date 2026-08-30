@@ -73,6 +73,18 @@ import {
   resolvePostUpscaleSharpenStrength,
   setPostUpscaleSharpenStrength,
 } from './albedo-clarity.js';
+// TEMPORAL SUPERSAMPLING (2026-08-30, Stage 5 —
+// project_albedo_zoom_out_clarity_audit_2026-08-30). Same extraction
+// reasoning as albedo-clarity.js above: THREE arrives by parameter, nothing
+// here touches game/canvas/settings, so the shader lab can import the real
+// node-builder directly. Intra-zone.
+import {
+  buildHaltonJitterSequence,
+  computeJitterOffsetWorld,
+  computeReprojectTransform,
+  isCutDetected,
+  buildTaaResolveNode,
+} from './taa-resolve.js';
 // The BC-compression client (worker + IndexedDB cache). Opaque whole images come
 // back as BC1 blocks (8× smaller), alpha images as BC7 (4×, carries the alpha) —
 // the WebGPU-memory-ceiling fix; any failure returns null and the loader keeps
@@ -1996,6 +2008,92 @@ export async function startVtPanViewer({
     // light.js's composite essay for why a linear-space add washed the scene
     // to a single hue and gamma-space fixes it).
     const sceneColoration = allocator.create('scene.coloration', describeSceneColor());
+    // TAA HISTORY (2026-08-30, Stage 5) — a ping-pong pair, same descriptor
+    // shape as scene.lit (HalfFloat/NoColorSpace, internal tier), but
+    // conceptually a `res:taaHistory` resource per the graph's own grammar
+    // (graph/passes.js's header: `res:*` covers non-image state including
+    // SIM state — read-last-frame/write-next-frame, structurally identical
+    // to sims.fluids' own hand-managed ping-pong sim grids, not a
+    // single-owner-per-frame `buf:*` target), reusing the allocator purely
+    // for its resize/law-enforcement mechanics.
+    //
+    // LAZY, not allocated here unconditionally — this is the audit's most
+    // speculative tier, off by default; two more full HalfFloat RGBA
+    // internal-tier buffers (~59MB combined at a representative 2560×1440)
+    // is real, avoidable cost for a player who never turns it on. Created on
+    // first `setTaaResolve({enabled:true})` by `ensureTaaHistoryBuffers`
+    // below, resized (only if they already exist) inside
+    // `resizeInternalTargets` alongside every other internal-tier target.
+    let taaHistoryA = null;
+    let taaHistoryB = null;
+    /** Which of A/B holds the MOST RECENTLY WRITTEN (this-frame) output —
+     * the OTHER one is what the next frame reads as "history". */
+    let taaHistoryWriteIndex = 0;
+    /** Separate from `taaJitterEnabled`: tracks whether the history buffers'
+     * CONTENTS are trustworthy RIGHT NOW (false on first enable, on any of
+     * the three invalidation triggers, or the frame right after). Gates the
+     * RESOLVE's blend weight, never the jitter itself. */
+    let taaHistoryValid = false;
+    /** Idempotent — a second `enabled:true` after the buffers already exist
+     * is a cheap no-op check, not a re-allocation. */
+    function ensureTaaHistoryBuffers() {
+      if (taaHistoryA && taaHistoryB) return;
+      taaHistoryA = allocator.create('taa.historyA', describeSceneColor());
+      taaHistoryB = allocator.create('taa.historyB', describeSceneColor());
+      taaHistoryValid = false; // freshly allocated — nothing real in either buffer yet
+    }
+
+    /** Built lazily, alongside the history buffers — see `ensureTaaHistoryBuffers`. */
+    let taaResolveMaterial = null;
+    let taaResolveQuad = null;
+    /** @type {{uReproject:*, uBlendWeight:*}|null} */
+    let taaResolveUniforms = null;
+    /** The swappable node `buildTaaResolveNode` returned — `.value` re-pointed
+     * to whichever buffer is HISTORY every frame (see that function's own
+     * "WHY historyTexNode IS RETURNED" doc). */
+    let taaHistoryTexNode = null;
+    /** Idempotent, same shape as `ensureTaaHistoryBuffers`. */
+    function ensureTaaResolveMaterial() {
+      if (taaResolveMaterial) return;
+      ensureTaaHistoryBuffers();
+      const { uniform, vec4, float, uv } = THREE.TSL;
+      const uReproject = uniform(vec4(1, 1, 0, 0));
+      const uBlendWeight = uniform(float(0.1));
+      // Arbitrary starting choice — `taaHistoryWriteIndex` (already declared
+      // above) tracks which buffer is "the freshest output" from here on;
+      // this is only ever read on the FIRST resolve, and that frame is
+      // guaranteed `historyValid:false` (nothing has been written to either
+      // buffer yet), so it never actually blends this placeholder in.
+      const { rgb, a, historyTexNode } = buildTaaResolveNode(THREE, {
+        currentTex: sceneLit.texture,
+        initialHistoryTex: taaHistoryB.texture,
+        uvNode: uv(),
+        uReproject,
+        uBlendWeight,
+      });
+      const material = new THREE.NodeMaterial();
+      material.transparent = false;
+      material.blending = THREE.NoBlending;
+      material.depthTest = false;
+      material.depthWrite = false;
+      material.colorNode = vec4(rgb, a);
+      material.name = 'Taa_resolve';
+      taaResolveMaterial = material;
+      taaResolveQuad = new THREE.QuadMesh(material);
+      taaResolveUniforms = { uReproject, uBlendWeight };
+      taaHistoryTexNode = historyTexNode;
+    }
+    /** Was the resolve pass active (wrote a history buffer, redirected
+     * present) LAST frame? The one piece of state `runPostTaaResolvePass`
+     * needs to correctly un-redirect present exactly once on the frame TAA
+     * turns off, without touching `gradePresent` on every OTHER disabled
+     * frame — see that function's own doc for why "touches nothing while
+     * off" and "never leaves a stale redirect" both matter here. */
+    let taaWasActiveLastFrame = false;
+    /** Frame-level TAA blend weight (0 = pure history, 1 = pure current) when
+     * history IS valid. Conventional TAA starting point; live-tunable via
+     * `setTaaResolve` like every other author-facing control in this file. */
+    let taaBlendWeight = 0.1;
     // S2.15 (Performance-Audit-2026-08.md §3.1's MRT-merge plan) —
     // `scene.pointLightMerged`, written by nothing else, ever. Allocated
     // UNCONDITIONALLY, in both `pointLightMrtMerge` flag states — the SAME
@@ -7323,6 +7421,82 @@ export async function startVtPanViewer({
 
       renderer.setRenderTarget(null);
     }
+
+    /**
+     * THE TAA RESOLVE PASS (2026-08-30, Stage 5). Runs AFTER bloom/DoF
+     * (temporal accumulation must include every additive effect, or those
+     * would shimmer independently) and BEFORE post.grade (grade must tonemap
+     * the RESOLVED image, not the raw current frame) — see
+     * graph/passes.js's own `post.taaResolve` declaration for the DAG
+     * position this encodes.
+     *
+     * DISABLED (`taaJitterEnabled` false, the default): a TRUE no-op on every
+     * frame except the exact one TAA turns off, where present is
+     * un-redirected back to `scene.lit` exactly once — see
+     * `taaWasActiveLastFrame`'s own doc for why that one exception is needed
+     * despite the "touches nothing while off" goal.
+     *
+     * SAFETY-SLIDE (this file's own §4.3, extended to a pass with no
+     * independent recovery path downstream — `present.composite` IS the
+     * safety-slide boundary, with nothing after it): on ANY invalid/
+     * first/post-invalidation frame, `historyGood` is false and the resolve
+     * still runs — writing a valid buffer — but at blend weight 1.0 (pure
+     * current-frame passthrough), PLUS the shader's own PER-PIXEL offscreen
+     * fail-open on top (`buildTaaResolveNode`'s own `inside` gate) — two
+     * independent fail-opens, frame-level and pixel-level. Never a partially
+     * blended or corrupted result.
+     */
+    function runPostTaaResolvePass() {
+      if (!taaJitterEnabled) {
+        if (taaWasActiveLastFrame) {
+          gradePresent.setLitSource(sceneLit.texture);
+          taaWasActiveLastFrame = false;
+        }
+        return;
+      }
+      ensureTaaResolveMaterial();
+
+      // THREE independent invalidation triggers, ORed (Stage 5.4):
+      //   1. renderScaleHeld — tab-hidden or !settleTracker.settled, already
+      //      covering floor switch (settleTracker.reset() in setFloorIndex)
+      //      and scene load.
+      //   2. isCutDetected(taaReprojectTransform) — this frame's camera delta
+      //      is too large to be an ordinary pan/zoom step.
+      //   3. taaHistoryValid's own false — set by ensureTaaHistoryBuffers
+      //      (freshly allocated) and resizeInternalTargets (wrong-resolution
+      //      content after a rung change/CSS resize).
+      const cut = isCutDetected(taaReprojectTransform);
+      const historyGood = taaHistoryValid && !renderScaleHeld && !cut;
+
+      taaResolveUniforms.uReproject.value.set(
+        taaReprojectTransform.scaleX,
+        taaReprojectTransform.scaleY,
+        taaReprojectTransform.offsetX,
+        taaReprojectTransform.offsetY
+      );
+      taaResolveUniforms.uBlendWeight.value = historyGood ? taaBlendWeight : 1.0;
+
+      // Read whichever buffer ISN'T being written this frame as history;
+      // write into the other. `taaHistoryTexNode.value =` is the cheap,
+      // no-rebuild re-point this whole design exists to make possible — see
+      // buildTaaResolveNode's own "WHY historyTexNode IS RETURNED" doc.
+      const writeTarget = taaHistoryWriteIndex === 0 ? taaHistoryA : taaHistoryB;
+      const readSource = taaHistoryWriteIndex === 0 ? taaHistoryB : taaHistoryA;
+      taaHistoryTexNode.value = readSource.texture;
+
+      renderer.setRenderTarget(writeTarget);
+      taaResolveQuad.render(renderer);
+      renderer.setRenderTarget(null);
+
+      taaHistoryWriteIndex = 1 - taaHistoryWriteIndex;
+      taaHistoryValid = true;
+      taaWasActiveLastFrame = true;
+      // Present reads THIS frame's resolved output, not scene.lit directly —
+      // the whole point. Cheap value swap, no rebuild (setLitSource's own
+      // doc, grade-present.js).
+      gradePresent.setLitSource(writeTarget.texture);
+    }
+
     // 'masks.occlusion'/'light.accumulate': the "add one line, widen fromStage"
     // the comment above predicted, done twice now. Both are hoisted function
     // declarations, so referencing them here (defined later / above in this
@@ -7338,6 +7512,7 @@ export async function startVtPanViewer({
       'vision.gate': runVisionGatePass,
       'post.bloom': runPostBloomPass,
       'post.dof': runPostDofPass,
+      'post.taaResolve': runPostTaaResolvePass,
       'present.composite': runPresentCompositePass,
     };
     // Today this resolves to exactly ['masks.occlusion', 'geometry.world',
@@ -9634,6 +9809,37 @@ export async function startVtPanViewer({
     depthCamera.position.set(0, 0, DEPTH_PASS_CAMERA_Z);
     depthCamera.lookAt(0, 0, 0);
 
+    // ══ TAA STATE (2026-08-30, Stage 5) ═══════════════════════════════════
+    // Hoisted from `renderFrame`'s own per-frame hitch-detection block (was a
+    // local `const` there) — the render-scale governor's existing "something
+    // big just changed" signal (tab-hidden or `!settleTracker.settled`,
+    // itself already covering floor switch/scene load — see that block's own
+    // comment), reused here as ONE of TAA's three history-invalidation
+    // triggers rather than hand-wired a second time.
+    let renderScaleHeld = false;
+    // `taaJitterEnabled` — wired to the live setting in `setTaaResolve` below
+    // (Stage 5.7). Off by default: this is the audit's most speculative
+    // tier, shipped without real live-eyes time backing a default-on choice.
+    let taaJitterEnabled = false;
+    // Halton(2,3), built once — see taa-resolve.js's own header for why this
+    // specific sequence and why index 0 is skipped.
+    const TAA_JITTER_SEQUENCE = buildHaltonJitterSequence(8);
+    let taaJitterIndex = 0;
+    // The frustum `updateCamera` ended THIS frame with (post-jitter, if
+    // jitter is on) — read next frame to derive `taaReprojectTransform`
+    // BEFORE being overwritten. `null` until the second frame ever renders
+    // (no "previous" frame exists yet), which is exactly the condition
+    // `getTaaReprojectTransform`'s own `historyValid` caller checks for.
+    let taaPrevFrustum = null;
+    /** This frame's reprojection transform (current frustum -> previous
+     * frame's UV space) — recomputed unconditionally every `updateCamera`
+     * call, regardless of whether jitter/TAA is enabled, so it is always
+     * ready and correct; a SEPARATE validity flag (`runPostTaaResolvePass`,
+     * Stage 5.4) is what actually gates whether the history buffer's own
+     * CONTENTS are trustworthy — cleanly separated concerns, not conflated
+     * into one. */
+    let taaReprojectTransform = { scaleX: 1, offsetX: 0, scaleY: 1, offsetY: 0 };
+
     /**
      * Point the camera at the current view rect.
      *
@@ -9648,6 +9854,19 @@ export async function startVtPanViewer({
      * reframeVisibleLayers() used to do by rewriting UVs, now done by moving the
      * camera, which is both cheaper and impossible to compound (the exact bug
      * class the deleted reframe path produced live on 2026-07-15).
+     *
+     * TAA JITTER (2026-08-30) is applied to `f` HERE, before either camera
+     * reads it — `depthCamera` mirrors `camera`'s jitter exactly, every
+     * frame: `buildWholeImageMaterial`'s early-occlusion-reject reads
+     * `uExpectedDepth` against THIS SAME FRAME's depth pass, so color and
+     * depth must share one frustum per frame. The cross-FRAME jitter
+     * difference is what reprojection compensates for, not a within-frame
+     * mismatch — see taa-resolve.js's own header for the full account.
+     * `currentViewRect`/`rect` itself is NEVER jittered — only the LOCAL `f`
+     * used to position the cameras — so wind spawning and
+     * `envLight.setViewRect` (both fed the unjittered rect by their own
+     * separate call sites in `renderFrame`) never see a sub-pixel wobble
+     * they have no reason to react to.
      */
     function updateCamera(precomputedRect) {
       if (!view) return;
@@ -9658,6 +9877,23 @@ export async function startVtPanViewer({
       // to computing it locally so this function stays correct standalone.
       const rect = precomputedRect ?? viewToWorldRect(view, canvasW / canvasH);
       const f = computeCameraFrustum(rect);
+      if (taaJitterEnabled) {
+        const sample = TAA_JITTER_SEQUENCE[taaJitterIndex % TAA_JITTER_SEQUENCE.length];
+        taaJitterIndex++;
+        const { dx, dy } = computeJitterOffsetWorld(f, internalW, internalH, sample);
+        f.left += dx;
+        f.right += dx;
+        f.top += dy;
+        f.bottom += dy;
+      }
+      // This frame's reprojection, from the frustum LAST frame ended with —
+      // computed BEFORE `taaPrevFrustum` is overwritten below. Unconditional
+      // (see this block's own declaration comment for why).
+      taaReprojectTransform = taaPrevFrustum
+        ? computeReprojectTransform(f, taaPrevFrustum)
+        : { scaleX: 1, offsetX: 0, scaleY: 1, offsetY: 0 };
+      taaPrevFrustum = f;
+
       camera.left = f.left;
       camera.right = f.right;
       camera.top = f.top;
@@ -13057,7 +13293,12 @@ export async function startVtPanViewer({
         // One caller, one combined condition, every frame — no race possible.
         const settleState = settleTracker.read();
         const tabHidden = document.hidden === true;
-        const renderScaleHeld = tabHidden || !settleState?.settled;
+        // Hoisted to the outer closure (was a local `const`) — TAA's own
+        // invalidation wiring (`runPostTaaResolvePass`, Stage 5.4) reads this
+        // SAME signal rather than re-deriving "something big just changed,"
+        // the exact reuse this codebase's own comment above already argues
+        // for over hand-wiring a second caller.
+        renderScaleHeld = tabHidden || !settleState?.settled;
         renderScaleGovernor.setHold(
           renderScaleHeld,
           tabHidden ? 'tab-hidden' : (settleState?.waitingFor?.[0] ?? 'settling')
@@ -15796,6 +16037,16 @@ export async function startVtPanViewer({
       allocator.resize(sceneIllum, internalW, internalH, describeSceneColor());
       allocator.resize(sceneLit, internalW, internalH, describeSceneColor());
       allocator.resize(sceneColoration, internalW, internalH, describeSceneColor());
+      // TAA history — only if it exists (lazy allocation, see
+      // ensureTaaHistoryBuffers's own doc). A rung change or CSS resize means
+      // wrong-resolution content either way, so this is also a THIRD,
+      // independent history-invalidation trigger, alongside the settle/hold
+      // signal and cut detection `runPostTaaResolvePass` checks.
+      if (taaHistoryA && taaHistoryB) {
+        allocator.resize(taaHistoryA, internalW, internalH, describeSceneColor());
+        allocator.resize(taaHistoryB, internalW, internalH, describeSceneColor());
+        taaHistoryValid = false;
+      }
       allocator.resize(sceneColorMapOnly, internalW, internalH, describeSceneColorMapOnlyMrt());
       allocator.resize(
         scenePointLightMerged,
@@ -17407,6 +17658,38 @@ export async function startVtPanViewer({
         renderScaleUserSetting = typeof value === 'string' ? value : 'auto';
         requestInternalRescale();
         return { userSetting: renderScaleUserSetting, resolvedInternalScale: resolveCurrentInternalScale() };
+      },
+      /**
+       * Tune TAA live (2026-08-30, Stage 5) — no rebuild, no scene reload for
+       * `blendWeight` (a plain uniform write, mirrors `setAlbedoClarity`'s own
+       * live-tuning shape); `enabled` flips the frame-level jitter/resolve
+       * path, lazily building the history buffers + resolve material on
+       * first use (`runPostTaaResolvePass`'s own `ensureTaaResolveMaterial`
+       * call) rather than paying for them until a player actually opts in —
+       * this is the audit's most speculative tier, default OFF.
+       *
+       * Re-enabling after being off always starts `historyValid:false`
+       * regardless of what it held before: every frame while disabled wrote
+       * nothing real to either history buffer, so whatever was last in them
+       * is stale by definition, not just "possibly wrong."
+       * @param {{enabled?:boolean, blendWeight?:number}} next
+       * @returns {{enabled:boolean, blendWeight:number}}
+       */
+      setTaaResolve(next = {}) {
+        if (typeof next.enabled === 'boolean' && next.enabled !== taaJitterEnabled) {
+          taaJitterEnabled = next.enabled;
+          if (taaJitterEnabled) taaHistoryValid = false;
+        }
+        if (Number.isFinite(next.blendWeight)) {
+          taaBlendWeight = Math.max(0, Math.min(1, next.blendWeight));
+        }
+        return { enabled: taaJitterEnabled, blendWeight: taaBlendWeight };
+      },
+      /** Current TAA settings, plus whether the history is trustworthy RIGHT
+       * NOW (diagnostics — mirrors `getAlbedoClarity`'s own "current value,
+       * plus a live-binding flag" shape). */
+      getTaaResolve() {
+        return { enabled: taaJitterEnabled, blendWeight: taaBlendWeight, historyValid: taaHistoryValid };
       },
       /**
        * TIER-COUPLED BUDGET (2026-08-27) — push a fresh frame budget into the
@@ -19767,6 +20050,26 @@ export function getVtPanViewerGpuZoneStatus() {
 export function setVtPanViewerRenderScaleSetting(value) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.setRenderScaleSetting(value);
+}
+
+/**
+ * Tune temporal supersampling live (2026-08-30, Stage 5 —
+ * project_albedo_zoom_out_clarity_audit_2026-08-30). `{enabled}` flips the
+ * whole feature; `{blendWeight}` (0..1, 0=pure history/1=pure current) tunes
+ * the steady-state blend once history is valid. No-op `{skipped:true}` if
+ * nothing is running — same deferred-to-next-start posture every other
+ * live-setting wrapper in this file already has.
+ * @param {{enabled?:boolean, blendWeight?:number}} next
+ */
+export function setVtPanViewerTaaResolve(next) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setTaaResolve(next);
+}
+
+/** Current TAA settings + live history-validity — diagnostics/settings-panel readout. */
+export function getVtPanViewerTaaResolve() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.getTaaResolve();
 }
 
 /**

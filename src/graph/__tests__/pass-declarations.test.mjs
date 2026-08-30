@@ -35,7 +35,15 @@ export function run(t) {
     // draw, before the vision gate) — no existing pass could absorb it without
     // losing one of those orderings, which is the same test `vision.gate`
     // itself had to pass.
-    t.ok('a sane number of passes (10-17, the promised ~10-12)', PASSES.length >= 10 && PASSES.length <= 17);
+    // ⚠️ CEILING RAISED 17 → 18 (2026-08-30, `post.taaResolve`, Stage 5 —
+    // project_albedo_zoom_out_clarity_audit_2026-08-30). SAME bar: load-bearing
+    // in both directions. AFTER bloom/DoF — temporal accumulation must include
+    // every additive effect, or bloom/DoF would shimmer independently frame to
+    // frame. BEFORE post.grade/present — grade must tonemap the RESOLVED
+    // image, not the raw current frame. Neither bloom nor DoF could absorb
+    // this (unrelated jobs); present.composite is the safety-slide boundary
+    // and must not also own temporal-resolve logic.
+    t.ok('a sane number of passes (10-18, the promised ~10-12)', PASSES.length >= 10 && PASSES.length <= 18);
     t.ok(
       'every stage used is declared',
       PASSES.every((p) => STAGES.includes(p.stage))

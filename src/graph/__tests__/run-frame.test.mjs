@@ -109,8 +109,12 @@ export function run(t) {
     // every additive light draw because rain is in front of the world (roofs
     // included), and BEFORE the vision gate because MSA owns vision now and
     // rain must never leak into unexplored fog (Precipitation.md §3.5).
+    // `post.taaResolve` joined 2026-08-30 (Stage 5) between post.dof and
+    // present.composite: AFTER bloom/DoF, so temporal accumulation includes
+    // every additive effect, and BEFORE present so grade tonemaps the
+    // RESOLVED image, not the raw current frame.
     const expected =
-      'masks.occlusion,geometry.world,light.accumulate,surface.response,surface.water,surface.particles,surface.precipitation,vision.gate,post.bloom,post.dof,present.composite';
+      'masks.occlusion,geometry.world,light.accumulate,surface.response,surface.water,surface.particles,surface.precipitation,vision.gate,post.bloom,post.dof,post.taaResolve,present.composite';
     ok(`today's real masks..present plan is exactly [${expected}] (got: ${ids.join(',')})`, ids.join(',') === expected);
     ok(
       'surface.response is planned AFTER light.accumulate — it reads what that pass writes',

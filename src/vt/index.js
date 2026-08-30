@@ -38,6 +38,10 @@ export {
   // TIER-COUPLED BUDGET (2026-08-27) — re-resolve the governor's frame
   // budget from the CURRENT performance-profile tier; see its own doc.
   setVtPanViewerRenderScaleProfile,
+  // TEMPORAL SUPERSAMPLING (2026-08-30, Stage 5) — opt-in only, default off;
+  // see vt/taa-resolve.js's own header for the full design.
+  setVtPanViewerTaaResolve,
+  getVtPanViewerTaaResolve,
   readVtPanViewerRenderInfo,
   readVtPanViewerDrawCallsOnly,
   readVtPanViewerTriangleCountOnly,
@@ -87,6 +91,7 @@ export {
   sampleVtPanViewerIllumPixel,
   probeVtPanViewerPixels,
   runInteractiveVtPanViewerPixelProbe,
+  pickVtPanViewerWorldPoint,
   probeVtPanViewerWindAndParticles,
   runInteractiveVtPanViewerWindProbe,
   // V4-Testament Stage 0 measurement-only debug flags — see each one's own

@@ -593,6 +593,38 @@ export const PASSES = [
       'a unified depth-authority read replacing N separate per-floor renders + Porter-Duff composites.',
   },
   {
+    id: 'post.taaResolve',
+    stage: 'post',
+    kind: 'gpu',
+    status: 'live',
+    owns: 'docs/planning/Albedo-Zoom-Out-Clarity-Audit-2026-08-30.md Stage 5 (temporal supersampling)',
+    creates: [],
+    reads: [],
+    modifies: ['buf:scene.color'],
+    absorbs: ['(none — genuinely new, no V2 precedent)'],
+    note:
+      'THE THIRD POST-STAGE EFFECT, and genuinely NEW — no V2 precedent, stated explicitly here since ' +
+      'there is nothing real to list. Sits AFTER bloom/DoF (temporal accumulation must include every additive ' +
+      'effect, or those would shimmer independently across frames) and BEFORE post.grade (grade must ' +
+      "tonemap the RESOLVED image, not the raw current frame). 'modifies buf:scene.color' at the " +
+      'SAME abstraction level post.bloom/post.dof already claim it at: the real implementation reads ' +
+      'scene.lit, writes a ping-ponged res:taaHistory pair (hand-managed outside the declarative ' +
+      "buf:* allocator, structurally identical to sims.fluids' own ping-pong sim grids — see that " +
+      "pass's own note), and redirects present.composite's read target to whichever history buffer " +
+      'was just written (grade-present.js#setLitSource, a bare value swap, no rebuild) — never a ' +
+      'literal write into the scene.color/scene.lit targets themselves. Scope, stated plainly: ' +
+      "reprojection uses ONLY the camera's own analytic frame-to-frame delta (closed-form, exact, " +
+      'for an orthographic camera over a flat plane — no depth reconstruction needed) plus a ' +
+      'neighbourhood clamp as the general anti-ghosting fallback — NOT a per-effect motion-vector ' +
+      'G-buffer across animated water/fire/vegetation/precipitation/tokens. Animated content gets ' +
+      'zero extra AA benefit and zero regression under this scope. Default OFF (author opt-in only) ' +
+      "— the audit's most speculative tier, shipped without real live-eyes time backing a default-on " +
+      "choice. Runtime: runPostTaaResolvePass, a closure in the viewer's local passImpls (mirrors " +
+      'post.bloom/post.dof, their own template) — a true no-op every frame while disabled, except the ' +
+      'exact frame it turns off, which un-redirects present exactly once. Full design: ' +
+      "vt/taa-resolve.js's own header.",
+  },
+  {
     id: 'post.grade',
     stage: 'post',
     kind: 'gpu',

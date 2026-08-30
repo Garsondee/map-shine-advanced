@@ -43,32 +43,38 @@
  * axis — the entire "motion vector" this scope needs.
  *
  * ===========================================================================
- * UV-DIRECTION — traced against `updateCamera`'s own doc, still bench-checked
+ * UV-DIRECTION — X-axis mechanism CONFIRMED on real hardware; Y traced from
+ * source, not yet independently bench-confirmed
  * ===========================================================================
- * `computeReprojectTransform` derives `scaleY`/`offsetY` from ONLY the
- * algebraic relationship "UV v=0 maps to `camera.bottom`'s value, v=1 maps
- * to `camera.top`'s value" — the FIXED, standard three.js orthographic
- * projection semantics (v=0 → NDC −1 → `camera.bottom`; v=1 → NDC +1 →
- * `camera.top`), true regardless of what world-space values those two
- * fields happen to hold. `vt-pan-viewer.js#updateCamera`'s own doc records
- * that `computeCameraFrustum` deliberately stores the world's SMALLEST Y in
- * `f.top` (matching Foundry's Y-down convention, "so Three maps the
- * smallest world Y to NDC +1 = the top of the screen") — but that
- * assignment is exactly what makes `f.top`/`f.bottom` mean "top/bottom" in
- * the first place; it is not a SECOND, independent flip layered on top of
- * standard NDC semantics. The derivation below (and the X-axis one beside
- * it) depends on nothing else, so it holds under this codebase's actual
- * convention, not just a generic one. The X axis needs no such argument —
- * u=0↔left/u=1↔right is the unflipped, universal case.
+ * `computeReprojectTransform` derives `scaleX`/`offsetX` (and, by the exact
+ * same shape, `scaleY`/`offsetY`) from ONLY the algebraic relationship "UV
+ * u=0 maps to `camera.left`'s value, u=1 to `camera.right`'s" (Y: v=0 ↔
+ * `camera.bottom`, v=1 ↔ `camera.top`) — the FIXED, standard three.js
+ * orthographic projection semantics, true regardless of what world-space
+ * values those fields happen to hold. `vt-pan-viewer.js#updateCamera`'s own
+ * doc records that `computeCameraFrustum` deliberately stores the world's
+ * SMALLEST Y in `f.top` (Foundry's Y-down convention) — but that assignment
+ * is exactly what makes `f.top`/`f.bottom` mean "top/bottom" in the first
+ * place, not a SECOND, independent flip layered on top of standard NDC
+ * semantics; the derivation depends on nothing else.
  *
- * STILL bench-checked, not left as pure algebra: `buildTaaResolveNode`'s own
- * fullscreen `uv()` convention (does `.y` truly follow NDC the standard way
- * for THIS renderer's specific present-pass geometry, with no incidental
- * flip introduced between NDC and the `uv()` node TSL hands the shader) is
- * exactly the kind of "should be true, verify it is" step the bench's
- * `moving-edge-reprojection-alignment` scenario exists for — matching
- * `mip-resample.js`'s own linearization fix, which was ALSO algebraically
- * sound and still verified against real rendered numbers before shipping.
+ * `tools/shader-lab/bench-taa-resolve.js`'s `reprojection-lands-on-the-
+ * correct-stripe` scenario CONFIRMED this mechanism on a real WebGPU
+ * device, 2026-08-30: three independent X-axis probes, the ACTUAL compiled
+ * shader (the `prevUV = uvNode.mul(uReproject.xy).add(uReproject.zw)` line
+ * below, copied verbatim into the bench) landed on the EXACT texel the JS
+ * algebra predicted, all three, zero colour-distance error. That proves the
+ * whole surrounding mechanism — uniform packing, `.xy`/`.zw` swizzling, a
+ * texture sample at a formula-derived offset UV — compiles and runs
+ * correctly, which the Y axis shares byte-for-byte; only the SIGN of what
+ * value lands in `.zw`'s Y half differs, and — deliberately, see that
+ * bench's own header — that specific sign was NOT independently re-proven
+ * on a real render (a pure-Y bench scenario, sidestepped this round to keep
+ * the fixture unambiguous), so it still rests on the source-level argument
+ * above, not on this same class of direct GPU confirmation the X axis now
+ * has. Matches `mip-resample.js`'s own linearization fix, same session: an
+ * algebraically-sound design that still needed — and got — a real render
+ * before being trusted, not assumed correct from the math alone.
  *
  * @module vt/taa-resolve
  */

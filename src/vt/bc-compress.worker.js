@@ -86,11 +86,14 @@
  */
 import { encodeStriped, computeMipChainDims } from './block-compress.js';
 import { coarseAlphaGridDims, extractAlphaGrid, createMinAlphaGrid, accumulateMinAlphaBand } from './coarse-alpha.js';
-// The mip reducer (Lanczos-2, premultiplied, dilated). Replaced the
+// The mip reducer (Lanczos-2, premultiplied, dilated, LINEARIZED). Replaced the
 // OffscreenCanvas `drawImage` resize this file used to rely on — see
-// mip-resample.js's header for the two author-reported defects that motivated
-// it ("pixelated at large zoom out", "tile edges very degraded when I zoom out").
-import { halveRGBA } from './mip-resample.js';
+// mip-resample.js's header for the three author-reported defects that motivated
+// it ("pixelated at large zoom out", "tile edges very degraded when I zoom out",
+// and the 2026-08-30 gamma/linear colour-space mismatch fix). `rmsContrastFromSums`/
+// `contrastPreservingCorrect` are the same session's companion fix — see
+// mip-resample.js's own header for why the two ship together.
+import { halveRGBA, rmsContrastFromSums, contrastPreservingCorrect } from './mip-resample.js';
 
 // Band height for the memory-bounded encode: rows are pulled and encoded
 // STRIP_ROWS at a time (rounded to a multiple of 4 by encodeStriped). 512 rows of
@@ -177,7 +180,20 @@ const STORE = 'blocks';
 // record lacks the field and would fail-open to boundary-everything (correct
 // pixels, no early-Z win) forever — re-encoded instead, the same
 // all-or-nothing trade every bump above has made.
-const CACHE_VERSION = 10;
+// v11 (2026-08-30, [[project_albedo_zoom_out_clarity_audit_2026-08-30]] §2):
+// the mip chain (levels 1+) is now built by DECODING to linear light before
+// filtering and re-encoding to sRGB on the way out (mip-resample.js's own
+// `halveRGBA` — it used to filter raw sRGB bytes directly, which disagreed
+// with the GPU's own sRGB-decode-before-filter hardware behaviour at sample
+// time), and each reduced level then gets a contrast-preserving correction
+// restoring its own RMS luminance contrast toward level 0's. Every v10
+// record's mip levels were produced by the OLD gamma-space-averaging path
+// with no correction and are measurably softer/lower-contrast than this
+// encoder now produces — re-encoded, not re-served, the same all-or-nothing
+// trade every bump above has made. Level 0 itself is byte-identical (this
+// change touches only `halveRGBA`, used for levels 1+ — see that function's
+// own header), so this bump exists for the mip TAIL, not the base level.
+const CACHE_VERSION = 11;
 
 /**
  * The coarse-alpha cache is versioned SEPARATELY from the BC blocks: the two
@@ -489,6 +505,16 @@ async function handle(src) {
   let alphaMax = 0;
   let alphaSum = 0;
   let texelCount = 0;
+  // CONTRAST-PRESERVING MIP CORRECTION (2026-08-30, mip-resample.js's own
+  // header): level 0's own RMS luminance contrast, accumulated in the SAME
+  // streaming pass as alphaStats above — the one place every source pixel is
+  // already in hand — rather than a second read of the source. `opaque` here
+  // means alpha>0 (mip-resample.js#computeRmsLuminanceContrast's own gate),
+  // a DIFFERENT question from the `opaque` variable above (that one means
+  // "is the WHOLE image opaque", the BC1-vs-BC7 format decision).
+  let lumaSum = 0;
+  let lumaSqSum = 0;
+  let opaqueTexelCount = 0;
   // STAGE 1's INTERIOR CERTIFICATION (see the v10 cache note above): a
   // per-texel MIN of source alpha, folded in from the SAME bands this scan
   // already reads — the one place every source pixel is already in hand.
@@ -504,6 +530,12 @@ async function handle(src) {
       if (a > alphaMax) alphaMax = a;
       alphaSum += a;
       texelCount++;
+      if (a > 0) {
+        const luma = data[i - 3] * 0.2126 + data[i - 2] * 0.7152 + data[i - 1] * 0.0722;
+        lumaSum += luma;
+        lumaSqSum += luma * luma;
+        opaqueTexelCount++;
+      }
     }
     accumulateMinAlphaBand({
       grid: minGridData,
@@ -518,6 +550,7 @@ async function handle(src) {
   }
   const alphaStats = { min: alphaMin, max: alphaMax, mean: texelCount ? +(alphaSum / texelCount).toFixed(2) : null };
   const alphaMinGrid = { w: minGridW, h: minGridH, data: minGridData };
+  const refRmsContrast = rmsContrastFromSums(lumaSum, lumaSqSum, opaqueTexelCount);
   const format = opaque ? 'bc1' : 'bc7';
   // encodeStriped re-reads each band and encodes it into the shared output — the
   // whole image is never resident at once. Result is bit-identical to a
@@ -556,6 +589,15 @@ async function handle(src) {
         `mip level ${i} size drift: reduced ${prev.width}x${prev.height}, chain expects ${d.logicalWidth}x${d.logicalHeight}`
       );
     }
+    // CONTRAST-PRESERVING CORRECTION, in place, BEFORE encoding — restores
+    // this level's own RMS luminance contrast toward level 0's (mip-resample.js's
+    // own header). Must run here, upstream of `encodeStriped`, not after: the
+    // whole point is that the BC encoder never sees the uncorrected, softer
+    // level at all. `levelRowReader` reads `prev.data` lazily on each call
+    // (verified: it is a bare `subarray` inside the returned closure, not a
+    // snapshot taken when `levelRowReader(prev)` itself is called), so this
+    // mutation lands before any read reaches it.
+    contrastPreservingCorrect(prev.data, prev.width, prev.height, refRmsContrast);
     const levelBlocks = encodeStriped(levelRowReader(prev), d.logicalWidth, d.logicalHeight, format, STRIP_ROWS);
     levels.push({ width: d.width, height: d.height, blocks: levelBlocks.buffer });
   }

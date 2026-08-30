@@ -57,6 +57,160 @@
  * @module vt/mip-resample
  */
 
+/** Clamp to a valid byte, rounding first. */
+function clampByte(v) {
+  const r = Math.round(v);
+  return r < 0 ? 0 : r > 255 ? 255 : r;
+}
+
+/**
+ * ============================================================================
+ * LINEARIZATION (2026-08-30 — [[project_albedo_zoom_out_clarity_audit_2026-08-30]]
+ * §2.1) — `halveRGBA` used to filter raw sRGB-encoded BYTES directly, but every
+ * mip it produces uploads with `colorSpace = SRGBColorSpace`
+ * (`vt-pan-viewer.js`), so the GPU decodes sRGB→linear on sample BEFORE
+ * filtering across levels. Two halves of one filter chain disagreeing about
+ * which space they operate in: the STORED bytes were a gamma-space average,
+ * but every runtime bilinear/trilinear/anisotropic blend between them
+ * happens in linear light. Fixed here — decode to linear before the
+ * weighted sum, re-encode to sRGB bytes only once, on the way out — so the
+ * stored bytes are what a linear-light-correct reduction actually produces,
+ * not a decode of a gamma-space average (a measurably different, and
+ * measurably WRONG, number: the project's own bench isolated this specific
+ * mismatch at -15% RMS contrast vs PIXI).
+ *
+ * The real IEC 61966-2-1 sRGB transfer function, not a naive gamma 2.2/2.4
+ * power-curve approximation — matching what the GPU's OWN hardware sRGB
+ * decode actually does on sample, since an approximation here would just
+ * reintroduce a smaller version of the mismatch this fix exists to close.
+ * ============================================================================
+ */
+const SRGB_TO_LINEAR = (() => {
+  const lut = new Float64Array(256);
+  for (let i = 0; i < 256; i++) {
+    const c = i / 255;
+    lut[i] = c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  }
+  return lut;
+})();
+
+/** Exact LUT hit — source bytes are always integer 0-255. @param {number} byte @returns {number} linear [0,1] */
+export function srgbToLinear(byte) {
+  return SRGB_TO_LINEAR[byte];
+}
+
+/** Analytic sRGB encode. @param {number} x - linear, clamped to [0,1] internally. @returns {number} sRGB [0,1] */
+export function linearToSrgb(x) {
+  const c = x <= 0 ? 0 : x >= 1 ? 1 : x;
+  return c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
+}
+
+/**
+ * The shared stddev/mean formula both `computeRmsLuminanceContrast` (a full,
+ * in-memory buffer) and `bc-compress.worker.js`'s own incremental per-band
+ * accumulation (level 0 of a 12000² map can never be fully resident — see
+ * this file's header) reduce down to, so the two can never define "RMS
+ * contrast" two different ways.
+ * @param {number} lumaSum @param {number} lumaSqSum @param {number} n
+ * @returns {number} 0 if n is 0 or the mean is 0 (nothing to take a ratio of).
+ */
+export function rmsContrastFromSums(lumaSum, lumaSqSum, n) {
+  if (!(n > 0)) return 0;
+  const mean = lumaSum / n;
+  if (!(mean > 0)) return 0;
+  const variance = Math.max(0, lumaSqSum / n - mean * mean);
+  return Math.sqrt(variance) / mean;
+}
+
+/**
+ * RMS luminance contrast (stddev/mean of Rec.709 luma) over the OPAQUE
+ * (alpha>0) texels of a full RGBA8 buffer — the same "opaque-only" framing
+ * `dilateTransparentRGB` already gives full-transparent texels its own
+ * separate treatment for. Deliberately measured on the RAW sRGB BYTES, not
+ * decoded to linear first: "contrast" is a perceptual quantity, the same
+ * reasoning this file's own header (§3) already gives for why CAS itself
+ * sharpens in gamma-2.0 space rather than linear light.
+ * @param {Uint8Array|Uint8ClampedArray} data @param {number} w @param {number} h
+ * @returns {number}
+ */
+export function computeRmsLuminanceContrast(data, w, h) {
+  let lumaSum = 0;
+  let lumaSqSum = 0;
+  let n = 0;
+  const count = w * h;
+  for (let i = 0; i < count; i++) {
+    const o = i * 4;
+    if (data[o + 3] <= 0) continue;
+    const luma = data[o] * 0.2126 + data[o + 1] * 0.7152 + data[o + 2] * 0.0722;
+    lumaSum += luma;
+    lumaSqSum += luma * luma;
+    n++;
+  }
+  return rmsContrastFromSums(lumaSum, lumaSqSum, n);
+}
+
+/**
+ * ============================================================================
+ * CONTRAST-PRESERVING MIP CORRECTION (2026-08-30, same audit as above, §2.2)
+ * — the direct analogue of Castaño's coverage-preserving alpha mipmaps
+ * (NVIDIA, 2010), applied to luminance instead of alpha coverage. Linear-
+ * space filtering (the fix just above) is measurably CORRECT but also
+ * measurably SOFTER on a high-contrast edge than the gamma-space averaging
+ * it replaces — exactly the audit's own live diagnostic result
+ * (`setAlbedoClarity({enabled:false})` reads as "mushy," meaning the
+ * runtime CAS sharpen was compensating for real upstream softness, not
+ * fighting a clean image). This is that repair, moved OFFLINE and upstream
+ * of the BC encoder: a single scalar gain per level, computed from and
+ * restoring toward level 0's OWN contrast statistic, so it is
+ * deterministic, free at runtime, temporally stable (cannot shimmer as the
+ * camera moves, unlike a per-frame shader sharpen), and — because it runs
+ * before the encoder ever sees the level — it cannot amplify BC block
+ * error the way sharpening an already-BLOCK-COMPRESSED level would.
+ *
+ * `gain` only ever RESTORES contrast toward the reference, never reduces it
+ * below what the level already has (`Math.max(1, ...)`) — a level that
+ * already matches (or exceeds) the reference is left alone.
+ * ============================================================================
+ * @param {Uint8Array|Uint8ClampedArray} data - modified IN PLACE.
+ * @param {number} w @param {number} h
+ * @param {number} refRmsContrast - level 0's own `computeRmsLuminanceContrast`.
+ * @param {{gMax?:number}} [opts] - `gMax` caps the correction (default 3.0) —
+ *   a numerical backstop matching `sharpenCasCore`'s own `GAIN_CEILING`
+ *   reasoning (`vt/albedo-clarity.js`): a near-flat level's own measured
+ *   contrast can be arbitrarily close to zero, and dividing by it without a
+ *   ceiling risks a runaway correction on exactly the levels doing the least
+ *   restoring.
+ * @returns {number} the gain actually applied (1 = no-op).
+ */
+export function contrastPreservingCorrect(data, w, h, refRmsContrast, opts = {}) {
+  const gMax = Number.isFinite(opts.gMax) ? opts.gMax : 3.0;
+  const count = w * h;
+  let lumaSum = 0;
+  let lumaSqSum = 0;
+  let n = 0;
+  for (let i = 0; i < count; i++) {
+    const o = i * 4;
+    if (data[o + 3] <= 0) continue;
+    const luma = data[o] * 0.2126 + data[o + 1] * 0.7152 + data[o + 2] * 0.0722;
+    lumaSum += luma;
+    lumaSqSum += luma * luma;
+    n++;
+  }
+  if (n === 0) return 1; // nothing opaque to correct
+  const mean = lumaSum / n;
+  const measured = rmsContrastFromSums(lumaSum, lumaSqSum, n);
+  const gain = Math.max(1, Math.min(gMax, refRmsContrast / Math.max(measured, 1e-4)));
+  if (gain <= 1.0001) return gain; // no-op — skip the second pass entirely
+  for (let i = 0; i < count; i++) {
+    const o = i * 4;
+    if (data[o + 3] <= 0) continue;
+    data[o] = clampByte(mean + (data[o] - mean) * gain);
+    data[o + 1] = clampByte(mean + (data[o + 1] - mean) * gain);
+    data[o + 2] = clampByte(mean + (data[o + 2] - mean) * gain);
+  }
+  return gain;
+}
+
 /** Lanczos window order. a=2 gives 8 taps at a 2x reduction — two positive
  * lobes and two negative ones, the classic "sharp but not ringy" downsample. */
 export const LANCZOS_A = 2;
@@ -117,7 +271,11 @@ export function halvedSize(srcW, srcH) {
  *   forward — so a caller may stream rather than seek.
  * @param {number} srcW @param {number} srcH
  * @param {{bandRows?:number, taps?:{offsets:Int32Array,weights:Float64Array},
- *          dilatePasses?:number}} [opts]
+ *          dilatePasses?:number, linearize?:boolean}} [opts] - `linearize`
+ *   (default true) filters in LINEAR light, decoded from and re-encoded to
+ *   sRGB — see this file's header §LINEARIZATION. `false` reproduces the
+ *   ORIGINAL gamma-space-averaging behaviour byte-for-byte, kept specifically
+ *   so the shader-lab bench can A/B the two directly.
  * @returns {{data:Uint8Array, width:number, height:number}}
  */
 export function halveRGBA(readRows, srcW, srcH, opts = {}) {
@@ -126,6 +284,8 @@ export function halveRGBA(readRows, srcW, srcH, opts = {}) {
   const taps = opts.taps || buildHalveTaps();
   const bandRows = Math.max(1, opts.bandRows || 256);
   const nTaps = taps.offsets.length;
+  const linearize = opts.linearize !== false;
+  const decode = linearize ? (byte) => SRGB_TO_LINEAR[byte] : (byte) => byte;
 
   // ── source band cache. Forward-only, so one band is enough.
   let bandY0 = -1;
@@ -167,11 +327,16 @@ export function halveRGBA(readRows, srcW, srcH, opts = {}) {
         const w = taps.weights[k];
         // Premultiply on the way in: a transparent texel's RGB then contributes
         // literally nothing, which is the whole point (header, mechanism 2a).
+        // Decoded to LINEAR first (header §LINEARIZATION) when `linearize` is
+        // on — `ar`/`ag`/`ab` then accumulate in linear-times-alpha-fraction
+        // scale rather than gamma-byte-times-alpha-fraction scale; the
+        // unpremultiply math below is scale-agnostic either way (see its own
+        // comment), only the FINAL byte write needs to know which mode ran.
         const al = band[i + 3];
         const pm = (al * w) / 255;
-        ar += band[i] * pm;
-        ag += band[i + 1] * pm;
-        ab += band[i + 2] * pm;
+        ar += decode(band[i]) * pm;
+        ag += decode(band[i + 1]) * pm;
+        ab += decode(band[i + 2]) * pm;
         aa += al * w;
       }
       const o = base + x * 4;
@@ -227,9 +392,19 @@ export function halveRGBA(readRows, srcW, srcH, opts = {}) {
         const r = ar * inv;
         const g = ag * inv;
         const b = ab * inv;
-        out[o] = r < 0 ? 0 : r > 255 ? 255 : r;
-        out[o + 1] = g < 0 ? 0 : g > 255 ? 255 : g;
-        out[o + 2] = b < 0 ? 0 : b > 255 ? 255 : b;
+        // Scale-agnostic unpremultiply (see `horizontalInto`'s own comment):
+        // `r`/`g`/`b` land in LINEAR [0,1] when `linearize` is on, or the
+        // ORIGINAL byte [0,255] scale when it's off — only the byte write
+        // below needs to know which.
+        if (linearize) {
+          out[o] = clampByte(linearToSrgb(r < 0 ? 0 : r > 1 ? 1 : r) * 255);
+          out[o + 1] = clampByte(linearToSrgb(g < 0 ? 0 : g > 1 ? 1 : g) * 255);
+          out[o + 2] = clampByte(linearToSrgb(b < 0 ? 0 : b > 1 ? 1 : b) * 255);
+        } else {
+          out[o] = r < 0 ? 0 : r > 255 ? 255 : r;
+          out[o + 1] = g < 0 ? 0 : g > 255 ? 255 : g;
+          out[o + 2] = b < 0 ? 0 : b > 255 ? 255 : b;
+        }
         out[o + 3] = a;
       }
     }

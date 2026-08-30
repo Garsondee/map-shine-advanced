@@ -10,7 +10,19 @@
  * because `getImageData` un-premultiplies and divides by zero — and assert that
  * no black survives to be averaged into a visible edge.
  */
-import { lanczos, buildHalveTaps, halvedSize, halveRGBA, dilateTransparentRGB, LANCZOS_A } from '../mip-resample.js';
+import {
+  lanczos,
+  buildHalveTaps,
+  halvedSize,
+  halveRGBA,
+  dilateTransparentRGB,
+  LANCZOS_A,
+  srgbToLinear,
+  linearToSrgb,
+  rmsContrastFromSums,
+  computeRmsLuminanceContrast,
+  contrastPreservingCorrect,
+} from '../mip-resample.js';
 
 /** Build a width×height straight-alpha RGBA image from fn(x,y) → [r,g,b,a]. */
 function makeImage(width, height, fn) {
@@ -239,5 +251,160 @@ export async function run(t) {
     const img = makeImage(W, H, () => [0, 0, 0, 0]);
     const filled = dilateTransparentRGB(img, W, H, 4);
     ok('dilation terminates on a fully transparent image', filled === 0);
+  }
+
+  // ══ LINEARIZATION (2026-08-30) ═══════════════════════════════════════════
+
+  // ── sRGB <-> linear round trip ────────────────────────────────────────────
+  {
+    ok('srgbToLinear(0) === 0', srgbToLinear(0) === 0);
+    ok('srgbToLinear(255) === 1', Math.abs(srgbToLinear(255) - 1) < 1e-9);
+    ok('linearToSrgb(0) === 0', linearToSrgb(0) === 0);
+    ok('linearToSrgb(1) === 1', Math.abs(linearToSrgb(1) - 1) < 1e-9);
+
+    let monotonic = true;
+    let prev = -1;
+    for (let i = 0; i <= 255; i++) {
+      const v = srgbToLinear(i);
+      if (v < prev) monotonic = false;
+      prev = v;
+    }
+    ok('srgbToLinear is monotonically non-decreasing over every byte', monotonic);
+
+    let maxRoundTripError = 0;
+    for (let i = 0; i <= 255; i++) {
+      const back = Math.round(linearToSrgb(srgbToLinear(i)) * 255);
+      maxRoundTripError = Math.max(maxRoundTripError, Math.abs(back - i));
+    }
+    ok('decode->encode round trip recovers every byte exactly', maxRoundTripError === 0);
+  }
+
+  // ── a flat image survives linearized halving exactly (no round-trip drift) ─
+  {
+    const W = 16;
+    const H = 16;
+    const img = makeImage(W, H, () => [37, 201, 8, 255]);
+    const { read } = bandReaderOver(img, W);
+    const { data } = halveRGBA(read, W, H, { bandRows: 4 }); // linearize defaults true
+    let exact = true;
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i] !== 37 || data[i + 1] !== 201 || data[i + 2] !== 8 || data[i + 3] !== 255) exact = false;
+    }
+    ok('a flat image survives LINEARIZED halving exactly, same as the legacy path', exact);
+  }
+
+  // ── linearize:false reproduces the ORIGINAL gamma-space-averaging path ────
+  {
+    const W = 4;
+    const H = 4;
+    // A genuine mid-tone edge, not flat — flat images can't distinguish the
+    // two filtering spaces (decode/encode round-trips to a no-op on a
+    // constant input either way).
+    const img = makeImage(W, H, (x) => (x < 2 ? [220, 220, 220, 255] : [30, 30, 30, 255]));
+    const { read: readLin } = bandReaderOver(img, W);
+    const { data: linData } = halveRGBA(readLin, W, H, { bandRows: 2, linearize: true });
+    const { read: readGamma } = bandReaderOver(img, W);
+    const { data: gammaData } = halveRGBA(readGamma, W, H, { bandRows: 2, linearize: false });
+    let differs = false;
+    for (let i = 0; i < linData.length; i += 4) if (linData[i] !== gammaData[i]) differs = true;
+    ok('linearize:true and linearize:false produce genuinely different output on a real edge', differs);
+  }
+
+  // ── RMS luminance contrast ────────────────────────────────────────────────
+  {
+    const W = 8;
+    const H = 8;
+    const flat = makeImage(W, H, () => [128, 128, 128, 255]);
+    ok('a flat image has zero RMS contrast', computeRmsLuminanceContrast(flat, W, H) === 0);
+
+    // Pure black/white 50/50: mean luma 127.5, stddev 127.5 -> ratio exactly 1.
+    const checker = makeImage(W, H, (x, y) => ((x + y) % 2 === 0 ? [255, 255, 255, 255] : [0, 0, 0, 255]));
+    ok(
+      'a pure black/white checkerboard has RMS contrast exactly 1',
+      Math.abs(computeRmsLuminanceContrast(checker, W, H) - 1) < 1e-9
+    );
+
+    const transparent = makeImage(W, H, () => [200, 50, 50, 0]);
+    ok('a fully transparent image reports 0, not NaN', computeRmsLuminanceContrast(transparent, W, H) === 0);
+
+    ok('rmsContrastFromSums(0,0,0) is 0 (no divide by zero)', rmsContrastFromSums(0, 0, 0) === 0);
+    ok('rmsContrastFromSums with zero mean is 0', rmsContrastFromSums(0, 0, 5) === 0);
+  }
+
+  // ── contrast-preserving mip correction ────────────────────────────────────
+  {
+    const W = 8;
+    const H = 8;
+    const checker = makeImage(W, H, (x, y) => ((x + y) % 2 === 0 ? [255, 255, 255, 255] : [0, 0, 0, 255]));
+    const refFromSelf = computeRmsLuminanceContrast(checker, W, H);
+
+    // A level already matching the reference gets gain 1 and is untouched.
+    const before = checker.slice();
+    const gainNoop = contrastPreservingCorrect(checker, W, H, refFromSelf);
+    ok('a level already matching the reference gets gain 1 (no-op)', gainNoop === 1);
+    let unchangedNoop = true;
+    for (let i = 0; i < checker.length; i++) if (checker[i] !== before[i]) unchangedNoop = false;
+    ok('no-op correction leaves the buffer byte-identical', unchangedNoop);
+
+    // A softer (lower-contrast) level restores toward the reference, upward.
+    const soft = makeImage(W, H, (x, y) => {
+      const v = (x + y) % 2 === 0 ? 180 : 75; // same mean as checker (127.5), less contrast
+      return [v, v, v, 255];
+    });
+    const softBefore = computeRmsLuminanceContrast(soft, W, H);
+    const gain = contrastPreservingCorrect(soft, W, H, refFromSelf);
+    ok('gain restores contrast: applied gain > 1', gain > 1);
+    const softAfter = computeRmsLuminanceContrast(soft, W, H);
+    ok('corrected contrast moved toward the reference, not away from it', softAfter > softBefore);
+    let inRange = true;
+    for (let i = 0; i < soft.length; i++) if (soft[i] < 0 || soft[i] > 255) inRange = false;
+    ok('every corrected byte stays in [0,255]', inRange);
+
+    // A near-flat level against a much higher reference forces the ceiling.
+    const nearFlat = makeImage(W, H, (x, y) => {
+      const v = (x + y) % 2 === 0 ? 129 : 127; // ratio ~0.0078
+      return [v, v, v, 255];
+    });
+    const cappedGain = contrastPreservingCorrect(nearFlat, W, H, 1.0, { gMax: 3.0 });
+    ok('a huge contrast deficit is capped at gMax, not applied uncapped', Math.abs(cappedGain - 3.0) < 1e-9);
+
+    // Transparent texels are never touched.
+    const withHole = makeImage(W, H, (x, y) => {
+      if (x === 0 && y === 0) return [10, 10, 10, 0];
+      return (x + y) % 2 === 0 ? [180, 180, 180, 255] : [75, 75, 75, 255];
+    });
+    const holeBefore = [withHole[0], withHole[1], withHole[2]];
+    contrastPreservingCorrect(withHole, W, H, refFromSelf);
+    ok(
+      'a transparent texel is never touched by the correction',
+      withHole[0] === holeBefore[0] && withHole[1] === holeBefore[1] && withHole[2] === holeBefore[2]
+    );
+  }
+
+  // ── REGRESSION: a real mip level loses contrast relative to its source;
+  //    the correction moves it back toward that source (2026-08-30) ─────────
+  {
+    const W = 16;
+    const H = 4;
+    // A thin dark line on light paper — the exact case this whole repair
+    // chain (linearization + contrast preservation) exists for.
+    const img = makeImage(W, H, (x) => (x === W / 2 ? [10, 10, 10, 255] : [230, 230, 230, 255]));
+    const sourceContrast = computeRmsLuminanceContrast(img, W, H);
+
+    const { read } = bandReaderOver(img, W);
+    const { data, width, height } = halveRGBA(read, W, H, { bandRows: 4 });
+    const reducedContrastBefore = computeRmsLuminanceContrast(data, width, height);
+    ok(
+      'a real reduced mip level measurably loses contrast relative to its source',
+      reducedContrastBefore < sourceContrast
+    );
+
+    const corrected = data.slice();
+    contrastPreservingCorrect(corrected, width, height, sourceContrast);
+    const reducedContrastAfter = computeRmsLuminanceContrast(corrected, width, height);
+    ok(
+      'the correction moves the reduced level CLOSER to the source contrast than the uncorrected reduction',
+      Math.abs(reducedContrastAfter - sourceContrast) < Math.abs(reducedContrastBefore - sourceContrast)
+    );
   }
 }

@@ -158,6 +158,7 @@ import {
   RenderScaleGovernor,
   computeRenderSize,
   SCALE_LADDER,
+  SUPERSAMPLE_CHOICES,
   FRAME_BUDGET_MS,
   createFrameCostSignal,
 } from '../graph/index.js';
@@ -224,6 +225,7 @@ import {
   getActiveSceneFloors,
   readSceneWallSegments,
   readSetting,
+  resolveTileMotionFrame,
 } from '../foundry/index.js';
 import { engageFoundryFallback, clearFoundryFallback } from '../diag/render-fallback.js';
 import {
@@ -283,6 +285,7 @@ import {
   createLightningSubsystem,
   createFireSubsystem,
   createPrecipitationSubsystem,
+  precipTierPlan,
   createFireParticleEngine,
   createDoorGraphicsSubsystem,
   KNOWN_DEFERRED_ANIMATIONS,
@@ -299,11 +302,14 @@ import {
   vegetationMeshSegments,
   buildTessellatedQuadGeometry,
   vegetationTierPlan,
+  vegetationSpringGridSpec,
   createVegetationShadowSubsystem,
   padPlacement,
   vegetationShadowPadPx,
   VEG_SHADOW_RENDER_ORDER_MAGNITUDE,
   VEG_SHADOW_SMEAR_TAPS,
+  buildVegetationSpringMaterials,
+  VEG_SPRING_MAX_DT_SEC,
   createShadowHandle,
   createSunShadowSubsystem,
   // (maxThrowForHeightPx / shadowPenumbraPx / BASE_SOFTNESS_PX / edgeRamp01
@@ -809,6 +815,14 @@ function disposeActive() {
   } catch (err) {
     log.error('wind sim dispose failed — VRAM may be leaked:', err);
   }
+  // Vegetation tier 6's own ping/pong/publish render targets + spring
+  // materials — same per-cycle VRAM-leak reasoning, mirroring disposeWindSim
+  // just above. Safe whether or not anything was ever allocated.
+  try {
+    _active.disposeVegetationSpringSim?.();
+  } catch (err) {
+    log.error('vegetation spring sim dispose failed — VRAM may be leaked:', err);
+  }
   // Every point-light mesh/material/geometry — same per-cycle VRAM-leak
   // reasoning, a separate call mirroring disposeOcclusionMask's own split
   // (one dispose function per resource-owning subsystem, not a grab-bag).
@@ -1013,6 +1027,14 @@ export async function startVtPanViewer({
   getBloomRenderState,
   getDofRenderState,
   getGradeLookState,
+  // PRECIPITATION'S CASCADE STATE (2026-08-30) — deliberately separate from
+  // getPrecipRenderState below, which stays defined IN this file (it mixes
+  // in viewer-internal state — the env snapshot, viewport size, scene
+  // bounds — boot.js has no access to). Only `enabled`/`perfTier` genuinely
+  // moved to boot.js's own registry-driven readout; this is the one new seam
+  // that supplies them, mirroring getBloomRenderState/getDofRenderState's
+  // own shape for the two fields they actually share with this effect.
+  getPrecipCascadeState,
   sampleWindExposureAt,
   getMaskAuthorityVersion,
   probeMaskAuthorityLiveAt,
@@ -1237,6 +1259,12 @@ export async function startVtPanViewer({
   // above. Default = the effect off, so an un-wired caller (the torture
   // fixture) runs no DoF pass at all.
   getDofRenderState ??= () => ({ enabled: false, params: {} });
+  // PRECIPITATION'S CASCADE STATE — same injection discipline as bloom/dof
+  // just above. Default = enabled true, matching this effect's own manifest
+  // (`enabledFromProfile: 'low'`) and its pre-2026-08-30 unconditional
+  // behaviour — an un-wired caller (the torture fixture) should not silently
+  // lose weather that was always on before this seam existed.
+  getPrecipCascadeState ??= () => ({ enabled: true, perfTier: null });
   // THE COLOUR GRADE (Look) effect's resolved state — same injection shape as
   // bloom. Default disabled ⇒ the artistic grade is identity (parity holds).
   getGradeLookState ??= () => ({ enabled: false, params: {} });
@@ -1602,9 +1630,14 @@ export async function startVtPanViewer({
     // header for why THAT signal, and not the real per-pass GPU zone timers).
     const renderScaleCostSignal = createFrameCostSignal();
     let renderScaleUserSetting = typeof renderScaleSetting === 'string' ? renderScaleSetting : 'auto';
+    // Fixed choices only (`SUPERSAMPLE_CHOICES`'s own header) — unioned here,
+    // not into `SCALE_LADDER` itself, so the AUTO governor (constructed below
+    // from `SCALE_LADDER` alone) can never select a supersample rung on its
+    // own; only an explicit player choice reaches it, via this validation set.
+    const RENDER_SCALE_FIXED_CHOICES = [...SUPERSAMPLE_CHOICES, ...SCALE_LADDER];
     /** @returns {number} the scale `resizeInternalTargets` should use RIGHT NOW. */
     const resolveCurrentInternalScale = () =>
-      resolveInternalScale(renderScaleUserSetting, renderScaleGovernor.scale, SCALE_LADDER);
+      resolveInternalScale(renderScaleUserSetting, renderScaleGovernor.scale, RENDER_SCALE_FIXED_CHOICES);
     const initialInternalSize = computeRenderSize(drawBufW, drawBufH, resolveCurrentInternalScale());
     /** Device pixels — what every INTERNAL-tier target (scene.color, scene.
      * illum, scene.lit, scene.coloration, scene.colorMapOnly, scene.
@@ -2569,6 +2602,26 @@ export async function startVtPanViewer({
      *  rect is exactly how a sampling offset gets born, so both are written
      *  from the SAME call site below and nowhere else. */
     const uVisionExploredRect = THREE.TSL.uniform(THREE.TSL.vec4(0, 0, 1, 1));
+    /**
+     * DOOR-FOG-REVEAL-SYNC (`door-graphics.js`'s deferred rung of the same
+     * name) — state for fading a door's newly-exposed sliver in over its own
+     * open animation instead of an instant reveal. See the vision block
+     * below (where these are actually driven) for the full mechanism;
+     * declared here only because `uDoorFogProgress` is a TSL uniform NODE
+     * and must exist at `visionGateQuad`'s material-build time just below,
+     * same TDZ reasoning as `uVisionExploredRect` above.
+     *
+     * `previousVisionSources`: last frame's `readActiveVisionSources().sources`
+     * (a reference swap, never copied — these arrays are Foundry-recreated
+     * per read and already treated as read-only elsewhere in this codebase).
+     * `frozenFloorSources`: the reference snapshotted at a transition's
+     * start — "what was already safely visible right before this door
+     * opened" — held for the transition's whole duration, `null` when none
+     * is active.
+     */
+    let previousVisionSources = [];
+    let frozenFloorSources = null;
+    const uDoorFogProgress = THREE.TSL.uniform(THREE.TSL.float(1));
     const envLight = buildEnvironmentalLightMaterials({
       THREE,
       albedoTexture: sceneColor.texture,
@@ -2624,6 +2677,7 @@ export async function startVtPanViewer({
         maskTexture: visionMask.texture,
         illumTexture: sceneIllum.texture,
         threshold: REVEAL_ILLUMINATION_THRESHOLD,
+        doorFogProgress: uDoorFogProgress,
       })
     );
     // THE EXPLORED-DIM QUAD (finishes slice 3) — a SECOND fullscreen pass,
@@ -2833,6 +2887,41 @@ export async function startVtPanViewer({
     // texture() that would freeze on the placeholder).
     const BLOOM_MIP_COUNT = 6;
     const BLOOM_ATMO_TOP = 3; // composite reads mips[0] (core) and mips[3] (atmosphere)
+    // TIER 1 ('six-mip-pyramid') vs TIER 0 ('dual-filter-two-band') — wired
+    // 2026-08-29 (bloom.js's own ladder header has the full account). Decided
+    // ONCE here, at construction, from the RAW performance profile — the same
+    // "no manifest of its own" shortcut `shouldUseFullAlbedoClarity` (below,
+    // this file) already takes for an identical reason: this decision has to
+    // land before any live-rebuild machinery exists for the post pipeline,
+    // and `standard` (rank 2) is the DEFAULT profile, so gating at
+    // `performance` (rank >= 1) keeps every profile from `performance` up
+    // byte-identical to today. Falls open (today's full 6/atmo-top-3) on a
+    // settings read that fails before Foundry's own registry is ready — the
+    // SAME direction every other fail-open in this file points.
+    const BLOOM_CHEAP_MIP_COUNT = 4;
+    const BLOOM_CHEAP_ATMO_TOP = 2; // core = mips[0-1], atmosphere = mips[2-3]
+    // LIVE AS OF 2026-08-30 — was construction-time-only ("decided ONCE...
+    // because this decision has to land before any live-rebuild machinery
+    // exists for the post pipeline"); that machinery now exists. Tries the
+    // real cascade-resolved seam first (getBloomRenderState().perfTier,
+    // wired the same day) and only falls back to the raw settings read this
+    // always used before — for the narrow window before the registry's
+    // first resolve, or if the seam is ever absent
+    // (feedback_seam_default_hides_unwired). Called fresh every
+    // runPostBloomPass, mirroring how this pass already re-pushes every
+    // OTHER uniform unconditionally each frame rather than caching a
+    // "did it change" key.
+    function bloomResolveUsesFullPyramid() {
+      const t = getBloomRenderState().perfTier;
+      if (Number.isFinite(t)) return t >= 1;
+      try {
+        return profileRank(readSetting(MODULE_ID, GLOBAL_SETTING_KEYS.profile)) >= 1;
+      } catch {
+        return true;
+      }
+    }
+    let bloomActiveMipCount = bloomResolveUsesFullPyramid() ? BLOOM_MIP_COUNT : BLOOM_CHEAP_MIP_COUNT;
+    let bloomActiveAtmoTop = bloomResolveUsesFullPyramid() ? BLOOM_ATMO_TOP : BLOOM_CHEAP_ATMO_TOP;
     const bloomNum = (x, d) => (Number.isFinite(Number(x)) ? Number(x) : d);
     // Map a 0..1 spread knob → the tent-filter UV reach (resolution-independent).
     const bloomSpreadToRadius = (s) => 0.0015 + Math.max(0, Math.min(1, Number(s) || 0)) * 0.0085;
@@ -2857,7 +2946,7 @@ export async function startVtPanViewer({
       THREE,
       litTexture: sceneLit.texture,
       coreTexture: bloomMips[0].texture,
-      atmoTexture: bloomMips[BLOOM_ATMO_TOP].texture,
+      atmoTexture: bloomMips[bloomActiveAtmoTop].texture,
       // Share envLight's outdoor-gate nodes (mask texture + rect uniforms), so the
       // clamp tracks a mask rebake and can never gate a different half of the map
       // than the sky light / grade do.
@@ -2886,6 +2975,30 @@ export async function startVtPanViewer({
     // (screenSized).
     // ========================================================================
     const DOF_MIP_COUNT = 4;
+    // TIER 1 ('four-level-pyramid') vs TIER 0 ('floor-distance-mip-blur') —
+    // wired 2026-08-29 (depth-of-field.js's own ladder header has the full
+    // account). Same construction-time-only, raw-profile-read shortcut
+    // bloom's own `bloomUsesFullPyramid` just above takes, for the identical
+    // reason — falls open to today's full 4-mip pyramid on a settings read
+    // that fails before Foundry's own registry is ready.
+    const DOF_CHEAP_MIP_COUNT = 2;
+    // LIVE AS OF 2026-08-30 — see bloomResolveUsesFullPyramid's own comment
+    // just above for the full account (identical reasoning, identical seam
+    // shape). Unlike bloom's own live handling, DoF's composite material
+    // genuinely bakes its mip COUNT into the compiled shader structure (see
+    // depth-of-field-render.js's own "TSL/WGSL has no runtime array
+    // indexing" comment) — a tier change here needs a real rebuild, done in
+    // rebuildDofForTier below, not just a texture re-point.
+    function dofResolveUsesFullPyramid() {
+      const t = getDofRenderState().perfTier;
+      if (Number.isFinite(t)) return t >= 1;
+      try {
+        return profileRank(readSetting(MODULE_ID, GLOBAL_SETTING_KEYS.profile)) >= 1;
+      } catch {
+        return true;
+      }
+    }
+    let dofActiveMipCount = dofResolveUsesFullPyramid() ? DOF_MIP_COUNT : DOF_CHEAP_MIP_COUNT;
     // TAP SPREAD (2026-08-27) — see depth-of-field-render.js's uTapSpread
     // for the full account. Shrinks the scene.lit→mip0 downsample step's
     // kernel footprint to this fraction of its normal (1.0) spread, so the
@@ -2914,17 +3027,60 @@ export async function startVtPanViewer({
     for (let k = 0; k < DOF_MIP_COUNT; k++) {
       dofMips.push(allocator.create(`dof.mip${k}`, describeDofMip(dofMipW(k), dofMipH(k))));
     }
-    const dof = buildDofMaterials({
+    let dof = buildDofMaterials({
       THREE,
       // buf:scene.depth's colour attachment — R = floor index/255, A = presence.
       // Sharing this SAME reference (never a private texture()) means a
       // residency-driven depth-authority rebuild reaches DoF for free, same
       // discipline bloom's own shared outdoors-gate nodes follow.
       depthColorTexture: sceneDepth.texture,
-      mipTextures: dofMips.map((m) => m.texture),
+      // TIER-SLICED (2026-08-29) — `buildDofMaterials` derives its own
+      // `mipCount`/`topLod` from however many textures it is handed, so
+      // passing fewer at the cheap tier genuinely shrinks the compiled
+      // composite shader (fewer texture nodes, a shorter unrolled `select`
+      // cascade) rather than merely leaving some targets unread. All
+      // `DOF_MIP_COUNT` targets stay allocated either way (see
+      // `dofActiveMipCount`'s own comment) — only the material build is
+      // tier-sliced.
+      mipTextures: dofMips.slice(0, dofActiveMipCount).map((m) => m.texture),
     });
     const dofDownQuad = new THREE.QuadMesh(dof.downsampleMaterial);
     const dofCompositeQuad = new THREE.QuadMesh(dof.compositeMaterial);
+    /** What `dof` was last rebuilt for — the same `builtForTier`-shaped
+     * tracker water/specular/window/fluid's own surface subsystems carry,
+     * scoped here to a boolean since DoF only has the one real/cheap split.
+     * Seeded to match the construction-time build just above. */
+    let dofBuiltUsesFullPyramid = dofActiveMipCount === DOF_MIP_COUNT;
+
+    /**
+     * A live profile change moved which mip count DoF's composite should be
+     * compiled at. Unlike bloom's own live handling (a plain texture
+     * re-point), DoF's composite bakes mip COUNT into the compiled shader
+     * (depth-of-field-render.js's own "no runtime array indexing" comment),
+     * so this rebuilds `compositeMaterial` (and, as a byproduct of calling
+     * the same builder, a fresh but behaviourally-identical
+     * `downsampleMaterial` — accepted rather than splitting the builder,
+     * since a tier change is a rare event, not a per-frame cost). Every
+     * uniform on the new materials gets a real value on the very next
+     * `runPostDofPass` regardless — that function already re-pushes ALL of
+     * them unconditionally every frame, so no separate "re-push params"
+     * step is needed here the way water/specular/fluid's own rebuilds need.
+     */
+    function rebuildDofForTier(usesFullPyramid) {
+      const oldDof = dof;
+      const activeMipCount = usesFullPyramid ? DOF_MIP_COUNT : DOF_CHEAP_MIP_COUNT;
+      dof = buildDofMaterials({
+        THREE,
+        depthColorTexture: sceneDepth.texture,
+        mipTextures: dofMips.slice(0, activeMipCount).map((m) => m.texture),
+      });
+      dofDownQuad.material = dof.downsampleMaterial;
+      dofCompositeQuad.material = dof.compositeMaterial;
+      oldDof.downsampleMaterial?.dispose?.();
+      oldDof.compositeMaterial?.dispose?.();
+      dofActiveMipCount = activeMipCount;
+      dofBuiltUsesFullPyramid = usesFullPyramid;
+    }
 
     // THROTTLE (2026-07-20 v5; kept as a SECONDARY optimization after v6
     // removed the dominant cost — the extra render() call, see uiShadow's own
@@ -3310,8 +3466,13 @@ export async function startVtPanViewer({
       getPrecipRenderState: () => {
         const env = lastEnvSnapshot?.env ?? null;
         if (!env) return null;
+        // THE REAL CASCADE, AT LAST (2026-08-30) — precipitation.js#PRECIPITATION
+        // now exists; `getPrecipCascadeState()` is boot.js's own registry-driven
+        // readout (mirrors getBloomRenderState/getDofRenderState exactly), not a
+        // hardcoded `true`/a raw settings read any more.
+        const cascade = getPrecipCascadeState();
         return {
-          enabled: true,
+          enabled: cascade.enabled !== false,
           weather: env.weather,
           // ⚠️ NO `worldRect` HERE. The obvious thing — reading `windSpawnRect`
           // — does not work and would not fail at build time: it is declared
@@ -3337,7 +3498,16 @@ export async function startVtPanViewer({
           // read — never a second "is it dark" derivation.
           dayFactor01: env.sun?.dayFactor01 ?? 1,
           flash01: 0, // sky-flash's own consumer is a later slice.
-          tierScale: 1,
+          // BUDGET-AWARE 2026-08-29, LIVE-RESOLVED 2026-08-30 — was hardcoded
+          // `1` forever (docs/planning/Effect-Tier-Gradient-Audit-2026-08-29.md
+          // §3.4), then genuinely tier-scaled but off a RAW settings read
+          // rather than the real resolver (§3.4's own round-2 follow-up).
+          // `precipTierPlan` clamps and falls back safely on its own (a
+          // non-finite `cascade.perfTier` — the pre-resolve seed, or an
+          // unwired caller's default — resolves to tier 2, today's
+          // unconditional `1`), so there is no separate try/catch needed here
+          // the way the raw settings read used to require.
+          tierScale: precipTierPlan(cascade.perfTier).tierScale,
         };
       },
     });
@@ -3926,6 +4096,158 @@ export async function startVtPanViewer({
     let windPingIsCurrent = true; // which of ping/pong currently holds the LATEST D_live
     let windThawUntilMs = 0; // sim ticks while nowMs < this; frozen otherwise
     let windIsThawed = false; // tracked explicitly so the freeze<->thaw transition logs exactly once each way
+
+    // ------------------------------------------------------------------
+    // VEGETATION TIER 6 — TORQUE-SWAY (effects/vegetation-spring-gpu.js).
+    // ONE shared, scene-wide ping-pong/publish triple holding every clump
+    // cell's spring state (angle/angularVelocity/liftOffset/liftVelocity,
+    // packed RGBA) — never per-mesh, see `vegetationSpringGridSpec`'s own doc
+    // for why a per-mesh grid would leave two plants on two different meshes
+    // with uncorrelated spring phases.
+    //
+    // ⚠️ ALLOCATED ON DEMAND, FROM `buildVegetationMaterial` ITSELF — NOT
+    // eagerly here, and NOT lazily from the first tick the way Wind Tier 2's
+    // own ping/pong/publish triple is. `ensureVegetationSpringGrid` (below)
+    // runs SYNCHRONOUSLY, inside `buildVegetationMaterial`, the FIRST time
+    // any mesh resolves `rotationLiftEnabled: true` — before that mesh's own
+    // positionNode can reference the published texture. Wind Tier 2 can
+    // tolerate a consumer racing ahead of its first tick (its consumers
+    // sample through `windHandle.node()`, which no-ops cleanly on an absent
+    // field); a vegetation mesh's shader graph is compiled once and cannot
+    // pick up a texture reference that did not exist yet at compile time, so
+    // this cannot be left to a later frame.
+    // ------------------------------------------------------------------
+    let vegSpringGrid = null; // {cols, rows, originX, originY, cellSize} | null until first demand
+    let vegSpringPingRT = null;
+    let vegSpringPongRT = null;
+    let vegSpringPublishRT = null;
+    let vegSpringMaterials = null; // { integrate, publish, dispose() } | null (rebuilt lazily, on windHandle.version change)
+    let vegSpringMaterialsWindVersion = -1;
+    let vegSpringPingIsCurrent = true;
+
+    /**
+     * Allocate tier 6's shared spring-state render targets, sized from the
+     * REAL scene rect and whatever `clumpSizePx` reads at this first call
+     * (`vegetationSpringGridSpec` — no live regrid in v1: nothing downstream
+     * is built to survive one, the same "next scene load" cadence
+     * `vegetationTierPlan` itself already documents). Idempotent — every
+     * call after the first is a no-op, so every `buildVegetationMaterial`
+     * call site can call this unconditionally whenever it resolves
+     * `rotationLiftEnabled: true`, with no caller needing to track "was this
+     * already done".
+     * @param {number} clumpSizePx - the live param value from whichever
+     *   mesh's `initialParams` triggered this (the first one built).
+     */
+    function ensureVegetationSpringGrid(clumpSizePx) {
+      if (vegSpringPublishRT) return;
+      vegSpringGrid = vegetationSpringGridSpec(dimensions.sceneRect, clumpSizePx);
+      const describeVegSpringRT = () => ({
+        resolvedW: vegSpringGrid.cols,
+        resolvedH: vegSpringGrid.rows,
+        type: THREE.HalfFloatType,
+        format: THREE.RGBAFormat,
+        colorSpace: THREE.NoColorSpace,
+        filter: 'linear',
+        depth: false,
+      });
+      vegSpringPingRT = allocator.create('veg.spring.ping', describeVegSpringRT());
+      vegSpringPongRT = allocator.create('veg.spring.pong', describeVegSpringRT());
+      vegSpringPublishRT = allocator.create('veg.spring.publish', describeVegSpringRT());
+      // Fresh GPU memory is UNDEFINED content — clear all three explicitly so
+      // a NaN bit-pattern can never enter the spring integrator (it would
+      // multiply through every subsequent tick forever). Same reasoning Wind
+      // Tier 2's own regrid clear uses.
+      const prevRT = renderer.getRenderTarget();
+      const prevClearColor = renderer.getClearColor(new THREE.Color());
+      const prevClearAlpha = renderer.getClearAlpha();
+      renderer.setClearColor(0x000000, 0);
+      for (const rt of [vegSpringPingRT, vegSpringPongRT, vegSpringPublishRT]) {
+        renderer.setRenderTarget(rt);
+        renderer.clear(true, false, false);
+      }
+      renderer.setRenderTarget(prevRT);
+      renderer.setClearColor(prevClearColor, prevClearAlpha);
+    }
+
+    /**
+     * TIER 6's OWN TICK — one spring-integrate pass + publish, once per
+     * frame. A cheap no-op whenever nothing has ever requested rotation+lift
+     * (`vegSpringPublishRT` still null — see `ensureVegetationSpringGrid`'s
+     * own doc for why allocation is demand-triggered rather than gated on a
+     * tier check here). Mirrors `tickWindSim`'s own ping-pong dispatch idiom,
+     * minus the N-iteration relax loop: this pass is a single step with no
+     * neighbour-coupling (see `effects/vegetation-spring-gpu.js`'s own header
+     * for why that is provably safe without a relax pass).
+     * @param {number} nowMs @param {number} dtSec
+     */
+    function tickVegetationSpring(nowMs, dtSec) {
+      if (!vegSpringPingRT || !vegSpringPongRT || !vegSpringPublishRT || !vegSpringGrid) return;
+      // Rebuild on first use AND whenever the wind handle has been reassigned
+      // (a rebake) — a cheap, worthwhile fix beyond what the existing
+      // per-mesh sway materials do (they do not track windHandle.version at
+      // all today), affordable here specifically because there is only ONE
+      // shared material to rebuild, not one per mesh.
+      if (!vegSpringMaterials || vegSpringMaterialsWindVersion !== windHandle.version) {
+        vegSpringMaterials?.dispose();
+        vegSpringMaterials = buildVegetationSpringMaterials({
+          THREE,
+          initialStateTexture: vegSpringPingRT.texture,
+          publishTexture: vegSpringPingRT.texture,
+          windHandle,
+          time: uGlobalTimeMs,
+          cols: vegSpringGrid.cols,
+          rows: vegSpringGrid.rows,
+          cellSize: vegSpringGrid.cellSize,
+          originX: vegSpringGrid.originX,
+          originY: vegSpringGrid.originY,
+        });
+        vegSpringMaterialsWindVersion = windHandle.version;
+      }
+
+      const p = getVegetationRenderState()?.params ?? {};
+      vegSpringMaterials.integrate.uDtSec.value = Math.min(Math.max(0, dtSec), VEG_SPRING_MAX_DT_SEC);
+      vegSpringMaterials.integrate.uTorqueGain.value = p.torqueGain ?? 0;
+      vegSpringMaterials.integrate.uSpringStiffness.value = Math.max(0, p.springStiffness ?? 0);
+      vegSpringMaterials.integrate.uSpringDamping.value = Math.max(0, p.springDamping ?? 0);
+      vegSpringMaterials.integrate.uLiftGain.value = p.liftGain ?? 0;
+
+      const prevRT = renderer.getRenderTarget();
+      let currentRT = vegSpringPingIsCurrent ? vegSpringPingRT : vegSpringPongRT;
+      let otherRT = vegSpringPingIsCurrent ? vegSpringPongRT : vegSpringPingRT;
+
+      for (const n of vegSpringMaterials.integrate.prevTexNodes) n.value = currentRT.texture;
+      renderer.setRenderTarget(otherRT);
+      vegSpringMaterials.integrate.quad.render(renderer);
+      [currentRT, otherRT] = [otherRT, currentRT];
+
+      vegSpringMaterials.publish.sourceTexNode.value = currentRT.texture;
+      renderer.setRenderTarget(vegSpringPublishRT);
+      vegSpringMaterials.publish.quad.render(renderer);
+
+      renderer.setRenderTarget(prevRT);
+      vegSpringPingIsCurrent = currentRT === vegSpringPingRT;
+    }
+
+    /** Tear down tier 6's own ping/pong/publish render targets + materials —
+     * same per-cycle VRAM-leak reasoning as `disposeWindSim`. Safe whether or
+     * not anything was ever allocated (the common case: a scene that never
+     * reaches the `extreme` profile). */
+    function disposeVegetationSpringSim() {
+      try {
+        vegSpringMaterials?.dispose();
+        allocator.dispose(vegSpringPingRT);
+        allocator.dispose(vegSpringPongRT);
+        allocator.dispose(vegSpringPublishRT);
+      } catch (err) {
+        log.error('vegetation spring sim dispose failed — GPU buffers may leak until renderer.dispose():', err);
+      }
+      vegSpringMaterials = null;
+      vegSpringMaterialsWindVersion = -1;
+      vegSpringPingRT = null;
+      vegSpringPongRT = null;
+      vegSpringPublishRT = null;
+      vegSpringGrid = null;
+    }
     let windForceThaw = false; // debug/perf-lab override — see setVtPanViewerWindForceThaw
     /** @type {import('../world/index.js').WindContributor[]} */
     let windActiveImpulses = []; // oneShot contributors (doors, test gusts), pruned each tick
@@ -5346,9 +5668,11 @@ export async function startVtPanViewer({
     // grade can never gate different halves of the map. QuadMesh, not a
     // hand-rolled quad — the whole Y-flip essay above still applies (grade-
     // present builds a NodeMaterial that a QuadMesh wraps below).
-    // A placeholder identity 3D LUT, so the LUT sampler always compiles (the
-    // Colour Grade effect's LUT strength gates it; a real .cube swaps in via
-    // gradePresent.setLut). 2³ is the smallest identity — plenty as a no-op.
+    // NOT PASSED AS `lutTexture` (2026-08-29, see below) — kept constructed
+    // and ready, ONLY so `MapShine.setGradeLut`-style reconnection (the day
+    // `deferredRungs.bundled-lut-loading` ships a real .cube) is a one-line
+    // change: swap this back into the call and pass a genuine strength
+    // param through. 2³ is the smallest identity — plenty as a no-op.
     const lutPlaceholder = makeIdentityLutTexture(THREE);
     const gradePresent = buildGradePresentMaterial({
       THREE,
@@ -5356,7 +5680,23 @@ export async function startVtPanViewer({
       outdoorsTexNode: envLight.outdoorsTexNode,
       uViewRect: envLight.uViewRect,
       uOutdoorsRect: envLight.uOutdoorsRect,
-      lutTexture: lutPlaceholder,
+      // `lutTexture` DELIBERATELY OMITTED (2026-08-29 — was `lutPlaceholder`
+      // unconditionally, per this project's own tier-gradient audit, §3.3:
+      // "GRADE... always-on ALU+LUT sample in present pass, even when
+      // 'disabled' — cannot get cheaper"). `GRADE_LOOK_PARAMS`' own header
+      // states `lutName`/`lutStrength` are "DELIBERATELY not declared yet" —
+      // no author-facing control can ever push `lutStrength` above its
+      // built-in-zero default until `deferredRungs.bundled-lut-loading`
+      // ships, so the 3D-texture fetch this would compile in could NEVER
+      // contribute anything but a wasted always-zero-weighted sample, at
+      // every profile, forever, until that rung lands.
+      // `buildGradePresentMaterial`'s own `lutTexture ? ... : null` branch
+      // (Effects.md Law 4) already does the right thing with an omitted
+      // texture — this is the one line that needed to stop feeding it one. Restore
+      // `lutTexture: lutPlaceholder` (or the real loaded texture) in the
+      // SAME commit that declares the two params and ships the asset load —
+      // never before, or the schema would describe a control with no
+      // consumer (`params/no-dead-controls`' own rule, one level up).
       // INJECTED, not imported by grade-present.js itself — see that
       // function's own param doc for why (a real circular zone dependency,
       // not just a door-rule technicality).
@@ -6101,6 +6441,11 @@ export async function startVtPanViewer({
       profiler?.begin(Z.lightVegSync);
       syncAllVegetationMotionForFrame();
       profiler?.end(Z.lightVegSync);
+      // Tile motion's own per-frame uniform sync — same placement, same
+      // reason (see syncAllTileMotionForFrame's own header).
+      profiler?.begin(Z.lightTileMotionSync);
+      syncAllTileMotionForFrame();
+      profiler?.end(Z.lightTileMotionSync);
       // Keep every drawn item's `buf:scene.attr` floor-index LIVE — see
       // `syncAllFloorAttrUniformsForFrame`'s own header for the live bug this
       // fixes (specular invisible on one specific floor, forever, because
@@ -6321,6 +6666,35 @@ export async function startVtPanViewer({
           readFailed: visionRead.source === 'default' && visionRead.reason !== null,
         });
         lastVisionGating = { ...gating, sourceCount: visionRead.sources.length, readReason: visionRead.reason };
+
+        // ── DOOR-FOG-REVEAL-SYNC (`door-graphics.js`'s deferred rung of the
+        // same name) ──────────────────────────────────────────────────────
+        // A door's newly-exposed area fades in over its own open animation
+        // instead of popping the instant Foundry recomputes LOS. Freeze
+        // "what was already safe" the moment a transition starts, from a
+        // HELD PRIOR-FRAME reference — never THIS frame's, because Foundry's
+        // own perception recompute may already have run earlier this same
+        // frame, which would make freezing this frame's sources a no-op (the
+        // door would already read as fully open in them). Gated on
+        // `gating.gate`: an ungated view (GM, nothing selected) already
+        // shows everything regardless of this mechanism — see
+        // `vision-mask-render.js`'s `buildVisionGateMaterial` doc for why
+        // that holds even without this guard — so this just skips the extra
+        // draw rather than changing anything visible.
+        const doorFogSummary = gating.gate ? doorGraphics.getTransitionSummary() : { anyActive: false, minProgress: 1 };
+        if (doorFogSummary.anyActive && !frozenFloorSources) {
+          // inactive → active: freeze last frame's (pre-transition) sources.
+          frozenFloorSources = previousVisionSources;
+        } else if (!doorFogSummary.anyActive && frozenFloorSources) {
+          // active → inactive: transition(s) settled, drop the floor.
+          frozenFloorSources = null;
+        }
+        // While a transition is ALREADY active, neither branch above fires —
+        // the floor stays frozen at its transition-start value for the
+        // whole window, not re-frozen every frame.
+        uDoorFogProgress.value = doorFogSummary.anyActive ? doorFogSummary.minProgress : 1;
+        previousVisionSources = visionRead.sources;
+
         // ⚠️ BEFORE `sync()`, NOT AFTER. `setExploredRect` is what schedules
         // the one-shot clear, and `sync()` is what CONSUMES that flag into
         // `explored.clearFirst`. Setting the rect afterwards would delay every
@@ -6363,6 +6737,16 @@ export async function startVtPanViewer({
         // is hidden, so rendering the scene would be a no-op draw call. Skip it
         // rather than pay for it on every GM frame.
         if (visionDraw.drawn > 0) renderer.render(visionDraw.scene, camera);
+        // DOOR-FOG-REVEAL-SYNC — the frozen floor, into THIS SAME bound
+        // target's G channel, no clear in between (MAX blending leaves the
+        // R/B/A just written above untouched). See `vision-mask-render.js`
+        // #syncFloor's own header. `frozenFloorSources` is non-null for
+        // every frame of an active transition, so this draws every frame
+        // one is in flight, not just once at freeze time.
+        if (gating.gate) {
+          const floorDraw = visionMask.syncFloor({ sources: frozenFloorSources });
+          if (floorDraw.drawn > 0) renderer.render(floorDraw.scene, camera);
+        }
         renderer.setClearColor(prevVisionClear, prevVisionAlpha);
         renderer.setRenderTarget(null);
 
@@ -6765,6 +7149,19 @@ export async function startVtPanViewer({
       if (!st.enabled) return;
       const p = st.params || {};
 
+      // LIVE TIER RE-POINT (2026-08-30) — cheap (two number comparisons, one
+      // texture-node field write on the rare frame it actually changes), so
+      // unconditional every frame rather than cached, matching every OTHER
+      // uniform push in this function. See bloomResolveUsesFullPyramid's own
+      // header for why this is a re-point, never a material rebuild.
+      const usesFullPyramid = Number.isFinite(st.perfTier) ? st.perfTier >= 1 : bloomResolveUsesFullPyramid();
+      bloomActiveMipCount = usesFullPyramid ? BLOOM_MIP_COUNT : BLOOM_CHEAP_MIP_COUNT;
+      const nextAtmoTop = usesFullPyramid ? BLOOM_ATMO_TOP : BLOOM_CHEAP_ATMO_TOP;
+      if (nextAtmoTop !== bloomActiveAtmoTop) {
+        bloomActiveAtmoTop = nextAtmoTop;
+        bloom.atmoTexNode.value = bloomMips[bloomActiveAtmoTop].texture;
+      }
+
       // Push resolved params into the build-once uniforms.
       profiler?.begin(Z.bloomUniforms);
       const u = bloom.uniforms;
@@ -6793,7 +7190,7 @@ export async function startVtPanViewer({
       // 2) DOWNSAMPLE — mip0→mip1 with the Karis average (firefly fix), then the
       //    plain 13-tap down the rest of the chain. uInvTexel = 1/sourceRes.
       profiler?.begin(Z.bloomDown);
-      for (let k = 0; k < BLOOM_MIP_COUNT - 1; k++) {
+      for (let k = 0; k < bloomActiveMipCount - 1; k++) {
         const src = bloomMips[k];
         if (k === 0) {
           bloom.downsampleKaris.inputNode.value = src.texture;
@@ -6813,19 +7210,25 @@ export async function startVtPanViewer({
       //    (an unguarded render would wipe the downsample content first).
       profiler?.end(Z.bloomDown);
       renderer.autoClearColor = false;
-      // CORE band: mip2 → mip1 → mip0 (tight spread) ⇒ mip0 = smooth blur of 0..2.
+      // CORE band: walks DOWN from (atmoTop - 1) to 0 (tight spread) ⇒ mip0 =
+      // smooth blur of the whole core range. At today's full pyramid
+      // (atmoTop=3) that is mip2 → mip1 → mip0, unchanged; the cheap tier
+      // (atmoTop=2) shortens it to mip1 → mip0, one fewer step.
       profiler?.begin(Z.bloomUpCore);
       bloom.upsample.uFilterRadius.value = bloomSpreadToRadius(bloomNum(p.coreSpread, 0.4));
-      for (const k of [1, 0]) {
+      for (let k = bloomActiveAtmoTop - 2; k >= 0; k--) {
         bloom.upsample.inputNode.value = bloomMips[k + 1].texture;
         renderer.setRenderTarget(bloomMips[k]);
         bloomUpQuad.render(renderer);
       }
       profiler?.end(Z.bloomUpCore);
-      // ATMOSPHERE band: mip5 → mip4 → mip3 (wide spread) ⇒ mip3 = smooth blur of 3..5.
+      // ATMOSPHERE band: walks DOWN from (mipCount - 2) to atmoTop (wide
+      // spread) ⇒ mips[atmoTop] = smooth blur of the whole atmosphere range.
+      // At today's full pyramid that is mip5 → mip4 → mip3, unchanged; the
+      // cheap tier shortens it to mip3 → mip2, one fewer step.
       profiler?.begin(Z.bloomUpAtmo);
       bloom.upsample.uFilterRadius.value = bloomSpreadToRadius(bloomNum(p.atmoSpread, 0.7));
-      for (const k of [4, 3]) {
+      for (let k = bloomActiveMipCount - 2; k >= bloomActiveAtmoTop; k--) {
         bloom.upsample.inputNode.value = bloomMips[k + 1].texture;
         renderer.setRenderTarget(bloomMips[k]);
         bloomUpQuad.render(renderer);
@@ -6860,6 +7263,18 @@ export async function startVtPanViewer({
       if ((view?.floorIndex ?? 0) === 0) return;
       const p = st.params || {};
 
+      // LIVE TIER REBUILD (2026-08-30) — guarded, unlike bloom's own
+      // unconditional re-point just above: DoF's composite genuinely bakes
+      // mip count into the compiled shader (rebuildDofForTier's own header),
+      // so this only fires on the rare frame the resolved tier actually
+      // crossed the performance/standard boundary — every other frame is
+      // the same two cheap comparisons water/specular/window/fluid's own
+      // per-sync tier checks already pay.
+      const usesFullPyramid = Number.isFinite(st.perfTier) ? st.perfTier >= 1 : dofResolveUsesFullPyramid();
+      if (usesFullPyramid !== dofBuiltUsesFullPyramid) {
+        rebuildDofForTier(usesFullPyramid);
+      }
+
       profiler?.begin(Z.dofUniforms);
       const u = dof.uniforms;
       u.viewedFloorIndex.value = view.floorIndex;
@@ -6878,7 +7293,7 @@ export async function startVtPanViewer({
       // 13-tap blur+halve (no Karis, no threshold — bloom's own reasons for
       // both are specific to a bright-pass pyramid, absent here).
       profiler?.begin(Z.dofDownsample);
-      for (let k = 0; k < DOF_MIP_COUNT; k++) {
+      for (let k = 0; k < dofActiveMipCount; k++) {
         const src = k === 0 ? sceneLit : dofMips[k - 1];
         dof.downsample.inputNode.value = src.texture;
         dof.downsample.uInvTexel.value.set(1 / src.width, 1 / src.height);
@@ -7371,9 +7786,9 @@ export async function startVtPanViewer({
       const accepted = dayClock.setHour(hour);
       return { accepted, ...dayClock.read() };
     }
-    /** @param {number} hour @returns {object} sweep to an hour rather than snapping. */
-    function sweepTimeOfDay(hour) {
-      dayClock.syncTo(hour);
+    /** @param {number} hour @param {number} [overMs] @returns {object} sweep to an hour rather than snapping. */
+    function sweepTimeOfDay(hour, overMs) {
+      dayClock.syncTo(hour, overMs);
       return dayClock.read();
     }
     /** @param {number} hoursPerMinute @returns {object} */
@@ -8841,8 +9256,16 @@ export async function startVtPanViewer({
         refraction.tick({
           bodyRect: body.getRect?.() ?? null,
           viewRect,
-          canvasW,
-          canvasH,
+          // INTERNAL tier, not canvasW/H (CSS px — a real bug, live since
+          // this call's first wiring commit d60322c, 2026-08-23: silently
+          // under-sized the capture by ~1/pixelRatio) and not PRESENT-tier
+          // drawBufW/H either — sceneLit below is ITSELF an internal-tier
+          // target, so anything denser than internalW/H just upscales blur
+          // into a bigger, wasted buffer, worst exactly when the render-
+          // scale governor has throttled down to claw GPU time back. See
+          // computeCaptureTargetSize's own doc (water-refraction-subsystem.js).
+          deviceW: internalW,
+          deviceH: internalH,
           sceneColorTexture: sceneLit.texture,
         });
         // ⚠️ THE SELF-CAPTURE FIX'S OWN SECOND HALF (2026-08-23). The tick
@@ -9329,10 +9752,32 @@ export async function startVtPanViewer({
     // new home, to stay under the size ratchet's per-function cap.)
 
     function buildWholeImageMaterial(tex, item, uvScale = [1, 1]) {
-      const { Fn, uniform, vec2, vec3, vec4, float, uv, texture } = THREE.TSL;
+      const { Fn, uniform, vec2, vec3, vec4, float, uv, texture, positionLocal } = THREE.TSL;
       const uTint = uniform(vec3(1, 1, 1));
       const uAlpha = uniform(float(1));
       const uUvScale = uniform(vec2(uvScale[0], uvScale[1]));
+
+      // TILE MOTION (foundry/tile-motion.js, 2026-08-27) — a rigid GPU
+      // transform + UV scroll/rotate, attached ONLY for item.kind==='tile'
+      // (this material also serves level backgrounds/foregrounds and other
+      // whole-image items that never animate). Identity by default;
+      // `syncAllTileMotionForFrame` (this file, beside
+      // `syncAllVegetationMotionForFrame`) writes fresh uniforms every frame
+      // for whichever tiles are actually animating — a per-vertex rigid
+      // transform costs the same 6 uniform writes regardless of how many
+      // vertices a coverage-tessellated tile has (vt/coverage-mesh.js),
+      // unlike rewriting the position buffer every frame.
+      const tileMotion =
+        item.kind === 'tile'
+          ? {
+              uMotionPivot: uniform(vec2(0, 0)),
+              uMotionRot: uniform(vec2(1, 0)), // (cos, sin) of the delta rotation — identity
+              uMotionTranslate: uniform(vec2(0, 0)),
+              uTexPivotUV: uniform(vec2(0.5, 0.5)),
+              uTexScrollUV: uniform(vec2(0, 0)),
+              uTexRotUV: uniform(vec2(1, 0)), // (cos, sin) of the texture rotation — identity
+            }
+          : null;
       // EARLY OCCLUSION REJECT (PERF, 2026-08-09 — live report: a 12K-map
       // upper floor measured geometry.worldDraw at 133ms GPU mean, 22 draw
       // calls, for a floor dense with stacked opaque content). This pass has
@@ -9442,6 +9887,24 @@ export async function startVtPanViewer({
       material.depthTest = false;
       material.depthWrite = false;
       material.side = THREE.DoubleSide; // negative scaleX flips winding — see world-quad.js
+      if (tileMotion) {
+        // v' = pivot + Rot(delta)*(v - pivot) + translate, applied to the
+        // REST-pose world vertex (`positionLocal.xy` already carries the
+        // tile's own static rotation, baked in by computeQuadCorners at mesh
+        // build/residency time — see world-quad.js's own header on why this
+        // module's whole coordinate space needs no further flips here).
+        // Verified algebraically against every one of V2's four per-type
+        // pose methods; see foundry/tile-motion.js's own header + tests.
+        material.positionNode = Fn(() => {
+          const rel = positionLocal.xy.sub(tileMotion.uMotionPivot);
+          const rotated = vec2(
+            rel.x.mul(tileMotion.uMotionRot.x).sub(rel.y.mul(tileMotion.uMotionRot.y)),
+            rel.x.mul(tileMotion.uMotionRot.y).add(rel.y.mul(tileMotion.uMotionRot.x))
+          );
+          const xy = tileMotion.uMotionPivot.add(rotated).add(tileMotion.uMotionTranslate);
+          return vec3(xy.x, xy.y, positionLocal.z);
+        })();
+      }
       // EARLY OCCLUSION REJECT — see `uExpectedDepth`'s own comment above for
       // the full account. `isAtOrBelow` is "nothing with a higher rank is
       // recorded as opaque here" — true means draw, matching maskNode's own
@@ -9478,7 +9941,20 @@ export async function startVtPanViewer({
         // condition that skips them. `standard` (the default) and above are
         // byte-for-byte what ships today — see that function's own doc for
         // why the boundary sits at `standard`, not just `extreme`.
-        const uvS = uv().mul(uUvScale).toVar();
+        let uvS = uv().mul(uUvScale);
+        if (tileMotion) {
+          // Matches THREE.Texture's own `Matrix3#setUvTransform` composition
+          // (translate to center, rotate, translate back, then offset) —
+          // verified against its source rather than guessed, so a ported
+          // `mode:'texture'` tile scrolls/spins the same way V2's real
+          // `THREE.Texture.offset/rotation` did.
+          const rel = uvS.sub(tileMotion.uTexPivotUV);
+          const rc = tileMotion.uTexRotUV.x;
+          const rs = tileMotion.uTexRotUV.y;
+          const rotated = vec2(rel.x.mul(rc).add(rel.y.mul(rs)), rel.y.mul(rc).sub(rel.x.mul(rs)));
+          uvS = tileMotion.uTexPivotUV.add(tileMotion.uTexScrollUV).add(rotated);
+        }
+        uvS = uvS.toVar();
         const clear = shouldUseFullAlbedoClarity()
           ? buildAlbedoClarityNode(THREE, tex, uvS, uTexSize)
           : buildFlatAlbedoNode(THREE, tex, uvS);
@@ -9506,6 +9982,7 @@ export async function startVtPanViewer({
       material.mrtNode = mrtNode;
       return {
         material,
+        tileMotion,
         // ⚠️ ONLY `item` is stored — never `sceneDoc`/`viewedFloorIndex`
         // alongside it. Those two are the exact things that change over
         // time (a scene switch, a floor switch) and MUST be read fresh at
@@ -9751,11 +10228,32 @@ export async function startVtPanViewer({
      *   the material's own `uKindSwayMul` uniform if it already has one).
      * @param {*} args.sceneMin - vec2 node, `uSceneMin`-shaped (world px).
      * @param {*} args.sceneSize - vec2 node, `uSceneSize`-shaped (world px).
-     * @returns {*} a vec2 node — world-px displacement, ALREADY capped
-     *   (`VEG_MAX_DISPLACE_PX`). Add to `positionLocal.xy`, never use alone.
+     * @param {boolean} [args.asShadow] - true for the shadow-twin call site.
+     *   Affects ONLY the new lift term (below) — everything else stays
+     *   identical between canopy and shadow, same as before tier 6 existed.
+     * @param {boolean} [args.rotationLiftEnabled] - tier 6's own gate
+     *   (`vegetationTierPlan(tier).rotationLiftEnabled`), a plain JS boolean
+     *   known at graph-build time — Law 4: when false, none of the spring
+     *   texture sample / rotation-matrix / lift nodes below are constructed
+     *   at all, not merely multiplied by zero.
+     * @returns {{xy: *, liftY: *}} `xy` — a vec2 node, world-px XY
+     *   displacement, ALREADY capped (`VEG_MAX_DISPLACE_PX`); add to
+     *   `positionLocal.xy`. `liftY` — a float node, world-px Y displacement
+     *   from tier 6's own lift spring (0 when disabled or `asShadow`); add to
+     *   `positionLocal.y` SEPARATELY, never folded into `xy`'s own cap (lift
+     *   is a different physical channel — see this function's own "(4)
+     *   TORQUE-SWAY" block for why).
      */
-    function buildVegetationSwayDisplacementNode({ motion, kind, kindSwayMul, sceneMin, sceneSize }) {
-      const { vec2, float, positionLocal, sin, cos, length, pow, max, min, smoothstep, clamp } = THREE.TSL;
+    function buildVegetationSwayDisplacementNode({
+      motion,
+      kind,
+      kindSwayMul,
+      sceneMin,
+      sceneSize,
+      asShadow,
+      rotationLiftEnabled,
+    }) {
+      const { vec2, float, positionLocal, sin, cos, length, pow, max, min, smoothstep, clamp, texture } = THREE.TSL;
       const worldXY = vec2(positionLocal.x, positionLocal.y);
       const tSec = uGlobalTimeMs.mul(float(0.001));
       // THE ARRIVAL LAG — see `effects/vegetation.js#VEGETATION_KINDS`'s own
@@ -9858,17 +10356,84 @@ export async function startVtPanViewer({
         smoothstep(float(0), max(edgeFadeWidthNormY, float(1e-5)), edgeDistY)
       );
 
-      const rawDisplace = bend
+      let translateDisplace = bend
         .add(oscillate)
         .mul(motion.uSwayAmount)
         .mul(motion.uWindResponse)
         .mul(kindSwayMul)
         .mul(edgeFade);
+      let liftY = float(0);
+
+      // (4) TORQUE-SWAY — wind-driven rotation + lift (tier 6, 2026-08-27).
+      // A plain JS `if`, not a TSL branch (Law 4): below tier 6 none of this
+      // is constructed, the same "don't even build it" posture the shadow
+      // mesh itself already takes at a coarser grain.
+      if (rotationLiftEnabled) {
+        // Reuses THIS SAME cell/cellCenterXY — layer (1)'s own clump-cell
+        // pivot, already computed above for the wind-decorrelation hash.
+        // `vegetationSpringGridSpec` deliberately snaps its grid's origin to
+        // this exact world-aligned cell boundary (see that function's own
+        // doc), so the rotation below pivots around the SAME physical point
+        // this vertex's translation/phase/amplitude jitter already treats as
+        // "its clump" — no separate pivot computation needed.
+        const gridOriginXY = vec2(float(vegSpringGrid.originX), float(vegSpringGrid.originY));
+        const gridExtentXY = vec2(
+          float(vegSpringGrid.cellSize * vegSpringGrid.cols),
+          float(vegSpringGrid.cellSize * vegSpringGrid.rows)
+        );
+        const springUv = clamp(worldXY.sub(gridOriginXY).div(gridExtentXY), vec2(0, 0), vec2(1, 1));
+        // Bilinear (the publish target's own LinearFilter) — smooth across
+        // clump-cell boundaries for free. The PIVOT below is still hard-
+        // snapped to this vertex's own nearest cell centre, not blended the
+        // same way — a known, quantified, documented tradeoff (see
+        // VEGETATION_PARAMS.torqueGain's own help text and `vegetation.js`'s
+        // `true-clump-differentiation` deferred-rung entry).
+        const springState = texture(vegSpringPublishRT.texture, springUv);
+        const springAngle = springState.x;
+        const springLiftRaw = springState.z;
+
+        // Rotation is inherently self-weighted — a vertex twice as far from
+        // the pivot swings through twice the arc for the same angle, no
+        // separate falloff curve needed the way flat translation sway did.
+        const offsetXY = worldXY.sub(cellCenterXY);
+        const rotCos = cos(springAngle);
+        const rotSin = sin(springAngle);
+        const rotatedOffsetXY = vec2(
+          offsetXY.x.mul(rotCos).sub(offsetXY.y.mul(rotSin)),
+          offsetXY.x.mul(rotSin).add(offsetXY.y.mul(rotCos))
+        );
+        // Folded into the SAME translation term, capped by the SAME final
+        // hard cap below — one more slider (torqueGain) that could be maxed
+        // out alongside sway/gale, exactly the scenario that cap already
+        // exists for.
+        translateDisplace = translateDisplace.add(rotatedOffsetXY.sub(offsetXY).mul(edgeFade));
+
+        // LIFT — CANOPY ONLY, deliberately never the shadow (asShadow=true
+        // skips this branch entirely, not merely zeroes it): this renderer's
+        // main camera is orthographic and the vegetation material disables
+        // depth test/write, so a Z-axis nudge would be genuinely invisible —
+        // there is no "toward the viewer" axis here. Applying this same Y
+        // offset to the shadow too would just look like the whole plant
+        // sliding north/south, not lifting. Left anchored at the ground, the
+        // shadow instead provides the reference the canopy visibly separates
+        // from — the classic 2D/isometric "sprite moves, shadow doesn't"
+        // trick, which is what actually reads as height in a flat top-down
+        // projection with no perspective cue of its own.
+        if (!asShadow) {
+          const halfCell = float(vegSpringGrid.cellSize * 0.5);
+          const radialWeight = clamp(length(offsetXY).div(max(halfCell, float(1e-4))), float(0), float(1));
+          liftY = springLiftRaw.mul(radialWeight).mul(edgeFade);
+        }
+      }
+
       // FINAL HARD CAP — the backstop for several independent sliders maxed
-      // out simultaneously. Rescales, never distorts direction.
-      const rawDisplaceLen = length(rawDisplace);
+      // out simultaneously (now including torqueGain's own rotation term
+      // above). Rescales, never distorts direction. Lift is a SEPARATE
+      // channel, deliberately not folded into this same cap — see this
+      // function's own @returns doc.
+      const rawDisplaceLen = length(translateDisplace);
       const displaceCapScale = min(float(1), float(VEG_MAX_DISPLACE_PX).div(max(rawDisplaceLen, float(1e-4))));
-      return rawDisplace.mul(displaceCapScale);
+      return { xy: translateDisplace.mul(displaceCapScale), liftY };
     }
 
     /**
@@ -10005,8 +10570,19 @@ export async function startVtPanViewer({
         flutterEnabled = true,
         smearTaps = VEG_SHADOW_SMEAR_TAPS,
         uvPerWorldBasis = null,
+        // TIER 6 (2026-08-27) — the performance-tier gate
+        // (vegetationTierPlan(tier).rotationLiftEnabled). Defaults to false
+        // so a caller that has not been updated to resolve a tier changes
+        // nothing, matching flutterEnabled/smearTaps's own precedent.
+        rotationLiftEnabled = false,
       } = {}
     ) {
+      // Demand-allocate tier 6's shared spring grid the FIRST time any mesh
+      // (canopy or shadow, whichever builds first) actually needs it —
+      // synchronously, before positionNode below can reference the published
+      // texture. See ensureVegetationSpringGrid's own doc for why this must
+      // not be left to the tick loop's first frame.
+      if (rotationLiftEnabled) ensureVegetationSpringGrid(initialParams?.clumpSizePx);
       const {
         Fn,
         If,
@@ -10172,8 +10748,10 @@ export async function startVtPanViewer({
           kindSwayMul: uKindSwayMul,
           sceneMin: uSceneMin,
           sceneSize: uSceneSize,
+          asShadow,
+          rotationLiftEnabled,
         });
-        return positionLocal.add(vec3(displace.x, displace.y, float(0)));
+        return positionLocal.add(vec3(displace.xy.x, displace.xy.y, float(0))).add(vec3(0, 1, 0).mul(displace.liftY));
       })();
 
       material.colorNode = Fn(() => {
@@ -10934,14 +11512,16 @@ export async function startVtPanViewer({
               }
               const wholeTile = { sx: 0, sy: 0, sw: c.width, sh: c.height, col: 0, row: 0 };
               const compressedUvScale = [c.width / padW, c.height / padH];
-              const { material, appearance, motion, floorAttrUniforms, floorAttrItem, uExpectedDepth } = vegActive
-                ? buildVegetationMaterial(tex, item, vegKind, vegState.params, {
-                    uvScale: compressedUvScale,
-                    isFloorSurface: true, // Case-1 embedded veg IS the floor here — see the function's own doc
-                    flutterEnabled: vegTier.flutterEnabled,
-                    uvPerWorldBasis: state.placement,
-                  })
-                : buildWholeImageMaterial(tex, item, compressedUvScale);
+              const { material, appearance, motion, tileMotion, floorAttrUniforms, floorAttrItem, uExpectedDepth } =
+                vegActive
+                  ? buildVegetationMaterial(tex, item, vegKind, vegState.params, {
+                      uvScale: compressedUvScale,
+                      isFloorSurface: true, // Case-1 embedded veg IS the floor here — see the function's own doc
+                      flutterEnabled: vegTier.flutterEnabled,
+                      rotationLiftEnabled: vegTier.rotationLiftEnabled,
+                      uvPerWorldBasis: state.placement,
+                    })
+                  : buildWholeImageMaterial(tex, item, compressedUvScale);
               const geometry = new THREE.BufferGeometry();
               // ⚠️ `floorAttrUniforms`/`floorAttrItem` retained on the tile entry
               // itself — `syncAllFloorAttrUniformsForFrame` reads them every
@@ -10960,6 +11540,7 @@ export async function startVtPanViewer({
                 material,
                 appearance,
                 motion,
+                tileMotion: tileMotion ?? null,
                 mesh: null,
                 floorAttrUniforms: floorAttrUniforms ?? null,
                 floorAttrItem: floorAttrItem ?? null,
@@ -11027,7 +11608,8 @@ export async function startVtPanViewer({
                   imageH,
                   vegSegments,
                   compressedUvScale,
-                  vegTier.shadowSmearTaps
+                  vegTier.shadowSmearTaps,
+                  vegTier.rotationLiftEnabled
                 );
               }
               wi.tiles.push(t);
@@ -11119,13 +11701,15 @@ export async function startVtPanViewer({
                 // recovery, so there is nothing to do here but stop waiting.
               }
             }
-            const { material, appearance, motion, floorAttrUniforms, floorAttrItem, uExpectedDepth } = vegActive
-              ? buildVegetationMaterial(tex, item, vegKind, vegState.params, {
-                  isFloorSurface: true,
-                  flutterEnabled: vegTier.flutterEnabled,
-                  uvPerWorldBasis: state.placement,
-                })
-              : buildWholeImageMaterial(tex, item);
+            const { material, appearance, motion, tileMotion, floorAttrUniforms, floorAttrItem, uExpectedDepth } =
+              vegActive
+                ? buildVegetationMaterial(tex, item, vegKind, vegState.params, {
+                    isFloorSurface: true,
+                    flutterEnabled: vegTier.flutterEnabled,
+                    rotationLiftEnabled: vegTier.rotationLiftEnabled,
+                    uvPerWorldBasis: state.placement,
+                  })
+                : buildWholeImageMaterial(tex, item);
             const geometry = new THREE.BufferGeometry();
             // ⚠️ See the compressed-path sibling above for why these are kept.
             const t = {
@@ -11136,6 +11720,7 @@ export async function startVtPanViewer({
               material,
               appearance,
               motion,
+              tileMotion: tileMotion ?? null,
               mesh: null,
               floorAttrUniforms: floorAttrUniforms ?? null,
               floorAttrItem: floorAttrItem ?? null,
@@ -11161,7 +11746,8 @@ export async function startVtPanViewer({
                 imageH,
                 vegSegments,
                 undefined,
-                vegTier.shadowSmearTaps
+                vegTier.shadowSmearTaps,
+                vegTier.rotationLiftEnabled
               );
             }
             wi.tiles.push(t);
@@ -11520,6 +12106,7 @@ export async function startVtPanViewer({
                   shadowPadPx / Math.max(1, Math.abs(state.placement?.height ?? 1)),
                 ],
                 smearTaps: vegTier.shadowSmearTaps,
+                rotationLiftEnabled: vegTier.rotationLiftEnabled,
                 uvPerWorldBasis: state.placement,
               });
               // The smear LOD's scale factor — see the Case-1 site's own note.
@@ -11557,6 +12144,7 @@ export async function startVtPanViewer({
               freshParams,
               {
                 flutterEnabled: vegTier.flutterEnabled,
+                rotationLiftEnabled: vegTier.rotationLiftEnabled,
                 // The world→UV basis the fold-free flutter cap needs; re-pushed
                 // by `syncVegetationUvBasis` whenever this placement changes.
                 uvPerWorldBasis: state.placement,
@@ -11740,6 +12328,51 @@ export async function startVtPanViewer({
               entry.shadow.mesh.visible = !!entry.shadow.residentVisible && draws;
               syncVegetationMotionUniforms(entry.shadow.motion, vegState.params);
             }
+          }
+        }
+      }
+    }
+
+    /**
+     * Tile motion's own per-frame uniform sync — the SAME shape as
+     * `syncAllVegetationMotionForFrame` right above, for the identical
+     * reason (see that function's own header): `finishResidencyPass`/
+     * `refreshWholeImageItem` only run on a residency pass (pan/zoom/
+     * placement change), never every frame, so anything that must update
+     * continuously has to be pulled into its own per-frame function called
+     * directly from `renderFrame`. Touches ONLY the six `t.tileMotion`
+     * uniforms — never geometry/visibility/renderOrder.
+     *
+     * `resolveTileMotionFrame()` (foundry/index.js) returns an EMPTY map
+     * whenever playback is stopped or a tile edit is in progress — "tile not
+     * in the map" means "render at rest" (identity transform), which is how
+     * stopping tile motion is free: there is no separate restore path.
+     */
+    function syncAllTileMotionForFrame() {
+      const frame = resolveTileMotionFrame();
+      for (const state of itemStates.values()) {
+        if (state.item?.kind !== 'tile' || !state.wholeImage) continue;
+        const tileId = state.item._placement?.tileDoc?.id;
+        const xform = tileId ? frame.get(tileId) : undefined;
+        for (const t of state.wholeImage.tiles) {
+          const tm = t.tileMotion;
+          if (!tm) continue;
+          if (xform) {
+            tm.uMotionPivot.value.set(xform.pivotWorldX, xform.pivotWorldY);
+            tm.uMotionRot.value.set(Math.cos(xform.deltaRotationRad), Math.sin(xform.deltaRotationRad));
+            tm.uMotionTranslate.value.set(xform.translateWorldX, xform.translateWorldY);
+            const tex = xform.texture;
+            tm.uTexPivotUV.value.set(tex ? tex.pivotU : 0.5, tex ? tex.pivotV : 0.5);
+            tm.uTexScrollUV.value.set(tex ? tex.offsetU : 0, tex ? tex.offsetV : 0);
+            tm.uTexRotUV.value.set(tex ? tex.rotCos : 1, tex ? tex.rotSin : 0);
+          } else {
+            // Not currently animating (disabled, or motion stopped) — identity.
+            tm.uMotionPivot.value.set(0, 0);
+            tm.uMotionRot.value.set(1, 0);
+            tm.uMotionTranslate.value.set(0, 0);
+            tm.uTexPivotUV.value.set(0.5, 0.5);
+            tm.uTexScrollUV.value.set(0, 0);
+            tm.uTexRotUV.value.set(1, 0);
           }
         }
       }
@@ -12257,6 +12890,7 @@ export async function startVtPanViewer({
       tickCamera: profiler?.indexOf('tick.camera') ?? -1,
       simsWind: profiler?.indexOf('sims.wind') ?? -1,
       simsFluid: profiler?.indexOf('sims.fluid') ?? -1,
+      simsVegSpring: profiler?.indexOf('sims.vegSpring') ?? -1,
       simsDust: profiler?.indexOf('sims.particlesDust') ?? -1,
       simsGusts: profiler?.indexOf('sims.particlesGusts') ?? -1,
       masksSync: profiler?.indexOf('masks.occlusionSync') ?? -1,
@@ -12285,6 +12919,7 @@ export async function startVtPanViewer({
       lightCandleSync: profiler?.indexOf('light.candleSync') ?? -1,
       lightLightningSync: profiler?.indexOf('light.lightningSync') ?? -1,
       lightVegSync: profiler?.indexOf('light.vegetationSync') ?? -1,
+      lightTileMotionSync: profiler?.indexOf('light.tileMotionSync') ?? -1,
       lightWindOverlaySync: profiler?.indexOf('light.windOverlaySync') ?? -1,
       lightUiShadow: profiler?.indexOf('light.uiShadowStamps') ?? -1,
       lightDrawIllum: profiler?.indexOf('light.drawIllum') ?? -1,
@@ -12536,6 +13171,17 @@ export async function startVtPanViewer({
       profiler?.begin(Z.simsFluid);
       tickFluidSim(lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value, lastEnvSnapshot?.env?.time?.dtSec ?? 0);
       profiler?.end(Z.simsFluid);
+      // Vegetation tier 6's torque-sway spring — same "inside the gpuProbe
+      // bracket, after tickWindSim so this frame's wind field is fresh"
+      // reasoning as tickFluidSim above. A cheap no-op on any scene that
+      // never resolved rotationLiftEnabled for any mesh (see
+      // tickVegetationSpring's own doc).
+      profiler?.begin(Z.simsVegSpring);
+      tickVegetationSpring(
+        lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value,
+        lastEnvSnapshot?.env?.time?.dtSec ?? 0
+      );
+      profiler?.end(Z.simsVegSpring);
       // sims.particles — advance the GPU particle sim right after the wind field
       // it samples, before the draw (surface.particles, in the plan below) reads
       // its positions. A DIRECT renderer.compute(): the sims stage is out of
@@ -13648,6 +14294,19 @@ export async function startVtPanViewer({
             const sceneRect = dimensions.sceneRect;
             const sceneMin = uniform(vec2(sceneRect.x, sceneRect.y));
             const sceneSize = uniform(vec2(Math.max(1, sceneRect.width), Math.max(1, sceneRect.height)));
+            // Same tier resolution the real canopy used to decide its own
+            // `rotationLiftEnabled` — this cache-miss branch runs once per
+            // overlay's lifetime (see this block's own header), the same
+            // effective cadence the canopy's own one-time build resolved its
+            // tier at, so the two cannot disagree in practice. Rotation/lift
+            // MOVE THE SILHOUETTE exactly like the arrival lag and gust
+            // wander already do — a proxy built without them would rasterize
+            // a differently-posed canopy than the one on screen, the same
+            // shimmering mismatch band this shared-node extraction exists to
+            // prevent.
+            const proxyRotationLiftEnabled = vegetationTierPlan(
+              getVegetationRenderState()?.perfTier
+            ).rotationLiftEnabled;
             const positionNode = Fn(() => {
               const displace = buildVegetationSwayDisplacementNode({
                 motion: overlay.motion,
@@ -13661,8 +14320,12 @@ export async function startVtPanViewer({
                 kindSwayMul: float(vegKind.swayMultiplier),
                 sceneMin,
                 sceneSize,
+                asShadow: false, // this proxy represents the CANOPY, never the shadow
+                rotationLiftEnabled: proxyRotationLiftEnabled,
               });
-              return positionLocal.add(vec3(displace.x, displace.y, float(0)));
+              return positionLocal
+                .add(vec3(displace.xy.x, displace.xy.y, float(0)))
+                .add(vec3(0, 1, 0).mul(displace.liftY));
             })();
             nodeEntry = { id: ++vegetationProxyNodeSeq, positionNode, sceneMin, sceneSize };
             vegetationProxyNodeCache.set(overlay.motion, nodeEntry);
@@ -17285,6 +17948,8 @@ export async function startVtPanViewer({
       },
       /** Tear down Tier 2's own ping/pong/publish RTs + solid mask + materials. */
       disposeWindSim,
+      /** Tear down vegetation tier 6's own ping/pong/publish RTs + materials. */
+      disposeVegetationSpringSim,
       /** Tear down every point-light mesh/material/geometry — now
        * `pointLights.dispose()` (effects/lighting/point-light-pool.js,
        * extraction step 3). Kept as a same-named method here so
@@ -17827,6 +18492,13 @@ export async function startVtPanViewer({
         // while `owningVision` is false. That is deliberate: the cost and the
         // pool health are observable BEFORE the flag is ever flipped.
         ...visionMask.getInfo(),
+        // DOOR-FOG-REVEAL-SYNC — the glue's OWN state (vision-mask.getInfo()
+        // above already reports the rasteriser's floor-mesh count; this is
+        // the live uniform actually reaching the gate shader this frame).
+        // `doorFogProgress` pinned at 1 with `doorFogFloorMeshCount` at 0 is
+        // the everyday "no door mid-swing" state, not a failure.
+        doorFogProgress: uDoorFogProgress.value,
+        doorFogFloorFrozen: frozenFloorSources !== null,
         // THE viewer's OWN current drawing-buffer size, next to `maskSize`
         // above — the two falling out of sync is exactly the resize-list
         // omission found and fixed 2026-08-15; this is what makes a future
@@ -18586,6 +19258,15 @@ export async function startVtPanViewer({
         const points = await armInteractivePixelProbe(maxPoints);
         if (!points.length) return [];
         return runProbeOnPoints(points);
+      },
+      // TILE MOTION's "Pick Pivot on Canvas" (2026-08-27) — the SAME
+      // click-to-world mechanism the pixel probe above uses, minus its
+      // buffer-readback tail (a pivot pick wants a raw world point, not a
+      // scene-depth diagnostic). One click, no marker session left armed
+      // longer than needed.
+      armPivotPick: async () => {
+        const points = await armInteractivePixelProbe(1);
+        return points[0] ?? null;
       },
       /**
        * THE CANDLE-PLACEMENT PROOF (Tier 0, 2026-07-20): draw a one-shot
@@ -19509,10 +20190,12 @@ export function setVtPanViewerGradeEnvStrength(strength01) {
 /**
  * Sweep to an hour rather than snapping — the astrolabe's time-stop buttons.
  * @param {number} hour
+ * @param {number} [overMs] - ease over this many ms (the Remote's own Fade
+ *   Time selector); omitted keeps day-clock's own fixed default walk rate.
  */
-export function sweepVtPanViewerTimeOfDay(hour) {
+export function sweepVtPanViewerTimeOfDay(hour, overMs) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
-  return _active.sweepTimeOfDay(hour);
+  return _active.sweepTimeOfDay(hour, overMs);
 }
 
 /**
@@ -19789,6 +20472,17 @@ export async function probeVtPanViewerPixels(points) {
 export async function runInteractiveVtPanViewerPixelProbe(maxPoints = 3) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.runInteractivePixelProbe(maxPoints);
+}
+
+/**
+ * Tile motion's "Pick Pivot on Canvas" — arms one click, resolves with that
+ * click's world position (or `null` if the viewer isn't running / the 90s
+ * arm window elapsed with no click). See `armPivotPick`'s own header.
+ * @returns {Promise<{x:number,y:number}|null>}
+ */
+export async function pickVtPanViewerWorldPoint() {
+  if (!_active) return null;
+  return _active.armPivotPick();
 }
 
 /**

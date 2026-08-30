@@ -27,7 +27,7 @@ import {
   DEFAULT_PERFORMANCE_PROFILE,
 } from '../effect-cascade.js';
 import { createEffectRegistry } from '../registry.js';
-import { SCALE_LADDER } from '../../graph/index.js';
+import { SCALE_LADDER, SUPERSAMPLE_CHOICES } from '../../graph/index.js';
 import {
   describeEffectSettings,
   deriveEffectLayers,
@@ -381,7 +381,8 @@ export function run(t) {
     const descriptors = describeEffectSettings([UI_WINDOW_SHADOW]);
     const byKey = (k) => descriptors.find((d) => d.key === k);
 
-    ok('one effect → 6 global + 2 per-effect descriptors', descriptors.length === 8);
+    // 8 global (2026-08-30: +hidpiRendering, project_albedo_zoom_out_clarity_audit_2026-08-30 Stage 1A) + 2 per-effect.
+    ok('one effect → 8 global + 2 per-effect descriptors', descriptors.length === 10);
 
     const master = byKey(GLOBAL_SETTING_KEYS.msaEnabled);
     ok(
@@ -428,17 +429,49 @@ export function run(t) {
       'render-scale is a client enum defaulting to auto',
       renderScale?.scope === 'client' && renderScale?.kind === 'enum' && renderScale?.default === 'auto'
     );
+    const rendererOverride = byKey(GLOBAL_SETTING_KEYS.rendererOverride);
     ok(
-      'render-scale choices are auto plus every SCALE_LADDER rung, as numeric strings — nothing hand-typed and drifted',
+      "renderer override (UI parity plan, phase 4b round 2) is a WORLD enum defaulting to msa, GM-only by Foundry's own scope rule",
+      rendererOverride?.scope === 'world' &&
+        rendererOverride?.kind === 'enum' &&
+        rendererOverride?.default === 'msa' &&
+        'msa' in rendererOverride.choices &&
+        'foundry' in rendererOverride.choices
+    );
+    const hidpiRendering = byKey(GLOBAL_SETTING_KEYS.hidpiRendering);
+    ok(
+      // 2026-08-30: replaces boot.js's own former unconditional force-off of
+      // Foundry's pixelRatioResolutionScaling. requiresReload, same posture
+      // as msaEnabled — a live-flip here isn't cheaply provable correct.
+      "hidpi-rendering is a client bool defaulting off (today's shipped behaviour, unchanged), requiring a reload",
+      hidpiRendering?.scope === 'client' &&
+        hidpiRendering?.kind === 'bool' &&
+        hidpiRendering?.default === false &&
+        hidpiRendering?.requiresReload === true
+    );
+    ok(
+      // 2026-08-30 (Stage 4): also unioned with SUPERSAMPLE_CHOICES — fixed
+      // rungs above 1.0, deliberately kept out of SCALE_LADDER itself so the
+      // AUTO governor can never select one (see SUPERSAMPLE_CHOICES's own
+      // header, graph/v3-perf.js).
+      'render-scale choices are auto plus every SCALE_LADDER + SUPERSAMPLE_CHOICES rung, as numeric strings — nothing hand-typed and drifted',
       renderScale &&
         'auto' in renderScale.choices &&
         SCALE_LADDER.every((s) => String(s) in renderScale.choices) &&
-        Object.keys(renderScale.choices).length === SCALE_LADDER.length + 1
+        SUPERSAMPLE_CHOICES.every((s) => String(s) in renderScale.choices) &&
+        Object.keys(renderScale.choices).length === SCALE_LADDER.length + SUPERSAMPLE_CHOICES.length + 1
     );
     ok(
       'the native (scale 1) choice label calls out "Native"; the lowest rung calls out "Lowest"',
       renderScale?.choices?.['1']?.includes('Native') &&
         renderScale?.choices?.[String(SCALE_LADDER[SCALE_LADDER.length - 1])]?.includes('Lowest')
+    );
+    ok(
+      // 2026-08-30: regression for the exact bug this fixed — "Native" used
+      // to be keyed off array INDEX 0, which a prepended supersample rung
+      // would have silently mislabeled.
+      'every supersample rung calls out "Supersampled", not "Native"',
+      SUPERSAMPLE_CHOICES.every((s) => renderScale?.choices?.[String(s)]?.includes('Supersampled'))
     );
 
     const gm = byKey(effectEnableKey('uiWindowShadow', 'gm'));
@@ -457,7 +490,7 @@ export function run(t) {
       'every descriptor is config:true (shows in Foundry Settings)',
       descriptors.every((d) => d.config === true)
     );
-    ok('no manifests → just the 6 global descriptors', describeEffectSettings([]).length === 6);
+    ok('no manifests → just the 8 global descriptors', describeEffectSettings([]).length === 8);
     ok(
       'the master off-switch exists even with zero effects registered — it gates BEFORE the cascade',
       describeEffectSettings([]).some((d) => d.key === GLOBAL_SETTING_KEYS.msaEnabled)

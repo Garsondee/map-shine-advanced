@@ -56,11 +56,48 @@ export const DEFAULT_PASS_BUDGET_MS = 2.0;
 export const SCALE_LADDER = [1.0, 0.85, 0.7, 0.6, 0.5];
 
 /**
+ * SUPERSAMPLE RUNGS (2026-08-30 —
+ * [[project_albedo_zoom_out_clarity_audit_2026-08-30]] Stage 4) — FIXED
+ * choices only, deliberately kept OUT of `SCALE_LADDER` itself. Widening that
+ * ladder directly would also change what the AUTO governor can select (a
+ * fresh session starting supersampled by default, `RenderScaleGovernor`'s own
+ * `maxScale` needing an explicit override at its one construction site,
+ * `resolveInternalScale`'s own `auto` branch needing a new upper-bound
+ * decision, `render-scale-policy.js`) — none of which this feature needs. A
+ * genuine supersample is exactly one more FIXED preset, unioned with
+ * `SCALE_LADDER` only where a fixed choice is built or validated
+ * (`effects/effect-settings.js#renderScaleChoices`, and the `allowedScales`
+ * `vt-pan-viewer.js` passes into `resolveInternalScale`) — the auto
+ * governor's own ladder stays untouched. Lives here, alongside
+ * `SCALE_LADDER`, rather than in `vt/render-scale-policy.js`: both `vt/` and
+ * `effects/` need it, and `effects/` reaching into `vt/`'s internals directly
+ * would cross the zone boundary `zones/one-door` exists to enforce — this
+ * module is the shared, zone-neutral home `SCALE_LADDER` itself already
+ * uses for exactly that reason.
+ * @type {readonly number[]}
+ */
+export const SUPERSAMPLE_CHOICES = Object.freeze([1.5, 1.25]);
+
+/**
  * Resolve the internal render size for a present (drawing-buffer) size and a
  * scale. At scale 1.0 the size is returned EXACTLY (the present blit must stay
- * 1:1 — no resampling softness on the identity path). Below 1.0, dimensions
- * floor to even numbers (≤ the present size, and mip/downsample chains behave
- * better on even sizes) with a floor of 2.
+ * 1:1 — no resampling softness on the identity path). Away from 1.0, dimensions
+ * snap to even numbers (mip/downsample chains behave better on even sizes)
+ * with a floor of 2 — below the present size for a downscale (scale < 1),
+ * above it for a genuine SUPERSAMPLE (scale > 1,
+ * [[project_albedo_zoom_out_clarity_audit_2026-08-30]] Stage 4).
+ *
+ * 2026-08-30 fix: this used to hard-clamp `scale` to `Math.min(1, scale)` AND
+ * short-circuit on `s >= 0.9995` — the second check alone would have kept
+ * defeating a supersample rung even with the clamp removed, since a scale of
+ * 1.25 or 1.5 also satisfies `>= 0.9995` and would have returned the IDENTITY
+ * size, silently no-oping the very feature being requested. Both are gone,
+ * replaced by a tight equality check that only short-circuits the TRUE
+ * no-resampling case (scale exactly 1). No caller-facing upper bound here by
+ * design — this is pure geometry; the settings layer is what validates a
+ * requested scale is one of the real, sane choices before it ever reaches this
+ * function (`render-scale-policy.js#resolveInternalScale`), the same
+ * separation of concerns this function already had for scale < 1.
  * @param {number} presentW
  * @param {number} presentH
  * @param {number} scale
@@ -69,8 +106,8 @@ export const SCALE_LADDER = [1.0, 0.85, 0.7, 0.6, 0.5];
 export function computeRenderSize(presentW, presentH, scale) {
   const w = Math.max(1, Math.floor(presentW) || 1);
   const h = Math.max(1, Math.floor(presentH) || 1);
-  const s = Number.isFinite(scale) && scale > 0 ? Math.min(1, scale) : 1;
-  if (s >= 0.9995) return { width: w, height: h };
+  const s = Number.isFinite(scale) && scale > 0 ? scale : 1;
+  if (Math.abs(s - 1) < 5e-4) return { width: w, height: h };
   const snap = (v) => Math.max(2, Math.floor((v * s) / 2) * 2);
   return { width: snap(w), height: snap(h) };
 }

@@ -63,13 +63,23 @@ export function resolvePresentPixelRatio(foundryResolution, maxPixelRatio) {
  * floor underneath it) — deliberate, matching how every other quality preset
  * in this codebase already behaves; the present-tier ceiling above still
  * protects a Fixed-mode player from Foundry's own opaque value regardless.
+ * A fixed choice ABOVE 1.0 (`SUPERSAMPLE_CHOICES`) is the one case this
+ * inertness matters for the OTHER direction too: it is real, deliberate extra
+ * GPU cost the governor would never choose on its own, which is exactly why
+ * it can only ever be reached as an explicit fixed choice, never `auto`.
  *
  * @param {string} userSetting - `'auto'`, or a numeric string matching one of
- *   `allowedScales` (e.g. `'0.75'`).
+ *   `allowedScales` (e.g. `'0.75'`, or `'1.5'` for a fixed supersample).
  * @param {number} governorScale - `RenderScaleGovernor#scale`, read only when
- *   `userSetting === 'auto'`.
- * @param {readonly number[]} allowedScales - the real ladder
- *   (`SCALE_LADDER`, `graph/index.js`) a fixed choice is validated against.
+ *   `userSetting === 'auto'`. Capped at 1 here regardless of `allowedScales`:
+ *   the AUTO governor's own ladder never carries a supersample rung (see
+ *   `SUPERSAMPLE_CHOICES`'s own header), so a value above 1 reaching this
+ *   branch would mean the governor itself was misconfigured, not a case to
+ *   silently accommodate.
+ * @param {readonly number[]} allowedScales - the real, valid FIXED choices a
+ *   fixed selection is validated against — `SCALE_LADDER` (`graph/index.js`)
+ *   for a downscale, unioned with `SUPERSAMPLE_CHOICES` by the caller for a
+ *   supersample.
  * @returns {number}
  */
 export function resolveInternalScale(userSetting, governorScale, allowedScales) {

@@ -23,7 +23,7 @@ import { PERFORMANCE_PROFILES, ENABLE_OVERRIDES, DEFAULT_PERFORMANCE_PROFILE } f
 // ladder, don't keep a parallel one that can drift" discipline
 // `vt/render-scale-policy.js#resolveInternalScale` already applies on the
 // read side.
-import { SCALE_LADDER } from '../graph/index.js';
+import { SCALE_LADDER, SUPERSAMPLE_CHOICES } from '../graph/index.js';
 
 /** The three GLOBAL (not per-effect) setting keys. */
 export const GLOBAL_SETTING_KEYS = Object.freeze({
@@ -121,18 +121,27 @@ function titleCase(s) {
 }
 
 /**
- * The render-scale setting's choices — DERIVED from `SCALE_LADDER`
- * (`graph/v3-perf.js`, the real ladder the governor steps through), never a
- * second, hand-typed list. `choiceLabels()`'s plain `titleCase` can't produce
+ * The render-scale setting's choices — DERIVED from `SCALE_LADDER` (the real
+ * ladder the AUTO governor steps through) UNIONED with `SUPERSAMPLE_CHOICES`
+ * (fixed-only rungs above 1.0 — both `graph/v3-perf.js`), never a second,
+ * hand-typed list. `choiceLabels()`'s plain `titleCase` can't produce
  * "100% — Native"/"85%" from a bare numeric string, so this is its own small
  * builder rather than a `choiceLabels(SCALE_LADDER)` call.
+ *
+ * 2026-08-30 fix: "Native" used to be keyed off array INDEX 0
+ * (`SCALE_LADDER`'s own first entry always being `1.0`) — silently wrong the
+ * instant a rung above 1.0 was prepended, which is exactly what
+ * `SUPERSAMPLE_CHOICES` does. Keyed off `scale === 1` directly now, so it
+ * stays correct regardless of how the combined list is ordered.
  * @returns {Record<string, string>}
  */
 export function renderScaleChoices() {
   const choices = { auto: 'Auto (recommended)' };
-  SCALE_LADDER.forEach((scale, i) => {
+  const combined = [...SUPERSAMPLE_CHOICES, ...SCALE_LADDER].sort((a, b) => b - a);
+  combined.forEach((scale, i) => {
     const pct = Math.round(scale * 100);
-    const suffix = i === 0 ? ' — Native' : i === SCALE_LADDER.length - 1 ? ' — Lowest' : '';
+    const suffix =
+      scale === 1 ? ' — Native' : scale > 1 ? ' — Supersampled' : i === combined.length - 1 ? ' — Lowest' : '';
     choices[String(scale)] = `${pct}%${suffix}`;
   });
   return choices;

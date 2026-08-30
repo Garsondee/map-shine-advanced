@@ -49,6 +49,31 @@ export function run(t) {
     ok('an empty ladder rejects every fixed choice', resolveInternalScale('0.5', 1, []) === 1);
   }
 
+  // resolveInternalScale — fixed SUPERSAMPLE choices (2026-08-30, Stage 4).
+  // vt-pan-viewer.js's own call site unions SUPERSAMPLE_CHOICES with
+  // SCALE_LADDER for the `allowedScales` argument — this is that widened
+  // list, built the same way, not SCALE_LADDER alone.
+  {
+    const WIDENED = [1.5, 1.25, ...LADDER];
+    ok(
+      'a fixed 1.5 supersample on the widened list is honored exactly',
+      resolveInternalScale('1.5', 1, WIDENED) === 1.5
+    );
+    ok('a fixed 1.25 supersample is honored exactly', resolveInternalScale('1.25', 0.7, WIDENED) === 1.25);
+    ok(
+      'a fixed supersample choice makes the governor fully irrelevant, same as any other fixed choice',
+      resolveInternalScale('1.5', 0.5, WIDENED) === 1.5
+    );
+    ok(
+      'a supersample value NOT on the widened list is still rejected, not trusted',
+      resolveInternalScale('1.75', 1, WIDENED) === 1
+    );
+    ok(
+      'a supersample choice against the UNWIDENED ladder alone is rejected (never silently honored)',
+      resolveInternalScale('1.5', 1, LADDER) === 1
+    );
+  }
+
   // RENDER_SCALE_TIER_TARGET_FPS / resolveRenderScaleFrameBudgetMs (2026-08-27)
   // — tier-coupled Auto budgets.
   {

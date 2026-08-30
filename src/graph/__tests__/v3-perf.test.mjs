@@ -18,7 +18,21 @@ export function run(t) {
     ok('sub-1 floors to even', snapped.width === 850 && snapped.height === 282);
     ok('never below 2', computeRenderSize(2, 2, 0.5).width === 2);
     ok('bad scale treated as 1', computeRenderSize(100, 100, NaN).width === 100);
-    ok('scale > 1 clamped to 1', computeRenderSize(100, 100, 2).width === 100);
+    // 2026-08-30 (project_albedo_zoom_out_clarity_audit_2026-08-30, Stage 4):
+    // scale > 1 is a genuine SUPERSAMPLE now, not clamped to identity — a
+    // real regression test for the exact bug that shipped: the OLD `s >=
+    // 0.9995` short-circuit fired for ANY scale at or above ~1, so even with
+    // the separate `Math.min(1,scale)` clamp removed, 1.25/1.5 would STILL
+    // have silently returned the identity size, no-oping the whole feature.
+    const supersampled = computeRenderSize(100, 100, 1.5);
+    ok('scale > 1 genuinely supersamples, does not clamp to identity', supersampled.width === 150);
+    ok('scale > 1 supersamples on both axes', supersampled.height === 150);
+    const supersampled125 = computeRenderSize(200, 100, 1.25);
+    ok(
+      'a non-integer supersample scale snaps to even, both axes',
+      supersampled125.width === 250 && supersampled125.height === 124
+    );
+    ok('scale exactly 1 still takes the identity fast path', computeRenderSize(2559, 1079, 1.0).width === 2559);
   }
 
   // V3PerfMonitor — folding, latching GPU results, budgets, cost estimate.

@@ -63,6 +63,42 @@ export const GLOBAL_SETTING_KEYS = Object.freeze({
    * while `MAX_PIXEL_RATIO` still protects them from Foundry's own opaque
    * value regardless of which mode they pick. */
   renderScale: 'renderScale',
+  /** HIDPI RENDERING (client, 2026-08-30) — replaces an unconditional
+   * one-way write to Foundry's OWN `core.pixelRatioResolutionScaling`
+   * setting (boot.js's `ready` hook used to force it `false` for every
+   * player, no opt-out) with a real MSA setting the player controls. `off`
+   * (the default) preserves today's shipped behaviour exactly — Foundry's
+   * canvas draws at CSS-pixel resolution regardless of display DPI, which
+   * is what every existing player already sees and what protects weak
+   * hardware from the exact frame-rate cliff that motivated the original
+   * force (30fps→55-60fps on Ingram's own machine, before the render-scale
+   * governor existed to soften it). `on` lets Foundry scale its canvas to
+   * the display's real device-pixel-ratio, which on a HiDPI/Retina screen
+   * means MSA's own drawing buffer — and everything it renders into —
+   * covers a real fraction of the display's actual pixels instead of a
+   * fraction of its CSS ones (see project_albedo_zoom_out_clarity_audit's
+   * own §2.1 for the fraction lost at `off` on a scaled display).
+   * `requiresReload` (see describeEffectSettings): this writes into
+   * Foundry's OWN setting namespace and this project has no vendored
+   * source confirming whether Foundry's canvas re-derives its resolution
+   * live off that write or only on its own next load — the reload is what
+   * makes flipping this safe either way, same reasoning `msaEnabled`'s own
+   * `requiresReload` already gives for "a live-flip we cannot cheaply
+   * prove correct." */
+  hidpiRendering: 'hidpiRendering',
+  /** THE RENDERER OVERRIDE (world, 2026-08-27) — the GM's master safety
+   * lever: which renderer draws the map for EVERY connected client, not
+   * just the one whose settings dialog is open. Redesigned from the old
+   * panel's own per-client 'render-compare' select (a comparison toggle
+   * for one browser tab) into a real Foundry world setting specifically
+   * because a GM reaching for this mid-session — "something is going
+   * wrong, get everyone back to native Foundry" — needs it to actually
+   * reach everyone, not just fix their own view. See boot.js#syncInterfaceSeam,
+   * the one place that already decides which renderer wins at every scene
+   * load/floor switch — this setting is checked there FIRST, ahead of its
+   * own default "always try to suppress Foundry's art" behaviour.
+   */
+  rendererOverride: 'rendererOverride',
 });
 
 /**
@@ -163,6 +199,20 @@ export function describeEffectSettings(manifests = []) {
       hint: 'Auto lets Map Shine automatically balance sharpness against your frame rate — it can never be pushed higher than a safe ceiling, regardless of your own display or Foundry resolution setting. A fixed value locks the render resolution and turns automatic adjustment off.',
     },
     {
+      key: GLOBAL_SETTING_KEYS.hidpiRendering,
+      scope: 'client',
+      kind: 'bool',
+      default: false,
+      config: true,
+      requiresReload: true,
+      name: 'Map Shine — Full display resolution',
+      hint:
+        'Off (default) renders at your CSS resolution — fastest, and what every existing player already ' +
+        "sees. On lets Foundry's canvas scale to your display's real pixel density (Retina / HiDPI monitors), " +
+        'which measurably sharpens zoomed-out map art at the cost of more GPU work — the Render resolution ' +
+        'setting above can offset that cost. Requires a reload.',
+    },
+    {
       key: GLOBAL_SETTING_KEYS.reducePhotosensitive,
       scope: 'client',
       kind: 'bool',
@@ -179,6 +229,16 @@ export function describeEffectSettings(manifests = []) {
       config: true,
       name: 'Map Shine — Reduced motion',
       hint: "Turn off panel/UI transitions and sweeps (not the map's own effects — this is about the interface around it, not the scene).",
+    },
+    {
+      key: GLOBAL_SETTING_KEYS.rendererOverride,
+      scope: 'world',
+      kind: 'enum',
+      choices: { msa: 'MSA', foundry: 'Foundry (safety fallback)' },
+      default: 'msa',
+      config: true,
+      name: 'Map Shine — Renderer (GM master override)',
+      hint: 'Which renderer draws the map for EVERY connected client, GM and players alike. Switch to Foundry if MSA is causing problems mid-session — this is the table-wide safety switch, not a personal preference.',
     },
     {
       key: GLOBAL_SETTING_KEYS.theme,

@@ -72,7 +72,7 @@ export function run(t) {
       getAlbedoClarity().gateHi > getAlbedoClarity().gateLo
     );
     resetAlbedoClarity();
-    setAlbedoClarity({ farHi: 2 }); // below the default farLo (6.0)
+    setAlbedoClarity({ farHi: 2 }); // below the default farLo (2.5)
     ok('farHi cannot be pushed at/below farLo', getAlbedoClarity().farHi > getAlbedoClarity().farLo);
   }
 

@@ -107,12 +107,16 @@ const ALBEDO_CLARITY_DEFAULTS = {
    * two ease the strength back down toward `farFloor` once minification passes
    * `farLo`, reaching it at `farHi`.
    *
-   * For scale: on the author's 6750² ground, the whole map on screen is about
-   * 5.4 texels per pixel, so the default keeps FULL strength through every
-   * normal zoom and only backs off beyond a whole-map view.
+   * RETUNED 2026-08-30 ([[project_albedo_zoom_out_clarity_audit_2026-08-30]]
+   * §2.3): the ORIGINAL 6.0/16.0 pair meant that on the author's own 6750²
+   * ground — whole-map view ≈5.4 texels/px — full, unattenuated strength
+   * covered every zoom level the author was actively complaining about; the
+   * roll-off this comment describes never engaged until PAST the complaint
+   * range. Pulled in so the roll-off actually starts inside a normal
+   * zoomed-out view instead of only beyond a whole-map one.
    */
-  farLo: 6.0,
-  farHi: 16.0,
+  farLo: 2.5,
+  farHi: 6.0,
   /** Fraction of `sharpness` still applied at and beyond `farHi`. 1 = no
    * roll-off at all; 0 = sharpening fully off at extreme zoom-out. */
   farFloor: 0.35,

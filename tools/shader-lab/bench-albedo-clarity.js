@@ -2,9 +2,20 @@
  * SHADER LAB — DOES CAS SHARPENING AMPLIFY BC1 QUANTIZATION NOISE?
  *
  * ============================================================================
- * UPDATE, SAME SESSION: THE FLAT-NOISE HYPOTHESIS BELOW WAS REJECTED —
- * THE REAL MECHANISM IS CHROMATIC FRINGING, CONFIRMED (see scenario
- * 'chromatic-fringing-on-a-coloured-edge' below)
+ * UPDATE, SAME SESSION (2026-08-15): THE FLAT-NOISE HYPOTHESIS BELOW WAS
+ * REJECTED — THE REAL MECHANISM WAS CHROMATIC FRINGING, CONFIRMED (see
+ * scenario 'chromatic-fringing-on-a-coloured-edge' below)
+ * ============================================================================
+ * ============================================================================
+ * FIXED, 2026-08-30 ([[project_albedo_zoom_out_clarity_audit_2026-08-30]]
+ * §1C) — 'chromatic-fringing-on-a-coloured-edge' now reports `ok:true`
+ * (spread ≈0.148, was ≈0.4-0.9 across two earlier attempts). See
+ * `vt/albedo-clarity.js`'s own `sharpenCasCore` header for the shipped
+ * mechanism (a single scalar luma drives a MULTIPLICATIVE gain applied to
+ * every channel, preserving R:G:B ratios exactly) and the two prior attempts
+ * — one gamma-space, one linear-ADDITIVE — that were tried and abandoned
+ * before this one, each caught by re-running THIS scenario rather than
+ * trusted from the algebra alone.
  * ============================================================================
  * The BC1-flat-region-noise hypothesis this bench was originally built to
  * check measured out negligible (amplification factor ~1.01-1.03x, real
@@ -15,13 +26,14 @@
  * rainbow/chromatic fringing at edges, dramatic at sharpness 0.4, present
  * more subtly at the shipped 0.22 default. Root cause, confirmed with real
  * numbers (`chromatic-fringing-on-a-coloured-edge`): `buildAlbedoClarityNode`
- * computes its ringing-guard `amp` and weight `w` as `vec3` — PER CHANNEL —
- * so R/G/B each get an independently-computed sharpen weight from their own
+ * computed its ringing-guard `amp` and weight `w` as `vec3` — PER CHANNEL —
+ * so R/G/B each got an independently-computed sharpen weight from their own
  * local min/max. A grayscale edge (R=G=B always) can never reveal this,
  * which is exactly why the original hypothesis's edge fixture missed it. See
  * `vt/albedo-clarity.js`'s own inline comment (right above the `mn`/`mx`/
- * `amp` block) for the full account, including two attempted luma-locked
- * fixes that did NOT cleanly resolve it in testing and were NOT shipped.
+ * `amp` block) for the full account, including two earlier attempted fixes
+ * that did NOT cleanly resolve it and were NOT shipped, before the one that
+ * did.
  *
  * ============================================================================
  * THE ORIGINAL HYPOTHESIS THIS BENCH WAS BUILT TO CHECK, BEFORE TOUCHING
@@ -241,7 +253,12 @@ export function createAlbedoClarityBench({ THREE, log }) {
    */
   function uploadBC1(image) {
     const blocks = encodeBC1(image, DIM, DIM);
-    const tex = new THREE.CompressedTexture([{ data: blocks, width: DIM, height: DIM }], DIM, DIM, THREE.RGBA_S3TC_DXT1_Format);
+    const tex = new THREE.CompressedTexture(
+      [{ data: blocks, width: DIM, height: DIM }],
+      DIM,
+      DIM,
+      THREE.RGBA_S3TC_DXT1_Format
+    );
     tex.flipY = false;
     tex.colorSpace = THREE.SRGBColorSpace; // matches production art upload exactly
     tex.generateMipmaps = false;
@@ -322,7 +339,7 @@ export function createAlbedoClarityBench({ THREE, log }) {
     name: 'edge-restoration-still-works',
     summary:
       'Positive control: sharpening measurably restores contrast across a real BC1-encoded hard edge — ' +
-      'and measures OVERSHOOT beyond the source\'s own [20,235] range, the classic ringing/halo signature. ' +
+      "and measures OVERSHOOT beyond the source's own [20,235] range, the classic ringing/halo signature. " +
       'Params: { sharpness } (default 0.22, the shipped value).',
     async run(ctx) {
       await ensureRenderer();
@@ -377,7 +394,7 @@ export function createAlbedoClarityBench({ THREE, log }) {
             measured: { overshootLow, overshootHigh, sharpenedMin: rSharp.min, sharpenedMax: rSharp.max },
             expected: `both 0 — source bytes never left [${SOURCE_LO},${SOURCE_HI}]`,
             note:
-              'HONEST AMBIGUITY, unlike the chromatic-fringing scenario\'s clean-cut finding: this fixture\'s ' +
+              "HONEST AMBIGUITY, unlike the chromatic-fringing scenario's clean-cut finding: this fixture's " +
               'source sits near the byte ceiling (235), so a fail here could be genuine restoration clipping ' +
               'at 255 rather than true overshoot — a MID-TONE coloured edge (see ' +
               '`chromatic-fringing-on-a-coloured-edge`) is what actually separated "restoration" from ' +
@@ -410,7 +427,15 @@ export function createAlbedoClarityBench({ THREE, log }) {
           calibration: 'OK',
         };
       }
-      setAlbedoClarity({ sharpness: 0.22, gateLo: 1.0, gateHi: 1.8, farLo: 6.0, farHi: 16.0, farFloor: 0.35, enabled: true });
+      setAlbedoClarity({
+        sharpness: 0.22,
+        gateLo: 1.0,
+        gateHi: 1.8,
+        farLo: 6.0,
+        farHi: 16.0,
+        farFloor: 0.35,
+        enabled: true,
+      });
       const SOURCE_RIGHT = [90, 30, 30]; // the darker side — where the divergence was measured
       const tex = uploadBC1(colouredEdgeFixture());
       const sharpened = await renderThrough(tex, buildAlbedoClarityNode);
@@ -432,7 +457,9 @@ export function createAlbedoClarityBench({ THREE, log }) {
       // the raw source — the baseline already carries BC1's own encode, so
       // this isolates what SHARPENING specifically did, same discipline as
       // edge-restoration's own overshoot metric).
-      const pctChange = [0, 1, 2].map((k) => (boundaryFlat[k] > 0 ? (boundarySharp[k] - boundaryFlat[k]) / boundaryFlat[k] : null));
+      const pctChange = [0, 1, 2].map((k) =>
+        boundaryFlat[k] > 0 ? (boundarySharp[k] - boundaryFlat[k]) / boundaryFlat[k] : null
+      );
       const finitePct = pctChange.filter((v) => v !== null);
       const spread = finitePct.length > 0 ? Math.max(...finitePct) - Math.min(...finitePct) : null;
 
@@ -444,36 +471,44 @@ export function createAlbedoClarityBench({ THREE, log }) {
             measured: boundaryFlat,
             expected: 'at least one non-zero channel — otherwise there is nothing to measure a divergence against',
           })),
-          // ⚠️ THIS SCENARIO IS SUPPOSED TO FAIL, TODAY — same convention
-          // bench-floor-lighting.js's own `real-map-reproduces-the-live-bug`
-          // established: `ok` means "healthy" (hue preserved, no fringing),
-          // so a live, uncorrected bug reads as `fail`, not `pass`. If a
-          // future session sees this scenario suddenly report `ok:true`,
-          // that means a real luma-locked fix landed — celebrate, then
-          // update this comment (it says "MUST FAIL, TODAY" for a reason)
-          // rather than being alarmed.
+          // FIXED 2026-08-30 — this scenario used to be SUPPOSED to fail
+          // (same convention `bench-floor-lighting.js`'s own
+          // `real-map-reproduces-the-live-bug` established: `ok` means
+          // "healthy", so a live bug reads as `fail`, not `pass`). It now
+          // reports `ok:true` — `sharpenCasCore`'s multiplicative, luma-only
+          // gain (`vt/albedo-clarity.js`) landed and this scenario is what
+          // caught two earlier attempts that did NOT actually fix it before
+          // this one shipped. If a future session sees this fail again,
+          // that is a real regression, not an expected state.
           evaluate('hue-is-preserved-no-chromatic-fringing', () => {
             // A pure brightness (luma-only, hue-preserving) change would move
             // every channel by close to the SAME proportion. A wide spread
             // between the channels' own % change is a HUE shift — measured
             // here, not inferred. Threshold (0.15 = 15 percentage points
-            // apart) is generous; the actual measured spread at the shipped
-            // default was far past it (R -43%, G -83%, B -53% — a 40-point
-            // spread between R and G alone).
+            // apart) is generous; the ORIGINAL bug's measured spread was far
+            // past it (R -43%, G -83%, B -53% — a 40-point spread between R
+            // and G alone). The shipped fix measures ≈0.148 — inside the
+            // threshold, but not by a wide margin; re-check this scenario
+            // after any future change to `sharpenCasCore`.
             const healthy = spread !== null && spread <= 0.15;
             return {
               ok: healthy,
               measured: { rgbPctChange: pctChange, spread, boundarySharp, boundaryFlat, source: SOURCE_RIGHT },
               expected: 'spread <= 0.15 (channels move together — no hue shift)',
               note: healthy
-                ? 'hue preserved — if this is unexpectedly healthy, a fix may have landed; update vt/albedo-clarity.js\'s inline comment'
-                : "CONFIRMED chromatic fringing, MUST FAIL TODAY — see vt/albedo-clarity.js's inline comment above the mn/mx/amp block for the full account and why a fix was not shipped this session",
+                ? 'hue preserved'
+                : "REGRESSED — see vt/albedo-clarity.js's sharpenCasCore header for the shipped mechanism and the two prior attempts that failed this same check",
             };
           }),
         ],
         calibration: 'OK',
         artifacts: artifact ? [artifact] : [],
-        inputs: { texelsPerPixel: TEXELS_PER_PIXEL, sharpness: 0.22, sourceLeft: [180, 140, 80], sourceRight: SOURCE_RIGHT },
+        inputs: {
+          texelsPerPixel: TEXELS_PER_PIXEL,
+          sharpness: 0.22,
+          sourceLeft: [180, 140, 80],
+          sourceRight: SOURCE_RIGHT,
+        },
         stats: { boundarySharp, boundaryFlat, pctChange, spread },
       };
     },
@@ -496,7 +531,15 @@ export function createAlbedoClarityBench({ THREE, log }) {
           calibration: 'OK',
         };
       }
-      setAlbedoClarity({ sharpness: 0.22, gateLo: 1.0, gateHi: 1.8, farLo: 6.0, farHi: 16.0, farFloor: 0.35, enabled: true });
+      setAlbedoClarity({
+        sharpness: 0.22,
+        gateLo: 1.0,
+        gateHi: 1.8,
+        farLo: 6.0,
+        farHi: 16.0,
+        farFloor: 0.35,
+        enabled: true,
+      });
       const rawImage = flatFixture();
       const tex = uploadBC1(rawImage);
       const sharpened = await renderThrough(tex, buildAlbedoClarityNode);
@@ -521,19 +564,28 @@ export function createAlbedoClarityBench({ THREE, log }) {
           evaluate('bc1-encoding-introduced-real-quantization-noise', () => ({
             ok: rFlat.stddev > rawStats.stddev * 1.1,
             measured: { unsharpenedBc1Stddev: rFlat.stddev, rawSourceStddev: rawStats.stddev },
-            expected: 'BC1 stddev measurably above the raw smooth source — otherwise there is no real noise here to amplify',
+            expected:
+              'BC1 stddev measurably above the raw smooth source — otherwise there is no real noise here to amplify',
             note: 'non-vacuity: this is what makes the amplification check below meaningful rather than trivially true',
           })),
           evaluate('sharpening-does-not-substantially-amplify-flat-region-noise', () => ({
             ok: amplification !== null && amplification <= 1.5,
-            measured: { amplificationFactor: amplification, sharpenedStddev: rSharp.stddev, unsharpenedStddev: rFlat.stddev },
+            measured: {
+              amplificationFactor: amplification,
+              sharpenedStddev: rSharp.stddev,
+              unsharpenedStddev: rFlat.stddev,
+            },
             expected: 'amplification factor <= 1.5x — a fail here is the hypothesis CONFIRMING, not a broken bench',
             note: 'THE finding this bench exists to produce. Report the real ratio either way.',
           })),
         ],
         calibration: 'OK',
         artifacts: artifact ? [artifact] : [],
-        inputs: { texelsPerPixel: TEXELS_PER_PIXEL, sharpness: 0.22, fixture: 'smooth diagonal gradient, band 90..130' },
+        inputs: {
+          texelsPerPixel: TEXELS_PER_PIXEL,
+          sharpness: 0.22,
+          fixture: 'smooth diagonal gradient, band 90..130',
+        },
         stats: { sharpened: rSharp, flat: rFlat, rawSource: rawStats, amplification },
       };
     },

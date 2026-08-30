@@ -287,10 +287,74 @@ export function isAlbedoClarityEnabled() {
  * THE CAS (Contrast Adaptive Sharpening) CORE — five ALREADY GAMMA-2.0-ENCODED
  * samples (center + 4 neighbours) in, sharpened linear rgb out. Extracted
  * 2026-08-27 (previously inlined at the tail of `buildAlbedoClarityNode`) so
- * `buildPostUpscaleSharpenNode` below can share the identical algorithm — same
- * ⚠️ KNOWN, CHARACTERISED, NOT YET FIXED per-channel rainbow-fringing caveat
- * `buildAlbedoClarityNode`'s own inline doc describes in full — defined once,
- * so that caveat can never silently drift between two copies.
+ * `buildPostUpscaleSharpenNode` below can share the identical algorithm.
+ *
+ * LUMA-LOCKED (2026-08-30 — [[project_albedo_zoom_out_clarity_audit_2026-08-30]]
+ * §1C), replacing a KNOWN, CHARACTERISED per-channel rainbow-fringing bug: the
+ * ORIGINAL version ran the whole `mn`/`mx`/`amp`/`w` algebra as `vec3` — R, G
+ * and B each got their OWN independently-computed sharpen weight from their
+ * OWN local min/max, so a coloured edge got a HUE shift, not just a brightness
+ * one (measured: a tan/wine-red edge moved R/G/B by -43%/-83%/-53% at the same
+ * boundary texel — `tools/shader-lab/bench-albedo-clarity.js`'s
+ * `chromatic-fringing-on-a-coloured-edge` scenario). A same-session
+ * (2026-08-15) attempt at a shared-weight fix in GAMMA space was abandoned:
+ * squaring a shared gamma-space delta back to linear does not produce a
+ * uniform proportional change per channel once the three channels' own
+ * squared values diverge, so the fringing came back one step downstream.
+ *
+ * THIS version derives a single scalar LUMA-based GAIN (never per-channel)
+ * and MULTIPLIES it into every channel of the LINEAR center sample.
+ * Multiplicative, not additive — this matters and was gotten wrong once
+ * before shipping (see the two attempts recorded below), because a
+ * multiplicative scale is the one operation that preserves R:G:B RATIOS
+ * exactly, which is what "hue and saturation unchanged" actually means
+ * colorimetrically. An additive shift does not: it changes those ratios,
+ * it just does so uniformly rather than divergently.
+ *
+ * TWO ATTEMPTS, gotten wrong before this one, both worth recording:
+ *
+ * 1. A shared delta added in GAMMA space (2026-08-15, same-session as the
+ *    bug's discovery): squaring a shared gamma-space delta back to linear
+ *    does not produce a uniform proportional change per channel once the
+ *    three channels' own squared values diverge — the fringing reappeared
+ *    one step downstream. Abandoned, unshipped.
+ *
+ * 2. A shared delta added in LINEAR space (2026-08-30, this session's own
+ *    first draft): computed correctly in the abstract, but ADDITIVE means
+ *    the delta is calibrated to whichever channel needs the most correction
+ *    and then applied at full strength to every channel regardless of ITS
+ *    OWN magnitude. Measured live on this file's own bench fixture (a dim,
+ *    desaturated red — R,G,B ≈ 0.099/0.011/0.015 linear): a delta sized
+ *    correctly for R's own 0.099 collapsed G and B — both under 0.015 —
+ *    to exactly 0, a WORSE spread (0.9) than the bug being fixed (0.4).
+ *    Caught by re-running `chromatic-fringing-on-a-coloured-edge` before
+ *    shipping, not assumed safe from the algebra alone. Replaced by this
+ *    multiplicative version, which scales every channel by the SAME
+ *    fraction of its own value instead of shifting all three by the same
+ *    absolute amount.
+ *
+ * ⚠️ THE SUBTLE PART shared with both attempts, still true here: `gain` is
+ * `sharpenedLumaProxy² ÷ UNSHARPENED lumaProxy²`, NOT `÷ linearCenter's own
+ * TRUE luma`. `lumaProxy` (`lC` below) is a luma of per-channel SQUARE
+ * ROOTS — `luma(√r,√g,√b)² ≠ luma(r,g,b)` for any non-grey colour
+ * (Jensen's-inequality gap, equality only when r=g=b). Dividing by the TRUE
+ * linear luma would introduce a small but real gain ≠ 1 on every flat,
+ * COLOURED region — zero local contrast to restore, yet a nonzero gain,
+ * purely from the colour of the pixel. Dividing by the UNSHARPENED value
+ * run through the SAME proxy formula cancels that gap exactly: on a flat
+ * neighbourhood `lSharpenedGamma === lC` algebraically (see `w`'s own
+ * comment below), so `gain` is EXACTLY 1 for every colour, not only grey.
+ *
+ * `gain` is capped (`GAIN_CEILING`) as a numerical backstop for a near-black
+ * pixel next to a genuinely bright edge, where `lC` in the divisor can
+ * approach zero — `amp`'s own ringing brake bounds `w`, not the DIVISION
+ * this core performs on top of it, so this is a second, independent guard
+ * rather than a redundant one.
+ *
+ * One accepted behaviour change from the original: `amp` (the ringing brake)
+ * now reads the neighbourhood's LUMA proximity to black/white, not each
+ * channel's own — a direct, intended consequence of no longer treating
+ * channels independently, not a new defect.
  *
  * @param {*} THREE
  * @param {{eC:*, eL:*, eR:*, eU:*, eD:*}} samples - gamma-2.0-encoded center +
@@ -299,28 +363,46 @@ export function isAlbedoClarityEnabled() {
  *   combining whatever gating/strength uniform the caller uses (e.g.
  *   `buildAlbedoClarityNode`'s `uSharpen * gate`; `buildPostUpscaleSharpenNode`'s
  *   plain external strength, no per-pixel gate at all — see its own header).
- * @returns {*} vec3 LINEAR rgb (the gamma-2.0 → linear round trip is done here,
- *   inside this shared core — neither caller repeats it).
+ * @param {*} linearCenter - the UNSHARPENED linear-space center sample
+ *   (`c.rgb` at both call sites, already available before `enc()` runs) —
+ *   the shared gain multiplies THIS, never re-derived from `eC`.
+ * @returns {*} vec3 LINEAR rgb, clamped non-negative.
  */
-function sharpenCasCore(THREE, { eC, eL, eR, eU, eD }, strengthNode) {
+function sharpenCasCore(THREE, { eC, eL, eR, eU, eD }, strengthNode, linearCenter) {
   const TSL = THREE.TSL;
-  const { vec3 } = TSL;
-  // `amp` is the ringing brake: it falls to zero as the neighbourhood
+  const { vec3, float } = TSL;
+  const GAIN_CEILING = 4.0;
+  const luma709 = (v) => v.x.mul(0.2126).add(v.y.mul(0.7152)).add(v.z.mul(0.0722));
+  const lC = luma709(eC);
+  const lL = luma709(eL);
+  const lR = luma709(eR);
+  const lU = luma709(eU);
+  const lD = luma709(eD);
+
+  // `amp` is the ringing brake: it falls to zero as the neighbourhood's LUMA
   // approaches black OR white, so a solid ink line next to bare paper — the
   // highest-contrast case there is — gets restored without gaining a halo.
-  const mn = TSL.min(eC, TSL.min(TSL.min(eL, eR), TSL.min(eU, eD)));
-  const mx = TSL.max(eC, TSL.max(TSL.max(eL, eR), TSL.max(eU, eD)));
-  const amp = TSL.saturate(TSL.min(mn, vec3(1).sub(mx)).div(TSL.max(mx, vec3(1e-4)))).sqrt();
+  const mn = TSL.min(lC, TSL.min(TSL.min(lL, lR), TSL.min(lU, lD)));
+  const mx = TSL.max(lC, TSL.max(TSL.max(lL, lR), TSL.max(lU, lD)));
+  const amp = TSL.saturate(TSL.min(mn, float(1).sub(mx)).div(TSL.max(mx, float(1e-4)))).sqrt();
 
   // w is NEGATIVE (neighbours subtracted) and the reciprocal renormalises, so a
-  // flat neighbourhood comes through exactly unchanged: (e + 4ew)/(1+4w) = e.
+  // flat neighbourhood comes through exactly unchanged: (l + 4lw)/(1+4w) = l —
+  // true for ANY scalar l, which is what makes `gain` exactly 1 on a flat
+  // neighbourhood regardless of colour (see this function's own header).
   const w = amp.mul(strengthNode).negate();
-  const rcp = vec3(1).div(w.mul(4).add(1));
-  const sharpened = eC.add(eL.add(eR).add(eU).add(eD).mul(w)).mul(rcp);
+  const rcp = float(1).div(w.mul(4).add(1));
+  const lSharpenedGamma = lC.add(lL.add(lR).add(lU).add(lD).mul(w)).mul(rcp);
 
-  // Gamma-2.0 → linear. Downstream sees exactly the units it always did.
-  const lin = TSL.max(sharpened, vec3(0));
-  return lin.mul(lin);
+  // Both terms through the SAME gamma²-proxy formula — see header. Never
+  // divide by `linearCenter`'s own true luma directly.
+  const gain = TSL.min(lSharpenedGamma.mul(lSharpenedGamma).div(TSL.max(lC.mul(lC), float(1e-6))), float(GAIN_CEILING));
+
+  // The ONE shared gain, multiplied into every channel of the ORIGINAL
+  // linear center — this is the whole fix: R:G:B ratios (hue, saturation)
+  // are preserved exactly, because a multiplicative scale is the one
+  // operation that cannot change them.
+  return TSL.max(linearCenter.mul(gain), vec3(0));
 }
 
 /**
@@ -380,39 +462,14 @@ export function buildAlbedoClarityNode(THREE, tex, uvNode, uTexSizeNode) {
   // CAS, via the shared core (sharpenCasCore, above) — combining `uSharpen`
   // (the player's own Sharpness control) with `gate` (the per-pixel
   // minification ramp computed above) into the ONE effective strength the
-  // core expects.
-  //
-  // ⚠️ KNOWN, CHARACTERISED, NOT YET FIXED (2026-08-15, author report: "too
-  // harsh / ringing, worse at some zoom levels"). Inside the shared core,
-  // `mn`/`mx`/`amp`/`w` are all `vec3` — R, G and B each get their OWN
-  // independently-computed sharpen weight from their OWN local min/max,
-  // because `eC` etc. are per-channel gamma-2.0 values, not a shared luma.
-  // On a COLOURED edge (this guard's own doc example, "dark ink on light
-  // paper", is grayscale and cannot reveal this) each channel's local
-  // contrast differs, so each gets pushed by a different amount — a HUE
-  // shift at the edge, not just a brightness one, i.e. chromatic/rainbow
-  // fringing rather than neutral ringing. CONFIRMED two ways: (1) shader-lab
-  // bench (`tools/shader-lab/bench-albedo-clarity.js`), a real BC1-encoded
-  // tan/wine-red edge at the shipped default (sharpness 0.22) — measured
-  // R/G/B changing by -43%/-83%/-53% at the same boundary texel; (2) the
-  // real bench Mansion at sharpness 0.4 shows the effect dramatically
-  // (every wall/furniture edge gets a visible rainbow halo) and more subtly
-  // at the shipped 0.22 default. A same-session attempt at a luma-locked
-  // fix (compute amp/w from a shared Rec.709 luma, or sharpen luma only and
-  // add the delta back additively) did NOT cleanly resolve the per-channel
-  // divergence in testing — the interaction with the gamma-2.0 round trip
-  // (linear = gamma²) means a uniform gamma-space delta does not produce a
-  // uniform proportional change once squared back to linear, so the fix
-  // needs more dedicated verification than a single session before it ships.
-  // Left UNCHANGED here deliberately (memory:
-  // feedback_defensive_fix_needs_same_proof_as_bug — an unverified "fix" is
-  // not safer than the known, characterised bug) — the shipped default is
-  // not dramatically affected, and the Make-panel Sharpening card now gives
-  // a live Sharpness slider so the effect can be tuned to taste directly
-  // against a real scene while a real fix is designed. `buildPostUpscale
-  // SharpenNode` below inherits this SAME caveat via the shared core — it is
-  // not a new bug introduced by that function, it is this one, shared.
-  const lin = sharpenCasCore(THREE, { eC, eL, eR, eU, eD }, uSharpen.mul(gate));
+  // core expects. The former per-channel chromatic-fringing bug (author,
+  // 2026-08-15: "too harsh / ringing, worse at some zoom levels") is fixed
+  // at the shared-core level — see `sharpenCasCore`'s own header for the
+  // luma-locked mechanism and the subtle Jensen's-gap mistake caught and
+  // corrected before it shipped. `buildPostUpscaleSharpenNode` below
+  // inherits the SAME fix via the shared core, with nothing further to do
+  // there.
+  const lin = sharpenCasCore(THREE, { eC, eL, eR, eU, eD }, uSharpen.mul(gate), c.rgb);
   return { rgb: lin, a: c.a };
 }
 
@@ -593,6 +650,6 @@ export function buildPostUpscaleSharpenNode(THREE, tex, uvNode) {
   const eU = enc(sU);
   const eD = enc(sD);
 
-  const rgb = sharpenCasCore(THREE, { eC, eL, eR, eU, eD }, strength);
+  const rgb = sharpenCasCore(THREE, { eC, eL, eR, eU, eD }, strength, c.rgb);
   return { rgb, a: c.a };
 }

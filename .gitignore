@@ -7,8 +7,10 @@ oldmapshinemodulecode
 module-staging
 dist
 othermodules
-# Local AI/editor tooling config
+# Local AI/editor tooling config — not used (2026-08-31)
 .continue/
+.cursor/
+.vscode/
 
 # Keyhole torture fixture — regenerable via `node tools/make-torture-world.mjs`
 assets/torture/

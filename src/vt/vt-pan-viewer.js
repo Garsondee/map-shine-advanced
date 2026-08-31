@@ -6831,20 +6831,37 @@ export async function startVtPanViewer({
         const prevVisionAlpha = renderer.getClearAlpha();
         renderer.setClearColor(visionDraw.clearColor, 1);
         renderer.clear(true, false, false);
+        // ⚠️ AUTOCLEAR GUARD — same trap as the illum sequence's own
+        // "BLACK OUTSIDE THE LIGHT RADIUS" postmortem (2026-07-19, above) and
+        // `runVisionGatePass` below: `renderer.autoClearColor` defaults TRUE
+        // and is evaluated on EVERY render() call, so the floor draw's
+        // render() below would silently re-clear this target to
+        // `visionDraw.clearColor` FIRST, wiping the R/B channels the very
+        // next line just wrote, before stamping its own G value — collapsing
+        // `revealed` (R OR B) to false EVERYWHERE for as long as any door is
+        // mid-swing, not just the door's own sliver. The comment this
+        // replaced claimed "no clear in between" without checking — the
+        // exact unverified claim the illum postmortem already proved false
+        // once in this same file.
+        const prevVisionAutoClear = renderer.autoClearColor;
+        renderer.autoClearColor = false;
         // An ungated frame wants the WHITE clear and nothing else — every mesh
         // is hidden, so rendering the scene would be a no-op draw call. Skip it
         // rather than pay for it on every GM frame.
         if (visionDraw.drawn > 0) renderer.render(visionDraw.scene, camera);
         // DOOR-FOG-REVEAL-SYNC — the frozen floor, into THIS SAME bound
         // target's G channel, no clear in between (MAX blending leaves the
-        // R/B/A just written above untouched). See `vision-mask-render.js`
-        // #syncFloor's own header. `frozenFloorSources` is non-null for
-        // every frame of an active transition, so this draws every frame
-        // one is in flight, not just once at freeze time.
+        // R/B/A just written above untouched — guaranteed now by the
+        // autoClearColor guard above, not just assumed). See
+        // `vision-mask-render.js` #syncFloor's own header.
+        // `frozenFloorSources` is non-null for every frame of an active
+        // transition, so this draws every frame one is in flight, not just
+        // once at freeze time.
         if (gating.gate) {
           const floorDraw = visionMask.syncFloor({ sources: frozenFloorSources });
           if (floorDraw.drawn > 0) renderer.render(floorDraw.scene, camera);
         }
+        renderer.autoClearColor = prevVisionAutoClear;
         renderer.setClearColor(prevVisionClear, prevVisionAlpha);
         renderer.setRenderTarget(null);
 

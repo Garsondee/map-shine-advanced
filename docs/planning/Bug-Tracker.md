@@ -61,6 +61,8 @@ building on any of this.
 | **28** | **A small painted fire blob near a bigger one could be silently suppressed to zero — peak separation pooled across unrelated blobs instead of scoping per component** | fire / mask extraction | `BUILT (unverified)` 2026-08-16 — Node-tested; bug #19's floor-specific ingest asymmetry is separate and still open |
 | **29** | **Only 3/20 painted fires produced flames (sensitivity too strict for real small/faint paint); fixing that made fires read diffuse with no hot core (cohesion rebuilt on connected-component identity)** | fire / mask sensitivity / cohesion | `LIVE` — author-confirmed 2026-08-17, `maskSensitivity` default 0.2→0.05, `flameCohesion` default 0→0.5 |
 | **30** | **Floor switches can freeze the interface for over a minute with no preload ever attempted — a built GPU pipeline warm-up mechanism was never wired to the floor-switch path, and two real UI triggers skip prepare entirely** | floor transitions / GPU pipelines / interface seam | `BUILT (unverified)` 2026-08-24 — Node lint/format/full test suite green (11,939 tests); needs the author's own eyes on a real floor switch |
+| **31** | **Clearing a painted mask and Save didn't stick — the old paint came back after a reload** | paint mode / persistence | `BUILT (unverified)` 2026-08-31 |
+| **32** | **Opening a door blacked out the ENTIRE map, not just the door's own sliver — the player's own token vanished too** | vision/fog / door-graphics / renderer state | `BUILT (unverified)` 2026-08-31 |
 
 ---
 
@@ -2900,3 +2902,101 @@ must stay dark. Also worth the author's own eyes on a multi-kind floor
 (clear one painted kind, leave a sibling kind painted, confirm only the
 cleared one is gone after reload) since that's the part a single-mask smoke
 test can't distinguish from "the whole flag got nuked."
+
+---
+
+## 32. Opening a door blacked out the ENTIRE map, not just the door's own sliver — the player's own token vanished too
+
+**Status:** `BUILT (unverified)` · **Reported:** 2026-08-31 · **Docs:**
+this file, `keyhole-door-fog-reveal-sync` (the feature this broke),
+`keyhole-vision-fog-direction` (the pipeline it lives in)
+
+### Symptom, in the author's own words
+
+*"When I have a token selected the fog of war appears correctly, I then
+move near a door I can see with the token, things are working perfectly
+fine so far. Then when I left click on the door icon currently what
+happens is the entire map becomes the black of the Fog of War except for
+a circle where the token is but the token graphic disappears."*
+
+### Root cause — CONFIRMED against current source, not a hypothesis
+
+`door-graphics-reveal-sync` (built 2026-08-27, never live-tested — see
+`keyhole-door-fog-reveal-sync`'s own honest verification-status section)
+draws a door's frozen "floor" polygon into the vision mask's G channel via
+a SECOND `renderer.render()` call to the SAME render target the live R/B
+mask was JUST drawn into, one line above
+(`vt-pan-viewer.js`, the vision-mask block):
+
+```js
+if (visionDraw.drawn > 0) renderer.render(visionDraw.scene, camera);   // draws R (sight) / B (light)
+if (gating.gate) {
+  const floorDraw = visionMask.syncFloor({ sources: frozenFloorSources });
+  if (floorDraw.drawn > 0) renderer.render(floorDraw.scene, camera);   // draws G (frozen floor)
+}
+```
+
+The comment above the second call claimed *"no clear in between (MAX
+blending leaves the R/B/A just written above untouched)"* — asserted, not
+checked. `renderer.autoClearColor` defaults `true` in vendored
+`three.webgpu.js` and is evaluated on **every** `render()` call, so the
+second call re-cleared the target to the frame's clear colour (black)
+*before* stamping G, wiping the R/B channels the first call had just
+written. With R and B zero everywhere, `buildVisionGateMaterial`'s
+`revealed = R OR (B AND litEnough)` (`vision-mask-render.js`) is false for
+every pixel on screen, so the fullscreen gate quad multiplies the ENTIRE
+composited frame to black — not just the newly-exposed sliver near the
+door — for as long as `frozenFloorSources` stays non-null, i.e. every
+frame the door is mid-swing. MSA's own token render sits in that same
+gated `scene.lit` target, so it goes black with everything else
+("disappears"); the surviving "circle where the token is" is Foundry's
+own UI-layer token indicator, which lives outside `scene.lit` and was
+never touched.
+
+This is the identical bug shape this exact file already documented and
+fixed twice before — the **"BLACK OUTSIDE THE LIGHT RADIUS"** incident
+(2026-07-19, the illum sequence's own header) and `runVisionGatePass`
+itself (~450 lines below the bug, in the same file), which both guard
+`autoClearColor` around every same-target multi-`render()` sequence for
+exactly this reason. The door-fog build added a new instance of the
+pattern and missed the one guard every other instance in this file
+carries.
+
+### Fix
+
+`vt-pan-viewer.js`'s vision-mask block now saves `renderer.autoClearColor`,
+sets it `false` for the live-mask + frozen-floor render pair, and restores
+it afterward — the same save/false/draw/restore idiom already used at
+every other same-target multi-render site in this file (illum sequence,
+`runVisionGatePass`, the explored buffer, the snapshot publish quad,
+coloration, candle flame, lightning, fire, wind). No change to
+`vision-mask-render.js`'s materials, blending, or channel semantics — the
+design was correct, only the render-call sequencing was missing a guard.
+
+### Proof
+
+`npm run verify` (lint/format/structure/full Node suite) green: 0 lint
+errors (5 pre-existing warnings, unrelated files), Prettier clean,
+`verify:structure` 33/33, 12,714 tests passed against 3 failures —
+identical to and no worse than the 2 pre-existing, unrelated failures
+already on the tree before this session (`tools/chart-room` build
+fingerprint, specular's `incidentSteepness` default; neither touches
+vision or doors). `src/effects/vision/__tests__/run-tests.mjs`: 32/32
+green, unchanged. This bug is in `vt-pan-viewer.js`'s per-frame renderer
+orchestration, which — per this file's own "GETTERS VS VALUES" /
+construction-order warnings elsewhere — the Node suite structurally cannot
+exercise (no real THREE renderer is constructed); the diagnosis instead
+traces the exact mechanism against vendored `three.webgpu.js` source
+(`renderer.autoClearColor = true` default, `Background#update` reading it
+on every `render()` call) and against this project's own prior incident of
+the identical bug shape in the same file. Not yet run against the live
+Foundry/Playwright harness — same deliberate boundary
+`keyhole-door-fog-reveal-sync` already drew for this feature.
+
+### Fixed when
+
+On a real scene: control a token, approach a door within its LOS, open it,
+and watch the newly-exposed sliver fade in over the door's own swing
+instead of the whole screen going black — the token should stay visible
+throughout, and everything already-revealed before the click should never
+dim at all.

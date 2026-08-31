@@ -40,10 +40,11 @@
  * path Foundry's native floor navigation already uses, not a fresh reinvention;
  * mask editing itself never depends on that call succeeding), a 4096² grid with
  * a dirty-rect preview (re-packs only what changed), embed persistence with an
- * unsaved-changes guard (on close + on effect switch), a spray/paint/erase
+ * unsaved-changes guard (on close, on effect switch, AND on a scene load — see
+ * `hydrateFromScene`, which never overwrites unsaved work), a spray/paint/erase
  * brush, AND the Author-Mode vector tools — point / line (stroked) / polygon
  * (filled) — all rasterizing into the SAME mask the brush writes
- * (Shapes-and-Regions.md), with an optional 4×4 sub-grid snap, shared undo,
+ * (Shapes-and-Regions.md), with an optional 4×4 sub-grid snap, per-layer undo,
  * and a live draft preview. Deferred: retained/editable vector shapes + a
  * Select tool, bake-to-file (Mode B), the package gate.
  *
@@ -119,9 +120,13 @@ const PAINTABLE_KINDS = MASK_KINDS.filter((k) => Array.isArray(k.suffixes) && k.
  *   kindId, layer)` — see that function's own doc for why a painted-empty
  *   layer is safe to re-ingest unconditionally (self-alpha composites it as
  *   a no-op) rather than this file needing to track and separately signal
- *   "was cleared". ⚠️ NOT fired from `hydrateFromScene()` — see that
- *   method's own doc for why (a scene-load ordering hazard); the caller
- *   reads `getLayers()` and calls the bridge itself there instead. NOT
+ *   "was cleared". ⚠️ NOT fired from `hydrateFromScene()`'s own normal path
+ *   — see that method's own doc for why (a scene-load ordering hazard); the
+ *   caller reads `getLayers()` and calls the bridge itself there instead.
+ *   The ONE exception is a LATE hydrate the author resolves by hand long
+ *   after that hook finished (`applyHydrate(..., {announce:true})`), where
+ *   the hazard cannot apply because `reset()` and the caller's own re-ingest
+ *   have both already run and nothing else will feed the render. NOT
  *   called on every brush stamp either — see this module's own header for
  *   why live, mid-stroke ingest is a deliberately separate, not-yet-built
  *   follow-up.
@@ -135,6 +140,22 @@ export function installPainter(
     ctx: null,
     kind: PAINTABLE_KINDS[0]?.id ?? 'fire',
     layers: {}, // `${kind}::${floor}` -> MaskGrid
+    // THE LAST-KNOWN-GOOD SNAPSHOT (2026-08-31). `layers` alone could never
+    // answer "what is actually ON the scene?" — so "Discard & close" discarded
+    // nothing (it only tore down the DOM, leaving the rejected edit in memory
+    // to be swept into the NEXT unrelated Save) and there was no state to fall
+    // back TO when a scene load arrived over unsaved work. This is a DEEP copy
+    // (each layer's Uint8Array `.slice()`d; `spec` is an immutable descriptor
+    // and is shared by reference), re-taken at exactly the two moments
+    // `layers` becomes the scene's own truth: right after a successful save,
+    // and right after a hydrate populates from the scene. `null` = never
+    // established (a painter that has not hydrated or saved yet) — Discard
+    // then falls back to today's just-close rather than throwing.
+    committedLayers: null,
+    // A scene load arrived while `layers` held unsaved work and was DEFERRED
+    // rather than allowed to overwrite it (see `hydrateFromScene`). While true,
+    // the in-memory layers are NOT this scene's authoritative content.
+    pendingHydrate: false,
     floor: 0, // which floor these strokes apply to — masks are PER-FLOOR (the Floor stepper picks it)
     floorSwitching: false, // a live setVtPanViewerFloor call is in flight — buttons disable so rapid clicks can't retrigger the flagged rapid-floor-switch residency bug
     gridCanvases: {}, // key -> offscreen canvas
@@ -155,6 +176,7 @@ export function installPainter(
     toolbar: null,
     raf: 0,
     painting: false,
+    pointerId: null, // the pointer whose capture this stroke holds (see `endStroke`)
     lastWorld: null,
     mouseClient: null,
     hoverOnBoard: false, // is the CURRENT hover over Foundry's board (not a UI panel)? gates the ring
@@ -163,7 +185,11 @@ export function installPainter(
     draft: null, // in-progress line/polygon: { type, vertices: [{x,y}...] }
     snap: false, // 4×4 sub-grid snap for vector vertices — OFF by default (precision-first)
     cursorWorld: null, // live cursor in world coords, for the rubber-band preview
-    undo: [],
+    // UNDO IS PER-LAYER, NOT GLOBAL (2026-08-31): `${kind}::${floor}` -> snapshot[].
+    // One flat stack meant Ctrl+Z popped whatever was pushed LAST — which could
+    // belong to a floor or kind you are not looking at, so the screen did not
+    // change and a stroke on another layer silently rolled back instead.
+    undo: {},
     handlers: null,
     refreshToolbar: null,
   };
@@ -176,6 +202,70 @@ export function installPainter(
     const key = keyOf(kind);
     if (!state.layers[key]) state.layers[key] = createPaintLayer(state.ctx.sceneRect);
     return state.layers[key];
+  }
+
+  // ---- the committed snapshot -------------------------------------------
+  /**
+   * A DEEP copy of a layer set: every `Uint8Array` is `.slice()`d so the copy
+   * and the original can never alias (a plain `{...layers}` would share the
+   * one buffer the brush writes into, which is the whole point of the
+   * snapshot — it would track the edits it exists to remember NOT tracking).
+   * `spec` is a frozen-in-practice grid descriptor, never mutated, so it is
+   * shared by reference rather than cloned per layer.
+   * @param {Record<string, import('../scene/mask-derive.js').MaskGrid>} layers
+   */
+  function cloneLayers(layers) {
+    const out = {};
+    for (const [key, layer] of Object.entries(layers ?? {})) {
+      if (!layer?.data) continue;
+      out[key] = { spec: layer.spec, data: layer.data.slice() };
+    }
+    return out;
+  }
+
+  /** `layers` is now the scene's own truth — remember it as the discard target. */
+  function snapshotCommitted() {
+    state.committedLayers = cloneLayers(state.layers);
+  }
+
+  /**
+   * Drop the offscreen preview canvas of every layer that is about to stop
+   * existing (a discard or a scene load can retire keys wholesale). Without
+   * this, a later layer re-created under the same key could be drawn from the
+   * retired one's pixels.
+   * @param {Record<string, unknown>} keep - the layer set that is replacing the current one.
+   */
+  function pruneGridCaches(keep) {
+    for (const key of Object.keys(state.gridCanvases)) {
+      if (keep[key]) continue;
+      delete state.gridCanvases[key];
+      delete state.gridImageData[key];
+    }
+  }
+
+  /**
+   * Throw away every edit since the last commit and go back to what the scene
+   * actually holds. Returns false ONLY when there is no committed snapshot to
+   * go back to (a painter that has never hydrated or saved) — the caller then
+   * falls back to the pre-2026-08-31 behaviour of just closing.
+   */
+  function discardEdits() {
+    // A DEFERRED scene load outranks the snapshot: the snapshot is the OLD
+    // scene's committed state, the scene's own flag is this one's. Discarding
+    // is exactly the moment to finally let that load through — and to tell the
+    // render about it, since the caller's own post-reset re-ingest ran (on an
+    // empty set, see `getLayers`) long before this.
+    if (state.pendingHydrate && applyHydrate(undefined, { announce: true })) return true;
+    if (!state.committedLayers) return false;
+    const restored = cloneLayers(state.committedLayers);
+    pruneGridCaches(restored);
+    state.layers = restored;
+    state.undo = {};
+    state.previewRect = {};
+    state.dirtySinceSave = false;
+    for (const key of Object.keys(state.layers)) markFull(key);
+    state.refreshToolbar?.();
+    return true;
   }
 
   // ---- the extracted halves, bound to this painter's state ----------------
@@ -273,19 +363,29 @@ export function installPainter(
   }
 
   // ---- painting ----------------------------------------------------------
+  // UNDO IS SCOPED PER `${kind}::${floor}` (2026-08-31). It used to be ONE flat
+  // stack shared by every layer, so Ctrl+Z popped the most recent push
+  // ANYWHERE — paint on floor 1, step to floor 2, Ctrl+Z, and floor 1's stroke
+  // silently vanished while the screen (showing floor 2) did not move. A stack
+  // per key means Ctrl+Z can only ever affect the layer you are looking at.
+  // UNDO_LIMIT is per key, not global: the cap exists because each snapshot is
+  // ~16MB at PAINT_GRID_MAX_DIM=4096, and that cost is per layer too.
   function pushUndo() {
     const key = activeKey();
     const layer = state.layers[key];
     if (!layer) return;
-    state.undo.push({ key, data: layer.data.slice() });
-    if (state.undo.length > UNDO_LIMIT) state.undo.shift();
+    const stack = (state.undo[key] ??= []);
+    stack.push({ key, data: layer.data.slice() });
+    if (stack.length > UNDO_LIMIT) stack.shift();
   }
 
   function undo() {
-    const snap = state.undo.pop();
-    if (!snap || !state.layers[snap.key]) return;
-    state.layers[snap.key].data.set(snap.data);
-    markFull(snap.key); // undo can change anywhere -> the whole grid re-packs
+    const key = activeKey();
+    const stack = state.undo[key];
+    const snap = stack?.pop();
+    if (!snap || !state.layers[key]) return;
+    state.layers[key].data.set(snap.data);
+    markFull(key); // undo can change anywhere -> the whole grid re-packs
     markEdited();
   }
 
@@ -371,6 +471,37 @@ export function installPainter(
   }
 
   // ---- input (window, capture phase — see the file header) ---------------
+  /**
+   * END THE CURRENT BRUSH STROKE, from wherever the news arrives — a real
+   * pointerup, a `pointercancel`, a move that turns out to have no button
+   * held, a modal opening on top, or the painter closing.
+   *
+   * Mirrors `ui/anchor-mode.js#startDrag`'s capture pattern (the sibling
+   * authoring tool in this directory, which already got this right): the
+   * board element captures the pointer on down and releases it here, so a
+   * drag that leaves the window still reports its up, and so a dialog opened
+   * mid-stroke is not stolen from by a captured pointer.
+   * @returns {boolean} true if a stroke was actually running.
+   */
+  function endStroke() {
+    if (!state.painting) return false;
+    state.painting = false;
+    state.lastWorld = null;
+    const pid = state.pointerId;
+    state.pointerId = null;
+    if (pid !== null) {
+      // Throws NotFoundError when the pointer id is already gone (the pointer
+      // was released outside, the element was re-created) — never a reason to
+      // leave the stroke half-ended.
+      try {
+        state.ctx?.boardElement?.releasePointerCapture?.(pid);
+      } catch {
+        /* the capture is gone either way */
+      }
+    }
+    return true;
+  }
+
   function installHandlers() {
     const suppress = (e) => {
       e.preventDefault();
@@ -387,6 +518,15 @@ export function installPainter(
       if (state.tool === 'brush') {
         state.painting = true;
         state.lastWorld = null;
+        // Capture on the board (the element this press is already proven to
+        // be on, two lines up) so the stroke keeps receiving moves — and,
+        // crucially, its UP — even when the drag leaves the window entirely.
+        state.pointerId = e.pointerId ?? null;
+        try {
+          state.ctx.boardElement?.setPointerCapture?.(e.pointerId);
+        } catch {
+          state.pointerId = null; // capture refused — the buttons guard in onMove still covers us
+        }
         pushUndo();
         const raw = state.ctx.screenToWorld(e.clientX, e.clientY); // the brush ignores snap (smooth strokes)
         paintTo(raw.x, raw.y);
@@ -417,16 +557,38 @@ export function installPainter(
       // crosses a panel (ordinary paint-tool behaviour); vector tools are
       // click-based, so a move only updates the rubber-band cursor.
       if (state.tool === 'brush' && state.painting) {
+        // TWO WAYS A "LIVE" STROKE IS ALREADY OVER, both of which used to
+        // paint anyway (2026-08-31):
+        //   - no primary button held. Drag off the browser window, release
+        //     there, come back over the map: the up was never delivered, so
+        //     `painting` stayed true and the return trip got interpolated
+        //     into one long unwanted stroke. `buttons` is the browser's own
+        //     answer to "is it still held", and it is authoritative on every
+        //     move — including the first one after a release we never saw.
+        //   - a modal went up. Holding the brush and pressing Escape opens
+        //     the unsaved-changes dialog, and this handler kept painting
+        //     underneath it — right across the map and into the dialog's own
+        //     "Save & close" button, which then saved the accident.
+        // Ending the stroke (rather than merely skipping the stamp) is what
+        // releases the pointer capture, so the dialog is fully clickable.
+        if (state.modalOpen || !(e.buttons & 1)) {
+          endStroke();
+          return;
+        }
         paintTo(raw.x, raw.y);
         suppress(e);
       }
     };
+    // Not gated on `state.tool`: a tool switch mid-stroke (the keyboard
+    // shortcuts do not stop one) must still be able to end it.
     const onUp = (e) => {
-      if (state.tool === 'brush' && state.painting) {
-        state.painting = false;
-        state.lastWorld = null;
-        suppress(e);
-      }
+      if (endStroke()) suppress(e);
+    };
+    // The browser gave up on this pointer (touch cancelled, capture stolen,
+    // the element removed). Same handling as an up — but never suppressed:
+    // it is the browser's own notification, not an input to intercept.
+    const onCancel = () => {
+      endStroke();
     };
     const onDbl = (e) => {
       if (state.draft) {
@@ -479,9 +641,10 @@ export function installPainter(
     window.addEventListener('pointerdown', onDown, true);
     window.addEventListener('pointermove', onMove, true);
     window.addEventListener('pointerup', onUp, true);
+    window.addEventListener('pointercancel', onCancel, true);
     window.addEventListener('dblclick', onDbl, true);
     window.addEventListener('keydown', onKey, true);
-    state.handlers = { onDown, onMove, onUp, onDbl, onKey };
+    state.handlers = { onDown, onMove, onUp, onCancel, onDbl, onKey };
   }
 
   function removeHandlers() {
@@ -490,6 +653,7 @@ export function installPainter(
     window.removeEventListener('pointerdown', h.onDown, true);
     window.removeEventListener('pointermove', h.onMove, true);
     window.removeEventListener('pointerup', h.onUp, true);
+    window.removeEventListener('pointercancel', h.onCancel, true);
     window.removeEventListener('dblclick', h.onDbl, true);
     window.removeEventListener('keydown', h.onKey, true);
     state.handlers = null;
@@ -529,7 +693,7 @@ export function installPainter(
   function exit() {
     if (!state.active) return;
     state.active = false;
-    state.painting = false;
+    endStroke(); // releases the pointer capture too — `painting = false` alone never did
     if (state.raf) cancelAnimationFrame(state.raf);
     state.raf = 0;
     removeHandlers();
@@ -541,6 +705,7 @@ export function installPainter(
   // Exit, but guard unsaved work first (the data-loss point — masks live in
   // memory + the scene flag, so closing without saving loses the in-memory edits).
   async function requestExit() {
+    endStroke(); // Escape can arrive with the brush still down — never leave a captured pointer behind a dialog
     if (!state.dirtySinceSave) return exit();
     const choice = await confirmModal(
       'Unsaved painting',
@@ -555,6 +720,15 @@ export function installPainter(
       await save();
       exit();
     } else if (choice === 'discard') {
+      // DISCARD ACTUALLY DISCARDS (2026-08-31). This used to be a bare
+      // `exit()`, which only tore down the DOM — the rejected edit (a Clear,
+      // say) stayed in `state.layers`, survived the close, and was swept into
+      // whatever unrelated Save happened later in the session. Now it rolls
+      // back to the last committed snapshot; `discardEdits()` returning false
+      // means there is no snapshot to roll back TO, in which case closing is
+      // still the honest thing to do (the pre-fix behaviour, kept as the
+      // fallback rather than throwing).
+      discardEdits();
       exit();
     }
     // cancel / dismissed -> stay in Author Mode
@@ -577,6 +751,12 @@ export function installPainter(
   }
 
   async function save() {
+    // Nothing to write. The Save button is `disabled` in this state (see
+    // paint-mode-toolbar.js#refreshToolbar), so this is defence in depth for
+    // any OTHER caller — a programmatic save, a macro — not the UI path: a
+    // no-op save would still cost a scene-flag round trip and re-fire the
+    // brush→render bridge for content nothing has changed.
+    if (!state.dirtySinceSave) return;
     const payload = serializePaintedMasks(state.layers);
     // PAINT_EMBED_BYTE_BUDGET existed but was never actually checked anywhere
     // live — an "unwired museum" piece. The resolution bump (512 -> 2048) makes
@@ -601,6 +781,13 @@ export function installPainter(
         )} KB) — saved fine, but very fine painted detail will eventually want file-based storage (not yet built).`;
     }
     state.dirtySinceSave = false;
+    // WHAT IS ON THE SCENE IS NOW WHAT IS IN MEMORY — so this is one of the
+    // exactly two moments the discard target is re-taken. It also resolves a
+    // deferred scene load: these layers have just been written to the CURRENT
+    // scene, so they are its authoritative content and `getLayers()` may hand
+    // them to the render bridge again.
+    snapshotCommitted();
+    state.pendingHydrate = false;
     state.refreshToolbar?.();
     notify(msg, heavy.length ? 'warn' : 'info');
     // THE BRUSH→RENDER BRIDGE — see this module's own header. Every
@@ -610,6 +797,83 @@ export function installPainter(
     // makes an all-zero layer a no-op there, automatically — see that
     // function's own doc).
     onLayersChanged?.(state.layers);
+  }
+
+  // ---- scene load --------------------------------------------------------
+  /**
+   * Replace the in-memory layers with whatever THIS scene holds — the second
+   * of the two moments `state.layers` becomes the scene's own truth, so the
+   * committed snapshot is re-taken here too.
+   *
+   * ⚠️ A FRESH CONTEXT ON EVERY LOAD (2026-08-31). `state.ctx` used to be
+   * captured exactly once, in `enter()`. Foundry rebuilds `canvas.app`/
+   * `canvas.stage` on a scene draw, so a painter left open across one held a
+   * `boardElement` that no longer existed — and because a stroke starts ONLY
+   * when `e.target === state.ctx.boardElement` (the positive check this
+   * module's header explains), that gate could never match again: painting
+   * stopped dead, no error, not even a brush ring, until the painter was
+   * closed and re-opened. Re-resolving here covers the non-dirty path too — a
+   * fresh scene always needs a fresh context, whatever the answer to the
+   * unsaved-work question below.
+   *
+   * @param {object} [ctx] - a fresh paint context; read here when omitted.
+   * @param {object} [opts]
+   * @param {boolean} [opts.announce=false] - fire `onLayersChanged`. FALSE for
+   *   the normal `canvasReady` path (see `hydrateFromScene`'s own doc for the
+   *   `maskAuthority.reset()` ordering hazard that makes it unsafe there);
+   *   TRUE only for a LATE hydrate resolved by the author after that hook has
+   *   long finished, where the caller's own post-reset re-ingest has already
+   *   been and gone and nothing else will feed the render.
+   * @returns {{loaded:boolean, mismatched?:string[]}|null} null = no ready
+   *   scene to load from, in which case nothing was touched.
+   */
+  function applyHydrate(ctx = readPaintContext(), { announce = false } = {}) {
+    if (!ctx.ready) return null;
+    state.ctx = ctx;
+    const payload = loadPaintedMasks();
+    const hydrated = payload ? hydratePaintedMasks(payload, ctx.sceneRect) : { layers: {} };
+    pruneGridCaches(hydrated.layers);
+    state.layers = hydrated.layers;
+    state.undo = {};
+    state.previewRect = {};
+    state.dirtySinceSave = false; // freshly loaded from the scene = clean
+    state.pendingHydrate = false;
+    snapshotCommitted(); // what the scene holds IS the committed truth
+    for (const key of Object.keys(state.layers)) markFull(key);
+    state.refreshToolbar?.();
+    if (announce) onLayersChanged?.(state.layers);
+    return { loaded: Object.keys(state.layers).length > 0, mismatched: hydrated.mismatched };
+  }
+
+  /**
+   * The deferred load, handed to the author as an actual choice rather than a
+   * notification they can only read. NOT awaited by `hydrateFromScene` — that
+   * has to stay synchronous (boot.js's `canvasReady` handler calls it without
+   * `await` and reads `getLayers()` later in the same hook, so an async
+   * version would move the layer population to after that read).
+   *
+   * Deliberately NO "Save" button, unlike the close and effect-switch guards:
+   * `savePaintedMasks` writes to whatever scene is active NOW, so a Save
+   * offered from here would silently write the PREVIOUS scene's painted masks
+   * into this one. Save stays on the toolbar, where the author chooses it
+   * with a scene in front of them.
+   */
+  function offerPendingHydrateResolution() {
+    if (state.modalOpen) return; // a dialog is already up; the notification carries the news
+    confirmModal(
+      'Unsaved painting kept',
+      "This scene's saved masks were NOT loaded — you have unsaved painting open, and loading would have " +
+        'overwritten it. Discard your unsaved work and load this scene, or keep it and resolve it yourself ' +
+        '(Save writes to the scene you are on now).',
+      [
+        { action: 'discard', label: 'Discard mine & load the scene', accent: '255,120,120' },
+        { action: 'keep', label: 'Keep mine for now', accent: '143,214,255' },
+      ]
+    ).then((choice) => {
+      if (choice !== 'discard') return;
+      if (!state.pendingHydrate) return; // already resolved meanwhile (saved, exited, another load)
+      applyHydrate(undefined, { announce: true });
+    });
   }
 
   // ---- preview loop ------------------------------------------------------
@@ -644,31 +908,59 @@ export function installPainter(
      * authority state and be silently lost the moment `reset()` ran. The
      * caller reads `getLayers()` (below) and calls the bridge itself, AFTER
      * its own `reset()` — see boot.js's own canvasReady handler.
+     *
+     * ⚠️ NEVER OVERWRITES UNSAVED WORK (2026-08-31). This is called on EVERY
+     * `canvasReady` — every scene change, every re-draw — and it used to
+     * replace `state.layers` wholesale and set `dirtySinceSave = false`
+     * unconditionally. A GM with unsaved painting open who switched scenes
+     * lost every stroke instantly, with the toolbar flipping to "💾 Saved" as
+     * if nothing had happened. When the painter is open AND dirty the load is
+     * now DEFERRED instead: the in-memory work survives, the dirty flag stays
+     * up, and the author is told (notification + a dialog offering to discard
+     * and load).
+     *
+     * DESIGN NOTE — why deferral rather than a blocking Save/Discard dialog
+     * at this call site: this function MUST stay synchronous. boot.js calls
+     * it without `await` at the top of its `canvasReady` handler and reads
+     * `getLayers()` much later in that same hook; an `async` version would
+     * move the layer population to after that read. A Save option here would
+     * also be actively wrong — `savePaintedMasks` targets whatever scene is
+     * active NOW, so it could write the previous scene's masks into this one.
+     *
+     * @returns {{loaded:boolean, mismatched?:string[], deferredForUnsavedChanges?:boolean}}
      */
     hydrateFromScene() {
       const ctx = readPaintContext();
       if (!ctx.ready) return { loaded: false };
-      const payload = loadPaintedMasks();
-      if (!payload) {
-        state.layers = {};
-        state.undo = [];
-        state.previewRect = {};
-        state.dirtySinceSave = false;
-        return { loaded: false };
+      if (state.active && state.dirtySinceSave) {
+        state.ctx = ctx; // a fresh scene still needs a fresh board element — see applyHydrate's own doc
+        state.pendingHydrate = true;
+        state.refreshToolbar?.();
+        notify(
+          "Map Shine: this scene's saved masks were NOT loaded — you have unsaved painting open. " +
+            'Save it, or discard it, to resolve.',
+          'error'
+        );
+        offerPendingHydrateResolution();
+        return { loaded: false, deferredForUnsavedChanges: true };
       }
-      const { layers, mismatched } = hydratePaintedMasks(payload, ctx.sceneRect);
-      state.layers = layers;
-      state.undo = [];
-      state.previewRect = {};
-      state.dirtySinceSave = false; // freshly loaded from the scene = clean
-      for (const key of Object.keys(layers)) markFull(key);
-      return { loaded: Object.keys(layers).length > 0, mismatched };
+      return applyHydrate(ctx) ?? { loaded: false };
     },
     /** The CURRENT in-memory layer set — read-only, for a caller that needs
      * to re-feed it to `onLayersChanged`'s own consumer at a moment this
      * file cannot safely call that callback itself (see `hydrateFromScene`'s
-     * own doc for the one caller that needs this, and why). */
+     * own doc for the one caller that needs this, and why).
+     *
+     * ⚠️ EMPTY WHILE A LOAD IS DEFERRED. The one caller feeds this straight
+     * into `maskAuthority.ingestPaintedMask` for the scene that just loaded —
+     * and while `pendingHydrate` is set, these layers belong to a DIFFERENT
+     * (previous) scene, with that scene's world rect baked into every layer's
+     * `spec`. Handing them over would paint one map's masks onto another's
+     * geometry. An empty set means the new scene simply renders without
+     * painted masks until the author resolves the deferral, which is the
+     * conservative half of that choice. */
     getLayers() {
+      if (state.pendingHydrate) return {};
       return state.layers;
     },
     /** POOL HEALTH — see gridCachePoolStats' own declaration for the exact

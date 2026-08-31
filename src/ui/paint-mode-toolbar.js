@@ -170,6 +170,36 @@ export function createToolbar(state, deps) {
       (v) => (state.brush.hardness = v / 100)
     );
 
+    /** This layer's name as the author sees it — the catalog's own suffix
+     * (`_Fire`), never a raw kind id, and never a guess about which layer. */
+    const activeSuffix = () => PAINTABLE_KINDS.find((k) => k.id === state.kind)?.suffixes[0] ?? state.kind;
+
+    // CLEAR ASKS FIRST (2026-08-31). It wipes a whole painted layer on one
+    // click — strictly more destructive than switching effects or closing the
+    // painter, BOTH of which already confirm — and the undo that covers it
+    // only lives until the painter closes. Names the exact kind AND floor,
+    // because "Clear" alone never said WHICH of the per-kind, per-floor masks
+    // was about to go.
+    let clearing = false;
+    async function confirmClear() {
+      if (clearing) return;
+      clearing = true;
+      try {
+        const choice = await confirmModal(
+          'Clear this mask?',
+          `Clear the painted ${activeSuffix()} mask on floor ${state.floor}? Undo can bring it back while the ` +
+            "painter is open, but not after you close it — and it's gone from the scene as soon as you Save.",
+          [
+            { action: 'clear', label: 'Clear it', accent: '255,120,120' },
+            { action: 'cancel', label: 'Keep it', accent: '143,214,255' },
+          ]
+        );
+        if (choice === 'clear') clearActive();
+      } finally {
+        clearing = false;
+      }
+    }
+
     const top = row();
     top.append(label('Mask'), kindSel, modeSeg.el);
     const mid = row();
@@ -178,7 +208,7 @@ export function createToolbar(state, deps) {
     const bottom = row();
     bottom.append(
       button('↶ Undo', undo, '143,214,255'),
-      button('Clear', clearActive, '255,196,120'),
+      button('Clear', confirmClear, '255,196,120'),
       saveBtn,
       button('Exit', requestExit, '143,214,255')
     );
@@ -216,6 +246,11 @@ export function createToolbar(state, deps) {
       floorNextBtn.style.opacity = state.floorSwitching ? '0.4' : '1';
       saveBtn.textContent = state.dirtySinceSave ? '💾 Save •' : '💾 Saved';
       saveBtn.style.opacity = state.dirtySinceSave ? '1' : '0.55';
+      // DIMMED MEANT NOTHING (2026-08-31): the button LOOKED disabled when
+      // there was nothing to save and still fired a real scene-flag write on
+      // a stray click. The opacity is the appearance; this is the state.
+      saveBtn.disabled = !state.dirtySinceSave;
+      saveBtn.style.cursor = state.dirtySinceSave ? 'pointer' : 'default';
     };
     state.refreshToolbar();
     return bar;

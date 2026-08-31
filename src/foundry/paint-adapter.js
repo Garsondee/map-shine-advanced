@@ -26,6 +26,43 @@ function activeCanvas() {
 }
 
 /**
+ * May THIS client edit the scene? GM always; otherwise only a user the scene
+ * itself grants `update` to (Foundry's OWN `Document#canUserModify`, so a
+ * trusted player with real scene ownership keeps working and nobody else
+ * does). Same shape as `legacy/settings/scene-settings.js#_canEditScene`, the
+ * pattern this project already uses at every other scene-flag write.
+ *
+ * ⚠️ WHY THE PAINT CHAIN NEEDS THIS AT ALL. Nothing else in the chain
+ * authorizes anything: the painter is constructed for every connected client,
+ * and the only GM check anywhere (`scene-controls-button.js`'s
+ * `visible: game.user?.isGM === true`) is a toolbar VISIBILITY filter — a
+ * player with a console open reaches the painter's global entry point and the
+ * button's `visible` flag never runs. A painted mask is map information, not
+ * decoration ("secrets safe from players"), so the enforcement point is the
+ * write boundary here, not the UI that happens to be hidden.
+ *
+ * ⚠️ FAILS TO `false` on any read failure — the same direction, for the same
+ * reason, as `scene-vision.js#readIsGM`: guessing "allowed" wrongly lets a
+ * player overwrite the author's masks, while guessing "denied" wrongly merely
+ * tells a legitimate author their save was refused, which they will
+ * immediately notice and report. Never invert this.
+ *
+ * @param {object} scene - the active `canvas.scene`.
+ * @returns {boolean}
+ */
+function canEditScene(scene) {
+  try {
+    const user = typeof game !== 'undefined' ? game?.user : null;
+    if (!scene || !user) return false;
+    if (user.isGM) return true;
+    if (typeof scene.canUserModify === 'function') return scene.canUserModify(user, 'update') === true;
+  } catch (_) {
+    /* fall through to the safe answer */
+  }
+  return false;
+}
+
+/**
  * Live paint context: the scene rect (world = Foundry canvas space), the two
  * transforms, and `boardElement` — Foundry's OWN `<canvas>` (`c.app.view`,
  * DOM id `board`) — or `{ ready: false }` when no scene is up.
@@ -122,12 +159,19 @@ export function readPaintContext() {
 /**
  * Persist the painted-mask payload to the active scene's flags (Mode A embed —
  * travels inside an adventure automatically; Authoring-and-Distribution.md §3).
+ *
+ * THE PAINT CHAIN'S ONE AUTHORIZATION CHECK lives here, at the mutation, and
+ * runs before ANY of the write sequence below — not even the `unsetFlag` leg
+ * may be attempted by a client that isn't allowed to write, or a denied save
+ * could still destroy the author's existing masks on its way to failing.
+ *
  * @param {object} payload
  * @returns {Promise<{ok:boolean, reason?:string}>}
  */
 export async function savePaintedMasks(payload) {
   const c = activeCanvas();
   if (!c || !c.scene) return { ok: false, reason: 'no active scene' };
+  if (!canEditScene(c.scene)) return { ok: false, reason: 'insufficient permission (GM only)' };
   const previous = c.scene.getFlag(MODULE_ID, PAINT_FLAG) ?? {};
   // setFlag deep-MERGES (Foundry's mergeObject), it does not replace. A key
   // missing from `payload` — e.g. a layer the author just fully Cleared,

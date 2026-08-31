@@ -1,5 +1,17 @@
 /**
- * Node verification for foundry/paint-adapter.js's scene-flag persistence.
+ * Node verification for foundry/paint-adapter.js's scene-flag persistence and
+ * its permission gate.
+ *
+ * The gate is the newer and more important half: the painter is constructed
+ * for EVERY connected client, and the only GM check anywhere else in the paint
+ * chain is `scene-controls-button.js`'s `visible: game.user?.isGM === true` — a
+ * toolbar VISIBILITY filter, not an authorization check. A player with a
+ * browser console open reaches `savePaintedMasks` directly and the button's
+ * `visible` flag never runs. A painted mask is map information, not decoration
+ * ("secrets safe from players"), so the enforcement point is this write
+ * boundary. The tests below therefore assert not just the verdict but that a
+ * refusal attempts NO write at all — including the destructive `unsetFlag`
+ * leg, which a check placed one line too late would still have run.
  *
  * Covers two related regressions:
  *  - Bug-Tracker #31 (Clear+Save not persisting): `serializePaintedMasks`
@@ -24,13 +36,19 @@
  */
 import { savePaintedMasks, loadPaintedMasks } from '../paint-adapter.js';
 
-function mkScene(initialFlagValue, { failSetFlag = false, failUnsetFlag = false } = {}) {
+function mkScene(initialFlagValue, { failSetFlag = false, failUnsetFlag = false, canUserModify = () => false } = {}) {
   const store = {};
   if (initialFlagValue !== undefined) store.paintedMasks = initialFlagValue;
   const calls = [];
   return {
     calls,
     scene: {
+      // A real Scene always carries this; the default mirrors Foundry's own
+      // answer for a plain player with no scene ownership. Deliberately NOT
+      // recorded in `calls` — that list is the write log the "a refusal
+      // attempts no write" assertions read, and a permission probe is not a
+      // write. Every GM case short-circuits before reaching this anyway.
+      canUserModify: (user, action) => canUserModify(user, action),
       getFlag: (moduleId, key) => store[key],
       setFlag: async (moduleId, key, value) => {
         calls.push(['setFlag', key]);
@@ -48,16 +66,28 @@ function mkScene(initialFlagValue, { failSetFlag = false, failUnsetFlag = false 
   };
 }
 
-async function withCanvas(canvasStub, fn) {
-  const prior = globalThis.canvas;
+/**
+ * Install both globals the module reads — `canvas` (scene + transforms) and
+ * `game` (the permission gate's `game.user`) — for the duration of `fn`.
+ *
+ * `user` DEFAULTS TO A GM so every pre-existing assertion below, all of which
+ * are about flag-write mechanics rather than authorization, keeps testing what
+ * it was written to test. The permission cases pass an explicit `user`, or
+ * `noGame: true` to remove the global entirely.
+ */
+async function withCanvas(canvasStub, fn, { user = { isGM: true }, noGame = false } = {}) {
+  const priorCanvas = globalThis.canvas;
+  const priorGame = globalThis.game;
   globalThis.canvas = canvasStub;
+  globalThis.game = noGame ? undefined : { user };
   try {
     // MUST await here, not `return fn()` — fn is async, and a bare `return`
     // lets `finally` restore globalThis.canvas before fn's own internal
     // awaits (e.g. a loadPaintedMasks() called after an awaited save) run.
     return await fn();
   } finally {
-    globalThis.canvas = prior;
+    globalThis.canvas = priorCanvas;
+    globalThis.game = priorGame;
   }
 }
 
@@ -195,5 +225,133 @@ export async function run(t) {
     });
     ok('fast-path failure is reported, never thrown', r && r.ok === false);
     ok('fast-path failure never called unsetFlag', !rig.calls.some((c) => c[0] === 'unsetFlag'));
+  }
+
+  // ======================================================================
+  // PERMISSION — the paint chain's ONE authorization check (see this file's
+  // own header for why it has to live at this write boundary and not in the
+  // UI that merely hides the brush).
+  // ======================================================================
+
+  // ---- a GM may always save, whatever the scene says ---------------------
+  {
+    // canUserModify deliberately refuses: a GM must never even consult it.
+    const rig = mkScene(undefined, { canUserModify: () => false });
+    let r;
+    await withCanvas(
+      { ready: true, dimensions: {}, scene: rig.scene },
+      async () => {
+        r = await savePaintedMasks({ 'fire::0': { w: 1, h: 1, rle: [1, 0] } });
+      },
+      { user: { isGM: true } }
+    );
+    ok('GM may save even when the scene would refuse a non-GM update', r.ok === true);
+    ok(
+      'GM save really reached the write',
+      rig.calls.some((c) => c[0] === 'setFlag')
+    );
+  }
+
+  // ---- a non-GM the SCENE ITSELF grants update to may save ---------------
+  // The gate is scene-level permission, not a blunt isGM(): a trusted player
+  // with real scene ownership is exactly who Foundry's own canUserModify
+  // exists to answer for, and locking them out would be a different bug.
+  {
+    const rig = mkScene(undefined, { canUserModify: (_user, action) => action === 'update' });
+    let r;
+    await withCanvas(
+      { ready: true, dimensions: {}, scene: rig.scene },
+      async () => {
+        r = await savePaintedMasks({ 'fire::0': { w: 1, h: 1, rle: [1, 0] } });
+      },
+      { user: { isGM: false } }
+    );
+    ok('a non-GM the scene grants update to may save', r.ok === true);
+    ok(
+      'that save really reached the write',
+      rig.calls.some((c) => c[0] === 'setFlag')
+    );
+  }
+
+  // ---- a plain player is blocked, and NOTHING is attempted ---------------
+  {
+    const fireLayer = { w: 2, h: 2, rle: [4, 0] };
+    const rig = mkScene({ 'fire::0': fireLayer }, { canUserModify: () => false });
+    let r;
+    let after;
+    await withCanvas(
+      { ready: true, dimensions: {}, scene: rig.scene },
+      async () => {
+        // An EMPTY payload against a non-empty stored flag is the destructive
+        // path (needsDeletion -> unsetFlag). Using it here proves the refusal
+        // lands before that leg, not merely before setFlag — a check placed
+        // one line too late would still have wiped the author's masks on its
+        // way to reporting failure.
+        r = await savePaintedMasks({});
+        after = loadPaintedMasks();
+      },
+      { user: { isGM: false } }
+    );
+    ok('a non-GM the scene refuses is blocked', r.ok === false);
+    ok(
+      'the refusal reason names permission (paint-mode.js surfaces it verbatim)',
+      typeof r.reason === 'string' && /permission/i.test(r.reason)
+    );
+    ok('a blocked save NEVER calls setFlag', !rig.calls.some((c) => c[0] === 'setFlag'));
+    ok('a blocked save NEVER calls unsetFlag — no partial write, ever', !rig.calls.some((c) => c[0] === 'unsetFlag'));
+    ok('a blocked save made no write calls at all', rig.calls.length === 0);
+    ok(
+      "a blocked save leaves the author's existing masks intact",
+      after && JSON.stringify(after['fire::0']) === JSON.stringify(fireLayer)
+    );
+  }
+
+  // ---- fail-closed: no `game` global at all ------------------------------
+  // Never "allowed by default" when the permission facts can't be read.
+  {
+    const rig = mkScene(undefined, { canUserModify: () => true });
+    let r;
+    await withCanvas(
+      { ready: true, dimensions: {}, scene: rig.scene },
+      async () => {
+        r = await savePaintedMasks({ 'fire::0': { w: 1, h: 1, rle: [1, 0] } });
+      },
+      { noGame: true }
+    );
+    ok('no game global -> blocked, not allowed by default', r.ok === false);
+    ok('no game global -> nothing written', rig.calls.length === 0);
+  }
+
+  // ---- fail-closed: a scene with no canUserModify, and one that throws ---
+  {
+    const rig = mkScene(undefined);
+    delete rig.scene.canUserModify;
+    let r;
+    await withCanvas(
+      { ready: true, dimensions: {}, scene: rig.scene },
+      async () => {
+        r = await savePaintedMasks({ 'fire::0': { w: 1, h: 1, rle: [1, 0] } });
+      },
+      { user: { isGM: false } }
+    );
+    ok('a scene with no canUserModify blocks a non-GM rather than assuming yes', r.ok === false);
+    ok('...and writes nothing', rig.calls.length === 0);
+  }
+  {
+    const rig = mkScene(undefined, {
+      canUserModify: () => {
+        throw new Error('canUserModify exploded (simulated)');
+      },
+    });
+    let r;
+    await withCanvas(
+      { ready: true, dimensions: {}, scene: rig.scene },
+      async () => {
+        r = await savePaintedMasks({ 'fire::0': { w: 1, h: 1, rle: [1, 0] } });
+      },
+      { user: { isGM: false } }
+    );
+    ok('a throwing canUserModify is reported as a refusal, never thrown past the caller', r && r.ok === false);
+    ok('...and writes nothing', rig.calls.length === 0);
   }
 }

@@ -255,15 +255,12 @@ export function installStudio({ debugPanel, ...roomCtx } = {}) {
     btn.dataset.acc = dept.accVar;
     btn.setAttribute('aria-pressed', String(dept.id === state.dept));
     if (dept.dev) btn.classList.add('dbg');
-    btn.addEventListener('click', () => {
-      // LAB is gated on isGM() -- the OLD panel's own current real gate
-      // (Agent finding: no separate "debug dress" flag exists in src/ yet;
-      // see Petition P10 for why this is parity, not a shortfall).
-      if (dept.dev && typeof debugPanel?.isGM === 'function' && !debugPanel.isGM()) return;
-      state.dept = dept.id;
-      for (const [id, b] of railButtons) b.setAttribute('aria-pressed', String(id === state.dept));
-      render();
-    });
+    // Straight through switchDepartment — the dev gate used to live HERE,
+    // duplicated, which meant the rail was locked and every programmatic
+    // caller of `ctx.switchDepartment` (effects-department.js's
+    // `onOpenHealthReport`, the search palette) walked past it into LAB
+    // unchecked. Two doors, one lock. Now there is one door.
+    btn.addEventListener('click', () => switchDepartment(dept.id));
     rail.append(btn);
     if (dept.dev)
       rail.append(Object.assign(document.createElement('div'), { className: 'devtag', textContent: 'DEV' }));
@@ -275,11 +272,24 @@ export function installStudio({ debugPanel, ...roomCtx } = {}) {
    * changes (the rail's own click handler, the search palette's `onOpenCard`,
    * and U6's health-badge deep-link all call this rather than each keeping
    * their own copy of the "update state + sync rail aria-pressed + render()"
-   * dance).
+   * dance) and, since 2026-08-31, the ONE place the dev gate is enforced.
+   *
+   * LAB is gated on isGM() -- the OLD panel's own current real gate (Agent
+   * finding: no separate "debug dress" flag exists in src/ yet; see Petition
+   * P10 for why this is parity, not a shortfall). The gate lives HERE and not
+   * on the rail button because this function is exported into every
+   * department's `ctx`, so a programmatic caller (effects-department.js's
+   * `onOpenHealthReport` is a live one) reached LAB without ever passing the
+   * button that carried the only check. Polarity is unchanged from that
+   * button's version, deliberately: no `debugPanel` at all still ALLOWS the
+   * switch, and `renderLabDepartment` shows its own honest "not installed"
+   * notice (see this function's caller doc on `installStudio`).
    * @param {string} id - a DEPTS entry's id (e.g. `'lab'`).
    */
   function switchDepartment(id) {
-    if (!DEPTS.some((d) => d.id === id)) return;
+    const dept = DEPTS.find((d) => d.id === id);
+    if (!dept) return;
+    if (dept.dev && typeof debugPanel?.isGM === 'function' && !debugPanel.isGM()) return;
     state.dept = id;
     for (const [bid, b] of railButtons) b.setAttribute('aria-pressed', String(bid === state.dept));
     render();

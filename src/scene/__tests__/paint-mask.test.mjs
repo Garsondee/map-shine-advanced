@@ -18,11 +18,20 @@ import {
   PAINT_EMBED_BYTE_BUDGET,
   PAINT_GRID_MAX_DIM,
 } from '../paint-mask.js';
+import { setLogSink, setLogLevel, LogLevel } from '../../core/log.js';
 
 const RECT = { x: 0, y: 0, width: 1000, height: 800 };
 const CENTER = { x: 500, y: 400 };
 
-const dataEqual = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+const dataEqual = (a, b) => !!a && !!b && a.length === b.length && a.every((v, i) => v === b[i]);
+
+/** A MaskGrid built by hand, so a test can pin an EXACT grid size (the codec
+ *  reads only `spec.w/h` and `data`) — `createPaintLayer` derives its size from
+ *  a rect and cannot land on, say, exactly 65,536 texels. */
+const gridOf = (w, h, fill = 0) => ({
+  spec: { x: 0, y: 0, width: w, height: h, w, h, texelW: 1, texelH: 1 },
+  data: new Uint8Array(w * h).fill(fill),
+});
 
 export function run(t) {
   // --- model -------------------------------------------------------------
@@ -234,10 +243,216 @@ export function run(t) {
     t.ok('serialize: keeps a painted mask', !!payload['fire::0']);
     t.ok('serialize: drops an unpainted mask (store only what differs)', !('dust::0' in payload));
 
-    const { layers, mismatched } = hydratePaintedMasks(payload, RECT);
+    const { layers, mismatched, rejected } = hydratePaintedMasks(payload, RECT);
     t.ok('hydrate: brings the painted mask back', !!layers['fire::0']);
     t.ok('hydrate: no false mismatches on the same rect', mismatched.length === 0);
     t.ok('hydrate: round-trips the painted data', dataEqual(fire.data, layers['fire::0'].data));
+    t.ok('hydrate: a clean payload rejects nothing (an empty list means "I looked")', rejected.length === 0);
+  }
+
+  // --- CORRUPT PERSISTED PAYLOADS ARE REJECTED, NEVER THROWN --------------
+  //     `{w,h,rle}` comes back out of a FOUNDRY SCENE FLAG, so it may have been
+  //     hand-edited, half-written, or round-tripped through a scene export.
+  //     Before validation, every shape below threw — `new Uint8Array(-4)` and
+  //     `new Uint8Array(1e10)` ("Invalid typed array length"), a missing `rle`
+  //     ("Cannot read properties of undefined (reading 'length')") — and the
+  //     throw escaped hydratePaintedMasks, escaped
+  //     ui/paint-mode.js#hydrateFromScene(), and landed in boot.js's canvasReady
+  //     OUTER catch, aborting sky resolve, fade/cue load, the anchor import and
+  //     the viewer itself. One corrupt byte in one optional flag took down the
+  //     whole scene bring-up and blamed the viewer for it.
+  {
+    const captured = [];
+    setLogSink((entry) => captured.push(entry));
+    setLogLevel(LogLevel.ERROR); // every drop below is deliberate — keep them out of the suite's own output
+    try {
+      const shapes = {
+        'no-rle::0': { w: 4, h: 4 }, // rle missing entirely
+        'rle-string::0': { w: 4, h: 4, rle: 'not an array' },
+        'rle-object::0': { w: 4, h: 4, rle: { 0: 255, 1: 16 } }, // array-ish, still not an array
+        'negative-w::0': { w: -1, h: 4, rle: [255, 4] },
+        'giant::0': { w: 100000, h: 100000, rle: [255, 4] }, // a 10-billion-texel allocation
+        'over-ceiling::0': { w: PAINT_GRID_MAX_DIM + 1, h: 4, rle: [255, 4] }, // just past the real ceiling
+        'zero-dims::0': { w: 0, h: 0, rle: [] }, // never threw — produced texelW:Infinity, every sample null
+        'fractional-w::0': { w: 4.5, h: 4, rle: [255, 4] },
+        'nan-w::0': { w: NaN, h: 4, rle: [255, 4] },
+        'infinite-h::0': { w: 4, h: Infinity, rle: [255, 4] },
+        'string-w::0': { w: '4', h: 4, rle: [255, 4] }, // a JSON round trip that stringified the numbers
+        'entry-null::0': null,
+        'entry-string::0': 'corrupted',
+        'entry-array::0': [255, 16],
+      };
+      for (const [key, enc] of Object.entries(shapes)) {
+        let out = null;
+        let threw = false;
+        try {
+          out = decodePaintLayer(enc, RECT);
+        } catch (err) {
+          threw = true;
+          captured.push({ level: 'test', message: `decode threw for ${key}: ${err?.message}` });
+        }
+        t.ok(
+          `decode: "${key}" is rejected with a reason, never thrown`,
+          !threw && out?.layer === null && typeof out?.rejected === 'string' && out.rejected.length > 0
+        );
+      }
+
+      // THE POINT OF PER-KEY VALIDATION: a neighbour in the SAME flag survives.
+      const fire = createPaintLayer(RECT);
+      stampBrushWorld(fire, CENTER.x, CENTER.y, 100, { value: 255 });
+      const fireEnc = encodePaintLayer(fire);
+      const mixed = {
+        'broken::0': { w: 4, h: 4 }, // no rle
+        'fire::0': fireEnc, // the one the author actually painted
+        'worse::1': { w: -1, h: 4, rle: [255, 4] },
+        'degenerate::2': { w: 0, h: 0, rle: [] },
+      };
+      let hydrated = null;
+      let hydrateThrew = false;
+      try {
+        hydrated = hydratePaintedMasks(mixed, RECT);
+      } catch (err) {
+        hydrateThrew = true;
+        captured.push({ level: 'test', message: `hydrate threw: ${err?.message}` });
+      }
+      t.ok('hydrate: three corrupt entries never throw', !hydrateThrew);
+      t.ok(
+        'hydrate: the VALID neighbour in the same flag still loads, byte-for-byte',
+        dataEqual(fire.data, hydrated?.layers?.['fire::0']?.data)
+      );
+      t.ok(
+        'hydrate: rejected keys are simply ABSENT, not present-and-broken',
+        !!hydrated &&
+          !('broken::0' in hydrated.layers) &&
+          !('worse::1' in hydrated.layers) &&
+          !('degenerate::2' in hydrated.layers)
+      );
+      t.ok(
+        'hydrate: every rejection is reported BY NAME (never a silent vanish)',
+        (hydrated?.rejected ?? [])
+          .map((r) => r.key)
+          .sort()
+          .join('|') === 'broken::0|degenerate::2|worse::1'
+      );
+      t.ok(
+        'hydrate: every rejection carries a WHY, not just a which',
+        (hydrated?.rejected ?? []).every((r) => typeof r.reason === 'string' && r.reason.length > 0)
+      );
+      t.ok('hydrate: a rejection is NOT smuggled through as a resolution mismatch', hydrated?.mismatched.length === 0);
+      t.ok(
+        'hydrate: each drop goes through the log door, naming the key',
+        ['broken::0', 'worse::1', 'degenerate::2'].every((key) =>
+          captured.some((e) => e.level === 'warn' && e.message.includes(key))
+        )
+      );
+
+      // The FLAG ITSELF corrupt (not a key->payload map at all). A scene with
+      // NO painted masks is the overwhelmingly common case and must stay
+      // silent — "absent" is not "rejected", and conflating them would make
+      // the rejection list cry wolf on every unpainted scene ever loaded.
+      const nullFlag = hydratePaintedMasks(null, RECT);
+      t.ok(
+        'hydrate: a null flag is the ordinary "nothing painted" case, not a rejection',
+        Object.keys(nullFlag.layers).length === 0 && nullFlag.rejected.length === 0
+      );
+      const undefinedFlag = hydratePaintedMasks(undefined, RECT);
+      t.ok(
+        'hydrate: an undefined flag is likewise not a rejection',
+        Object.keys(undefinedFlag.layers).length === 0 && undefinedFlag.rejected.length === 0
+      );
+      let stringFlag = null;
+      let stringFlagThrew = false;
+      try {
+        stringFlag = hydratePaintedMasks('corrupted-flag', RECT);
+      } catch (err) {
+        stringFlagThrew = true;
+        captured.push({ level: 'test', message: `string flag threw: ${err?.message}` });
+      }
+      t.ok(
+        'hydrate: a flag that is a bare STRING is one rejection, not one-per-character',
+        !stringFlagThrew && Object.keys(stringFlag.layers).length === 0 && stringFlag.rejected.length === 1
+      );
+    } finally {
+      setLogSink(null);
+      setLogLevel(LogLevel.INFO);
+    }
+  }
+
+  // --- CODEC EDGE CASES, PINNED ------------------------------------------
+  //     The RLE round trip was verified correct at every edge below by hand
+  //     (2026-08-31) and NONE of it was in the suite — so a future change to
+  //     the run-length cap or the rasterizer could silently regress it. These
+  //     are regression stakes, not new behaviour.
+  {
+    const roundTrips = (grid) => {
+      const enc = encodePaintLayer(grid);
+      const { layer: back, rejected } = decodePaintLayer(enc); // no sceneRect: the spec is synthesized from w/h
+      return rejected === null && dataEqual(grid.data, back.data);
+    };
+
+    const allZero = gridOf(64, 64, 0);
+    t.ok('codec edge: an all-ZERO grid round-trips byte-for-byte', roundTrips(allZero));
+    t.ok('codec edge: an all-zero grid is a single run', encodePaintLayer(allZero).rle.join(',') === '0,4096');
+
+    const allFull = gridOf(64, 64, 255);
+    t.ok('codec edge: an all-255 grid round-trips byte-for-byte', roundTrips(allFull));
+    t.ok('codec edge: an all-255 grid is a single run', encodePaintLayer(allFull).rle.join(',') === '255,4096');
+
+    const oneTexel = gridOf(64, 64, 0);
+    oneTexel.data[35 * 64 + 17] = 200;
+    t.ok('codec edge: a SINGLE painted texel round-trips byte-for-byte', roundTrips(oneTexel));
+    t.ok('codec edge: a single texel is three runs (zeros, it, zeros)', encodePaintLayer(oneTexel).rle.length === 6);
+
+    // THE RUN-LENGTH CAP. `encodePaintLayer` stops a run at 65535 so the pair
+    // stays a 16-bit-representable number. 255*257 is EXACTLY 65535 and
+    // 256*256 is EXACTLY 65536 — the two sides of that boundary, tested as
+    // such rather than approached from a comfortable distance.
+    const exactlyCap = gridOf(255, 257, 7); // 65,535 texels
+    t.ok('codec edge: a run of exactly 65535 stays ONE pair', encodePaintLayer(exactlyCap).rle.join(',') === '7,65535');
+    t.ok('codec edge: a run of exactly 65535 round-trips byte-for-byte', roundTrips(exactlyCap));
+
+    const oneOverCap = gridOf(256, 256, 7); // 65,536 texels — one past the cap
+    t.ok(
+      'codec edge: a run of 65536 SPLITS into 65535 + 1, never overflows',
+      encodePaintLayer(oneOverCap).rle.join(',') === '7,65535,7,1'
+    );
+    t.ok('codec edge: a run one past the cap round-trips byte-for-byte', roundTrips(oneOverCap));
+
+    const changeAtCap = gridOf(256, 256, 7);
+    changeAtCap.data[65535] = 9; // the value changes on the exact texel the cap lands on
+    t.ok(
+      'codec edge: a value change ON the cap boundary is not swallowed',
+      encodePaintLayer(changeAtCap).rle.join(',') === '7,65535,9,1'
+    );
+    t.ok('codec edge: a value change on the cap boundary round-trips', roundTrips(changeAtCap));
+  }
+
+  // --- brush strokes at every rect CORNER and EDGE survive the round trip --
+  //     Clamping at the rect boundary is a spec.w/spec.h edge condition,
+  //     independent of resolution, so a modest maxDim keeps eight full
+  //     encode+decode round trips cheap.
+  {
+    const MAXDIM = 512;
+    const probes = [
+      ['top-left corner', RECT.x, RECT.y],
+      ['top-right corner', RECT.x + RECT.width, RECT.y],
+      ['bottom-left corner', RECT.x, RECT.y + RECT.height],
+      ['bottom-right corner', RECT.x + RECT.width, RECT.y + RECT.height],
+      ['top edge', RECT.x + RECT.width / 2, RECT.y],
+      ['bottom edge', RECT.x + RECT.width / 2, RECT.y + RECT.height],
+      ['left edge', RECT.x, RECT.y + RECT.height / 2],
+      ['right edge', RECT.x + RECT.width, RECT.y + RECT.height / 2],
+    ];
+    for (const [where, wx, wy] of probes) {
+      const layer = createPaintLayer(RECT, MAXDIM);
+      stampBrushWorld(layer, wx, wy, 40, { value: 255, hardness: 0.6 });
+      t.ok(`codec edge: a stroke at the ${where} actually painted something`, !isPaintLayerEmpty(layer));
+      const { layer: back, rejected } = decodePaintLayer(encodePaintLayer(layer), RECT, MAXDIM);
+      t.ok(
+        `codec edge: a stroke at the ${where} round-trips byte-for-byte`,
+        rejected === null && dataEqual(layer.data, back.data)
+      );
+    }
   }
 
   // --- guards -------------------------------------------------------------

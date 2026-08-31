@@ -12084,7 +12084,22 @@ function install() {
       try {
         const sceneDoc = canvasRef?.scene ?? null;
         if (!sceneDoc) return;
-        MapShine.__painter?.hydrateFromScene(); // pull any painted masks saved on this scene
+        // PAINTED MASKS ARE OPTIONAL; THE REST OF THIS HANDLER IS NOT.
+        // Everything below — sky resolve, fade/cue load, the V2 anchor import,
+        // startRealSceneViewer itself — lives under this hook's ONE outer
+        // catch, so anything thrown here took the whole scene bring-up with it
+        // and reported it as a viewer failure. That is a wildly disproportionate
+        // blast radius for "a scene flag was corrupt". scene/paint-mask.js now
+        // rejects malformed payloads per-key rather than throwing, so this
+        // should never fire; it is the belt to that braces, kept because the
+        // cost of being wrong is the entire scene and the cost of the guard is
+        // four lines. Loud, never silent — painting is what gets skipped, and
+        // the author is told exactly that.
+        try {
+          MapShine.__painter?.hydrateFromScene(); // pull any painted masks saved on this scene
+        } catch (err) {
+          log.error('painted-mask hydrate (canvasReady) failed — painting skipped, scene bring-up continues:', err);
+        }
         // THE SKY, RE-RESOLVED FOR THIS SCENE — `canvas.scene` did not exist at
         // `init` (where the setting itself gets registered), so this is the
         // first point a per-scene override can actually be read. Also the right

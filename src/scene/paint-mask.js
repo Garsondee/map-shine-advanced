@@ -30,12 +30,22 @@
  * sparse) into a JSON-native `{w,h,rle}` payload that rides in a scene flag and
  * therefore travels inside an adventure automatically. A per-mask byte budget
  * flags a mask too detailed to embed cheaply — the signal to bake it to a file
- * instead (Mode B, ui/paint-mode.js).
+ * instead (Mode B, ui/paint-mode.js). Reading that flag back is a TRUST
+ * BOUNDARY, not a formality — see `paintLayerRejectionReason` for what a single
+ * corrupt entry used to cost the whole scene load, and why a bad entry is now
+ * dropped (loudly, by name) while its neighbours in the same flag still load.
  *
  * @module scene/paint-mask
  */
 
 import { computeMaskGridSpec, createMaskGrid, sampleMaskGridWorld } from './mask-derive.js';
+import { createLogger } from '../core/log.js';
+
+// The ONE log door (core/log.js) — `console.*` is build-failing in src/ and,
+// more to the point, a console line never reaches the flight-recorder bundle
+// the author exports when reporting a bug. A dropped mask is EXACTLY the kind
+// of thing that must survive into that bundle.
+const log = createLogger('paint-mask');
 
 /** Per-mask embed budget (bytes of the JSON payload in a scene flag). Over this,
  *  the UI should offer "bake to a file" instead of embedding — a detailed mask
@@ -291,11 +301,65 @@ export function encodePaintLayer(layer) {
 }
 
 /**
+ * A usable grid side: a whole number of texels, at least one, never more than
+ * the ceiling `createPaintLayer` can itself produce. The bound is the CONSTANT,
+ * deliberately not the `maxDim` argument — decoding a 4096-wide payload against
+ * a 256 comparison spec is a legitimate resolution MISMATCH (reported, see
+ * `decodePaintLayer`), not corruption, and must still load.
+ * @param {unknown} n
+ */
+function isValidGridDim(n) {
+  return Number.isInteger(n) && n >= 1 && n <= PAINT_GRID_MAX_DIM;
+}
+
+/**
+ * WHY a persisted payload cannot be trusted, or `null` if it can.
+ *
+ * This is a TRUST BOUNDARY, not a formality. `{w,h,rle}` arrives from a Foundry
+ * scene flag, which means: a hand-edited world JSON, a partial write, a
+ * scene export/import round trip, or any future bug anywhere in the write path.
+ * Before validation, a single corrupt entry took the WHOLE scene down —
+ * `new Uint8Array(-4)` and `new Uint8Array(1e10)` both throw, `rle` missing
+ * throws on `.length`, and the throw propagated out of `hydratePaintedMasks`,
+ * out of `ui/paint-mode.js#hydrateFromScene()`, into boot.js's `canvasReady`
+ * outer catch — aborting sky resolve, cue load, anchor import and the viewer
+ * itself, with a diagnostic pointing at none of them.
+ *
+ * `{w:0,h:0,rle:[]}` is rejected too even though it never threw: it produced a
+ * `texelW: Infinity` spec whose every sample reads `null` — a layer that is
+ * "valid" and silently unreadable is worse than one that is simply absent.
+ *
+ * @param {unknown} encoded
+ * @returns {string|null} a human-readable reason, safe to log and to show.
+ */
+function paintLayerRejectionReason(encoded) {
+  if (encoded === null || encoded === undefined) return `entry is ${encoded === null ? 'null' : 'undefined'}`;
+  if (typeof encoded !== 'object' || Array.isArray(encoded))
+    return `entry is ${Array.isArray(encoded) ? 'an array' : `a ${typeof encoded}`}, not a {w,h,rle} object`;
+  const { w, h, rle } = encoded;
+  if (!Array.isArray(rle)) return `rle is ${rle === undefined ? 'missing' : `a ${typeof rle}`}, not an array`;
+  if (!isValidGridDim(w)) return `w=${String(w)} is not a whole number of texels in 1..${PAINT_GRID_MAX_DIM}`;
+  if (!isValidGridDim(h)) return `h=${String(h)} is not a whole number of texels in 1..${PAINT_GRID_MAX_DIM}`;
+  return null;
+}
+
+/**
  * Decode an RLE payload back into a layer. The spec is rebuilt from the live
  * `sceneRect` (so world↔cell mapping matches the current scene) when supplied;
  * a payload whose stored `w×h` disagrees with the current scene rect is a
  * resolution change — the caller is told via `dimensionsMatch` rather than
  * silently stretched.
+ *
+ * REJECTS RATHER THAN THROWS on a malformed payload (see
+ * `paintLayerRejectionReason` for the full why): the caller gets
+ * `{layer: null, rejected: "<reason>"}` and decides. Nothing about a corrupt
+ * scene flag is worth an exception escaping into a `canvasReady` handler.
+ *
+ * The RLE walk itself needs no extra guard: `di < data.length` bounds every
+ * write, so a negative/NaN/Infinite run length simply writes nothing or stops
+ * at the end of the grid, and a non-numeric value coerces to 0 through the
+ * `Uint8Array`. It cannot over-run, hang, or throw.
+ *
  * @param {{w:number, h:number, rle:number[]}} encoded
  * @param {{x:number, y:number, width:number, height:number}} [sceneRect]
  * @param {number} [maxDim] - MUST match what `createPaintLayer` used to
@@ -305,9 +369,12 @@ export function encodePaintLayer(layer) {
  *   load as a false "scene resized" (a real bug this project shipped once:
  *   this parameter used to be silently absent and always compared against
  *   mask-derive's unrelated 512 default).
- * @returns {{layer: import('./mask-derive.js').MaskGrid, dimensionsMatch: boolean}}
+ * @returns {{layer: import('./mask-derive.js').MaskGrid|null, dimensionsMatch: boolean,
+ *   rejected: string|null}} `layer` is null exactly when `rejected` is set.
  */
 export function decodePaintLayer(encoded, sceneRect, maxDim = PAINT_GRID_MAX_DIM) {
+  const rejection = paintLayerRejectionReason(encoded);
+  if (rejection) return { layer: null, dimensionsMatch: false, rejected: rejection };
   const { w, h, rle } = encoded;
   const data = new Uint8Array(w * h);
   let di = 0;
@@ -335,7 +402,7 @@ export function decodePaintLayer(encoded, sceneRect, maxDim = PAINT_GRID_MAX_DIM
   } else {
     spec = { x: 0, y: 0, width: w, height: h, w, h, texelW: 1, texelH: 1 };
   }
-  return { layer: { spec, data }, dimensionsMatch };
+  return { layer: { spec, data }, dimensionsMatch, rejected: null };
 }
 
 /** Estimated JSON byte size of an encoded layer — checked against PAINT_EMBED_BYTE_BUDGET. */
@@ -364,20 +431,47 @@ export function serializePaintedMasks(layersByKey) {
  * Rehydrate painted layers from a scene-flag payload against the live scene rect.
  * Reports any layer whose stored resolution no longer matches (a scene resized
  * since it was painted) rather than silently rescaling.
+ *
+ * CORRUPTION IS PER-KEY, AND SO IS THE DAMAGE. Validation lives inside this
+ * loop, not around it: one unreadable `"fire::0"` must not cost the author the
+ * `"water::0"` and `"dust::1"` sitting beside it in the same flag. A rejected
+ * key is simply ABSENT from `layers` — the same state as never having been
+ * painted — and is reported in `rejected` WITH ITS REASON so the drop is
+ * discoverable instead of silent (`skipped: []` must mean "nothing was
+ * skipped", never "I did not look"). Each one also goes through the log door,
+ * so it lands in an exported flight-recorder bundle.
+ *
  * @param {Record<string, {w:number, h:number, rle:number[]}>} payload
  * @param {{x:number, y:number, width:number, height:number}} sceneRect
  * @param {number} [maxDim] - see `decodePaintLayer`'s note; defaults consistently.
- * @returns {{layers: Record<string, import('./mask-derive.js').MaskGrid>, mismatched: string[]}}
+ * @returns {{layers: Record<string, import('./mask-derive.js').MaskGrid>,
+ *   mismatched: string[], rejected: Array<{key: string, reason: string}>}}
  */
 export function hydratePaintedMasks(payload, sceneRect, maxDim = PAINT_GRID_MAX_DIM) {
   const layers = {};
   const mismatched = [];
+  const rejected = [];
+  // A flag that is not a key→payload MAP at all (a bare string, a number, an
+  // array) is caught here rather than per-key: `Object.entries('corrupt')`
+  // would happily hand the loop seven single-character "layers" and report
+  // seven rejections for one broken flag. null/undefined stays the ordinary
+  // "this scene has no painted masks" case, not a rejection.
+  if (payload !== null && payload !== undefined && (typeof payload !== 'object' || Array.isArray(payload))) {
+    const reason = `flag is ${Array.isArray(payload) ? 'an array' : `a ${typeof payload}`}, not a {key: {w,h,rle}} map`;
+    log.warn(`painted-mask flag ignored — ${reason}. No painted masks loaded for this scene.`);
+    return { layers, mismatched, rejected: [{ key: '(payload)', reason }] };
+  }
   for (const [key, enc] of Object.entries(payload || {})) {
-    const { layer, dimensionsMatch } = decodePaintLayer(enc, sceneRect, maxDim);
+    const { layer, dimensionsMatch, rejected: reason } = decodePaintLayer(enc, sceneRect, maxDim);
+    if (reason) {
+      rejected.push({ key, reason });
+      log.warn(`painted mask "${key}" dropped — ${reason}. Every other painted mask on this scene still loads.`);
+      continue;
+    }
     layers[key] = layer;
     if (!dimensionsMatch) mismatched.push(key);
   }
-  return { layers, mismatched };
+  return { layers, mismatched, rejected };
 }
 
 /** Re-export so a painted layer can be sampled through the authority's own reader. */

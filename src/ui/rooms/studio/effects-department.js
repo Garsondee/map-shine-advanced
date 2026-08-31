@@ -96,6 +96,11 @@ function buildStudioEffectCard(model) {
       ? model.status()
       : (model.status ?? collapsedStatusLine({ enabled: model.enabled }));
   statusLine.textContent = statusText;
+  // The row is tight (icon + name + up to 3 badges + 3-4 tool buttons all
+  // share one line), so a long status genuinely does clip behind the CSS
+  // ellipsis above — a real `title` means hovering still reveals the whole
+  // thing rather than just a dead-end "…".
+  if (statusText) statusLine.title = statusText;
   nameWrap.append(name, statusLine);
   head.append(ic, nameWrap);
 
@@ -104,18 +109,25 @@ function buildStudioEffectCard(model) {
   head.append(spacer);
 
   if (typeof model.onToggleEnabled === 'function') {
+    // The status dot stays a small 9px circle (it's a glance-indicator, not
+    // a button that should visually dominate the header) — but a 9px CLICK
+    // target is real trouble to hit precisely. `.hbtn` (shell.js) wraps it
+    // in the same 24px hit box every other header tool button here uses,
+    // same trick as a checkbox's own padded label: small visual, real target.
     const enableBtn = document.createElement('button');
     enableBtn.type = 'button';
+    enableBtn.className = 'hbtn';
     enableBtn.title = model.enabled ? 'Enabled — click to turn off' : 'Disabled — click to turn on';
-    Object.assign(enableBtn.style, {
+    enableBtn.style.flex = '0 0 auto';
+    const dot = document.createElement('span');
+    Object.assign(dot.style, {
       width: '9px',
       height: '9px',
       borderRadius: '50%',
       background: model.enabled ? 'var(--ok, #4bd48c)' : 'var(--ink2, #7f97ba)',
-      border: 'none',
-      cursor: 'pointer',
-      flex: '0 0 auto',
+      display: 'block',
     });
+    enableBtn.append(dot);
     enableBtn.addEventListener('click', () => model.onToggleEnabled(!model.enabled));
     head.append(enableBtn);
   }
@@ -139,7 +151,11 @@ function buildStudioEffectCard(model) {
 
   const pinBtn = document.createElement('button');
   pinBtn.type = 'button';
-  pinBtn.title = 'Pin to top';
+  pinBtn.className = 'hbtn';
+  // State-aware, like the enable dot just above — a pinned card's own button
+  // still said "Pin to top" even though clicking it would UNpin; the label
+  // needs to describe what THIS click does, not just what the control is.
+  pinBtn.title = pinned.has(model.id) ? 'Unpin (remove from top)' : 'Pin to top';
   pinBtn.innerHTML = iconMarkup('pin');
   pinBtn.setAttribute('aria-pressed', String(pinned.has(model.id)));
   Object.assign(pinBtn.style, {
@@ -156,9 +172,11 @@ function buildStudioEffectCard(model) {
   if (typeof model.onPopOut === 'function') {
     const popBtn = document.createElement('button');
     popBtn.type = 'button';
+    popBtn.className = 'hbtn';
     popBtn.title = 'Pop out for side-by-side tuning';
     popBtn.innerHTML = iconMarkup('popout');
     popBtn.style.color = 'var(--ink2)';
+    popBtn.style.flex = '0 0 auto';
     popBtn.addEventListener('click', () => model.onPopOut());
     head.append(popBtn);
   }
@@ -172,8 +190,10 @@ function buildStudioEffectCard(model) {
     // Defaults to the original wording so every already-shipped card (water
     // included) is unaffected.
     paintBtn.title = `${model.paintVerb ?? 'Paint'} ${model.title} on the map`;
+    paintBtn.className = 'hbtn';
     paintBtn.innerHTML = iconMarkup('brush');
     paintBtn.style.color = 'var(--ink2)';
+    paintBtn.style.flex = '0 0 auto';
     paintBtn.addEventListener('click', () => model.onPaint());
     head.append(paintBtn);
   }
@@ -263,14 +283,47 @@ function buildStudioEffectCard(model) {
   }
   card.append(foh);
 
-  // ---- Advanced: ROH, categorised -------------------------------------------
+  // ---- extra: opaque, always-visible content (UI parity plan, phase 5a) ---
+  // The door `diag/effect-controls.js#buildEffectCard` has always had, for
+  // content that doesn't fit the flat param-control shape — a hand-built
+  // debug-channel <select>, a preset row that isn't a plain enum, etc.
+  // Right after the FOH strip, same position that file uses.
+  //
+  // ⚠️ REAL BUG, CAUGHT LIVE (author console trace, first Studio open after
+  // this round's UI-parity work: "TypeError: function is not iterable") —
+  // `resolveExtra` below, not a bare `model.extra ?? []`. Both a THUNK
+  // (`() => HTMLElement[]`, e.g. Wind's card: `extra: () =>
+  // MapShine.debug.buildEffectAttachments('wind')`, built fresh every
+  // render so a late-registered {effect:'wind'} diagnostic shows up without
+  // a stale card) AND a plain ARRAY (water's own card factory already
+  // re-runs its whole buildFn fresh every render, so a thunk would be
+  // redundant ceremony there — `extra: [buildWaterDebugSelect()]`) are
+  // real, intentional shapes in actual use today; this typedef only ever
+  // documented the array form, and iterating a bare function throws exactly
+  // this error.
+  const resolveExtra = (v) => (typeof v === 'function' ? (v() ?? []) : (v ?? []));
+  for (const el of resolveExtra(model.extra)) card.append(el);
+
+  // ---- Advanced: ROH, categorised, + extraAdvanced -------------------------
   const roh = rohGroups(model.schema, model.fohKeys);
-  if (roh.length > 0) {
+  const extraAdvanced = resolveExtra(model.extraAdvanced);
+  if (roh.length > 0 || extraAdvanced.length > 0) {
     const details = document.createElement('details');
     Object.assign(details.style, { border: '1px solid var(--line)', borderRadius: '7px', background: 'var(--bg2)' });
     const summary = document.createElement('summary');
-    summary.style.cssText = 'cursor:pointer; padding:5px 8px; font-size:.7rem; font-weight:600; color:var(--ink2)';
-    summary.textContent = `▸ Advanced — ${roh.reduce((n, g) => n + g.keys.length, 0)} controls`;
+    summary.style.cssText =
+      'cursor:pointer; padding:5px 8px; font-size:.7rem; font-weight:600; color:var(--ink2); display:flex; align-items:center; gap:5px';
+    // A `.msa-chev` span, not a `▸` baked into textContent — `<summary>`
+    // already draws its OWN native disclosure triangle (suppressed via
+    // shell.js's `summary::-webkit-details-marker` rule, but only once
+    // something suppresses it); before that CSS existed this rendered as
+    // TWO triangles side by side, the browser's plus this hand-typed one.
+    // Same shape diag/effect-controls.js's own `.msa-chev` already solved —
+    // ported the class name so the two panels' Advanced sections match.
+    const chev = document.createElement('span');
+    chev.className = 'msa-chev';
+    chev.textContent = '▸';
+    summary.append(chev, document.createTextNode(`Advanced — ${roh.reduce((n, g) => n + g.keys.length, 0)} controls`));
     details.append(summary);
     const body = document.createElement('div');
     Object.assign(body.style, { display: 'flex', flexDirection: 'column', padding: '2px 8px 8px' });
@@ -290,6 +343,10 @@ function buildStudioEffectCard(model) {
       }
       body.append(wrap);
     }
+    // Opaque advanced-only content (specular's 3 shimmer-layer strips is
+    // the canonical case — see diag/effect-controls.js's own JSDoc) — after
+    // the categorised ROH groups, same position the old shell uses.
+    for (const el of extraAdvanced) body.append(el);
     details.append(body);
     card.append(details);
   }
@@ -323,6 +380,19 @@ function buildStudioEffectCard(model) {
  * @property {string} [paintVerb] - overrides the paint button's "Paint" verb
  *   (e.g. 'Place' for an anchor-placement onPaint rather than a mask brush).
  * @property {string|(()=>string)} [status]
+ * @property {HTMLElement[]|(()=>HTMLElement[])} [extra] - opaque content that
+ *   doesn't fit the flat param-control shape (a hand-built debug-channel
+ *   select, etc.), rendered right after the FOH strip, always visible. UI
+ *   parity plan, phase 5a — mirrors diag/effect-controls.js#buildEffectCard's
+ *   own `extra`. A plain array when the model factory itself already runs
+ *   fresh every render (water's own card); a thunk when the elements need
+ *   building fresh independent of that (Wind's card, built from whatever
+ *   {effect:'wind'} diagnostics are registered right now) —
+ *   `buildStudioEffectCard` resolves either.
+ * @property {HTMLElement[]|(()=>HTMLElement[])} [extraAdvanced] - same idea,
+ *   inside the Advanced disclosure after the categorised ROH groups
+ *   (specular's 3 shimmer-layer strips is the canonical case). Mirrors that
+ *   file's own `extraAdvanced`.
  */
 
 /**

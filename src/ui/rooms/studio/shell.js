@@ -143,6 +143,13 @@ ${ACCENT_VARS.map(
 #${ROOM_ID} .deptscroll{flex:1; overflow-y:auto; overflow-x:hidden; padding:16px 18px 24px; scrollbar-width:thin}
 #${ROOM_ID} .stagePlaceholder{margin:auto; text-align:center; color:var(--ink2); font-size:.85rem; max-width:360px}
 #${ROOM_ID} .stagePlaceholder b{color:var(--ink1); display:block; margin-bottom:6px; font-size:1rem}
+#${ROOM_ID} summary{list-style:none}
+#${ROOM_ID} summary::-webkit-details-marker{display:none}
+#${ROOM_ID} .msa-chev{display:inline-block; transition:transform var(--t-micro); opacity:.55}
+/* \`> summary >\` and not a descendant selector — same trap diag/debug-panel-
+   controls.js already documents: a descendant rule would rotate a NESTED
+   details' own chevron just because an ANCESTOR details is open. */
+#${ROOM_ID} details[open] > summary .msa-chev{transform:rotate(90deg)}
 `.trim();
   document.head.appendChild(el);
 }

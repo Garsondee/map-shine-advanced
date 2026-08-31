@@ -168,15 +168,13 @@ export function renderCuesDepartment(container, ctx) {
       downBtn.title = 'Move down';
       downBtn.textContent = '▼';
       for (const b of [upBtn, downBtn]) {
+        // `.hbtn` (shell.js, shared by every icon-only tool in this room)
+        // for a real click target — the previous 18×14px box, half the
+        // room's own header-button size, was a real miss to land a click on.
+        b.className = 'hbtn';
         Object.assign(b.style, {
-          width: '18px',
-          height: '14px',
-          display: 'grid',
-          placeItems: 'center',
-          background: 'none',
-          border: 'none',
-          color: 'var(--ink2)',
-          cursor: 'pointer',
+          width: '20px',
+          height: '18px',
           fontSize: '.6rem',
           lineHeight: '1',
         });

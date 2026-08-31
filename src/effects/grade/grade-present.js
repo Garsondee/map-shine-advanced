@@ -25,7 +25,10 @@
  *
  * Ships neutral: env grade identity, artistic grade identity, tone map `none`,
  * LUT strength 0 — the whole thing is `present(scene.lit)` unchanged until the
- * Colour Grade effect resolves its AgX default.
+ * Colour Grade effect resolves its own params. As of 2026-08-31 its resolved
+ * `toneMapping` default is ALSO `'none'` (grade.js), so on a fresh scene this
+ * construction-time state and the cascade's resolved state already agree —
+ * no rebuild fires until an author actually picks a film response.
  *
  * @module effects/grade/grade-present
  */

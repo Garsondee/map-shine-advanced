@@ -62,7 +62,7 @@ building on any of this.
 | **29** | **Only 3/20 painted fires produced flames (sensitivity too strict for real small/faint paint); fixing that made fires read diffuse with no hot core (cohesion rebuilt on connected-component identity)** | fire / mask sensitivity / cohesion | `LIVE` — author-confirmed 2026-08-17, `maskSensitivity` default 0.2→0.05, `flameCohesion` default 0→0.5 |
 | **30** | **Floor switches can freeze the interface for over a minute with no preload ever attempted — a built GPU pipeline warm-up mechanism was never wired to the floor-switch path, and two real UI triggers skip prepare entirely** | floor transitions / GPU pipelines / interface seam | `BUILT (unverified)` 2026-08-24 — Node lint/format/full test suite green (11,939 tests); needs the author's own eyes on a real floor switch |
 | **31** | **Clearing a painted mask and Save didn't stick — the old paint came back after a reload** | paint mode / persistence | `BUILT (unverified)` 2026-08-31 |
-| **32** | **Opening a door blacked out the ENTIRE map, not just the door's own sliver — the player's own token vanished too** | vision/fog / door-graphics / renderer state | `BUILT (unverified)` 2026-08-31 |
+| **32** | **Opening a door blacked out the ENTIRE map, not just the door's own sliver — the player's own token vanished too** | vision/fog / door-graphics / renderer state | `LIVE` ✅ — author-confirmed 2026-08-31 |
 
 ---
 
@@ -2944,8 +2944,10 @@ test can't distinguish from "the whole flag got nuked."
 
 ## 32. Opening a door blacked out the ENTIRE map, not just the door's own sliver — the player's own token vanished too
 
-**Status:** `BUILT (unverified)` · **Reported:** 2026-08-31 · **Docs:**
-this file, `keyhole-door-fog-reveal-sync` (the feature this broke),
+**Status:** `LIVE` ✅ — author-confirmed 2026-08-31, same session, on a real
+door with a real controlled token: blackout is gone, the reveal now fades
+smoothly. **Reported:** 2026-08-31 · **Docs:** this file,
+`keyhole-door-fog-reveal-sync` (the feature this broke),
 `keyhole-vision-fog-direction` (the pipeline it lives in)
 
 ### Symptom, in the author's own words
@@ -3037,3 +3039,23 @@ and watch the newly-exposed sliver fade in over the door's own swing
 instead of the whole screen going black — the token should stay visible
 throughout, and everything already-revealed before the click should never
 dim at all.
+
+**Confirmed, same session, 2026-08-31:** *"Confirmed that it's slowly
+fading in the visibility which is a nice effect and we should keep it."*
+Blackout gone, fade works as coded. → `LIVE`.
+
+### Follow-up (NOT this bug — a real design gap in the feature itself)
+
+Same message, immediately after confirming: *"but it's not the effect I
+thought we'd be getting... turn the geometry/texture of the doors into
+vision blockers and then as the doors swing open they partially reveal
+what lies beyond them."* The fade this bug fixed is a TIME-based
+approximation (Foundry's before/after LOS polygons, cross-faded over the
+door's swing duration) — it looks similar but is not actually gated by the
+door leaf's real swing angle. What's wanted is the door leaf's own
+geometry acting as a genuine, real-time vision occluder. This is a real
+follow-on feature, not a defect in #32's fix — tracked separately, see
+`keyhole-door-fog-reveal-sync` for the design discussion (it revives
+exactly the "reimplement occlusion locally" question the original
+2026-08-27 redesign deliberately steered away from, now with the author's
+own direct steer to reconsider it).

@@ -506,118 +506,17 @@ export function run(t) {
     Math.abs(warmDim[0] / warmDim[1] - 0.6 / 0.4) < 1e-9 && Math.abs(warmDim[1] / warmDim[2] - 0.4 / 0.2) < 1e-9
   );
 
-  // ══════════════════════════════════════════════════════════════════════
-  // SHEEN/GLINT CONTRAST SURVIVES THE GLOBAL TONEMAP — 2026-07-27.
-  // ══════════════════════════════════════════════════════════════════════
-  // The author's report: *"the darker parts are being boosted in brightness
-  // much like the brighter parts, which leads to a washed out ugly look
-  // instead of a sharper, high contrast result."* Measuring `sheen`/`glint`
-  // in ISOLATION (as the assertions above do for other terms) cannot see this
-  // bug: the composite's own values looked fine on their own. The problem
-  // only appears once `neutralToneMapping` — the SAME curve `grade-present.js`
-  // runs on every frame by default — acts on `scene.lit` (base + shine
-  // together). This is that formula's CPU twin, transcribed from
-  // `three.webgpu.js`'s own `neutralToneMapping` (searchable there verbatim),
-  // so this test measures what actually reaches the SCREEN, not an
-  // intermediate this effect never gets to see the fate of.
-  const neutralToneMap = (rgb) => {
-    const StartCompression = 0.8 - 0.04;
-    const Desaturation = 0.15;
-    let [r, g, b] = rgb;
-    const x = Math.min(r, g, b);
-    const offset = x < 0.08 ? x - 6.25 * x * x : 0.04;
-    r -= offset;
-    g -= offset;
-    b -= offset;
-    const peak = Math.max(r, g, b);
-    if (peak < StartCompression) return [r, g, b];
-    const d = 1 - StartCompression;
-    const newPeak = 1 - (d * d) / (peak + d - StartCompression);
-    const scale = newPeak / peak;
-    const desat = 1 - 1 / (Desaturation * (peak - newPeak) + 1);
-    return [r * scale, g * scale, b * scale].map((c) => c + (newPeak - c) * desat);
-  };
-  const luma3 = (rgb) => rgb[0] * LUMA_709[0] + rgb[1] * LUMA_709[1] + rgb[2] * LUMA_709[2];
-
-  /** One point's post-tonemap luma: a base scene pixel plus this effect's OWN
-   * sheen + glint, using the REAL exported ceiling function and constants —
-   * never hand-typed numbers — so this test tracks the actual shipped values.
-   * @param {number} tintLuma @param {number} incidentAmt @param {number[]} base
-   * @param {number} shimmer @returns {number} */
-  function litMetalLuma(tintLuma, incidentAmt, base, shimmer) {
-    const tintRgb = [tintLuma, tintLuma * 0.86, tintLuma * 0.23]; // a representative gold hue
-    const sheenRawL = tintLuma * incidentAmt;
-    const sheenScale = sheenRawL > 1e-6 ? reinhardCeiling(sheenRawL, SPECULAR_SHEEN_CEILING) / sheenRawL : 0;
-    const sheen = tintRgb.map((c) => c * incidentAmt * sheenScale);
-    const glintRawL = tintLuma * shimmer * SPECULAR_DEFAULT_SHIMMER_GAIN * incidentAmt;
-    const glintScale = glintRawL > 1e-6 ? reinhardCeiling(glintRawL, SPECULAR_GLINT_CEILING) / glintRawL : 0;
-    const glint = tintRgb.map((c) => c * shimmer * SPECULAR_DEFAULT_SHIMMER_GAIN * incidentAmt * glintScale);
-    const combined = base.map((c, i) => c + sheen[i] + glint[i]);
-    return luma3(neutralToneMap(combined));
-  }
-
-  // Two points on the SAME metal, SAME lighting — differing only in where the
-  // shimmer pattern sits: 0.025 is its typical BACKGROUND value (see
-  // `shimmer`'s own combine formula — mostly the small cellular trace), 0.8 a
-  // genuine PATTERN PEAK. This is exactly "the metal area's darker parts" vs
-  // "brighter parts" the author described, isolated from scene lighting
-  // (already covered above) and from the mask's own painted variation.
-  //
-  // ⚠️ `incidentAmt` COMPOSES THE REAL LIGHTING CHAIN — CHANGED ROUND 18
-  // (2026-08-03). This used to be a flat, hand-picked `0.8`, chosen back in
-  // Round 10 BEFORE `steepenIncidentRgb` existed, when `incidentAmt` WAS
-  // simply `incident` with no further curve — 0.8 was a fair stand-in for
-  // "a well-lit interior" at the time. It no longer is: feeding the SAME
-  // "well-lit" illum reading (0.866, the author's own Round 8 measurement,
-  // used elsewhere in this file) through the REAL current chain
-  // (`incidentFromIllumRgb` → `steepenIncidentRgb`) now yields `shineResponse
-  // ≈ 0.395`, not 0.8 — the flat stand-in was quietly testing a MUCH
-  // brighter point than "well-lit" now means. Composing the real chain
-  // keeps this test honest about what a realistic scene point actually
-  // produces, independent of whatever this file's OTHER constants do next.
-  const goldBase = [0.35, 0.3, 0.15];
-  const wellLitIncidentAmt = steepenIncidentRgb(
-    incidentFromIllumRgb([0.866, 0.866, 0.866]),
-    LUMA_709,
-    SPECULAR_INCIDENT_STEEPNESS
-  )[0];
-  const troughLuma = litMetalLuma(0.7, wellLitIncidentAmt, goldBase, 0.025);
-  const peakLuma = litMetalLuma(0.7, wellLitIncidentAmt, goldBase, 0.8);
-  const baseLumaAlone = luma3(neutralToneMap(goldBase));
-
-  // ⚠️ ROUND 18→19 (2026-08-03): thresholds sagged to 1.4x when `sheenCeiling`
-  // briefly shipped at 1 (Round 18's live-confirmed brightness fix traded away
-  // most of Round 10's contrast — see that round's own memory account). The
-  // author's next live look confirmed the concern directly: *"the base shine
-  // ceiling should be lower, make it very low."* Reverted to the ORIGINAL
-  // Round-10 value (0.15) — not a fresh guess — and thresholds restored to
-  // their original, stricter bar: measured on this composed scenario (Round
-  // 18's realistic-incidentAmt fix still applies), ratio is back to ≈2.00,
-  // clearing 1.8x comfortably, with `glintCeiling`/`shimmerGain` left at
-  // their Round 18 values (28/2.2) since only the sheen ceiling was named.
-  ok(
-    'the pattern survives to the SCREEN with real contrast (peak > 1.8x trough, post-tonemap)',
-    peakLuma / troughLuma > 1.8
-  );
-  ok(
-    "the background (no shimmer) reading stays close to the base art's own brightness — dark parts stay dark",
-    troughLuma < baseLumaAlone * 2
-  );
-  ok('…while the peak is still allowed to shine well past the base', peakLuma > baseLumaAlone * 2.5);
-
-  // THE REGRESSION THIS GUARDS: the OLD ceiling (1.4) measured on this exact
-  // scenario reached the screen at a meaningfully lower ratio. If a future
-  // change raises `sheenCeiling` back up without re-checking against the
-  // tonemap, this is the assertion that catches it — same shape as Round 10's
-  // original guard, just composed against the realistic incidentAmt now.
-  const oldSheenScale = (l) => (l > 1e-6 ? reinhardCeiling(l, 1.4) / l : 0);
-  const oldTrough = (() => {
-    const l = 0.7 * wellLitIncidentAmt;
-    const s = [0.7, 0.6, 0.16].map((c) => c * wellLitIncidentAmt * oldSheenScale(l));
-    const gl = 0.7 * 0.025 * 4 * wellLitIncidentAmt;
-    const gScale = gl > 1e-6 ? reinhardCeiling(gl, 16) / gl : 0;
-    const g = [0.7, 0.6, 0.16].map((c) => c * 0.025 * 4 * wellLitIncidentAmt * gScale);
-    return luma3(neutralToneMap(goldBase.map((c, i) => c + s[i] + g[i])));
-  })();
-  ok('the fix is a REAL improvement over the old ceiling on the same scenario', troughLuma < oldTrough);
+  // A "sheen/glint contrast survives the tonemap at a well-lit interior
+  // point" scenario lived here (2026-07-27 → 2026-08-31). RETIRED, not
+  // silently deleted: `SPECULAR_INCIDENT_STEEPNESS` went to 200 (see this
+  // file's own header), and at that steepness a well-lit-but-not-directly-lit
+  // point (illum 0.866, this scenario's own test input) produces
+  // `incidentAmt ≈ 4.8e-29` — sheen and glint both scale by that, so trough,
+  // peak, and the unlit base luma all come out numerically identical. That's
+  // not a contrast regression to chase; it's the new, author-confirmed
+  // design: shine is now near-binary, meaningfully present only right next to
+  // an actual light source, silent everywhere else. Live-confirmed
+  // 2026-08-31 ("specular looks good with the 200 constant") — no scenario
+  // like this one is meaningful to assert against any more, since "well-lit
+  // ambient" and "unlit" now produce the same reading by design.
 }

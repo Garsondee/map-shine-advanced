@@ -462,8 +462,17 @@ export function steepenIncidentRgb(rgb, lumaWeights, steepness) {
  * round above. This is now well past 3, i.e. MORE aggressive suppression of
  * dim/shadowed metal than any earlier round shipped — only genuinely bright
  * points (candles, point lights, direct sun) keep meaningful shine.
+ *
+ * ⚠️ RAISED 7.15 → 200 — a further live-tuned round, author-confirmed
+ * 2026-08-31 ("the darkness response curve was setup and decided by me. It
+ * stays, it's correct") after this constant had drifted out of sync with
+ * `SPECULAR_PARAMS.incidentSteepness.default` (specular.js), which had
+ * already moved to 200 in the working tree. This constant was the stale
+ * side, not the param. See `specular-pattern.test.mjs`'s own
+ * `litMetalLuma` scenario for the recomputed contrast thresholds this
+ * forced — a jump this large changes what "well-lit" produces there too.
  */
-export const SPECULAR_INCIDENT_STEEPNESS = 7.15;
+export const SPECULAR_INCIDENT_STEEPNESS = 200;
 
 /**
  * THE KNEE — the incident-light level at which metal reaches its FULL shine.

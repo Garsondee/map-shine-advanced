@@ -128,7 +128,17 @@ export function readPaintContext() {
 export async function savePaintedMasks(payload) {
   const c = activeCanvas();
   if (!c || !c.scene) return { ok: false, reason: 'no active scene' };
-  await c.scene.setFlag(MODULE_ID, PAINT_FLAG, payload);
+  // setFlag deep-MERGES (Foundry's mergeObject), it does not replace. A key
+  // missing from `payload` — e.g. a layer the author just fully Cleared,
+  // which serializePaintedMasks deliberately omits ("store only what
+  // differs") — would otherwise survive untouched in the old flag value
+  // forever and reappear on the next scene load. Unset first so the flag
+  // always ends up EQUAL to `payload`, never a union of `payload` and
+  // whatever used to be there.
+  await c.scene.unsetFlag(MODULE_ID, PAINT_FLAG);
+  if (Object.keys(payload).length > 0) {
+    await c.scene.setFlag(MODULE_ID, PAINT_FLAG, payload);
+  }
   return { ok: true };
 }
 

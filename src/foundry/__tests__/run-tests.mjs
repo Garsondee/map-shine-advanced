@@ -13,6 +13,7 @@ import { run as runCanvasCompositing } from './canvas-compositing.test.mjs';
 import { run as runCanvasLifecycle } from './canvas-lifecycle.test.mjs';
 import { run as runDrawListDocuments } from './draw-list-documents.test.mjs';
 import { run as runMaskDiscovery } from './mask-discovery.test.mjs';
+import { run as runPaintAdapter } from './paint-adapter.test.mjs';
 import { run as runPixiProxyTextures } from './pixi-proxy-textures.test.mjs';
 import { run as runGameTime } from './game-time.test.mjs';
 import { run as runCombatState } from './combat-state.test.mjs';
@@ -76,6 +77,7 @@ const suites = [
   ['canvas-lifecycle', runCanvasLifecycle],
   ['draw-list-documents', runDrawListDocuments],
   ['mask-discovery', runMaskDiscovery],
+  ['paint-adapter', runPaintAdapter],
   ['pixi-proxy-textures', runPixiProxyTextures],
   ['game-time', runGameTime],
   ['combat-state', runCombatState],

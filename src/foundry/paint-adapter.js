@@ -128,18 +128,39 @@ export function readPaintContext() {
 export async function savePaintedMasks(payload) {
   const c = activeCanvas();
   if (!c || !c.scene) return { ok: false, reason: 'no active scene' };
+  const previous = c.scene.getFlag(MODULE_ID, PAINT_FLAG) ?? {};
   // setFlag deep-MERGES (Foundry's mergeObject), it does not replace. A key
   // missing from `payload` — e.g. a layer the author just fully Cleared,
   // which serializePaintedMasks deliberately omits ("store only what
   // differs") — would otherwise survive untouched in the old flag value
-  // forever and reappear on the next scene load. Unset first so the flag
-  // always ends up EQUAL to `payload`, never a union of `payload` and
-  // whatever used to be there.
-  await c.scene.unsetFlag(MODULE_ID, PAINT_FLAG);
-  if (Object.keys(payload).length > 0) {
-    await c.scene.setFlag(MODULE_ID, PAINT_FLAG, payload);
+  // forever and reappear on the next scene load. unsetFlag first makes the
+  // write a true replace instead of a merge, but ONLY pay for that (and its
+  // failure window, below) when a key is actually being removed — the
+  // common case (nothing fully cleared this save) stays a single setFlag,
+  // exactly as safe as before this ever needed fixing.
+  const needsDeletion = Object.keys(previous).some((key) => !(key in payload));
+  try {
+    if (needsDeletion) await c.scene.unsetFlag(MODULE_ID, PAINT_FLAG);
+    if (Object.keys(payload).length > 0) {
+      await c.scene.setFlag(MODULE_ID, PAINT_FLAG, payload);
+    }
+    return { ok: true };
+  } catch (err) {
+    // A rejected setFlag here (permission, payload too large, connection
+    // drop) after unsetFlag already succeeded would otherwise leave the
+    // scene with NO painted masks at all — every floor, every kind, not
+    // just the one this save touched. Best-effort restore rather than
+    // silently losing previously-saved work; if the restore itself fails
+    // there is nothing more that can safely be done from here.
+    if (needsDeletion && Object.keys(previous).length > 0) {
+      try {
+        await c.scene.setFlag(MODULE_ID, PAINT_FLAG, previous);
+      } catch (_restoreErr) {
+        /* best-effort only */
+      }
+    }
+    return { ok: false, reason: String(err?.message || err) };
   }
-  return { ok: true };
 }
 
 /** Read the painted-mask payload from the active scene's flags (or null). */

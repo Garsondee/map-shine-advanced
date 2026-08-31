@@ -146,6 +146,43 @@ export function createFluidRegistration({
  * `authoredStatusForItem`, and this seam now uses it for every item on the
  * floor, background and tile alike.
  *
+ * ============================================================================
+ * ⚠️ IN-APP PAINTED MASKS: EVALUATED 2026-08-31, DELIBERATELY NOT WIRED
+ * ============================================================================
+ * `authoredStatusForItem` is file-discovery only, so a mask painted with the
+ * in-app brush (`ui/paint-mode.js` → `mask-authority.js#ingestPaintedMask`)
+ * never appears in this seam's output, no entry is created, no mesh is built,
+ * and nothing errors — the same silence the tile-vs-floor bug above produced.
+ * Three blockers, each independently disqualifying:
+ *
+ *   1. THE ≤512 GRID WAS ALREADY REJECTED FOR THIS EXACT EFFECT, ON PURPOSE.
+ *      `fluid-surface-subsystem.js#loadAndBake` runs the extractor on the
+ *      FILE's pixels and says why in one line — *"Fluid.md correction #2 — the
+ *      ≤512 derivation grid merges tubes a tube's width apart"* — then
+ *      downsamples by MAX rather than mean so a one-pixel tube survives.
+ *      Feeding the painted derivation grid in here re-introduces precisely the
+ *      bug that correction fixed, and it would do so invisibly: a merged tube
+ *      net still bakes, still flows, and still looks plausible.
+ *   2. FLUID IS PER-ITEM; PAINTED INGESTS ARE PER-FLOOR. Every entry below
+ *      carries the HOST's own `corners` and `renderOrder`, the mesh is that
+ *      item's quad sampled in `uv()` (so a rotated tile comes out right), and
+ *      it draws at `hostRenderOrder - magnitude` — BELOW its host, because the
+ *      host's art has alpha cutouts at the tube shape that the glow shows
+ *      through. `ingestPaintedMask` is keyed `${floorIndex}/${kindId}` over
+ *      the whole scene rect and has no host at all: there is no quad to build,
+ *      no rotation to honour, and no cutout to shine through. A synthetic
+ *      floor-wide quad behind the background would be invisible by
+ *      construction.
+ *   3. THE VISIBLE SILHOUETTE IS A GPU TEXTURE FETCH. `fluid-render.js` gates
+ *      the tube on `smoothstep(EDGE0, EDGE1, maskTexNode.r)` against the
+ *      full-resolution file; a 512-texel grid is ~20 world px per texel on the
+ *      author's map, so a glass tube is one or two texels wide. The tube's
+ *      EDGE is the effect (`feedback_sdf_does_not_draw_the_edge`).
+ *
+ * Unblocking this needs a per-item painted-mask concept and a full-resolution
+ * painted source — a real design, not a seam swap. Until then the Painter
+ * department's own tile states that this effect reads the file only.
+ *
  * @param {object} args
  * @param {object} args.maskAuthority - `scene/mask-authority.js`'s instance.
  * @param {() => Array<object>} args.getItems - the scene's current item list. A

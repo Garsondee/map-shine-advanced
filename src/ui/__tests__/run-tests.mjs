@@ -9,12 +9,14 @@
  *   node ./node_modules/esbuild/bin/esbuild src/ui/__tests__/run-tests.mjs \
  *     --bundle --format=esm --platform=node --outfile=<tmp>.mjs && node <tmp>.mjs
  */
-import { run as runAstrolabe } from './astrolabe.test.mjs';
+import { run as runAstrolabe } from './astrolabe-geometry.test.mjs';
 import { run as runLoadProgress } from './load-progress.test.mjs';
 import { run as runPerfProgressOverlay } from './perf-progress-overlay.test.mjs';
 import { run as runFloorTransition } from './floor-transition.test.mjs';
 import { run as runTokens } from './tokens.test.mjs';
 import { run as runAstrolabeDial } from './astrolabe-dial.test.mjs';
+import { run as runPainterDepartment } from './painter-department.test.mjs';
+import { run as runPaintMode } from './paint-mode.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -56,6 +58,12 @@ const suites = [
   ['floor-transition', runFloorTransition],
   ['tokens', runTokens],
   ['astrolabe-dial', runAstrolabeDial],
+  ['painter-department', runPainterDepartment],
+  // LAST on purpose: paint-mode installs a `document` shim for its toolbar
+  // half. It removes it again, but `floor-transition` above asserts the
+  // no-DOM path, so ordering it after that suite costs nothing and removes
+  // the only way a leak could ever be mistaken for a passing assertion.
+  ['paint-mode', runPaintMode],
 ];
 
 for (const [name, fn] of suites) {

@@ -1289,12 +1289,49 @@ function install() {
   // describes: the painter's Floor stepper drives `setVtPanViewerFloor`
   // directly and has no other way to keep fire/candle/lightning/doors
   // pointed at the floor it just switched to.
+  /**
+   * `${kindId}::${floorIndex}` for every painted layer that currently has at
+   * least one non-zero texel — the Painter department's own "you painted here"
+   * signal. Session-scoped and additive, exactly like the painter's own layer
+   * set: it answers what the BRUSH has done, which is a different question
+   * from `maskAuthority.authoredStatus`'s "was a mask file discovered".
+   * @type {Set<string>}
+   */
+  const paintedLayerKeys = new Set();
+
   // THE BRUSH→RENDER BRIDGE's boot.js half (2026-08-18) — every in-app
   // painted layer, fed straight to maskAuthority.ingestPaintedMask so the
-  // SAME lazy recompute every other mask consumer already relies on picks
-  // it up on its own next read (fire/water/window/specular/fluid/
-  // vegetation all already read maskAuthority.getDerived(kindId,
-  // floorIndex) — none of them needed a single line changed for this).
+  // SAME lazy recompute every mask consumer that reads a DERIVED GRID relies
+  // on picks it up on its own next read.
+  //
+  // ⚠️ CORRECTED 2026-08-31 (the painting-system audit). This comment used to
+  // claim *"fire/water/window/specular/fluid/vegetation all already read
+  // maskAuthority.getDerived(kindId, floorIndex) — none of them needed a
+  // single line changed for this"*. **That was false for four of the six**,
+  // and `ui/rooms/studio/painter-department.js` shipped the same claim as
+  // user-facing copy. What is actually true, kind by kind:
+  //
+  //   fire      — reads getDerived('fire'). Paint renders. ✔
+  //   outdoors  — reads getDerived('outdoors'). Paint renders. ✔ (no tile)
+  //   water     — the BODY PACK reads getDerived('water'), so paint does reach
+  //               the flood/shore-distance field; but the visible surface mesh
+  //               is hard-gated on a discovered FILE url
+  //               (`water-surface-subsystem.js#refreshVisibility`,
+  //               `bakedReady = … && !!loadedUrl && …`). Paint alone draws no
+  //               water. PARTIAL.
+  //   specular  — resolves its texture from authoredStatus(...).url only.
+  //   window    — same.
+  //   fluid     — same (authoredStatusForItem), and its tube-net extractor runs
+  //               on the FILE's pixels by an explicit earlier correction.
+  //   tree/bush — NOT `rasterize: true` in scene/mask-catalog.js at all, so
+  //               `sourcesFor` is never called for them and the grid stored
+  //               below is composited by nothing. A painted canopy is inert.
+  //   shadow    — likewise not rasterized, and no effect reads it.
+  //
+  // So `ingestPaintedMask` accepts every kind, and for five of the nine the
+  // grid it stores is read by nobody. See each gated consumer's own deferral
+  // note (specular/window/fluid surface subsystems, and the vegetation URL
+  // block further down this file) for why wiring them is not a small change.
   function ingestPaintedLayers(layersByKey) {
     for (const [key, layer] of Object.entries(layersByKey ?? {})) {
       const sep = key.lastIndexOf('::');
@@ -1304,6 +1341,19 @@ function install() {
       if (!Number.isFinite(floorIndex)) continue;
       try {
         maskAuthority.ingestPaintedMask(floorIndex, kindId, layer);
+        // WHAT THE BRUSH ACTUALLY PUT DOWN, recorded so the Painter
+        // department can tell "you painted this and it renders" apart from
+        // "you painted this and nothing reads it" — the silent failure this
+        // audit was opened for. Keyed in the painter's OWN `${kind}::${floor}`
+        // format (ui/paint-mode.js#keyOf), reused rather than re-derived.
+        //
+        // NON-EMPTY, not merely present: paint-mode's save() re-ingests every
+        // in-memory layer including painted-empty ones, and merely SELECTING a
+        // kind in its dropdown creates an all-zero layer for it. A key added on
+        // presence alone would report "painted" for a kind never touched. The
+        // scan early-exits on the first painted texel, and only runs on Save.
+        if (layer?.data?.some?.((v) => v > 0)) paintedLayerKeys.add(key);
+        else paintedLayerKeys.delete(key);
       } catch (err) {
         log.error(`painted-mask ingest failed for '${key}':`, err);
       }
@@ -6345,14 +6395,42 @@ function install() {
   }
 
   /**
-   * Every effect that declares `authoring.paint`, with per-tile mask-found
-   * status for the floor you are CURRENTLY viewing — the PAINTER
-   * department's own tile grid (U4). Read fresh on every call, never
-   * cached: a cached list would report whatever floor was active the last
-   * time the department opened, forever.
-   * @returns {{id: string, title: string, suffixes: string[], found: boolean}[]}
+   * Every effect that declares `authoring.paint`, with per-tile mask status
+   * for the floor you are CURRENTLY viewing — the PAINTER department's own
+   * tile grid (U4). Read fresh on every call, never cached: a cached list
+   * would report whatever floor was active the last time the department
+   * opened, forever.
+   *
+   * ⚠️ `found` AND `painted` ARE TWO DIFFERENT FACTS, DELIBERATELY NOT MERGED
+   * (2026-08-31, the painting-system audit). `found` is unchanged: "discovery
+   * located a mask FILE beside this floor's background art". `painted` is new:
+   * "the in-app brush has laid down at least one non-zero texel here this
+   * session". Folding the second into the first was the tempting one-line
+   * 'fix' and would have been the WORSE lie — for five of the nine mask kinds
+   * a painted grid reaches no renderer at all (see `ingestPaintedLayers`'s own
+   * comment for the kind-by-kind account), so a merged flag would have turned
+   * a green "authored on this floor" tick on for content that draws nothing.
+   * Kept apart, `painter-department.js` can say the true thing instead:
+   * *painted here, but this effect reads only the file.*
+   *
+   * `kinds` rides along so that same file can key its per-kind verdict off the
+   * manifest's own declaration rather than re-deriving the effect→kind mapping
+   * (vegetation's tree+bush pairing lives in `effects/vegetation.js` and must
+   * not be copied into the UI).
+   *
+   * ⚠️ KNOWN, PRE-EXISTING, OUT OF SCOPE HERE: `found` reads
+   * `authoredStatus`, which resolves this level's BACKGROUND item only — a
+   * mask hosted on a TILE reads `false`. `boot.js`'s own fluid report already
+   * names that gap (*"a floor-keyed mask lookup cannot see a tile's file"*).
+   * Fixing it needs a per-floor any-host door the authority does not expose
+   * yet; `floorsWithAuthored` is not it, because it folds painted content in
+   * and would re-create exactly the conflation this doc block just refused.
+   *
+   * @returns {{id: string, title: string, suffixes: string[], kinds: string[],
+   *   found: boolean, painted: boolean}[]}
    */
   function listPaintableEffects() {
+    const floorIndex = activeFloorContext?.floorIndex;
     return effectRegistry
       .list()
       .filter((m) => m.authoring?.paint)
@@ -6362,7 +6440,8 @@ function install() {
         const found = kinds.some(
           (k) => maskAuthority.authoredStatus(activeFloorContext?.levelId, k)?.source === 'authored'
         );
-        return { id: m.id, title: m.title ?? m.id, suffixes, found };
+        const painted = Number.isFinite(floorIndex) && kinds.some((k) => paintedLayerKeys.has(`${k}::${floorIndex}`));
+        return { id: m.id, title: m.title ?? m.id, suffixes, kinds, found, painted };
       });
   }
 
@@ -10232,6 +10311,37 @@ function install() {
     // Foregrounds/roofs are excluded — V2's own TreeEffectV2/BushEffectV2
     // never populated from foreground art either, and "a canopy overlay on a
     // roof texture" has no obvious meaning to preserve accidentally.
+    //
+    // ============================================================================
+    // ⚠️ PAINTED VEGETATION: EVALUATED 2026-08-31, DELIBERATELY NOT WIRED
+    // ============================================================================
+    // The in-app painter offers `tree` and `bush` (its own PAINTABLE_KINDS is
+    // every catalog kind with a suffix), the Painter department shows a
+    // Vegetation tile, and a save reports success — yet a painted canopy has
+    // never rendered and cannot, through this block or any other. Two
+    // independent blockers, either one sufficient:
+    //
+    //   1. NEITHER KIND IS `rasterize: true` (scene/mask-catalog.js). The
+    //      authority only builds per-floor grids for rasterized kinds
+    //      (`rasterizedKinds()` → `extraRasterized` → `sourcesFor`), so the
+    //      painted grid `ingestPaintedMask` stores under `${floor}/tree` is
+    //      composited by nothing and `getDerived('tree', floor)` returns null.
+    //      There is no painted content to read even in principle.
+    //   2. THE CONSUMER WANTS A WHOLE IMAGE, NOT A COVERAGE FIELD. Both kinds
+    //      are `channels: 'rgba'` — *"RGBA canopy colour + coverage alpha"* —
+    //      and the url set here becomes a texture sampled for its actual
+    //      colour (`vt-pan-viewer.js#loadVegetationOverlayTexture`). The
+    //      painter can only ever author a SINGLE-CHANNEL coverage grid
+    //      (scene/paint-mask.js's MaskGrid; `ingestPaintedMask` passes that one
+    //      byte as its own alpha), so it cannot express what vegetation reads
+    //      at ANY resolution — this is not a resolution trade like fire's.
+    //
+    // Unblocking it is a catalog + derivation change (declare the kinds
+    // rasterized, decide what a monochrome canopy means, give the overlay a
+    // grid-fed path beside its url-fed one) and belongs to whoever owns
+    // mask-catalog.js/mask-derive.js — not a seam tweak here. Until then the
+    // Painter department's Vegetation tile says so out loud rather than
+    // showing a success toast over a no-op.
     vegetationUrlByItemId = new Map();
     for (const item of layers.items) {
       if (item.kind !== 'levelBackground' && item.kind !== 'tile') continue;

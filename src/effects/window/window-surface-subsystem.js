@@ -217,6 +217,33 @@ export function createWindowSurfaceSubsystem({
    * Load the floor's authored window file, crop the quad to whatever is
    * painted in it. Async and idempotent; the mesh stays hidden until it
    * lands, which needs no shader-side fallback.
+   *
+   * ============================================================================
+   * ⚠️ IN-APP PAINTED MASKS: EVALUATED 2026-08-31, DELIBERATELY NOT WIRED
+   * ============================================================================
+   * Same verdict, and largely the same reasoning, as `specular-surface-
+   * subsystem.js#ensureMaskImage` — read that note for the long form. In
+   * brief: `getWindowMaskUrl` is file-discovery only, so a mask painted with
+   * the in-app brush never reaches this subsystem, `refreshVisibility` above
+   * gates on `!!loadedUrl`, and the mesh silently stays hidden.
+   *
+   * Window is the WORST of the four candidates to grid-feed, because colour is
+   * not decoration here, it is the payload. The catalog's own meaning for this
+   * kind is *"a hand-painted INTERIOR light cookie… read as GLASS: value = how
+   * much light lands here, hue+saturation = what colour it becomes. NOT an
+   * aperture to project through — the mask already IS the light"*, and
+   * `window-render.js` splits exactly that apart (`tint = s.rgb.div(value)`).
+   * The authority's derived grid carries the R channel alone
+   * (`mask-catalog.js#extractionPlanFor`) and the brush can only author a
+   * single coverage byte anyway (`scene/paint-mask.js`), so a painted window
+   * mask has no hue to recover — every stained-glass cookie would come out
+   * white. Resolution compounds it (a cookie is an EDGE, and `MASK_GRID_MAX_DIM`
+   * is 512), but the channel loss alone settles it.
+   *
+   * Wiring this needs a colour-capable brush first. Until then the Painter
+   * department's own tile says this effect reads the file only, rather than
+   * showing a success toast over a save that renders nothing.
+   *
    * @param {number} floorIndex
    */
   function ensureMaskImage(floorIndex) {

@@ -292,6 +292,46 @@ export function createSpecularSurfaceSubsystem({
    * Load the floor's authored specular file, crop the quad to whatever is
    * painted in it, and bake the island pack. Async and idempotent; the mesh
    * stays hidden until it lands, which needs no shader-side fallback.
+   *
+   * ============================================================================
+   * ⚠️ IN-APP PAINTED MASKS: EVALUATED 2026-08-31, DELIBERATELY NOT WIRED
+   * ============================================================================
+   * `getSpecularMaskUrl` is file-discovery only, so a mask painted with the
+   * in-app brush (`ui/paint-mode.js` → `mask-authority.js#ingestPaintedMask`)
+   * never reaches this subsystem — the mesh stays hidden and nothing errors.
+   * The painted content DOES exist as a composited grid
+   * (`getDerived('specular', floor)`, which `specular-seams.js` already reads
+   * for its rect), so feeding it here looks like a small change. It is not,
+   * for three independent reasons — any one of them alone is disqualifying:
+   *
+   *   1. THE GRID IS ONE CHANNEL; THIS EFFECT IS COLOUR. The authority
+   *      extracts a non-packed kind's R channel and nothing else
+   *      (`mask-catalog.js#extractionPlanFor`), while the shader tints the
+   *      shine by `maskSample.rgb` (`specular-render.js`, `colored =
+   *      maskSample.rgb.mul(strength/luma709)`). `specular-seams.js`'s own
+   *      header already states the consequence: *"for a colour mask R is not
+   *      presence — a blue-painted steel object has r = 0"*. Worse, the brush
+   *      cannot author colour AT ALL: a `scene/paint-mask.js` MaskGrid is a
+   *      single coverage byte, so painted steel could only ever be grey.
+   *   2. THE ISLAND PACK IS A CONNECTED-COMPONENT PASS OVER REAL PIXELS.
+   *      `MASK_GRID_MAX_DIM` is 512 — about 20 world px per texel on the
+   *      author's map — and this file already records the live failure at that
+   *      scale: *"a scatter of coin-sized detail a texel or two apart is
+   *      individually sub-threshold and was being dropped in full, reporting
+   *      `islands: 0`"*. Per-object parallax variety would collapse to one
+   *      island, silently and plausibly.
+   *   3. THE SHINE IS AN EDGE. `contentBoundsWorld`/`paddedBoundsUv` crop the
+   *      quad to the painted silhouette, which is the `feedback_sdf_does_not_
+   *      draw_the_edge` case by name — the opposite of fire, whose own
+   *      `fire-spawn-points.js` header spells out the distinction: *"a
+   *      distribution needs the mask's density; only an edge needs its
+   *      resolution."* Specular needs the resolution.
+   *
+   * A painted-specular path therefore needs a real design (a colour-capable
+   * brush, and a full-resolution painted source), not a seam swap. Until then
+   * the Painter department's own tile states that this effect reads the file
+   * only, instead of reporting a save that renders nothing.
+   *
    * @param {number} floorIndex
    */
   function ensureMaskImage(floorIndex) {

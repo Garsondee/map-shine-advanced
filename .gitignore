@@ -43,3 +43,9 @@ tests/playwright-artifacts/look/*.png
 # source — a capture worth keeping gets its findings into docs/planning/, not
 # the .json(.gz) itself committed. Files run 10s-100s of MB.
 chrome-performance-traces/
+
+# Real map artwork kept locally as working/reference material for development
+# — not engine source, and this repo is public. Same "discovered on disk, not
+# tracked" treatment as FoundryVTT/ above. (2026-08-31)
+example_map/
+mansion_example_map/

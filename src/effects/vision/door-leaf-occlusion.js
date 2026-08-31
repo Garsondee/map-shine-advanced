@@ -62,9 +62,12 @@ function cross(ux, uy, vx, vy) {
  * Ray `S + t·(dx,dy)`, `t>0`, intersected against segment `A→B`. Standard
  * two-line-parametrization solve (Cramer's rule on the 2×2 system) — see
  * this module's own tests for a hand-verified worked example.
- * @returns {{t: number, x: number, y: number}|null} null when parallel, or
- *   the intersection falls behind S (`t<=0`) or outside the segment's own
- *   span (`u` outside `[0,1]`).
+ * @returns {{t: number, u: number, x: number, y: number}|null} null when
+ *   parallel, or the intersection falls behind S (`t<=0`) or outside the
+ *   segment's own span (`u` outside `[0,1]`). `u` is the parameter ALONG
+ *   THE SEGMENT (0 at A, 1 at B) — used by
+ *   {@link clipPolygonBySegmentShadow} to order two crossings that land on
+ *   the SAME polygon edge.
  */
 function raySegmentIntersect(sx, sy, dx, dy, ax, ay, bx, by) {
   const ex = bx - ax;
@@ -76,31 +79,7 @@ function raySegmentIntersect(sx, sy, dx, dy, ax, ay, bx, by) {
   const t = cross(ex, ey, asx, asy) / denom;
   const u = cross(dx, dy, asx, asy) / denom;
   if (t <= EPS_ABS || u < -EPS_ABS || u > 1 + EPS_ABS) return null;
-  return { t, x: sx + t * dx, y: sy + t * dy };
-}
-
-/**
- * The NEAREST point where a ray from `(sx,sy)` in direction `(dx,dy)`
- * crosses the polygon's own boundary (walks every edge; a star-shaped
- * polygon crosses any ray from its own center exactly once in the generic
- * case, but the nearest-hit search is robust to float noise regardless).
- * @returns {{t: number, x: number, y: number}|null} null if no edge is hit
- *   (degenerate input) — callers must treat this as "nothing to insert
- *   here" and continue safely, never throw.
- */
-function raycastPolygonBoundary(points, sx, sy, dx, dy) {
-  const n = points.length / 2;
-  let best = null;
-  for (let i = 0; i < n; i++) {
-    const ax = points[i * 2];
-    const ay = points[i * 2 + 1];
-    const j = (i + 1) % n;
-    const bx = points[j * 2];
-    const by = points[j * 2 + 1];
-    const hit = raySegmentIntersect(sx, sy, dx, dy, ax, ay, bx, by);
-    if (hit && (!best || hit.t < best.t)) best = hit;
-  }
-  return best;
+  return { t, u, x: sx + t * dx, y: sy + t * dy };
 }
 
 /**
@@ -145,43 +124,52 @@ export function clipPolygonBySegmentShadow(points, sx, sy, ax, ay, bx, by) {
   // Per-vertex ANGULAR wedge membership (not yet distance-clamped) — a
   // point P is between rays S→A and S→B (the shorter arc, which a segment
   // always subtends — see this module's header) iff cross(dA,dP) and
-  // cross(dP,dB) both carry the SAME sign as cross(dA,dB) itself.
+  // cross(dP,dB) both carry the SAME sign as cross(dA,dB) itself. `sideA`/
+  // `sideB` are kept (not just folded into `inWedge`) because the per-edge
+  // crossing check below needs each ray's OWN sign at each vertex, not
+  // just their conjunction.
+  const sideA = new Array(n);
+  const sideB = new Array(n);
   const inWedge = new Array(n);
   for (let i = 0; i < n; i++) {
     const px = points[i * 2] - sx;
     const py = points[i * 2 + 1] - sy;
-    const sideA = cross(dAx, dAy, px, py);
-    const sideB = cross(px, py, dBx, dBy);
-    inWedge[i] = (sideA > 0 ? 1 : sideA < 0 ? -1 : 0) === wSign && (sideB > 0 ? 1 : sideB < 0 ? -1 : 0) === wSign;
+    sideA[i] = Math.sign(cross(dAx, dAy, px, py));
+    sideB[i] = Math.sign(cross(px, py, dBx, dBy));
+    inWedge[i] = sideA[i] === wSign && sideB[i] === wSign;
   }
-  if (!inWedge.some(Boolean)) return points; // wedge doesn't touch this polygon at all
 
-  // ⚠️ THE PATHOLOGICAL CASE, CAUGHT BEFORE IT CAN PRODUCE WRONG GEOMETRY —
-  // a single edge whose BOTH endpoints individually read as outside the
-  // wedge (neither vertex's own inWedge flag is set) can still DIP THROUGH
-  // it, if the doorway opens onto a room whose nearest real polygon
-  // vertices are angularly far apart. A per-vertex inWedge check alone
-  // misses this; testing each RAY's side independently, per edge, catches
-  // it (both sides flip across such an edge even though the combined flag
-  // never does). When found: do NOT attempt to splice it — the honest,
-  // safe fallback is to skip clipping for this leaf/polygon pair entirely
-  // (this frame keeps the existing timer-fade-only look here, nothing
-  // more). Cost: at most one frame, for one source against one leaf, in a
-  // rare layout — never wrong geometry, never a reveal Foundry didn't
-  // already authorize.
-  for (let i = 0; i < n; i++) {
-    if (inWedge[i]) continue;
-    const j = (i + 1) % n;
-    if (inWedge[j]) continue;
-    const p1x = points[i * 2] - sx;
-    const p1y = points[i * 2 + 1] - sy;
-    const p2x = points[j * 2] - sx;
-    const p2y = points[j * 2 + 1] - sy;
-    const sideA1 = Math.sign(cross(dAx, dAy, p1x, p1y));
-    const sideA2 = Math.sign(cross(dAx, dAy, p2x, p2y));
-    const sideB1 = Math.sign(cross(p1x, p1y, dBx, dBy));
-    const sideB2 = Math.sign(cross(p2x, p2y, dBx, dBy));
-    if (sideA1 !== sideA2 && sideB1 !== sideB2) return points;
+  // Fast exit: does the wedge touch this polygon AT ALL? Checking only
+  // "is any VERTEX inside" is not sufficient on its own — a single long,
+  // vertex-free edge (an ordinary far wall of a plain room, not a rare
+  // shape) can have BOTH its endpoints outside the wedge while the edge's
+  // own straight line still dips through it. Also checking whether either
+  // ray crosses ANY edge catches that case too (this is the fix for the
+  // bug this file's own tests once pinned as a "safe fallback" — it fired
+  // on ordinary rooms, not rare ones; see the per-edge crossing loop below
+  // for how it's now actually clipped instead of skipped).
+  //
+  // ⚠️ DELIBERATELY CONSERVATIVE, NOT EXACT — `sideA[i] !== sideA[j]`
+  // detects a sign change across the INFINITE LINE through S and A, which
+  // includes the ray's BACKWARD extension (behind S) as well as its real
+  // forward direction. So this can occasionally answer "touches" for a
+  // polygon that, once the main loop's `raySegmentIntersect` calls (which
+  // DO reject a backward `t<=0` crossing) run for real, turns out to need
+  // no clipping at all — verified this stays SAFE, not wrong: the main
+  // loop still emits the polygon's original coordinates unchanged in that
+  // case, just via a freshly-allocated array instead of the same
+  // reference. Only the zero-allocation optimization is occasionally
+  // missed, never the geometry. Tightening this to be exact would mean
+  // running the same `raySegmentIntersect` cost here that the main loop
+  // already pays, defeating the point of a fast exit — not worth it for a
+  // rare, harmless, bounded-cost miss during an already-brief door swing.
+  if (!inWedge.some(Boolean)) {
+    let anyCross = false;
+    for (let i = 0; i < n && !anyCross; i++) {
+      const j = (i + 1) % n;
+      if (sideA[i] !== sideA[j] || sideB[i] !== sideB[j]) anyCross = true;
+    }
+    if (!anyCross) return points; // wedge doesn't touch this polygon at all
   }
 
   // Clamp an in-wedge vertex to the leaf segment, ONLY if the leaf is
@@ -190,15 +178,6 @@ export function clipPolygonBySegmentShadow(points, sx, sy, ax, ay, bx, by) {
   const clampVertex = (px, py) => {
     const hit = raySegmentIntersect(sx, sy, px - sx, py - sy, ax, ay, bx, by);
     return hit && hit.t < 1 - EPS_ABS ? [hit.x, hit.y] : [px, py];
-  };
-  // Insert a wedge-boundary vertex (at exactly angle A or angle B) ONLY if
-  // the ORIGINAL (unclipped) polygon boundary reaches at least as far as
-  // that endpoint at this exact angle — otherwise the polygon was already
-  // nearer than the leaf there and there is nothing to clip at that angle.
-  const boundaryInsertion = (dirX, dirY, epX, epY) => {
-    const boundary = raycastPolygonBoundary(points, sx, sy, dirX, dirY);
-    if (!boundary || boundary.t < 1 - EPS_ABS) return null;
-    return [epX, epY];
   };
 
   const out = [];
@@ -214,28 +193,34 @@ export function clipPolygonBySegmentShadow(points, sx, sy, ax, ay, bx, by) {
       out.push(vix, viy);
     }
 
-    if (inWedge[i] !== inWedge[j]) {
-      // The sweep transitions across edge i->j. A straight edge crossing
-      // from inside a convex angular wedge to outside (or vice versa)
-      // crosses exactly ONE of the two bounding rays — never both — so at
-      // most one of these two fires per transition edge.
-      const p1x = vix - sx;
-      const p1y = viy - sy;
-      const p2x = points[j * 2] - sx;
-      const p2y = points[j * 2 + 1] - sy;
-      const sideA1 = Math.sign(cross(dAx, dAy, p1x, p1y));
-      const sideA2 = Math.sign(cross(dAx, dAy, p2x, p2y));
-      if (sideA1 !== sideA2) {
-        const ins = boundaryInsertion(dAx, dAy, ax, ay);
-        if (ins) out.push(ins[0], ins[1]);
-      }
-      const sideB1 = Math.sign(cross(p1x, p1y, dBx, dBy));
-      const sideB2 = Math.sign(cross(p2x, p2y, dBx, dBy));
-      if (sideB1 !== sideB2) {
-        const ins = boundaryInsertion(dBx, dBy, bx, by);
-        if (ins) out.push(ins[0], ins[1]);
-      }
+    // UNIFIED per-edge crossing insertion — one ray, both rays, or neither
+    // can cross edge i->j, checked independently rather than gated on the
+    // combined inWedge flag changing. This is what replaces the old
+    // "detect the both-rays case and bail" fallback: instead of giving up,
+    // both crossings are located ALONG THIS SPECIFIC EDGE and inserted in
+    // the order they actually occur (nearer to V_i first), cutting a clean
+    // notch into the edge exactly where the leaf occludes it. A normal
+    // single-ray transition (the common case — the wedge boundary passing
+    // between two vertices where the polygon is otherwise dense) still
+    // produces exactly one insertion here, identical to before.
+    const crossesA = sideA[i] !== sideA[j];
+    const crossesB = sideB[i] !== sideB[j];
+    if (!crossesA && !crossesB) continue;
+
+    const hits = [];
+    if (crossesA) {
+      const hit = raySegmentIntersect(sx, sy, dAx, dAy, vix, viy, points[j * 2], points[j * 2 + 1]);
+      // t>=1: the polygon's own edge reaches at least as far as A at this
+      // angle, so A itself is the clip point. t<1 means the edge is
+      // already nearer than the leaf here — nothing to insert for this ray.
+      if (hit && hit.t >= 1 - EPS_ABS) hits.push({ u: hit.u, x: ax, y: ay });
     }
+    if (crossesB) {
+      const hit = raySegmentIntersect(sx, sy, dBx, dBy, vix, viy, points[j * 2], points[j * 2 + 1]);
+      if (hit && hit.t >= 1 - EPS_ABS) hits.push({ u: hit.u, x: bx, y: by });
+    }
+    hits.sort((h1, h2) => h1.u - h2.u); // nearer-to-V_i first, preserves winding
+    for (const h of hits) out.push(h.x, h.y);
   }
 
   return out.length >= 6 ? out : points; // guard against a degenerate collapse

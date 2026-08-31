@@ -19,6 +19,7 @@ import {
   isSwingLikeAnimation,
   computeDoorLeafFreeEndpoint,
   computeAnimatingLeafSegments,
+  advanceDoorFogRatchet,
 } from '../door-graphics-render.js';
 
 /** A horizontal single-swing door from (100,100)→(200,100): distance 100, angle 0. */
@@ -442,6 +443,86 @@ export function run(t) {
     ok(
       'a non-finite currentRotation is skipped',
       JSON.stringify(computeAnimatingLeafSegments([swingLeaf({ currentRotation: undefined })])) === '[]'
+    );
+  }
+
+  // ── advanceDoorFogRatchet — the multi-door snap-back fix ──────────────────
+  {
+    ok(
+      'inactive: peak resets to 0, uniform reads 1 (fully revealed, timer-fade inert)',
+      JSON.stringify(
+        advanceDoorFogRatchet({ anyActive: false, minProgress: 1, startedThisFrame: false, peak: 0.7 })
+      ) === JSON.stringify({ peak: 0, uniformValue: 1 })
+    );
+    ok(
+      'a window just starting: peak follows minProgress from 0, ignoring any stale prior peak',
+      JSON.stringify(
+        advanceDoorFogRatchet({ anyActive: true, minProgress: 0.05, startedThisFrame: true, peak: 0.9 })
+      ) === JSON.stringify({ peak: 0.05, uniformValue: 0.05 })
+    );
+    ok(
+      'progress climbing normally (single door, no ratchet needed): peak tracks minProgress exactly',
+      JSON.stringify(
+        advanceDoorFogRatchet({ anyActive: true, minProgress: 0.6, startedThisFrame: false, peak: 0.4 })
+      ) === JSON.stringify({ peak: 0.6, uniformValue: 0.6 })
+    );
+    ok(
+      'THE BUG THIS FIXES: a second door dropping the group minProgress does NOT pull the ratchet back down',
+      JSON.stringify(
+        advanceDoorFogRatchet({ anyActive: true, minProgress: 0.02, startedThisFrame: false, peak: 0.6 })
+      ) === JSON.stringify({ peak: 0.6, uniformValue: 0.6 })
+    );
+    ok(
+      'minProgress is clamped before use — a non-finite value cannot corrupt the ratchet',
+      JSON.stringify(
+        advanceDoorFogRatchet({ anyActive: true, minProgress: NaN, startedThisFrame: false, peak: 0.6 })
+      ) === JSON.stringify({ peak: 0.6, uniformValue: 0.6 })
+    );
+
+    // THE FULL WALKTHROUGH, PINNED NUMERICALLY — door1 alone → door2 joins
+    // mid-swing → door1 finishes → door2 finishes → both settle → door1
+    // reopens later. Mirrors exactly how vt-pan-viewer.js's per-frame block
+    // drives this: `startedThisFrame` is true only on the very first
+    // active frame of each window, `peak` threads frame to frame.
+    let peak = 0;
+    let out;
+
+    out = advanceDoorFogRatchet({ anyActive: true, minProgress: 0.1, startedThisFrame: true, peak });
+    peak = out.peak;
+    ok('step 1: door1 alone, early in its swing', out.uniformValue === 0.1);
+
+    out = advanceDoorFogRatchet({ anyActive: true, minProgress: 0.6, startedThisFrame: false, peak });
+    peak = out.peak;
+    ok('step 2: door1 alone, later in its swing — normal climb', out.uniformValue === 0.6);
+
+    // door2 joins: group minProgress drops to door2's own near-zero value.
+    // frozenFloorSources does NOT re-freeze (already non-null) — matches
+    // `startedThisFrame: false` here too, the SAME edge the caller uses.
+    out = advanceDoorFogRatchet({ anyActive: true, minProgress: 0.05, startedThisFrame: false, peak });
+    peak = out.peak;
+    ok('step 3: door2 joins mid-swing — NO re-darkening, holds at door1’s peak', out.uniformValue === 0.6);
+
+    // door1 finishes (progress 1, leaves the animating set); group min is
+    // now purely door2's own progress, which has caught up past the peak.
+    out = advanceDoorFogRatchet({ anyActive: true, minProgress: 0.65, startedThisFrame: false, peak });
+    peak = out.peak;
+    ok('step 4: door1 finishes, door2 has caught up past the held peak — resumes climbing', out.uniformValue === 0.65);
+
+    out = advanceDoorFogRatchet({ anyActive: true, minProgress: 1, startedThisFrame: false, peak });
+    peak = out.peak;
+    ok('step 5: door2 also finishes — peak reaches 1', out.uniformValue === 1);
+
+    out = advanceDoorFogRatchet({ anyActive: false, minProgress: 1, startedThisFrame: false, peak });
+    peak = out.peak;
+    ok(
+      'step 6: both settle — peak resets to 0 for whatever window comes next',
+      out.peak === 0 && out.uniformValue === 1
+    );
+
+    out = advanceDoorFogRatchet({ anyActive: true, minProgress: 0.1, startedThisFrame: true, peak });
+    ok(
+      'step 7: door1 reopens later — starts a genuinely fresh window at its own progress, not stuck at 1',
+      out.uniformValue === 0.1
     );
   }
 }

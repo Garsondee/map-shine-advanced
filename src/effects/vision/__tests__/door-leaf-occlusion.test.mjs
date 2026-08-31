@@ -75,13 +75,38 @@ export function run(t) {
     ok('wraparound: the 180° vertex clamps to exactly (-10,0), mirroring the 0° case', pointsNear(out, expected));
   }
 
-  // NO OVERLAP AT ALL — a triangle entirely on the far side from a leaf
-  // near the +X axis. Same reference back, not just equal values (the
-  // "wedge doesn't touch this polygon" fast path).
+  // NO OVERLAP AT ALL — a small triangle entirely on the far side from a
+  // leaf near the +X axis (vertices at 100°/120°/140°, nowhere near the
+  // wedge OR either ray's infinite line). Same reference back, not just
+  // equal values (the "wedge doesn't touch this polygon" zero-copy path).
   {
-    const farTri = [0, 100, -100, -100, 100, -100];
+    const farTri = [];
+    for (const deg of [100, 120, 140]) {
+      const a = (deg * Math.PI) / 180;
+      farTri.push(100 * Math.cos(a), 100 * Math.sin(a));
+    }
     const out = clipPolygonBySegmentShadow(farTri, 0, 0, 10, -2, 10, 2);
     ok('no angular overlap: returns the SAME array reference (zero-copy fast path)', out === farTri);
+  }
+
+  // THE FAST-EXIT'S OWN DOCUMENTED IMPRECISION, PINNED — a triangle
+  // (vertices at 60°/120°/180°) that touches neither ray's actual FORWARD
+  // direction, but whose closing edge (180°→60°) crosses ray A's INFINITE
+  // LINE behind the source. The fast exit (a cheap sign check, not a full
+  // `raySegmentIntersect` call) conservatively treats that as "might
+  // touch," so this does NOT take the zero-copy path — but the main loop's
+  // real ray/segment intersection then correctly finds no forward crossing
+  // and emits the original coordinates anyway. Pins the module's own
+  // documented tradeoff: occasionally over-cautious, never wrong.
+  {
+    const farTri2 = [];
+    for (const deg of [60, 120, 180]) {
+      const a = (deg * Math.PI) / 180;
+      farTri2.push(100 * Math.cos(a), 100 * Math.sin(a));
+    }
+    const out = clipPolygonBySegmentShadow(farTri2, 0, 0, 10, -2, 10, 2);
+    ok('fast-exit over-triggers on this shape (not the same reference)...', out !== farTri2);
+    ok('...but the values it returns are still exactly correct (unclipped)', pointsNear(out, farTri2));
   }
 
   // LEAF FARTHER THAN THE POLYGON EVERYWHERE IN ITS OWN (narrow) WEDGE —
@@ -109,14 +134,32 @@ export function run(t) {
     ok('S collinear with the leaf: no-op, same reference', out === tri);
   }
 
-  // ⚠️ THE DOCUMENTED PATHOLOGICAL CASE, PINNED — a polygon sparse enough
-  // near the doorway that one edge dips through the wedge without either
-  // endpoint individually reading as "in wedge". Verified two ways: a
-  // hexagon whose 60° vertex spacing straddles a ~22.6°-wide wedge, and a
-  // quad with one very wide edge (-60° to 60°) spanning it directly. Both
-  // must fall back to "unchanged" — the safe, honest, documented
-  // limitation (this frame keeps the timer-fade-only look for this one
-  // leaf/polygon pair), never an attempt to splice wrong geometry.
+  // ⚠️ THE FORMERLY-PATHOLOGICAL CASE, NOW ACTUALLY CLIPPED — a polygon
+  // sparse enough near the doorway that one edge dips through the wedge
+  // without either endpoint individually reading as "in wedge". This used
+  // to be a bail-out fallback (an ordinary room shape, not a rare one —
+  // the whole reason this file exists in its current form); now it's
+  // handled the same way any transition edge is: both ray crossings are
+  // located ALONG THE ONE EDGE that spans the wedge and inserted in the
+  // order they actually occur, cutting a clean notch into that edge.
+  //
+  // wideEdgeQuad (vertices at -60°/60°/150°/240°), hand-derived: edge
+  // V0→V1 (the x=50 line) is the sole crossed edge. Ray A (dir (10,-2))
+  // hits it at t=5, (50,-10), u=(-10+86.60254)/173.20508≈0.4424; ray B
+  // (dir (10,2)) hits at t=5, (50,10), u≈0.5578. Both t≥1 (edge farther
+  // than the leaf), both insert, A before B (smaller u first).
+  {
+    const wideEdgeQuad = [50, -86.60254, 50, 86.60254, -86.60254, 50, -50, -86.60254];
+    const out = clipPolygonBySegmentShadow(wideEdgeQuad, 0, 0, 10, -2, 10, 2);
+    const expected = [50, -86.60254, 10, -2, 10, 2, 50, 86.60254, -86.60254, 50, -50, -86.60254];
+    ok('a single wide edge spanning the wedge gets a clean notch cut into it, in order', pointsNear(out, expected));
+  }
+  // hexShift15 (vertices at 15°/75°/135°/195°/255°/315°): the wedge
+  // (±11.31° around 0°) falls entirely between V5 (315°=-45°) and V0
+  // (15°) — neither individually in-wedge — so that one edge (the LAST
+  // edge in traversal order, wrapping back to V0) is where both crossings
+  // land, same A-before-B ordering (sweeping from -45° toward +15° passes
+  // ray A's -11.31° before ray B's +11.31°).
   {
     const hexShift15 = [];
     for (let i = 0; i < 6; i++) {
@@ -124,12 +167,11 @@ export function run(t) {
       hexShift15.push(100 * Math.cos(a), 100 * Math.sin(a));
     }
     const out = clipPolygonBySegmentShadow(hexShift15, 0, 0, 10, -2, 10, 2);
-    ok('pathological edge (sparse hexagon): safe fallback, unchanged', out === hexShift15);
-  }
-  {
-    const wideEdgeQuad = [50, -86.60254, 50, 86.60254, -86.60254, 50, -50, -86.60254]; // vertices at -60°,60°,150°,240°
-    const out = clipPolygonBySegmentShadow(wideEdgeQuad, 0, 0, 10, -2, 10, 2);
-    ok('pathological edge (wide single edge spanning the wedge): safe fallback, unchanged', out === wideEdgeQuad);
+    const expected = [
+      96.592583, 25.881905, 25.881905, 96.592583, -70.710678, 70.710678, -96.592583, -25.881905, -25.881905, -96.592583,
+      70.710678, -70.710678, 10, -2, 10, 2,
+    ];
+    ok('the sparse-hexagon case also gets a clean notch, appended after the last vertex', pointsNear(out, expected));
   }
 
   // ORDER INDEPENDENCE — two perpendicular leaves clipped in either order

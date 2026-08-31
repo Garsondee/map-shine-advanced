@@ -2,6 +2,10 @@
  * THE DOOR to effects/ — every pass door and (eventually) every effect
  * declaration crosses this threshold or does not cross at all.
  */
+// THE SHARED readout/render-state PROJECTION (2026-08-30) — every inline
+// effect in boot.js's install() now delegates to these instead of hand-
+// typing the same object literal; see effect-readout.js's own header.
+export { buildCascadeReadout, projectCascadeRenderState } from './effect-readout.js';
 export { validateParticleSystem, EMITTER_SHAPES, BEHAVIORS, SPAWN_KINDS } from './particles/particle-system-schema.js';
 export {
   ParticleArena,
@@ -385,7 +389,13 @@ export { UI_WINDOW_SHADOW, UI_SHADOW_PARAMS } from './ui-window-shadow.js';
 export { CANDLE_FLAME, CANDLE_FLAME_PARAMS } from './candle-flame.js';
 export { shouldAutoIgnite, stableUnit01 } from './candle-ignite.js';
 export { DOOR_GRAPHICS, DOOR_GRAPHICS_PARAMS } from './door-graphics.js';
-export { VEGETATION, VEGETATION_PARAMS, VEGETATION_KINDS } from './vegetation.js';
+// DOOR-FOG MULTI-DOOR RATCHET (Bug-Tracker #35) — pure, needs no
+// door-subsystem-internal state (unlike computeTransitionSummary, which
+// door-graphics-subsystem.js wraps as getTransitionSummary() because IT
+// needs the internal leaf list), so this is called directly by
+// vt-pan-viewer.js rather than routed through the subsystem object.
+export { advanceDoorFogRatchet } from './door-graphics-render.js';
+export { VEGETATION, VEGETATION_PARAMS, VEGETATION_KINDS, VEGETATION_LIVE_PARAM_KEYS } from './vegetation.js';
 // The vegetation RUNTIME's pure half (vegetation-render.js's own header
 // explains the split): Case-1 self-vegetation-tile detection + the
 // vertex-displacement curve. THREE/TSL glue lives in vt/vt-pan-viewer.js.
@@ -403,6 +413,8 @@ export {
   buildVegetationDepthItems,
   flutterFoldFreeAmplitudePx,
   VEG_FLUTTER_FOLD_SAFETY,
+  springChase,
+  vegetationSpringGridSpec,
 } from './vegetation-render.js';
 // The vegetation SHADOW subsystem — extraction step 2 of docs/planning/
 // VT-Pan-Viewer-Extraction.md. The padded quad, the per-kind pad, and the
@@ -418,6 +430,16 @@ export {
   VEG_SHADOW_RENDER_ORDER_MAGNITUDE,
   VEG_SHADOW_SMEAR_TAPS,
 } from './vegetation-shadow-subsystem.js';
+// VEGETATION TIER 6's GPU half (torque-sway) — the ping-pong/publish TSL
+// builders, mirroring `world/wind-sim-gpu.js`'s own re-export shape from
+// `world/index.js` just below. `vt-pan-viewer.js` owns allocation/dispatch
+// (`gpu/allocator-only`/`renderer-state/graph-only` forbid doing that here);
+// this file only builds NodeMaterial + QuadMesh objects.
+export {
+  buildVegetationSpringMaterials,
+  VEG_SPRING_MAX_DT_SEC,
+  VEG_SPRING_ARM_LEN_FRACTION,
+} from './vegetation-spring-gpu.js';
 // THE SHADOW HANDLE (effects/shadow-access.js's header is the map) — the sky
 // described ONCE; a caster declares only a height and an offset scale. The
 // atmospheric half (cloud softening, night fading) is derived there and shared
@@ -615,7 +637,12 @@ export {
   isBuiltSpecies,
   resolveSpeciesFrame,
   evalCurve,
+  precipTierScaleForProfile,
+  precipTierPlan,
 } from './precipitation/precip-species.js';
+// THE MANIFEST (2026-08-30) — see precipitation.js's own header for why
+// PRECIPITATION_PARAMS is deliberately empty.
+export { PRECIPITATION, PRECIPITATION_PARAMS } from './precipitation/precipitation.js';
 // THE SPRITE — V2's four bird's-eye flame archetypes plus the colour spec they
 // are drawn with (docs/planning/Fire.md). Exported through the zone door rather
 // than imported directly by the runtime that will consume it, per `zones/

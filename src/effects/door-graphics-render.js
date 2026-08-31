@@ -409,6 +409,51 @@ export function computeAnimatingLeafSegments(leafStates) {
 }
 
 /**
+ * DOOR-FOG MULTI-DOOR RATCHET (Bug-Tracker #35) — `uDoorFogProgress`'s own
+ * value, but never allowed to DECREASE while a transition window stays
+ * open. Without this, `computeTransitionSummary`'s `minProgress` (the
+ * MINIMUM across every currently-animating leaf, by design the most
+ * conservative reading — see that function's own header) drags a room that
+ * already faded in mostly-visible back toward dark the instant a SECOND
+ * door starts opening nearby, because `uDoorFogProgress` is one global
+ * uniform applied to every pixel newly revealed since the floor froze,
+ * door 1's territory included.
+ *
+ * Deliberately a PARTIAL fix, not a full per-door redesign: this trades a
+ * visible, ugly re-darkening (the bug) for a smaller, self-correcting
+ * artifact — a SECOND door's own brand-new sliver reads the
+ * already-ratcheted value instead of starting from black, so it pops in
+ * partway bright rather than fully fading in, then finishes fading
+ * normally. A fully correct per-door fade would need per-pixel door
+ * attribution (which door's shadow is THIS pixel behind), a real
+ * architecture change — not this function's job.
+ *
+ * Owns none of `frozenFloorSources` itself (a reference to real vision
+ * source objects, not a value this module should hold) — the caller keeps
+ * deciding when to freeze/drop it on the exact same inactive↔active edges
+ * it already did; `startedThisFrame` is that SAME edge, just also handed
+ * here so the ratchet resets in lockstep with the freeze, never out of
+ * sync with it.
+ *
+ * @param {object} args
+ * @param {boolean} args.anyActive - `computeTransitionSummary(...).anyActive`.
+ * @param {number} args.minProgress - `computeTransitionSummary(...).minProgress`.
+ * @param {boolean} args.startedThisFrame - true exactly on the frame a
+ *   transition window opens (the same `anyActive && !frozenFloorSources`
+ *   edge the caller freezes on) — resets the ratchet for the new window.
+ * @param {number} args.peak - the previous frame's ratchet value.
+ * @returns {{peak: number, uniformValue: number}} `peak` is what the
+ *   caller should hold and pass back in as next frame's `peak`;
+ *   `uniformValue` is what `uDoorFogProgress.value` should be set to.
+ */
+export function advanceDoorFogRatchet({ anyActive, minProgress, startedThisFrame, peak }) {
+  if (!anyActive) return { peak: 0, uniformValue: 1 };
+  const basePeak = startedThisFrame ? 0 : peak;
+  const nextPeak = Math.max(basePeak, clamp01(minProgress));
+  return { peak: nextPeak, uniformValue: nextPeak };
+}
+
+/**
  * THE DOOR MATERIAL — a textured world-quad, tinted + alpha'd, drawn INTO the
  * lit scene albedo (so the lighting pass darkens a door at night and a torch
  * pools on it, for free, exactly like the map tile beside it). Mirrors the

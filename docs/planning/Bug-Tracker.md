@@ -64,6 +64,9 @@ building on any of this.
 | **31** | **Clearing a painted mask and Save didn't stick — the old paint came back after a reload** | paint mode / persistence | `BUILT (unverified)` 2026-08-31 |
 | **32** | **Opening a door blacked out the ENTIRE map, not just the door's own sliver — the player's own token vanished too** | vision/fog / door-graphics / renderer state | `LIVE` ✅ — author-confirmed 2026-08-31 |
 | **33** | **Feature: a swinging door leaf's own geometry as a real-time vision occluder (the timer-fade in #32 looked similar but wasn't gated by the leaf's actual position)** | vision/fog / door-graphics | `BUILT (unverified)` 2026-08-31 |
+| **34** | **The "explored/dim" fog memory's map-only snapshot had no working depth buffer — most ordinary opaque floor tiles silently failed to render into it** | vision/fog / renderer state / depth | `BUILT (unverified)` 2026-08-31 |
+| **35** | **A second door opening while a first door's sliver was still fading in snapped the already-revealed room back toward dark** | vision/fog / door-graphics | `BUILT (unverified)` 2026-08-31 |
+| **36** | **#33's door-leaf occluder gave up on ORDINARY rooms (a plain long far wall), not rare ones — doors "blocked for a bit then suddenly stopped blocking"** | vision/fog / door-graphics | `BUILT (unverified)` 2026-08-31 |
 
 ---
 
@@ -3196,3 +3199,247 @@ angle — NOT a uniform fade applied to whatever Foundry already says is
 open. A double door should reveal correctly from both leaves. Everything
 #32 already fixed (no full-map blackout, token stays visible,
 already-revealed areas never dim) must still hold.
+
+---
+
+## Fog-of-war tip-to-tail audit — #34, #35, #36
+
+**Reported:** 2026-08-31, same session as #32/#33. The author tested #33
+live and reported it broken worse than before: a screenshot showed
+isolated dark "circles" left at old token positions instead of a
+continuous reveal trail as a token moved, and doors that "block sight for
+a bit then suddenly stop blocking." He also pasted a second LLM's
+speculative read of `vt-pan-viewer.js`, explicitly flagged as "theory to
+confirm or reject, not gospel," and asked for a full audit "from tip to
+tail."
+
+Both theories were checked against actual current source (not trusted at
+face value) via two parallel Explore passes plus direct reads, then the
+fix designs were independently validated/corrected by a Plan pass before
+any code was written (`EnterPlanMode`, given the scope and stakes). Three
+distinct, confirmed bugs came out of it — filed separately below. Two
+predate this session (#34 traces to an unresolved 2026-08-16 live report;
+#35 is a documented v1 limitation of the original 2026-08-27 door-fog
+build, now confirmed visibly bothersome); #36 is a real regression in
+#33's own build this session.
+
+## 34. The "explored/dim" fog memory's map-only snapshot had no working depth buffer
+
+**Status:** `BUILT (unverified)` · **Reported:** 2026-08-31 (traces to an
+unresolved 2026-08-16 report) · **Docs:** this file, the audit section
+above
+
+### Root cause — CONFIRMED against current source
+
+`captureMapOnlySnapshot()` (`vt-pan-viewer.js`) captures a token/vegetation-
+excluded "map only" snapshot, published into `exploredSnapshotTarget` and
+read by the dim-explored fog quad for what color to show in
+previously-explored-but-not-currently-visible territory. It reuses the
+SAME tile materials the real world draw does. When `earlyZComposition` is
+on (the default), a fully-opaque, ordinary floor/base-map tile is marked
+`'interior'` — `depthTest:true, depthFunc:EqualDepth`, hardware depth
+testing as its ONLY occlusion mechanism (not roof-specific — the ordinary
+case, confirmed via source trace of `earlyZInteriorVerdict`).
+
+The snapshot's own target (`sceneColorMapOnly`) had **no depth attachment
+at all** (`describeSceneColorMapOnlyMrt` built from `describeSceneAttrMrt`
+alone — compare `describeSceneColorMrt`, the REAL `sceneColor` target's
+descriptor, which adds `depthTexture:true` on top of the exact same base).
+The capture also skipped the depth-prepass entirely and used the wrong
+camera (`camera` instead of `depthCamera` — a real mismatch even though a
+follow-up check showed `rankToDepthZ`'s output range isn't actually
+frustum-clipped by `camera`'s own near/far, correcting an early theory).
+Net effect: `'interior'`-mode fragments — most of the visible floor area
+in an ordinary scene — had nothing valid to test depth against and failed
+to render, corrupting the dim fog memory for most ordinary map area, by
+default, every session.
+
+### Fix
+
+`sceneColorMapOnly` gains a real depth attachment, mirroring
+`describeSceneColorMrt` exactly. The shared STAGE-1 sequence
+`runGeometryWorldPass` already used for the real draw (depth-prepass via
+`depthPrepassScene`/`depthCamera`, then the color draw via `depthCamera`)
+was extracted into `runEarlyZDepthPrepassAndColorDraw`, a single function
+now called by BOTH the real draw and `captureMapOnlySnapshot()` — the two
+had already drifted apart once (this bug); one shared function is what
+keeps that from happening again instead of a second hand-maintained copy.
+
+**Known, accepted follow-up gap, not fixed here:** `depthPrepassScene`
+includes vegetation depth-proxy twins, never hidden by
+`captureMapOnlySnapshot` (only the color meshes are). A floor tile under
+vegetation, marked interior, still fails its depth test against the
+vegetation's nearer Z — a small, localized hole in the dim view under
+vegetation clusters specifically. Fixing this fully needs a second,
+vegetation-excluded depth-prepass scene with its own visibility
+bookkeeping — the "hand-maintained duplicate that silently drifts" shape
+this codebase already avoids elsewhere. This fix is still a large,
+correct improvement over today's near-total corruption; the gap is a
+named, deliberate follow-up, not an oversight.
+
+### Proof
+
+Renderer-only — the Node suite structurally cannot exercise this (no real
+THREE renderer/WebGPU device in tests). Verified by direct source trace
+(two independent Explore-agent passes plus a Plan-agent validation pass,
+all cross-checked against actual line numbers before trusting), not a
+live screenshot. `npm run verify` — one combined run covering #34/#35/#36
+together — green: 0 lint errors, Prettier clean, `verify:structure`
+33/33, full Node suite 13,056 passed / 3 failed, identical to the 2
+pre-existing unrelated failures already on the tree (see #36's own Proof
+section for the full breakdown by suite).
+
+### Fixed when
+
+On a real scene: move a token through a previously-explored area, then
+look away. The dimmed "remembered" zone should show an actual dimmed map
+image (not black, not a bare circle) continuously along wherever the
+token went, not just at rest points.
+
+---
+
+## 35. A second door opening while the first's sliver was still fading in snapped it back toward dark
+
+**Status:** `BUILT (unverified)` · **Reported:** 2026-08-31 (documented as
+accepted v1 scope in the original 2026-08-27 door-fog build; now
+author-confirmed visibly bothersome) · **Docs:** this file, the audit
+section above
+
+### Root cause
+
+`uDoorFogProgress` is one global uniform, driven by
+`doorFogSummary.minProgress` (the MINIMUM progress across ALL currently-
+animating door leaves — deliberately conservative by design). When a
+second door starts opening while a first door's sliver is already mostly
+faded in, the group minimum drops toward the new door's near-0 progress —
+and since EVERY pixel newly revealed since the original freeze (door 1's
+territory included) reads the SAME global uniform, door 1's already-
+revealed room visibly snaps back toward dark until door 2 catches up.
+
+### Fix
+
+A ratchet, not a full per-door redesign: `effects/door-graphics-render.js`
+gains `advanceDoorFogRatchet` (pure, Node-tested), tracking a peak that
+never decreases while a transition window stays open, reset to 0 exactly
+when a window opens and when it fully settles. `vt-pan-viewer.js` threads
+`doorFogProgressPeak` frame to frame and calls it in place of reading
+`minProgress` directly.
+
+**Known, accepted flaw, documented not hidden:** because `uDoorFogProgress`
+stays one shared scalar, a SECOND door's own brand-new sliver also reads
+the already-ratcheted value instead of starting from black — it pops in
+partway bright rather than fully fading in, then finishes fading normally.
+This trades a visible, ugly re-darkening (the bug) for a smaller, self-
+correcting artifact confined to the second-and-later door in an
+overlapping window. A fully correct per-door fade needs per-pixel door
+attribution — a real architecture change, not scoped here. A rejected
+alternative (re-freezing on any active-count change rather than
+ratcheting) was checked and found WORSE: it would let a still-mid-swing
+door 1 jump instantly to full brightness the moment door 2 starts, since
+Foundry's raw LOS already reads door 1 as open from the START of its
+animation, not its visual finish.
+
+### Proof
+
+`advanceDoorFogRatchet` is pure and fully Node-tested, including a full
+6-step numeric walkthrough (door1 alone → door2 joins mid-swing → door1
+finishes → door2 finishes → both settle → door1 reopens later) pinning
+the exact expected value at every step — see
+`src/effects/__tests__/door-graphics-render.test.mjs`. The wiring into
+`vt-pan-viewer.js`'s per-frame block is renderer-only and not
+independently testable; see #34's own Proof section for that honest limit
+restated.
+
+### Fixed when
+
+On a real scene: open two doors within the same overlapping window. No
+room already faded in should go dark again; the second door's own sliver
+fading in "a bit too bright at first, then normal" is the accepted,
+documented artifact above, not something to chase further.
+
+---
+
+## 36. #33's door-leaf occluder gave up on ordinary rooms, not rare ones
+
+**Status:** `BUILT (unverified)` · **Reported:** 2026-08-31, same session
+as #33 (a real regression in that build) · **Docs:** this file, the audit
+section above, `keyhole-door-fog-reveal-sync`
+
+### Symptom, in the author's own words
+
+*"I can see the doors block things for a bit but then suddenly that stops
+working and the doors stop blocking sight."*
+
+### Root cause — CONFIRMED, and more precisely located than the first pass found
+
+`effects/vision/door-leaf-occlusion.js#clipPolygonBySegmentShadow`'s fast
+exit (`if (!inWedge.some(Boolean)) return points;`) fired whenever ZERO
+polygon vertices were individually inside the door's shadow wedge — which
+is the ORDINARY case for a door opening onto a room whose far wall is one
+long, vertex-free edge, not a rare shape. A SEPARATE "pathological loop"
+existed to catch exactly this and bail out safely — but hand-checking the
+module's own two "pathological" test fixtures showed every vertex in both
+was already outside the wedge, so the fast exit returned BEFORE that loop
+was ever reached. The loop was a red herring for this bug; the real
+trigger was one line earlier. Given a door's own wedge keeps sweeping
+across the same long wall edge as it continues opening, this condition
+could stay true for the REST of the swing once triggered, not the "at
+most one frame" the code's own comment claimed — matching the reported
+"blocks for a bit, then suddenly stops."
+
+### Fix
+
+The fast exit now also checks whether either bounding ray crosses ANY
+edge (not just whether a vertex sits inside the wedge). The separate
+"pathological loop" and the transition-only boundary-insertion block were
+replaced with one uniform per-edge check: for every edge, independently
+test whether each ray crosses it, compute both crossings' position ALONG
+THAT SPECIFIC EDGE (`raySegmentIntersect` now also returns `u`, the
+edge-parameter), sort by `u`, and insert in that order — cutting a clean
+notch into the edge exactly where the leaf occludes it, instead of giving
+up. A mathematical argument (Foundry's polygons are radially monotonic, so
+an in-wedge vertex run, if any, is always contiguous and bounded by the
+two edges the existing per-vertex code already handled) shows the
+pathological case can now ONLY occur when zero vertices are in-wedge —
+i.e. it's fully subsumed by the widened fast exit; the old bail-out is
+gone, not hidden.
+
+**A separate, explicitly accepted imprecision, found while fixing this:**
+the widened fast-exit check (a cheap sign test) can occasionally treat a
+polygon as "might touch the wedge" when the real ray/segment intersection
+would find no forward crossing — the sign test doesn't distinguish a
+ray's forward direction from its backward extension. Verified this stays
+SAFE, never wrong: the main loop's real intersection test still emits the
+original coordinates unchanged in that case, just via a freshly-allocated
+array instead of the same reference — an occasional missed zero-copy
+optimization, never wrong geometry. Documented inline rather than
+tightened further (an exact fix would cost the same `raySegmentIntersect`
+calls the fast exit exists to avoid).
+
+### Proof
+
+Fully Node-testable, zero renderer coupling. `door-leaf-occlusion.test.mjs`'s
+two former "safe fallback, unchanged" cases now assert the derived
+clipped output instead (hand-derived via the ray/segment-intersection
+formula, cross-checked with a standalone Node script before being written
+into the test — not guessed, not reverse-engineered from a first run of
+the fix). New cases added: the fast-exit's own documented imprecision,
+pinned as "not same reference, but values still correct." All prior pinned
+cases (worked example, wraparound, order-independence, never-mutates,
+degenerates, the `clipPolygonByDoorLeaves`/`applyDoorLeafOcclusion` suite)
+pass unmodified, serving as the regression net. `npm run verify` (covers
+#34/#35/#36 together — one combined run): 0 lint errors, Prettier clean,
+`verify:structure` 33/33, full Node suite **13,056 passed, 3 failed** —
+identical to and no worse than the 2 pre-existing, unrelated failures
+already on the tree (`tools/chart-room` build fingerprint, specular's
+`incidentSteepness` default). `src/effects/vision/__tests__/run-tests.mjs`:
+**61/61 green** (59 before this round — the 2 rewritten pathological
+cases). `src/effects/__tests__/run-tests.mjs`: **1097/1097 green** (1085
+before — the 12 new `advanceDoorFogRatchet` cases from #35).
+
+### Fixed when
+
+On a real scene: open a single swing door in a plain rectangular room and
+watch the reveal visibly track the leaf's actual swing angle all the way
+through, not just a narrow crack near the hinge before reverting to the
+old uniform fade.

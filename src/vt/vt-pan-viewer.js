@@ -281,6 +281,8 @@ import {
   // DOOR-LEAF-OCCLUSION — a swinging leaf's own CURRENT geometry as a
   // real-time vision occluder (additive to the door-fog timer fade above).
   applyDoorLeafOcclusion,
+  // DOOR-FOG MULTI-DOOR RATCHET (Bug-Tracker #35) — see its own header.
+  advanceDoorFogRatchet,
   buildRegionRectangleMaterial,
   buildRegionEllipseMaterial,
   buildRegionPolygonMaterial,
@@ -2127,8 +2129,27 @@ export async function startVtPanViewer({
     // exact empty-struct WGSL error this produced. `describeSceneAttrMrt`
     // gives this target a second, real 'attr' attachment so the match
     // succeeds; its contents are simply never read by anything.
-    const describeSceneColorMapOnlyMrt = () =>
-      describeSceneAttrMrt({ THREE, resolvedW: internalW, resolvedH: internalH });
+    //
+    // ⚠️ ALSO NEEDS A REAL DEPTH ATTACHMENT — found live, Bug-Tracker #34.
+    // `captureMapOnlySnapshot()` reuses the SAME tile materials the real
+    // world draw does, and when `earlyZComposition` is on (the default) an
+    // ordinary fully-opaque floor/base-map tile is marked 'interior':
+    // `depthTest:true, depthFunc:EqualDepth`, hardware depth testing as its
+    // ONLY occlusion mechanism — mirroring `describeSceneColorMrt` (the
+    // REAL `scene.color` target, just above) exactly, which already carries
+    // this for the identical reason. Without it, those fragments have no
+    // valid depth to compare against and silently fail to render — this was
+    // the actual cause of the "explored/dim" fog memory reading back
+    // near-black for ordinary map area (a 2026-08-16 live report that went
+    // unresolved until this fix). `captureMapOnlySnapshot()`'s own STAGE-1
+    // sequence (`runEarlyZDepthPrepassAndColorDraw`) is what actually
+    // populates this buffer correctly now — the attachment alone does
+    // nothing without a prepass to write into it.
+    const describeSceneColorMapOnlyMrt = () => ({
+      ...describeSceneAttrMrt({ THREE, resolvedW: internalW, resolvedH: internalH }),
+      depthTexture: true,
+      depthTextureType: THREE.FloatType,
+    });
     const sceneColorMapOnly = allocator.create('scene.colorMapOnly', describeSceneColorMapOnlyMrt());
 
     // ========================================================================
@@ -2723,6 +2744,11 @@ export async function startVtPanViewer({
     let previousVisionSources = [];
     let frozenFloorSources = null;
     const uDoorFogProgress = THREE.TSL.uniform(THREE.TSL.float(1));
+    /** DOOR-FOG MULTI-DOOR RATCHET (Bug-Tracker #35) — `advanceDoorFogRatchet`'s
+     *  own held peak, threaded frame to frame. See that function's header
+     *  for why this exists: without it, a second door opening while the
+     *  first's sliver is still fading in visibly snaps it back toward dark. */
+    let doorFogProgressPeak = 0;
     /** DOOR-LEAF-OCCLUSION diagnostic — how many currently-animating leaves
      *  (and out of how many active sources) were folded into this frame's
      *  mask, so a mechanism that silently stopped is visible as a number in
@@ -5861,6 +5887,66 @@ export async function startVtPanViewer({
     // below via `passImpls`. `PASS_IMPLS` in graph/pass-impls.js is unchanged:
     // it still honestly names `startVtPanViewer` as the reachable entry point,
     // because externally that is still the only door in.
+    /**
+     * STAGE 1's shared middle — the earlyZ depth-prepass + main colour draw,
+     * used by BOTH the real world draw (`runGeometryWorldPass`) and the
+     * map-only snapshot (`captureMapOnlySnapshot`). Both need the SAME two
+     * things: populate the CURRENTLY BOUND target's own depth buffer via
+     * `depthPrepassScene`/`depthCamera` FIRST, then draw `colorScene`
+     * through `depthCamera` — never the plain `camera`, whose projection
+     * does not match `rankToDepthZ`'s Z convention — so an 'interior'-mode
+     * tile's hardware `EqualDepth` test has a same-projection depth buffer
+     * to compare against.
+     *
+     * ⚠️ THIS EXTRACTION EXISTS BECAUSE THE TWO CALLERS ALREADY DRIFTED
+     * APART ONCE — `captureMapOnlySnapshot` never got this sequence at all
+     * (Bug-Tracker #34), silently corrupting the explored/dim fog memory
+     * for every ordinary opaque floor tile whenever `earlyZComposition` is
+     * on (the default). One shared function is how it stays impossible for
+     * the two to diverge again, instead of two hand-maintained copies.
+     *
+     * CALLER'S responsibility, unchanged from before this extraction:
+     * `setRenderTarget(target)`/`setMRT`/clear-COLOUR override BEFORE
+     * calling; `setRenderTarget(null)`/`setMRT(previous)` AFTER. This
+     * function only touches depth-related renderer state plus the one
+     * "cheap insurance" colour reclear already proven load-bearing in the
+     * lab (see its own inline comment, preserved verbatim from the
+     * original single call site).
+     *
+     * @param {object} args
+     * @param {*} args.depthPrepassScene @param {*} args.depthCamera
+     * @param {*} args.colorScene - `scene` for the real draw; the SAME
+     *   `scene` (minus hidden token/vegetation meshes) for the map-only
+     *   capture.
+     * @param {*} [args.zPrepass] @param {*} [args.zColor] - optional
+     *   perf-timer zone ids; omitted by the throttled map-only caller,
+     *   which has no perf zones of its own to report into.
+     */
+    function runEarlyZDepthPrepassAndColorDraw({ depthPrepassScene, depthCamera, colorScene, zPrepass, zColor }) {
+      const prevAutoClearDepth = renderer.autoClearDepth;
+      const prevAutoClearColor = renderer.autoClearColor;
+      const prevClearDepth = renderer.getClearDepth();
+      profiler?.begin(zPrepass);
+      renderer.setClearDepth(1); // far plane — every real rank sits nearer, so an unwritten texel loses to anything
+      renderer.clear(true, true, true);
+      renderer.render(depthPrepassScene, depthCamera);
+      // ⚠️ A COLOUR-ONLY RECLEAR, KEPT AS CHEAP INSURANCE — NOT A CONFIRMED
+      // MECHANISM (2026-08-11, corrected same day; preserved verbatim from
+      // this sequence's original single call site — see git history for the
+      // full greenhouse-bug account this once chased). Unconditionally
+      // cheap and can never make anything WORSE, not because a mechanism
+      // justifies it.
+      renderer.clear(true, false, false);
+      profiler?.end(zPrepass);
+      renderer.autoClearDepth = false;
+      renderer.autoClearColor = false;
+      profiler?.begin(zColor);
+      renderer.render(colorScene, depthCamera);
+      profiler?.end(zColor);
+      renderer.autoClearDepth = prevAutoClearDepth;
+      renderer.autoClearColor = prevAutoClearColor;
+      renderer.setClearDepth(prevClearDepth);
+    }
     function runGeometryWorldPass() {
       // buf:scene.depth FIRST (REORDERED 2026-08-09, PERF — a live report on
       // a 12K-map upper floor measured this whole pass's colour draw at
@@ -5891,58 +5977,22 @@ export async function startVtPanViewer({
       const previousMRT = renderer.getMRT();
       renderer.setMRT(sceneAttrZeroMrt);
       // STAGE 1 (see `earlyZComposition`'s own declaration for the full
-      // account). The prepass carries this target's ONLY clear — colour AND
-      // depth — and the world draw then loads both, which is why both
-      // autoClear halves must be off across it (proven load-bearing in the
-      // lab: with either left on, the world draw wipes what it needs to read).
+      // account, and `runEarlyZDepthPrepassAndColorDraw`'s own header for
+      // why this sequence is shared with `captureMapOnlySnapshot` rather
+      // than hand-duplicated). The prepass carries this target's ONLY
+      // clear — colour AND depth — and the world draw then loads both,
+      // which is why both autoClear halves must be off across it (proven
+      // load-bearing in the lab: with either left on, the world draw wipes
+      // what it needs to read) — all handled inside the shared function now.
       if (earlyZComposition) {
-        const prevAutoClearDepth = renderer.autoClearDepth;
-        const prevAutoClearColor = renderer.autoClearColor;
-        const prevClearDepth = renderer.getClearDepth();
-        profiler?.begin(Z.geomEarlyZPrepass);
         renderer.setRenderTarget(sceneColor);
-        renderer.setClearDepth(1); // far plane — every real rank sits nearer, so an unwritten texel loses to anything
-        renderer.clear(true, true, true);
-        renderer.render(depthPrepassScene, depthCamera);
-        // ⚠️ A COLOUR-ONLY RECLEAR, KEPT AS CHEAP INSURANCE — NOT A CONFIRMED
-        // MECHANISM (2026-08-11, corrected same day). The live bug this was
-        // first written for: a translucent roof (a greenhouse) rendering
-        // black. The FIRST diagnosis — `buildSceneDepthWriterMaterial`'s
-        // `colorWrite:false` failing to mask attachment 0 on a real
-        // two-attachment MRT target — turned out to be a MEASUREMENT
-        // ARTIFACT, not a real finding: the lab test that "confirmed" it
-        // compared a GPU readback against the RAW hex bytes of a clear
-        // colour, not against what `renderer.setClearColor` actually stores
-        // (it sRGB-decodes its hex argument regardless of the target's own
-        // declared colour space) — the "leaked" bytes were an exact sRGB
-        // decode of the clear colour itself, reproduced identically by a
-        // plain clear with ZERO geometry ever drawn. A corrected, delta-based
-        // version of that same lab scenario (`bench-scene-depth.js`,
-        // `single-target-prepass-equal`) now shows `colorWrite:false`
-        // masking attachment 0 perfectly: a draw and a no-draw are
-        // byte-identical. See that scenario's own "ROUND FOUR" header for
-        // the full account.
-        //
-        // So the greenhouse bug's REAL cause is still open — this reclear is
-        // not proven to fix it, and is not proven irrelevant to it either.
-        // It stays here because it is unconditionally cheap and can never
-        // make anything WORSE (a plain colour clear cannot leave stale data
-        // behind, whatever the real mechanism turns out to be), not because
-        // a mechanism justifies it. If the greenhouse bug reappears, or
-        // turns out to have a different root cause entirely, look there
-        // first rather than trusting this comment's old story.
-        renderer.clear(true, false, false);
-        profiler?.end(Z.geomEarlyZPrepass);
-        renderer.autoClearDepth = false;
-        renderer.autoClearColor = false;
-        profiler?.begin(Z.geomWorld);
-        renderer.render(scene, depthCamera);
-        profiler?.end(Z.geomWorld);
-        // Restored BEFORE the door draw below, which does its own
-        // autoClearColor guard and must find the renderer as it always was.
-        renderer.autoClearDepth = prevAutoClearDepth;
-        renderer.autoClearColor = prevAutoClearColor;
-        renderer.setClearDepth(prevClearDepth);
+        runEarlyZDepthPrepassAndColorDraw({
+          depthPrepassScene,
+          depthCamera,
+          colorScene: scene,
+          zPrepass: Z.geomEarlyZPrepass,
+          zColor: Z.geomWorld,
+        });
       } else {
         profiler?.begin(Z.geomWorld);
         renderer.setRenderTarget(sceneColor);
@@ -6091,6 +6141,19 @@ export async function startVtPanViewer({
       const prevCaptureClear = renderer.getClearColor(new THREE.Color());
       const prevCaptureAlpha = renderer.getClearAlpha();
       renderer.setRenderTarget(sceneColorMapOnly);
+      // ⚠️ EARLY-Z-AWARE, AS OF Bug-Tracker #34 — this capture used to
+      // ALWAYS take the `else` branch below regardless of `earlyZComposition`,
+      // which is why it silently failed to render most ordinary opaque floor
+      // tiles: `earlyZComposition` (the default) marks a fully-opaque tile
+      // 'interior' — `depthTest:true, depthFunc:EqualDepth`, hardware depth
+      // test as its ONLY occlusion mechanism — but this capture's own target
+      // had no depth attachment at all (now fixed, see
+      // `describeSceneColorMapOnlyMrt`'s own header) and never ran the
+      // matching depth-prepass, so those fragments had nothing valid to
+      // compare against. `runEarlyZDepthPrepassAndColorDraw` is the SAME
+      // sequence `runGeometryWorldPass` uses for the real draw — sharing it
+      // (rather than a second hand-written copy) is what keeps the two from
+      // silently drifting apart the way they already had.
       // ⚠️ ALPHA 1, NOT 0 — every material this reuses is `transparent:
       // true` (buf:scene.attr's own header confirms this for the whole
       // unified world draw), so a soft edge or any authored fade blends
@@ -6103,8 +6166,15 @@ export async function startVtPanViewer({
       // target's own alpha is never read by anything downstream (the
       // publish quad samples `.rgb` only).
       renderer.setClearColor(0x000000, 1);
-      renderer.clear(true, false, false);
-      renderer.render(scene, camera);
+      if (earlyZComposition) {
+        // The shared function's OWN first step is a full clear(true,true,
+        // true) — no separate color-only clear needed first, same as
+        // runGeometryWorldPass's own call site never does one either.
+        runEarlyZDepthPrepassAndColorDraw({ depthPrepassScene, depthCamera, colorScene: scene });
+      } else {
+        renderer.clear(true, false, false);
+        renderer.render(scene, camera);
+      }
       renderer.setClearColor(prevCaptureClear, prevCaptureAlpha);
       renderer.setRenderTarget(null);
       renderer.setMRT(previousMRT);
@@ -6788,7 +6858,12 @@ export async function startVtPanViewer({
         // that holds even without this guard — so this just skips the extra
         // draw rather than changing anything visible.
         const doorFogSummary = gating.gate ? doorGraphics.getTransitionSummary() : { anyActive: false, minProgress: 1 };
-        if (doorFogSummary.anyActive && !frozenFloorSources) {
+        // Captured BEFORE frozenFloorSources is reassigned below — this is
+        // the SAME inactive→active edge both the floor-freeze decision and
+        // the ratchet (advanceDoorFogRatchet, Bug-Tracker #35) key off of,
+        // so the two can never fall out of sync with each other.
+        const doorFogWindowStarting = doorFogSummary.anyActive && !frozenFloorSources;
+        if (doorFogWindowStarting) {
           // inactive → active: freeze last frame's (pre-transition) sources.
           frozenFloorSources = previousVisionSources;
         } else if (!doorFogSummary.anyActive && frozenFloorSources) {
@@ -6798,7 +6873,21 @@ export async function startVtPanViewer({
         // While a transition is ALREADY active, neither branch above fires —
         // the floor stays frozen at its transition-start value for the
         // whole window, not re-frozen every frame.
-        uDoorFogProgress.value = doorFogSummary.anyActive ? doorFogSummary.minProgress : 1;
+        //
+        // ⚠️ RATCHET, NOT A BARE MIN-PROGRESS READ (Bug-Tracker #35) — see
+        // `advanceDoorFogRatchet`'s own header for the full mechanism and
+        // its one documented, accepted tradeoff. Plain `doorFogSummary.
+        // minProgress` used to drive this directly, which let a SECOND door
+        // starting while a first door's sliver was still fading in drag the
+        // whole already-revealed area back toward dark.
+        const ratchet = advanceDoorFogRatchet({
+          anyActive: doorFogSummary.anyActive,
+          minProgress: doorFogSummary.minProgress,
+          startedThisFrame: doorFogWindowStarting,
+          peak: doorFogProgressPeak,
+        });
+        doorFogProgressPeak = ratchet.peak;
+        uDoorFogProgress.value = ratchet.uniformValue;
         // ⚠️ `previousVisionSources` is fed from the RAW `visionRead.sources`
         // here, NEVER from `sourcesForMask` below. Its whole job is "what was
         // already safe right before this transition started" — a snapshot
@@ -8298,7 +8387,7 @@ export async function startVtPanViewer({
         // LUT strength stays 0 for now: the LUT shader path + placeholder are
         // wired, but bundled .cube loading is the next rung (grade.js's
         // `bundled-lut-loading`), so there is no real LUT to blend toward yet.
-        { toneMapping: p.toneMapping ?? 'neutral', lutStrength: 0 }
+        { toneMapping: p.toneMapping ?? 'none', lutStrength: 0 }
       );
     }
 

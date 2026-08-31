@@ -2824,3 +2824,79 @@ two-client GM+player session, player with explored-but-not-currently-visible
 territory, floor switch during a slow cold-cache prepare — no reveal at any
 point. This exact scenario is named in existing project memory as never yet
 run.
+
+## 31. Clearing a painted mask and Save didn't stick — the old paint came back after a reload
+
+**Status:** `BUILT (unverified)` · **Reported:** 2026-08-31 · **Docs:** this
+file, `keyhole-authoring-and-distribution`, `feedback_git_staging_hazard`
+(the commit itself needed a hunk-split, unrelated to the bug)
+
+### Symptom, in the author's own words
+
+*"1) I paint fire onto the fire mask using the painting system. 2) I want to
+get rid of that fire, I click 'clear' and then 'save'. 3) I reload Foundry
+VTT and the fire that was removed has returned."*
+
+### Root cause — CONFIRMED against current source
+
+Three individually-reasonable pieces of code composed into a deletion that
+could never be expressed:
+
+1. `ui/paint-mode.js#clearActive` zeroes the layer's `Uint8Array` in memory.
+   The key stays present in `state.layers` — correct, and what lets the
+   painter's own preview and the live render both go dark immediately.
+2. `save()` → `scene/paint-mask.js#serializePaintedMasks` deliberately
+   **drops** any layer where `isPaintLayerEmpty()` is true ("store only what
+   differs" — a real, tested, desired optimization). A fully-cleared layer is
+   indistinguishable from a never-painted one, so it's omitted from the save
+   payload entirely.
+3. `foundry/paint-adapter.js#savePaintedMasks` wrote that payload with a bare
+   `scene.setFlag(MODULE_ID, 'paintedMasks', payload)`. `Document#setFlag`
+   deep-**merges** (`mergeObject`), it does not replace — a key missing from
+   `payload` just means "leave whatever's already there." The old
+   `fire::0` blob survived untouched on the scene document, confirmed on disk
+   in the mansion example map's `info.json`.
+
+The render genuinely goes dark on Save (point 1's zeroed grid gets pushed
+straight into `maskAuthority.ingestPaintedMask` via the `onLayersChanged`
+bridge, self-alpha composites as a no-op, 0 fires extracted) — which is
+exactly what hid the persistence gap: everything *looked* fixed until the
+next `canvasReady#hydrateFromScene` read the untouched flag back off the
+scene and re-ingested the old paint.
+
+Load path itself (`hydrateFromScene` → `ingestPaintedLayers` →
+`maskAuthority`) was audited and is correct — no fallback, no stale cache, no
+legacy key. It faithfully reproduces whatever is actually in the flag; the
+flag itself was the thing holding stale data.
+
+### Fix
+
+`savePaintedMasks` now calls `scene.unsetFlag(MODULE_ID, 'paintedMasks')`
+before conditionally re-`setFlag`-ing (skipped entirely when the payload is
+empty) — so the flag always ends up EQUAL to the current payload, never a
+union of the payload and whatever used to be there. `serializePaintedMasks`'s
+drop-empty behavior is untouched (still correct, still tested); the fix is
+entirely in how the write expresses "this key is now gone."
+
+### Proof
+
+New `src/foundry/__tests__/paint-adapter.test.mjs`, a scene mock that
+reproduces real Foundry `getFlag`/`setFlag`(merge)/`unsetFlag`(delete)
+semantics — pins the exact clear→save→reload round trip (fails against the
+old single-`setFlag` code, passes against the fix), a partial-clear case
+(one kind cleared, a sibling kind on the same scene survives), and
+write-ordering (`unsetFlag` before `setFlag`). Lint clean (0 errors, 5
+pre-existing unrelated warnings), Prettier clean, `verify:structure` 33/33,
+full Node suite green except two pre-existing failures already present in
+the working tree before this change (`tools/chart-room` build fingerprint,
+`specular`'s `incidentSteepness` default) — neither touches painting or
+masks.
+
+### Fixed when
+
+On a real scene: paint `_Fire`, Save, confirm it's still there after a
+reload (round-trip sanity); paint, Clear, Save, reload — the cleared region
+must stay dark. Also worth the author's own eyes on a multi-kind floor
+(clear one painted kind, leave a sibling kind painted, confirm only the
+cleared one is gone after reload) since that's the part a single-mask smoke
+test can't distinguish from "the whole flag got nuked."

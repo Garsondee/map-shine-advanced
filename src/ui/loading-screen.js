@@ -127,9 +127,39 @@ function buildOverlay() {
   Object.assign(root.style, {
     position: 'absolute',
     inset: '0',
-    // Above the VT canvas (5), below Foundry's UI (60) — the GM keeps their
-    // sidebar and can still navigate away from a scene that is loading badly.
-    zIndex: '6',
+    // Above the VT canvas (5) AND above every one of MSA's own floating
+    // rooms (2026-08-27 fix, author: "this UI should appear below the
+    // loading screen... currently... this appears above it"). Those rooms
+    // (Remote/Studio/Player, z-index 100; their own popovers, 400) did not
+    // exist when this was set to 6 — nothing here was ever weighed against
+    // them, and z-index 100 simply outranks 6. This still sits below
+    // Foundry's OWN UI (60)... except it no longer can, now that it must
+    // also clear 400: raised to 500, comfortably past MSA's own chrome.
+    // Foundry's sidebar is unaffected regardless of this number — it lives
+    // outside this overlay's own host (resolveHost(), above) entirely, so a
+    // higher z-index here changes stacking order only against things that
+    // occupy the SAME screen region (the scene area), never Foundry's own
+    // UI docked elsewhere on screen.
+    //
+    // 2026-08-31 fix, author: "the paused UI layer appears above the
+    // loading screen, move the loading screen up so nothing can go in
+    // front of it." Foundry's own `#pause` banner (game-pause.mjs, id:
+    // "pause", frame:false/positioned:false so it never gets bumped by
+    // ApplicationV2's z-index-on-focus logic) is declared at
+    // `calc(var(--z-index-canvas) + 1)` = 1 in Foundry v14's own
+    // interface.less, and — like `#board` — sits at the SAME body-level
+    // DOM depth as this overlay's host, so 500 already outranks it on
+    // paper. The author saw it win anyway, which means something about the
+    // live stacking (a theme override, a game-system stylesheet, a
+    // difference from the vendored source this was checked against) traps
+    // it differently than this analysis predicts. Rather than keep
+    // reasoning about a stacking context this codebase cannot fully see,
+    // this jumps past Foundry's own highest reserved level —
+    // `--z-index-notification: 99999`, the ceiling of Foundry's ENTIRE
+    // z-index scale (tooltips, windows, the pause banner, everything) —
+    // so the curtain wins regardless of which of those explanations is
+    // right.
+    zIndex: '100000',
     background: 'linear-gradient(180deg, #070b12 0%, #0d1420 100%)',
     color: '#cfe8ff',
     display: 'flex',

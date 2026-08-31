@@ -87,13 +87,15 @@ function plannedDbtn(text, title, plannedReason) {
 
 /**
  * @param {HTMLElement} container
- * @param {{onProbe?: () => void, onExport?: () => void}} ctx
+ * @param {{onProbe?: () => void, onExport?: () => void,
+ *   buildPerfSweepButton?: () => HTMLElement|null}} ctx
  * @returns {{update: (snapshot: {fpsText: string, msText: string,
  *   vramText: string, sparkHistory: Array<{ratio: number|null, level: string}>}
  *   |null|undefined) => void}} boot.js's own heartbeat calls `update` every
- *   ~250ms alongside `MapShine.debug.updatePerfStrip`, the SAME dual-dispatch
- *   shape `remoteAstrolabe.update`/`astrolabe.update` already use side by
- *   side. A falsy `snapshot` (before the heartbeat's first tick) is a no-op.
+ *   ~250ms with a fresh snapshot (the old panel's own equivalent call,
+ *   `MapShine.debug.updatePerfStrip`, was deleted along with that panel —
+ *   UI parity plan, phase 7b; this is the sole surviving display now).
+ *   A falsy `snapshot` (before the heartbeat's first tick) is a no-op.
  */
 export function renderDebugStrip(container, ctx) {
   const wrap = document.createElement('div');
@@ -101,10 +103,90 @@ export function renderDebugStrip(container, ctx) {
   wrap.setAttribute('role', 'group');
   wrap.setAttribute('aria-label', 'Debug equipment');
 
+  // ---- THE ACCORDION, round 2 (2026-08-27, author RE-testing this exact
+  // round's own first pass: "I liked seeing the performance monitoring
+  // ticks, those were nice to see all the time and I don't want them
+  // hidden. The same goes for the basic FPS/VRAM... I just want a SMALL
+  // performance sweep button... and a small pixel probe button to be
+  // available at all time along with the VRAM/FPS information and display
+  // — but also the ability to fold it open for future debug buttons").
+  // Round 1 collapsed fps/ms/vram/sparkline into the accordion body along
+  // with HUD/export — too much: those four are exactly the "nice to see all
+  // the time" readout, not "a library of debug buttons." Corrected shape:
+  // PRIMARY (probe + perf sweep, buttons only) sits directly above a SECOND
+  // always-visible row (the stats), and ONLY HUD/export — genuinely
+  // occasional tools — collapse into the accordion body. The accordion
+  // itself stays, for the SAME "room to grow" reason round 1 built it.
+  const primaryRow = document.createElement('div');
+  primaryRow.className = 'msa-debug-primary';
+
   const tag = document.createElement('span');
   tag.className = 'msa-debug-tag';
   tag.innerHTML = `${iconMarkup('flask')}DEBUG`;
 
+  const probeBtn = dbtn('probe', 'Pixel probe — click 3 map points, sample the compositor', () => ctx.onProbe?.());
+  // The full performance sweep — a REAL registered action (boot.js's own
+  // 'perf-run-full', ~5min single floor/20+min multi-floor), reached
+  // through MapShine.debug.buildActionButton so it gets the SAME status-
+  // text/error-handling/clipboard-copy every other registered action
+  // already has, for free, rather than a second hand-rolled version of
+  // that UX. `null` (debugPanel not installed yet, or the action somehow
+  // isn't registered) falls back to an honest planned stub rather than a
+  // silently missing button.
+  const perfBtn =
+    ctx.buildPerfSweepButton?.() ??
+    plannedDbtn(
+      'perf sweep',
+      'Full performance report',
+      'The debug panel has not installed yet, or perf-run-full is not registered.'
+    );
+  perfBtn.classList.add('msa-debug-btn');
+  // buildActionButton's own button (debug-panel-controls.js#makeButton) sets
+  // font/padding/background/border/color as INLINE styles, which beat any
+  // external class rule by specificity regardless of class order — adding
+  // .msa-debug-btn alone was never going to shrink this (2026-08-27 fix,
+  // author: "the current button text is huge"). Clearing the inline
+  // declarations lets .msa-debug-btn's own CSS apply instead, matching
+  // probeBtn's look exactly rather than a bespoke smaller-but-still-
+  // different size.
+  Object.assign(perfBtn.style, {
+    font: '',
+    fontWeight: '',
+    padding: '',
+    background: '',
+    border: '',
+    borderRadius: '',
+    color: '',
+  });
+  // Round 2 (author: "performance report button text is stupid long") — the
+  // registered action's OWN label is deliberately the long, honest one
+  // ('🔬 Performance Report (this scene, CPU + GPU + every tier, ~5 min
+  // single floor, 20+ min multi-floor)', boot.js's own 'perf-run-full')
+  // because Studio's Lab tab renders that exact same label in a row with
+  // real room for it. This compact strip has none — swap the DISPLAYED text
+  // only (the click still runs the real 'perf-run-full' action either way;
+  // only makeRunnable's own textContent is being overwritten here, not the
+  // registry), and move the full wording to `title` so it's one hover away
+  // instead of gone.
+  if (perfBtn.textContent && perfBtn.textContent.length > 'perf sweep'.length) {
+    perfBtn.title = perfBtn.textContent;
+    perfBtn.textContent = 'perf sweep';
+  }
+
+  const accordionToggle = document.createElement('button');
+  accordionToggle.type = 'button';
+  accordionToggle.className = 'msa-debug-more';
+  accordionToggle.setAttribute('aria-expanded', 'false');
+  accordionToggle.title = 'More debug tools';
+  accordionToggle.innerHTML = iconMarkup('chev');
+
+  primaryRow.append(tag, probeBtn, perfBtn, accordionToggle);
+
+  // ---- THE STATS ROW — always visible, NOT part of the collapsible body
+  // (round 2 correction, see this section's own header above). Sits as its
+  // own row directly under primaryRow, still inside `wrap` but outside
+  // `body`, so it renders unconditionally regardless of the accordion's
+  // open/closed state.
   const spark = document.createElement('span');
   spark.className = 'msa-debug-spark';
   spark.title = 'FPS health, recent samples';
@@ -125,18 +207,33 @@ export function renderDebugStrip(container, ctx) {
   vramStat.className = 'msa-debug-stat';
   vramStat.innerHTML = 'vram <b>—</b>';
 
-  const spacer = document.createElement('span');
-  spacer.className = 'msa-debug-spacer';
+  const statsRow = document.createElement('div');
+  statsRow.className = 'msa-debug-stats-row';
+  statsRow.append(spark, fpsStat, msStat, vramStat);
+
+  // ---- THE ACCORDION BODY — genuinely occasional tools only (HUD/export).
+  const body = document.createElement('div');
+  body.className = 'msa-debug-more-body';
+  body.hidden = true;
+  accordionToggle.addEventListener('click', () => {
+    const expanded = accordionToggle.getAttribute('aria-expanded') === 'true';
+    accordionToggle.setAttribute('aria-expanded', String(!expanded));
+    body.hidden = expanded;
+  });
 
   const hudBtn = plannedDbtn(
     'HUD',
     'Perf HUD — per-zone frame costs over the map',
     'diag/perf-hud.js is real but only reachable through the old debug panel today — a standalone open() for a new room is a real, scoped follow-up, not built this round.'
   );
-  const probeBtn = dbtn('probe', 'Pixel probe — click 3 map points, sample the compositor', () => ctx.onProbe?.());
   const exportBtn = dbtn('export', 'Export everything — the flight-recorder bundle', () => ctx.onExport?.());
+  const moreBtnsRow = document.createElement('div');
+  moreBtnsRow.className = 'msa-debug-more-btns';
+  moreBtnsRow.append(hudBtn, exportBtn);
 
-  wrap.append(tag, spark, fpsStat, msStat, vramStat, spacer, hudBtn, probeBtn, exportBtn);
+  body.append(moreBtnsRow);
+
+  wrap.append(primaryRow, statsRow, body);
   container.appendChild(wrap);
 
   function update(snapshot) {

@@ -140,6 +140,36 @@ export function fireRampStops() {
   return FIRE_RAMP_WOOD.map((s) => ({ t: s.t, rgb: hexToRgb01(s.hex) }));
 }
 
+/**
+ * The ramp's own t=0.5 "golden" stop (`#FDBA35`) — `color`'s neutral anchor.
+ * ⚠️ NOT A COINCIDENCE: `FIRE_PARAMS.color`'s shipped default IS this exact
+ * hex. `fireTintMul` divides the picked swatch by this reference, so at the
+ * default swatch the multiplier is exactly [1,1,1] — a provable no-op against
+ * the already-live-approved look — and only a genuine colour change produces
+ * a non-identity multiplier.
+ */
+const FLAME_TINT_REFERENCE_RGB = hexToRgb01(FIRE_RAMP_WOOD[3].hex);
+
+/**
+ * `color`'s effect: a per-channel multiplier RELATIVE TO THE RAMP'S OWN
+ * reference midpoint, not a raw multiply. A raw multiply by the default hex
+ * (`#fdba35` ≈ 0.99/0.73/0.21) would crush blue in every channel the instant
+ * this is wired live, visibly darkening the exact look already seen on Tower
+ * Bridge. Dividing by that same reference makes the picked swatch scale the
+ * ramp's OWN gradient/contrast shape instead of flattening it toward one flat
+ * colour — "tint", not "replace".
+ *
+ * @param {string} hex @returns {[number,number,number]}
+ */
+export function fireTintMul(hex) {
+  const picked = hexToRgb01(hex) ?? FLAME_TINT_REFERENCE_RGB;
+  return [
+    picked[0] / Math.max(1e-4, FLAME_TINT_REFERENCE_RGB[0]),
+    picked[1] / Math.max(1e-4, FLAME_TINT_REFERENCE_RGB[1]),
+    picked[2] / Math.max(1e-4, FLAME_TINT_REFERENCE_RGB[2]),
+  ];
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // THE SCALE CHAIN — one authored knob, everything else derived
 // ─────────────────────────────────────────────────────────────────────────────
@@ -354,14 +384,84 @@ export function firePuffEnvelope(phase, flickerAmp) {
  *
  * ⚠️ `estMsPerMp` in the MANIFEST must stay consistent with `sheets` here:
  * measured cost is `M × 0.1323 + N × ~0.004` ms/Mpx.
+ *
+ * `spriteCountScale` ADDED 2026-08-30 (Effect-Tier-Gradient-Audit-2026-08-29.md
+ * round 2's own "fire's 3rd unused lever" finding) — a THIRD real, live axis
+ * alongside `clusterFactor`/the puff-clock's `animation.quality`. Multiplies
+ * `fire-subsystem.js`'s own `activeCount` (the flame/ember/smoke particle
+ * budget PER FIRE, `PER_FIRE`'s own values) — the sprite layer's dominant
+ * per-frame cost, and until now the one thing about fire that never varied
+ * by profile at all. 1.0 at `standard` and above, matching `PER_FIRE`
+ * exactly — those three rungs are BYTE-IDENTICAL to before this lever
+ * existed, the same "only low/performance move" discipline every other
+ * effect's tier gradient in this audit follows (`clusterFactor`'s own ramp
+ * predates this session and is a DIFFERENT case — already shipped, already
+ * live at every rung, not something newly introduced here). Ramped rather
+ * than binary below `standard`, mirroring `precipTierScaleForProfile`'s own
+ * 3-step shape (`precip-species.js`) — sparser fire at `low`, not absent
+ * fire.
  */
 const FIRE_TIER_PLANS = Object.freeze([
-  Object.freeze({ sheets: 0, maxSlices: 1, octaveCap: 0, bands: 4, smoke: false, shear: false, clusterFactor: 2.0 }),
-  Object.freeze({ sheets: 1, maxSlices: 3, octaveCap: 3, bands: 5, smoke: false, shear: false, clusterFactor: 1.5 }),
-  Object.freeze({ sheets: 2, maxSlices: 6, octaveCap: 3, bands: 6, smoke: false, shear: true, clusterFactor: 1.0 }),
-  Object.freeze({ sheets: 3, maxSlices: 10, octaveCap: 4, bands: 7, smoke: true, shear: true, clusterFactor: 0.6 }),
-  Object.freeze({ sheets: 3, maxSlices: 10, octaveCap: 4, bands: 8, smoke: true, shear: true, clusterFactor: 0.5 }),
-  Object.freeze({ sheets: 4, maxSlices: 14, octaveCap: 4, bands: 9, smoke: true, shear: true, clusterFactor: 0.35 }),
+  Object.freeze({
+    sheets: 0,
+    maxSlices: 1,
+    octaveCap: 0,
+    bands: 4,
+    smoke: false,
+    shear: false,
+    clusterFactor: 2.0,
+    spriteCountScale: 0.35,
+  }),
+  Object.freeze({
+    sheets: 1,
+    maxSlices: 3,
+    octaveCap: 3,
+    bands: 5,
+    smoke: false,
+    shear: false,
+    clusterFactor: 1.5,
+    spriteCountScale: 0.6,
+  }),
+  Object.freeze({
+    sheets: 2,
+    maxSlices: 6,
+    octaveCap: 3,
+    bands: 6,
+    smoke: false,
+    shear: true,
+    clusterFactor: 1.0,
+    spriteCountScale: 0.8,
+  }),
+  Object.freeze({
+    sheets: 3,
+    maxSlices: 10,
+    octaveCap: 4,
+    bands: 7,
+    smoke: true,
+    shear: true,
+    clusterFactor: 0.6,
+    spriteCountScale: 1.0,
+  }),
+  Object.freeze({
+    sheets: 3,
+    maxSlices: 10,
+    octaveCap: 4,
+    bands: 8,
+    smoke: true,
+    shear: true,
+    clusterFactor: 0.5,
+    spriteCountScale: 1.0,
+  }),
+  Object.freeze({
+    sheets: 4,
+    maxSlices: 14,
+    octaveCap: 4,
+    bands: 9,
+    smoke: true,
+    shear: true,
+    clusterFactor: 0.35,
+    spriteCountScale: 1.0,
+  }),
 ]);
 
 /**
@@ -977,7 +1077,9 @@ export function fireRuntimeFromParams(params = {}, chain = {}) {
   return {
     // Material uniforms.
     intensity: clampNum(num(p.brightness, 1), 0, 3),
-    posterize: clampNum(num(p.posterize, 0.85), 0, 1),
+    // 0, matching FIRE_PARAMS.posterize's own (fixed) default — see fire.js's
+    // "Look" category header for why not the schema's old 0.85.
+    posterize: clampNum(num(p.posterize, 0), 0, 1),
     bands: Math.round(clampNum(num(p.bandCount, 7), 3, 12)),
     smokeGain: clampNum(num(p.smokeAmount, 1) * 0.3, 0, 1),
     grainGain: clampNum(num(p.grain, 0.5), 0, 1),
@@ -1010,6 +1112,20 @@ export function fireRuntimeFromParams(params = {}, chain = {}) {
     lightRadiusScale: clampNum(num(p.lightRadiusScale, 1), 0.25, 3),
     lightColor: typeof p.lightColor === 'string' ? p.lightColor : '#ff9a3c',
     flameColor: typeof p.color === 'string' ? p.color : FIRE_RAMP_WOOD[3].hex,
+    /** `color`'s ready-to-multiply form — see `fireTintMul`'s own header. */
+    flameColorTintMul: fireTintMul(typeof p.color === 'string' ? p.color : FIRE_RAMP_WOOD[3].hex),
+    /**
+     * ⚠️ TWO SOURCES, ONE UNIFORM. `chain.hueShift` is the FUEL's own built-in
+     * shift (`FIRE_FUELS` — magical's 0.5 turns is what its own help text
+     * already promises: "magical is hue-shifted for the unnatural stuff").
+     * It was dead alongside `color`/`posterize` — this is also its fix, not a
+     * new feature: any scene already using magical fuel will visibly change
+     * (a full 180° flip) the moment this ships, in the direction its own
+     * label always claimed. `p.colorHueShift` is the author's manual ROH
+     * dial, in degrees because a GM thinks in degrees, not turns; converted
+     * here so the shader only ever receives one combined radian value.
+     */
+    hueShiftRad: ((chain.hueShift ?? 0) + clampNum(num(p.colorHueShift, 0), -180, 180) / 360) * Math.PI * 2,
 
     // Weather. `weatherResponse` scales how far each response term travels from
     // its neutral value, so 0 is genuinely "ignores the weather" rather than

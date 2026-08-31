@@ -69,6 +69,7 @@
  * storm-lock a scene, and it must never be silent either).
  */
 import { SNOW_RATE_PER_HOUR, PUDDLE_RATE_PER_HOUR } from './mantle-model.js';
+import { profileRank } from '../effect-cascade.js';
 
 export const PRECIP_SPECIES_IDS = Object.freeze(['rain', 'snow', 'hail', 'ash', 'sand', 'spore', 'petal', 'mote']);
 
@@ -1243,6 +1244,69 @@ export function resolveSpeciesFrame(species, axes, tierScale = 1) {
     alphaMul: alphaMul + (alphaMul * L.flashAlphaMul - alphaMul) * flash01,
     rgbMul: rgbMul + (rgbMul * L.flashRgbMul - rgbMul) * flash01,
   });
+}
+
+/**
+ * THE ONE LADDER — index 0/1/2 = tier 0 (unconditional) / 1 (`performance`) /
+ * 2 (`standard`+), matching `precipitation.js#PRECIPITATION.tiers` exactly.
+ * Both access patterns below (by profile string, by resolved tier number)
+ * read this SAME array, so they cannot quietly disagree about what a given
+ * profile or tier actually costs.
+ */
+const PRECIP_TIER_SCALES = Object.freeze([0.4, 0.7, 1.0]);
+
+/**
+ * THE PRODUCER for `resolveSpeciesFrame`'s own `tierScale` parameter — wired
+ * 2026-08-29. That parameter has existed since P1 (its own doc already called
+ * it "the effect cascade's own budget multiplier"), and the maths above has
+ * genuinely multiplied it into `liveCount` the whole time — but its one
+ * caller, `vt-pan-viewer.js#getPrecipRenderState`, hardcoded `tierScale: 1`
+ * forever, so rain/snow cost the same live-particle count on any machine at a
+ * given weather intensity and zoom. See docs/planning/
+ * Effect-Tier-Gradient-Audit-2026-08-29.md §3.4 for the audit that found it.
+ *
+ * ⚠️ UPDATED 2026-08-30 — precipitation now has a real manifest
+ * (`precipitation.js#PRECIPITATION`), and `getPrecipRenderState()`
+ * (`vt-pan-viewer.js`) resolves its live tier through the REAL cascade
+ * resolver, same as every other effect. This function is KEPT, not deleted:
+ * it still answers a real, distinct question (a profile STRING in, not a
+ * resolved tier NUMBER) and stays exported/tested in its own right — but it
+ * is no longer the render seam's own source of truth, `precipTierPlan`
+ * (below) is. Both share the one canonical ladder, `PRECIP_TIER_SCALES`, so
+ * the two can never quietly disagree about what "low" costs.
+ *
+ * `standard` (rank 2, the DEFAULT profile) and above return exactly 1 — this
+ * project's own established rule (stated verbatim in `vegetation-render.js`'s
+ * own tier-3 doc) is that the default profile must reproduce today's shipped
+ * behaviour EXACTLY. Only `low`/`performance` — profiles a player has
+ * actively opted INTO for less cost — are reduced, and `performance` less
+ * aggressively than `low`, the same two-rung shape every other effect's own
+ * ladder uses rather than one combined "off" state.
+ *
+ * @param {string} profile
+ * @returns {number} in (0, 1] — `resolveSpeciesFrame`'s own `Math.min(1, …)`
+ *   clamp means this can only ever REDUCE the live count, never inflate it
+ *   past a species' authored capacity.
+ */
+export function precipTierScaleForProfile(profile) {
+  const rank = profileRank(profile);
+  if (rank >= 2) return PRECIP_TIER_SCALES[2];
+  return rank === 1 ? PRECIP_TIER_SCALES[1] : PRECIP_TIER_SCALES[0];
+}
+
+/**
+ * The tier-NUMBER form of the identical ladder — `precipitation.js#
+ * PRECIPITATION.tiers` declares tier 0 unconditional, tier 1 `fromProfile:
+ * 'performance'`, tier 2 `fromProfile: 'standard'`, so a resolved tier of
+ * 0/1/2 maps onto `PRECIP_TIER_SCALES` by index directly. Mirrors every
+ * other effect's own `xTierPlan(tier)` shape (specular/window/fluid/fire).
+ *
+ * @param {number} tier
+ * @returns {{tier: number, tierScale: number}}
+ */
+export function precipTierPlan(tier) {
+  const n = Number.isFinite(tier) ? Math.max(0, Math.min(PRECIP_TIER_SCALES.length - 1, Math.floor(tier))) : 2;
+  return { tier: n, tierScale: PRECIP_TIER_SCALES[n] };
 }
 
 /** @param {*} v @returns {number} */

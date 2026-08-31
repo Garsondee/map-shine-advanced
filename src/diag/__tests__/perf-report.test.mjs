@@ -290,7 +290,12 @@ export function run(t) {
   // Declared cost vs measured — the loop that has never been closed
   // ======================================================================
   {
-    ok('bloom declares a cost we can compare against', BLOOM.tiers[0].cost.estMsPerMp === 0.3);
+    // 2026-08-29 — bloom grew a second, cheaper tier (tiers[0]: the new
+    // 4-mip floor, 0.18; tiers[1]: today's 6-mip pipeline, still 0.3 — see
+    // bloom.js's own ladder). `compareToManifest` reports the RANGE across
+    // all declared tiers (line 310's own test below), so the max stays 0.3
+    // unchanged; only tier 0's own value moved.
+    ok('bloom declares a cost we can compare against', BLOOM.tiers[0].cost.estMsPerMp === 0.18);
 
     const within = compareToManifest(0.31, BLOOM);
     ok("measured near declared is 'within'", within.verdict === 'within');

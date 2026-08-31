@@ -133,6 +133,43 @@ export const GLASS_DEBUG_HEIGHT_RANGE = 1 + GLASS_OCTAVE2_AMP;
 export const GLASS_DEBUG_OFFSET_REF_PX = 20;
 
 /**
+ * THE PERFORMANCE-TIER LADDER — wired 2026-08-29.
+ *
+ * `window.js#WINDOW.tiers` now declares a real tier 1 ('glass') above the
+ * tier-0 floor ('cookie') — the glass/dispersion/caustic subgraph this
+ * module's own `glass` construction flag already knew how to omit (see that
+ * param's own JSDoc, below), but which nothing had ever wired to a resolved
+ * tier: `deferredRungs.glassPerfGate` named the exact gap this closes. See
+ * docs/planning/Effect-Tier-Gradient-Audit-2026-08-29.md §3.3.
+ *
+ * `WINDOW_DEFAULT_TIER` is asserted equal to what `DEFAULT_PERFORMANCE_
+ * PROFILE` ('standard') resolves to (`effect-tier.test.mjs`'s own anti-drift
+ * block) — which is 1, the top rung, so wiring this changes NOTHING for
+ * anyone at standard/quality/extreme, or even `performance`. Only `low` (the
+ * one profile below tier 1's `fromProfile: 'performance'`) loses glass —
+ * tier 0 alone is byte-for-byte what the author's own `glassWarpPx = 0`
+ * already produces (every glass term vanishes there), just without paying
+ * for the five noise taps that prove it.
+ */
+
+/** The top rung `window.js#WINDOW.tiers` declares. */
+export const WINDOW_MAX_TIER = 1;
+
+/** The fallback tier for an unwired caller — see the ladder header above.
+ * MUST equal what `resolveEffectTier(WINDOW, {profile:
+ * DEFAULT_PERFORMANCE_PROFILE})` resolves to; `effect-tier.test.mjs` pins it. */
+export const WINDOW_DEFAULT_TIER = 1;
+
+/**
+ * @param {number} [tier]
+ * @returns {{tier: number, glassEnabled: boolean}}
+ */
+export function windowTierPlan(tier) {
+  const t = Number.isFinite(tier) ? Math.max(0, Math.min(WINDOW_MAX_TIER, Math.floor(tier))) : WINDOW_DEFAULT_TIER;
+  return { tier: t, glassEnabled: t >= 1 };
+}
+
+/**
  * Build the window-light material.
  *
  * @param {object} args
@@ -157,7 +194,10 @@ export const GLASS_DEBUG_OFFSET_REF_PX = 20;
  *   multiplying them by a zero (`tsl/no-uniform-gates`). Defaults ON — the
  *   author's `glassWarpPx = 0` is the runtime off switch, and it is exact,
  *   but it is a VISUAL off switch only — the noise underneath still runs;
- *   see `gateGlass` below for the one that actually skips it.
+ *   see `gateGlass` below for the one that actually skips it. As of
+ *   2026-08-29 the real caller (`window-surface-subsystem.js`) resolves this
+ *   from `windowTierPlan(tier).glassEnabled`, above — pass it explicitly
+ *   rather than relying on this default whenever the caller has a real tier.
  * @param {boolean} [args.gateGlass] - skip the glass/caustic computation on
  *   the GPU for fragments the floor gate has already decided are invisible,
  *   instead of computing it unconditionally and multiplying the result by

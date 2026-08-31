@@ -11,9 +11,38 @@ import {
   buildCoverageCellMask,
   buildCoverageIndices,
   splitCoverageCellMask,
+  summarizeTileCoverage,
   COVERAGE_MESH_CELLS,
   COVERAGE_ALPHA_THRESHOLD,
 } from '../coverage-mesh.js';
+
+/** A tile-record-shaped fixture, mirroring exactly what `setTileGeometry`
+ * (vt-pan-viewer.js) stamps — never a real THREE.Mesh, since
+ * `summarizeTileCoverage` only ever reads `.mesh.visible` and
+ * `.mesh.geometry.index.count`. */
+function tileFixture({
+  visible = true,
+  indexCount = null,
+  positionCount = null,
+  coverageGrid = null,
+  coverageCells = null,
+  coverageOccupied = null,
+  vegActive = false,
+} = {}) {
+  return {
+    coverageGrid,
+    coverageCells,
+    coverageOccupied,
+    vegActive,
+    mesh: {
+      visible,
+      geometry: {
+        index: indexCount !== null ? { count: indexCount } : null,
+        attributes: positionCount !== null ? { position: { count: positionCount } } : {},
+      },
+    },
+  };
+}
 
 /** A w×h alpha grid, `paint(x,y)` returning 0-255. */
 function grid(w, h, paint) {
@@ -273,5 +302,115 @@ export function run(t) {
       'and its split is null (nothing occupied at all)',
       splitCoverageCellMask({ mask, minGrid: min, tile, imageW: 640, imageH: 640 }) === null
     );
+  }
+
+  // ==========================================================================
+  // summarizeTileCoverage — pure bookkeeping over what setTileGeometry stamps
+  // ==========================================================================
+  {
+    const empty = summarizeTileCoverage([]);
+    ok(
+      'no tiles at all reads every counter as 0/false, fraction null (not fabricated)',
+      empty.neverEvaluated === 0 &&
+        empty.meshed === 0 &&
+        empty.fullyDense === 0 &&
+        empty.cellsTotal === 0 &&
+        empty.cellsKept === 0 &&
+        empty.rasterizedFractionPct === null &&
+        empty.plainTriangles === 0 &&
+        empty.vegetationTriangles === 0
+    );
+    ok('non-array input is treated the same as empty, never a crash', summarizeTileCoverage(null).meshed === 0);
+    ok('undefined input is also safe', summarizeTileCoverage(undefined).neverEvaluated === 0);
+  }
+  {
+    // An invisible tile (mesh built but not currently drawn) contributes
+    // NOTHING — no triangles, no coverage classification either way. Mirrors
+    // getGeometryComposition's own `if (!t.mesh?.visible) continue` discipline
+    // one level up, so the two never disagree about what "owned" means.
+    const tiles = [tileFixture({ visible: false, indexCount: 30000, coverageGrid: {} })];
+    const s = summarizeTileCoverage(tiles);
+    ok(
+      'an invisible tile is fully excluded — no triangles, no bucket at all',
+      s.plainTriangles === 0 && s.neverEvaluated === 0 && s.meshed === 0 && s.fullyDense === 0
+    );
+  }
+  {
+    // Never evaluated: no coverageGrid at all — still counts its triangles
+    // (it is genuinely drawing them), just lands in the "why hasn't this been
+    // reduced yet" bucket rather than "evaluated, found dense".
+    const tiles = [tileFixture({ indexCount: 6, coverageGrid: null })];
+    const s = summarizeTileCoverage(tiles);
+    ok(
+      'a tile with no coverage grid at all is neverEvaluated',
+      s.neverEvaluated === 1 && s.meshed === 0 && s.fullyDense === 0
+    );
+    ok('its triangles are still counted (it really is drawing them)', s.plainTriangles === 2);
+    ok('neverEvaluated tiles contribute nothing to the cell tally', s.cellsTotal === 0 && s.cellsKept === 0);
+  }
+  {
+    // Fully dense: a grid DID arrive, but this tile collapsed to a plain
+    // 1-of-1-cell quad (setTileGeometry's own n<=1 branch stamps exactly this).
+    const tiles = [tileFixture({ indexCount: 6, coverageGrid: {}, coverageCells: 1, coverageOccupied: 1 })];
+    const s = summarizeTileCoverage(tiles);
+    ok(
+      'a truthy grid with 1-of-1 cells kept is fullyDense, not meshed or neverEvaluated',
+      s.fullyDense === 1 && s.meshed === 0 && s.neverEvaluated === 0
+    );
+    ok('fullyDense tiles also contribute nothing to the cell tally', s.cellsTotal === 0 && s.cellsKept === 0);
+  }
+  {
+    // Meshed: a real reduction. n=64 (COVERAGE_MESH_CELLS), only 1200 of 4096
+    // cells kept — real content, mostly empty canvas.
+    const cells = COVERAGE_MESH_CELLS * COVERAGE_MESH_CELLS;
+    const tiles = [
+      tileFixture({ indexCount: 1200 * 6, coverageGrid: {}, coverageCells: cells, coverageOccupied: 1200 }),
+    ];
+    const s = summarizeTileCoverage(tiles);
+    ok('a real reduction (occupied < cells) is meshed', s.meshed === 1 && s.fullyDense === 0 && s.neverEvaluated === 0);
+    ok('cellsTotal/cellsKept carry the raw counts', s.cellsTotal === cells && s.cellsKept === 1200);
+    ok(
+      'rasterizedFractionPct is cellsKept/cellsTotal as a percentage, rounded to 0.1',
+      s.rasterizedFractionPct === Math.round((1200 / cells) * 1000) / 10
+    );
+  }
+  {
+    // Multiple meshed tiles: the fraction is over the SUM, not an average of
+    // per-tile fractions (a tile with more cells should weigh more).
+    const tiles = [
+      tileFixture({ indexCount: 60, coverageGrid: {}, coverageCells: 100, coverageOccupied: 10 }), // 10%
+      tileFixture({ indexCount: 5940, coverageGrid: {}, coverageCells: 1000, coverageOccupied: 990 }), // 99%
+    ];
+    const s = summarizeTileCoverage(tiles);
+    ok('cellsTotal/cellsKept sum across tiles', s.cellsTotal === 1100 && s.cellsKept === 1000);
+    ok(
+      'the fraction is summed-cells, not a naive 50/50 average of (10%,99%)',
+      s.rasterizedFractionPct === Math.round((1000 / 1100) * 1000) / 10 && s.rasterizedFractionPct !== 54.5
+    );
+  }
+  {
+    // Material family split — vegActive routes triangles to the OTHER bucket,
+    // independent of coverage state.
+    const tiles = [
+      tileFixture({ indexCount: 300, vegActive: false, coverageGrid: null }),
+      tileFixture({ indexCount: 900, vegActive: true, coverageGrid: null }),
+    ];
+    const s = summarizeTileCoverage(tiles);
+    ok('plainTriangles only counts non-vegetation tiles', s.plainTriangles === 100);
+    ok('vegetationTriangles only counts vegActive tiles', s.vegetationTriangles === 300);
+    ok('both still count toward neverEvaluated when uncoveraged', s.neverEvaluated === 2);
+  }
+  {
+    // Triangle count falls back to position.count when there is no index
+    // (matches getGeometryComposition's own countMeshTriangles fallback).
+    const tiles = [tileFixture({ indexCount: null, positionCount: 30, coverageGrid: null })];
+    const s = summarizeTileCoverage(tiles);
+    ok('falls back to attributes.position.count/3 when geometry has no index', s.plainTriangles === 10);
+  }
+  {
+    // A tile whose mesh hasn't been built yet at all — must not crash.
+    const tiles = [{ coverageGrid: null, mesh: null }];
+    const s = summarizeTileCoverage(tiles);
+    ok('a tile with no mesh object at all is safely skipped, not a crash', s.plainTriangles === 0);
   }
 }

@@ -166,6 +166,9 @@ export function createDayClock({
   const walkRate = Math.max(0, Number(syncHoursPerSecond) || DEFAULT_SYNC_HOURS_PER_SECOND);
   /** Where `synced` mode is walking to, or null when settled / not syncing. */
   let targetHour = null;
+  /** This sync's own rate, hours/sec — `walkRate` unless `syncTo`'s own
+   * `overMs` requested a specific duration (2026-08-27 fix, below). */
+  let activeWalkRate = walkRate;
 
   return {
     /**
@@ -190,7 +193,7 @@ export function createDayClock({
       // astrolabe's own time-stop buttons ("jump to dawn" should sweep).
       if (targetHour !== null) {
         const remaining = shortestHourDelta(hour, targetHour);
-        const step = walkRate * dt;
+        const step = activeWalkRate * dt;
         if (step <= 0 || Math.abs(remaining) <= Math.max(step, SYNC_ARRIVAL_HOURS)) {
           hour = targetHour;
           targetHour = null;
@@ -227,14 +230,42 @@ export function createDayClock({
      * Walk to an hour rather than snapping (a time-stop button; a Foundry world
      * time change in `synced` mode). Always accepted — in `synced` mode this is
      * the ONLY way the hour moves, so it must work regardless of mode.
+     *
+     * `overMs` (2026-08-27 fix, author live-testing round: "I select 10s
+     * transition time... [change time of day and] it happens instantly") —
+     * the Remote's own Fade Time selector, so a time-stop eases over the same
+     * duration a weather fade would, instead of this walk's fixed default
+     * rate (`DEFAULT_SYNC_HOURS_PER_SECOND` — under a second for most jumps,
+     * indistinguishable from a snap). `overMs <= 0` (Fade Time's own "Now")
+     * snaps outright, matching a weather fade's own "Now = cut instantly."
+     * Omitted entirely keeps the original fixed-rate walk (a foreign client's
+     * edit, a scene load) — additive, not a behaviour change for a caller
+     * that never asks for a specific duration.
+     *
+     * A call that RE-TARGETS THE SAME HOUR ALREADY BEING WALKED TO — which is
+     * exactly what happens the instant `editSky`'s own persisted write loops
+     * back through `applyLookToEngines`'s re-sync, milliseconds after the
+     * original timed call above started the walk — leaves the in-flight rate
+     * untouched: recomputing here from `overMs` (or its absence) would reset
+     * a 10s sweep back to the fast default on its very first frame, which is
+     * the exact bug this fix exists to close. Only a GENUINELY NEW target
+     * recomputes the rate.
      * @param {number} h
+     * @param {number} [overMs] - total duration for THIS sync, if the caller
+     *   wants one; unset falls back to the constant walk rate.
      */
-    syncTo(h) {
+    syncTo(h, overMs) {
       const next = normalizeHour(h);
-      if (Math.abs(shortestHourDelta(hour, next)) <= SYNC_ARRIVAL_HOURS) {
+      const delta = shortestHourDelta(hour, next);
+      if (Math.abs(delta) <= SYNC_ARRIVAL_HOURS || (Number.isFinite(overMs) && overMs <= 0)) {
         hour = next;
         targetHour = null;
+        activeWalkRate = walkRate;
         return;
+      }
+      const isNewTarget = targetHour === null || Math.abs(shortestHourDelta(targetHour, next)) > SYNC_ARRIVAL_HOURS;
+      if (isNewTarget) {
+        activeWalkRate = Number.isFinite(overMs) && overMs > 0 ? Math.abs(delta) / (overMs / 1000) : walkRate;
       }
       targetHour = next;
     },

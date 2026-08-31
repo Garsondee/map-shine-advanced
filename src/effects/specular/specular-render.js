@@ -439,6 +439,55 @@ export const SPECULAR_LAYER_DEFAULTS = Object.freeze([
 ]);
 
 /**
+ * THE PERFORMANCE-TIER LADDER — wired 2026-08-29.
+ *
+ * ============================================================================
+ * THE GAP THIS CLOSES
+ * ============================================================================
+ * `specular.js#SPECULAR.tiers` has always declared five real rungs above the
+ * presence floor (shimmer/parallax/life/islands/sunAndSky), each with a
+ * `fromProfile` and a cost class — but `resolved.perfTier` was captured into
+ * this effect's registration readout and dropped one step before it reached
+ * `buildSpecularSurfaceMaterial`, so every rung ran unconditionally on every
+ * profile. This is effect-cascade.js's own "14 effects declared a ladder
+ * nobody read" shape, effect #15 — see docs/planning/
+ * Effect-Tier-Gradient-Audit-2026-08-29.md for the audit that found it.
+ *
+ * `SPECULAR_DEFAULT_TIER` is asserted equal to what `DEFAULT_PERFORMANCE_
+ * PROFILE` ('standard') actually resolves to (`effect-tier.test.mjs`'s own
+ * anti-drift block) — which is 5, the top rung, so wiring this changes
+ * NOTHING for anyone at standard/quality/extreme. Only `low`/`performance`
+ * (both resolve to tier 3) lose `islands` and `sunAndSky` — a genuine,
+ * intended look change for those two profiles, the whole point of the fix.
+ */
+
+/** The top rung `specular.js#SPECULAR.tiers` declares — five real rungs above
+ * the unconditional presence floor. */
+export const SPECULAR_MAX_TIER = 5;
+
+/** The fallback tier for an unwired caller — see `specularTierPlan`'s own
+ * header above. MUST equal what `resolveEffectTier(SPECULAR, {profile:
+ * DEFAULT_PERFORMANCE_PROFILE})` resolves to; `effect-tier.test.mjs` pins it. */
+export const SPECULAR_DEFAULT_TIER = 5;
+
+/**
+ * @param {number} [tier]
+ * @returns {{tier: number, shimmerEnabled: boolean, parallaxEnabled: boolean,
+ *   lifeEnabled: boolean, islandsEnabled: boolean, sunSkyEnabled: boolean}}
+ */
+export function specularTierPlan(tier) {
+  const t = Number.isFinite(tier) ? Math.max(0, Math.min(SPECULAR_MAX_TIER, Math.floor(tier))) : SPECULAR_DEFAULT_TIER;
+  return {
+    tier: t,
+    shimmerEnabled: t >= 1,
+    parallaxEnabled: t >= 2,
+    lifeEnabled: t >= 3,
+    islandsEnabled: t >= 4,
+    sunSkyEnabled: t >= 5,
+  };
+}
+
+/**
  * Build the shimmer material.
  *
  * @param {object} args
@@ -462,6 +511,10 @@ export const SPECULAR_LAYER_DEFAULTS = Object.freeze([
  *   "world XY → mask UV → sample" exists exactly once in the renderer.
  * @param {*} args.timeMsNode - THE shared clock (`uGlobalTimeMs`). Sim time, so
  *   the shimmer stops when Foundry pauses, like every other animation here.
+ * @param {number} [args.tier] - the resolved performance-tier rung
+ *   (`specularTierPlan`, above) — gates shimmer/parallax/life/islands/
+ *   sunAndSky at JS-construction time. Defaults to `SPECULAR_DEFAULT_TIER`
+ *   (today's unconditional look), so an unwired caller sees no change.
  * @returns {object} the material plus its setters.
  */
 export function buildSpecularSurfaceMaterial({
@@ -494,6 +547,7 @@ export function buildSpecularSurfaceMaterial({
   flickerSpeed = SPECULAR_FLICKER_SPEED,
   flickerScalePx = SPECULAR_FLICKER_SCALE_PX,
   flickerRoughness = SPECULAR_FLICKER_ROUGHNESS,
+  tier = SPECULAR_DEFAULT_TIER,
 }) {
   const TSL = THREE.TSL;
   const {
@@ -537,6 +591,11 @@ export function buildSpecularSurfaceMaterial({
   // BOUND target's texture names: a key with no match yields an EMPTY output
   // struct, i.e. no fragment output at all. Not importing the symbol is the
   // cheapest way to make a future edit reach for this note first.
+
+  // THE TIER — see specularTierPlan's own header for the wiring history this
+  // closes. Read ONCE, here, so every gate below (shimmer/parallax/life/
+  // islands/sunAndSky) agrees on the same rung for this one material build.
+  const plan = specularTierPlan(tier);
 
   const uStrength = uniform(float(strength));
   const uSaturation = uniform(float(saturation));
@@ -619,7 +678,7 @@ export function buildSpecularSurfaceMaterial({
   const maskTexNode = texture(maskTexture, maskUv);
   const maskSample = maskTexNode.toVar('specMaskSample');
 
-  // ── TIER 1: THE DECODE ───────────────────────────────────────────────────
+  // ── THE DECODE (unconditional — ladder tier 0, 'presence') ───────────────
   // The transcription of `decodeSpecularMask`. RAW values, no transfer curve.
   const luma601 = dot(maskSample.rgb, vec3(LUMA_601[0], LUMA_601[1], LUMA_601[2])).toVar('specLuma');
   const maskAlpha = clamp(maskSample.a, 0, 1);
@@ -660,12 +719,29 @@ export function buildSpecularSurfaceMaterial({
     'specTint'
   );
 
-  // ── TIER 3: THE ISLAND PACK ──────────────────────────────────────────────
+  // ── THE ISLAND PACK ───────────────────────────────────────────────────────
+  // ⚠️ These in-file section labels used to say "TIER N" as PIPELINE
+  // CONSTRUCTION ORDER, NOT the performance ladder — a numbering collision
+  // the 2026-08-29 wiring audit flagged as actively misleading once real
+  // tier gates (`plan.*Enabled`) exist in this same file. Removed rather
+  // than renumbered: the real ladder tier a piece of maths belongs to is
+  // named inline instead (e.g. "ladder tier 4, 'islands'" below), which
+  // cannot drift out of sync with `specular.js#SPECULAR.tiers` the way a
+  // second hand-maintained numbering could.
+  //
   // ⚠️ SAMPLED AT THE UNSHIFTED COORDINATE, ALWAYS. Reading the pack through a
   // parallax-shifted uv is a feedback loop — the offset would depend on a texel
   // the offset chose — and it bleeds one island's motion across its neighbour's
   // boundary. The pack answers "which island owns THIS texel", which is a
   // question about where the texel is, not about where its pattern has slid to.
+  //
+  // ⚠️ UNCONDITIONAL, even below ladder tier 4 ('islands') — `packTexNode`
+  // must always exist as a real texture-sampling node so `setIslandPackTexture`
+  // has something to re-point on a bake, and the debug material's own
+  // `islands`/`islandMotion` channels read it directly regardless of tier (a
+  // developer picking those channels wants the real pack, not a stand-in).
+  // What the REAL material sees is decided just below, at
+  // `effectiveIslandParallax`.
   const packTexNode = texture(islandPackTexture, maskUv);
   const packSample = packTexNode.toVar('specPack');
   // Decoded from the byte encoding -- see `ISLAND_PARALLAX_RANGE` for why this
@@ -675,22 +751,44 @@ export function buildSpecularSurfaceMaterial({
     .mul(float(2 * ISLAND_PARALLAX_RANGE))
     .sub(vec2(ISLAND_PARALLAX_RANGE, ISLAND_PARALLAX_RANGE))
     .toVar('specIsland');
+  // LADDER TIER 4 ('islands') — below it, every texel takes the GLOBAL
+  // parallax `(1, 0)`, the SAME placeholder value `specular-surface-
+  // subsystem.js` uploads before any pack has baked (see that file's own
+  // comment on the 1×1 placeholder) — so a tier-4 downgrade looks EXACTLY
+  // like "no island pack baked yet", a state this shader already renders
+  // correctly. This is a JS-time ternary choosing which NODE feeds the real
+  // material's graph: below tier 4, `packTexNode`'s texture READ is never
+  // reached by walking from `specularMaterial.colorNode` and is not compiled
+  // into that material's shader at all — only into the always-real debug
+  // material above, which already reads `islandParallax` directly.
+  const effectiveIslandParallax = plan.islandsEnabled ? islandParallax : vec2(1, 0);
 
-  // ── TIER 2 + 4: PATTERN SPACE, PARALLAX, DRIFT ───────────────────────────
+  // ── PATTERN SPACE ──────────────────────────────────────────────────────
   const tSec = timeMsNode.mul(float(0.001)).toVar('specTimeSec');
   const patternScale = max(uPatternScale, float(1)).toVar('specPatternScale');
   const worldUv = vec2(positionWorld.x, positionWorld.y).div(patternScale);
-  // THE PARALLAX. `uViewCentre × islandParallax × strength / patternScale` —
-  // at depth 1 this is V2's measured ≈1:1 world-space slide, i.e. very nearly
-  // screen-locked. V2 buried the same relationship in a magic 0.0006 that only
-  // came out at 1:1 because it cancelled against a pattern scale of 16384.
-  const parallaxBase = uViewCentre.mul(islandParallax).mul(uParallaxStrength).div(patternScale).toVar('specParallax');
-  // ⚠️ TRAVEL, NOT A PER-PIXEL DIRECTION × TIME. The drift is ONE vector,
-  // identical for every pixel, which is what makes an unbounded `× tSec` safe.
-  // A per-pixel direction multiplied by unbounded time fans out around every
-  // convex feature and shipped live as "barcodes radiating from all surfaces"
+  // LADDER TIER 2 ('parallax'). `uViewCentre × islandParallax × strength /
+  // patternScale` — at depth 1 this is V2's measured ≈1:1 world-space slide,
+  // i.e. very nearly screen-locked. V2 buried the same relationship in a
+  // magic 0.0006 that only came out at 1:1 because it cancelled against a
+  // pattern scale of 16384. Below tier 2 the whole offset is zero — a
+  // JS-time ternary, not a zeroed uniform, so the pattern is genuinely
+  // camera-static.
+  const parallaxBase = (
+    plan.parallaxEnabled
+      ? uViewCentre.mul(effectiveIslandParallax).mul(uParallaxStrength).div(patternScale)
+      : vec2(0, 0)
+  ).toVar('specParallax');
+  // LADDER TIER 3 ('life'), drift half — the pulse half lives inside
+  // `buildShimmerTerms` below, next to the term it modulates. ⚠️ TRAVEL, NOT A
+  // PER-PIXEL DIRECTION × TIME. The drift is ONE vector, identical for every
+  // pixel, which is what makes an unbounded `× tSec` safe. A per-pixel
+  // direction multiplied by unbounded time fans out around every convex
+  // feature and shipped live as "barcodes radiating from all surfaces"
   // (`water-field.js`'s own boxed warning, learned the expensive way).
-  const drift = vec2(float(0.8), float(0.6)).mul(uDriftSpeed.mul(tSec)).toVar('specDrift');
+  const drift = (plan.lifeEnabled ? vec2(float(0.8), float(0.6)).mul(uDriftSpeed.mul(tSec)) : vec2(0, 0)).toVar(
+    'specDrift'
+  );
 
   // ── OUTDOORS ─────────────────────────────────────────────────────────────
   // The SAME world-space read `buf:scene.attr`'s G channel uses — injected, so
@@ -758,6 +856,10 @@ export function buildSpecularSurfaceMaterial({
    * @param {object} L @returns {*}
    */
   function sunGrainBias(L) {
+    // LADDER TIER 5 ('sunAndSky') — below it, no bias: every layer reads as
+    // if grain angle never mattered to the sun, exactly what tier 4 already
+    // draws (nothing here touches the composite below this rung).
+    if (!plan.sunSkyEnabled) return float(1);
     const perp = vec2(L.uGrain.y.negate(), L.uGrain.x);
     const d = abs(dot(uSunDir, perp));
     const bias = mix(float(SUN_BIAS_MIN), float(1), clamp(d, 0, 1));
@@ -842,15 +944,19 @@ export function buildSpecularSurfaceMaterial({
     // identical to `sum`.
     let layeredTerm = shimmerLayer(layers[0]);
     for (let i = 1; i < SPECULAR_LAYER_COUNT; i++) layeredTerm = max(layeredTerm, shimmerLayer(layers[i]));
-    const pulseNode = float(1)
-      .sub(uPulse)
-      .add(
-        uPulse.mul(
-          sin(tSec.mul(float(0.37)))
-            .mul(float(0.5))
-            .add(float(0.5))
-        )
-      );
+    // LADDER TIER 3 ('life'), pulse half — see `drift`'s own comment above
+    // for the other half. Below tier 3 this is a constant 1 (no breathing).
+    const pulseNode = plan.lifeEnabled
+      ? float(1)
+          .sub(uPulse)
+          .add(
+            uPulse.mul(
+              sin(tSec.mul(float(0.37)))
+                .mul(float(0.5))
+                .add(float(0.5))
+            )
+          )
+      : float(1);
     // ⚠️ THE UNCONDITIONAL TAIL SHRANK FROM 0.22 TO 0.05 — corrected
     // 2026-07-27. `cellular` is a continuous field with genuine dark valleys
     // (its own smoothstep already clips ~28% of its range to exactly 0), but
@@ -892,13 +998,23 @@ export function buildSpecularSurfaceMaterial({
   //
   // Visually lossless by construction: the gated-off value is 0, and 0 is
   // exactly what `shimmer * coverage` already produced there.
-  const shimmer = Fn(() => {
-    const out = float(0).toVar('specShimmerGated');
-    If(presence.greaterThan(float(0)), () => {
-      out.assign(buildShimmerTerms().shimmer);
-    });
-    return out;
-  })().toVar('specShimmer');
+  // LADDER TIER 1 ('shimmer') — GATED HERE, AT JS-CONSTRUCTION TIME
+  // (Effects.md Law 4): below tier 1, `buildShimmerTerms()` — the 27-cell
+  // Worley + Perlin cellular base, "THE DOMINANT COST OF THE WHOLE EFFECT"
+  // per that function's own header — is never even CALLED for THIS, the
+  // real material, so none of it compiles into the shipped shader. The
+  // debug material's own `cellular`/`shimmer` channels (below) call it
+  // separately and are deliberately left ungated — see that call's own
+  // comment.
+  const shimmer = plan.shimmerEnabled
+    ? Fn(() => {
+        const out = float(0).toVar('specShimmerGated');
+        If(presence.greaterThan(float(0)), () => {
+          out.assign(buildShimmerTerms().shimmer);
+        });
+        return out;
+      })().toVar('specShimmer')
+    : float(0).toVar('specShimmer');
 
   // UNGATED, for the debug material only — see buildShimmerTerms' own header.
   // Deliberately ungated: channel 'cellular' exists to show whether the noise
@@ -1390,6 +1506,10 @@ export function buildSpecularSurfaceMaterial({
     maskTexNode,
     packTexNode,
     layerCount: SPECULAR_LAYER_COUNT,
+    /** The ladder rung this exact material was built for — see
+     * specular-surface-subsystem.js's own `builtForTier`, which records THIS
+     * rather than the requested tier (same discipline water's rebuild uses). */
+    tier: plan.tier,
     /** THE ONE DOOR onto the mask texture — see `setMaskUvBounds` for why the
      * lookup is uv-based, and the subsystem for who calls this. */
     setMaskTexture(tex) {

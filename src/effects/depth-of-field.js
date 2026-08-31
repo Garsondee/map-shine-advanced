@@ -151,11 +151,25 @@ export const DEPTH_OF_FIELD = Object.freeze({
     Object.freeze({
       n: 0,
       name: 'floor-distance-mip-blur',
+      cost: Object.freeze({ class: 'C2', estMsPerMp: 0.08 }),
+      adds:
+        'a 2-level downsample pyramid of scene.lit, sampled per-pixel at a fractional mip level driven by ' +
+        "buf:scene.depth's floor index vs the currently viewed floor, composited back via NormalBlending " +
+        '(alpha=0 on the current floor, so it is left byte-identical) — a genuinely coarser blur ramp than ' +
+        'the full pyramid (tier 1), not a crop of the same one: a below-floor pixel still reads as blurred, ' +
+        'just with less resolvable falloff between "just below" and "far below".',
+    }),
+    Object.freeze({
+      n: 1,
+      name: 'four-level-pyramid',
+      fromProfile: 'performance',
       cost: Object.freeze({ class: 'C2', estMsPerMp: 0.15 }),
       adds:
-        'a 4-level downsample pyramid of scene.lit, sampled per-pixel at a fractional mip level driven by ' +
-        "buf:scene.depth's floor index vs the currently viewed floor, composited back via NormalBlending " +
-        '(alpha=0 on the current floor, so it is left byte-identical)',
+        "the pyramid deepens to 4 levels — twice today's tier-0 resolution in the blur ramp, the SAME " +
+        'pipeline this effect has always shipped. Wired 2026-08-29: `buildDofMaterials` (depth-of-field-' +
+        'render.js) was already fully generic in mip count (`mipCount`/`topLod` derive from however many ' +
+        'textures it is handed, never a hardcoded 4) — the gap was that the VIEWER always built it with ' +
+        'all 4 mips regardless of profile. See docs/planning/Effect-Tier-Gradient-Audit-2026-08-29.md §3.3.',
     }),
   ]),
   // Recorded, NOT built — honest rungs (Effects.md §0).
@@ -169,10 +183,6 @@ export const DEPTH_OF_FIELD = Object.freeze({
     Object.freeze({
       name: 'fog-of-war-clip',
       note: "darken/skip the blur under fog-of-war once MSA renders its own fog — same deferred hook bloom's own clamp names (keyhole-vision-fog-direction)",
-    }),
-    Object.freeze({
-      name: 'performance-tiers',
-      note: 'governor-driven mip count / resolution scale per performance profile (Effects.md §6) — tier 0 is a fixed 4-mip chain',
     }),
   ]),
 });

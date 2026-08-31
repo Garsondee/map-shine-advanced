@@ -32,11 +32,13 @@
  * the approved art exactly is the whole point of this fix, and a "close but
  * independently re-tuned" version risks becoming a SECOND mismatch.
  *
- * `ui/astrolabe.js` itself is UNTOUCHED and stays exactly as it is — the old
- * debug panel keeps using `createAstrolabe()`, which is a real, working,
- * separate surface with its own legitimate bundled-controls use case. Only
- * `hourToDialDeg`/`formatClock`/`compassLabel` are reused from it (pure
- * geometry/formatting, already correct, already tested).
+ * `ui/astrolabe.js` itself was UNTOUCHED at the time (the old debug panel
+ * still used `createAstrolabe()` as its own separate surface) — since
+ * deleted whole (UI parity plan, phase 7b) once that panel went too.
+ * `hourToDialDeg`/`formatClock`/`compassLabel`/`TIME_STOPS`, reused from it
+ * even then (pure geometry/formatting, already correct, already tested),
+ * now live in `ui/astrolabe-geometry.js`, extracted at that same deletion
+ * so this file's own import kept working with a real module behind it.
  *
  * ============================================================================
  * WHAT IS DELIBERATELY NOT PORTED THIS ROUND — named, not silently dropped
@@ -63,7 +65,7 @@
  * @module ui/rooms/remote/astrolabe-dial
  */
 
-import { hourToDialDeg, formatClock, compassLabel } from '../../astrolabe.js';
+import { hourToDialDeg, formatClock, compassLabel, TIME_STOPS } from '../../astrolabe-geometry.js';
 
 // ---- geometry, ported verbatim from the mock's own #astro/.rimArt rules ---
 
@@ -205,6 +207,10 @@ function nextUid() {
  *
  * @param {object} opts
  * @param {(hour: number, committed: boolean) => void} opts.onTimeChange - ring drag.
+ * @param {(hour: number) => void} [opts.onTimeStop] - a time-stop dot on the
+ *   ring (UI parity plan, phase 6b) — sweeps immediately, same shape as
+ *   `ui/astrolabe.js`'s own `onTimeStop`, gated by the SAME `locked` this
+ *   dial's own drag gesture already respects.
  * @param {() => void} [opts.onDateClick]
  * @param {() => void} [opts.onWindClick] - opens the compass popover.
  * @param {() => void} [opts.onLockedAttempt] - fired when a drag/key gesture
@@ -238,21 +244,56 @@ export function buildAstrolabeDial(opts = {}) {
 
   const rimArt = svgEl('svg', { viewBox: `0 0 ${RIM_FACE} ${RIM_FACE}`, 'aria-hidden': 'true' });
   rimArt.classList.add('msa-astro-rimart');
+
+  // ---- the 24 hour ticks, now clickable (UI parity plan, phase 6b, round 2)
+  // Author feedback on the first attempt (8 separate dots at their own
+  // radius): they visually clashed with the NOON/MIDNIGHT/DAWN/DUSK labels,
+  // and "we already have lines, let's make those lines clickable" — so
+  // instead of a second overlay, this tick loop IS the time-stop surface
+  // now: all 24 hours, not just 8, each with a generous invisible hit-line
+  // laid directly over its own visible tick.
+  //
+  // ⚠️ THE ANGLE INDEX `i` IS NOT THE HOUR. `i` is a purely decorative,
+  // evenly-spaced 24-gridline index (i=0 at the top, clockwise) — it only
+  // happens to coincide with hour 12 (noon) at the top because that is
+  // where BOTH this loop's own i=0 AND `hourToDialDeg(12)`'s real rotation
+  // land, by construction of the "noon is up" convention, not by i being an
+  // hour number. Derived by hand, then checked against all four labels
+  // before trusting it: hourToDialDeg(hour) ≡ i's own angle (mod 360) ⇒
+  // hour = (i + 12) % 24 — confirmed i=0→12 (top/NOON), i=6→18 (right/DUSK),
+  // i=12→0 (bottom/MIDNIGHT), i=18→6 (left/DAWN), each checked against
+  // where that label actually sits. Using `i` itself as the hour (the
+  // tempting, wrong shortcut) would put every tick's real time 12 hours
+  // from where it visually points.
   const tickG = svgEl('g');
   for (let i = 0; i < 24; i++) {
     const a = (i / 24) * 2 * Math.PI;
+    const hour = (i + 12) % 24;
     const major = i % 6 === 0;
     const r1 = major ? 108 : 113;
     const r2 = 121;
-    tickG.appendChild(
-      svgEl('line', {
-        class: major ? 'major' : '',
-        x1: (RIM_C + r1 * Math.sin(a)).toFixed(2),
-        y1: (RIM_C - r1 * Math.cos(a)).toFixed(2),
-        x2: (RIM_C + r2 * Math.sin(a)).toFixed(2),
-        y2: (RIM_C - r2 * Math.cos(a)).toFixed(2),
-      })
-    );
+    const x1 = (RIM_C + r1 * Math.sin(a)).toFixed(2);
+    const y1 = (RIM_C - r1 * Math.cos(a)).toFixed(2);
+    const x2 = (RIM_C + r2 * Math.sin(a)).toFixed(2);
+    const y2 = (RIM_C - r2 * Math.cos(a)).toFixed(2);
+    tickG.appendChild(svgEl('line', { class: major ? 'major' : '', x1, y1, x2, y2 }));
+    // A fat, invisible stroke over the SAME two points — 15° apart at this
+    // radius leaves ample clearance between neighbours (checked: real-pixel
+    // arc spacing comfortably exceeds the hit stroke's own width).
+    const hit = svgEl('line', { class: 'msa-astro-timestop-hit', x1, y1, x2, y2 });
+    const named = TIME_STOPS.find((s) => s.hour === hour);
+    const title = svgEl('title');
+    title.textContent = named ? `${named.label} — ${formatClock(hour)}` : formatClock(hour);
+    hit.appendChild(title);
+    hit.addEventListener('pointerdown', (e) => {
+      e.stopPropagation(); // never start a ring-drag underneath a time-stop click
+      if (locked) {
+        opts.onLockedAttempt?.();
+        return;
+      }
+      opts.onTimeStop?.(hour);
+    });
+    tickG.appendChild(hit);
   }
   rimArt.appendChild(tickG);
   const label = (x, y, text) => {
@@ -261,6 +302,7 @@ export function buildAstrolabeDial(opts = {}) {
     return t;
   };
   rimArt.append(label(122, 32, 'NOON'), label(122, 212, 'MIDNIGHT'), label(32, 122, 'DAWN'), label(212, 122, 'DUSK'));
+
   const handleG = svgEl('g', { class: 'msa-astro-handle' });
   handleG.appendChild(svgEl('rect', { x: 116.5, y: 3.5, width: 11, height: 10.5, rx: 5.5 }));
   rimArt.appendChild(handleG);
@@ -429,7 +471,7 @@ export function buildAstrolabeDial(opts = {}) {
   // `locked` mirrors ui/astrolabe.js's own `ringLocked` (2026-08-18 fix —
   // gap-audit Gap 12: this ring never carried a lock at all, so a drag in
   // Follow/Almanac mode silently persisted a `todHour` the engines then
-  // ignored — `boot.js#applyLookToEngines` only calls `setVtPanViewerSunHour`
+  // ignored — `boot.js#applyLookToEngines` only applies `todHour` at all
   // in `sky.mode === 'aesthetic'`, but `editSky`'s own merge has no such
   // guard, so the stored hour drifted from what the GM actually saw with no
   // visible sign anything was wrong, confirmed by reading day-clock.js's
@@ -452,9 +494,24 @@ export function buildAstrolabeDial(opts = {}) {
         opts.onLockedAttempt?.();
         return;
       }
+      // PAINT FIRST, CAPTURE SECOND, AND THE CAPTURE IS ALLOWED TO FAIL — the
+      // same documented trap `param-control.js#buildCompassRow` already
+      // guards against (2026-08-16 finding, that file's own header): a real
+      // browser can throw `NotFoundError` from `setPointerCapture` when the
+      // pointer id is no longer active by the time this handler runs. The
+      // ORIGINAL order here (capture, then move) let that throw abort the
+      // handler AFTER `dragging=true` but BEFORE `move(e)` recorded a real
+      // position — leaving `dragging` stuck true with no capture and no
+      // pointermove/pointerup ever reliably reaching this element again,
+      // which reads exactly as "drag, release, and the ring goes dead."
       dragging = true;
-      ring.setPointerCapture(e.pointerId);
       move(e);
+      try {
+        ring.setPointerCapture(e.pointerId);
+      } catch (_) {
+        /* no capture: a drag that leaves the ring's own hit-area simply
+           stops tracking, which is a degraded control, not a stuck one */
+      }
     });
     ring.addEventListener('pointermove', move);
     ring.addEventListener('pointerup', (e) => {
@@ -465,6 +522,21 @@ export function buildAstrolabeDial(opts = {}) {
       const dy = e.clientY - (r.top + r.height / 2);
       const deg = ((Math.atan2(dx, -dy) * 180) / Math.PI + 360) % 360;
       opts.onTimeChange?.(((deg / 360) * 24 + 12) % 24, true);
+    });
+    // Without this, a cancelled gesture (OS/browser interrupts the pointer —
+    // an alt-tab, a system dialog, a touch cancel) leaves `dragging` stuck
+    // `true` forever with no capture, since only `pointerup` was ever
+    // handled — a real robustness gap alongside the setPointerCapture fix
+    // just above, same failure family (a drag that starts but never
+    // cleanly ends). Resets state WITHOUT committing — a cancel means
+    // "abort," not "confirm whatever the last known position was."
+    ring.addEventListener('pointercancel', (e) => {
+      dragging = false;
+      try {
+        ring.releasePointerCapture(e.pointerId);
+      } catch (_) {
+        /* capture already gone — releasing twice is not worth surfacing */
+      }
     });
     ring.addEventListener('keydown', (e) => {
       if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight' && e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;

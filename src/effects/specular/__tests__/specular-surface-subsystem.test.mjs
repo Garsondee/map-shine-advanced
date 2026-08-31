@@ -40,6 +40,7 @@
 import * as THREE from '../../../../src/vendor/three/three.webgpu.js';
 import { buildWorldSpaceOutdoorsGate } from '../../lighting/environmental-light.js';
 import { createSpecularSurfaceSubsystem } from '../specular-surface-subsystem.js';
+import { SPECULAR_DEFAULT_TIER } from '../specular-render.js';
 
 /** Two well-separated painted squares, so the island pack has something real
  * to label. @param {number} w @param {number} h @returns {Uint8Array} */
@@ -167,6 +168,20 @@ export async function run(t) {
   // come back as "unchanged" — unreadable.
   ok('the mesh carries the ADDITIVE shine material by default', mesh.material.blendDst === THREE.OneFactor);
   ok('the reported debug channel is 0 — the effect as it ships', sub.getStatus().debugChannel === 0);
+
+  // ── THE TIER-HONESTY FIELD (2026-08-30) — getStatus().perfTier reports
+  // what the LIVE material actually built at, not merely what was resolved,
+  // mirroring water-surface-subsystem.js's own field. `state` above carries
+  // no `perfTier`, so the subsystem falls back to the default rung — proven
+  // here, then proven to actually TRACK a change rather than statically
+  // reporting the same fallback forever. ───────────────────────────────────
+  ok(
+    'no resolved perfTier on state → getStatus() reports the default rung, not undefined/NaN',
+    sub.getStatus().perfTier === SPECULAR_DEFAULT_TIER
+  );
+  state.perfTier = 2;
+  sub.sync(0, VIEW_RECT);
+  ok('a genuinely different resolved tier reaches getStatus() on the very next sync', sub.getStatus().perfTier === 2);
 
   // ── THE ISLAND PACK — the capability V2 never had ───────────────────────
   const status = sub.getStatus();

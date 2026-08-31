@@ -1,47 +1,47 @@
 /**
- * src/diag/debug-panel.js — the Map Shine Advanced control panel (Tier 0 shell).
+ * src/diag/debug-panel.js — THE DIAGNOSTIC REGISTRY, plus the Lab.
  *
- * WHAT THIS IS NOW: the single control surface from docs/planning/
- * Control-Panel.md — a SHELL with a four-zone icon rail:
- * Bridge · Make · Lab · Settings.
+ * WHAT THIS IS NOW (2026-08-27, UI parity plan phase 7b): NOT a floating
+ * panel any more. The old Tier-0 shell — a four-zone icon rail (Bridge · Make
+ * · Lab · Setup), its own header/drag/minimize/close chrome, its own perf
+ * strip — is DELETED, along with the `map-shine-advanced` toolbar toggle
+ * that opened it (foundry/scene-controls-button.js). Bridge/Make/Setup's
+ * real functionality all has a live home in the new UI now (the Remote's
+ * astrolabe + weather board, Studio's Effects department, Studio's/Player's
+ * System department) — see docs/planning/UI-Parity-Gap-Analysis-2026-08-27.md
+ * for the room-by-room accounting that justified the deletion.
  *
- *   🧭 Bridge   the astrolabe + the handful of live world levers
- *   🔥 Make     one collapsed accordion per effect; everything about an effect
- *               — params, its ＋ add affordance, its probes — is in ITS card
- *   🔬 Lab      diagnostics belonging to no single effect, in folders
- *   ⚙️ Setup    graphics & performance; the only zone a player sees
+ * What SURVIVES here, and why: `registerReport`/`registerAction`/
+ * `registerSelect`/`registerPanel` are the shared registry every diagnostic
+ * in this codebase still registers into (vt/, graph/, foundry/, every effect
+ * card's own probes) — deleting the registry would silently unwire dozens of
+ * already-built diagnostics, not just the old panel's own chrome around
+ * them. `renderLabBody()` (still real) is what Studio's own LAB department
+ * (`ui/rooms/studio/lab-department.js`) mounts — the Lab's folders/quick-
+ * reach row/Export-everything button are the one part of the old panel's
+ * OWN rendering that lives on, now inside the new Studio rather than a
+ * separate window. `buildEffectAttachments`/`buildActionButton` are the two
+ * doors the new Remote/Studio UI reaches through to pull {effect}-scoped or
+ * bare registered diagnostics into their OWN cards (Wind's Studio card,
+ * debug-strip.js's perf-sweep button) — see each of those files' own header
+ * for why.
  *
- * Four primitives feed it: `registerReport`/`registerAction`/`registerSelect`
- * render as buttons and dropdowns, and `registerPanel` (2026-07-22) renders a
- * rich composite DOM block — an effect's whole FOH/ROH card
- * (`diag/effect-controls.js`). Routing is `routeEntry`: an entry declaring
- * `{ effect }` renders inside that effect's card, otherwise it goes to its
- * `{ zone }` (or the ZONES map, or the Lab).
+ * Routing is `routeEntry`: an entry declaring `{ effect }` renders inside
+ * that effect's card (via `buildEffectAttachments`/`attachmentsFor`),
+ * otherwise `zoneOf` decides whether it lands in the Lab (`renderLab`,
+ * `zoneOf(...) === 'lab'`) — nothing else reads a non-Lab zone any more, so
+ * an entry declaring `{ zone: 'bridge' }`/`'workshop'`/`'settings'` today
+ * simply renders nowhere in THIS file (its real UI home, if any, is now a
+ * Studio/Remote registration instead).
  *
- * REBUILT 2026-07-27, author's brief: "the UI is starting to become a bit of a
- * mess." Three things went, and each was a named failure rather than a matter of
- * taste — 21 inert 🚧 placeholders (two of which had drifted into duplicating the
- * live controls rendered a few pixels above them), the per-zone blurb paragraphs,
- * and the Toolbox zone, which after the placeholders left held two buttons.
- * Effect cards fold shut by default so ten of them can be scanned at once, and
- * every per-effect diagnostic moved out of the Lab's catch-all drawer into the
- * card it describes.
+ * PERMISSION IS A FILTER, NOT A FORK (Control-Panel.md §2, landed 2026-07-20)
+ * — `isGM()` below still reads the one live fact (`game.user.isGM`), now
+ * consumed by the new UI's own rooms rather than this file's own (deleted)
+ * rail.
  *
- * PERMISSION IS A FILTER, NOT A FORK (Control-Panel.md §2, landed 2026-07-20):
- * `isGM()` below reads the one live fact (`game.user.isGM`); a non-GM sees only
- * the Settings icon (the whole rail hides itself when there is nothing to
- * choose between) and the panel opens straight into it. A GM sees all of them —
- * this file has exactly ONE render path for both, never a duplicated layout.
- * Opening/closing is driven by the scene-controls toolbar button
- * (foundry/scene-controls-button.js) via `showPanel`/`hidePanel`/`togglePanel`;
- * the panel itself decides its OWN default (open for a GM, closed for a
- * player) the moment it attaches, per the author's standing directive to keep
- * that GM auto-open until the module ships and it becomes a real setting.
- *
- * Lives in the same corner box as the boot heartbeat. A growing set of
- * buttons, one per registered "report" — click one and its output is copied
- * to the clipboard as text, ready to paste back into chat. This is the
- * standing debugging protocol for the rest of the build: when
+ * A growing set of buttons, one per registered "report" — click one and its
+ * output is copied to the clipboard as text, ready to paste back into chat.
+ * This is the standing debugging protocol for the rest of the build: when
  * something breaks, the fix comes with "run report X (and Y)" instead of "can
  * you paste your console" — structured, consistent, and it survives across
  * stages because any future module can register its own report.
@@ -81,26 +81,19 @@
  */
 
 import { createLogger } from '../core/log.js';
-// The panel's reusable DOM vocabulary (drag, stylesheet, the shared control
-// builders, the Tier-0 zone scaffold), split out 2026-07-25 — the size-ratchet
-// god-object reversal; this file was 1,321 lines / a 1,249-line closure.
-// (`sectionLabel` is no longer imported here: the "Working now" / "Planned"
-// captions it drew were deleted with the stub scaffold. It stays exported from
-// the vocabulary because effect-controls.js has its own use for the same look.)
+// The shared control builders + routing logic, split out 2026-07-25 — the
+// size-ratchet god-object reversal; this file was 1,321 lines / a 1,249-line
+// closure. `makeDraggable`/`ensurePanelStyle`/`createPerfStrip` (the old
+// panel's own drag/stylesheet/perf-strip chrome) are no longer imported here
+// — deleted along with the panel itself (UI parity plan, phase 7b); Studio/
+// Remote each own their own drag+style+perf-readout now.
 import {
-  makeDraggable,
-  ensurePanelStyle,
   createControlBuilders,
   routeEntry,
   sortPanelsForZone,
   REPORT_SKIN,
   ACTION_SKIN,
 } from './debug-panel-controls.js';
-// The perf/VRAM strip at the top of the panel — folded in from boot.js's old
-// standalone bottom-right HUD 2026-08-05 (author: it belongs "inside the main
-// panel, at the top"). Owns its own pure/DOM split; this file only mounts it
-// and forwards boot.js's per-tick stats through `updatePerfStrip`.
-import { createPerfStrip } from './perf-strip.js';
 
 export function installDebugPanel(MapShine) {
   if (MapShine.debug) return MapShine.debug; // idempotent
@@ -164,7 +157,6 @@ export function installDebugPanel(MapShine) {
       zone: opts.zone,
       effect: opts.effect,
     });
-    if (bodyEl) renderBody();
   }
 
   /**
@@ -186,10 +178,15 @@ export function installDebugPanel(MapShine) {
    * control's underlying state (scene load, floor switch, a lever toggled
    * via console) — `syncInterfaceSeam` in boot.js calls it after every
    * `applyArtSuppression()`/`restoreFoundryArt()` attempt, seam settled or not.
+   *
+   * A genuine no-op since the old panel it used to repaint was deleted (UI
+   * parity plan, phase 7b) — kept as a real, callable function rather than
+   * deleted outright so its dozen-plus call sites across boot.js (each
+   * already just "a live value changed, tell the panel") don't all need
+   * individually re-verifying as safe to remove. Studio/Remote each already
+   * repaint themselves through their own, separate mechanisms.
    */
-  function refreshControls() {
-    if (bodyEl) renderBody();
-  }
+  function refreshControls() {}
 
   /**
    * A RICH PANEL — a composite DOM block a report/action/select cannot
@@ -230,7 +227,6 @@ export function installDebugPanel(MapShine) {
       effect: opts.effect,
       order: opts.order ?? 0,
     });
-    if (bodyEl) renderBody();
   }
 
   /**
@@ -259,7 +255,6 @@ export function installDebugPanel(MapShine) {
       zone: opts.zone,
       effect: opts.effect,
     });
-    if (bodyEl) renderBody();
   }
 
   /**
@@ -281,7 +276,6 @@ export function installDebugPanel(MapShine) {
       zone: opts.zone,
       effect: opts.effect,
     });
-    if (bodyEl) renderBody();
   }
 
   /**
@@ -324,27 +318,52 @@ export function installDebugPanel(MapShine) {
   }
 
   // ---- UI ------------------------------------------------------------------
-  let panelEl = null;
-  let statusEl = null;
-  let bodyEl = null; // the ACTIVE zone's content — re-rendered on zone switch and on every registration
-  let railEl = null; // the zone rail (built once); its highlight updates on zone switch
-  let shellRowEl = null; // rail + body; hidden when the panel is collapsed
-  let zoneHeadEl = null; // the active zone's title/subtitle strip
-  let footerEl = null;
-  let perfStripWidget = null; // { el, update(stats) } — see attachPanel's doc for why it sits ABOVE shellRowEl
-  let collapsed = false;
-  // The shell opens on the Bridge for a GM (the design's home per
-  // docs/planning/Control-Panel.md) or Settings for a player — set for real in
-  // buildUI(), once game.user is readable. The Lab (today's debug registry) is
-  // one rail-click away for a GM, never reachable for a player.
-  let activeZone = 'bridge';
-  // Whole-panel visibility (the scene-controls toolbar button + its own Close
-  // button both drive this) — SEPARATE from `collapsed`, which only shrinks it
-  // to its header bar. A closed panel is not in the document flow at all.
-  // Starts `null` (not `false`) so the FIRST setPanelVisible call always
-  // applies its CSS — the panel's own base style defaults to visible, and a
-  // real write is what actually hides it for a player.
-  let panelVisible = null;
+  // `panelEl` never gets assigned any more (the old panel it pointed at is
+  // deleted, UI parity plan phase 7b) — kept as a permanently-null variable
+  // rather than torn out of `setPanelVisible`'s own `if (panelEl)` guard
+  // below, so that function's tested visibility-STATE behaviour (still real,
+  // still used) stays byte-identical rather than rewritten around a removed
+  // branch.
+  const panelEl = null;
+  // A REAL, always-valid, NEVER-ATTACHED sink — not `null` (2026-08-27 fix):
+  // `attachmentsFor`'s buttons (Wind's Studio card, Water/Specular's own
+  // `extra`/`extraAdvanced`) and `buildActionButton` (debug-strip.js's own
+  // perf-sweep button) both render through THIS file's own top-level
+  // `makeRunnable`/`makeControl` (below), which write status text into
+  // whatever `getStatusEl()` returns on every click. Before phase 7b, the
+  // old panel's own `buildUI()` ALWAYS ran during boot (attachPanel, called
+  // unconditionally from bootHeartbeat) and assigned a real DOM node here —
+  // so this was never actually null by the time a user could click anything,
+  // even though nobody could see the OLD panel. Deleting that unconditional
+  // boot-time build removed that accidental safety net: a `null` here would
+  // throw the moment any of those buttons (all live in the NEW Studio/Remote
+  // UI) were clicked. A real, if invisible, div keeps the report/action
+  // itself (and its clipboard copy) working; only the little "Running…/✔
+  // Copied" status text has nowhere visible to land.
+  const statusEl = document.createElement('div');
+  // Whole-panel visibility (used to be the scene-controls toolbar button +
+  // the old panel's own Close button; now: `hideLiveUi`/`restoreLiveUi`'s
+  // perf-measurement harness, and the astrolabe repaint's own "hidden for
+  // measurement" gate, both in boot.js).
+  //
+  // ⚠️⚠️ REAL BUG, FOUND LIVE (2026-08-27, author: "the fun display of
+  // landscape in the middle of the UI stopped rendering correctly") — this
+  // used to start `null` on the theory that the FIRST real `setPanelVisible`
+  // call would always apply, since the old panel's own `buildUI()` ALWAYS
+  // called `setPanelVisible(isGM())` unconditionally during boot (phase 1's
+  // auto-open). Deleting that panel (phase 7b) removed the ONLY thing that
+  // ever moved this off `null` during normal play — `isPanelVisible()`
+  // coerces with `!!`, so `null` and `false` are INDISTINGUISHABLE to every
+  // caller, including boot.js's own astrolabe-repaint gate
+  // (`hiddenForMeasurement = isPanelVisible() === false`), which therefore
+  // read "hidden" from the very first frame, forever, with nothing left to
+  // ever flip it back — the dial silently froze at its as-constructed
+  // defaults (placeholder sky colours, unfilled-therefore-black terrain, an
+  // unpositioned-therefore-off-screen sun) and never painted again. `true`
+  // is the honest default now: nothing is hidden until `hidePanel()`
+  // actually says so, which is exactly the "fails OPEN" doctrine
+  // `hiddenForMeasurement`'s own comment in boot.js already states.
+  let panelVisible = true;
   let visibilityListener = null; // notified on every showPanel/hidePanel/togglePanel — see onVisibilityChange
 
   /**
@@ -358,15 +377,13 @@ export function installDebugPanel(MapShine) {
     return typeof game !== 'undefined' ? !!game.user?.isGM : true;
   }
 
-  /** Show/hide the whole panel — including the perf strip at its top since
-   * 2026-08-05 (folded in from the old standalone heartbeat HUD; the author
-   * wanted it "inside the main panel," so closing the panel now hides it too,
-   * unlike before). Minimize is the one that leaves it up — see attachPanel's
-   * placement of `perfStripWidget` outside `shellRowEl`. Tells whoever is
-   * listening (the scene-controls toolbar button) so its highlight never
-   * drifts from what's actually on screen — the same "don't let a control lie
-   * about live state" rule as `refreshControls` above, applied to visibility
-   * instead of a dropdown. */
+  /** Show/hide state — genuinely just state now that the panel itself is
+   * gone (UI parity plan, phase 7b); `if (panelEl)` below is permanently
+   * false, so this never touches the DOM any more. Still real: it's what
+   * `hideLiveUi`/`restoreLiveUi` (boot.js's perf-measurement harness) and the
+   * astrolabe repaint's own throttle gate both key off, so a benchmark sweep
+   * can still say "don't bother painting UI-adjacent things right now"
+   * without a visible panel to actually hide. */
   function setPanelVisible(next) {
     if (panelVisible === next) return;
     panelVisible = next;
@@ -461,18 +478,15 @@ export function installDebugPanel(MapShine) {
   // controls and six 🚧 placeholders; deleting the placeholders left a rail icon
   // leading to a pair of buttons. Its contents moved to the Lab's new "Scene
   // utilities" folder. Four zones, each with a reason to be clicked.
-  const ZONE_ORDER = ['bridge', 'workshop', 'lab', 'settings'];
-  const ZONE_META = {
-    bridge: { icon: '🧭', tag: 'Bridge', title: 'The Bridge', sub: 'live world control' },
-    workshop: { icon: '🔥', tag: 'Make', title: 'The Workshop', sub: 'add & author effects' },
-    lab: { icon: '🔬', tag: 'Lab', title: 'The Lab', sub: 'diagnostics & dev tools', dev: true },
-    settings: { icon: '⚙️', tag: 'Setup', title: 'Settings', sub: 'graphics & performance' },
-  };
-  /** The permission filter (Control-Panel.md §2): a GM gets every zone; a
-   * player gets exactly one. Everything downstream (the rail, the default
-   * zone, whether the rail even renders) reads THIS, never `isGM()` directly —
-   * one seam if the player's set ever grows past Settings alone. */
-  const visibleZones = () => (isGM() ? ZONE_ORDER : ['settings']);
+  // ZONE_ORDER/ZONE_META/visibleZones (the rail's own icon/tag/title table and
+  // its GM-vs-player zone list) were deleted along with the rail itself (UI
+  // parity plan, phase 7b). ZONES/zoneOf below stay — 'lab' is still a real,
+  // rendered destination (renderLab, mounted by Studio's own LAB department);
+  // an entry routed to any OTHER zone here simply renders nowhere in THIS
+  // file any more (its real UI home, if it has one today, is a Studio/Remote
+  // registration instead) — still fully reachable via
+  // `MapShine.debug.runReport(id)`/the flight-recorder export either way.
+  //
   // id → zone override, for the handful of controls that belong in a product
   // zone rather than the dev suite. A registration's own `{ zone }` beats this
   // table; `{ effect }` beats both and sends the entry into that effect's card.
@@ -487,8 +501,18 @@ export function installDebugPanel(MapShine) {
   // ('anchors'/'live-markers-toggle' left for the candle card; 'candle-markers-once'
   // was deleted; the loading-screen pair came here from the retired Tools zone.)
   const ZONES = {
-    'darkness-realism': 'bridge',
-    'render-compare': 'bridge',
+    // UI parity plan, phase 4a: reclassified to 'lab' now that
+    // ui/rooms/studio/scene-department.js has a real, live Darkness-at-max
+    // card calling the SAME getDarknessRealism/setDarknessRealism this
+    // select always has -- Studio's LAB department still mounts this exact
+    // registry, so the control stays reachable there too, just no longer
+    // duplicated onto Bridge once Bridge itself goes away (phase 7b).
+    'darkness-realism': 'lab',
+    // UI parity plan, phase 4b: 'lab', not 'bridge' -- the Remote's own
+    // header Renderer toggle now calls the SAME restoreFoundryArt/
+    // applyArtSuppression this select always has (see that toggle's own
+    // comment in boot.js). Same reasoning as darkness-realism just above.
+    'render-compare': 'lab',
     'camera-path-open': 'bridge',
     paint: 'workshop',
     'wind-overlay-toggle': 'workshop',
@@ -553,290 +577,11 @@ export function installDebugPanel(MapShine) {
     FOLDERS,
   });
 
-  function buildFooter() {
-    const foot = document.createElement('div');
-    Object.assign(foot.style, {
-      display: 'flex',
-      alignItems: 'center',
-      gap: '12px',
-      flexWrap: 'wrap',
-      marginTop: '8px',
-      paddingTop: '6px',
-      borderTop: '1px solid rgba(143,214,255,0.16)',
-      fontSize: '10px',
-    });
-    const link = (href, text, color) => {
-      const a = document.createElement('a');
-      a.href = href;
-      a.target = '_blank';
-      a.rel = 'noopener noreferrer';
-      a.textContent = text;
-      Object.assign(a.style, { color, textDecoration: 'none', pointerEvents: 'auto', fontWeight: '600' });
-      a.addEventListener('mouseenter', () => (a.style.textDecoration = 'underline'));
-      a.addEventListener('mouseleave', () => (a.style.textDecoration = 'none'));
-      return a;
-    };
-    foot.appendChild(link('https://www.patreon.com/c/MythicaMachina', '❤ Patreon', '#ff6b74'));
-    foot.appendChild(link('https://github.com/Garsondee/map-shine-advanced/issues', '🐛 Report a bug', '#8fd6ff'));
-    const cred = document.createElement('span');
-    cred.textContent = 'Mythica Machina';
-    Object.assign(cred.style, { marginLeft: 'auto', opacity: '0.4' });
-    foot.appendChild(cred);
-    return foot;
-  }
-
-  function buildUI() {
-    ensurePanelStyle();
-    // The permission-appropriate home zone (Control-Panel.md §2) — decided once,
-    // here, because this is the first point game.user is reliably readable
-    // (attachPanel runs on Foundry's 'ready' hook).
-    activeZone = visibleZones()[0];
-    const panel = document.createElement('div');
-    panelEl = panel;
-    panel.id = 'msa-debug-panel';
-    Object.assign(panel.style, {
-      pointerEvents: 'auto',
-      marginTop: '6px',
-      background: 'rgba(12,16,26,0.93)',
-      border: '1px solid rgba(143,214,255,0.28)',
-      borderRadius: '10px',
-      font: '11px/1.35 Signika, sans-serif',
-      color: '#dcecff',
-      width: '498px',
-      boxShadow: '0 10px 30px rgba(0,0,0,0.45)',
-      backdropFilter: 'blur(7px)',
-      overflow: 'hidden',
-      display: 'flex',
-      flexDirection: 'column',
-    });
-
-    // Brand header — the product surface's title bar, and still the drag handle
-    // (author-reported, 2026-07-16: the panel sits under Foundry's right-hand
-    // sidebar; the whole HOST moves as one unit — heartbeat strip + panel).
-    const header = document.createElement('div');
-    Object.assign(header.style, {
-      display: 'flex',
-      justifyContent: 'space-between',
-      alignItems: 'center',
-      cursor: 'grab',
-      padding: '8px 10px',
-      borderBottom: '1px solid rgba(143,214,255,0.16)',
-      touchAction: 'none', // let pointermove reach us instead of becoming a scroll gesture
-    });
-    const ver = MapShine.version ? ` v${MapShine.version}` : '';
-    const brand = document.createElement('span');
-    Object.assign(brand.style, { display: 'flex', alignItems: 'center', gap: '8px' });
-    brand.innerHTML =
-      '<span style="font-size:15px">🗝️</span>' +
-      '<span><span style="font-weight:700;letter-spacing:.2px">Map Shine Advanced</span>' +
-      `<span style="opacity:.5;font-size:9px;display:block;margin-top:-1px">control panel${ver}</span></span>`;
-
-    makeDraggable(header, () => panelEl?.parentElement);
-
-    // MINIMIZE / CLOSE — two explicit buttons (author, 2026-07-20: "we also
-    // need a button to close this dialogue as well as minimise it"), replacing
-    // the old implicit "click anywhere on the header" gesture that was easy to
-    // confuse with the drag it shares a hit area with. Minimize shrinks to the
-    // header bar + perf strip (the panel is still "open" — the toolbar stays
-    // lit, and FPS/VRAM stay readable at a glance). Close hides the whole
-    // panel, perf strip included, and dims the toolbar button; reopen from
-    // there (foundry/scene-controls-button.js).
-    const headerBtn = (glyph, title) => {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.textContent = glyph;
-      b.title = title;
-      Object.assign(b.style, {
-        pointerEvents: 'auto',
-        background: 'transparent',
-        border: '1px solid rgba(143,214,255,0.22)',
-        borderRadius: '5px',
-        color: '#9fb6d8',
-        font: '11px/1 Signika, sans-serif',
-        width: '20px',
-        height: '20px',
-        cursor: 'pointer',
-      });
-      b.addEventListener('mouseenter', () => {
-        b.style.background = 'rgba(143,214,255,0.14)';
-        b.style.color = '#eaf4ff';
-      });
-      b.addEventListener('mouseleave', () => {
-        b.style.background = 'transparent';
-        b.style.color = '#9fb6d8';
-      });
-      // The header's own pointerdown starts a drag (setPointerCapture) — without
-      // this, that capture swallows the button's matching pointerup and the
-      // click event never fires at all, not just "sometimes".
-      b.addEventListener('pointerdown', (e) => e.stopPropagation());
-      return b;
-    };
-    const minimizeBtn = headerBtn('▾', 'Minimize');
-    minimizeBtn.addEventListener('click', () => {
-      collapsed = !collapsed;
-      shellRowEl.style.display = collapsed ? 'none' : 'flex';
-      minimizeBtn.textContent = collapsed ? '▸' : '▾';
-    });
-    const closeBtn = headerBtn('✕', 'Close (reopen from the scene-controls toolbar)');
-    closeBtn.addEventListener('click', hidePanel);
-
-    const btnRow = document.createElement('span');
-    Object.assign(btnRow.style, { display: 'flex', alignItems: 'center', gap: '4px' });
-    btnRow.append(minimizeBtn, closeBtn);
-
-    header.append(brand, btnRow);
-
-    // THE PERF STRIP — sits between the header and the shell row, i.e.
-    // OUTSIDE shellRowEl, deliberately: Minimize (below) only hides
-    // shellRowEl, so a minimized panel still shows live FPS/VRAM instead of
-    // going dark. It renders regardless of which zone is active and starts
-    // empty (all bars "unknown") until boot.js's heartbeat loop calls
-    // `MapShine.debug.updatePerfStrip(stats)` on its first tick.
-    perfStripWidget = createPerfStrip();
-
-    // The shell row: the zone rail (left) + the active zone (right).
-    shellRowEl = document.createElement('div');
-    Object.assign(shellRowEl.style, { display: 'flex', alignItems: 'stretch' });
-
-    railEl = buildRail();
-    // A rail with one icon is chrome for a choice that doesn't exist — a player
-    // has exactly one zone (Settings), so it opens straight into it instead.
-    if (visibleZones().length <= 1) railEl.style.display = 'none';
-
-    const main = document.createElement('div');
-    Object.assign(main.style, { display: 'flex', flexDirection: 'column', flex: '1', minWidth: '0' });
-
-    zoneHeadEl = document.createElement('div');
-    Object.assign(zoneHeadEl.style, { padding: '9px 12px 8px', borderBottom: '1px solid rgba(143,214,255,0.10)' });
-
-    bodyEl = document.createElement('div');
-    Object.assign(bodyEl.style, {
-      display: 'flex',
-      flexDirection: 'column',
-      gap: '6px',
-      padding: '11px 12px',
-      maxHeight: '60vh',
-      overflowY: 'auto',
-    });
-
-    statusEl = document.createElement('div');
-    Object.assign(statusEl.style, {
-      margin: '0 12px',
-      color: '#9fdcc0',
-      minHeight: '14px',
-      fontSize: '10px',
-      wordBreak: 'break-word',
-    });
-    statusEl.textContent = 'Output copies to your clipboard.';
-
-    footerEl = buildFooter();
-    footerEl.style.margin = '6px 12px 8px';
-
-    main.appendChild(zoneHeadEl);
-    main.appendChild(bodyEl);
-    main.appendChild(statusEl);
-    main.appendChild(footerEl);
-
-    shellRowEl.appendChild(railEl);
-    shellRowEl.appendChild(main);
-
-    panel.appendChild(header);
-    panel.appendChild(perfStripWidget.el);
-    panel.appendChild(shellRowEl);
-    updateZoneHead();
-    // "Always opens for the GM at the moment" (author, 2026-07-20) — a
-    // temporary default kept until the module ships and this becomes a real
-    // per-user setting. A player starts closed and reaches Settings via the
-    // scene-controls toolbar button (foundry/scene-controls-button.js).
-    setPanelVisible(isGM());
-    return panel;
-  }
-
-  // ---- the zone rail -------------------------------------------------------
-
-  function buildRail() {
-    const rail = document.createElement('div');
-    Object.assign(rail.style, {
-      display: 'flex',
-      flexDirection: 'column',
-      gap: '3px',
-      padding: '9px 6px',
-      background: 'rgba(6,10,20,0.5)',
-      borderRight: '1px solid rgba(143,214,255,0.12)',
-    });
-    for (const z of visibleZones()) {
-      const m = ZONE_META[z];
-      const b = document.createElement('button');
-      b.dataset.zone = z;
-      b.type = 'button';
-      b.innerHTML =
-        `<span style="font-size:16px;line-height:1">${m.icon}</span>` +
-        `<span style="font-size:8px;letter-spacing:.3px;opacity:.9">${m.tag}</span>`;
-      Object.assign(b.style, {
-        pointerEvents: 'auto',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        gap: '2px',
-        width: '46px',
-        padding: '7px 2px 5px',
-        background: 'transparent',
-        border: '1px solid transparent',
-        borderRadius: '8px',
-        color: '#9fb6d8',
-        cursor: 'pointer',
-      });
-      if (m.dev) b.title = 'Developer tools (dev-gated in the real shell)';
-      b.addEventListener('mouseenter', () => {
-        if (b.dataset.zone !== activeZone) b.style.background = 'rgba(143,214,255,0.08)';
-      });
-      b.addEventListener('mouseleave', () => updateRail());
-      b.addEventListener('click', () => selectZone(z));
-      rail.appendChild(b);
-    }
-    return rail;
-  }
-
-  function updateRail() {
-    if (!railEl) return;
-    for (const b of railEl.children) {
-      const on = b.dataset.zone === activeZone;
-      b.style.background = on ? 'rgba(143,214,255,0.14)' : 'transparent';
-      b.style.borderColor = on ? 'rgba(143,214,255,0.30)' : 'transparent';
-      b.style.color = on ? '#eaf4ff' : '#9fb6d8';
-    }
-  }
-
-  function updateZoneHead() {
-    if (!zoneHeadEl) return;
-    const m = ZONE_META[activeZone];
-    zoneHeadEl.innerHTML =
-      `<span style="font-weight:700;font-size:12.5px;color:#eaf4ff">${m.title}</span>` +
-      `<span style="opacity:.5;font-size:9px;margin-left:7px">${m.sub}</span>`;
-  }
-
-  function selectZone(z) {
-    activeZone = z;
-    updateRail();
-    updateZoneHead();
-    renderBody();
-  }
-
-  // ---- rendering: dispatch to the active zone ------------------------------
-
-  function renderBody() {
-    if (!bodyEl) return;
-    bodyEl.innerHTML = '';
-    updateRail();
-    warnOrphanedAttachments();
-    // Independent of which rail zone is active — the performance center lives
-    // in the perf strip's own expand area (see renderPerformanceCenter's doc),
-    // not behind a rail click, so it repaints on every registration/refresh
-    // the same as the active zone body does.
-    renderPerformanceCenter();
-    if (activeZone === 'lab') renderLab();
-    else renderProductZone(activeZone);
-  }
+  // buildFooter/buildUI/buildRail/updateRail/updateZoneHead/selectZone/
+  // renderBody — the old panel's own header/drag/minimize/close chrome, zone
+  // rail, and top-level render dispatch — are all deleted (UI parity plan,
+  // phase 7b). makeFolder/buildRoutedPanels/attachmentsFor/renderLab below
+  // survive: they're what Studio's own LAB department actually mounts.
 
   // A collapsed-by-default accordion folder; open/closed state remembered across
   // re-renders via openFolders.
@@ -927,27 +672,14 @@ export function installDebugPanel(MapShine) {
     return out;
   }
 
-  /**
-   * Announce any diagnostic that declared an `{ effect }` no card claims — its
-   * button is drawn nowhere. It is still reachable (`MapShine.debug.runReport(id)`,
-   * and every report is still in the export bundle), but a control that silently
-   * vanished from the UI is this project's own named bug class, so it says so.
-   */
-  const warnedOrphans = new Set();
-  function warnOrphanedAttachments() {
-    const cardEffects = new Set([...panels.values()].map((e) => e.effect).filter(Boolean));
-    const orphans = [];
-    for (const map of [reports, actions, controls]) {
-      for (const [id, e] of map) {
-        if (!e.effect || cardEffects.has(e.effect) || warnedOrphans.has(id)) continue;
-        warnedOrphans.add(id); // once per id, not once per render — renderBody runs constantly
-        orphans.push(`${id} → ${e.effect}`);
-      }
-    }
-    if (orphans.length > 0) {
-      log.warn(`${orphans.length} diagnostic(s) declare an effect with no card to render in: ${orphans.join(', ')}`);
-    }
-  }
+  // warnOrphanedAttachments (the old panel's own "a diagnostic declares an
+  // {effect} no card claims" console warning) was only ever called from
+  // renderBody, deleted above with it (UI parity plan, phase 7b). Every
+  // {effect}-scoped diagnostic stays reachable regardless — via
+  // `MapShine.debug.runReport(id)`, the flight-recorder export, and whatever
+  // card actually claims that effect today — this only drops the console
+  // warning for the (now purely hypothetical, since Studio's own effect
+  // registry drives which cards exist) case of one that claims none.
 
   // ---- THE LAB — today's debug registry, behaviour unchanged ---------------
   // The "Export everything" button + quick-reach primaries + the accordion
@@ -1049,96 +781,17 @@ export function installDebugPanel(MapShine) {
     return root;
   }
 
-  /**
-   * THE PERFORMANCE CENTER — every performance-related report/action/panel,
-   * gathered from wherever it registered itself and mounted into the perf
-   * strip's own expand area (diag/perf-strip.js), never a rail zone.
-   *
-   * 2026-08-06, author directive: "move all performance monitoring things into
-   * a single space which becomes the only place for performance related
-   * tools" — these used to be scattered across the Lab's quick-reach row (a
-   * handful of `{primary:true}` buttons: Profile, Profile+sweep, Benchmark,
-   * the all-tiers report), a `{primary:true}` button that opened a SEPARATE
-   * floating "Effect Performance Lab" window, and a SEPARATE floating
-   * top-right live-zone-HUD overlay. All three homes are gone; every entry
-   * below simply declares `{ zone: 'performance' }` at its registration site
-   * (boot.js) instead of leaving `zone` unset (which would default to 'lab')
-   * or `{primary:true}` (which would put it in the Lab's quick-reach row).
-   *
-   * Flat, not foldered — unlike the Lab's dozens of diagnostics, there are a
-   * handful of these, and foldering a handful is chrome for a choice that
-   * doesn't exist (the same reasoning buildRoutedPanels/the rail already
-   * apply elsewhere). `registerPanel(..., {zone:'performance'})` is how
-   * perf-lab.js's sweep UI and perf-hud.js's live ranking table (both
-   * refactored 2026-08-06 from floating overlays into plain embeddable
-   * elements) land here too — same primitive every effect card already uses,
-   * no new registration API.
-   */
-  function renderPerformanceCenter() {
-    if (!perfStripWidget) return;
-    const wrap = document.createElement('div');
-    Object.assign(wrap.style, { display: 'flex', flexDirection: 'column', gap: '8px' });
-
-    const quick = document.createElement('div');
-    Object.assign(quick.style, { display: 'flex', flexWrap: 'wrap', gap: '5px' });
-    for (const [id, entry] of actions)
-      if (zoneOf(id, entry) === 'performance') quick.appendChild(makeRunnable(id, entry.label, ACTION_SKIN));
-    for (const [id, entry] of reports)
-      if (zoneOf(id, entry) === 'performance') quick.appendChild(makeRunnable(id, entry.label, REPORT_SKIN));
-    if (quick.children.length) wrap.appendChild(quick);
-
-    for (const node of buildRoutedPanels('performance')) wrap.appendChild(node);
-
-    perfStripWidget.setTools(wrap);
-  }
-
-  // ---- THE PRODUCT ZONES — Tier 0 scaffold ---------------------------------
-  // Each shows (a) whatever already-working controls are routed to it, then
-  // (b) a 🚧 stub scaffold of what's planned — so the final arrangement can be
-  // judged before the real (Effects-UI / astrolabe) renderers exist. Nothing
-  // here is load-bearing; it is the skeleton of docs/planning/Control-Panel.md.
-
-  function renderProductZone(z) {
-    // (a) real controls routed to this zone, in one compact row. No "Working
-    // now" caption: everything drawn here works, so the label distinguished
-    // nothing once the 🚧 half below it was deleted.
-    const realReports = [...reports].filter(([id, e]) => zoneOf(id, e) === z);
-    const realActions = [...actions].filter(([id, e]) => zoneOf(id, e) === z);
-    const realControls = [...controls].filter(([id, e]) => zoneOf(id, e) === z);
-    if (realReports.length || realActions.length || realControls.length) {
-      const real = document.createElement('div');
-      Object.assign(real.style, { display: 'flex', flexWrap: 'wrap', gap: '5px' });
-      for (const [id, e] of realControls) real.appendChild(makeControl(id, e));
-      for (const [id, e] of realActions) real.appendChild(makeRunnable(id, e.label, ACTION_SKIN));
-      for (const [id, e] of realReports) real.appendChild(makeRunnable(id, e.label, REPORT_SKIN));
-      bodyEl.appendChild(real);
-    }
-
-    // (b) rich panels routed to this zone (Effects-UI.md FOH/ROH cards) — each
-    // is its own full-width block, never squeezed into the small-control row.
-    for (const el of buildRoutedPanels(z)) bodyEl.appendChild(el);
-  }
-
-  /** Call once the boot heartbeat box exists in the DOM. Idempotent. */
-  function attachPanel(panelHost) {
-    if (panelEl) return panelEl;
-    panelEl = buildUI();
-    panelHost.appendChild(panelEl);
-    renderBody();
-    return panelEl;
-  }
-
-  /**
-   * Repaint the perf strip at the top of the panel — called every ~250ms from
-   * boot.js's heartbeat loop, the only place that owns `renderer`/the frame-gap
-   * ring/the VT diagnostics this needs. A no-op before `attachPanel` has run
-   * (the strip doesn't exist yet); boot.js calls this unconditionally via `?.`
-   * so it doesn't need to know that ordering itself.
-   * @param {object} stats - see diag/perf-strip.js's `buildPerfStripModel` doc for the shape.
-   */
-  function updatePerfStrip(stats) {
-    perfStripWidget?.update(stats);
-  }
+  // renderPerformanceCenter (the perf strip's own "expand for tools" area,
+  // fed by {zone:'performance'} registrations), renderProductZone (the
+  // Bridge/Workshop/Settings body renderer), attachPanel, and updatePerfStrip
+  // are all deleted (UI parity plan, phase 7b) — every one of them depended
+  // on DOM this file no longer builds (perfStripWidget, bodyEl, the panel
+  // element itself). {zone:'performance'} registrations (boot.js's perf-lab/
+  // perf-hud panels, the Reckoning Report action, etc.) stay fully real and
+  // exporter-covered; they simply have no dedicated UI surface drawing them
+  // as a group any more — each is still reachable via
+  // `MapShine.debug.runReport(id)`/`buildActionButton(id)`, the same as
+  // every other registered report/action.
 
   // ---- baseline reports every stage benefits from --------------------------
   registerReport('boot', 'Boot', () =>
@@ -1247,16 +900,36 @@ export function installDebugPanel(MapShine) {
     refreshControls,
     runReport,
     copyToClipboard,
-    attachPanel,
     // The Lab zone's body, built (never attached) — the Studio's own LAB
     // department mount point (ui/rooms/studio/lab-department.js). Same
     // registries as this panel's own Lab zone (reports/actions/controls/
     // panels), a fresh, independently-scoped set of control builders when
     // the caller passes its own getStatusEl (see renderLab's own doc).
     renderLabBody: (opts) => renderLab(opts),
-    updatePerfStrip,
-    // Whole-panel visibility — driven by the scene-controls toolbar button
-    // (foundry/scene-controls-button.js) and the panel's own Close button.
+    // UI parity plan, phase 5c — the SAME private mechanism the old panel's
+    // own effect-scoped `registerPanel` buildFns already receive as
+    // `{attachments}` (buildRoutedPanels, above), exposed publicly so a
+    // Studio EffectCardModel can pull an effect's {effect}-scoped
+    // reports/actions/selects into its own `extra` without a second
+    // registry or a hand-duplicated button list — Wind's own card (boot.js)
+    // is the first consumer, but this is generic for any future effect
+    // whose whole UI lives in loose {effect}-scoped registrations.
+    buildEffectAttachments: (effectId) => attachmentsFor(effectId),
+    // UI parity plan, phase 5 follow-up (author, live-testing round: "prepare
+    // this section so that it can open up and allow access to a library of
+    // debug buttons eventually") — a SECOND, non-effect-scoped door onto the
+    // exact same reports/actions registry + the SAME makeRunnable() every
+    // other button in this file already renders through (status text,
+    // clipboard copy, error handling, all for free). `ui/rooms/remote/
+    // debug-strip.js`'s own accordion is the first consumer, wiring in
+    // 'perf-run-full' specifically, but this works for any registered id.
+    buildActionButton: (id) => {
+      const entry = actions.get(id) ?? reports.get(id);
+      if (!entry) return null;
+      return makeRunnable(id, entry.label, actions.has(id) ? ACTION_SKIN : REPORT_SKIN);
+    },
+    // Whole-panel VISIBILITY STATE — see this file's own `panelVisible`
+    // declaration for what still drives it now that there is no panel.
     showPanel,
     hidePanel,
     togglePanel,

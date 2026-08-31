@@ -187,6 +187,42 @@ const FLUID_STRUCTURE_FREQ_ACROSS = 3.0;
 const FLUID_STRUCTURE_TINT_SCALE = 0.15;
 const FLUID_STRUCTURE_GRAIN_SCALE = 0.25;
 
+/** How many performance-cascade rungs this effect declares (0..5, `fluid.js#FLUID.tiers`). */
+export const FLUID_MAX_TIER = 5;
+
+/** What `resolveEffectTier(FLUID, {profile: DEFAULT_PERFORMANCE_PROFILE})` resolves to —
+ * `standard` reaches tier 3 ('film') contiguously; tier 4 ('fill') needs `quality`. Used as
+ * the surface subsystem's own pre-resolve fallback, mirroring water/specular/window's
+ * identical constants. */
+export const FLUID_DEFAULT_TIER = 3;
+
+/**
+ * The tier ladder, as a plan a builder can branch on — mirrors
+ * `specularTierPlan`/`windowTierPlan`'s own shape exactly.
+ *
+ * No `flowEnabled` field for tier 2 ('flow'): as of the 2026-08-30 correction
+ * below, tier 2 has no shader content of its own left to gate — `s` and
+ * `across` both arrive together in tier 1's own pack fetch, and the
+ * windowing tier 2's text used to describe was superseded by tier 4's real
+ * transport before this ladder was ever wired (`fluid.js`'s own tier-2
+ * `adds` text says so). A field that gated nothing would be a field that
+ * lies about having an effect — omitted rather than shipped inert.
+ *
+ * @param {number} tier
+ * @returns {{tier: number, cylinderEnabled: boolean, filmEnabled: boolean,
+ *   fillEnabled: boolean, structureEnabled: boolean}}
+ */
+export function fluidTierPlan(tier) {
+  const t = Number.isFinite(tier) ? Math.max(0, Math.min(FLUID_MAX_TIER, Math.floor(tier))) : FLUID_DEFAULT_TIER;
+  return {
+    tier: t,
+    cylinderEnabled: t >= 1,
+    filmEnabled: t >= 3,
+    fillEnabled: t >= 4,
+    structureEnabled: t >= 5,
+  };
+}
+
 /**
  * Build fluid's two surface materials — absorb (multiply) and emit (add).
  *
@@ -231,7 +267,9 @@ export function buildFluidSurfaceMaterials({
   opacity = 1,
   flowSpeed = 1,
   structure = FLUID_TIER5_STRUCTURE,
+  tier = FLUID_DEFAULT_TIER,
 }) {
+  const plan = fluidTierPlan(tier);
   const {
     texture,
     uv,
@@ -275,117 +313,124 @@ export function buildFluidSurfaceMaterials({
   // not do at all (a rect has no rotation).
   const quadUv = uv();
   const maskTexNode = texture(maskTexture, quadUv);
-  const packTexNode = texture(packTexture, quadUv);
 
-  // THE SILHOUETTE — from the FILE, at its own resolution.
+  // THE SILHOUETTE — from the FILE, at its own resolution. Never gated:
+  // this IS tier 0's own admission price, unconditional at every tier.
   const inside = smoothstep(float(FLUID_PRESENCE_EDGE0), float(FLUID_PRESENCE_EDGE1), maskTexNode.r).toVar();
 
-  const s = packTexNode.r.toVar();
-  const across = clamp(packTexNode.g, 0, 1).toVar();
-  // Needed by TIER 3 (the film's slow drift) and TIER 5 (τ, below) — hoisted
-  // here once so both tiers read from one declaration instead of two
-  // independent `.mul(1/1000)`s. TIER 4 (fill) owns its own clock, none here.
   const tSec = timeMsNode.mul(float(1 / 1000));
 
-  // ── TIER 5: STRUCTURE — τ, the material coordinate ──────────────────────
-  // `τ = s − v̄·t`, computed BEFORE tier 1 needs `across`/`thickness` so it
-  // reads top-to-bottom as "the pack's own coordinates, then the ONE derived
-  // coordinate the rest of this tier ladder can also use." `v̄` is
-  // `flowSpeed / FLUID_TARGET_TRAVERSAL_SECONDS` — a SINGLE SCALAR, the same
-  // for every pixel on this tube — because `computeFluidLengthQScale`
-  // (`fluid-sim.js`) already calibrates each tube's own `Q` so its real
-  // traversal time lands near `FLUID_TARGET_TRAVERSAL_SECONDS` regardless of
-  // that tube's length/width; τ's own rate is the mirror of that same
-  // calibration, not a second guess at it. `uFlowSpeed` (not the JS-side
-  // scale bare) so a live speed-control change moves the material pattern in
-  // the SAME direction and proportion as the visible fill speeds up.
-  //
-  // ⚠️ SPATIALLY CONSTANT, not per-pixel — the safe half of `water-field.js`'s
-  // own "never multiply a per-pixel direction by unbounded time" trap. That
-  // bug came from a per-pixel-VARYING direction times unbounded t causing
-  // adjacent pixels to diverge into a fan of streaks; here `v̄` is the
-  // IDENTICAL value at every pixel on this tube, so τ and `s` differ by
-  // exactly the same amount everywhere — nothing can shear, however long the
-  // tick clock has been running (matches that file's own safe "TRAVEL" term,
-  // not its dangerous one).
-  const tau = s.sub(uFlowSpeed.div(float(FLUID_TARGET_TRAVERSAL_SECONDS)).mul(tSec)).toVar();
-
-  // ── TIER 1: THE CYLINDER ────────────────────────────────────────────────
-  // Optical path length through a round tube from directly above. Maximum down
-  // the centreline, zero at the glass — which is what a real capillary looks
-  // like and what V2 had no way to express (everything it drew was a function
-  // of arc length alone, so nothing varied ACROSS the tube). Shared by both
-  // passes: it IS the depth the absorb pass attenuates over, and it IS the
-  // brightness ramp the emit pass shows.
-  const thickness = sqrt(max(float(1).sub(across.mul(across)), float(0))).toVar();
-
-  // The wall rim: a thin bright band where the glass catches light. One
-  // smoothstep on a value already in a register.
-  const rim = smoothstep(float(0.72), float(0.99), across).toVar();
+  // ── TIER 1: THE PACK READ, THEN THE CYLINDER ─────────────────────────────
+  // ⚠️ CORRECTED 2026-08-30 (Ingram: "fluid should be visible in some way at
+  // the lowest setting but we need minimal cost to do that"). This rung's
+  // own `adds` text used to claim `across` rode on "a read tier 0 already
+  // paid for" — false: tier 0, above, touches only the mask, never the
+  // pack. `packTexNode` is its OWN dedicated fetch, gated HERE rather than
+  // unconditionally, which is what makes tier 0 genuinely the cheap,
+  // always-visible floor Ingram asked for (one texture read total, not two).
+  let packTexNode = null;
+  let s, across, thickness, rim;
+  if (plan.cylinderEnabled) {
+    packTexNode = texture(packTexture, quadUv);
+    s = packTexNode.r.toVar();
+    across = clamp(packTexNode.g, 0, 1).toVar();
+    // Optical path length through a round tube from directly above. Maximum
+    // down the centreline, zero at the glass — which is what a real
+    // capillary looks like and what V2 had no way to express (everything it
+    // drew was a function of arc length alone, so nothing varied ACROSS the
+    // tube). Shared by both passes: it IS the depth the absorb pass
+    // attenuates over, and it IS the brightness ramp the emit pass shows.
+    thickness = sqrt(max(float(1).sub(across.mul(across)), float(0))).toVar();
+    // The wall rim: a thin bright band where the glass catches light.
+    rim = smoothstep(float(0.72), float(0.99), across).toVar();
+  } else {
+    // TIER 0 FLOOR — no pack read at all. Flat cross-section (thickness=1:
+    // uniform brightness across the tube's width, wherever the silhouette
+    // allows) and no wall rim — the tube still reads as translucent, glowing
+    // goo, it just does not look ROUND yet. `s`/`across` need no placeholder:
+    // nothing still active at this tier references them (film/fill/structure
+    // are all gated behind `cylinderEnabled` too, transitively — every later
+    // gate implies this one, since tier numbers only go up).
+    thickness = float(1);
+    rim = float(0);
+  }
 
   // ── TIER 3: THE FILM ────────────────────────────────────────────────────
   // Thin-film interference as a readout of REAL optical thickness, so the
   // rainbow bands across the cross-section drift on their own instead of
   // floating free. Three constants where V2 needed thirteen.
-  const filmPhase = thickness
-    .mul(float(9.0))
-    .add(s.mul(float(2.0)))
-    .add(tSec.mul(float(0.35)));
-  const film = vec3(
-    sin(filmPhase).mul(0.5).add(0.5),
-    sin(filmPhase.add(float(2.1)))
-      .mul(0.5)
-      .add(0.5),
-    sin(filmPhase.add(float(4.2)))
-      .mul(0.5)
-      .add(0.5)
-  );
-  const tinted = mix(uTint, film, uIridescence.mul(float(0.6))).toVar();
+  let tinted;
+  if (plan.filmEnabled) {
+    const filmPhase = thickness
+      .mul(float(9.0))
+      .add(s.mul(float(2.0)))
+      .add(tSec.mul(float(0.35)));
+    const film = vec3(
+      sin(filmPhase).mul(0.5).add(0.5),
+      sin(filmPhase.add(float(2.1)))
+        .mul(0.5)
+        .add(0.5),
+      sin(filmPhase.add(float(4.2)))
+        .mul(0.5)
+        .add(0.5)
+    );
+    tinted = mix(uTint, film, uIridescence.mul(float(0.6))).toVar();
+  } else {
+    // Below tier 3: the flat authored tint, no film phase computed at all.
+    tinted = uTint;
+  }
 
-  // ── TIER 5: STRUCTURE — the noise fetch, at τ not `s` ───────────────────
-  // ONE `mx_fractal_noise_vec3` fetch (Law 8: the vendored MaterialX node,
-  // never a hand-rolled hash — `water-field.js#buildWaterSurfaceField`'s own
-  // identical "ONE fetch" comment is the precedent copied here), reading TWO
-  // of its three channels rather than calling noise twice. Sampled at
-  // `(τ, across)`, NOT `(s, across)` — τ is what makes the pattern ride WITH
-  // the flow instead of sitting static in the pack's own fixed coordinate;
-  // this is the one channel `fluid.js`'s own `structure` tier note says fixes
-  // all eight of V2's abandoned decoration families, all of which sampled
-  // noise in screen space instead.
+  // ── TIER 5: STRUCTURE — τ, then the noise fetch, at τ not `s` ───────────
+  // `τ = s − v̄·t` — see this file's own header for the full derivation
+  // (SPATIALLY CONSTANT, the safe half of `water-field.js`'s per-pixel-time
+  // trap). Computed HERE, inside the same gate as the noise fetch that is
+  // its only consumer, rather than hoisted unconditionally: τ has no other
+  // use, and `s` is only in scope when `cylinderEnabled` also held — which
+  // it always does whenever `structureEnabled` does, tier 5 ≥ tier 1 by
+  // construction.
   //
-  // Output range is SIGNED, centred near zero (confirmed against
-  // `water-field.js`'s own usage: "turbidity... centred on zero"), so both
+  // ONE `mx_fractal_noise_vec3` fetch (Law 8: the vendored MaterialX node,
+  // never a hand-rolled hash), reading TWO of its three channels rather than
+  // calling noise twice. Output range is SIGNED, centred near zero, so both
   // channels below are read as a SMALL fractional swing around 1, clamped to
   // a sane band rather than left able to invert a colour channel on an
   // extreme sample.
-  const structureNoise = mx_fractal_noise_vec3(
-    vec3(tau.mul(float(FLUID_STRUCTURE_FREQ_ALONG)), across.mul(float(FLUID_STRUCTURE_FREQ_ACROSS)), float(0)),
-    3,
-    2.0,
-    0.5
-  ).toVar();
-  // MARBLING — a further modulation of the already-tinted colour, exactly
-  // the way FILM modulates the raw tint: one more multiplicative layer, never
-  // a competing colour source.
-  const marbled = tinted
-    .mul(
-      clamp(
-        float(1).add(structureNoise.x.mul(uStructure).mul(float(FLUID_STRUCTURE_TINT_SCALE))),
-        float(0.5),
-        float(1.5)
+  let marbled, grain;
+  if (plan.structureEnabled) {
+    const tau = s.sub(uFlowSpeed.div(float(FLUID_TARGET_TRAVERSAL_SECONDS)).mul(tSec)).toVar();
+    const structureNoise = mx_fractal_noise_vec3(
+      vec3(tau.mul(float(FLUID_STRUCTURE_FREQ_ALONG)), across.mul(float(FLUID_STRUCTURE_FREQ_ACROSS)), float(0)),
+      3,
+      2.0,
+      0.5
+    ).toVar();
+    // MARBLING — a further modulation of the already-tinted colour, exactly
+    // the way FILM modulates the raw tint: one more multiplicative layer,
+    // never a competing colour source.
+    marbled = tinted
+      .mul(
+        clamp(
+          float(1).add(structureNoise.x.mul(uStructure).mul(float(FLUID_STRUCTURE_TINT_SCALE))),
+          float(0.5),
+          float(1.5)
+        )
       )
-    )
-    .toVar();
-  // GRAIN — a brightness perturbation, applied to `body` below (not here):
-  // `body` is already zero wherever `fill` is zero, so multiplying it by
-  // `grain` inherits that gating for free — no separate "only where there is
-  // liquid" test needed, the SAME reasoning `opticalDepth`'s own comment
-  // already gives for why it needs no separate outside-the-tube gate.
-  const grain = clamp(
-    float(1).add(structureNoise.y.mul(uStructure).mul(float(FLUID_STRUCTURE_GRAIN_SCALE))),
-    float(0.5),
-    float(1.5)
-  );
+      .toVar();
+    // GRAIN — a brightness perturbation, applied to `body` below (not here):
+    // `body` is already zero wherever `fill` is zero, so multiplying it by
+    // `grain` inherits that gating for free — no separate "only where there
+    // is liquid" test needed, the SAME reasoning `opticalDepth`'s own
+    // comment already gives for why it needs no separate outside-the-tube
+    // gate.
+    grain = clamp(
+      float(1).add(structureNoise.y.mul(uStructure).mul(float(FLUID_STRUCTURE_GRAIN_SCALE))),
+      float(0.5),
+      float(1.5)
+    );
+  } else {
+    marbled = tinted;
+    grain = float(1);
+  }
 
   // ── TIER 4: FILL — a genuine 1-D SIMULATION, not a scroll ───────────────
   // `fluid-sim.js` owns transport now; this is the DEPENDENT READ Effects.md's
@@ -395,39 +440,51 @@ export function buildFluidSurfaceMaterials({
   // read it from. `s` and the sim's own U are the same 0..1 arc-length
   // coordinate BY CONSTRUCTION (both derive from `fluid-net.js`'s
   // `distFromRoot / lengthPx`), so no conversion belongs between them.
-  const tubeId = packTexNode.b.toVar();
-  const stateV = tubeId.sub(float(0.5)).div(tubeCountF);
-  const stateTexNode = texture(stateTexture, vec2(s, stateV));
-  const fill = stateTexNode.r.toVar();
+  let fill, meniscus;
+  let stateTexNode = null;
+  let fillAheadTexNode = null;
+  if (plan.fillEnabled) {
+    const tubeId = packTexNode.b.toVar();
+    const stateV = tubeId.sub(float(0.5)).div(tubeCountF);
+    stateTexNode = texture(stateTexture, vec2(s, stateV));
+    fill = stateTexNode.r.toVar();
 
-  // The meniscus — bright right where φ CHANGES along the tube, not at the
-  // wall. A moving front is a near-step in φ; a two-tap finite difference
-  // spikes there and reads flat everywhere else, since a fully-filled or
-  // fully-empty stretch has zero gradient by construction. On the RIGHT AXIS
-  // this time: V2's `meniscusStrength` was a function of distance to the wall
-  // and defaulted to 0 because it could never have looked right.
-  //
-  // ⚠️ A SECOND independent sample of the SAME ping-ponged texture — not a
-  // re-read of `stateTexNode` above. `world/wind-sim-gpu.js`'s own header
-  // names this exact trap: a texture that gets re-pointed every tick needs
-  // EVERY node that samples it re-pointed together, and there is no `.uv()`
-  // chain method on a built TextureNode in this vendored THREE, so a second
-  // UV needs a genuinely second `texture(...)` call — which means a second
-  // node the caller must track. Both live in `stateTexNodes` below, never
-  // just the first.
-  //
-  // ⚠️ CLAMPED, not left to the texture's own wrap mode. Near a tube's tip
-  // (`s` close to 1) this offset can exceed 1.0; a REPEAT-wrapped sample
-  // would wrap around to the tube's ROOT — a false gradient spike comparing
-  // the tip against the opposite end. `fluid-sim.js`'s own backtrace clamps
-  // its UV explicitly for the identical reason (never relies on wrap mode);
-  // this is the same discipline applied here.
-  const fillAheadU = clamp(s.add(float(FLUID_MENISCUS_EPSILON)), float(0), float(1));
-  const fillAheadTexNode = texture(stateTexture, vec2(fillAheadU, stateV));
-  const fillAhead = fillAheadTexNode.r;
-  const meniscus = clamp(abs(fillAhead.sub(fill)).mul(float(24)), 0, 1)
-    .mul(fill)
-    .toVar();
+    // The meniscus — bright right where φ CHANGES along the tube, not at the
+    // wall. A moving front is a near-step in φ; a two-tap finite difference
+    // spikes there and reads flat everywhere else, since a fully-filled or
+    // fully-empty stretch has zero gradient by construction. On the RIGHT AXIS
+    // this time: V2's `meniscusStrength` was a function of distance to the wall
+    // and defaulted to 0 because it could never have looked right.
+    //
+    // ⚠️ A SECOND independent sample of the SAME ping-ponged texture — not a
+    // re-read of `stateTexNode` above. `world/wind-sim-gpu.js`'s own header
+    // names this exact trap: a texture that gets re-pointed every tick needs
+    // EVERY node that samples it re-pointed together, and there is no `.uv()`
+    // chain method on a built TextureNode in this vendored THREE, so a second
+    // UV needs a genuinely second `texture(...)` call — which means a second
+    // node the caller must track. Both live in `stateTexNodes` below, never
+    // just the first.
+    //
+    // ⚠️ CLAMPED, not left to the texture's own wrap mode. Near a tube's tip
+    // (`s` close to 1) this offset can exceed 1.0; a REPEAT-wrapped sample
+    // would wrap around to the tube's ROOT — a false gradient spike comparing
+    // the tip against the opposite end. `fluid-sim.js`'s own backtrace clamps
+    // its UV explicitly for the identical reason (never relies on wrap mode);
+    // this is the same discipline applied here.
+    const fillAheadU = clamp(s.add(float(FLUID_MENISCUS_EPSILON)), float(0), float(1));
+    fillAheadTexNode = texture(stateTexture, vec2(fillAheadU, stateV));
+    const fillAhead = fillAheadTexNode.r;
+    meniscus = clamp(abs(fillAhead.sub(fill)).mul(float(24)), 0, 1)
+      .mul(fill)
+      .toVar();
+  } else {
+    // Below tier 4: no simulation read at all. The tube reads as permanently
+    // FULL (fill=1) — still a clear, glowing tube shape, just without the
+    // animated fill-level V2 never had either. `meniscus=0` matches: there
+    // is no moving front to spike on without a real sim to compare against.
+    fill = float(1);
+    meniscus = float(0);
+  }
 
   // ── EMIT (ADD) — the goo's own light ─────────────────────────────────────
   const body = thickness
@@ -515,12 +572,22 @@ export function buildFluidSurfaceMaterials({
     absorbMaterial,
     emitMaterial,
     maskTexNode,
+    // `null` below tier 1 — nothing in this codebase reads `packTexNode` off
+    // the return value today (confirmed by a full-tree grep), so this is
+    // documentation of the gate's real effect, not a live seam to guard.
     packTexNode,
     // BOTH samples of the ping-ponged state texture, so a tick function can
     // re-point every one the same way `fluid-sim.js`'s own `prevTexNodes`
     // works — re-pointing only `stateTexNode` would leave the meniscus
-    // reading a stale half of the ping-pong pair forever.
-    stateTexNodes: [stateTexNode, fillAheadTexNode],
+    // reading a stale half of the ping-pong pair forever. Empty below tier 4
+    // — nothing was built to re-point, and `fluid-surface-subsystem.js`'s own
+    // per-tick loop already treats a shorter/empty array as "nothing to do".
+    stateTexNodes: plan.fillEnabled ? [stateTexNode, fillAheadTexNode] : [],
+    // THE TIER GATE'S OWN HONESTY CHECK, mirroring water/specular/window's
+    // identical field: what this call ACTUALLY built, for a caller that
+    // wants to confirm a rebuild landed rather than trust the argument it
+    // passed in.
+    tier: plan.tier,
     uniforms: {
       uTint,
       uGlow,

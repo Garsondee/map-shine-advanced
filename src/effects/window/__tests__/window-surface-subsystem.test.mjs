@@ -26,6 +26,7 @@
 import * as THREE from '../../../../src/vendor/three/three.webgpu.js';
 import { createWindowSurfaceSubsystem } from '../window-surface-subsystem.js';
 import { WINDOW_DEFAULT_AMBIENT_CEILING } from '../window-cookie.js';
+import { WINDOW_DEFAULT_TIER } from '../window-render.js';
 
 /** A 1×1 texture — enough for a node to reference; never sampled here. */
 function stubTexture() {
@@ -104,6 +105,20 @@ export async function run(t) {
   // diagnostic REPLACES (One/Zero).
   ok('the mesh carries the ADDITIVE cookie material by default', mesh.material.blendDst === THREE.OneFactor);
   ok('the reported debug channel is 0 — the effect as it ships', sub.getStatus().debugChannel === 0);
+
+  // ── THE TIER-HONESTY FIELD (2026-08-30) — getStatus().perfTier reports
+  // what the LIVE material actually built at, not merely what was resolved,
+  // mirroring water/specular-surface-subsystem.js's own field. `state` above
+  // carries no `perfTier`, so the subsystem falls back to the default rung —
+  // proven here, then proven to actually TRACK a change (0 → 1, WINDOW's
+  // only other rung) rather than statically reporting the fallback forever.
+  ok(
+    'no resolved perfTier on state → getStatus() reports the default rung, not undefined/NaN',
+    sub.getStatus().perfTier === WINDOW_DEFAULT_TIER
+  );
+  state.perfTier = 0;
+  sub.sync(0);
+  ok('a genuinely different resolved tier reaches getStatus() on the very next sync', sub.getStatus().perfTier === 0);
 
   // ── SCENE COMPOSITION (2026-08-12) — chasing the live drawCalls:4 finding ──
   // `meshesOf()` above already confirms exactly one MESH via `.isMesh`; this

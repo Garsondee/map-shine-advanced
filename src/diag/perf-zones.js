@@ -169,6 +169,21 @@ export const ZONES = Object.freeze(
     z('sims.windBake', 'Wind field bake', 'sims', null, null, 'cpu', 'bake', false, 'bakeWindField'),
     z('sims.wind', 'Wind sim', 'sims', null, null, 'both', 'conditional', false, 'tickWindSim'),
     z('sims.fluid', 'Fluid sim', 'sims', null, 'fluid', 'both', 'conditional', false, 'tickFluidSim'),
+    // 2026-08-27 — tier 6's torque-sway spring integrate+publish pass. A
+    // no-op (cheap null checks only) on every scene that never reaches the
+    // `extreme` profile, hence 'conditional' rather than 'steady' — the same
+    // cadence sims.fluid uses for the identical reason.
+    z(
+      'sims.vegSpring',
+      'Vegetation torque-sway sim',
+      'sims',
+      null,
+      'vegetation',
+      'both',
+      'conditional',
+      false,
+      'tickVegetationSpring'
+    ),
     z(
       'sims.particlesDust',
       'Dust particle step',
@@ -556,6 +571,17 @@ export const ZONES = Object.freeze(
       'steady',
       false,
       'syncAllVegetationMotionForFrame'
+    ),
+    z(
+      'light.tileMotionSync',
+      'Tile motion sync',
+      'lighting',
+      'light.accumulate',
+      null, // not a registered effect (effects/registry.js) — a standalone GM tool, like camera-path
+      'cpu',
+      'steady',
+      false,
+      'syncAllTileMotionForFrame'
     ),
     z(
       'light.windOverlaySync',

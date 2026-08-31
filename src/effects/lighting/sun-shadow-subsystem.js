@@ -187,7 +187,10 @@
  *   });
  *
  *   // Per frame (light.accumulate, exactly where the inline call used to be):
- *   for (const floor of everyFloorInTheScene) sunShadows.maybeBake(floor.index);
+ *   // `nowMs` — `env.time?.realMs ?? 0` — throttles the actual bake only
+ *   // (see `SUN_SHADOW_BAKE_THROTTLE_MS`'s own doc); omit it and every call
+ *   // behaves exactly as it did before the throttle existed.
+ *   for (const floor of everyFloorInTheScene) sunShadows.maybeBake(floor.index, nowMs);
  *   // Every frame, unconditionally — a slot's REBAKE is rare, but its floor
  *   // attribution must stay correct even on a frame that skipped one:
  *   for (let i = 0; i < sunShadows.fields.length; i++) {
@@ -339,6 +342,34 @@ export const SUN_SHADOW_TIP_BLUR_MUL = 3;
  * this constant.
  */
 const SUN_SHADOW_MAX_FLOORS = 6;
+
+/**
+ * §5.8 of the 2026-08 perf audit MECHANICALLY CONFIRMED this subsystem reads
+ * mask-authority's ONE scene-wide `productsVersion` counter — the SAME
+ * counter water and the wind-rebake poll read. Dragging a slider with
+ * nothing to do with sun-shadows (wall height, a Tile field, a water mask
+ * brushstroke — `touch()` has six call sites, none scoped to "does this
+ * affect sun-shadow's own inputs") still bumps it, so `versionChanged` below
+ * reads "changed" on every one of those edits too, not just a real caster
+ * change. That check is correct and stays O(1) — the thing that is NOT safe
+ * to pay for on every one of those bumps is `bakeLayerTexture` (a repack +
+ * a 4 MB synchronous DataTexture upload) and the GPU march it forces right
+ * behind it (`bakeLayerTexture` nulls `bakedSun`, and `sunNeedsRebake(null,
+ * ...)` always answers "yes" — see that function's own `if (!last) return
+ * true` — so a version bump chains straight into a full re-march, ~262 M
+ * fetches at the default rung per §6.5). Worse than water's own version of
+ * this problem: it pays this chained cost **per resident floor slot**, since
+ * each slot polls the identical counter independently — up to
+ * `SUN_SHADOW_MAX_FLOORS` full chains for one unrelated edit.
+ *
+ * Mirrors `water-body-subsystem.js#BAKE_THROTTLE_MS`'s own mechanism exactly
+ * — read that constant's doc for the full "why a throttle, why it gates the
+ * BAKE and not the cheap checks" reasoning, which applies here unchanged.
+ * Same 150ms: no live measurement exists yet to justify a different number
+ * for this subsystem specifically — a tuning starting point, not a measured
+ * optimum, exactly as water's own comment states of itself.
+ */
+const SUN_SHADOW_BAKE_THROTTLE_MS = 150;
 
 /**
  * PACK THE LAYER TEXTURE'S BYTES — the RGBA layout `buildLayerSmearBakeMaterial`
@@ -744,6 +775,13 @@ function createFloorSlot({
    * floor below's bakes still detects it with one integer compare. */
   let bakeSerial = 0;
   let lastSeenLowerSerial = -1;
+  /** Wall-clock ms of the last COMPLETED bake (either half of the pair —
+   * see `SUN_SHADOW_BAKE_THROTTLE_MS`'s own doc), `-Infinity` so the very
+   * first real bake of a session is never throttled. Compared only against a
+   * caller-supplied `nowMs` — this module samples no clock of its own,
+   * exactly as `water-body-subsystem.js#lastBakeWallClockMs` documents in
+   * full. */
+  let lastBakeWallClockMs = -Infinity;
 
   // ── THE RESOLVED RUNG (§4) ───────────────────────────────────────────────
   // Constructed at the DEFAULT rung, not at the live one: `getSunShadowRenderState()`
@@ -1255,13 +1293,23 @@ function createFloorSlot({
    * frozen at dawn.
    *
    * @param {number} floorIndex
+   * @param {number} [nowMs] - wall-clock ms (`env.time.realMs`, never a fresh
+   *   `performance.now()` — see `lastBakeWallClockMs`'s own doc), used only to
+   *   throttle the actual bake work. Optional and defaults to "never
+   *   throttle" — the same "predates this dependency, still builds" shape
+   *   `water-body-subsystem.js#maybeBake`'s own `nowMs` already uses, so
+   *   every caller that predates this parameter (every test in this file
+   *   included) keeps its exact old behaviour with no change required.
    */
-  function maybeBake(floorIndex) {
+  function maybeBake(floorIndex, nowMs) {
     casterFieldFloor = floorIndex;
     const state = getSunShadowRenderState();
     const enabled = state.enabled !== false;
 
     // ── OFF: COLLAPSE, DO NOT MARCH (§4) ──────────────────────────────────
+    // Never throttled — already the cheap path (one 1×1 draw per "off" spell,
+    // guarded by `offFieldWritten`), not the expensive one the throttle below
+    // exists to protect.
     if (!enabled) {
       if (casterFieldLoaded) dropCasterField();
       const collapsed = applyFieldDim(1);
@@ -1278,6 +1326,15 @@ function createFloorSlot({
     // a LIVE client setting with no reload behind it, so a player who drops
     // from Extreme to Standard mid-session must see the cheaper field on the
     // next bake, not on the next scene load.
+    //
+    // NOT throttled: this reacts to `state.perfTier`, a rare, user-driven
+    // setting change — a different input entirely from the mask-authority
+    // storm `SUN_SHADOW_BAKE_THROTTLE_MS` defends against — and
+    // `applyFieldDim` is a `setSize` (§4: "KEEPS THE SAME `.texture` OBJECT"),
+    // never a reallocate, so resizing on a throttled frame is safe; only the
+    // bake that fills the (possibly resized) target with real content is what
+    // the throttle below may defer, exactly as it would for any other pending
+    // change.
     offFieldWritten = false;
     const tier = Number.isFinite(state.perfTier) ? state.perfTier : LAYER_SMEAR_DEFAULT_TIER;
     const plan = layerSmearTierPlan(tier);
@@ -1297,18 +1354,21 @@ function createFloorSlot({
     const qualityChanged = applyQuality(plan);
     const geometryChanged = dimChanged || qualityChanged;
 
+    // ── THE GATES, CHECKED BUT NOT YET ACTED ON — cheap, unthrottled, exactly
+    // like water's own `unchanged` comparison. `versionChanged` reads
+    // mask-authority's shared counter (`SUN_SHADOW_BAKE_THROTTLE_MS`'s own doc
+    // has the full mechanism) — reading `true` does not by itself mean THIS
+    // floor's own caster inputs changed, only that they might have.
+    // `sunChanged` is read against the CURRENT `bakedSun` purely to decide
+    // whether the throttle gate below applies; if `versionChanged` is also
+    // true and a real bake runs past the throttle, `bakeLayerTexture` nulls
+    // `bakedSun`, and the OR-condition further down re-reads it fresh — see
+    // that condition's own comment for why reusing this snapshot there would
+    // be wrong.
     const version = getMaskAuthorityVersion ? getMaskAuthorityVersion() : casterFieldVersion;
-    if (!casterFieldLoaded || version !== casterFieldVersion) {
-      casterFieldBakeRuns += 1;
-      casterFieldVersion = version;
-      lastCasterBakeResult = bakeLayerTexture(floorIndex);
-      casterFieldLoaded = true;
-    } else {
-      casterFieldBakeSkips += 1;
-    }
+    const versionChanged = !casterFieldLoaded || version !== casterFieldVersion;
     const paramsKey = JSON.stringify(state.params ?? {}) + `|on|t${activeTier}`;
     const paramsChanged = paramsKey !== lastSunShadowParamsKey;
-    if (paramsChanged) lastSunShadowParamsKey = paramsKey;
     // ⚠️ THE FLOOR BELOW IS AN INPUT NOW. Its field is sampled by this slot's
     // own bake, so its rebake dirties this one exactly like a param change
     // would. The caller iterates floors ASCENDING, so by the time this runs
@@ -1316,7 +1376,51 @@ function createFloorSlot({
     // one frame of lag is impossible rather than merely unlikely.
     const lowerSerial = lowerField ? lowerField.getBakeSerial() : -1;
     const lowerChanged = lowerSerial !== lastSeenLowerSerial;
+    const sunChanged = sunNeedsRebake(bakedSun, getShadowHandle().atmosphere, plan.quantizeDeg);
+
+    // ⚠️ THE THROTTLE — see `SUN_SHADOW_BAKE_THROTTLE_MS`'s own doc for the
+    // full "shared version counter" mechanism this defends against, and
+    // `water-body-subsystem.js#lastBakeWallClockMs` for why this gates the
+    // BAKE and not the cheap checks just above. `Number.isFinite` guards a
+    // caller that never passes `nowMs` (this function's own JSDoc):
+    // `undefined - anything` is `NaN`, and `NaN < SUN_SHADOW_BAKE_THROTTLE_MS`
+    // is `false`, so an omitted `nowMs` already never throttles — the explicit
+    // check just says so, rather than relying on that fallthrough's own
+    // silent behaviour to carry the intent.
+    //
+    // Gated on `needsBake`, and checked BEFORE any of `casterFieldVersion`/
+    // `lastSunShadowParamsKey`/`lastSeenLowerSerial`/`bakedSun` are stamped —
+    // the same "safe to retry indefinitely" discipline water's own throttle
+    // uses: a quiet poll (nothing changed) still falls through to the
+    // ordinary skip counters below, unthrottled and unaffected; a declined
+    // REAL change touches no state at all, so the very next poll past the
+    // window re-detects the identical pending change and bakes it for real,
+    // never silently dropping it.
+    const needsBake = versionChanged || paramsChanged || geometryChanged || lowerChanged || sunChanged;
+    if (needsBake && Number.isFinite(nowMs) && nowMs - lastBakeWallClockMs < SUN_SHADOW_BAKE_THROTTLE_MS) {
+      lastSunShadowBake = {
+        reason: 'a real change is pending, throttled to protect this frame — retries next poll',
+        floorIndex,
+        skipped: true,
+      };
+      return;
+    }
+
+    if (versionChanged) {
+      casterFieldBakeRuns += 1;
+      casterFieldVersion = version;
+      lastCasterBakeResult = bakeLayerTexture(floorIndex);
+      casterFieldLoaded = true;
+    } else {
+      casterFieldBakeSkips += 1;
+    }
+    if (paramsChanged) lastSunShadowParamsKey = paramsKey;
     lastSeenLowerSerial = lowerSerial;
+    // Re-read, NOT the `sunChanged` snapshot above: `bakeLayerTexture` (just
+    // above, when `versionChanged`) nulls `bakedSun` on success, which this
+    // must see fresh — reusing the stale snapshot here would let a
+    // version-only change repack the layer texture and then leave the GPU
+    // march stale against it.
     if (
       paramsChanged ||
       geometryChanged ||
@@ -1324,6 +1428,7 @@ function createFloorSlot({
       sunNeedsRebake(bakedSun, getShadowHandle().atmosphere, plan.quantizeDeg)
     ) {
       sunShadowBakeRuns += 1;
+      lastBakeWallClockMs = nowMs;
       bakeSunShadowField(
         geometryChanged ? 'profile' : paramsChanged ? 'param' : lowerChanged ? 'cascade' : bakedSun ? 'sun' : 'first'
       );
@@ -1413,7 +1518,7 @@ function createFloorSlot({
  *   the literal `new THREE.DataTexture(...)` + filter setup, defined in `vt/`.
  * @returns {{
  *   fields: Array<{texture: *, getRect: Function, getFloorIndex: Function}>,
- *   maybeBake: (floorIndex: number) => void,
+ *   maybeBake: (floorIndex: number, nowMs?: number) => void,
  *   getDebugQuad: (viewId: string, floorIndex: number) => *,
  *   getStatus: () => object,
  *   dispose: () => void,
@@ -1509,9 +1614,13 @@ export function createSunShadowSubsystem({
      * `floorIndex` owns — claiming a fresh slot for it on first call. A
      * `floorIndex` beyond the cap is a silent no-op past the one logged
      * warning: that floor simply never gets a slot, exactly as if it were
-     * never asked for. */
-    maybeBake(floorIndex) {
-      slotFor(floorIndex)?.maybeBake(floorIndex);
+     * never asked for.
+     * @param {number} floorIndex
+     * @param {number} [nowMs] - forwarded verbatim to the slot's own
+     *   `maybeBake` — see that function's own doc for the bake throttle this
+     *   drives. */
+    maybeBake(floorIndex, nowMs) {
+      slotFor(floorIndex)?.maybeBake(floorIndex, nowMs);
     },
     /**
      * The fullscreen debug quad to draw INSTEAD of the present pass, or null

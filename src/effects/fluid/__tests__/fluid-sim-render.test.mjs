@@ -15,7 +15,7 @@
  */
 import * as THREE from '../../../../src/vendor/three/three.webgpu.js';
 import { buildFluidAdvectMaterial } from '../fluid-sim.js';
-import { buildFluidSurfaceMaterials } from '../fluid-render.js';
+import { buildFluidSurfaceMaterials, fluidTierPlan, FLUID_MAX_TIER, FLUID_DEFAULT_TIER } from '../fluid-render.js';
 
 /** A 1×1 texture — enough for a node to reference; never sampled here. */
 function stubTexture(format = THREE.RGBAFormat, type = THREE.UnsignedByteType, data = new Uint8Array([0, 0, 0, 255])) {
@@ -59,6 +59,15 @@ export function run(t) {
   }
 
   // ── buildFluidSurfaceMaterials — closing the gap this file's header names ──
+  // ⚠️ `tier: FLUID_MAX_TIER` EXPLICITLY (2026-08-30) — this block proves
+  // every code path CAN construct, so it deliberately asks for the richest
+  // rung rather than trusting the function's own default. `FLUID_DEFAULT_TIER`
+  // (3) would silently skip tier 4/5's own branches (`fillEnabled`/
+  // `structureEnabled` both false at 3), and the assertions below that check
+  // `stateTexNodes` would go from "proving the dependent read was built" to
+  // "vacuously true because it was never attempted" — the exact
+  // `feedback_instruments_must_not_lie` shape this file's own header warns
+  // against, just moved one level up.
   {
     let built = null;
     let buildError = null;
@@ -76,6 +85,7 @@ export function run(t) {
         stateTexture: stubTexture(THREE.RGBAFormat, THREE.FloatType, new Float32Array([1, 0, 0, 1])),
         tubeCount: 3,
         timeMsNode: THREE.TSL.float(0),
+        tier: FLUID_MAX_TIER,
       });
     } catch (err) {
       buildError = err;
@@ -164,6 +174,83 @@ export function run(t) {
       // this line, not silently produced a wrong picture.
       ok('uFlowSpeed is exposed — τ`s own drift rate follows the live speed control', !!built.uniforms.uFlowSpeed);
       ok('uStructure is exposed — the marbling/grain strength control', !!built.uniforms.uStructure);
+    }
+  }
+
+  // ── fluidTierPlan — the gate a live profile change actually branches on ───
+  {
+    ok(
+      'tier 0: nothing above the mandatory mask read is enabled',
+      (() => {
+        const p = fluidTierPlan(0);
+        return !p.cylinderEnabled && !p.filmEnabled && !p.fillEnabled && !p.structureEnabled;
+      })()
+    );
+    ok(
+      'tier 1: only the cylinder (the pack read) turns on',
+      (() => {
+        const p = fluidTierPlan(1);
+        return p.cylinderEnabled && !p.filmEnabled && !p.fillEnabled && !p.structureEnabled;
+      })()
+    );
+    ok(
+      'tier 3: cylinder + film, not yet the sim or structure',
+      (() => {
+        const p = fluidTierPlan(3);
+        return p.cylinderEnabled && p.filmEnabled && !p.fillEnabled && !p.structureEnabled;
+      })()
+    );
+    ok(
+      'tier 5 (max): every gate on',
+      (() => {
+        const p = fluidTierPlan(FLUID_MAX_TIER);
+        return p.cylinderEnabled && p.filmEnabled && p.fillEnabled && p.structureEnabled;
+      })()
+    );
+    ok(
+      'non-finite input falls back to FLUID_DEFAULT_TIER, not NaN',
+      fluidTierPlan(undefined).tier === FLUID_DEFAULT_TIER
+    );
+    ok('clamps above the max', fluidTierPlan(99).tier === FLUID_MAX_TIER);
+    ok('clamps below zero', fluidTierPlan(-3).tier === 0);
+    ok('a fractional tier floors, never rounds up past what was actually resolved', fluidTierPlan(2.9).tier === 2);
+  }
+
+  // ── TIER 0 — THE FLOOR INGRAM ASKED FOR: visible, and genuinely minimal ───
+  // "fluid should be visible in some way at the lowest setting but we need
+  // minimal cost to do that" (2026-08-30). This block is the proof: at
+  // tier 0 the pack is never even fetched (packTexNode stays null) and the
+  // sim's dependent read is never attempted (stateTexNodes stays empty) —
+  // Effects.md Law 4 ("if turning it off does not SHRINK the compiled
+  // shader, it is not off"), not a uniform left at zero.
+  {
+    let built = null;
+    let buildError = null;
+    try {
+      built = buildFluidSurfaceMaterials({
+        THREE,
+        maskTexture: stubTexture(),
+        packTexture: stubTexture(THREE.RGBAFormat, THREE.FloatType, new Float32Array([0, 0, 0, 0])),
+        stateTexture: stubTexture(THREE.RGBAFormat, THREE.FloatType, new Float32Array([1, 0, 0, 1])),
+        tubeCount: 3,
+        timeMsNode: THREE.TSL.float(0),
+        tier: 0,
+      });
+    } catch (err) {
+      buildError = err;
+    }
+    ok(`tier 0 CONSTRUCTS without throwing (${buildError ? buildError.message : 'clean'})`, buildError === null);
+    if (built) {
+      ok(
+        'tier 0 still returns both real materials — the tube stays visible',
+        built.absorbMaterial?.isNodeMaterial && built.emitMaterial?.isNodeMaterial
+      );
+      ok('the pack was never fetched — packTexNode is null, not a built-then-ignored node', built.packTexNode === null);
+      ok(
+        'the sim state was never read — stateTexNodes is empty, nothing to re-point per tick',
+        Array.isArray(built.stateTexNodes) && built.stateTexNodes.length === 0
+      );
+      ok('the return value honestly reports what it built', built.tier === 0);
     }
   }
 }

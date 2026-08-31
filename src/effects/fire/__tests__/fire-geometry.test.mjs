@@ -39,6 +39,7 @@ import {
   hexToRgb01,
   fireRampStops,
   fireRuntimeFromParams,
+  fireTintMul,
   FIRE_DEFAULT_TIER,
   FIRE_FUELS,
   FIRE_RAMP_WOOD,
@@ -571,6 +572,65 @@ export function run(t) {
     t.ok('motionSpeed is independent of fire size, unlike the old puff clock', small.motionSpeed === huge.motionSpeed);
   }
 
+  // ── COLOUR CC (2026-08-30) — color/posterize/bandCount/colorHueShift ───────
+  // fireRuntimeFromParams computed flameColor/posterize/bands for these since
+  // the schema shipped, but fire-subsystem.js never forwarded any of the three
+  // to a live engine — the same "reads the key, drops the value" shape the
+  // block above documents for the old puffHz field. This is that fix's own
+  // proof, for the params → runtime half; fire-subsystem.test.mjs proves the
+  // runtime → engine half.
+
+  {
+    // `color`'s neutral anchor IS its own shipped default — must be a
+    // provable no-op there, not merely "close".
+    const identity = fireTintMul('#fdba35');
+    t.ok(
+      'fireTintMul is exactly [1,1,1] at the shipped default (#fdba35)',
+      identity.every((c) => near(c, 1, 1e-6))
+    );
+    const reddened = fireTintMul('#ff0000');
+    t.ok(
+      'a different swatch produces a real, non-identity multiplier',
+      reddened.some((c) => Math.abs(c - 1) > 0.05)
+    );
+    t.ok(
+      'an invalid hex falls back to identity rather than NaN',
+      fireTintMul('not-a-colour').every((c) => near(c, 1, 1e-6))
+    );
+
+    // hueShiftRad — fuel's own turns-based shift plus the manual ROH degrees
+    // dial, combined into one radian value the shader reads once.
+    const neutral = fireRuntimeFromParams({}, fireScaleChain(66, M_PER_PX));
+    t.ok('no fuel contribution, no manual shift → hueShiftRad is 0', near(neutral.hueShiftRad, 0, 1e-9));
+
+    const manual = fireRuntimeFromParams({ colorHueShift: 90 }, fireScaleChain(66, M_PER_PX));
+    t.ok('a 90° manual shift resolves to π/2 radians', near(manual.hueShiftRad, Math.PI / 2, 1e-6));
+
+    const magicalChain = fireScaleChain(66, M_PER_PX, { fuel: 'magical' });
+    const magical = fireRuntimeFromParams({ fuel: 'magical' }, magicalChain);
+    t.ok(
+      "magical fuel's own built-in shift resolves correctly (its help text's own '180°')",
+      near(magical.hueShiftRad, FIRE_FUELS.magical.hueShift * 2 * Math.PI, 1e-6) &&
+        near(magical.hueShiftRad, Math.PI, 1e-6)
+    );
+
+    const both = fireRuntimeFromParams({ fuel: 'magical', colorHueShift: 90 }, magicalChain);
+    t.ok(
+      'fuel and the manual dial ADD rather than override',
+      near(both.hueShiftRad, magical.hueShiftRad + Math.PI / 2, 1e-6)
+    );
+
+    const overdriven = fireRuntimeFromParams({ colorHueShift: 999 }, fireScaleChain(66, M_PER_PX));
+    t.ok('the manual dial clamps to its declared ±180° before combining', near(overdriven.hueShiftRad, Math.PI, 1e-6));
+
+    // posterize/bands now genuinely reach the runtime object, ready to flow
+    // downstream.
+    t.ok('posterize now defaults to 0 (smooth) — see fire.js for why not the old 0.85', neutral.posterize === 0);
+    const banded = fireRuntimeFromParams({ posterize: 1, bandCount: 4.6 }, fireScaleChain(66, M_PER_PX));
+    t.ok('posterize passes straight through', banded.posterize === 1);
+    t.ok('bandCount passes through rounded and clamped', banded.bands === 5);
+  }
+
   // ── GEOMETRY ───────────────────────────────────────────────────────────────
 
   {
@@ -812,5 +872,31 @@ export function run(t) {
     }
     t.ok('an out-of-range tier clamps into the ladder', fireTierPlan(99) === fireTierPlan(5));
     t.ok('a negative tier clamps to rung 0', fireTierPlan(-3) === fireTierPlan(0));
+  }
+
+  // === 🔒 spriteCountScale (2026-08-30) — fire's 3rd real tier lever ========
+  // Mirrors clusterFactor's own coverage just below each block above, for the
+  // newer field. See fire-subsystem.test.mjs for proof this actually reaches
+  // a live activeCount, not just the plan data itself.
+  {
+    t.ok('rung 0 (the absolute floor) is the sparsest, not zero', fireTierPlan(0).spriteCountScale > 0);
+    t.ok(
+      'the ladder is non-decreasing across every rung, never a step backward',
+      [0, 1, 2, 3, 4, 5].every(
+        (n) => n === 0 || fireTierPlan(n).spriteCountScale >= fireTierPlan(n - 1).spriteCountScale
+      )
+    );
+    t.ok(
+      'the DEFAULT tier (standard) already sits at the ceiling — 1.0, matching PER_FIRE exactly',
+      fireTierPlan(FIRE_DEFAULT_TIER).spriteCountScale === 1.0
+    );
+    t.ok(
+      'every rung AT OR ABOVE the default is byte-identical to it — this lever never exceeds today`s shipped density',
+      [FIRE_DEFAULT_TIER, 4, 5].every((n) => fireTierPlan(n).spriteCountScale === 1.0)
+    );
+    t.ok(
+      'every rung BELOW the default is genuinely cheaper, not just cosmetically different',
+      [0, 1, 2].every((n) => fireTierPlan(n).spriteCountScale < 1.0)
+    );
   }
 }

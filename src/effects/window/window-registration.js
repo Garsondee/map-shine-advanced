@@ -85,6 +85,10 @@ export function createWindowRegistration({
    */
   function getRenderState() {
     const p = readout.params ?? {};
+    // perfTier ADDED 2026-08-29 — closing the gap `readout`'s own comment
+    // above already named (the same fix as fluid/specular's own readouts):
+    // the tier was resolved and reported, but never reached the render seam.
+    // See window.js's tier-1 ('glass') rung and window-render.js#windowTierPlan.
     return {
       enabled: readout.enabled,
       params: {
@@ -93,6 +97,7 @@ export function createWindowRegistration({
         nightTint: typeof p.nightTint === 'string' ? hexToRgb01(p.nightTint) : undefined,
       },
       debugChannel,
+      perfTier: readout.perfTier,
     };
   }
 

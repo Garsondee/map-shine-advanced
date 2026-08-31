@@ -31,6 +31,7 @@ import {
 import { UI_WINDOW_SHADOW } from '../ui-window-shadow.js';
 import { CANDLE_FLAME } from '../candle-flame.js';
 import { SPECULAR } from '../specular/specular.js';
+import { specularTierPlan, SPECULAR_DEFAULT_TIER } from '../specular/specular-render.js';
 import { WATER } from '../water/water.js';
 import { WATER_DEFAULT_TIER } from '../water/water-render.js';
 import { FLUID } from '../fluid/fluid.js';
@@ -40,6 +41,10 @@ import { VEGETATION } from '../vegetation.js';
 import { SUN_SHADOWS } from '../sun-shadows.js';
 import { GRADE } from '../grade/grade.js';
 import { WINDOW } from '../window/window.js';
+import { windowTierPlan, WINDOW_DEFAULT_TIER } from '../window/window-render.js';
+import { fluidTierPlan, FLUID_DEFAULT_TIER, FLUID_MAX_TIER } from '../fluid/fluid-render.js';
+import { PRECIPITATION } from '../precipitation/precipitation.js';
+import { precipTierPlan } from '../precipitation/precip-species.js';
 
 /** A 5-rung ladder spread across the profile axis. Rung 0 carries NO
  * `fromProfile` — it is unconditional, and declaring one is a validation error. */
@@ -294,28 +299,57 @@ export function run(t) {
       vegShipped.shadowSmearTaps
   );
   ok(
-    'extreme is the reserved top rung — the finest smear this effect draws, and where the next ' +
-      'extreme-only addition plugs in',
-    resolveEffectTier(VEGETATION, { profile: 'extreme' }).tier === 5 &&
-      vegetationTierPlan(5).shadowSmearTaps > vegetationTierPlan(4).shadowSmearTaps
+    "tier 5 is still the shadow-smear ladder's OWN reserved top — the finest smear this effect draws " +
+      '(unchanged by tier 6 landing beside it, not inside it)',
+    vegetationTierPlan(5).shadowSmearTaps > vegetationTierPlan(4).shadowSmearTaps
   );
   ok(
     'shadow smear taps are monotonic down the ladder — a better machine never gets a coarser shadow',
-    [0, 1, 2, 3, 4, 5].every(
+    [0, 1, 2, 3, 4, 5, 6].every(
       (n) => n === 0 || vegetationTierPlan(n).shadowSmearTaps >= vegetationTierPlan(n - 1).shadowSmearTaps
     )
   );
   ok(
     'flutter, once bought at low, is never taken away by a HIGHER tier (Effects.md Law 2 — monotonic)',
-    [1, 2, 3, 4, 5].every((n) => vegetationTierPlan(n).flutterEnabled === true)
+    [1, 2, 3, 4, 5, 6].every((n) => vegetationTierPlan(n).flutterEnabled === true)
   );
   ok(
     'a wildly out-of-range tier clamps into the ladder rather than returning undefined',
-    vegetationTierPlan(999).shadowSmearTaps === vegetationTierPlan(5).shadowSmearTaps
+    vegetationTierPlan(999).shadowSmearTaps === vegetationTierPlan(6).shadowSmearTaps
   );
   ok(
     'a negative tier clamps to the floor',
     vegetationTierPlan(-3).flutterEnabled === false && vegetationTierPlan(-3).shadowEnabled === false
+  );
+
+  // === 🔒 TIER 6 (TORQUE-SWAY) ANTI-DRIFT, 2026-08-27 =======================
+  // A genuinely NEW rung, not an extension of tier 5's own reservation — see
+  // vegetation.js's own manifest header for why (a different cost class:
+  // a whole extra GPU simulation pass, not more shadow-smear taps in an
+  // already-built pass). `extreme` now resolves to tier 6 specifically
+  // because BOTH tier 5 and tier 6 declare `fromProfile: 'extreme'` — the
+  // resolver climbs to the highest satisfied rung, and 6 sits one above 5.
+  ok(
+    "extreme resolves to tier 6, not 5 — the ladder's new, genuinely-highest rung now that torque-sway exists",
+    resolveEffectTier(VEGETATION, { profile: 'extreme' }).tier === 6
+  );
+  ok(
+    'quality (one rung below extreme) does NOT reach torque-sway — only extreme does',
+    vegetationTierPlan(resolveEffectTier(VEGETATION, { profile: 'quality' }).tier).rotationLiftEnabled === false
+  );
+  ok(
+    'rotationLiftEnabled is false for every tier below 6 — a new cost class turning on a rung early would be ' +
+      'exactly the "restyles every existing scene" regression this ladder exists to prevent',
+    [0, 1, 2, 3, 4, 5].every((n) => vegetationTierPlan(n).rotationLiftEnabled === false)
+  );
+  ok('rotationLiftEnabled is true at tier 6, and ONLY tier 6', vegetationTierPlan(6).rotationLiftEnabled === true);
+  ok(
+    'an out-of-range tier clamps to 6 (the new ceiling), not 5 — rotationLiftEnabled included',
+    vegetationTierPlan(999).rotationLiftEnabled === true
+  );
+  ok(
+    'a negative tier clamps to the floor — no rotation/lift there either',
+    vegetationTierPlan(-3).rotationLiftEnabled === false
   );
 
   // === 🔒 THE WATER ANTI-DRIFT CROSS-CHECK ================================
@@ -492,5 +526,268 @@ export function run(t) {
   ok(
     'a malformed plan costs zero samples rather than NaN — a status report must never print NaN',
     layerSmearBakeSamples(null) === 0 && layerSmearBakeSamples({ steps: 5 }) === 0
+  );
+
+  // === 🔒 THE SPECULAR ANTI-DRIFT CROSS-CHECK =============================
+  // Wired 2026-08-29 — until this date, `resolved.perfTier` reached the
+  // registration readout but was dropped one step before `getRenderState()`,
+  // so the shimmer/parallax/life/islands/sunAndSky ladder was declared but
+  // never consumed (effect-cascade.js#resolveEffectTier's own header, effect
+  // #15 of that same shape — see docs/planning/
+  // Effect-Tier-Gradient-Audit-2026-08-29.md for the audit that found it).
+  // Same reasoning as the candle/vegetation blocks above.
+  ok(
+    'low and performance BOTH resolve to tier 3 — shimmer, parallax and life, but not islands or the ' +
+      'sun/sky bias (both require standard)',
+    resolveEffectTier(SPECULAR, { profile: 'low' }).tier === 3 &&
+      resolveEffectTier(SPECULAR, { profile: 'performance' }).tier === 3
+  );
+  ok(
+    'the specular fallback tier IS what the default profile resolves to — no second authority',
+    resolveEffectTier(SPECULAR, { profile: DEFAULT_PERFORMANCE_PROFILE }).tier === SPECULAR_DEFAULT_TIER
+  );
+  const specShipped = specularTierPlan(SPECULAR_DEFAULT_TIER);
+  ok(
+    'the default rung reproduces the SHIPPED look exactly — every gate on, matching today`s unconditional ' +
+      'behaviour byte-for-byte (standard/quality/extreme all resolve here, so wiring this changed nothing ' +
+      'for any of them)',
+    specShipped.shimmerEnabled === true &&
+      specShipped.parallaxEnabled === true &&
+      specShipped.lifeEnabled === true &&
+      specShipped.islandsEnabled === true &&
+      specShipped.sunSkyEnabled === true
+  );
+  ok(
+    'an absent tier falls back to that same rung, so an unwired caller sees no change',
+    specularTierPlan(undefined).shimmerEnabled === true && specularTierPlan(undefined).sunSkyEnabled === true
+  );
+  ok(
+    'tier 0 has NOTHING but the presence floor — no shimmer at all, the term that "cannot be zero" per ' +
+      'the manifest`s own tier-0 prose IS zero',
+    specularTierPlan(0).shimmerEnabled === false &&
+      specularTierPlan(0).parallaxEnabled === false &&
+      specularTierPlan(0).lifeEnabled === false &&
+      specularTierPlan(0).islandsEnabled === false &&
+      specularTierPlan(0).sunSkyEnabled === false
+  );
+  ok(
+    'each gate turns on at its own rung and never turns back off climbing higher (monotonic)',
+    [0, 1, 2, 3, 4, 5].every((n) => {
+      const plan = specularTierPlan(n);
+      return (
+        plan.shimmerEnabled === n >= 1 &&
+        plan.parallaxEnabled === n >= 2 &&
+        plan.lifeEnabled === n >= 3 &&
+        plan.islandsEnabled === n >= 4 &&
+        plan.sunSkyEnabled === n >= 5
+      );
+    })
+  );
+  ok(
+    'a wildly out-of-range tier clamps into the ladder rather than returning undefined',
+    specularTierPlan(999).sunSkyEnabled === true && specularTierPlan(999).tier === 5
+  );
+  ok(
+    'a negative tier clamps to the floor — nothing enabled',
+    specularTierPlan(-3).shimmerEnabled === false && specularTierPlan(-3).tier === 0
+  );
+
+  // === 🔒 THE WINDOW ANTI-DRIFT CROSS-CHECK ================================
+  // Wired 2026-08-29 — WINDOW declared exactly one rung (the floor) until
+  // this date; tier 1 ('glass') is new, closing the gap `deferredRungs.
+  // glassPerfGate` named ("the machinery to flip it while running... specular
+  // carries exactly that machinery and is the template"). See docs/planning/
+  // Effect-Tier-Gradient-Audit-2026-08-29.md §3.3.
+  ok('low is the ONLY profile that loses glass', resolveEffectTier(WINDOW, { profile: 'low' }).tier === 0);
+  ok(
+    'performance and standard both buy the glass rung',
+    resolveEffectTier(WINDOW, { profile: 'performance' }).tier === 1 &&
+      resolveEffectTier(WINDOW, { profile: 'standard' }).tier === 1
+  );
+  ok(
+    'the window fallback tier IS what the default profile resolves to — no second authority',
+    resolveEffectTier(WINDOW, { profile: DEFAULT_PERFORMANCE_PROFILE }).tier === WINDOW_DEFAULT_TIER
+  );
+  ok(
+    'the default rung reproduces the SHIPPED look exactly — glass on, byte-identical to before this ladder existed',
+    windowTierPlan(WINDOW_DEFAULT_TIER).glassEnabled === true
+  );
+  ok(
+    'an absent tier falls back to that same rung, so an unwired caller sees no change',
+    windowTierPlan(undefined).glassEnabled === true
+  );
+  ok('tier 0 has no glass at all', windowTierPlan(0).glassEnabled === false);
+  ok(
+    'a wildly out-of-range tier clamps into the ladder rather than returning undefined',
+    windowTierPlan(999).glassEnabled === true && windowTierPlan(999).tier === 1
+  );
+  ok(
+    'a negative tier clamps to the floor — no glass',
+    windowTierPlan(-3).glassEnabled === false && windowTierPlan(-3).tier === 0
+  );
+
+  // === 🔒 THE BLOOM / DEPTH-OF-FIELD ANTI-DRIFT CROSS-CHECK ================
+  // Wired 2026-08-29 — both manifests declared exactly one tier (today's full
+  // mip pyramid) until this date; each grew a genuinely cheaper tier 0 below
+  // it. WENT LIVE 2026-08-30 — the mip-count decision used to be
+  // construction-time-only (`deferredRungs.liveMipRebuild`, now removed —
+  // the gap it named is closed); `vt-pan-viewer.js#runPostBloomPass`/
+  // `runPostDofPass` now re-resolve it every frame from `getBloomRenderState
+  // ().perfTier`/`getDofRenderState().perfTier` (`bloomResolveUsesFullPyramid`
+  // / `dofResolveUsesFullPyramid`), re-pointing bloom's `atmoTexNode` live or
+  // calling `rebuildDofForTier` on the rare frame the resolved tier actually
+  // crosses the performance/standard boundary. Still no Node-testable
+  // `xTierPlan` pure function to cross-check the RESOLUTION logic against —
+  // that live code lives in `vt-pan-viewer.js`, which Node cannot construct
+  // (needs a real WebGPU renderer) — so what CAN be pinned here is the
+  // resolver-side contract: which profile buys which rung. What CAN
+  // additionally be pinned now, and is, in `bloom-dof-render.test.mjs`: that
+  // `buildBloomMaterials`/`buildDofMaterials` themselves actually construct
+  // at BOTH tier sizes — the exact code path this fix newly exercises a
+  // second time, mid-session, that never ran before it existed.
+  ok(
+    'bloom: low is the ONLY profile that stays on the shorter 4-mip pyramid',
+    resolveEffectTier(BLOOM, { profile: 'low' }).tier === 0
+  );
+  ok(
+    'bloom: performance and standard both buy the full 6-mip pyramid',
+    resolveEffectTier(BLOOM, { profile: 'performance' }).tier === 1 &&
+      resolveEffectTier(BLOOM, { profile: 'standard' }).tier === 1
+  );
+  ok(
+    'bloom: the default profile resolves to the TOP rung — today`s look, unchanged',
+    resolveEffectTier(BLOOM, { profile: DEFAULT_PERFORMANCE_PROFILE }).tier === 1
+  );
+  ok(
+    'dof: low is the ONLY profile that stays on the shorter 2-mip pyramid',
+    resolveEffectTier(DEPTH_OF_FIELD, { profile: 'low' }).tier === 0
+  );
+  ok(
+    'dof: performance and standard both buy the full 4-mip pyramid',
+    resolveEffectTier(DEPTH_OF_FIELD, { profile: 'performance' }).tier === 1 &&
+      resolveEffectTier(DEPTH_OF_FIELD, { profile: 'standard' }).tier === 1
+  );
+  ok(
+    'dof: the default profile resolves to the TOP rung — today`s look, unchanged',
+    resolveEffectTier(DEPTH_OF_FIELD, { profile: DEFAULT_PERFORMANCE_PROFILE }).tier === 1
+  );
+
+  // === 🔒 THE FLUID ANTI-DRIFT CROSS-CHECK ==================================
+  // Wired 2026-08-30 (Ingram: "fluid should be visible in some way at the
+  // lowest setting but we need minimal cost to do that"). Closes the audit's
+  // own headline finding for this effect: a full 6-rung ladder existed in
+  // code with zero tier parameter on the builder — every profile paid the
+  // top rung's cost. Tier 1 ('tube') also moved fromProfile low→performance
+  // as part of the SAME fix, correcting its own text's false "already paid
+  // for" claim — see fluid.js's tier 1 adds text and fluid-render.js's own
+  // 2026-08-30 header note. See docs/planning/Effect-Tier-Gradient-Audit-
+  // 2026-08-29.md, ranked action #7.
+  ok(
+    'low is the ONLY profile with no pack read at all — flat cross-section, still visible',
+    (() => {
+      const p = fluidTierPlan(resolveEffectTier(FLUID, { profile: 'low' }).tier);
+      return !p.cylinderEnabled && !p.filmEnabled && !p.fillEnabled && !p.structureEnabled;
+    })()
+  );
+  ok(
+    'performance buys the cylinder (the pack read) and nothing above it',
+    resolveEffectTier(FLUID, { profile: 'performance' }).tier === 1
+  );
+  ok(
+    'standard buys film on top of the cylinder, but not the real simulation or structure',
+    (() => {
+      const p = fluidTierPlan(resolveEffectTier(FLUID, { profile: 'standard' }).tier);
+      return p.cylinderEnabled && p.filmEnabled && !p.fillEnabled && !p.structureEnabled;
+    })()
+  );
+  ok(
+    'quality is the first profile to buy the real simulation and the structure noise',
+    (() => {
+      const p = fluidTierPlan(resolveEffectTier(FLUID, { profile: 'quality' }).tier);
+      return p.fillEnabled && p.structureEnabled;
+    })()
+  );
+  ok(
+    'extreme resolves identically to quality — no rung declared above it, matching water`s own precedent',
+    resolveEffectTier(FLUID, { profile: 'extreme' }).tier === resolveEffectTier(FLUID, { profile: 'quality' }).tier
+  );
+  ok(
+    'the fluid fallback tier IS what the default profile resolves to — no second authority',
+    resolveEffectTier(FLUID, { profile: DEFAULT_PERFORMANCE_PROFILE }).tier === FLUID_DEFAULT_TIER
+  );
+  ok(
+    'an absent tier falls back to that same rung, so an unwired caller sees today`s shipped standard look',
+    fluidTierPlan(undefined).tier === FLUID_DEFAULT_TIER
+  );
+  ok('a wildly out-of-range tier clamps to the max, not undefined', fluidTierPlan(999).tier === FLUID_MAX_TIER);
+  ok(
+    'a negative tier clamps to the floor — nothing enabled',
+    (() => {
+      const p = fluidTierPlan(-3);
+      return p.tier === 0 && !p.cylinderEnabled && !p.filmEnabled && !p.fillEnabled && !p.structureEnabled;
+    })()
+  );
+  ok(
+    'monotonic: every gate that is on at tier N is still on at every tier above N',
+    (() => {
+      let prev = fluidTierPlan(0);
+      for (let t = 1; t <= FLUID_MAX_TIER; t++) {
+        const cur = fluidTierPlan(t);
+        if (
+          (prev.cylinderEnabled && !cur.cylinderEnabled) ||
+          (prev.filmEnabled && !cur.filmEnabled) ||
+          (prev.fillEnabled && !cur.fillEnabled) ||
+          (prev.structureEnabled && !cur.structureEnabled)
+        )
+          return false;
+        prev = cur;
+      }
+      return true;
+    })()
+  );
+
+  // === 🔒 THE PRECIPITATION ANTI-DRIFT CROSS-CHECK ==========================
+  // Wired 2026-08-30 — precipitation was the LAST of the 16 audited effects
+  // with no manifest at all (docs/planning/Effect-Tier-Gradient-Audit-
+  // 2026-08-29.md §3.4, round 2). `precipTierPlan`/`PRECIP_TIER_SCALES`
+  // (precip-species.js) predate this manifest by one day — this cross-check
+  // is what proves the two can never quietly disagree about what a resolved
+  // tier costs.
+  ok(
+    'low resolves to tier 0 — the floor every profile gets, at 40% live-particle density',
+    (() => {
+      const t = resolveEffectTier(PRECIPITATION, { profile: 'low' }).tier;
+      return t === 0 && precipTierPlan(t).tierScale === 0.4;
+    })()
+  );
+  ok(
+    'performance resolves to tier 1 — 70% density',
+    (() => {
+      const t = resolveEffectTier(PRECIPITATION, { profile: 'performance' }).tier;
+      return t === 1 && precipTierPlan(t).tierScale === 0.7;
+    })()
+  );
+  ok(
+    'standard AND above resolve to tier 2 — the ceiling, 100% density, unchanged from before this manifest existed',
+    (() => {
+      for (const profile of ['standard', 'quality', 'extreme']) {
+        const t = resolveEffectTier(PRECIPITATION, { profile }).tier;
+        if (t !== 2 || precipTierPlan(t).tierScale !== 1.0) return false;
+      }
+      return true;
+    })()
+  );
+  ok(
+    'the default profile resolves to the SAME tier precipTierPlan`s own default falls back to',
+    resolveEffectTier(PRECIPITATION, { profile: DEFAULT_PERFORMANCE_PROFILE }).tier === precipTierPlan(undefined).tier
+  );
+  ok(
+    'a wildly out-of-range tier clamps into the ladder rather than returning undefined',
+    precipTierPlan(99).tier === 2
+  );
+  ok('a negative tier clamps to the floor', precipTierPlan(-3).tier === 0 && precipTierPlan(-3).tierScale === 0.4);
+  ok(
+    'on at every profile — precipitation.js formalises, but does not change, this effect`s pre-manifest unconditional behaviour',
+    PERFORMANCE_PROFILES.every((profile) => resolveEffectEnabled(PRECIPITATION, { profile }))
   );
 }

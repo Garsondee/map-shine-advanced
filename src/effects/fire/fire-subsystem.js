@@ -30,7 +30,13 @@
  *
  * @module effects/fire/fire-subsystem
  */
-import { fireScaleChain, fireRuntimeFromParams, buildFireLightSources, FIRE_DEFAULT_TIER } from './fire-geometry.js';
+import {
+  fireScaleChain,
+  fireRuntimeFromParams,
+  buildFireLightSources,
+  fireTierPlan,
+  FIRE_DEFAULT_TIER,
+} from './fire-geometry.js';
 import { FLAME_ARCHETYPES } from './fire-sprite.js';
 import { applyCohesion } from './fire-spawn-points.js';
 
@@ -308,9 +314,26 @@ export function createFireSubsystem({
 
     const params = state.params ?? {};
     const tier = Number.isFinite(state.perfTier) ? state.perfTier : FIRE_DEFAULT_TIER;
+    // THE THIRD LEVER (2026-08-30) — `.clusterFactor` already reaches
+    // `buildFireLightSources` below via its own `{tier}` argument;
+    // `.spriteCountScale` is read directly here since `activeCount` (the
+    // per-fire particle budget) is computed inline in THIS function, not
+    // routed through fire-geometry.js the way the light-merge lever is.
+    const firePlan = fireTierPlan(tier);
     const mPerPx = Number.isFinite(state.mPerPx) && state.mPerPx > 0 ? state.mPerPx : 0.02;
     const env = getEnvironment?.() ?? null;
-    const runtime = fireRuntimeFromParams(params, fireScaleChain(fires[0]?.diameterPx ?? 100, mPerPx));
+    // ⚠️ `{ fuel: params?.fuel }` ADDED 2026-08-30 — without it, `fireScaleChain`
+    // defaults to 'wood' regardless of the author's actual "Fuel" selection, so
+    // `chain.hueShift` (magical fuel's own built-in 180° shift) would resolve
+    // to 0 here even after the new colorHueShift wiring below — a fix that
+    // passes its own Node tests (which pass `fuel` directly to `fireScaleChain`)
+    // while silently doing nothing through this real call site. `fireScaleChain`
+    // already defaults/validates internally, so an undefined/invalid value here
+    // is safe.
+    const runtime = fireRuntimeFromParams(
+      params,
+      fireScaleChain(fires[0]?.diameterPx ?? 100, mPerPx, { fuel: params?.fuel })
+    );
 
     // The spawn cloud is pushed only when it actually needs to change — a full
     // buffer upload and a re-seed, not a per-frame write. Two independent
@@ -399,6 +422,18 @@ export function createFireSubsystem({
         intensity: runtime.fireIntensity,
         cameraHeight: runtime.cameraHeight,
         motionSpeed: runtime.motionSpeed,
+        // ⚠️ FIXED ALONGSIDE THE ABOVE (2026-08-30) — `hueShiftRad`/
+        // `posterizeAmount`/`bandCount`/`tintMul` were the other three
+        // `fireRuntimeFromParams` fields nothing ever read: computed every
+        // frame, forwarded to nobody. See fire.js's "Look" category header
+        // for the full account. Global like `motionSpeed` above — every
+        // engine (flame/ember/smoke) needs `hueShiftRad` so a recoloured
+        // fire reads as one object; the other three sit inert on ember/smoke
+        // engines exactly the way `colorAge` already does.
+        hueShiftRad: runtime.hueShiftRad,
+        posterizeAmount: runtime.posterize,
+        bandCount: runtime.bands,
+        tintMul: runtime.flameColorTintMul,
         // Smoke keeps V2's absolute sizing: it is the layer the author reports
         // already reads correctly, and it SHOULD outgrow its fire — a plume is
         // wider than the fuel that made it.
@@ -409,7 +444,20 @@ export function createFireSubsystem({
         // The control is PER FIRE; the engine budget is map-wide, so it scales
         // by how many fires are sharing it (and is clamped to the arena inside
         // `setParams`). Falls back to the shipped PER_FIRE default.
-        activeCount: Math.max(0, (tune.activeCount ?? PER_FIRE[kind]) * Math.max(1, fireCount)),
+        //
+        // ⚠️ `firePlan.spriteCountScale` ADDED 2026-08-30 — fire's 3rd real
+        // tier lever (fire-geometry.js#FIRE_TIER_PLANS's own header has the
+        // full account). 1.0 at `standard`+, so this multiply is a genuine
+        // no-op there — byte-identical to before this lever existed. ONLY
+        // an author's explicit `tune.activeCount` override bypasses it
+        // (matches how `tune.sizeScale` above is multiplied INTO the tier
+        // term rather than replaced by it — an author dialing "more
+        // particles" should still get fewer of them at `low`, not opt
+        // fully out of the gradient by accident).
+        activeCount: Math.max(
+          0,
+          (tune.activeCount ?? PER_FIRE[kind]) * Math.max(1, fireCount) * firePlan.spriteCountScale
+        ),
       });
       engine.step(renderer, { dtSec, tMs: nowMs, worldRect });
     }

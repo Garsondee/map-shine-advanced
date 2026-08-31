@@ -17,6 +17,7 @@ import { run as runSpecies } from './precip-species.test.mjs';
 import { run as runMantle } from './mantle-model.test.mjs';
 import { run as runSquall } from './squall-field.test.mjs';
 import { run as runDrips } from './drip-edges.test.mjs';
+import { run as runPrecipitation } from './precipitation.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -50,6 +51,7 @@ const suites = [
   ['mantle-model', runMantle],
   ['squall-field', runSquall],
   ['drip-edges', runDrips],
+  ['precipitation', runPrecipitation],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

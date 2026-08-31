@@ -201,6 +201,99 @@ export function createTaaResolveBench({ THREE, log }) {
 
   const scenarios = new Map();
 
+  scenarios.set('bare-value-swap-redirects-without-rebuild', {
+    name: 'bare-value-swap-redirects-without-rebuild',
+    summary:
+      "URGENT, added 2026-08-31 in response to a live report (full-screen wobble with TAA on): does " +
+      "grade-present.js#setLitSource's bare `presentTexNode.value = tex` (deliberately no `needsUpdate`, " +
+      "unlike its sibling rebindLit) actually redirect an ALREADY-COMPILED NodeMaterial to sample the NEW " +
+      'texture on the very next render — or does the compiled shader keep sampling the texture it was ' +
+      'built against? Two renders of the SAME material, ONE bare value-swap between them, no other change.',
+    async run(ctx) {
+      await ensureRenderer();
+      const { texture, vec4, uv } = THREE.TSL;
+
+      // NOTE: uploadStripeTexture hardcodes the module-level DIM (64) as the
+      // texture's own width/height regardless of the image array's real
+      // size — a 4x4 fixture here previously produced a 64x64-claimed
+      // upload backed by only 4x4 worth of data (an invalid upload reading
+      // back as black on both sides of the swap, a false "broken" result
+      // caught by re-checking against a trivial control, not trusted from
+      // one run). Use DIM x DIM fixtures, matching what the helper expects.
+      const redTex = uploadStripeTexture(makeImage(DIM, DIM, () => [255, 0, 0, 255]));
+      const greenTex = uploadStripeTexture(makeImage(DIM, DIM, () => [0, 255, 0, 255]));
+
+      // EXACT shape of grade-present.js: `const presentTexNode = texture(litTexture);`
+      // then later `material.fragmentNode = vec4(...presentTexNode.rgb...)`.
+      const presentTexNode = texture(redTex, uv());
+      const material = new THREE.NodeMaterial();
+      material.colorNode = vec4(presentTexNode.rgb, 1);
+      material.transparent = false;
+      material.depthTest = false;
+      material.depthWrite = false;
+      const geo = new THREE.PlaneGeometry(1, 1);
+      const mesh = new THREE.Mesh(geo, material);
+      mesh.position.set(0.5, 0.5, 0);
+      mesh.frustumCulled = false;
+      const scene = new THREE.Scene();
+      scene.add(mesh);
+
+      async function renderOnce() {
+        renderer.setRenderTarget(outRt);
+        renderer.setClearColor(0x000000, 1);
+        renderer.clear(true, false, false);
+        await renderer.renderAsync(scene, camera);
+        renderer.setRenderTarget(null);
+        const buf = await renderer.readRenderTargetPixelsAsync(outRt, 0, 0, OUT_DIM, OUT_DIM);
+        return ArrayBuffer.isView(buf) ? buf : new Uint8Array(buf);
+      }
+
+      const bufBefore = await renderOnce();
+
+      // THE SWAP UNDER TEST — bare .value=, no needsUpdate, exactly setLitSource's own line.
+      presentTexNode.value = greenTex;
+
+      const bufAfter = await renderOnce();
+
+      geo.dispose();
+      material.dispose?.();
+      redTex.dispose();
+      greenTex.dispose();
+
+      const centerOf = (buf) => {
+        const i = (Math.floor(OUT_DIM / 2) * OUT_DIM + Math.floor(OUT_DIM / 2)) * 4;
+        return [buf[i], buf[i + 1], buf[i + 2]];
+      };
+      const before = centerOf(bufBefore);
+      const after = centerOf(bufAfter);
+
+      return {
+        checks: [
+          evaluate('first render shows the INITIAL texture (red)', () => ({
+            ok: before[0] > 200 && before[1] < 50 && before[2] < 50,
+            measured: before,
+            expected: 'roughly [255,0,0] — non-vacuity: if this fails the harness itself is broken',
+          })),
+          evaluate('SECOND render, after the bare .value swap, shows the NEW texture (green)', () => ({
+            ok: after[1] > 200 && after[0] < 50 && after[2] < 50,
+            measured: after,
+            expected:
+              "roughly [0,255,0] — if this reads red instead (unchanged from 'before'), a bare .value swap " +
+              'does NOT redirect an already-compiled material on this renderer/version, which would mean ' +
+              "setLitSource's entire mechanism is broken and TAA's resolved output never reaches present at all",
+            note:
+              after[1] > 200
+                ? 'CONFIRMED: the swap mechanism works — present redirection is not the cause of the reported wobble'
+                : 'CONFIRMED BROKEN: this is very likely the reported full-screen wobble — see grade-present.js#setLitSource',
+          })),
+        ],
+        calibration: 'OK',
+        inputs: {},
+        stats: { before, after },
+      };
+    },
+  });
+
   scenarios.set('reprojection-lands-on-the-correct-stripe', {
     name: 'reprojection-lands-on-the-correct-stripe',
     summary:

@@ -35,6 +35,8 @@ import { run as runSceneGeometry } from './scene-geometry.test.mjs';
 import { run as runSceneLayers } from './scene-layers.test.mjs';
 import { run as runSceneTokens } from './scene-tokens.test.mjs';
 import { run as runSceneTiles } from './scene-tiles.test.mjs';
+import { run as runTileMotion } from './tile-motion.test.mjs';
+import { run as runTileMotionRuntime } from './tile-motion-runtime.test.mjs';
 import { run as runV2AnchorImport } from './v2-anchor-import.test.mjs';
 import { run as runSettingsAdapter } from './settings-adapter.test.mjs';
 
@@ -100,6 +102,8 @@ const suites = [
   ['scene-layers', runSceneLayers],
   ['scene-tokens', runSceneTokens],
   ['scene-tiles', runSceneTiles],
+  ['tile-motion', runTileMotion],
+  ['tile-motion-runtime', runTileMotionRuntime],
   ['v2-anchor-import', runV2AnchorImport],
   ['settings-adapter', runSettingsAdapter],
 ];

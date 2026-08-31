@@ -352,24 +352,32 @@ export const WINDOW = Object.freeze({
         'buf:scene.illum, cropped to the mask own AABB (Law 6) and gated to the visible floor. No ' +
         'aperture, no wall, no sill — the artist already painted where the light lands. The term that ' +
         'cannot be a silent zero: with strength above 0 and a painted texel above the presence edge, ' +
-        'this always contributes. Also carries THE GLASS (effects/window/window-glass.js): one ' +
-        'procedural THICKNESS field over world space, whose gradient displaces the cookie (warp), ' +
-        'whose per-channel scaling of that same displacement splits red from blue along the same ' +
-        'gradient (prism), and whose curvature focuses light into bright knots over the thick spots ' +
-        '(fake caustics) — three derivatives of ONE field, sharing five noise taps, so the highlight ' +
-        'always lands where the warp bunches and the fringe wraps it. The prism is what forces three ' +
-        'mask taps instead of one: each channel now samples where ITS OWN wavelength came from. Every ' +
-        'glass term vanishes exactly at glassWarpPx = 0 — flat glass refracts nothing — which is the ' +
-        "off switch, and the whole subgraph is additionally omitted at BUILD time by window-render.js's " +
-        "own `glass` flag. LAST, over the top of everything above (the glass's own warp/prism/caustic, " +
-        'the highlight shoulder), a DAYLIGHT TINT: the finished light is multiplied by a mix of the ' +
-        "author's dawn/dusk and night colours, driven by world/sun.js's dayFactor01/twilight01 (the " +
-        'SAME sun `env/one-sun` already computes for everything else), neutral at noon. Deliberately ' +
-        'ordered last (author directive, 2026-08-05: the RGB-shifted glass result must be what gets ' +
-        'tinted) — see window-render.js#uDaylightTint for why applying it earlier would let the tint ' +
-        "distort the highlight shoulder's own exposure maths. A cheap CPU-side colour lerp on a live " +
-        '0..1 signal — not the physically-modelled sun/sky two-lobe drive `deferredRungs.skyDriven` ' +
-        'below still is, which stays unbuilt.',
+        'this always contributes. Also carries the highlight shoulder (the exposure step that keeps a ' +
+        'bright cookie from washing architectural art out to a flat white disc) and, LAST, a DAYLIGHT ' +
+        "TINT: the finished light multiplied by a mix of the author's dawn/dusk and night colours, " +
+        "driven by world/sun.js's dayFactor01/twilight01 (the SAME sun env/one-sun already computes " +
+        'for everything else), neutral at noon. This is the genuinely cheap floor (glass moved to tier ' +
+        "1, below) — one mask tap, the shoulder's own ALU, one CPU-resolved colour lerp.",
+    }),
+    Object.freeze({
+      n: 1,
+      name: 'glass',
+      fromProfile: 'performance',
+      cost: Object.freeze({ class: 'C4', estMsPerMp: 0.18 }),
+      adds:
+        'THE GLASS (effects/window/window-glass.js): one procedural THICKNESS field over world space, ' +
+        'whose gradient displaces the cookie (warp), whose per-channel scaling of that same ' +
+        'displacement splits red from blue along the same gradient (prism), and whose curvature ' +
+        'focuses light into bright knots over the thick spots (fake caustics) — three derivatives of ' +
+        'ONE field, sharing five noise taps, so the highlight always lands where the warp bunches and ' +
+        'the fringe wraps it. The prism is what forces three mask taps instead of one: each channel ' +
+        "now samples where ITS OWN wavelength came from. Wired 2026-08-29 to `window-render.js`'s own " +
+        "`glass` JS-time construction flag — already built, per this rung's own history (see " +
+        'deferredRungs below, formerly `glassPerfGate`) — never previously reachable at runtime, so it ' +
+        'compiled in unconditionally at every profile. Below this rung, tier 0 alone is byte-identical ' +
+        "to what the author's `glassWarpPx = 0` already produced (every glass term vanishes exactly " +
+        'there) — this rung is the SAME picture, minus the five taps it costs to prove it, restored at ' +
+        'the profile a player has NOT opted below.',
     }),
   ]),
   deferredRungs: Object.freeze([
@@ -393,19 +401,6 @@ export const WINDOW = Object.freeze({
     Object.freeze({
       name: 'moon',
       note: 'The same cookie at night on the night dome colour — a cold faint pool instead of an off switch.',
-    }),
-    Object.freeze({
-      name: 'glassPerfGate',
-      note:
-        'PUT THE GLASS ON A REAL PERFORMANCE TIER. The expensive half of tier 0 — five noise taps and ' +
-        "two extra mask taps — already has its JS-time off switch (`window-render.js`'s `glass` " +
-        'construction flag, which omits the subgraph rather than multiplying it by zero, per ' +
-        'Effects.md Law 4). What is MISSING is the machinery to flip it while running: a perf tier has ' +
-        'to change with the profile selector, and this subsystem never rebuilds its material (specular ' +
-        'carries exactly that machinery and is the template). Declaring a `fromProfile` rung before ' +
-        'that rebuild exists would be a manifest claiming a gate nothing honours, so the rung is named ' +
-        'here instead. Until then the glass is always compiled in and `glassWarpPx = 0` is the ' +
-        "author's exact, but runtime-cost-free-only-in-ALU, off switch.",
     }),
     Object.freeze({
       name: 'glassConvergence',

@@ -242,8 +242,26 @@ export const BLOOM = Object.freeze({
     Object.freeze({
       n: 0,
       name: 'dual-filter-two-band',
+      cost: Object.freeze({ class: 'C2', estMsPerMp: 0.18 }),
+      adds:
+        'Jimenez/COD progressive downsample (13-tap + Karis) + tent upsample, split into an ' +
+        'independently-weighted tight core (mips 0-1) and wide atmosphere band (mips 2-3), masked ' +
+        'bright-pass input (outdoor-spill clamp via the outdoors mask), additively composited into ' +
+        'scene.lit before the grade — a genuinely shorter 4-mip pyramid, both bands still present, just ' +
+        "each one rung shallower than tier 1's.",
+    }),
+    Object.freeze({
+      n: 1,
+      name: 'six-mip-pyramid',
+      fromProfile: 'performance',
       cost: Object.freeze({ class: 'C2', estMsPerMp: 0.3 }),
-      adds: 'Jimenez/COD progressive downsample (13-tap + Karis) + tent upsample, split into an independently-weighted tight core and wide atmosphere band, masked bright-pass input (outdoor-spill clamp via the outdoors mask), additively composited into scene.lit before the grade',
+      adds:
+        'the pyramid deepens to 6 mips (core 0-2, atmosphere 3-5) — the SAME pipeline this effect has ' +
+        'always shipped. Wired 2026-08-29: `buildBloomMaterials` (bloom-render.js) was already fully ' +
+        'generic in mip count — its downsample/upsample materials are reused, swappable-input passes with ' +
+        'no hardcoded depth, and its composite only ever takes two FIXED textures (whichever the caller ' +
+        'names "core" and "atmosphere") — the gap was that the VIEWER always built and looped 6 mips ' +
+        'regardless of profile. See docs/planning/Effect-Tier-Gradient-Audit-2026-08-29.md §3.3.',
     }),
   ]),
   // Recorded, NOT built — honest rungs (Effects.md §0).
@@ -259,10 +277,6 @@ export const BLOOM = Object.freeze({
     Object.freeze({
       name: 'lens-dirt-and-streaks',
       note: 'a screen-space dirt texture and anamorphic streak tap on the bright-pass for a lens feel',
-    }),
-    Object.freeze({
-      name: 'performance-tiers',
-      note: 'governor-driven resolution scale + mip count per performance profile (Effects.md §6) — tier 0 is fixed half-res, 6 mips',
     }),
   ]),
 });

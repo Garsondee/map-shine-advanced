@@ -18,6 +18,8 @@ import {
   buildVegetationDepthItems,
   flutterFoldFreeAmplitudePx,
   VEG_FLUTTER_FOLD_SAFETY,
+  springChase,
+  vegetationSpringGridSpec,
 } from '../vegetation-render.js';
 import { VEGETATION_KINDS } from '../vegetation.js';
 import { makeLayerKey, sortByLayer, SORT_LAYERS } from '../../scene/layer-order.js';
@@ -731,5 +733,240 @@ export function run(t) {
       threw = true;
     }
     ok('a wrong corner count throws loudly rather than producing silent garbage', threw);
+  }
+
+  // ==========================================================================
+  // springChase — tier 6's torque/lift integrator (2026-08-27), the Node-
+  // tested reference `effects/vegetation-spring-gpu.js`'s TSL port must stay
+  // byte-for-byte equivalent to (that file cannot itself be Node-tested —
+  // see its own header). This is the FIRST persistent, frame-to-frame
+  // integrated spring in this codebase, so it gets real coverage of the
+  // properties that actually matter: it settles, it can overshoot when
+  // asked to, it decays rather than rings forever, and it cannot produce
+  // NaN/Infinity across a stability sweep.
+  // ==========================================================================
+  {
+    /** Step `steps` times at a fixed `dt`, return the final {value, velocity}. */
+    const runSteps = (start, target, stiffness, damping, dt, steps) => {
+      let value = start.value;
+      let velocity = start.velocity;
+      for (let i = 0; i < steps; i++) {
+        const next = springChase(value, velocity, target, stiffness, damping, dt);
+        value = next.value;
+        velocity = next.velocity;
+      }
+      return { value, velocity };
+    };
+
+    // --- settles to target -------------------------------------------------
+    {
+      const critical = { value: 0, velocity: 0 };
+      const stiffness = 8;
+      const damping = 2 * Math.sqrt(stiffness); // exactly critical
+      const settled = runSteps(critical, 5, stiffness, damping, 1 / 60, 600); // 10s of sim time
+      ok(
+        'a critically-damped spring settles close to a sustained target (within 1% after 10s of sim time)',
+        Math.abs(settled.value - 5) < 0.05
+      );
+    }
+
+    // --- zero-torque steady state --------------------------------------------
+    ok(
+      'starting AT rest at target 0 with zero forcing stays at exactly 0 — no drift, no spontaneous motion',
+      (() => {
+        const r = runSteps({ value: 0, velocity: 0 }, 0, 10, 6, 1 / 60, 120);
+        return r.value === 0 && r.velocity === 0;
+      })()
+    );
+
+    // --- underdamped: visibly overshoots then settles, does not ring forever -
+    {
+      // Matches this effect's own shipped defaults' RELATIONSHIP (damping <
+      // 2*sqrt(stiffness)) — the author explicitly asked for a spring that
+      // "encourages the plant to sway back in the opposite rotational
+      // direction", i.e. a real overshoot past the target before settling.
+      const stiffness = 6;
+      const damping = 3; // critical would be 2*sqrt(6) ≈ 4.9 — this is underdamped, this effect's own shipped default
+      const dt = 1 / 60;
+      let value = 0;
+      let velocity = 0;
+      let peak = 0;
+      let troughAfterPeak = Infinity;
+      let sawPeak = false;
+      for (let i = 0; i < 300; i++) {
+        const next = springChase(value, velocity, 1, stiffness, damping, dt);
+        value = next.value;
+        velocity = next.velocity;
+        if (!sawPeak && value > 0 && velocity < 0) {
+          peak = value;
+          sawPeak = true;
+        }
+        if (sawPeak) troughAfterPeak = Math.min(troughAfterPeak, value);
+      }
+      ok('an underdamped spring overshoots PAST its target on the way to it', sawPeak && peak > 1);
+      // ⚠️ NOT "crosses back past the original starting value (0)" — for a
+      // driven damped oscillator answering a STEP target, that only happens
+      // in the near-undamped limit (ζ→0, rings forever). A real spring
+      // (any ζ>0, including this effect's own shipped default) oscillates
+      // in a NARROWING band AROUND THE TARGET, not around the start — each
+      // successive extremum is closer to the target than the last. The
+      // physically honest claim is genuine oscillation (a real dip back
+      // below the peak, toward/past the target from the other side), not a
+      // monotonic glide that merely overshoots once and plateaus.
+      ok(
+        'and genuinely oscillates — after the peak it dips back down at least to the target, the "spring" ' +
+          'feel the author asked for, not a straight glide to rest',
+        sawPeak && troughAfterPeak <= 1
+      );
+      const final = runSteps({ value, velocity }, 1, stiffness, damping, dt, 600); // +10s more
+      ok(
+        'given enough time it still settles near the target — overshoot is transient, not permanent drift',
+        Math.abs(final.value - 1) < 0.05
+      );
+    }
+
+    // --- overdamped: reaches target without ever overshooting ----------------
+    ok(
+      'an overdamped spring (damping well above critical) never overshoots a step target',
+      (() => {
+        const stiffness = 4;
+        const damping = 20; // critical is 2*sqrt(4) = 4 — this is heavily overdamped
+        let value = 0;
+        let velocity = 0;
+        let maxValue = 0;
+        for (let i = 0; i < 600; i++) {
+          const next = springChase(value, velocity, 1, stiffness, damping, 1 / 60);
+          value = next.value;
+          velocity = next.velocity;
+          maxValue = Math.max(maxValue, value);
+        }
+        return maxValue <= 1.001; // never meaningfully exceeds the target
+      })()
+    );
+
+    // --- zero/degenerate dt is a safe no-op -----------------------------------
+    ok(
+      'dt=0 changes nothing (a paused/degenerate frame cannot silently advance the spring)',
+      (() => {
+        const r = springChase(2, 0.5, 10, 6, 3, 0);
+        return r.value === 2 && r.velocity === 0.5;
+      })()
+    );
+
+    // --- non-finite inputs degrade to safe defaults, never propagate NaN -----
+    ok(
+      'non-finite value/velocity/target/stiffness/damping all fall back to 0 rather than propagating NaN',
+      (() => {
+        const r = springChase(NaN, undefined, NaN, NaN, NaN, 1 / 60);
+        return Number.isFinite(r.value) && Number.isFinite(r.velocity);
+      })()
+    );
+
+    // --- STABILITY SWEEP — the first Euler-integrated spring in this codebase's
+    // shaders needs this where a closed-form exponential wouldn't: proves a
+    // hitch-sized dt (VEG_SPRING_MAX_DT_SEC's own ceiling, 1/20s) across a wide
+    // spread of live-param-reachable stiffness/damping never produces NaN or
+    // an unbounded runaway within the number of frames a real session would
+    // actually accumulate.
+    {
+      const HITCH_DT = 1 / 20; // matches vegetation-spring-gpu.js#VEG_SPRING_MAX_DT_SEC
+      const stiffnesses = [0, 0.1, 6, 40]; // VEGETATION_PARAMS.springStiffness' own min..max
+      const dampings = [0, 3, 20]; // VEGETATION_PARAMS.springDamping's own min..max-ish
+      let anyNonFinite = false;
+      let anyRunaway = false;
+      for (const stiffness of stiffnesses) {
+        for (const damping of dampings) {
+          let value = 0;
+          let velocity = 0;
+          for (let i = 0; i < 1000; i++) {
+            const next = springChase(value, velocity, 1, stiffness, damping, HITCH_DT);
+            value = next.value;
+            velocity = next.velocity;
+            if (!Number.isFinite(value) || !Number.isFinite(velocity)) anyNonFinite = true;
+            if (Math.abs(value) > 1e6) anyRunaway = true;
+          }
+        }
+      }
+      ok(
+        'across every reachable stiffness x damping combination, 1000 hitch-sized steps never produce NaN/Infinity',
+        !anyNonFinite
+      );
+      ok(
+        'and never runs away to an absurd magnitude either (the shader-side clamp is a backstop, not the only ' +
+          'line of defence — sane params should never need it)',
+        !anyRunaway
+      );
+    }
+  }
+
+  // ==========================================================================
+  // vegetationSpringGridSpec — the shared, scene-wide grid tier 6's torque/
+  // lift spring reads and writes. Must always cover the real scene rect and,
+  // critically, must snap its own origin to the SAME world-aligned cell
+  // boundaries the existing translation-sway's clump-hash already uses (see
+  // this function's own doc for why: rotation needs to pivot around the same
+  // physical clump the rest of the effect already decorrelates by).
+  // ==========================================================================
+  {
+    ok(
+      'cols/rows are always >= 1, even for a degenerate zero-size scene',
+      vegetationSpringGridSpec({ x: 0, y: 0, width: 0, height: 0 }, 150).cols >= 1 &&
+        vegetationSpringGridSpec({ x: 0, y: 0, width: 0, height: 0 }, 150).rows >= 1
+    );
+    ok(
+      'a non-finite/absent clumpSizePx falls back to the same 150px default the live param declares, never 0/NaN',
+      vegetationSpringGridSpec({ x: 0, y: 0, width: 1000, height: 1000 }, NaN).cellSize === 150 &&
+        vegetationSpringGridSpec({ x: 0, y: 0, width: 1000, height: 1000 }, undefined).cellSize === 150
+    );
+
+    // A scene rect that does NOT start on a clumpSizePx multiple — the case
+    // that would silently misalign rotation pivots from the existing
+    // translation-sway clump grid if the origin were left as the raw rect
+    // corner instead of snapped.
+    const rect = { x: 137, y: -283, width: 4000, height: 2500 };
+    const cellSize = 150;
+    const spec = vegetationSpringGridSpec(rect, cellSize);
+
+    ok(
+      'the grid origin is snapped to a whole multiple of cellSize on both axes',
+      (spec.originX / cellSize) % 1 === 0 && (spec.originY / cellSize) % 1 === 0
+    );
+    ok(
+      'the snap only ever grows coverage, never shrinks it below the real scene rect',
+      spec.originX <= rect.x &&
+        spec.originY <= rect.y &&
+        spec.originX + spec.cols * cellSize >= rect.x + rect.width &&
+        spec.originY + spec.rows * cellSize >= rect.y + rect.height
+    );
+    ok(
+      "⚠️ THE LOAD-BEARING PROPERTY: for ANY world position, this grid's own cell index " +
+        '(derived from its origin) agrees with the EXISTING clump-hash convention ' +
+        '(`floor(worldXY / clumpSizePx)`, world-(0,0)-aligned, no origin at all) up to a constant integer offset — ' +
+        'i.e. the two grids describe the SAME physical cell boundaries, just indexed from different starting points. ' +
+        'This is what lets the vertex shader reuse its own already-computed clump-cell centre AS the rotation pivot ' +
+        'with no separate pivot computation.',
+      (() => {
+        const probeWorldPositions = [
+          { x: rect.x + 10, y: rect.y + 10 },
+          { x: rect.x + rect.width - 10, y: rect.y + rect.height - 10 },
+          { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
+          { x: 0, y: 0 }, // world origin itself, well outside this scene's own rect
+        ];
+        // Relative cell index under EACH convention, for two DIFFERENT probes —
+        // if the grids truly agree up to a constant offset, the DIFFERENCE
+        // between any two probes' cell indices must be identical under both.
+        const existingCell = (p) => ({ cx: Math.floor(p.x / cellSize), cy: Math.floor(p.y / cellSize) });
+        const gridCell = (p) => ({
+          cx: Math.floor((p.x - spec.originX) / cellSize),
+          cy: Math.floor((p.y - spec.originY) / cellSize),
+        });
+        const [a, b] = [probeWorldPositions[0], probeWorldPositions[1]];
+        const existingDx = existingCell(b).cx - existingCell(a).cx;
+        const existingDy = existingCell(b).cy - existingCell(a).cy;
+        const gridDx = gridCell(b).cx - gridCell(a).cx;
+        const gridDy = gridCell(b).cy - gridCell(a).cy;
+        return existingDx === gridDx && existingDy === gridDy;
+      })()
+    );
   }
 }

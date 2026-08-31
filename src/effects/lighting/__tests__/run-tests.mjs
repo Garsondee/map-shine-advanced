@@ -23,6 +23,7 @@ import { run as runCasterPack } from './caster-pack.test.mjs';
 import { run as runSunShadowDebug } from './sun-shadow-debug.test.mjs';
 import { run as runSunShadowBlur } from './sun-shadow-blur.test.mjs';
 import { run as runSunShadowMultiFloor } from './sun-shadow-multi-floor.test.mjs';
+import { run as runSunShadowSubsystem } from './sun-shadow-subsystem.test.mjs';
 import { run as runShadowBands } from './shadow-bands.test.mjs';
 import { run as runLayerSmear } from './layer-smear.test.mjs';
 import { run as runLayerSmearRender } from './layer-smear-render.test.mjs';
@@ -71,6 +72,7 @@ const suites = [
   ['sun-shadow-debug', runSunShadowDebug],
   ['sun-shadow-blur', runSunShadowBlur],
   ['sun-shadow-multi-floor', runSunShadowMultiFloor],
+  ['sun-shadow-subsystem', runSunShadowSubsystem],
   ['shadow-bands', runShadowBands],
   ['layer-smear', runLayerSmear],
   ['layer-smear-render', runLayerSmearRender],

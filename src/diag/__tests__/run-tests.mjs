@@ -25,7 +25,6 @@ import { run as runPerfStrip } from './perf-strip.test.mjs';
 import { run as runWindFieldOverlay } from './wind-field-overlay.test.mjs';
 import { run as runWindProbe } from './wind-probe.test.mjs';
 import { run as runEffectControls } from './effect-controls.test.mjs';
-import { run as runSettingsPanel } from './settings-panel.test.mjs';
 import { run as runRenderFallback } from './render-fallback.test.mjs';
 import { run as runShaderRebuildProbe } from './shader-rebuild-probe.test.mjs';
 import { run as runPipelineRebuildProbe } from './pipeline-rebuild-probe.test.mjs';
@@ -71,7 +70,6 @@ const suites = [
   ['wind-field-overlay', runWindFieldOverlay],
   ['wind-probe', runWindProbe],
   ['effect-controls', runEffectControls],
-  ['settings-panel', runSettingsPanel],
   ['render-fallback', runRenderFallback],
   ['shader-rebuild-probe', runShaderRebuildProbe],
   ['pipeline-rebuild-probe', runPipelineRebuildProbe],

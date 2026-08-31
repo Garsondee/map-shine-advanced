@@ -24,7 +24,7 @@
 import { jumpToHour, advanceDays, advanceWeeks, isPenArmed } from '../../../foundry/index.js';
 import { iconMarkup } from '../../widgets/icon-sprite.js';
 import { buildImpulseButton } from '../../widgets/impulse-button.js';
-import { TIME_RATE_STEPS } from '../../astrolabe.js';
+import { TIME_RATE_STEPS } from '../../astrolabe-geometry.js';
 
 /** Dawn/Noon/Dusk/Midnight — matches the mock's own #jumpPop quick-taps. */
 const HOUR_JUMPS = Object.freeze([
@@ -47,12 +47,6 @@ function iconBtn(icon, title, onClick) {
   btn.title = title;
   btn.innerHTML = iconMarkup(icon);
   btn.addEventListener('click', onClick);
-  return btn;
-}
-
-function plannedIconBtn(icon, title, plannedReason, onClick) {
-  const btn = iconBtn(icon, `${title} — ${plannedReason}`, onClick);
-  btn.classList.add('msa-planned');
   return btn;
 }
 
@@ -329,14 +323,17 @@ function buildCornerBL(onStatus) {
   return el;
 }
 
-/** BR — one motion-tiles global transport toggle (planned: no src/ runtime
- * exists for Motion Tiles yet, same honest gap the Studio's SCENE
- * department already names) plus two more open slots. */
-function buildCornerBR(onStatus) {
+/** BR — Tile Motion (2026-08-27: `foundry/tile-motion-runtime.js` shipped
+ * the same session this corner's own old "no src/ runtime yet" stub was
+ * written against, making that reason stale within the day) plus two more
+ * open slots. Opens `ui/rooms/remote/tile-motion-panel.js` — the SAME
+ * consolidated panel Studio's Scene department "Open" button and the
+ * Lab's own 'tile-motion-open' action both reach, never a second
+ * implementation living behind this corner specifically. */
+function buildCornerBR(onStatus, onOpenTileMotion) {
   const el = cornerBox('msa-corner-br');
-  const reason = 'Motion Tiles has no src/ runtime yet (V2-only) — this toggle is chrome, not a working transport.';
   el.append(
-    plannedIconBtn('gear', 'Play/pause motion tiles', reason, () => onStatus(reason)),
+    iconBtn('play', 'Tile motion', () => onOpenTileMotion?.()),
     ghostSlotBtn(() => onStatus('Reserved for a future quick-access shortcut.')),
     ghostSlotBtn(() => onStatus('Reserved for a future quick-access shortcut.'))
   );
@@ -345,11 +342,12 @@ function buildCornerBR(onStatus) {
 
 /**
  * @param {HTMLElement} container
- * @param {{mountAstrolabeDial: (el: HTMLElement, dialCtx: {onLockedAttempt: () => void}) => void,
+ * @param {{mountAstrolabeDial: (el: HTMLElement, dialCtx: {onLockedAttempt: () => void, onWindClick?: () => void}) => void,
  *   getPosture: () => string,
  *   onSetMode?: (mode: string) => void, isFlowPlaying: () => boolean,
  *   onFlowToggle: () => void, getFlowRate?: () => number,
  *   onSetFlowRate?: (rate: number) => void,
+ *   onWindClick?: () => void, onOpenTileMotion?: () => void,
  *   impulses?: Array<import('../../../core/impulse-schema.js').ImpulseDecl>}} ctx
  * @returns {{syncFlowState: () => void}} `syncFlowState` re-reads
  *   `getPosture`/`isFlowPlaying`/`getFlowRate` and repaints the Clock-mode
@@ -386,11 +384,26 @@ export function renderAstrolabePanel(container, ctx) {
   const dialHost = document.createElement('div');
   dialHost.className = 'msa-astro-dial-host';
   const cornerTL = buildCornerTL({ ...ctx, onStatus });
-  dialHost.append(cornerTL.el, buildCornerTR(ctx.impulses, onStatus), buildCornerBL(onStatus), buildCornerBR(onStatus));
+  dialHost.append(
+    cornerTL.el,
+    buildCornerTR(ctx.impulses, onStatus),
+    buildCornerBL(onStatus),
+    buildCornerBR(onStatus, ctx.onOpenTileMotion)
+  );
 
   const dialSlot = document.createElement('div');
   dialSlot.className = 'msa-astro-dial-slot';
-  ctx.mountAstrolabeDial(dialSlot, { onLockedAttempt: explainRingLocked });
+  // onWindClick (UI parity plan, phase 6a) — straight pass-through, same
+  // shape as onLockedAttempt just above: this file has no opinion about
+  // the gesture, it just forwards ctx's own handler to the dial that
+  // actually renders the clickable surface for it. onTimeStop needs no
+  // equivalent forwarding — boot.js's own mountAstrolabeDial wires the
+  // real engine call directly (see its own comment), matching
+  // onTimeChange's identical precedent two lines above it there.
+  ctx.mountAstrolabeDial(dialSlot, {
+    onLockedAttempt: explainRingLocked,
+    onWindClick: ctx.onWindClick,
+  });
   dialHost.appendChild(dialSlot);
 
   wrap.append(clockMode.el, dialHost, statusLine);

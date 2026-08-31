@@ -53,6 +53,7 @@ import {
   buildFlameShapeAlpha,
   buildFlameShading,
   buildLifeFade,
+  hueRotateNode,
   piecewiseLinear,
   piecewiseLinearRgb,
   EMBER_COLOR_STOPS,
@@ -265,6 +266,17 @@ export function createFireParticleEngine({
   const uIntensity = uniform(float(p.intensity ?? 1));
   const uSizeScale = uniform(float(p.sizeScale ?? 1));
   const uTemperature = uniform(float(p.temperature ?? 0.85));
+  /**
+   * THE COLOUR-CORRECTION SET (2026-08-30). `uHueShiftRad` applies to every
+   * kind uniformly (flame/ember/smoke recolour together — see `colorNode`'s
+   * own final `hueRotateNode` call); `uPosterize`/`uBandCount`/`uTintMul`
+   * only matter to `kind === 'flame'`'s `buildFlameShading` call and sit
+   * inertly on ember/smoke engines, the same way `uColorAge` already does.
+   */
+  const uHueShiftRad = uniform(float(p.hueShiftRad ?? 0));
+  const uPosterize = uniform(float(p.posterizeAmount ?? 0));
+  const uBandCount = uniform(float(p.bandCount ?? 8));
+  const uTintMul = uniform(vec3(1, 1, 1));
   /** How many spawn slots hold real paint. Zero = nothing painted; the kernel
    * then parks every particle dead rather than spawning at the origin. */
   const uSpawnCount = uniform(float(0));
@@ -622,17 +634,32 @@ export function createFireParticleEngine({
     const t01 = vLife.x;
     const bright = vLife.y;
     const heat = vLife.z;
+    let rgb;
     if (kind === 'flame') {
-      const shade = buildFlameShading(TSL, { t01, heat, brightness: bright, ageToTemperature: uColorAge });
-      return shade.rgb.mul(uIntensity).mul(uEmissionScale);
-    }
-    if (kind === 'ember') {
-      const rgb = piecewiseLinearRgb(TSL, t01, EMBER_COLOR_STOPS);
+      const shade = buildFlameShading(TSL, {
+        t01,
+        heat,
+        brightness: bright,
+        ageToTemperature: uColorAge,
+        posterizeAmount: uPosterize,
+        bandCount: uBandCount,
+        tintMul: uTintMul,
+      });
+      rgb = shade.rgb.mul(uIntensity).mul(uEmissionScale);
+    } else if (kind === 'ember') {
+      const emberRgb = piecewiseLinearRgb(TSL, t01, EMBER_COLOR_STOPS);
       const em = piecewiseLinear(TSL, t01, EMBER_EMISSION_STOPS).mul(float(EMBER_EMISSION * FIRE_HDR_LINEAR_GAIN));
-      return rgb.mul(em).mul(heat).mul(uIntensity).mul(uEmissionScale);
+      rgb = emberRgb.mul(em).mul(heat).mul(uIntensity).mul(uEmissionScale);
+    } else {
+      // Smoke is born the colour the flame died — see SMOKE_COLOR_STOPS' own note.
+      rgb = piecewiseLinearRgb(TSL, t01, SMOKE_COLOR_STOPS).mul(uIntensity).mul(uEmissionScale);
     }
-    // Smoke is born the colour the flame died — see SMOKE_COLOR_STOPS' own note.
-    return piecewiseLinearRgb(TSL, t01, SMOKE_COLOR_STOPS).mul(uIntensity).mul(uEmissionScale);
+    // ONE hue-rotate for all three kinds, post-emission — recolouring is a
+    // linear operator (see hueRotateNode's own header), so it commutes with
+    // the HDR gain above and this stays correct however bright the particle
+    // is. This is what keeps a recoloured fire reading as ONE object instead
+    // of a flame that changed colour while its own embers/smoke did not.
+    return hueRotateNode(TSL, rgb, uHueShiftRad);
   })();
 
   material.opacityNode = Fn(() => {
@@ -737,6 +764,12 @@ export function createFireParticleEngine({
       set(uColorAge, p2.colorAge);
       set(uSpawnBias, p2.spawnBias);
       set(uMotionSpeed, p2.motionSpeed);
+      set(uHueShiftRad, p2.hueShiftRad);
+      set(uPosterize, p2.posterizeAmount);
+      set(uBandCount, p2.bandCount);
+      if (Array.isArray(p2.tintMul) && p2.tintMul.length === 3) {
+        uTintMul.value.set(p2.tintMul[0], p2.tintMul[1], p2.tintMul[2]);
+      }
       // ⚠️ CLAMPED TO THE ARENA, not to the slider's range. The control is
       // allowed to ask for more particles than exist; it just cannot get them,
       // and silently capping is far better than indexing past the buffer.

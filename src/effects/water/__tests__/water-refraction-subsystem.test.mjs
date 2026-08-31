@@ -62,8 +62,8 @@ function fakeRenderPass() {
 }
 
 const VIEW_RECT = { minX: 0, minY: 0, maxX: 2000, maxY: 1000 };
-const CANVAS_W = 1600;
-const CANVAS_H = 800;
+const DEVICE_W = 1600;
+const DEVICE_H = 800;
 
 function buildHarness() {
   const allocator = fakeAllocator();
@@ -113,11 +113,11 @@ export function run(t) {
   ok(
     'computeCaptureTargetSize scales by the declared downsample factor',
     (() => {
-      // 200 world px wide, view is 2000 world px across a 1600px canvas ->
-      // 0.8 device px per world px -> 160 device px at 1:1, halved by the
-      // downsample factor -> 80, rounded up to the next 64px bucket -> 128.
+      // 200 world px wide, view is 2000 world px across a 1600px-wide device
+      // buffer -> 0.8 device px per world px -> 160 device px at 1:1, halved
+      // by the downsample factor -> 80, rounded up to the next 64px bucket -> 128.
       const region = { minX: 0, minY: 0, maxX: 200, maxY: 200 };
-      const { width } = computeCaptureTargetSize(region, VIEW_RECT, CANVAS_W, CANVAS_H);
+      const { width } = computeCaptureTargetSize(region, VIEW_RECT, DEVICE_W, DEVICE_H);
       return width === 128;
     })()
   );
@@ -125,7 +125,7 @@ export function run(t) {
     'a tiny region still gets at least one full bucket, never zero',
     (() => {
       const region = { minX: 0, minY: 0, maxX: 1, maxY: 1 };
-      const { width, height } = computeCaptureTargetSize(region, VIEW_RECT, CANVAS_W, CANVAS_H);
+      const { width, height } = computeCaptureTargetSize(region, VIEW_RECT, DEVICE_W, DEVICE_H);
       return width === WATER_REFRACTION_BUCKET_PX && height === WATER_REFRACTION_BUCKET_PX;
     })()
   );
@@ -133,7 +133,7 @@ export function run(t) {
     'an enormous region is clamped to the declared max dimension',
     (() => {
       const region = { minX: 0, minY: 0, maxX: 1e7, maxY: 1e7 };
-      const { width, height } = computeCaptureTargetSize(region, VIEW_RECT, CANVAS_W, CANVAS_H);
+      const { width, height } = computeCaptureTargetSize(region, VIEW_RECT, DEVICE_W, DEVICE_H);
       return width === WATER_REFRACTION_MAX_DIM_PX && height === WATER_REFRACTION_MAX_DIM_PX;
     })()
   );
@@ -145,8 +145,8 @@ export function run(t) {
     subsystem.tick({
       bodyRect: null,
       viewRect: VIEW_RECT,
-      canvasW: CANVAS_W,
-      canvasH: CANVAS_H,
+      deviceW: DEVICE_W,
+      deviceH: DEVICE_H,
       sceneColorTexture: stubTexture('sc'),
     });
     ok('no body rect: texture stays null', subsystem.texture === null);
@@ -163,8 +163,8 @@ export function run(t) {
     subsystem.tick({
       bodyRect: { minX: 0, minY: 0, maxX: 500, maxY: 500 },
       viewRect: VIEW_RECT,
-      canvasW: CANVAS_W,
-      canvasH: CANVAS_H,
+      deviceW: DEVICE_W,
+      deviceH: DEVICE_H,
       sceneColorTexture: null,
     });
     ok('no scene-color texture yet: never renders', pass.calls === 0);
@@ -177,8 +177,8 @@ export function run(t) {
     subsystem.tick({
       bodyRect: { minX: 100000, minY: 100000, maxX: 100500, maxY: 100500 }, // nowhere near VIEW_RECT
       viewRect: VIEW_RECT,
-      canvasW: CANVAS_W,
-      canvasH: CANVAS_H,
+      deviceW: DEVICE_W,
+      deviceH: DEVICE_H,
       sceneColorTexture: stubTexture('sc'),
     });
     ok('off-screen water: never renders', pass.calls === 0);
@@ -194,8 +194,8 @@ export function run(t) {
     subsystem.tick({
       bodyRect,
       viewRect: VIEW_RECT,
-      canvasW: CANVAS_W,
-      canvasH: CANVAS_H,
+      deviceW: DEVICE_W,
+      deviceH: DEVICE_H,
       sceneColorTexture: sceneColor,
     });
     ok('a real capture allocates exactly one target', allocator.created === 1);
@@ -227,15 +227,15 @@ export function run(t) {
     subsystem.tick({
       bodyRect,
       viewRect: VIEW_RECT,
-      canvasW: CANVAS_W,
-      canvasH: CANVAS_H,
+      deviceW: DEVICE_W,
+      deviceH: DEVICE_H,
       sceneColorTexture: sceneColor,
     });
     subsystem.tick({
       bodyRect,
       viewRect: VIEW_RECT,
-      canvasW: CANVAS_W,
-      canvasH: CANVAS_H,
+      deviceW: DEVICE_W,
+      deviceH: DEVICE_H,
       sceneColorTexture: sceneColor,
     });
     ok('an unchanged region/texture reuses the SAME allocation — no per-frame realloc', allocator.created === 1);
@@ -250,8 +250,8 @@ export function run(t) {
     subsystem.tick({
       bodyRect: { minX: 0, minY: 0, maxX: 500, maxY: 500 },
       viewRect: VIEW_RECT,
-      canvasW: CANVAS_W,
-      canvasH: CANVAS_H,
+      deviceW: DEVICE_W,
+      deviceH: DEVICE_H,
       sceneColorTexture: sceneColor,
     });
     const firstSize = subsystem.getStatus().grid;
@@ -260,8 +260,8 @@ export function run(t) {
     subsystem.tick({
       bodyRect: { minX: 0, minY: 0, maxX: 500, maxY: 500 },
       viewRect: { minX: 0, minY: 0, maxX: 20000, maxY: 10000 },
-      canvasW: CANVAS_W,
-      canvasH: CANVAS_H,
+      deviceW: DEVICE_W,
+      deviceH: DEVICE_H,
       sceneColorTexture: sceneColor,
     });
     ok(
@@ -277,15 +277,15 @@ export function run(t) {
     subsystem.tick({
       bodyRect,
       viewRect: VIEW_RECT,
-      canvasW: CANVAS_W,
-      canvasH: CANVAS_H,
+      deviceW: DEVICE_W,
+      deviceH: DEVICE_H,
       sceneColorTexture: stubTexture('sc-a'),
     });
     subsystem.tick({
       bodyRect,
       viewRect: VIEW_RECT,
-      canvasW: CANVAS_W,
-      canvasH: CANVAS_H,
+      deviceW: DEVICE_W,
+      deviceH: DEVICE_H,
       sceneColorTexture: stubTexture('sc-b'),
     });
     ok('a new scene-color texture identity triggers a material rebuild', subsystem.getStatus().rebuilds === 2);
@@ -297,8 +297,8 @@ export function run(t) {
     subsystem.tick({
       bodyRect: { minX: 0, minY: 0, maxX: 500, maxY: 500 },
       viewRect: VIEW_RECT,
-      canvasW: CANVAS_W,
-      canvasH: CANVAS_H,
+      deviceW: DEVICE_W,
+      deviceH: DEVICE_H,
       sceneColorTexture: stubTexture('sc'),
     });
     subsystem.dispose();

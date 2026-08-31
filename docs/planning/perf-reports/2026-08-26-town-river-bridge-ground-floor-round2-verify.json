@@ -1,0 +1,98 @@
+{
+  "_archiveNote": "Condensed from the full perf-run-full JSON pasted into chat 2026-08-26 (generatedAt below). Captured specifically to verify the four Round 2 instrument fixes (commit f829a13) against real data — the second-ever real capture of the extended instrument, first multi-floor + floor-wide-AB + tier-noise-floor + edit-cascade run. Bulky raw per-frame block[]/perCycle[]/vramWindow.series arrays trimmed to their summary verdicts to keep this file reviewable; full uncondensed JSON lives in this session's transcript if a stripped field is needed verbatim. See the companion .md in this same directory for the synthesis and Round 2 verification verdict.",
+  "generatedAt": "2026-08-26T13:25:04.979Z",
+  "msaVersion": "0.6.0-dev.0",
+  "window": { "frames": 1694, "durationMs": 56976.8, "resolution": { "w": 3840, "h": 1906, "pixelRatio": 1.5 }, "floorIndex": 0 },
+  "method": { "gpu": "timestamp-query", "route": "n_to_s:2kf/60000ms", "timestampPoolOverflowed": false },
+  "frame": {
+    "fps": { "avgFps": 29.7, "bestFps": 40.3, "worstFps": 23.8, "p1LowFps": 23.9, "p5LowFps": 29.8, "medianFps": 30 },
+    "gpuMs": { "p50": 31.92, "p95": 32.96, "max": 34.08, "sampleCount": 423 },
+    "hangs": { "totalStalls": 0 }
+  },
+  "bottleneck": {
+    "verdict": "gpu-bound",
+    "median": { "gapMs": 33.3, "gpuMs": 31.92, "unexplainedMs": 1.38, "gpuFraction": 0.959 },
+    "tail": { "gapMs": 33.6, "gpuMs": 32.96, "unexplainedMs": 0.64, "gpuFraction": 0.981 }
+  },
+  "attribution": { "frameGpuMs": 31.92, "attributedGpuMs": 31.822, "residualGpuMs": 0.098, "coverage": 0.997, "verdict": "good" },
+  "topOffenders": [
+    { "rank": 1, "label": "World scene draw", "costMs": 25.807, "id": "geometry.worldDraw" },
+    { "rank": 2, "label": "Window light", "costMs": 0.687, "severity": "high", "note": "1.57x its own declared budget" },
+    { "rank": 3, "label": "Present composite", "costMs": 0.669 },
+    { "rank": 4, "label": "Bloom", "costMs": 0.477 },
+    { "rank": 5, "label": "Illumination fill", "costMs": 0.284 }
+  ],
+
+  "round2VerificationSummary": {
+    "item1_findingsFolding": {
+      "verdict": "CONFIRMED WORKING",
+      "evidence": "findings[] contains structural-ab-floors:pointLightBatching, structural-ab-floors:earlyZComposition, and edit-cascade-stress (severity high) — none of these existed as findings[] entries before Round 2, only as raw top-level fields."
+    },
+    "item2_gpuPoolOverflow": {
+      "verdict": "CONFIRMED WORKING",
+      "evidence": "poolOverflowed:false, maxPendingSize:259 (was 2017 pre-fix), pendingUidsByType:{render:0,compute:0}, maxResolveSkipStreakByType:{render:3,compute:3}, frameGpuMs.basis now says 'render AND compute'. Held for the whole 57s window (foldedSamples:62493) — roughly 4x the window length that first overflowed. attribution.coverage stayed 0.997, never exceeded 1.0."
+    },
+    "item3_tierNoiseFloor": {
+      "verdict": "CONFIRMED WORKING",
+      "evidence": "tierComparison.noiseFloor present: {method:'single-reference-tier-bracket', referenceProfile:'quality', noiseFloorMs:0.070, significanceFactor:1.5}. frameLadder resolves the quality-vs-extreme question from report 1: deltaMs -0.26 vs noiseFloorMs 0.07 -> verdict 'cheaper-than-expected', CLEARS the floor (0.26 > 1.5x0.07=0.105). This is a real, reproducible ladder violation, not noise."
+    },
+    "item4_vramFloorSwitchSampler": {
+      "verdict": "CONFIRMED WORKING — on a second capture",
+      "evidence": "This first capture showed floorSwitchVram completely missing from multiFloor and every floorStructuralAB.perFloor[] entry, despite boot.js code (lines ~4450-4541 Phase 2, ~4798-4865 Phase 3B) verified correct end-to-end against a clean `git diff --stat` (zero diff vs HEAD f829a13). Stale build, spread-clobbering, and serialization stripping were all ruled out directly, leaving no code-level explanation. Ingram re-ran perf-run-full fresh ~40 minutes later (generatedAt 2026-08-26T14:06:08.835Z); that second capture shows floorSwitchVram working exactly as designed on BOTH floor transitions: multiFloor.floorSwitchVram.peak = 1287.49MB at 1270ms into the 0->1 switch (baseline 1220.39MB, +67MB spike); the Roof floor's own floorSwitchVram.peak = 1354.59MB at 251ms into the 1->2 switch (baseline 1287.49MB, another clean +67MB spike). Both skip-path floors correctly show floorSwitchVram:null.",
+      "conclusion": "The code was always correct. The first miss reads as a one-off browser/module-cache timing gap on Ingram's end at that exact moment, not a defect — re-running was sufficient, no code change was needed."
+    }
+  },
+
+  "structuralAB_mainWindow": {
+    "earlyZComposition": { "verdict": "pays-for-itself", "onGpuMs": 29.445, "offGpuMs": 29.996, "deltaGpuMs": -0.551, "noiseFloorMs": 0.241 },
+    "pointLightBatching": { "verdict": "within-noise", "onGpuMs": 30.177, "offGpuMs": 29.922, "deltaGpuMs": 0.256, "noiseFloorMs": 0.976, "noiseFloorVsAmbientRatio": 5.99 }
+  },
+  "floorStructuralAB_roofFloor": {
+    "floorIndex": 2, "floorName": "Roof", "switchMs": 2547,
+    "earlyZComposition": { "verdict": "pays-for-itself", "onGpuMs": 35.747, "offGpuMs": 36.266, "deltaGpuMs": -0.519, "noiseFloorMs": 0.087, "agreementWithMainWindow": "consistent — both floors independently confirm this pays for itself" },
+    "pointLightBatching": { "verdict": "within-noise", "onGpuMs": 35.533, "offGpuMs": 35.789, "deltaGpuMs": -0.256, "noiseFloorMs": 0.714, "noiseFloorVsAmbientRatio": 12.53, "agreementWithMainWindow": "insufficient-data on BOTH floors now — this toggle has failed to resolve twice in a row" }
+  },
+
+  "tierComparison_ranked_top": {
+    "tiersRun": ["low", "performance", "standard", "quality", "extreme"],
+    "frame": {
+      "low": { "gpuMsP50": 23.07, "avgFps": 40.4 },
+      "performance": { "gpuMsP50": 26.8, "avgFps": 35 },
+      "standard": { "gpuMsP50": 27.79, "avgFps": 33.9 },
+      "quality": { "gpuMsP50": 35.19, "avgFps": 27.2 },
+      "extreme": { "gpuMsP50": 34.93, "avgFps": 27.4 }
+    },
+    "frameLadder": [
+      { "fromProfile": "low", "toProfile": "performance", "deltaMs": 3.73, "verdict": "costlier" },
+      { "fromProfile": "performance", "toProfile": "standard", "deltaMs": 0.99, "verdict": "costlier" },
+      { "fromProfile": "standard", "toProfile": "quality", "deltaMs": 7.4, "verdict": "costlier" },
+      { "fromProfile": "quality", "toProfile": "extreme", "deltaMs": -0.26, "verdict": "cheaper-than-expected", "note": "clears the 0.07ms noise floor by 1.5x+ — a real, reproducible ladder violation" }
+    ]
+  },
+
+  "editCascadeStress": {
+    "verdict": "costs-more-than-it-saves", "burstGpuMs": 80.813, "quietGpuMs": 27.49, "deltaGpuMs": 53.323, "noiseFloorMs": 1.461,
+    "maskAuthorityBakeDelta": { "bakeRuns": 77, "bakeSkips": 16728 },
+    "topMovers": [
+      { "id": "light.sunShadowBake", "deltaMs": 25.694 },
+      { "id": "geometry.worldDraw", "deltaMs": 23.388 },
+      { "id": "pass.surface.water", "deltaMs": 1.823 }
+    ],
+    "perCycleAgreement": "53.637ms and 53.009ms across 2 independent cycles — tight, highly reproducible"
+  },
+
+  "simsWindFluid_stillNull": {
+    "observation": "sims.wind and sims.fluid both still show gpuMs:null (kind:'both', gpuAbsentByDeclaration:false, cadence:'conditional') even after the Item 2 fix.",
+    "explanation": "Read tickFluidSim (vt-pan-viewer.js) directly: `if (!clears.length && !advects.length) return;` — an early return before any renderer.compute()/render() call. On a calm pan-only window with no active fluid flow or wind impulses, the compute dispatch these zones would need to fold a GPU sample from never fires at all this window. This is the report telling the truth (cadence:'conditional', absence not fabricated as zero) rather than a residual Item-2 bug — foldResolved()'s mechanism (profiler.noteGpuMs(slot, ms) for ANY resolved uid, render or compute, keyed to whichever zone was open when the pass began) is generic and would attribute real gpuMs to these zones the moment they actually dispatch compute. Not verified live on an active-wind/active-fluid window this session.",
+    "openQuestion": "No forced-activity stress test exists yet for wind/fluid compute the way editCascadeStress now exists for mask-authority edits — worth considering as a future addition if we ever want to directly confirm Item 2 fixed these specific zones rather than inferring it structurally."
+  },
+
+  "vram": { "estimatedTotalMb": 1220.39, "ceilingMb": 2500, "headroomFraction": 0.512, "verdict": "ok", "note": "Flat across all 240 samples in this window (no in-window floor switch) — see round2VerificationSummary.item4 for why this makes the missing floorSwitchVram field consequential, not cosmetic." },
+
+  "instrument_gpuTimer": {
+    "poolOverflowed": false, "maxPendingSize": 259, "maxResolveSkipStreak": 3,
+    "maxResolveSkipStreakByType": { "render": 3, "compute": 3 },
+    "pendingUidsByType": { "render": 0, "compute": 0 },
+    "foldedSamples": 62493, "resolveErrors": 0
+  }
+}

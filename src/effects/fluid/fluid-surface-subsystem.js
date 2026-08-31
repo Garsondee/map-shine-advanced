@@ -76,7 +76,7 @@
  */
 
 import { createLogger } from '../../core/log.js';
-import { buildFluidSurfaceMaterials } from './fluid-render.js';
+import { buildFluidSurfaceMaterials, fluidTierPlan, FLUID_DEFAULT_TIER } from './fluid-render.js';
 import { extractTubeNet, FLUID_PROFILE_SAMPLES } from './fluid-net.js';
 import { buildFluidPack, FLUID_PACK_MAX_DIM } from './fluid-pack.js';
 import {
@@ -183,6 +183,17 @@ export function createFluidSurfaceSubsystem({
       );
     }
     return { enabled: true, params: {} };
+  }
+
+  /** The resolved tier, read fresh every call — never cached, so a live
+   * profile change is visible on the very next `sync()`/`prepareSimTick()`.
+   * Falls back to `FLUID_DEFAULT_TIER` pre-resolve, the identical reasoning
+   * `water-surface-subsystem.js`'s own fallback already documents: the
+   * CONSUMERS below already treat a non-finite tier this way, so there is no
+   * second fallback value to keep in sync here. */
+  function resolveTier() {
+    const t = renderState().perfTier;
+    return Number.isFinite(t) ? t : FLUID_DEFAULT_TIER;
   }
 
   /** One entry per masked item, keyed by item id. */
@@ -377,10 +388,20 @@ export function createFluidSurfaceSubsystem({
     geometry.setAttribute('position', new THREE.BufferAttribute(buildQuadPositions(entry.corners), 3));
     geometry.computeBoundingSphere();
 
+    // Remembered on the entry (not just a local var) so a LATER tier-only
+    // rebuild (`rebuildMaterialsForTier` below) can call the builder again
+    // without needing to reload or re-bake anything — the mask/pack/sim are
+    // all unchanged by a profile change, only the compiled shader is.
+    entry.maskTexture = maskTexture;
+    entry.builtForTier = resolveTier();
+
     // `entry.simPingRT` always exists by the time this runs: `loadAndBake`
     // calls `buildSim` immediately before `buildMesh` (never the reverse), and
     // a zero-tube mask returns before ever reaching this function at all (see
-    // `loadAndBake`'s own `tubeCount === 0` early return).
+    // `loadAndBake`'s own `tubeCount === 0` early return). The sim is built
+    // REGARDLESS of tier — only the MATERIAL's read of it is gated
+    // (`fluid-render.js#fluidTierPlan`) — so `stateTexture` here is always a
+    // real texture, never a placeholder for "not built yet".
     entry.built = buildFluidSurfaceMaterials({
       THREE,
       maskTexture,
@@ -388,6 +409,7 @@ export function createFluidSurfaceSubsystem({
       stateTexture: entry.simPingRT.texture,
       tubeCount: entry.simTubeCount,
       timeMsNode,
+      tier: entry.builtForTier,
       ...pickParams(renderState().params ?? {}),
     });
     entry.geometry = geometry;
@@ -412,6 +434,41 @@ export function createFluidSurfaceSubsystem({
     scene.add(entry.emitMesh);
     lastParamsKey = '';
     refreshVisibility();
+  }
+
+  /**
+   * A live profile change moved which rung this item's materials should be
+   * compiled at. Mirrors water/specular/window's own `buildSurfaceForTier`
+   * pattern, scoped to fluid's own per-ITEM shape: rebuilds ONLY the two
+   * materials (never the geometry, the mesh objects, the scene graph
+   * membership, renderOrder, or the sim) — the tier gates are JS-time
+   * branches INSIDE `buildFluidSurfaceMaterials` (Effects.md Law 4), so a
+   * uniform push cannot move them, only a fresh build can, and nothing else
+   * about this item changed.
+   * @param {object} entry @param {number} tier
+   */
+  function rebuildMaterialsForTier(entry, tier) {
+    const oldBuilt = entry.built;
+    entry.built = buildFluidSurfaceMaterials({
+      THREE,
+      maskTexture: entry.maskTexture,
+      packTexture: entry.packTexture,
+      stateTexture: entry.simPingRT.texture,
+      tubeCount: entry.simTubeCount,
+      timeMsNode,
+      tier,
+      ...pickParams(renderState().params ?? {}),
+    });
+    entry.absorbMesh.material = entry.built.absorbMaterial;
+    entry.emitMesh.material = entry.built.emitMaterial;
+    oldBuilt?.absorbMaterial?.dispose?.();
+    oldBuilt?.emitMaterial?.dispose?.();
+    entry.builtForTier = tier;
+    // The FRESH materials' uniforms start at the builder's own schema
+    // defaults, not the author's authored values — forcing the param-sync
+    // block in `sync()` to re-push onto them on this same pass, exactly as
+    // water/specular/window's own rebuild does for their mask-crop bounds.
+    lastParamsKey = '';
   }
 
   /** Mesh/material teardown ONLY — deliberately NOT the sim. `buildMesh` calls
@@ -483,6 +540,10 @@ export function createFluidSurfaceSubsystem({
           absorbMesh: null,
           emitMesh: null,
           loading: false,
+          // Remembered for a later tier-only rebuild — see `buildMesh`'s own
+          // comment on `entry.maskTexture` and `rebuildMaterialsForTier`.
+          maskTexture: null,
+          builtForTier: null,
           // THE SIM — populated by buildSim, torn down by disposeSim. Listed
           // explicitly here (rather than left to appear dynamically) so this
           // object literal stays the one place a reader sees an entry's whole
@@ -537,6 +598,19 @@ export function createFluidSurfaceSubsystem({
       entries.delete(id);
     }
 
+    // ── TIER-CHANGE REBUILD (2026-08-30) ────────────────────────────────
+    // A live profile change resolves a different tier without touching the
+    // mask, so nothing above (the url-change branch) ever fires for it —
+    // this is the ONLY place that notices. Cheap when nothing changed: one
+    // field comparison per entry, the same cost class water/specular/window
+    // already pay on every sync.
+    const resolvedTier = resolveTier();
+    for (const entry of entries.values()) {
+      if (entry.built && entry.builtForTier !== resolvedTier) {
+        rebuildMaterialsForTier(entry, resolvedTier);
+      }
+    }
+
     const p = state.params ?? {};
     // `flowSpeed` IS in this key now (tier `structure`'s own `uFlowSpeed`
     // uniform, `fluid-render.js`) — it is ALSO read fresh every tick in
@@ -582,6 +656,17 @@ export function createFluidSurfaceSubsystem({
     const clears = [];
     const advects = [];
     if (!enabled) return { clears, advects };
+
+    // Below tier 4 ('fill'), the material never reads the sim state at all
+    // (`fluid-render.js#fluidTierPlan`'s own `fillEnabled` gate) — so
+    // ticking it would be pure waste: a real render pass (the advect quad)
+    // producing a result nothing on screen ever looks at. This is the
+    // effect's single most expensive per-frame cost (C5, a genuine
+    // semi-Lagrangian simulation), and the ONE place in this file that can
+    // actually eliminate it — the sim's own allocation (`buildSim`) stays
+    // unconditional (a one-time, comparatively small VRAM cost, left alone
+    // to keep this fix scoped to the real per-frame win).
+    if (!fluidTierPlan(resolveTier()).fillEnabled) return { clears, advects };
 
     const flowSpeedRaw = Number(renderState().params?.flowSpeed);
     const flowSpeed = Number.isFinite(flowSpeedRaw) ? Math.max(0, flowSpeedRaw) : 1;
@@ -676,6 +761,13 @@ export function createFluidSurfaceSubsystem({
         simBuilt: !!e.simAdvect,
         simPingIsCurrent: e.simPingIsCurrent,
         simAwaitingFirstClear: !!e.simNeedsClear,
+        // THE TIER GATE'S OWN HONESTY CHECK, mirroring water/specular/
+        // window's identical field: what this item's LIVE material actually
+        // compiled with, not merely what the cascade most recently resolved
+        // (that value is `renderState().perfTier`, a subsystem-wide seam,
+        // not per-item — compare the two if a rebuild is ever suspected of
+        // going stale). `null` means this item has never been built at all.
+        perfTier: e.builtForTier,
         warnings: e.net ? e.net.warnings : [],
         tubes: e.net
           ? e.net.tubes.map((t) => ({

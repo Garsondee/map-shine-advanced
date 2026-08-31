@@ -1,6 +1,10 @@
 /**
- * THE ASTROLABE's pure core — the maths behind the dial, split out from the DOM
- * exactly the way `scene/paint-mask.js` splits from `ui/paint-mode.js`.
+ * THE ASTROLABE's pure core — the maths behind the dial. Moved here from
+ * `astrolabe.test.mjs` (2026-08-27, UI parity plan Phase 7b) when `ui/
+ * astrolabe.js`'s own DOM (`createAstrolabe`, the old panel's dial) was
+ * deleted along with the rest of the old UI — everything this file tests
+ * moved to `ui/astrolabe-geometry.js`, which has real, live dependents
+ * beyond the deleted dial (see that module's own header).
  *
  * The arc-geometry assertions are the ones that earn their keep: a ring band
  * that silently degenerates renders as nothing, and "nothing" is
@@ -18,7 +22,7 @@ import {
   nearestRateIndex,
   formatRate,
   TIME_RATE_STEPS,
-} from '../astrolabe.js';
+} from '../astrolabe-geometry.js';
 
 export function run(t) {
   const close = (a, b, eps = 1e-9) => Math.abs(a - b) < eps;

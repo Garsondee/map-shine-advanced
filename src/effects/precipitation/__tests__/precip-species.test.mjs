@@ -21,6 +21,7 @@ import {
   evalCurve,
   resolveSpeciesFrame,
   windTowardVector,
+  precipTierScaleForProfile,
 } from '../precip-species.js';
 import { resolveActivePopulations } from '../precip-subsystem.js';
 
@@ -565,6 +566,38 @@ export function run(t) {
     t.ok(
       'non-finite axes yield a clear sky, not NaN',
       garbage.liveCount === 0 && Number.isFinite(garbage.alphaMul) && Number.isFinite(garbage.rgbMul)
+    );
+  }
+
+  // ---- 🔒 precipTierScaleForProfile — wired 2026-08-29 -----------------------
+  // `resolveSpeciesFrame`'s own `tierScale` parameter (tested above) has always
+  // multiplied into `liveCount`; this is the producer that used to be hardcoded
+  // to `1` at its one caller (`vt-pan-viewer.js#getPrecipRenderState`) — see
+  // docs/planning/Effect-Tier-Gradient-Audit-2026-08-29.md §3.4.
+  {
+    t.ok('standard (the DEFAULT profile) is untouched — exactly 1', precipTierScaleForProfile('standard') === 1);
+    t.ok(
+      'quality and extreme are ALSO exactly 1 — this is a downward-only budget lever, never an upscale',
+      precipTierScaleForProfile('quality') === 1 && precipTierScaleForProfile('extreme') === 1
+    );
+    t.ok('performance is reduced, but less than low', precipTierScaleForProfile('performance') === 0.7);
+    t.ok('low is the most reduced', precipTierScaleForProfile('low') === 0.4);
+    t.ok(
+      'the ladder never goes DOWN as the profile goes up',
+      ['low', 'performance', 'standard', 'quality', 'extreme'].every(
+        (p, i, arr) => i === 0 || precipTierScaleForProfile(p) >= precipTierScaleForProfile(arr[i - 1])
+      )
+    );
+    t.ok(
+      'an unknown profile falls back to the default rank (standard) — total, never a throw',
+      precipTierScaleForProfile('ludicrous') === 1
+    );
+    t.ok(
+      'feeding this straight into resolveSpeciesFrame genuinely reduces liveCount at low, and not at standard',
+      resolveSpeciesFrame(PRECIP_SPECIES.rain, { precip01: 1 }, precipTierScaleForProfile('low')).liveCount <
+        PRECIP_SPECIES.rain.capacity &&
+        resolveSpeciesFrame(PRECIP_SPECIES.rain, { precip01: 1 }, precipTierScaleForProfile('standard')).liveCount ===
+          PRECIP_SPECIES.rain.capacity
     );
   }
 }

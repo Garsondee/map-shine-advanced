@@ -1127,6 +1127,12 @@ export const RULES = [
       // grandfathered checkboxes just above (U2's Remote popover is a
       // faithful re-skin of that exact dialog's fields, not a new schema).
       `${sep}ui${sep}rooms${sep}remote${sep}camera-path-popover.js`,
+      // Tile-motion fields (enabled/snapToGrid/mode/…) are `tile-motion.js`'s
+      // own TileMotionConfig/TileMotionTransport typedefs, not a
+      // params-schema.js declaration — the identical reasoning as the
+      // camera-path pair just above, not a new exception category (2026-08-27).
+      `${sep}ui${sep}tile-motion-dialog.js`,
+      `${sep}ui${sep}rooms${sep}remote${sep}tile-motion-popover.js`,
     ],
     why:
       'V2 had ONE good declarative control system and 266 hand-written Tweakpane calls beside it ' +

@@ -81,12 +81,19 @@ export function createFluidRegistration({
    */
   function getRenderState() {
     const p = readout.params ?? {};
+    // perfTier ADDED 2026-08-30 — closing the exact gap the readout's own
+    // comment above already named ("this readout had captured none of them
+    // before the Studio card started wanting one"): the tier was resolved
+    // and reported to the UI, but never reached the render seam. The same
+    // fix specular/window both needed (see effect-tier-consumption.test.mjs,
+    // which now covers fluid too). See fluid-render.js#fluidTierPlan.
     return {
       enabled: readout.enabled,
       params: {
         ...p,
         tint: typeof p.tint === 'string' ? hexToRgb01(p.tint) : undefined,
       },
+      perfTier: readout.perfTier,
     };
   }
 

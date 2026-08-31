@@ -69,40 +69,72 @@ export const FIRE_PARAMS = Object.freeze({
   },
 
   // ── Look ──────────────────────────────────────────────────────────────────
+  // ⚠️ FIXED, 2026-08-30 — `color`/`posterize`/`bandCount` were all SCHEMA-ONLY
+  // on the live particle fire until today: `fireRuntimeFromParams` computed
+  // `flameColor`/`posterize`/`bands` from them, but `fire-subsystem.js`'s
+  // `sync()` never forwarded any of the three into `engine.setParams`, so
+  // dragging any of them changed nothing (`feedback_unconsumed_api_rots_
+  // silently` — the exact "reads the param, never uses the value" shape this
+  // file's own `lightRadiusScale` note already names once). `brightness`
+  // (below) is the one member of this category left deliberately dead —
+  // "Fire intensity" (Presence) is already the live brightness control an
+  // author reaches for; wiring a second one would just be two knobs for one
+  // job. All three fixes below, plus the new `colorHueShift`, are the
+  // "CC tool set" the author asked for on 2026-08-30. See fire-sprite.js
+  // #buildFlameShading and fire-geometry.js#fireTintMul for the mechanism.
   color: {
     type: 'color',
     space: 'srgb',
     default: '#fdba35',
     category: 'Look',
     label: 'Flame tint',
-    help: 'Tints the flame only — never the smoke, which is lit by the fire rather than made of it.',
+    help: 'Tints the flame only — never the smoke, which is lit by the fire rather than made of it. The default matches the reference ramp’s own golden midpoint exactly, so it is a genuine no-op until you move it.',
   },
   posterize: {
     type: 'float',
     min: 0,
     max: 1,
     step: 0.05,
-    default: 0.85,
+    // ⚠️ 0, NOT 0.85. This param's own default predates the particle rebuild
+    // and was written for a volumetric material that no longer ships
+    // (fire-render.js is orphaned — see fire.js's tiers doc above). Because
+    // this was dead, every fire the author has already live-approved
+    // (Tower Bridge included) was rendered at an EFFECTIVE posterize of 0 —
+    // shipping the old 0.85 the moment this control came alive would have
+    // silently reshaped every existing scene's fire into cel-shaded bands
+    // nobody asked for. 0 preserves the smooth look already seen live; the
+    // slider now genuinely bands the ramp for anyone who dials it up.
+    default: 0,
     category: 'Look',
     label: 'Banding',
-    help: 'How hard the colour steps between temperature bands. 0 is a smooth photographic ramp; 1 is flat cel-shaded bands. The painted reference look sits high.',
+    help: 'How hard the colour steps between temperature bands. 0 is a smooth photographic ramp (today’s look); 1 is flat cel-shaded bands.',
   },
   bandCount: {
     type: 'int',
     min: 3,
     max: 12,
     step: 1,
-    default: 7,
+    default: 8,
     category: 'Look',
     label: 'Band count',
-    help: 'How many distinct colour steps the banding uses. Fewer reads as more stylised.',
+    help: 'How many distinct colour steps the banding uses once Banding is above 0. Fewer reads as more stylised.',
+  },
+  colorHueShift: {
+    type: 'float',
+    min: -180,
+    max: 180,
+    step: 1,
+    default: 0,
+    category: 'Look',
+    label: 'Hue shift',
+    help: 'Rotates the flame, embers and smoke around the colour wheel together — the way to get a green alchemical fire or a blue foxfire without hand-picking every stop. Adds to whatever the chosen Fuel already contributes (magical fuel carries its own built-in 180° shift). ±180° already covers the whole wheel in either direction; there is no further edge to push past.',
   },
   brightness: {
     type: 'float',
     min: 0,
     max: 3,
     step: 0.05,
-    default: 1,
+    default: 0.25,
     category: 'Look',
     label: 'Flame brightness',
     help: 'Master brightness for the flame itself. Push it too far and the banding blows out into a flat disc.',
@@ -128,7 +160,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 200,
     step: 1,
-    default: 47,
+    default: 20,
     category: 'Flame',
     label: 'Flame count',
     help: 'Flame sprites per fire, PER ARCHETYPE — there are four, so the real total is four times this. V2 ran about 51 for a whole floor.',
@@ -138,7 +170,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0.05,
     max: 30,
     step: 0.05,
-    default: 1.1,
+    default: 2,
     category: 'Flame',
     label: 'Flame lifetime ×',
     help: 'Multiplies how long each flame sprite lives (base 2.4-4.2s). Short lives read as puffs that vanish; long ones as a steady body of fire.',
@@ -148,7 +180,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0.02,
     max: 20,
     step: 0.02,
-    default: 1.22,
+    default: 0.52,
     category: 'Flame',
     label: 'Flame size ×',
     help: 'Multiplies sprite size on top of the automatic scaling to the fire’s painted width.',
@@ -158,7 +190,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 20,
     step: 0.05,
-    default: 0.85,
+    default: 1.5,
     category: 'Flame',
     label: 'Flame opacity ×',
     help: 'How solid each flame sprite is. Raise this if the fire looks thin or washed out.',
@@ -168,7 +200,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 50,
     step: 0.1,
-    default: 50,
+    default: 23.9,
     category: 'Flame',
     label: 'Flame emission ×',
     help: 'Raw brightness of the flame colour. Above about 3 the hues start saturating toward white where sprites overlap — that is the "white blur" failure.',
@@ -188,7 +220,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: -20,
     max: 20,
     step: 0.1,
-    default: 0,
+    default: 2.5,
     category: 'Flame',
     label: 'Spawn brightness bias',
     help: 'Which painted texels flames prefer to spawn on. 0 = evenly across every painted texel, matching intensity to shade. Positive pulls spawns toward the brightest paint; negative toward the darkest. Saturates well before the ends of the range — no need to reach them.',
@@ -198,14 +230,15 @@ export const FIRE_PARAMS = Object.freeze({
     min: -2,
     max: 3,
     step: 0.02,
-    // ⚠️ 0.5, NOT 0 (2026-08-17, author-confirmed live on Tower Bridge after
-    // the label-scoped rebuild — see `fire-spawn-points.js#applyCohesion`'s
-    // own header). Cohesion used to default OFF because "belongs to" was a
+    // ⚠️ NOT 0 (2026-08-17, author-confirmed live on Tower Bridge after the
+    // label-scoped rebuild — see `fire-spawn-points.js#applyCohesion`'s own
+    // header). Cohesion used to default OFF because "belongs to" was a
     // raw-distance guess that could pull one fire's flames toward a
     // different, disconnected fire; it is now a structural per-blob
     // guarantee, so a real default that actually gives every fire a visible
-    // hot core is the correct ship state, not an opt-in experiment.
-    default: 0.5,
+    // hot core is the correct ship state, not an opt-in experiment. Retuned
+    // to 0.66 in the 2026-08-27 author preset pass.
+    default: 0.66,
     category: 'Flame',
     label: 'Cohesion (pull together)',
     help: 'Pulls every flame toward the brightest part of its own fire. 0 = spawns spread across the full painted shape. 1 = every flame collapses onto that single hottest point. Negative pushes flames apart instead, beyond their painted region.',
@@ -227,7 +260,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0.02,
     max: 20,
     step: 0.02,
-    default: 1,
+    default: 0.52,
     category: 'Ember',
     label: 'Ember size ×',
     help: 'Base is 2.3-8.7 world px — already a third of V2’s own, at the author’s request.',
@@ -237,7 +270,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0.05,
     max: 30,
     step: 0.05,
-    default: 1,
+    default: 0.45,
     category: 'Ember',
     label: 'Ember lifetime ×',
     help: 'How long a spark survives. Longer lives let embers travel further from the fire before dying.',
@@ -247,7 +280,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 30,
     step: 0.05,
-    default: 1,
+    default: 6.2,
     category: 'Ember',
     label: 'Ember chaos ×',
     help: 'Strength of the swirling flow that pushes embers around. 0 leaves them drifting only with wind.',
@@ -267,7 +300,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 50,
     step: 0.1,
-    default: 1,
+    default: 50,
     category: 'Ember',
     label: 'Ember brightness ×',
     help: 'Embers are ~8x hotter than flames by design — that ratio is what makes a tiny dot read as a spark rather than a speck.',
@@ -353,7 +386,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 2,
     step: 0.05,
-    default: 1,
+    default: 0.05,
     category: 'Detail',
     label: 'Smoke',
     help: 'How much smoke this fire makes, on top of what its size already implies. 0 turns it off entirely.',
@@ -390,7 +423,7 @@ export const FIRE_PARAMS = Object.freeze({
   lightColor: {
     type: 'color',
     space: 'srgb',
-    default: '#ff9a3c',
+    default: '#fe7e06',
     category: 'Light',
     label: 'Light colour',
     help: "The colour this fire throws into the room, separate from the flame's own tint.",
@@ -464,12 +497,44 @@ export const FIRE = Object.freeze({
   authoring: Object.freeze({ paint: 'fire' }),
 
   /**
-   * `estMsPerMp` is MEASURED, not estimated, for the noise term — the dominant
-   * one. `tools/shader-lab/bench-fire.js#octave-cost-curve` put a 3-octave 3D
-   * fBm at 0.1323 ms/Mpx on the reference machine (RTX 3070 Laptop), perfectly
-   * linear across octaves 1–6 with a fixed cost of 0.0004 ms/Mpx. Sheet cost is
-   * `M × 0.1323`; the per-slice scalar ALU is still estimated at ~0.004 ms/Mpx
-   * and gets its own measurement once the material has a steady-state bench.
+   * ⚠️ REWRITTEN 2026-08-29 — the six `adds` strings below used to describe a
+   * volumetric slab-integral material (sheets/slices/billow-fold/banding) that
+   * `fire-subsystem.js`'s own header says was fully replaced by the sprite/
+   * particle system on 2026-08-09. That material (`fire-render.js#
+   * buildFireMaterial`, `fireSlabPlan`/`fireSliceTable` in this file's sibling
+   * `fire-geometry.js`) still exists in source and still passes its own tests,
+   * but is never imported by `vt-pan-viewer.js` or `boot.js` — it is not what
+   * ships. See docs/planning/Effect-Tier-Gradient-Audit-2026-08-29.md §3.2 for
+   * the audit that found the mismatch.
+   *
+   * WHAT ACTUALLY RUNS, per rung, is THREE levers read from `fireTierPlan`
+   * (`fire-geometry.js`) — `plan.clusterFactor` (how aggressively nearby fires'
+   * lights merge into one draw, via `clusterFireSources`); `tier` itself,
+   * separately clamped to `animation.quality` 0..2 (the shared candle-flicker
+   * ladder: 0 plain, 1 chaotic guttering, 2 lean/oval/boiling edge) — see
+   * `buildFireLightSources`'s own two call sites; and, ADDED 2026-08-30,
+   * `plan.spriteCountScale` (the flame/ember/smoke particle budget PER FIRE,
+   * `fire-subsystem.js`'s own `activeCount` — the sprite layer's dominant
+   * per-frame cost, and until this date the one thing about fire that never
+   * varied by profile at all). `FIRE_TIER_PLANS`' remaining fields
+   * (`sheets`/`maxSlices`/`octaveCap`/`bands`/`smoke`/`shear`) stay DEAD in
+   * the live path — real values, consumed only by the orphaned volumetric
+   * material and its own tests. Because `Math.floor(tier)` clamps into `0..2`,
+   * `animation.quality` reaches its own maximum at rung 2; `spriteCountScale`
+   * reaches ITS OWN ceiling (1.0 — today's shipped `PER_FIRE` density,
+   * unchanged) at rung 3 — so rungs 3 through 5 differ from each other ONLY
+   * in clusterFactor, but rungs 0 through 3 each genuinely move on more than
+   * one axis.
+   *
+   * ⚠️ `estMsPerMp` BELOW IS STALE, KNOWINGLY LEFT RATHER THAN INVENTED. The
+   * original numbers were genuinely measured (`tools/shader-lab/bench-
+   * fire.js#octave-cost-curve`, a real 3-octave 3D fBm bench) — but they
+   * measured the RETIRED material's noise cost, which no longer executes. The
+   * real cost driver today — light/draw-call count via `clusterFactor` — has
+   * never been separately benched. Overwriting these with fabricated numbers
+   * would be a worse lie than a labelled-stale true one
+   * (`feedback_instruments_must_not_lie`); a real bench is the honest fix,
+   * not a guess with more decimal places.
    *
    * ⚠️ RUNG 0 IS C8 AND THAT IS LEGAL — the monotonic-cost check starts at i=2
    * (`effect-manifest.js:194`), the same shape water uses. A fire that emits no
@@ -480,28 +545,39 @@ export const FIRE = Object.freeze({
       n: 0,
       name: 'hearth',
       cost: { class: 'C8', estMsPerMp: 0.05 },
-      adds: 'one clustered warm light per fire plus a flat posterized disc pulsing at the real puff frequency — right place, right size, lights the room',
+      adds:
+        'one flame/ember/smoke sprite cluster at 35% of the shipped per-fire density, lit by ONE clustered ' +
+        'light merging every fire within a wide radius (clusterFactor 2.0 — the most aggressive merge of any ' +
+        'rung), animating on the plain (quality 0) puff clock — right place, right size, lights the room as ' +
+        'cheaply as this effect ever gets while still emitting light at all',
     },
     {
       n: 1,
       name: 'billow',
       fromProfile: 'low',
       cost: { class: 'C1', estMsPerMp: 0.14 },
-      adds: 'one noise sheet: the 1−|fbm| billow fold erodes the disc into cauliflower lobes and the field boils',
+      adds:
+        'sprite density rises to 60% of shipped, lights merge less aggressively (clusterFactor 1.5) and the ' +
+        'puff clock steps up to chaotic guttering (quality 1)',
     },
     {
       n: 2,
       name: 'plume',
       fromProfile: 'performance',
       cost: { class: 'C1', estMsPerMp: 0.29 },
-      adds: 'the slab integral proper — two sheets over six slices, giving self-occlusion seams, a downwind-sheared plume and an accumulated soft edge',
+      adds:
+        'sprite density rises to 80% of shipped, clusterFactor drops to 1.0, and the puff clock reaches its ' +
+        'own ceiling — full lean/oval/boiling-edge animation (quality 2), the most this effect ever animates.',
     },
     {
       n: 3,
       name: 'smoke',
       fromProfile: 'standard',
       cost: { class: 'C1', estMsPerMp: 0.45 },
-      adds: 'three sheets over ten slices, the upper ones taking the smoke ramp — a warm-lit crown with stipple grain and soot flecks, plus wind and rain response',
+      adds:
+        'sprite density reaches its own ceiling — 100% of the shipped per-fire count, unchanged above this ' +
+        'rung — and clusterFactor drops to 0.6 — noticeably fewer fires now share one light than at the ' +
+        'default profile just below. Every rung above this one differs only in clusterFactor.',
     },
     // ⚠️ ONE RUNG PER PROFILE FROM HERE, and that is not cosmetic. An earlier
     // version put `smoke` AND `flicker` both at `standard`, so the default
@@ -514,14 +590,14 @@ export const FIRE = Object.freeze({
       name: 'flicker',
       fromProfile: 'quality',
       cost: { class: 'C3', estMsPerMp: 0.49 },
-      adds: 'the cast light animates from the same puff clock the flame runs on, and is depth-gated so a fire behind a wall stops lighting through it',
+      adds: 'clusterFactor drops to 0.5',
     },
     {
       n: 5,
       name: 'inferno',
       fromProfile: 'extreme',
       cost: { class: 'C8', estMsPerMp: 0.7 },
-      adds: 'four sheets over fourteen slices, finer clustering so big fires stop sharing one light, and the deepest colour banding',
+      adds: 'clusterFactor reaches its own floor, 0.35 — fires stop sharing lights almost entirely, each one close to its own',
     },
   ]),
 

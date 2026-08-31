@@ -18,10 +18,19 @@
  * `tools/verify-structure.mjs#ui/no-dead-axis` holds the line structurally.
  * The mock's own 7-channel list (rain/clouds/fog/wind/freeze/bolt/ash) is
  * NOT reproduced whole: fog/freeze/ash have no live axis, lightning is an
- * impulse (not a fade channel, U7's job), and wind already has a real,
- * dedicated control on the astrolabe itself (`ui/astrolabe.js`'s own
- * arrow+slider) — a second wind fader here would be the exact "two controls,
- * one value" mirror this codebase's own Environment.md §2.4 warns against.
+ * impulse (not a fade channel, U7's job). Wind STRENGTH, unlike those three,
+ * IS a channel here (2026-08-27 fix, author: "wind speed should be one of
+ * the vertical sliders") — this reverses an earlier call on this exact
+ * question: `ui/astrolabe.js`'s OLD dial had its own always-visible wind
+ * arrow+slider built into the ring, so a second fader here really would have
+ * been the "two controls, one value" mirror Environment.md §2.4 warns
+ * against. The NEW dial (`astrolabe-dial.js`) has no such built-in slider —
+ * wind edit lives only behind a popover the pill must be clicked to open
+ * (`ui/rooms/remote/wind-popover.js`) — so the old reasoning no longer
+ * describes this codebase's actual shape. Direction stays popover-only (an
+ * angle has no vertical-fader equivalent); strength moves here AND out of
+ * the popover (wind-popover.js's own header explains that half), so there is
+ * still exactly one editable home for each, never two.
  *
  * ⚠️ MOOD-CHIP FADES ARE THIS CHECKPOINT'S FIRST REAL FADE ENGINE CONSUMER.
  * A chip click does NOT snap — it starts a real `mergeFadeState` fade toward
@@ -156,6 +165,13 @@ const ENV_CHANNELS = Object.freeze([
     help: 'Cold to hot — also decides whether precipitation falls as rain or snow.',
     getValue: 'getTemperature',
     onCommit: 'onTemperatureCommit',
+  },
+  {
+    key: 'windSpeed',
+    label: 'Wind',
+    help: 'How hard the wind blows. Direction is set from the astrolabe’s own wind pill.',
+    getValue: 'getWindSpeed01',
+    onCommit: 'onWindSpeed01Commit',
   },
 ]);
 

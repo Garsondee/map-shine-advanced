@@ -8,10 +8,11 @@
  * (`[structure-change]`) and update the governing UI docs (docs/planning/UI.md,
  * Effects-UI.md, Authoring-and-Distribution.md).
  */
-export { createAstrolabe, phaseDisplayName } from './astrolabe.js';
+export { phaseDisplayName } from './astrolabe-geometry.js';
 export { buildAstrolabeDial } from './rooms/remote/astrolabe-dial.js';
 export { installPainter } from './paint-mode.js';
 export { openCameraPathDialog, closeCameraPathDialog } from './camera-path-dialog.js';
+export { installTileMotionPanel } from './rooms/remote/tile-motion-panel.js';
 export { installAnchorMode } from './anchor-mode.js';
 export { installAnchorViewMode } from './anchor-view-mode.js';
 export { showPerfProgress, hidePerfProgress, formatPerfProgressText } from './perf-progress-overlay.js';

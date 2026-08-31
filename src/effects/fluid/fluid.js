@@ -173,13 +173,31 @@ export const FLUID = Object.freeze({
     Object.freeze({
       n: 1,
       name: 'tube',
-      fromProfile: 'low',
-      cost: Object.freeze({ class: 'C1', estMsPerMp: 0.01 }),
+      // ⚠️ MOVED low → performance (2026-08-30, Ingram: "fluid should be
+      // visible in some way at the lowest setting but we need minimal cost
+      // to do that"). This rung's own cross-section shading needs the
+      // pack's `across` channel — a REAL, dedicated texture fetch, not the
+      // free ride this rung's text used to claim (see `cost` below). Tier 0
+      // alone (mask read + flat tint/glow, unconditional at every profile)
+      // is what now genuinely satisfies "visible, minimal cost" at `low`.
+      fromProfile: 'performance',
+      // ⚠️ RECLASSIFIED C1 → C4 (2026-08-30), same correction tier 4/5 below
+      // already had to make once built: `cost.class` is the CEILING this
+      // rung runs within (`validateEffectManifest`'s own enforced Law 3),
+      // not its marginal operation type — and the pack fetch this rung now
+      // gates is genuinely a C4 virtual-texture read, the same class water
+      // and specular's own per-item mask fetches carry. `estMsPerMp` moved
+      // to line up with this file's OTHER C4 rungs (tier 2/3's own 0.04) —
+      // a same-shape correction, not a bench measurement; no bench exists
+      // for this rung yet.
+      cost: Object.freeze({ class: 'C4', estMsPerMp: 0.04 }),
       adds:
-        'Cross-section from the pack`s `across`: optical path length sqrt(1-across^2), longest down ' +
-        'the centreline and zero at the glass, plus the wall rim. Pure ALU on a read tier 0 already ' +
-        'paid for. THIS is the rung where a tube stops reading as a painted line — V2 could not ' +
-        'express it at all, because everything it drew was a function of arc length alone.',
+        'The pack`s own dedicated fetch: `across`, the distance from the tube`s centreline. From it, ' +
+        'the cylinder — optical path length sqrt(1-across^2), longest down the centreline and zero at ' +
+        'the glass, plus the wall rim. THIS is the rung where a tube stops reading as a painted line — ' +
+        'V2 could not express it at all, because everything it drew was a function of arc length alone. ' +
+        'Below this rung (tier 0 only) the cross-section is flat: a real, glowing, correctly-tinted ' +
+        'tube, just not yet round-looking.',
     }),
     Object.freeze({
       n: 2,
@@ -187,15 +205,16 @@ export const FLUID = Object.freeze({
       fromProfile: 'standard',
       cost: Object.freeze({ class: 'C4', estMsPerMp: 0.04 }),
       adds:
-        'The pack read: `s`, the GEODESIC arc-length coordinate (so position along a tube means the ' +
-        'same thing on a long one and a short one, unlike V2`s hand-painted ramp), and the fill-change ' +
-        'axis the meniscus reads — the right axis, where V2`s was a function of distance to the WALL ' +
-        'and defaulted to 0 because it could never have looked right. ⚠️ This rung`s ORIGINAL windowing ' +
-        'technique — an analytic `fract(s·count − t·speed)` scroll — was SUPERSEDED by tier `fill`' +
-        '`s real transport the same phase it was built, matching this codebase`s own established ' +
-        'precedent (no shipped effect keeps a live per-tier code switch; the governor that would need ' +
-        'one is unbuilt — Effects.md §6). What tier `flow` still owns is `s` itself and the meniscus ' +
-        'axis; the WINDOW now comes from `fill`.',
+        '⚠️ HONEST STATUS (corrected 2026-08-30): this rung has NO shader gate of its own today. `s`, ' +
+        'the GEODESIC arc-length coordinate, arrives as a side effect of tier `tube`s own pack fetch ' +
+        '(one read, two channels) — so it is already sitting in a register by the time a `standard` ' +
+        'profile is reached, whether this rung is "on" or not. This rung`s ORIGINAL windowing technique ' +
+        '— an analytic `fract(s·count − t·speed)` scroll — was SUPERSEDED by tier `fill`s real transport ' +
+        'the same phase it was built (no shipped effect keeps a live per-tier code switch; the governor ' +
+        'that would need one is unbuilt — Effects.md §6), and the meniscus axis that scroll used to feed ' +
+        'moved WITH it, into tier `fill`. Kept as a named rung for the cost ladder`s own accounting ' +
+        '(a real, non-trivial gap sits between tier `tube` at `performance` and tier `film`/`fill` at ' +
+        '`standard`/`quality`) — not because gating it separately would change anything on screen today.',
     }),
     Object.freeze({
       n: 3,

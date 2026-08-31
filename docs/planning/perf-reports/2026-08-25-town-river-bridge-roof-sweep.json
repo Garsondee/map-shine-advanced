@@ -1,0 +1,293 @@
+{
+  "report": "perf-profile",
+  "formatVersion": 1,
+  "summary": {
+    "note": "Ranked by measured ms/frame where a real number exists; high-severity findings with no zone of their own to rank by are folded in beneath the smallest measured cost, never above it and never dropped. Full detail for any entry: look up its sourceIds in effects[]/zones[]/findings[].",
+    "topOffenders": [
+      {
+        "rank": 1,
+        "label": "World scene draw",
+        "costMs": 25.11,
+        "severity": "info",
+        "whatItMeans": "World scene draw — engine-level cost not owned by any single effect — is costing 25.11ms every frame.",
+        "sourceIds": [
+          "geometry.worldDraw"
+        ]
+      },
+      {
+        "rank": 2,
+        "label": "Window light",
+        "costMs": 2.486,
+        "severity": "high",
+        "whatItMeans": "Window light is costing 2.486ms every frame — 5.67× its own declared budget. This has never been checked against a real measurement before now, so either the budget is stale or something regressed.",
+        "sourceIds": [
+          "window"
+        ]
+      },
+      {
+        "rank": 3,
+        "label": "Present composite",
+        "costMs": 0.677,
+        "severity": "info",
+        "whatItMeans": "Present composite — engine-level cost not owned by any single effect — is costing 0.677ms every frame.",
+        "sourceIds": [
+          "present.blit"
+        ]
+      },
+      {
+        "rank": 4,
+        "label": "Bloom",
+        "costMs": 0.463,
+        "severity": "info",
+        "whatItMeans": "Bloom is costing 0.463ms every frame.",
+        "sourceIds": [
+          "bloom"
+        ]
+      },
+      {
+        "rank": 5,
+        "label": "Lit composite",
+        "costMs": 0.403,
+        "severity": "info",
+        "whatItMeans": "Lit composite — engine-level cost not owned by any single effect — is costing 0.403ms every frame.",
+        "sourceIds": [
+          "light.drawComposite"
+        ]
+      },
+      {
+        "rank": 6,
+        "label": "Depth authority draw",
+        "costMs": 0.368,
+        "severity": "info",
+        "whatItMeans": "Depth authority draw — engine-level cost not owned by any single effect — is costing 0.368ms every frame.",
+        "sourceIds": [
+          "geometry.depthDraw"
+        ]
+      },
+      {
+        "rank": 7,
+        "label": "Depth of Field",
+        "costMs": 0.353,
+        "severity": "info",
+        "whatItMeans": "Depth of Field is costing 0.353ms every frame.",
+        "sourceIds": [
+          "depthOfField"
+        ]
+      },
+      {
+        "rank": 8,
+        "label": "Environment snapshot",
+        "costMs": 0.32,
+        "severity": "info",
+        "whatItMeans": "Environment snapshot — engine-level cost not owned by any single effect — is costing 0.32ms every frame.",
+        "sourceIds": [
+          "tick.envSnapshot"
+        ]
+      },
+      {
+        "rank": 9,
+        "label": "Early-Z depth prepass into scene.color",
+        "costMs": 0.303,
+        "severity": "info",
+        "whatItMeans": "Early-Z depth prepass into scene.color — engine-level cost not owned by any single effect — is costing 0.303ms every frame.",
+        "sourceIds": [
+          "geometry.earlyZPrepass"
+        ]
+      },
+      {
+        "rank": 10,
+        "label": "Illumination fill",
+        "costMs": 0.283,
+        "severity": "info",
+        "whatItMeans": "Illumination fill — engine-level cost not owned by any single effect — is costing 0.283ms every frame.",
+        "sourceIds": [
+          "light.drawIllum"
+        ]
+      }
+    ],
+    "cacheWarnings": [
+      {
+        "label": "Render-mode diagnostic cache (diag/render-fallback.js)",
+        "hitRatePct": 37.1,
+        "text": "Render-mode diagnostic cache (diag/render-fallback.js) is only avoiding repeated work 37.1% of the time this window (83 unnecessary rebuilds out of 132 checks) — worth a look before trusting it as healthy."
+      }
+    ],
+    "instrumentWarnings": []
+  },
+  "generatedAt": "2026-08-25T09:04:50.301Z",
+  "msaVersion": "0.6.0-dev.0",
+  "codename": null,
+  "method": {
+    "gpu": "timestamp-query",
+    "gpuReason": null,
+    "cpuClockResolutionMs": 0.09999996423721313,
+    "sweepRequested": false,
+    "sweepEffectsMeasured": 0,
+    "sweepEffectsRejected": 0,
+    "sweepNoiseFloorMs": null,
+    "sweepIncluded": false,
+    "route": "n_to_s:2kf/60000ms",
+    "timestampPoolOverflowed": false,
+    "zoneStatsNote": "Zones report mean/max/amortised over the window, NOT percentiles. Per-zone percentiles would require retaining a per-frame sample per zone, which this profiler deliberately does not do — it stays zero-allocation while armed so the instrument does not create the GC hitches it is measuring. Percentiles are frame-level, where the samples already exist."
+  },
+  "window": {
+    "frames": 180,
+    "durationMs": 6762.9,
+    "earlyWindowMs": 10000,
+    "settleFramesDiscarded": 120,
+    "resolution": {
+      "w": 3840,
+      "h": 1906,
+      "pixelRatio": 1.5
+    },
+    "megapixels": 7.32,
+    "sceneName": null,
+    "floorIndex": 2,
+    "loop": "viewer"
+  },
+  "frame": {
+    "fps": {
+      "avgFps": 26.6,
+      "avgFpsNote": "frames ÷ elapsed time — the felt rate. NOT the mean of per-frame fps, which over-weights fast frames.",
+      "bestFps": 30.1,
+      "worstFps": 23.9,
+      "p1LowFps": 23.9,
+      "p5LowFps": 23.9,
+      "medianFps": 24.1,
+      "frameMs": {
+        "best": 33.2,
+        "median": 41.5,
+        "p95": 41.8,
+        "p99": 41.8,
+        "worst": 41.8
+      },
+      "sampleCount": 180
+    },
+    "hangs": {
+      "note": "Bands are cumulative — a 300ms frame counts in all four. `worst` is sorted by severity and carries WHEN it happened, so a hang can be reproduced rather than just counted.",
+      "bands": [
+        { "label": "stutter (>2x median)", "minMs": 83, "count": 0 },
+        { "label": "hitch (>50ms)", "minMs": 50, "count": 0 },
+        { "label": "stall (>100ms)", "minMs": 100, "count": 0 },
+        { "label": "freeze (>250ms)", "minMs": 250, "count": 0 }
+      ],
+      "totalStalls": 0,
+      "kept": 0,
+      "dropped": 0,
+      "worst": []
+    },
+    "gapMs": { "p50": 41.5, "p90": 41.7, "p95": 41.8, "p99": 41.8, "max": 41.8, "sampleCount": 180 },
+    "gpuMs": {
+      "p50": 35.65,
+      "p95": 36.5,
+      "max": 36.77,
+      "sampleCount": 44,
+      "basis": "sum of timestamped render passes per frame (renderer.info.render.timestamp)",
+      "caveat": "NOT the whole GPU frame: mipmap generation, presentation and any work outside a render pass are not counted. Coverage against this measures \"of the pass time we can see, how much did we attribute to a declared zone\" — a real question, but a narrower one than \"where did the frame go\"."
+    },
+    "cpuEncodeMs": { "p50": 5.71, "sampleCount": 120 },
+    "gapSampleCoverage": "every frame in the window",
+    "histogram": [
+      { "label": "30-60fps", "frames": 56, "percent": 31.1 },
+      { "label": "20-30fps", "frames": 124, "percent": 68.9 }
+    ],
+    "hitches": {
+      "thresholdMs": 50,
+      "count": 1,
+      "countIsReceivedNotTotal": "How many hitch records reached this report. Compare against frame.hangs.totalStalls — which comes from the profiler's own complete gap series — for how many actually occurred.",
+      "kept": 1,
+      "droppedFromReport": 0,
+      "droppedByRing": 0,
+      "items": [
+        { "atMs": 319001, "gapMs": 58.3, "halfSpanPx": 2670.168067226891 }
+      ]
+    }
+  },
+  "bottleneck": {
+    "verdict": "gpu-bound",
+    "median": { "gapMs": 41.5, "gpuMs": 35.65, "unexplainedMs": 5.85, "gpuFraction": 0.859, "verdict": "gpu-bound" },
+    "tail": { "gapMs": 41.8, "gpuMs": 36.5, "unexplainedMs": 5.3, "gpuFraction": 0.873, "verdict": "gpu-bound" },
+    "tailDiffers": false
+  },
+  "attribution": {
+    "frameGpuMs": 35.65,
+    "attributedGpuMs": 34.155,
+    "residualGpuMs": 1.495,
+    "coverage": 0.958,
+    "verdict": "good"
+  },
+  "findingsTopLevel": "Full findings[] (14 entries), zones[] (60+ entries), effects[] (17 entries), caches[] (39 rows), vram, structuralAB, multiFloor, rapidStressSweep were all present in the original paste analyzed in chat on 2026-08-25 — this archive file captures the headline sections used to build the companion .md synthesis; see the chat transcript for the complete verbatim JSON if a field is needed that isn't summarized here.",
+  "keyFindings": [
+    {
+      "severity": "high",
+      "id": "dominant-zone",
+      "text": "geometry.worldDraw (World scene draw) is the single largest attributed zone at 25.11ms, 70.4% of frame GPU from 28 draw calls, 11548 triangles."
+    },
+    {
+      "severity": "high",
+      "id": "declared-cost-understated:window",
+      "text": "window: MEASURED 5.67x the highest declared tier (0.34 vs 0.06 ms/Mpx) — first-ever real measurement against the declared budget."
+    },
+    {
+      "severity": "medium",
+      "id": "bottleneck",
+      "text": "GPU-bound at both median (85.9% of frame explained by timestamped passes) and tail (87.3%)."
+    },
+    {
+      "severity": "medium",
+      "id": "structural-ab:earlyZComposition",
+      "text": "Stage 1 Early-Z composition A/B on THIS map: NO VERDICT — ON/OFF delta (2.534ms) did not clear the run's own noise floor (2.452ms) by the required 1.5x. onGpuMs 32.184 vs offGpuMs 34.718."
+    },
+    {
+      "severity": "medium",
+      "id": "effects-unpriceable",
+      "text": "fire, grade, water, apertureGobo remain structurally unpriceable this run (partial/none zone coverage) — standing instrumentation gap, not specific to this capture."
+    },
+    {
+      "severity": "medium",
+      "id": "cache-low-hit-rate:describeRenderMode",
+      "text": "describeRenderMode cache hit rate 37.1% (49 hits, 83 misses)."
+    },
+    {
+      "severity": "low",
+      "id": "depth-proxy-pool-health",
+      "text": "Depth-proxy material pool: 64.9% hit rate (48 hits, 26 misses, 22 evictions)."
+    },
+    {
+      "severity": "low",
+      "id": "duplicate-geometry",
+      "text": "geometry.depthDraw + geometry.earlyZPrepass submit the same 15 draws/8542 triangles twice (0.671ms combined). light.drawPointLights + light.drawColoration submit the same 10 draws/614 triangles twice (0.495ms combined). Cannot tell from this data alone whether either pays for itself."
+    }
+  ],
+  "declaredVsMeasured": [
+    { "effect": "window", "measuredMsPerMp": 0.34, "declaredMaxMsPerMp": 0.06, "verdict": "over", "ratio": 5.67 },
+    { "effect": "bloom", "measuredMsPerMp": 0.063, "declaredMaxMsPerMp": 0.3, "verdict": "under", "ratio": 0.21 },
+    { "effect": "depthOfField", "measuredMsPerMp": 0.048, "declaredMaxMsPerMp": 0.15, "verdict": "under", "ratio": 0.32 },
+    { "effect": "doorGraphics", "measuredMsPerMp": 0.0, "declaredMaxMsPerMp": 0.01, "verdict": "under", "ratio": 0.0 }
+  ],
+  "multiFloorHeadline": {
+    "baseFloorIndex": 1,
+    "secondFloorIndex": 2,
+    "secondFloorName": "Roof",
+    "frame": {
+      "floor-1": { "gpuMsP50": 35.65, "avgFps": 26.6, "p1LowFps": 23.9, "hitchCount": 0 },
+      "floor-2": { "gpuMsP50": 35.19, "avgFps": 27.0, "p1LowFps": 23.9, "hitchCount": 0 }
+    },
+    "worldDrawBothFloors": { "floor-1": 25.11, "floor-2": 25.123 },
+    "note": "geometry.worldDraw dominance is near-identical on both floors — a whole-map cost, not a Roof-specific artifact."
+  },
+  "rapidStressHeadline": {
+    "steady-sweep": { "gpuMsP50": 35.65, "avgFps": 26.6, "hitchCount": 0 },
+    "rapid-diagonal-stress": { "gpuMsP50": 39.65, "avgFps": 24.6, "p1LowFps": 20, "hitchCount": 2, "p99FrameMs": 50.1 },
+    "worldDrawUnderStress": { "steady": 25.11, "stress": 28.629 },
+    "windowUnderStress": { "steady": 2.486, "stress": 3.414 },
+    "recovery": { "elapsedMs": 2008, "settled": true, "timedOut": false }
+  },
+  "vram": {
+    "estimatedTotalMb": 1354.59,
+    "ceilingMb": 2500,
+    "headroomFraction": 0.458,
+    "verdict": "ok"
+  },
+  "archiveNote": "Filed 2026-08-25 per feedback_archive_long_reports — companion synthesis at 2026-08-25-town-river-bridge-roof-sweep.md. Scene: modules/mythica-machina-town-river-bridge (Tower Bridge Town/River map), floorIndex 2 (Roof), captured at Ingram's own reference resolution (3840x1906, DPR 1.5). NOT the internal msa-bench Mansion — this looks like real product-map content."
+}

@@ -238,6 +238,17 @@ export function buildBloomMaterials({
     upsampleMaterial,
     upsample: { inputNode: upInputNode, uFilterRadius },
     compositeMaterial,
+    // EXPOSED 2026-08-30 — the tier gate's own live seam. `coreTexNode`
+    // always reads mips[0] regardless of tier (never needs re-pointing);
+    // `atmoTexNode` reads mips[atmoTop], and atmoTop is exactly what moves
+    // between the cheap/full pyramid. Unlike depth-of-field's own composite
+    // (a FIXED-LENGTH array of mip texture nodes, genuinely baked into the
+    // compiled shader's structure — TSL/WGSL has no runtime array
+    // indexing), bloom's composite reads only TWO plain texture() nodes —
+    // so a tier change here needs a live re-point of this ONE node's
+    // `.value`, never a material rebuild. See vt-pan-viewer.js's own
+    // live bloom-tier handling for the caller side of this.
+    atmoTexNode,
     // Uniform handles the viewer writes each frame from the resolved params.
     uniforms: {
       threshold: uThreshold,

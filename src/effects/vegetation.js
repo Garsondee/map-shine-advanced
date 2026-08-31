@@ -345,7 +345,7 @@ export const VEGETATION_PARAMS = Object.freeze({
     default: 34,
     category: 'Motion',
     label: 'Sway amount',
-    help: 'World-pixel displacement at the canopy top under a full-strength wind sample (before the per-kind multiplier and Wind response). The root of the mesh never moves; the top moves this far.',
+    help: 'World-pixel displacement at the canopy top under a full-strength wind sample (before the per-kind multiplier and Wind response). This is a smooth per-VERTEX displacement of a tessellated mesh, so it moves the plant without ever folding its texture.',
   },
   swayFrequency: {
     type: 'float',
@@ -390,6 +390,76 @@ export const VEGETATION_PARAMS = Object.freeze({
     category: 'Motion',
     label: 'Gale rate gain',
     help: 'Extra oscillation speed at full gale, as a multiple of the calm-wind frequency above — the difference between a gale that thrashes and one that just swings wider.',
+  },
+  // ── TORQUE-SWAY (2026-08-27, tier 6 / extreme only) ─────────────────────
+  // Ingram: "a 'rotational sway' around the centre of mass... wind pressing
+  // on one side or the other side might cause the whole thing to sway in a
+  // rotational way and then include the idea of a 'spring' that encourages
+  // the plant to sway back in the opposite rotational direction." This is
+  // `deferredRungs`' own `spring-response` entry, finally built — a real,
+  // persistent-state spring per clump cell (`vt/vegetation-spring-gpu.js`),
+  // driven by wind sampled at two points straddling each cell's pivot (the
+  // differential IS the torque), plus an independent lift spring driven by
+  // local gust strength. See `vegetation-render.js#springChase` for the
+  // integrator math this shares with the lift channel below.
+  //
+  // Deliberately FOUR params here, not five: the lever-arm/rotation-radius
+  // safety cap is a code constant (`VEG_SPRING_ARM_LEN_FRACTION` in
+  // vegetation-spring-gpu.js), not a live dial — the same "structural never-
+  // exceed backstop, not a creative dial" posture VEG_MAX_DISPLACE_PX etc.
+  // already take (see this file's own header on the 18-param growth).
+  torqueGain: {
+    type: 'float',
+    min: 0,
+    max: 4,
+    step: 0.01,
+    // Conservative by design, verify live before raising: the rotation angle
+    // this drives is NOT smoothly blended at a clump-cell boundary the way
+    // the angle's own VALUE is (bilinear texture read) — the PIVOT each
+    // vertex rotates around stays hard-snapped to its own nearest cell centre,
+    // so the displacement discontinuity there is roughly
+    // `clumpSizePx * angle_radians`. A bigger Clump size (above) makes this
+    // worse at the same angle — raise this gradually and watch the seams
+    // between clumps, not just the motion itself.
+    default: 0.15,
+    category: 'Motion',
+    label: 'Torque gain',
+    help: "How strongly a wind difference between one side of a clump and the other twists it — the rotational counterpart to Sway amount. 0 = no rotation at all, translation-only sway exactly as before this existed. Interacts with Clump size: a larger clump makes the same angle's seam at its own boundary more visible, so raise both together carefully.",
+  },
+  springStiffness: {
+    type: 'float',
+    min: 0.1,
+    max: 40,
+    step: 0.1,
+    default: 6,
+    category: 'Motion',
+    label: 'Spring stiffness',
+    help: 'How strongly the torque/lift spring pulls toward its wind-driven target — higher snaps back faster and rings at a higher frequency. Critical damping for a given stiffness is 2×√stiffness; see Spring damping below.',
+  },
+  springDamping: {
+    type: 'float',
+    min: 0,
+    max: 20,
+    step: 0.1,
+    // Deliberately UNDERDAMPED at the default stiffness (critical damping at
+    // stiffness=6 is 2*sqrt(6)=4.9) — a gust should visibly overshoot and
+    // counter-sway before settling, not glide straight to rest. Raise past
+    // critical for a plant that recovers without ever swinging back past
+    // neutral.
+    default: 3,
+    category: 'Motion',
+    label: 'Spring damping',
+    help: 'How quickly the torque/lift spring settles. Below 2×√(Spring stiffness) the plant visibly overshoots and swings back the other way before settling — the "spring" feel. At or above that line it recovers smoothly with no counter-sway.',
+  },
+  liftGain: {
+    type: 'float',
+    min: 0,
+    max: 40,
+    step: 0.5,
+    default: 6,
+    category: 'Motion',
+    label: 'Lift gain',
+    help: 'How much a gust visibly lifts the canopy, in world px, at full local wind strength — drives the SAME spring as Torque gain (Spring stiffness/damping apply to both). Applied to the canopy only, never its ground shadow: the gap that opens between them on a gust is what reads as lift. 0 = no vertical motion, rotation-only.',
   },
   // ── WIND ARRIVAL (2026-08-15) ───────────────────────────────────────────
   // See VEGETATION_KINDS's own "THE THREE ARRIVAL/DECORRELATION CONSTANTS"
@@ -562,6 +632,56 @@ export const VEGETATION_PARAMS = Object.freeze({
 });
 
 /**
+ * THE keys `MapShine.setVegetation` (boot.js) actually reads off a live
+ * partial — i.e. every `VEGETATION_PARAMS` key EXCEPT the two named per-kind
+ * height exceptions (`treeHeightFt`/`bushHeightFt`, which vegetation's own
+ * discovery/placement path resolves differently — not wired to this transient-
+ * override console/UI door). Kept as an EXPLICIT array, not derived via
+ * `Object.keys(VEGETATION_PARAMS)`, matching `setVegetation`'s own long-
+ * standing reasoning (boot.js): a rename must be a visible typo (an unmatched
+ * key falling through to nothing), never a silent auto-sync.
+ *
+ * ⚠️ WHY THIS IS A NAMED, EXPORTED CONSTANT AND NOT AN INLINE ARRAY LITERAL
+ * INSIDE `setVegetation` (2026-08-27) — found while adding `torqueGain`/
+ * `springStiffness`/`springDamping`/`liftGain`: `groundLagSec`/`gustTurbulence`
+ * (added 2026-08-15) had been declared in `VEGETATION_PARAMS`, were already
+ * rendering live Advanced-panel sliders, and were NEVER added to the old
+ * inline list — a real, live, silent no-op bug (dragging either slider did
+ * nothing, no error). An inline array has nothing to check it against; a
+ * named export does — `vegetation.test.mjs` asserts this list plus the two
+ * named exceptions above exactly equals `Object.keys(VEGETATION_PARAMS)`,
+ * so the NEXT forgotten param is a red test, not a quietly dead slider.
+ *
+ * @type {ReadonlyArray<string>}
+ */
+export const VEGETATION_LIVE_PARAM_KEYS = Object.freeze([
+  'intensity',
+  'windResponse',
+  'swayAmount',
+  'swayFrequency',
+  'swayCurve',
+  'galeBendAmount',
+  'galeRateGain',
+  'torqueGain',
+  'springStiffness',
+  'springDamping',
+  'liftGain',
+  'flutterAmount',
+  'flutterFrequency',
+  'flutterGaleFrequency',
+  'flutterUvScale',
+  'flutterScale',
+  'clumpSizePx',
+  'clumpPhaseSpread',
+  'clumpAmpSpread',
+  'clumpDirSpread',
+  'groundLagSec',
+  'gustTurbulence',
+  'edgeFadeWidthPx',
+  'shadowStrength',
+]);
+
+/**
  * The manifest — the effect as data (Effects.md §2 shape). `enabledFromProfile:
  * 'low'` matches `CANDLE_FLAME`'s own reasoning: a handful of swaying overlays
  * is cheap (one wind sample per MESH, never per fragment — see
@@ -615,10 +735,21 @@ export const VEGETATION = Object.freeze({
   // touched the performance profile setting. Below `standard` the picture
   // genuinely simplifies (no shadow below `performance`, no flutter below
   // `low`); above it the shadow's smear gets progressively finer, ending at
-  // `extreme` — which is also this ladder's RESERVED SLOT: a future rung that
-  // should only ever run on the top profile (self-shadowing and true per-plant
-  // clump differentiation, both already named in `deferredRungs` below) extends
-  // tier 5 in place rather than requiring the ladder to be renumbered.
+  // tier 5 — this ladder's ORIGINAL reserved slot: a future rung that should
+  // only ever run on the top profile (self-shadowing and true per-plant clump
+  // differentiation, both still named in `deferredRungs` below) extends tier 5
+  // in place rather than requiring the ladder to be renumbered.
+  //
+  // Tier 6 (2026-08-27, torque-sway) is a NEW rung rather than a third
+  // extension of tier 5's own reservation — rotation/lift is a whole extra
+  // GPU simulation pass, a genuinely different KIND of cost than "more
+  // shadow-smear taps in an already-built pass" even though both land in the
+  // same C8 bucket (Effects.md §1's cost-class table tops out at C8 — there
+  // is no higher rung to escalate to; C8 means "the most expensive class",
+  // not "exactly as expensive as tier 5"). Kept as a separate rung anyway so
+  // rotation/lift can be promoted down independently of self-shadow/true-
+  // clump-differentiation once either lands, without dragging the other with
+  // it (Law 3).
   tiers: Object.freeze([
     Object.freeze({
       n: 0,
@@ -675,9 +806,24 @@ export const VEGETATION = Object.freeze({
       fromProfile: 'extreme',
       cost: Object.freeze({ class: 'C8', estMsPerMp: 0.2 }),
       adds:
-        'the finest shadow smear this effect draws (12 stations). Also the reserved top rung: the next ' +
-        'extreme-only addition to this effect (self-shadow, true clump differentiation — see ' +
-        'deferredRungs) extends this rung rather than needing a new one appended.',
+        'the finest shadow smear this effect draws (12 stations). Still the reserved slot for a future ' +
+        'extreme-only addition in this SAME cost class (self-shadow, true clump differentiation — see ' +
+        'deferredRungs) to extend rather than needing a new rung of its own.',
+    }),
+    Object.freeze({
+      n: 6,
+      name: 'torque-sway',
+      fromProfile: 'extreme',
+      // Unmeasured — new subsystem (2026-08-27), not yet seen live. C8 is the
+      // top of Effects.md §1's cost-class table (there is no rung above it to
+      // escalate to) — see this manifest's own header above for why this is
+      // still a SEPARATE rung from tier 5 despite sharing that top class.
+      cost: Object.freeze({ class: 'C8', estMsPerMp: 0.2 }),
+      adds:
+        'the canopy rotates around its own clump-cell pivot under a wind-torque-driven, spring-damped ' +
+        "twist, and lifts/settles independently — the TRANSIENT half deferredRungs' own 'spring-response' " +
+        'entry named (this rung retires that entry). Below this rung vegetation sways and translates but ' +
+        'never rotates or lifts, exactly as it did before this rung existed.',
     }),
   ]),
   // Recorded, NOT built — honest rungs (Effects.md §0), matching
@@ -692,15 +838,14 @@ export const VEGETATION = Object.freeze({
         "(scene/mask-derive.js's per-page extraction is the right foundation). PARTLY SUPERSEDED " +
         '2026-07-23: tessellation + world-cell hashing already gives per-region phase/amplitude/' +
         'direction variation with no CPU analysis, which was the visible half of the problem. What ' +
-        'remains is that a single plant can still shear slightly across a cell boundary.',
-    }),
-    Object.freeze({
-      name: 'spring-response',
-      note:
-        'a critically-damped spring per swaying region so foliage lags the wind and overshoots on ' +
-        'release, instead of tracking it instantaneously. The persistent-bend term added 2026-07-23 ' +
-        'gives the STEADY-state half of this (a canopy that stays bent in a gale); a real spring ' +
-        'would add the TRANSIENT half (the whip when a gust arrives or drops).',
+        'remains is that a single plant can still shear slightly across a cell boundary — SHARPER since ' +
+        'tier 6 (2026-08-27): torque-sway blends its ANGLE smoothly across cells (bilinear texture read) ' +
+        'but rotates each vertex around its own hard-snapped nearest cell pivot, so the residual ' +
+        'discontinuity is roughly `clumpSizePx * angle_radians`, worse than plain translation ever had. A ' +
+        'proper fix (4-corner manual blend of the resulting DISPLACEMENT vectors, not the angle) is real, ' +
+        'extra, uncharted-in-this-codebase per-vertex work, deliberately not built for tier 6 v1 — true ' +
+        'islands would also solve this by construction, since a plant would never straddle a pivot it ' +
+        'shares with another plant.',
     }),
     Object.freeze({
       name: 'self-shadow',

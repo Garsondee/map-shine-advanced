@@ -30,6 +30,7 @@
  * just that the source param is textually referenced somewhere.
  */
 import { createFireSubsystem } from '../fire-subsystem.js';
+import { fireTintMul, fireTierPlan } from '../fire-geometry.js';
 
 const SPAWN_POINT_STRIDE = 4; // x, y, brightness, jitterRadiusPx — mirrors fire-spawn-points.js
 
@@ -258,6 +259,33 @@ export function run(t) {
     engineInstances.every((e) => e.paramCalls.at(-1)?.intensity === 1.8)
   );
 
+  // ── THE COLOUR CC SET (2026-08-30) — hueShiftRad/posterizeAmount/bandCount/
+  // tintMul are the other four `fireRuntimeFromParams` fields nothing ever
+  // read (fire.js's "Look" category header has the full account). GLOBAL like
+  // motionSpeed/intensity above — every engine must receive them, ember and
+  // smoke included, not just flame's four archetype engines. ──
+  state.params = { ...state.params, colorHueShift: 45, posterize: 0.6, bandCount: 5, color: '#ff0000' };
+  subsystem.sync(renderer, 112, 0.016, rect);
+  const expectedTintMul = fireTintMul('#ff0000');
+  t.ok(
+    'colorHueShift (45°, no fuel contribution) reaches every engine as hueShiftRad = π/4',
+    engineInstances.every((e) => Math.abs(e.paramCalls.at(-1)?.hueShiftRad - Math.PI / 4) < 1e-6)
+  );
+  t.ok(
+    'posterize reaches every engine as posterizeAmount',
+    engineInstances.every((e) => e.paramCalls.at(-1)?.posterizeAmount === 0.6)
+  );
+  t.ok(
+    'bandCount reaches every engine unchanged',
+    engineInstances.every((e) => e.paramCalls.at(-1)?.bandCount === 5)
+  );
+  t.ok(
+    "the Flame tint swatch reaches every engine as tintMul, fireTintMul's own output",
+    engineInstances.every((e) =>
+      (e.paramCalls.at(-1)?.tintMul ?? []).every((c, i) => Math.abs(c - expectedTintMul[i]) < 1e-9)
+    )
+  );
+
   // ── THE STALE-fires REGRESSION (2026-08-12): `fires` (cohesion's own pull
   // TARGETS, from extractFiresFromMask) is a DIFFERENT extraction than
   // `spawnCloud` (from extractFireSpawnPoints) over the same grid, and can
@@ -290,5 +318,52 @@ export function run(t) {
       const after = e.spawnCalls.at(-1)?.points;
       return before && after && (after[0] !== before[0] || after[1] !== before[1]);
     })
+  );
+
+  // ── THE 3RD LEVER (2026-08-30) — spriteCountScale, LIVE ──────────────────
+  // `state.perfTier` has sat at its fixture value (2) since construction;
+  // every block above exercised a DIFFERENT param without ever moving it.
+  // This is the first assertion in this file that a live PROFILE change
+  // (not a look param) reaches `activeCount` at all — before this lever
+  // existed, `activeCount` had no tier dependency whatsoever, so this same
+  // test written against yesterday's code would have found the ratios
+  // below all equal to 1.
+  const flame0 = flameEngines[0];
+  const atTier2 = flame0.paramCalls.at(-1)?.activeCount;
+  t.ok('a resolved activeCount exists at the fixture`s own tier (2)', Number.isFinite(atTier2) && atTier2 > 0);
+
+  state.perfTier = 0;
+  subsystem.sync(renderer, 128, 0.016, rect);
+  const atTier0 = flame0.paramCalls.at(-1)?.activeCount;
+  t.ok(
+    `tier 0 genuinely shrinks activeCount versus tier 2 (${atTier0} vs ${atTier2})`,
+    Number.isFinite(atTier0) && atTier0 < atTier2
+  );
+  t.ok(
+    'the shrink matches fireTierPlan(0).spriteCountScale exactly, not an approximation',
+    Math.abs(atTier0 / atTier2 - fireTierPlan(0).spriteCountScale / fireTierPlan(2).spriteCountScale) < 1e-9
+  );
+
+  state.perfTier = 5;
+  subsystem.sync(renderer, 144, 0.016, rect);
+  const atTier5 = flame0.paramCalls.at(-1)?.activeCount;
+  t.ok(
+    `tier 5 (the ceiling) is genuinely richer than tier 0 (${atTier5} vs ${atTier0})`,
+    Number.isFinite(atTier5) && atTier5 > atTier0
+  );
+
+  state.perfTier = 3;
+  subsystem.sync(renderer, 160, 0.016, rect);
+  const atTier3 = flame0.paramCalls.at(-1)?.activeCount;
+  t.ok(
+    'tier 3 (standard, the DEFAULT profile) and tier 5 (extreme) draw the identical sprite count — the ' +
+      'ceiling this lever was designed never to exceed, matching this session`s own "standard+ byte-identical" ' +
+      'discipline for every other effect',
+    atTier3 === atTier5
+  );
+  t.ok(
+    'ember and smoke engines received the SAME tier-scaled treatment as flame, not just the archetype tested above',
+    Math.abs((emberEngine.paramCalls.at(-1)?.activeCount ?? -1) / atTier3 - 10 / 12) < 1e-9 &&
+      Math.abs((smokeEngine.paramCalls.at(-1)?.activeCount ?? -1) / atTier3 - 24 / 12) < 1e-9
   );
 }

@@ -43,6 +43,7 @@ import {
   buildSpecularSurfaceMaterial,
   SPECULAR_MASK_IMAGE_SCALE,
   SPECULAR_DEFAULT_ISLAND_SPREAD,
+  SPECULAR_DEFAULT_TIER,
 } from './specular-render.js';
 import { keyLightDirection, describeSpecularMapping } from './specular-material.js';
 import { buildSpecularIslandPack } from './specular-islands.js';
@@ -182,18 +183,38 @@ export function createSpecularSurfaceSubsystem({
    * exported, and used by nothing until this line). */
   let islandSpread = SPECULAR_DEFAULT_ISLAND_SPREAD;
 
-  const surface = buildSpecularSurfaceMaterial({
-    THREE,
-    maskTexture,
-    islandPackTexture,
-    illumTexture,
-    depthTexture,
-    uViewRect,
-    uOutdoorsRect,
-    outdoorsTexNode,
-    buildOutdoorsGate,
-    timeMsNode,
-  });
+  /**
+   * Rebuilds the whole material for a new ladder rung — closes over the
+   * subsystem's OWN current `maskTexture`/`islandPackTexture` rather than
+   * taking them as parameters, so a rebuild triggered by a tier change always
+   * reflects whatever is CURRENTLY loaded, not whatever was current when the
+   * subsystem was constructed. Mirrors water-surface-subsystem.js's own
+   * `buildSurfaceForTier` — same reasoning, same shape (Effects.md Law 4: the
+   * shimmer/parallax/life/islands/sunAndSky gates are JS-time branches baked
+   * into the compiled shader graph, not values a uniform can flip).
+   * @param {number} tier
+   */
+  function buildSurfaceForTier(tier) {
+    return buildSpecularSurfaceMaterial({
+      THREE,
+      maskTexture,
+      islandPackTexture,
+      illumTexture,
+      depthTexture,
+      uViewRect,
+      uOutdoorsRect,
+      outdoorsTexNode,
+      buildOutdoorsGate,
+      timeMsNode,
+      tier,
+    });
+  }
+
+  /** The ladder rung the CURRENT `surface` was actually built for — read
+   * `surface.tier` on every rebuild (below), not the requested value, same
+   * discipline water's own `builtForTier` uses. */
+  let builtForTier = SPECULAR_DEFAULT_TIER;
+  let surface = buildSurfaceForTier(builtForTier);
 
   // ONE MESH, ADDITIVE — see the header for why the multiply pass is gone.
   const mesh = new THREE.Mesh(geometry, surface.specularMaterial);
@@ -480,6 +501,36 @@ export function createSpecularSurfaceSubsystem({
    * @param {{minX:number,minY:number,maxX:number,maxY:number}|null} viewRect
    */
   function sync(floorIndex, viewRect) {
+    // THE TIER — read FIRST, so a rebuild (if needed) happens before anything
+    // else touches `surface` this frame. See `buildSurfaceForTier`'s own
+    // header for why a full rebuild, not a uniform, is what a tier change
+    // requires.
+    const state = getSpecularRenderState();
+    const resolvedTier = Number.isFinite(state.perfTier) ? state.perfTier : SPECULAR_DEFAULT_TIER;
+    if (resolvedTier !== builtForTier) {
+      const prev = surface;
+      surface = buildSurfaceForTier(resolvedTier);
+      prev.specularMaterial?.dispose?.();
+      prev.debugMaterial?.dispose?.();
+      builtForTier = surface.tier;
+      // A FRESH material starts at ITS OWN constructor defaults — re-push
+      // everything that is normally set ONCE (on mask load / island bake)
+      // rather than every sync(), or it would silently revert: the crop
+      // bounds (else the mask samples the whole 0..1 UV range instead of the
+      // padded content box) and the debug instrument's own bake-status
+      // uniform (else channel 6 would falsely claim "never baked" after a
+      // tier change — exactly the class of bug this effect's own history
+      // calls `feedback_instruments_must_not_lie`).
+      if (paddedBoundsUv) surface.setMaskUvBounds(paddedBoundsUv);
+      surface.setIslandBakeStatus(islandBakeStatus);
+      // Force every cached value below to re-push onto the FRESH material —
+      // it starts back at its constructor defaults, and the key-based cache
+      // below exists to skip REDUNDANT writes, not the first write to a new
+      // object.
+      lastParamsKey = '';
+      lastSkyKey = '';
+    }
+
     ensureMaskImage(floorIndex);
 
     // THE EXPECTED DEPTH — STAGE 3 (2026-08-05). Pushed every frame and NEVER
@@ -519,8 +570,9 @@ export function createSpecularSurfaceSubsystem({
     // THE LOOK PARAMS. A string compare against cached uniform writes, and NOT
     // gated on any load generation: a slider drag changes no texture and
     // produces no reload, so gating these on the mask would make every control
-    // in the panel do nothing.
-    const state = getSpecularRenderState();
+    // in the panel do nothing. (`state` was already fetched above, for the
+    // tier check — reused here rather than a second `getSpecularRenderState()`
+    // call.)
     const p = state.params ?? {};
     const layerParams = state.layers ?? [];
     const key = [
@@ -630,6 +682,16 @@ export function createSpecularSurfaceSubsystem({
         // effect — reported so a channel can never be silently left on and then
         // mistaken for a rendering bug.
         debugChannel,
+        // THE TIER GATE'S OWN HONESTY CHECK (`feedback_instruments_must_not_
+        // lie`), mirroring water-surface-subsystem.js's own field exactly —
+        // `perfTier` on the registration's `getRenderState()` is what the
+        // cascade RESOLVED; this is what the LIVE material actually compiled
+        // with (`specularTierPlan`, read inside `buildSurfaceForTier` above).
+        // They can disagree for at most one `sync()` between a resolve and
+        // its rebuild; agreeing every other frame is the proof the
+        // rebuild-on-tier-change wiring (2026-08-29) is actually running,
+        // not just resolved-and-reported the way it was before that fix.
+        perfTier: builtForTier,
         enabled,
         floor: loadedFloor,
         bounds: contentBoundsWorld,

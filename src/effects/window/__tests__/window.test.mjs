@@ -33,7 +33,16 @@ export function run(t) {
   // --- the ladder: BUILT rungs in `tiers`, the rest honestly deferred ------
   ok('tier 0 exists — the coarse pin (Effects.md Law 1)', WINDOW.tiers[0]?.n === 0);
   ok('tier 0 is named for what it does, not for a technique', WINDOW.tiers[0]?.name === 'cookie');
-  ok('exactly one tier is BUILT — this increment is deliberately small', WINDOW.tiers.length === 1);
+  // GREW 1 → 2 (2026-08-29): `glassPerfGate`'s own deferred-rung note named
+  // the exact gap tier 1 closes ("the machinery to flip it while running...
+  // specular carries exactly that machinery and is the template") — see
+  // window-surface-subsystem.js's own rebuild-on-tier-change. Still small and
+  // deliberate: one real gate (`glass`), not a sprawling ladder.
+  ok('exactly two tiers are BUILT — still a deliberately small ladder', WINDOW.tiers.length === 2);
+  ok(
+    'tier 1 is the glass rung, bought from performance up',
+    WINDOW.tiers[1]?.n === 1 && WINDOW.tiers[1]?.name === 'glass' && WINDOW.tiers[1]?.fromProfile === 'performance'
+  );
   const allNames = [...WINDOW.tiers.map((x) => x.name), ...WINDOW.deferredRungs.map((x) => x.name)];
   ok('no rung is claimed twice', new Set(allNames).size === allNames.length);
   ok(

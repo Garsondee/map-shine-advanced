@@ -112,7 +112,17 @@ export function createSpecularRegistration({
    * authoring model showing up in the plumbing.
    */
   function getRenderState() {
-    return { enabled: readout.enabled, params: readout.params ?? {}, layers: layerOverrides, debugChannel };
+    // perfTier ADDED 2026-08-29 — closing the exact gap `readout`'s own
+    // comment already named ("same fix as fluid-registration.js's own
+    // readout"): the tier was resolved and reported, but never reached the
+    // render seam. See specular-render.js#specularTierPlan's own header.
+    return {
+      enabled: readout.enabled,
+      params: readout.params ?? {},
+      layers: layerOverrides,
+      debugChannel,
+      perfTier: readout.perfTier,
+    };
   }
 
   /**

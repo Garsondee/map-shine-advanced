@@ -329,6 +329,113 @@ function dilateCellMask(src, n) {
 }
 
 /**
+ * SUMMARIZE WHAT COVERAGE MESHING IS ACTUALLY BUYING (2026-08-25) — pure
+ * bookkeeping over the fields `setTileGeometry` (vt-pan-viewer.js) stamps on
+ * every tile record it builds (`coverageGrid`, `coverageCells`,
+ * `coverageOccupied`, `vegActive`). Touches no THREE/renderer state, so it is
+ * directly testable the same way every other export in this file already is
+ * — unlike `getGeometryComposition()` in vt-pan-viewer.js, which reads live
+ * `itemStates`/`lastItems` closure state and stays untested for that reason
+ * (CONVENTIONS §4: "extensive mocking for little signal").
+ *
+ * Built because this exact question — "is coverage meshing reaching THIS
+ * map's art, and how much is it actually cutting" — had no answer anywhere
+ * except reading `t.coverageSig` off a live tile record by hand in a
+ * console. See this module's own header for the mechanism; this function
+ * only reports on it.
+ *
+ * THREE buckets per tile, not two, because "drawing an un-reduced quad"
+ * means two different things and conflating them hides a real gap:
+ *   - `neverEvaluated` — no coverage grid has ever reached this tile
+ *     (`coverageGrid` falsy). It is drawing a full quad/tessellation purely
+ *     because the async grid fetch (`requestItemAlphaGrid`) hasn't landed
+ *     yet, or never resolved — NOT because meshing looked and found nothing
+ *     to cut. A raw-fallback tile's very first build is always in this
+ *     bucket (`setTileGeometry` is called with no `coverageGrid` argument on
+ *     that path); it should self-correct once `refreshWholeImageItem`'s
+ *     re-mesh gate sees the grid arrive, so a large steady-state count here
+ *     (not just immediately after load) is the signal worth chasing.
+ *   - `fullyDense` — a grid DID arrive and `buildCoverageCellMask`
+ *     legitimately found (near-)100% of cells occupied (or declined for some
+ *     other fail-open reason) — correctly left un-reduced, not a gap.
+ *   - `meshed` — a grid arrived and real cells were dropped. The feature's
+ *     actual, working win; `cellsKept`/`cellsTotal` name the reduction
+ *     instead of leaving it invisible.
+ *
+ * Also splits owned triangles by material family (`vegActive`), because a
+ * single vegetation-tessellated item (curl-noise + wind-sampled
+ * `buildVegetationMaterial`, not the plain `buildWholeImageMaterial`) was
+ * separately measured at 97% of `geometry.worldDraw`'s cost in one prior
+ * investigation (`docs/planning/Performance-Insights.md` §4) — the
+ * `item.kind` taxonomy (levelBackground/tile/levelForeground) does not
+ * follow this fault line, since a Case-1 embedded-vegetation tile can be any
+ * of those kinds.
+ *
+ * @param {Array<{
+ *   coverageGrid?: unknown,
+ *   coverageCells?: number,
+ *   coverageOccupied?: number,
+ *   vegActive?: boolean,
+ *   mesh?: { visible?: boolean, geometry?: { index?: { count: number }, attributes?: { position?: { count: number } } } } | null,
+ * }>} tiles - tile records as `setTileGeometry` builds them (or plain
+ *   objects shaped the same way, for tests — nothing here reads a real
+ *   THREE.Mesh method, only `.visible`/`.geometry.index.count`).
+ * @returns {{
+ *   neverEvaluated: number, meshed: number, fullyDense: number,
+ *   cellsTotal: number, cellsKept: number, rasterizedFractionPct: number|null,
+ *   plainTriangles: number, vegetationTriangles: number,
+ * }}
+ */
+export function summarizeTileCoverage(tiles) {
+  const out = {
+    neverEvaluated: 0,
+    meshed: 0,
+    fullyDense: 0,
+    cellsTotal: 0,
+    cellsKept: 0,
+    rasterizedFractionPct: null,
+    plainTriangles: 0,
+    vegetationTriangles: 0,
+  };
+  if (!Array.isArray(tiles)) return out;
+  for (const t of tiles) {
+    if (!t?.mesh?.visible) continue;
+    const geom = t.mesh.geometry;
+    const triangles = geom?.index
+      ? geom.index.count / 3
+      : geom?.attributes?.position
+        ? geom.attributes.position.count / 3
+        : 0;
+    if (t.vegActive) out.vegetationTriangles += triangles;
+    else out.plainTriangles += triangles;
+
+    if (!t.coverageGrid) {
+      out.neverEvaluated++;
+      continue;
+    }
+    const cells = Number.isFinite(t.coverageCells) ? t.coverageCells : 0;
+    // `buildCoverageCellMask` never returns a mask with occupiedCount>=cells
+    // (its own "nothing to gain" fail-open, see this file's header) — so
+    // occupied<cells here is a reliable "a real mask was applied" signal,
+    // not something that needs re-deriving from `coverageSig`.
+    const occupied = Number.isFinite(t.coverageOccupied) ? t.coverageOccupied : cells;
+    if (cells > 1 && occupied < cells) {
+      out.meshed++;
+      out.cellsTotal += cells;
+      out.cellsKept += occupied;
+    } else {
+      out.fullyDense++;
+    }
+  }
+  if (out.cellsTotal > 0) {
+    out.rasterizedFractionPct = Math.round((out.cellsKept / out.cellsTotal) * 1000) / 10;
+  }
+  out.plainTriangles = Math.round(out.plainTriangles);
+  out.vegetationTriangles = Math.round(out.vegetationTriangles);
+  return out;
+}
+
+/**
  * The index buffer for the occupied cells of an n×n tessellation, in the SAME
  * per-cell winding `buildTessellatedQuadGeometry` uses — (a,b,c)/(a,c,d) over
  * the (n+1)² vertex grid — so a coverage mesh and a full one face identically

@@ -246,6 +246,41 @@ export function piecewiseLinear(TSL, t, stops) {
 }
 
 /**
+ * Rotate a colour's HUE by `angleRad`, via the YIQ chroma plane — the same
+ * decomposition the CSS/SVG `hue-rotate()` filter spec uses, chosen over a
+ * hand-rolled 3×3 matrix so the coefficients are checkable against a known
+ * reference rather than asserted. Linear in `rgb`, so it commutes with the
+ * emission gain — safe to apply before OR after that multiply.
+ *
+ * ⚠️ NOT the grade primitive (`effects/grade/grade-ops.js`), and deliberately
+ * so — `grade/one-stack` walls off a SECOND brightness/contrast/gamma/
+ * saturation correction stack forming per-effect, but a hue rotation is not
+ * that: the global grade has no hue control at all (`temperature`/`tint`
+ * there are gentle ±20% warm/cool nudges, not a colour-wheel spin), so this
+ * cannot duplicate or fight it. It is the same category as `color` and
+ * `FIRE_FUELS.magical.hueShift` — "what colour is this fire", authored per
+ * effect, same as water's own `tint`.
+ *
+ * @param {*} TSL @param {*} rgb - vec3 node. @param {*} angleRad - float node.
+ * @returns {*} vec3 node.
+ */
+export function hueRotateNode(TSL, rgb, angleRad) {
+  const { vec3, cos, sin, dot } = TSL;
+  const y = dot(rgb, vec3(0.299, 0.587, 0.114));
+  const i = dot(rgb, vec3(0.596, -0.274, -0.322));
+  const q = dot(rgb, vec3(0.211, -0.523, 0.312));
+  const c = cos(angleRad);
+  const s = sin(angleRad);
+  const i2 = i.mul(c).sub(q.mul(s));
+  const q2 = i.mul(s).add(q.mul(c));
+  return vec3(
+    y.add(i2.mul(0.956)).add(q2.mul(0.621)),
+    y.sub(i2.mul(0.272)).sub(q2.mul(0.647)),
+    y.sub(i2.mul(1.106)).add(q2.mul(1.703))
+  );
+}
+
+/**
  * The same, for colour stops. Same linear reasoning as {@link piecewiseLinear}.
  * @returns {*} a vec3 node.
  */
@@ -516,13 +551,28 @@ export function buildFlameShapeAlpha(TSL, { nx, ny, phase, seed, archetype = 'pl
  * @param {*} args.brightness - the painted mask's value where this spawned.
  * @param {number} [args.temperature=0.85] - blends the three gradients.
  * @param {number} [args.hdrGain=FIRE_HDR_LINEAR_GAIN]
+ * @param {*} [args.posterizeAmount=null] - float node 0..1, "Banding". Null/
+ *   omitted skips the quantize step entirely rather than blending at 0, so
+ *   the opacity-only call site (which never passes it) pays nothing extra.
+ * @param {*} [args.bandCount=null] - float node, step count for banding.
+ * @param {*} [args.tintMul=null] - vec3 node, `fireTintMul`'s output. Null
+ *   skips the multiply — same zero-cost-when-unused shape as posterizeAmount.
  * @returns {{rgb:*, alpha:*}} both nodes.
  */
 export function buildFlameShading(
   TSL,
-  { t01, heat, brightness, ageToTemperature = null, hdrGain = FIRE_HDR_LINEAR_GAIN }
+  {
+    t01,
+    heat,
+    brightness,
+    ageToTemperature = null,
+    hdrGain = FIRE_HDR_LINEAR_GAIN,
+    posterizeAmount = null,
+    bandCount = null,
+    tintMul = null,
+  }
 ) {
-  const { float, clamp } = TSL;
+  const { float, clamp, mix } = TSL;
   // ⚠️ THE AUTHOR'S OWN REFERENCE RAMP, NOT V2's, AND NOT INDEXED BY AGE.
   // Author, 2026-08-09: *"Flames aren't visible yet at all and I maxed out the
   // intensity... Flame brightness effects just a white blur... the same shades
@@ -543,8 +593,20 @@ export function buildFlameShading(
   // `ageToTemperature` is a live uniform when the author is tuning; the constant
   // is the shipped default.
   const ageRate = ageToTemperature ?? float(AGE_TO_TEMPERATURE);
-  const temp = clamp(float(1).sub(t01.mul(ageRate)), float(0.08), float(1));
-  const rgb = piecewiseLinearRgb(TSL, temp, referenceFlameStops());
+  let temp = clamp(float(1).sub(t01.mul(ageRate)), float(0.08), float(1));
+  if (posterizeAmount) {
+    // POSTERIZE THE TEMPERATURE SCALAR, NEVER THE RGB — quantizing before the
+    // ramp lookup produces clean isotherm bands; quantizing the RGB afterward
+    // produces posterized noise instead (FIRE_RAMP_WOOD's own header,
+    // fire-geometry.js). `mix`, the GLOBAL function, not `.mix()` the method
+    // — `a.mix(b,t)` silently means `mix(b,t,a)` (reference_tsl_method_
+    // chaining_trap), which would blend the wrong two operands here.
+    const steps = (bandCount ?? float(8)).sub(float(1));
+    const quantized = temp.mul(steps).round().div(steps);
+    temp = mix(temp, quantized, posterizeAmount);
+  }
+  let rgb = piecewiseLinearRgb(TSL, temp, referenceFlameStops());
+  if (tintMul) rgb = rgb.mul(tintMul);
   const emission = piecewiseLinear(TSL, t01, FLAME_EMISSION_STOPS)
     .mul(float(FLAME_CORE_EMISSION * hdrGain))
     .mul(heat)

@@ -313,18 +313,54 @@ export {
   DEFAULT_SETTINGS as CAMERA_PATH_DEFAULT_SETTINGS,
 } from './camera-path.js';
 
-// THE SCENE-CONTROLS (left palette) TOGGLE — the ONE button that opens the
-// control panel (docs/planning/Control-Panel.md), for both GM and player;
-// which zones it shows is a permission filter INSIDE the panel, not a second
-// button. `syncControlPanelButtonState` re-syncs the toolbar highlight when
-// the panel's visibility changes for a reason other than this exact button.
-export { registerControlPanelButton, syncControlPanelButtonState } from './scene-controls-button.js';
-// THE ANCHOR VIEW TOGGLE — a second, GM-only tool just below the MSA button
-// that opens ui/anchor-view-mode.js (see scene-controls-button.js's own doc).
+// TILE MOTION (2026-08-27, V2 port + replan) — GM-authored rotate/orbit/
+// pingPong/sine/texture-scroll motion for tiles. `tile-motion.js` is the pure
+// rigid-transform math (Node-tested); `tile-motion-runtime.js` is the live
+// glue (per-tile + scene flags, hooks, the one per-frame resolve the render
+// side calls). Every mutation below is the extension seam for a future
+// non-GM trigger source (see tile-motion-runtime.js's own header) — nothing
+// else has private access these don't.
+export {
+  MOTION_TYPES as TILE_MOTION_TYPES,
+  ROTATION_EASING_TYPES as TILE_MOTION_ROTATION_EASING_TYPES,
+  normalizeTileMotionConfig,
+  normalizeTransportState as normalizeTileMotionTransport,
+  worldPointToLocalPivot as tileMotionWorldPointToLocalPivot,
+} from './tile-motion.js';
+export {
+  initializeTileMotionRuntime,
+  disposeTileMotionRuntime,
+  resolveTileMotionFrame,
+  setTileEditSuppressed as setTileMotionEditSuppressed,
+  getTileMotionTileList,
+  getTileMotionConfig,
+  getTileMotionTransportState,
+  getTileMotionRestPose,
+  getTileMotionRuntimeStatus,
+  getTileMotionSummary,
+  setTileMotionConfig,
+  startTileMotion,
+  stopTileMotion,
+  pauseTileMotion,
+  resumeTileMotion,
+  resetTileMotionPhase,
+  setTileMotionSpeedPercent,
+  setTileMotionTimeFactorPercent,
+  setTileMotionAutoPlayEnabled,
+  activateTileMotionNativeTool,
+  watchTileMotionSelection,
+} from './tile-motion-runtime.js';
+
+// THE SCENE-CONTROLS (left palette) TOGGLES — one per room. The old panel's
+// own `map-shine-advanced` toggle (registerControlPanelButton/
+// syncControlPanelButtonState) was deleted in the UI parity plan's phase 7b,
+// alongside the panel itself.
+// THE ANCHOR VIEW TOGGLE — a GM-only tool that opens ui/anchor-view-mode.js
+// (see scene-controls-button.js's own doc).
 export { registerAnchorViewModeButton, syncAnchorViewModeButtonState } from './scene-controls-button.js';
-// THE STUDIO TOGGLE (U1) — a third, GM-only tool that opens the new LANTERN
-// Studio side-by-side with the old panel during rollout (see scene-controls-
-// button.js's own doc for why this is the same proven mechanism, twice over).
+// THE STUDIO TOGGLE (U1) — a GM-only tool that opens the new LANTERN Studio
+// (see scene-controls-button.js's own doc for why this is the same proven
+// mechanism as Anchor View above).
 export { registerStudioButton, syncStudioButtonState } from './scene-controls-button.js';
 // THE REMOTE TOGGLE (U2) — a fourth, GM-only tool that opens the new
 // LANTERN Remote side-by-side with the panel/Studio (see scene-controls-

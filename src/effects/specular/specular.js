@@ -142,13 +142,13 @@ export const SPECULAR_PARAMS = Object.freeze({
     // the shipped default is already 7.15, so the old ceiling left barely any
     // room to push the suppression harder, which is one of the two directions
     // someone tuning this actually wants to explore.
-    max: 20,
+    max: 500,
     step: 0.05,
     // LOWERED 3 → 2.85 (2026-08-03, ROUND 18) — live-confirmed; barely
     // moved from the Round 17 default, unlike several of its neighbours.
     // RAISED 2.85 → 7.15 (ROUND 21, 2026-08-05) — new live-tuned defaults;
     // see SPECULAR_INCIDENT_STEEPNESS's own header (specular-pattern.js).
-    default: 7.15,
+    default: 200,
     category: 'Response',
     label: 'Light response',
     // NEW (2026-08-03, ROUND 17) — exposes `SPECULAR_INCIDENT_STEEPNESS`

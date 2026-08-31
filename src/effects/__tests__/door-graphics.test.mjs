@@ -47,12 +47,14 @@ export function run(t) {
   // Tier 0 is the animated leaf.
   ok('tier 0 is the animated leaf', DOOR_GRAPHICS.tiers[0]?.n === 0 && /leaf/.test(DOOR_GRAPHICS.tiers[0]?.adds ?? ''));
 
-  // The fog reveal is recorded as a HIGH-PRIORITY deferred rung — the one thing
-  // V2 had that this V1 defers, blocked only on the V3 fog system.
-  const fogRung = (DOOR_GRAPHICS.deferredRungs ?? []).find((r) => r.name === 'fog-reveal-sync');
-  ok('the fog-reveal-sync rung exists', !!fogRung);
-  ok('the fog rung is flagged high priority', fogRung?.priority === 'high');
-  ok('the fog rung names the openFactor hand-off', /openFactor/i.test(fogRung?.note ?? ''));
+  // The open-direction fog reveal sync landed 2026-08-27 (see
+  // vision-mask-render.js / door-graphics-render.js#computeTransitionSummary);
+  // what's left deferred is close-direction fade + multi-door attribution,
+  // recorded honestly rather than silently dropped.
+  const fogRung = (DOOR_GRAPHICS.deferredRungs ?? []).find((r) => r.name === 'fog-reveal-sync-close-and-multi-door');
+  ok('the fog-reveal-sync follow-on rung exists', !!fogRung);
+  ok('the fog rung records what shipped, not just what is left', /landed 2026-08-27/i.test(fogRung?.note ?? ''));
+  ok('the fog rung names the still-deferred close direction', /clos/i.test(fogRung?.note ?? ''));
   ok(
     'the roof-occlusion limitation is recorded honestly',
     (DOOR_GRAPHICS.deferredRungs ?? []).some((r) => r.name === 'roof-occlusion')

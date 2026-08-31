@@ -132,14 +132,24 @@ export function intersectRects(bodyRect, viewRect) {
  *
  * @param {{minX:number,minY:number,maxX:number,maxY:number}} regionRect - world px.
  * @param {{minX:number,minY:number,maxX:number,maxY:number}} viewRect - world px, the CURRENT view.
- * @param {number} canvasW @param {number} canvasH - the drawing buffer's own device px.
+ * @param {number} deviceW @param {number} deviceH - device px of the buffer
+ *   `tick`'s own `sceneColorTexture` arg is ITSELF sized to — in
+ *   `vt-pan-viewer.js` that is the INTERNAL tier (`internalW`/`internalH`,
+ *   what `sceneLit` is actually rendered at), never the CSS `canvasW`/
+ *   `canvasH` (a real bug, live from the first wiring commit through
+ *   2026-08-27: silently under-sized this capture by ~1/pixelRatio) and
+ *   never the PRESENT tier `drawBufW`/`drawBufH` either — the render-scale
+ *   governor can make PRESENT larger than what the sampled texture actually
+ *   holds, which would size this capture above the source data's own
+ *   density for zero quality gain, exactly when the governor is trying to
+ *   claw GPU time back.
  * @returns {{width:number, height:number}}
  */
-export function computeCaptureTargetSize(regionRect, viewRect, canvasW, canvasH) {
+export function computeCaptureTargetSize(regionRect, viewRect, deviceW, deviceH) {
   const viewSpanX = Math.max(1e-6, viewRect.maxX - viewRect.minX);
   const viewSpanY = Math.max(1e-6, viewRect.maxY - viewRect.minY);
-  const pxPerWorldX = canvasW / viewSpanX;
-  const pxPerWorldY = canvasH / viewSpanY;
+  const pxPerWorldX = deviceW / viewSpanX;
+  const pxPerWorldY = deviceH / viewSpanY;
   const rawW = ((regionRect.maxX - regionRect.minX) * pxPerWorldX) / WATER_REFRACTION_DOWNSAMPLE;
   const rawH = ((regionRect.maxY - regionRect.minY) * pxPerWorldY) / WATER_REFRACTION_DOWNSAMPLE;
   const width = Math.min(WATER_REFRACTION_MAX_DIM_PX, roundUpToBucket(rawW, WATER_REFRACTION_BUCKET_PX));
@@ -159,7 +169,7 @@ export function computeCaptureTargetSize(regionRect, viewRect, canvasW, canvasH)
  *   capturedRect: {minX:number,minY:number,maxX:number,maxY:number}|null,
  *   width: number|null,
  *   height: number|null,
- *   tick: (args: {bodyRect: object|null, viewRect: object, canvasW: number, canvasH: number, sceneColorTexture: *|null}) => void,
+ *   tick: (args: {bodyRect: object|null, viewRect: object, deviceW: number, deviceH: number, sceneColorTexture: *|null}) => void,
  *   getStatus: () => object,
  *   dispose: () => void,
  * }}
@@ -247,9 +257,9 @@ export function createWaterRefractionSubsystem({ THREE, allocator, renderWaterPa
    * place) when there is no water body, no scene-color texture yet, or the
    * body/view intersection is empty.
    */
-  function tick({ bodyRect, viewRect, canvasW, canvasH, sceneColorTexture }) {
+  function tick({ bodyRect, viewRect, deviceW, deviceH, sceneColorTexture }) {
     ticks++;
-    if (!bodyRect || !sceneColorTexture || !(canvasW > 0) || !(canvasH > 0)) {
+    if (!bodyRect || !sceneColorTexture || !(deviceW > 0) || !(deviceH > 0)) {
       lastStatus = !bodyRect ? 'no water body rect for this floor' : 'waiting on scene.color';
       return;
     }
@@ -258,7 +268,7 @@ export function createWaterRefractionSubsystem({ THREE, allocator, renderWaterPa
       lastStatus = 'water fully off-screen this frame — capture skipped';
       return;
     }
-    const { width, height } = computeCaptureTargetSize(region, viewRect, canvasW, canvasH);
+    const { width, height } = computeCaptureTargetSize(region, viewRect, deviceW, deviceH);
     ensureTarget(width, height);
     if (!quad || sceneColorTexture !== boundSceneColorTexture) rebuildMaterial(sceneColorTexture);
 

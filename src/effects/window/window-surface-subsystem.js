@@ -43,6 +43,7 @@ import {
   WINDOW_MASK_IMAGE_SCALE,
   WINDOW_DEFAULT_DAWN_DUSK_TINT_RGB,
   WINDOW_DEFAULT_NIGHT_TINT_RGB,
+  WINDOW_DEFAULT_TIER,
 } from './window-render.js';
 import { QUAD_UVS, QUAD_INDICES, buildQuadPositions } from '../../scene/index.js';
 import { computeSeedOffset } from './window-glass.js';
@@ -191,13 +192,47 @@ export function createWindowSurfaceSubsystem({
   let maskReloadHits = 0;
   let maskReloadMisses = 0;
 
-  const surface = buildWindowSurfaceMaterial({
-    THREE,
-    maskTexture,
-    depthTexture,
-    uViewRect,
-    cloudFactorNode,
-  });
+  /**
+   * Rebuilds the whole material for a new ladder rung — closes over the
+   * subsystem's OWN current `maskTexture` rather than taking it as a
+   * parameter, so a rebuild triggered by a tier change always reflects
+   * whatever is CURRENTLY loaded. Mirrors specular-surface-subsystem.js's
+   * own `buildSurfaceForTier` (Effects.md Law 4: `glass` is a JS-time branch
+   * baked into the compiled shader graph, not a value a uniform can flip).
+   * @param {number} tier
+   */
+  function buildSurfaceForTier(tier) {
+    return buildWindowSurfaceMaterial({
+      THREE,
+      maskTexture,
+      depthTexture,
+      uViewRect,
+      cloudFactorNode,
+      // Every floor's window mesh stays visible for as long as that floor
+      // exists in the scene (see this file's own header), not just while it is
+      // the VIEWED floor — so on a multi-floor map, every hidden floor was
+      // paying the full five-tap glass/dispersion/caustic chain per fragment
+      // only to have the per-pixel floor gate zero it right afterward.
+      // `gateGlass` (window-render.js, built 2026-08-12) skips that
+      // computation entirely wherever the gate has already decided a fragment
+      // is invisible — provably lossless (the gated-off value is the same
+      // zero vector the ungated path already produced there), off by default
+      // in the builder itself pending a live look. Opted in HERE, at the one
+      // real production wiring point, because a live GPU capture on a 3-floor
+      // scene (2026-08-25, Town River Bridge) measured window light at 5.5x
+      // its own declared budget with exactly two floors' worth of window
+      // meshes simultaneously visible — the live-look confirmation is still
+      // outstanding, but the math cannot make this look different on screen.
+      gateGlass: true,
+      // TIER 1 ('glass') — wired 2026-08-29. See window-render.js's own
+      // ladder header for the full account.
+      glass: tier >= 1,
+    });
+  }
+
+  /** The ladder rung the CURRENT `surface` was actually built for. */
+  let builtForTier = WINDOW_DEFAULT_TIER;
+  let surface = buildSurfaceForTier(builtForTier);
 
   // ONE MESH, ADDITIVE.
   const mesh = new THREE.Mesh(geometry, surface.windowMaterial);
@@ -304,19 +339,7 @@ export function createWindowSurfaceSubsystem({
         paddedBoundsUv = toUvBounds(contentBoundsWorld, rect);
         if (paddedBoundsUv) {
           surface.setMaskUvBounds(paddedBoundsUv);
-          // THE REFRACTION'S OWN WORLD→UV CONVERSION, derived from the SAME
-          // two boxes the bounds came from rather than from the mask rect
-          // directly — so the shader's px-to-UV step and the quad's own crop
-          // cannot drift apart, including in V's direction
-          // (`feedback_y_flip_recurring_risk`: both are `(world − min) / span`
-          // with no flip, and deriving the ratio from the already-computed
-          // pair is what keeps that true if either ever changes).
-          const worldW = contentBoundsWorld.maxX - contentBoundsWorld.minX;
-          const worldH = contentBoundsWorld.maxY - contentBoundsWorld.minY;
-          surface.setUvPerWorldPx(
-            Math.abs(worldW) > 1e-6 ? (paddedBoundsUv.maxU - paddedBoundsUv.minU) / worldW : 0,
-            Math.abs(worldH) > 1e-6 ? (paddedBoundsUv.maxV - paddedBoundsUv.minV) / worldH : 0
-          );
+          pushUvPerWorldPx();
         }
         maskInfo = {
           url,
@@ -370,6 +393,28 @@ export function createWindowSurfaceSubsystem({
     };
   }
 
+  /**
+   * THE REFRACTION'S OWN WORLD→UV CONVERSION, pushed onto the CURRENT
+   * `surface` from the SAME two cached boxes `toUvBounds`/`ensureMaskImage`
+   * already computed — never re-derived a second way, so the shader's
+   * px-to-UV step and the quad's own crop cannot drift apart, including in
+   * V's direction (`feedback_y_flip_recurring_risk`: both are
+   * `(world − min) / span` with no flip). Extracted 2026-08-29 so a tier
+   * rebuild (below) can re-push this onto the FRESH material exactly the way
+   * `ensureMaskImage`'s own mask-load callback already does — a single
+   * formula, two call sites, rather than two copies that could disagree.
+   * No-ops while no mask has loaded yet (both inputs null).
+   */
+  function pushUvPerWorldPx() {
+    if (!paddedBoundsUv || !contentBoundsWorld) return;
+    const worldW = contentBoundsWorld.maxX - contentBoundsWorld.minX;
+    const worldH = contentBoundsWorld.maxY - contentBoundsWorld.minY;
+    surface.setUvPerWorldPx(
+      Math.abs(worldW) > 1e-6 ? (paddedBoundsUv.maxU - paddedBoundsUv.minU) / worldW : 0,
+      Math.abs(worldH) > 1e-6 ? (paddedBoundsUv.maxV - paddedBoundsUv.minV) / worldH : 0
+    );
+  }
+
   /** Rewrite the shared quad to the painted AABB. */
   function cropGeometry() {
     const b = contentBoundsWorld;
@@ -412,6 +457,33 @@ export function createWindowSurfaceSubsystem({
    * is poisoned by one that never re-opens (frame-profiler.js's own
    * `unbalancedBrackets` anomaly). */
   function syncUnguarded(floorIndex) {
+    // THE TIER — read FIRST, so a rebuild (if needed) happens before anything
+    // else touches `surface` this frame. See `buildSurfaceForTier`'s own
+    // header for why a full rebuild, not a uniform, is what a tier change
+    // requires.
+    const state = getWindowRenderState();
+    const resolvedTier = Number.isFinite(state.perfTier) ? state.perfTier : WINDOW_DEFAULT_TIER;
+    if (resolvedTier !== builtForTier) {
+      const prev = surface;
+      surface = buildSurfaceForTier(resolvedTier);
+      prev.windowMaterial?.dispose?.();
+      prev.debugMaterial?.dispose?.();
+      builtForTier = resolvedTier;
+      // A FRESH material starts at ITS OWN constructor defaults — re-push
+      // the crop bounds and the refraction's own world→UV ratio (both
+      // normally set ONCE, on mask load, never every sync()), or a tier
+      // rebuild AFTER a mask has already loaded would silently sample the
+      // whole 0..1 UV range instead of the painted content box. No-ops
+      // correctly while no mask has loaded yet.
+      if (paddedBoundsUv) surface.setMaskUvBounds(paddedBoundsUv);
+      pushUvPerWorldPx();
+      // Force every cached value below to re-push onto the FRESH material —
+      // it starts back at its constructor defaults, and the key-based cache
+      // below exists to skip REDUNDANT writes, not the first write to a new
+      // object.
+      lastParamsKey = '';
+    }
+
     ensureMaskImage(floorIndex);
 
     // THE EXPECTED DEPTH (2026-08-05). Pushed every frame and NEVER gated on
@@ -428,8 +500,8 @@ export function createWindowSurfaceSubsystem({
 
     // THE LOOK PARAMS. A string compare against cached uniform writes, and
     // NOT gated on any load generation: a slider drag changes no texture and
-    // produces no reload.
-    const state = getWindowRenderState();
+    // produces no reload. (`state` was already fetched above, for the tier
+    // check — reused here rather than a second `getWindowRenderState()` call.)
     const p = state.params ?? {};
     // THE DAYLIGHT SIGNAL — the astrolabe's own sun, read every sync() (it is
     // what makes the tint move at all) but folded into the SAME cached-key
@@ -551,6 +623,16 @@ export function createWindowSurfaceSubsystem({
       return {
         visible: mesh.visible,
         debugChannel,
+        // THE TIER GATE'S OWN HONESTY CHECK (`feedback_instruments_must_not_
+        // lie`), mirroring water-surface-subsystem.js's own field exactly —
+        // `perfTier` on the registration's `getRenderState()` is what the
+        // cascade RESOLVED; this is what the LIVE material actually compiled
+        // with (`windowTierPlan`, read inside `buildSurfaceForTier` above).
+        // They can disagree for at most one `sync()` between a resolve and
+        // its rebuild; agreeing every other frame is the proof the
+        // rebuild-on-tier-change wiring (2026-08-29) is actually running,
+        // not just resolved-and-reported the way it was before that fix.
+        perfTier: builtForTier,
         enabled,
         floor: loadedFloor,
         bounds: contentBoundsWorld,

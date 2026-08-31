@@ -241,8 +241,26 @@ export function createVegetationShadowSubsystem({
    *   count (`vegetation-render.js#vegetationTierPlan`). Defaults to
    *   `VEG_SHADOW_SMEAR_TAPS` (today's `standard`-tier value) so a caller that
    *   has not been updated to resolve a tier still gets a correct shadow.
+   * @param {boolean} [rotationLiftEnabled] - tier 6's own gate, forwarded
+   *   straight through to `buildVegetationMaterial` — the shadow twin must
+   *   receive the SAME value the caller's own canopy build resolved, or a
+   *   twisting canopy would carry a shadow that only ever translates.
+   *   Defaults false so a caller that has not been updated to resolve a tier
+   *   changes nothing.
    */
-  function attachTileShadow(t, item, kind, params, state, imageW, imageH, segments, uvScale, smearTaps) {
+  function attachTileShadow(
+    t,
+    item,
+    kind,
+    params,
+    state,
+    imageW,
+    imageH,
+    segments,
+    uvScale,
+    smearTaps,
+    rotationLiftEnabled
+  ) {
     // THE PAD — how far outside the plant's own quad its shadow can ever
     // reach. Constant per KIND (the throw is bounded by
     // `maxThrowForHeightPx`, plus the penumbra at its softest), so the
@@ -259,6 +277,7 @@ export function createVegetationShadowSubsystem({
       uvScale,
       shadowPadUv,
       smearTaps: taps,
+      rotationLiftEnabled: !!rotationLiftEnabled,
     });
     // How many ART TEXELS one world px covers — the smear LOD needs it to
     // size a station's blur against the gap to the next station (see

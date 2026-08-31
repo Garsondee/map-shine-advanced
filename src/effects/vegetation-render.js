@@ -754,7 +754,122 @@ export function buildTessellatedQuadGeometry(corners, segments) {
 }
 
 /**
- * THE PERFORMANCE-TIER PLAN — one vegetation rung translated into the two
+ * A driven damped-oscillator "spring-chase" step — Euler-integrated, the same
+ * shape `docs/planning/Vegetation.md` §4 sketched and `vegetation.js`'s own
+ * `deferredRungs` entry `'spring-response'` named and deferred: "a
+ * critically-damped spring per swaying region so foliage lags the wind and
+ * overshoots on release, instead of tracking it instantaneously." This
+ * function is that spring, generalized over any scalar channel (used for both
+ * the rotation angle and the lift offset — see `vt/vegetation-spring-gpu.js`,
+ * the TSL port of this exact formula for the GPU integrate pass).
+ *
+ * `target` is NOT the raw forcing term itself — the caller pre-multiplies by
+ * its own gain (e.g. `torque * torqueGain`) so steady-state amplitude depends
+ * on that gain ALONE, never on `stiffness`/`damping` too. That keeps the two
+ * families of dial orthogonal: one decides how far it swings, the other how
+ * springy the swing feels.
+ *
+ * Critical damping (implicit unit mass) is `damping = 2*sqrt(stiffness)`. A
+ * caller wanting the overshoot-and-settle behaviour asked for (Ingram,
+ * 2026-08-27: "a 'spring' that encourages the plant to sway back in the
+ * opposite rotational direction") keeps `damping` below that line —
+ * deliberately underdamped, not critically/over-damped.
+ *
+ * ⚠️ EULER-INTEGRATED, NOT UNCONDITIONALLY STABLE — unlike every other
+ * "spring-like" curve already in this codebase (`SPLAT_FOLLOW_REMAIN_PER_
+ * SECOND` and friends are closed-form exponentials, stable for any `dt`).
+ * This one can blow up for a large enough `dt` (a frame hitch) at a high
+ * enough `stiffness` — the caller MUST clamp `dt` to a small ceiling before
+ * calling this (a code constant, not a live param — see
+ * `VEG_SPRING_MAX_DT_SEC` in `vt/vegetation-spring-gpu.js`), never pass a
+ * raw, unclamped frame delta straight through.
+ *
+ * @param {number} value - current channel value (radians, or world px).
+ * @param {number} velocity - current channel rate.
+ * @param {number} target - where the spring is being driven toward THIS step.
+ * @param {number} stiffness - pull-toward-target gain. Higher = faster,
+ *   higher-frequency response.
+ * @param {number} damping - velocity drag. Higher = less overshoot.
+ * @param {number} dt - seconds, already clamped by the caller.
+ * @returns {{value: number, velocity: number}}
+ */
+export function springChase(value, velocity, target, stiffness, damping, dt) {
+  const v = Number.isFinite(value) ? value : 0;
+  const vel = Number.isFinite(velocity) ? velocity : 0;
+  const tgt = Number.isFinite(target) ? target : 0;
+  const k = Number.isFinite(stiffness) ? stiffness : 0;
+  const c = Number.isFinite(damping) ? damping : 0;
+  const dtSafe = Number.isFinite(dt) && dt > 0 ? dt : 0;
+  const accel = k * (tgt - v) - c * vel;
+  const newVelocity = vel + accel * dtSafe;
+  const newValue = v + newVelocity * dtSafe;
+  return { value: newValue, velocity: newVelocity };
+}
+
+/**
+ * THE SHARED VEGETATION-SPRING GRID SPEC — one small world-space grid, sized
+ * ONCE from the real scene bounds and the live `clumpSizePx` param, that the
+ * torque/lift GPU integrate pass writes into and every vegetation mesh's
+ * vertex shader reads back from (`vt/vegetation-spring-gpu.js`,
+ * `vt-pan-viewer.js#tickVegetationSpring`).
+ *
+ * ⚠️ SCENE-WIDE, NOT PER-MESH — deliberately. `vegClumpHash`'s own cell
+ * computation (`worldXY / clumpSizePx`, floored) is already a pure function
+ * of world position with no per-mesh indexing at all; two vegetation meshes
+ * (two separately painted tiles/overlays) standing near or overlapping each
+ * other must resolve the SAME cell to the SAME spring state, or neighbouring
+ * plants on different meshes would twist with completely uncorrelated
+ * phases — a worse seam than the one this grid's own bilinear blending is
+ * built to soften. Pass the real `dimensions.sceneRect`, never one mesh's own
+ * placement.
+ *
+ * Resolved ONCE, at first construction, from whatever `clumpSizePx` reads at
+ * that moment — the same "a live param reaches an already-built resource only
+ * on next scene load" cadence `vegetationTierPlan` already documents. No live
+ * regrid in this pass: nothing downstream (the render-target allocation, the
+ * published texture's identity) is built to survive one.
+ *
+ * ⚠️ `originX`/`originY` ARE SNAPPED TO THE EXISTING WORLD-ALIGNED CLUMP
+ * GRID, NOT THE RAW SCENE-RECT CORNER. The existing translation sway hashes
+ * `cell = floor(worldXY / clumpSizePx)` — aligned to WORLD (0,0), not to
+ * wherever a scene's own bounds happen to start. If this grid's origin were
+ * the raw `sceneRect.x`/`.y` instead, its own cell boundaries would sit a
+ * fractional cell-width off from the existing ones almost every time (any
+ * scene whose rect doesn't start exactly on a `clumpSizePx` multiple) —
+ * rotation would then pivot around a DIFFERENT point than the one the
+ * translation/phase/amplitude jitter for the "same" visual clump already
+ * uses, which is confusing even though nothing would be technically broken
+ * (the two grids don't NEED to agree for correctness, only for the rotation
+ * to visually belong to the same clump the rest of the effect already
+ * decorrelates by cell). Snapping down to the nearest world-aligned multiple
+ * of `cellSize` at or before the scene's own edge makes them agree for free.
+ *
+ * @param {{x: number, y: number, width: number, height: number}} sceneRect -
+ *   the real scene bounds (`dimensions.sceneRect`), never a mesh's own footprint.
+ * @param {number} clumpSizePx - the live `VEGETATION_PARAMS.clumpSizePx` value
+ *   at construction time (world px per cell — same grid the existing
+ *   translation sway already hashes into).
+ * @returns {{cols: number, rows: number, originX: number, originY: number, cellSize: number}}
+ *   `cols`/`rows` are always >= 1 (a degenerate/zero-size scene still gets a
+ *   usable 1x1 grid rather than a divide-by-zero downstream). The grid's far
+ *   edge (`originX + cols*cellSize`) always reaches at least `sceneRect.x +
+ *   sceneRect.width` — the snap can only grow the covered area, never shrink it.
+ */
+export function vegetationSpringGridSpec(sceneRect, clumpSizePx) {
+  const cellSize = Number.isFinite(clumpSizePx) && clumpSizePx > 0 ? clumpSizePx : 150;
+  const rectX = Number.isFinite(sceneRect?.x) ? sceneRect.x : 0;
+  const rectY = Number.isFinite(sceneRect?.y) ? sceneRect.y : 0;
+  const width = Number.isFinite(sceneRect?.width) ? Math.abs(sceneRect.width) : 0;
+  const height = Number.isFinite(sceneRect?.height) ? Math.abs(sceneRect.height) : 0;
+  const originX = Math.floor(rectX / cellSize) * cellSize;
+  const originY = Math.floor(rectY / cellSize) * cellSize;
+  const cols = Math.max(1, Math.ceil((rectX + width - originX) / cellSize));
+  const rows = Math.max(1, Math.ceil((rectY + height - originY) / cellSize));
+  return { cols, rows, originX, originY, cellSize };
+}
+
+/**
+ * THE PERFORMANCE-TIER PLAN — one vegetation rung translated into the four
  * knobs that actually cost something. Pure, total, Node-tested (via
  * `effect-tier.test.mjs`'s own anti-drift block — the same home
  * `candleTierPlan`'s equivalent check lives in, not a local test here); the
@@ -767,12 +882,17 @@ export function buildTessellatedQuadGeometry(corners, segments) {
  * uniform set to zero still executes every pixel). `shadowEnabled` gates
  * whether a tile/overlay gets a ground-shadow mesh built AT ALL;
  * `shadowSmearTaps` is how many smear stations THAT build unrolls into its
- * shader loop when it does. All three are graph/mesh-BUILD-time decisions,
- * resolved once when a tile or overlay loads — the same already-accepted
- * limitation `vegetation.js`'s own `live-disable-for-self-vegetation-tiles`
- * deferred rung documents for sway/wind response: a live performance-profile
- * change reaches an already-built tile/overlay only on its next scene load,
- * never retroactively.
+ * shader loop when it does. `rotationLiftEnabled` (2026-08-27) gates the
+ * WHOLE torque/spring rotation + wind-driven lift subsystem — the GPU
+ * integrate/publish passes, their render targets, and the extra displacement
+ * terms in `buildVegetationSwayDisplacementNode` — the same "don't even
+ * construct it" pattern the shadow mesh already uses, extended to a whole
+ * extra simulation pass rather than just a mesh. All four are graph/mesh/
+ * pass-BUILD-time decisions, resolved once when a tile or overlay loads — the
+ * same already-accepted limitation `vegetation.js`'s own
+ * `live-disable-for-self-vegetation-tiles` deferred rung documents for sway/
+ * wind response: a live performance-profile change reaches an already-built
+ * tile/overlay only on its next scene load, never retroactively.
  *
  * ⚠️ TIER 3 REPRODUCES TODAY'S SHIPPED BEHAVIOUR EXACTLY — flutter on, the
  * shadow on at `VEG_SHADOW_SMEAR_TAPS` (6) stations — and tier 3 is what the
@@ -780,12 +900,12 @@ export function buildTessellatedQuadGeometry(corners, segments) {
  * system on must not silently restyle every existing scene. Below `standard`
  * the picture genuinely simplifies (no shadow at all below `performance`, no
  * flutter below `low`); above it the shadow's smear gets finer than it has
- * ever been.
+ * ever been, and at the new top rung (6) rotation+lift joins in.
  *
  * @param {number} tier - a resolved rung (effect-cascade.js#resolveEffectTier).
  *   Clamped into the ladder, so a stale or malformed value degrades to a rung
  *   that exists rather than producing an uncompilable quality.
- * @returns {{flutterEnabled: boolean, shadowEnabled: boolean, shadowSmearTaps: number}}
+ * @returns {{flutterEnabled: boolean, shadowEnabled: boolean, shadowSmearTaps: number, rotationLiftEnabled: boolean}}
  */
 export function vegetationTierPlan(tier) {
   const n = Number.isFinite(tier)
@@ -819,12 +939,29 @@ export const VEGETATION_DEFAULT_TIER = 3;
  * `VEG_SHADOW_SMEAR_TAPS` for exactly this reason: a call site that forgets to
  * check `shadowEnabled` first still gets a sane, working shadow rather than a
  * broken one — belt-and-braces, not a path this table means to exercise.
+ *
+ * `rotationLiftEnabled` (tier 6, 2026-08-27) is a NEW rung, not an extension
+ * of tier 5 — tier 5's own reserved slot was earmarked in prose for a
+ * DIFFERENT, specifically-named pair (self-shadow, true clump
+ * differentiation); torque/spring rotation + lift is a genuinely new COST
+ * CLASS (a whole extra simulation pass) rather than more of tier 5's existing
+ * cost class (more shadow-smear taps in an already-built pass), so bundling
+ * them would block promoting one down independently of the other later
+ * (Law 3). Every earlier tier explicitly carries `rotationLiftEnabled: false`
+ * — the same "0/false marks this tier never builds it at all" convention
+ * `shadowSmearTaps: 0` already establishes, never an omitted field.
  */
 const VEGETATION_TIER_PLANS = Object.freeze([
-  Object.freeze({ flutterEnabled: false, shadowEnabled: false, shadowSmearTaps: 0 }), // 0 placed-and-swaying
-  Object.freeze({ flutterEnabled: true, shadowEnabled: false, shadowSmearTaps: 0 }), // 1 shimmer
-  Object.freeze({ flutterEnabled: true, shadowEnabled: true, shadowSmearTaps: 3 }), // 2 shadow-coarse
-  Object.freeze({ flutterEnabled: true, shadowEnabled: true, shadowSmearTaps: VEG_SHADOW_SMEAR_TAPS }), // 3 shadow-smooth — TODAY
-  Object.freeze({ flutterEnabled: true, shadowEnabled: true, shadowSmearTaps: 9 }), // 4 shadow-finer
-  Object.freeze({ flutterEnabled: true, shadowEnabled: true, shadowSmearTaps: 12 }), // 5 shadow-finest
+  Object.freeze({ flutterEnabled: false, shadowEnabled: false, shadowSmearTaps: 0, rotationLiftEnabled: false }), // 0 placed-and-swaying
+  Object.freeze({ flutterEnabled: true, shadowEnabled: false, shadowSmearTaps: 0, rotationLiftEnabled: false }), // 1 shimmer
+  Object.freeze({ flutterEnabled: true, shadowEnabled: true, shadowSmearTaps: 3, rotationLiftEnabled: false }), // 2 shadow-coarse
+  Object.freeze({
+    flutterEnabled: true,
+    shadowEnabled: true,
+    shadowSmearTaps: VEG_SHADOW_SMEAR_TAPS,
+    rotationLiftEnabled: false,
+  }), // 3 shadow-smooth — TODAY
+  Object.freeze({ flutterEnabled: true, shadowEnabled: true, shadowSmearTaps: 9, rotationLiftEnabled: false }), // 4 shadow-finer
+  Object.freeze({ flutterEnabled: true, shadowEnabled: true, shadowSmearTaps: 12, rotationLiftEnabled: false }), // 5 shadow-finest
+  Object.freeze({ flutterEnabled: true, shadowEnabled: true, shadowSmearTaps: 12, rotationLiftEnabled: true }), // 6 torque-sway
 ]);

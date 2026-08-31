@@ -7,7 +7,7 @@ import { validateParamsSchema } from '../../core/params-schema.js';
 import { validateEffectManifest } from '../effect-manifest.js';
 import { createEffectRegistry } from '../registry.js';
 import { resolveEffectEnabled } from '../effect-cascade.js';
-import { VEGETATION, VEGETATION_PARAMS, VEGETATION_KINDS } from '../vegetation.js';
+import { VEGETATION, VEGETATION_PARAMS, VEGETATION_KINDS, VEGETATION_LIVE_PARAM_KEYS } from '../vegetation.js';
 import { validateVegetationKinds } from '../vegetation-render.js';
 
 export function run(t) {
@@ -32,16 +32,22 @@ export function run(t) {
   // own anti-drift block; pinned here is just the manifest's own SHAPE, the
   // same way this file already pins "exactly two kinds" below.
   ok(
-    'the ladder has exactly 6 rungs — the floor plus one per PERFORMANCE_PROFILES entry',
-    VEGETATION.tiers.length === 6
+    'the ladder has 7 rungs — the floor, one per PERFORMANCE_PROFILES entry, plus tier 6 (torque-sway, ' +
+      "2026-08-27) as a genuinely new rung rather than extending tier 5's own reservation",
+    VEGETATION.tiers.length === 7
   );
   ok('rung 0 is the unconditional floor (no fromProfile declared)', !('fromProfile' in VEGETATION.tiers[0]));
   ok(
-    'every rung 1..5 names the performance profile that buys it, in ascending order',
+    'every rung 1..6 names the performance profile that buys it, in ascending order — 5 and 6 both land at ' +
+      'extreme (tier 5 stays the shadow-smear ladder top; tier 6 is the new, separate torque-sway rung)',
     VEGETATION.tiers
       .slice(1)
       .map((t) => t.fromProfile)
-      .join(',') === 'low,performance,standard,quality,extreme'
+      .join(',') === 'low,performance,standard,quality,extreme,extreme'
+  );
+  ok(
+    'tier 6 is named torque-sway and carries a real cost-class entry',
+    VEGETATION.tiers[6].name === 'torque-sway' && !!VEGETATION.tiers[6].cost?.class
   );
 
   // --- ONE shared param set, TWO kinds — the whole design's central claim -
@@ -90,9 +96,56 @@ export function run(t) {
     // ceiling still exists — it guards against genuine V2-style bloat (~50
     // sliders PER KIND, two near-identical files) — but the load-bearing
     // claim was never a specific count; it is the structural assertion just
-    // above (ONE shared set, zero per-kind params).
+    // above (ONE shared set, zero per-kind params). Bumped 24 → 26 2026-08-27
+    // (torqueGain/springStiffness/springDamping/liftGain, tier 6) —
+    // deliberately, not a surprise: the rotation-radius safety cap is a code
+    // constant (VEG_SPRING_ARM_LEN_FRACTION), not a 5th param, specifically
+    // to keep this bump smaller.
     "the param set stays well short of V2's scale (it had ~50 PER KIND, in TWO files)",
-    Object.keys(VEGETATION_PARAMS).length <= 24
+    Object.keys(VEGETATION_PARAMS).length <= 26
+  );
+
+  // ==========================================================================
+  // ⚠️ THE ALLOWLIST/SCHEMA AGREEMENT — the fix for a real, live bug found
+  // 2026-08-27: `groundLagSec`/`gustTurbulence` (added 2026-08-15) were
+  // declared here, rendering real Advanced-panel sliders, but were missing
+  // from boot.js's `MapShine.setVegetation` allowlist — dragging either did
+  // nothing, silently, no error. `VEGETATION_LIVE_PARAM_KEYS` (this module)
+  // is now the ONE place that allowlist is authored; this is the test that
+  // makes the next forgotten param a red test instead of a dead slider.
+  // ==========================================================================
+  ok(
+    'every VEGETATION_PARAMS key is live-settable via VEGETATION_LIVE_PARAM_KEYS, except the two named ' +
+      'per-kind height exceptions (treeHeightFt/bushHeightFt, which have no live-override door of their own)',
+    Object.keys(VEGETATION_PARAMS).every((k) => KNOWN_PER_KIND_PARAMS.has(k) || VEGETATION_LIVE_PARAM_KEYS.includes(k))
+  );
+  ok(
+    'VEGETATION_LIVE_PARAM_KEYS never lists a key the schema does not declare (the inverse drift — a stale ' +
+      'entry left behind after a param was renamed or removed)',
+    VEGETATION_LIVE_PARAM_KEYS.every((k) => k in VEGETATION_PARAMS)
+  );
+  ok(
+    'VEGETATION_LIVE_PARAM_KEYS never lists either per-kind height exception — those have no live-override door',
+    !VEGETATION_LIVE_PARAM_KEYS.includes('treeHeightFt') && !VEGETATION_LIVE_PARAM_KEYS.includes('bushHeightFt')
+  );
+
+  // --- TORQUE-SWAY params (tier 6, 2026-08-27) — declared, sane defaults ---
+  ok(
+    'torqueGain/liftGain default to 0-or-above and are declared under Motion',
+    VEGETATION_PARAMS.torqueGain.default >= 0 &&
+      VEGETATION_PARAMS.liftGain.default >= 0 &&
+      VEGETATION_PARAMS.torqueGain.category === 'Motion' &&
+      VEGETATION_PARAMS.liftGain.category === 'Motion'
+  );
+  ok(
+    'the shipped default is deliberately UNDERdamped (springDamping < 2*sqrt(springStiffness)) — a gust should ' +
+      "visibly overshoot and counter-sway, matching the author's own ask",
+    VEGETATION_PARAMS.springDamping.default < 2 * Math.sqrt(VEGETATION_PARAMS.springStiffness.default)
+  );
+  ok(
+    'springStiffness/springDamping cannot go negative — a negative spring constant is not a softer spring, ' +
+      'it is an unstable one',
+    VEGETATION_PARAMS.springStiffness.min >= 0 && VEGETATION_PARAMS.springDamping.min >= 0
   );
   // SHADOW: exactly ONE knob, per the author's explicit brief. Offset,
   // softness, direction, elongation, cloud and night are all DERIVED

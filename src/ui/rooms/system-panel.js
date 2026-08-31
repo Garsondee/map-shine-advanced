@@ -109,9 +109,10 @@ function lockRow(rowEl, reason) {
  *   read: (key: string) => unknown,
  *   write: (key: string, value: unknown) => void,
  *   profiles: Array<{value:string,label:string}>,
+ *   renderScaleChoices?: Array<{value:string,label:string}> - Auto + every SCALE_LADDER rung; omitted renders no row.
  *   enableChoices: Array<{value:string,label:string}>,
  *   effectRows: Array<{id:string,title:string,photosensitive?:boolean,playerKey:string,gmKey:string}>,
- *   keys: {msaEnabled:string, profile:string, reducePhotosensitive:string, reducedMotion:string, theme:string},
+ *   keys: {msaEnabled:string, profile:string, renderScale?:string, reducePhotosensitive:string, reducedMotion:string, theme:string},
  * }} ctx
  * @returns {string} a short subtitle.
  */
@@ -164,6 +165,25 @@ export function renderSystemPanel(container, ctx) {
       read(keys.profile),
       (v) => write(keys.profile, v)
     );
+
+    // 2b. RENDER RESOLUTION (UI parity plan, phase 2) — same position as the
+    // old panel's own equivalent row (diag/settings-panel.js, right after
+    // Graphics Quality, before Accessibility: "both are 'how much GPU does
+    // this cost me' knobs"). ctx.renderScaleChoices/ctx.keys.renderScale are
+    // already threaded through by boot.js's getSystemPanelCtx() — this row
+    // was the only missing piece.
+    if (ctx.renderScaleChoices && keys.renderScale) {
+      put(
+        'renderScale',
+        enumDecl({
+          values: ctx.renderScaleChoices,
+          label: 'Render Resolution',
+          help: "Auto automatically balances sharpness against your frame rate — it can never be pushed above a safe ceiling, regardless of your display or Foundry's own resolution setting. A fixed value locks the resolution and turns automatic adjustment off.",
+        }),
+        read(keys.renderScale) ?? 'auto',
+        (v) => write(keys.renderScale, v)
+      );
+    }
 
     // 3. ACCESSIBILITY.
     wrap.append(sectionHead('Accessibility'));

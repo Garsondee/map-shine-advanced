@@ -120,6 +120,52 @@ export function buildVisionLightMaterial({ THREE }) {
 }
 
 /**
+ * Build the material that stamps a FROZEN "floor" polygon into G — the
+ * door-fog-reveal-sync consumer's own channel (`vt-pan-viewer.js`'s door-fog
+ * glue calls this the transition "floor": what was already safely revealed
+ * the moment a door started swinging, from a held reference to a PRIOR
+ * frame's vision sources — see `door-graphics.js`'s `fog-reveal-sync`
+ * deferred rung for the feature this exists for).
+ *
+ * Deliberately ONE channel, not a G/A mirror of the live R/B split: the floor
+ * only ever answers "was this pixel already safe to show before the door(s)
+ * currently mid-swing started opening" for `buildVisionGateMaterial`'s fade
+ * below — it does not need to re-run the full illumination-conditioned
+ * reveal rule, only union whatever was ALREADY true (sight or light) at
+ * freeze time. Over-approximating "already revealed" here can only make
+ * FEWER pixels get the fade (they fall back to today's instant reveal
+ * instead), never show anything the live R/B channels don't already
+ * authorize.
+ *
+ * ⚠️ A IS NOT AVAILABLE FOR THIS — checked, not assumed. Both
+ * `buildVisionLosMaterial` and `buildVisionLightMaterial` hard-code alpha to
+ * `float(1)` with `MaxEquation`/`OneFactor` blending, and the frame host
+ * clears this render target with alpha 1 in both the gated and ungated case
+ * — so alpha is provably a constant 1 across this whole texture today.
+ * Reclaiming it would mean editing those two already-shipped materials and
+ * the shared clear call; G costs nothing and is genuinely unused.
+ *
+ * @param {*} THREE @returns {{material: *}}
+ */
+export function buildVisionFloorMaterial({ THREE }) {
+  const { float, vec4 } = THREE.TSL;
+  const material = new THREE.NodeMaterial();
+  material.transparent = false;
+  material.depthTest = false;
+  material.depthWrite = false;
+  material.side = THREE.DoubleSide;
+  material.blending = THREE.CustomBlending;
+  material.blendEquation = THREE.MaxEquation;
+  material.blendSrc = THREE.OneFactor;
+  material.blendDst = THREE.OneFactor;
+  material.blendEquationAlpha = THREE.MaxEquation;
+  material.blendSrcAlpha = THREE.OneFactor;
+  material.blendDstAlpha = THREE.OneFactor;
+  material.fragmentNode = vec4(float(0), float(1), float(0), float(1));
+  return { material };
+}
+
+/**
  * THE REVEAL TEST, shared by every material in this file that needs it — the
  * live gate, the explored-dim quad, and the snapshot publish quad all ask the
  * exact same question ("is this ALREADY-SAMPLED mask/illum pair revealed?"),
@@ -191,15 +237,31 @@ function buildRevealedNode({ THREE, mask, illum, threshold }) {
  * @param {*} args.maskTexture - this subsystem's own R/G/B mask.
  * @param {*} args.illumTexture - `buf:scene.illum`, MSA's own per-pixel brightness.
  * @param {number} args.threshold - `REVEAL_ILLUMINATION_THRESHOLD`.
+ * @param {*} [args.doorFogProgress] - DOOR-FOG-REVEAL-SYNC: an optional live
+ *   TSL float uniform, 0 (just started opening) .. 1 (fully open / no
+ *   transition active). Omit for today's behaviour unchanged (instant
+ *   reveal). When supplied, a pixel that is revealed NOW (R/B) but was NOT
+ *   already revealed on the frozen "floor" (G, `buildVisionFloorMaterial`,
+ *   populated only while a door is mid-swing) is exactly the sliver a
+ *   transitioning door newly exposes — faded by this value instead of
+ *   snapping straight to 1. Every OTHER pixel (already safe before the
+ *   transition, or nothing transitioning at all) is completely unaffected.
  * @returns {*} a NodeMaterial for a fullscreen quad.
  */
-export function buildVisionGateMaterial({ THREE, maskTexture, illumTexture, threshold }) {
+export function buildVisionGateMaterial({ THREE, maskTexture, illumTexture, threshold, doorFogProgress = null }) {
   const { texture, uv, float, vec4, select } = THREE.TSL;
 
   const mask = texture(maskTexture).sample(uv());
   const illum = texture(illumTexture).sample(uv());
   const revealed = buildRevealedNode({ THREE, mask, illum, threshold });
-  const factor = select(revealed, float(1), float(0));
+
+  // wasFloorRevealed=true (or no doorFogProgress supplied at all) → factor 1,
+  // byte-for-byte today's behaviour. Only a pixel that is revealed now AND
+  // was NOT on the frozen floor gets the fade — see this param's own doc.
+  const doorProgress = doorFogProgress ? doorFogProgress.clamp(0, 1) : float(1);
+  const wasFloorRevealed = mask.g.greaterThan(float(0.5));
+  const revealFactor = select(wasFloorRevealed, float(1), doorProgress);
+  const factor = select(revealed, revealFactor, float(0));
 
   const material = new THREE.NodeMaterial();
   material.transparent = true;
@@ -586,6 +648,51 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
   let lastDrawn = 0;
   let lastGate = null;
 
+  /**
+   * DOOR-FOG-REVEAL-SYNC — the frozen "floor" scene (see
+   * `buildVisionFloorMaterial`'s own header). `floorSourcesRef` is a
+   * reference-equality gate: the mesh set is rebuilt only when the caller
+   * hands `syncFloor` a DIFFERENT sources array — once per transition
+   * start/end, never per frame, because `vt-pan-viewer.js`'s glue holds one
+   * frozen reference for the whole transition window. The DRAW still
+   * happens every frame the caller asks for it (this target is cleared
+   * every frame by the live mask draw above it); only the geometry rebuild
+   * is skipped.
+   */
+  const floorScene = new THREE.Scene();
+  let floorSourcesRef = null;
+  let floorMeshes = [];
+
+  function clearFloorMeshes() {
+    for (const mesh of floorMeshes) {
+      floorScene.remove(mesh);
+      mesh.geometry.dispose();
+      mesh.material.dispose();
+    }
+    floorMeshes = [];
+  }
+
+  function addFloorMesh(points, ox, oy) {
+    const { material } = buildVisionFloorMaterial({ THREE });
+    const mesh = new THREE.Mesh(new THREE.BufferGeometry(), material);
+    mesh.frustumCulled = false; // bounding sphere never computed — see createEntry's own note
+    writeFanGeometry(THREE, mesh, points, ox, oy);
+    mesh.position.set(ox, oy, 0);
+    floorScene.add(mesh);
+    floorMeshes.push(mesh);
+  }
+
+  function rebuildFloorMeshes(sources) {
+    clearFloorMeshes();
+    for (const src of sources) {
+      // Dropped, not drawn-then-masked — same fail-safe direction the live
+      // pool uses for a blinded source (this file's own header).
+      if (!src || src.blinded) continue;
+      if (src.losPoints) addFloorMesh(src.losPoints, src.x, src.y);
+      if (src.lightPoints) addFloorMesh(src.lightPoints, src.x, src.y);
+    }
+  }
+
   function createEntry() {
     const los = buildVisionLosMaterial({ THREE });
     const light = buildVisionLightMaterial({ THREE });
@@ -611,6 +718,30 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
     entry.lightMesh.geometry.dispose();
     entry.losMesh.material.dispose();
     entry.lightMesh.material.dispose();
+  }
+
+  /**
+   * DOOR-FOG-REVEAL-SYNC — draw the frozen floor into THIS SAME render
+   * target's G channel, on top of whatever `sync()` already drew this frame
+   * (MAX blending, so R/B/A are untouched — see `buildVisionFloorMaterial`).
+   * Rebuilds the mesh set only when `sources` is a DIFFERENT reference than
+   * last call; pass `null` (or an empty array) to freeze nothing / drop an
+   * ended transition's floor.
+   *
+   * @param {{sources: Array<object>|null}} args
+   * @returns {{target: *, scene: *, drawn: number}} the draw the host should
+   *   perform IMMEDIATELY after `sync()`'s own live-mask render, same
+   *   target, no clear in between — every frame a transition is active, not
+   *   just once at freeze time (this target is cleared every frame).
+   */
+  function syncFloor({ sources }) {
+    const next = Array.isArray(sources) && sources.length > 0 ? sources : null;
+    if (next !== floorSourcesRef) {
+      floorSourcesRef = next;
+      if (next) rebuildFloorMeshes(next);
+      else clearFloorMeshes();
+    }
+    return { target: renderTarget, scene: floorScene, drawn: floorMeshes.length };
   }
 
   /**
@@ -794,6 +925,7 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
   function dispose() {
     for (const [, entry] of pool) disposeEntry(entry);
     pool.clear();
+    clearFloorMeshes();
     allocator.dispose(renderTarget);
     allocator.dispose(exploredTarget);
     allocator.dispose(exploredSnapshotTarget);
@@ -810,6 +942,11 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
       // The explored buffer never clears, so "is it accumulating" cannot be
       // read off a screenshot — report the rect it covers instead.
       exploredRect: [...exploredRect],
+      // DOOR-FOG-REVEAL-SYNC — a floor that silently stopped drawing (or
+      // never started) must be visible as a number here too, same doctrine
+      // as every other count in this report.
+      doorFogFloorActive: floorSourcesRef !== null,
+      doorFogFloorMeshCount: floorMeshes.length,
       // The live mask's OWN current size — added 2026-08-15 chasing a report
       // of the gate going solid black after resize/pan/zoom. Sits next to
       // the viewer's own `drawBufSize` in `getVisionMaskInfo` so a mismatch
@@ -827,6 +964,7 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
       return renderTarget.texture;
     },
     sync,
+    syncFloor,
     resize,
     setExploredRect,
     getExploredRect,

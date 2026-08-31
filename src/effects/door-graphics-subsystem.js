@@ -60,6 +60,8 @@ import {
   // The zone door (effects/index.js) re-exports this as `doorEaseInOutCosine`
   // for outside consumers; intra-zone we take its real name and alias here.
   easeInOutCosine as doorEaseInOutCosine,
+  computeTransitionSummary,
+  computeAnimatingLeafSegments,
 } from './door-graphics-render.js';
 // Cross-zone imports go through each zone's own index.js door
 // (`zones/one-door`); intra-zone (`./door-graphics-render.js`) does not.
@@ -316,6 +318,13 @@ export function createDoorGraphicsSubsystem({ THREE, dimensions, getDoorRenderSt
           leaf.lastAnimDirection = door.animation.direction;
           leaf.lastAnimStrength = door.animation.strength;
           leaf.lastAnimProgress = leaf.progress;
+          // DOOR-LEAF-OCCLUSION (`effects/vision/door-leaf-occlusion.js`'s
+          // consumer, `getAnimatingLeafSegments()` below) — `snap`/`placement`
+          // are already being computed above for this leaf's own rendering;
+          // stashing their rotation/width here is free, not new math.
+          leaf.currentRotation = snap.rotation;
+          leaf.currentWidth = placement.width;
+          leaf.animType = door.animation.type;
         }
         leaf.mesh.visible = true;
       }
@@ -346,6 +355,39 @@ export function createDoorGraphicsSubsystem({ THREE, dimensions, getDoorRenderSt
      * value: the count changes on every reconcile. */
     get leafCount() {
       return doorLeaves.size;
+    },
+    /**
+     * FOG-REVEAL-SYNC (`door-graphics.js`'s deferred rung of the same name) —
+     * the one thing the fog gate needs from here: is any door leaf currently
+     * mid open/close animation, and if so, how far along (most-conservative
+     * across leaves) is the least-open one. Pure delegation to
+     * {@link computeTransitionSummary} over the SAME `animating`/`progress`
+     * fields each leaf already carries for its own rendering above — no new
+     * state tracked here.
+     * @returns {{anyActive: boolean, minProgress: number, activeCount: number}}
+     */
+    getTransitionSummary() {
+      const leafStates = [];
+      for (const leaves of doorLeaves.values()) {
+        for (const leaf of leaves) leafStates.push(leaf);
+      }
+      return computeTransitionSummary(leafStates);
+    },
+    /**
+     * DOOR-LEAF-OCCLUSION (`effects/vision/door-leaf-occlusion.js`'s
+     * consumer) — the current world-space segment of every leaf mid-swing
+     * right now, for the vision mask to clip against. Pure delegation to
+     * {@link computeAnimatingLeafSegments} over the SAME fields the
+     * transition-summary accessor above already reduces — no new state
+     * tracked here either.
+     * @returns {ReturnType<typeof computeAnimatingLeafSegments>}
+     */
+    getAnimatingLeafSegments() {
+      const leafStates = [];
+      for (const leaves of doorLeaves.values()) {
+        for (const leaf of leaves) leafStates.push(leaf);
+      }
+      return computeAnimatingLeafSegments(leafStates);
     },
     /**
      * SCENE READINESS (vt/settle.js probe `doorTextures`) — how many door

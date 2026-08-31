@@ -13,6 +13,7 @@
  * forget this directory (`feedback_test_dispatch_list_forgets_new_files`).
  */
 import { run as runVisionMask } from './vision-mask.test.mjs';
+import { run as runDoorLeafOcclusion } from './door-leaf-occlusion.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -41,7 +42,10 @@ const t = {
   },
 };
 
-const suites = [['vision-mask', runVisionMask]];
+const suites = [
+  ['vision-mask', runVisionMask],
+  ['door-leaf-occlusion', runDoorLeafOcclusion],
+];
 for (const [name, fn] of suites) {
   const before = failed;
   fn(t);

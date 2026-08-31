@@ -51,19 +51,28 @@ export const DOOR_STYLES = Object.freeze({
 
 /**
  * The door animation types Foundry ships (`CONFIG.Wall.animationTypes`,
- * config.mjs:2509) and the ONLY thing that matters here about each: whether it
+ * config.mjs:2509) and the things that matter here about each: whether it
  * pivots around the door's MIDPOINT (ascend/descend/swivel) or its HINGE EDGE
- * (swing/slide). This is the render-side authority for that set;
- * `foundry/scene-doors.js#KNOWN_ANIMATION_TYPES` mirrors the keys as its
- * validation whitelist (a test pins them equal).
- * @type {Record<string, {midpoint: boolean}>}
+ * (swing/slide); and — DOOR-LEAF-OCCLUSION (see `computeAnimatingLeafSegments`
+ * below) — whether the leaf's motion is representable as a 2D line segment
+ * rotating about a fixed hinge, i.e. can act as a real-time vision occluder.
+ * Only swing/swivel qualify: ascend/descend move perpendicular to the map
+ * plane (a fade/scale, not a rotation — no segment to project) and slide
+ * translates rather than rotates (a near-free follow-on — needs only a
+ * translate-based segment deriver — but not built; the leaf never actually
+ * leaves the doorway's footprint mid-slide the way a swing leaf does, so the
+ * visual payoff is smaller too). This is the render-side authority for the
+ * key set; `foundry/scene-doors.js#KNOWN_ANIMATION_TYPES` mirrors the keys as
+ * its validation whitelist (a test pins the KEYS equal — not the per-type
+ * shape, so adding `occludesAsSegment` here needed no test update there).
+ * @type {Record<string, {midpoint: boolean, occludesAsSegment: boolean}>}
  */
 export const DOOR_ANIMATION_TYPES = Object.freeze({
-  ascend: Object.freeze({ midpoint: true }),
-  descend: Object.freeze({ midpoint: true }),
-  slide: Object.freeze({ midpoint: false }),
-  swing: Object.freeze({ midpoint: false }),
-  swivel: Object.freeze({ midpoint: true }),
+  ascend: Object.freeze({ midpoint: true, occludesAsSegment: false }),
+  descend: Object.freeze({ midpoint: true, occludesAsSegment: false }),
+  slide: Object.freeze({ midpoint: false, occludesAsSegment: false }),
+  swing: Object.freeze({ midpoint: false, occludesAsSegment: true }),
+  swivel: Object.freeze({ midpoint: true, occludesAsSegment: true }),
 });
 
 /** @param {*} v @returns {number} clamped to [0,1]; non-finite reads as 0 */
@@ -99,6 +108,17 @@ export function doorLeafStyles(double) {
  */
 export function isMidpointAnimation(type) {
   return DOOR_ANIMATION_TYPES[type]?.midpoint === true;
+}
+
+/**
+ * DOOR-LEAF-OCCLUSION — does this animation type's leaf motion reduce to a
+ * line segment rotating about a fixed hinge, i.e. can it be treated as a
+ * real-time vision occluder? See {@link DOOR_ANIMATION_TYPES}'s own header
+ * for why only swing/swivel qualify.
+ * @param {string} type @returns {boolean}
+ */
+export function isSwingLikeAnimation(type) {
+  return DOOR_ANIMATION_TYPES[type]?.occludesAsSegment === true;
 }
 
 /**
@@ -289,6 +309,103 @@ export function doorSnapshotToPlacement(snap, { texWidth, texHeight }) {
     anchorY: 0.5,
     rotation: (snap.rotation * 180) / Math.PI,
   };
+}
+
+/**
+ * Summarize door-leaf animation state for the fog-reveal-sync consumer
+ * (`effects/vision/vision-mask-render.js`'s gate fade) — a pure reduction over
+ * the SAME `animating`/`progress` fields `door-graphics-subsystem.js` already
+ * tracks per leaf for its own rendering, per `door-graphics.js`'s
+ * `fog-reveal-sync` deferred rung: "no new door math is needed, only the
+ * consumer." This is that consumer's one shared piece of pure logic.
+ *
+ * `minProgress` (not average/max) is deliberately the MOST CONSERVATIVE
+ * reading when several leaves are mid-animation at once: the fog fade this
+ * feeds multiplies a newly-exposed pixel's brightness by this value, so the
+ * least-open leaf in a simultaneous batch caps how much anything can show —
+ * never the wrong direction to be wrong in.
+ *
+ * `clamp01` (not a bare Number check) is deliberate too: a non-finite
+ * `progress` reads as 0 rather than being skipped, which is the SAFE
+ * direction for a value that gates fog brightness — garbage input keeps the
+ * newly-exposed sliver dark rather than accidentally reading as fully open.
+ *
+ * @param {Array<{animating: boolean, progress: number}>} leafStates
+ * @returns {{anyActive: boolean, minProgress: number, activeCount: number}}
+ */
+export function computeTransitionSummary(leafStates) {
+  let minProgress = 1;
+  let activeCount = 0;
+  for (const leaf of Array.isArray(leafStates) ? leafStates : []) {
+    if (!leaf?.animating) continue;
+    activeCount++;
+    const p = clamp01(leaf.progress);
+    if (p < minProgress) minProgress = p;
+  }
+  return { anyActive: activeCount > 0, minProgress, activeCount };
+}
+
+/**
+ * DOOR-LEAF-OCCLUSION — the leaf's current FREE (swinging) endpoint, given
+ * its fixed hinge and its CURRENT animated rotation/width. For swing/swivel
+ * (the only types this is ever called for — see `isSwingLikeAnimation`), the
+ * hinge never moves (`applyDoorAnimation` leaves `x,y` untouched for these
+ * two types — only `rotation` changes), so this is the one thing that DOES
+ * move each frame: a point at `width` distance from the hinge, at the
+ * leaf's current rotation.
+ *
+ * @param {{x: number, y: number}} hinge - world-space, e.g. `leaf.closed`.
+ * @param {number} rotation - radians, the CURRENT (animated) rotation —
+ *   `applyDoorAnimation(...).rotation`, not the closed one.
+ * @param {number} width - `doorSnapshotToPlacement(...).width` (signed is
+ *   fine; only the free endpoint's position matters here, not the sign).
+ * @returns {{x: number, y: number}}
+ */
+export function computeDoorLeafFreeEndpoint(hinge, rotation, width) {
+  return {
+    x: hinge.x + Math.cos(rotation) * width,
+    y: hinge.y + Math.sin(rotation) * width,
+  };
+}
+
+/**
+ * DOOR-LEAF-OCCLUSION — every leaf CURRENTLY mid-swing, reduced to the one
+ * thing `effects/vision/door-leaf-occlusion.js` needs from each: its current
+ * physical segment (hinge → free endpoint), in world space. Pure reduction,
+ * same shape as {@link computeTransitionSummary} — over fields
+ * `door-graphics-subsystem.js` already tracks per leaf for its own
+ * rendering, no new door math.
+ *
+ * Only swing/swivel leaves are included (`isSwingLikeAnimation`) — see
+ * {@link DOOR_ANIMATION_TYPES}'s own header for why the other three types
+ * don't reduce to a segment at all. `progress` bounds are STRICT (`0 < p <
+ * 1`, not `animating` alone): a leaf can be marked `animating` for one frame
+ * at exactly progress 0 or 1 (the instant a transition starts/ends), where
+ * it casts either a full-doorway shadow (redundant — Foundry's own polygon
+ * already excludes everything there) or none at all (flush with the wall) —
+ * excluding those two instants is a pure perf/no-op skip, never a
+ * correctness difference, since {@link clipPolygonBySegmentShadow} would
+ * compute the same no-op result anyway, just for free instead of for a walk
+ * over every source's polygon.
+ *
+ * @param {Array<{animating: boolean, progress: number, animType: string,
+ *   currentRotation: number, currentWidth: number, closed: {x: number, y: number}}>} leafStates
+ * @returns {Array<{hingeX: number, hingeY: number, freeX: number, freeY: number}>}
+ */
+export function computeAnimatingLeafSegments(leafStates) {
+  const segments = [];
+  for (const leaf of Array.isArray(leafStates) ? leafStates : []) {
+    if (!leaf?.animating) continue;
+    if (!isSwingLikeAnimation(leaf.animType)) continue;
+    const p = clamp01(leaf.progress);
+    if (!(p > 0 && p < 1)) continue;
+    const hinge = leaf.closed;
+    if (!hinge || !Number.isFinite(hinge.x) || !Number.isFinite(hinge.y)) continue;
+    if (!Number.isFinite(leaf.currentRotation) || !Number.isFinite(leaf.currentWidth)) continue;
+    const free = computeDoorLeafFreeEndpoint(hinge, leaf.currentRotation, leaf.currentWidth);
+    segments.push({ hingeX: hinge.x, hingeY: hinge.y, freeX: free.x, freeY: free.y });
+  }
+  return segments;
 }
 
 /**

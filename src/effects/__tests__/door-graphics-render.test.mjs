@@ -15,6 +15,10 @@ import {
   computeDoorClosedSnapshot,
   applyDoorAnimation,
   doorSnapshotToPlacement,
+  computeTransitionSummary,
+  isSwingLikeAnimation,
+  computeDoorLeafFreeEndpoint,
+  computeAnimatingLeafSegments,
 } from '../door-graphics-render.js';
 
 /** A horizontal single-swing door from (100,100)→(200,100): distance 100, angle 0. */
@@ -306,5 +310,138 @@ export function run(t) {
     const s = computeDoorClosedSnapshot(diag, DOOR_STYLES.SINGLE, { gridSize: 100, texWidth: 100 });
     ok('a 45° wall closes at rotation π/4 (raw atan2, no flip)', near(s.rotation, Math.PI / 4));
     ok('scaleX fills the diagonal length (√2·100 / 100)', near(s.scaleX, Math.SQRT2));
+  }
+
+  // ── computeTransitionSummary — the fog-reveal-sync consumer's one pure piece ─
+  {
+    ok(
+      'no leaves at all → inert (no fade)',
+      JSON.stringify(computeTransitionSummary([])) ===
+        JSON.stringify({ anyActive: false, minProgress: 1, activeCount: 0 })
+    );
+    ok(
+      'leaves present but none animating → inert',
+      JSON.stringify(computeTransitionSummary([{ animating: false, progress: 0.4 }])) ===
+        JSON.stringify({ anyActive: false, minProgress: 1, activeCount: 0 })
+    );
+    ok(
+      'one animating leaf → its own progress, active',
+      JSON.stringify(computeTransitionSummary([{ animating: true, progress: 0.3 }])) ===
+        JSON.stringify({ anyActive: true, minProgress: 0.3, activeCount: 1 })
+    );
+    ok(
+      'two animating leaves → the MINIMUM progress wins (most conservative)',
+      JSON.stringify(
+        computeTransitionSummary([
+          { animating: true, progress: 0.8 },
+          { animating: true, progress: 0.2 },
+        ])
+      ) === JSON.stringify({ anyActive: true, minProgress: 0.2, activeCount: 2 })
+    );
+    ok(
+      'a settled (non-animating) leaf among animating ones does not drag the minimum down',
+      JSON.stringify(
+        computeTransitionSummary([
+          { animating: true, progress: 0.9 },
+          { animating: false, progress: 0 },
+        ])
+      ) === JSON.stringify({ anyActive: true, minProgress: 0.9, activeCount: 1 })
+    );
+    ok(
+      'a non-finite progress on an animating leaf clamps to 0 (the safe/dark direction), not skipped',
+      JSON.stringify(computeTransitionSummary([{ animating: true, progress: NaN }])) ===
+        JSON.stringify({ anyActive: true, minProgress: 0, activeCount: 1 })
+    );
+    ok('non-array input reads as no leaves, never throws', computeTransitionSummary(null).anyActive === false);
+  }
+
+  // ── isSwingLikeAnimation / computeDoorLeafFreeEndpoint /
+  //    computeAnimatingLeafSegments — the DOOR-LEAF-OCCLUSION consumer's own
+  //    pure pieces ──────────────────────────────────────────────────────────
+  {
+    ok('swing reduces to a segment', isSwingLikeAnimation('swing') === true);
+    ok('swivel reduces to a segment', isSwingLikeAnimation('swivel') === true);
+    ok('slide does not (translate, not rotate — no segment to project)', isSwingLikeAnimation('slide') === false);
+    ok('ascend does not (perpendicular to the map plane)', isSwingLikeAnimation('ascend') === false);
+    ok('descend does not', isSwingLikeAnimation('descend') === false);
+    ok('an unknown type reads as false, never throws', isSwingLikeAnimation('nonsense') === false);
+
+    const hinge = { x: 100, y: 100 };
+    const flat = computeDoorLeafFreeEndpoint(hinge, 0, 100);
+    ok('rotation 0: free endpoint is hinge + (width, 0)', near(flat.x, 200) && near(flat.y, 100));
+    const quarter = computeDoorLeafFreeEndpoint(hinge, Math.PI / 2, 100);
+    ok('rotation π/2: free endpoint is hinge + (0, width)', near(quarter.x, 100) && near(quarter.y, 200));
+    const half = computeDoorLeafFreeEndpoint(hinge, Math.PI, 50);
+    ok('rotation π: free endpoint is hinge + (-width, 0)', near(half.x, 50) && near(half.y, 100));
+  }
+  {
+    // Mirrors computeTransitionSummary's own cases just above — same
+    // fields door-graphics-subsystem.js actually tracks per leaf.
+    const swingLeaf = (overrides = {}) => ({
+      animating: true,
+      progress: 0.5,
+      animType: 'swing',
+      closed: { x: 100, y: 100 },
+      currentRotation: Math.PI / 4,
+      currentWidth: 100,
+      ...overrides,
+    });
+    const expectedFree = computeDoorLeafFreeEndpoint({ x: 100, y: 100 }, Math.PI / 4, 100);
+
+    ok('no leaves at all → []', JSON.stringify(computeAnimatingLeafSegments([])) === '[]');
+    ok('non-array input reads as no leaves, never throws', JSON.stringify(computeAnimatingLeafSegments(null)) === '[]');
+    ok(
+      'a non-animating leaf is excluded',
+      JSON.stringify(computeAnimatingLeafSegments([swingLeaf({ animating: false })])) === '[]'
+    );
+    ok(
+      'progress exactly 0 is excluded (leaf flush across the wall — Foundry already excludes everything past it)',
+      JSON.stringify(computeAnimatingLeafSegments([swingLeaf({ progress: 0 })])) === '[]'
+    );
+    ok(
+      'progress exactly 1 is excluded (leaf flush with the wall — casts no meaningful shadow)',
+      JSON.stringify(computeAnimatingLeafSegments([swingLeaf({ progress: 1 })])) === '[]'
+    );
+    ok(
+      'an animating ascend leaf is excluded even though it IS animating (structural non-fit, not a bug)',
+      JSON.stringify(computeAnimatingLeafSegments([swingLeaf({ animType: 'ascend' })])) === '[]'
+    );
+    ok(
+      'an animating descend leaf is excluded',
+      JSON.stringify(computeAnimatingLeafSegments([swingLeaf({ animType: 'descend' })])) === '[]'
+    );
+    ok(
+      'an animating slide leaf is excluded (near-free follow-on, not built)',
+      JSON.stringify(computeAnimatingLeafSegments([swingLeaf({ animType: 'slide' })])) === '[]'
+    );
+
+    const swingSegs = computeAnimatingLeafSegments([swingLeaf()]);
+    ok('a mid-swing leaf produces exactly one segment', swingSegs.length === 1);
+    ok(
+      "its hinge is the leaf's own closed pivot, unchanged",
+      near(swingSegs[0].hingeX, 100) && near(swingSegs[0].hingeY, 100)
+    );
+    ok(
+      "its free endpoint matches computeDoorLeafFreeEndpoint at the leaf's current rotation/width",
+      near(swingSegs[0].freeX, expectedFree.x) && near(swingSegs[0].freeY, expectedFree.y)
+    );
+
+    const swivelSegs = computeAnimatingLeafSegments([swingLeaf({ animType: 'swivel' })]);
+    ok('a mid-swing swivel leaf ALSO produces a segment', swivelSegs.length === 1);
+
+    const doubleSegs = computeAnimatingLeafSegments([
+      swingLeaf({ closed: { x: 100, y: 100 } }),
+      swingLeaf({ closed: { x: 200, y: 100 }, currentRotation: -Math.PI / 4 }),
+    ]);
+    ok('a double door (two swinging leaves at once) produces TWO segments', doubleSegs.length === 2);
+
+    ok(
+      'a non-finite hinge is skipped rather than propagating NaN',
+      JSON.stringify(computeAnimatingLeafSegments([swingLeaf({ closed: { x: NaN, y: 100 } })])) === '[]'
+    );
+    ok(
+      'a non-finite currentRotation is skipped',
+      JSON.stringify(computeAnimatingLeafSegments([swingLeaf({ currentRotation: undefined })])) === '[]'
+    );
   }
 }

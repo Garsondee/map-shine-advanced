@@ -278,6 +278,9 @@ import {
   decideFogGating,
   REVEAL_ILLUMINATION_THRESHOLD,
   EXPLORED_DIM_FACTOR,
+  // DOOR-LEAF-OCCLUSION — a swinging leaf's own CURRENT geometry as a
+  // real-time vision occluder (additive to the door-fog timer fade above).
+  applyDoorLeafOcclusion,
   buildRegionRectangleMaterial,
   buildRegionEllipseMaterial,
   buildRegionPolygonMaterial,
@@ -2720,6 +2723,11 @@ export async function startVtPanViewer({
     let previousVisionSources = [];
     let frozenFloorSources = null;
     const uDoorFogProgress = THREE.TSL.uniform(THREE.TSL.float(1));
+    /** DOOR-LEAF-OCCLUSION diagnostic — how many currently-animating leaves
+     *  (and out of how many active sources) were folded into this frame's
+     *  mask, so a mechanism that silently stopped is visible as a number in
+     *  the report rather than only inferable from a screenshot. */
+    let lastDoorLeafOcclusion = { activeLeaves: 0, sourcesTotal: 0 };
     const envLight = buildEnvironmentalLightMaterials({
       THREE,
       albedoTexture: sceneColor.texture,
@@ -6791,7 +6799,38 @@ export async function startVtPanViewer({
         // the floor stays frozen at its transition-start value for the
         // whole window, not re-frozen every frame.
         uDoorFogProgress.value = doorFogSummary.anyActive ? doorFogSummary.minProgress : 1;
+        // ⚠️ `previousVisionSources` is fed from the RAW `visionRead.sources`
+        // here, NEVER from `sourcesForMask` below. Its whole job is "what was
+        // already safe right before this transition started" — a snapshot
+        // frozen once, at the transition's first active frame (see the
+        // `frozenFloorSources` assignment above). Feeding it the door-leaf-
+        // clipped array would make that "frozen" reference silently shrink
+        // frame-to-frame as the leaf keeps swinging, contradicting its own
+        // definition as a FIXED pre-transition snapshot.
         previousVisionSources = visionRead.sources;
+
+        // ── DOOR-LEAF-OCCLUSION — the leaf's own CURRENT geometry as a
+        // real-time vision occluder (additive to the timer fade above; see
+        // `effects/vision/door-leaf-occlusion.js`'s own header for the full
+        // mechanism and why it's safe-by-construction: it can only ever
+        // REMOVE area from what Foundry's polygon already authorized, never
+        // add any). Reuses `doorFogSummary.anyActive`, already computed
+        // above — free. Only swing/swivel leaves mid-swing produce a segment
+        // (`computeAnimatingLeafSegments`'s own doc); every other case
+        // (nothing animating, or only slide/ascend/descend leaves) returns
+        // `[]`, and `sourcesForMask` stays byte-identical to `visionRead.
+        // sources` — the reference itself, not a copy, so `sync()` below
+        // pays nothing extra in the overwhelming majority of frames.
+        let sourcesForMask = visionRead.sources;
+        if (doorFogSummary.anyActive) {
+          const leafSegments = doorGraphics.getAnimatingLeafSegments();
+          if (leafSegments.length > 0) {
+            sourcesForMask = applyDoorLeafOcclusion(visionRead.sources, leafSegments);
+          }
+          lastDoorLeafOcclusion = { activeLeaves: leafSegments.length, sourcesTotal: visionRead.sources.length };
+        } else if (lastDoorLeafOcclusion.activeLeaves !== 0) {
+          lastDoorLeafOcclusion = { activeLeaves: 0, sourcesTotal: 0 };
+        }
 
         // ⚠️ BEFORE `sync()`, NOT AFTER. `setExploredRect` is what schedules
         // the one-shot clear, and `sync()` is what CONSUMES that flag into
@@ -6823,7 +6862,7 @@ export async function startVtPanViewer({
         // its own target, and the wall was right). The frame host does the
         // binding, exactly as it already does for regionScene/lightScene.
         const visionDraw = visionMask.sync({
-          sources: visionRead.sources,
+          sources: sourcesForMask,
           gate: gating.gate,
         });
         renderer.setRenderTarget(visionDraw.target);
@@ -18799,6 +18838,12 @@ export async function startVtPanViewer({
         // the everyday "no door mid-swing" state, not a failure.
         doorFogProgress: uDoorFogProgress.value,
         doorFogFloorFrozen: frozenFloorSources !== null,
+        // DOOR-LEAF-OCCLUSION — see its own state declaration for why this
+        // is reported as a number rather than left inferable only from a
+        // screenshot. Both 0 is the everyday "no swing-type door mid-swing"
+        // state, not a failure.
+        doorLeafOcclusionActiveLeaves: lastDoorLeafOcclusion.activeLeaves,
+        doorLeafOcclusionSourceCount: lastDoorLeafOcclusion.sourcesTotal,
         // THE viewer's OWN current drawing-buffer size, next to `maskSize`
         // above — the two falling out of sync is exactly the resize-list
         // omission found and fixed 2026-08-15; this is what makes a future

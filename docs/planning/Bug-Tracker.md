@@ -63,6 +63,7 @@ building on any of this.
 | **30** | **Floor switches can freeze the interface for over a minute with no preload ever attempted — a built GPU pipeline warm-up mechanism was never wired to the floor-switch path, and two real UI triggers skip prepare entirely** | floor transitions / GPU pipelines / interface seam | `BUILT (unverified)` 2026-08-24 — Node lint/format/full test suite green (11,939 tests); needs the author's own eyes on a real floor switch |
 | **31** | **Clearing a painted mask and Save didn't stick — the old paint came back after a reload** | paint mode / persistence | `BUILT (unverified)` 2026-08-31 |
 | **32** | **Opening a door blacked out the ENTIRE map, not just the door's own sliver — the player's own token vanished too** | vision/fog / door-graphics / renderer state | `LIVE` ✅ — author-confirmed 2026-08-31 |
+| **33** | **Feature: a swinging door leaf's own geometry as a real-time vision occluder (the timer-fade in #32 looked similar but wasn't gated by the leaf's actual position)** | vision/fog / door-graphics | `BUILT (unverified)` 2026-08-31 |
 
 ---
 
@@ -3058,4 +3059,140 @@ follow-on feature, not a defect in #32's fix — tracked separately, see
 `keyhole-door-fog-reveal-sync` for the design discussion (it revives
 exactly the "reimplement occlusion locally" question the original
 2026-08-27 redesign deliberately steered away from, now with the author's
-own direct steer to reconsider it).
+own direct steer to reconsider it). **Built as #33, same session.**
+
+---
+
+## 33. Feature: a swinging door leaf's own geometry as a real-time vision occluder
+
+**Status:** `BUILT (unverified)` · **Built:** 2026-08-31, same session as
+#32 · **Docs:** this file, `keyhole-door-fog-reveal-sync` (the design
+discussion), the plan at `C:\Users\HiveDisco\.claude\plans\
+twinkly-squishing-haven.md` (full algorithm derivation + review)
+
+### The ask, in the author's own words
+
+*"Doors have textures/geometry if it has an applied texture and the effect
+I wanted you to create is where the fog of war gets revealed only where
+the door has moved out of the way of the character's vision. Basically we
+turn the geometry/texture of the doors into vision blockers and then as
+the doors swing open they partially reveal what lies beyond them."*
+Explicitly additive to #32's timer-fade, which the author separately
+confirmed and asked to keep: *"Confirmed that it's slowly fading in the
+visibility which is a nice effect and we should keep it."*
+
+### Why this needed a real plan first, not a quick patch
+
+It revisits a deliberate architectural choice. The original
+2026-08-27 redesign of the door-fog feature explicitly avoided recomputing
+occlusion locally — V2's `VisionPolygonComputer`, a duplicate
+wall-raycaster swapping in the swinging leaf's real position — because
+[[keyhole-vision-fog-direction]]'s locked doctrine is "consume Foundry's
+vision compute, never reimplement it." The author is the one person with
+standing to redirect that call, and did so directly. Went through
+`EnterPlanMode` → two parallel Explore-agent research passes (door leaf
+world-space geometry; existing shadow/occlusion-clip code — none found
+anywhere in this codebase) → a Plan-agent design/validation pass →
+author-approved plan, before any code was written.
+
+### The mechanism
+
+Foundry flips a door's wall sense-type the INSTANT `door.open` changes,
+unconditional on the swing animation (which is purely decorative to
+Foundry) — so Foundry's own LOS polygon is already fully-open the moment
+the click lands. The key insight that makes real-time geometric gating
+tractable rather than a second full LOS system: Foundry's `losPoints`/
+`lightPoints` are already star-shaped around the vision source's own
+origin (a radial sweep), and the region a single segment shadows from that
+SAME origin is provably also star-shaped from it (intersection of 3
+half-planes — convex). Subtracting one star-shaped-from-S region from
+another reduces to a per-angle MINIMUM of their radial functions — it can
+never fragment a polygon into disconnected pieces, so the result stays
+valid input for the existing fan-triangulation rendering path with zero
+changes to `vision-mask-render.js`.
+
+Implementation (`effects/vision/door-leaf-occlusion.js`, new) is entirely
+cross-product based — no `atan2`, no ±π wraparound handling needed (a
+finite segment viewed from an external point always subtends <π). A
+polygon vertex angularly inside the leaf's shadow wedge gets clamped to
+where the ray from the source crosses the leaf; two boundary vertices are
+inserted at the leaf's own endpoints where the sweep transitions in/out of
+the wedge, so a coarse/sparse polygon still gets a crisp wedge edge rather
+than a triangular fin. One genuinely hard case exists and is handled by a
+documented, safe fallback rather than an attempt to splice it: a single
+polygon edge whose both endpoints read as angularly outside the wedge can
+still dip through it (a doorway opening onto a room with no nearby wall
+corners) — detected via independent per-ray sign-flip tests per edge, and
+when found, clipping is skipped for that one leaf/polygon pair that one
+frame, falling back to the (already-shipped, already-correct) timer-fade
+look. Cost: at most ~16ms, for one source against one leaf, in a rare
+layout — never wrong geometry, never a reveal Foundry's own polygon didn't
+already authorize.
+
+Only swing/swivel leaves qualify (the leaf's motion reduces to a hinge +
+rotating free endpoint); ascend/descend (perpendicular to the map plane —
+no segment to project) and slide (translation, not rotation — a near-free
+follow-on, not built) keep today's timer-fade-only look, documented, not
+silently missing. Open-direction only, same scope as #32's own feature —
+this layer only ever REMOVES area from what Foundry's polygon authorizes,
+so it cannot fix (and isn't trying to fix) the separate, pre-existing
+close-direction "snaps instantly" gap.
+
+### Files changed
+
+- `src/effects/vision/door-leaf-occlusion.js` (new) — the pure clip
+  algorithm: `clipPolygonBySegmentShadow`, `clipPolygonByDoorLeaves`
+  (broad-phase reject via the source's own radius), `applyDoorLeafOcclusion`
+  (the `sources`-array entry point).
+- `src/effects/door-graphics-render.js` — `DOOR_ANIMATION_TYPES` gains
+  `occludesAsSegment`; `isSwingLikeAnimation`, `computeDoorLeafFreeEndpoint`,
+  `computeAnimatingLeafSegments` (mirrors `computeTransitionSummary`'s own
+  shape).
+- `src/effects/door-graphics-subsystem.js` — stashes each leaf's current
+  rotation/width/animType (free, already computed for its own rendering);
+  new `getAnimatingLeafSegments()` accessor.
+- `src/effects/index.js` — barrel export.
+- `src/vt/vt-pan-viewer.js` — clips `visionRead.sources` into a new
+  `sourcesForMask` BEFORE `visionMask.sync()`, only when a swing/swivel
+  leaf is actually mid-transition; `previousVisionSources` (the #32 floor
+  freeze) deliberately still reads the RAW sources, never the clipped
+  ones — a frozen "what was safe before" snapshot must not itself shrink
+  as the leaf keeps swinging. Two new diagnostic fields in
+  `getVisionMaskInfo()`.
+
+### Proof
+
+`npm run verify`: 0 lint errors (the same 5 pre-existing, unrelated
+warnings), Prettier clean, `verify:structure` 296/296, full Node suite
+**12,773 passed, 3 failed** — identical to and no worse than the 2
+pre-existing, unrelated failures already on the tree before this session
+(`tools/chart-room` build fingerprint, specular's `incidentSteepness`
+default; neither touches vision or doors).
+`src/effects/vision/__tests__/run-tests.mjs`: **59/59 green** (up from
+32 before this session — the 27 new `door-leaf-occlusion.test.mjs` cases:
+the worked numeric example pinned exactly by hand-derivation, its
+wraparound mirror at 180° proving no atan2 bug exists to trigger, both
+documented degenerate/pathological-fallback cases constructed and pinned,
+order-independence across two leaves, never-mutates and reference-
+preservation contracts, broad-phase reject behavior including `Infinity`).
+`src/effects/__tests__/run-tests.mjs`: **1085/1085 green** (up from 1061 —
+the new `computeAnimatingLeafSegments`/`isSwingLikeAnimation`/
+`computeDoorLeafFreeEndpoint` cases in the existing
+`door-graphics-render.test.mjs`). Every pinned geometric result was
+cross-checked against the ray/segment-intersection formula by hand (a
+Node script run separately, printing and hand-verifying outputs before
+any value was written into the actual test file) before being trusted,
+not derived FROM a first run of the test itself.
+
+This is `vt-pan-viewer.js` per-frame renderer orchestration — the Node
+suite structurally cannot exercise whether it *looks* right (no real THREE
+renderer is constructed in tests), same honest limit as #32's own fix.
+
+### Fixed when
+
+On a real scene, with #32 already confirmed working: open a swing door and
+watch the newly-revealed sliver visibly track the leaf's actual swing
+angle — NOT a uniform fade applied to whatever Foundry already says is
+open. A double door should reveal correctly from both leaves. Everything
+#32 already fixed (no full-map blackout, token stays visible,
+already-revealed areas never dim) must still hold.

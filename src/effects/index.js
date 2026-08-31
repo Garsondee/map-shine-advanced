@@ -162,6 +162,11 @@ export {
   buildVisionSnapshotPublishMaterial,
 } from './vision/vision-mask-render.js';
 export {
+  clipPolygonBySegmentShadow,
+  clipPolygonByDoorLeaves,
+  applyDoorLeafOcclusion,
+} from './vision/door-leaf-occlusion.js';
+export {
   buildRegionRectangleMaterial,
   buildRegionEllipseMaterial,
   buildRegionPolygonMaterial,

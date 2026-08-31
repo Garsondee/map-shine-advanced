@@ -83,13 +83,11 @@ export const DOOR_GRAPHICS = Object.freeze({
     }),
   ]),
   // Recorded, NOT built — honest rungs so the deferred work does not rot
-  // (Effects.md §0). The fog reveal is FIRST because it is the one behaviour V2
-  // had that this V1 does not, and it is blocked only on the V3 fog system.
+  // (Effects.md §0).
   deferredRungs: Object.freeze([
     Object.freeze({
-      name: 'fog-reveal-sync',
-      priority: 'high',
-      note: "HIGH PRIORITY. A door opening must drive the fog-of-war slow reveal — the area a now-open doorway exposes fades into view synced to the door's OPEN animation, not instantly (V2's DoorMesh#getOpenAnimationFactor fed FogOfWarEffectV2 exactly this). Blocked on V3 fog-of-war landing (self-contained, incoming). The door runtime ALREADY tracks each door's eased openFactor (0..1) for its own rendering — the fog system consumes that same factor; no new door math is needed, only the consumer.",
+      name: 'fog-reveal-sync-close-and-multi-door',
+      note: "The OPEN-direction fog reveal sync landed 2026-08-27 (effects/vision/vision-mask-render.js's buildVisionFloorMaterial + syncFloor, driven by this file's own getTransitionSummary() — see door-graphics-render.js#computeTransitionSummary). Two things deliberately NOT covered: closing a door still snaps fog instantly (would need the mirror floor semantics — freeze the OPEN state instead of the closed one); and several doors transitioning at once share ONE frozen floor + the MINIMUM active progress across them (always conservative, never a leak, just imprecise — a transient re-darken of an already-fading-in door's sliver — if it ever visibly matters). Neither was asked for; both are straightforward follow-ons, not blocked on anything.",
     }),
     Object.freeze({
       name: 'roof-occlusion',

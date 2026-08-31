@@ -2894,6 +2894,43 @@ the working tree before this change (`tools/chart-room` build fingerprint,
 `specular`'s `incidentSteepness` default) — neither touches painting or
 masks.
 
+### Follow-up, same day — the fix itself was a non-atomic, unguarded write
+
+A whole-painting-system audit (Ingram's own follow-up ask, four parallel
+reviews) caught a real regression in the fix above before it caused any
+damage: `unsetFlag` then `setFlag`, unconditionally, with no try/catch. If
+`setFlag` rejected AFTER `unsetFlag` already succeeded — permission, an
+oversized payload, a dropped connection — the scene was left with **no
+`paintedMasks` flag at all**: every previously-saved mask gone, not just the
+one being saved, and the rejection propagated as an unhandled promise
+rejection past every caller (the `{ok:false}` branch in `save()` never ran).
+Not hypothetical: an ordinary wandering stroke across a 12,000×8,000 scene
+measured **~2.55 MB** encoded, 27× over `PAINT_EMBED_BYTE_BUDGET` (96 KB,
+warn-only) — exactly the kind of write a real Foundry document update could
+reject.
+
+Fixed (`e315027`): `savePaintedMasks` now only takes the unset+set path when
+a key is actually being removed (`Object.keys(previous).some(k => !(k in
+payload))`) — the common case, nothing fully cleared this save, stays a
+single `setFlag`, exactly as safe as before Bug #31 ever needed fixing.
+Both calls are wrapped in try/catch; on failure it best-effort restores the
+previous flag value before returning `{ok:false, reason}` instead of
+throwing. Restore is best-effort, not a real transaction — if the restore's
+own `setFlag` also fails there is nothing more that can safely be done from
+inside this function, but that failure is now itself reported rather than
+silent, and a restore re-sending an already-once-accepted payload is far
+more likely to succeed than the original write was.
+
+The size problem itself (2.55 MB routinely, 96 KB budget) is **not** fixed
+here — flagged for Ingram, not resolved unilaterally. Either the soft budget
+needs to become a real gate with a real fallback, or Mode B (bake-to-file,
+[[keyhole-authoring-and-distribution]]) needs to stop being deferred.
+
+New memory: `feedback_omission_cannot_delete_under_merge_semantics` gained a
+second lesson section on this ("a multi-step write needs its own failure
+handling — splitting one write into two only ever increases the failure
+surface").
+
 ### Fixed when
 
 On a real scene: paint `_Fire`, Save, confirm it's still there after a

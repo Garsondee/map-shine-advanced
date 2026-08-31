@@ -23,6 +23,7 @@ import { run as runAlmanacDiagnostics } from './almanac-diagnostics.test.mjs';
 import { run as runCalendarInstall } from './calendar-install.test.mjs';
 import { run as runSceneEnvironment } from './scene-environment.test.mjs';
 import { run as runSceneLights } from './scene-lights.test.mjs';
+import { run as runSceneSyntheticLights } from './scene-synthetic-lights.test.mjs';
 import { run as runSceneWallClip } from './scene-wall-clip.test.mjs';
 import { run as runSceneWalls } from './scene-walls.test.mjs';
 import { run as runSceneDoors } from './scene-doors.test.mjs';
@@ -87,6 +88,7 @@ const suites = [
   ['calendar-install', runCalendarInstall],
   ['scene-environment', runSceneEnvironment],
   ['scene-lights', runSceneLights],
+  ['scene-synthetic-lights', runSceneSyntheticLights],
   ['scene-wall-clip', runSceneWallClip],
   ['scene-walls', runSceneWalls],
   ['scene-doors', runSceneDoors],

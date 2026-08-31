@@ -192,6 +192,18 @@ export {
   deriveGlobalLightConfig,
 } from './scene-lights.js';
 
+// THE INVERSE OF THE READER ABOVE — mirrors MSA's OWN candle/fire light
+// descriptors INTO canvas.effects.lightSources (client-local, never a
+// document write), so Foundry's native door-icon reveal / light-perception
+// detection actually sees a candle-lit room as lit. See scene-synthetic-
+// lights.js's own header for the full mechanism and why this is safe.
+export {
+  buildVisionLightData,
+  diffVisionLightState,
+  createSceneSyntheticLights,
+  DETECTION_RADIUS_MULTIPLIER,
+} from './scene-synthetic-lights.js';
+
 // WALL-CLIPPED POLYGON FOR NON-DOCUMENT POINTS — the one place
 // `CONFIG.Canvas.polygonBackends`/`canvas.scene.levels` are read to compute
 // a wall-aware shape for a point that isn't a real Foundry document (candle

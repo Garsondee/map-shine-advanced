@@ -220,6 +220,12 @@ import {
   deriveGlobalLightWindow,
   shouldPublishGlobalLightWindow,
   readSceneGlobalLightRaw,
+  // THE DOOR-REVEAL BRIDGE (2026-08-31) — the inverse of the darkness
+  // write-back above: mirrors candle/fire light descriptors INTO Foundry's
+  // OWN canvas.effects.lightSources (client-local, never scene.update()),
+  // so a candle-lit room registers as lit for Foundry's native door-icon
+  // reveal. See `scene-synthetic-lights.js`'s own header.
+  createSceneSyntheticLights,
   // THE VISION-SOURCE READER (Pillar 11) — consumes Foundry's own wall-swept
   // polygons; never reproduces the vision ruleset.
   readActiveVisionSources,
@@ -299,6 +305,7 @@ import {
   buildCandleFlameGeometry,
   candleAnimationQualityTier,
   candleTierPlan,
+  buildCandleLightSources,
   createLightningSubsystem,
   createFireSubsystem,
   createPrecipitationSubsystem,
@@ -847,6 +854,15 @@ function disposeActive() {
     _active.disposePointLights?.();
   } catch (err) {
     log.error('point-light dispose failed — VRAM may be leaked:', err);
+  }
+  // Not VRAM — every synthetic Foundry light source the door-reveal bridge
+  // registered into canvas.effects.lightSources, so a scene switch or
+  // Stop/Restart doesn't leave a ghost light revealing doors around a
+  // candle that no longer exists.
+  try {
+    _active.disposeSyntheticLights?.();
+  } catch (err) {
+    log.error('synthetic light dispose failed — a ghost door-reveal light may linger:', err);
   }
   // Every region-darkness mesh's own material + the shared quad geometry.
   try {
@@ -3693,6 +3709,34 @@ export async function startVtPanViewer({
       // instrumentation-audit-2026-08-12, same shape as specular's own
       // `profiler` above.
       profiler,
+    });
+
+    // THE DOOR-REVEAL BRIDGE (2026-08-31) — see scene-synthetic-lights.js's
+    // own header for the full mechanism. Deliberately NOT fed from
+    // `pointLights`' own internal candle/fire merge (that pool is a
+    // performance-tuned rendering path; recomputing the same clustering
+    // independently here, throttled to a few times a SECOND rather than
+    // every frame — see MIN_SYNC_INTERVAL_MS — costs nothing worth avoiding
+    // that coupling for). Same TDZ-safe closure pattern as `getWindHandle`
+    // above: `fireSubsystem` is declared further down this function, safe
+    // because neither closure is invoked until `syntheticLights.sync()`
+    // runs from the frame loop.
+    const syntheticLights = createSceneSyntheticLights({
+      getCandleDescriptors: () => {
+        const state = getCandleRenderState();
+        if (!state?.enabled) return [];
+        return buildCandleLightSources(state.anchors, {
+          lightRadiusPx: state.params?.lightRadiusPx,
+          colorHex: state.params?.color,
+          animationQuality: state.params?.animationQuality,
+          windResponse: state.params?.windResponse,
+          perfTier: state.perfTier,
+        });
+      },
+      // Fire's lights are already computed once per frame for the pool
+      // above (`fireSubsystem.lightSources()` — free to read again here,
+      // not recomputed).
+      getFireDescriptors: () => fireSubsystem.lightSources(),
     });
 
     // ------------------------------------------------------------------
@@ -6609,6 +6653,12 @@ export async function startVtPanViewer({
       profiler?.begin(Z.lightCandleSync);
       updateCandleFlame();
       profiler?.end(Z.lightCandleSync);
+      // THE DOOR-REVEAL BRIDGE'S own per-frame tick — throttles itself
+      // (MIN_SYNC_INTERVAL_MS), so this call is cheap on every frame it
+      // skips. `env.time.realMs`, NEVER `env.time.tMs` — sim time freezes
+      // on pause, which would latch the throttle shut forever (the exact
+      // bug already paid for once, see scene-synthetic-lights.js's header).
+      syntheticLights.sync(env.time.realMs);
       // Every loaded vegetation mesh's live motion/shadow uniforms — SAME
       // "every frame, not just on residency pass" placement as the candle
       // call just above (see `syncAllVegetationMotionForFrame`'s own header
@@ -18384,6 +18434,14 @@ export async function startVtPanViewer({
        * `disposeActive`'s own call site needs no change. */
       disposePointLights() {
         pointLights.dispose();
+      },
+      /** Removes every synthetic Foundry light source the door-reveal bridge
+       * registered (scene-synthetic-lights.js) — not VRAM, but the same
+       * "must not outlive this viewer instance" reasoning: an un-removed
+       * one would keep revealing doors around a candle that no longer
+       * exists after a scene switch or Stop/Restart. */
+      disposeSyntheticLights() {
+        syntheticLights.dispose();
       },
       /** Tear down every region-darkness mesh's OWN material (see
        * disposeActive). Unlike point lights, every region mesh SHARES

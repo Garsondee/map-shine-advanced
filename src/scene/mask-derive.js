@@ -207,6 +207,103 @@ export function sampleContentBilinear(content, u, v) {
 }
 
 /**
+ * ⚠️ WHEN ONE DESTINATION TEXEL COVERS THIS MANY SOURCE TEXELS OR MORE (per
+ * axis, measured as a HALF-extent, so 0.75 means a footprint 1.5 source
+ * texels wide), an `areaAverage` source stops being point-sampled by
+ * {@link compositeItemOverwrite} and is area-averaged instead. See that
+ * function's MINIFICATION section for why, and for why clearing this bar is
+ * necessary but not on its own sufficient.
+ *
+ * 0.75 is the smallest threshold that is safe rather than a tuning choice: a
+ * half-extent of exactly 0.75 spans 1.5 source texels, which ALWAYS contains
+ * at least one source texel centre at every sub-texel phase, so the box can
+ * never come back empty and need a fallback. Below it the box would be
+ * narrower than one texel — i.e. NEAREST sampling, strictly worse than the
+ * bilinear tap it would replace — so a source that is merely level with, or
+ * finer than, the destination keeps the existing path even having opted in.
+ * The painter's own layer clears it by a wide margin and is meant to: 4096
+ * against `MASK_GRID_MAX_DIM`'s 512 is a half-extent of 4.0, and against
+ * `WATER_GRID_MAX_DIM`'s 2048 it is exactly 1.0.
+ */
+export const BOX_FILTER_MIN_HALF_TEXELS = 0.75;
+
+/**
+ * AREA-AVERAGE (box filter) a content grid — and its PREMULTIPLIED value —
+ * over the source-texel footprint that ONE destination texel covers.
+ *
+ * ⚠️ PREMULTIPLIED, AND THAT IS THE WHOLE POINT. The area-average of a
+ * source-over composite is NOT `dst×(1−mean(a)) + mean(c)×mean(a)`; it is
+ *
+ *     (1/N)·Σ [dst×(1−aₖ) + cₖ×aₖ]  =  dst×(1−ā) + (1/N)·Σ cₖaₖ
+ *
+ * — the mean of the PRODUCT, never the product of the means. Filtering
+ * non-premultiplied colour re-introduces exactly the multiply this whole
+ * change exists to delete: a small opaque dab covering 9 of a footprint's 64
+ * source texels has ā = 0.14 and mean(c) = 36, and the wrong form composites
+ * it to 36 × 0.14 = 5 — back under fire's sensitivity floor, with the
+ * aliasing merely traded for a crush. The right form composites it to 36.
+ *
+ * Returns the two numbers the caller needs and nothing else: `alphaMean`
+ * (0..1) and `premultMean` (0..255, already `Σcₖaₖ/N/255`).
+ *
+ * `alpha === null` means "fully opaque", the same `?? null` rule
+ * {@link compositeItemOverwrite} applies everywhere else — which reduces
+ * this to a plain box average of `content`.
+ *
+ * @param {ContentGrid} content
+ * @param {ContentGrid|null} alpha - MUST share `content`'s dimensions (the
+ *   caller checks; both painted self-alpha and a file's decoded alpha do by
+ *   construction).
+ * @param {number} u - 0..1 across the content, the destination texel's CENTRE.
+ * @param {number} v - 0..1 down the content, likewise.
+ * @param {number} hx - footprint half-extent in SOURCE TEXELS, X.
+ * @param {number} hy - the same, Y.
+ * @returns {{alphaMean: number, premultMean: number}}
+ */
+export function sampleContentBoxPremultiplied(content, alpha, u, v, hx, hy) {
+  const { w, h, data } = content;
+  const ad = alpha ? alpha.data : null;
+  // Source texel CENTRES sit at integers in this space — the same half-texel
+  // convention `sampleContentBilinear` uses, so "which texels does this
+  // footprint contain" is just "which integers are in [c−h, c+h)".
+  const cx = u * w - 0.5;
+  const cy = v * h - 0.5;
+  // HALF-OPEN, `[c − h, c + h)`, and that detail is load-bearing: the closed
+  // interval takes 2h+1 texels whenever the footprint happens to align on a
+  // texel centre and 2h otherwise, so the divisor — and therefore the
+  // composited value — would still wobble with sub-texel phase. That is a
+  // smaller version of the very lottery this path exists to remove. Half-open
+  // takes exactly `floor(2h)` texels at EVERY phase, which is also exactly
+  // the footprint's own area in source texels.
+  let x0 = Math.ceil(cx - hx);
+  let x1 = Math.ceil(cx + hx) - 1;
+  let y0 = Math.ceil(cy - hy);
+  let y1 = Math.ceil(cy + hy) - 1;
+  if (x0 < 0) x0 = 0;
+  if (y0 < 0) y0 = 0;
+  if (x1 > w - 1) x1 = w - 1;
+  if (y1 > h - 1) y1 = h - 1;
+  // Only reachable when the footprint's centre is outside the grid entirely,
+  // which the caller's own in-footprint test already excludes — kept so this
+  // helper is honest on its own rather than only inside its one call site.
+  if (x0 > x1 || y0 > y1) return { alphaMean: 0, premultMean: 0 };
+  let sumA = 0;
+  let sumCA = 0;
+  let n = 0;
+  for (let sy = y0; sy <= y1; sy++) {
+    const row = sy * w;
+    for (let sx = x0; sx <= x1; sx++) {
+      const i = row + sx;
+      const a = ad ? ad[i] : 255;
+      sumA += a;
+      sumCA += data[i] * a;
+      n++;
+    }
+  }
+  return { alphaMean: sumA / n / 255, premultMean: sumCA / n / 255 };
+}
+
+/**
  * MAX-composite one item's content grid into a scene grid through its
  * placement. Iterates only the grid texels under the item's rotated-corner
  * AABB; each texel center is inverse-transformed and bilinearly sampled.
@@ -292,14 +389,99 @@ export function compositeItemMax(grid, content, placement, valueScale = 1) {
  * byte-identical to the pre-2026-08-02 behaviour for any caller that has no
  * alpha to give.
  *
+ * ⚠️ MINIFICATION TAKES A DIFFERENT PATH (2026-08-31), and the reason is that
+ * everything above this line was designed for the opposite case. A single
+ * 2×2 bilinear tap per destination texel is the CORRECT filter for
+ * MAGNIFICATION — a ≤248-texel coarse mip stretched over a 512-texel scene
+ * grid, which is what every mask FILE is and what `sampleContentBilinear`'s
+ * own header describes. It is structurally wrong for MINIFICATION, and the
+ * in-app painter is exactly that: `scene/paint-mask.js#PAINT_GRID_MAX_DIM` is
+ * 4096 against `MASK_GRID_MAX_DIM`'s 512, so ONE destination texel covers 64
+ * source texels and a single narrow tap throws 63 of them away.
+ *
+ * The symptom that is: a minimum-size brush dab (`stampBrushWorld`'s own
+ * `MIN_STAMP_RADIUS_TEXELS`, ~1–4 painted texels) either lands under a
+ * destination texel's centre and reads ~255, or misses it and reads 0 — a
+ * COIN FLIP on sub-texel phase, decided by where in the map the author
+ * happened to click and by nothing they can see or control. Measured on the
+ * real 4096→512 geometry: real signal survived ~27% of phases. The painter's
+ * own preview, which draws the source layer directly at source resolution,
+ * showed the dab every single time.
+ *
+ * So when the source is meaningfully FINER than the destination
+ * ({@link BOX_FILTER_MIN_HALF_TEXELS}), each destination texel area-averages
+ * every source texel whose centre falls inside its own footprint
+ * ({@link sampleContentBoxPremultiplied}) instead. Same dab, same geometry:
+ * 100% of phases, composited to a stable ~36/255 — above fire's own 13/255
+ * sensitivity floor at every phase rather than at one in four of them.
+ *
+ * ⚠️⚠️ AND IT IS OPT-IN, NOT GEOMETRY ALONE — `areaAverage` must be asked
+ * for. The geometry test above is necessary but NOT sufficient, and finding
+ * that out is the reason this parameter exists rather than the branch simply
+ * firing wherever a source happens to minify. Measured while building this:
+ * a 512²-native TILE with its own mask file, placed at ~512 world px on a
+ * 10,650 px map, hands in a coarse-mip content grid finer than its own
+ * footprint on the scene grid — it minifies by ~5×, clears the threshold, and
+ * would have silently changed compositing behaviour for an existing,
+ * author-tuned, file-based mask kind on every small masked Tile in every
+ * scene. That is a blast radius this change has no live visual verification
+ * for, and "it is the more correct filter" is not the same claim as "it is
+ * safe to change under every live scene tonight".
+ *
+ * There is also a real difference between the two sources, not just a
+ * difference in risk appetite: a FILE's content grid is its pack's coarsest
+ * MIP, which the packer produced by successive area-averaging from native
+ * resolution — it arrives already band-limited to roughly its own texel
+ * count. The painter's grid is raw, full-resolution, never-filtered signal
+ * (`scene/paint-mask.js` writes brush stamps straight into it), which is the
+ * textbook setup for exactly the aliasing above. Opting one in and not the
+ * other is a statement about which signal has already been filtered, and it
+ * keeps every file-based mask byte-for-byte identical to before, provably,
+ * rather than by argument.
+ *
  * @param {MaskGrid} grid
  * @param {ContentGrid} content
  * @param {Parameters<typeof worldToItemUv>[0]} placement
  * @param {ContentGrid|null} [alpha] - the mask image's OWN alpha, same
  *   geometry as `content` (both come from one `extractContentWindow` pass).
+ * @param {object} [options]
+ * @param {boolean} [options.areaAverage=false] - opt IN to the minifying box
+ *   filter described above. `scene/mask-authority.js#ingestPaintedMask` is
+ *   the one producer that sets it (carried on the source and forwarded by
+ *   {@link rasterizeAuthored}); every file-based source leaves it false and
+ *   takes the untouched bilinear path at any resolution ratio.
  */
-export function compositeItemOverwrite(grid, content, placement, alpha = null) {
+export function compositeItemOverwrite(grid, content, placement, alpha = null, { areaAverage = false } = {}) {
   const { spec, data } = grid;
+  // ── MAGNIFY OR MINIFY? ───────────────────────────────────────────────────
+  // How much of the SOURCE does one DESTINATION texel cover, in source
+  // texels? `worldToItemUv` is linear (a rotation and two scales), so a
+  // destination texel's UV footprint is that same rotated rectangle and its
+  // AABB half-extents fall straight out of the transform's own cos/sin — no
+  // per-texel work, computed once for the whole composite. Rotation is
+  // handled by over-covering slightly (an axis-aligned box around a rotated
+  // footprint), which costs a touch of extra blur on a rotated minifying
+  // source and never a missed texel; a painted layer, the only minifying
+  // source that exists today, is always axis-aligned.
+  let hx = 0;
+  let hy = 0;
+  if (areaAverage) {
+    const rot = ((placement.rotation ?? 0) * Math.PI) / 180;
+    const absCos = Math.abs(Math.cos(rot));
+    const absSin = Math.abs(Math.sin(rot));
+    hx = ((absCos * spec.texelW + absSin * spec.texelH) / (2 * Math.abs(placement.width))) * content.w;
+    hy = ((absSin * spec.texelW + absCos * spec.texelH) / (2 * Math.abs(placement.height))) * content.h;
+  }
+  const useBox =
+    hx >= BOX_FILTER_MIN_HALF_TEXELS &&
+    hy >= BOX_FILTER_MIN_HALF_TEXELS &&
+    Number.isFinite(hx) &&
+    Number.isFinite(hy) &&
+    // Premultiplying the two together index-for-index needs them to BE the
+    // same geometry. Every real caller's already is (one `extractContentWindow`
+    // pass for a file, one derived LUT array for paint); a hypothetical
+    // mismatch falls back to the bilinear path rather than reading garbage.
+    (!alpha || (alpha.w === content.w && alpha.h === content.h));
   const corners = itemWorldCorners(placement);
   const minX = Math.min(...corners.map((c) => c.x));
   const maxX = Math.max(...corners.map((c) => c.x));
@@ -316,9 +498,19 @@ export function compositeItemOverwrite(grid, content, placement, alpha = null) {
     for (let gx = gx0; gx <= gx1; gx++) {
       const wx = spec.x + (gx + 0.5) * spec.texelW;
       const { u, v } = worldToItemUv(placement, wx, wy);
+      // REACH IS DECIDED BY THE TEXEL CENTRE ON BOTH PATHS, deliberately: it
+      // is the same "which texels does this source own" question
+      // `rasterizeAuthored` builds its absent-vs-painted distinction on, and
+      // widening it under the box filter would silently change every
+      // source's footprint by half a texel.
       if (u < 0 || u >= 1 || v < 0 || v >= 1) continue;
-      const raw = sampleContentBilinear(content, u, v);
       const i = gy * spec.w + gx;
+      if (useBox) {
+        const { alphaMean, premultMean } = sampleContentBoxPremultiplied(content, alpha, u, v, hx, hy);
+        data[i] = Math.min(255, Math.round(data[i] * (1 - alphaMean) + premultMean));
+        continue;
+      }
+      const raw = sampleContentBilinear(content, u, v);
       if (!alpha) {
         data[i] = Math.min(255, Math.round(raw));
         continue;
@@ -592,10 +784,11 @@ export function compositeItemHeightMax(grid, content, placement, heightByte) {
  *
  * @param {MaskGridSpec} gridSpec
  * @param {Array<{placement: Parameters<typeof worldToItemUv>[0], content: ContentGrid,
- *   alpha?: ContentGrid|null}>} sources - already filtered to real
- *   content+placement, already sorted ascending by draw order. `alpha` is the
- *   mask file's own opacity; see {@link compositeItemOverwrite} for why a
- *   transparent texel must not be written as a painted 0.
+ *   alpha?: ContentGrid|null, areaAverage?: boolean}>} sources - already
+ *   filtered to real content+placement, already sorted ascending by draw
+ *   order. `alpha` is the mask file's own opacity; see
+ *   {@link compositeItemOverwrite} for why a transparent texel must not be
+ *   written as a painted 0, and for what `areaAverage` opts a source into.
  * @param {number} absentValue - 0..1, the catalog's own.
  * @returns {MaskGrid}
  */
@@ -725,7 +918,14 @@ export function rasterizeAuthored(gridSpec, sources, absentValue) {
     // `source.alpha` is the mask file's OWN alpha, carried from
     // `mask-authority.js#ingestDecodedPage`. Absent (an older/synthetic
     // source) composites fully opaque — the pre-2026-08-02 behaviour.
-    compositeItemOverwrite(grid, source.content, source.placement, source.alpha ?? null);
+    //
+    // `source.areaAverage` is the PAINTED source's own opt-in to the
+    // minifying box filter (2026-08-31) — see `compositeItemOverwrite`'s
+    // MINIFICATION section. Absent/false on every file source, which is what
+    // keeps them byte-for-byte on the untouched bilinear path.
+    compositeItemOverwrite(grid, source.content, source.placement, source.alpha ?? null, {
+      areaAverage: source.areaAverage === true,
+    });
   }
   return grid;
 }

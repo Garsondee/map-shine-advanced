@@ -108,6 +108,68 @@ import { compareLayerKeys, maskHostFloorIndices } from './layer-order.js';
 
 const EXTRACT_ERROR_LOG_MAX = 10;
 
+/**
+ * ⚠️ THE PAINTED SELF-ALPHA RAMP (2026-08-31) — how many painted bytes it
+ * takes for a brush stroke to count as FULLY covering, rather than partially
+ * transparent. See `ingestPaintedMask`'s own SELF-ALPHA doc for the mechanism;
+ * this constant is the fix for what that mechanism did WRONG.
+ *
+ * A painted layer has no alpha channel of its own, so its byte value doubles
+ * as its own coverage. Feeding the SAME byte in as both the VALUE and the
+ * ALPHA made `mask-derive.js#compositeItemOverwrite`'s source-over blend
+ * SQUARE it: against fire's own transparent background (`absentValue` 0) the
+ * composite `0×(1−a) + raw×a` with `raw === alpha === content` reduces to
+ * exactly `content² / 255`. Two measured consequences, both invisible to the
+ * author because the painter's own preview draws the RAW layer, unsquared:
+ *
+ *   - EVERY painted byte at or below 56 composited under 13/255, which is
+ *     fire's own live sensitivity floor (`FIRE_PARAMS.maskSensitivity`
+ *     default 0.05). The bottom ~20% of the Strength slider therefore painted
+ *     something the preview showed and the render could never ignite.
+ *   - A soft brush's edge falloff is ALREADY a smoothstep; squaring it again
+ *     compounded into a visibly tighter stroke than the one painted.
+ *
+ * And it quietly broke this door's own stated "can only ever ADD" invariant:
+ * for any PARTIAL painted value over existing non-zero background content (a
+ * Photoshop-authored `_Fire.webp` underneath), `content²/255` pulls the
+ * file's own value DOWN in the overlap instead of overwriting it — erosion,
+ * from the one direction the doc promised could not erode.
+ *
+ * THE CURVE: `alpha = smoothstep(0, 16, content)`, applied ONCE at ingest.
+ * Chosen, not tuned — the three properties it has to hold are all endpoint
+ * properties, and this is the narrowest curve that holds them:
+ *   1. `content 0 → alpha 0`, EXACTLY. Unpainted stays unpainted; a painted
+ *      layer still cannot blank out what a file authored outside the stroke.
+ *      (A curve that merely approaches 0 would erode the whole file mask by a
+ *      hair everywhere, which is the bug above wearing a smaller hat.)
+ *   2. `alpha 255` — a true, lossless overwrite — for every content ≥ 16, so
+ *      the composite is the IDENTITY (`out === content`) across the entire
+ *      realistic Strength range. Not "closer to linear": linear.
+ *   3. A C1-continuous ramp over the last 16 bytes rather than a step at 1,
+ *      so a soft brush's antialiased outer fringe still fades out instead of
+ *      terminating on a hard edge. 16/255 is 6% intensity — a band already
+ *      below fire's own sensitivity floor, so the ramp cannot cost the author
+ *      any paint they could otherwise have seen.
+ */
+const PAINTED_ALPHA_RAMP_BYTES = 16;
+
+/**
+ * `PAINTED_ALPHA_RAMP_BYTES`' curve, evaluated once for all 256 byte values —
+ * `ingestPaintedMask` runs this over a ≤4096²-texel painted grid (`scene/
+ * paint-mask.js#PAINT_GRID_MAX_DIM`), so a table lookup rather than a
+ * smoothstep per texel is the difference between a table scan and eight
+ * million `Math.pow`s on the author's Save.
+ * @type {Uint8Array}
+ */
+const PAINTED_ALPHA_LUT = (() => {
+  const lut = new Uint8Array(256);
+  for (let v = 0; v < 256; v++) {
+    const t = Math.min(1, v / PAINTED_ALPHA_RAMP_BYTES);
+    lut[v] = Math.round(255 * t * t * (3 - 2 * t));
+  }
+  return lut;
+})();
+
 /** Item kinds that participate in cover derivation (never tokens — they move
  * constantly and are not architecture). */
 const COVER_ITEM_KINDS = new Set(['levelBackground', 'levelForeground', 'tile']);
@@ -533,17 +595,35 @@ export function createMaskAuthority({ readPageImageData, log }) {
    * "later host overwrites earlier" law `compositeItemOverwrite`'s own doc
    * already states for Tiles.
    *
-   * SELF-ALPHA: the grid's own byte value is ALSO passed as its own alpha.
-   * An unpainted texel (byte 0) is therefore fully TRANSPARENT under
+   * SELF-ALPHA: the grid has no alpha channel of its own to carry (unlike a
+   * real mask FILE, whose alpha rides alongside its colour channel from the
+   * same decode), so its own byte value is the only honest stand-in for
+   * coverage. An unpainted texel (byte 0) is fully TRANSPARENT under
    * `compositeItemOverwrite`'s existing "transparent means unpainted" law
    * (2026-08-02) — the file/earlier source shows through completely
-   * unchanged there — while a fully-painted texel (byte 255) fully
-   * overwrites. A painted layer has no separate alpha channel of its own to
-   * carry (unlike a real mask FILE, whose alpha rides alongside its colour
-   * channel from the same decode), so its own coverage value is the only
-   * honest stand-in — and it means the author's brush can only ever ADD
-   * fire (or whatever kind) on top of a file, never silently blank out
-   * everything the file painted outside the stroke.
+   * unchanged there — while a painted texel overwrites. That is what lets
+   * the author's brush only ever ADD fire (or whatever kind) on top of a
+   * file, never silently blank out everything the file painted outside the
+   * stroke.
+   *
+   * ⚠️ THE ALPHA IS DERIVED THROUGH A RAMP, NOT PASSED THROUGH RAW
+   * (2026-08-31). Handing the same byte in as BOTH value and alpha squared
+   * it in the composite and broke every one of the claims in the paragraph
+   * above for partial values — see `PAINTED_ALPHA_RAMP_BYTES`' own doc for
+   * the arithmetic, the two measured symptoms, and why 16 is the number.
+   *
+   * ⚠️ THE GRID IS COPIED, NOT ALIASED (2026-08-31). `grid.data` is
+   * `ui/paint-mode.js`'s OWN live working buffer, which it mutates in place
+   * (Clear is `layer.data.fill(0)`, Undo is `layer.data.set(snapshot)`) and
+   * hands here only through its Save-time `onLayersChanged` — a SNAPSHOT
+   * contract, never a subscription. Storing the reference made the two the
+   * same array: the authority's already-ingested content changed underneath
+   * it with no `touch()`, so the render stayed correct until some UNRELATED
+   * event (any Tile/Wall CRUD, a streaming page decode, a slider) happened
+   * to dirty the products — at which point unsaved or already-undone paint
+   * appeared in, or vanished from, the live render with no correlation to
+   * anything the author had just done. One `.slice()` is the whole fix; the
+   * alpha derivation below allocates its own array for the same reason.
    *
    * `grid=null`/`undefined` forgets this floor+kind's painted content
    * entirely. Most callers never need that: an ALL-UNPAINTED grid (every
@@ -564,10 +644,32 @@ export function createMaskAuthority({ readPageImageData, log }) {
       if (scene.paintedIngests.delete(key)) touch();
       return;
     }
-    const content = { w: grid.spec.w, h: grid.spec.h, data: grid.data };
+    // ONE pass, two arrays: the snapshot copy and its own derived coverage.
+    // Both are the painter's grid size (≤ PAINT_GRID_MAX_DIM² bytes each) and
+    // both are paid ONCE per Save, never per frame and never per recompute —
+    // `onLayersChanged` is the only caller and it fires from `save()` alone.
+    const data = grid.data.slice();
+    const alphaData = new Uint8Array(data.length);
+    for (let i = 0; i < data.length; i++) alphaData[i] = PAINTED_ALPHA_LUT[data[i]];
     scene.paintedIngests.set(key, {
-      content,
-      alpha: content, // self-alpha — see this function's own doc
+      content: { w: grid.spec.w, h: grid.spec.h, data },
+      // SELF-ALPHA, RAMPED — see this function's own doc and
+      // `PAINTED_ALPHA_RAMP_BYTES`. Same geometry as `content` by
+      // construction, which is what lets `compositeItemOverwrite`'s
+      // minifying box filter premultiply the two together index-for-index.
+      alpha: { w: grid.spec.w, h: grid.spec.h, data: alphaData },
+      // ⚠️ THE ONE PRODUCER THAT OPTS INTO THE MINIFYING BOX FILTER
+      // (2026-08-31) — `mask-derive.js#compositeItemOverwrite`'s MINIFICATION
+      // section. The painter's grid is `PAINT_GRID_MAX_DIM` (4096) against
+      // `MASK_GRID_MAX_DIM`'s 512: ONE destination texel covers 64 source
+      // texels, and the single bilinear tap that is correct for a magnifying
+      // FILE mip turns a small brush dab into a coin flip on sub-texel phase
+      // (measured: real signal survived ~27% of phases; the painter's own
+      // preview showed it at 100% of them). Set HERE, on the source, rather
+      // than inferred from geometry in the composite, because a small masked
+      // Tile's own FILE minifies too and changing its long-standing
+      // compositing behaviour is not part of this fix.
+      areaAverage: true,
       placement: {
         x: grid.spec.x,
         y: grid.spec.y,

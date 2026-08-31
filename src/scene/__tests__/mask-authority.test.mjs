@@ -960,5 +960,220 @@ export async function run(t) {
     t.ok('paint lands before reset', fireByteAt(50, 50) === 255);
     resetPaintScene([]); // a fresh scene, no items, no file, no prior paint
     t.ok('a scene reset wipes previously-painted content — fire reads absent again', fireByteAt(50, 50) === 0);
+
+    // ══════════════════════════════════════════════════════════════════
+    // 6. 📸 THE GRID IS A SNAPSHOT, NOT A SUBSCRIPTION (2026-08-31).
+    //
+    // `grid.data` is `ui/paint-mode.js`'s OWN live working buffer and it
+    // mutates it IN PLACE — Clear is `layer.data.fill(0)`, Undo is
+    // `layer.data.set(snapshot)` — while handing it here only through its
+    // Save-time `onLayersChanged`. Storing the reference made the two the
+    // same array: the ingested content changed underneath the authority
+    // with no `touch()`, so the render stayed correct until some unrelated
+    // event dirtied the products, at which point unsaved or already-undone
+    // paint appeared in (or vanished from) the live render, uncorrelated
+    // with anything the author had just done.
+    // ══════════════════════════════════════════════════════════════════
+    resetPaintScene([
+      { id: 'level:P0:background', kind: 'levelBackground', levelId: 'P0', hidden: false, key: { elevation: 0 } },
+    ]);
+    {
+      const live = paintGrid((gx) => (gx < 5 ? 255 : 0)); // the painter's own live buffer
+      paintAuthority.ingestPaintedMask(0, 'fire', live);
+      t.ok('setup: the ingested paint reads back', fireByteAt(25, 50) === 255 && fireByteAt(75, 50) === 0);
+
+      // CLEAR, the painter's own `layer.data.fill(0)` — never routed through
+      // this door, never `touch()`ed.
+      live.data.fill(0);
+      t.ok(
+        "the painter's own Clear does NOT reach already-ingested content — the snapshot is the authority's",
+        fireByteAt(25, 50) === 255
+      );
+
+      // UNDO, the painter's own `layer.data.set(snapshot)` — the mirror case:
+      // paint the OTHER half in place and confirm it does not leak in either.
+      const undone = new Uint8Array(100);
+      for (let gy = 0; gy < 10; gy++) for (let gx = 5; gx < 10; gx++) undone[gy * 10 + gx] = 255;
+      live.data.set(undone);
+      t.ok(
+        "and neither does the painter's own Undo — an in-place set() cannot rewrite what was already served",
+        fireByteAt(25, 50) === 255 && fireByteAt(75, 50) === 0
+      );
+
+      // The state only ever moves when the door is used, which is the whole
+      // contract: re-ingesting the SAME (now mutated) array does land.
+      paintAuthority.ingestPaintedMask(0, 'fire', live);
+      t.ok(
+        'a real re-ingest of the mutated buffer DOES land — the door is the only way in, and it works',
+        fireByteAt(25, 50) === 0 && fireByteAt(75, 50) === 255
+      );
+
+      // And the copy is not a one-shot: mutating the source after the SECOND
+      // ingest is just as inert as after the first.
+      live.data.fill(0);
+      t.ok('the copy holds after a re-ingest too, not just the first time', fireByteAt(75, 50) === 255);
+      paintAuthority.ingestPaintedMask(0, 'fire', null);
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // 7. 📐 SELF-ALPHA MUST NOT SQUARE THE PAINTED BYTE (2026-08-31).
+    //
+    // Passing the same byte in as both VALUE and ALPHA made
+    // `compositeItemOverwrite`'s source-over blend reduce to `content²/255`
+    // against fire's transparent absentValue — a quadratic, not the identity
+    // the Strength slider promises. Everything at or below 56 composited
+    // under fire's own 13/255 sensitivity floor, so the bottom ~20% of the
+    // slider painted something the preview showed and the render could never
+    // ignite. See `mask-authority.js#PAINTED_ALPHA_RAMP_BYTES`.
+    //
+    // The grids here are COARSER than the derived grid, so this measures the
+    // alpha curve alone — the minifying box filter (block 8) never engages.
+    // ══════════════════════════════════════════════════════════════════
+    {
+      const FIRE_FLOOR = 13; // FIRE_PARAMS.maskSensitivity default 0.05 · 255
+      const compositedFor = (value) => {
+        paintAuthority.ingestPaintedMask(
+          0,
+          'fire',
+          paintGrid(() => value)
+        );
+        return fireByteAt(50, 50);
+      };
+      t.ok('the endpoint at 0 is exact — an unpainted texel composites to nothing', compositedFor(0) === 0);
+      t.ok('the endpoint at 255 is exact — a fully painted texel fully overwrites', compositedFor(255) === 255);
+      const linear = [15, 30, 60, 100, 128, 180, 220].map((v) => ({ v, out: compositedFor(v) }));
+      t.ok(
+        'every realistic painted value composites to ITSELF, not its square: ' +
+          linear.map((r) => `${r.v}→${r.out}`).join(' '),
+        linear.every((r) => Math.abs(r.out - r.v) <= 1)
+      );
+      t.ok(
+        'the old quadratic would have crushed these to c²/255 (60→14, 100→39, 180→127) — it no longer does',
+        linear.find((r) => r.v === 100).out >= 99 && linear.find((r) => r.v === 180).out >= 179
+      );
+      // The measured cliff: the highest painted byte that still fails to
+      // ignite. 58 before this change, and now only the ramp band itself.
+      let cliff = -1;
+      for (let v = 0; v <= 64; v++) if (compositedFor(v) <= FIRE_FLOOR) cliff = v;
+      t.ok(`the dead bottom of the Strength slider is gone — highest silent byte is ${cliff}, was 58`, cliff <= 16);
+      // ...and it still TAPERS. A hard step at 1 would make a soft brush's
+      // antialiased fringe terminate on an aliased edge in the render.
+      const ramp = [1, 4, 8, 12].map((v) => compositedFor(v));
+      t.ok(
+        `the last few bytes still fade smoothly to zero rather than stepping (${ramp.join(', ')})`,
+        ramp[0] < ramp[1] && ramp[1] < ramp[2] && ramp[2] < ramp[3] && ramp[3] < 16
+      );
+
+      // AND IT NO LONGER ERODES A FILE IT PAINTS OVER. The file below reads
+      // 128 everywhere; painting 100 on the right half must leave 128 on the
+      // left and read 100 on the right — never the old 161, which is neither.
+      paintAuthority.ingestDecodedPage({
+        ownerId: 'level:P0:background',
+        layerName: 'fire',
+        table: { worldWidthPx: 100, worldHeightPx: 100, maxMip: 3 },
+        page: { mip: 3, px: 0, py: 0 },
+        contentWindow: fullWindow(8),
+        bitmap: syntheticPage(8, { r: 128 }),
+      });
+      paintAuthority.ingestPaintedMask(
+        0,
+        'fire',
+        paintGrid((gx) => (gx >= 5 ? 100 : 0))
+      );
+      t.ok(
+        "painting a PARTIAL value no longer erodes the file it sits on — the unpainted half is still the file's 128",
+        Math.abs(fireByteAt(25, 50) - 128) <= 1
+      );
+      t.ok(
+        'and the painted half reads the value the author actually painted (100), not the old blend (161)',
+        Math.abs(fireByteAt(75, 50) - 100) <= 1
+      );
+      paintAuthority.ingestPaintedMask(0, 'fire', null);
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // 🔬 8× MINIFICATION, END TO END — the painted layer is FINER than the
+  // grid every consumer derives at (PAINT_GRID_MAX_DIM 4096 vs
+  // MASK_GRID_MAX_DIM 512), so one destination texel covers 64 source
+  // texels. `ingestPaintedMask` is the one producer that opts into
+  // `mask-derive.js#compositeItemOverwrite`'s area-average path, and this
+  // proves the opt-in survives the whole chain — ingest → sourcesFor →
+  // rasterizeAuthored → composite — rather than only the primitive.
+  //
+  // A DELIBERATELY FLAT scene rect keeps the real 8:1 ratio while making the
+  // grids small enough for a unit suite: 4096x512 painted into 512x64.
+  // ══════════════════════════════════════════════════════════════════════
+  {
+    const minifyAuthority = createMaskAuthority({ readPageImageData: (bitmap) => bitmap, log });
+    const RECT = { x: 0, y: 0, width: 100, height: 12.5 };
+    minifyAuthority.reset({
+      sceneKey: 'minify-test',
+      dimensions: { width: 100, height: 12.5, sceneRect: RECT },
+      floors: [{ index: 0, id: 'M0', name: 'Ground', ceilingElevation: 10 }],
+      items: [],
+      resolvePlacement: () => ({ x: 50, y: 6.25, width: 100, height: 12.5 }),
+    });
+    const SRC_W = 4096;
+    const SRC_H = 512;
+    const srcSpec = {
+      x: 0,
+      y: 0,
+      width: 100,
+      height: 12.5,
+      w: SRC_W,
+      h: SRC_H,
+      texelW: 100 / SRC_W,
+      texelH: 12.5 / SRC_H,
+    };
+    const derivedSpec = minifyAuthority.getDerived('fire', 0)?.grid?.spec;
+    t.ok(
+      `the derived grid really is 8x coarser than the painted one (${srcSpec.w}x${srcSpec.h} -> ` +
+        `${derivedSpec?.w}x${derivedSpec?.h})`,
+      derivedSpec?.w === 512 && derivedSpec?.h === 64
+    );
+
+    // A 3x3 painted dab — ~0.07 world units, well under one destination
+    // texel — swept across every sub-texel phase of one destination texel.
+    const data = new Uint8Array(SRC_W * SRC_H);
+    const peakForPhase = (px, py) => {
+      data.fill(0);
+      for (let y = 200 + py; y < 203 + py; y++) for (let x = 400 + px; x < 403 + px; x++) data[y * SRC_W + x] = 255;
+      minifyAuthority.ingestPaintedMask(0, 'fire', { spec: srcSpec, data });
+      const grid = minifyAuthority.getDerived('fire', 0).grid;
+      let peak = 0;
+      for (let i = 0; i < grid.data.length; i++) if (grid.data[i] > peak) peak = grid.data[i];
+      return peak;
+    };
+    let lit = 0;
+    let min = 255;
+    let max = 0;
+    for (let py = 0; py < 8; py++) {
+      for (let px = 0; px < 8; px++) {
+        const peak = peakForPhase(px, py);
+        if (peak > 13) lit++; // fire's own maskSensitivity floor
+        if (peak < min) min = peak;
+        if (peak > max) max = peak;
+      }
+    }
+    t.ok(
+      `a small dab now survives the 8x downsample at EVERY sub-texel phase (${lit}/64, peak ${min}..${max}) — ` +
+        'the single-tap path scores ~16/64 on the same sweep (mask-derive.test.mjs)',
+      lit === 64
+    );
+    t.ok(
+      'and its composited value is bounded rather than a 0-or-255 lottery',
+      min >= 15 && max <= 37 && max - min <= 21
+    );
+
+    // The other half of the same guarantee: unpainted stays unpainted, even
+    // through the box filter, at this ratio.
+    data.fill(0);
+    minifyAuthority.ingestPaintedMask(0, 'fire', { spec: srcSpec, data });
+    const empty = minifyAuthority.getDerived('fire', 0).grid;
+    t.ok(
+      'an all-unpainted layer is still a total no-op through the minifying path',
+      empty.data.every((v) => v === 0)
+    );
   }
 }

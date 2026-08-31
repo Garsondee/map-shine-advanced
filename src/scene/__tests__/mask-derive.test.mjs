@@ -14,6 +14,7 @@ import {
   itemWorldCorners,
   compositeItemMax,
   compositeItemOverwrite,
+  sampleContentBoxPremultiplied,
   deriveFloorProducts,
   rasterizeAuthored,
   makeUniformContent,
@@ -226,6 +227,195 @@ export async function run(t) {
       'rasterizeAuthored forwards alpha — a transparent source leaves the absent fill intact',
       viaRasterize.data.every((v) => v === 255)
     );
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  // 🔬 MINIFICATION: ONE BILINEAR TAP IS A COIN FLIP (2026-08-31).
+  //
+  // `sampleContentBilinear` is the right filter for MAGNIFICATION — a ≤248-
+  // texel coarse mip stretched over the scene grid, which is what every mask
+  // FILE is. The in-app painter is the opposite: PAINT_GRID_MAX_DIM 4096
+  // against MASK_GRID_MAX_DIM 512, so one destination texel covers 64 source
+  // texels and a single tap discards 63 of them. Whether a small brush dab
+  // survives then depends on sub-texel PHASE — where on the map the author
+  // happened to click — and on nothing they can see. These prove the box
+  // path fixes that, that it is PREMULTIPLIED (the arithmetic that makes a
+  // partly-covered texel come out right), and — the load-bearing one — that
+  // it stays OFF unless a source opts in, so file masks never move.
+  // ══════════════════════════════════════════════════════════════════
+  {
+    // 8x minification, the painter's own real ratio, at a size a unit test
+    // can afford: a 512² source into a 64² grid over the same world rect.
+    const rect = { x: 0, y: 0, width: 1024, height: 1024 };
+    const dspec = computeMaskGridSpec(rect, 64);
+    const SRC = 512;
+    const placement = { x: 512, y: 512, width: 1024, height: 1024, anchorX: 0.5, anchorY: 0.5, rotation: 0 };
+    const paintGridAt = (sx, sy, size, value) => {
+      const data = new Uint8Array(SRC * SRC);
+      for (let y = sy; y < sy + size; y++) for (let x = sx; x < sx + size; x++) data[y * SRC + x] = value;
+      return { w: SRC, h: SRC, data };
+    };
+    // The painted layer's own self-alpha, ramped exactly as
+    // `mask-authority.js#ingestPaintedMask` derives it (smoothstep(0,16,c)) —
+    // a binary 0/255 dab is unaffected by the ramp, so this is just its own
+    // coverage.
+    const selfAlpha = (c) => ({ w: c.w, h: c.h, data: Uint8Array.from(c.data, (b) => (b > 0 ? 255 : 0)) });
+
+    // --- the primitive, on its own -----------------------------------------
+    {
+      const uniform = { w: 4, h: 4, data: new Uint8Array(16).fill(200) };
+      const opaque = { w: 4, h: 4, data: new Uint8Array(16).fill(255) };
+      const full = sampleContentBoxPremultiplied(uniform, opaque, 0.5, 0.5, 2, 2);
+      t.ok(
+        'box over a fully opaque uniform source: alphaMean 1, premultMean the value itself',
+        near(full.alphaMean, 1, 1e-9) && near(full.premultMean, 200, 1e-9)
+      );
+      const none = sampleContentBoxPremultiplied(uniform, { w: 4, h: 4, data: new Uint8Array(16) }, 0.5, 0.5, 2, 2);
+      t.ok(
+        'box over a fully TRANSPARENT source: both means 0, so the composite is a no-op',
+        near(none.alphaMean, 0, 1e-9) && near(none.premultMean, 0, 1e-9)
+      );
+      // 4 of 16 texels opaque at 255: the PREMULTIPLIED mean is 4·255/16 = 64,
+      // which is NOT mean(c)·mean(a) = 64·0.25 = 16. That difference is the
+      // whole reason this helper returns two numbers instead of two samples.
+      const partial = { w: 4, h: 4, data: new Uint8Array(16) };
+      const partialA = { w: 4, h: 4, data: new Uint8Array(16) };
+      for (const i of [0, 1, 4, 5]) {
+        partial.data[i] = 255;
+        partialA.data[i] = 255;
+      }
+      const q = sampleContentBoxPremultiplied(partial, partialA, 0.5, 0.5, 2, 2);
+      t.ok(
+        'a quarter-covered footprint: alphaMean 0.25 and premultMean 4·255/16 = 63.75 (the mean of the PRODUCT)',
+        near(q.alphaMean, 0.25, 1e-9) && near(q.premultMean, 63.75, 1e-9)
+      );
+      t.ok(
+        'and NOT mean(content)·mean(alpha) = 15.9, which is the crush this replaces',
+        !near(q.premultMean, 15.9375, 1)
+      );
+      t.ok(
+        'a null alpha is fully opaque, same `?? null` rule as everywhere else — a plain box average',
+        near(sampleContentBoxPremultiplied(uniform, null, 0.5, 0.5, 2, 2).premultMean, 200, 1e-9)
+      );
+    }
+
+    // --- the phase sweep: the actual reported symptom -----------------------
+    {
+      const DAB = 3; // source texels across — ~7.8 world px on the real map
+      const sweep = (areaAverage) => {
+        let hits = 0;
+        let min = 255;
+        let max = 0;
+        // 8x8 sub-texel phases: every alignment of a dab inside one
+        // destination texel, which is exactly the choice the author has no
+        // control over.
+        for (let py = 0; py < 8; py++) {
+          for (let px = 0; px < 8; px++) {
+            const content = paintGridAt(200 + px, 200 + py, DAB, 255);
+            const grid = createMaskGrid(dspec);
+            compositeItemOverwrite(grid, content, placement, selfAlpha(content), { areaAverage });
+            const peak = Math.max(...grid.data);
+            if (peak > 13) hits++; // fire's own maskSensitivity floor, 0.05·255
+            if (peak < min) min = peak;
+            if (peak > max) max = peak;
+          }
+        }
+        return { hits, min, max };
+      };
+      const tap = sweep(false);
+      const box = sweep(true);
+      t.ok(
+        `one bilinear tap loses a small dab on most phases (${tap.hits}/64 survived, peak ${tap.min}..${tap.max})`,
+        tap.hits < 32 && tap.min === 0
+      );
+      t.ok(`the box filter survives EVERY phase (${box.hits}/64, peak ${box.min}..${box.max})`, box.hits === 64);
+      // The remaining spread is not phase NOISE, it is the dab genuinely
+      // splitting across two destination texels — a real fact about where it
+      // was painted, bounded and monotonic, not a coin flip. Worst case is a
+      // 4-corner split whose largest piece is 2x2 of 8x8 (4·255/64 ≈ 16);
+      // best case is the whole 3x3 inside one footprint (9·255/64 ≈ 36).
+      t.ok(
+        `its value stays in a narrow, bounded band across every phase (${box.min}..${box.max})`,
+        box.min >= 15 && box.max <= 37 && box.max - box.min <= 21
+      );
+      t.ok(
+        'and a dab landing wholly inside one texel reaches exactly the ideal area average, 9·255/64 ≈ 36',
+        box.max === 36
+      );
+    }
+
+    // --- OFF BY DEFAULT: the regression guard for every file-based mask -----
+    {
+      const content = paintGridAt(200, 200, 3, 255);
+      const alpha = selfAlpha(content);
+      const withFlag = createMaskGrid(dspec);
+      compositeItemOverwrite(withFlag, content, placement, alpha, { areaAverage: true });
+      const noFlag = createMaskGrid(dspec);
+      compositeItemOverwrite(noFlag, content, placement, alpha);
+      const noOpts = createMaskGrid(dspec);
+      compositeItemOverwrite(noOpts, content, placement, alpha, {});
+      t.ok(
+        'omitting the options object entirely leaves the bilinear path — a file source cannot opt in by accident',
+        noFlag.data.every((v, i) => v === noOpts.data[i])
+      );
+      t.ok(
+        'and that path is genuinely different from the box path at this ratio (so the guard is testing something)',
+        !noFlag.data.every((v, i) => v === withFlag.data[i])
+      );
+      // The same source through the real entry point: `rasterizeAuthored`
+      // forwards `source.areaAverage`, and a source without it stays put.
+      const viaRasterizeOff = rasterizeAuthored(dspec, [{ placement, content, alpha }], 0);
+      const viaRasterizeOn = rasterizeAuthored(dspec, [{ placement, content, alpha, areaAverage: true }], 0);
+      t.ok(
+        'rasterizeAuthored leaves a source alone unless it carries areaAverage',
+        viaRasterizeOff.data.every((v, i) => v === noFlag.data[i])
+      );
+      t.ok(
+        'rasterizeAuthored forwards areaAverage when the source does carry it',
+        viaRasterizeOn.data.every((v, i) => v === withFlag.data[i])
+      );
+    }
+
+    // --- the box path composites correctly OVER existing content -----------
+    // (the same "transparent means unpainted" law the bilinear path obeys —
+    // a minifying source must not erode what an earlier source painted where
+    // it did not paint itself.)
+    {
+      const half = new Uint8Array(SRC * SRC);
+      const halfA = new Uint8Array(SRC * SRC);
+      // Painted at 120 out to source column 259 — four columns PAST the
+      // destination-texel boundary at 256, so destination texel 32 is exactly
+      // half covered and the partial-coverage arithmetic is really exercised
+      // rather than landing on a clean edge.
+      for (let y = 0; y < SRC; y++)
+        for (let x = 0; x < SRC / 2 + 4; x++) {
+          half[y * SRC + x] = 120;
+          halfA[y * SRC + x] = 255;
+        }
+      const grid = createMaskGrid(dspec);
+      grid.data.fill(200); // an existing file mask underneath
+      compositeItemOverwrite(
+        grid,
+        { w: SRC, h: SRC, data: half },
+        placement,
+        { w: SRC, h: SRC, data: halfA },
+        { areaAverage: true }
+      );
+      t.ok('box path: the fully-painted half reads the painted value, not a blend', grid.data[32 * 64 + 8] === 120);
+      t.ok(
+        "box path: the UNPAINTED half keeps the earlier source's own value, untouched",
+        grid.data[32 * 64 + 56] === 200
+      );
+      // Genuine partial coverage: half the footprint painted at 120 over a
+      // 200 background is 200·0.5 + 120·0.5 = 160. It must land BETWEEN the
+      // two — filtering NON-premultiplied colour would give 200·0.5 + 60·0.5
+      // = 130, i.e. pulled toward black by the same multiply this replaces.
+      const straddle = grid.data[32 * 64 + 32];
+      t.ok(
+        `a half-covered texel blends proportionally between the two (got ${straddle}, want ~160)`,
+        Math.abs(straddle - 160) <= 2
+      );
+    }
   }
 
   // --- floor derivation: threshold, hidden, missing, sky math --------------

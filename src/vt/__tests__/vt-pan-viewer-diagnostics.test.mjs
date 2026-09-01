@@ -146,4 +146,25 @@ export async function run(t) {
     const [row] = buildDrawList({ lastItems: [baseItem], itemStates: new Map() });
     t.ok('an item with no state at all reports null uniforms, not a crash', row.uniforms === null);
   }
+
+  // --- buildDrawList — earlyZState (mythica-machina-press#104 follow-up) ----
+  {
+    const itemStates = new Map([
+      [
+        'token:a',
+        { wholeImage: { tiles: [{ appearance: fakeAppearance, earlyZState: 'interior', earlyZReason: 'interior' }] } },
+      ],
+    ]);
+    const [row] = buildDrawList({ lastItems: [baseItem], itemStates });
+    t.ok("earlyZState surfaces the tile's real classification", row.earlyZState !== null);
+    t.ok('...including the state itself', row.earlyZState.state === 'interior');
+    t.ok('...and the reason it was classified that way', row.earlyZState.reason === 'interior');
+  }
+  {
+    // A tile that never went through STAGE 1 (earlyZState never set) reports
+    // null, not 'undefined' or a crash.
+    const itemStates = new Map([['token:a', { wholeImage: { tiles: [{ appearance: fakeAppearance }] } }]]);
+    const [row] = buildDrawList({ lastItems: [baseItem], itemStates });
+    t.ok('a tile with no earlyZState yet reports null, not a crash', row.earlyZState === null);
+  }
 }

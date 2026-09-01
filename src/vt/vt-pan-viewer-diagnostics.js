@@ -294,6 +294,22 @@ export function buildDrawList({ lastItems, itemStates }) {
           srgbDecode: state?.vt?.uniforms.srgbDecode.value ?? null,
         };
       })(),
+      // EARLY-Z BLEND STATE (2026-09-01, mythica-machina-press#104 follow-up:
+      // tint confirmed working live, authored token opacity was not). `uAlpha`
+      // above can read correctly while the token still renders fully opaque if
+      // `applyEarlyZTileState`'s classification (vt-pan-viewer.js, "STAGE 1")
+      // has this tile stuck in `'interior'` — a real, on-by-default state that
+      // forces `material.transparent = false`, which makes the GPU ignore
+      // shader alpha for blending entirely regardless of what `uniforms.alpha`
+      // says. `earlyZState !== null && earlyZState !== 'interior'` alongside a
+      // correct `uniforms.alpha` means the bug is elsewhere; `earlyZState ===
+      // 'interior'` with `uniforms.alpha < 1` means THIS is exactly it — the
+      // shader is computing the right number and the render state is
+      // discarding it before it ever reaches the screen.
+      earlyZState: (() => {
+        const t = state?.wholeImage?.tiles?.find((tt) => tt.earlyZState !== undefined);
+        return t ? { state: t.earlyZState ?? null, reason: t.earlyZReason ?? null } : null;
+      })(),
     };
   });
 }

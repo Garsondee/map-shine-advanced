@@ -1,0 +1,34 @@
+# Runs the project's verification suite (lint, format check, structure
+# walls, the Node test suite) on every push, and on manual dispatch.
+#
+# Why this exists (2026-09-01): `main.yml` only runs `npm run verify` when a
+# GitHub release is published — so a commit that breaks lint, structure or
+# tests stays broken and unnoticed until release day, the worst possible time
+# to find out. This workflow closes that gap by running the exact same gate
+# on every push, so breakage is caught within minutes of the commit that
+# caused it rather than at release time.
+
+name: Verify
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Set Up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Run Verification Suite
+        run: npm run verify

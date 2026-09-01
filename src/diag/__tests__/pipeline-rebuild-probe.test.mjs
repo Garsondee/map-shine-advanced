@@ -40,6 +40,15 @@ function fakePipelines() {
         if (previousPipeline && previousPipeline.usedTimes === 0) {
           this.caches.delete(previousPipeline.cacheKey);
         }
+        // A deliberate busy-wait ON A GENUINE COMPILE ONLY, so the probe's OWN
+        // clock (real performance.now() reads) has something real to measure
+        // — see the "worst offender is first" test below.
+        if (renderObject.slowMs > 0) {
+          const until = performance.now() + renderObject.slowMs;
+          while (performance.now() < until) {
+            /* deliberate spin */
+          }
+        }
         compiles++;
         pipeline = { cacheKey, usedTimes: 0 };
         this.caches.set(cacheKey, pipeline);
@@ -55,10 +64,11 @@ function fakePipelines() {
   return { pipelines, getCompiles: () => compiles };
 }
 
-const ro = (cacheKey, objName = 'tile', matName = 'NodeMaterial') => ({
+const ro = (cacheKey, objName = 'tile', matName = 'NodeMaterial', slowMs = 0) => ({
   cacheKey,
   material: { type: matName },
   object: { name: objName },
+  slowMs,
 });
 
 export function run(t) {
@@ -164,20 +174,37 @@ export function run(t) {
     ok('...it did not go silently dark after the reassignment', probe.stats().hits === 0);
   }
 
-  // ---- labels are ranked worst-first, so the report leads with the culprit -
+  // ---- labels are ranked worst-first BY TIME, not just count ----------------
+  // A single 40-second pipeline compile is the finding a report must lead
+  // with; five 1ms compiles beside it are noise — count-sorting would get
+  // that backwards. `quiet` misses once but slowly; `noisy` misses five times
+  // but each is near-instant.
   {
     const { pipelines } = fakePipelines();
     const probe = createPipelineRebuildProbe({ pipelines });
     probe.install();
-    pipelines.getForRender(ro('q', 'quiet'));
+    pipelines.getForRender(ro('q', 'quiet', 'NodeMaterial', 20));
     for (let i = 0; i < 5; i++) pipelines.getForRender(ro(`n${i}`, 'noisy'));
     const labels = probe.stats().labels;
-    ok('the worst offender is first', labels[0].label.startsWith('noisy'));
+    const noisy = labels.find((l) => l.label.startsWith('noisy'));
+    ok('the noisy label still counted all five of its own misses', noisy.misses === 5);
+    ok('the slow-but-rare offender is ranked first, by wall-clock time', labels[0].label.startsWith('quiet'));
+    ok('...with a real, measured duration behind it', labels[0].ms >= 15);
     ok(
-      '...and the quiet one is still reported',
-      labels.some((l) => l.label.startsWith('quiet'))
+      '...and the frequent-but-cheap one is still reported',
+      labels.some((l) => l.label.startsWith('noisy'))
     );
-    ok('the noisy label counted all five of its own misses', labels[0].misses === 5);
+
+    const s = probe.stats();
+    ok('totalMissMs sums every miss across every label', s.totalMissMs >= 15);
+    ok('worstMissMs is the single worst compile, not a sum', s.worstMissMs >= 15 && s.worstMissMs <= s.totalMissMs);
+    const totalBeforeHit = probe.stats().totalMissMs;
+    pipelines.getForRender(ro('q', 'quiet', 'NodeMaterial', 20)); // same cacheKey 'q' -> a HIT, not a miss
+    ok('a hit never advances the miss clock', probe.stats().totalMissMs === totalBeforeHit);
+
+    probe.reset();
+    const r = probe.stats();
+    ok('reset zeroes the accumulated timing, not just the counts', r.totalMissMs === 0 && r.worstMissMs === 0);
   }
 
   // ---- a throwing describe() must never break the render loop -------------

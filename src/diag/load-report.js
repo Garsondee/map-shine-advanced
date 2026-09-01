@@ -24,6 +24,11 @@
  * @module diag/load-report
  */
 import { LOAD_PHASES, PHASE_LABELS } from '../ui/index.js';
+// Reused, not reinvented: cache-report.js already turns each subsystem's own
+// bespoke stats shape into one comparable {hits,misses,hitRatePct,...} row and
+// already refuses to fabricate a hit rate a cache cannot actually report — see
+// that file's own header. Re-deriving that here would risk disagreeing with it.
+import { buildCacheRows, findLowHitRateCaches } from './cache-report.js';
 
 const round = (v) => (Number.isFinite(v) ? Math.round(v) : null);
 
@@ -80,6 +85,128 @@ function buildBlockerBreakdown(bucket, phaseDurMs) {
   };
 }
 
+/**
+ * The five art-streaming caches a cold load actually walks through — see
+ * `cache-report.js`'s own `RAW_CACHE_ADAPTERS` for the full set this is
+ * deliberately a NARROWER slice of (point-light/door/paint-mode pools have
+ * nothing to do with a cold scene load, and would just be noise here).
+ */
+const ART_CACHE_IDS = new Set([
+  'vtPageCache',
+  'vtDecodePool',
+  'compressedTextureWorker',
+  'coarseAlphaGridRequests',
+  'pyramidStore',
+]);
+
+/**
+ * Cache hit/miss for THIS load specifically (mythica-machina-press#400,
+ * author: "if something is being recalculated every load that doesn't need
+ * to be, that would also cause slowdown"). `snapshot` is `{start, end}`, two
+ * point-in-time reads of the same raw stats bracketing the load — cache-
+ * report.js's own `buildCacheRows` already knows how to diff exactly this
+ * shape, so this just calls it and keeps the five rows relevant to art
+ * streaming, discarding whatever else it always constructs (point-light/
+ * door/paint-mode pools) with no start/end data behind it.
+ */
+function buildCacheHealthSection(snapshot) {
+  if (!snapshot?.start || !snapshot?.end) return null;
+  const rows = buildCacheRows({ cacheStats: snapshot }).filter((r) => ART_CACHE_IDS.has(r.id));
+  if (rows.length === 0) return null;
+  const lowHitRate = findLowHitRateCaches(rows);
+  return {
+    rows,
+    // Named, not just left for the reader to notice buried in `rows` — see
+    // this file's own top-contributor rule: a verdict a tool can compute
+    // must not be left as an exercise.
+    lowHitRateCacheIds: lowHitRate.map((r) => r.id),
+    note:
+      'hits/misses are for THIS LOAD ONLY (a before/after snapshot around it), not lifetime totals. A cache with ' +
+      'a low hit rate here, on a scene already visited before, is the "recomputing something that should have ' +
+      'been cached" signature the author asked to watch for — see each row\'s own note for what hit/miss means ' +
+      'for that specific cache (they are not all the same granularity, and some have no hits counter at all).',
+  };
+}
+
+/**
+ * One rebuild probe's stats() -> one report section. `skipped: true` (the
+ * probe could not find what it needed to wrap, e.g. `renderer._pipelines`
+ * moved) is a genuinely different fact from "armed and measured zero
+ * misses" — collapsing them would let a broken probe read as a healthy load.
+ */
+function buildProbeSection(stats) {
+  if (!stats) return null;
+  if (stats.skipped === true) {
+    return {
+      measured: false,
+      reason: stats.reason ?? 'not measured',
+      misses: null,
+      totalMs: null,
+      worstMs: null,
+      topLabels: [],
+    };
+  }
+  return {
+    measured: true,
+    misses: Number.isFinite(stats.misses) ? stats.misses : 0,
+    totalMs: Number.isFinite(stats.totalMissMs) ? round(stats.totalMissMs) : null,
+    worstMs: Number.isFinite(stats.worstMissMs) ? round(stats.worstMissMs) : null,
+    topLabels: (stats.labels ?? []).slice(0, 5),
+  };
+}
+
+/**
+ * Shader-graph rebuild + GPU pipeline compile time — the ONE measurement in
+ * this whole report that survives a fully synchronous main-thread freeze
+ * intact (mythica-machina-press#400 follow-up). Everything else here
+ * (`warmingBreakdown` included) is built from POLLING `vt/settle.js` every
+ * ~250ms, which requires the main thread to be free to check in at all; a
+ * genuine multi-second block starves that poll (and the render-loop-driven
+ * settle sampler it depends on) just as much as it starves the user. This
+ * section instead brackets the two known-synchronous compile call sites
+ * directly — a clock read immediately before and immediately after — so it
+ * reports the truth even when nothing else could run in between.
+ *
+ * @param {{shaderRebuild:object, pipelineRebuild:object}|null} diagnostics
+ * @param {number|null} worstStallMs - for the correlation note below.
+ */
+function buildCompileTimeSection(diagnostics, worstStallMs) {
+  const shader = buildProbeSection(diagnostics?.shaderRebuild ?? null);
+  const pipeline = buildProbeSection(diagnostics?.pipelineRebuild ?? null);
+  if (!shader && !pipeline) return null;
+  const shaderMs = shader?.measured ? shader.totalMs : null;
+  const pipelineMs = pipeline?.measured ? pipeline.totalMs : null;
+  const haveEither = shaderMs !== null || pipelineMs !== null;
+  const combinedMs = haveEither ? round((shaderMs ?? 0) + (pipelineMs ?? 0)) : null;
+
+  let correlationNote = null;
+  if (combinedMs !== null && Number.isFinite(worstStallMs) && worstStallMs > 0) {
+    const ratio = combinedMs / worstStallMs;
+    correlationNote =
+      ratio >= 0.7
+        ? `This is close to (${Math.round(ratio * 100)}% of) the worst single main-thread stall recorded this ` +
+          `load (${round(worstStallMs)}ms) — shader/pipeline compilation is a strong candidate for what caused it.`
+        : ratio >= 0.2
+          ? `This accounts for only ${Math.round(ratio * 100)}% of the worst single stall (${round(worstStallMs)}ms) ` +
+            '— real, but likely not the whole story behind that stall.'
+          : `This is small next to the worst single stall (${round(worstStallMs)}ms) — look elsewhere (bakes, ` +
+            "decode bursts, mask readback) for that freeze's cause.";
+  }
+
+  return {
+    shaderRebuild: shader,
+    pipelineRebuild: pipeline,
+    combinedMs,
+    correlationNote,
+    note:
+      'Wall-clock time inside real shader-graph rebuilds and GPU pipeline compiles this load, timed with a clock ' +
+      'read immediately before and after each one. If this total is large while `warmingBreakdown` above shows ' +
+      'little or no "pipelineCompiles" time, that mismatch is itself informative, not a contradiction: it means ' +
+      'the compile was long enough to block the very poll that would have caught it — this direct measurement is ' +
+      'the one built to survive exactly that case.',
+  };
+}
+
 /** Rank phases by duration and name the biggest one — a verdict a tool can compute must not be left as an exercise. */
 function pickTopContributor(phaseRows) {
   const ranked = phaseRows.filter((p) => Number.isFinite(p.durMs)).sort((a, b) => b.durMs - a.durMs);
@@ -112,9 +239,16 @@ const METHODOLOGY =
 
 /**
  * @param {ReturnType<typeof import('../ui/loading-screen.js').getLoadingScreenState>} loadingScreenState
+ * @param {{shaderRebuild?:object, pipelineRebuild?:object, cacheSnapshot?:{start:object,end:object}}|null} [diagnostics] -
+ *   the arm/disarm bracket `boot.js` gathers around the SAME load this
+ *   report describes (mythica-machina-press#400 follow-up). Optional and
+ *   separate from `loadingScreenState` deliberately: it is orthogonal to
+ *   phase timing (load-progress.js's own job) and gathered by a different
+ *   part of boot.js (the rebuild probes + cache getters), not something the
+ *   phase-timing model should have to know exists.
  * @returns {object}
  */
-export function buildLoadReport(loadingScreenState) {
+export function buildLoadReport(loadingScreenState, diagnostics = null) {
   const state = loadingScreenState ?? {};
   const report = { report: 'loading-time', generatedAt: new Date().toISOString(), methodology: METHODOLOGY };
 
@@ -122,6 +256,7 @@ export function buildLoadReport(loadingScreenState) {
     const totalMs = round(state.current.elapsedMs);
     const phaseRows = buildPhaseRows(state.currentPhases, totalMs);
     const warmingRow = phaseRows.find((p) => p.id === LOAD_PHASES.WARMING);
+    const worstStallMs = Number.isFinite(state.currentWorstStallMs) ? state.currentWorstStallMs : null;
     report.status = 'in-progress';
     report.note =
       'A scene load is running RIGHT NOW. Every duration below is "elapsed so far", not final — the open phase ' +
@@ -129,6 +264,7 @@ export function buildLoadReport(loadingScreenState) {
     report.elapsedMsSoFar = totalMs;
     report.currentPhaseLabel = state.current.title ?? null;
     report.stallNote = state.current.stallNote ?? null;
+    report.worstStallMsSoFar = worstStallMs === null ? null : round(worstStallMs);
     report.blockers = state.current.blockers ?? [];
     report.phases = phaseRows;
     report.topContributorSoFar = pickTopContributor(phaseRows);
@@ -136,6 +272,8 @@ export function buildLoadReport(loadingScreenState) {
       state.currentBlockerDurationsMs?.[LOAD_PHASES.WARMING],
       warmingRow?.durMs ?? null
     );
+    report.compileTime = buildCompileTimeSection(diagnostics, worstStallMs);
+    report.cacheHealth = buildCacheHealthSection(diagnostics?.cacheSnapshot ?? null);
   } else if (state.lastLoad) {
     const last = state.lastLoad;
     const totalMs = round(last.totalMs);
@@ -159,6 +297,8 @@ export function buildLoadReport(loadingScreenState) {
       last.blockerDurationsMs?.[LOAD_PHASES.WARMING],
       warmingRow?.durMs ?? null
     );
+    report.compileTime = buildCompileTimeSection(diagnostics, report.worstStallMs);
+    report.cacheHealth = buildCacheHealthSection(diagnostics?.cacheSnapshot ?? null);
   } else {
     report.status = 'no-data';
     report.note =

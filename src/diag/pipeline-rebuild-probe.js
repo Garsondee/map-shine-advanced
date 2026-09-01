@@ -77,6 +77,11 @@
 /** Cap on distinct labels retained. A runaway label function must not leak. */
 export const DEFAULT_MAX_LABELS = 64;
 
+/** @param {number} v @returns {number} one decimal place — same rounding perf-report.js uses for ms figures. */
+function round1(v) {
+  return Number.isFinite(v) ? Math.round(v * 10) / 10 : 0;
+}
+
 /**
  * Default label for a render object — same shape as
  * shader-rebuild-probe.js's `defaultDescribeRenderObject`, deliberately, so a
@@ -122,20 +127,35 @@ export function createPipelineRebuildProbe({
   let hits = 0;
   let misses = 0;
   let labelsDropped = 0;
-  /** label -> {misses} */
+  // WALL-CLOCK COST, NOT JUST A COUNT (mythica-machina-press#400 follow-up,
+  // 2026-09-01). A miss count says a compile happened; it says nothing about
+  // whether it took 2ms or 40,000ms — and a genuinely synchronous
+  // `device.createRenderPipeline` call (this probe's own header) is exactly
+  // the kind of block a POLLED instrument (vt/settle.js) cannot see through:
+  // nothing can check in while the main thread is solid. Timing the bracket
+  // this probe ALREADY wraps costs nothing extra to install — the delegate
+  // call is already inside a `try`; reading the clock immediately before and
+  // (on a miss) immediately after survives the freeze by construction, since
+  // both reads happen on the same thread, sequentially, regardless of how
+  // long the call in between blocks.
+  let totalMissMs = 0;
+  let worstMissMs = 0;
+  /** label -> {misses, ms, worstMs} */
   const byLabel = new Map();
 
-  function recordLabeledMiss(label) {
+  function recordLabeledMiss(label, tookMs) {
     let entry = byLabel.get(label);
     if (entry === undefined) {
       if (byLabel.size >= maxLabels) {
         labelsDropped++;
         return;
       }
-      entry = { misses: 0 };
+      entry = { misses: 0, ms: 0, worstMs: 0 };
       byLabel.set(label, entry);
     }
     entry.misses++;
+    entry.ms += tookMs;
+    if (tookMs > entry.worstMs) entry.worstMs = tookMs;
   }
 
   /**
@@ -172,12 +192,18 @@ export function createPipelineRebuildProbe({
         const wasInside = insideTrackedCall;
         insideTrackedCall = cachesReady;
         sawSetThisCall = false;
+        // One clock read on EVERY call (a hit is the common case and must
+        // stay cheap) — a second read only on the rare miss path, below.
+        const startedAtMs = performance.now();
         try {
           return delegate(renderObject, promises);
         } finally {
           insideTrackedCall = wasInside;
           if (cachesReady && sawSetThisCall) {
             misses++;
+            const tookMs = performance.now() - startedAtMs;
+            totalMissMs += tookMs;
+            if (tookMs > worstMissMs) worstMissMs = tookMs;
             let label = null;
             try {
               label = describe(renderObject);
@@ -185,7 +211,7 @@ export function createPipelineRebuildProbe({
               label = null;
             }
             if (label !== null && label !== undefined) {
-              recordLabeledMiss(label);
+              recordLabeledMiss(label, tookMs);
             } else {
               labelsDropped++;
             }
@@ -219,26 +245,38 @@ export function createPipelineRebuildProbe({
       hits = 0;
       misses = 0;
       labelsDropped = 0;
+      totalMissMs = 0;
+      worstMissMs = 0;
       byLabel.clear();
     },
 
     stats() {
       const labels = [];
-      for (const [label, e] of byLabel) labels.push({ label, misses: e.misses });
-      labels.sort((a, b) => b.misses - a.misses);
+      for (const [label, e] of byLabel) {
+        labels.push({ label, misses: e.misses, ms: round1(e.ms), worstMs: round1(e.worstMs) });
+      }
+      // Worst-first by TIME, not by count — a label that missed once for
+      // 40,000ms is the finding; a label that missed ten times for 0.4ms each
+      // is noise, and a count-sorted list would bury the first under the second.
+      labels.sort((a, b) => b.ms - a.ms);
       return {
         installed,
         calls,
         hits,
         misses,
         labelsDropped,
+        totalMissMs: round1(totalMissMs),
+        worstMissMs: round1(worstMissMs),
         labels,
         note:
           'misses are real GPU PIPELINE compiles (device.createRenderPipeline), a DIFFERENT cache from ' +
           "shader-rebuild-probe.js's node-graph one — see this module's own header for why a miss here can " +
-          'happen even when that probe reads clean. Per label: how many times this render object forced a ' +
-          'brand-new pipeline this window (no material/nodes split here — a pipeline miss already names the ' +
-          'render object directly, so there is no second axis to classify).',
+          'happen even when that probe reads clean. `ms`/`worstMs` are WALL-CLOCK time inside the (real, ' +
+          'main-thread-blocking) compile call itself, timed with a clock read immediately before and after — ' +
+          'this survives a fully synchronous freeze by construction, unlike anything that relies on polling ' +
+          'during the block. Per label: how many times this render object forced a brand-new pipeline this ' +
+          'window, and how much wall-clock time that cost (no material/nodes split here — a pipeline miss ' +
+          'already names the render object directly, so there is no second axis to classify).',
       };
     },
   };

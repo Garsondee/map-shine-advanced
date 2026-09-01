@@ -62,6 +62,11 @@
 /** Cap on distinct labels retained. A runaway label function must not leak. */
 export const DEFAULT_MAX_LABELS = 64;
 
+/** @param {number} v @returns {number} one decimal place — same rounding perf-report.js uses for ms figures. */
+function round1(v) {
+  return Number.isFinite(v) ? Math.round(v * 10) / 10 : 0;
+}
+
 /**
  * Default label for a render object: what it is, stably, across frames.
  *
@@ -105,7 +110,17 @@ export function createShaderRebuildProbe({
   let hits = 0;
   let misses = 0;
   let labelsDropped = 0;
-  /** label -> {misses, hits, materialChanged, nodesChanged, lastUuid, lastKey, keys:Set} */
+  // WALL-CLOCK COST alongside the count (mythica-machina-press#400 follow-up,
+  // 2026-09-01) — same reasoning as pipeline-rebuild-probe.js's own addition:
+  // a miss COUNT says a rebuild happened, not whether it cost 2ms or 40,000ms,
+  // and `NodeBuilder.build()` is a real, synchronous, main-thread cost (this
+  // file's own header: "40-67% of a frame"). Timed with a clock read
+  // immediately before/after the delegate call already made below, so it
+  // survives even a fully blocking freeze — nothing needs to run DURING the
+  // block, only right before it starts and right after it ends.
+  let totalMissMs = 0;
+  let worstMissMs = 0;
+  /** label -> {misses, hits, materialChanged, nodesChanged, lastUuid, lastKey, keys:Set, ms, worstMs} */
   const byLabel = new Map();
 
   function recordMiss(label, renderObject, cacheKey) {
@@ -123,6 +138,8 @@ export function createShaderRebuildProbe({
         distinctKeys: 0,
         keysTruncated: false,
         keys: new Set(),
+        ms: 0,
+        worstMs: 0,
       };
       byLabel.set(label, entry);
     }
@@ -186,17 +203,29 @@ export function createShaderRebuildProbe({
           // reported as neither hit nor miss rather than guessed at.
           missed = false;
         }
-        if (missed) {
-          misses++;
-          try {
-            recordMiss(describe(renderObject), renderObject, cacheKey);
-          } catch {
-            labelsDropped++;
-          }
-        } else {
+        if (!missed) {
           hits++;
+          return delegate(renderObject, useAsync);
         }
-        return delegate(renderObject, useAsync);
+        misses++;
+        let entry = null;
+        try {
+          entry = recordMiss(describe(renderObject), renderObject, cacheKey);
+        } catch {
+          labelsDropped++;
+        }
+        const startedAtMs = performance.now();
+        try {
+          return delegate(renderObject, useAsync);
+        } finally {
+          const tookMs = performance.now() - startedAtMs;
+          totalMissMs += tookMs;
+          if (tookMs > worstMissMs) worstMissMs = tookMs;
+          if (entry) {
+            entry.ms += tookMs;
+            if (tookMs > entry.worstMs) entry.worstMs = tookMs;
+          }
+        }
       };
       installed = true;
       return true;
@@ -217,6 +246,8 @@ export function createShaderRebuildProbe({
       hits = 0;
       misses = 0;
       labelsDropped = 0;
+      totalMissMs = 0;
+      worstMissMs = 0;
       byLabel.clear();
     },
 
@@ -232,20 +263,28 @@ export function createShaderRebuildProbe({
           nodesChanged: e.nodesChanged,
           distinctCacheKeys: e.distinctKeys,
           distinctCacheKeysTruncated: e.keysTruncated,
+          ms: round1(e.ms),
+          worstMs: round1(e.worstMs),
         });
       }
-      labels.sort((a, b) => b.misses - a.misses);
+      // Worst-first by TIME — see pipeline-rebuild-probe.js's own note on why
+      // count-sorting would bury a single 40-second rebuild under ten cheap ones.
+      labels.sort((a, b) => b.ms - a.ms);
       return {
         installed,
         calls,
         hits,
         misses,
         labelsDropped,
+        totalMissMs: round1(totalMissMs),
+        worstMissMs: round1(worstMissMs),
         labels,
         note:
           'misses are FULL TSL node-graph rebuilds. Per label: materialChanged>0 means a NEW material ' +
           'object each time (fix = pool the material); nodesChanged>0 means the SAME material with a new ' +
           'node graph (fix = stop rebuilding its nodes — pooling would change nothing). ' +
+          '`ms`/`worstMs` are WALL-CLOCK time inside the rebuild call itself (clock read immediately before ' +
+          'and after), so it is real even across a fully synchronous freeze. ' +
           'renderer.info.programs stays FLAT during this either way, because three caches pipelines by ' +
           'generated source, not by node identity — flat programs is this bug’s signature, not its absence.',
       };

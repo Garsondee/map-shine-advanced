@@ -527,6 +527,9 @@ export function getLoadingScreenState() {
     // `currentPhases`: the WARMING breakdown is most useful WHILE stuck, not
     // only after the fact.
     currentBlockerDurationsMs: state ? cloneBlockerDurations(state.blockerDurationsMs) : null,
+    // Same reasoning again, for the stall watermark: a load stuck mid-freeze
+    // right now is exactly when "how bad has it been so far" matters most.
+    currentWorstStallMs: state ? state.worstStallMs : null,
     lastLoad: lastSummary,
   };
 }

@@ -18002,7 +18002,16 @@ export async function startVtPanViewer({
       getShaderRebuildStats() {
         return shaderRebuildProbe
           ? shaderRebuildProbe.stats()
-          : { installed: false, calls: 0, hits: 0, misses: 0, labels: [], note: 'probe never armed this session' };
+          : {
+              installed: false,
+              calls: 0,
+              hits: 0,
+              misses: 0,
+              totalMissMs: 0,
+              worstMissMs: 0,
+              labels: [],
+              note: 'probe never armed this session',
+            };
       },
       /**
        * PIPELINE-REBUILD PROBE arm/disarm (diag/pipeline-rebuild-probe.js).
@@ -18042,7 +18051,16 @@ export async function startVtPanViewer({
       getPipelineRebuildStats() {
         return pipelineRebuildProbe
           ? pipelineRebuildProbe.stats()
-          : { installed: false, calls: 0, hits: 0, misses: 0, labels: [], note: 'probe never armed this session' };
+          : {
+              installed: false,
+              calls: 0,
+              hits: 0,
+              misses: 0,
+              totalMissMs: 0,
+              worstMissMs: 0,
+              labels: [],
+              note: 'probe never armed this session',
+            };
       },
       /** CACHE HEALTH (perf-instrumentation-audit-2026-08-12) — every cache
        * this file can see hits/misses/evictions for that has no dedicated

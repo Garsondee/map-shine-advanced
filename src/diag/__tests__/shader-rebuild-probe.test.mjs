@@ -31,6 +31,16 @@ function fakeNodes() {
       if (data.nodeBuilderState !== undefined) return data.nodeBuilderState;
       let state = nodeBuilderCache.get(ro.cacheKey);
       if (state === undefined) {
+        // A deliberate busy-wait ON A GENUINE MISS ONLY, so the probe's OWN
+        // clock (real performance.now() reads, not a fake) has something real
+        // to measure — see the "worst offender is first" test below, which
+        // exists specifically to prove the ranking is by TIME, not count.
+        if (ro.slowMs > 0) {
+          const until = performance.now() + ro.slowMs;
+          while (performance.now() < until) {
+            /* deliberate spin */
+          }
+        }
         state = { builtFor: ro.cacheKey };
         builds.push(ro.cacheKey);
         nodeBuilderCache.set(ro.cacheKey, state);
@@ -42,10 +52,11 @@ function fakeNodes() {
   return { nodes, builds, nodeBuilderCache };
 }
 
-const ro = (cacheKey, uuid, objName = 'tile', matName = 'NodeMaterial') => ({
+const ro = (cacheKey, uuid, objName = 'tile', matName = 'NodeMaterial', slowMs = 0) => ({
   cacheKey,
   material: { uuid, type: matName },
   object: { name: objName },
+  slowMs,
 });
 
 export function run(t) {
@@ -145,19 +156,34 @@ export function run(t) {
     );
   }
 
-  // ---- labels are ranked worst-first, so the report leads with the culprit -
+  // ---- labels are ranked worst-first BY TIME, not just count ----------------
+  // A label that misses once for 40 seconds is the finding a report must lead
+  // with; a label that misses five times for a few ms each is noise beside it
+  // — count-sorting would get that backwards. `quiet` misses once but slowly;
+  // `noisy` misses five times but each is near-instant, so a count-based sort
+  // would (wrongly) put `noisy` first.
   {
     const { nodes } = fakeNodes();
     const probe = createShaderRebuildProbe({ nodes });
     probe.install();
-    nodes.getForRender(ro(30, 'a', 'quiet'));
+    nodes.getForRender(ro(30, 'a', 'quiet', 'NodeMaterial', 20));
     for (let i = 0; i < 5; i++) nodes.getForRender(ro(40 + i, `n${i}`, 'noisy'));
     const labels = probe.stats().labels;
-    ok('the worst offender is first', labels[0].label.startsWith('noisy'));
+    ok('misses are still counted correctly per label', labels.find((l) => l.label.startsWith('noisy')).misses === 5);
+    ok('the slow-but-rare offender is ranked first, by wall-clock time', labels[0].label.startsWith('quiet'));
+    ok('...with a real, measured duration behind it', labels[0].ms >= 15);
     ok(
-      '...and the quiet one is still reported',
-      labels.some((l) => l.label.startsWith('quiet'))
+      '...and the frequent-but-cheap one is still reported',
+      labels.some((l) => l.label.startsWith('noisy'))
     );
+
+    const s = probe.stats();
+    ok('totalMissMs sums every miss across every label', s.totalMissMs >= 15);
+    ok('worstMissMs is the single worst rebuild, not a sum', s.worstMissMs >= 15 && s.worstMissMs <= s.totalMissMs);
+
+    probe.reset();
+    const r = probe.stats();
+    ok('reset zeroes the accumulated timing, not just the counts', r.totalMissMs === 0 && r.worstMissMs === 0);
   }
 
   // ---- a throwing describe() must never break the render loop -------------

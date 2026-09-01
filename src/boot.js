@@ -10851,15 +10851,30 @@ function install() {
   // load, from the moment the module engages through the warm-up hold, with a
   // verdict on which phase ate the majority of it and, for WARMING
   // specifically, which NAMED thing (streaming, GPU compression, shader/
-  // pipeline compile, ...) was outstanding and for how long. `primary: true`
-  // puts the button in the Performance Center's hero row next to the
-  // Performance Report and the Reckoning Report — this is meant to be reached
-  // for mid-freeze, not discovered by accident in the Lab's "More" drawer.
+  // pipeline compile, ...) was outstanding and for how long.
+  //
+  // ⚠️ ZONE IS 'lab', NOT 'performance' — CORRECTED 2026-09-01, LIVE BUG. The
+  // Performance Report and the Reckoning Report both still declare `{ zone:
+  // 'performance', primary: true }`, which used to land them in the perf
+  // strip's own "expand for tools" drawer (`renderPerformanceCenter`,
+  // diag/debug-panel.js). That drawer was deleted in the UI parity migration
+  // (phase 7b) and never replaced — see debug-panel.js's own comment where
+  // `renderPerformanceCenter` used to live: "{zone:'performance']}
+  // registrations ... stay fully real and exporter-covered; they simply have
+  // no dedicated UI surface drawing them as a group any more." So EVERY
+  // `zone: 'performance'` entry, this one included on first pass, is today
+  // reachable only from the console (`MapShine.debug.runReport(id)`) — no
+  // button anywhere draws it. `renderLab` (debug-panel.js) only ever places
+  // `zone === 'lab'` entries, and `primary: true` there puts a button in the
+  // Lab's own top quick-reach row (where "⬇ Export everything" and "Pixel
+  // Probe" already sit) — a real, currently-rendered surface, unlike
+  // 'performance'. Filed as its own gap rather than silently reusing the
+  // dead zone: mythica-machina-press#401.
   MapShine.debug.registerReport(
     'loading-time-report',
     '🐢 Loading Time Report (what ate the startup?)',
     () => buildLoadReport(getLoadingScreenState()),
-    { zone: 'performance', primary: true }
+    { zone: 'lab', primary: true }
   );
 
   // The curtain correctly refuses to reappear for the same scene, which makes it

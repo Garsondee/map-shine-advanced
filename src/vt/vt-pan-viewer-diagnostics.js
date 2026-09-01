@@ -187,7 +187,7 @@ function computeLayerResidency({ itemStates, itemLoadErrors, cache }) {
  * @param {any[]} args.lastItems @param {Map} args.itemStates
  * @returns {any[]}
  */
-function buildDrawList({ lastItems, itemStates }) {
+export function buildDrawList({ lastItems, itemStates }) {
   return lastItems.map((i) => {
     const state = itemStates.get(i.id);
     return {
@@ -271,7 +271,18 @@ function buildDrawList({ lastItems, itemStates }) {
       // search onto the OPERATION rather than the values and found the .mix()
       // trap (reference_tsl_method_chaining_trap).
       uniforms: (() => {
-        const a = state?.appearance;
+        // BUG FIX (2026-09-01, found while verifying mythica-machina-press#104):
+        // this read `state?.appearance` — a field that has never existed on the
+        // top-level per-item state object (loadNewItem's own shape: item/packs/
+        // layerErrors/imageSize/placement/worldBounds/geometry/material/mesh/
+        // hoverFade/occluded — no `appearance`). `appearance` only ever lives
+        // nested under `state.wholeImage.tiles[N].appearance` (see
+        // buildWholeImageMaterial's return shape, and the `t.appearance =
+        // appearance` assignment at both its call sites). The result: this field
+        // has read null for EVERY item, always — masking the real bug (uTint/
+        // uAlpha never being assigned at all) behind a diagnostic that could
+        // never have shown otherwise either way.
+        const a = state?.wholeImage?.tiles?.find((t) => t.appearance)?.appearance;
         if (!a) return null;
         return {
           occlusionWeights: a.uOcclusionWeights.value.toArray(),

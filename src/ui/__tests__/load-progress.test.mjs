@@ -338,6 +338,87 @@ export function run(t) {
     ok('describeLoad hands out a COPY of the blockers', d.blockers.length === 2);
   }
 
+  // --- WARMING BLOCKER-TIME ACCUMULATION (mythica-machina-press#400) -------
+  // The flat WARMING span cannot say WHICH named cause (streaming, GPU
+  // compression, shader/pipeline compile, ...) ate the time — only that
+  // *something* did. `structuredBlockers` bills the gap between polls to
+  // whatever was reported outstanding at each poll, so `diag/load-report.js`
+  // can rank causes instead of reporting just the one lump sum.
+  {
+    const s = mk(0);
+    beginPhase(s, LOAD_PHASES.WARMING, { nowMs: 0 });
+
+    // The FIRST sample only sets the clock — there is no preceding gap yet.
+    reportProgress(s, LOAD_PHASES.WARMING, {
+      structuredBlockers: [{ key: 'pipelineCompiles', label: 'GPU shader pipelines still compiling' }],
+      nowMs: 100,
+    });
+    ok(
+      'the first blocker sample credits nothing yet',
+      Object.keys(s.blockerDurationsMs[LOAD_PHASES.WARMING] ?? {}).length === 0
+    );
+
+    // The 250ms gap since the last sample is billed to what was just
+    // reported — the only attribution a poll can honestly make.
+    reportProgress(s, LOAD_PHASES.WARMING, {
+      structuredBlockers: [{ key: 'pipelineCompiles', label: 'GPU shader pipelines still compiling' }],
+      nowMs: 350,
+    });
+    const bucket = s.blockerDurationsMs[LOAD_PHASES.WARMING];
+    ok('the elapsed gap is billed to the blocker reported at the end of it', bucket.pipelineCompiles.ms === 250);
+    ok('the label rides along', bucket.pipelineCompiles.label === 'GPU shader pipelines still compiling');
+
+    // A second, DIFFERENT blocker appears alongside the first — both are
+    // independently true for the same interval, so BOTH get the full gap,
+    // not half each.
+    reportProgress(s, LOAD_PHASES.WARMING, {
+      structuredBlockers: [
+        { key: 'pipelineCompiles', label: 'GPU shader pipelines still compiling' },
+        { key: 'bcCompressOutstanding', label: 'textures still being GPU-compressed' },
+      ],
+      nowMs: 600,
+    });
+    ok('concurrent blockers each get the FULL gap (250ms), not a divided share', bucket.pipelineCompiles.ms === 500);
+    ok('a newly-appearing blocker starts from this gap only', bucket.bcCompressOutstanding.ms === 250);
+
+    // The compile finishes; only compression is still outstanding.
+    reportProgress(s, LOAD_PHASES.WARMING, {
+      structuredBlockers: [{ key: 'bcCompressOutstanding', label: 'textures still being GPU-compressed' }],
+      nowMs: 850,
+    });
+    ok('a blocker that stopped being reported stops accumulating', bucket.pipelineCompiles.ms === 500);
+    ok('the still-outstanding one keeps accumulating', bucket.bcCompressOutstanding.ms === 500);
+
+    // An empty sample in between must not retroactively hand its gap to
+    // whatever happened to be busy before AND after it.
+    reportProgress(s, LOAD_PHASES.WARMING, { structuredBlockers: [], nowMs: 1000 });
+    reportProgress(s, LOAD_PHASES.WARMING, {
+      structuredBlockers: [{ key: 'bcCompressOutstanding', label: 'textures still being GPU-compressed' }],
+      nowMs: 1050,
+    });
+    ok('a gap with an empty blocker list is not credited to anything', bucket.bcCompressOutstanding.ms === 550);
+  }
+  {
+    // A phase change must not leak the previous phase's blocker clock into the
+    // new one — otherwise WARMING's first sample could be billed for however
+    // long ago some earlier phase last reported blockers.
+    const s = mk(0);
+    beginPhase(s, LOAD_PHASES.SCENE, { nowMs: 0 });
+    reportProgress(s, LOAD_PHASES.WARMING, { structuredBlockers: [{ key: 'x', label: 'x' }], nowMs: 5000 });
+    reportProgress(s, LOAD_PHASES.WARMING, { structuredBlockers: [{ key: 'x', label: 'x' }], nowMs: 5100 });
+    ok(
+      'a phase entered long after the previous one does not inherit a giant first gap',
+      s.blockerDurationsMs[LOAD_PHASES.WARMING].x.ms === 100
+    );
+  }
+  {
+    // Blockers reported without a clock must not throw or fabricate a duration.
+    const s = mk(0);
+    beginPhase(s, LOAD_PHASES.WARMING, { nowMs: 0 });
+    reportProgress(s, LOAD_PHASES.WARMING, { structuredBlockers: [{ key: 'x', label: 'x' }] });
+    ok('no clock means no accumulation, not a crash', !s.blockerDurationsMs[LOAD_PHASES.WARMING]);
+  }
+
   // --- THE DEADLINE, AND WHY IT IS NOT A LIE -------------------------------
   {
     const s = mk(0);

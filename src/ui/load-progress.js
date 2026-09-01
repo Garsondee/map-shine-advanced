@@ -151,7 +151,10 @@ export const LOAD_PHASES = Object.freeze({
   WARMING: 'warming',
 });
 
-const PHASE_LABELS = Object.freeze({
+// Exported (2026-09-01, mythica-machina-press#400) so `diag/load-report.js`
+// can label phases from the SAME taxonomy rather than hand-keeping a second
+// copy that drifts the moment a phase is renamed here.
+export const PHASE_LABELS = Object.freeze({
   [LOAD_PHASES.DEVICE]: 'Starting the graphics device',
   [LOAD_PHASES.SCENE]: 'Reading the scene',
   [LOAD_PHASES.MASKS]: 'Finding masks',
@@ -180,6 +183,15 @@ const PHASE_LABELS = Object.freeze({
  *   sticking forever. See {@link STALL_NOTE_VISIBLE_MS}.
  * @property {PhaseSpan[]} phases - every phase entered, with its duration. See
  *   {@link beginPhase}.
+ * @property {number|null} lastBlockerSampleMs - clock reading of the most
+ *   recent {@link reportProgress} call that carried `structuredBlockers`, so
+ *   the next one can bill the elapsed gap to whatever was just reported.
+ *   Reset to `null` on every phase transition — see {@link beginPhase}.
+ * @property {Record<string, Record<string, {label:string, ms:number}>>} blockerDurationsMs -
+ *   per-phase, per-named-blocker accumulated time: how long was THIS named
+ *   thing (a GPU pipeline compiling, textures still compressing, ...)
+ *   reported outstanding, in total, while this phase ran. See
+ *   {@link reportProgress}.
  */
 
 /**
@@ -242,6 +254,8 @@ export function createLoadState({ sceneId, sceneName, nowMs }) {
     lastStallMs: 0,
     lastStallAtMs: null,
     phases: [],
+    lastBlockerSampleMs: null,
+    blockerDurationsMs: {},
   };
 }
 
@@ -281,6 +295,11 @@ export function beginPhase(state, phaseId, { total = null, detail = null, nowMs 
   state.done = 0;
   state.total = total;
   state.detail = detail;
+  // A new phase gets a fresh blocker-time clock. Carrying the old timestamp
+  // forward would bill this phase's first blocker sample for however long ago
+  // the PREVIOUS phase's blockers were last polled — a gap that has nothing to
+  // do with this phase at all.
+  state.lastBlockerSampleMs = null;
   state.phases.push({
     phase: phaseId,
     startMs: Number.isFinite(nowMs) ? round2(nowMs - state.startedAtMs) : null,
@@ -292,12 +311,53 @@ export function beginPhase(state, phaseId, { total = null, detail = null, nowMs 
 }
 
 /**
+ * Bill the elapsed time since the last blocker sample to whichever NAMED
+ * blockers were just reported — the only attribution a POLLED signal can
+ * honestly make. We know for certain what was outstanding at this instant; we
+ * do not know exactly when inside the preceding gap it started or stopped, so
+ * the whole gap is credited to what this sample confirms.
+ *
+ * Concurrent blockers each get the FULL gap, never a divided share: "3 items
+ * still streaming" and "1 pipeline still compiling" can both be true for the
+ * same interval, and each one really was independently outstanding for all of
+ * it. Dividing would understate whichever blocker is chronically present
+ * alongside a rotating cast of others. `diag/load-report.js` is the one that
+ * turns this into a report and says, explicitly, that entries can overlap.
+ *
+ * @param {LoadState} state @param {string} phaseId
+ * @param {ReadonlyArray<{key:string, label?:string}>} structuredBlockers
+ * @param {number} nowMs
+ */
+function accumulateBlockerTime(state, phaseId, structuredBlockers, nowMs) {
+  const last = state.lastBlockerSampleMs;
+  state.lastBlockerSampleMs = nowMs;
+  // The first sample after a phase begins only establishes the clock — there
+  // is no preceding gap yet to bill anything for.
+  if (!Number.isFinite(last)) return;
+  const dt = nowMs - last;
+  if (!(dt > 0)) return;
+  if (!state.blockerDurationsMs[phaseId]) state.blockerDurationsMs[phaseId] = {};
+  const bucket = state.blockerDurationsMs[phaseId];
+  for (const b of structuredBlockers) {
+    if (!b || typeof b.key !== 'string' || !b.key) continue;
+    if (!bucket[b.key]) bucket[b.key] = { label: typeof b.label === 'string' && b.label ? b.label : b.key, ms: 0 };
+    bucket[b.key].ms += dt;
+  }
+}
+
+/**
  * Report progress within the active phase.
  * @param {LoadState} state @param {string} phaseId
- * @param {{done?:number, total?:number|null, detail?:string|null, nowMs?:number}} opts
+ * @param {{done?:number, total?:number|null, detail?:string|null, blockers?:string[],
+ *   structuredBlockers?: ReadonlyArray<{key:string,label?:string,count?:number}>, nowMs?:number}} opts
+ *   `blockers` is the display list (formatted strings, for the curtain);
+ *   `structuredBlockers` is the stable-keyed source of the SAME information
+ *   (`vt/settle.js`'s own `{key,label,count}` shape), kept separate because a
+ *   formatted string like "…(3)" changes on every count and would fragment one
+ *   blocker's accumulated time across however many counts it passed through.
  * @returns {LoadState}
  */
-export function reportProgress(state, phaseId, { done, total, detail, blockers, nowMs } = {}) {
+export function reportProgress(state, phaseId, { done, total, detail, blockers, structuredBlockers, nowMs } = {}) {
   // A progress report for a phase we are not in IS a phase transition — and it
   // must be timed like one, or a phase entered only this way would be the one
   // phase with no duration.
@@ -306,6 +366,9 @@ export function reportProgress(state, phaseId, { done, total, detail, blockers, 
   if (total !== undefined) state.total = total;
   if (detail !== undefined) state.detail = detail;
   if (blockers !== undefined) state.blockers = Array.isArray(blockers) ? blockers : [];
+  if (Array.isArray(structuredBlockers) && Number.isFinite(nowMs)) {
+    accumulateBlockerTime(state, phaseId, structuredBlockers, nowMs);
+  }
   return state;
 }
 

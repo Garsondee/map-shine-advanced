@@ -424,10 +424,15 @@ export function shouldStopWaitingForReady() {
  * Publish what readiness is currently waiting for, so the curtain can name it.
  * A no-op with no curtain up, like every other reporter here.
  * @param {string[]} blockers @param {string|null} [detail]
+ * @param {ReadonlyArray<{key:string,label:string,count:number}>|null} [structuredBlockers] -
+ *   the SAME blockers as `vt/settle.js`'s own stable-keyed shape, so
+ *   `load-progress.js` can bill outstanding time per named cause instead of
+ *   per formatted (and count-fluctuating) string. Optional so a caller that
+ *   only has the display strings still works.
  */
-export function reportSceneLoadBlockers(blockers, detail = null) {
+export function reportSceneLoadBlockers(blockers, detail = null, structuredBlockers = null) {
   if (!state) return;
-  reportProgress(state, LOAD_PHASES.WARMING, { blockers, detail, nowMs: now() });
+  reportProgress(state, LOAD_PHASES.WARMING, { blockers, detail, structuredBlockers, nowMs: now() });
 }
 
 /**
@@ -471,6 +476,12 @@ export function endSceneLoad({ error = null, silent = false, forced = false } = 
       // already returned by getLoadingScreenState(), which is already a
       // registered read-only report.
       phases: state.phases.map((p) => ({ ...p })),
+      // WARMING'S OWN BREAKDOWN (mythica-machina-press#400) — which named cause
+      // (streaming, GPU compression, shader/pipeline compile, ...) ate how much
+      // of the warm-up hold, straight off `load-progress.js`'s accumulator.
+      // Cloned for the same reason `phases` is: nothing downstream should be
+      // able to mutate the summary after the fact.
+      blockerDurationsMs: cloneBlockerDurations(state.blockerDurationsMs),
       error: state.error,
     };
     if (!silent) lastSummary = summary;
@@ -485,6 +496,21 @@ export function endSceneLoad({ error = null, silent = false, forced = false } = 
   return summary;
 }
 
+/**
+ * Defensive clone of the blocker-time accumulator — two levels of plain
+ * objects, so a shallow spread per level is enough; no need for a generic deep
+ * clone over a shape this small and fixed.
+ * @param {Record<string, Record<string, {label:string, ms:number}>>} src
+ */
+function cloneBlockerDurations(src) {
+  const out = {};
+  for (const phaseId of Object.keys(src || {})) {
+    out[phaseId] = {};
+    for (const key of Object.keys(src[phaseId])) out[phaseId][key] = { ...src[phaseId][key] };
+  }
+  return out;
+}
+
 /** For diagnostics: what the last real load cost, and whether one is up now. */
 export function getLoadingScreenState() {
   return {
@@ -496,6 +522,11 @@ export function getLoadingScreenState() {
     // would show the previous load's timings and nothing about the one that is
     // actually hanging. The still-open phase names itself by `endMs: null`.
     currentPhases: state ? state.phases.map((p) => ({ ...p })) : null,
+    // LIVE blocker-time accumulation (mythica-machina-press#400), for the exact
+    // moment someone reaches for this mid-freeze — same reasoning as
+    // `currentPhases`: the WARMING breakdown is most useful WHILE stuck, not
+    // only after the fact.
+    currentBlockerDurationsMs: state ? cloneBlockerDurations(state.blockerDurationsMs) : null,
     lastLoad: lastSummary,
   };
 }

@@ -31,6 +31,7 @@ import { run as runPipelineRebuildProbe } from './pipeline-rebuild-probe.test.mj
 import { run as runReckoningReport } from './reckoning-report.test.mjs';
 import { run as runParamReadHealth } from './param-read-health.test.mjs';
 import { run as runUiPerf } from './ui-perf.test.mjs';
+import { run as runLoadReport } from './load-report.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -76,6 +77,7 @@ const suites = [
   ['reckoning-report', runReckoningReport],
   ['param-read-health', runParamReadHealth],
   ['ui-perf', runUiPerf],
+  ['load-report', runLoadReport],
 ];
 
 for (const [name, fn] of suites) {

@@ -474,6 +474,7 @@ import {
   resetLoadingSceneMemory,
 } from './ui/loading-screen.js';
 import { LOAD_PHASES } from './ui/load-progress.js';
+import { buildLoadReport } from './diag/load-report.js';
 import {
   installPainter,
   openCameraPathDialog,
@@ -10845,6 +10846,22 @@ function install() {
       'is suppressed precisely because it matches.',
   }));
 
+  // THE LOADING-TIME REPORT (mythica-machina-press#400, author: "I want to
+  // know what is causing things to freeze" — a full accounting of the whole
+  // load, from the moment the module engages through the warm-up hold, with a
+  // verdict on which phase ate the majority of it and, for WARMING
+  // specifically, which NAMED thing (streaming, GPU compression, shader/
+  // pipeline compile, ...) was outstanding and for how long. `primary: true`
+  // puts the button in the Performance Center's hero row next to the
+  // Performance Report and the Reckoning Report — this is meant to be reached
+  // for mid-freeze, not discovered by accident in the Lab's "More" drawer.
+  MapShine.debug.registerReport(
+    'loading-time-report',
+    '🐢 Loading Time Report (what ate the startup?)',
+    () => buildLoadReport(getLoadingScreenState()),
+    { zone: 'performance', primary: true }
+  );
+
   // The curtain correctly refuses to reappear for the same scene, which makes it
   // impossible to look at again without switching scenes back and forth. This
   // forgets that memory so the next redraw is treated as a cold load.
@@ -12445,7 +12462,7 @@ function install() {
             if (settle?.skipped) return { ready: false, reason: settle.reason ?? 'viewer not running' };
             const stop = shouldStopWaitingForReady();
             if (stop.stop) return { ready: false, reason: stop.reason, waitingFor: settle?.waitingFor ?? [] };
-            reportSceneLoadBlockers(settle?.waitingFor ?? []);
+            reportSceneLoadBlockers(settle?.waitingFor ?? [], null, settle?.blockers ?? []);
             await new Promise((r) => setTimeout(r, READY_POLL_MS));
           }
         }

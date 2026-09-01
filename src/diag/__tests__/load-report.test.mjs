@@ -343,4 +343,97 @@ export function run(t) {
     const r = buildLoadReport({ showing: false, lastLoad }, { cacheSnapshot: null });
     ok('a missing snapshot is absent, not an empty-but-present section', r.cacheHealth === null);
   }
+
+  // --- ZONE BREAKDOWN: what actually filled the unattributed gap -------------
+  // (mythica-machina-press#400, second follow-up — the live Big Bank capture
+  // where compileTime measured only ~1.2s but FIRST_FRAME alone took 33.5s.)
+  {
+    const lastLoad = {
+      sceneId: 's',
+      sceneName: 's',
+      totalMs: 1000,
+      worstStallMs: 0,
+      forcedReveal: false,
+      unfinished: [],
+      error: null,
+      phases: [],
+      blockerDurationsMs: {},
+    };
+    // A steady-state zone with a HIGH per-frame average but a LOW worst single
+    // hit, beside a sparse/bake-style zone with a tiny average (many frames in
+    // the denominator) but one huge occurrence — the exact case a per-frame
+    // mean would hide.
+    const zoneRows = [
+      { id: 'pass.light.accumulate', cpuMsPerFrame: 2.5, cpuMaxMs: 4, gpuMsPerFrame: 3, gpuMaxMs: 5, count: 500 },
+      { id: 'sims.windBake', cpuMsPerFrame: 0.02, cpuMaxMs: 9800, gpuMsPerFrame: null, gpuMaxMs: null, count: 1 },
+      { id: 'residency.itemLoad', cpuMsPerFrame: 0.1, cpuMaxMs: 120, gpuMsPerFrame: null, gpuMaxMs: null, count: 40 },
+      { id: 'nothing-happened', cpuMsPerFrame: 0, cpuMaxMs: 0, gpuMsPerFrame: 0, gpuMaxMs: 0, count: 0 },
+    ];
+    const r = buildLoadReport({ showing: false, lastLoad }, { zoneRows });
+    ok(
+      'the once-off bake is ranked first, by its single worst hit, not its tiny per-frame average',
+      r.zoneBreakdown.topZones[0].id === 'sims.windBake'
+    );
+    ok('...with the real worst-case figure surfaced', r.zoneBreakdown.topZones[0].worstMs === 9800);
+    ok(
+      'a zone with genuinely zero cost is dropped, not padding the list',
+      !r.zoneBreakdown.topZones.some((z) => z.id === 'nothing-happened')
+    );
+    ok('the honesty note explains the ranking basis', /worst/i.test(r.zoneBreakdown.note));
+  }
+  {
+    // Capped, not truncated silently past the point of usefulness.
+    const lastLoad = {
+      sceneId: 's',
+      sceneName: 's',
+      totalMs: 1000,
+      worstStallMs: 0,
+      forcedReveal: false,
+      unfinished: [],
+      error: null,
+      phases: [],
+      blockerDurationsMs: {},
+    };
+    const zoneRows = Array.from({ length: 20 }, (_, i) => ({
+      id: `zone${i}`,
+      cpuMsPerFrame: 1,
+      cpuMaxMs: 20 - i,
+      gpuMsPerFrame: null,
+      gpuMaxMs: null,
+      count: 1,
+    }));
+    const r = buildLoadReport({ showing: false, lastLoad }, { zoneRows });
+    ok('the list is capped to a readable top slice', r.zoneBreakdown.topZones.length === 10);
+    ok('...and it is still the ACTUAL worst ten, not just the first ten', r.zoneBreakdown.topZones[0].id === 'zone0');
+  }
+  {
+    const lastLoad = {
+      sceneId: 's',
+      sceneName: 's',
+      totalMs: 1000,
+      worstStallMs: 0,
+      forcedReveal: false,
+      unfinished: [],
+      error: null,
+      phases: [],
+      blockerDurationsMs: {},
+    };
+    const r = buildLoadReport({ showing: false, lastLoad }, { zoneRows: null });
+    ok('no zone data at all is absent, not an empty-but-present section', r.zoneBreakdown === null);
+  }
+  {
+    // The in-progress branch has no live path for this yet (see load-report.js's
+    // own comment) — must read null even if a stale zoneRows happens to be
+    // sitting in `diagnostics` from a PREVIOUS completed load.
+    const state = {
+      showing: true,
+      current: { elapsedMs: 5000, title: 'Streaming map art', stallNote: null, blockers: [] },
+      currentPhases: [{ phase: LOAD_PHASES.ART, startMs: 0, endMs: null, durMs: null }],
+      currentBlockerDurationsMs: {},
+      lastLoad: null,
+    };
+    const staleDiagnostics = { zoneRows: [{ id: 'stale', cpuMsPerFrame: 1, cpuMaxMs: 5000, count: 1 }] };
+    const r = buildLoadReport(state, staleDiagnostics);
+    ok("in-progress never surfaces a previous load's zone data as if it were live", r.zoneBreakdown === null);
+  }
 }

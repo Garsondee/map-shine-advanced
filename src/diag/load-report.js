@@ -207,6 +207,44 @@ function buildCompileTimeSection(diagnostics, worstStallMs) {
   };
 }
 
+/**
+ * Real per-zone CPU/GPU cost during THIS load, straight off the SAME zone
+ * profiler the steady-state performance report already uses — arming it for
+ * one load's duration (boot.js) is the entire new instrumentation; the
+ * formatting is `reckoning-report.js`'s own `summarizeZoneRows`, unchanged.
+ *
+ * Found via a real live capture (mythica-machina-press#400, Big Bank,
+ * 2026-09-01): a load whose FIRST_FRAME phase alone took 33.5s, with an
+ * 11.96s single main-thread stall inside it, while shader/pipeline compile
+ * time measured only ~1.2s total. Something else was the other ~20s+ — this
+ * section exists to name it (a bake, a residency pass, mask readback, ...)
+ * rather than leaving that gap unattributed the way `compileTime` alone does.
+ *
+ * RANKED BY WORST SINGLE OCCURRENCE, not `summarizeZoneRows`'s own per-frame
+ * average: that average is the right lens for a many-second steady-state
+ * window, and the wrong one here — a bake that fires exactly once during a
+ * cold load, divided by however few frames rendered in a mostly-frozen
+ * window, is precisely the shape a per-frame mean hides (perf-report.js's
+ * own `feedback_instruments_must_not_lie` rule about sparse vs steady cost).
+ */
+function buildZoneBreakdownSection(zoneRows) {
+  if (!Array.isArray(zoneRows) || zoneRows.length === 0) return null;
+  const ranked = zoneRows
+    .map((r) => ({ ...r, worstMs: Math.max(r.gpuMaxMs ?? 0, r.cpuMaxMs ?? 0) }))
+    .filter((r) => r.worstMs > 0)
+    .sort((a, b) => b.worstMs - a.worstMs)
+    .slice(0, 10);
+  if (ranked.length === 0) return null;
+  return {
+    topZones: ranked,
+    note:
+      'Ranked by the SINGLE WORST occurrence (max CPU or GPU ms this load), not the per-frame average — a bake ' +
+      'or one-time pass that fires once during a cold load is exactly what a steady-state average would hide. ' +
+      'These are the same named zones (residency passes, per-effect bakes, ...) the steady-state performance ' +
+      'report already declares; this is that same profiler, armed for one load instead of a fixed window.',
+  };
+}
+
 /** Rank phases by duration and name the biggest one — a verdict a tool can compute must not be left as an exercise. */
 function pickTopContributor(phaseRows) {
   const ranked = phaseRows.filter((p) => Number.isFinite(p.durMs)).sort((a, b) => b.durMs - a.durMs);
@@ -272,8 +310,16 @@ export function buildLoadReport(loadingScreenState, diagnostics = null) {
       state.currentBlockerDurationsMs?.[LOAD_PHASES.WARMING],
       warmingRow?.durMs ?? null
     );
+    // Compile time reads LIVE here (boot.js passes a fresh, non-destructive
+    // probe read for an in-flight load, not last load's disarmed stats) —
+    // arming a probe never needs to stop mid-load to be READ mid-load.
+    // Cache health and the zone breakdown are NOT yet wired for a live read
+    // (both need a "since this load's own start" baseline boot.js does not
+    // yet expose while still in flight) — absent here rather than showing a
+    // previous load's numbers mislabelled as this one's.
     report.compileTime = buildCompileTimeSection(diagnostics, worstStallMs);
     report.cacheHealth = buildCacheHealthSection(diagnostics?.cacheSnapshot ?? null);
+    report.zoneBreakdown = null;
   } else if (state.lastLoad) {
     const last = state.lastLoad;
     const totalMs = round(last.totalMs);
@@ -299,6 +345,9 @@ export function buildLoadReport(loadingScreenState, diagnostics = null) {
     );
     report.compileTime = buildCompileTimeSection(diagnostics, report.worstStallMs);
     report.cacheHealth = buildCacheHealthSection(diagnostics?.cacheSnapshot ?? null);
+    // Zone breakdown is COMPLETED-LOAD ONLY — see the in-progress branch's own
+    // comment on why compile time reads live there but this does not (yet).
+    report.zoneBreakdown = buildZoneBreakdownSection(diagnostics?.zoneRows ?? null);
   } else {
     report.status = 'no-data';
     report.note =

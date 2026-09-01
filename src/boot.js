@@ -4085,17 +4085,26 @@ function install() {
   // THE PERFORMANCE CENTER (docs/planning/Performance.md; author directive
   // 2026-08-06: "move all performance monitoring things into a single space
   // which becomes the only place for performance related tools"). Every
-  // perf-related report/action/panel below declares `{ zone: 'performance' }`
-  // instead of leaving `zone` unset (which defaults to the Lab) or
-  // `{primary:true}` (the Lab's own quick-reach row) — debug-panel.js's
-  // `renderPerformanceCenter` gathers all of them into diag/perf-strip.js's
-  // own expand area, never a rail zone. `perfLab`/`perfHud` used to be
-  // SEPARATE floating overlays (`.open()`/toggle-then-appear-top-right);
-  // both were refactored the same day into plain embeddable elements
-  // (`{ el }`) mounted here via the same `registerPanel` primitive every
-  // effect card already uses — no new registration API.
+  // perf-related report/action/panel below declares `{ zone: 'lab' }` — FIXED
+  // mythica-machina-press#401, 2026-09-01, LIVE BUG. Until this fix they
+  // declared `{ zone: 'performance' }`, which debug-panel.js's
+  // `renderPerformanceCenter` used to gather into diag/perf-strip.js's own
+  // expand area. That renderer was deleted in the UI parity migration (phase
+  // 7b) and never replaced, so every one of these — the whole Performance
+  // Center — was real, tested, and completely unreachable except by typing
+  // `MapShine.debug.runReport(id)` into the console: no button anywhere drew
+  // it. 'lab' is a real, currently-rendered destination (Studio's own LAB
+  // department, `renderLab`); the two vital tools (the master Performance
+  // Report action, the Reckoning Report) also declare `primary: true` so
+  // they land in the Lab's quick-reach row, matching the "Vital tools (Pixel
+  // Probe, Performance)" intent already named in debug-panel.js's `place()`.
+  // `perfLab`/`perfHud` used to be SEPARATE floating overlays (`.open()`/
+  // toggle-then-appear-top-right); both were refactored the same day into
+  // plain embeddable elements (`{ el }`) mounted here via the same
+  // `registerPanel` primitive every effect card already uses — no new
+  // registration API.
   const perfLab = createPerfLab();
-  MapShine.debug.registerPanel('perf-lab-panel', 'Effect sweep', () => perfLab.el, { zone: 'performance' });
+  MapShine.debug.registerPanel('perf-lab-panel', 'Effect sweep', () => perfLab.el, { zone: 'lab' });
 
   // ===========================================================================
   // THE PERFORMANCE PROFILE (docs/planning/Performance.md)
@@ -5519,7 +5528,10 @@ function install() {
       MapShine.debug.refreshControls();
       return lastPerfProfile;
     },
-    { zone: 'performance' }
+    // `primary: true` — this is the "Performance" half of debug-panel.js's own
+    // "Vital tools (Pixel Probe, Performance)" quick-reach comment (FIXED
+    // mythica-machina-press#401 alongside the zone change just below).
+    { zone: 'lab', primary: true }
   );
 
   // EARLY-Z A/B, THE FULL SWEEP TWICE (2026-08-12) — author directive, given
@@ -6171,7 +6183,7 @@ function install() {
     'reckoning-report',
     '⚖️ The Reckoning Report (≈4 s capture)',
     () => MapShine.reckoningReport(),
-    { zone: 'performance', primary: true }
+    { zone: 'lab', primary: true }
   );
 
   // Its own Show/Hide button lives inside perfHud.el now (2026-08-06) — no
@@ -6179,7 +6191,7 @@ function install() {
   // report button below: this is a LIVE view for while you pan/zoom/toggle an
   // effect by hand, not a report, and folding it into the report action would
   // mean it could only ever show a snapshot from ~2-4 minutes ago.
-  MapShine.debug.registerPanel('perf-hud-panel', 'Live zone ranking', () => perfHud.el, { zone: 'performance' });
+  MapShine.debug.registerPanel('perf-hud-panel', 'Live zone ranking', () => perfHud.el, { zone: 'lab' });
 
   // THE CAMERA-PATH TOOL (2026-07-21, author request: revive V2's camera-pass
   // recorder for PIXI mode, with UI-hide, needed to finish releasing maps).
@@ -8349,7 +8361,7 @@ function install() {
           base.interpretation,
       };
     },
-    { zone: 'performance' }
+    { zone: 'lab' }
   );
 
   // THE INLINE RESULT VIEW — author's ask: "an area where you can press a
@@ -8473,7 +8485,7 @@ function install() {
     return el;
   }
   MapShine.debug.registerPanel('perf-last-result-panel', 'Last result', buildPerfLastResultPanel, {
-    zone: 'performance',
+    zone: 'lab',
   });
 
   // FLUID — the whole chain, link by link. Click this FIRST when the tubes
@@ -12200,6 +12212,10 @@ function install() {
     // that survives it is a clock read immediately before and after the
     // suspect call — which is exactly what the rebuild probes now do.
     let lastLoadDiagnostics = null;
+    // Whether THIS load currently holds the zone profiler — `arm()` can
+    // refuse (another owner, e.g. the perf HUD, already holds it), so this is
+    // never assumed true just because an arm was attempted.
+    let zonesArmedForLoad = false;
 
     // THE LOADING-TIME REPORT (mythica-machina-press#400, author: "I want to
     // know what is causing things to freeze" — a full accounting of the whole
@@ -12214,26 +12230,43 @@ function install() {
     // lexically visible — `no-undef` caught the first attempt at registering
     // it from the wrong scope before it ever shipped as a live ReferenceError.
     //
-    // ⚠️ ZONE IS 'lab', NOT 'performance' — CORRECTED 2026-09-01, LIVE BUG. The
-    // Performance Report and the Reckoning Report both still declare `{ zone:
-    // 'performance', primary: true }`, which used to land them in the perf
+    // ZONE IS 'lab', NOT 'performance'. `renderLab` (debug-panel.js) only ever
+    // places `zone === 'lab'` entries, and `primary: true` there puts a button
+    // in the Lab's own top quick-reach row (where "⬇ Export everything" and
+    // "Pixel Probe" already sit) — a real, currently-rendered surface. This
+    // report was deliberately NOT given `zone: 'performance'`, the zone the
+    // Performance Report/Reckoning Report/perf-lab/perf-hud panels still used
+    // at the time (2026-09-01): that zone used to land entries in the perf
     // strip's own "expand for tools" drawer (`renderPerformanceCenter`,
-    // diag/debug-panel.js). That drawer was deleted in the UI parity migration
-    // (phase 7b) and never replaced — see debug-panel.js's own comment where
-    // `renderPerformanceCenter` used to live: "{zone:'performance'}
-    // registrations ... stay fully real and exporter-covered; they simply have
-    // no dedicated UI surface drawing them as a group any more." So EVERY
-    // `zone: 'performance'` entry is today reachable only from the console
-    // (`MapShine.debug.runReport(id)`) — no button anywhere draws it.
-    // `renderLab` (debug-panel.js) only ever places `zone === 'lab'` entries,
-    // and `primary: true` there puts a button in the Lab's own top quick-reach
-    // row (where "⬇ Export everything" and "Pixel Probe" already sit) — a
-    // real, currently-rendered surface, unlike 'performance'. Filed as its own
-    // gap rather than silently reusing the dead zone: mythica-machina-press#401.
+    // diag/debug-panel.js), deleted in the UI parity migration (phase 7b) and
+    // never replaced, leaving every `zone: 'performance'` entry reachable only
+    // from the console (`MapShine.debug.runReport(id)`) — no button anywhere
+    // drew it. Filed as mythica-machina-press#401 and FIXED the same day: the
+    // whole Performance Center (this report's siblings, above in this file)
+    // now declares `zone: 'lab'` too, so 'performance' is no longer a live
+    // destination anywhere in this file.
     MapShine.debug.registerReport(
       'loading-time-report',
       '🐢 Loading Time Report (what ate the startup?)',
-      () => buildLoadReport(getLoadingScreenState(), lastLoadDiagnostics),
+      () => {
+        const lss = getLoadingScreenState();
+        // A load in flight gets a LIVE, non-destructive read — arming a probe
+        // never needs to stop mid-load to be read mid-load (getVtPanViewer-
+        // ShaderRebuilds/PipelineRebuilds peek at stats() without disarming),
+        // so "diagnose it while it's still frozen" does not have to wait for
+        // `lastLoadDiagnostics`, which only updates once THIS load finishes.
+        // Cache/zone data has no live path yet (see load-report.js's own
+        // comment on its in-progress branch) — absent there, not stale.
+        const diagnostics = lss.showing
+          ? {
+              shaderRebuild: getVtPanViewerShaderRebuilds(),
+              pipelineRebuild: getVtPanViewerPipelineRebuilds(),
+              cacheSnapshot: null,
+              zoneRows: null,
+            }
+          : lastLoadDiagnostics;
+        return buildLoadReport(lss, diagnostics);
+      },
       { zone: 'lab', primary: true }
     );
 
@@ -12526,6 +12559,27 @@ function install() {
         // matched by a disarm the moment this load ends, below.
         setVtPanViewerShaderRebuildProbe(true);
         setVtPanViewerPipelineRebuildProbe(true);
+        // ARM THE SAME ZONE PROFILER THE STEADY-STATE PERFORMANCE REPORT USES
+        // (mythica-machina-press#400 follow-up, live evidence: a load whose
+        // FIRST_FRAME phase alone took 33.5s while shader/pipeline compiles
+        // measured only ~1.2s — something else, already zone-bracketed for
+        // OTHER reports, is the rest). `settleFrames: 0` — this load's own
+        // first frames ARE the window of interest; discarding them (the
+        // steady-state default) would throw away exactly what this exists to
+        // see. Wrapped in try/catch: a refusal (another owner already holds
+        // it, e.g. the live perf HUD) must degrade to "no zone data this
+        // load", never break the scene load itself.
+        try {
+          perfProfiler.arm({
+            owner: 'load-report',
+            settleFrames: 0,
+            readDrawCalls: () => readVtPanViewerDrawCallsOnly(),
+            readTriangles: () => readVtPanViewerTriangleCountOnly(),
+          });
+          zonesArmedForLoad = true;
+        } catch (e) {
+          log.warn('loading-time report: zone profiler unavailable for this load (owner conflict?):', e);
+        }
         // ART-CACHE SNAPSHOT, BEFORE. The user's own hypothesis: "if
         // something is being recalculated every load that doesn't need to
         // be, that would also cause slowdown." These five are the whole
@@ -12602,6 +12656,22 @@ function install() {
         // polling, which needs the main thread to be free to check in at all.
         const shaderRebuildStats = setVtPanViewerShaderRebuildProbe(false);
         const pipelineRebuildStats = setVtPanViewerPipelineRebuildProbe(false);
+        let zoneRows = null;
+        if (zonesArmedForLoad) {
+          try {
+            const zoneSnap = perfProfiler.snapshot();
+            zoneRows = summarizeZoneRows(zoneSnap.zoneStats, zoneSnap.frames);
+          } catch (e) {
+            log.warn('loading-time report: zone profiler snapshot failed for this load:', e);
+          } finally {
+            try {
+              perfProfiler.disarm();
+            } catch (e) {
+              log.warn('loading-time report: zone profiler disarm failed:', e);
+            }
+            zonesArmedForLoad = false;
+          }
+        }
         const loadCacheSnapshotEnd = {
           vtPageCache: getVtPanViewerDiagnostics()?.cacheStats ?? null,
           vtDecodePool: getVtPanViewerDiagnostics()?.decodeStats ?? null,
@@ -12610,6 +12680,7 @@ function install() {
           pyramidStore: getPyramidStoreStats(),
         };
         lastLoadDiagnostics = {
+          zoneRows,
           shaderRebuild: shaderRebuildStats,
           pipelineRebuild: pipelineRebuildStats,
           cacheSnapshot: { start: loadCacheSnapshotStart, end: loadCacheSnapshotEnd },

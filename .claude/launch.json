@@ -13,13 +13,6 @@
       "runtimeExecutable": "npx",
       "runtimeArgs": ["--yes", "http-server", "-p", "8137", "-c-1", "--silent", "."],
       "port": 8137
-    },
-    {
-      "name": "chart-room",
-      "runtimeExecutable": "node",
-      "runtimeArgs": ["tools/chart-room/server.mjs"],
-      "port": 8935,
-      "autoPort": true
     }
   ]
 }

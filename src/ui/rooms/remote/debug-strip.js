@@ -19,12 +19,14 @@
  * itself.
  *
  * `probe`/`export` call real, already-shipping `MapShine.*` diagnostics
- * (armPixelProbe, flight.export) — genuinely wired, not stubs. `HUD` stays
- * honestly `planned`: `diag/perf-hud.js#createPerfHud` is real but reachable
- * only through the old debug panel's `registerPanel` mechanism today: no
- * standalone "open as its own floating panel" entry point exists yet for a
- * new room to call into — a real, scoped, named follow-up, matching the
- * mock's own tooltip rather than overreaching past it.
+ * (armPixelProbe, flight.export) — genuinely wired, not stubs. `HUD` is now
+ * wired too (mythica-machina-press#173 fix): `ctx.getHudPanel()` hands back
+ * boot.js's own `perfHud` (`diag/perf-hud.js#createPerfHud`), and the button
+ * mounts its already-embeddable `.el` into a host inside this strip's own
+ * accordion body, toggling `hidden` — no floating panel, no second overlay
+ * mechanism, just this file's existing accordion doing double duty as the
+ * "open as its own panel" entry point the old debug-panel registry used to
+ * provide.
  *
  * @module ui/rooms/remote/debug-strip
  */
@@ -221,17 +223,42 @@ export function renderDebugStrip(container, ctx) {
     body.hidden = expanded;
   });
 
-  const hudBtn = plannedDbtn(
-    'HUD',
-    'Perf HUD — per-zone frame costs over the map',
-    'diag/perf-hud.js is real but only reachable through the old debug panel today — a standalone open() for a new room is a real, scoped follow-up, not built this round.'
-  );
+  // The standalone open() this file's own header used to defer
+  // (mythica-machina-press#173 fix): perfHud.el is a plain embeddable
+  // element (2026-08-06 refactor, see perf-hud.js's own header) that's
+  // ALSO still handed to the old debug-panel registry for Studio's Lab tab
+  // (boot.js's registerPanel('perf-hud-panel', ...)) — a single shared node
+  // can only live in one parent at a time, so re-appending it into this
+  // host on every open (not just once, up front) reclaims it if the other
+  // room's tab most recently pulled it over there. The panel's OWN internal
+  // Show/Hide button still owns arm/disarm; closing the host here also
+  // calls hide() so a forgotten-open host can't keep the profiler armed for
+  // a panel nobody can see.
+  const hud = ctx.getHudPanel?.() ?? null;
+  const hudHost = document.createElement('div');
+  hudHost.className = 'msa-debug-hud-host';
+  hudHost.hidden = true;
+
+  const hudBtn = hud
+    ? dbtn('HUD', 'Perf HUD — per-zone frame costs over the map. Click to open the live view below.', () => {
+        const opening = hudHost.hidden;
+        if (opening && hud.el) hudHost.appendChild(hud.el);
+        hudHost.hidden = !opening;
+        hudBtn.setAttribute('aria-pressed', String(opening));
+        if (!opening) hud.hide?.();
+      })
+    : plannedDbtn(
+        'HUD',
+        'Perf HUD — per-zone frame costs over the map',
+        'diag/perf-hud.js is real but only reachable through the old debug panel today.'
+      );
+  if (hud) hudBtn.setAttribute('aria-pressed', 'false');
   const exportBtn = dbtn('export', 'Export everything — the flight-recorder bundle', () => ctx.onExport?.());
   const moreBtnsRow = document.createElement('div');
   moreBtnsRow.className = 'msa-debug-more-btns';
   moreBtnsRow.append(hudBtn, exportBtn);
 
-  body.append(moreBtnsRow);
+  body.append(moreBtnsRow, hudHost);
 
   wrap.append(primaryRow, statsRow, body);
   container.appendChild(wrap);

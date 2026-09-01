@@ -394,6 +394,13 @@ function injectStyle() {
   color:var(--ink1); background:none; font-family:var(--mono); font-size:.62rem; cursor:pointer; pointer-events:auto}
 #${ROOM_ID} .msa-debug-btn:hover{border-color:var(--c-system); color:var(--ink0)}
 #${ROOM_ID} .msa-debug-btn.msa-planned{border-style:dashed; border-color:var(--fail); color:var(--fail)}
+#${ROOM_ID} .msa-debug-btn[aria-pressed="true"]{border-color:var(--c-system);
+  color:var(--ink0); background:color-mix(in oklab, var(--c-system) 16%, transparent)}
+/* Host for the perf HUD's own embeddable element inside the accordion body,
+   filled in and revealed by the HUD button (mythica-machina-press#173 fix)
+   -- perf-hud.js sets its own width:100%/background/border inline, this
+   just gives it breathing room in the strip's flex column. */
+#${ROOM_ID} .msa-debug-hud-host{width:100%}
 /* The accordion's own chevron toggle -- pushed to the row's far end,
    rotates open/closed the SAME way the header's own minimize chevron
    already does (transform-box:fill-box, see .hbtn.msa-minimized above). */

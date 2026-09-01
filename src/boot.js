@@ -1356,6 +1356,13 @@ function install() {
       // clipboard-copy through the SAME registry every other debug action
       // renders through.
       buildPerfSweepButton: () => MapShine.debug?.buildActionButton?.('perf-run-full') ?? null,
+      // The standalone HUD entry point (mythica-machina-press#173 fix):
+      // perfHud is created further down install()'s own body (createPerfHud
+      // below) — same "closure over install()'s own locals" shape as
+      // windPopover's getDirectionDeg/getSpeed01 just below, safe because
+      // this isn't called until the strip actually builds its HUD button,
+      // well after install() has run past that point.
+      getHudPanel: () => perfHud,
     },
     // THE RENDERER DROPDOWN (UI parity plan, phase 4b round 2 — author
     // redesign into a real, world-scoped GM master override; see

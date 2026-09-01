@@ -14908,6 +14908,25 @@ export async function startVtPanViewer({
             t.material.needsUpdate = true;
           }
           if (!t.mesh?.visible) continue;
+          // A token whose live alpha sits below 1 (mythica-machina-press#104:
+          // the Token Opacity slider), or a roof mid occlusion-fade, must NOT
+          // still tell `depthScene` "something solid covers this pixel" —
+          // `buildSceneDepthWriterMaterial` (scene-depth.js) only ever tests
+          // the TEXTURE's own per-pixel alpha via `alwaysOpaque`/the discard
+          // above, never this item's authored multiplier. Before this check,
+          // a half-see-through (or fully invisible) token still rasterized a
+          // full opaque silhouette into `depthScene`, so the floor tile
+          // underneath discarded itself via its own `maskNode`
+          // (`querySceneDepth(...).isAtOrBelow`, buildWholeImageMaterial
+          // above) believing the token already covered it — the fading token
+          // then composited over nothing at all (the pass's own leftover
+          // black clear colour) instead of the real floor art, reading as
+          // "opacity dims to black" rather than true fade-through. Same two
+          // reasons `applyEarlyZTileState`'s STAGE-0 A/B block a few lines up
+          // already excludes for the identical reason — reused, not
+          // re-derived, so the two mechanisms can't drift on what "reliably
+          // opaque" means.
+          if (t.earlyZReason === 'authoredAlpha' || t.earlyZReason === 'occlusionResponsive') continue;
           const writerArgs = {
             THREE,
             tex: t.tex,

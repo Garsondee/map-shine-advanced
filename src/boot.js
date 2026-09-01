@@ -1,7 +1,10 @@
 /**
  * Map Shine Advanced 0.6.0
  * ========================
- * src/boot.js — the ONE entry point of the V3 rebirth (docs/planning/Keyhole.md §3).
+ * src/boot.js — the ONE entry point of the V3 rebirth (Keyhole.md §3 — a design
+ * doc kept outside this repo now, in the author's private planning archive;
+ * `docs/` no longer exists here. Section-numbered citations to Keyhole.md and
+ * Roadmap-to-Parity.md throughout this codebase refer to that same archive.
  *
  * `module.json`'s `esmodules` points at this file and NOTHING else. Everything the
  * module does in the new architecture is reached from here: init/ready hooks, the
@@ -574,7 +577,7 @@ const HEARTBEAT_CANVAS_PX = 8;
 const VERSION = '0.6.0-dev.0';
 // (The product CODENAME was removed 2026-07-27 — there isn't one any more.
 // "Keyhole" survives as the name of the ARCHITECTURE and its plan of record
-// (docs/planning/Keyhole.md, graph/three-allocator.js#enforceKeyholeLaw): the
+// (Keyhole.md, graph/three-allocator.js#enforceKeyholeLaw): the
 // O(screen)-not-O(world) law. It is no longer shown to a user, stamped into a
 // report, or printed in the console banner.)
 const STAGE = 'Stage 1 · the law, running';

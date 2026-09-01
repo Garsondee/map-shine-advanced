@@ -1,6 +1,6 @@
 /**
  * perf-strip.js — the always-on performance/VRAM strip at the top of the
- * control panel (docs/planning/Keyhole.md Track 3 item 8, "VRAM headroom
+ * control panel (Keyhole.md Track 3 item 8, "VRAM headroom
  * tripwire"). Folded in from boot.js's old standalone bottom-right HUD
  * 2026-08-05, author's brief: it belongs "inside the main panel, at the top,"
  * concise, collapsible to just FPS, and framed as a WARNING STATION — FPS and

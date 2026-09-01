@@ -1,5 +1,5 @@
 /**
- * make-torture-world.mjs — Keyhole Stage 0 fixture generator (docs/planning/Keyhole.md §8).
+ * make-torture-world.mjs — Keyhole Stage 0 fixture generator (Keyhole.md §8).
  * ============================================================================
  * Emits the synthetic TORTURE SCENE that is Stage 0's fixture and every stage's
  * gate: a 12,000² × 3-floor world with labeled grids + per-floor tint (so a

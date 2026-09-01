@@ -8,7 +8,7 @@
 
 ## 1. Directory structure
 
-The tree is fixed by [`docs/planning/Keyhole.md`](../docs/planning/Keyhole.md) §3 — don't add a new top-level directory under `src/` without updating that doc first:
+The tree is fixed by `Keyhole.md` §3 — don't add a new top-level directory under `src/` without updating that doc first. (`Keyhole.md` and `Roadmap-to-Parity.md` are kept outside this repo, in the author's private planning archive — `docs/` no longer exists here, so section-numbered citations to either file throughout this codebase point there, not to a path in this tree.)
 
 ```
 src/

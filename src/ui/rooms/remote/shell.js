@@ -550,6 +550,14 @@ function dangerFooterBtn(text, tooltip, onConfirmed, armMs = 4000) {
  *   `onScrollToRateControl` callback.
  */
 export function installRemote(opts = {}) {
+  // Remote is the GM-only control room — same safety law and the same
+  // debugPanel.isGM() gate as installStudio's own (ui/rooms/studio/shell.js),
+  // reusing whatever it reports rather than a second isGM source of truth. A
+  // non-GM client gets no DOM here at all, not even the shared token/icon-
+  // sprite/stylesheet installs below (player-shell.js already calls those
+  // independently, so Player is unaffected either way).
+  if (typeof opts.debugPanel?.isGM === 'function' && !opts.debugPanel.isGM()) return undefined;
+
   installTokens();
   installIconSprite();
   injectStyle();

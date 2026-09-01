@@ -1164,6 +1164,10 @@ function install() {
   // same closure) are fully initialized. See shell.js's own header for why
   // that deferral exists at all.
   MapShine.__remote = installRemote({
+    // Lets the Remote gate its own DOM construction on GM status, the same
+    // debugPanel.isGM() the Studio call above already passes through — see
+    // installRemote's own header for the safety law this closes.
+    debugPanel: MapShine.debug,
     impulses: IMPULSES,
     // 2026-08-18 fix (author report: "the astrolabe looks completely
     // different... the CSS and layout are not the same yet") — the Remote

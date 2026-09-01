@@ -200,6 +200,17 @@ function deptHead(dept, subtitle, onSearchInput) {
  * }}
  */
 export function installStudio({ debugPanel, ...roomCtx } = {}) {
+  // Studio is the GM-only control room (docs/holy/UI-Testament.md's own safety
+  // law: "never built into a player client's DOM at all", not merely hidden
+  // after the fact) — so a non-GM client gets no DOM here at all, not even the
+  // shared token/icon-sprite/stylesheet installs below (player-shell.js already
+  // calls those independently, so Player is unaffected either way). Mirrors the
+  // SAME debugPanel.isGM() gate the LAB department below already uses — one
+  // fact, read the same way twice in this file. Every MapShine.__studio
+  // consumer elsewhere already reaches through optional chaining, so
+  // returning undefined here for a non-GM client is safe.
+  if (typeof debugPanel?.isGM === 'function' && !debugPanel.isGM()) return undefined;
+
   installTokens();
   installIconSprite();
   injectStyle();

@@ -787,11 +787,14 @@ export function installDebugPanel(MapShine) {
   // are all deleted (UI parity plan, phase 7b) — every one of them depended
   // on DOM this file no longer builds (perfStripWidget, bodyEl, the panel
   // element itself). {zone:'performance'} registrations (boot.js's perf-lab/
-  // perf-hud panels, the Reckoning Report action, etc.) stay fully real and
-  // exporter-covered; they simply have no dedicated UI surface drawing them
-  // as a group any more — each is still reachable via
-  // `MapShine.debug.runReport(id)`/`buildActionButton(id)`, the same as
-  // every other registered report/action.
+  // perf-hud panels, the Reckoning Report action, etc.) USED TO stay fully
+  // real and exporter-covered while having no dedicated UI surface drawing
+  // them as a group any more — reachable only via
+  // `MapShine.debug.runReport(id)`/`buildActionButton(id)`. FIXED
+  // mythica-machina-press#401 (2026-09-01): every one of those registrations
+  // now declares `zone: 'lab'` instead, so `{zone:'performance'}` has no
+  // live registrations left in boot.js at all — this paragraph is kept as
+  // the historical record of why `renderPerformanceCenter` itself is gone.
 
   // ---- baseline reports every stage benefits from --------------------------
   registerReport('boot', 'Boot', () =>

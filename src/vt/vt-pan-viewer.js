@@ -8995,7 +8995,24 @@ export async function startVtPanViewer({
         // + recreate) gets a new id and takes `loadNewItem` below, which is
         // why that was the author's own workaround.
         if (existing.wholeImage) {
-          for (const t of existing.wholeImage.tiles) t.floorAttrItem = item;
+          for (const t of existing.wholeImage.tiles) {
+            t.floorAttrItem = item;
+            // SAME BUG CLASS, SAME FIX (2026-09-01, mythica-machina-press#104):
+            // `buildWholeImageMaterial`'s uTint/uAlpha are now seeded from
+            // `item` at construction (see that function's own comment), but an
+            // EXISTING token/tile never goes through construction again — only
+            // this fast path, on every document update. Without also refreshing
+            // here, a tint change or a hide/reveal on an already-loaded item
+            // would silently stop taking effect the moment `existing.wholeImage`
+            // was already built, exactly the "resolved once, never revisited"
+            // trap `floorAttrItem` just above already exists to close for a
+            // sibling field.
+            if (t.appearance) {
+              const liveTint = new THREE.Color(item.tint ?? 0xffffff);
+              t.appearance.uTint.value.set(liveTint.r, liveTint.g, liveTint.b);
+              t.appearance.uAlpha.value = item.alpha ?? 1;
+            }
+          }
         }
         return existing;
       } finally {
@@ -10187,6 +10204,18 @@ export async function startVtPanViewer({
       const uTint = uniform(vec3(1, 1, 1));
       const uAlpha = uniform(float(1));
       const uUvScale = uniform(vec2(uvScale[0], uvScale[1]));
+      // WIRE-UP (2026-09-01, mythica-machina-press#104): uTint/uAlpha were
+      // declared here and READ below (colorNode's `c.rgb.mulAssign(uTint)` /
+      // `c.a.mulAssign(uAlpha)`) but never once given a value FROM `item` —
+      // every token, tile, and level texture rendered at flat white tint and
+      // full alpha no matter what its document said (a hidden token's 0.5
+      // dimming, computed correctly in `collectTokens`/`collectTiles`, was
+      // thrown away here). Same fixed-for-the-item's-lifetime treatment as
+      // `uUvScale` immediately above: read once, at construction, from the
+      // plain `0xRRGGBB` int `normalizeTint()` already produced.
+      const initialTint = new THREE.Color(item.tint ?? 0xffffff);
+      uTint.value.set(initialTint.r, initialTint.g, initialTint.b);
+      uAlpha.value = item.alpha ?? 1;
 
       // TILE MOTION (foundry/tile-motion.js, 2026-08-27) — a rigid GPU
       // transform + UV scroll/rotate, attached ONLY for item.kind==='tile'

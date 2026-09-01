@@ -10,6 +10,7 @@ othermodules
 # Local AI/editor tooling config — not used (2026-08-31)
 .continue/
 .cursor/
+.cursorignore
 .vscode/
 
 # Keyhole torture fixture — regenerable via `node tools/make-torture-world.mjs`
@@ -34,11 +35,12 @@ tools/shader-lab/cache/
 # the same rule as tools/shader-lab/runs/ above.
 FoundryVTT/
 module.zip
-tests/playwright-artifacts/chrome-profile/
-tests/playwright-artifacts/chrome-profile-usercheck/
-tests/playwright-artifacts/test-results/
-tests/playwright-artifacts/look/*.json
-tests/playwright-artifacts/look/*.png
+# Everything under playwright-artifacts/ is run output except the capture
+# scripts themselves (look/*.mjs) — those are the scenario and ARE committed.
+tests/playwright-artifacts/*
+!tests/playwright-artifacts/look/
+tests/playwright-artifacts/look/*
+!tests/playwright-artifacts/look/*.mjs
 
 # Raw Chrome DevTools Performance-panel captures handed to tools/trace-analyze.mjs.
 # Same rule as perf-capture outputs above: these are regenerable evidence, not

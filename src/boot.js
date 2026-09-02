@@ -474,6 +474,7 @@ import {
   resetLoadingSceneMemory,
 } from './ui/loading-screen.js';
 import { LOAD_PHASES } from './ui/load-progress.js';
+import { installCompressionStatusBadge } from './ui/compression-status.js';
 import { buildLoadReport } from './diag/load-report.js';
 import {
   installPainter,
@@ -1446,6 +1447,13 @@ function install() {
   // why: unlike Studio/Remote, nothing inside it is ever GM-only). Same
   // closure-reference safety as installStudio's own getSystemPanelCtx above.
   MapShine.__player = installPlayer({ getSystemPanelCtx: () => getSystemPanelCtx() });
+  // THE COMPRESSION STATUS BADGE (mythica-machina-press#435) — same
+  // unconditional-for-every-client posture as installPlayer immediately
+  // above, for the same reason: every client independently compresses
+  // textures into its own cache, so every client independently needs to be
+  // told when that is why the scene looks unfinished. See
+  // ui/compression-status.js's own header for the full defect this closes.
+  MapShine.__compressionStatus = installCompressionStatusBadge();
   // The in-app painter (tier 0): registers its "🖌️ Paint _Fire" action on the
   // debug panel and returns a hydrate hook the canvasReady handler calls to pull
   // any saved paint for the newly-loaded scene (docs/planning/Authoring-and-Distribution.md).

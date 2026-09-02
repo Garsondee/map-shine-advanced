@@ -1006,7 +1006,36 @@ export function buildFireLightSources(sources, { tier, mPerPx, env = null, color
     // `alive01` in place of the old live `envelope` — see this function's own
     // header note on why the pulse moved to the GPU.
     const alive01 = weather.alive01;
-    const luminosity01 = clampNum(0.5 + 0.42 * (alive01 - 1) + 0.25 * (chain.baseTemp - 0.6), 0.05, 1);
+    // ⚠️ BASELINE DROPPED 0.5 → 0.12, 2026-09-02 (mythica-machina-press#475).
+    // THE REAL ROOT CAUSE, found only after two earlier (real, but
+    // insufficient) fixes — a live side-by-side the author ran nailed it: a
+    // plain Foundry light at luminosity≈0 threw an evenly warm glow with NO
+    // white halo; the SAME light at Foundry's neutral default (luminosity
+    // 0.5) read as flatly white with no visible tint anywhere.
+    //
+    // Illumination's own colour is Foundry-parity colour-agnostic ambient —
+    // its "bright" tone IS the scene's literal `ambient.brightest`
+    // (`environmental-light.js#computeAmbientColors`, `[1,1,1]` by default),
+    // and `computeExposure`/`exposureFactor` (point-light-illumination.js)
+    // PUSHES a fragment TOWARD that white whenever luminosity is ≥ 0.5
+    // (`exposure ≥ 0`) — which, at Foundry's own neutral default 0.5, this
+    // formula's old 0.5 BASE sat right on top of, before any modulation ever
+    // moved it. A fragment already pushed to (or near) pure white [1,1,1] has
+    // no headroom left: coloration's own additive orange on top of an
+    // already-saturated white channel clips right back to white, REGARDLESS
+    // of the coloration's own strength or falloff reach — which is exactly
+    // why the two earlier fixes (widening `coreFade`, then the whole falloff
+    // curve) moved the goalposts but never the actual symptom. Below 0.5
+    // (exposure < 0) illumination instead pulls the SAME fragment DOWN
+    // toward black, which is what opens the headroom the additive tint needs
+    // to read as genuinely orange rather than an invisible top-up on white.
+    //
+    // This does not make fire dimmer in any way a player would notice: the
+    // scene's actual brightening still comes overwhelmingly from the
+    // ADDITIVE coloration below (`alpha01`), which never depended on
+    // `luminosity01` at all — this only stops illumination's OWN, colour-
+    // agnostic contribution from drowning it out.
+    const luminosity01 = clampNum(0.12 + 0.42 * (alive01 - 1) + 0.25 * (chain.baseTemp - 0.6), 0.05, 0.4);
     const alpha01 = clampNum(0.55 * alive01 * chain.baseTemp, 0.05, 1);
     const elevation = Number.isFinite(c.elevation) ? c.elevation : 0;
     if (!shapePoints || ![radius, luminosity01, alpha01].every(Number.isFinite)) continue;

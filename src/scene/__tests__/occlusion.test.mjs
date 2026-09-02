@@ -479,6 +479,63 @@ export function run(t) {
     ok('shader mirror: max() across channels — B is cleared so RADIAL 0.5 wins', near(mixed, 0.5));
   }
 
+  // --- REGRESSION (mythica-machina-press#470 follow-up, 2026-09-02): a
+  // HOST's own coverage grid is NOT a safe substitute for a smaller feature
+  // painted on top of it, for hover-hit-testing purposes ------------------
+  {
+    // The exact shape of the live regression (author, verbatim: "Trees just
+    // turned black and hovering my mouse over them does not cause them to
+    // disappear"). A Case-2 `_Tree`/`_Bush` vegetation overlay can be hosted
+    // on an entire Level's BACKGROUND image, not just a small Tile
+    // (`boot.js`'s own `vegetationUrlByItemId` covers `levelBackground`
+    // items too — a real, deliberately supported authoring pattern:
+    // `vt-pan-viewer.js#ensureVegetationOverlay`'s own measured note says
+    // "`_Tree` paints 11.9% of its 12000² canvas" on the author's own map —
+    // one mask painted across a WHOLE floor, not one Tile per plant). The
+    // first fix attempt (`vt-pan-viewer.js`'s `runMaskOcclusionPass`) reused
+    // the HOST's own hit test — `testItemHoverAlpha` against the HOST's own
+    // coverage grid — to decide whether the vegetation itself was hovered.
+    // This models exactly why that is unsafe: a real ground image is opaque
+    // almost everywhere, so its OWN grid says "hit" at UVs the much
+    // sparser vegetation-only grid (the actual painted tree/bush pixels)
+    // correctly says are empty ground. Substituting one grid for the other
+    // is not a rounding error — the two silhouettes can, and structurally
+    // will, disagree the moment the host is bigger than the plant.
+    //
+    // The fix (`vegetationOverlayContainsWorldPoint`, vt-pan-viewer.js) is
+    // this exact composition — `testItemHoverAlpha` against the
+    // VEGETATION's OWN grid instead of the host's — so this test exercises
+    // the real primitive both the broken and fixed code are built from,
+    // even though the browser-only closure that wires it up cannot be
+    // exercised directly from Node (this module stays GPU/DOM-free by
+    // design — see this file's own header).
+    const hostGrid = { w: 2, h: 2, data: new Uint8Array([255, 255, 255, 255]) }; // opaque everywhere — a real ground image
+    const vegGrid = { w: 2, h: 2, data: new Uint8Array([255, 0, 0, 0]) }; // only the top-left texel is painted tree
+
+    // A UV on bare ground — no tree painted there — but well inside the
+    // host's own opaque art (this is the exact point a mouse sitting
+    // anywhere over an ordinary floor lands on, almost always).
+    const bareGroundUv = { u: 0.9, v: 0.9 };
+    ok(
+      'regression: the HOST grid alone says "hit" on bare ground (the bug\'s own premise)',
+      testItemHoverAlpha({ ...bareGroundUv, grid: hostGrid, alphaThreshold: 0.75 }) === true
+    );
+    ok(
+      'regression FIX: the VEGETATION\'s OWN grid correctly says "no hit" at the SAME point',
+      testItemHoverAlpha({ ...bareGroundUv, grid: vegGrid, alphaThreshold: 0.75 }) === false
+    );
+
+    // The converse, proving this is a genuine disagreement rather than one
+    // grid simply being stricter everywhere: at a UV actually painted with
+    // tree art, both grids correctly agree it is a hit.
+    const paintedUv = { u: 0, v: 0 };
+    ok(
+      'regression: both grids agree at a UV actually painted with vegetation',
+      testItemHoverAlpha({ ...paintedUv, grid: hostGrid, alphaThreshold: 0.75 }) === true &&
+        testItemHoverAlpha({ ...paintedUv, grid: vegGrid, alphaThreshold: 0.75 }) === true
+    );
+  }
+
   // --- computeOcclusionAlpha: FADE's constant-R channel --------------------
   {
     // Foundry clears R to 0 and never writes it (MIN blend + 0xFF writes are

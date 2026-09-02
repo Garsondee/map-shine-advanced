@@ -15738,11 +15738,64 @@ export async function startVtPanViewer({
      *    query (`uExpectedDepth` is null for them), so that same null is the
      *    signal here rather than a second, driftable test.
      *  - an occlusion-responsive item (a roof that fades as a token walks
-     *    under it) multiplies its OUTPUT alpha per frame. Fade is a render
-     *    convenience, not solidity — and a faded draw needs blending.
+     *    under it, or on hover) multiplies its OUTPUT alpha per frame. Fade is
+     *    a render convenience, not solidity — and a faded draw needs blending.
      *  - the item's own authored alpha below 1, same arithmetic as above.
      *  - no `alphaStats` at all (the raw-decode fallback): opacity unknown,
      *    so fail open to today's path.
+     *
+     * ⚠️ THE OCCLUSION-RESPONSIVE TEST READS THE DOCUMENT, NOT THE LIVE
+     * UNIFORM — FIXED 2026-09-02, mythica-machina-press#470's own live-tested
+     * fallout, found while chasing "a hover-faded tile only fully disappears
+     * once the camera moves". This function — like the rest of `applyEarlyZTileState`
+     * it feeds — runs ONCE PER RESIDENCY PASS (`rebuildSceneDepthProxies`,
+     * called from `finishResidencyPass`), never per frame; that cadence was
+     * always fine for `uOcclusionWeights` because, before #470, the value
+     * really was a residency-timescale constant (`buildOcclusionUniforms`
+     * computed it exactly ONCE, at material-build time, and nothing ever
+     * touched it again). #470 turned it into a value `runMaskOcclusionPass`
+     * rewrites every FRAME (hover-fade's whole point), without anyone
+     * revisiting THIS earlier, unrelated consumer's implicit "residency-
+     * stable" assumption. The old code read `t.appearance.uOcclusionWeights
+     * .value` straight off the uniform: for a plain FADE-mode tile with fully
+     * opaque art, that value is genuinely all-zero at the LAST residency pass
+     * (nothing hovered yet) — so the tile gets classified 'interior'
+     * (`mat.transparent = false`, hardware `EqualDepth`, no `maskNode`
+     * discard — see the branch below). Hovering it then correctly ramps
+     * `uOcclusionWeights` toward full fade every frame (`runMaskOcclusionPass`
+     * genuinely never stops), but with blending DISABLED the shader's own
+     * `c.a` computation has ZERO effect on what reaches the screen — exactly
+     * the danger the STAGE-0 A/B block a few hundred lines down already knew
+     * to guard against for ITS OWN, narrower `transparent:false` (see its own
+     * 2026-08-26 comment: "the roof gets stuck fully opaque... regardless of
+     * what the shader computes for alpha that frame") — this was the SAME
+     * mechanism, unguarded, in the path that is actually on by default. The
+     * tile only ever reclassifies (and the already-correct fade suddenly
+     * renders, reading as an instant "snap") on the NEXT residency pass —
+     * which nothing schedules while the camera sits still (`scheduleResidency
+     * Update()`'s own call sites are all camera/floor/resize/load events, see
+     * that function's callers), so a stationary hover could stay stuck for as
+     * long as the pointer stayed put. Reading `isOccludable(occlusionMode)`
+     * instead — a DOCUMENT property, identical to what `runMaskOcclusionPass`
+     * itself gates the whole weight computation on — fixes this the same way
+     * `syncAllVegetationMotionForFrame` fixed the identically-shaped
+     * `feedback_residency_sync_vs_render_loop` bug for vegetation sliders
+     * (see `refreshVegetationOverlay`'s own "did nothing until the camera
+     * moved" comment): a NONE-mode item's weight is provably, permanently
+     * zero (`runMaskOcclusionPass` never even computes one for it — the
+     * uniform default just sits there), so `isOccludable` false is exactly as
+     * safe a residency-cadence read as before; ANY occludable mode (FADE,
+     * SURFACE, RADIAL, VISION, alone or combined) can EITHER always contribute
+     * a nonzero weight (RADIAL/SURFACE, unconditionally, the instant their bit
+     * is set — already proven safe, since a RADIAL tile has never been
+     * eligible for 'interior' either way) OR become one at any frame with no
+     * residency event alongside it (FADE/VISION, via hover or a token walking
+     * underneath) — so it can never again be trusted 'interior', no matter
+     * what the uniform reads at the instant this happens to run. Trades a
+     * small amount of the Stage 1 fast path (occlusion-capable tiles only —
+     * ordinary floor/base art, the bulk of a scene's tile count and the
+     * original perf motivation, is untouched) for correctness that no longer
+     * depends on residency and hover-fade timing lining up.
      *
      * ⚠️ THE REASON IS RETURNED, NOT JUST THE BOOLEAN, and that is what makes
      * DEFERRED-S1a a measurable question rather than a guess. "This tile is not
@@ -15762,10 +15815,17 @@ export async function startVtPanViewer({
      * Measuring that split BEFORE building it is the whole point of this
      * function ([[feedback_measure_the_output_not_the_equation]]).
      *
+     * @param {object} t - a `wholeImage.tiles[]` entry.
+     * @param {*} alphaStats - `state.wholeImage.alphaStats`.
+     * @param {number} occlusionMode - `item.occlusion.modes` (already OR'd —
+     *   `packOcclusionModes`'s output), a union of {@link OCCLUSION_MODES}.
+     *   The DOCUMENT'S capability, not this frame's live weight — see this
+     *   function's own "READS THE DOCUMENT, NOT THE LIVE UNIFORM" note above
+     *   for why that distinction is load-bearing at this cadence.
      * @returns {{interior: boolean, reason: string}} `reason` is 'interior'
      *   when it passes, otherwise the FIRST test that refused.
      */
-    function earlyZInteriorVerdict(t, alphaStats) {
+    function earlyZInteriorVerdict(t, alphaStats, occlusionMode) {
       // ⚠️ ORDER IS LOAD-BEARING: every STRUCTURAL exclusion is tested before
       // per-texel alpha, so that `reason === 'alpha'` means "alpha is the ONLY
       // objection" and nothing weaker. Corrected 2026-08-11, having first
@@ -15779,8 +15839,7 @@ export async function startVtPanViewer({
       // either way (all five tests must pass for `interior`); only the
       // attribution — and now a real behavioural gate — depends on the order.
       if (!t?.uExpectedDepth) return { interior: false, reason: 'vegetation' };
-      const w = t.appearance?.uOcclusionWeights?.value;
-      if (w && (w.x !== 0 || w.y !== 0 || w.z !== 0 || w.w !== 0)) {
+      if (isOccludable(occlusionMode)) {
         return { interior: false, reason: 'occlusionResponsive' };
       }
       const a = t.appearance?.uAlpha?.value;
@@ -15798,11 +15857,18 @@ export async function startVtPanViewer({
      * graph itself via `maskNode`), so `needsUpdate` is set — which is
      * precisely why this is guarded by a stored state tag and runs per
      * RESIDENCY PASS, never per frame.
+     *
+     * @param {object} t @param {*} alphaStats @param {number} z
+     * @param {number} occlusionMode - `item.occlusion.modes`, threaded straight
+     *   to `earlyZInteriorVerdict` — see that function's own "READS THE
+     *   DOCUMENT, NOT THE LIVE UNIFORM" note for why this must be the
+     *   document's static capability, never a live per-frame uniform read, at
+     *   this once-per-residency-pass cadence.
      */
-    function applyEarlyZTileState(t, alphaStats, z) {
+    function applyEarlyZTileState(t, alphaStats, z, occlusionMode) {
       const mat = t?.material;
       if (!mat || !t.mesh) return;
-      const verdict = earlyZInteriorVerdict(t, alphaStats);
+      const verdict = earlyZInteriorVerdict(t, alphaStats, occlusionMode);
       // Recorded even when the flag is OFF and even when the state is
       // unchanged below: this is the input to the DEFERRED-S1a decision, and a
       // reason that only appears once a tile happens to transition would be
@@ -16440,7 +16506,13 @@ export async function startVtPanViewer({
           // the STAGE-0 A/B block below (2026-08-26) — that block needs this
           // call's own `t.earlyZReason` write to be FRESH for the current
           // pass, not last pass's value; see that block's own comment.
-          applyEarlyZTileState(t, alphaStats, z);
+          // `item.occlusion?.modes` — the SAME `?? OCCLUSION_MODES.NONE`
+          // fallback `runMaskOcclusionPass` itself reads modes with — is
+          // `earlyZInteriorVerdict`'s occlusion-responsive test as of
+          // 2026-09-02 (see that function's own "READS THE DOCUMENT, NOT THE
+          // LIVE UNIFORM" note): a residency-pass-cadence read needs the
+          // document's static capability, not this frame's live weight.
+          applyEarlyZTileState(t, alphaStats, z, item.occlusion?.modes ?? OCCLUSION_MODES.NONE);
           // STAGE-0 A/B (2026-08-10, debug-only, OFF by default): measures the
           // rgba16f MRT read-modify-write tax opaque colour-pass draws pay for
           // blending they don't strictly need. Gated on the SAME `alwaysOpaque`

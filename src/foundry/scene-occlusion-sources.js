@@ -1,6 +1,9 @@
 /**
- * GRID-GEOMETRY READERS — two related, narrow readers of Foundry's live grid
- * constants (scope broadened 2026-07-19; was distance-pixels only).
+ * GRID-GEOMETRY + POINTER READERS — narrow readers of Foundry's live
+ * occlusion-relevant globals (scope broadened 2026-07-19 for the grid pair;
+ * broadened again for `readMouseHoverPoint` fixing mythica-machina-press#470,
+ * the tile hover-fade that never fired because nothing in this codebase read
+ * Foundry's own live pointer state at all).
  *
  * `readGridDistancePixels` feeds the RADIAL occlusion disc radius formula,
  * replicated from `Token#getLightRadius` (`client/canvas/placeables/token.mjs:3818-3821`):
@@ -23,11 +26,27 @@
  * from `distancePixels` (pixels PER GRID SQUARE, not pixels per distance
  * UNIT), read separately rather than derived from it.
  *
+ * `readMouseHoverPoint` feeds the hover-fade hit test (`vt-pan-viewer.js`'s
+ * per-frame occlusion-weight recompute): Foundry's own `canvas.mousePosition`
+ * (`client/canvas/board.mjs:322`) is a plain, continuously-updated
+ * `PIXI.Point` in world/stage coordinates, maintained by Foundry's own
+ * interaction manager regardless of anything this project does — "Foundry
+ * owns all input" is a locked decision here (`foundry/canvas-compositing.js`'s
+ * header; `keyhole-input-model-decision`), so this READS Foundry's live value
+ * rather than re-deriving pointer tracking from raw DOM events.
+ * `canvas.mousePositionVisible`/`.mousePositionExplored` are Foundry's own
+ * fog-of-war gates on whether hover should register AT ALL — replicated from
+ * `PrimaryCanvasGroup#updateHoveredObjects` (`client/canvas/groups/
+ * primary.mjs:544`): `if (!(canvas.mousePositionVisible ||
+ * canvas.mousePositionExplored)) return;` — a player must be able to see or
+ * have explored a tile's location before hovering it can reveal anything
+ * underneath, or hover-fade would leak fog-of-war information for free.
+ *
  * Split pure-vs-live the same way `canvas-compositing.js` and
  * `scene-environment.js` already do: `deriveDistancePixels`/`deriveGridSizePixels`/
- * `computeTokenOcclusionRadiusPx` are Node-tested; the `readGrid*` functions
- * touch the live `canvas` global and are browser-only (verified via a debug
- * report, not here).
+ * `computeTokenOcclusionRadiusPx`/`deriveMouseHoverPoint` are Node-tested; the
+ * `readGrid*`/`readMouseHoverPoint` functions touch the live `canvas` global
+ * and are browser-only (verified via a debug report, not here).
  *
  * @module foundry/scene-occlusion-sources
  */
@@ -112,4 +131,44 @@ export function computeTokenOcclusionRadiusPx({ footprint, occludableRadius, dis
   if (!occludableRadius) return 0;
   const externalRadius = Math.max(footprint?.width ?? 0, footprint?.height ?? 0) / 2;
   return Math.abs(occludableRadius) * distancePixels + externalRadius;
+}
+
+/**
+ * @param {*} rawPoint - whatever `canvas.mousePosition` was (ideally `{x,y}`,
+ *   a real PIXI.Point in practice).
+ * @param {*} rawVisible - whatever `canvas.mousePositionVisible` was.
+ * @param {*} rawExplored - whatever `canvas.mousePositionExplored` was.
+ * @returns {{x:number, y:number, eligible:boolean}|null} `null` when there is
+ *   no trustworthy point to act on — see {@link readMouseHoverPoint}'s doc for
+ *   why that is the safe default here, unlike the grid readers above.
+ */
+export function deriveMouseHoverPoint(rawPoint, rawVisible, rawExplored) {
+  const x = rawPoint?.x;
+  const y = rawPoint?.y;
+  if (typeof x !== 'number' || !Number.isFinite(x) || typeof y !== 'number' || !Number.isFinite(y)) return null;
+  return { x, y, eligible: !!(rawVisible || rawExplored) };
+}
+
+/**
+ * Live read of Foundry's own continuously-updated pointer position, plus the
+ * fog-of-war gate on whether it may register a hover at all. Never throws —
+ * see `deriveDarkness`'s sibling doc in scene-environment.js.
+ *
+ * Returns `null` on any failure (no `canvas` yet, mid-teardown, a malformed
+ * point) rather than a synthetic `{x:0, y:0}` the way the grid readers above
+ * fall back to a documented default: unlike a pixels-per-unit constant, world
+ * position (0,0) is REAL geometry — faking it risks a false hover hit exactly
+ * at the scene's own origin. Every caller must treat `null` as "no hover this
+ * frame", never as a point.
+ *
+ * @returns {{x:number, y:number, eligible:boolean}|null}
+ */
+export function readMouseHoverPoint() {
+  try {
+    const c = typeof canvas !== 'undefined' ? canvas : null;
+    if (!c) return null;
+    return deriveMouseHoverPoint(c.mousePosition, c.mousePositionVisible, c.mousePositionExplored);
+  } catch (_) {
+    return null;
+  }
 }

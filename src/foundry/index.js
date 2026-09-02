@@ -255,15 +255,20 @@ export { readSceneDoors, deriveDoorSnapshot, normalizeDoorAnimationType, watchDo
 export { readActiveDarknessRegions, deriveRegionDarknessAdjuster, readSuppressWeatherStub } from './scene-regions.js';
 export { readPaintContext, savePaintedMasks, loadPaintedMasks } from './paint-adapter.js';
 
-// GRID-GEOMETRY READERS — feeds the masks.occlusion producer's RADIAL channel
-// (distancePixels) and the point-light soft-edge margin (gridSizePixels); the
-// one place canvas.dimensions.distancePixels / canvas.grid.size are read.
+// GRID-GEOMETRY + POINTER READERS — feeds the masks.occlusion producer's
+// RADIAL channel (distancePixels), the point-light soft-edge margin
+// (gridSizePixels), and the hover-fade hit test (readMouseHoverPoint — the
+// one place canvas.mousePosition/.mousePositionVisible/.mousePositionExplored
+// are read, mythica-machina-press#470); also the one place
+// canvas.dimensions.distancePixels / canvas.grid.size are read.
 export {
   readGridDistancePixels,
   deriveDistancePixels,
   readGridSizePixels,
   deriveGridSizePixels,
   computeTokenOcclusionRadiusPx,
+  readMouseHoverPoint,
+  deriveMouseHoverPoint,
 } from './scene-occlusion-sources.js';
 
 // THE SETTINGS ADAPTER — the one place game.settings is touched (foundry/

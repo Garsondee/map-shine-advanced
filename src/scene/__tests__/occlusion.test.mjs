@@ -12,11 +12,14 @@ import {
   MAX_OCCLUSION_ELEVATIONS,
   packOcclusionModes,
   isOccludable,
+  isHoverFadeEligible,
   buildElevationTable,
   mapElevation,
   computeOcclusionState,
   testTokenOcclusion,
+  testItemHoverAlpha,
   createHoverFadeState,
+  HOVER_FADE_CONFIG,
   updateHoverFade,
   easeInOutCosine,
   computeOcclusionAlpha,
@@ -52,6 +55,24 @@ export function run(t) {
     ok('pack: accepts an array too', packOcclusionModes([1, 4]) === 5);
     ok('isOccludable: NONE is not occludable', isOccludable(0) === false);
     ok('isOccludable: any flag is occludable', isOccludable(1) && isOccludable(8));
+  }
+
+  // --- isHoverFadeEligible: tile.mjs:365's exact rule ------------------------
+  {
+    const M = OCCLUSION_MODES;
+    ok('hoverFadeEligible: NONE is never eligible', isHoverFadeEligible(M.NONE) === false);
+    ok('hoverFadeEligible: FADE alone is eligible', isHoverFadeEligible(M.FADE) === true);
+    ok('hoverFadeEligible: RADIAL alone is eligible', isHoverFadeEligible(M.RADIAL) === true);
+    ok('hoverFadeEligible: VISION alone is eligible', isHoverFadeEligible(M.VISION) === true);
+    // SURFACE is excluded even combined with something else eligible — real
+    // Foundry's own `!(occlusionMode & M.SURFACE)` half of the expression.
+    ok('hoverFadeEligible: SURFACE alone is NOT eligible', isHoverFadeEligible(M.SURFACE) === false);
+    ok(
+      'hoverFadeEligible: RADIAL|SURFACE is NOT eligible (SURFACE poisons it)',
+      isHoverFadeEligible(M.RADIAL | M.SURFACE) === false
+    );
+    ok('hoverFadeEligible: FADE|SURFACE is NOT eligible', isHoverFadeEligible(M.FADE | M.SURFACE) === false);
+    ok('hoverFadeEligible: FADE|RADIAL (no SURFACE) is eligible', isHoverFadeEligible(M.FADE | M.RADIAL) === true);
   }
 
   // --- buildElevationTable / mapElevation ----------------------------------
@@ -210,6 +231,106 @@ export function run(t) {
       }) === true
     );
     ok('testOcclusion: stops at the first hit', calls === 2);
+  }
+
+  // --- testItemHoverAlpha: the CPU mirror of containsCanvasPoint's alpha test
+  {
+    // A 2x2 grid: opaque top-left texel (255), transparent everywhere else.
+    const grid = { w: 2, h: 2, data: new Uint8Array([255, 0, 0, 0]) };
+    ok(
+      'hoverAlpha: off the quad entirely (u<0) is never a hit',
+      testItemHoverAlpha({ u: -0.1, v: 0.5, grid, alphaThreshold: 0.75 }) === false
+    );
+    ok(
+      'hoverAlpha: off the quad entirely (v>1) is never a hit',
+      testItemHoverAlpha({ u: 0.5, v: 1.1, grid, alphaThreshold: 0.75 }) === false
+    );
+    ok(
+      'hoverAlpha: u=0/v=0 (top-left texel, opaque) hits at the default 0.75 threshold',
+      testItemHoverAlpha({ u: 0, v: 0, grid, alphaThreshold: 0.75 }) === true
+    );
+    ok(
+      'hoverAlpha: u=1/v=1 (bottom-right texel, transparent) does not hit',
+      testItemHoverAlpha({ u: 0.99, v: 0.99, grid, alphaThreshold: 0.75 }) === false
+    );
+    // On-the-quad boundary values (u=1, v=1 exactly) must clamp into the grid,
+    // not index out of bounds.
+    ok(
+      'hoverAlpha: u=1/v=1 exactly clamps to the last texel, not an out-of-range read',
+      testItemHoverAlpha({ u: 1, v: 1, grid, alphaThreshold: 0.75 }) === false
+    );
+    // FAIL OPEN: no grid at all (still loading, or never arrived) is a hit
+    // anywhere on the quad — matches this codebase's "no grid == draw the
+    // whole quad" convention everywhere else a coarse alpha grid is read.
+    ok(
+      'hoverAlpha: missing grid fails open (still a hit, if on the quad)',
+      testItemHoverAlpha({ u: 0.5, v: 0.5, grid: null, alphaThreshold: 0.75 }) === true
+    );
+    ok(
+      'hoverAlpha: missing grid still respects the off-quad reject',
+      testItemHoverAlpha({ u: 1.5, v: 0.5, grid: null, alphaThreshold: 0.75 }) === false
+    );
+    ok(
+      'hoverAlpha: a degenerate grid (w:0) fails open exactly like a missing one',
+      testItemHoverAlpha({
+        u: 0.5,
+        v: 0.5,
+        grid: { w: 0, h: 2, data: new Uint8Array([255]) },
+        alphaThreshold: 0.75,
+      }) === true
+    );
+    // Threshold is a real gate, not decorative: the SAME texel (128/255 =
+    // 0.502) hits a low threshold and misses a high one.
+    const halfGrid = { w: 1, h: 1, data: new Uint8Array([128]) };
+    ok(
+      'hoverAlpha: a partial texel hits below its own alpha',
+      testItemHoverAlpha({ u: 0.5, v: 0.5, grid: halfGrid, alphaThreshold: 0.4 }) === true
+    );
+    ok(
+      'hoverAlpha: the SAME partial texel misses above its own alpha',
+      testItemHoverAlpha({ u: 0.5, v: 0.5, grid: halfGrid, alphaThreshold: 0.6 }) === false
+    );
+
+    // Composed with testTokenOcclusion exactly as vt-pan-viewer.js wires them
+    // together: testItemHoverAlpha stands in for the alpha-aware
+    // `containsPoint`, proving the two functions' contracts actually fit —
+    // not just that each passes its own isolated assertions. `testPoints`
+    // stays {x,y} (testTokenOcclusion's real contract — a WORLD point); the
+    // real caller inserts `worldToQuadUv` (scene/world-quad.js, tested in its
+    // own suite) between the two, so `containsPoint` here treats x/y as
+    // already-converted UV, a deliberate test-only simplification of that one
+    // step, not a claim about the real coordinate mapping.
+    ok(
+      'composed: testTokenOcclusion + testItemHoverAlpha occludes through a real opaque texel',
+      testTokenOcclusion({
+        tokenElevation: 5,
+        objectElevation: 10,
+        testPoints: [{ x: 0, y: 0 }],
+        containsPoint: (p) => testItemHoverAlpha({ u: p.x, v: p.y, grid, alphaThreshold: 0.75 }),
+      }) === true
+    );
+    ok(
+      'composed: the SAME pair does NOT occlude through a transparent texel',
+      testTokenOcclusion({
+        tokenElevation: 5,
+        objectElevation: 10,
+        testPoints: [{ x: 0.99, y: 0.99 }],
+        containsPoint: (p) => testItemHoverAlpha({ u: p.x, v: p.y, grid, alphaThreshold: 0.75 }),
+      }) === false
+    );
+  }
+
+  // --- HOVER_FADE_CONFIG: Foundry's real CONFIG.Canvas.hoverFade -------------
+  {
+    // Verified directly against the vendored v14.367.0 client source
+    // (client/config.mjs:1125 AND the built public/scripts/foundry.mjs:217661
+    // agree): duration is 750, not a rounder-sounding guess.
+    ok('HOVER_FADE_CONFIG: delay matches real Foundry (250ms)', HOVER_FADE_CONFIG.delay === 250);
+    ok('HOVER_FADE_CONFIG: duration matches real Foundry (750ms)', HOVER_FADE_CONFIG.duration === 750);
+    ok(
+      'HOVER_FADE_CONFIG: frozen, so a careless caller cannot mutate the shared constant',
+      Object.isFrozen(HOVER_FADE_CONFIG)
+    );
   }
 
   // --- easeInOutCosine ------------------------------------------------------

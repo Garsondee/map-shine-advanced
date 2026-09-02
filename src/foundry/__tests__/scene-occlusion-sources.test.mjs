@@ -7,6 +7,7 @@ import {
   deriveDistancePixels,
   deriveGridSizePixels,
   computeTokenOcclusionRadiusPx,
+  deriveMouseHoverPoint,
 } from '../scene-occlusion-sources.js';
 
 export function run(t) {
@@ -77,4 +78,33 @@ export function run(t) {
     'a missing/malformed footprint does not throw — externalRadius degrades to 0',
     computeTokenOcclusionRadiusPx({ footprint: null, occludableRadius: 5, distancePixels: 20 }) === 100
   );
+
+  // ---- deriveMouseHoverPoint: mythica-machina-press#470's hover-fade hit
+  // test needs Foundry's live canvas.mousePosition — same "could not read"
+  // vs "read a real value" discipline as the others, except the safe
+  // fallback here is `null` (no hover this frame), never a synthetic point —
+  // world (0,0) is real geometry, unlike a pixels-per-unit constant. -------
+  {
+    const p = deriveMouseHoverPoint({ x: 100, y: 200 }, true, false);
+    ok('a real point with mousePositionVisible passes through', p.x === 100 && p.y === 200);
+    ok('eligible is true when mousePositionVisible is true', p.eligible === true);
+  }
+  ok(
+    'eligible is true when ONLY mousePositionExplored is true (the real OR-gate)',
+    deriveMouseHoverPoint({ x: 0, y: 0 }, false, true).eligible === true
+  );
+  ok(
+    'eligible is false when NEITHER visible nor explored',
+    deriveMouseHoverPoint({ x: 0, y: 0 }, false, false).eligible === false
+  );
+  ok('eligible is true when BOTH are true', deriveMouseHoverPoint({ x: 0, y: 0 }, true, true).eligible === true);
+  // World (0,0) is a real, legitimate point — must NOT be rejected as falsy.
+  ok('(0,0) is a real point, not treated as missing', deriveMouseHoverPoint({ x: 0, y: 0 }, true, true) !== null);
+  ok(
+    'a missing point (no canvas.mousePosition) -> null, not a fabricated origin',
+    deriveMouseHoverPoint(undefined, true, true) === null
+  );
+  ok('a malformed point (non-numeric x) -> null', deriveMouseHoverPoint({ x: 'nope', y: 0 }, true, true) === null);
+  ok('a malformed point (NaN y) -> null', deriveMouseHoverPoint({ x: 0, y: NaN }, true, true) === null);
+  ok('a null point -> null', deriveMouseHoverPoint(null, true, true) === null);
 }

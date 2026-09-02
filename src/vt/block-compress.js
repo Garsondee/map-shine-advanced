@@ -482,6 +482,64 @@ const CHANS_RGB = Uint8Array.from([0, 1, 2]);
 const CHANS_RGBA = Uint8Array.from([0, 1, 2, 3]);
 
 /**
+ * THE BC1-vs-BC7 FORMAT DECISION, and its noise tolerance (mythica-machina-
+ * press#442, 2026-09-02). BC1 has no alpha at all — every texel of an image
+ * routed here must be treated as fully opaque. Before this fix the rule was
+ * "every single texel is exactly 255, with zero exceptions", live on the real
+ * Mansion module: `Mansion_GroundFloor.webp` (10000², a plainly opaque floor)
+ * has 39,996 of its 100,000,000 texels (0.04%) sitting at 228–254 alpha — near-
+ * invisible antialiasing/lossy-webp noise near some edge, not an authored
+ * translucent feature — and that noise alone forced the ENTIRE floor onto BC7,
+ * doubling its VRAM (1.33 vs 0.67 B/px) and roughly tripling its encode time,
+ * for content nobody would call "has transparency" by looking at it.
+ *
+ * THE FIX is a TOLERANCE ON THE FRACTION of non-255 texels, not their depth:
+ * below {@link OPAQUE_NOISE_TOLERANCE} of an image's texels being non-255,
+ * this classifies it as opaque-with-noise and sends the whole thing to BC1
+ * anyway — those few texels' RGB still encodes correctly (BC1 never reads
+ * alpha for anything), only their slight transparency is lost, which is
+ * exactly the accepted trade-off. A FRACTION threshold, not a severity one,
+ * is deliberate: it doesn't matter how far below 255 the affected texels are,
+ * only how many of them there are — real authored alpha features in this
+ * catalogue (a window, a stairwell cutout) are large contiguous regions, never
+ * scattered single-digit-texel noise, so a tiny SCATTERED fraction is a safe
+ * proxy for "this is noise, not an authored hole."
+ *
+ * ⚠️ KNOWN, ACCEPTED LIMITATION, not a silently swallowed one: a hypothetical
+ * image with a handful of fully-transparent (alpha=0) "hole" texels below this
+ * fraction would also get forced opaque, since this counts fraction alone,
+ * never depth. Not a live concern for anything in the current catalogue
+ * (checked: every deliberate hole is a large region) — revisit if a future
+ * map's authored content pattern changes that assumption.
+ *
+ * SHARED, not reimplemented per caller: `bc-compress.worker.js#handle` (the
+ * live runtime encoder) and `mythica-machina-press/scripts/bake-textures.mjs`
+ * (the build-time baker, mythica-machina-press#439) both call this — before
+ * the fix they computed the same decision independently and had already begun
+ * to drift (the baker's own first cut used `alphaMin === 255`, equivalent to a
+ * ZERO tolerance, which is exactly bug #442 reproduced a second time by a
+ * second implementation of the same idea).
+ */
+export const OPAQUE_NOISE_TOLERANCE = 0.001; // 0.1% — the author's own call, #442
+
+/**
+ * Decide BC1 vs BC7 for an image from its alpha scan. `texelCount` and
+ * `alphaBelow255Count` are accumulated over the WHOLE image (a full pass, not
+ * early-exited) by whichever caller already scans every texel for alphaStats.
+ * @param {{texelCount:number, alphaBelow255Count:number}} args
+ * @returns {'bc1'|'bc7'}
+ */
+export function classifyBcFormat({ texelCount, alphaBelow255Count }) {
+  if (!(texelCount > 0)) throw new Error(`classifyBcFormat: texelCount must be > 0, got ${texelCount}`);
+  if (alphaBelow255Count < 0 || alphaBelow255Count > texelCount) {
+    throw new Error(
+      `classifyBcFormat: alphaBelow255Count ${alphaBelow255Count} out of range for texelCount ${texelCount}`
+    );
+  }
+  return alphaBelow255Count / texelCount < OPAQUE_NOISE_TOLERANCE ? 'bc1' : 'bc7';
+}
+
+/**
  * Encode RGBA8 pixels (row-major, 4 bytes/texel) to BC1 blocks.
  * @param {Uint8Array|Uint8ClampedArray} rgba length must be width*height*4
  * @param {number} width

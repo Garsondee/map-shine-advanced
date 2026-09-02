@@ -21,6 +21,8 @@ import {
   encodeStriped,
   computeMipChainDims,
   mipChainByteLength,
+  classifyBcFormat,
+  OPAQUE_NOISE_TOLERANCE,
 } from '../block-compress.js';
 
 /** Build a width×height RGBA8 image from a per-pixel fn(x,y) → [r,g,b,a]. */
@@ -852,5 +854,39 @@ export function run(t) {
     // touched both.
     ok('BC1 encoder output is byte-stable (CACHE_VERSION 9)', fnv1a(encodeBC1(fixture, N, N)) === '6fa75fa5');
     ok('BC7 encoder output is byte-stable (CACHE_VERSION 9)', fnv1a(encodeBC7(fixture, N, N)) === '3bd31c2d');
+  }
+
+  // ===========================================================================
+  // classifyBcFormat — the noise-tolerant BC1-vs-BC7 decision (mythica-machina-
+  // press#442). A tiny FRACTION of non-255 texels must still classify as BC1
+  // (real map art has scattered antialiasing/lossy-webp noise, not a signal);
+  // a large fraction, or a small-but-over-tolerance one, must classify as BC7.
+  // ===========================================================================
+  {
+    ok(
+      'perfectly opaque (0 non-255 texels) → bc1',
+      classifyBcFormat({ texelCount: 1000, alphaBelow255Count: 0 }) === 'bc1'
+    );
+    ok(
+      'a fraction JUST UNDER the tolerance → bc1 (the live bug: Mansion_GroundFloor.webp measured 0.04%)',
+      classifyBcFormat({ texelCount: 100_000_000, alphaBelow255Count: 39_996 }) === 'bc1'
+    );
+    ok(
+      'a fraction JUST OVER the tolerance → bc7',
+      classifyBcFormat({ texelCount: 100_000, alphaBelow255Count: 101 }) === 'bc7'
+    );
+    ok(
+      'every texel non-255 (fully alpha content) → bc7',
+      classifyBcFormat({ texelCount: 500, alphaBelow255Count: 500 }) === 'bc7'
+    );
+    ok(
+      'the boundary itself is EXCLUSIVE — exactly at the tolerance fraction → bc7, not bc1',
+      classifyBcFormat({ texelCount: 1000, alphaBelow255Count: 1 }) === 'bc7' // 1/1000 = 0.001 = OPAQUE_NOISE_TOLERANCE exactly
+    );
+    ok('OPAQUE_NOISE_TOLERANCE is the documented 0.1%, not silently redefined', OPAQUE_NOISE_TOLERANCE === 0.001);
+    throws('rejects texelCount <= 0', () => classifyBcFormat({ texelCount: 0, alphaBelow255Count: 0 }));
+    throws('rejects an out-of-range alphaBelow255Count', () =>
+      classifyBcFormat({ texelCount: 10, alphaBelow255Count: 11 })
+    );
   }
 }

@@ -84,7 +84,7 @@
  * same kind of work — fetch, decode, reduce, cache — and a worker that is already
  * warm costs nothing to reuse.
  */
-import { encodeStriped, computeMipChainDims } from './block-compress.js';
+import { encodeStriped, computeMipChainDims, classifyBcFormat } from './block-compress.js';
 import { fetchBakedTexture } from './baked-textures.js';
 import { coarseAlphaGridDims, extractAlphaGrid, createMinAlphaGrid, accumulateMinAlphaBand } from './coarse-alpha.js';
 // The mip reducer (Lanczos-2, premultiplied, dilated, LINEARIZED). Replaced the
@@ -194,7 +194,18 @@ const STORE = 'blocks';
 // trade every bump above has made. Level 0 itself is byte-identical (this
 // change touches only `halveRGBA`, used for levels 1+ — see that function's
 // own header), so this bump exists for the mip TAIL, not the base level.
-const CACHE_VERSION = 11;
+// v12 (2026-09-02, mythica-machina-press#442): the BC1-vs-BC7 decision gained
+// a noise tolerance (`classifyBcFormat`, block-compress.js's own header) — an
+// image with under 0.1% non-255 texels now encodes BC1 instead of BC7. Every
+// v11 record for such an image holds a BC7 encode this encoder would no
+// longer produce (double its VRAM, and BC1's own format for the SAME source
+// would decode differently) — re-encoded, not re-served, the same all-or-
+// nothing trade every bump above has made. A record whose image had either
+// zero or well over 0.1% non-255 texels is unaffected in FORMAT, but every
+// record still bumps together: this file has never special-cased "which old
+// records happen to be unaffected," and there is no cheap way to know that
+// without re-scanning the source, which is exactly the work a bump avoids.
+const CACHE_VERSION = 12;
 
 /**
  * The coarse-alpha cache is versioned SEPARATELY from the BC blocks: the two
@@ -510,7 +521,10 @@ async function handle(src) {
   // wrong (near-zero almost everywhere) BEFORE the BC7 encoder ever touches it —
   // and that distinction is exactly what separates a decode-time bug from an
   // encode-time one. min/max are the two numbers that answer it at a glance.
-  let opaque = true;
+  // Non-255 texel COUNT, not a boolean — `classifyBcFormat` (block-compress.js,
+  // mythica-machina-press#442) needs the fraction, not just "any at all", to
+  // tell authored alpha from a handful of stray antialiasing/lossy-webp texels.
+  let alphaBelow255Count = 0;
   let alphaMin = 255;
   let alphaMax = 0;
   let alphaSum = 0;
@@ -535,7 +549,7 @@ async function handle(src) {
     const data = readStrip(y, sh);
     for (let i = 3; i < data.length; i += 4) {
       const a = data[i];
-      if (a !== 255) opaque = false;
+      if (a !== 255) alphaBelow255Count++;
       if (a < alphaMin) alphaMin = a;
       if (a > alphaMax) alphaMax = a;
       alphaSum += a;
@@ -561,7 +575,7 @@ async function handle(src) {
   const alphaStats = { min: alphaMin, max: alphaMax, mean: texelCount ? +(alphaSum / texelCount).toFixed(2) : null };
   const alphaMinGrid = { w: minGridW, h: minGridH, data: minGridData };
   const refRmsContrast = rmsContrastFromSums(lumaSum, lumaSqSum, opaqueTexelCount);
-  const format = opaque ? 'bc1' : 'bc7';
+  const format = classifyBcFormat({ texelCount, alphaBelow255Count });
   // encodeStriped re-reads each band and encodes it into the shared output — the
   // whole image is never resident at once. Result is bit-identical to a
   // whole-image encodeBC1/encodeBC7 (proven in block-compress.test.mjs).

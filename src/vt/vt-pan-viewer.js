@@ -203,6 +203,7 @@ import {
   QUAD_INDICES,
   computeTileSubPlacement,
   rectsOverlap,
+  worldToQuadUv,
 } from '../scene/world-quad.js';
 import {
   computeQuadCorners,
@@ -240,6 +241,11 @@ import {
   readGridDistancePixels,
   readGridSizePixels,
   computeTokenOcclusionRadiusPx,
+  // THE LIVE POINTER READ (mythica-machina-press#470) — the one place
+  // canvas.mousePosition/.mousePositionVisible/.mousePositionExplored are
+  // read; see scene-occlusion-sources.js's own header for why this reads
+  // Foundry's live value rather than re-deriving pointer tracking.
+  readMouseHoverPoint,
   getActiveSceneFloors,
   readSceneWallSegments,
   readSetting,
@@ -260,6 +266,19 @@ import {
   createHoverFadeState,
   mapElevation,
   buildElevationTable,
+  // THE HOVER-FADE WIRING (mythica-machina-press#470) — isOccludable/
+  // isHoverFadeEligible gate which items this frame's hit test and hover-fade
+  // advance even bother with; testItemHoverAlpha/testTokenOcclusion are the
+  // real per-item hit tests (world-space glue lives here; the pure alpha/
+  // elevation math stays in scene/occlusion.js); updateHoverFade/
+  // HOVER_FADE_CONFIG drive the actual fade animation, every occludable item,
+  // every frame — see runMaskOcclusionPass's own header for the full wiring.
+  isOccludable,
+  isHoverFadeEligible,
+  testItemHoverAlpha,
+  testTokenOcclusion,
+  updateHoverFade,
+  HOVER_FADE_CONFIG,
 } from '../scene/occlusion.js';
 import {
   buildEnvSnapshot,
@@ -8484,36 +8503,56 @@ export async function startVtPanViewer({
       );
     }
 
-    // THE OCCLUSION MASK — a REAL render target as of 2026-07-18, RADIAL-only.
+    // THE OCCLUSION MASK — a REAL render target as of 2026-07-18. The MASK
+    // TEXTURE ITSELF is still RADIAL-only (see the clear-value breakdown
+    // below) — that much is genuinely unchanged. What changed
+    // (mythica-machina-press#470, 2026-09-02) is the PER-OBJECT side: which
+    // mask channels an object actually LISTENS to (`uOcclusionWeights`) used
+    // to be computed exactly ONCE, at material-build time, with `occluded`/
+    // `hoverFadeAmount` hardcoded false/0 forever — so FADE's weight and
+    // VISION's no-vision-source fallback were always 0, and hovering a roof
+    // or standing under one did precisely nothing. `runMaskOcclusionPass` now
+    // recomputes this for real, every frame — see that function's own header.
     //
     // scene/occlusion.js has the full model ported and Node-tested, and the
     // shader in buildWholeImageMaterial() implements
     // Foundry's algorithm for real. This is the PRODUCER: runMaskOcclusionPass()
     // below renders each occludable token's RADIAL disc into this screen-space
     // RGBA target with MIN blending, every frame (tokens already sync position
-    // every frame via syncTokenPlacements — this rides the same cadence).
+    // every frame via syncTokenPlacements — this rides the same cadence), and
+    // (as of #470) recomputes every occludable item's hover-fade state and
+    // occlusion weights in that SAME per-frame pass.
     //
     // ⚠️ SCOPE — read before assuming this is Foundry-complete. The REAL
     // Foundry producer (client/canvas/layers/masks/occlusion.mjs) has TWO
     // independent halves: tokens (vision polygons + radial discs — what THIS
     // builds) and SURFACES, driven entirely by Region documents
     // (Scene#getSurfaces(), region.polygonTree) — a system this
-    // project has not touched at all. Level/roof art defaults to SURFACE mode
-    // (foundry/scene-layers.js:273), so THE HEADLINE "see the token under the
-    // roof" case is NOT affected by this increment — it needs the Regions
-    // half, a separate, materially larger piece of work. What this DOES make
-    // real: any author-authored tile with RADIAL occlusion.modes set.
-    // VISION (token sight-based reveal) is also not built this cut — see
-    // runMaskOcclusionPass's own header.
+    // project has not touched at all, and #470 does not start it either.
+    // Level/roof art — a Level's OWN background/foreground texture, distinct
+    // from an author-placed Tile — defaults to SURFACE mode for every upper,
+    // non-viewed floor (foundry/scene-layers.js:314), so hovering THAT still
+    // does nothing, correctly: SURFACE stays out of scope on purpose (see
+    // isHoverFadeEligible's own doc — this is real Foundry parity, not a
+    // gap). What #470 DOES make real: any author-placed TILE with FADE,
+    // RADIAL, and/or VISION occlusion.modes set now genuinely fades on hover
+    // and/or when a token stands under it. VISION's actual reveal-by-sight
+    // and SURFACE's reveal-by-Region both remain unbuilt.
     //
     // The clear value is Foundry's own (`CanvasOcclusionMask#clearColor =
-    // [0,1,1,1]`), which is exactly "nothing occludes anything":
-    //   R = 0 -> Fade says "occlude everywhere", but the per-object fade WEIGHT
-    //            is what gates it, and that stays 0 — FADE is not wired this
-    //            cut either (it needs testTokenOcclusion's spatial hit-test,
-    //            not just RADIAL's radius-only shape; a documented future step).
+    // [0,1,1,1]`), which is exactly "nothing occludes anything" AT THE MASK
+    // LEVEL — unchanged by #470, because FADE's occlusion was never meant to
+    // go through the mask at all (scene/occlusion.js's own "why R is a
+    // constant 0" note):
+    //   R = 0 -> Fade says "occlude everywhere" at the MASK level, but the
+    //            per-object fade WEIGHT (now real — testTokenOcclusion +
+    //            hover-fade, computed on the CPU, never the mask) is what
+    //            actually gates it, by Foundry's own design.
     //   G = written per-frame by real token discs.
-    //   B/A = 1 always (VISION/SURFACE not built) -> step() -> never occluded.
+    //   B/A = 1 always (VISION's reveal-by-sight / SURFACE not built) ->
+    //         step() -> never occluded through the mask. VISION's
+    //         no-vision-source FALLBACK to FADE (also now real) doesn't need
+    //         this channel either, for the identical reason FADE doesn't.
     const describeOcclusionMask = () => ({
       // INTERNAL tier — see describeSceneColor's note (same render-scale split).
       resolvedW: internalW,
@@ -8536,9 +8575,10 @@ export async function startVtPanViewer({
     };
 
     // ========================================================================
-    // masks.occlusion — THE PRODUCER, RADIAL-ONLY (2026-07-18). See the
-    // occlusionMask block above for the full scope note (SURFACE/Regions and
-    // VISION are NOT built this cut).
+    // masks.occlusion — THE PRODUCER (2026-07-18; hover-fade + FADE/VISION-
+    // fallback wired in for real, mythica-machina-press#470, 2026-09-02). See
+    // the occlusionMask block above for the full scope note (SURFACE/Regions
+    // and VISION's actual reveal-by-sight are NOT built).
     // ========================================================================
 
     /** Reused across every renderer.setClearColor()/getClearColor() this pass
@@ -8582,6 +8622,23 @@ export async function startVtPanViewer({
      * updateRegionDarknessMeshes' own sort scratch. */
     const maskOccluderScratch = [];
     const maskOccluderElevationScratch = [];
+    /**
+     * Persistent FADE/VISION-fallback occluder scratch (mythica-machina-
+     * press#470) — every non-hidden token's `{elevation,x,y}`, reused across
+     * frames like `maskOccluderScratch` above and for the same reason.
+     *
+     * Deliberately a SEPARATE list from `maskOccluderScratch`, not a reuse of
+     * it: that array is gated on `occludableRadius > 0` (skip tokens that
+     * draw no RADIAL disc), but real Foundry's own `testOcclusion(token)`
+     * (primary-occludable-object.mjs:310) never consults `occludable.radius`
+     * at all — that field is a RADIAL-only concept. Foundry's schema default
+     * for it is 0 (`common/documents/token.mjs:107`), so reusing the
+     * radius-gated list here would silently exclude every default-configured
+     * token from FADE occlusion too — the exact bug class #470 exists to fix,
+     * reintroduced one level down.
+     * @type {Array<{elevation:number, x:number, y:number}>}
+     */
+    const occlusionTestTokenScratch = [];
 
     /**
      * Build (once, on first appearance) one token's disc mesh — a flat green-
@@ -8619,27 +8676,179 @@ export async function startVtPanViewer({
     }
 
     /**
+     * Does `item`'s actual painted art (not just its bounding box) contain
+     * world point `(x,y)`? Shared by the hover-fade hit test AND the token-
+     * occlusion test below — same shape as Foundry's real
+     * `containsCanvasPoint` (primary-sprite-mesh.mjs:230-267): cheap AABB
+     * reject against `state.worldBounds`, then quad-local UV (`worldToQuadUv`
+     * — the exact algebraic inverse of the placement this item's own quad was
+     * built from, scene/world-quad.js), then the coarse-alpha-grid sample
+     * (scene/occlusion.js#testItemHoverAlpha) against the item's own
+     * alphaThreshold.
+     *
+     * `coverageGrids` (declared below, populated by `requestItemAlphaGrid`)
+     * covers the item's ENTIRE source image, in the SAME 0..1 space
+     * `worldToQuadUv` returns UV in — a tile's "fit" mode resizes/repositions
+     * the QUAD, it never crops the UV space (coverage-mesh.js's own header),
+     * so no further remapping is needed between the two. A missing grid
+     * (never requested, still loading, or the request failed) fails OPEN —
+     * `testItemHoverAlpha`'s own doc — matching this codebase's "no grid ==
+     * draw the whole quad" convention everywhere else a coarse alpha grid is
+     * read, so a roof isn't permanently un-fadeable while its alpha streams in.
+     *
+     * @param {object} state - an `itemStates` entry.
+     * @param {object} item - `state.item`.
+     * @param {number} x @param {number} y - world point.
+     * @returns {boolean}
+     */
+    function itemContainsWorldPoint(state, item, x, y) {
+      const b = state.worldBounds;
+      if (!b || x < b.minX || x > b.maxX || y < b.minY || y > b.maxY) return false;
+      if (!state.placement) return false;
+      const { u, v } = worldToQuadUv({ x, y }, state.placement);
+      return testItemHoverAlpha({
+        u,
+        v,
+        grid: coverageGrids.get(item.id) ?? null,
+        alphaThreshold: item.alphaThreshold ?? 0.75,
+      });
+    }
+
+    /**
+     * Is any token in `tokens` currently standing under this item, per
+     * Foundry's real per-object `testOcclusion(token)`
+     * (primary-occludable-object.mjs:310)? Feeds FADE's `occluded` gate and
+     * VISION's no-vision-source fallback
+     * (scene/occlusion.js#computeOcclusionState). `tokens` is this frame's
+     * `occlusionTestTokenScratch` above — every non-hidden token, not merely
+     * ones with a nonzero RADIAL `occludable.radius`.
+     *
+     * SIMPLIFICATION, same class as the RADIAL pass's own (this section's
+     * header, foundry/scene-occlusion-sources.js's header): real Foundry
+     * tests several DENSE, wall-constrained points per token
+     * (`Token#getOcclusionTestPoints`); this tests only the token's own
+     * centre, with no wall-clipping. Replicating wall-constraint is real,
+     * separate work for VISION's own eventual reveal-by-sight build, out of
+     * scope for #470 (MSA stays "documents, not placeables" — Keyhole.md
+     * §4.3).
+     *
+     * @param {object} state - an `itemStates` entry (the tile being tested).
+     * @param {object} item - `state.item`.
+     * @param {Array<{elevation:number, x:number, y:number}>} tokens
+     * @returns {boolean}
+     */
+    function computeItemOccludedByTokens(state, item, tokens) {
+      const objectElevation = item?.key?.elevation;
+      const b = state.worldBounds;
+      if (objectElevation === undefined || !b) return false;
+      for (const tok of tokens) {
+        const hit = testTokenOcclusion({
+          tokenElevation: tok.elevation,
+          objectElevation,
+          testPoints: [{ x: tok.x, y: tok.y }],
+          containsPoint: (p) => itemContainsWorldPoint(state, item, p.x, p.y),
+          boundsIntersect: () => tok.x >= b.minX && tok.x <= b.maxX && tok.y >= b.minY && tok.y <= b.maxY,
+        });
+        if (hit) return true;
+      }
+      return false;
+    }
+
+    /**
+     * Write one item's occlusion uniforms — `uOcclusionElevation` always,
+     * `uOcclusionWeights` only when `weights` is supplied (an unoccludable
+     * item, `isOccludable(modes) === false`, never gets a `weights` object;
+     * its `uOcclusionWeights` stays at `buildOcclusionUniforms`'s own
+     * all-zero uniform default forever, which is the correct, final value
+     * for it). Small shared sink for the one shape repeated three times below
+     * (an item's own `appearance`, every `wholeImage.tiles[*].appearance`,
+     * and every ready `vegetationOverlays[kind].appearance`/`.shadow
+     * .appearance`) — see `runMaskOcclusionPass`'s own per-frame loop.
+     *
+     * @param {object|null|undefined} appearance - a `{uOcclusionElevation,
+     *   uOcclusionWeights, ...}` bag, from `buildOcclusionUniforms` via
+     *   `buildWholeImageMaterial`/`buildVegetationMaterial`.
+     * @param {number} elevationValue - from `mapElevation`.
+     * @param {import('../scene/occlusion.js').OcclusionState|null} weights
+     */
+    function refreshItemOcclusionUniforms(appearance, elevationValue, weights) {
+      if (!appearance) return;
+      appearance.uOcclusionElevation.value = elevationValue;
+      if (weights)
+        appearance.uOcclusionWeights.value.set(weights.fade, weights.radial, weights.vision, weights.surface);
+    }
+
+    /**
      * Render this frame's occlusion mask: gather occludable tokens from the
      * CURRENT draw list, build the real elevation table, reconcile the disc
      * pool, draw with MIN blending, then refresh every drawn item's
-     * uOcclusionElevation uniform against the fresh table.
+     * `uOcclusionElevation`/`uOcclusionWeights` uniforms and hover-fade state
+     * against the fresh table and the live mouse position.
      *
-     * RADIAL-ONLY — see the occlusionMask block's header for the full scope
-     * note. Token filter: real document data (`occludableRadius > 0`,
-     * `!hidden`) — NOT Foundry's own `_getOccludableTokens` (which branches
-     * on a world SETTING plus PIXI Token object state like `.controlled`/
-     * `.interactive` this project's documents-only adapter doesn't read;
-     * Keyhole.md §4.3 draws from documents, never placeables). A documented
-     * simplification, not a bug: every visible token with a nonzero
-     * occludable radius contributes a disc, always.
+     * The MASK itself stays RADIAL-only — see the occlusionMask block's
+     * header for the full scope note. Token filter for the RADIAL disc pass
+     * specifically: real document data (`occludableRadius > 0`, `!hidden`) —
+     * NOT Foundry's own `_getOccludableTokens` (which branches on a world
+     * SETTING plus PIXI Token object state like `.controlled`/`.interactive`
+     * this project's documents-only adapter doesn't read; Keyhole.md §4.3
+     * draws from documents, never placeables). A documented simplification,
+     * not a bug: every visible token with a nonzero occludable radius
+     * contributes a disc, always. The SEPARATE FADE/VISION-fallback token
+     * list (`occlusionTestTokenScratch`) has no such radius gate — see its
+     * own doc.
+     *
+     * HOVER-FADE + WEIGHTS (mythica-machina-press#470): every occludable
+     * item's hover-fade animation (`updateHoverFade`) advances every frame
+     * regardless of hit-test result — it needs wall-clock time to finish an
+     * in-flight fade after the cursor leaves, so it cannot be an on-enter/
+     * on-leave event pair. The hit test itself (`itemContainsWorldPoint`
+     * against the live `readMouseHoverPoint()`) only runs for hover-fade-
+     * ELIGIBLE items (`isHoverFadeEligible` — real Foundry's own
+     * `tile.mjs:365` rule: NONE and SURFACE-inclusive modes never hover-fade)
+     * — ineligible items simply never have `hovered` set true, so calling
+     * `updateHoverFade` on them regardless is a harmless, permanent no-op
+     * (matches real Foundry: `#updateHoverFadeState` runs unconditionally in
+     * `updateTransform()` too, and no-ops via its own `if (!this.#hoverFade)
+     * return`). `occluded` (FADE's gate, VISION's fallback trigger) is
+     * computed once per item via `computeItemOccludedByTokens` whenever its
+     * modes include FADE or VISION — RADIAL/SURFACE-only items skip it
+     * entirely, since neither weight depends on it.
+     *
+     * NOT REPLICATED (documented scope cuts, #470): Foundry's own
+     * `#updateHoveredObjects` "mouseThreshold shifts to the actively-edited
+     * placeable" refinement and its multi-object z-order `break`/`continue`
+     * stacking logic — both are editing-UI/multi-overlap edge cases with no
+     * clean MSA equivalent (no notion of "the placeable actively being
+     * edited on the active layer"). Every eligible tile is tested
+     * independently here; two overlapping roofs both fading at once under
+     * the same cursor is an accepted, documented simplification, matching
+     * this file's own precedent for the RADIAL pass above.
      */
     function runMaskOcclusionPass() {
       profiler?.begin(Z.masksSync);
       const distancePixels = readGridDistancePixels().distancePixels;
       let occluderCount = 0;
+      let testTokenCount = 0;
       for (const it of lastItems) {
         if (it.kind !== 'token') continue;
         if (it.hidden) continue; // dimmed-for-GM tokens still occlude in real Foundry; hidden ones do not
+
+        // FADE/VISION-fallback test point — EVERY non-hidden token, gathered
+        // in this SAME pass over lastItems rather than a second scan (see
+        // occlusionTestTokenScratch's own doc for why this is a separate
+        // list from the radius-gated one just below, not a reuse of it).
+        let tt;
+        if (testTokenCount < occlusionTestTokenScratch.length) {
+          tt = occlusionTestTokenScratch[testTokenCount];
+        } else {
+          tt = {};
+          occlusionTestTokenScratch.push(tt);
+        }
+        tt.elevation = it.key.elevation;
+        tt.x = it.footprint.centerX;
+        tt.y = it.footprint.centerY;
+        testTokenCount++;
+
         const radiusPx = computeTokenOcclusionRadiusPx({
           footprint: it.footprint,
           occludableRadius: it.occludableRadius ?? 0,
@@ -8663,6 +8872,7 @@ export async function startVtPanViewer({
       }
       maskOccluderScratch.length = occluderCount; // drop any slots left over from a larger previous frame
       maskOccluderElevationScratch.length = occluderCount;
+      occlusionTestTokenScratch.length = testTokenCount;
       const occluders = maskOccluderScratch;
 
       occlusionMask.elevationTable = buildElevationTable(maskOccluderElevationScratch);
@@ -8710,18 +8920,115 @@ export async function startVtPanViewer({
       renderer.setClearColor(prevClearColor, prevClearAlpha);
       profiler?.end(Z.masksDraw);
 
-      // uOcclusionElevation refresh — every drawn item, every frame (cheap: a
-      // per-item float set, no shader rebuild). uOcclusionWeights is NOT
-      // touched here — it is static for an item's lifetime this cut (see
-      // ensureItemMesh's/buildWholeImageMaterial's own notes on why).
+      // OCCLUSION REFRESH — every drawn item, every frame: uOcclusionElevation
+      // (unchanged shape from before #470) PLUS hover-fade advance +
+      // uOcclusionWeights recompute (mythica-machina-press#470 — see this
+      // function's own header for the full mechanism).
+      //
+      // Read ONCE per frame, not per item. `readMouseHoverPoint()` returns
+      // null on any live-read failure (foundry/scene-occlusion-sources.js's
+      // own doc) — every item below treats a null/ineligible point as "not
+      // hovered", never as (0,0), which would be a false hit at the scene's
+      // own origin. `nowMs` mirrors this codebase's OWN established
+      // per-frame wall-clock convention — `lastEnvSnapshot.env.time.realMs`,
+      // the SAME `?? 0` fallback `pollMaskAuthorityForWindRebake` already
+      // uses in `renderFrame` — rather than a fresh `canvas.app.ticker
+      // .lastTime` read: real Foundry's own clock for this exact purpose IS
+      // an unscaled, monotonic wall-clock ms value
+      // (`primary-occludable-object.mjs`'s `#updateHoverFadeState`), and
+      // this codebase already threads one exactly like it through every
+      // frame — a second live clock read for the identical KIND of value
+      // would be exactly the "independent clocks desync" failure
+      // `core/frame-clock.js`'s own header exists to prevent.
+      const hoverPoint = readMouseHoverPoint();
+      const nowMs = lastEnvSnapshot?.env?.time?.realMs ?? 0;
       for (const state of itemStates.values()) {
-        const elevation = state.item?.key?.elevation;
+        const item = state.item;
+        const elevation = item?.key?.elevation;
         if (elevation === undefined) continue;
         const value = mapElevation(occlusionMask.elevationTable, elevation);
-        if (state.appearance) state.appearance.uOcclusionElevation.value = value;
+        const modes = item?.occlusion?.modes ?? OCCLUSION_MODES.NONE;
+
+        // An unoccludable item (NONE mode) never needs its weights
+        // recomputed — uOcclusionWeights stays at buildOcclusionUniforms'
+        // own all-zero uniform default forever, already the correct value.
+        let weights = null;
+        if (isOccludable(modes)) {
+          // THE HOVER HIT TEST — only for hover-fade-eligible items
+          // (isHoverFadeEligible: real Foundry's own tile.mjs:365 rule), and
+          // only when the live pointer is actually on-screen/fog-eligible
+          // this frame. An ineligible item's `hovered` is simply never set
+          // true below (see this function's own header for why calling
+          // updateHoverFade on it anyway, every frame, is still safe).
+          let hit = false;
+          if (isHoverFadeEligible(modes) && hoverPoint && hoverPoint.eligible) {
+            hit = itemContainsWorldPoint(state, item, hoverPoint.x, hoverPoint.y);
+          }
+          // Stamp the CHANGE instant only — matches updateHoverFade's own
+          // contract (`hoveredTime` is "when hovered LAST CHANGED", not a
+          // per-frame timestamp). Foundry's own event-driven dance around a
+          // saved `_hoveredTime` (`primary.mjs`'s `_onMouseMove`) exists to
+          // handle several synthetic mouse-move events landing at the
+          // identical timestamp — moot here, since this runs exactly once
+          // per RENDER frame rather than once per raw pointer event.
+          if (hit !== state.hoverFade.hovered) {
+            state.hoverFade.hovered = hit;
+            state.hoverFade.hoveredTime = nowMs;
+          }
+          updateHoverFade(state.hoverFade, nowMs, HOVER_FADE_CONFIG);
+
+          // FADE's occluded gate / VISION's no-vision-source fallback — only
+          // items whose modes actually consult it need the (tile x token)
+          // scan; a RADIAL/SURFACE-only item's weights never read `occluded`
+          // (scene/occlusion.js#computeOcclusionState), so skip it entirely.
+          let occluded = false;
+          if (modes & (OCCLUSION_MODES.FADE | OCCLUSION_MODES.VISION)) {
+            occluded = computeItemOccludedByTokens(state, item, occlusionTestTokenScratch);
+          }
+          state.occluded = occluded;
+
+          weights = computeOcclusionState({
+            occlusionMode: modes,
+            occluded,
+            // Read from the real field rather than a hardcoded `false`: it
+            // IS permanently false this cut (no Region/Surfaces
+            // implementation exists — see this function's own header), but
+            // wiring the read to `occlusionMask.visionActive` itself means a
+            // future VISION reveal-by-sight build only has to set that ONE
+            // field for real; nothing here would need to change.
+            visionActive: occlusionMask.visionActive,
+            hoverFadeAmount: state.hoverFade.occlusion,
+          });
+        }
+
+        refreshItemOcclusionUniforms(state.appearance, value, weights);
         if (state.wholeImage) {
-          for (const t of state.wholeImage.tiles) {
-            if (t.appearance) t.appearance.uOcclusionElevation.value = value;
+          for (const t of state.wholeImage.tiles) refreshItemOcclusionUniforms(t.appearance, value, weights);
+        }
+        // VEGETATION OVERLAYS (mythica-machina-press#470) — a Case-1/Case-2
+        // vegetation mesh shares its HOST item's occlusion.modes (the SAME
+        // `item` this loop already has; `ensureVegetationOverlay` is called
+        // with the host's own item), but lives in a completely separate
+        // collection (`state.vegetationOverlays[kindId]`, never
+        // `state.wholeImage.tiles[]`) — UNREACHED by this loop before #470,
+        // for EITHER uOcclusionElevation (a real, pre-existing gap: stuck at
+        // its build-time default of 1 = "above every real elevation" forever,
+        // which — since the comparison is strict — actually means occluded
+        // by ANY real occluder recorded anywhere in its own screen
+        // footprint, regardless of the vegetation's real elevation) or
+        // uOcclusionWeights. Reached here now, mirroring
+        // `state.wholeImage.tiles[]`'s own shape exactly
+        // (`refreshVegetationOverlay`'s established iteration pattern:
+        // `for (const kind of VEGETATION_KINDS)`, `entry.status ===
+        // 'ready'` gate). The shadow twin's own appearance is reached via
+        // `entry.shadow?.appearance` — see `ensureVegetationOverlay`'s own
+        // `entry.shadow = {...}` assignment for why that field exists now.
+        if (state.vegetationOverlays) {
+          for (const kind of VEGETATION_KINDS) {
+            const entry = state.vegetationOverlays[kind.id];
+            if (!entry || entry.status !== 'ready') continue;
+            refreshItemOcclusionUniforms(entry.appearance, value, weights);
+            refreshItemOcclusionUniforms(entry.shadow?.appearance, value, weights);
           }
         }
       }
@@ -10206,26 +10513,33 @@ export async function startVtPanViewer({
      * (this function was the ONLY caller until `buildVegetationMaterial`
      * below became the second — extracted 2026-07-23 rather than copied, so
      * this ~10-line concern can't quietly drift between two call sites the
-     * way duplicated logic always eventually does). `uOcclusionElevation` is
-     * the one LIVE member (refreshed per-frame elsewhere, by
-     * `refreshItemOcclusionElevation()`); the rest are fixed for the item's
-     * lifetime (`item.occlusion.modes` never changes at runtime).
+     * way duplicated logic always eventually does).
+     *
+     * `uOcclusionElevation` AND `uOcclusionWeights` are BOTH live, refreshed
+     * every frame by `runMaskOcclusionPass`'s own per-item loop (via
+     * `refreshItemOcclusionUniforms`) — as of mythica-machina-press#470,
+     * which is also why `item.occlusion.modes` is not even consulted here
+     * any more: `itemStates` gains this item, and `runMaskOcclusionPass`
+     * next reaches it, well before its mesh/material ever becomes visible
+     * (`loadNewItem`'s own synchronous `itemStates.set` precedes the async
+     * mesh build), so computing a weight from `modes` here would be
+     * overwritten before it could ever be seen — dead work, not a
+     * meaningful initial value. BEFORE #470 there was no per-frame refresh
+     * at all, so a one-time `computeOcclusionState({occluded:false,
+     * visionActive:false, hoverFadeAmount:0})` call right here WAS the only
+     * value `uOcclusionWeights` would ever have — permanently zero for FADE
+     * and VISION's fallback, which was the whole bug (#470's own root cause).
+     * Only `uUnoccludedAlpha`/`uOccludedAlpha` remain genuinely fixed for the
+     * item's lifetime (`item.occlusion.alpha` never changes at runtime, same
+     * as `item.occlusion.modes` itself).
      * @param {object} item
      */
     function buildOcclusionUniforms(item) {
       const { uniform, float, vec4 } = THREE.TSL;
       const uOcclusionElevation = uniform(float(1)); // 1 = "above every real elevation" — inert until refreshed
-      const uOcclusionWeights = uniform(vec4(0, 0, 0, 0));
+      const uOcclusionWeights = uniform(vec4(0, 0, 0, 0)); // all-zero — inert until refreshed
       const uUnoccludedAlpha = uniform(float(1));
       const uOccludedAlpha = uniform(float(0));
-      const modes = item?.occlusion?.modes ?? OCCLUSION_MODES.NONE;
-      const st = computeOcclusionState({
-        occlusionMode: modes,
-        occluded: false,
-        visionActive: false,
-        hoverFadeAmount: 0,
-      });
-      uOcclusionWeights.value.set(st.fade, st.radial, st.vision, st.surface);
       uOccludedAlpha.value = item?.occlusion?.alpha ?? 0;
       return { uOcclusionElevation, uOcclusionWeights, uUnoccludedAlpha, uOccludedAlpha };
     }
@@ -13888,6 +14202,18 @@ export async function startVtPanViewer({
                   // syncVegetationMotionUniforms's own header for why this must
                   // be synced separately from the canopy's `entry.motion` above.
                   motion: shadowBuilt.motion,
+                  // The shadow twin's OWN occlusion uniform bag
+                  // (uOcclusionElevation/uOcclusionWeights) — retained as of
+                  // mythica-machina-press#470 so runMaskOcclusionPass's
+                  // per-frame refresh can reach it (`entry.shadow?.appearance`).
+                  // Before #470 this was built (buildVegetationMaterial's own
+                  // `asShadow` branch calls buildOcclusionUniforms exactly
+                  // like the canopy does) and then immediately discarded —
+                  // dropped on the floor right here — so a shadow's own
+                  // elevation/weights uniforms were permanently stuck at
+                  // their construction-time defaults, unreachable by
+                  // anything, forever.
+                  appearance: shadowBuilt.appearance,
                 }
               : null; // this tier draws no shadow at all — see vegTier.shadowEnabled above
           })

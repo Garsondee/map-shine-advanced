@@ -96,6 +96,33 @@ export function isOccludable(occlusionMode) {
 }
 
 /**
+ * Is this object eligible to hover-fade at all? Replicates `Tile#_refreshMesh`
+ * (client/canvas/placeables/tile.mjs:365) exactly:
+ *
+ *     this.mesh.hoverFade = (this.mesh.occlusionMode !== M.NONE) && !(this.mesh.occlusionMode & M.SURFACE);
+ *
+ * Two real Foundry rules, both worth stating explicitly rather than trusting
+ * the bitwise expression to read itself: a NONE-mode object never fades on
+ * hover (nothing to reveal), and a SURFACE-mode object never does either —
+ * SURFACE is "revealed by Region", not by the pointer, and Foundry excludes
+ * it even when combined with another mode (SURFACE|RADIAL is still
+ * ineligible). This is Foundry's own design, not a bug this project is
+ * choosing to skip: SURFACE stays visually inert here regardless (this
+ * codebase has no Region/Surfaces implementation — see this module's own
+ * header, "Why this is not blocked on Stage 5"), so the SURFACE half of this
+ * gate is currently unreachable in practice, but it is reproduced anyway
+ * because RADIAL|SURFACE and FADE|SURFACE are real, authorable combinations
+ * a map author can still set, and getting this gate right now is cheaper
+ * than re-deriving it later once SURFACE stops being inert.
+ *
+ * @param {number} occlusionMode - union of {@link OCCLUSION_MODES}.
+ * @returns {boolean}
+ */
+export function isHoverFadeEligible(occlusionMode) {
+  return occlusionMode !== OCCLUSION_MODES.NONE && !(occlusionMode & OCCLUSION_MODES.SURFACE);
+}
+
+/**
  * Build the elevation → [0,1] mapping table used by the mask.
  *
  * Replicates `CanvasOcclusionMask#mapElevation` (occlusion.mjs:138) and the table
@@ -214,6 +241,57 @@ export function testTokenOcclusion({ tokenElevation, objectElevation, testPoints
 }
 
 /**
+ * Does a point land on this object's actual painted art, thickly enough to
+ * count as "there" for a hit test? The CPU mirror of Foundry's real
+ * `PrimarySpriteMesh#containsCanvasPoint`/`#containsLocalPoint`
+ * (primary-sprite-mesh.mjs:230-267): sample the alpha at this point and
+ * compare against the object's own alpha threshold — `alpha >=
+ * textureAlphaThreshold`, strictly greater-or-equal, matching Foundry's own
+ * `#getTextureAlpha(x,y) >= textureAlphaThreshold` exactly.
+ *
+ * The caller supplies `u`/`v` already converted to this object's own 0..1
+ * quad-local UV space (`scene/world-quad.js#worldToQuadUv` is the renderer's
+ * real inverse-placement math for that step) rather than this function
+ * taking a world point + placement itself: this module stays free of any
+ * coordinate-geometry dependency on principle (this file is occlusion
+ * SEMANTICS; world-quad.js is coordinate geometry; each stays about one
+ * thing, matching this module's own "no GPU, no Foundry globals, no DOM"
+ * header claim — a placement import would not violate that literally, but
+ * would blur the boundary for no real gain).
+ *
+ * `grid` is the item's coarse alpha grid over its ENTIRE source image
+ * (`vt/coverage-mesh.js`'s own `{w,h,data}` shape — the SAME grid that
+ * module's `cellGridSpan` maps image-pixel-space onto via `(pixel/imageDim)
+ * * gridDim`; since UV **is** `pixel/imageDim` by construction, indexing the
+ * grid at `floor(u*w), floor(v*h)` is that identical mapping collapsed to
+ * UV, not a second one invented here).
+ *
+ * @param {object} args
+ * @param {number} args.u @param {number} args.v - quad-local UV, 0..1 when on the quad.
+ * @param {{w:number,h:number,data:Uint8Array}|null|undefined} args.grid
+ * @param {number} args.alphaThreshold - 0..1, the item's own alpha threshold
+ *   (`item.alphaThreshold`, `foundry/scene-layers.js`'s `tile.texture
+ *   ?.alphaThreshold ?? 0.75`).
+ * @returns {boolean}
+ */
+export function testItemHoverAlpha({ u, v, grid, alphaThreshold }) {
+  // Off the quad entirely (a rotated tile's AABB is looser than its real
+  // shape) — never a hit, regardless of the grid.
+  if (!(u >= 0) || u > 1 || !(v >= 0) || v > 1) return false;
+  // FAIL OPEN: no grid (not yet arrived, or never will) is drawn as a full
+  // quad everywhere else in this codebase (vt-pan-viewer.js's own
+  // `requestItemAlphaGrid` doc: "every reader treats 'no grid' as 'draw the
+  // whole quad'") — a roof whose coarse alpha hasn't landed yet must still
+  // be hoverable, not permanently un-fadeable for however long that async
+  // request takes.
+  if (!grid || !grid.data || !(grid.w > 0) || !(grid.h > 0)) return true;
+  const gx = Math.min(grid.w - 1, Math.max(0, Math.floor(u * grid.w)));
+  const gy = Math.min(grid.h - 1, Math.max(0, Math.floor(v * grid.h)));
+  const alpha01 = grid.data[gy * grid.w + gx] / 255;
+  return alpha01 >= alphaThreshold;
+}
+
+/**
  * @typedef {object} HoverFadeState
  * @property {boolean} hovered - is the pointer over this object right now?
  * @property {number} hoveredTime - when `hovered` last changed, in ms.
@@ -227,6 +305,18 @@ export function testTokenOcclusion({ tokenElevation, objectElevation, testPoints
 export function createHoverFadeState() {
   return { hovered: false, hoveredTime: 0, faded: false, fading: false, fadingTime: 0, occlusion: 0 };
 }
+
+/**
+ * Foundry's `CONFIG.Canvas.hoverFade` (client/config.mjs:1125), verbatim —
+ * verified directly against the vendored v14.367.0 client source (both the
+ * unbundled `client/config.mjs:1125` and the built `public/scripts/
+ * foundry.mjs:217661` agree). `duration` here is **750**, not the 500 an
+ * earlier pass at wiring this up assumed — double-check against the
+ * vendored source before trusting a remembered number, exactly the mistake
+ * this constant now makes structurally impossible to repeat: every caller
+ * reads it from here rather than re-typing the literal.
+ */
+export const HOVER_FADE_CONFIG = Object.freeze({ delay: 250, duration: 750 });
 
 /** Foundry's `CanvasAnimation.easeInOutCosine`. */
 export function easeInOutCosine(t) {

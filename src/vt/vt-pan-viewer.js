@@ -8814,23 +8814,6 @@ export async function startVtPanViewer({
      * modes include FADE or VISION — RADIAL/SURFACE-only items skip it
      * entirely, since neither weight depends on it.
      *
-     * VEGETATION BROADENS ELIGIBILITY, NEVER PARTICIPATION (mythica-machina-
-     * press#470 follow-up, direct author decision): a tile with vegetation
-     * overlays (`state.vegetationOverlays`) advances its hover timer and
-     * attempts the hit test EVEN WHEN its own `modes` would make it
-     * ineligible above — bushes/trees fade on hover always, independent of
-     * whatever Occlusion Mode (if any) the HOST tile is authored with. The
-     * host's own `weights` — and thus the host tile's own on-screen fade —
-     * is completely unaffected: `isOccludable`/`isHoverFadeEligible` still
-     * gate it exactly as just described. Vegetation gets its OWN weights
-     * instead (`vegWeights`, this function's own per-item loop below),
-     * always FADE-shaped and driven purely by the shared hover timer — never
-     * by token occlusion, and never shared with the drop-shadow twin, which
-     * never fades regardless of hover (see the loop's own vegetation-
-     * overlays comment for why that mirrors, on purpose, the exact
-     * "permanently stuck at construction-time defaults" shape #470 itself
-     * had to FIX for the shadow as a bug).
-     *
      * NOT REPLICATED (documented scope cuts, #470): Foundry's own
      * `#updateHoveredObjects` "mouseThreshold shifts to the actively-edited
      * placeable" refinement and its multi-object z-order `break`/`continue`
@@ -8966,42 +8949,21 @@ export async function startVtPanViewer({
         const value = mapElevation(occlusionMask.elevationTable, elevation);
         const modes = item?.occlusion?.modes ?? OCCLUSION_MODES.NONE;
 
-        // VEGETATION'S HOVER ELIGIBILITY IS UNCONDITIONAL (mythica-machina-
-        // press#470 follow-up, direct author decision) — independent of
-        // whatever the HOST TILE's own `occlusion.modes` is authored as.
-        // `isOccludable(modes)`/`isHoverFadeEligible(modes)` keep gating the
-        // TILE's own fade exactly as before (`weights`, further down); OR'ing
-        // `hasVegetation` onto each only widens whether the shared hover
-        // TIMER (`state.hoverFade`) advances and gets hit-tested this frame.
-        // A true no-op for every non-vegetation item: `hasVegetation` is
-        // false, so `advanceHover`/`attemptHit` reduce to exactly
-        // `isOccludable(modes)`/`isHoverFadeEligible(modes)` — unchanged from
-        // every frame before this pass.
-        //
-        // Gated on `hasVegetation` itself, not a per-kind `entry.status ===
-        // 'ready'` check below: there is exactly one hover state per TILE
-        // (`state.hoverFade`), so it must start advancing the instant
-        // `ensureVegetationOverlay` has found ANY vegetation URL for this
-        // tile (`state.vegetationOverlays ??= {}`, set synchronously well
-        // before the texture itself finishes loading) — waiting on 'ready'
-        // would just stack the SAME 250ms hover-fade delay on top of the
-        // texture's own async fetch, for no reason.
-        const hasVegetation = !!state.vegetationOverlays;
-        const advanceHover = isOccludable(modes) || hasVegetation;
-        const attemptHit = isHoverFadeEligible(modes) || hasVegetation;
-
-        // THE HOVER HIT TEST — hoisted out of the `isOccludable(modes)` block
-        // below so a vegetation-bearing tile can reach it even when `modes`
-        // itself would never qualify. Otherwise unchanged: only when the
-        // live pointer is actually on-screen/fog-eligible this frame. An
-        // ineligible, non-vegetation item's `hovered` is simply never set
-        // true below (see this function's own header for why calling
-        // updateHoverFade on it anyway, every frame, is still safe).
-        let hit = false;
-        if (attemptHit && hoverPoint && hoverPoint.eligible) {
-          hit = itemContainsWorldPoint(state, item, hoverPoint.x, hoverPoint.y);
-        }
-        if (advanceHover) {
+        // An unoccludable item (NONE mode) never needs its weights
+        // recomputed — uOcclusionWeights stays at buildOcclusionUniforms'
+        // own all-zero uniform default forever, already the correct value.
+        let weights = null;
+        if (isOccludable(modes)) {
+          // THE HOVER HIT TEST — only for hover-fade-eligible items
+          // (isHoverFadeEligible: real Foundry's own tile.mjs:365 rule), and
+          // only when the live pointer is actually on-screen/fog-eligible
+          // this frame. An ineligible item's `hovered` is simply never set
+          // true below (see this function's own header for why calling
+          // updateHoverFade on it anyway, every frame, is still safe).
+          let hit = false;
+          if (isHoverFadeEligible(modes) && hoverPoint && hoverPoint.eligible) {
+            hit = itemContainsWorldPoint(state, item, hoverPoint.x, hoverPoint.y);
+          }
           // Stamp the CHANGE instant only — matches updateHoverFade's own
           // contract (`hoveredTime` is "when hovered LAST CHANGED", not a
           // per-frame timestamp). Foundry's own event-driven dance around a
@@ -9014,13 +8976,7 @@ export async function startVtPanViewer({
             state.hoverFade.hoveredTime = nowMs;
           }
           updateHoverFade(state.hoverFade, nowMs, HOVER_FADE_CONFIG);
-        }
 
-        // An unoccludable item (NONE mode) never needs its weights
-        // recomputed — uOcclusionWeights stays at buildOcclusionUniforms'
-        // own all-zero uniform default forever, already the correct value.
-        let weights = null;
-        if (isOccludable(modes)) {
           // FADE's occluded gate / VISION's no-vision-source fallback — only
           // items whose modes actually consult it need the (tile x token)
           // scan; a RADIAL/SURFACE-only item's weights never read `occluded`
@@ -9045,40 +9001,15 @@ export async function startVtPanViewer({
           });
         }
 
-        // VEGETATION'S OWN WEIGHTS (mythica-machina-press#470 follow-up) —
-        // always FADE-shaped and driven ONLY by the SAME hover timer just
-        // advanced above: `occluded` is hardcoded false (a token standing
-        // under/near vegetation is NOT asked to fade it this pass — only the
-        // mouse-hover trigger is, by direct author decision) and
-        // `visionActive` is hardcoded false (vegetation has no VISION
-        // channel of its own). Tracing computeOcclusionState with these
-        // exact args: the `FADE`-branch requires `occluded`, which never
-        // fires here, so `state.fade` starts at 0; the unconditional tail
-        // then sets `state.fade = max(0, hoverFadeAmount)` since
-        // `visionActive` is also false — i.e. the canopy's fade tracks the
-        // hover ramp 1:1 and nothing else contributes. Computed ONCE per
-        // tile, shared by every vegetation kind on it: there is exactly one
-        // hover state per tile today (`state.hoverFade`), not one per
-        // vegetation instance.
-        let vegWeights = null;
-        if (hasVegetation) {
-          vegWeights = computeOcclusionState({
-            occlusionMode: OCCLUSION_MODES.FADE,
-            occluded: false,
-            visionActive: false,
-            hoverFadeAmount: state.hoverFade.occlusion,
-          });
-        }
-
         refreshItemOcclusionUniforms(state.appearance, value, weights);
         if (state.wholeImage) {
           for (const t of state.wholeImage.tiles) refreshItemOcclusionUniforms(t.appearance, value, weights);
         }
         // VEGETATION OVERLAYS (mythica-machina-press#470) — a Case-1/Case-2
-        // vegetation mesh shares its HOST item's uOcclusionElevation (the
-        // SAME `item` this loop already has; `ensureVegetationOverlay` is
-        // called with the host's own item), but lives in a completely
-        // separate collection (`state.vegetationOverlays[kindId]`, never
+        // vegetation mesh shares its HOST item's occlusion.modes (the SAME
+        // `item` this loop already has; `ensureVegetationOverlay` is called
+        // with the host's own item), but lives in a completely separate
+        // collection (`state.vegetationOverlays[kindId]`, never
         // `state.wholeImage.tiles[]`) — UNREACHED by this loop before #470,
         // for EITHER uOcclusionElevation (a real, pre-existing gap: stuck at
         // its build-time default of 1 = "above every real elevation" forever,
@@ -9089,36 +9020,15 @@ export async function startVtPanViewer({
         // `state.wholeImage.tiles[]`'s own shape exactly
         // (`refreshVegetationOverlay`'s established iteration pattern:
         // `for (const kind of VEGETATION_KINDS)`, `entry.status ===
-        // 'ready'` gate).
-        //
-        // CANOPY VS SHADOW NO LONGER MATCH (mythica-machina-press#470
-        // follow-up, direct author decision): the canopy (`entry.appearance`)
-        // takes `vegWeights` — always hover-driven, regardless of the host's
-        // own occlusion authoring (see that block's own doc above). The
-        // shadow (`entry.shadow?.appearance`) takes a permanent `null`
-        // instead of `weights`/`vegWeights`: it must never fade or hide,
-        // ever, regardless of hover. `refreshItemOcclusionUniforms`'s own `if
-        // (weights)` guard then simply never touches its `uOcclusionWeights`,
-        // which stays at `buildOcclusionUniforms`'s all-zero build-time
-        // default FOREVER — deliberately the exact "permanently stuck at
-        // construction-time defaults" shape `ensureVegetationOverlay`'s own
-        // `entry.shadow.appearance` comment describes #470 having to FIX as
-        // a BUG (the shadow's uniforms used to be built and immediately
-        // discarded); here it is the correct, intended final state, because
-        // canopy and shadow each build their own fully independent `occ`
-        // uniform bag (`buildVegetationMaterial` calls `buildOcclusionUniforms`
-        // once per `asShadow` value), so the canopy's own refresh just above
-        // can never reach — let alone clobber — the shadow's. `occlusionAlphaFactor`'s
-        // `amount` (scene/occlusion.js's pure mirror: `computeOcclusionAlpha`)
-        // is therefore provably always 0 for the shadow, i.e. `mix(unoccluded,
-        // occluded, 0)`, so it renders at its own normal `uUnoccludedAlpha`
-        // forever.
+        // 'ready'` gate). The shadow twin's own appearance is reached via
+        // `entry.shadow?.appearance` — see `ensureVegetationOverlay`'s own
+        // `entry.shadow = {...}` assignment for why that field exists now.
         if (state.vegetationOverlays) {
           for (const kind of VEGETATION_KINDS) {
             const entry = state.vegetationOverlays[kind.id];
             if (!entry || entry.status !== 'ready') continue;
-            refreshItemOcclusionUniforms(entry.appearance, value, vegWeights);
-            refreshItemOcclusionUniforms(entry.shadow?.appearance, value, null);
+            refreshItemOcclusionUniforms(entry.appearance, value, weights);
+            refreshItemOcclusionUniforms(entry.shadow?.appearance, value, weights);
           }
         }
       }

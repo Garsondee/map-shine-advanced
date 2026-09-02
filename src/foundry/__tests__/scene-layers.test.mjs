@@ -326,17 +326,49 @@ export function run(t) {
     const res = collectTiles({ tiles: [restricting] }, { visibleLevelIds: ['a'] });
     ok('tiles: restrictions carry through', res.items[0].restrictsLight && res.items[0].restrictsWeather);
 
-    // A srcless tile is legitimate; a video tile is reported.
+    // A srcless tile is legitimate; a genuinely unsupported extension is
+    // reported and dropped.
     ok(
       'tiles: srcless is skipped silently',
       collectTiles({ tiles: [mkTile('n', 0, 0, { texture: { src: null } })] }, { visibleLevelIds: ['a'] }).items
         .length === 0
     );
-    const video = collectTiles(
-      { tiles: [mkTile('v', 0, 0, { texture: { src: 'v.webm' } })] },
+    const bogus = collectTiles(
+      { tiles: [mkTile('bad', 0, 0, { texture: { src: 'x.psd' } })] },
       { visibleLevelIds: ['a'] }
     );
-    ok('tiles: video is reported, not silently dropped', video.items.length === 0 && video.skipped.length === 1);
+    ok(
+      'tiles: an unsupported extension is reported, not silently dropped',
+      bogus.items.length === 0 && bogus.skipped.length === 1
+    );
+
+    // --- mythica-machina-press#430: a video tile is now a REAL drawn item,
+    // not a skip. This is the exact bug #430 reports — a video Tile used to
+    // land in skipped[] with "video tiles aren't supported yet" and never
+    // reach the renderer at all (Grand Theatre's curtain tiles, live).
+    const video = collectTiles(
+      { tiles: [mkTile('curtain', 0, 0, { texture: { src: 'stagecurtainsclosed_w.webm' } })] },
+      { visibleLevelIds: ['a'] }
+    );
+    ok('tiles: a video tile is INCLUDED, not skipped (#430)', video.items.length === 1 && video.skipped.length === 0);
+    ok(
+      'tiles: the video tile carries its (resolved) video src through',
+      video.items[0].src === 'stagecurtainsclosed_w.webm'
+    );
+    ok(
+      'tiles: a video tile still carries the same _placement.tileDoc a downstream renderer needs to read tile.video config from',
+      video.items[0]._placement.kind === 'tile' &&
+        video.items[0]._placement.tileDoc.texture.src === 'stagecurtainsclosed_w.webm'
+    );
+
+    // Every other recognized video extension (m4v/ogv/mp4), not just webm.
+    for (const ext of ['m4v', 'mp4', 'ogv']) {
+      const r = collectTiles(
+        { tiles: [mkTile('v-' + ext, 0, 0, { texture: { src: `clip.${ext}` } })] },
+        { visibleLevelIds: ['a'] }
+      );
+      ok(`tiles: .${ext} video is included too`, r.items.length === 1 && r.skipped.length === 0);
+    }
   }
 
   // --- THE CABIN: a realistic two-floor scene, collected AND sorted --------

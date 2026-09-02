@@ -33,7 +33,20 @@ export {
   computeVisibleFloorIndices,
   resolveAssetUrl,
   isImageUrl,
+  // VIDEO TILES (mythica-machina-press#430) — the sibling extension check
+  // that lets a caller route a video source to its own construction path
+  // instead of lumping it in with "not a still image, skip it". See
+  // active-scene-source.js's own isVideoUrl doc for why this is a genuine
+  // sibling rather than a boolean flag on isImageUrl.
+  isVideoUrl,
 } from './active-scene-source.js';
+
+// VIDEO TILE PLAYBACK (mythica-machina-press#430) — hands an MSA-owned
+// <video> element to the REAL game.video singleton so it plays under
+// Foundry's own first-gesture gate, at the Tile's own configured
+// loop/autoplay/volume. See tile-video.js's own header for the full
+// mechanism + Foundry-source citations.
+export { playTileVideo } from './tile-video.js';
 
 // The coordinate model — Foundry canvas space, placements, quads.
 export {

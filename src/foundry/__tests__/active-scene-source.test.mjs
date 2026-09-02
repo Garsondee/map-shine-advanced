@@ -6,6 +6,7 @@
  */
 import {
   isImageUrl,
+  isVideoUrl,
   resolveAssetUrl,
   getActiveSceneBackground,
   getActiveSceneFloors,
@@ -24,6 +25,25 @@ export function run(t) {
     ok('isImageUrl: rejects mp4 (a real Foundry video-background extension)', !isImageUrl('a.mp4'));
     ok('isImageUrl: rejects webm', !isImageUrl('a.webm'));
     ok('isImageUrl: rejects no extension / empty / null', !isImageUrl('noext') && !isImageUrl('') && !isImageUrl(null));
+  }
+
+  // --- isVideoUrl (mythica-machina-press#430) --------------------------------
+  {
+    ok(
+      'isVideoUrl: accepts all four of CONST.VIDEO_FILE_EXTENSIONS (m4v/mp4/ogv/webm)',
+      isVideoUrl('a.m4v') && isVideoUrl('a.mp4') && isVideoUrl('a.ogv') && isVideoUrl('a.webm')
+    );
+    ok(
+      'isVideoUrl: accepts a real Grand Theatre-shaped path + querystring',
+      isVideoUrl('worlds/x/stagecurtainsclosed_w.webm?v=7')
+    );
+    ok('isVideoUrl: is case-insensitive', isVideoUrl('a.WEBM'));
+    ok('isVideoUrl: rejects still-image extensions (webp/png)', !isVideoUrl('a.webp') && !isVideoUrl('a.png'));
+    ok('isVideoUrl: rejects no extension / empty / null', !isVideoUrl('noext') && !isVideoUrl('') && !isVideoUrl(null));
+    ok(
+      'isVideoUrl and isImageUrl are mutually exclusive for every extension either one accepts',
+      !isVideoUrl('a.webp') && !isImageUrl('a.webm')
+    );
   }
 
   // --- resolveAssetUrl --------------------------------------------------------

@@ -25,7 +25,7 @@ import {
   computeTokenPlacement,
   tokenFootprint,
 } from './scene-geometry.js';
-import { isImageUrl, resolveAssetUrl } from './active-scene-source.js';
+import { isImageUrl, isVideoUrl, resolveAssetUrl } from './active-scene-source.js';
 
 /**
  * Normalize Foundry's ColorField (a `Color` instance live, a `"#rrggbb"` string
@@ -348,6 +348,11 @@ export function collectLevelTextures(sceneDoc, { viewedLevelId, visibleLevelIds,
  * visibility filter. (This matters — a tile with an empty `levels` set is on
  * every level, and emitting it per-level would draw it N times.)
  *
+ * VIDEO TILES (mythica-machina-press#430) are emitted here exactly like
+ * image tiles — `isVideoUrl` is accepted alongside `isImageUrl` below; this
+ * function does not itself distinguish the two beyond that. Only a genuinely
+ * unrecognized extension still lands in `skipped[]`.
+ *
  * @param {object|null} sceneDoc
  * @param {object} [options]
  * @param {string[]} [options.visibleLevelIds] - levels currently composited.
@@ -366,10 +371,20 @@ export function collectTiles(sceneDoc, { visibleLevelIds = [], getRouteFn, isGM 
     const on = visibleLevelIds.filter((levelId) => includedInLevel(tile, levelId));
     if (on.length === 0) continue; // not on any visible floor
 
-    if (!isImageUrl(src)) {
+    // VIDEO TILES (mythica-machina-press#430) — a video-textured Tile is now
+    // a REAL, drawn item, not a permanent skip. `isImageUrl`/`isVideoUrl`
+    // are the two recognized "yes, hand this to a construction path"
+    // answers; anything else (a typo'd extension, an unsupported format) is
+    // still reported and dropped exactly as before. This function does not
+    // itself distinguish image from video beyond that — `vt-pan-viewer.js`
+    // reads `item.src`'s extension again downstream to pick the actual
+    // construction path (whole-image raster vs. whole-image video), the
+    // same way it already re-derives placement from `item._placement`
+    // rather than this collector doing the renderer's job for it.
+    if (!isImageUrl(src) && !isVideoUrl(src)) {
       skipped.push({
         name: tile.name || tile.id || '(unnamed tile)',
-        reason: `"${src}" is not a still image (video tiles aren't supported yet)`,
+        reason: `"${src}" is not a supported texture (recognized still-image or video extension)`,
       });
       continue;
     }

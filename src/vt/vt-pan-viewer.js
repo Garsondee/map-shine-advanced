@@ -244,6 +244,14 @@ import {
   readSceneWallSegments,
   readSetting,
   resolveTileMotionFrame,
+  // VIDEO TILES (mythica-machina-press#430) — isVideoUrl is the sibling of
+  // isImageUrl (active-scene-source.js) that lets ensureWholeImageMeshes
+  // route a video src to its own construction path; playTileVideo
+  // (tile-video.js) is the one call that hands an MSA-built <video> element
+  // to Foundry's real game.video singleton so it plays under Foundry's own
+  // first-gesture gate. See both files' own headers for the full mechanism.
+  isVideoUrl,
+  playTileVideo,
 } from '../foundry/index.js';
 import { engageFoundryFallback, clearFoundryFallback } from '../diag/render-fallback.js';
 import {
@@ -719,6 +727,16 @@ function disposeActive() {
         // can throw on dispose; renderer.dispose() below frees the backend
         // regardless, so this is best-effort cleanup of the JS-side wrappers.
       }
+      // VIDEO TILES (mythica-machina-press#430) — `t.tex?.dispose()` above
+      // frees the GPU texture but does NOT pause/unload the underlying
+      // <video> element (verified against three.webgpu.js's own
+      // VideoTexture#dispose — see stopAndDetachTileVideo's own header for
+      // the exact source). Without this, a playing video tile — decoding,
+      // and audibly playing if its own volume is non-zero — would keep
+      // running in the background forever after a Stop/Restart or scene
+      // switch, invisible and unbounded. No-ops instantly for every
+      // ordinary (non-video) tile.
+      stopAndDetachTileVideo(t);
     }
     for (const pack of state.packs.values()) {
       try {
@@ -9055,7 +9073,19 @@ export async function startVtPanViewer({
       profiler?.begin(Z.residencyItemLoadDims);
       let dims;
       try {
-        dims = await getSourceDimensions(item.src);
+        // VIDEO DIMENSIONS (mythica-machina-press#430) — getSourceDimensions
+        // (decode-pool.js) parses STILL-IMAGE headers off a ranged fetch
+        // (PNG/WebP signatures). A video container's dimensions live in a
+        // completely different, format-specific structure (an mp4's own
+        // moov/tkhd atom, a webm's EBML segment info) that no generic
+        // image-header parser understands — routed to getVideoDimensions
+        // below instead, this file's OWN video-side counterpart, rather
+        // than teaching an image-only function a second file-format family.
+        // Both are needed unconditionally here: `state.imageSize` (below)
+        // feeds placement math (computeItemPlacement) the same way for
+        // every item regardless of source type, and this is the ONE place
+        // that resolves it.
+        dims = isVideoUrl(item.src) ? await getVideoDimensions(item.src) : await getSourceDimensions(item.src);
       } finally {
         profiler?.end(Z.residencyItemLoadDims);
       }
@@ -11808,7 +11838,16 @@ export async function startVtPanViewer({
      * STALE-SRC REBUILD comment immediately below. The async load fills in
      * `state.wholeImage.tiles` as bitmaps arrive. Every failure is captured
      * on `state.wholeImage.error`, never thrown — a broken item must not
-     * take the scene down, and the diagnostics must be able to name it. */
+     * take the scene down, and the diagnostics must be able to name it.
+     *
+     * VIDEO ITEMS (mythica-machina-press#430) share this ENTIRE function up
+     * through the disclosure-safety placeholder below — only `wi.loadPromise`'s
+     * own body branches, at its very top, into a wholly separate video
+     * construction path (`buildVideoWholeImageTile`) that never touches the
+     * compressed/raw image pipeline. See that branch's own "VIDEO PATH"
+     * comment for why (a video is a continuously-updating source with no
+     * "decode once" moment for the image pipeline to act on) and
+     * `buildVideoWholeImageTile`'s own header for the construction itself. */
     function ensureWholeImageMeshes(state, item) {
       if (state.wholeImage) {
         if (state.wholeImage.src === item.src) return state.wholeImage;
@@ -11867,6 +11906,23 @@ export async function startVtPanViewer({
         // because that field (`t.shadow.*`) was ONCE ALREADY the exact
         // "third mesh location the cleanup forgot" bug in this same file —
         // see that teardown loop's own comment.
+        //
+        // VIDEO ↔ IMAGE SWAPS (mythica-machina-press#430, traced against
+        // this exact rebuild rather than assumed to fall out for free): this
+        // comparison is PURELY a string comparison of `item.src` — it does
+        // not care whether either side is a video or a still image. A Tile
+        // whose `texture.src` changes from one video clip to another, from
+        // an image to a video, or from a video back to an image, ALWAYS
+        // takes this same branch (the src strings always differ), which
+        // ALWAYS disposes the old `wi` (now also stopping/detaching a video
+        // element if the OLD build was one — see `disposeWholeImageTiles`'s
+        // own `stopAndDetachTileVideo` call) and ALWAYS falls through to a
+        // fresh top-of-function construction that re-reads the NEW
+        // `item.src` fresh, including its own `isVideoUrl` dispatch inside
+        // `wi.loadPromise`. No special-casing was needed here beyond making
+        // `disposeWholeImageTiles` video-aware — the existing STALE-SRC
+        // REBUILD architecture already generalizes correctly to every
+        // image/video permutation.
         //
         // THE IN-FLIGHT-LOAD RACE — the real subtlety here, not just the
         // happy path: the stale `wi`'s OWN `wi.loadPromise` may still be
@@ -11973,7 +12029,7 @@ export async function startVtPanViewer({
         renderOrder: item.renderOrder,
         bitmapsFreed: 0, // decoded CPU bitmaps closed after GPU upload (memory reclaimed)
         bitmapsRetained: 0, // bitmaps left un-closed (upload could not be forced) — should stay 0
-        compressed: null, // null | 'bc1'|'bc7' (+ '(cached)') | 'error:fellback'
+        compressed: null, // null | 'bc1'|'bc7' (+ '(cached)') | 'error:fellback' | 'video' (mythica-machina-press#430 — never BC-compressed; see the VIDEO PATH branch below)
         rawScale: 1, // <1 only on the capped RAW fallback (worker unavailable) — see MAX_RAW_FALLBACK_DIM
         // SOURCE alpha, as the decoder actually handed it to the worker, BEFORE
         // any BC7 encoding touches it (2026-07-18 diagnostic: "background renders
@@ -12180,6 +12236,60 @@ export async function startVtPanViewer({
       // gate" class of lie load-progress.js's header exists to forbid, just
       // relocated from the progress bar to the floor switch).
       wi.loadPromise = (async () => {
+        // ════════════════════════════════════════════════════════════════
+        // VIDEO PATH (mythica-machina-press#430) — dispatched FIRST and
+        // UNCONDITIONALLY for a video src, entirely bypassing everything
+        // below (the serialized wholeImageLoadChain queue included).
+        //
+        // WHY IT SKIPS THE QUEUE — wholeImageLoadChain exists to bound
+        // MEMORY: two giant static-image decodes in flight at once is the
+        // confirmed cause of a real device-loss incident (see this
+        // function's own "Serialize whole-image loads" comment, a few
+        // dozen lines up). Building a `<video>` element and pointing it at
+        // a URL is cheap — the actual decode/buffering happens
+        // asynchronously inside the BROWSER's own media pipeline, not as a
+        // JS-heap-resident ImageBitmap this code holds and uploads — so
+        // none of the pressure that queue exists to bound applies here.
+        // Serializing N video tiles behind each other would instead
+        // introduce a NEW, avoidable regression: Grand Theatre's own 4
+        // curtain tiles would buffer one at a time, three of them not even
+        // starting to load until the first finished, where Foundry's own
+        // native (PIXI) video tiles — and every browser's ordinary <video>
+        // element — load fully in parallel. A video item therefore never
+        // touches `wholeImageLoadChain`/`priorLoad`/`releaseLoad` at all;
+        // it has its own small, self-contained try/catch below instead of
+        // sharing the image pipeline's.
+        //
+        // A video item never falls through to the image paths further
+        // down — either this branch succeeds (and returns) or it fails
+        // into its own catch, leaving the disclosure-safety placeholder
+        // standing exactly like an outright image-load failure would (see
+        // that placeholder's own "WHY A FAILED LOAD DOES NOT REMOVE IT"
+        // note, this function's top).
+        // ════════════════════════════════════════════════════════════════
+        if (isVideoUrl(item.src)) {
+          const isStaleVideo = () => state.wholeImage !== wi;
+          try {
+            // Backend must be up before initTexture can force-upload a
+            // frame — same requirement, same idempotent-and-fast-once-the-
+            // device-exists reasoning, as the image paths' own await below.
+            await renderer.init();
+            if (isStaleVideo()) return;
+            await buildVideoWholeImageTile(wi, state, item, imageW, imageH, isStaleVideo);
+          } catch (err) {
+            // Mirrors the outer catch below EXACTLY (same three
+            // assignments, same log door, same "leave the placeholder
+            // standing" fail-SAFE posture) — kept as its own block rather
+            // than falling into that one so a video item's failure can
+            // never accidentally run any image-pipeline cleanup it never
+            // entered (e.g. `releaseLoad`, which this branch never created).
+            wi.status = 'error';
+            wi.error = String(err?.message || err);
+            log.error(`whole-image video load failed for "${item.id}" (${item.src}):`, err);
+          }
+          return;
+        }
+
         // Take our place in the serialized load queue: only one giant image is
         // ever in flight at a time (see wholeImageLoadChain).
         const priorLoad = wholeImageLoadChain;
@@ -12617,6 +12727,306 @@ export async function startVtPanViewer({
     }
 
     /**
+     * Build a video-backed whole-image tile — the VIDEO counterpart to
+     * `ensureWholeImageMeshes`'s own compressed/raw image construction (see
+     * that function's own "VIDEO PATH" dispatch, which calls this once it
+     * has confirmed `item.src` is a video and the backend is up).
+     *
+     * WHY THIS NEVER TOUCHES `requestCompressedTexture`/the raw fetch-blob-
+     * decode path above: both assume a SINGLE STATIC IMAGE to fetch/decode/
+     * upload ONCE (compressed-textures.js's own header: "the worker does
+     * the fetch/decode/opacity-check/encode... for a source image"). A
+     * video is a continuously-updating source with no "decode once" moment
+     * at all — there is nothing for the BC1/BC7 encoder or the ImageBitmap
+     * raw-fallback path to DO with one, and forcing either to try would
+     * mean handing video container bytes to an image decoder. Traced, not
+     * assumed, given this pipeline's own two confirmed device-loss
+     * incidents (compressed-textures.js's header): `bc-compress.worker.js`
+     * wraps its whole message handler in one top-level try/catch (line
+     * ~668) that always posts back `{ok:false}` on a decode failure rather
+     * than hanging, and `createImageBitmap` reliably REJECTS (does not
+     * hang) on undecodable bytes — so a video src accidentally reaching
+     * that pipeline fails cleanly rather than stalling its single-slot
+     * queue for every other item. Still a wasted round trip through a
+     * precious one-slot queue, which is exactly why this function is
+     * dispatched BEFORE that pipeline is ever asked, not as a fallback
+     * after it fails.
+     *
+     * VideoTexture, not VideoFrameTexture (three.webgpu.js — both classes
+     * read in full before choosing, not guessed): `VideoFrameTexture`
+     * (~line 16061) takes NO video element at all — it is fed individual
+     * WebCodecs `VideoFrame` objects one at a time via `.setFrame()`,
+     * meaning ITS caller must already be running a separate
+     * `VideoDecoder`/`MediaStreamTrackProcessor` pipeline to PRODUCE those
+     * frames; it manages no playback, timing, or `<video>` element of its
+     * own whatsoever. Choosing it would not remove the need to build and
+     * drive an `HTMLVideoElement` (`game.video.play` needs one regardless
+     * — see tile-video.js) and would ADD an entire frame-production
+     * subsystem this codebase has never built before, in the single most
+     * incident-prone pipeline in this engine (compressed-textures.js's own
+     * header: two confirmed real WebGPU device-loss incidents from smaller
+     * "obviously safe" changes to this exact texture pipeline). VideoTexture
+     * (~line 16009) is the proven, standard, batteries-included choice: it
+     * takes the SAME `HTMLVideoElement` this function must construct
+     * anyway, self-drives its own `needsUpdate` via
+     * `requestVideoFrameCallback` (falling back to per-frame `readyState`
+     * polling on browsers without it — both paths verified in the vendored
+     * source, three.webgpu.js ~line 16029-16052), and both the WebGPU
+     * renderer's own texture-update path (~line 47787-47790: an explicit
+     * sRGB-transfer-function warning gate specifically for
+     * `isVideoTexture`) and the WebGL fallback backend (~line 66890: its
+     * own `isVideoTexture` upload branch, `texture.update();
+     * gl.texImage2D(...)`) already handle it as a first-class texture
+     * source needing no bespoke plumbing here.
+     *
+     * @param {object} wi - the wholeImage record being built
+     *   (`state.wholeImage` — the SAME object `ensureWholeImageMeshes`
+     *   already created and returned before kicking off `wi.loadPromise`).
+     * @param {object} state
+     * @param {object} item
+     * @param {number} imageW @param {number} imageH - from
+     *   `getVideoDimensions` (this file), NOT re-read from the video
+     *   element here — `state.imageSize` is this item's single source of
+     *   truth for placement math (`computeItemPlacement`), resolved once in
+     *   `loadNewItem`; re-deriving a second, possibly-different number here
+     *   from `video.videoWidth`/`videoHeight` would let this tile's OWN
+     *   geometry disagree with what the rest of the pipeline placed it
+     *   against.
+     * @param {() => boolean} isStale - `state.wholeImage !== wi`, from this
+     *   function's one caller.
+     */
+    async function buildVideoWholeImageTile(wi, state, item, imageW, imageH, isStale) {
+      const video = document.createElement('video');
+      // NEVER the native `autoplay` attribute/property — that would let
+      // the BROWSER decide when to start playback, entirely outside
+      // game.video's own gesture-lock bookkeeping (its `pending` queue
+      // would never even learn this element exists, since nothing ever
+      // calls `game.video.play` on an element the browser already started
+      // on its own). `playTileVideo` (foundry/tile-video.js), called below
+      // once this element has real data, is the ONLY thing that ever
+      // starts it playing — exactly how Foundry's own Tile#_draw/
+      // _refreshVideo pair works (tile.mjs: the texture loads with no
+      // autoplay of its own; `_refreshVideo` is what calls
+      // `game.video.play`).
+      video.loop = true; // corrected to the Tile's own config by playTileVideo below; a safe default while it's still unset
+      video.playsInline = true; // prevents iOS Safari's native fullscreen takeover for a programmatic texture source — a browser-compatibility need, not a Foundry playback-semantics choice; Foundry's own source has no equivalent to cite because PIXI's video resource never runs on a platform where this matters the same way
+      video.preload = 'auto';
+      // crossOrigin: a complete no-op for the overwhelmingly common case
+      // (Foundry serves its own module/world assets from the SAME origin
+      // as the page), and REQUIRED for a genuinely cross-origin video to be
+      // usable as a WebGPU/WebGL texture source at all (an unmarked
+      // cross-origin <video> taints the texture the same way a cross-
+      // origin <img> would). UNVERIFIED against a live cross-origin Foundry
+      // deployment (e.g. assets on a separate media host/CDN without
+      // permissive CORS headers) — if one exists, this could make video
+      // tiles fail to load there even though images (fetched as a blob,
+      // different cross-origin rules) keep working. Flagged, not silently
+      // assumed away.
+      video.crossOrigin = 'anonymous';
+      // NOT muted: Foundry's own tiles are never muted-by-attribute either
+      // — audibility is controlled purely through `document.video.volume`
+      // (schema default 0 — see tile-video.js's header), which
+      // playTileVideo passes to `game.video.play`. Setting `.muted` here
+      // would keep this tile silent even after a GM raises its volume
+      // slider, a real behavior divergence from native Foundry tiles.
+      video.src = item.src;
+      video.load();
+
+      // ════════════════════════════════════════════════════════════════
+      // THE DISCLOSURE-SAFETY WAIT (mythica-machina-press#435's
+      // placeholder, reused UNCHANGED — see ensureWholeImageMeshes's own
+      // "DISCLOSURE-SAFETY PLACEHOLDER" comment for the full mechanism
+      // this plugs into: the placeholder built at that function's top
+      // already covers this item opaquely for the entire duration of this
+      // wait). `loadeddata` is the first event guaranteeing the browser
+      // has decoded and buffered at least one real frame (readyState 2,
+      // HAVE_CURRENT_DATA) — NOT `loadedmetadata` (dimensions/duration
+      // only, no pixel data yet — that is the cheap, throwaway probe
+      // `getVideoDimensions` uses, a separate, earlier, separate-element
+      // read; see its own header) and not merely constructing the element
+      // above, which guarantees nothing has been decoded at all yet.
+      // Swapping to the real texture before this point would show an
+      // ACTUAL VideoTexture with no frame data behind it — not a crash,
+      // but exactly the "possibly-transparent/blank-until-proven-opaque"
+      // gap #435 exists to close, so this function holds the placeholder
+      // exactly as long as the image paths above hold theirs.
+      // ════════════════════════════════════════════════════════════════
+      await new Promise((resolve, reject) => {
+        let settled = false;
+        const onReady = () => {
+          if (settled) return;
+          settled = true;
+          video.removeEventListener('loadeddata', onReady);
+          video.removeEventListener('error', onError);
+          resolve();
+        };
+        const onError = () => {
+          if (settled) return;
+          settled = true;
+          video.removeEventListener('loadeddata', onReady);
+          video.removeEventListener('error', onError);
+          const mediaErr = video.error;
+          reject(
+            new Error(
+              `video failed to load for "${item.id}" (${item.src}): ${mediaErr?.message || mediaErr?.code || 'unknown error'}`
+            )
+          );
+        };
+        // Already-ready fast path — kept for symmetry with
+        // getVideoDimensions and because it costs nothing; rare here since
+        // this element was only just created a few lines up.
+        if (video.readyState >= 2 /* HAVE_CURRENT_DATA */) {
+          onReady();
+          return;
+        }
+        video.addEventListener('loadeddata', onReady);
+        video.addEventListener('error', onError);
+      });
+
+      if (isStale()) {
+        // Superseded while we were waiting for data (a STALE-SRC REBUILD —
+        // mythica-machina-press#431 — fired on this same item mid-buffer).
+        // This attempt's element has never been handed to a THREE texture
+        // or to game.video, so a plain DOM-level stop+detach is enough;
+        // nothing GPU-resident exists yet to dispose (mirrors the image
+        // paths' own "nothing GPU-resident has been built yet... just
+        // don't start" comment at this function's caller).
+        try {
+          video.pause();
+          video.removeAttribute('src');
+          video.load();
+        } catch (_) {
+          // Best-effort — matches this file's other cleanup sites.
+        }
+        return;
+      }
+
+      // Fix up the DOM `.width`/`.height` REFLECTED ATTRIBUTES — NOT the
+      // same thing as `.videoWidth`/`.videoHeight`, an easy-to-miss
+      // HTMLVideoElement gotcha (`.width`/`.height` mirror the HTML
+      // attributes, which nothing has ever set on this element; they stay
+      // 0 unless assigned). buildWholeImageMaterial's `uTexSize` uniform
+      // reads `tex.image?.width || 1` / `tex.image?.height || 1` GENERICALLY
+      // for every whole-image texture type (see its own comment: "read off
+      // the texture rather than passed in... Both are the number we
+      // want") — for a VideoTexture, `tex.image` IS this `video` element,
+      // so without this assignment that generic read would silently fall
+      // back to the degenerate `1x1` default instead of the video's real
+      // decoded size. This element is never attached to the visible DOM,
+      // so setting these has no layout/visual side effect of its own.
+      video.width = video.videoWidth;
+      video.height = video.videoHeight;
+
+      const tex = new THREE.VideoTexture(video);
+      // sRGB, matching every other art texture in this pipeline — and not
+      // merely a style match: the WebGPU renderer (three.webgpu.js
+      // ~line 47788) explicitly WARNS if a VideoTexture's colorSpace lacks
+      // an sRGB transfer function, so this is required for correct color,
+      // not optional tuning.
+      tex.colorSpace = THREE.SRGBColorSpace;
+      // v=0 = image top row — the SAME world-quad convention every other
+      // whole-image texture in this function already flips to match (see
+      // the compressed/raw paths' own "Y-FLIP is a recurring bug class"
+      // comments). A browser decodes video top-row-first into `.image`
+      // exactly like an ImageBitmap does, so the identical correction
+      // applies.
+      tex.flipY = false;
+      tex.anisotropy = ART_TEXTURE_ANISOTROPY;
+      // generateMipmaps/minFilter/magFilter are DELIBERATELY left at
+      // THREE.VideoTexture's own constructor defaults (generateMipmaps:
+      // false, min/magFilter: LinearFilter — three.webgpu.js ~line 16023-
+      // 16026) rather than copied from the raw-image path's
+      // LinearMipmapLinearFilter tuning: a continuously-updating source has
+      // no mip chain to filter with, and cannot cheaply grow one every
+      // frame the way a one-shot static upload can — VideoTexture's own
+      // defaults are already the correct answer here, not an oversight to
+      // fix.
+      try {
+        renderer.initTexture(tex);
+      } catch (_) {
+        // Backend not up yet — Three uploads it lazily on first render,
+        // same tolerance as every other texture built in this function.
+      }
+
+      const { material, appearance, motion, tileMotion, floorAttrUniforms, floorAttrItem, uExpectedDepth } =
+        buildWholeImageMaterial(tex, item);
+      // NO vegetation branch for video, even when item.src happens to
+      // match a _Tree/_Bush naming convention — deliberate, the same
+      // reasoning the disclosure-safety placeholder above already gives
+      // for skipping buildVegetationMaterial on ITS OWN stand-in tile:
+      // wind-sway math has never been exercised against a continuously-
+      // updating texture source in this engine, and the one live,
+      // motivating case for this whole feature (Grand Theatre's curtains)
+      // is not vegetation. A video tile always renders through the plain
+      // whole-image material.
+      const geometry = new THREE.BufferGeometry();
+      const t = {
+        tile: { sx: 0, sy: 0, sw: imageW, sh: imageH, col: 0, row: 0 },
+        sub: null,
+        tex,
+        geometry,
+        material,
+        appearance,
+        motion,
+        tileMotion: tileMotion ?? null,
+        mesh: null,
+        floorAttrUniforms: floorAttrUniforms ?? null,
+        floorAttrItem: floorAttrItem ?? null,
+        uExpectedDepth: uExpectedDepth ?? null,
+        vegActive: false,
+      };
+      // No coverage/min-grid for video — alpha-grid analysis
+      // (requestCoarseAlphaGrid, primeCoverAlphaGrids's own
+      // requestItemAlphaGrid) is a static-image concept: it fetches the
+      // src and hands the bytes to createImageBitmap, exactly like the
+      // compressed-texture worker does. Traced, not assumed: that worker's
+      // own top-level try/catch (bc-compress.worker.js ~line 668) already
+      // turns an undecodable-as-image src into a clean `{ok:false}` reply
+      // rather than a hang, and `requestItemAlphaGrid`'s own `.catch` (a
+      // few thousand lines up) already treats that as an ordinary,
+      // harmless "no grid arrived" outcome — the identical fire-and-forget
+      // tolerance every OTHER item's not-yet-arrived grid already relies
+      // on, so a video src simply never resolves one, forever, with no new
+      // failure mode to guard against here. `setTileGeometry` already
+      // treats a null grid as "draw the full quad", the exact steady state
+      // every image tile starts in too before its own grid arrives — no
+      // special-casing needed here, and no segment tessellation either
+      // (video is never vegetation, so `segments` stays 1).
+      setTileGeometry(t, state.placement, imageW, imageH, 1, 0, null, null);
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.frustumCulled = false;
+      mesh.visible = false; // the refresh loop decides visibility + renderOrder
+      mesh.renderOrder = wi.renderOrder;
+      t.mesh = mesh;
+      scene.add(mesh);
+      wi.tiles.push(t);
+      // The real tile now covers this item's whole footprint — retire the
+      // placeholder now, in this same synchronous block, so there is no
+      // frame with both meshes present and no frame with neither (same
+      // discipline as the compressed/raw paths' own identical call).
+      removeWholeImagePlaceholderTiles(wi);
+      wi.compressed = 'video'; // see this field's own declaration, a few dozen lines up in this function's caller
+      wi.status = 'ready';
+
+      // THE ACTUAL PLAYBACK TRIGGER — see foundry/tile-video.js's own
+      // header for the full game.video integration + Foundry-source
+      // citations. Only Tile items carry a document to read loop/autoplay/
+      // volume config from (collectTiles, foundry/scene-layers.js); a
+      // non-tile whole-image item can never reach this branch today (Level
+      // background/foreground video is still skipped upstream — see
+      // active-scene-source.js's own "STILL DELIBERATELY NOT BUILT" note),
+      // so the `?? null` fallback below is a defensive guard against a
+      // future caller shape change, not a path this session can exercise
+      // — playTileVideo itself already tolerates a null doc by falling
+      // back to the schema defaults.
+      playTileVideo(video, item._placement?.kind === 'tile' ? item._placement.tileDoc : null);
+
+      scheduleResidencyUpdate().catch(() => {
+        // Non-fatal: the next real input refreshes visibility anyway.
+      });
+    }
+
+    /**
      * Remove and dispose every DISCLOSURE-SAFETY PLACEHOLDER tile still
      * sitting in `wi.tiles` (see `ensureWholeImageMeshes`'s own
      * "DISCLOSURE-SAFETY PLACEHOLDER" comment for why one can be there at
@@ -12760,6 +13170,17 @@ export async function startVtPanViewer({
         } catch (_) {
           // Best-effort cleanup — matches removeWholeImagePlaceholderTiles's own posture.
         }
+        // VIDEO TILES (mythica-machina-press#430) — same reasoning as
+        // disposeActive()'s own identical call: `t.tex?.dispose()` above
+        // frees the GPU texture but not the underlying <video> element (see
+        // stopAndDetachTileVideo's own header). THIS is the path that fires
+        // on a live `item.src` swap (mythica-machina-press#431's STALE-SRC
+        // REBUILD) — a Tile whose video changes from one clip to another,
+        // or from video to image or back, must stop the OLD video here or
+        // it keeps decoding/playing in the background forever, replaced on
+        // screen but never actually released. No-ops instantly for every
+        // ordinary (non-video) tile.
+        stopAndDetachTileVideo(t);
         wi.tiles.splice(i, 1);
       }
     }
@@ -21076,6 +21497,171 @@ function makeDisclosurePlaceholderTexture(THREE) {
   const tex = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
   tex.needsUpdate = true;
   return tex;
+}
+
+/**
+ * Read a video source's pixel dimensions via a throwaway `<video>` element —
+ * the video-side counterpart to `decode-pool.js#getSourceDimensions` (which
+ * parses still-image headers off a ranged fetch, a technique that does not
+ * apply to video container formats at all: an mp4's `moov`/`tkhd` atom or a
+ * webm's EBML segment info is a completely different, format-specific
+ * structure no generic byte-range header parser understands).
+ *
+ * Mirrors that function's OWN two-phase shape rather than inventing a new
+ * one (mythica-machina-press#430): a cheap, throwaway probe now (here), a
+ * real, long-lived construction later (`ensureWholeImageMeshes`'s video
+ * path, dispatched separately, well after this has already resolved).
+ * `loadNewItem` (this function's one caller) needs `state.imageSize`
+ * populated correctly for EVERY item before any drawable is built, video
+ * included, since placement math (`computeItemPlacement`) runs off it
+ * regardless of source type. DELIBERATELY a second, independent `<video>`
+ * element/network load rather than threading a shared one through from
+ * `loadNewItem` to `ensureWholeImageMeshes` — those two functions run in
+ * different phases of the residency pipeline (dimension-read happens once,
+ * ever, per item; whole-image construction is idempotent-per-src and can
+ * re-run many times across many residency passes for the same item), and
+ * this codebase's own architecture keeps that separation for every OTHER
+ * item type too. Coupling them for video alone would be new, video-specific
+ * cross-phase state on `state` that doesn't exist for any other item shape
+ * — real risk in the single most incident-prone pipeline in this engine for
+ * a redundant load a browser's own HTTP cache will very likely absorb
+ * anyway — a reasonable, standard assumption about ordinary HTTP caching
+ * behavior, but genuinely UNVERIFIED against this engine live (this
+ * session has no browser to confirm the second load is actually cheap in
+ * practice, only that the design does not depend on it being free — a
+ * cache miss here just means one extra full video fetch, not a
+ * correctness problem).
+ *
+ * `loadedmetadata` (NOT `loadeddata`/`canplay`, which the REAL playback
+ * element in `buildVideoWholeImageTile` waits for later) is the earliest
+ * event at which `videoWidth`/`videoHeight` are guaranteed populated
+ * (`HTMLMediaElement` spec) — it does not require the browser to have
+ * buffered any actual frame DATA, only the container header (duration/
+ * dimensions/track info), so this genuinely is the video equivalent of the
+ * image path's "read only the header" cost discipline, not a corners-cut
+ * approximation of it.
+ *
+ * No `crossOrigin` set here (unlike the real playback element in
+ * `buildVideoWholeImageTile`) — reading `.videoWidth`/`.videoHeight` is
+ * metadata, not pixel data, so it is never subject to the canvas/WebGL/
+ * WebGPU cross-origin-tainting rules that make `crossOrigin` necessary
+ * there; leaving it unset here maximizes the chance of successfully reading
+ * dimensions even from a cross-origin host with no CORS headers configured
+ * at all, which the real playback element cannot tolerate regardless.
+ *
+ * No bespoke timeout — matches `getSourceDimensions`'s own posture (that
+ * function's `fetch()` call has none either); a video item that never
+ * settles here fails exactly like an image item that never settles there
+ * already can, a pre-existing accepted risk this does not newly introduce.
+ *
+ * @param {string} url
+ * @returns {Promise<{width:number, height:number}>}
+ */
+function getVideoDimensions(url) {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement('video');
+    video.preload = 'metadata';
+    video.muted = true; // this element never plays — only probes metadata — but a defensive default costs nothing (see this function's own header)
+    let settled = false;
+    const cleanup = () => {
+      video.removeEventListener('loadedmetadata', onMeta);
+      video.removeEventListener('error', onError);
+      try {
+        video.removeAttribute('src');
+        video.load();
+      } catch (_) {
+        // Best-effort — this element is being discarded regardless.
+      }
+    };
+    const onMeta = () => {
+      if (settled) return;
+      settled = true;
+      const { videoWidth: width, videoHeight: height } = video;
+      cleanup();
+      if (width > 0 && height > 0) resolve({ width, height });
+      else reject(new Error(`video metadata loaded but dimensions are ${width}x${height} for "${url}"`));
+    };
+    const onError = () => {
+      if (settled) return;
+      settled = true;
+      const mediaErr = video.error;
+      cleanup();
+      reject(
+        new Error(`video metadata probe failed for "${url}": ${mediaErr?.message || mediaErr?.code || 'unknown error'}`)
+      );
+    };
+    video.addEventListener('loadedmetadata', onMeta);
+    video.addEventListener('error', onError);
+    video.src = url;
+    video.load();
+  });
+}
+
+/**
+ * Stop and fully detach a whole-image tile's underlying `<video>` element,
+ * if it has one — a pure DOM operation, not a Foundry adapter call (nothing
+ * here touches `game.*`/`canvas.*`/`Hooks.*`, so `foundry/adapter-only`
+ * does not apply; `HTMLMediaElement#pause()` has no Foundry meaning at all).
+ *
+ * `THREE.VideoTexture.dispose()` (verified against the vendored
+ * three.webgpu.js, ~line 16053-16059) cancels its own
+ * `requestVideoFrameCallback` registration and frees the GPU texture, but
+ * does NOT pause or unload the underlying `HTMLVideoElement`:
+ *
+ *     dispose() {
+ *       if (this._requestVideoFrameCallbackId !== 0) {
+ *         this.source.data.cancelVideoFrameCallback(this._requestVideoFrameCallbackId);
+ *         this._requestVideoFrameCallbackId = 0;
+ *       }
+ *       super.dispose();
+ *     }
+ *
+ * A "removed" video tile would otherwise keep decoding and playing audio in
+ * the background forever, invisible and unbounded — a real resource-leak
+ * class none of this engine's static-image teardown code has ever had to
+ * consider, since a `THREE.Texture` built from an `ImageBitmap` has no
+ * ongoing activity to stop once its GPU texture is freed.
+ *
+ * Called from BOTH whole-image-tile disposal paths — `disposeActive()`'s
+ * full-teardown loop (Stop/Restart, scene switch) and
+ * `disposeWholeImageTiles()` (a live `item.src` swap, mythica-machina-
+ * press#431's STALE-SRC REBUILD) — kept as ONE function rather than copied
+ * into both so the two teardown paths cannot quietly drift out of sync with
+ * each other, matching this file's own extraction discipline (see
+ * `buildOcclusionUniforms`'s header for the same reasoning applied once
+ * already: "this ~10-line concern can't quietly drift between two call
+ * sites the way duplicated logic always eventually does").
+ *
+ * A TOP-LEVEL function (not nested inside `startVtPanViewer`'s closure,
+ * unlike `ensureWholeImageMeshes`/`buildVideoWholeImageTile`) because
+ * `disposeActive()` — this function's OTHER caller — is itself top-level,
+ * outside that closure (it operates on the module-level `_active` handle,
+ * not closure-captured state); a nested definition would be unreachable
+ * from there.
+ *
+ * @param {object} t - a whole-image tile record (`wi.tiles[]` entry).
+ */
+function stopAndDetachTileVideo(t) {
+  const video = t.tex?.isVideoTexture ? t.tex.image : null;
+  if (!video) return;
+  try {
+    video.pause();
+  } catch (_) {
+    // Best-effort — matches every other resource-cleanup site in this file.
+  }
+  try {
+    // Fully detach the source so the browser stops fetching/decoding —
+    // pause() alone leaves the network/decode pipeline armed to resume the
+    // instant something sets .src again, which nothing here ever will for
+    // a torn-down tile. removeAttribute, not `src = ''`: an empty-string
+    // src can itself be interpreted as a URL (the current page) by some
+    // browsers, logging a spurious error; removing the attribute entirely
+    // is the standard, warning-free way to fully release a media element.
+    video.removeAttribute('src');
+    video.load();
+  } catch (_) {
+    // Best-effort — matches every other resource-cleanup site in this file.
+  }
 }
 
 /**

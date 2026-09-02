@@ -66,6 +66,22 @@
  *   increment). Composited floors with genuinely mismatched `worldSizePx`
  *   will visually misalign — `vt-pan-viewer.js` warns (console) rather than
  *   silently misaligning, but doesn't yet reconcile/rescale.
+ * - Video Level backgrounds/foregrounds (mythica-machina-press#430).
+ *   `isVideoUrl()` exists below and IS consumed by Tiles
+ *   (`foundry/scene-layers.js#collectTiles` → `vt/vt-pan-viewer.js`'s
+ *   whole-image video path) — but a Level's background/foreground plays
+ *   through a materially DIFFERENT, simpler Foundry mechanism than a Tile
+ *   does: `client/canvas/groups/primary.mjs#drawLevelTexture` always calls
+ *   `game.video.play(video, {volume: game.settings.get("core",
+ *   "globalAmbientVolume")})` — no per-document loop/autoplay config at
+ *   all, because `BaseLevel`'s own schema (common/documents/level.mjs) has
+ *   no `video` field whatsoever, unlike `BaseTile`'s
+ *   (common/documents/tile.mjs:63-67). Folding Level video into #430's fix
+ *   would have meant a second, differently-shaped construction/playback
+ *   path, not a reuse of the Tile one — explicitly left for its own
+ *   separate pass instead (see #430's own tracking notes). This function
+ *   and `getActiveSceneFloors` below still reject a video Level
+ *   background/foreground exactly as before.
  *
  * @module foundry/active-scene-source
  */
@@ -77,7 +93,12 @@
  * extension (`CONST.VIDEO_FILE_EXTENSIONS` — scene backgrounds legitimately
  * support animated video in Foundry) is a real possibility this module must
  * reject loudly rather than hand to `createImageBitmap()`, which cannot
- * decode video.
+ * decode video. See `isVideoUrl` below (mythica-machina-press#430) for the
+ * sibling check that lets a caller tell "not an image because it's a
+ * supported video" apart from "not an image because it's neither" — Tiles
+ * now route on that distinction (`scene-layers.js#collectTiles`); Level
+ * backgrounds/foregrounds still don't (see this file's own header, "STILL
+ * DELIBERATELY NOT BUILT").
  */
 const IMAGE_EXTENSIONS = new Set(['apng', 'avif', 'bmp', 'gif', 'jpeg', 'jpg', 'png', 'svg', 'tiff', 'webp']);
 
@@ -85,6 +106,34 @@ const IMAGE_EXTENSIONS = new Set(['apng', 'avif', 'bmp', 'gif', 'jpeg', 'jpg', '
 export function isImageUrl(url) {
   const match = /\.([a-z0-9]+)(?:\?.*)?$/i.exec(url || '');
   return !!match && IMAGE_EXTENSIONS.has(match[1].toLowerCase());
+}
+
+/**
+ * Extensions Foundry itself treats as video (mirrors `CONST.VIDEO_FILE_
+ * EXTENSIONS`, common/constants.mjs — verified against the vendored v14
+ * source: `{m4v, mp4, ogv, webm}`, not guessed).
+ *
+ * Kept as a SIBLING to `isImageUrl`, not folded into it — deliberately, per
+ * mythica-machina-press#430's own design directive. "What kind of source is
+ * this" has three real, differently-handled answers (a still image, a
+ * video, or neither), and a caller needs to be able to ask each
+ * independently rather than getting back one yes/no that conflates two of
+ * them. Before this existed, `scene-layers.js#collectTiles` and this file's
+ * own `getActiveSceneFloors`/`getActiveSceneBackground` could only ask
+ * `isImageUrl` and treat every "no" identically — which is exactly how a
+ * correctly-authored video Tile (Grand Theatre's curtains, #430's live
+ * motivating report) ended up silently and permanently dropped rather than
+ * routed to a video-specific construction path: nothing downstream could
+ * tell "this is a video, handle it as one" apart from "this is garbage,
+ * skip it."
+ *
+ * @param {string} url @returns {boolean} true if the URL's extension is a video type Foundry serves.
+ */
+const VIDEO_EXTENSIONS = new Set(['m4v', 'mp4', 'ogv', 'webm']);
+
+export function isVideoUrl(url) {
+  const match = /\.([a-z0-9]+)(?:\?.*)?$/i.exec(url || '');
+  return !!match && VIDEO_EXTENSIONS.has(match[1].toLowerCase());
 }
 
 /**

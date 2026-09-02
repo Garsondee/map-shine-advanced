@@ -701,7 +701,19 @@ function disposeActive() {
     // Whole-image mode's per-tile GPU resources (geometry/material/texture).
     // renderer.dispose() below frees the backend, but dispose these too so a
     // Stop/Restart doesn't leak the JS-side handles (parallels state.geometry).
-    for (const t of state.wholeImage?.tiles ?? []) {
+    //
+    // BOTH `state.wholeImage` AND `state.wholeImageRebuild` (mythica-
+    // machina-press#431's flash-free rebuild — see `ensureWholeImageMeshes`'s
+    // own THE FLASH-FREE COMMIT comment) — not just the former. A REBUILD in
+    // flight at the exact moment of a Stop/Restart has real, scene-attached
+    // GPU resources (and, for a video src, a real `<video>` element) sitting
+    // at `state.wholeImageRebuild`, deliberately never written to
+    // `state.wholeImage` while it builds; skipping it here would leak
+    // exactly the class of resource every comment in this loop already
+    // exists to catch (a texture, a video element quietly decoding forever)
+    // — the "third mesh location the cleanup forgot" bug class, reproduced a
+    // third time, for a field this loop simply did not know about yet.
+    for (const t of [...(state.wholeImage?.tiles ?? []), ...(state.wholeImageRebuild?.tiles ?? [])]) {
       try {
         t.geometry?.dispose();
         t.material?.dispose();
@@ -11833,24 +11845,37 @@ export async function startVtPanViewer({
      * tile's source rect → texture → quad mesh. Idempotent PER SRC — a second
      * call for the same item with the same `item.src` returns the cached
      * result immediately; a call whose `item.src` has changed since the
-     * cached build (a live GM edit, e.g. the Stage Manager macro) disposes
-     * the stale build and falls through to a genuine rebuild — see the
-     * STALE-SRC REBUILD comment immediately below. The async load fills in
+     * cached build (a live GM edit, e.g. the Stage Manager macro) starts a
+     * REBUILD — see the STALE-SRC REBUILD comment immediately below for the
+     * full mechanism (mythica-machina-press#431, revised: a flash-free swap,
+     * not an immediate dispose). The async load fills in
      * `state.wholeImage.tiles` as bitmaps arrive. Every failure is captured
-     * on `state.wholeImage.error`, never thrown — a broken item must not
-     * take the scene down, and the diagnostics must be able to name it.
+     * on the failing build's own `.error`, never thrown — a broken item must
+     * not take the scene down, and the diagnostics must be able to name it.
      *
-     * VIDEO ITEMS (mythica-machina-press#430) share this ENTIRE function up
-     * through the disclosure-safety placeholder below — only `wi.loadPromise`'s
-     * own body branches, at its very top, into a wholly separate video
-     * construction path (`buildVideoWholeImageTile`) that never touches the
-     * compressed/raw image pipeline. See that branch's own "VIDEO PATH"
-     * comment for why (a video is a continuously-updating source with no
-     * "decode once" moment for the image pipeline to act on) and
-     * `buildVideoWholeImageTile`'s own header for the construction itself. */
+     * VIDEO ITEMS (mythica-machina-press#430) share this ENTIRE function,
+     * including the flash-free rebuild machinery below — only
+     * `wi.loadPromise`'s own body branches, at its very top, into a wholly
+     * separate video construction path (`buildVideoWholeImageTile`) that
+     * never touches the compressed/raw image pipeline, but ends at the SAME
+     * `commitWholeImageBuild` call the image paths use (see that function's
+     * own header). See the video branch's own "VIDEO PATH" comment for why
+     * it needs a separate construction path at all (a video is a
+     * continuously-updating source with no "decode once" moment for the
+     * image pipeline to act on). */
     function ensureWholeImageMeshes(state, item) {
       if (state.wholeImage) {
         if (state.wholeImage.src === item.src) return state.wholeImage;
+
+        // Already converging on this exact target — a rebuild is already in
+        // flight (see `state.wholeImageRebuild`, set a few dozen lines
+        // below) and nothing about a REPEATED call for the SAME new src
+        // (Stage Manager double-clicked, Foundry's own Tile config sheet
+        // saved twice) changes what it is already heading toward. Idempotent,
+        // mirroring this function's own same-src fast path immediately
+        // above; no new attempt starts, and — see the notification block
+        // below — no second notification fires either.
+        if (state.wholeImageRebuild && state.wholeImageRebuild.src === item.src) return state.wholeImage;
 
         // STALE-SRC REBUILD (mythica-machina-press#431 — live author report:
         // the "Stage Manager" macro sets an existing Tile's `texture.src` via
@@ -11881,31 +11906,94 @@ export async function startVtPanViewer({
         // call. THE FIX is exactly this `.src` comparison — nothing
         // upstream needed to change.
         //
-        // THE DISCLOSURE-SAFETY PLACEHOLDER (mythica-machina-press#435, a
-        // few dozen lines below) applies here FOR FREE, not by accident:
-        // this rebuild disposes the stale build and falls THROUGH the
-        // ordinary top-of-function construction path below — the exact same
-        // path a first-ever call already takes — rather than running a
-        // second, parallel construction routine. That placeholder block's
-        // own "WHAT THIS DELIBERATELY DOES NOT COVER" note named this exact
-        // gap (a live `texture.src` change never re-entering construction at
-        // all, "placeholder included") as explicitly out of its own scope;
-        // this fix is that gap's closure — a live re-texture swap is now
-        // disclosure-safe during its OWN recompression wait too, the same
-        // as a first-time load already was.
+        // THE FLASH-FREE COMMIT (mythica-machina-press#431, revised same day
+        // — author follow-up, verbatim: "why not have the tile only change
+        // once the new tile is done and ready to be displayed so that it
+        // just changes from one tile to another" instead of a black/white
+        // flash). The FIRST cut of this fix disposed the stale build
+        // immediately and fell through to the SAME synchronous-black-
+        // placeholder construction a first-ever load uses (the DISCLOSURE-
+        // SAFETY PLACEHOLDER, mythica-machina-press#435, a few dozen lines
+        // below) — correct for a first load (nothing valid is on screen
+        // yet), wrong for THIS case: the OLD art is already correctly on
+        // screen and does not need a stand-in of its own while the NEW art
+        // builds. Disposing it early only to cover the resulting gap with a
+        // placeholder was solving a problem this rebuild does not have to
+        // create in the first place.
         //
-        // DISPOSAL: `disposeWholeImageTiles` (defined beside
-        // `removeWholeImagePlaceholderTiles`, a few dozen lines below) frees
-        // every tile CURRENTLY on the stale `wi` — mesh/geometry/material/
-        // tex, PLUS the S1a split-material and the Case-1 vegetation-shadow
-        // twin that `removeWholeImagePlaceholderTiles` itself does not need
-        // to touch (a placeholder is never split and never a vegetation-
-        // shadow caster). Written carefully against `stopVtPanViewer`'s own
-        // full-teardown loop's hard-won field list rather than
-        // `removeWholeImagePlaceholderTiles`'s shorter one, specifically
-        // because that field (`t.shadow.*`) was ONCE ALREADY the exact
-        // "third mesh location the cleanup forgot" bug in this same file —
-        // see that teardown loop's own comment.
+        // MIRRORS `prepareFloor`'s OWN MECHANISM (a few thousand lines
+        // below — read its "THE SECRETS FIX, MECHANICALLY" doc for the full
+        // argument), one level down: floor scope → one item's tile set.
+        // `prepareFloor` builds an incoming floor's meshes fully resident
+        // while `ensureWholeImageMeshes`'s own construction default
+        // (`mesh.visible = false`) keeps them off screen, touching NOTHING
+        // about the outgoing floor, then commits by flipping outgoing/
+        // incoming visibility in ONE synchronous pass with no `await` in
+        // between — "a browser can only ever present a frame using state
+        // that exists the instant a synchronous task yields back to the
+        // event loop", so if the SAME synchronous pass hides the old and
+        // shows the new, no frame can ever be drawn with neither. Applied
+        // here at item scope: this rebuild constructs the new tile(s) —
+        // image OR video — fully, hidden, WITHOUT ever writing
+        // `state.wholeImage` while it builds, so every one of this file's
+        // many `state.wholeImage` read sites keeps seeing the OLD, still-
+        // correct build for the entire wait. The in-progress attempt lives
+        // at `state.wholeImageRebuild` instead (set a few lines below) — a
+        // second, narrowly-scoped per-item slot, deliberately NOT wired
+        // into any of this file's other `state.wholeImage` readers
+        // (occlusion, depth proxies, the alpha-stat/Reckoning diagnostics,
+        // the `itemsLoading` readiness probe `vt/settle.js` feeds off of):
+        // every one of them should keep reporting exactly what's on screen,
+        // never work that is still pending and invisible — the identical
+        // "hidden work doesn't count yet" property `prepareFloor`'s own
+        // incoming-floor items already have relative to
+        // `rebuildSceneDepthProxies` and friends. `commitWholeImageBuild`
+        // (defined beside `disposeWholeImageTiles`, a few dozen lines below)
+        // is the one place that flips `state.wholeImage` from old to new and
+        // disposes the old build, in one synchronous block — called from
+        // all three construction paths' own success points (compressed,
+        // raw-fallback, video) so there is exactly one commit mechanism,
+        // not three copies of it.
+        //
+        // THE PER-ITEM GENERATION COUNTER — `state.wholeImageRebuild` alone
+        // answers "is a rebuild in flight for this item", but the async body
+        // building it (`wi.loadPromise`, below) still needs to answer "is MY
+        // attempt still the one that matters" at every meaningful `await` it
+        // crosses — the same question `prepareFloor`'s own
+        // `floorPrepareGeneration`/`myGeneration`/`isStale` idiom (a few
+        // thousand lines below) answers for a floor-scoped prepare. Mirrored
+        // here, adapted PER-ITEM rather than per-viewer:
+        // `state.wholeImageRebuildGeneration` (bumped a few lines below)
+        // lives on the per-item `state` object instead of a viewer-wide
+        // closure variable, so two DIFFERENT items rebuilding at the same
+        // time never invalidate each other — each item's own counter only
+        // ever answers for that item. A SECOND rebuild firing for THIS SAME
+        // item while the first is still in flight (Stage Manager clicked
+        // twice, or Foundry's own Tile config sheet saved twice, each time
+        // choosing a genuinely different target) bumps this counter again;
+        // the older attempt notices at its own next `isStale()` check
+        // (inside `wi.loadPromise`, the same density of checks
+        // `prepareFloor` itself uses) and disposes whatever it already
+        // built — an image tile via the same per-resource `.dispose()`
+        // calls every existing stale-bail site here already uses, or a
+        // video element via `stopAndDetachTileVideo` (mythica-machina-
+        // press#430) — instead of committing it. A THIRD rapid call
+        // targeting the SAME src the second one is already chasing is a
+        // no-op (the dedup check at this comment's own top) rather than a
+        // third redundant attempt.
+        //
+        // VIDEO'S READINESS FEEDS THE SAME COMMIT POINT —
+        // `buildVideoWholeImageTile`'s own `loadeddata` wait (see its "THE
+        // DISCLOSURE-SAFETY WAIT" comment) used to end by marking `wi` ready
+        // directly; it now ends by calling the SAME `commitWholeImageBuild`
+        // the compressed and raw image paths call, handed the SAME
+        // `isStale` this function builds once, below (a fresh-load identity
+        // check or a rebuild generation check, decided by which case this
+        // call is) — one commit point regardless of which of the three
+        // construction paths got there, so "the new tile is done and ready
+        // to be displayed" (the author's own phrase) means the same thing
+        // whether that tile came from a compressed image, a raw-fallback
+        // image, or a video's first decoded frame.
         //
         // VIDEO ↔ IMAGE SWAPS (mythica-machina-press#430, traced against
         // this exact rebuild rather than assumed to fall out for free): this
@@ -11913,61 +12001,80 @@ export async function startVtPanViewer({
         // not care whether either side is a video or a still image. A Tile
         // whose `texture.src` changes from one video clip to another, from
         // an image to a video, or from a video back to an image, ALWAYS
-        // takes this same branch (the src strings always differ), which
-        // ALWAYS disposes the old `wi` (now also stopping/detaching a video
-        // element if the OLD build was one — see `disposeWholeImageTiles`'s
-        // own `stopAndDetachTileVideo` call) and ALWAYS falls through to a
-        // fresh top-of-function construction that re-reads the NEW
-        // `item.src` fresh, including its own `isVideoUrl` dispatch inside
-        // `wi.loadPromise`. No special-casing was needed here beyond making
-        // `disposeWholeImageTiles` video-aware — the existing STALE-SRC
-        // REBUILD architecture already generalizes correctly to every
-        // image/video permutation.
+        // takes this same branch (the src strings always differ) and ALWAYS
+        // ends at the same `commitWholeImageBuild` call, which disposes
+        // whichever kind the OLD build was (image tile or video element —
+        // `disposeWholeImageTiles` already calls `stopAndDetachTileVideo`
+        // unconditionally, a no-op for a non-video tile). No special-casing
+        // was needed here beyond what mythica-machina-press#430 already
+        // built.
         //
-        // THE IN-FLIGHT-LOAD RACE — the real subtlety here, not just the
-        // happy path: the stale `wi`'s OWN `wi.loadPromise` may still be
-        // running (mid fetch/decode/compress) at the exact moment this
-        // rebuild fires — Stage Manager firing twice in quick succession, or
-        // a texture changed while a brand-new tile's first-ever compression
-        // hasn't finished. Disposing `wi.tiles` here only cleans up what
-        // exists SYNCHRONOUSLY, right now; it does NOT cancel that promise
-        // (the fetch/worker requests it may be waiting on have no
-        // cancellation path, and building one is out of this task's scope).
-        // The promise's own body guards itself instead, via an `isStale`
-        // check mirroring `prepareFloor`'s own generation-counter idiom (a
-        // few thousand lines below) — same CONCEPT, a stale async operation
-        // notices its own supersession and bails out harmlessly, adapted
-        // here to an identity check rather than a counter: this closure
-        // already captures the exact `wi` it belongs to, and
-        // `state.wholeImage` already IS the single "which one is current"
-        // pointer `prepareFloor` needed a dedicated counter to express, so
-        // no new counter field is introduced. See `wi.loadPromise`'s own
-        // body, below, for the checks themselves.
+        // PLAYER-FACING NOTICE (mythica-machina-press#431, author's own
+        // follow-up request, verbatim: "get Foundry to put up a notification
+        // saying something like 'Map Shine Advanced: Converting tile... This
+        // may take a little time but is happening in the background.' so
+        // that users don't get confused") — fires a few lines below, exactly
+        // once per genuinely NEW rebuild attempt (guarded by the SAME dedup
+        // check this comment opens with, so a repeated call converging on a
+        // target already in flight never fires it twice). Never fires for a
+        // first-ever load: that case already has its own placeholder AND the
+        // ambient compression-status.js badge (mythica-machina-press#435) —
+        // a second indicator on top of two existing ones would be noise, not
+        // help. See that block's own comment for why no additional cross-
+        // item throttling was built on top of the natural once-per-attempt
+        // gate this dedup check already provides.
         //
-        // ⚠ ACCEPTED LIMITATION, stated rather than hidden (not fixed here —
-        // filed as mythica-machina-press#436 alongside this fix):
-        // `state.imageSize` (the SOURCE IMAGE's own pixel dimensions, read
-        // once via `getSourceDimensions` the first time this ITEM — not this
-        // wholeImage — ever loaded, in `loadNewItem`) has this EXACT SAME
-        // "resolved once, never revisited" shape, one layer up, and this fix
-        // does not touch it: `tryGetLoadedItem` is deliberately synchronous
-        // (its own header comment explains why) and cannot re-fetch
-        // dimensions without breaking that contract. A live `src` swap to an
-        // image of the SAME pixel dimensions (the common case for something
-        // like interchangeable stage backdrops) rebuilds correctly; a swap
-        // to a DIFFERENT-dimension image would rebuild against the OLD
-        // image's `imageW`/`imageH` and come out mis-fitted — not silently
-        // stuck any more (a real improvement over today), but not
-        // necessarily correct either. A real fix touches `tryGetLoadedItem`'s
-        // own sync-fast-path contract, a materially different, separately-
-        // scoped change — see #436.
+        // ⚠ ACCEPTED LIMITATIONS, stated rather than hidden:
+        //  - `state.imageSize` (mythica-machina-press#436, filed alongside
+        //    the original #431 fix and unchanged by this revision): the
+        //    SOURCE IMAGE's own pixel dimensions are read once, the first
+        //    time this ITEM — not this wholeImage — ever loaded
+        //    (`loadNewItem`), and `tryGetLoadedItem`'s deliberately-
+        //    synchronous fast path cannot re-fetch them without breaking its
+        //    own contract. A live `src` swap to a DIFFERENT-dimension image
+        //    rebuilds against the OLD image's `imageW`/`imageH` and can come
+        //    out mis-fitted. A real fix is a separately-scoped change to
+        //    that fast path's own contract — see #436.
+        //  - `tryGetLoadedItem`'s live per-frame tint/alpha/floorAttrItem
+        //    refresh (a few thousand lines up) reads `existing.wholeImage`
+        //    only. During a rebuild that correctly keeps the OLD, still-
+        //    visible tiles live-updated for the entire wait (they are what
+        //    `state.wholeImage` still points at) — but a tint/alpha change
+        //    that lands mid-rebuild will not reach the pending
+        //    `state.wholeImageRebuild` tiles; they carry whatever `item`
+        //    looked like at THIS construction, current again as of commit.
+        //    A second, independent live-edit racing a src change on the
+        //    same item is a narrow enough compound case that threading a
+        //    second target into that fast path did not seem worth the added
+        //    surface here — flagged for the same reason #436 was filed
+        //    rather than folded in, not overlooked.
         log.debug(
-          `ensureWholeImageMeshes: "${item.id}" src changed (${state.wholeImage.src} -> ${item.src}), rebuilding`
+          `ensureWholeImageMeshes: "${item.id}" src changed (${state.wholeImage.src} -> ${item.src}), rebuilding in the background (old art stays visible until the new art is ready)`
         );
-        disposeWholeImageTiles(state.wholeImage);
-        state.wholeImage = null;
-        // Falls through to the ordinary construction path below.
+        try {
+          // 'image' (not 'tile'/'token') for a level background/foreground —
+          // the only other kind that can reach this branch — reads naturally
+          // in the sentence below ("...for the updated image.") rather than
+          // the doubled-up "the updated image's image" a naive "${kindLabel}'s
+          // image" phrasing would produce for that case.
+          const kindLabel = item.kind === 'tile' ? 'tile' : item.kind === 'token' ? 'token' : 'image';
+          globalThis.ui?.notifications?.info?.(
+            `Map Shine Advanced: converting new art for the updated ${kindLabel}. This can take a little while on a large image — it's happening in the background, and the current art stays visible until the new art is ready.`
+          );
+        } catch (_) {
+          // A missing/broken notifications API (headless/Node context, a
+          // very early boot race) must not block the rebuild itself —
+          // matches this file's other defensive `globalThis`-guarded calls
+          // (see e.g. diag/render-fallback.js's own `ui.notifications.error`).
+        }
+        // Falls through to the ordinary construction path below, which
+        // detects `state.wholeImage` is still set (captured as `isRebuild`
+        // immediately below, before anything is mutated further) and builds
+        // this attempt OFF TO THE SIDE rather than disposing/replacing
+        // `state.wholeImage` synchronously — see THE FLASH-FREE COMMIT,
+        // above.
       }
+      const isRebuild = !!state.wholeImage;
       const imageW = state.imageSize.width;
       const imageH = state.imageSize.height;
 
@@ -12042,186 +12149,31 @@ export async function startVtPanViewer({
         // two apart instead of guessing a third time.
         alphaStats: null,
       };
-      state.wholeImage = wi;
-
-      // ════════════════════════════════════════════════════════════════════
-      // DISCLOSURE-SAFETY PLACEHOLDER (mythica-machina-press#435) — built
-      // SYNCHRONOUSLY, right here, before `wi.loadPromise` below has even
-      // started its first `await`. Read this before touching either of the
-      // two real build paths further down in that promise's body.
-      //
-      // THE GAP THIS CLOSES: everything from here to the first real
-      // `scene.add(mesh)` inside `wi.loadPromise` used to be pure wall-clock
-      // time with NO occluding geometry for this item at all — first an
-      // `await priorLoad` for the serialized whole-image queue (itself
-      // bounded by every OTHER giant image already loading), then the real
-      // fetch/decode/compress/upload chain, which compressed-textures.js's
-      // own header and the live author report both put at 5-10 minutes for
-      // a large source image. A Tile in this engine is very often placed
-      // specifically to hide something (a roof over an unexplored room, a
-      // secret-door overlay) — the multifloor composite relies on an upper
-      // floor's OWN authored alpha holes to show the floor below only where
-      // the art actually has a window or stairwell cut into it (see bc-
-      // compress.worker.js's header for the same "alpha holes are load-
-      // bearing" point). A tile with no mesh at all has no alpha holes — its
-      // ENTIRE footprint is one unintended hole — so every second this gap
-      // stayed open was a second a player could see straight through
-      // something a GM placed on purpose. Neither existing "wait honestly"
-      // path closes it: `loading-screen.js`'s cold-load curtain force-
-      // reveals at HARD_REVEAL_MS regardless of outstanding compression
-      // (and tears its own DOM node down on reveal, so nothing persists to
-      // say "still compressing" even then), and a LIVE post-load change on
-      // the CURRENT floor — a GM macro editing a Tile's `texture.src`
-      // (Stage Manager-style), or dropping a brand-new tile — never reaches
-      // `prepareFloor`'s own "await compression before reveal" phase at
-      // all, because that phase only runs on a FLOOR SWITCH. So this gap
-      // was reachable on an already-visible floor, not just during a cold
-      // load.
-      //
-      // THE FIX: build the SAME shape of tile entry the real paths below
-      // build — same `buildWholeImageMaterial`, same `setTileGeometry`,
-      // same `new THREE.Mesh(...)` + `scene.add(mesh)` — but through a
-      // trivial 1×1 fully-opaque texture instead of the real (possibly
-      // still-compressing) art. It is pushed onto `wi.tiles` itself, not a
-      // parallel system, so `refreshWholeImageItem` (this function's own
-      // caller runs it immediately after this returns) decides this mesh's
-      // visibility/renderOrder exactly like it would any other tile — zero
-      // changes needed there.
-      //
-      // WHY A SEPARATE MESH, NOT A LIVE TEXTURE SWAP ON ONE SHARED MESH —
-      // this was the recommended-but-not-mandated shape of the fix, and it
-      // was investigated, not assumed. `envLight.outdoorsTexNode.value =
-      // tex` (a few thousand lines up) proves swapping a TSL texture node's
-      // `.value` live IS a real, working pattern in this codebase — but
-      // every proven use of it swaps between textures of the SAME kind (two
-      // `THREE.DataTexture`s, same uncompressed RGBA8 format). It has never
-      // been exercised swapping an uncompressed placeholder for a
-      // `THREE.CompressedTexture` (a genuinely different GPU texture format
-      // — BC1/BC7 block-compressed vs. plain RGBA8, a different upload path
-      // per three.webgpu.js's own `_copyCompressedBufferToTexture` vs.
-      // `copyExternalImageToTexture`), and `buildWholeImageMaterial` samples
-      // `tex` from TWO separate call sites (`physicalSolidityAlpha` and
-      // `colorNode`'s own albedo taps), neither of which currently exposes a
-      // swappable node — wiring that up would mean restructuring the most
-      // incident-prone material builder in this engine (two confirmed real
-      // device-loss incidents already trace through this exact pipeline —
-      // see compressed-textures.js's own header) on the strength of an
-      // untested cross-format assumption. A second, disposable mesh instead
-      // reuses every one of those call sites completely unmodified, for
-      // BOTH the placeholder and the real texture — the only new operations
-      // are `scene.add`/`removeFromParent`/`.dispose()`, all three already
-      // proven mid-session, on a running viewer, a few thousand lines up
-      // (the region-mesh reconcile: `entry.mesh.removeFromParent();
-      // entry.material.dispose();`). Slower to write than a `.value =`
-      // swap; nothing new to get wrong in the one pipeline that has already
-      // twice proven "obviously safe" wrong.
-      //
-      // WHY `makeDisclosurePlaceholderTexture`, NOT the shared
-      // `makeOutdoorsPlaceholderTexture` (2026-09-02 correction — the first
-      // version of this fix DID reuse the white one, on the reasoning that
-      // alpha≡255 is the only property that matters here; author report the
-      // same day: a live re-texture through it read as "the tile flashes
-      // white for a moment", a real visual regression). Alpha≡255 is still
-      // the only property that matters for `physicalSolidityAlpha`/the
-      // depth-authority system (a placeholder must read as "real art here"),
-      // but RGB is not free to pick arbitrarily once the placeholder can
-      // appear during a LIVE update on an already-visible tile, not just
-      // during a cold, curtained load — a flash is exactly the kind of thing
-      // a curtain hides and a live update does not. Black matches this
-      // engine's own loading-curtain ground colour, so a flash reads as
-      // "still loading", not a strobe. See that function's own doc for why
-      // it is a genuine second function rather than a colour parameter on
-      // the shared one (the white in `makeOutdoorsPlaceholderTexture` is
-      // semantically load-bearing for its own callers, not an arbitrary
-      // default).
-      //
-      // WHY NO VEGETATION MATERIAL, EVEN WHEN `vegActive` IS TRUE — the
-      // placeholder's only job is opaque coverage, which `buildWholeImage
-      // Material` already gives it; replicating `buildVegetationMaterial`'s
-      // tessellation/wind/shadow machinery for a mesh that lives for, at
-      // most, one compression pass would be real added risk (a second,
-      // rarely-exercised code path through the wind system) for zero
-      // disclosure-safety benefit — nothing is hidden BEHIND a vegetation
-      // tile's own sway, only behind its OPAQUE footprint, which a plain
-      // quad already covers. `vegActive: false` on the entry below is
-      // therefore factually correct for THIS entry, not a simplification.
-      //
-      // WHY IT NEVER GETS RE-EVALUATED PER FRAME — it doesn't need to be:
-      // it is removed, once, in the SAME synchronous block that pushes the
-      // first real tile(s) for this item (see `removeWholeImagePlaceholder
-      // Tiles`'s call sites below, in both the compressed-success and raw-
-      // fallback-success branches) — so there is no frame with both the
-      // placeholder and zero real tiles, nor a frame where the placeholder
-      // outlives the real art it stands in for.
-      //
-      // WHY A FAILED LOAD DOES NOT REMOVE IT — see the outer `catch` block
-      // further down: on total failure (a 404, an undecodable file)
-      // `wi.tiles` used to stay empty forever, i.e. today's failure mode for
-      // a broken whole-image item was already a PERMANENT hole. Leaving the
-      // placeholder standing on failure is strictly SAFER than that — a
-      // permanently-broken tile now fails to a permanent opaque stand-in
-      // instead of a permanent hole. Fail-SAFE, not merely fail-open
-      // (memory: feedback_safety_slide_outranks_doctrine).
-      //
-      // UPDATE (mythica-machina-press#431, landed same day): this USED to
-      // read "does not cover a live texture.src change" here, because
-      // `state.wholeImage`'s guard was pure presence and a same-id document
-      // update never re-entered this construction path at all. That guard
-      // now compares `state.wholeImage.src` against `item.src` and disposes
-      // + rebuilds on a mismatch (see the STALE-SRC REBUILD block at this
-      // function's own top) — a rebuild falls through this SAME
-      // construction path, so a live re-texture now gets this placeholder
-      // too, automatically, not as a special case. The flash this section's
-      // own colour choice, above, exists to soften is the visible evidence
-      // that this now happens.
-      const placeholderTex = makeDisclosurePlaceholderTexture(THREE);
-      try {
-        renderer.initTexture(placeholderTex);
-      } catch (_) {
-        // Backend not up yet — same tolerated race every other texture
-        // built in this function already accepts; Three uploads it lazily
-        // on first render instead of on this forced call.
+      // WHERE THIS BUILD LIVES WHILE IT'S UNDER CONSTRUCTION (mythica-
+      // machina-press#431) — see THE FLASH-FREE COMMIT, above, for the full
+      // reasoning. A FRESH load (nothing shown for this item yet) becomes
+      // `state.wholeImage` immediately, exactly as every read site in this
+      // file already expects. A REBUILD (`isRebuild`, above) is kept off
+      // that pointer entirely — parked at `state.wholeImageRebuild` instead
+      // — until `commitWholeImageBuild` (defined beside `disposeWholeImage
+      // Tiles`, below) says it's ready. `state.wholeImageRebuildGeneration`
+      // is bumped once for this exact attempt; `myGeneration` captures the
+      // new value so `wi.loadPromise`'s own `isStale()` (below) can tell
+      // whether a NEWER rebuild has since taken this attempt's place.
+      let myGeneration;
+      if (isRebuild) {
+        state.wholeImageRebuild = wi;
+        state.wholeImageRebuildGeneration = (state.wholeImageRebuildGeneration ?? 0) + 1;
+        myGeneration = state.wholeImageRebuildGeneration;
+      } else {
+        state.wholeImage = wi;
+        // DISCLOSURE-SAFETY PLACEHOLDER (mythica-machina-press#435) — FRESH
+        // LOADS ONLY; a rebuild (the branch above) never needs one. Built
+        // SYNCHRONOUSLY, before `wi.loadPromise` below has even started its
+        // first `await` — see `buildDisclosurePlaceholderTile`'s own header
+        // (a few dozen lines below) for the full mechanism this closes.
+        buildDisclosurePlaceholderTile(wi, state, item, imageW, imageH);
       }
-      const {
-        material: placeholderMaterial,
-        appearance: placeholderAppearance,
-        motion: placeholderMotion,
-        tileMotion: placeholderTileMotion,
-        floorAttrUniforms: placeholderFloorAttrUniforms,
-        floorAttrItem: placeholderFloorAttrItem,
-        uExpectedDepth: placeholderUExpectedDepth,
-      } = buildWholeImageMaterial(placeholderTex, item);
-      const placeholderGeometry = new THREE.BufferGeometry();
-      const placeholderTileEntry = {
-        // Logical full-image rect, matching the compressed path's own
-        // single-tile shape (`wholeTile` below) — a placeholder never
-        // splits regardless of how the REAL load eventually resolves (one
-        // compressed tile, or several raw-fallback ones): one quad
-        // covering the whole placement is always at least as opaque as
-        // whatever shape the real art ends up taking.
-        tile: { sx: 0, sy: 0, sw: imageW, sh: imageH, col: 0, row: 0 },
-        sub: null,
-        tex: placeholderTex,
-        geometry: placeholderGeometry,
-        material: placeholderMaterial,
-        appearance: placeholderAppearance,
-        motion: placeholderMotion,
-        tileMotion: placeholderTileMotion ?? null,
-        mesh: null,
-        floorAttrUniforms: placeholderFloorAttrUniforms ?? null,
-        floorAttrItem: placeholderFloorAttrItem ?? null,
-        uExpectedDepth: placeholderUExpectedDepth ?? null,
-        vegActive: false, // see this block's own "WHY NO VEGETATION MATERIAL" note above
-        isPlaceholder: true, // marks this entry for wholesale removal — see removeWholeImagePlaceholderTiles
-      };
-      setTileGeometry(placeholderTileEntry, state.placement, imageW, imageH, 1, 0, null, null);
-      const placeholderMesh = new THREE.Mesh(placeholderGeometry, placeholderMaterial);
-      placeholderMesh.frustumCulled = false;
-      placeholderMesh.visible = false; // the refresh loop (refreshWholeImageItem, run by this function's own caller right after) decides visibility, same as every other tile
-      placeholderMesh.renderOrder = wi.renderOrder;
-      placeholderTileEntry.mesh = placeholderMesh;
-      scene.add(placeholderMesh);
-      wi.tiles.push(placeholderTileEntry);
 
       // wi.loadPromise: the async body below ALWAYS resolves (every error path
       // sets wi.status='error' + wi.error and does not re-throw — see the catch
@@ -12236,6 +12188,46 @@ export async function startVtPanViewer({
       // gate" class of lie load-progress.js's header exists to forbid, just
       // relocated from the progress bar to the floor switch).
       wi.loadPromise = (async () => {
+        // SUPERSESSION GUARD (mythica-machina-press#431) — mirrors
+        // `prepareFloor`'s own generation-counter `isStale` idiom (a few
+        // thousand lines below): a stale async operation notices its own
+        // supersession and bails out harmlessly instead of mutating state a
+        // newer operation already owns. ONE definition, shared by the video
+        // branch immediately below and the compressed/raw image paths
+        // further down — this used to be two separate copies (the video
+        // branch's own `isStaleVideo`, and a second `isStale` declared past
+        // its early `return`), unified here since both were always
+        // answering the identical question the identical way.
+        //
+        // TWO SHAPES, chosen once, for this build's entire lifetime:
+        //  - FRESH LOAD (`!isRebuild`, from this function's own top):
+        //    `state.wholeImage` already IS `wi` (assigned synchronously
+        //    before this promise started) and is the single "which build is
+        //    current" pointer for this item — a stale-src rebuild always
+        //    REPLACES that pointer with a brand-new object rather than
+        //    mutating this one in place, so identity
+        //    (`state.wholeImage !== wi`) is exact and needs no counter.
+        //  - REBUILD (`isRebuild`): `state.wholeImage` deliberately does NOT
+        //    point at `wi` until commit (see THE FLASH-FREE COMMIT, at this
+        //    function's own top) — an identity check against it would
+        //    (wrongly) report "stale" from this promise's very first line.
+        //    `myGeneration` (captured when this attempt started, above)
+        //    against the live `state.wholeImageRebuildGeneration` is the
+        //    PER-ITEM equivalent of `prepareFloor`'s own
+        //    `myGeneration`/`floorPrepareGeneration` pair — see THE PER-ITEM
+        //    GENERATION COUNTER comment, also at this function's top, for
+        //    the full reasoning.
+        //
+        // Checked after every meaningful `await` below, the same density as
+        // `prepareFloor`'s own checks — a superseded result must never be
+        // pushed into `wi.tiles`/`scene.add`ed onto the live scene, and any
+        // GPU resource a stale attempt already built must be disposed
+        // instead of leaked (each check site below disposes whatever
+        // actually exists at that point — see its own comment).
+        const isStale = isRebuild
+          ? () => state.wholeImageRebuildGeneration !== myGeneration
+          : () => state.wholeImage !== wi;
+
         // ════════════════════════════════════════════════════════════════
         // VIDEO PATH (mythica-machina-press#430) — dispatched FIRST and
         // UNCONDITIONALLY for a video src, entirely bypassing everything
@@ -12262,27 +12254,30 @@ export async function startVtPanViewer({
         //
         // A video item never falls through to the image paths further
         // down — either this branch succeeds (and returns) or it fails
-        // into its own catch, leaving the disclosure-safety placeholder
+        // into its own catch, leaving whatever was already on screen (a
+        // first load's placeholder, or a rebuild's still-correct OLD art)
         // standing exactly like an outright image-load failure would (see
         // that placeholder's own "WHY A FAILED LOAD DOES NOT REMOVE IT"
-        // note, this function's top).
+        // note, and this function's own STALE-SRC REBUILD comment, both at
+        // this function's top).
         // ════════════════════════════════════════════════════════════════
         if (isVideoUrl(item.src)) {
-          const isStaleVideo = () => state.wholeImage !== wi;
           try {
             // Backend must be up before initTexture can force-upload a
             // frame — same requirement, same idempotent-and-fast-once-the-
             // device-exists reasoning, as the image paths' own await below.
             await renderer.init();
-            if (isStaleVideo()) return;
-            await buildVideoWholeImageTile(wi, state, item, imageW, imageH, isStaleVideo);
+            if (isStale()) return;
+            await buildVideoWholeImageTile(wi, state, item, imageW, imageH, isStale);
           } catch (err) {
-            // Mirrors the outer catch below EXACTLY (same three
-            // assignments, same log door, same "leave the placeholder
-            // standing" fail-SAFE posture) — kept as its own block rather
-            // than falling into that one so a video item's failure can
-            // never accidentally run any image-pipeline cleanup it never
-            // entered (e.g. `releaseLoad`, which this branch never created).
+            // Mirrors the outer catch below EXACTLY (same rebuild-slot
+            // cleanup, same three status assignments, same log door, same
+            // "leave whatever's already on screen standing" fail-SAFE
+            // posture) — kept as its own block rather than falling into
+            // that one so a video item's failure can never accidentally run
+            // any image-pipeline cleanup it never entered (e.g.
+            // `releaseLoad`, which this branch never created).
+            if (state.wholeImageRebuild === wi) state.wholeImageRebuild = null;
             wi.status = 'error';
             wi.error = String(err?.message || err);
             log.error(`whole-image video load failed for "${item.id}" (${item.src}):`, err);
@@ -12302,26 +12297,6 @@ export async function startVtPanViewer({
         // back up into a TDR (the guard the streaming path uses too).
         const gpuQueue = renderer.backend?.isWebGPUBackend ? renderer.backend.device?.queue : null;
 
-        // SUPERSESSION GUARD (mythica-machina-press#431) — mirrors
-        // `prepareFloor`'s own generation-counter `isStale` idiom (a few
-        // thousand lines below): a stale async operation notices its own
-        // supersession and bails out harmlessly instead of mutating state a
-        // newer operation already owns. Adapted here to an IDENTITY check
-        // rather than a counter — this closure already captures the exact
-        // `wi` this load belongs to (the enclosing function's own `const
-        // wi`, a few dozen lines up), and `state.wholeImage` already IS this
-        // item's single "which build is current" pointer: a stale-src
-        // rebuild (this function's own top-of-function guard) always
-        // REPLACES that pointer with a brand-new object rather than
-        // mutating this one in place, so `state.wholeImage !== wi` is exact
-        // and needs no dedicated counter field the way `prepareFloor` does.
-        // Checked after every meaningful `await` below, the same density as
-        // `prepareFloor`'s own checks — a superseded result must never be
-        // pushed into `wi.tiles`/`scene.add`ed onto the live scene, and any
-        // GPU resource a stale attempt already built must be disposed
-        // instead of leaked (each check site below disposes whatever
-        // actually exists at that point — see its own comment).
-        const isStale = () => state.wholeImage !== wi;
         try {
           // Our chain promise is only ever RESOLVED (releaseLoad in finally),
           // never rejected, so a plain await cannot propagate a prior failure.
@@ -12500,21 +12475,19 @@ export async function startVtPanViewer({
                 );
               }
               wi.tiles.push(t);
-              // The real tile now covers this item's whole footprint, so
-              // the synchronous placeholder built at the top of this
-              // function (see its own "DISCLOSURE-SAFETY PLACEHOLDER"
-              // comment) has done its job — retire it now, in this same
-              // synchronous block, so there is no frame with both meshes
-              // present and no frame with neither.
-              removeWholeImagePlaceholderTiles(wi);
-              wi.compressed = c.cached ? `${c.format}(cached)` : c.format;
               // alphaStats/alphaMinGrid are already set — see the comment a
               // few dozen lines up, right before this tile's own
               // `setTileGeometry` call, which is what actually needs them.
-              wi.status = 'ready';
-              scheduleResidencyUpdate().catch(() => {
-                // Non-fatal: the next real input refreshes visibility anyway.
-              });
+              wi.compressed = c.cached ? `${c.format}(cached)` : c.format;
+              // The real tile now covers this item's whole footprint —
+              // commit it. For a fresh load this retires the synchronous
+              // placeholder built at the top of this function (see its own
+              // "DISCLOSURE-SAFETY PLACEHOLDER" comment); for a rebuild this
+              // is the flash-free swap (see this function's own THE
+              // FLASH-FREE COMMIT comment). Either way, one synchronous
+              // call, no frame drawn in between — see `commitWholeImageBuild`'s
+              // own header, beside `disposeWholeImageTiles` below.
+              commitWholeImageBuild(state, item, wi);
               return; // compressed → done (releaseLoad still runs in the finally below)
             }
           } catch (err) {
@@ -12676,25 +12649,19 @@ export async function startVtPanViewer({
           // Guarded the same way as the compressed path's own commit above —
           // if the loop above broke out on isStale(), every tile THIS
           // attempt built has already been disposed (or never built), and
-          // this now-stale `wi` must not be flipped to 'ready' or trigger a
-          // residency refresh on the NEW build's behalf; that build's own
-          // load owns its own status/refresh.
+          // this now-stale `wi` must not be committed or trigger a residency
+          // refresh on the NEW build's behalf; that build's own load owns
+          // its own status/refresh.
           if (!isStale()) {
-            // Same retirement as the compressed path above, run once after
-            // EVERY raw sub-tile has been pushed — not per-tile inside the
-            // loop — so the placeholder keeps covering whichever sub-tiles
-            // haven't loaded YET for the full duration of this loop's per-
-            // tile GPU-drain awaits, and is only removed once nothing in
-            // this item's footprint still depends on it.
-            removeWholeImagePlaceholderTiles(wi);
-            wi.status = 'ready';
-            // The meshes were added mid-load with visible:false, and nothing else
-            // sets their visibility until the NEXT input event — which is why the
-            // big textures stayed BLACK until the user panned. Re-run the refresh
-            // now so they appear the instant they finish loading.
-            scheduleResidencyUpdate().catch(() => {
-              // Non-fatal: the next real input refreshes visibility anyway.
-            });
+            // The real tiles now cover this item's whole footprint — commit.
+            // For a fresh load this retires the placeholder, run once after
+            // EVERY raw sub-tile has been pushed (not per-tile inside the
+            // loop above) so it keeps covering whichever sub-tiles haven't
+            // loaded YET for the full duration of this loop's per-tile
+            // GPU-drain awaits. For a rebuild this is the flash-free swap —
+            // see `commitWholeImageBuild`'s own header, beside
+            // `disposeWholeImageTiles` below, either way.
+            commitWholeImageBuild(state, item, wi);
           }
         } catch (err) {
           // Deliberately NOT calling removeWholeImagePlaceholderTiles here
@@ -12704,15 +12671,31 @@ export async function startVtPanViewer({
           // to a hole; `wi.tiles` already stayed empty forever on this
           // path before this fix existed, so leaving the placeholder here
           // is strictly safer than what this codebase already accepted,
-          // never a new risk.
+          // never a new risk. For a REBUILD there is no placeholder to
+          // leave standing at all — the OLD, already-correct build simply
+          // stays exactly as `state.wholeImage`, an even safer failure mode
+          // than case 1's placeholder-forever (real art, not a stand-in).
+          //
+          // `state.wholeImageRebuild` cleared HERE, not left dangling — only
+          // when this attempt is still the current one (a newer rebuild may
+          // already have superseded it and reassigned the field to ITS OWN
+          // `wi`, which must not be clobbered). Required for correctness,
+          // not just tidiness: leaving a permanently-failed `wi` parked at
+          // `state.wholeImageRebuild` would make the in-flight dedup check
+          // at this function's own top (`state.wholeImageRebuild.src ===
+          // item.src`) mistake a dead attempt for one still converging,
+          // silently blocking every future retry of this exact src.
           //
           // NOT isStale()-guarded, unlike every success path above — a
           // superseded attempt's own failure is harmless either way (this
-          // `wi` is already detached from `state.wholeImage`, so nothing
-          // reads its `.status`/`.error` for display), and the diagnostic
-          // value of knowing THIS src genuinely failed to load outweighs
-          // the log noise of an occasional message about a src nobody is
-          // looking at any more.
+          // `wi` is either already detached from `state.wholeImage` — a
+          // fresh load a newer rebuild replaced — or was never attached to
+          // it in the first place — a rebuild, by design — so nothing reads
+          // its `.status`/`.error` for display), and the diagnostic value of
+          // knowing THIS src genuinely failed to load outweighs the log
+          // noise of an occasional message about a src nobody is looking at
+          // any more.
+          if (state.wholeImageRebuild === wi) state.wholeImageRebuild = null;
           wi.status = 'error';
           wi.error = String(err?.message || err);
           log.error(`whole-image load failed for "${item.id}" (${item.src}):`, err);
@@ -12724,6 +12707,201 @@ export async function startVtPanViewer({
       })();
 
       return wi;
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // DISCLOSURE-SAFETY PLACEHOLDER (mythica-machina-press#435) — built
+    // SYNCHRONOUSLY, before `wi.loadPromise` has even started its first
+    // `await`, by `ensureWholeImageMeshes`'s own FRESH-load branch (the
+    // `else` beside the `state.wholeImageRebuild = wi` assignment, above).
+    // Read this before touching either of the two real build paths further
+    // down in that promise's body.
+    //
+    // THE GAP THIS CLOSES: everything from here to the first real
+    // `scene.add(mesh)` inside `wi.loadPromise` used to be pure wall-clock
+    // time with NO occluding geometry for this item at all — first an
+    // `await priorLoad` for the serialized whole-image queue (itself
+    // bounded by every OTHER giant image already loading), then the real
+    // fetch/decode/compress/upload chain, which compressed-textures.js's
+    // own header and the live author report both put at 5-10 minutes for
+    // a large source image. A Tile in this engine is very often placed
+    // specifically to hide something (a roof over an unexplored room, a
+    // secret-door overlay) — the multifloor composite relies on an upper
+    // floor's OWN authored alpha holes to show the floor below only where
+    // the art actually has a window or stairwell cut into it (see bc-
+    // compress.worker.js's header for the same "alpha holes are load-
+    // bearing" point). A tile with no mesh at all has no alpha holes — its
+    // ENTIRE footprint is one unintended hole — so every second this gap
+    // stayed open was a second a player could see straight through
+    // something a GM placed on purpose. Neither existing "wait honestly"
+    // path closes it: `loading-screen.js`'s cold-load curtain force-
+    // reveals at HARD_REVEAL_MS regardless of outstanding compression
+    // (and tears its own DOM node down on reveal, so nothing persists to
+    // say "still compressing" even then), and a LIVE post-load change on
+    // the CURRENT floor — a GM macro editing a Tile's `texture.src`
+    // (Stage Manager-style), or dropping a brand-new tile — never reaches
+    // `prepareFloor`'s own "await compression before reveal" phase at
+    // all, because that phase only runs on a FLOOR SWITCH. So this gap
+    // was reachable on an already-visible floor, not just during a cold
+    // load — FOR A FIRST-EVER LOAD; see "FRESH LOADS ONLY", below, for why
+    // a live re-texture on an ALREADY-shown item no longer reaches this
+    // function at all.
+    //
+    // THE FIX: build the SAME shape of tile entry the real paths below
+    // build — same `buildWholeImageMaterial`, same `setTileGeometry`,
+    // same `new THREE.Mesh(...)` + `scene.add(mesh)` — but through a
+    // trivial 1×1 fully-opaque texture instead of the real (possibly
+    // still-compressing) art. It is pushed onto `wi.tiles` itself, not a
+    // parallel system, so `refreshWholeImageItem` (run right after
+    // `ensureWholeImageMeshes` returns to ITS OWN caller) decides this
+    // mesh's visibility/renderOrder exactly like it would any other tile —
+    // zero changes needed there.
+    //
+    // WHY A SEPARATE MESH, NOT A LIVE TEXTURE SWAP ON ONE SHARED MESH —
+    // this was the recommended-but-not-mandated shape of the fix, and it
+    // was investigated, not assumed. `envLight.outdoorsTexNode.value =
+    // tex` (a few thousand lines up) proves swapping a TSL texture node's
+    // `.value` live IS a real, working pattern in this codebase — but
+    // every proven use of it swaps between textures of the SAME kind (two
+    // `THREE.DataTexture`s, same uncompressed RGBA8 format). It has never
+    // been exercised swapping an uncompressed placeholder for a
+    // `THREE.CompressedTexture` (a genuinely different GPU texture format
+    // — BC1/BC7 block-compressed vs. plain RGBA8, a different upload path
+    // per three.webgpu.js's own `_copyCompressedBufferToTexture` vs.
+    // `copyExternalImageToTexture`), and `buildWholeImageMaterial` samples
+    // `tex` from TWO separate call sites (`physicalSolidityAlpha` and
+    // `colorNode`'s own albedo taps), neither of which currently exposes a
+    // swappable node — wiring that up would mean restructuring the most
+    // incident-prone material builder in this engine (two confirmed real
+    // device-loss incidents already trace through this exact pipeline —
+    // see compressed-textures.js's own header) on the strength of an
+    // untested cross-format assumption. A second, disposable mesh instead
+    // reuses every one of those call sites completely unmodified, for
+    // BOTH the placeholder and the real texture — the only new operations
+    // are `scene.add`/`removeFromParent`/`.dispose()`, all three already
+    // proven mid-session, on a running viewer, a few thousand lines up
+    // (the region-mesh reconcile: `entry.mesh.removeFromParent();
+    // entry.material.dispose();`). Slower to write than a `.value =`
+    // swap; nothing new to get wrong in the one pipeline that has already
+    // twice proven "obviously safe" wrong.
+    //
+    // WHY `makeDisclosurePlaceholderTexture`, NOT the shared
+    // `makeOutdoorsPlaceholderTexture` (2026-09-02 correction — the first
+    // version of this fix DID reuse the white one, on the reasoning that
+    // alpha≡255 is the only property that matters here; author report the
+    // same day: a live re-texture through it read as "the tile flashes
+    // white for a moment", a real visual regression). Alpha≡255 is still
+    // the only property that matters for `physicalSolidityAlpha`/the
+    // depth-authority system (a placeholder must read as "real art here"),
+    // but RGB is not free to pick arbitrarily once the placeholder can
+    // appear during a LIVE update on an already-visible tile, not just
+    // during a cold, curtained load — a flash is exactly the kind of thing
+    // a curtain hides and a live update does not. Black matches this
+    // engine's own loading-curtain ground colour, so a flash reads as
+    // "still loading", not a strobe. See that function's own doc for why
+    // it is a genuine second function rather than a colour parameter on
+    // the shared one (the white in `makeOutdoorsPlaceholderTexture` is
+    // semantically load-bearing for its own callers, not an arbitrary
+    // default). NOW READ ONLY EVER AT A FIRST-EVER LOAD (see "FRESH LOADS
+    // ONLY" below) — but left exactly as before rather than reverted to
+    // white, since a first load can still race a slow curtain reveal (see
+    // "THE GAP THIS CLOSES", above) and black remains the right colour for
+    // that case too.
+    //
+    // WHY NO VEGETATION MATERIAL, EVEN WHEN `vegActive` IS TRUE — the
+    // placeholder's only job is opaque coverage, which `buildWholeImage
+    // Material` already gives it; replicating `buildVegetationMaterial`'s
+    // tessellation/wind/shadow machinery for a mesh that lives for, at
+    // most, one compression pass would be real added risk (a second,
+    // rarely-exercised code path through the wind system) for zero
+    // disclosure-safety benefit — nothing is hidden BEHIND a vegetation
+    // tile's own sway, only behind its OPAQUE footprint, which a plain
+    // quad already covers. `vegActive: false` on the entry below is
+    // therefore factually correct for THIS entry, not a simplification.
+    //
+    // WHY IT NEVER GETS RE-EVALUATED PER FRAME — it doesn't need to be:
+    // it is removed, once, in the SAME synchronous block that pushes the
+    // first real tile(s) for this item (see `removeWholeImagePlaceholder
+    // Tiles`'s call sites, inside `commitWholeImageBuild` below) — so
+    // there is no frame with both the placeholder and zero real tiles, nor
+    // a frame where the placeholder outlives the real art it stands in
+    // for.
+    //
+    // WHY A FAILED LOAD DOES NOT REMOVE IT — see the outer `catch` block
+    // further down: on total failure (a 404, an undecodable file)
+    // `wi.tiles` used to stay empty forever, i.e. today's failure mode for
+    // a broken whole-image item was already a PERMANENT hole. Leaving the
+    // placeholder standing on failure is strictly SAFER than that — a
+    // permanently-broken tile now fails to a permanent opaque stand-in
+    // instead of a permanent hole. Fail-SAFE, not merely fail-open
+    // (memory: feedback_safety_slide_outranks_doctrine).
+    //
+    // FRESH LOADS ONLY (mythica-machina-press#431, revised again same day
+    // — this comment briefly read "a rebuild falls through this SAME
+    // construction path, so a live re-texture now gets this placeholder
+    // too" between the previous two fixes landing; that is no longer
+    // true). A live `texture.src` change on an ALREADY-SHOWN item is now a
+    // REBUILD (see `ensureWholeImageMeshes`'s own STALE-SRC REBUILD / THE
+    // FLASH-FREE COMMIT comments, at that function's top) that never calls
+    // this function at all — the OLD, already-correct art keeps covering
+    // this item's footprint for the entire wait, so there is no disclosure
+    // gap for a stand-in to close, and the flash this section's own colour
+    // choice was invented to soften cannot happen here any more either.
+    // This function is reached ONLY for a genuinely first-ever load, where
+    // nothing valid is on screen yet and the gap this whole comment
+    // describes is real.
+    //
+    // @param {object} wi @param {object} state @param {object} item
+    // @param {number} imageW @param {number} imageH
+    function buildDisclosurePlaceholderTile(wi, state, item, imageW, imageH) {
+      const placeholderTex = makeDisclosurePlaceholderTexture(THREE);
+      try {
+        renderer.initTexture(placeholderTex);
+      } catch (_) {
+        // Backend not up yet — same tolerated race every other texture
+        // built in this function already accepts; Three uploads it lazily
+        // on first render instead of on this forced call.
+      }
+      const {
+        material: placeholderMaterial,
+        appearance: placeholderAppearance,
+        motion: placeholderMotion,
+        tileMotion: placeholderTileMotion,
+        floorAttrUniforms: placeholderFloorAttrUniforms,
+        floorAttrItem: placeholderFloorAttrItem,
+        uExpectedDepth: placeholderUExpectedDepth,
+      } = buildWholeImageMaterial(placeholderTex, item);
+      const placeholderGeometry = new THREE.BufferGeometry();
+      const placeholderTileEntry = {
+        // Logical full-image rect, matching the compressed path's own
+        // single-tile shape (`wholeTile` below) — a placeholder never
+        // splits regardless of how the REAL load eventually resolves (one
+        // compressed tile, or several raw-fallback ones): one quad
+        // covering the whole placement is always at least as opaque as
+        // whatever shape the real art ends up taking.
+        tile: { sx: 0, sy: 0, sw: imageW, sh: imageH, col: 0, row: 0 },
+        sub: null,
+        tex: placeholderTex,
+        geometry: placeholderGeometry,
+        material: placeholderMaterial,
+        appearance: placeholderAppearance,
+        motion: placeholderMotion,
+        tileMotion: placeholderTileMotion ?? null,
+        mesh: null,
+        floorAttrUniforms: placeholderFloorAttrUniforms ?? null,
+        floorAttrItem: placeholderFloorAttrItem ?? null,
+        uExpectedDepth: placeholderUExpectedDepth ?? null,
+        vegActive: false, // see this block's own "WHY NO VEGETATION MATERIAL" note above
+        isPlaceholder: true, // marks this entry for wholesale removal — see removeWholeImagePlaceholderTiles
+      };
+      setTileGeometry(placeholderTileEntry, state.placement, imageW, imageH, 1, 0, null, null);
+      const placeholderMesh = new THREE.Mesh(placeholderGeometry, placeholderMaterial);
+      placeholderMesh.frustumCulled = false;
+      placeholderMesh.visible = false; // the refresh loop (refreshWholeImageItem, run right after ensureWholeImageMeshes returns to ITS OWN caller) decides visibility, same as every other tile
+      placeholderMesh.renderOrder = wi.renderOrder;
+      placeholderTileEntry.mesh = placeholderMesh;
+      scene.add(placeholderMesh);
+      wi.tiles.push(placeholderTileEntry);
     }
 
     /**
@@ -12779,9 +12957,17 @@ export async function startVtPanViewer({
      * gl.texImage2D(...)`) already handle it as a first-class texture
      * source needing no bespoke plumbing here.
      *
-     * @param {object} wi - the wholeImage record being built
-     *   (`state.wholeImage` — the SAME object `ensureWholeImageMeshes`
-     *   already created and returned before kicking off `wi.loadPromise`).
+     * @param {object} wi - the wholeImage record being built. For a FRESH
+     *   load this is already `state.wholeImage` (the SAME object
+     *   `ensureWholeImageMeshes` created and returned before kicking off
+     *   `wi.loadPromise`); for a REBUILD (mythica-machina-press#431) it is
+     *   `state.wholeImageRebuild` instead — built fully off to the side,
+     *   never written to `state.wholeImage` until `commitWholeImageBuild`
+     *   (below `disposeWholeImageTiles`, called at this function's own tail)
+     *   says it's ready. Either way this function does not need to know
+     *   which case it's in — it just finishes building `wi` and hands it to
+     *   `commitWholeImageBuild`, which reads `state.wholeImageRebuild` to
+     *   tell the two apart.
      * @param {object} state
      * @param {object} item
      * @param {number} imageW @param {number} imageH - from
@@ -12792,8 +12978,13 @@ export async function startVtPanViewer({
      *   from `video.videoWidth`/`videoHeight` would let this tile's OWN
      *   geometry disagree with what the rest of the pipeline placed it
      *   against.
-     * @param {() => boolean} isStale - `state.wholeImage !== wi`, from this
-     *   function's one caller.
+     * @param {() => boolean} isStale - built once by this function's one
+     *   caller (`ensureWholeImageMeshes`, inside `wi.loadPromise`) and
+     *   shared with the compressed/raw image paths there — a fresh-load
+     *   identity check (`state.wholeImage !== wi`) or a rebuild generation
+     *   check (`state.wholeImageRebuildGeneration !== myGeneration`),
+     *   whichever this build is. This function does not need to know which;
+     *   it only needs the boolean.
      */
     async function buildVideoWholeImageTile(wi, state, item, imageW, imageH, isStale) {
       const video = document.createElement('video');
@@ -13000,13 +13191,7 @@ export async function startVtPanViewer({
       t.mesh = mesh;
       scene.add(mesh);
       wi.tiles.push(t);
-      // The real tile now covers this item's whole footprint — retire the
-      // placeholder now, in this same synchronous block, so there is no
-      // frame with both meshes present and no frame with neither (same
-      // discipline as the compressed/raw paths' own identical call).
-      removeWholeImagePlaceholderTiles(wi);
       wi.compressed = 'video'; // see this field's own declaration, a few dozen lines up in this function's caller
-      wi.status = 'ready';
 
       // THE ACTUAL PLAYBACK TRIGGER — see foundry/tile-video.js's own
       // header for the full game.video integration + Foundry-source
@@ -13021,21 +13206,29 @@ export async function startVtPanViewer({
       // back to the schema defaults.
       playTileVideo(video, item._placement?.kind === 'tile' ? item._placement.tileDoc : null);
 
-      scheduleResidencyUpdate().catch(() => {
-        // Non-fatal: the next real input refreshes visibility anyway.
-      });
+      // The real tile now covers this item's whole footprint — commit it
+      // through the SAME commit point the compressed/raw image paths use
+      // (mythica-machina-press#431), one synchronous call: retires the
+      // placeholder for a first-ever load, or performs the flash-free
+      // old→new swap for a rebuild — see `commitWholeImageBuild`'s own
+      // header (beside `disposeWholeImageTiles`) for the full mechanism.
+      commitWholeImageBuild(state, item, wi);
     }
 
     /**
      * Remove and dispose every DISCLOSURE-SAFETY PLACEHOLDER tile still
-     * sitting in `wi.tiles` (see `ensureWholeImageMeshes`'s own
-     * "DISCLOSURE-SAFETY PLACEHOLDER" comment for why one can be there at
-     * all). Called at BOTH real-texture success points inside
-     * `ensureWholeImageMeshes`'s `wi.loadPromise` — compressed and raw-
-     * fallback — the moment the first genuine tile(s) for this item have
-     * just been pushed and are about to take over. Deliberately NEVER
-     * called from that promise's outer `catch` block, so a load that fails
-     * outright leaves its placeholder standing forever rather than
+     * sitting in `wi.tiles` (see `buildDisclosurePlaceholderTile`'s own
+     * header for why one can be there at all). Called from
+     * `commitWholeImageBuild`'s FRESH-load branch (below, beside
+     * `disposeWholeImageTiles`) — reached from all three of
+     * `ensureWholeImageMeshes`'s construction paths' own success points
+     * (compressed, raw-fallback, video), the moment the first genuine
+     * tile(s) for this item have just been pushed and are about to take
+     * over. A REBUILD never has a placeholder to remove in the first place
+     * (`buildDisclosurePlaceholderTile` is FRESH-load-only) — see
+     * `commitWholeImageBuild`'s own header for how it tells the two cases
+     * apart. Deliberately NEVER called on a failed load, so a load that
+     * fails outright leaves its placeholder standing forever rather than
      * reverting to a hole (fail-SAFE, not fail-open — see that same
      * comment's "WHY A FAILED LOAD DOES NOT REMOVE IT" note).
      *
@@ -13089,12 +13282,25 @@ export async function startVtPanViewer({
     /**
      * Remove and dispose EVERY tile on a `wi` — real art and any surviving
      * placeholder alike — unconditionally, not just the placeholder-tagged
-     * ones `removeWholeImagePlaceholderTiles` targets. The sibling this
-     * function's own top-of-function STALE-SRC REBUILD comment calls out:
-     * where that function retires a placeholder because the REAL art just
-     * took over, this one throws away an entire `wi` — real art included —
-     * because a live `item.src` change means it no longer describes what
-     * this item should be showing at all.
+     * ones `removeWholeImagePlaceholderTiles` targets. Used to throw away an
+     * entire STALE `wi` — real art included — because a live `item.src`
+     * change means it no longer describes what this item should be showing
+     * at all.
+     *
+     * CALLED FROM `commitWholeImageBuild`'s REBUILD branch (below), AT
+     * COMMIT TIME — mythica-machina-press#431, revised: this function's own
+     * disposal work is unchanged, but WHEN it runs moved. It used to run
+     * immediately, at the top of `ensureWholeImageMeshes`, the instant a
+     * `.src` mismatch was noticed — disposing the OLD, still-correctly-shown
+     * build before the NEW one had even started fetching, which is exactly
+     * what forced a placeholder to stand in for the gap in between. It now
+     * runs only once the NEW build is fully ready, in the SAME synchronous
+     * block that flips `state.wholeImage` over to it (see
+     * `commitWholeImageBuild`'s own header, and `ensureWholeImageMeshes`'s
+     * own THE FLASH-FREE COMMIT comment, at that function's top, for the
+     * full mechanism this timing change is in service of) — so the OLD
+     * build is disposed only once nothing on screen depends on it any more,
+     * never before.
      *
      * FIELD LIST verified against `stopVtPanViewer`'s own full-teardown loop
      * (this function's file, `stopVtPanViewer` — a few thousand lines up
@@ -13122,9 +13328,9 @@ export async function startVtPanViewer({
      * is kept even though a reassignment would likely be just as safe here
      * too (this `wi` is about to be dropped by its only caller regardless).
      *
-     * @param {object} wi - the STALE `state.wholeImage` being replaced, not
-     *   the new one — see the STALE-SRC REBUILD comment at this file's
-     *   `ensureWholeImageMeshes` for the one call site.
+     * @param {object} wi - the STALE build being replaced (the OLD
+     *   `state.wholeImage`, captured by `commitWholeImageBuild` just before
+     *   it reassigns that pointer to the new build) — never the new one.
      */
     function disposeWholeImageTiles(wi) {
       for (let i = wi.tiles.length - 1; i >= 0; i--) {
@@ -13183,6 +13389,77 @@ export async function startVtPanViewer({
         stopAndDetachTileVideo(t);
         wi.tiles.splice(i, 1);
       }
+    }
+
+    /**
+     * THE ONE COMMIT POINT (mythica-machina-press#431) for a whole-image
+     * build that has just produced its first real tile(s) — called from all
+     * three of `ensureWholeImageMeshes`'s construction paths' own success
+     * points (compressed, raw-fallback, and `buildVideoWholeImageTile`'s own
+     * video path), so "the new tile is done and ready to be displayed" (the
+     * author's own phrase, from the follow-up request this exists to
+     * satisfy) means exactly one thing regardless of which of the three
+     * built it.
+     *
+     * SELF-DETERMINING, not told which case it's in: reads
+     * `state.wholeImageRebuild === wi` to decide FRESH LOAD vs. REBUILD,
+     * rather than taking a boolean from its caller. Every caller already has
+     * `state` and the just-finished `wi` in scope regardless, so asking
+     * `state` directly is one fewer thing a caller can get wrong, and it is
+     * the same self-determination style this file already uses for the
+     * fresh-load identity check (`state.wholeImage !== wi`) one layer up.
+     *
+     * TWO BRANCHES, ONE EACH:
+     *  - FRESH LOAD: `wi` has been `state.wholeImage` since the moment
+     *    `ensureWholeImageMeshes` created it — this item's disclosure-safety
+     *    placeholder (`buildDisclosurePlaceholderTile`) has been covering it
+     *    the entire wait. Unchanged from before this revision: retire the
+     *    placeholder, mark ready, schedule a residency refresh so the
+     *    (until-now invisible) real tile appears on the very next pass.
+     *  - REBUILD: `wi` has been sitting at `state.wholeImageRebuild`,
+     *    `mesh.visible: false`, never touching `state.wholeImage` — see
+     *    `ensureWholeImageMeshes`'s own THE FLASH-FREE COMMIT comment (that
+     *    function's top) for why. This is the moment it takes over: read the
+     *    OLD build's OWN current visibility (`oldWi.tiles[0]?.mesh?.visible`
+     *    — the same "ask the tile what it's already showing" idiom
+     *    `syncTokenPlacements` already uses a few thousand lines up, rather
+     *    than re-deriving on-screen/isolate-mode from scratch here), flip
+     *    `state.wholeImage` from old to new, hand the new build to
+     *    `refreshWholeImageItem` so its tiles pick up that SAME visibility
+     *    (plus renderOrder, plus a fresh `setTileGeometry` pass in case
+     *    placement moved during the wait), and dispose the OLD build. ALL of
+     *    that is ONE synchronous block — no `await` anywhere in this
+     *    function — which is exactly `prepareFloor`'s own "THE SECRETS FIX,
+     *    MECHANICALLY" argument (that function, a few thousand lines below,
+     *    reused here one level down): a browser can only ever present a
+     *    frame using state that exists the instant a synchronous task
+     *    yields back to the event loop, so a pass that both hides the old
+     *    and shows the new in the SAME synchronous block can never have a
+     *    frame drawn with neither — no flash, no placeholder, no gap.
+     *    Disposal is LAST, after the swap and the visibility refresh, so it
+     *    can never race the thing it's cleaning up after.
+     *
+     * @param {object} state
+     * @param {object} item
+     * @param {object} wi - the just-completed build (whichever construction
+     *   path finished it).
+     */
+    function commitWholeImageBuild(state, item, wi) {
+      if (state.wholeImageRebuild === wi) {
+        const oldWi = state.wholeImage;
+        const show = oldWi?.tiles?.[0]?.mesh?.visible ?? false;
+        state.wholeImage = wi;
+        state.wholeImageRebuild = null;
+        wi.status = 'ready';
+        refreshWholeImageItem(state, item, show, true);
+        if (oldWi) disposeWholeImageTiles(oldWi);
+      } else {
+        removeWholeImagePlaceholderTiles(wi);
+        wi.status = 'ready';
+      }
+      scheduleResidencyUpdate().catch(() => {
+        // Non-fatal: the next real input refreshes visibility anyway.
+      });
     }
 
     /** Update a whole-image item each refresh: reposition on placement change,

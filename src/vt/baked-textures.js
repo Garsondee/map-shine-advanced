@@ -1,7 +1,7 @@
 /**
  * @fileoverview vt/baked-textures.js — client for build-time pre-baked BC1/BC7
  * sidecars (mythica-machina-press#439: bake once at module-build time instead
- * of asking every player's browser to encode). Looks for a `.msa-baked/
+ * of asking every player's browser to encode). Looks for a `msa-baked/
  * manifest.json` near a source asset and, on a fresh hit, fetches and decodes
  * the sidecar instead of the caller ever touching the source image.
  *
@@ -24,7 +24,7 @@
  *
  * WALK-UP, NOT A HARD-CODED FOLDER NAME. The manifest is not assumed to live
  * under any specific directory (e.g. "assets/") — this looks in the asset's
- * own directory first, then a few parents up, for a `.msa-baked/
+ * own directory first, then a few parents up, for a `msa-baked/
  * manifest.json`. That matches the baker's own convention (one manifest per
  * module, sitting next to the assets it covers) without this file hard-coding
  * that module layout.
@@ -55,7 +55,7 @@ function dirname(url) {
 }
 
 async function fetchManifest(dir, fetchFn) {
-  const url = `${dir}/.msa-baked/manifest.json`;
+  const url = `${dir}/msa-baked/manifest.json`;
   if (_manifestCache.has(url)) return _manifestCache.get(url);
   const p = (async () => {
     try {
@@ -121,7 +121,7 @@ export async function fetchBakedTexture(src, { fetchFn = fetch } = {}) {
     if (!entry.file || (entry.format !== 'bc1' && entry.format !== 'bc7')) return null;
     if (!(await isFresh(src, entry, fetchFn))) return null;
 
-    const sidecarUrl = `${manifestDir}/.msa-baked/${entry.file}`;
+    const sidecarUrl = `${manifestDir}/msa-baked/${entry.file}`;
     const resp = await fetchFn(sidecarUrl);
     if (!resp.ok) return null;
     const buf = new Uint8Array(await resp.arrayBuffer());

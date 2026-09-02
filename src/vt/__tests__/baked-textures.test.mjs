@@ -66,7 +66,7 @@ export async function run(t) {
     _clearBakedManifestCacheForTests();
     const sidecar = await makeBc1Sidecar(16, 16);
     const { fetchFn, calls } = makeFakeFetch({
-      '/modules/mythica-machina-mansion/assets/.msa-baked/manifest.json': {
+      '/modules/mythica-machina-mansion/assets/msa-baked/manifest.json': {
         json: {
           entries: {
             'ground_floor_150.webp': { file: 'ground_floor_150.webp.msabc', format: 'bc1', sourceBytes: 12345 },
@@ -74,7 +74,7 @@ export async function run(t) {
         },
       },
       '/modules/mythica-machina-mansion/assets/ground_floor_150.webp': { headers: { 'content-length': '12345' } },
-      '/modules/mythica-machina-mansion/assets/.msa-baked/ground_floor_150.webp.msabc': { bytes: sidecar },
+      '/modules/mythica-machina-mansion/assets/msa-baked/ground_floor_150.webp.msabc': { bytes: sidecar },
     });
     const result = await fetchBakedTexture('/modules/mythica-machina-mansion/assets/ground_floor_150.webp', {
       fetchFn,
@@ -96,11 +96,11 @@ export async function run(t) {
     _clearBakedManifestCacheForTests();
     const sidecar = await makeBc1Sidecar(8, 8);
     const { fetchFn } = makeFakeFetch({
-      '/modules/mythica-machina-mansion/assets/.msa-baked/manifest.json': {
+      '/modules/mythica-machina-mansion/assets/msa-baked/manifest.json': {
         json: { entries: { 'scenes/thumb.webp': { file: 'scenes/thumb.webp.msabc', format: 'bc1', sourceBytes: 99 } } },
       },
       '/modules/mythica-machina-mansion/assets/scenes/thumb.webp': { headers: { 'content-length': '99' } },
-      '/modules/mythica-machina-mansion/assets/.msa-baked/scenes/thumb.webp.msabc': { bytes: sidecar },
+      '/modules/mythica-machina-mansion/assets/msa-baked/scenes/thumb.webp.msabc': { bytes: sidecar },
     });
     const result = await fetchBakedTexture('/modules/mythica-machina-mansion/assets/scenes/thumb.webp', { fetchFn });
     ok('a nested asset finds a manifest one directory up', result && result.format === 'bc1');
@@ -111,11 +111,11 @@ export async function run(t) {
     _clearBakedManifestCacheForTests();
     const sidecar = await makeBc1Sidecar(8, 8);
     const { fetchFn } = makeFakeFetch({
-      '/modules/m/assets/.msa-baked/manifest.json': {
+      '/modules/m/assets/msa-baked/manifest.json': {
         json: { entries: { 'x.webp': { file: 'x.webp.msabc', format: 'bc1', sourceBytes: 1 } } },
       },
       '/modules/m/assets/x.webp?v=7': { headers: { 'content-length': '1' } },
-      '/modules/m/assets/.msa-baked/x.webp.msabc': { bytes: sidecar },
+      '/modules/m/assets/msa-baked/x.webp.msabc': { bytes: sidecar },
     });
     const result = await fetchBakedTexture('/modules/m/assets/x.webp?v=7', { fetchFn });
     ok('a cache-busting query string on the source URL does not defeat the lookup', result && result.format === 'bc1');
@@ -135,7 +135,7 @@ export async function run(t) {
   {
     _clearBakedManifestCacheForTests();
     const { fetchFn } = makeFakeFetch({
-      '/modules/m/assets/.msa-baked/manifest.json': {
+      '/modules/m/assets/msa-baked/manifest.json': {
         json: { entries: { 'other.webp': { file: 'other.webp.msabc', format: 'bc1', sourceBytes: 1 } } },
       },
     });
@@ -148,11 +148,11 @@ export async function run(t) {
     _clearBakedManifestCacheForTests();
     const sidecar = await makeBc1Sidecar(8, 8);
     const { fetchFn } = makeFakeFetch({
-      '/modules/m/assets/.msa-baked/manifest.json': {
+      '/modules/m/assets/msa-baked/manifest.json': {
         json: { entries: { 'floor.webp': { file: 'floor.webp.msabc', format: 'bc1', sourceBytes: 500 } } },
       },
       '/modules/m/assets/floor.webp': { headers: { 'content-length': '999' } }, // author re-exported the art after baking
-      '/modules/m/assets/.msa-baked/floor.webp.msabc': { bytes: sidecar },
+      '/modules/m/assets/msa-baked/floor.webp.msabc': { bytes: sidecar },
     });
     const result = await fetchBakedTexture('/modules/m/assets/floor.webp', { fetchFn });
     ok('a size mismatch against the live source is treated as stale ⇒ null', result === null);
@@ -163,11 +163,11 @@ export async function run(t) {
     _clearBakedManifestCacheForTests();
     const sidecar = await makeBc1Sidecar(8, 8);
     const { fetchFn } = makeFakeFetch({
-      '/modules/m/assets/.msa-baked/manifest.json': {
+      '/modules/m/assets/msa-baked/manifest.json': {
         json: { entries: { 'floor.webp': { file: 'floor.webp.msabc', format: 'bc1', sourceBytes: 500 } } },
       },
       // no route for the HEAD target ⇒ 404
-      '/modules/m/assets/.msa-baked/floor.webp.msabc': { bytes: sidecar },
+      '/modules/m/assets/msa-baked/floor.webp.msabc': { bytes: sidecar },
     });
     const result = await fetchBakedTexture('/modules/m/assets/floor.webp', { fetchFn });
     ok(
@@ -180,7 +180,7 @@ export async function run(t) {
   {
     _clearBakedManifestCacheForTests();
     const { fetchFn } = makeFakeFetch({
-      '/modules/m/assets/.msa-baked/manifest.json': {
+      '/modules/m/assets/msa-baked/manifest.json': {
         json: { entries: { 'floor.webp': { file: 'floor.webp.msabc', format: 'bc1', sourceBytes: 500 } } },
       },
       '/modules/m/assets/floor.webp': { headers: { 'content-length': '500' } },
@@ -194,11 +194,11 @@ export async function run(t) {
   {
     _clearBakedManifestCacheForTests();
     const { fetchFn } = makeFakeFetch({
-      '/modules/m/assets/.msa-baked/manifest.json': {
+      '/modules/m/assets/msa-baked/manifest.json': {
         json: { entries: { 'floor.webp': { file: 'floor.webp.msabc', format: 'bc1', sourceBytes: 500 } } },
       },
       '/modules/m/assets/floor.webp': { headers: { 'content-length': '500' } },
-      '/modules/m/assets/.msa-baked/floor.webp.msabc': { bytes: new Uint8Array(64) }, // garbage, not a real sidecar
+      '/modules/m/assets/msa-baked/floor.webp.msabc': { bytes: new Uint8Array(64) }, // garbage, not a real sidecar
     });
     const result = await fetchBakedTexture('/modules/m/assets/floor.webp', { fetchFn });
     ok('a corrupt sidecar file resolves null rather than throwing out of the caller', result === null);
@@ -209,7 +209,7 @@ export async function run(t) {
     _clearBakedManifestCacheForTests();
     const sidecar = await makeBc1Sidecar(8, 8);
     const { fetchFn, calls } = makeFakeFetch({
-      '/modules/m/assets/.msa-baked/manifest.json': {
+      '/modules/m/assets/msa-baked/manifest.json': {
         json: {
           entries: {
             'a.webp': { file: 'a.webp.msabc', format: 'bc1', sourceBytes: 1 },
@@ -219,8 +219,8 @@ export async function run(t) {
       },
       '/modules/m/assets/a.webp': { headers: { 'content-length': '1' } },
       '/modules/m/assets/b.webp': { headers: { 'content-length': '1' } },
-      '/modules/m/assets/.msa-baked/a.webp.msabc': { bytes: sidecar },
-      '/modules/m/assets/.msa-baked/b.webp.msabc': { bytes: sidecar },
+      '/modules/m/assets/msa-baked/a.webp.msabc': { bytes: sidecar },
+      '/modules/m/assets/msa-baked/b.webp.msabc': { bytes: sidecar },
     });
     await fetchBakedTexture('/modules/m/assets/a.webp', { fetchFn });
     await fetchBakedTexture('/modules/m/assets/b.webp', { fetchFn });

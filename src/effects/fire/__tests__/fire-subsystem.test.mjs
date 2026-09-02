@@ -366,4 +366,111 @@ export function run(t) {
     Math.abs((emberEngine.paramCalls.at(-1)?.activeCount ?? -1) / atTier3 - 10 / 12) < 1e-9 &&
       Math.abs((smokeEngine.paramCalls.at(-1)?.activeCount ?? -1) / atTier3 - 24 / 12) < 1e-9
   );
+
+  // ── THE DEPTH-AUTHORITY OCCLUSION GATE (mythica-machina-press#469) — fire
+  // previously had zero awareness of what was drawn above it, unlike candle/
+  // lightning which already gate on this. Two SEPARATE subsystem instances
+  // below (their own engines, their own state) so neither disturbs the long
+  // call-count sequence built up against the first subsystem above. ──
+  {
+    const withGateEngines = [];
+    const withGateSubsystem = createFireSubsystem({
+      THREE: { Scene: FakeScene },
+      getFireRenderState: () => ({
+        enabled: true,
+        params: {},
+        perfTier: 2,
+        mPerPx: 0.02,
+        // fires[0] is the REPRESENTATIVE fire syncUnguarded already reads for
+        // sprite scale — a SECOND fire at a wildly different elevation proves
+        // the resolver reads fires[0] specifically, not some other one.
+        fires: [
+          { id: 'f1', x: 50, y: 50, diameterPx: 80, intensity: 1, elevation: 42 },
+          { id: 'f2', x: 10, y: 10, diameterPx: 40, intensity: 1, elevation: 999 },
+        ],
+        spawnCloud: makeCloud([[0, 0]], 1),
+      }),
+      createEngine: ({ kind, archetype, renderOrder, depthTexNode, depthFlagsTexNode }) => {
+        const e = {
+          kind,
+          archetype,
+          renderOrder,
+          depthTexNode,
+          depthFlagsTexNode,
+          scene: { visible: true, renderOrder: 0 },
+          paramCalls: [],
+          setSpawnPoints() {},
+          setParams(p) {
+            e.paramCalls.push(p);
+          },
+          step() {},
+          debugState: () => ({ kind, archetype }),
+        };
+        withGateEngines.push(e);
+        return e;
+      },
+      depthTexNode: { id: 'depthTex' },
+      depthFlagsTexNode: { id: 'depthFlagsTex' },
+      resolveExpectedDepth: (elevation) => elevation * 10,
+    });
+    withGateSubsystem.sync(renderer, 0, 0.016, rect);
+
+    t.ok('depth-authority engines were built', withGateEngines.length > 0);
+    t.ok(
+      "resolveExpectedDepth's result — from fires[0]'s elevation specifically, not fires[1]'s — reaches every " +
+        'engine as setParams.expectedDepth',
+      withGateEngines.every((e) => e.paramCalls.at(-1)?.expectedDepth === 420)
+    );
+    t.ok(
+      'depthTexNode/depthFlagsTexNode reach every engine unchanged, via createEngine',
+      withGateEngines.every((e) => e.depthTexNode?.id === 'depthTex' && e.depthFlagsTexNode?.id === 'depthFlagsTex')
+    );
+  }
+
+  {
+    const noGateEngines = [];
+    const noGateSubsystem = createFireSubsystem({
+      THREE: { Scene: FakeScene },
+      getFireRenderState: () => ({
+        enabled: true,
+        params: {},
+        perfTier: 2,
+        mPerPx: 0.02,
+        fires: [{ id: 'f1', x: 50, y: 50, diameterPx: 80, intensity: 1, elevation: 42 }],
+        spawnCloud: makeCloud([[0, 0]], 1),
+      }),
+      createEngine: ({ kind, archetype, renderOrder, depthTexNode, depthFlagsTexNode }) => {
+        const e = {
+          kind,
+          archetype,
+          renderOrder,
+          depthTexNode,
+          depthFlagsTexNode,
+          scene: { visible: true, renderOrder: 0 },
+          paramCalls: [],
+          setSpawnPoints() {},
+          setParams(p) {
+            e.paramCalls.push(p);
+          },
+          step() {},
+          debugState: () => ({ kind, archetype }),
+        };
+        noGateEngines.push(e);
+        return e;
+      },
+      // depthTexNode/depthFlagsTexNode/resolveExpectedDepth all omitted —
+      // must not throw, must default every engine's expectedDepth to 0, the
+      // same "omit for byte-identical no-gate behaviour" contract candle and
+      // lightning already ship.
+    });
+    noGateSubsystem.sync(renderer, 0, 0.016, rect);
+
+    t.ok('omitting the gate params entirely does not throw, and engines were still built', noGateEngines.length > 0);
+    t.ok(
+      'expectedDepth defaults to 0 and depthTexNode/depthFlagsTexNode default to null when omitted',
+      noGateEngines.every(
+        (e) => e.paramCalls.at(-1)?.expectedDepth === 0 && e.depthTexNode === null && e.depthFlagsTexNode === null
+      )
+    );
+  }
 }

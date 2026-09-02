@@ -3533,6 +3533,19 @@ export async function startVtPanViewer({
       // perf-instrumentation-audit-2026-08-12, same shape as specular's own
       // `profiler` a few call sites down.
       profiler,
+      // THE DEPTH-AUTHORITY OCCLUSION GATE (mythica-machina-press#469 — fire
+      // painted/anchored under a roof tile drew straight through it, because
+      // fire alone among the guarded-additive effects never got this wiring).
+      // Byte-for-byte the same shape as lightningSubsystem's own copy just
+      // above — every depth-authority consumer gets its OWN copy, never a
+      // shared reference (keyhole-depth-authority-design.md).
+      depthTexNode: envLight.depthTexNode,
+      depthFlagsTexNode: envLight.depthFlagsTexNode,
+      resolveExpectedDepth: (elevation) => {
+        const safeElevation = Number.isFinite(elevation) ? elevation : 0;
+        const rank = depthAuthority.rankOfElevation(safeElevation);
+        return computeTieSafeExpectedDepth(rank, depthAuthority.maxRank);
+      },
     });
 
     // ========================================================================

@@ -179,6 +179,19 @@ function fireListSignature(fires) {
  *   (string form) — same reasoning as `specular-surface-subsystem.js`'s own
  *   `profiler` param: this subsystem is constructed independently of
  *   vt-pan-viewer.js's pre-resolved `Z` index table.
+ * @param {*} [deps.depthTexNode] - `buf:scene.depth`'s DEPTH attachment,
+ *   forwarded straight into `createEngine` — the SAME depth-authority
+ *   occlusion gate candle/lightning already use (mythica-machina-press#469).
+ *   Omitted → every engine's gate compiles out, byte-identical to before it
+ *   existed.
+ * @param {*} [deps.depthFlagsTexNode] - `buf:scene.depth`'s COLOUR attachment
+ *   (the Tile "Restrict Lighting" flag). Also forwarded straight through.
+ * @param {(elevation: number) => number} [deps.resolveExpectedDepth] - turns a
+ *   raw world elevation into the tie-safe value the gate compares (`rank` +
+ *   `computeTieSafeExpectedDepth`, the SAME two-step split lightning's own
+ *   injected copy uses — vt-pan-viewer.js constructs both). Called ONCE per
+ *   sync against a REPRESENTATIVE fire's elevation (see `syncUnguarded`'s own
+ *   note), not per particle. Omitted → every engine's `expectedDepth` stays 0.
  * @returns {{scene:*, sync:Function, lightSources:()=>Array<object>,
  *   hasContent:boolean, getStatus:()=>object, dispose:()=>void}}
  */
@@ -190,6 +203,9 @@ export function createFireSubsystem({
   getPxPerMeter = null,
   createEngine = null,
   profiler = null,
+  depthTexNode = null,
+  depthFlagsTexNode = null,
+  resolveExpectedDepth = null,
 }) {
   if (typeof getFireRenderState !== 'function') {
     throw new TypeError(
@@ -257,6 +273,8 @@ export function createFireSubsystem({
         renderOrder,
         windHandle,
         pxPerMeter,
+        depthTexNode,
+        depthFlagsTexNode,
       });
       engines.push({ engine, kind });
       scene.add(engine.scene);
@@ -334,6 +352,19 @@ export function createFireSubsystem({
       params,
       fireScaleChain(fires[0]?.diameterPx ?? 100, mPerPx, { fuel: params?.fuel })
     );
+
+    // THE DEPTH-AUTHORITY OCCLUSION GATE'S INPUT (mythica-machina-press#469) —
+    // ONE value per sync, from the SAME representative fire the line above
+    // already reads for sprite scale, not per particle. This is a deliberate,
+    // honestly-labelled simplification: a floor's fires overwhelmingly share
+    // one ground elevation (mirrors lightning's own per-bolt-not-per-vertex
+    // gate), so the common case is exactly right; an anchor fire deliberately
+    // raised above its floor's other fires is a real, narrower edge case this
+    // does not separately solve — that would need a per-particle elevation
+    // channel, and the spawn-point buffer (fire-spawn-points.js#packSpawnPoints)
+    // has no spare one (`vec4` = x, y, brightness, jitter-radius already).
+    const expectedDepth =
+      typeof resolveExpectedDepth === 'function' ? resolveExpectedDepth(fires[0]?.elevation ?? 0) : 0;
 
     // The spawn cloud is pushed only when it actually needs to change — a full
     // buffer upload and a re-seed, not a per-frame write. Two independent
@@ -422,6 +453,7 @@ export function createFireSubsystem({
         intensity: runtime.fireIntensity,
         cameraHeight: runtime.cameraHeight,
         motionSpeed: runtime.motionSpeed,
+        expectedDepth,
         // ⚠️ FIXED ALONGSIDE THE ABOVE (2026-08-30) — `hueShiftRad`/
         // `posterizeAmount`/`bandCount`/`tintMul` were the other three
         // `fireRuntimeFromParams` fields nothing ever read: computed every

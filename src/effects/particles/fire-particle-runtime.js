@@ -49,6 +49,7 @@ import { ParticleArena, BYTES_PER_PARTICLE } from './particle-arena.js';
 import { createWindHandle } from '../../world/index.js';
 import { createLogger } from '../../core/log.js';
 import { packSpawnPoints } from '../fire/fire-spawn-points.js';
+import { buildDepthHeightGateNode } from '../lighting/point-light-illumination.js';
 import {
   buildFlameShapeAlpha,
   buildFlameShading,
@@ -210,6 +211,13 @@ const PERSPECTIVE_CAMERA_HEIGHT = 1000;
  *   actually gets constructed, is what makes it real.
  * @param {object} [deps.windHandle]
  * @param {number} [deps.pxPerMeter=100]
+ * @param {*} [deps.depthTexNode] - `buf:scene.depth`'s DEPTH attachment (the
+ *   SAME node candle/lightning already read — see candle-flame-render.js's own
+ *   depth-authority doc). Omitted → the occlusion gate compiles out entirely,
+ *   byte-identical to before it existed.
+ * @param {*} [deps.depthFlagsTexNode] - `buf:scene.depth`'s COLOUR attachment
+ *   (B = flags byte, the Tile "Restrict Lighting" bit). Omitted → that ONE
+ *   hard-block compiles out; the rank comparison alone still applies.
  * @returns {object} `{scene, capacity, init, step, setWorldRect, setSpawnPoints, updateWind, debugState}`
  */
 export function createFireParticleEngine({
@@ -222,9 +230,12 @@ export function createFireParticleEngine({
   renderOrder = 0,
   windHandle = TIER0_WIND_HANDLE,
   pxPerMeter = 100,
+  depthTexNode = null,
+  depthFlagsTexNode = null,
 }) {
   const TSL = THREE.TSL;
-  const { Fn, instanceIndex, float, vec2, vec3, vec4, uniform, sin, cos, fract, uv, mix, positionGeometry } = TSL;
+  const { Fn, instanceIndex, float, vec2, vec3, vec4, uniform, sin, cos, fract, uv, mix, positionGeometry, screenUV } =
+    TSL;
 
   const K = KINDS[kind] ?? KINDS.flame;
   const p = system?.params ?? {};
@@ -323,6 +334,14 @@ export function createFireParticleEngine({
    */
   const uCamCentre = uniform(vec2(0, 0));
   const uCamHeight = uniform(float(PERSPECTIVE_CAMERA_HEIGHT));
+  /**
+   * THE DEPTH-AUTHORITY OCCLUSION GATE's OWN INPUT — this engine's population is
+   * one representative elevation per sync (`fire-subsystem.js`'s own doc on
+   * `expectedDepth` explains why one value, not per-particle). Fed through
+   * `computeTieSafeExpectedDepth` by the caller, exactly like every other
+   * consumer of `buildDepthHeightGateNode`.
+   */
+  const uExpectedDepth = uniform(float(0));
 
   // ── THE AUTHOR'S DIALS ────────────────────────────────────────────────────
   // Every one is a MULTIPLIER over the V2-derived constant in `KINDS`, never a
@@ -667,6 +686,21 @@ export function createFireParticleEngine({
     const bright = vLife.y;
     const sd = vLife.w;
     const fade = buildLifeFade(TSL, t01, K.fadeIn, K.fadeOut);
+    // THE DEPTH-AUTHORITY OCCLUSION GATE — the SAME node candle/lightning
+    // already use (point-light-illumination.js#buildDepthHeightGateNode), so a
+    // fire painted/anchored under a roof tile goes dark exactly like they do
+    // (mythica-machina-press#469 — fire previously had no occlusion awareness
+    // at all). Gated on opacity alone: AdditiveBlending's default SrcAlpha
+    // source factor already scales flame/ember's contribution by alpha, and
+    // smoke (NormalBlending) needs opacity gated regardless — no need to also
+    // touch colorNode. `screenUV`, never the bare node — this is a WORLD-space
+    // instanced batch, not a screen-space quad.
+    let occlusionGate = float(1);
+    if (depthTexNode) {
+      const depthHere = depthTexNode.sample(screenUV);
+      const flagsHere = depthFlagsTexNode ? depthFlagsTexNode.sample(screenUV) : null;
+      occlusionGate = buildDepthHeightGateNode(TSL, { depthHere, flagsHere, uLightExpectedDepth: uExpectedDepth });
+    }
     if (kind === 'flame') {
       // The archetype's own silhouette. Phase advances with the particle's age
       // (scaled by uMotionSpeed, so the boil itself can speed up or slow down
@@ -678,15 +712,16 @@ export function createFireParticleEngine({
         .add(sd.mul(float(97)));
       const shape = buildFlameShapeAlpha(TSL, { nx: uv().x, ny: uv().y, phase, seed: sd, archetype });
       const shade = buildFlameShading(TSL, { t01, heat: float(1), brightness: bright, ageToTemperature: uColorAge });
-      return shape.mul(shade.alpha).mul(fade).mul(uOpacityScale);
+      return shape.mul(shade.alpha).mul(fade).mul(uOpacityScale).mul(occlusionGate);
     }
     // Ember and smoke are soft radial dots — V2's ember sprite is a 15×15
     // authored blur, which is what this is, minus the texture fetch.
     const d = uv().sub(0.5).length();
     const soft = d.mul(float(2)).oneMinus().clamp(float(0), float(1));
     const radial = soft.mul(soft);
-    if (kind === 'ember') return radial.mul(float(EMBER_PEAK_OPACITY)).mul(fade).mul(bright).mul(uOpacityScale);
-    return radial.mul(float(0.19)).mul(fade).mul(bright).mul(uOpacityScale);
+    if (kind === 'ember')
+      return radial.mul(float(EMBER_PEAK_OPACITY)).mul(fade).mul(bright).mul(uOpacityScale).mul(occlusionGate);
+    return radial.mul(float(0.19)).mul(fade).mul(bright).mul(uOpacityScale).mul(occlusionGate);
   })();
 
   material.transparent = true;
@@ -767,6 +802,7 @@ export function createFireParticleEngine({
       set(uHueShiftRad, p2.hueShiftRad);
       set(uPosterize, p2.posterizeAmount);
       set(uBandCount, p2.bandCount);
+      set(uExpectedDepth, p2.expectedDepth);
       if (Array.isArray(p2.tintMul) && p2.tintMul.length === 3) {
         uTintMul.value.set(p2.tintMul[0], p2.tintMul[1], p2.tintMul[2]);
       }

@@ -363,7 +363,7 @@ export function buildColorationShadingCore({ THREE, inputs, shared, flags }) {
  * @param {number} [args.animationQuality=0] - a graph-BUILD-time quality tier
  *   forwarded to the seed builder as `quality` (see point-light-
  *   illumination.js's own header for the no-uniform-gates rationale).
- * @param {'foundry'|'inverseSquare'} [args.falloffModel='foundry'] - the radial
+ * @param {'foundry'|'inverseSquare'|'inverseSquareWide'} [args.falloffModel='foundry'] - the radial
  *   falloff curve (see point-light-illumination.js's own param). Must match
  *   the illumination material's so both channels of a light fade together.
  * @param {{x:number,y:number}} [args.windCenter] - see point-light-

@@ -312,12 +312,45 @@ export function elevationRank(floorIndex, unitsAboveFloorBottom) {
 /**
  * Steepness `K` of the windowed inverse-square falloff (see
  * `inverseSquareFalloff`) — bigger = a tighter bright centre and a faster
- * drop-off. Tuned for candles (the only current `falloffModel: 'inverseSquare'`
- * caller): "right next to the candle is bright but the light quickly drops
- * off" (the author's own ask). A module constant, not a uniform — the whole
- * falloff-model choice is a graph-build-time JS branch (`no-uniform-gates`).
+ * drop-off. Tuned for candles (`falloffModel: 'inverseSquare'`, also used
+ * verbatim by lightning's origin-flash): "right next to the candle is bright
+ * but the light quickly drops off" (the author's own ask). A module
+ * constant, not a uniform — the whole falloff-model choice is a graph-
+ * build-time JS branch (`no-uniform-gates`).
  */
 export const INVERSE_SQUARE_STEEPNESS = 8;
+
+/**
+ * The SAME windowed inverse-square shape, steepness `K=1` — FIRE's own
+ * falloff (`falloffModel: 'inverseSquareWide'`), split out from
+ * `INVERSE_SQUARE_STEEPNESS` 2026-09-02 (mythica-machina-press#475,
+ * author-reported: "the light a fire throws is white" — confirmed live
+ * even after `firePuff`'s coloration seed lost its own extra `coreFade`
+ * narrowing).
+ *
+ * ⚠️ THE STEEPNESS ITSELF WAS THE BUG, NOT (ONLY) THE SEED SHAPE. Fire
+ * originally shared `falloffModel: 'inverseSquare'` verbatim with candles —
+ * `INVERSE_SQUARE_STEEPNESS`'s own header said so explicitly ("tuned for
+ * candles... the only current caller"), a claim that stopped being true the
+ * moment fire adopted the same string without a matching claim update
+ * (the exact bug class this codebase's own `feedback_*` names already
+ * cover: a constant tuned for one caller's scale, reused unmodified by a
+ * caller with a much bigger one). At K=8, this falloff is down to ~29% by
+ * half the light's OWN radius and ~12% by 70% of it — a deliberately tight
+ * "bright point, falls off fast" curve, exactly right for a candle's small
+ * radius. Applied to a fire — whose radius is documented elsewhere in this
+ * codebase as substantially larger (`fire-geometry.js#clusterFireSources`'s
+ * own header: "Fire's radii are LARGER") — illumination still LOOKS lit
+ * that far out (it mixes toward the scene's own ambient floor, never to
+ * nothing), but the ADDITIVE coloration splash — genuinely down to a sliver
+ * of its centre value — reads as no colour at all across most of the
+ * visible glow: a small warm ring, then a hard wall of plain brightness.
+ * `K=1` keeps the same "bright centre, clean zero at the edge" shape but
+ * spreads it out into a big, lazy glow — ~70% strength at half radius,
+ * ~39% at 70% — appropriate to a fire's actual scale. Candles and
+ * lightning keep `INVERSE_SQUARE_STEEPNESS` untouched.
+ */
+export const FIRE_INVERSE_SQUARE_STEEPNESS = 1;
 
 /**
  * A physically-flavoured inverse-square falloff over the NORMALIZED radial
@@ -329,17 +362,21 @@ export const INVERSE_SQUARE_STEEPNESS = 8;
  * drives it cleanly to exactly 0 at the light's edge (a raw inverse square
  * never reaches 0, which would leave a hard clip at the mesh boundary). At
  * `dist=0` it is 1; the window and the reciprocal both only reduce it from
- * there. `K` is `INVERSE_SQUARE_STEEPNESS`.
+ * there.
  *
  * @param {*} TSL - THREE.TSL.
  * @param {*} dist - a float TSL node, the normalized radial distance.
+ * @param {number} [steepness=INVERSE_SQUARE_STEEPNESS] - `K` above — bigger
+ *   is tighter/faster. Callers pass their OWN constant (candle/lightning's
+ *   `INVERSE_SQUARE_STEEPNESS`, fire's `FIRE_INVERSE_SQUARE_STEEPNESS`); the
+ *   default keeps every pre-existing call site byte-identical.
  * @returns {*} a float TSL node in [0,1].
  */
-export function inverseSquareFalloff(TSL, dist) {
+export function inverseSquareFalloff(TSL, dist, steepness = INVERSE_SQUARE_STEEPNESS) {
   const { float, clamp } = TSL;
   const d2 = dist.mul(dist);
   const windowTerm = clamp(float(1).sub(d2.mul(d2)), float(0), float(1)); // 1 - dist⁴, → 0 at the edge
-  return windowTerm.mul(windowTerm).div(d2.mul(float(INVERSE_SQUARE_STEEPNESS)).add(float(1)));
+  return windowTerm.mul(windowTerm).div(d2.mul(float(steepness)).add(float(1)));
 }
 
 /**
@@ -921,7 +958,7 @@ function makeSdPolygonEdgeDistance(TSL) {
  * @param {*} args.localUnitXY - the per-light/per-vertex local xy node.
  * @param {*} args.attenuationEased
  * @param {*} args.expectedDepth - the height-gate's `uLightExpectedDepth`.
- * @param {'foundry'|'inverseSquare'} [args.falloffModel='foundry']
+ * @param {'foundry'|'inverseSquare'|'inverseSquareWide'} [args.falloffModel='foundry']
  * @param {*} [args.depthTexNode] @param {*} [args.depthFlagsTexNode] -
  *   `buf:scene.depth`'s two attachments. Omitted → the height gate compiles
  *   out entirely, same posture as before the gate existed.
@@ -971,12 +1008,18 @@ export function buildPointLightSharedTerms({
   // FALLOFF MODEL (2026-07-20) — a graph-BUILD-time JS branch (never a
   // uniform, per no-uniform-gates): `foundry` is the default attenuation-
   // slider corona above; `inverseSquare` is a physical bright-centre/fast-
-  // drop-off curve (candles — see inverseSquareFalloff's own header). The
-  // attenuation slider does not apply to the inverse-square model (its
-  // steepness is INVERSE_SQUARE_STEEPNESS, not the slider).
+  // drop-off curve (candles/lightning — see inverseSquareFalloff's own
+  // header); `inverseSquareWide` (2026-09-02, mythica-machina-press#475) is
+  // the SAME shape at fire's own, much gentler steepness (`FIRE_INVERSE_
+  // SQUARE_STEEPNESS`'s own header has the full "reused a candle-scaled
+  // constant at fire's scale" account). The attenuation slider does not
+  // apply to either inverse-square model (their steepness is the module
+  // constant, not the slider).
   let falloff;
   if (falloffModel === 'inverseSquare') {
     falloff = inverseSquareFalloff(THREE.TSL, dist);
+  } else if (falloffModel === 'inverseSquareWide') {
+    falloff = inverseSquareFalloff(THREE.TSL, dist, FIRE_INVERSE_SQUARE_STEEPNESS);
   } else {
     const attenForFalloff = attenuationEased.max(float(0.0001));
     falloff = smoothstep(float(1), float(1).sub(attenForFalloff), dist);
@@ -1548,7 +1591,7 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
  *   tier — the `tsl/no-uniform-gates` wall's own rule. Only MSA-native
  *   animations that declare tiers (currently `candleFlicker`) read it;
  *   every other seed builder ignores the extra arg harmlessly.
- * @param {'foundry'|'inverseSquare'} [args.falloffModel='foundry'] - the radial
+ * @param {'foundry'|'inverseSquare'|'inverseSquareWide'} [args.falloffModel='foundry'] - the radial
  *   falloff curve, a graph-build-time choice (never a uniform). `foundry` =
  *   the attenuation-slider corona (every real Foundry light); `inverseSquare`
  *   = a physical bright-centre/fast-drop curve (candles). See

@@ -36,8 +36,9 @@
  *   `isRequired`-style override that draws coloration even for a colourless
  *   light. Default false.
  * @property {number} [animationQuality] - graph-build-time tier, default 0.
- * @property {string} falloffModel - `'foundry'` | `'inverseSquare'` — must
- *   be in `BATCH_FALLOFF_MODELS`' closed list or the light is inadmissible.
+ * @property {string} falloffModel - `'foundry'` | `'inverseSquare'` |
+ *   `'inverseSquareWide'` — must be in `BATCH_FALLOFF_MODELS`' closed list
+ *   or the light is inadmissible.
  * @property {boolean} [windPresent] - `Number.isFinite(light.windExposure)`.
  * @property {number} [apertureCount] - a light with any apertures is NEVER
  *   admitted in v1 (design doc §3.1: apGoboCols/Rows are graph-build-time
@@ -53,11 +54,18 @@
  * The falloff models a bucket may batch — a closed list
  * (`feedback_category_string_must_be_in_closed_list`), not a negative check.
  * A light whose `falloffModel` is not one of these (should never happen
- * today — `point-light-pool.js` only ever produces these two — but this
+ * today — `point-light-pool.js` only ever produces these three — but this
  * module never trusts that from the outside) is inadmissible, same as an
  * aperture-lit one; it stays on the existing per-light path.
+ *
+ * `inverseSquareWide` added 2026-09-02 (mythica-machina-press#475) — fire's
+ * own gentler-steepness inverse-square curve (`FIRE_INVERSE_SQUARE_
+ * STEEPNESS`, point-light-illumination.js). `computeBucketKey` already
+ * folds the raw `falloffModel` string into its own key, so fire lights
+ * naturally bucket separately from candle/lightning's `inverseSquare` —
+ * no bucket-key change needed, only this admission list.
  */
-export const BATCH_FALLOFF_MODELS = Object.freeze(['foundry', 'inverseSquare']);
+export const BATCH_FALLOFF_MODELS = Object.freeze(['foundry', 'inverseSquare', 'inverseSquareWide']);
 
 /**
  * WebGPU's real per-pipeline vertex-buffer limit, as this codebase already

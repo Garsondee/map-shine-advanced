@@ -1027,7 +1027,16 @@ export function buildFireLightSources(sources, { tier, mPerPx, env = null, color
       hasColor: true,
       alpha01,
       color: rgb,
-      falloffModel: 'inverseSquare',
+      // ⚠️ `'inverseSquareWide'`, NOT candle/lightning's plain `'inverseSquare'`
+      // (2026-09-02, mythica-machina-press#475 — "the light a fire throws is
+      // white"). The two share the same windowed-inverse-square SHAPE, just
+      // at a different steepness (`point-light-illumination.js`'s
+      // `FIRE_INVERSE_SQUARE_STEEPNESS` vs `INVERSE_SQUARE_STEEPNESS`) — see
+      // that constant's own header for why fire needed its own: the candle-
+      // tuned K=8 curve is already down to a sliver of strength by ~50-70%
+      // of a light's OWN radius, which reads fine on a candle's small radius
+      // but left most of a fire's much bigger glow looking uncoloured.
+      falloffModel: 'inverseSquareWide',
       animation: {
         type: 'firePuff',
         speedRaw: 5,

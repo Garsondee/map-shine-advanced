@@ -487,7 +487,9 @@ export function run(t) {
     t.ok('the light is attributed to the fire effect', l.ownerEffectId === 'fire');
     t.ok('the light carries a real elevation', Number.isFinite(l.elevation));
     t.ok('the light has a wall-clippable polygon', Array.isArray(l.shapePoints) && l.shapePoints.length > 8);
-    t.ok('the light uses inverse-square falloff', l.falloffModel === 'inverseSquare');
+    // `'inverseSquareWide'`, not candle/lightning's plain `'inverseSquare'`
+    // (mythica-machina-press#475) — same shape, fire's own gentler steepness.
+    t.ok("the light uses fire's own (wide) inverse-square falloff", l.falloffModel === 'inverseSquareWide');
     // ⚠️ NO LONGER ASSERTS `puffHz` (removed 2026-08-09, author: "adjust fire
     // light to work more like candle light"). The GPU animation is now
     // `candleFlicker`'s own wind-aware noise (registry.js), driven by

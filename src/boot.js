@@ -1115,306 +1115,332 @@ function install() {
   MapShine.__tileMotion = installTileMotionPanel();
   const tileMotionPanel = MapShine.__tileMotion;
 
-  MapShine.__studio = installStudio({
-    debugPanel: MapShine.debug,
-    impulses: IMPULSES,
-    listCues: () => orderedCues(cueStack),
-    captureCue: (name) => captureCueFromLive(name),
-    updateCueFadeMs: (id, overMs) => updateCueFadeMs(id, overMs),
-    moveCueOrder: (id, direction) => moveCueOrder(id, direction),
-    testFireCue: (id) => testFireCue(id),
-    revertCueTest: () => revertCueTest(),
-    isCueTestActive: () => isCueTestActive(),
-    validateCue: (cue) => validateCue(cue, fadeSourceRegistry.typeOf),
-    // THE PAINTER DEPARTMENT (U4) — same closure-reference safety as CUES
-    // above. armBrush reuses paintAffordance's own onAdd rather than
-    // re-deriving which mask kind to open on, so the tile grid and the
-    // EFFECTS department's own 🖌 card button (water's, today) can never
-    // disagree about which kind a given effect opens.
-    listPaintableEffects: () => listPaintableEffects(),
-    armBrush: (effectId) => paintAffordance(effectId)?.onAdd?.(),
-    // THE SYSTEM DEPARTMENT (U5) — getSystemPanelCtx is declared much
-    // further down install() (it closes over PROFILE_CHOICE_LIST/
-    // ENABLE_CHOICE_LIST, built right next to the old settings panel's own
-    // registration) — the identical closure-reference safety every other
-    // ctx function on this call already relies on.
-    getSystemPanelCtx: () => getSystemPanelCtx(),
-    // THE SCENE DEPARTMENT's Motion tiles card (2026-08-27) — a summary
-    // readout + an "Open" button onto the full ui/rooms/remote/tile-motion-
-    // panel.js panel, same closure-reference safety as every other ctx fn
-    // here. `tileMotionPanel` itself is declared further down install()'s
-    // own body (same temporal-dead-zone safety every other late-declared
-    // closure reference here already relies on).
-    getTileMotionSummary: () => getTileMotionSummary(),
-    openTileMotionDialog: () => tileMotionPanel.open(),
-    // THE SCENE DEPARTMENT's Darkness-at-max card (UI parity plan, phase
-    // 4a) — the SAME real functions the old panel's own 'darkness-realism'
-    // select already calls (see that registration's own comment, below,
-    // for the full lever's rationale); this is a second door onto it, not
-    // a second implementation.
-    getDarknessRealism: () => getDarknessRealism(),
-    setDarknessRealism: (v) => setDarknessRealism(v),
-  });
-  // THE REMOTE (U2, docs/holy/UI-Testament.md §4, §9) — side-by-side with
-  // both the old panel and the Studio. Every callback below is a closure
-  // reference, not an eager read — installRemote() itself runs NOW (this
-  // eager point in install()), but the Remote's own shell.js defers calling
-  // any of them until the room's first open(), by which point
-  // buildAstrolabeOptions/skyScope/editSky (all declared further down this
-  // same closure) are fully initialized. See shell.js's own header for why
-  // that deferral exists at all.
-  MapShine.__remote = installRemote({
-    // Lets the Remote gate its own DOM construction on GM status, the same
-    // debugPanel.isGM() the Studio call above already passes through — see
-    // installRemote's own header for the safety law this closes.
-    debugPanel: MapShine.debug,
-    impulses: IMPULSES,
-    // 2026-08-18 fix (author report: "the astrolabe looks completely
-    // different... the CSS and layout are not the same yet") — the Remote
-    // gets its OWN dial, matching the approved mock for real, instead of the
-    // old panel's own pre-LANTERN `createAstrolabe()` styling (see astrolabe-
-    // dial.js's own header for the full story; that old dial was deleted
-    // whole in the UI parity plan's phase 7b — this is the only one now).
-    mountAstrolabeDial: (container, dialCtx) => {
-      remoteAstrolabe = buildAstrolabeDial({
-        onTimeChange: (hour, committed) => {
-          setVtPanViewerSunHour(hour);
-          if (committed) void editSky({ todHour: hour });
-        },
-        // Ring-lock explanation (2026-08-18 fix) — astrolabe-panel.js supplies
-        // this, routed through the Remote's own shared status line, same
-        // Law-5 shape as the TL corner's explainUnarmed/explainNotAesthetic.
-        onLockedAttempt: dialCtx?.onLockedAttempt,
-        // shell.js's own wind-popover.js instance — this dial only fires the
-        // click, shell.js owns what opens (UI parity plan, phase 6a).
-        onWindClick: dialCtx?.onWindClick,
-        // UI parity plan, phase 6b — hand-mirrors buildAstrolabeOptions()'s
-        // own onTimeStop exactly (same two lines, same reasoning in its own
-        // comment a few hundred lines down), not a call to that factory as a
-        // whole: matches onTimeChange's own precedent two lines above, which
-        // has never delegated to buildAstrolabeOptions() either — both
-        // instances share STATE (skyScope, editSky), never a hand-copied
-        // function reference.
-        // overMs (2026-08-27 fix, author: "I select 10s transition time...
-        // it happens instantly") — the SAME Fade Time the weather chips
-        // already ease over (weather-board.js's own fadeTime), read through
-        // the Remote's own controller since this dial has no access to
-        // shell.js's weatherBoardHandle closure directly (see shell.js's
-        // own getFadeOverMs for the full reasoning).
-        onTimeStop: (hour) => {
-          sweepVtPanViewerTimeOfDay(hour, MapShine.__remote?.getFadeOverMs?.() ?? 0);
-          if (skyScope.sky?.mode === 'aesthetic') void editSky({ todHour: hour });
-        },
-      });
-      container.appendChild(remoteAstrolabe.root);
-    },
-    getPosture: () => skyScope.sky?.mode,
-    // The Clock-mode pill (2026-08-18 fix) — exactly the old astrolabe.js
-    // instance's own `onTimeModeChange` (see its own registerPanel call
-    // below), the SAME editSky path, not a second one.
-    onSetMode: (mode) => void editSky({ mode }),
-    // Play/pause IS the rate (astrolabe-panel.js's own note) — 'playing'
-    // means whatever the current rate is, is non-zero.
-    isFlowPlaying: () => (skyScope.sky?.rateHoursPerMinute ?? 0) > 0,
-    onFlowToggle: () => {
-      const current = skyScope.sky?.rateHoursPerMinute ?? 0;
-      if (current > 0) {
-        lastNonZeroRateHoursPerMinute = current;
-        void editSky({ rateHoursPerMinute: 0 });
-      } else {
-        void editSky({ rateHoursPerMinute: lastNonZeroRateHoursPerMinute || 1 });
-      }
-    },
-    // The TL corner's speed badge (2026-08-18 fix) — real TIME_RATE_STEPS,
-    // the SAME editSky path the old debug panel's own rate slider already
-    // writes through, not a second speed vocabulary. Reads the REMEMBERED
-    // rate, not the raw live one: production's single-field model uses 0
-    // itself to mean "paused" (unlike the mock's own two-field state, which
-    // keeps speed and play/pause fully independent), so showing the live
-    // value verbatim would flash the badge to a meaningless fallback on
-    // every pause instead of the speed flow will actually resume at.
-    getFlowRate: () => {
-      const live = skyScope.sky?.rateHoursPerMinute ?? 0;
-      return live > 0 ? live : lastNonZeroRateHoursPerMinute || 1;
-    },
-    onSetFlowRate: (rate) => {
-      lastNonZeroRateHoursPerMinute = rate;
-      void editSky({ rateHoursPerMinute: rate });
-    },
-    // THE WEATHER BOARD (U2 checkpoint 3) — every field below is a closure
-    // reference to state/functions declared further down this SAME install()
-    // body (fadeSourceRegistry, fadeWeatherToArchetype, skyScope, editSky).
-    // Safe for the identical reason mountAstrolabeDial above already is:
-    // nothing here EXECUTES until the Remote's body actually renders, well
-    // after install() has finished defining everything once.
-    weatherBoard: {
-      getWeatherMode: () => (skyScope.sky?.weatherMode === 'almanac' ? 'almanac' : 'director'),
-      onWeatherModeChange: (mode) => void editSky({ weatherMode: mode }),
-      getWeatherBiome: () => skyScope.sky?.weatherBiome ?? null,
-      onWeatherBiomeChange: (id) => void editSky({ weatherBiome: id }),
-      getWeatherArchetype: () => skyScope.sky?.weatherArchetype ?? 'custom',
-      fadeToArchetype: (archetypeId, overMs) => fadeWeatherToArchetype(archetypeId, overMs),
-      getAxisValue: (axisName) => fadeSourceRegistry.readLive(`weather.${axisName}`),
-      onAxisCommit: (axisName, value) => void editSky({ [axisName]: value, weatherArchetype: 'custom' }),
-      // Pace, Sky Light, Atmosphere, Scene override (2026-08-18 fix —
-      // gap-audit against the old astrolabe.js's own tuning-drawer sliders,
-      // entirely missing from the new Remote before this). Same real
-      // functions the old panel's own instance already calls — see this
-      // exact wiring a few hundred lines down at `buildAstrolabeOptions`'s
-      // own `onWeatherVolatilityChange`/`onSkyRealismChange`/
-      // `onGradeEnvChange`/`onSceneOverrideChange`, never a second path.
-      getWeatherVolatility: () => skyScope.sky?.weatherVolatility ?? 1,
-      onWeatherVolatilityCommit: (v) => void editSky({ weatherVolatility: v }),
-      // The Almanac forecast (2026-08-18 fix — gap-audit against the old
-      // astrolabe.js's own real forecastRow, never ported to the new Remote
-      // at all). No new engine work: `weather.forecast()` already projects
-      // the walk forward for free (world/weather.js), and
-      // getVtPanViewerTimeDialState() already surfaces its next transition
-      // as `weatherForecastNext` — the SAME door `getCloudPinned` below
-      // already reaches through for a different field.
-      getForecast: () => getVtPanViewerTimeDialState()?.weatherForecastNext ?? null,
-      getSkyRealism: () => skyScope.sky?.realism01 ?? 0,
-      onSkyRealismCommit: (v) => void editSky({ realism01: v }),
-      getGradeEnvStrength: () => skyScope.sky?.gradeEnvStrength ?? 0,
-      onGradeEnvStrengthCommit: (v) => void editSky({ gradeEnvStrength: v }),
-      // Temperature (2026-08-18 fix — author pressing again on "still
-      // missing a lot of sliders"; re-checked WEATHER_AXES fresh rather than
-      // repeating the old finding unverified). `temperature01` genuinely IS
-      // `consumerStatus:'live'` (precipKind derivation, wetness dry-rate) —
-      // unlike cloudType01/cloudAltitudePx/cloudScalePx, which are still
-      // honestly `'pending'` (world/cloud-field.js does not exist, grepped
-      // again, still true) — but has been `MapShine.setTemperature`
-      // console-only since it shipped, zero UI slider anywhere. Own commit
-      // path, same reason Sky Light/Atmosphere need one: `ARCHETYPE_OWNED_
-      // AXES` deliberately excludes temperature ("a sky is not a climate"),
-      // so stamping `weatherArchetype:'custom'` on a temperature drag (what
-      // LIVE_CHANNELS' own onAxisCommit does) would wrongly un-light the
-      // active mood chip over an edit that has nothing to do with it.
-      getTemperature: () => skyScope.sky?.temperature01 ?? 0.55,
-      onTemperatureCommit: (v) => void editSky({ temperature01: v }),
-      // Wind strength (2026-08-27 fix, author: "wind speed should be one of
-      // the vertical sliders") — same ENV_CHANNELS shape as Sky
-      // light/Atmosphere/Temperature just above (own getter/commit pair, not
-      // onAxisCommit: wind is not a weather axis and must never stamp
-      // weatherArchetype:'custom'). Reuses MapShine.getWind/setWind
-      // directly — the SAME source of truth the wind popover's own compass
-      // row already reads/writes, not a second copy of wind state.
-      getWindSpeed01: () => MapShine.getWind().speed01,
-      onWindSpeed01Commit: (v) => MapShine.setWind({ speed01: v }),
-      getSceneOverride: () => skyScope.sceneOverrides === true,
-      // The cloud pin glyph (2026-08-18 fix — gap-audit against the old
-      // astrolabe.js's own Cloud row). `weatherPinnedAxes` already rides the
-      // dial-state snapshot pumpAstrolabe reads every tick (vt-pan-viewer.js
-      // own `weather.read().pinnedAxes`) — pulled fresh here rather than
-      // pushed, matching every other weatherBoard getter's own shape, not a
-      // second live-update channel. `unpinVtPanViewerWeatherAxis` is the
-      // SAME function the old panel's own `onUnpinCloudCover` already calls.
-      getCloudPinned: () => Boolean(getVtPanViewerTimeDialState()?.weatherPinnedAxes?.includes('cloudCover01')),
-      onUnpinCloudCover: () => unpinVtPanViewerWeatherAxis('cloudCover01'),
-      // Which mood chip a fade is currently heading toward (2026-08-18 fix —
-      // author report: "mood buttons don't work yet"). Root cause, confirmed
-      // by reading fadeWeatherToArchetype: `weatherArchetype` flips to
-      // 'custom' THE INSTANT a fade starts, so `activeArchetype === id`
-      // (renderChips' own highlight check) goes false for every chip
-      // including the one just clicked — a GM watching a 10s fade sees the
-      // WHOLE row go dark with no sign their click landed. Same
-      // fadeState/pendingArchetypeCompletions buildNowPlayingLabel already
-      // reads, reused rather than a second tracking mechanism.
-      getFadingArchetypeId: () => {
-        const nowMs = wallClockMs();
-        for (const [key, entry] of Object.entries(fadeState)) {
-          if (key.startsWith('weather.') && !isEntryExpired(entry, nowMs)) {
-            return pendingArchetypeCompletions.get(entry.id) ?? null;
-          }
-        }
-        return null;
-      },
-      onSceneOverrideCommit: async (enabled) => {
-        const result = await setSceneSkyOverride(enabled, skyScope.sky);
-        if (!result.ok) log.warn(`scene sky override not changed: ${result.reason}`);
-        resolveAndApplySky();
-      },
-    },
-    onBaseline: (overMs) => fadeWeatherToBaseline(overMs),
-    // THE CUE DECK (U3) — same closure-reference safety as weatherBoard
-    // just above. fireCue is the ONLY mutation the deck itself calls
-    // (GO / a jump-list click); capture/reorder/test-fire are the CUES
-    // department's own job (installStudio above), never the Remote's.
-    cueDeck: {
+  // DEFERRED TO 'ready' (CRITICAL FIX, mythica-machina-press, 2026-09-02) —
+  // installStudio()/installRemote() below both bail out and build NO DOM at
+  // all when debugPanel.isGM() is false (commit 68b909a2). That check reads
+  // game.user?.isGM directly, but this whole install() body runs at ES-module
+  // evaluation time — while Foundry is still loading module scripts, which
+  // is BEFORE Game#setupGame() ever populates game.user (verified against
+  // the real v14 source, client/game.mjs: Hooks.callAll("init") fires first;
+  // setupGame() only runs afterward, and it's the one that sets `this.user`
+  // before finally calling Hooks.callAll("setup")). Called this early,
+  // isGM() always reads `!!undefined` -> false — for the GM exactly as much
+  // as for a player — so both rooms silently got no DOM for ANYONE. The
+  // Remote's own toolbar button (foundry/scene-controls-button.js) still
+  // looked normal and clickable, since its own game.user.isGM read happens
+  // safely inside a getSceneControlButtons hook callback fired long after
+  // ready — but MapShine.__remote was undefined, so every call through it
+  // (MapShine.__remote?.open(), below) silently no-op'd via optional
+  // chaining: the button did nothing, with no error anywhere.
+  // Hooks.once('ready', ...) is the same deferral idiom this file already
+  // uses elsewhere for setup that genuinely needs game.user (see the
+  // existing Hooks.once('ready', ...) further down this file) — by 'ready',
+  // game.user is unconditionally populated, so isGM() finally reads the real
+  // value. Safe to delay: every other MapShine.__studio/__remote reference
+  // in this file (grep-verified) is already `?.`-guarded inside a callback
+  // that can only fire well after install() has returned once.
+  Hooks.once('ready', () => {
+    MapShine.__studio = installStudio({
+      debugPanel: MapShine.debug,
+      impulses: IMPULSES,
       listCues: () => orderedCues(cueStack),
-      fireCue: (id) => fireCueById(id),
-    },
-    // THE DEBUG ROW (2026-08-18 fix) — fps/ms/vram/sparkline are PUSHED by
-    // bootHeartbeat() straight into MapShine.__remote.updateDebugStrip(), not
-    // pulled through this ctx (that standalone top-level function has no
-    // lexical access to install()'s own locals, unlike weatherBoard/cueDeck's
-    // closures above). Only the two real, one-line MapShine.* actions live
-    // here.
-    debugStrip: {
-      onProbe: () => void MapShine.armPixelProbe(3),
-      onExport: () => void MapShine.flight?.export(),
-      // UI parity plan, phase 5 follow-up (author: "pixel probe and
-      // performance review the only two buttons... all the time") — a
-      // ready-made button, not a raw function: MapShine.debug.
-      // buildActionButton already wires status text/error handling/
-      // clipboard-copy through the SAME registry every other debug action
-      // renders through.
-      buildPerfSweepButton: () => MapShine.debug?.buildActionButton?.('perf-run-full') ?? null,
-      // The standalone HUD entry point (mythica-machina-press#173 fix):
-      // perfHud is created further down install()'s own body (createPerfHud
-      // below) — same "closure over install()'s own locals" shape as
-      // windPopover's getDirectionDeg/getSpeed01 just below, safe because
-      // this isn't called until the strip actually builds its HUD button,
-      // well after install() has run past that point.
-      getHudPanel: () => perfHud,
-    },
-    // THE RENDERER DROPDOWN (UI parity plan, phase 4b round 2 — author
-    // redesign into a real, world-scoped GM master override; see
-    // GLOBAL_SETTING_KEYS.rendererOverride's own doc in effects/effect-
-    // settings.js and syncInterfaceSeam's own doc in this file for the full
-    // account). Reads/writes that ONE world setting; the actual renderer
-    // switch happens for EVERY client independently, via each one's own
-    // settings-changed listener calling syncInterfaceSeam — this callback
-    // never touches applyArtSuppression/restoreFoundryArt directly.
-    getRendererOverride: () => readSetting(MODULE_ID, GLOBAL_SETTING_KEYS.rendererOverride) ?? 'msa',
-    // writeSetting (foundry/settings-adapter.js) is a THIN wrapper —
-    // `game.settings.set()` verbatim, which REJECTS on failure (a non-GM
-    // writing a world-scoped setting) rather than returning an {ok,reason}
-    // shape. try/catch here, not a truthiness check on the resolved value.
-    onRendererOverrideChange: async (value) => {
-      try {
-        await writeSetting(MODULE_ID, GLOBAL_SETTING_KEYS.rendererOverride, value);
-      } catch (err) {
-        throw new Error(`could not change the renderer (GM only?): ${err?.message ?? err}`);
-      }
-    },
-    // THE SAFETY BUTTON (UI parity plan, phase 4b) — deliberately calls
-    // engageFoundryFallback DIRECTLY, the SAME one-way mechanism the
-    // startup-failure and device-lost paths already use (vt-pan-viewer.js),
-    // never a second implementation. `canvas` is resolved by the same DOM
-    // id vt-pan-viewer.js stamps on its own canvas at creation
-    // ('msa-vt-pan-viewer-canvas') rather than a new exported getter into
-    // that ~20k-line module for one read.
-    onEngageSafety: () => {
-      engageFoundryFallback({
-        reason: 'Manually triggered from the Remote — the GM asked MSA to stop rendering.',
-        canvas: document.getElementById('msa-vt-pan-viewer-canvas'),
-      });
-    },
-    // THE WIND POPOVER (UI parity plan, phase 6a) — the SAME closure state
-    // (windDirectionDeg/windSpeed01) and the SAME MapShine.setWind the old
-    // astrolabe.js's own wind arrow+slider already read/write; a second
-    // door onto them, not a second implementation.
-    windPopover: {
-      getDirectionDeg: () => windDirectionDeg,
-      getSpeed01: () => windSpeed01,
-      onCommit: ({ directionDeg, speed01 }) => MapShine.setWind({ directionDeg, speed01 }),
-    },
-    // THE BR CORNER'S TILE MOTION BUTTON (2026-08-27) — the SAME panel
-    // controller instance Studio's Scene department and the Lab action
-    // both already open, never a second one.
-    onOpenTileMotion: () => tileMotionPanel.open(),
-  });
+      captureCue: (name) => captureCueFromLive(name),
+      updateCueFadeMs: (id, overMs) => updateCueFadeMs(id, overMs),
+      moveCueOrder: (id, direction) => moveCueOrder(id, direction),
+      testFireCue: (id) => testFireCue(id),
+      revertCueTest: () => revertCueTest(),
+      isCueTestActive: () => isCueTestActive(),
+      validateCue: (cue) => validateCue(cue, fadeSourceRegistry.typeOf),
+      // THE PAINTER DEPARTMENT (U4) — same closure-reference safety as CUES
+      // above. armBrush reuses paintAffordance's own onAdd rather than
+      // re-deriving which mask kind to open on, so the tile grid and the
+      // EFFECTS department's own 🖌 card button (water's, today) can never
+      // disagree about which kind a given effect opens.
+      listPaintableEffects: () => listPaintableEffects(),
+      armBrush: (effectId) => paintAffordance(effectId)?.onAdd?.(),
+      // THE SYSTEM DEPARTMENT (U5) — getSystemPanelCtx is declared much
+      // further down install() (it closes over PROFILE_CHOICE_LIST/
+      // ENABLE_CHOICE_LIST, built right next to the old settings panel's own
+      // registration) — the identical closure-reference safety every other
+      // ctx function on this call already relies on.
+      getSystemPanelCtx: () => getSystemPanelCtx(),
+      // THE SCENE DEPARTMENT's Motion tiles card (2026-08-27) — a summary
+      // readout + an "Open" button onto the full ui/rooms/remote/tile-motion-
+      // panel.js panel, same closure-reference safety as every other ctx fn
+      // here. `tileMotionPanel` itself is declared further down install()'s
+      // own body (same temporal-dead-zone safety every other late-declared
+      // closure reference here already relies on).
+      getTileMotionSummary: () => getTileMotionSummary(),
+      openTileMotionDialog: () => tileMotionPanel.open(),
+      // THE SCENE DEPARTMENT's Darkness-at-max card (UI parity plan, phase
+      // 4a) — the SAME real functions the old panel's own 'darkness-realism'
+      // select already calls (see that registration's own comment, below,
+      // for the full lever's rationale); this is a second door onto it, not
+      // a second implementation.
+      getDarknessRealism: () => getDarknessRealism(),
+      setDarknessRealism: (v) => setDarknessRealism(v),
+    });
+    // THE REMOTE (U2, docs/holy/UI-Testament.md §4, §9) — side-by-side with
+    // both the old panel and the Studio. Every callback below is a closure
+    // reference, not an eager read — installRemote() itself runs NOW (this
+    // eager point in install()), but the Remote's own shell.js defers calling
+    // any of them until the room's first open(), by which point
+    // buildAstrolabeOptions/skyScope/editSky (all declared further down this
+    // same closure) are fully initialized. See shell.js's own header for why
+    // that deferral exists at all.
+    MapShine.__remote = installRemote({
+      // Lets the Remote gate its own DOM construction on GM status, the same
+      // debugPanel.isGM() the Studio call above already passes through — see
+      // installRemote's own header for the safety law this closes.
+      debugPanel: MapShine.debug,
+      impulses: IMPULSES,
+      // 2026-08-18 fix (author report: "the astrolabe looks completely
+      // different... the CSS and layout are not the same yet") — the Remote
+      // gets its OWN dial, matching the approved mock for real, instead of the
+      // old panel's own pre-LANTERN `createAstrolabe()` styling (see astrolabe-
+      // dial.js's own header for the full story; that old dial was deleted
+      // whole in the UI parity plan's phase 7b — this is the only one now).
+      mountAstrolabeDial: (container, dialCtx) => {
+        remoteAstrolabe = buildAstrolabeDial({
+          onTimeChange: (hour, committed) => {
+            setVtPanViewerSunHour(hour);
+            if (committed) void editSky({ todHour: hour });
+          },
+          // Ring-lock explanation (2026-08-18 fix) — astrolabe-panel.js supplies
+          // this, routed through the Remote's own shared status line, same
+          // Law-5 shape as the TL corner's explainUnarmed/explainNotAesthetic.
+          onLockedAttempt: dialCtx?.onLockedAttempt,
+          // shell.js's own wind-popover.js instance — this dial only fires the
+          // click, shell.js owns what opens (UI parity plan, phase 6a).
+          onWindClick: dialCtx?.onWindClick,
+          // UI parity plan, phase 6b — hand-mirrors buildAstrolabeOptions()'s
+          // own onTimeStop exactly (same two lines, same reasoning in its own
+          // comment a few hundred lines down), not a call to that factory as a
+          // whole: matches onTimeChange's own precedent two lines above, which
+          // has never delegated to buildAstrolabeOptions() either — both
+          // instances share STATE (skyScope, editSky), never a hand-copied
+          // function reference.
+          // overMs (2026-08-27 fix, author: "I select 10s transition time...
+          // it happens instantly") — the SAME Fade Time the weather chips
+          // already ease over (weather-board.js's own fadeTime), read through
+          // the Remote's own controller since this dial has no access to
+          // shell.js's weatherBoardHandle closure directly (see shell.js's
+          // own getFadeOverMs for the full reasoning).
+          onTimeStop: (hour) => {
+            sweepVtPanViewerTimeOfDay(hour, MapShine.__remote?.getFadeOverMs?.() ?? 0);
+            if (skyScope.sky?.mode === 'aesthetic') void editSky({ todHour: hour });
+          },
+        });
+        container.appendChild(remoteAstrolabe.root);
+      },
+      getPosture: () => skyScope.sky?.mode,
+      // The Clock-mode pill (2026-08-18 fix) — exactly the old astrolabe.js
+      // instance's own `onTimeModeChange` (see its own registerPanel call
+      // below), the SAME editSky path, not a second one.
+      onSetMode: (mode) => void editSky({ mode }),
+      // Play/pause IS the rate (astrolabe-panel.js's own note) — 'playing'
+      // means whatever the current rate is, is non-zero.
+      isFlowPlaying: () => (skyScope.sky?.rateHoursPerMinute ?? 0) > 0,
+      onFlowToggle: () => {
+        const current = skyScope.sky?.rateHoursPerMinute ?? 0;
+        if (current > 0) {
+          lastNonZeroRateHoursPerMinute = current;
+          void editSky({ rateHoursPerMinute: 0 });
+        } else {
+          void editSky({ rateHoursPerMinute: lastNonZeroRateHoursPerMinute || 1 });
+        }
+      },
+      // The TL corner's speed badge (2026-08-18 fix) — real TIME_RATE_STEPS,
+      // the SAME editSky path the old debug panel's own rate slider already
+      // writes through, not a second speed vocabulary. Reads the REMEMBERED
+      // rate, not the raw live one: production's single-field model uses 0
+      // itself to mean "paused" (unlike the mock's own two-field state, which
+      // keeps speed and play/pause fully independent), so showing the live
+      // value verbatim would flash the badge to a meaningless fallback on
+      // every pause instead of the speed flow will actually resume at.
+      getFlowRate: () => {
+        const live = skyScope.sky?.rateHoursPerMinute ?? 0;
+        return live > 0 ? live : lastNonZeroRateHoursPerMinute || 1;
+      },
+      onSetFlowRate: (rate) => {
+        lastNonZeroRateHoursPerMinute = rate;
+        void editSky({ rateHoursPerMinute: rate });
+      },
+      // THE WEATHER BOARD (U2 checkpoint 3) — every field below is a closure
+      // reference to state/functions declared further down this SAME install()
+      // body (fadeSourceRegistry, fadeWeatherToArchetype, skyScope, editSky).
+      // Safe for the identical reason mountAstrolabeDial above already is:
+      // nothing here EXECUTES until the Remote's body actually renders, well
+      // after install() has finished defining everything once.
+      weatherBoard: {
+        getWeatherMode: () => (skyScope.sky?.weatherMode === 'almanac' ? 'almanac' : 'director'),
+        onWeatherModeChange: (mode) => void editSky({ weatherMode: mode }),
+        getWeatherBiome: () => skyScope.sky?.weatherBiome ?? null,
+        onWeatherBiomeChange: (id) => void editSky({ weatherBiome: id }),
+        getWeatherArchetype: () => skyScope.sky?.weatherArchetype ?? 'custom',
+        fadeToArchetype: (archetypeId, overMs) => fadeWeatherToArchetype(archetypeId, overMs),
+        getAxisValue: (axisName) => fadeSourceRegistry.readLive(`weather.${axisName}`),
+        onAxisCommit: (axisName, value) => void editSky({ [axisName]: value, weatherArchetype: 'custom' }),
+        // Pace, Sky Light, Atmosphere, Scene override (2026-08-18 fix —
+        // gap-audit against the old astrolabe.js's own tuning-drawer sliders,
+        // entirely missing from the new Remote before this). Same real
+        // functions the old panel's own instance already calls — see this
+        // exact wiring a few hundred lines down at `buildAstrolabeOptions`'s
+        // own `onWeatherVolatilityChange`/`onSkyRealismChange`/
+        // `onGradeEnvChange`/`onSceneOverrideChange`, never a second path.
+        getWeatherVolatility: () => skyScope.sky?.weatherVolatility ?? 1,
+        onWeatherVolatilityCommit: (v) => void editSky({ weatherVolatility: v }),
+        // The Almanac forecast (2026-08-18 fix — gap-audit against the old
+        // astrolabe.js's own real forecastRow, never ported to the new Remote
+        // at all). No new engine work: `weather.forecast()` already projects
+        // the walk forward for free (world/weather.js), and
+        // getVtPanViewerTimeDialState() already surfaces its next transition
+        // as `weatherForecastNext` — the SAME door `getCloudPinned` below
+        // already reaches through for a different field.
+        getForecast: () => getVtPanViewerTimeDialState()?.weatherForecastNext ?? null,
+        getSkyRealism: () => skyScope.sky?.realism01 ?? 0,
+        onSkyRealismCommit: (v) => void editSky({ realism01: v }),
+        getGradeEnvStrength: () => skyScope.sky?.gradeEnvStrength ?? 0,
+        onGradeEnvStrengthCommit: (v) => void editSky({ gradeEnvStrength: v }),
+        // Temperature (2026-08-18 fix — author pressing again on "still
+        // missing a lot of sliders"; re-checked WEATHER_AXES fresh rather than
+        // repeating the old finding unverified). `temperature01` genuinely IS
+        // `consumerStatus:'live'` (precipKind derivation, wetness dry-rate) —
+        // unlike cloudType01/cloudAltitudePx/cloudScalePx, which are still
+        // honestly `'pending'` (world/cloud-field.js does not exist, grepped
+        // again, still true) — but has been `MapShine.setTemperature`
+        // console-only since it shipped, zero UI slider anywhere. Own commit
+        // path, same reason Sky Light/Atmosphere need one: `ARCHETYPE_OWNED_
+        // AXES` deliberately excludes temperature ("a sky is not a climate"),
+        // so stamping `weatherArchetype:'custom'` on a temperature drag (what
+        // LIVE_CHANNELS' own onAxisCommit does) would wrongly un-light the
+        // active mood chip over an edit that has nothing to do with it.
+        getTemperature: () => skyScope.sky?.temperature01 ?? 0.55,
+        onTemperatureCommit: (v) => void editSky({ temperature01: v }),
+        // Wind strength (2026-08-27 fix, author: "wind speed should be one of
+        // the vertical sliders") — same ENV_CHANNELS shape as Sky
+        // light/Atmosphere/Temperature just above (own getter/commit pair, not
+        // onAxisCommit: wind is not a weather axis and must never stamp
+        // weatherArchetype:'custom'). Reuses MapShine.getWind/setWind
+        // directly — the SAME source of truth the wind popover's own compass
+        // row already reads/writes, not a second copy of wind state.
+        getWindSpeed01: () => MapShine.getWind().speed01,
+        onWindSpeed01Commit: (v) => MapShine.setWind({ speed01: v }),
+        getSceneOverride: () => skyScope.sceneOverrides === true,
+        // The cloud pin glyph (2026-08-18 fix — gap-audit against the old
+        // astrolabe.js's own Cloud row). `weatherPinnedAxes` already rides the
+        // dial-state snapshot pumpAstrolabe reads every tick (vt-pan-viewer.js
+        // own `weather.read().pinnedAxes`) — pulled fresh here rather than
+        // pushed, matching every other weatherBoard getter's own shape, not a
+        // second live-update channel. `unpinVtPanViewerWeatherAxis` is the
+        // SAME function the old panel's own `onUnpinCloudCover` already calls.
+        getCloudPinned: () => Boolean(getVtPanViewerTimeDialState()?.weatherPinnedAxes?.includes('cloudCover01')),
+        onUnpinCloudCover: () => unpinVtPanViewerWeatherAxis('cloudCover01'),
+        // Which mood chip a fade is currently heading toward (2026-08-18 fix —
+        // author report: "mood buttons don't work yet"). Root cause, confirmed
+        // by reading fadeWeatherToArchetype: `weatherArchetype` flips to
+        // 'custom' THE INSTANT a fade starts, so `activeArchetype === id`
+        // (renderChips' own highlight check) goes false for every chip
+        // including the one just clicked — a GM watching a 10s fade sees the
+        // WHOLE row go dark with no sign their click landed. Same
+        // fadeState/pendingArchetypeCompletions buildNowPlayingLabel already
+        // reads, reused rather than a second tracking mechanism.
+        getFadingArchetypeId: () => {
+          const nowMs = wallClockMs();
+          for (const [key, entry] of Object.entries(fadeState)) {
+            if (key.startsWith('weather.') && !isEntryExpired(entry, nowMs)) {
+              return pendingArchetypeCompletions.get(entry.id) ?? null;
+            }
+          }
+          return null;
+        },
+        onSceneOverrideCommit: async (enabled) => {
+          const result = await setSceneSkyOverride(enabled, skyScope.sky);
+          if (!result.ok) log.warn(`scene sky override not changed: ${result.reason}`);
+          resolveAndApplySky();
+        },
+      },
+      onBaseline: (overMs) => fadeWeatherToBaseline(overMs),
+      // THE CUE DECK (U3) — same closure-reference safety as weatherBoard
+      // just above. fireCue is the ONLY mutation the deck itself calls
+      // (GO / a jump-list click); capture/reorder/test-fire are the CUES
+      // department's own job (installStudio above), never the Remote's.
+      cueDeck: {
+        listCues: () => orderedCues(cueStack),
+        fireCue: (id) => fireCueById(id),
+      },
+      // THE DEBUG ROW (2026-08-18 fix) — fps/ms/vram/sparkline are PUSHED by
+      // bootHeartbeat() straight into MapShine.__remote.updateDebugStrip(), not
+      // pulled through this ctx (that standalone top-level function has no
+      // lexical access to install()'s own locals, unlike weatherBoard/cueDeck's
+      // closures above). Only the two real, one-line MapShine.* actions live
+      // here.
+      debugStrip: {
+        onProbe: () => void MapShine.armPixelProbe(3),
+        onExport: () => void MapShine.flight?.export(),
+        // UI parity plan, phase 5 follow-up (author: "pixel probe and
+        // performance review the only two buttons... all the time") — a
+        // ready-made button, not a raw function: MapShine.debug.
+        // buildActionButton already wires status text/error handling/
+        // clipboard-copy through the SAME registry every other debug action
+        // renders through.
+        buildPerfSweepButton: () => MapShine.debug?.buildActionButton?.('perf-run-full') ?? null,
+        // The standalone HUD entry point (mythica-machina-press#173 fix):
+        // perfHud is created further down install()'s own body (createPerfHud
+        // below) — same "closure over install()'s own locals" shape as
+        // windPopover's getDirectionDeg/getSpeed01 just below, safe because
+        // this isn't called until the strip actually builds its HUD button,
+        // well after install() has run past that point.
+        getHudPanel: () => perfHud,
+      },
+      // THE RENDERER DROPDOWN (UI parity plan, phase 4b round 2 — author
+      // redesign into a real, world-scoped GM master override; see
+      // GLOBAL_SETTING_KEYS.rendererOverride's own doc in effects/effect-
+      // settings.js and syncInterfaceSeam's own doc in this file for the full
+      // account). Reads/writes that ONE world setting; the actual renderer
+      // switch happens for EVERY client independently, via each one's own
+      // settings-changed listener calling syncInterfaceSeam — this callback
+      // never touches applyArtSuppression/restoreFoundryArt directly.
+      getRendererOverride: () => readSetting(MODULE_ID, GLOBAL_SETTING_KEYS.rendererOverride) ?? 'msa',
+      // writeSetting (foundry/settings-adapter.js) is a THIN wrapper —
+      // `game.settings.set()` verbatim, which REJECTS on failure (a non-GM
+      // writing a world-scoped setting) rather than returning an {ok,reason}
+      // shape. try/catch here, not a truthiness check on the resolved value.
+      onRendererOverrideChange: async (value) => {
+        try {
+          await writeSetting(MODULE_ID, GLOBAL_SETTING_KEYS.rendererOverride, value);
+        } catch (err) {
+          throw new Error(`could not change the renderer (GM only?): ${err?.message ?? err}`);
+        }
+      },
+      // THE SAFETY BUTTON (UI parity plan, phase 4b) — deliberately calls
+      // engageFoundryFallback DIRECTLY, the SAME one-way mechanism the
+      // startup-failure and device-lost paths already use (vt-pan-viewer.js),
+      // never a second implementation. `canvas` is resolved by the same DOM
+      // id vt-pan-viewer.js stamps on its own canvas at creation
+      // ('msa-vt-pan-viewer-canvas') rather than a new exported getter into
+      // that ~20k-line module for one read.
+      onEngageSafety: () => {
+        engageFoundryFallback({
+          reason: 'Manually triggered from the Remote — the GM asked MSA to stop rendering.',
+          canvas: document.getElementById('msa-vt-pan-viewer-canvas'),
+        });
+      },
+      // THE WIND POPOVER (UI parity plan, phase 6a) — the SAME closure state
+      // (windDirectionDeg/windSpeed01) and the SAME MapShine.setWind the old
+      // astrolabe.js's own wind arrow+slider already read/write; a second
+      // door onto them, not a second implementation.
+      windPopover: {
+        getDirectionDeg: () => windDirectionDeg,
+        getSpeed01: () => windSpeed01,
+        onCommit: ({ directionDeg, speed01 }) => MapShine.setWind({ directionDeg, speed01 }),
+      },
+      // THE BR CORNER'S TILE MOTION BUTTON (2026-08-27) — the SAME panel
+      // controller instance Studio's Scene department and the Lab action
+      // both already open, never a second one.
+      onOpenTileMotion: () => tileMotionPanel.open(),
+    });
+  }); // end Hooks.once('ready', ...) — see the deferral comment above installStudio
   // THE PLAYER ROOM (U5, docs/holy/UI-Testament.md §5.5) — safe to construct
   // unconditionally for every client, GM or not (its own header explains
   // why: unlike Studio/Remote, nothing inside it is ever GM-only). Same

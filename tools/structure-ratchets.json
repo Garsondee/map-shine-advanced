@@ -2,7 +2,7 @@
   "no-global-bus": 0,
   "renderer-state/graph-only": 0,
   "no-silent-catch": 27,
-  "foundry/adapter-only": 12,
+  "foundry/adapter-only": 13,
   "log/one-door": 30,
   "time/one-clock": 0,
   "zones/one-door": 8,

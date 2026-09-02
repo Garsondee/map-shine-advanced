@@ -321,36 +321,48 @@ export function elevationRank(floorIndex, unitsAboveFloorBottom) {
 export const INVERSE_SQUARE_STEEPNESS = 8;
 
 /**
- * The SAME windowed inverse-square shape, steepness `K=1` — FIRE's own
+ * The SAME windowed inverse-square shape, steepness `K=0.15` — FIRE's own
  * falloff (`falloffModel: 'inverseSquareWide'`), split out from
  * `INVERSE_SQUARE_STEEPNESS` 2026-09-02 (mythica-machina-press#475,
- * author-reported: "the light a fire throws is white" — confirmed live
- * even after `firePuff`'s coloration seed lost its own extra `coreFade`
- * narrowing).
+ * author-reported: "the light a fire throws is white").
  *
- * ⚠️ THE STEEPNESS ITSELF WAS THE BUG, NOT (ONLY) THE SEED SHAPE. Fire
- * originally shared `falloffModel: 'inverseSquare'` verbatim with candles —
- * `INVERSE_SQUARE_STEEPNESS`'s own header said so explicitly ("tuned for
- * candles... the only current caller"), a claim that stopped being true the
- * moment fire adopted the same string without a matching claim update
- * (the exact bug class this codebase's own `feedback_*` names already
- * cover: a constant tuned for one caller's scale, reused unmodified by a
- * caller with a much bigger one). At K=8, this falloff is down to ~29% by
- * half the light's OWN radius and ~12% by 70% of it — a deliberately tight
- * "bright point, falls off fast" curve, exactly right for a candle's small
- * radius. Applied to a fire — whose radius is documented elsewhere in this
- * codebase as substantially larger (`fire-geometry.js#clusterFireSources`'s
- * own header: "Fire's radii are LARGER") — illumination still LOOKS lit
- * that far out (it mixes toward the scene's own ambient floor, never to
- * nothing), but the ADDITIVE coloration splash — genuinely down to a sliver
- * of its centre value — reads as no colour at all across most of the
- * visible glow: a small warm ring, then a hard wall of plain brightness.
- * `K=1` keeps the same "bright centre, clean zero at the edge" shape but
- * spreads it out into a big, lazy glow — ~70% strength at half radius,
- * ~39% at 70% — appropriate to a fire's actual scale. Candles and
- * lightning keep `INVERSE_SQUARE_STEEPNESS` untouched.
+ * ⚠️ K=1 (this constant's own first value) WAS STILL TOO STEEP — confirmed
+ * against a live diagnostic dump (`MapShine.debug.runReport('vt-pan-viewer-
+ * diagnostics')`) on the author's own reported-broken scene, which named the
+ * actual mechanism precisely: `env.darkness01` was `0` (this "night cave"
+ * scene's ACTUAL configured darkness is noon-bright — `env.sun.todHour: 12`,
+ * `dayFactor01: 1` — regardless of how dark the painted art looks) and
+ * `env.ambient.brightest` was `[1,1,1]`, literal white.
+ * `computeAmbientBackground`/`computeAmbientColors` (environmental-light.js)
+ * derive EVERY light's `background`/`dim`/`bright` ambient tones from
+ * exactly those two numbers — at `darkness01=0` they collapse to
+ * `background ≈ [0.93,0.93,0.93]` and `bright = brightest = [1,1,1]`
+ * exactly, independent of the fire entirely.
+ *
+ * That matters because illumination's `outputColor = mix(backgroundFloor,
+ * finalColorExposed, falloff)` (this file, below) blends TOWARD that
+ * near-white `backgroundFloor` as falloff drops — and at K=1, falloff is
+ * already down to ~70% by half the light's radius and ~39% at 70%, i.e.
+ * `mix()` is already weighted 30-60% toward near-white well inside the
+ * glow. Coloration fades on the SAME curve, so exactly where illumination
+ * is sliding back toward white, coloration's own additive strength is
+ * ALSO collapsing — the two effects compound into "a small tinted core,
+ * then a wall of the scene's own bright ambient," independent of the
+ * `FIRE_INVERSE_SQUARE_STEEPNESS` fix's own direction being correct.
+ *
+ * K=0.15 spreads the SAME shape much further: ~85% strength at half radius,
+ * ~54% at 70%, only genuinely collapsing in the outer ~15-20%. That keeps
+ * BOTH channels away from the near-white ambient floor across nearly the
+ * whole glow, so the additive tint actually has room to read before
+ * illumination reverts to ambient. It does not, on its own, fix a scene
+ * whose darkness/global-illumination settings keep the WHOLE map near-white
+ * regardless of any light — that is a scene-configuration question, raised
+ * separately on the issue, not something a light's own falloff curve can
+ * compensate for. Candles and lightning keep `INVERSE_SQUARE_STEEPNESS`
+ * untouched — candles are small and viewed close, where this compounding
+ * is far less visible.
  */
-export const FIRE_INVERSE_SQUARE_STEEPNESS = 1;
+export const FIRE_INVERSE_SQUARE_STEEPNESS = 0.15;
 
 /**
  * A physically-flavoured inverse-square falloff over the NORMALIZED radial

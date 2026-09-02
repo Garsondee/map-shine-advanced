@@ -26,6 +26,8 @@ import { run as runCompressedTextures } from './compressed-textures.test.mjs';
 import { run as runDepthProxyMaterialPool } from './depth-proxy-material-pool.test.mjs';
 import { run as runAlbedoClarity } from './albedo-clarity.test.mjs';
 import { run as runTaaResolve } from './taa-resolve.test.mjs';
+import { run as runBakedFormat } from './baked-format.test.mjs';
+import { run as runBakedTextures } from './baked-textures.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -80,6 +82,8 @@ const suites = [
   ['depth-proxy-material-pool', runDepthProxyMaterialPool],
   ['albedo-clarity', runAlbedoClarity],
   ['taa-resolve', runTaaResolve],
+  ['baked-format', runBakedFormat],
+  ['baked-textures', runBakedTextures],
 ];
 
 for (const [name, fn] of suites) {

@@ -85,6 +85,7 @@
  * warm costs nothing to reuse.
  */
 import { encodeStriped, computeMipChainDims } from './block-compress.js';
+import { fetchBakedTexture } from './baked-textures.js';
 import { coarseAlphaGridDims, extractAlphaGrid, createMinAlphaGrid, accumulateMinAlphaBand } from './coarse-alpha.js';
 // The mip reducer (Lanczos-2, premultiplied, dilated, LINEARIZED). Replaced the
 // OffscreenCanvas `drawImage` resize this file used to rely on — see
@@ -448,6 +449,15 @@ async function handleAlphaGrid(src) {
 }
 
 async function handle(src) {
+  // BAKED FIRST (mythica-machina-press#439): if the module this asset ships
+  // in was pre-compressed at build time, use that instead of ever decoding or
+  // encoding anything here. `fetchBakedTexture` is fully degradation-first —
+  // no manifest, a stale entry, a network error, a corrupt file all resolve
+  // `null` — so a map with no bake at all falls straight through to the
+  // IndexedDB-cache-then-encode path below, completely unchanged.
+  const baked = await fetchBakedTexture(src);
+  if (baked) return { ...baked, cached: false };
+
   const key = `bc:v${CACHE_VERSION}:${src}`;
   const cached = await cacheGet(key).catch(() => null);
   if (cached && isSameResource(cached, await headSource(src))) {

@@ -12060,19 +12060,24 @@ export async function startVtPanViewer({
       // swap; nothing new to get wrong in the one pipeline that has already
       // twice proven "obviously safe" wrong.
       //
-      // WHY `makeOutdoorsPlaceholderTexture` (reused, not duplicated) — its
-      // 1×1 opaque-WHITE DataTexture already has exactly the one property
-      // this placeholder needs (alpha ≡ 255 everywhere, i.e. fully solid —
-      // `physicalSolidityAlpha`/the depth-authority system reads this as
-      // "real art here", the correct, conservative answer for a tile whose
-      // real art nobody has decoded the alpha of yet). Its own doc-comment
-      // describes a different semantic use (the sky's outdoors gate);
-      // reused here on the same reasoning `fireMaskTexture` already reuses
-      // it for a THIRD, also-unrelated purpose — see that call site's own
-      // comment. A dedicated duplicate would be more narrowly named and
-      // would otherwise be byte-for-byte the same DataTexture — exactly the
-      // kind of coincidence this codebase's own conventions warn against
-      // manufacturing twice.
+      // WHY `makeDisclosurePlaceholderTexture`, NOT the shared
+      // `makeOutdoorsPlaceholderTexture` (2026-09-02 correction — the first
+      // version of this fix DID reuse the white one, on the reasoning that
+      // alpha≡255 is the only property that matters here; author report the
+      // same day: a live re-texture through it read as "the tile flashes
+      // white for a moment", a real visual regression). Alpha≡255 is still
+      // the only property that matters for `physicalSolidityAlpha`/the
+      // depth-authority system (a placeholder must read as "real art here"),
+      // but RGB is not free to pick arbitrarily once the placeholder can
+      // appear during a LIVE update on an already-visible tile, not just
+      // during a cold, curtained load — a flash is exactly the kind of thing
+      // a curtain hides and a live update does not. Black matches this
+      // engine's own loading-curtain ground colour, so a flash reads as
+      // "still loading", not a strobe. See that function's own doc for why
+      // it is a genuine second function rather than a colour parameter on
+      // the shared one (the white in `makeOutdoorsPlaceholderTexture` is
+      // semantically load-bearing for its own callers, not an arbitrary
+      // default).
       //
       // WHY NO VEGETATION MATERIAL, EVEN WHEN `vegActive` IS TRUE — the
       // placeholder's only job is opaque coverage, which `buildWholeImage
@@ -12102,18 +12107,18 @@ export async function startVtPanViewer({
       // instead of a permanent hole. Fail-SAFE, not merely fail-open
       // (memory: feedback_safety_slide_outranks_doctrine).
       //
-      // WHAT THIS DELIBERATELY DOES NOT COVER — an EXISTING, already-loaded
-      // item whose Foundry document's `texture.src` changes live (Stage
-      // Manager and similar tools). `state.wholeImage` is set exactly once
-      // per item (this function's own top-of-function guard returns early
-      // whenever it is already truthy), so a same-id document update never
-      // re-enters this construction path at all — placeholder included.
-      // That is a PRE-EXISTING characteristic of this function, not
-      // something introduced or widened here; this fix closes the gap
-      // between "an item is first discovered" and "its first real texture
-      // finishes", which is the only gap in scope (see this task's own
-      // constraint on not expanding past the mesh-construction timing).
-      const placeholderTex = makeOutdoorsPlaceholderTexture(THREE);
+      // UPDATE (mythica-machina-press#431, landed same day): this USED to
+      // read "does not cover a live texture.src change" here, because
+      // `state.wholeImage`'s guard was pure presence and a same-id document
+      // update never re-entered this construction path at all. That guard
+      // now compares `state.wholeImage.src` against `item.src` and disposes
+      // + rebuilds on a mismatch (see the STALE-SRC REBUILD block at this
+      // function's own top) — a rebuild falls through this SAME
+      // construction path, so a live re-texture now gets this placeholder
+      // too, automatically, not as a special case. The flash this section's
+      // own colour choice, above, exists to soften is the visible evidence
+      // that this now happens.
+      const placeholderTex = makeDisclosurePlaceholderTexture(THREE);
       try {
         renderer.initTexture(placeholderTex);
       } catch (_) {
@@ -21046,6 +21051,29 @@ function makeOutdoorsPlaceholderTexture(THREE) {
     THREE.RGBAFormat,
     THREE.UnsignedByteType
   );
+  tex.needsUpdate = true;
+  return tex;
+}
+
+/**
+ * A dedicated 1x1 OPAQUE-BLACK placeholder — same shape as
+ * `makeOutdoorsPlaceholderTexture` (alpha=255, the one property either
+ * placeholder actually needs), deliberately a SEPARATE function rather than
+ * a shared one with a colour argument (author report, 2026-09-02: a live
+ * texture swap through the white outdoors placeholder read as "the tile
+ * flashes white for a moment", a real visual regression the disclosure-
+ * safety fix introduced). `makeOutdoorsPlaceholderTexture`'s white is
+ * load-bearing for ITS OWN callers (the sky's outdoors gate, the fire-mask
+ * gate — see their own call sites) — white there means "fully outdoors" /
+ * "fully lit", a real semantic value, not an arbitrary placeholder colour.
+ * Recolouring that shared function would silently change what those two
+ * unrelated systems compute. Black is the deliberate choice for THIS use
+ * (matches this engine's own loading-curtain background, `ui/loading-
+ * screen.js`'s `#070b12`-family dark ground, so a flash reads as "still
+ * loading" rather than a jarring white strobe).
+ */
+function makeDisclosurePlaceholderTexture(THREE) {
+  const tex = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
   tex.needsUpdate = true;
   return tex;
 }

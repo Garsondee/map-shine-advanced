@@ -11799,13 +11799,119 @@ export async function startVtPanViewer({
     // slower reveal for a bounded peak.
     let wholeImageLoadChain = Promise.resolve();
 
-    /** Build (once) the whole-image drawable for an item: plan → async decode
-     * each tile's source rect → texture → quad mesh. Idempotent; the async load
-     * fills in `state.wholeImage.tiles` as bitmaps arrive. Every failure is
-     * captured on `state.wholeImage.error`, never thrown — a broken item must
-     * not take the scene down, and the diagnostics must be able to name it. */
+    /** Build the whole-image drawable for an item: plan → async decode each
+     * tile's source rect → texture → quad mesh. Idempotent PER SRC — a second
+     * call for the same item with the same `item.src` returns the cached
+     * result immediately; a call whose `item.src` has changed since the
+     * cached build (a live GM edit, e.g. the Stage Manager macro) disposes
+     * the stale build and falls through to a genuine rebuild — see the
+     * STALE-SRC REBUILD comment immediately below. The async load fills in
+     * `state.wholeImage.tiles` as bitmaps arrive. Every failure is captured
+     * on `state.wholeImage.error`, never thrown — a broken item must not
+     * take the scene down, and the diagnostics must be able to name it. */
     function ensureWholeImageMeshes(state, item) {
-      if (state.wholeImage) return state.wholeImage;
+      if (state.wholeImage) {
+        if (state.wholeImage.src === item.src) return state.wholeImage;
+
+        // STALE-SRC REBUILD (mythica-machina-press#431 — live author report:
+        // the "Stage Manager" macro sets an existing Tile's `texture.src` via
+        // `TileDocument#update()`. Foundry's own document data updates
+        // correctly (confirmed via console log), but the backdrop stayed on
+        // the OLD art until a full browser tab refresh — confirmed live by
+        // disabling MSA entirely (native Foundry rendering worked correctly)
+        // then re-enabling it (broke again): conclusively an MSA rendering-
+        // pipeline gap, not a Foundry/macro-side bug).
+        //
+        // ROOT CAUSE THIS CLOSES: this function's guard used to be pure
+        // presence (`if (state.wholeImage) return state.wholeImage;`), with
+        // NO comparison against the item's CURRENT `.src` — a PERMANENT
+        // one-shot cache keyed only on "has this item ever been built," not
+        // "was it built from what `item.src` says RIGHT NOW." Every upstream
+        // layer already gets this right, independently verified before
+        // writing this fix rather than assumed: `collectTiles`
+        // (foundry/scene-layers.js) reads the live Foundry document fresh on
+        // every call, the `updateTile` Hook (boot.js's `redrawOn`, wired
+        // over `SCENE_LAYER_DOCUMENTS`) fires a fresh redraw on exactly this
+        // document change, and `finishResidencyPass`/`prepareFloor` (this
+        // function's own two call sites) hand this function a genuinely
+        // fresh `item` every single pass — `startVtPanViewer`'s own
+        // `buildItems` doc says as much ("Called fresh on every residency
+        // update, so the list follows the scene rather than being captured
+        // once"). The fresh `item.src` was arriving correctly the entire
+        // time; this function simply never looked at it past the first
+        // call. THE FIX is exactly this `.src` comparison — nothing
+        // upstream needed to change.
+        //
+        // THE DISCLOSURE-SAFETY PLACEHOLDER (mythica-machina-press#435, a
+        // few dozen lines below) applies here FOR FREE, not by accident:
+        // this rebuild disposes the stale build and falls THROUGH the
+        // ordinary top-of-function construction path below — the exact same
+        // path a first-ever call already takes — rather than running a
+        // second, parallel construction routine. That placeholder block's
+        // own "WHAT THIS DELIBERATELY DOES NOT COVER" note named this exact
+        // gap (a live `texture.src` change never re-entering construction at
+        // all, "placeholder included") as explicitly out of its own scope;
+        // this fix is that gap's closure — a live re-texture swap is now
+        // disclosure-safe during its OWN recompression wait too, the same
+        // as a first-time load already was.
+        //
+        // DISPOSAL: `disposeWholeImageTiles` (defined beside
+        // `removeWholeImagePlaceholderTiles`, a few dozen lines below) frees
+        // every tile CURRENTLY on the stale `wi` — mesh/geometry/material/
+        // tex, PLUS the S1a split-material and the Case-1 vegetation-shadow
+        // twin that `removeWholeImagePlaceholderTiles` itself does not need
+        // to touch (a placeholder is never split and never a vegetation-
+        // shadow caster). Written carefully against `stopVtPanViewer`'s own
+        // full-teardown loop's hard-won field list rather than
+        // `removeWholeImagePlaceholderTiles`'s shorter one, specifically
+        // because that field (`t.shadow.*`) was ONCE ALREADY the exact
+        // "third mesh location the cleanup forgot" bug in this same file —
+        // see that teardown loop's own comment.
+        //
+        // THE IN-FLIGHT-LOAD RACE — the real subtlety here, not just the
+        // happy path: the stale `wi`'s OWN `wi.loadPromise` may still be
+        // running (mid fetch/decode/compress) at the exact moment this
+        // rebuild fires — Stage Manager firing twice in quick succession, or
+        // a texture changed while a brand-new tile's first-ever compression
+        // hasn't finished. Disposing `wi.tiles` here only cleans up what
+        // exists SYNCHRONOUSLY, right now; it does NOT cancel that promise
+        // (the fetch/worker requests it may be waiting on have no
+        // cancellation path, and building one is out of this task's scope).
+        // The promise's own body guards itself instead, via an `isStale`
+        // check mirroring `prepareFloor`'s own generation-counter idiom (a
+        // few thousand lines below) — same CONCEPT, a stale async operation
+        // notices its own supersession and bails out harmlessly, adapted
+        // here to an identity check rather than a counter: this closure
+        // already captures the exact `wi` it belongs to, and
+        // `state.wholeImage` already IS the single "which one is current"
+        // pointer `prepareFloor` needed a dedicated counter to express, so
+        // no new counter field is introduced. See `wi.loadPromise`'s own
+        // body, below, for the checks themselves.
+        //
+        // ⚠ ACCEPTED LIMITATION, stated rather than hidden (not fixed here —
+        // filed as mythica-machina-press#436 alongside this fix):
+        // `state.imageSize` (the SOURCE IMAGE's own pixel dimensions, read
+        // once via `getSourceDimensions` the first time this ITEM — not this
+        // wholeImage — ever loaded, in `loadNewItem`) has this EXACT SAME
+        // "resolved once, never revisited" shape, one layer up, and this fix
+        // does not touch it: `tryGetLoadedItem` is deliberately synchronous
+        // (its own header comment explains why) and cannot re-fetch
+        // dimensions without breaking that contract. A live `src` swap to an
+        // image of the SAME pixel dimensions (the common case for something
+        // like interchangeable stage backdrops) rebuilds correctly; a swap
+        // to a DIFFERENT-dimension image would rebuild against the OLD
+        // image's `imageW`/`imageH` and come out mis-fitted — not silently
+        // stuck any more (a real improvement over today), but not
+        // necessarily correct either. A real fix touches `tryGetLoadedItem`'s
+        // own sync-fast-path contract, a materially different, separately-
+        // scoped change — see #436.
+        log.debug(
+          `ensureWholeImageMeshes: "${item.id}" src changed (${state.wholeImage.src} -> ${item.src}), rebuilding`
+        );
+        disposeWholeImageTiles(state.wholeImage);
+        state.wholeImage = null;
+        // Falls through to the ordinary construction path below.
+      }
       const imageW = state.imageSize.width;
       const imageH = state.imageSize.height;
 
@@ -12080,6 +12186,27 @@ export async function startVtPanViewer({
         // next starts, bounding queue depth so a burst of giant copies can't
         // back up into a TDR (the guard the streaming path uses too).
         const gpuQueue = renderer.backend?.isWebGPUBackend ? renderer.backend.device?.queue : null;
+
+        // SUPERSESSION GUARD (mythica-machina-press#431) — mirrors
+        // `prepareFloor`'s own generation-counter `isStale` idiom (a few
+        // thousand lines below): a stale async operation notices its own
+        // supersession and bails out harmlessly instead of mutating state a
+        // newer operation already owns. Adapted here to an IDENTITY check
+        // rather than a counter — this closure already captures the exact
+        // `wi` this load belongs to (the enclosing function's own `const
+        // wi`, a few dozen lines up), and `state.wholeImage` already IS this
+        // item's single "which build is current" pointer: a stale-src
+        // rebuild (this function's own top-of-function guard) always
+        // REPLACES that pointer with a brand-new object rather than
+        // mutating this one in place, so `state.wholeImage !== wi` is exact
+        // and needs no dedicated counter field the way `prepareFloor` does.
+        // Checked after every meaningful `await` below, the same density as
+        // `prepareFloor`'s own checks — a superseded result must never be
+        // pushed into `wi.tiles`/`scene.add`ed onto the live scene, and any
+        // GPU resource a stale attempt already built must be disposed
+        // instead of leaked (each check site below disposes whatever
+        // actually exists at that point — see its own comment).
+        const isStale = () => state.wholeImage !== wi;
         try {
           // Our chain promise is only ever RESOLVED (releaseLoad in finally),
           // never rejected, so a plain await cannot propagate a prior failure.
@@ -12088,6 +12215,11 @@ export async function startVtPanViewer({
           // throws otherwise). init() is idempotent and resolves instantly once
           // the device exists, so awaiting it here just removes a startup race.
           await renderer.init();
+          // Bail before spending a possibly-minutes-long compression/fetch on
+          // a result nobody will ever look at — see isStale's own doc above.
+          // Nothing GPU-resident has been built yet at this point, so there
+          // is nothing to dispose; just don't start.
+          if (isStale()) return;
 
           // COMPRESSED PATH — the WebGPU-memory-ceiling fix. Both floors of raw
           // 12000² art exceed Chrome's ~2.5 GB device-loss wall; compressed they
@@ -12100,6 +12232,12 @@ export async function startVtPanViewer({
           // rendering (the safety slide).
           try {
             const c = await requestCompressedTexture(item.src);
+            // Superseded while compression ran (possibly minutes) — discard
+            // the result without committing it. Nothing GPU-resident exists
+            // yet at this exact point (the CompressedTexture below is not
+            // built until the `if` below succeeds), so there is nothing to
+            // dispose here; just don't build it.
+            if (isStale()) return;
             if (c && (c.format === 'bc1' || c.format === 'bc7') && c.levels?.length) {
               // A block-compressed texture's dimensions MUST be a multiple of 4
               // (the 4×4 block). The worker encodes ceil(w/4)×ceil(h/4) blocks with
@@ -12269,6 +12407,11 @@ export async function startVtPanViewer({
             wi.compressed = 'error:fellback';
             log.warn(`BC1 path failed for "${item.id}", using raw:`, err);
           }
+          // Same bail as above — reached either because compression declined
+          // (unavailable/no levels) or threw into the catch just above.
+          // Either way, a superseded item has no business starting the RAW
+          // path's own fetch/decode chain over on the new build's behalf.
+          if (isStale()) return;
 
           // RAW PATH (fallback). Reached only when the compressed worker gave us
           // nothing (unavailable/failed). Main thread resolves a data-relative src
@@ -12342,6 +12485,28 @@ export async function startVtPanViewer({
                 // recovery, so there is nothing to do here but stop waiting.
               }
             }
+            // Superseded partway through this tile's own decode/upload —
+            // unlike the earlier bail points, `tex` IS already GPU-resident
+            // here (renderer.initTexture ran a few lines up), so there is a
+            // real resource to free. Stop after this tile: remaining
+            // `plan.tiles` entries are simply never attempted, matching
+            // prepareFloor's own "stop at the first stale check, don't keep
+            // grinding through already-doomed work" posture.
+            if (isStale()) {
+              try {
+                tex.dispose();
+              } catch (_) {
+                // Best-effort — matches this file's other tile-disposal sites.
+              }
+              try {
+                bitmap.close?.();
+              } catch (_) {
+                // Idempotent per spec even if already closed above (the
+                // renderer.initTexture try/catch a few lines up); best-effort
+                // regardless, same posture as every other cleanup here.
+              }
+              break;
+            }
             const { material, appearance, motion, tileMotion, floorAttrUniforms, floorAttrItem, uExpectedDepth } =
               vegActive
                 ? buildVegetationMaterial(tex, item, vegKind, vegState.params, {
@@ -12393,21 +12558,29 @@ export async function startVtPanViewer({
             }
             wi.tiles.push(t);
           }
-          // Same retirement as the compressed path above, run once after
-          // EVERY raw sub-tile has been pushed — not per-tile inside the
-          // loop — so the placeholder keeps covering whichever sub-tiles
-          // haven't loaded YET for the full duration of this loop's per-
-          // tile GPU-drain awaits, and is only removed once nothing in
-          // this item's footprint still depends on it.
-          removeWholeImagePlaceholderTiles(wi);
-          wi.status = 'ready';
-          // The meshes were added mid-load with visible:false, and nothing else
-          // sets their visibility until the NEXT input event — which is why the
-          // big textures stayed BLACK until the user panned. Re-run the refresh
-          // now so they appear the instant they finish loading.
-          scheduleResidencyUpdate().catch(() => {
-            // Non-fatal: the next real input refreshes visibility anyway.
-          });
+          // Guarded the same way as the compressed path's own commit above —
+          // if the loop above broke out on isStale(), every tile THIS
+          // attempt built has already been disposed (or never built), and
+          // this now-stale `wi` must not be flipped to 'ready' or trigger a
+          // residency refresh on the NEW build's behalf; that build's own
+          // load owns its own status/refresh.
+          if (!isStale()) {
+            // Same retirement as the compressed path above, run once after
+            // EVERY raw sub-tile has been pushed — not per-tile inside the
+            // loop — so the placeholder keeps covering whichever sub-tiles
+            // haven't loaded YET for the full duration of this loop's per-
+            // tile GPU-drain awaits, and is only removed once nothing in
+            // this item's footprint still depends on it.
+            removeWholeImagePlaceholderTiles(wi);
+            wi.status = 'ready';
+            // The meshes were added mid-load with visible:false, and nothing else
+            // sets their visibility until the NEXT input event — which is why the
+            // big textures stayed BLACK until the user panned. Re-run the refresh
+            // now so they appear the instant they finish loading.
+            scheduleResidencyUpdate().catch(() => {
+              // Non-fatal: the next real input refreshes visibility anyway.
+            });
+          }
         } catch (err) {
           // Deliberately NOT calling removeWholeImagePlaceholderTiles here
           // — see the placeholder's own "WHY A FAILED LOAD DOES NOT REMOVE
@@ -12417,6 +12590,14 @@ export async function startVtPanViewer({
           // path before this fix existed, so leaving the placeholder here
           // is strictly safer than what this codebase already accepted,
           // never a new risk.
+          //
+          // NOT isStale()-guarded, unlike every success path above — a
+          // superseded attempt's own failure is harmless either way (this
+          // `wi` is already detached from `state.wholeImage`, so nothing
+          // reads its `.status`/`.error` for display), and the diagnostic
+          // value of knowing THIS src genuinely failed to load outweighs
+          // the log noise of an occasional message about a src nobody is
+          // looking at any more.
           wi.status = 'error';
           wi.error = String(err?.message || err);
           log.error(`whole-image load failed for "${item.id}" (${item.src}):`, err);
@@ -12485,6 +12666,94 @@ export async function startVtPanViewer({
           t.tex?.dispose();
         } catch (_) {
           // Best-effort cleanup — matches the per-tile teardown loop's own posture (stopVtPanViewer).
+        }
+        wi.tiles.splice(i, 1);
+      }
+    }
+
+    /**
+     * Remove and dispose EVERY tile on a `wi` — real art and any surviving
+     * placeholder alike — unconditionally, not just the placeholder-tagged
+     * ones `removeWholeImagePlaceholderTiles` targets. The sibling this
+     * function's own top-of-function STALE-SRC REBUILD comment calls out:
+     * where that function retires a placeholder because the REAL art just
+     * took over, this one throws away an entire `wi` — real art included —
+     * because a live `item.src` change means it no longer describes what
+     * this item should be showing at all.
+     *
+     * FIELD LIST verified against `stopVtPanViewer`'s own full-teardown loop
+     * (this function's file, `stopVtPanViewer` — a few thousand lines up
+     * from here), NOT against `removeWholeImagePlaceholderTiles`'s shorter
+     * one, deliberately: a placeholder tile is never early-Z split and never
+     * a Case-1 vegetation-shadow caster (see the placeholder's own "WHY NO
+     * VEGETATION MATERIAL" comment), so `removeWholeImagePlaceholderTiles`
+     * correctly has no need to touch `t.splitInteriorMaterial` or
+     * `t.shadow.*` — but a REAL tile, which is exactly what this function
+     * disposes, can be either. `t.shadow.*` was ONCE ALREADY the exact
+     * "third mesh location the cleanup forgot" bug in that same teardown
+     * loop (see its own comment) — copying the shorter list here instead of
+     * the hard-won complete one would have reproduced that bug a second
+     * time in a second location.
+     *
+     * UNLIKE `stopVtPanViewer`'s teardown loop, this DOES call
+     * `removeFromParent()` on every mesh (both `t.mesh` and `t.shadow.mesh`)
+     * — matching `removeWholeImagePlaceholderTiles`'s own posture, not the
+     * teardown loop's: teardown discards the whole `scene` right after, so
+     * unlinking individual meshes first is pure waste there, whereas this
+     * runs on a scene that keeps rendering every other item.
+     *
+     * Mutates `wi.tiles` in place (splice, iterating backwards) — see
+     * `removeWholeImagePlaceholderTiles`'s own doc for why that discipline
+     * is kept even though a reassignment would likely be just as safe here
+     * too (this `wi` is about to be dropped by its only caller regardless).
+     *
+     * @param {object} wi - the STALE `state.wholeImage` being replaced, not
+     *   the new one — see the STALE-SRC REBUILD comment at this file's
+     *   `ensureWholeImageMeshes` for the one call site.
+     */
+    function disposeWholeImageTiles(wi) {
+      for (let i = wi.tiles.length - 1; i >= 0; i--) {
+        const t = wi.tiles[i];
+        try {
+          t.mesh?.removeFromParent();
+        } catch (_) {
+          // Scene already gone (viewer torn down mid-load) — nothing left to remove from.
+        }
+        try {
+          t.geometry?.dispose();
+        } catch (_) {
+          // Best-effort cleanup — matches removeWholeImagePlaceholderTiles's own posture.
+        }
+        try {
+          t.material?.dispose();
+        } catch (_) {
+          // Best-effort cleanup — matches removeWholeImagePlaceholderTiles's own posture.
+        }
+        try {
+          // S1a's interior sibling — a REAL second material with its own
+          // compiled pipeline (see stopVtPanViewer's own teardown loop
+          // comment); missing this here would leak one per split tile.
+          t.splitInteriorMaterial?.dispose();
+        } catch (_) {
+          // Best-effort cleanup — matches removeWholeImagePlaceholderTiles's own posture.
+        }
+        try {
+          t.tex?.dispose();
+        } catch (_) {
+          // Best-effort cleanup — matches removeWholeImagePlaceholderTiles's own posture.
+        }
+        try {
+          // Case-1 vegetation ground shadow (vegetation-shadow-subsystem.js#
+          // attachTileShadow) — a REAL second mesh (its own scene.add), its
+          // own geometry, and its own material twinning this tile's own; the
+          // texture is shared with `t.tex` above, not a third upload, so no
+          // separate `.tex.dispose()` here (see attachTileShadow's own body:
+          // it builds its material FROM `t.tex`, never a texture of its own).
+          t.shadow?.mesh?.removeFromParent();
+          t.shadow?.geometry?.dispose();
+          t.shadow?.material?.dispose();
+        } catch (_) {
+          // Best-effort cleanup — matches removeWholeImagePlaceholderTiles's own posture.
         }
         wi.tiles.splice(i, 1);
       }

@@ -83,7 +83,11 @@ import { buildFairyIlluminationSeed, buildFairyColorationSeed } from './fairy.js
 import { buildGridColorationSeed } from './grid.js';
 import { buildStarlightColorationSeed } from './starlight.js';
 import { buildSmokepatchIlluminationSeed, buildSmokepatchColorationSeed } from './smokepatch.js';
-import { buildCandleFlickerIlluminationSeed, buildCandleFlickerColorationSeed } from './candle-flicker.js';
+import {
+  buildCandleFlickerIlluminationSeed,
+  buildCandleFlickerColorationSeed,
+  buildFirePuffColorationSeed,
+} from './candle-flicker.js';
 
 /**
  * Real, Foundry-valid animation keys this project has deliberately not
@@ -167,12 +171,12 @@ export const LIGHT_ANIMATIONS = {
     buildColorationSeed: buildEnergyColorationSeed,
   },
   /**
-   * FIRE's cast light (docs/planning/Fire.md). Reuses `candleFlicker`'s
-   * builders verbatim rather than inventing a second wind-aware shader — same
-   * philosophy as the original `firePuff` (the difference between a candle
-   * and a bonfire is the DESCRIPTOR: radius, luminosity, ratio, `quality`),
-   * just pointed at MSA's own richer noise instead of Foundry's generic
-   * `flame` torch shader.
+   * FIRE's cast light (docs/planning/Fire.md). Shares `candleFlicker`'s
+   * illumination builder verbatim rather than inventing a second wind-aware
+   * shader — same philosophy as the original `firePuff` (the difference
+   * between a candle and a bonfire is the DESCRIPTOR: radius, luminosity,
+   * ratio, `quality`), just pointed at MSA's own richer noise instead of
+   * Foundry's generic `flame` torch shader.
    *
    * ⚠️ RE-POINTED FROM `flame` TO `candleFlicker`, 2026-08-09, AUTHOR'S OWN
    * DIRECTION: *"adjust fire light to work more like candle light."* `flame`
@@ -188,7 +192,22 @@ export const LIGHT_ANIMATIONS = {
    * animation is active, not specially for candles) and fire's descriptor
    * already carries `quality` in the exact 0..2 range `candleFlicker` expects
    * (`buildFireLightSources`'s own `quality: clampNum(..., 0, 2)`) — so this
-   * is a pure re-point, no scaffold or descriptor change required.
+   * was a pure re-point, no scaffold or descriptor change required.
+   *
+   * ⚠️ COLORATION SPLIT FROM CANDLE'S OWN, 2026-09-02
+   * (mythica-machina-press#475, author-reported: "the light a fire throws is
+   * white"). `buildCandleFlickerColorationSeed`'s `coreFade` narrows the
+   * visible tint to roughly the inner half of the light's OWN radius — a
+   * deliberate "fine point at the wick" for a candle, but fire's radii are
+   * documented elsewhere as substantially larger (`fire-geometry.js#cluster
+   * FireSources`'s own header: "Fire's radii are LARGER"), so the same
+   * fraction-of-radius core left most of a fire's glow reading as plain,
+   * colourless brightness. `buildFirePuffColorationSeed` (`candle-flicker.js`)
+   * keeps the identical warm↔cool temperature swing and guttering pulse but
+   * drops `coreFade`/`candleShape` entirely, so the tint rides the same
+   * single `falloff` illumination already uses. Illumination is UNCHANGED
+   * (still `buildCandleFlickerIlluminationSeed`) — the brightness/guttering
+   * look was never the reported problem, only the hue's reach was.
    *
    * ⚠️ REGISTERED BECAUSE AN UNREGISTERED TYPE IS NOT INERT — IT IS FEATURELESS.
    * `resolveLightAnimation` returns null for an unknown string, and the pool's
@@ -204,7 +223,7 @@ export const LIGHT_ANIMATIONS = {
     flickerAmplification: () => 1,
     forceDefaultColor: false,
     buildIlluminationSeed: buildCandleFlickerIlluminationSeed,
-    buildColorationSeed: buildCandleFlickerColorationSeed,
+    buildColorationSeed: buildFirePuffColorationSeed,
   },
 
   // TIER 1 (2026-07-20) — the remaining 17 light animations, same proven

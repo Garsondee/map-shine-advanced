@@ -465,3 +465,74 @@ export function buildCandleFlickerColorationSeed({
   const finalColor = tinted.mul(brightnessPulse).mul(uColorationAlpha).mul(coreFade);
   return { finalColor };
 }
+
+/**
+ * FIRE's own coloration seed — the same warm↔cool temperature swing as
+ * {@link buildCandleFlickerColorationSeed}, but WITHOUT that function's own
+ * `coreFade` narrowing.
+ *
+ * ⚠️ WHY THIS IS A SEPARATE FUNCTION (mythica-machina-press#475, author-
+ * reported: "the light a fire throws is white"). `buildCandleFlickerColoration
+ * Seed`'s `coreFade` (`coreInverseSquare`, `CORE_POINT_SPAN`) is a SECOND,
+ * steep falloff, MULTIPLIED on top of the ordinary `falloff` every light
+ * already gets downstream (`point-light-coloration.js`'s `outputColor =
+ * finalColor.mul(falloff)`). Two compounded falloffs squeeze the visible tint
+ * into roughly the inner half of the light's radius, while illumination — ONE
+ * falloff, softening outward to `uDimColor` rather than to nothing — still
+ * reaches the full radius. For a candle (small, always seen close up) that
+ * reads as the intended "fine bright point at the wick." Fire's radii are
+ * documented elsewhere as substantially larger (`fire-geometry.js#cluster
+ * FireSources`'s own header: "Fire's radii are LARGER"), so the SAME
+ * fraction-of-radius core spans enough screen space that the un-tinted outer
+ * band — full brightness, zero hue — becomes the dominant thing a viewer
+ * actually sees: a big pool of white light with a small warm dot in the
+ * middle, not a fire-lit room. Dropping the extra narrowing here lets the
+ * warm↔cool tint ride the SAME single falloff illumination already uses, so
+ * the colour fills the whole glow a viewer actually sees.
+ *
+ * No `candleShape` either — fire's own particle system already authors the
+ * flame's silhouette; the CAST LIGHT has no wick to lean/oval/boil around.
+ *
+ * @param {object} args
+ * @param {*} args.THREE
+ * @param {*} args.uLightColor
+ * @param {*} args.uColorationAlpha
+ * @param {*} args.uIntensityRaw
+ * @param {*} args.time
+ * @param {number} [args.quality=0] - graph-build-time tier (see this
+ *   module's header) — `quality >= 1` is what turns the temperature swing on;
+ *   fire reaches this at its default effect tier (`fire-geometry.js`'s
+ *   `FIRE_DEFAULT_TIER`).
+ * @param {*} [args.wind] - the scaffold's shared wind sample, forwarded to
+ *   `candleLife` for the wind-driven gutter/snuff term only — there is no
+ *   lean to compute here.
+ * @param {*} [args.windResponse]
+ * @returns {{finalColor: *}}
+ */
+export function buildFirePuffColorationSeed({
+  THREE,
+  uLightColor,
+  uColorationAlpha,
+  uIntensityRaw,
+  time,
+  quality = 0,
+  wind,
+  windResponse,
+}) {
+  const { float, vec3, clamp, mix } = THREE.TSL;
+  const amplification = uIntensityRaw.div(float(5));
+  const { brightnessPulse, warmth } = candleLife(THREE.TSL, time, amplification, quality, wind, windResponse);
+
+  // TIER ≥1 — the identical warm↔cool swing candle's own coloration uses
+  // (see buildCandleFlickerColorationSeed above); just never narrowed to a core.
+  let tinted = uLightColor;
+  if (quality >= 1) {
+    const tempMix = clamp(float(0.5).add(warmth.mul(float(0.5))), float(0), float(1));
+    const cool = vec3(COOL_TINT[0], COOL_TINT[1], COOL_TINT[2]);
+    const warm = vec3(WARM_TINT[0], WARM_TINT[1], WARM_TINT[2]);
+    tinted = uLightColor.mul(mix(cool, warm, tempMix));
+  }
+
+  const finalColor = tinted.mul(brightnessPulse).mul(uColorationAlpha);
+  return { finalColor };
+}

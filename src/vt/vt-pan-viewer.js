@@ -11882,6 +11882,180 @@ export async function startVtPanViewer({
       };
       state.wholeImage = wi;
 
+      // ════════════════════════════════════════════════════════════════════
+      // DISCLOSURE-SAFETY PLACEHOLDER (mythica-machina-press#435) — built
+      // SYNCHRONOUSLY, right here, before `wi.loadPromise` below has even
+      // started its first `await`. Read this before touching either of the
+      // two real build paths further down in that promise's body.
+      //
+      // THE GAP THIS CLOSES: everything from here to the first real
+      // `scene.add(mesh)` inside `wi.loadPromise` used to be pure wall-clock
+      // time with NO occluding geometry for this item at all — first an
+      // `await priorLoad` for the serialized whole-image queue (itself
+      // bounded by every OTHER giant image already loading), then the real
+      // fetch/decode/compress/upload chain, which compressed-textures.js's
+      // own header and the live author report both put at 5-10 minutes for
+      // a large source image. A Tile in this engine is very often placed
+      // specifically to hide something (a roof over an unexplored room, a
+      // secret-door overlay) — the multifloor composite relies on an upper
+      // floor's OWN authored alpha holes to show the floor below only where
+      // the art actually has a window or stairwell cut into it (see bc-
+      // compress.worker.js's header for the same "alpha holes are load-
+      // bearing" point). A tile with no mesh at all has no alpha holes — its
+      // ENTIRE footprint is one unintended hole — so every second this gap
+      // stayed open was a second a player could see straight through
+      // something a GM placed on purpose. Neither existing "wait honestly"
+      // path closes it: `loading-screen.js`'s cold-load curtain force-
+      // reveals at HARD_REVEAL_MS regardless of outstanding compression
+      // (and tears its own DOM node down on reveal, so nothing persists to
+      // say "still compressing" even then), and a LIVE post-load change on
+      // the CURRENT floor — a GM macro editing a Tile's `texture.src`
+      // (Stage Manager-style), or dropping a brand-new tile — never reaches
+      // `prepareFloor`'s own "await compression before reveal" phase at
+      // all, because that phase only runs on a FLOOR SWITCH. So this gap
+      // was reachable on an already-visible floor, not just during a cold
+      // load.
+      //
+      // THE FIX: build the SAME shape of tile entry the real paths below
+      // build — same `buildWholeImageMaterial`, same `setTileGeometry`,
+      // same `new THREE.Mesh(...)` + `scene.add(mesh)` — but through a
+      // trivial 1×1 fully-opaque texture instead of the real (possibly
+      // still-compressing) art. It is pushed onto `wi.tiles` itself, not a
+      // parallel system, so `refreshWholeImageItem` (this function's own
+      // caller runs it immediately after this returns) decides this mesh's
+      // visibility/renderOrder exactly like it would any other tile — zero
+      // changes needed there.
+      //
+      // WHY A SEPARATE MESH, NOT A LIVE TEXTURE SWAP ON ONE SHARED MESH —
+      // this was the recommended-but-not-mandated shape of the fix, and it
+      // was investigated, not assumed. `envLight.outdoorsTexNode.value =
+      // tex` (a few thousand lines up) proves swapping a TSL texture node's
+      // `.value` live IS a real, working pattern in this codebase — but
+      // every proven use of it swaps between textures of the SAME kind (two
+      // `THREE.DataTexture`s, same uncompressed RGBA8 format). It has never
+      // been exercised swapping an uncompressed placeholder for a
+      // `THREE.CompressedTexture` (a genuinely different GPU texture format
+      // — BC1/BC7 block-compressed vs. plain RGBA8, a different upload path
+      // per three.webgpu.js's own `_copyCompressedBufferToTexture` vs.
+      // `copyExternalImageToTexture`), and `buildWholeImageMaterial` samples
+      // `tex` from TWO separate call sites (`physicalSolidityAlpha` and
+      // `colorNode`'s own albedo taps), neither of which currently exposes a
+      // swappable node — wiring that up would mean restructuring the most
+      // incident-prone material builder in this engine (two confirmed real
+      // device-loss incidents already trace through this exact pipeline —
+      // see compressed-textures.js's own header) on the strength of an
+      // untested cross-format assumption. A second, disposable mesh instead
+      // reuses every one of those call sites completely unmodified, for
+      // BOTH the placeholder and the real texture — the only new operations
+      // are `scene.add`/`removeFromParent`/`.dispose()`, all three already
+      // proven mid-session, on a running viewer, a few thousand lines up
+      // (the region-mesh reconcile: `entry.mesh.removeFromParent();
+      // entry.material.dispose();`). Slower to write than a `.value =`
+      // swap; nothing new to get wrong in the one pipeline that has already
+      // twice proven "obviously safe" wrong.
+      //
+      // WHY `makeOutdoorsPlaceholderTexture` (reused, not duplicated) — its
+      // 1×1 opaque-WHITE DataTexture already has exactly the one property
+      // this placeholder needs (alpha ≡ 255 everywhere, i.e. fully solid —
+      // `physicalSolidityAlpha`/the depth-authority system reads this as
+      // "real art here", the correct, conservative answer for a tile whose
+      // real art nobody has decoded the alpha of yet). Its own doc-comment
+      // describes a different semantic use (the sky's outdoors gate);
+      // reused here on the same reasoning `fireMaskTexture` already reuses
+      // it for a THIRD, also-unrelated purpose — see that call site's own
+      // comment. A dedicated duplicate would be more narrowly named and
+      // would otherwise be byte-for-byte the same DataTexture — exactly the
+      // kind of coincidence this codebase's own conventions warn against
+      // manufacturing twice.
+      //
+      // WHY NO VEGETATION MATERIAL, EVEN WHEN `vegActive` IS TRUE — the
+      // placeholder's only job is opaque coverage, which `buildWholeImage
+      // Material` already gives it; replicating `buildVegetationMaterial`'s
+      // tessellation/wind/shadow machinery for a mesh that lives for, at
+      // most, one compression pass would be real added risk (a second,
+      // rarely-exercised code path through the wind system) for zero
+      // disclosure-safety benefit — nothing is hidden BEHIND a vegetation
+      // tile's own sway, only behind its OPAQUE footprint, which a plain
+      // quad already covers. `vegActive: false` on the entry below is
+      // therefore factually correct for THIS entry, not a simplification.
+      //
+      // WHY IT NEVER GETS RE-EVALUATED PER FRAME — it doesn't need to be:
+      // it is removed, once, in the SAME synchronous block that pushes the
+      // first real tile(s) for this item (see `removeWholeImagePlaceholder
+      // Tiles`'s call sites below, in both the compressed-success and raw-
+      // fallback-success branches) — so there is no frame with both the
+      // placeholder and zero real tiles, nor a frame where the placeholder
+      // outlives the real art it stands in for.
+      //
+      // WHY A FAILED LOAD DOES NOT REMOVE IT — see the outer `catch` block
+      // further down: on total failure (a 404, an undecodable file)
+      // `wi.tiles` used to stay empty forever, i.e. today's failure mode for
+      // a broken whole-image item was already a PERMANENT hole. Leaving the
+      // placeholder standing on failure is strictly SAFER than that — a
+      // permanently-broken tile now fails to a permanent opaque stand-in
+      // instead of a permanent hole. Fail-SAFE, not merely fail-open
+      // (memory: feedback_safety_slide_outranks_doctrine).
+      //
+      // WHAT THIS DELIBERATELY DOES NOT COVER — an EXISTING, already-loaded
+      // item whose Foundry document's `texture.src` changes live (Stage
+      // Manager and similar tools). `state.wholeImage` is set exactly once
+      // per item (this function's own top-of-function guard returns early
+      // whenever it is already truthy), so a same-id document update never
+      // re-enters this construction path at all — placeholder included.
+      // That is a PRE-EXISTING characteristic of this function, not
+      // something introduced or widened here; this fix closes the gap
+      // between "an item is first discovered" and "its first real texture
+      // finishes", which is the only gap in scope (see this task's own
+      // constraint on not expanding past the mesh-construction timing).
+      const placeholderTex = makeOutdoorsPlaceholderTexture(THREE);
+      try {
+        renderer.initTexture(placeholderTex);
+      } catch (_) {
+        // Backend not up yet — same tolerated race every other texture
+        // built in this function already accepts; Three uploads it lazily
+        // on first render instead of on this forced call.
+      }
+      const {
+        material: placeholderMaterial,
+        appearance: placeholderAppearance,
+        motion: placeholderMotion,
+        tileMotion: placeholderTileMotion,
+        floorAttrUniforms: placeholderFloorAttrUniforms,
+        floorAttrItem: placeholderFloorAttrItem,
+        uExpectedDepth: placeholderUExpectedDepth,
+      } = buildWholeImageMaterial(placeholderTex, item);
+      const placeholderGeometry = new THREE.BufferGeometry();
+      const placeholderTileEntry = {
+        // Logical full-image rect, matching the compressed path's own
+        // single-tile shape (`wholeTile` below) — a placeholder never
+        // splits regardless of how the REAL load eventually resolves (one
+        // compressed tile, or several raw-fallback ones): one quad
+        // covering the whole placement is always at least as opaque as
+        // whatever shape the real art ends up taking.
+        tile: { sx: 0, sy: 0, sw: imageW, sh: imageH, col: 0, row: 0 },
+        sub: null,
+        tex: placeholderTex,
+        geometry: placeholderGeometry,
+        material: placeholderMaterial,
+        appearance: placeholderAppearance,
+        motion: placeholderMotion,
+        tileMotion: placeholderTileMotion ?? null,
+        mesh: null,
+        floorAttrUniforms: placeholderFloorAttrUniforms ?? null,
+        floorAttrItem: placeholderFloorAttrItem ?? null,
+        uExpectedDepth: placeholderUExpectedDepth ?? null,
+        vegActive: false, // see this block's own "WHY NO VEGETATION MATERIAL" note above
+        isPlaceholder: true, // marks this entry for wholesale removal — see removeWholeImagePlaceholderTiles
+      };
+      setTileGeometry(placeholderTileEntry, state.placement, imageW, imageH, 1, 0, null, null);
+      const placeholderMesh = new THREE.Mesh(placeholderGeometry, placeholderMaterial);
+      placeholderMesh.frustumCulled = false;
+      placeholderMesh.visible = false; // the refresh loop (refreshWholeImageItem, run by this function's own caller right after) decides visibility, same as every other tile
+      placeholderMesh.renderOrder = wi.renderOrder;
+      placeholderTileEntry.mesh = placeholderMesh;
+      scene.add(placeholderMesh);
+      wi.tiles.push(placeholderTileEntry);
+
       // wi.loadPromise: the async body below ALWAYS resolves (every error path
       // sets wi.status='error' + wi.error and does not re-throw — see the catch
       // block), so this is safe for a caller to await without a try/catch of its
@@ -12073,6 +12247,13 @@ export async function startVtPanViewer({
                 );
               }
               wi.tiles.push(t);
+              // The real tile now covers this item's whole footprint, so
+              // the synchronous placeholder built at the top of this
+              // function (see its own "DISCLOSURE-SAFETY PLACEHOLDER"
+              // comment) has done its job — retire it now, in this same
+              // synchronous block, so there is no frame with both meshes
+              // present and no frame with neither.
+              removeWholeImagePlaceholderTiles(wi);
               wi.compressed = c.cached ? `${c.format}(cached)` : c.format;
               // alphaStats/alphaMinGrid are already set — see the comment a
               // few dozen lines up, right before this tile's own
@@ -12212,6 +12393,13 @@ export async function startVtPanViewer({
             }
             wi.tiles.push(t);
           }
+          // Same retirement as the compressed path above, run once after
+          // EVERY raw sub-tile has been pushed — not per-tile inside the
+          // loop — so the placeholder keeps covering whichever sub-tiles
+          // haven't loaded YET for the full duration of this loop's per-
+          // tile GPU-drain awaits, and is only removed once nothing in
+          // this item's footprint still depends on it.
+          removeWholeImagePlaceholderTiles(wi);
           wi.status = 'ready';
           // The meshes were added mid-load with visible:false, and nothing else
           // sets their visibility until the NEXT input event — which is why the
@@ -12221,6 +12409,14 @@ export async function startVtPanViewer({
             // Non-fatal: the next real input refreshes visibility anyway.
           });
         } catch (err) {
+          // Deliberately NOT calling removeWholeImagePlaceholderTiles here
+          // — see the placeholder's own "WHY A FAILED LOAD DOES NOT REMOVE
+          // IT" note, at the top of this function. A permanently-broken
+          // item keeps its opaque stand-in forever rather than reverting
+          // to a hole; `wi.tiles` already stayed empty forever on this
+          // path before this fix existed, so leaving the placeholder here
+          // is strictly safer than what this codebase already accepted,
+          // never a new risk.
           wi.status = 'error';
           wi.error = String(err?.message || err);
           log.error(`whole-image load failed for "${item.id}" (${item.src}):`, err);
@@ -12232,6 +12428,66 @@ export async function startVtPanViewer({
       })();
 
       return wi;
+    }
+
+    /**
+     * Remove and dispose every DISCLOSURE-SAFETY PLACEHOLDER tile still
+     * sitting in `wi.tiles` (see `ensureWholeImageMeshes`'s own
+     * "DISCLOSURE-SAFETY PLACEHOLDER" comment for why one can be there at
+     * all). Called at BOTH real-texture success points inside
+     * `ensureWholeImageMeshes`'s `wi.loadPromise` — compressed and raw-
+     * fallback — the moment the first genuine tile(s) for this item have
+     * just been pushed and are about to take over. Deliberately NEVER
+     * called from that promise's outer `catch` block, so a load that fails
+     * outright leaves its placeholder standing forever rather than
+     * reverting to a hole (fail-SAFE, not fail-open — see that same
+     * comment's "WHY A FAILED LOAD DOES NOT REMOVE IT" note).
+     *
+     * Symmetric with the per-tile disposal already done at full viewer
+     * teardown (stopVtPanViewer's own cleanup loop, a few thousand lines
+     * up) — same three `.dispose()` calls, same best-effort try/catch-per-
+     * resource posture — just scoped to one item's stand-in tile instead
+     * of every tile in the session, and additionally unlinking the mesh
+     * from `scene` (teardown never needs to: the whole scene is discarded
+     * there, whereas THIS removal happens on a scene that keeps rendering).
+     *
+     * Mutates `wi.tiles` IN PLACE (splice, iterating backwards), not by
+     * reassigning `wi.tiles` to a filtered copy — every known reader
+     * (`refreshWholeImageItem`, `rebuildSceneDepthProxies`,
+     * `getGeometryComposition`, the teardown loop) reads `wi.tiles` fresh
+     * at use time, so a reassignment would likely be just as safe, but
+     * preserving the array's own identity costs nothing and removes any
+     * chance of this being wrong about that.
+     *
+     * @param {object} wi - `state.wholeImage`, the object this function's
+     *   two call sites already have in scope.
+     */
+    function removeWholeImagePlaceholderTiles(wi) {
+      for (let i = wi.tiles.length - 1; i >= 0; i--) {
+        const t = wi.tiles[i];
+        if (!t.isPlaceholder) continue;
+        try {
+          t.mesh?.removeFromParent();
+        } catch (_) {
+          // Scene already gone (viewer torn down mid-load) — nothing left to remove from.
+        }
+        try {
+          t.geometry?.dispose();
+        } catch (_) {
+          // Best-effort cleanup — matches the per-tile teardown loop's own posture (stopVtPanViewer).
+        }
+        try {
+          t.material?.dispose();
+        } catch (_) {
+          // Best-effort cleanup — matches the per-tile teardown loop's own posture (stopVtPanViewer).
+        }
+        try {
+          t.tex?.dispose();
+        } catch (_) {
+          // Best-effort cleanup — matches the per-tile teardown loop's own posture (stopVtPanViewer).
+        }
+        wi.tiles.splice(i, 1);
+      }
     }
 
     /** Update a whole-image item each refresh: reposition on placement change,

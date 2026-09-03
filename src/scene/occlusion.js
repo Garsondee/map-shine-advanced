@@ -384,6 +384,24 @@ export function testItemHoverAlpha({ u, v, grid, alphaThreshold }) {
  * would need the new diagnostic's output from a real repro, not a read of
  * the source. This fix does not depend on knowing which one it was.
  *
+ * FOURTH ROUND (2026-09-03) — it turned out not to matter WHICH path fired:
+ * the live report on this exact fix, verbatim, was *"Now it's not fading
+ * the trees / bushes no matter where I place my mouse cursor"* — every
+ * vegetation overlay's grid was landing null, every time, which fail-closed
+ * (correctly) turned into "never hover-fades, anywhere". The most likely
+ * mechanism traced by reading: the worker's own `_unavailable` latch
+ * (`compressed-textures.js#ensureWorker`) is SESSION-WIDE and PERMANENT —
+ * one hard error from any job of any kind, anywhere, and every later
+ * `requestCoarseAlphaGrid` call resolves null for the rest of the page's
+ * life, not just for whichever asset first triggered it.
+ * `ensureVegetationOverlay` (`vt-pan-viewer.js`) now retries with a
+ * main-thread decode (`computeVegetationCoverageGridOnMainThread`, same
+ * file) whenever the worker's own request resolves null, so THIS function's
+ * fail-closed branch should now only be reached for a genuinely unfetchable
+ * image — the residual case it was always meant for. This function's own
+ * behaviour is unchanged; only how often a real caller should expect to hit
+ * its missing-grid branch has changed.
+ *
  * @param {object} args
  * @param {number} args.u @param {number} args.v - quad-local UV, 0..1 when on the quad.
  * @param {{w:number,h:number,data:Uint8Array}|null|undefined} args.grid - the

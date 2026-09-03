@@ -95,6 +95,12 @@ import {
   getCompressedTextureStats,
   PRIORITY_INTERACTIVE,
 } from './compressed-textures.js';
+// The pure half of the coarse-alpha grid (dims + channel extraction) — reused
+// by computeVegetationCoverageGridOnMainThread's fallback decode, below,
+// UNCHANGED from what bc-compress.worker.js#handleAlphaGrid already calls;
+// see that function's own doc for why this fix needs a second, main-thread
+// caller for these instead of new logic. Intra-zone.
+import { coarseAlphaGridDims, extractAlphaGrid } from './coarse-alpha.js';
 import { createSettleTracker, createReadinessRegistry, READINESS_STAGE } from './settle.js';
 import {
   buildCoverageCellMask,
@@ -8795,6 +8801,19 @@ export async function startVtPanViewer({
      * default is correct for ITS OWN caller and wrong for this one, on
      * purpose, per that same doc.
      *
+     * FOURTH ROUND (mythica-machina-press#470, 2026-09-03) — fail-closed
+     * above was correct but `entry.coverageGrid` was STILL turning up null
+     * on every single overlay in the author's live session, so nothing ever
+     * hover-faded at all ("Now it's not fading the trees / bushes no matter
+     * where I place my mouse cursor" — the exact shape fail-closed produces
+     * when the grid never arrives). `ensureVegetationOverlay` now retries
+     * with a main-thread decode (`computeVegetationCoverageGridOnMainThread`)
+     * whenever the shared worker's own grid request resolves null, so a null
+     * `entry.coverageGrid` at this point should be rare — genuinely
+     * unfetchable art, not a dead worker. This function's own fail-closed
+     * default is UNCHANGED and still correct for that residual case; only
+     * how often the grid legitimately goes missing has changed.
+     *
      * @param {object} state - the HOST's `itemStates` entry (worldBounds/placement only — never its own coverage grid).
      * @param {object} entry - a `state.vegetationOverlays[kindId]` entry, `status === 'ready'`.
      * @param {number} x @param {number} y - world point.
@@ -14281,6 +14300,112 @@ export async function startVtPanViewer({
     }
 
     /**
+     * MAIN-THREAD FALLBACK for a vegetation overlay's coarse alpha grid
+     * (mythica-machina-press#470, FOURTH round — live report on the THIRD
+     * round's own fix, verbatim: "Now it's not fading the trees / bushes no
+     * matter where I place my mouse cursor". That is exactly what
+     * `testVegetationHoverAlpha`'s fail-CLOSED default produces when
+     * `entry.coverageGrid` never arrives — not occasionally, but for EVERY
+     * vegetation overlay in the session).
+     *
+     * THE MECHANISM: `requestCoarseAlphaGrid` and `requestCompressedTexture`
+     * (this file's own texture load, just above) share exactly ONE worker
+     * (`compressed-textures.js#ensureWorker`). A single hard `onerror` from
+     * ANY job — either kind, any asset, anywhere in the page session —
+     * permanently latches that module's own `_unavailable` flag; every
+     * subsequent call to EITHER function then resolves `null` for the rest
+     * of the session (see that module's own header — this fix deliberately
+     * does not touch that latch; a session-wide worker crash degrading
+     * every OTHER coarse-alpha consumer too, e.g. ordinary Tile hover-fade
+     * precision, is a separate, larger-blast-radius concern, filed
+     * independently rather than fixed here). `loadVegetationOverlayTexture`,
+     * immediately above, already has a working raw-`fetch` fallback for
+     * exactly this failure on the TEXTURE side — the canopy keeps rendering
+     * normally either way, which is exactly why this regression was invisible
+     * there. The coverage GRID had no equivalent: a resolved `null` was
+     * simply accepted as "no coverage data", forever, for that url, which is
+     * what leaves `entry.coverageGrid` permanently null and
+     * `vegetationOverlayContainsWorldPoint` permanently a non-hit.
+     *
+     * THE FIX mirrors `bc-compress.worker.js#handleAlphaGrid` exactly: the
+     * same two-step `createImageBitmap` dance (a cheap probe decode for the
+     * source's true dimensions, then a SECOND decode asking the browser to
+     * resize DIRECTLY to grid resolution — the decoder box-averages the
+     * alpha channel for free, `vt/coarse-alpha.js`'s own header), the same
+     * `OffscreenCanvas` readback, and the SAME pure `coarseAlphaGridDims`/
+     * `extractAlphaGrid` functions that module already exports and this file
+     * now also imports — just executed HERE, on the main thread, instead of
+     * inside the (possibly permanently dead) worker, so the result is
+     * identical in shape and semantics to what the worker would have
+     * produced. `OffscreenCanvas` on the main thread is an already-
+     * established pattern in this codebase (`vt/mask-image.js`,
+     * `foundry/pixi-proxy-textures.js`), not a new API surface.
+     *
+     * DELIBERATELY ITS OWN `fetch`, not threaded through
+     * `loadVegetationOverlayTexture`'s already-decoded raw-fallback bitmap:
+     * that bitmap exists on only ONE of that function's two return paths
+     * (its BC1/BC7 success path never decodes anything on the main thread at
+     * all — the exact case where the worker is healthy and this fallback is
+     * never even invoked), so reuse would help only sometimes, in exchange
+     * for tying this function's correctness to that one's bitmap-close
+     * timing. A second fetch is normally an HTTP cache hit (the texture load
+     * just requested this same url) — the identical reasoning
+     * `handleAlphaGrid` already gives for its own fetch running independently
+     * of `handle()`'s.
+     *
+     * NOT CACHED, unlike the worker's IndexedDB record: this path only runs
+     * once the shared worker has already failed this exact url, a rare,
+     * residual case — and `_unavailable` never resets within a session, so a
+     * cache entry written here could only ever be read back by a FUTURE page
+     * load's brand-new worker, never by this one. Duplicating the worker's
+     * cache-versioning/freshness-check machinery for a payoff that only
+     * matters if the SAME permanent failure recurs on a future reload is out
+     * of scope for this fix.
+     *
+     * DEGRADATION-FIRST, the same contract `requestCoarseAlphaGrid` itself
+     * documents: any failure here (network, decode, canvas) resolves `null`,
+     * never throws. There is no third fallback beneath this one — an image
+     * that is genuinely unfetchable has no coverage data to offer by any
+     * method, and `testVegetationHoverAlpha`'s fail-closed default
+     * (mythica-machina-press#470, third round) is the correct, final
+     * behaviour for that residual case: never hover-fading beats fading
+     * everywhere, always.
+     *
+     * @param {string} url
+     * @returns {Promise<{w:number, h:number, data:Uint8Array}|null>}
+     */
+    async function computeVegetationCoverageGridOnMainThread(url) {
+      try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+        const blob = await res.blob();
+        // Probe decode: the source's true dimensions, no resampling yet.
+        const probe = await createImageBitmap(blob, { premultiplyAlpha: 'none', colorSpaceConversion: 'none' });
+        const { w: gridW, h: gridH } = coarseAlphaGridDims(probe.width, probe.height);
+        probe.close();
+        // Second decode, resized DIRECTLY to grid resolution by the browser's
+        // own decoder — identical technique to bc-compress.worker.js#handleAlphaGrid.
+        const small = await createImageBitmap(blob, {
+          premultiplyAlpha: 'none',
+          colorSpaceConversion: 'none',
+          resizeWidth: gridW,
+          resizeHeight: gridH,
+          resizeQuality: 'high',
+        });
+        const canvas = new OffscreenCanvas(gridW, gridH);
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        ctx.clearRect(0, 0, gridW, gridH);
+        ctx.drawImage(small, 0, 0);
+        small.close();
+        const imageData = ctx.getImageData(0, 0, gridW, gridH);
+        return extractAlphaGrid(imageData);
+      } catch (err) {
+        ingestLog.warn(`main-thread coarse alpha fallback failed for vegetation overlay "${url}":`, err);
+        return null;
+      }
+    }
+
+    /**
      * Build (once per detected kind) this item's Case-2 overlay mesh(es).
      * Idempotent per kind (mirrors `ensureWholeImageMeshes`' own "already
      * built" guard) — safe to call every residency pass; async loads fill in
@@ -14354,10 +14479,33 @@ export async function startVtPanViewer({
               const res = await requestCoarseAlphaGrid(url, { priority: PRIORITY_INTERACTIVE });
               if (res?.grid) vegCoverageGrid = { w: res.gridW, h: res.gridH, data: res.grid };
             } catch (err) {
-              // Fails OPEN to a full quad — a canopy that draws its whole
-              // (mostly empty) quad is slow, never wrong.
+              // The shared worker's own contract resolves `null` rather than
+              // rejecting on failure (compressed-textures.js's own
+              // DEGRADATION-FIRST header) — this catch is defensive, not the
+              // expected path. The fallback below covers the resolved-null
+              // case, which is the one that actually happens in practice.
               ingestLog.warn(`coarse alpha failed for vegetation overlay "${url}":`, err);
             }
+            if (!vegCoverageGrid) {
+              // MAIN-THREAD FALLBACK (mythica-machina-press#470, FOURTH
+              // round) — a resolved-null grid used to be accepted as final
+              // here, which is what let a permanently-dead shared worker
+              // leave every vegetation overlay's hover hit test fail-closed
+              // for the rest of the session. See
+              // computeVegetationCoverageGridOnMainThread's own doc for the
+              // full mechanism and why retrying this way is safe.
+              vegCoverageGrid = await computeVegetationCoverageGridOnMainThread(url);
+            }
+            // If STILL null here, both the worker path and the main-thread
+            // fallback failed — e.g. the image itself is genuinely
+            // unfetchable. `vegCoverageMask` then stays null too, which
+            // fails OPEN to a full (untessellated-by-coverage) quad for the
+            // MESH GEOMETRY below — slow, never wrong, same as ever. The
+            // HOVER hit test is a separate, later consumer of this same null
+            // (`entry.coverageGrid`, `testVegetationHoverAlpha`) and fails
+            // CLOSED on it instead, by design (third round) — never
+            // hover-fading is the correct behaviour for a canopy with no
+            // real alpha data by any method.
             const vegCoverageMask = vegCoverageGrid
               ? buildCoverageCellMask({
                   grid: vegCoverageGrid,
@@ -14500,12 +14648,21 @@ export async function startVtPanViewer({
             // `coverageGrid === null`) are known at the same time — never in
             // the per-frame hover-test path, which would spam this every
             // frame the vegetation is on screen.
+            //
+            // FOURTH ROUND (2026-09-03): `computeVegetationCoverageGridOnMainThread`
+            // now retries once, above, before this point is ever reached — so
+            // firing this warning today means BOTH the shared worker AND the
+            // main-thread fallback failed for this url, a much rarer,
+            // genuinely-exceptional case (most plausibly the source image
+            // itself being unfetchable) than when this diagnostic was first
+            // added, when a merely-dead worker was enough on its own.
             if (!vegCoverageGrid) {
               ingestLog.warn(
                 `vegetation overlay "${kind.id}" for item "${item.id}" (${url}) reached ready with no ` +
                   `coverage grid — its hover hit test fails closed, so it will never hover-fade until ` +
-                  `this is fixed. requestCoarseAlphaGrid resolved null for this url; see its own and ` +
-                  `the worker's logs for why.`
+                  `this is fixed. Both requestCoarseAlphaGrid (the shared worker) and the main-thread ` +
+                  `fallback (computeVegetationCoverageGridOnMainThread) resolved null for this url; see ` +
+                  `their own logs above for why — most likely this image is genuinely unfetchable.`
               );
             }
             entry.shadow = shadowBuilt

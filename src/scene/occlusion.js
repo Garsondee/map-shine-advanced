@@ -351,11 +351,13 @@ export function testItemHoverAlpha({ u, v, grid, alphaThreshold }) {
  * 11.9% of its 12000² canvas" — one mask painted across a whole floor, not
  * one Tile per plant). Failing open there does not mean "slightly too
  * generous" — it means "the entire visible scene counts as a hit, always",
- * which is structurally the SAME bug this feature has now shipped and
- * reverted for TWICE (mythica-machina-press#470's original follow-up, which
- * tested the host's own grid instead of the vegetation's; and this round,
- * which tested the vegetation's own grid correctly but still fell through to
- * fail-open whenever that grid came back missing). A vegetation entry with
+ * which is structurally the SAME CLASS of bug that has now shipped broken
+ * TWICE (mythica-machina-press#470's original follow-up, which tested the
+ * host's own grid instead of the vegetation's, shipped, broke live, and was
+ * REVERTED; and round 2, c753bb5c, which tested the vegetation's own grid
+ * correctly, shipped, and STAYED shipped, but still fell through to
+ * fail-open whenever that grid came back missing — no revert needed this
+ * time, since this fix lands in place of one). A vegetation entry with
  * no real alpha data to test against should simply never hover-fade —
  * indistinguishable from ordinary, unfaded vegetation, until real data
  * arrives — which is a vastly better failure mode than fading everywhere,

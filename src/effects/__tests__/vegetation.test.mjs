@@ -89,21 +89,19 @@ export function run(t) {
       VEGETATION_PARAMS.treeHeightFt.category === 'Extent' &&
       VEGETATION_PARAMS.bushHeightFt.category === 'Extent'
   );
-  ok(
-    // Raised 2026-07-23 (same day) after the author's own follow-up asked for
-    // the opposite: "I need controls over frequency, evolution rate,
-    // amplitude and things like that, the more controls the better." The
-    // ceiling still exists — it guards against genuine V2-style bloat (~50
-    // sliders PER KIND, two near-identical files) — but the load-bearing
-    // claim was never a specific count; it is the structural assertion just
-    // above (ONE shared set, zero per-kind params). Bumped 24 → 26 2026-08-27
-    // (torqueGain/springStiffness/springDamping/liftGain, tier 6) —
-    // deliberately, not a surprise: the rotation-radius safety cap is a code
-    // constant (VEG_SPRING_ARM_LEN_FRACTION), not a 5th param, specifically
-    // to keep this bump smaller.
-    "the param set stays well short of V2's scale (it had ~50 PER KIND, in TWO files)",
-    Object.keys(VEGETATION_PARAMS).length <= 26
-  );
+  // ⚠️ THE COUNT CEILING WAS REMOVED, 2026-09-04 — author, high-level
+  // authority: *"remove ratchets around ROH controls... a limited number of
+  // FOH makes a little bit of sense but not the limited number of ROH
+  // controls."* This guard used to assert `Object.keys(VEGETATION_PARAMS).
+  // length <= 26` (raised once already, 24 → 26, on the SAME kind of
+  // direction — 2026-07-23's *"I need controls over frequency, evolution
+  // rate, amplitude and things like that, the more controls the better"*).
+  // What it guarded against was real V2-style bloat (~50 sliders PER KIND,
+  // two near-identical files) — but the load-bearing claim was never a
+  // specific count, it is the structural assertion just above (ONE shared
+  // set, zero per-kind params beyond the two-key exception) plus
+  // `params/no-dead-controls` proving every declared control is genuinely
+  // consumed. Neither of those needs a ceiling to keep meaning what it says.
 
   // ==========================================================================
   // ⚠️ THE ALLOWLIST/SCHEMA AGREEMENT — the fix for a real, live bug found

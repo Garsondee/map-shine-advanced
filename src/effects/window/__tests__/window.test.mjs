@@ -57,26 +57,22 @@ export function run(t) {
   ok("the author's point-light-conversion idea is recorded", allNames.includes('pointLights'));
 
   // --- every param is genuinely consumed (params/no-dead-controls proves ---
-  // this at build time for real code; this pins the SHAPE the design argues
-  // for: a small schema, not a rebuild of V2's 98 controls).
+  // this at build time for real code).
   //
-  // ⚠️ THIS BOUND MOVED, 4 → 16, AND IT WAS A DELIBERATE DESIGN CHANGE, NOT A
-  // TEST BEING MADE TO FIT. It was written at 4 to encode "tier 0 is
-  // deliberately small". The author then asked for the glass rung by name and
-  // in the same breath asked for *"plenty of controls to alter the look of the
-  // RGB split"* (2026-08-05) — a direct instruction that the glass deserves a
-  // real control surface, which is the only authority that can move a pin like
-  // this one. Nine `Glass` params landed as a result.
-  //
-  // The bound is kept, and kept TIGHT, because what it actually guards is
-  // still live: V2's 98 controls were not one considered decision but the
-  // absence of any, one knob at a time, with 46 of them driving nothing at all.
-  // `params/no-dead-controls` walls the inert half at build time; this walls
-  // the accretion half. Sixteen leaves room for the deferred rungs that will
-  // legitimately want a knob (cloud, moon) and not much else — the next person
-  // to need more must come back here and justify it too.
+  // ⚠️ THE COUNT CEILING ITSELF WAS REMOVED, 2026-09-04 — author, high-level
+  // authority: *"remove ratchets around ROH controls... a limited number of
+  // FOH makes a little bit of sense but not the limited number of ROH
+  // controls."* This guard used to assert `keys.length <= 16` (moved once
+  // already, 4 → 16, when the glass rung's nine params landed on a direct
+  // "plenty of controls" instruction — the same shape of direction as this
+  // removal). What it guarded against was real — V2's 98 controls were not
+  // one considered decision but unchecked accretion, one knob at a time, with
+  // 46 driving nothing at all — but `params/no-dead-controls` already walls
+  // the INERT half of that at build time, unconditionally, with no ceiling
+  // attached. A control that is genuinely consumed and genuinely documented
+  // (the `category`/help-text assertions around this one) is not the disease
+  // V2 had, no matter how many of them exist.
   const keys = Object.keys(WINDOW_PARAMS);
-  ok('the whole schema is a small fraction of V2s 98 controls', keys.length <= 16);
   ok(
     'every glass control is grouped under its own category, so the panel does not read as one long list',
     keys.filter((k) => k.startsWith('glass')).every((k) => WINDOW_PARAMS[k].category === 'Glass')

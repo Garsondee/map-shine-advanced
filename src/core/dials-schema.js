@@ -63,10 +63,18 @@
 export const DIAL_CURVES = Object.freeze(['linear', 'ease-in', 'ease-out', 'smoothstep']);
 
 /**
- * Hard ceiling (Effects-UI.md §3.2): "3-6 dials per effect, hard ceiling" —
- * a strip that needs a seventh dial has stopped being a curated FOH strip.
+ * Hard ceiling (Effects-UI.md §3.2, originally "3-6 dials per effect, hard
+ * ceiling" — a strip that needs a seventh dial has stopped being a curated
+ * FOH strip).
+ *
+ * ⚠️ RAISED 6 → 10, 2026-09-04 — author, high-level authority: *"increase
+ * limits for FOH"* (paired with removing the equivalent ROH ceilings
+ * entirely — see the `<= 26`/`<= 32`/`<= 16` removals in vegetation/
+ * specular/window's own test files, same round). FOH stays a genuinely
+ * SMALLER, more curated set than ROH (which has no ceiling at all now) —
+ * this is headroom, not a removal of the distinction.
  */
-export const MAX_DIALS_PER_EFFECT = 6;
+export const MAX_DIALS_PER_EFFECT = 10;
 
 /** [0,1] -> [0,1], monotonic non-decreasing — the shaping the dial's raw
  * [0,1] position gets pushed through before landing in a drive's `to` window. */

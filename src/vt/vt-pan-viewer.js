@@ -9342,6 +9342,23 @@ export async function startVtPanViewer({
             // disagree about whether it's "there" this frame — the identical
             // guarantee the tile push's own comment describes.
             if (entry.uDepthOcclusionAmount) entry.uDepthOcclusionAmount.value = vegWeights.fade;
+            // THE STAGE-1 PREPASS TWIN'S OWN LIVE GATE (mythica-machina-
+            // press#470, SIXTH round) — same push, same value, same guard
+            // shape as `uDepthOcclusionAmount` just above, for the SEPARATE
+            // uniform `rebuildSceneDepthProxies`'s vegetationOverlay branch
+            // now stashes on `overlay.uDepthPrepassOcclusionAmount` (that
+            // branch's own comment has the full mechanism this closes: a
+            // ground tile classified 'interior' stopped redrawing under this
+            // canopy's silhouette AT ALL, hover or not, because this twin's
+            // discard used to answer only "does the art have leaf pixels
+            // here", never "is the canopy CURRENTLY rendering solid" — so
+            // hover-fade exposed a never-written, literal-black
+            // `scene.color` pixel instead of the ground's real colour).
+            // Without this second push the fifth round's own fix pattern
+            // would repeat exactly: a gate that exists but that nothing ever
+            // moves off its build-time 0 is indistinguishable from no gate
+            // at all.
+            if (entry.uDepthPrepassOcclusionAmount) entry.uDepthPrepassOcclusionAmount.value = vegWeights.fade;
           }
         }
       }
@@ -16547,9 +16564,17 @@ export async function startVtPanViewer({
      *   keeps today's single-material behaviour byte-for-byte; every
      *   existing caller (vegetation, and every non-split tile) is
      *   unaffected by this parameter's mere existence.
+     * @returns {*|null} the twin's own (non-split, "boundary") material —
+     *   `null` when `earlyZComposition` is off and no twin was built at all.
+     *   Mythica-machina-press#470 sixth round: the vegetation caller needs
+     *   this so it can reach `.uLiveOcclusionAmount` and keep this twin's own
+     *   depth-write decision live, exactly as it already does for the real
+     *   proxy's — see that call site's own comment for why. Every pre-
+     *   existing caller (the two tile call sites) ignores the return value,
+     *   so adding it changes nothing for them.
      */
     function addDepthPrepassTwin(writerArgs, geometry, z, pooled = false, interiorWriterArgs = null) {
-      if (!earlyZComposition) return;
+      if (!earlyZComposition) return null;
       const twinArgs = { ...writerArgs, colorWrite: false };
       const material = pooled
         ? depthProxyMaterialPool.get(computeDepthProxyMaterialSignature(twinArgs), () =>
@@ -16574,6 +16599,7 @@ export async function startVtPanViewer({
       const mesh = buildSceneDepthProxyMesh({ THREE, geometry, material: finalMaterial, z });
       depthPrepassScene.add(mesh);
       depthPrepassEntries.push({ mesh, material: finalMaterial, pooled });
+      return material;
     }
 
     /**
@@ -17018,19 +17044,49 @@ export async function startVtPanViewer({
           // would occlude where it is not drawn — see
           // `feedback_depth_proxy_needs_the_same_animation`).
           //
-          // BUILT FROM `writerArgs`, NEVER `liveWriterArgs` — deliberately.
-          // This twin feeds STAGE 1's OWN `scene.color` depth prepass (see
-          // `addDepthPrepassTwin`'s own header), not `buf:scene.depth` — an
-          // unrelated consumer this fix does not target. Giving it the live
-          // gate too would mean building a material whose own
-          // `uLiveOcclusionAmount` nothing would ever push a live value
-          // into (nothing reaches this twin's material the way `overlay.
-          // uDepthOcclusionAmount` reaches the real proxy's, above), freezing
-          // it at its own build-time default of 0 — functionally identical
-          // to never having added the gate here, just with an extra unused
-          // uniform. Leaving it off instead keeps STAGE 1's own behaviour
-          // byte-for-byte unchanged by this fix.
-          addDepthPrepassTwin(writerArgs, overlay.geometry, z, true);
+          // ⚠️ NOW BUILT FROM `liveWriterArgs`, NOT `writerArgs` (mythica-
+          // machina-press#470, SIXTH round — live report, verbatim: "solid
+          // black shape which appears when the vegetation fades... Placing a
+          // light there has absolutely no effect... not a 'darkening'
+          // effect... solid black pixels"). The comment this replaced argued
+          // for leaving this twin OFF the live gate because "nothing would
+          // ever push a live value into it" — true when written, and exactly
+          // the gap that caused this: this twin feeds STAGE 1's own
+          // `scene.color` depth attachment, which the WORLD DRAW then tests
+          // with hardware `EqualDepth` for every 'interior'-classified tile
+          // (`applyEarlyZTileState`) — typically the ground THIS canopy sits
+          // on, since a fully-opaque, non-occludable floor texture is exactly
+          // what reaches 'interior'. Before this fix, this twin's own
+          // discard was gated ONLY on the STATIC art alpha (`alphaThreshold`
+          // vs. the texture's OWN, unfading alpha — see
+          // `buildSceneDepthWriterMaterial`'s discard, scene-depth.js) with NO
+          // connection to the canopy's LIVE, hover-fade-reduced render alpha —
+          // so it kept claiming the depth-prepass "win" under the canopy's
+          // full silhouette FOREVER, hover or not. The ground tile's
+          // 'interior' EqualDepth redraw was therefore discarded there every
+          // frame, so `scene.color` never received the ground's real texture
+          // at those pixels — invisible while the canopy was opaque (its own
+          // alpha=1 draw fully overwrites the gap right after), but once
+          // hover-fade lowered the canopy's alpha, blending mixed the fading
+          // canopy against that NEVER-WRITTEN pixel instead of the ground's
+          // real color. `scene.color` is later used as this frame's albedo
+          // and MULTIPLIED by illumination (`environmental-light.js`:
+          // `litSrgb = mapSrgb.mul(illumWithUiShadow)`), so a pixel that was
+          // never given any albedo stays literal (0,0,0) — solid black —
+          // no matter how much light reaches it, exactly the "a light has
+          // absolutely no effect" report. This is a COMPLETELY SEPARATE
+          // mechanism from `buf:scene.depth` (the point-light gate the FIFTH
+          // round's `liveOcclusionGate` fix targeted, a few lines up) — same
+          // shape, different buffer, which is exactly why that fix's own
+          // byte-for-byte-unchanged promise for THIS twin left this bug
+          // standing. `overlay.uDepthPrepassOcclusionAmount` is pushed the
+          // SAME `vegWeights.fade` value every frame as `uDepthOcclusionAmount`
+          // above (`runMaskOcclusionPass`), so the ground's paint and the
+          // canopy's own visible fade can no longer disagree about whether
+          // the canopy is "there" this frame, mirroring the fifth round's own
+          // guarantee for lighting.
+          const prepassMaterial = addDepthPrepassTwin(liveWriterArgs, overlay.geometry, z, true);
+          overlay.uDepthPrepassOcclusionAmount = prepassMaterial?.uLiveOcclusionAmount ?? null;
           continue;
         }
         const state = itemStates.get(item.id);

@@ -86,6 +86,7 @@ import { buildSmokepatchIlluminationSeed, buildSmokepatchColorationSeed } from '
 import {
   buildCandleFlickerIlluminationSeed,
   buildCandleFlickerColorationSeed,
+  buildFirePuffIlluminationSeed,
   buildFirePuffColorationSeed,
 } from './candle-flicker.js';
 
@@ -194,20 +195,32 @@ export const LIGHT_ANIMATIONS = {
    * (`buildFireLightSources`'s own `quality: clampNum(..., 0, 2)`) — so this
    * was a pure re-point, no scaffold or descriptor change required.
    *
-   * ⚠️ COLORATION SPLIT FROM CANDLE'S OWN, 2026-09-02
-   * (mythica-machina-press#475, author-reported: "the light a fire throws is
-   * white"). `buildCandleFlickerColorationSeed`'s `coreFade` narrows the
-   * visible tint to roughly the inner half of the light's OWN radius — a
-   * deliberate "fine point at the wick" for a candle, but fire's radii are
-   * documented elsewhere as substantially larger (`fire-geometry.js#cluster
-   * FireSources`'s own header: "Fire's radii are LARGER"), so the same
-   * fraction-of-radius core left most of a fire's glow reading as plain,
-   * colourless brightness. `buildFirePuffColorationSeed` (`candle-flicker.js`)
-   * keeps the identical warm↔cool temperature swing and guttering pulse but
-   * drops `coreFade`/`candleShape` entirely, so the tint rides the same
-   * single `falloff` illumination already uses. Illumination is UNCHANGED
-   * (still `buildCandleFlickerIlluminationSeed`) — the brightness/guttering
-   * look was never the reported problem, only the hue's reach was.
+   * ⚠️ BOTH CHANNELS NOW SPLIT FROM CANDLE'S OWN (mythica-machina-press#475,
+   * author-reported: "the light a fire throws is white"). Round 1
+   * (2026-09-02) gave coloration its own `buildFirePuffColorationSeed`
+   * (`candle-flicker.js`) — `buildCandleFlickerColorationSeed`'s `coreFade`
+   * narrows the visible tint to roughly the inner half of the light's OWN
+   * radius, a deliberate "fine point at the wick" for a candle, wrong at
+   * fire's much larger documented radius (`fire-geometry.js#cluster
+   * FireSources`'s own header: "Fire's radii are LARGER") — on the
+   * assumption, stated here at the time, that illumination's own brightness/
+   * guttering was never the reported problem, only the hue's reach.
+   *
+   * ⚠️ THAT ASSUMPTION WAS WRONG — round 2 (2026-09-03), after three more
+   * live-tested fixes (falloff steepness ×2, illumination baseline) still
+   * left "a LOT of white light" reported live. `buildCandleFlickerIllumination
+   * Seed`'s OWN `extraCompress`/`candleShape` narrowing (candle-flicker.js)
+   * forces the WHOLE illumination seed to flat, neutral `uDimColor` from
+   * roughly 11% of the light's ratio outward — a SECOND, independent
+   * narrowing nobody had touched, sitting in the channel that MULTIPLIES the
+   * map's own albedo (colour-agnostic by Foundry-parity design) rather than
+   * the one that adds hue. A large flat-neutral illumination zone on a
+   * fire-sized radius reads as a flat, colourless brightening that
+   * competes with — and often visually beats — coloration's own modest
+   * additive orange. `buildFirePuffIlluminationSeed` (`candle-flicker.js`)
+   * keeps the identical guttering pulse but drops the narrowing, so
+   * illumination follows `computeSwitchColorBand`'s own ratio-driven
+   * falloff instead of a candle-scaled hot-point riding on top of it.
    *
    * ⚠️ REGISTERED BECAUSE AN UNREGISTERED TYPE IS NOT INERT — IT IS FEATURELESS.
    * `resolveLightAnimation` returns null for an unknown string, and the pool's
@@ -222,7 +235,7 @@ export const LIGHT_ANIMATIONS = {
     cpuDriver: 'flicker',
     flickerAmplification: () => 1,
     forceDefaultColor: false,
-    buildIlluminationSeed: buildCandleFlickerIlluminationSeed,
+    buildIlluminationSeed: buildFirePuffIlluminationSeed,
     buildColorationSeed: buildFirePuffColorationSeed,
   },
 

@@ -399,6 +399,74 @@ export function buildCandleFlickerIlluminationSeed({
 }
 
 /**
+ * FIRE's own illumination seed — same guttering `brightnessPulse` as
+ * {@link buildCandleFlickerIlluminationSeed}, but WITHOUT that function's
+ * own `extraCompress`/`candleShape` narrowing.
+ *
+ * ⚠️ WHY THIS IS A SEPARATE FUNCTION (mythica-machina-press#475, round 2 —
+ * the coloration-only fix, and three rounds of falloff/luminosity tuning
+ * downstream of it, still left "a LOT of white light" live). Fire's
+ * `firePuff` entry (`registry.js`) originally left `buildIlluminationSeed`
+ * pointed at candle's own function on the stated assumption that
+ * "brightness/guttering was never the reported problem, only the hue's
+ * reach was" (`registry.js`'s own now-corrected header) — WRONG, confirmed
+ * by re-reading this function with that assumption specifically in
+ * question. `extraCompress` (`compressedRatio = jitteredRatio * CORE_SCALE
+ * (0.32)`) forces the ENTIRE seed to flat `uDimColor` from roughly 11% of
+ * the light's own ratio outward — a MUCH smaller "distinctly bright" zone
+ * than `ratio` alone implies, deliberately, for a candle's "fine point at
+ * the wick." That is a SECOND, independent narrowing living in the
+ * ILLUMINATION channel, parallel to (and undiscovered by) the coreFade
+ * narrowing already removed from fire's COLORATION channel — illumination
+ * was never actually touched by any of this issue's earlier fixes, despite
+ * being colour-agnostic ambient brightness that MULTIPLIES the map's own
+ * albedo (`environmental-light.js`'s composite): a large flat-`uDimColor`
+ * zone reads as a flat, neutral brightening of whatever's underneath,
+ * competing with — and on a fire's much bigger radius, often winning
+ * against — the additive orange coloration's own, comparatively modest
+ * contribution. Dropping the extra narrowing here lets illumination follow
+ * `computeSwitchColorBand`'s own natural ratio-driven falloff instead of a
+ * candle-scaled hot-point on top of it. No `candleShape` either, for the
+ * same reason `buildFirePuffColorationSeed` has none — fire's own particle
+ * system already authors the flame's silhouette.
+ *
+ * @param {object} args
+ * @param {*} args.THREE
+ * @param {*} args.uRatio
+ * @param {*} args.uIntensityRaw
+ * @param {*} args.time
+ * @param {(ratio: *) => *} args.computeSwitchColorBand - the scaffold's own
+ *   band-rebuild closure (bright/dim pick by ratio vs. `dist`).
+ * @param {number} [args.quality=0] - graph-build-time tier (see this
+ *   module's header) — `candleLife`'s own tier ladder still applies to the
+ *   guttering pulse; only the SHAPE narrowing above it is removed.
+ * @param {*} [args.wind] @param {*} [args.windResponse] - forwarded to
+ *   `candleLife` for the wind-driven gutter/snuff term only.
+ * @returns {{finalColor: *}}
+ */
+export function buildFirePuffIlluminationSeed({
+  THREE,
+  uRatio,
+  uIntensityRaw,
+  time,
+  computeSwitchColorBand,
+  quality = 0,
+  wind,
+  windResponse,
+}) {
+  const { float } = THREE.TSL;
+  const amplification = uIntensityRaw.div(float(5));
+  const { n, brightnessPulse } = candleLife(THREE.TSL, time, amplification, quality, wind, windResponse);
+  const jitteredRatio = buildFlickerRatioNode(THREE.TSL, uRatio, n);
+  const seed = computeSwitchColorBand(jitteredRatio);
+
+  // Same guttering multiply as candle's own — see that function's identical
+  // comment for why brightnessPulse applies to the WHOLE contribution.
+  const finalColor = seed.mul(brightnessPulse);
+  return { finalColor };
+}
+
+/**
  * @param {object} args
  * @param {*} args.THREE
  * @param {*} args.uLightColor

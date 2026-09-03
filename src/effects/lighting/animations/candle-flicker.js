@@ -149,6 +149,46 @@ const CORE_POINT_SPAN = 0.75; // the coloration warm point dies by this fraction
 const COOL_TINT = [1.0, 0.5, 0.16];
 const WARM_TINT = [1.0, 0.96, 0.82];
 
+// ── FIRE's own radial temperature ramp + gentled flicker (author's ask,
+// 2026-09-03, once the white-wash bug (mythica-machina-press#475) was fixed
+// and graded "D — needs a whiter core fading to warm, then deep orange-red
+// at the edges, plus a candle-like flicker, nothing too extreme") ──────────
+//
+// A real flame's apparent colour temperature falls with distance from its
+// hottest point, so this ramps by the light's own normalized radial `dist`
+// (0 centre, 1 true edge) rather than a fixed palette — the GM's own
+// authored "Light colour" still anchors the MIDDLE of the ramp; only the
+// core brightens toward white and the edge deepens toward ember red AROUND
+// it, so a magically-recoloured fire (e.g. a green `Light colour`) still
+// gets a sensible white-core/dark-edge shape rather than a hardcoded
+// orange-specific one.
+const FIRE_CORE_WHITEN = 0.72; // how far the centre blends toward pure white
+const FIRE_EDGE_DEEPEN = 0.8; // how far the edge blends toward the ember colour below
+const FIRE_EDGE_EMBER = [0.42, 0.07, 0.02]; // a dying-ember red-orange, not pure red
+// Candle's own BRIGHT_FLOOR..BRIGHT_CEIL guttering (0.4..1.2, roughly ±40%)
+// is tuned for a small, gutter-prone wick — the author's own "nothing too
+// extreme" ask, and `fire-geometry.js#fireScaleChain`'s own documented
+// physics ("flicker amplitude FALLS with size... a big fire's light breathes
+// slowly and shallowly while a candle guts hard"), both point the same way:
+// compress the swing toward neutral for fire specifically, without touching
+// candle's own constants. 0.5 halves the deviation from 1 in both directions
+// (roughly 0.7..1.1) — still visibly alive, nowhere near a candle's gutter.
+const FIRE_FLICKER_DAMPING = 0.5;
+
+/**
+ * Compress a `candleLife` `brightnessPulse` toward neutral (1) by `amount`
+ * (0 = untouched, 1 = fully flat) — see `FIRE_FLICKER_DAMPING`'s own header.
+ * Shared by fire's illumination AND coloration seeds so brightness and hue
+ * keep breathing in lockstep, the same guarantee candle's own single shared
+ * `brightnessPulse` value already gives its two channels.
+ * @param {*} TSL @param {*} pulse @param {number} amount
+ * @returns {*}
+ */
+function dampenPulse(TSL, pulse, amount) {
+  const { float } = TSL;
+  return float(1).add(pulse.sub(float(1)).mul(float(1 - amount)));
+}
+
 /**
  * The candle's own life signal — tier 0 is Foundry's `animateFlickering`
  * primitive verbatim (single perlin); tier ≥1 is a chaotic multi-timescale
@@ -460,9 +500,9 @@ export function buildFirePuffIlluminationSeed({
   const jitteredRatio = buildFlickerRatioNode(THREE.TSL, uRatio, n);
   const seed = computeSwitchColorBand(jitteredRatio);
 
-  // Same guttering multiply as candle's own — see that function's identical
-  // comment for why brightnessPulse applies to the WHOLE contribution.
-  const finalColor = seed.mul(brightnessPulse);
+  // Gentled, not candle's full guttering swing — see FIRE_FLICKER_DAMPING's
+  // own header. Same multiply-the-whole-contribution shape as candle's own.
+  const finalColor = seed.mul(dampenPulse(THREE.TSL, brightnessPulse, FIRE_FLICKER_DAMPING));
   return { finalColor };
 }
 
@@ -567,6 +607,10 @@ export function buildCandleFlickerColorationSeed({
  * @param {*} args.uColorationAlpha
  * @param {*} args.uIntensityRaw
  * @param {*} args.time
+ * @param {*} args.dist - the light's own normalized radial distance (0
+ *   centre, 1 true edge) — drives the white-core/ember-edge ramp below.
+ *   NOT narrowed into a small core the way candle's `coreFade` is (see this
+ *   function's own earlier header) — this rides the light's full reach.
  * @param {number} [args.quality=0] - graph-build-time tier (see this
  *   module's header) — `quality >= 1` is what turns the temperature swing on;
  *   fire reaches this at its default effect tier (`fire-geometry.js`'s
@@ -583,24 +627,48 @@ export function buildFirePuffColorationSeed({
   uColorationAlpha,
   uIntensityRaw,
   time,
+  dist,
   quality = 0,
   wind,
   windResponse,
 }) {
-  const { float, vec3, clamp, mix } = THREE.TSL;
+  const { float, vec3, clamp, mix, smoothstep } = THREE.TSL;
   const amplification = uIntensityRaw.div(float(5));
   const { brightnessPulse, warmth } = candleLife(THREE.TSL, time, amplification, quality, wind, windResponse);
 
-  // TIER ≥1 — the identical warm↔cool swing candle's own coloration uses
-  // (see buildCandleFlickerColorationSeed above); just never narrowed to a core.
-  let tinted = uLightColor;
+  // THE RADIAL TEMPERATURE RAMP (author's ask, round 2 of the "upgrade to an
+  // A" pass, 2026-09-03) — white-hot at the centre, through the authored
+  // "Light colour" at mid-radius, to a deep ember red at the true edge. See
+  // FIRE_CORE_WHITEN/FIRE_EDGE_EMBER's own header for why this anchors on
+  // `uLightColor` rather than a hardcoded palette.
+  const core = mix(uLightColor, vec3(1, 1, 1), float(FIRE_CORE_WHITEN));
+  const ember = mix(
+    uLightColor,
+    vec3(FIRE_EDGE_EMBER[0], FIRE_EDGE_EMBER[1], FIRE_EDGE_EMBER[2]),
+    float(FIRE_EDGE_DEEPEN)
+  );
+  const d = clamp(dist, float(0), float(1));
+  // Two overlapping smoothsteps rather than a hard midpoint split, so the
+  // authored colour is a genuine PEAK the ramp passes through at ~mid-radius
+  // instead of a corner two straight segments meet at.
+  const innerHalf = mix(core, uLightColor, smoothstep(float(0), float(0.55), d));
+  const rampColor = mix(innerHalf, ember, smoothstep(float(0.45), float(1), d));
+
+  // TIER ≥1 — the same slow warm↔cool temperature BREATHING candle's own
+  // coloration uses, now riding on top of the radial ramp instead of the
+  // flat authored colour: a gentle "sometimes redder, sometimes more gold"
+  // over time, independent of (and layered onto) the spatial shape above.
+  let tinted = rampColor;
   if (quality >= 1) {
     const tempMix = clamp(float(0.5).add(warmth.mul(float(0.5))), float(0), float(1));
     const cool = vec3(COOL_TINT[0], COOL_TINT[1], COOL_TINT[2]);
     const warm = vec3(WARM_TINT[0], WARM_TINT[1], WARM_TINT[2]);
-    tinted = uLightColor.mul(mix(cool, warm, tempMix));
+    tinted = rampColor.mul(mix(cool, warm, tempMix));
   }
 
-  const finalColor = tinted.mul(brightnessPulse).mul(uColorationAlpha);
+  // Gentled, not candle's full guttering swing — see FIRE_FLICKER_DAMPING's
+  // own header. The SAME damping `buildFirePuffIlluminationSeed` applies, so
+  // brightness and hue keep pulsing in lockstep.
+  const finalColor = tinted.mul(dampenPulse(THREE.TSL, brightnessPulse, FIRE_FLICKER_DAMPING)).mul(uColorationAlpha);
   return { finalColor };
 }

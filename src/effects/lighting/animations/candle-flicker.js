@@ -615,16 +615,19 @@ export function buildCandleFlickerColorationSeed({
  * @param {*} args.uIntensityRaw
  * @param {*} args.time
  * @param {*} args.dist - the light's own normalized radial distance (0
- *   centre, 1 true edge) — drives the white-core/ember-edge ramp below.
- *   NOT narrowed into a small core the way candle's `coreFade` is (see this
- *   function's own earlier header) — this rides the light's full reach.
+ *   centre, 1 true edge) — the UNWARPED fallback `candleShape` returns
+ *   below quality 2; NOT narrowed into a small core the way candle's
+ *   `coreFade` is (see this function's own earlier header) — this rides
+ *   the light's full reach.
+ * @param {*} args.localPosition - the local-space vec2 `dist` was derived
+ *   from, forwarded to `candleShape` for the wind-lean sway below — NEVER
+ *   read via `positionLocal` directly (candleShape's own header explains why).
  * @param {number} [args.quality=0] - graph-build-time tier (see this
- *   module's header) — `quality >= 1` is what turns the temperature swing on;
- *   fire reaches this at its default effect tier (`fire-geometry.js`'s
- *   `FIRE_DEFAULT_TIER`).
+ *   module's header) — `quality >= 1` turns the temperature swing on,
+ *   `quality >= 2` turns the wind-lean sway on; fire reaches quality 2 at
+ *   its default effect tier (`fire-geometry.js`'s `FIRE_DEFAULT_TIER`).
  * @param {*} [args.wind] - the scaffold's shared wind sample, forwarded to
- *   `candleLife` for the wind-driven gutter/snuff term only — there is no
- *   lean to compute here.
+ *   `candleLife` (gutter/snuff) AND `candleShape` (the lean itself) below.
  * @param {*} [args.windResponse]
  * @returns {{finalColor: *}}
  */
@@ -635,26 +638,43 @@ export function buildFirePuffColorationSeed({
   uIntensityRaw,
   time,
   dist,
+  localPosition,
   quality = 0,
   wind,
   windResponse,
 }) {
   const { float, vec3, clamp, mix, smoothstep } = THREE.TSL;
   const amplification = uIntensityRaw.div(float(5));
-  const { brightnessPulse, warmth } = candleLife(THREE.TSL, time, amplification, quality, wind, windResponse);
+  const { brightnessPulse, warmth, life } = candleLife(THREE.TSL, time, amplification, quality, wind, windResponse);
 
-  // THE RADIAL TEMPERATURE RAMP (author's ask, round 2 of the "upgrade to an
-  // A" pass, 2026-09-03) — white-hot at the centre, through the authored
-  // "Light colour" at mid-radius, to a deep ember red at the true edge. See
-  // FIRE_CORE_WHITEN/FIRE_EDGE_EMBER's own header for why this anchors on
-  // `uLightColor` rather than a hardcoded palette.
+  // THE WIND-DRIVEN SWAY (author's ask, round 3: "I want the fires to have
+  // the light swinging around look that candles have in the wind... increase
+  // flickering in the wind" — raising `windResponse` alone (round 2) only
+  // ever touched `candleLife`'s brightness DIP, never gave the light
+  // anywhere to visibly MOVE). Reuses candle's own wandering-lean/oval-
+  // stretch shape verbatim (`candleShape` — a no-op returning `flameDist:
+  // dist` below quality 2, so this is harmless at lower tiers) instead of
+  // inventing a second one. Illumination is deliberately NOT given this:
+  // its own equivalent (`extraCompress`) was the exact mechanism already
+  // removed earlier in this issue for forcing a flat neutral zone across
+  // most of the radius — this is a colour/highlight sway, not a brightness
+  // one, so it stays confined to coloration.
+  const { flameDist } = candleShape(THREE.TSL, time, dist, localPosition, life, quality, wind, windResponse);
+
+  // THE RADIAL TEMPERATURE RAMP (round 2) — white-hot at the centre, through
+  // the authored "Light colour" at mid-radius, to a deep ember red at the
+  // true edge. See FIRE_CORE_WHITEN/FIRE_EDGE_EMBER's own header for why
+  // this anchors on `uLightColor` rather than a hardcoded palette. Now keyed
+  // on `flameDist`, not raw `dist`, so the white-hot centre sways/stretches
+  // WITH the wind-lean above instead of sitting pinned to the light's true
+  // geometric centre while the shape drifts independently underneath it.
   const core = mix(uLightColor, vec3(1, 1, 1), float(FIRE_CORE_WHITEN));
   const ember = mix(
     uLightColor,
     vec3(FIRE_EDGE_EMBER[0], FIRE_EDGE_EMBER[1], FIRE_EDGE_EMBER[2]),
     float(FIRE_EDGE_DEEPEN)
   );
-  const d = clamp(dist, float(0), float(1));
+  const d = clamp(flameDist, float(0), float(1));
   // Two overlapping smoothsteps rather than a hard midpoint split, so the
   // authored colour is a genuine PEAK the ramp passes through at ~mid-radius
   // instead of a corner two straight segments meet at.

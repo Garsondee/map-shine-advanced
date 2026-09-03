@@ -649,7 +649,30 @@ export function createFireParticleEngine({
     // makes an indoor fire's flame stay calm while an outdoor one on the same
     // map genuinely gets shoved, instead of every fire on the floor sharing
     // one blended reading (the author's own "averaging is dumb" objection).
-    const effectiveWindMotion = uWindMotion01.mul(opennessGain);
+    //
+    // ⚠️⚠️ TEMPORARY ×10 DIAGNOSTIC MULTIPLIER (2026-09-04, ROUND 3) — REMOVE
+    // OR RETUNE ONCE THE ANSWER IS KNOWN. Author, live: raising the CPU-side
+    // "Wind response" dial to its OWN maximum (2×) made no visible difference
+    // at all, and motion is now WORSE than before the real-grid change landed
+    // ("previously flames moved a good long distance at wind 1, now very
+    // little"). That combination — a 2× CPU-side gain producing zero visible
+    // change — is the signature of a term being multiplied by something at or
+    // near ZERO downstream of it, not of an under-tuned strength constant (a
+    // weak-but-nonzero term WOULD have visibly grown at 2× gain). The prime
+    // suspect is `particleOpenness` itself reading near-0 at real painted
+    // fire locations. This ×10 is a blunt, deliberately extreme instrument to
+    // settle that: if flame/ember motion is STILL barely visible with this in
+    // place, the signal reaching this line is genuinely ~0 (confirms the
+    // suspect — likely `windOpennessBuffer` not actually populated, or the
+    // wind bake's own openness reading low for reasons unrelated to fire); if
+    // motion is suddenly obviously, unmissably strong, the signal was real
+    // but weak and this can be retuned down to something reasonable instead
+    // of removed. Deliberately NOT touching `world/wind-field.js` /
+    // `wind-access.js` — those are shared with vegetation/gust-runtime.js,
+    // which the author confirmed already look right; this multiplier is
+    // fire-local so nothing else can regress from it either way.
+    const WIND_DIAGNOSTIC_BOOST_TEMP = 10;
+    const effectiveWindMotion = uWindMotion01.mul(opennessGain).mul(float(WIND_DIAGNOSTIC_BOOST_TEMP));
 
     // ⚠️ 95% of flame particles never move AT REST — V2's `flameStationaryFraction`,
     // and the signature of the whole look (a fire POOL should not translate).
@@ -744,7 +767,12 @@ export function createFireParticleEngine({
     // upward. Ember/smoke ship `calmRiseY: 0`, so the second term is an
     // exact no-op for them. Fades on THIS particle's own local wind, not the
     // map-wide ceiling, for the same reason `effectiveStationary` does above.
-    const calmFade = float(1).sub(effectiveWindMotion);
+    // ⚠️ CLAMPED — `effectiveWindMotion` is no longer guaranteed ≤1 now that
+    // the diagnostic multiplier above can push it past that (it was, by
+    // construction, before); an unclamped `calmFade` would go negative and
+    // FLIP the calm-rise term's sign, shoving flame sharply downward instead
+    // of merely fading its upward drift to zero.
+    const calmFade = float(1).sub(effectiveWindMotion).clamp(float(0), float(1));
     const buoyancy = vec2(0, float(-K.buoyancyY * 60).sub(float((K.calmRiseY ?? 0) * 60).mul(calmFade))).mul(
       motionScale
     );

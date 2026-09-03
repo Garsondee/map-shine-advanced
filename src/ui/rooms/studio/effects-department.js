@@ -18,7 +18,7 @@
 
 import { buildParamControl } from '../../widgets/param-control.js';
 import { buildDialControl } from '../../widgets/dial-control.js';
-import { rohGroups, collapsedStatusLine } from '../../widgets/param-groups.js';
+import { rohGroups, collapsedStatusLine, buildSettingsSnapshot } from '../../widgets/param-groups.js';
 import { iconMarkup } from '../../widgets/icon-sprite.js';
 import { tierChip, scopeGlyph, healthBadge } from '../../widgets/badges.js';
 
@@ -50,6 +50,87 @@ function sectionLabel(text) {
   });
   el.textContent = text;
   return el;
+}
+
+/**
+ * Copy text to the clipboard — the same async-API-then-`execCommand`
+ * fallback `diag/effect-controls.js#copyTextToClipboard` uses. Duplicated
+ * rather than imported: this shell stays free of any import of the old
+ * debug panel, the same boundary that file's own copy of this helper (kept
+ * separate from `debug-panel.js`) already draws.
+ * @param {string} text @returns {Promise<boolean>}
+ */
+async function copyTextToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (_) {
+      /* fall through to the execCommand fallback */
+    }
+  }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * The 📋 header button every OLD debug-panel card already has
+ * (`diag/effect-controls.js#buildCopyButton`) — never ported to this shell
+ * until now (mythica-machina-press#490). No dedicated icon exists for this
+ * in `icon-sprite.js`: this control was never part of the Testament mock's
+ * own `buildCard`, so there is nothing there to port an icon FROM — kept as
+ * the original's literal glyph rather than hand-drawing a new SVG symbol
+ * into a set that file's own header says is ported verbatim, never redrawn.
+ *
+ * ⚠️ Reads `model` at CLICK time, not at build time — the same trap
+ * `buildCopyButton`'s own note documents (its 2026-08-17 bug: a captured
+ * build-time snapshot exported stale defaults while the sliders already
+ * showed the author's real live values). `model` is already this card's one
+ * live source for every other control, rebuilt fresh by its factory on
+ * every render, so reading `model.getValue`/`model.enabled` inside the
+ * click handler — never hoisted above it — is enough on its own.
+ * @param {object} model - see effects-department's own JSDoc typedef below.
+ * @returns {HTMLElement}
+ */
+function buildCopySettingsButton(model) {
+  const idleGlyph = '📋';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'hbtn';
+  btn.textContent = idleGlyph;
+  btn.title = 'Copy every current setting for this effect as text — paste it to Claude instead of a screenshot.';
+  Object.assign(btn.style, { width: 'auto', padding: '0 6px', fontSize: '.7rem', flex: '0 0 auto' });
+  let resetTimer = null;
+  btn.addEventListener('click', async () => {
+    const snapshot = buildSettingsSnapshot({
+      id: model.id,
+      title: model.title,
+      enabled: model.enabled,
+      schema: model.schema,
+      getValue: (key) => model.getValue(key),
+    });
+    const ok = await copyTextToClipboard(JSON.stringify(snapshot, null, 2));
+    clearTimeout(resetTimer);
+    btn.textContent = ok ? '✓ Copied' : '✗ Failed';
+    btn.style.color = ok ? 'var(--ok, #4bd48c)' : 'var(--fail, #ff9a9a)';
+    resetTimer = setTimeout(() => {
+      btn.textContent = idleGlyph;
+      btn.style.color = '';
+    }, 1400);
+  });
+  return btn;
 }
 
 /**
@@ -196,6 +277,11 @@ function buildStudioEffectCard(model) {
     paintBtn.style.flex = '0 0 auto';
     paintBtn.addEventListener('click', () => model.onPaint());
     head.append(paintBtn);
+  }
+  // The copy-settings button — see `buildCopySettingsButton`'s own note.
+  // Same "skip when there's nothing to copy" guard `buildEffectCard` uses.
+  if (model.schema && Object.keys(model.schema).length > 0) {
+    head.append(buildCopySettingsButton(model));
   }
   card.append(head);
 

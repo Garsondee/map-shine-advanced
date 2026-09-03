@@ -35,6 +35,7 @@ function chainable(kind, extra = {}) {
   node.level = (lvl) => chainable('level', { subject: node, lvl });
   Object.defineProperty(node, 'a', { get: () => chainable('swizzle-a', { subject: node }) });
   node.lessThan = (other) => chainable('lessThan', { subject: node, other });
+  node.greaterThan = (other) => chainable('greaterThan', { subject: node, other });
   node.not = () => chainable('not', { subject: node });
   node.discard = () => chainable('discard', { subject: node });
   return node;
@@ -309,6 +310,58 @@ export function run(t) {
       payload.args[2].__kind === 'uniform' && payload.args[2].value === 1 / 255
     );
     ok('writer alwaysOpaque: A is still 1', payload.args[3].value === 1);
+  }
+
+  // buildSceneDepthWriterMaterial — liveOcclusionGate (mythica-machina-press#480):
+  // an occlusion-responsive tile (a roof with Foundry Fade/Radial/Vision
+  // occlusion configured) must still restrict light while it's actually
+  // solid, gated by a LIVE per-frame uniform rather than excluded from
+  // depthScene wholesale. Default omitted — every EXISTING caller above gets
+  // no new uniform and no new discard, proven structurally (not just "still
+  // passes") by the SAME sampledTex/payload checks those tests already make.
+  {
+    const THREE = makeTHREE();
+    const mat = buildSceneDepthWriterMaterial({ THREE, floorIndex: 0, flags: 0 });
+    ok('writer: liveOcclusionGate omitted — no uLiveOcclusionAmount at all', mat.uLiveOcclusionAmount === undefined);
+  }
+
+  // liveOcclusionGate:true must reach BOTH structural branches — the
+  // alwaysOpaque/no-tex early-return AND the textured/alpha-discard path —
+  // because a roof's own art being fully opaque (`alwaysOpaque:true`, the
+  // common case for roof textures) is completely independent of whether it
+  // is ALSO occlusion-responsive. Missing either branch silently reintroduces
+  // exactly the reported bug for whichever tiles take that branch.
+  for (const [label, tex] of [
+    ['no tex (alwaysOpaque-shaped)', undefined],
+    ['a real tex', { __kind: 'real-texture' }],
+  ]) {
+    const THREE = makeTHREE();
+    const greaterThanCalls = [];
+    const originalUniform = THREE.TSL.uniform;
+    THREE.TSL.uniform = (v) => {
+      const node = originalUniform(v);
+      const originalGreaterThan = node.greaterThan;
+      node.greaterThan = (other) => {
+        greaterThanCalls.push({ subjectValue: node.value, otherValue: other?.value });
+        return originalGreaterThan(other);
+      };
+      return node;
+    };
+    const mat = buildSceneDepthWriterMaterial({ THREE, tex, floorIndex: 1, flags: 0, liveOcclusionGate: true });
+    ok(
+      `writer liveOcclusionGate (${label}): returns a live, updatable uniform`,
+      mat.uLiveOcclusionAmount?.__kind === 'uniform'
+    );
+    ok(`writer liveOcclusionGate (${label}): starts at 0 — "fully solid"`, mat.uLiveOcclusionAmount.value === 0);
+    ok(
+      `writer liveOcclusionGate (${label}): the gate uniform was compared against the threshold exactly once`,
+      greaterThanCalls.length === 1 && greaterThanCalls[0].subjectValue === 0
+    );
+    ok(
+      `writer liveOcclusionGate (${label}): threshold is 0.05 — small enough to relax as soon as a real fade starts, ` +
+        'big enough to absorb float noise on an untouched item',
+      greaterThanCalls[0].otherValue === 0.05
+    );
   }
 
   // buildSceneDepthProxyMesh — shares the item's OWN geometry, never builds new.

@@ -9215,7 +9215,21 @@ export async function startVtPanViewer({
 
         refreshItemOcclusionUniforms(state.appearance, value, weights);
         if (state.wholeImage) {
-          for (const t of state.wholeImage.tiles) refreshItemOcclusionUniforms(t.appearance, value, weights);
+          for (const t of state.wholeImage.tiles) {
+            refreshItemOcclusionUniforms(t.appearance, value, weights);
+            // THE LIVE DEPTH-AUTHORITY GATE (mythica-machina-press#480) —
+            // `t.uDepthOcclusionAmount` only exists for a tile whose depth
+            // proxy was built `occlusionResponsive` (rebuildSceneDepthProxies,
+            // scene-depth.js#buildSceneDepthWriterMaterial's own
+            // `liveOcclusionGate`); every other tile leaves this a no-op.
+            // `weights.fade` — never `.radial`/`.surface`, which read a
+            // permanent 1 the instant those modes are configured at all,
+            // regardless of any token's real proximity (`computeOcclusionState`)
+            // — is the SAME value this tile's own visible hover-fade already
+            // mixes toward, so the roof's paint and the light it blocks can
+            // never disagree about whether it's "there" this frame.
+            if (t.uDepthOcclusionAmount) t.uDepthOcclusionAmount.value = weights ? weights.fade : 0;
+          }
         }
         // VEGETATION OVERLAYS (mythica-machina-press#470) — a Case-1/Case-2
         // vegetation mesh shares its HOST item's uOcclusionElevation (the
@@ -16764,6 +16778,14 @@ export async function startVtPanViewer({
           // LIVE UNIFORM" note): a residency-pass-cadence read needs the
           // document's static capability, not this frame's live weight.
           applyEarlyZTileState(t, alphaStats, z, item.occlusion?.modes ?? OCCLUSION_MODES.NONE);
+          // Reset unconditionally, every pass — mirrors `t.uExpectedDepth`'s
+          // own "kept fresh here" discipline just below. Cleared before the
+          // `occlusionResponsive` branch (further down) may re-set it, so a
+          // tile that stops being occlusion-responsive doesn't leave a stale
+          // uniform reference for the per-frame refresh loop to keep writing
+          // into (harmless — nothing samples it once its material is gone —
+          // but not a value worth trusting either).
+          t.uDepthOcclusionAmount = null;
           // STAGE-0 A/B (2026-08-10, debug-only, OFF by default): measures the
           // rgba16f MRT read-modify-write tax opaque colour-pass draws pay for
           // blending they don't strictly need. Gated on the SAME `alwaysOpaque`
@@ -16816,7 +16838,23 @@ export async function startVtPanViewer({
           // already excludes for the identical reason — reused, not
           // re-derived, so the two mechanisms can't drift on what "reliably
           // opaque" means.
-          if (t.earlyZReason === 'authoredAlpha' || t.earlyZReason === 'occlusionResponsive') continue;
+          //
+          // `occlusionResponsive` tiles (mythica-machina-press#480) used to
+          // get this SAME unconditional skip — but `earlyZReason` here is the
+          // DOCUMENT-level "CAN this tile ever fade" classifier
+          // (`applyEarlyZTileState`'s own "READS THE DOCUMENT, NOT THE LIVE
+          // UNIFORM" header explains why that's correct for ITS purpose, the
+          // tile's own colour-draw fast path). Treated as "IS this faded
+          // right now" here instead, it meant a fully-opaque, never-hovered
+          // roof with Restrict Lighting ticked never wrote depth at all, so
+          // every light underneath showed straight through — permanently,
+          // not just while actually fading. Handled below instead of
+          // skipped: still built, still restricts light, but with the LIVE
+          // per-frame gate `t.uDepthOcclusionAmount` (reset just above,
+          // pushed every frame by the SAME loop that refreshes this tile's
+          // own `uOcclusionWeights` — see that loop's own comment) rather
+          // than a residency-pass snapshot.
+          if (t.earlyZReason === 'authoredAlpha') continue;
           const writerArgs = {
             THREE,
             tex: t.tex,
@@ -16825,6 +16863,27 @@ export async function startVtPanViewer({
             flags,
             alwaysOpaque,
           };
+          if (t.earlyZReason === 'occlusionResponsive') {
+            // UNPOOLED, ON PURPOSE — never depthProxyMaterialPool. That pool
+            // shares ONE material object across every tile whose
+            // (tex, alphaThreshold, floorIndex, flags, alwaysOpaque) signature
+            // matches; this material's new uniform is a genuinely PER-TILE
+            // mutable value (see buildSceneDepthWriterMaterial's own
+            // `liveOcclusionGate` doc), so two roofs that happened to share a
+            // signature would otherwise blank out each other's occlusion the
+            // instant only one of them was actually being hovered. No prepass
+            // twin either (`addDepthPrepassTwin`, below): that mechanism
+            // exists solely for a tile's OWN 'interior' colour-draw fast
+            // path, which `earlyZInteriorVerdict` never grants an
+            // occlusion-responsive tile in the first place — matches this
+            // tile's pre-existing (skipped) prepass state exactly.
+            const liveMaterial = buildSceneDepthWriterMaterial({ ...writerArgs, liveOcclusionGate: true });
+            t.uDepthOcclusionAmount = liveMaterial.uLiveOcclusionAmount;
+            const mesh = buildSceneDepthProxyMesh({ THREE, geometry: t.geometry, material: liveMaterial, z });
+            depthScene.add(mesh);
+            depthProxyEntries.push({ mesh, material: liveMaterial, pooled: false });
+            continue;
+          }
           // POOLED (DEFERRED-S1b) — tex/alphaThreshold/floorIndex/flags/
           // alwaysOpaque are all either a stable texture reference or a
           // value unchanged pass-to-pass for the same tile, so the common

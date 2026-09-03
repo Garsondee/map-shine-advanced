@@ -404,7 +404,21 @@ export function resolveSceneDepthFloorIndex({ item, sceneDoc, viewedFloorIndex, 
  *   `alphaThreshold`, so the discard below could structurally never fire.
  *   See the comment beside its use for why this is a separate parameter and
  *   not just a runtime-false condition.
- * @returns {*} a `THREE.NodeMaterial`.
+ * @param {boolean} [args.liveOcclusionGate=false] - mythica-machina-press#480.
+ *   When true, adds a SECOND, independent discard driven by a live uniform
+ *   (`material.uLiveOcclusionAmount`, returned at 0 — "fully solid" — and
+ *   left for the caller to update every frame) rather than anything baked in
+ *   at construction. For an occlusion-responsive tile (Foundry Fade/Radial/
+ *   Vision/Surface), "solid" is not a residency-pass-cadence fact the way
+ *   floorIndex/flags/alphaThreshold are — it changes every frame a token
+ *   walks under it or the pointer hovers it — so unlike every other field
+ *   here it cannot be a `uniform()` fixed at build time; it has to stay live
+ *   for the material's whole lifetime. See `vt-pan-viewer.js#
+ *   rebuildSceneDepthProxies`'s own caller for why this ALSO means such a
+ *   material must never go through `depthProxyMaterialPool` (a shared
+ *   material cannot carry one tile's own live value).
+ * @returns {*} a `THREE.NodeMaterial`, with `.uLiveOcclusionAmount` set
+ *   (a float uniform, initial value 0) when `liveOcclusionGate` is true.
  */
 export function buildSceneDepthWriterMaterial({
   THREE,
@@ -415,6 +429,7 @@ export function buildSceneDepthWriterMaterial({
   positionNode,
   alwaysOpaque = false,
   colorWrite = true,
+  liveOcclusionGate = false,
 }) {
   const { Fn, float, uniform, vec4, texture } = THREE.TSL;
   const material = new THREE.NodeMaterial();
@@ -450,6 +465,20 @@ export function buildSceneDepthWriterMaterial({
   // a handful of variants, not one per item) compiles ONCE and is reused.
   const uFloorIndex = uniform(float(floorIndex / 255));
   const uFlags = uniform(float(flags / 255));
+  // LIVE OCCLUSION GATE (mythica-machina-press#480) — 0 = "not currently
+  // fading", the correct default for a tile nobody is hovering and no token
+  // stands under. Pushed toward 1 by the SAME per-frame
+  // `computeOcclusionState(...).fade` value the tile's own visible hover-fade
+  // already reads (`runMaskOcclusionPass`), so the depth-authority buffer and
+  // the tile's own rendered fade can never disagree about whether it's
+  // "there" right now. 0.05, not `>0`, only to absorb float noise on an
+  // untouched item — this is a discard, not a blend, so there is no partial-
+  // fade case to interpolate (matching `buildDepthHeightGateNode`'s own RANK
+  // comparison, which has no smoothstep either).
+  const uLiveOcclusionAmount = liveOcclusionGate ? uniform(float(0)) : null;
+  const discardIfFading = () => {
+    if (uLiveOcclusionAmount) uLiveOcclusionAmount.greaterThan(float(0.05)).discard();
+  };
   // EARLY-Z FAST PATH (PERF, 2026-08-09, §4.3 of the perf audit): a discard()
   // anywhere in a fragment shader forces the GPU to disable early-fragment-
   // tests for the WHOLE shader — hardware can't see that the condition below
@@ -468,13 +497,18 @@ export function buildSceneDepthWriterMaterial({
   // opaque item shares this leaner shape and compiles once, not once per
   // item.
   if (alwaysOpaque || !tex) {
-    material.fragmentNode = Fn(() => vec4(uFloorIndex, float(0), uFlags, float(1)))();
+    material.fragmentNode = Fn(() => {
+      discardIfFading();
+      return vec4(uFloorIndex, float(0), uFlags, float(1));
+    })();
+    if (uLiveOcclusionAmount) material.uLiveOcclusionAmount = uLiveOcclusionAmount;
     return material;
   }
   const uAlphaThreshold = uniform(float(alphaThreshold));
   material.fragmentNode = Fn(() => {
     const a = texture(tex).level(float(0)).a;
     a.lessThan(uAlphaThreshold).discard();
+    discardIfFading();
     // G (outdoors) is a KNOWN GAP, stated honestly, not faked: wiring it
     // needs the same envLight/uOutdoorsRect plumbing scene-attr.js's real
     // writers take, and no Stage 1 consumer reads it yet (design doc §6's
@@ -483,6 +517,7 @@ export function buildSceneDepthWriterMaterial({
     // no authored outdoors mask, never a fabricated "somewhere outside".
     return vec4(uFloorIndex, float(0), uFlags, float(1));
   })();
+  if (uLiveOcclusionAmount) material.uLiveOcclusionAmount = uLiveOcclusionAmount;
   return material;
 }
 

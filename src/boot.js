@@ -1140,6 +1140,24 @@ function install() {
   // value. Safe to delay: every other MapShine.__studio/__remote reference
   // in this file (grep-verified) is already `?.`-guarded inside a callback
   // that can only fire well after install() has returned once.
+  //
+  // SIBLING GAP (mythica-machina-press#481): every registerEffectCard()/
+  // registerSimpleEffectCard() call below (water, wind, and the ~12 routed
+  // through registerSimpleEffectCard) runs eagerly in this SAME synchronous
+  // install() body, long before 'ready' — so at the moment each one calls
+  // `MapShine.__studio?.registerEffectCard(...)`, `__studio` is still
+  // undefined and the optional-chain silently drops it. The Studio's own
+  // DOM builds fine once 'ready' fires (installStudio() below does that
+  // regardless of card data), but its effectCardFactories Map is left
+  // permanently empty — "0 registered" with a fully-rendered shell.
+  // registerEffectCardSafe() queues a registration if the controller isn't
+  // built yet and flushes the queue the moment it is, so every call site
+  // keeps calling it exactly where it already does today.
+  const pendingEffectCards = [];
+  function registerEffectCardSafe(id, modelFactory) {
+    if (MapShine.__studio) MapShine.__studio.registerEffectCard(id, modelFactory);
+    else pendingEffectCards.push([id, modelFactory]);
+  }
   Hooks.once('ready', () => {
     MapShine.__studio = installStudio({
       debugPanel: MapShine.debug,
@@ -1181,6 +1199,14 @@ function install() {
       getDarknessRealism: () => getDarknessRealism(),
       setDarknessRealism: (v) => setDarknessRealism(v),
     });
+    // Flush every card registered before __studio existed (see
+    // registerEffectCardSafe's own comment above) — one-time, in the same
+    // order they were queued. Guarded: installStudio() returns undefined
+    // for a non-GM client, and there is nothing to flush into there.
+    if (MapShine.__studio) {
+      for (const [id, modelFactory] of pendingEffectCards) MapShine.__studio.registerEffectCard(id, modelFactory);
+      pendingEffectCards.length = 0;
+    }
     // THE REMOTE (U2, docs/holy/UI-Testament.md §4, §9) — side-by-side with
     // both the old panel and the Studio. Every callback below is a closure
     // reference, not an eager read — installRemote() itself runs NOW (this
@@ -7438,7 +7464,7 @@ function install() {
   // effects/ or effectRegistry directly). `filterCategory` is this
   // session's own proposal for the category strip — no per-effect taxonomy
   // exists in src/ yet; see Petition P10.
-  MapShine.__studio?.registerEffectCard('water', () => {
+  registerEffectCardSafe('water', () => {
     const readLive = () => water.getReadout();
     const maskStatus = (() => {
       try {
@@ -7532,7 +7558,7 @@ function install() {
    *   status?: (readout: object) => string}} opts
    */
   function registerSimpleEffectCard(id, opts) {
-    MapShine.__studio?.registerEffectCard(id, () => {
+    registerEffectCardSafe(id, () => {
       // `readLive` stays a live ACCESSOR, called fresh at every field below
       // — never captured into a `const readout = ...` snapshot closed over
       // by getValue (tools/verify-structure.mjs#panels/no-captured-readout;
@@ -9364,7 +9390,7 @@ function install() {
   // buildEffectAttachments instead of a hand-copied button list — any
   // future change to wind's own {effect:'wind'} registrations shows up
   // here automatically, the same forever-parity the Lab tab already has.
-  MapShine.__studio?.registerEffectCard('wind', () => ({
+  registerEffectCardSafe('wind', () => ({
     id: 'wind',
     icon: 'wind',
     title: 'Wind',

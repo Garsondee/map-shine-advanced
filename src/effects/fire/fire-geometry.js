@@ -1168,29 +1168,6 @@ export function buildFireLightSources(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Calm-air lifespan boost / full-gale lifespan cut, flame only.
- *
- * ⚠️ AUTHOR'S OWN ENDPOINTS (2026-09-03): *"at very low wind values flames
- * have longer lifespans to make them feel lazy and slow"* / *"at wind 1...
- * flame particles should have smaller lifespans."* `FLAME_CALM_LIFE_MUL`
- * makes "no wind at all" its own distinct, unhurried character rather than
- * just "whatever `flameLifeScale` already says"; `FLAME_GUTTER_LIFE_MUL`
- * makes a full gale recycle particles fast — short, flickery puffs.
- */
-const FLAME_CALM_LIFE_MUL = 1.4;
-// ⚠️ TEMPORARILY NEUTRALISED, 2026-09-04 — author: "I think you currently
-// make the flames last less time in high winds but revert that for the
-// moment please." Was 0.3 (a full gale cut flame's life to 30% of normal,
-// recycling particles fast for short flickery puffs). 1 means high wind no
-// longer shortens life AT ALL — it stays at whatever `FLAME_CALM_LIFE_MUL`'s
-// interpolation gives, down to a neutral 1× at `windMotion01=1`, never below
-// baseline. The calm-air boost above is untouched; only the gutter-side cut
-// is reverted. Restore 0.3 (or whatever value the author lands on) once
-// they've evaluated the ROUND 6 wind-push magnitude fix without lifespan
-// also changing at the same time (mythica-machina-press#485).
-const FLAME_GUTTER_LIFE_MUL = 1;
-
-/**
  * How far a guttering flame's population/brightness can be pushed down.
  *
  * ⚠️ RAISED 2026-09-04 (from 0.15/0.55) — author, live, TWICE: "the amount of
@@ -1319,15 +1296,30 @@ export function fireWindMotion01({
  * it — the same "1.0 = exactly the reference" contract every existing
  * `perKind` multiplier already keeps (this file's own "THE AUTHOR'S DIALS"
  * header, `fire-particle-runtime.js`). At `windMotion01 = 0` count/opacity sit
- * at their neutral 1× (only the calm LIFE boost moves — lazy, not
- * suppressed) and smoke's multiplier is exactly 1 — a windless fire looks
- * exactly as it would with no wind system at all.
+ * at their neutral 1× and smoke's multiplier is exactly 1 — a windless fire
+ * looks exactly as it would with no wind system at all.
+ *
+ * ⚠️ LIFESPAN MOVED OFF THIS FUNCTION, 2026-09-04, ROUND 7. It used to carry
+ * a THIRD field, `flameLifeMul`, computed from this same map-wide
+ * `windMotion01` — a CPU-side, per-kind-engine value with no per-fire (let
+ * alone per-particle) home, exactly the aggregate shape the author already
+ * rejected once for the PUSH ("averaging is dumb... test the actual
+ * location", mythica-machina-press#485). Life now blends on the GPU, per
+ * particle, at ITS OWN spawn point's real wind exposure
+ * (`fire-particle-runtime.js#effectiveWindMotionAt`, fed by the author's new
+ * `flameLifeAtWind0`/`flameLifeAtWind1` and `emberLifeAtWind0`/
+ * `emberLifeAtWind1` dials, fire.js) — the same per-location principle this
+ * function's own count/opacity fields still cannot reach (no storage for a
+ * per-particle population/opacity home — see `fire-particle-runtime.js`'s
+ * own module header). COUNT and OPACITY stay here: both are population-level
+ * (how many sprites exist at all, how solid the survivors look), which is
+ * inherently a per-kind-ENGINE concept, not a per-particle one.
  *
  * @param {number} windMotion01 - from {@link fireWindMotion01}.
  * @param {boolean} [canBeSnuffed=true] - `FIRE_PARAMS.canBeSnuffed`; false
  *   raises every floor so wind can rough the fire up but never empty it out.
- * @returns {{flameLifeMul:number, flameActiveCountMul:number,
- *   flameOpacityMul:number, smokeActiveCountMul:number}}
+ * @returns {{flameActiveCountMul:number, flameOpacityMul:number,
+ *   smokeActiveCountMul:number}}
  */
 export function fireWindParticleResponse(windMotion01, canBeSnuffed = true) {
   const t = clampNum(Number.isFinite(windMotion01) ? windMotion01 : 0, 0, 1);
@@ -1339,7 +1331,6 @@ export function fireWindParticleResponse(windMotion01, canBeSnuffed = true) {
   const countFloor = canBeSnuffed ? FLAME_GUTTER_COUNT_FLOOR : FLAME_GUTTER_COUNT_FLOOR_IMMUNE;
   const opacityFloor = canBeSnuffed ? FLAME_GUTTER_OPACITY_FLOOR : FLAME_GUTTER_OPACITY_FLOOR_IMMUNE;
   return {
-    flameLifeMul: FLAME_CALM_LIFE_MUL + (FLAME_GUTTER_LIFE_MUL - FLAME_CALM_LIFE_MUL) * eased,
     flameActiveCountMul: 1 - eased * (1 - countFloor),
     flameOpacityMul: 1 - eased * (1 - opacityFloor),
     // Bowed toward an earlier fade (see SMOKE_WIND_FADE_EXPONENT) and an
@@ -1489,10 +1480,15 @@ export function fireRuntimeFromParams(params = {}, chain = {}, wind = {}) {
         // ⚠️ WIND-MODULATED (2026-09-03) — see fireWindParticleResponse. Each
         // multiplier STACKS onto the author's own dial rather than replacing
         // it, and is ~1 at windMotion01=0 (activeCount/opacity) so a windless
-        // fire is unaffected. `lifeScale` moves even at zero wind (the "calm
-        // = lazy" boost) — that is the one asymmetry the author asked for.
+        // fire is unaffected.
         activeCount: Math.round(clampNum(num(p.flameCount, 12), 0, 200) * windFx.flameActiveCountMul),
-        lifeScale: clampNum(num(p.flameLifeScale, 1), 0.05, 30) * windFx.flameLifeMul,
+        // ⚠️ LIFE IS A WIND0/WIND1 PAIR, NOT A SINGLE SCALE, 2026-09-04
+        // ROUND 7 — see `fireWindParticleResponse`'s own note on why this
+        // moved off the CPU-side, map-wide suppression path entirely. Both
+        // ends are passed through UNCOMBINED; the particle kernel blends them
+        // against each particle's own real spawn-point wind exposure.
+        lifeAtWind0: clampNum(num(p.flameLifeAtWind0, 2.8), 0.05, 30),
+        lifeAtWind1: clampNum(num(p.flameLifeAtWind1, 1.5), 0.05, 30),
         sizeScale: clampNum(num(p.flameSizeScale, 1), 0.02, 20),
         opacityScale: clampNum(num(p.flameOpacity, 1), 0, 20) * windFx.flameOpacityMul,
         emissionScale: clampNum(num(p.flameEmission, 1), 0, 50),
@@ -1505,15 +1501,32 @@ export function fireRuntimeFromParams(params = {}, chain = {}, wind = {}) {
         // Default 0 (off) — known good idea, currently buggy in practice
         // (author verdict, 2026-08-13); see FIRE_PARAMS.flameCohesion's help.
         cohesion: clampNum(num(p.flameCohesion, 0), -2, 3),
+        // How hard wind physically shoves flame, ON TOP OF the self-scaled
+        // guarantee `fire-particle-runtime.js#windAccelPerUnitSize` already
+        // provides — see that constant's own construction-site note.
+        windPushScale: clampNum(num(p.flameWindPush, 1), 0, 30),
       },
       ember: {
         activeCount: Math.round(clampNum(num(p.emberCount, 10), 0, 200)),
-        lifeScale: clampNum(num(p.emberLifeScale, 1), 0.05, 30),
+        // Same wind0/wind1 pair as flame's life, above — see that field's own
+        // note. Embers previously had NO wind-driven life change at all.
+        lifeAtWind0: clampNum(num(p.emberLifeAtWind0, 0.45), 0.05, 30),
+        lifeAtWind1: clampNum(num(p.emberLifeAtWind1, 0.7), 0.05, 30),
         sizeScale: clampNum(num(p.emberSizeScale, 1), 0.02, 20),
         opacityScale: clampNum(num(p.emberOpacity, 1), 0, 20),
         emissionScale: clampNum(num(p.emberEmission, 1), 0, 50),
-        chaosScale: clampNum(num(p.emberChaos, 1), 0, 30),
-        riseScale: clampNum(num(p.emberRise, 1), 0, 30),
+        // ⚠️ CHAOS AND RISE ARE WIND0/WIND1 PAIRS, 2026-09-04 ROUND 7 —
+        // author: *"I want chaotic rising embers at wind 0 and wind driven
+        // embers at high wind values that move sideways and not upwards."*
+        // High Wind-0 defaults keep today's chaotic climb; low Wind-1
+        // defaults let the (now self-scaled, ROUND 6) sideways wind push
+        // dominate instead once wind genuinely reaches a given ember.
+        chaosAtWind0: clampNum(num(p.emberChaosAtWind0, 6.2), 0, 30),
+        chaosAtWind1: clampNum(num(p.emberChaosAtWind1, 1.5), 0, 30),
+        riseAtWind0: clampNum(num(p.emberRiseAtWind0, 1), 0, 30),
+        riseAtWind1: clampNum(num(p.emberRiseAtWind1, 0.15), 0, 30),
+        // Same idea as flame's own windPushScale, above.
+        windPushScale: clampNum(num(p.emberWindPush, 1), 0, 30),
       },
       smoke: {
         // ⚠️ WIND-MODULATED (2026-09-03) — fades to a literal ZERO active
@@ -1525,7 +1538,14 @@ export function fireRuntimeFromParams(params = {}, chain = {}, wind = {}) {
         sizeScale: clampNum(num(p.smokeSizeScale, 1), 0.02, 20),
         opacityScale: clampNum(num(p.smokeOpacity, 1), 0, 20),
         growthScale: clampNum(num(p.smokeGrowth, 1), 0, 30),
-        riseScale: clampNum(num(p.smokeRise, 1), 0, 30),
+        // Not a wind0/wind1 pair — smoke keeps its single "Smoke rise ×" dial
+        // (out of scope this round), so both ends of the particle kernel's
+        // blend receive the SAME value, a no-op blend that reproduces a flat
+        // multiplier exactly. This also, incidentally, fixes smoke rise
+        // being a dead control before ROUND 7 — see
+        // `fire-particle-runtime.js`'s own note on `riseScaleNow`.
+        riseAtWind0: clampNum(num(p.smokeRise, 1), 0, 30),
+        riseAtWind1: clampNum(num(p.smokeRise, 1), 0, 30),
       },
     },
     /**

@@ -668,26 +668,23 @@ export function run(t) {
     );
 
     // ── THE CURVES THEMSELVES ──
+    // ⚠️ NO LONGER CARRIES A `flameLifeMul` FIELD, 2026-09-04 ROUND 7 — life
+    // moved to a GPU-side, per-particle wind0/wind1 blend
+    // (`fire-particle-runtime.js#effectiveWindMotionAt`); see this function's
+    // own header for why. Only count/opacity/smoke remain here — see
+    // `fire-subsystem.test.mjs` for the new life-blend contract.
     const calm = fireWindParticleResponse(0, true);
     t.ok(
       'at windMotion01=0, count/opacity/smoke sit at their neutral 1x — a windless fire is unaffected',
       calm.flameActiveCountMul === 1 && calm.flameOpacityMul === 1 && calm.smokeActiveCountMul === 1
-    );
-    t.ok(
-      "the ONE asymmetry: lifeScale moves even at zero wind — the author's own 'lazy at low wind' ask",
-      near(calm.flameLifeMul, 1.4, 1e-9)
     );
 
     const guttering = fireWindParticleResponse(1, true);
     t.ok(
       // ⚠️ FLOORS RAISED 2026-09-04 (from 0.15/0.55) — author, live, TWICE:
       // "far too strong" — see FLAME_GUTTER_COUNT_FLOOR's own header.
-      // ⚠️ LIFESPAN CUT TEMPORARILY NEUTRALISED 2026-09-04 (FLAME_GUTTER_LIFE_MUL
-      // 0.3 -> 1, author: "revert that for the moment") — flame is mostly
-      // suppressed (count/opacity) at full wind but no longer short-lived.
-      'at windMotion01=1 (can be snuffed), flame is at its normal lifespan and mostly suppressed, never literally zero',
-      near(guttering.flameLifeMul, 1, 1e-9) &&
-        near(guttering.flameActiveCountMul, 0.3, 1e-9) &&
+      'at windMotion01=1 (can be snuffed), flame is mostly suppressed, never literally zero',
+      near(guttering.flameActiveCountMul, 0.3, 1e-9) &&
         near(guttering.flameOpacityMul, 0.65, 1e-9) &&
         guttering.flameActiveCountMul > 0
     );
@@ -705,19 +702,16 @@ export function run(t) {
         near(immune.flameOpacityMul, 0.85, 1e-9)
     );
     t.ok(
-      'canBeSnuffed does NOT gate the lifespan cut or the smoke shutoff — those are cosmetic, not "did it go out"',
-      near(immune.flameLifeMul, guttering.flameLifeMul, 1e-9) && immune.smokeActiveCountMul === 0
+      'canBeSnuffed does NOT gate the smoke shutoff — that is cosmetic, not "did it go out"',
+      immune.smokeActiveCountMul === 0
     );
 
     // Monotonic across the whole range, and smoke fades AHEAD of flame's own
     // suppression (real smoke shears apart before a flame actually gutters).
     const mid = fireWindParticleResponse(0.5, true);
     t.ok(
-      'lifespan, count and opacity all fall monotonically from calm to guttering',
-      mid.flameLifeMul < calm.flameLifeMul &&
-        mid.flameLifeMul > guttering.flameLifeMul &&
-        mid.flameActiveCountMul < calm.flameActiveCountMul &&
-        mid.flameActiveCountMul > guttering.flameActiveCountMul
+      'count and opacity fall monotonically from calm to guttering',
+      mid.flameActiveCountMul < calm.flameActiveCountMul && mid.flameActiveCountMul > guttering.flameActiveCountMul
     );
     t.ok(
       'at the midpoint, smoke has already faded further than flame has been suppressed',
@@ -739,16 +733,16 @@ export function run(t) {
     const explicitNoWind = fireRuntimeFromParams({}, chain66, { speed01: 0 });
     t.ok(
       'omitting the wind argument entirely matches passing speed01=0 explicitly (backward-compatible default)',
-      noWind.windMotion01 === explicitNoWind.windMotion01 &&
-        noWind.perKind.flame.lifeScale === explicitNoWind.perKind.flame.lifeScale
+      noWind.windMotion01 === explicitNoWind.windMotion01
     );
     t.ok(
-      // ⚠️ 1, NOT fire.js's schema default of 2 — `fireRuntimeFromParams`'s
-      // OWN internal fallback for an absent `flameLifeScale` is 1 (this
-      // function is pure and knows nothing of the schema; a real call site
-      // resolves schema defaults into `params` BEFORE calling it).
-      "the calm boost applies even to the function's own default lifeScale — a windless scene's flame is NOT the raw dial value",
-      near(noWind.perKind.flame.lifeScale, 1 * 1.4, 1e-6)
+      // ⚠️ LIFE IS NO LONGER CPU-BLENDED, 2026-09-04 ROUND 7 — `lifeAtWind0`/
+      // `lifeAtWind1` are the (clamped) author dial values, passed through
+      // UNCOMBINED regardless of wind speed; the particle kernel blends them
+      // per particle against real spawn-point exposure instead. See
+      // `fireWindParticleResponse`'s own header.
+      "flame's lifeAtWind0/lifeAtWind1 fall back to the same defaults fire.js's schema ships",
+      near(noWind.perKind.flame.lifeAtWind0, 2.8, 1e-6) && near(noWind.perKind.flame.lifeAtWind1, 1.5, 1e-6)
     );
     t.ok(
       'a windless scene leaves smoke/flame activeCount at exactly their author-dialled values',
@@ -761,9 +755,13 @@ export function run(t) {
       fullWind.perKind.smoke.activeCount === 0
     );
     t.ok(
-      'a full gale shortens flame lifeScale and thins its activeCount below the windless case',
-      fullWind.perKind.flame.lifeScale < noWind.perKind.flame.lifeScale &&
-        fullWind.perKind.flame.activeCount < noWind.perKind.flame.activeCount
+      'a full gale still thins flame activeCount below the windless case — that stays CPU-side, map-wide',
+      fullWind.perKind.flame.activeCount < noWind.perKind.flame.activeCount
+    );
+    t.ok(
+      'a full gale does NOT move lifeAtWind0/lifeAtWind1 — wind speed no longer touches the CPU-side value at all',
+      fullWind.perKind.flame.lifeAtWind0 === noWind.perKind.flame.lifeAtWind0 &&
+        fullWind.perKind.flame.lifeAtWind1 === noWind.perKind.flame.lifeAtWind1
     );
     t.ok(
       'runtime.windMotion01 is exposed for fire-subsystem.js to forward to every engine',
@@ -778,19 +776,21 @@ export function run(t) {
     // exposure itself, sampled live from the wind bake's own geometry
     // (`fire-particle-runtime.js`'s own header). Baking the CPU-side
     // aggregate exposure in HERE TOO would double-count it for any fire
-    // whose own exposure is the map's only (or lowest) one. Suppression
-    // (lifeScale/activeCount) has no per-particle home to move into (a
-    // necessarily shared, map-wide arena — see that same header) and so
-    // correctly KEEPS reading exposure.
+    // whose own exposure is the map's only (or lowest) one. `activeCount`
+    // suppression has no per-particle home to move into (a necessarily
+    // shared, map-wide arena — see that same header) and so correctly KEEPS
+    // reading exposure; `lifeAtWind0`/`lifeAtWind1` are untouched by exposure
+    // for the same reason they are untouched by speed above — pure
+    // passthrough, full stop.
     const fullWindSealed = fireRuntimeFromParams({}, chain66, { speed01: 1, exposure01: 0 });
     t.ok(
       'windMotion01 is IDENTICAL whether the representative fire is fully exposed or fully sealed — exposure moved to the kernel',
       fullWindSealed.windMotion01 === fullWind.windMotion01
     );
     t.ok(
-      'flame lifeScale/activeCount, by contrast, still differ with exposure — suppression stays exposure-aware',
-      fullWindSealed.perKind.flame.lifeScale !== fullWind.perKind.flame.lifeScale &&
-        fullWindSealed.perKind.flame.lifeScale > fullWind.perKind.flame.lifeScale
+      'flame activeCount, by contrast, still differs with exposure — suppression stays exposure-aware',
+      fullWindSealed.perKind.flame.activeCount !== fullWind.perKind.flame.activeCount &&
+        fullWindSealed.perKind.flame.activeCount > fullWind.perKind.flame.activeCount
     );
   }
 

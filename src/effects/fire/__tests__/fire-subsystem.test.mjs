@@ -555,10 +555,14 @@ export function run(t) {
       )
     );
     t.ok(
-      'flame lifeScale/activeCount actually moved from the calm sync — the wiring reaches the tuning, not just a passthrough field',
+      // ⚠️ `activeCount`, NOT `lifeScale`, 2026-09-04 ROUND 7 — life moved off
+      // this CPU-side path entirely (`fireWindParticleResponse`'s own
+      // header); `activeCount` is what still proves suppression genuinely
+      // reaches setParams rather than sitting inert.
+      'flame activeCount actually moved from the calm sync — the wiring reaches the tuning, not just a passthrough field',
       windEngines
         .filter((e) => e.kind === 'flame')
-        .every((e) => e.paramCalls.at(-1)?.lifeScale !== e.paramCalls.at(-2)?.lifeScale)
+        .every((e) => e.paramCalls.at(-1)?.activeCount !== e.paramCalls.at(-2)?.activeCount)
     );
 
     // ⚠️ REWRITTEN 2026-09-04 — MOTION (uWindMotion01, what reaches setParams
@@ -588,21 +592,23 @@ export function run(t) {
       Number.isFinite(windMotionExposed) && windMotionExposed === windMotionSealed
     );
 
-    // SUPPRESSION (lifeScale/activeCount — the OTHER thing wind drives, still
-    // a necessarily map-wide CPU aggregate, see fire-particle-runtime.js's
-    // own header on why activeCount genuinely cannot be made per-particle)
-    // must STILL respond to exposure — this is `windMotionForSuppression01`,
+    // SUPPRESSION (activeCount — the OTHER thing wind drives, still a
+    // necessarily map-wide CPU aggregate, see fire-particle-runtime.js's own
+    // header on why activeCount genuinely cannot be made per-particle) must
+    // STILL respond to exposure — this is `windMotionForSuppression01`,
     // a SEPARATE internal computation from `windMotion01` above, and this is
     // its own proof that splitting the two didn't quietly drop the exposure
     // awareness the previous commit's fix relied on.
     const flameSealed = windEngines.find((e) => e.kind === 'flame');
-    const lifeScaleSealed = flameSealed?.paramCalls.at(-1)?.lifeScale;
+    const activeCountSealed = flameSealed?.paramCalls.at(-1)?.activeCount;
     windState.fires = [exposedFire];
     windSubsystem.sync(renderer, 48, 0.016, rect);
-    const lifeScaleExposed = flameSealed?.paramCalls.at(-1)?.lifeScale;
+    const activeCountExposed = flameSealed?.paramCalls.at(-1)?.activeCount;
     t.ok(
-      `flame lifeScale still responds to windExposure (suppression stays exposure-aware even though motion no longer is) — sealed=${lifeScaleSealed}, exposed=${lifeScaleExposed}`,
-      Number.isFinite(lifeScaleSealed) && Number.isFinite(lifeScaleExposed) && lifeScaleSealed !== lifeScaleExposed
+      `flame activeCount still responds to windExposure (suppression stays exposure-aware even though motion no longer is) — sealed=${activeCountSealed}, exposed=${activeCountExposed}`,
+      Number.isFinite(activeCountSealed) &&
+        Number.isFinite(activeCountExposed) &&
+        activeCountSealed !== activeCountExposed
     );
 
     // ⚠️ THE ORIGINAL REPORTED BUG (2026-09-04) — author, live, on a map with
@@ -621,18 +627,18 @@ export function run(t) {
     // `f2` is the narrower outdoor one (windExposure: 1).
     windState.fires = [{ id: 'f1', x: 10, y: 10, diameterPx: 200, intensity: 1, windExposure: 0 }];
     windSubsystem.sync(renderer, 56, 0.016, rect);
-    const lifeScaleIndoorOnly = flameSealed?.paramCalls.at(-1)?.lifeScale;
+    const activeCountIndoorOnly = flameSealed?.paramCalls.at(-1)?.activeCount;
     windState.fires = [
       { id: 'f1', x: 10, y: 10, diameterPx: 200, intensity: 1, windExposure: 0 },
       { id: 'f2', x: 500, y: 500, diameterPx: 40, intensity: 1, windExposure: 1 },
     ];
     windSubsystem.sync(renderer, 64, 0.016, rect);
-    const lifeScaleWithOutdoor = flameSealed?.paramCalls.at(-1)?.lifeScale;
+    const activeCountWithOutdoor = flameSealed?.paramCalls.at(-1)?.activeCount;
     t.ok(
-      `adding a narrower OUTDOOR fire alongside a wider INDOOR one still moves suppression — MAX exposure, not fires[0]'s own (indoor-only=${lifeScaleIndoorOnly}, with-outdoor=${lifeScaleWithOutdoor})`,
-      Number.isFinite(lifeScaleIndoorOnly) &&
-        Number.isFinite(lifeScaleWithOutdoor) &&
-        lifeScaleWithOutdoor !== lifeScaleIndoorOnly
+      `adding a narrower OUTDOOR fire alongside a wider INDOOR one still moves suppression — MAX exposure, not fires[0]'s own (indoor-only=${activeCountIndoorOnly}, with-outdoor=${activeCountWithOutdoor})`,
+      Number.isFinite(activeCountIndoorOnly) &&
+        Number.isFinite(activeCountWithOutdoor) &&
+        activeCountWithOutdoor !== activeCountIndoorOnly
     );
   }
 }

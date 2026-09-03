@@ -18,17 +18,27 @@
 /**
  * THE PARAMS.
  *
- * ⚠️ NOTE HOW FEW THERE ARE. V2's fire shipped **167 controls**
- * (`docs/reference/v2-effect-params/fire-effect.md`), several of which were
- * dead on arrival — `coalBedScrollSpeed` was literally labelled "Scroll
- * (unused)", `smokeSizeGrowth` was "(Legacy)", and `fireSize` existed in
- * `params` with no schema entry at all. The reason there are ~20 here is not
- * restraint for its own sake: almost everything V2 exposed as a slider is
- * DERIVED from `diameterPx` in `fire-geometry.js#fireScaleChain`, because it
- * genuinely is derived — puff frequency, plume height, turbulence, smoke
- * production, light radius and flicker depth all follow from how big the fire
- * is. A control that lets you set a bonfire's flicker rate to a candle's is not
- * a feature; it is a way to make the fire stop reading as a fire.
+ * ⚠️ NOTE HOW FEW OF THESE ARE DERIVED-FROM-SIZE FILLER. V2's fire shipped
+ * **167 controls** (`docs/reference/v2-effect-params/fire-effect.md`),
+ * several of which were dead on arrival — `coalBedScrollSpeed` was literally
+ * labelled "Scroll (unused)", `smokeSizeGrowth` was "(Legacy)", and
+ * `fireSize` existed in `params` with no schema entry at all. Restraint for
+ * its own sake was never the goal here: almost everything V2 exposed as a
+ * slider is DERIVED from `diameterPx` in `fire-geometry.js#fireScaleChain`,
+ * because it genuinely is derived — puff frequency, plume height,
+ * turbulence, smoke production, light radius and flicker depth all follow
+ * from how big the fire is. A control that lets you set a bonfire's flicker
+ * rate to a candle's is not a feature; it is a way to make the fire stop
+ * reading as a fire.
+ *
+ * ⚠️ THE COUNT GREW PAST ~20 ON 2026-09-04, DELIBERATELY, ROUND 7 — author:
+ * *"add a lot more controls... I want all the wind motion and lifespan
+ * controls for embers and flames... two separate controls for each element
+ * for Wind being 0 and wind being 1... pick very very wide ranges for every
+ * slider."* Every flame/ember lifetime, chaos and rise dial split into a
+ * Wind-0/Wind-1 pair (the same "very wide ranges, I'll find the values"
+ * philosophy "THE TUNING SET" below already applies) — genuinely new
+ * surface area, not a return to V2-style size-redundant filler.
  */
 export const FIRE_PARAMS = Object.freeze({
   // ── Presence ──────────────────────────────────────────────────────────────
@@ -165,15 +175,32 @@ export const FIRE_PARAMS = Object.freeze({
     label: 'Flame count',
     help: 'Flame sprites per fire, PER ARCHETYPE — there are four, so the real total is four times this. V2 ran about 51 for a whole floor.',
   },
-  flameLifeScale: {
+  // ⚠️ SPLIT INTO A WIND0/WIND1 PAIR, 2026-09-04 (was a single `flameLifeScale`)
+  // — author: "two separate controls for each element for Wind being 0 and
+  // wind being 1, we blend between those two so that I can fine tune what it
+  // looks like in both setups." Blended per-particle against how exposed
+  // THIS flame's own spawn point is to wind right now — not the map-wide
+  // dial — so a hearth tucked out of the wind keeps its Wind 0 character
+  // even while an exposed one nearby is already reading Wind 1.
+  flameLifeAtWind0: {
     type: 'float',
     min: 0.05,
     max: 30,
     step: 0.05,
-    default: 2,
+    default: 2.8,
     category: 'Flame',
-    label: 'Flame lifetime ×',
-    help: 'Multiplies how long each flame sprite lives (base 2.4-4.2s). Short lives read as puffs that vanish; long ones as a steady body of fire.',
+    label: 'Flame lifetime × (Wind 0)',
+    help: 'Multiplies how long each flame sprite lives (base 2.4-4.2s) in still air. Short lives read as puffs that vanish; long ones as a steady body of fire.',
+  },
+  flameLifeAtWind1: {
+    type: 'float',
+    min: 0.05,
+    max: 30,
+    step: 0.05,
+    default: 1.5,
+    category: 'Flame',
+    label: 'Flame lifetime × (Wind 1)',
+    help: 'The same multiplier, but for a flame sitting in full wind exposure. Lower than the Wind 0 value reads as guttering — quick, flickery puffs instead of a steady body of fire. Set equal to Wind 0 to turn off wind-driven lifespan change entirely.',
   },
   flameSizeScale: {
     type: 'float',
@@ -243,6 +270,16 @@ export const FIRE_PARAMS = Object.freeze({
     label: 'Cohesion (pull together)',
     help: 'Pulls every flame toward the brightest part of its own fire. 0 = spawns spread across the full painted shape. 1 = every flame collapses onto that single hottest point. Negative pushes flames apart instead, beyond their painted region.',
   },
+  flameWindPush: {
+    type: 'float',
+    min: 0,
+    max: 30,
+    step: 0.05,
+    default: 1,
+    category: 'Flame',
+    label: 'Flame wind push ×',
+    help: "How hard wind physically shoves flame sideways, on top of the engine's own baked-in guarantee that full wind moves a flame several times its own size. 1 = exactly that guarantee; higher throws flame further, lower holds it closer to the hearth even in a gale. Only affects flame that is actually exposed to wind (see the Response category) — sheltered flame is untouched regardless of this dial.",
+  },
 
   // ── Ember ─────────────────────────────────────────────────────────────────
   emberCount: {
@@ -265,35 +302,84 @@ export const FIRE_PARAMS = Object.freeze({
     label: 'Ember size ×',
     help: 'Base is 2.3-8.7 world px — already a third of V2’s own, at the author’s request.',
   },
-  emberLifeScale: {
+  // ⚠️ LIFE/CHAOS/RISE ARE ALL WIND0/WIND1 PAIRS, 2026-09-04 (were single
+  // `emberLifeScale`/`emberChaos`/`emberRise` dials) — same mechanism as
+  // flame's `flameLifeAtWind0`/`flameLifeAtWind1`, see that pair's own note.
+  // Author: *"embers need investigating and adding into this system too so
+  // that I can get chaotic rising embers at wind 0 and wind driven embers at
+  // high wind values that move sideways and not upwards."* The shipped
+  // defaults do exactly that split — high chaos/rise at Wind 0, low at
+  // Wind 1 — but every range is wide enough to push the balance the other
+  // way entirely.
+  emberLifeAtWind0: {
     type: 'float',
     min: 0.05,
     max: 30,
     step: 0.05,
     default: 0.45,
     category: 'Ember',
-    label: 'Ember lifetime ×',
-    help: 'How long a spark survives. Longer lives let embers travel further from the fire before dying.',
+    label: 'Ember lifetime × (Wind 0)',
+    help: 'How long a spark survives in still air. Longer lives let embers travel further before dying.',
   },
-  emberChaos: {
+  emberLifeAtWind1: {
+    type: 'float',
+    min: 0.05,
+    max: 30,
+    step: 0.05,
+    default: 0.7,
+    category: 'Ember',
+    label: 'Ember lifetime × (Wind 1)',
+    help: 'The same, for a spark in full wind exposure. Higher than Wind 0 by default — a wind-blown ember gets a little longer to travel sideways before it dies. Set equal to Wind 0 to turn off wind-driven lifespan change entirely.',
+  },
+  emberChaosAtWind0: {
     type: 'float',
     min: 0,
     max: 30,
     step: 0.05,
     default: 6.2,
     category: 'Ember',
-    label: 'Ember chaos ×',
-    help: 'Strength of the swirling flow that pushes embers around. 0 leaves them drifting only with wind.',
+    label: 'Ember chaos × (Wind 0)',
+    help: 'Strength of the swirling flow that pushes embers around in still air. 0 leaves them drifting only with wind.',
   },
-  emberRise: {
+  emberChaosAtWind1: {
+    type: 'float',
+    min: 0,
+    max: 30,
+    step: 0.05,
+    default: 1.5,
+    category: 'Ember',
+    label: 'Ember chaos × (Wind 1)',
+    help: 'The same, for an ember in full wind exposure. Lower than Wind 0 by default, so a real gale reads as WIND-DRIVEN motion rather than random swirl — raise it back up if you want embers to stay chaotic even in a storm.',
+  },
+  emberRiseAtWind0: {
     type: 'float',
     min: 0,
     max: 30,
     step: 0.05,
     default: 1,
     category: 'Ember',
-    label: 'Ember rise ×',
-    help: 'How fast embers climb. Height drives the perspective effect, so this also controls how much they grow and splay outward as they go.',
+    label: 'Ember rise × (Wind 0)',
+    help: 'How fast embers climb in still air. Height drives the perspective effect, so this also controls how much they grow and splay outward as they go.',
+  },
+  emberRiseAtWind1: {
+    type: 'float',
+    min: 0,
+    max: 30,
+    step: 0.05,
+    default: 0.15,
+    category: 'Ember',
+    label: 'Ember rise × (Wind 1)',
+    help: "The same, for an ember in full wind exposure. Held low by default so wind-driven embers read as moving SIDEWAYS rather than climbing — raise it back toward Wind 0's value if you want embers to keep rising even in a gale.",
+  },
+  emberWindPush: {
+    type: 'float',
+    min: 0,
+    max: 30,
+    step: 0.05,
+    default: 1,
+    category: 'Ember',
+    label: 'Ember wind push ×',
+    help: "How hard wind physically shoves embers sideways, on top of the engine's own baked-in guarantee that full wind moves an ember many times its own (tiny) size. 1 = exactly that guarantee; higher throws sparks further, lower keeps them closer even in a gale. Only affects embers actually exposed to wind (see the Response category).",
   },
   emberEmission: {
     type: 'float',
@@ -438,7 +524,7 @@ export const FIRE_PARAMS = Object.freeze({
     default: 1,
     category: 'Motion',
     label: 'Wind response',
-    help: 'How hard wind leans the plume and scatters the flame/ember/smoke particles themselves — and, toward the top of a gale, how fast flame gutters down toward suppressed. The lean grows with height on its own, so a tall fire streams further than a short one at the same setting.',
+    help: 'How much wind reaches this fire at all — the master gate every other wind dial (Flame/Ember wind push, lifetime/chaos/rise Wind 1 values) multiplies against. At 0 this fire ignores wind entirely, at 2 it reacts to a fraction of the map wind other fires need. The lean grows with height on its own, so a tall fire streams further than a short one at the same setting.',
   },
   animationSpeed: {
     type: 'float',

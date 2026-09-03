@@ -6970,7 +6970,7 @@ function install() {
       // reach-for-it-mid-session control right now, not set-once detail.
       fohKeys: [
         'flameCount',
-        'flameLifeScale',
+        'flameLifeAtWind0',
         'flameOpacity',
         'flameColorAge',
         'emberCount',
@@ -7688,7 +7688,7 @@ function install() {
     schema: FIRE_PARAMS,
     fohKeys: [
       'flameCount',
-      'flameLifeScale',
+      'flameLifeAtWind0',
       'flameOpacity',
       'flameColorAge',
       'emberCount',

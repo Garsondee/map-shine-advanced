@@ -535,18 +535,40 @@ export function createFireParticleEngine({
   // nobody can calibrate. Ranges are deliberately far wider than anything
   // plausible — the author asked to find the values, and a slider that cannot
   // reach the answer is worse than no slider.
-  const uLifeScale = uniform(float(1));
+  //
+  // ⚠️ LIFE/CHAOS/RISE ARE WIND0/WIND1 PAIRS, 2026-09-04, ROUND 7 — author:
+  // *"two separate controls for each element for Wind being 0 and wind being
+  // 1, we blend between those two."* Each pair blends against
+  // `effectiveWindMotion` — THIS PARTICLE'S OWN real, per-position wind
+  // exposure (the ROUND 4-6 openness-gated signal), never the map-wide dial
+  // directly — so a spawn point sheltered from wind keeps its Wind-0
+  // character even while an exposed one on the SAME fire already reads its
+  // Wind-1 value. See `effectiveWindMotionAt`, below, and each `mix(...)`
+  // call site in the seed/update kernels.
+  const uLifeAtWind0 = uniform(float(1));
+  const uLifeAtWind1 = uniform(float(1));
   const uOpacityScale = uniform(float(1));
   const uEmissionScale = uniform(float(1));
-  const uChaosScale = uniform(float(1));
-  const uRiseScale = uniform(float(1));
+  const uChaosAtWind0 = uniform(float(1));
+  const uChaosAtWind1 = uniform(float(1));
+  const uRiseAtWind0 = uniform(float(1));
+  const uRiseAtWind1 = uniform(float(1));
   const uGrowthScale = uniform(float(1));
   const uColorAge = uniform(float(2.5));
   /**
+   * How hard THIS kind's own particles get physically shoved by wind, layered
+   * ON TOP of the self-scaled push magnitude `windAccelPerUnitSize` already
+   * guarantees (construction site) — an author dial over that physics fix,
+   * not a replacement for it. 1 = exactly the guarantee (`K.windSizesTarget`
+   * × this kind's own rendered sprite size, within `K.windWorstCaseLifeS`, at
+   * full `effectiveWindMotion`). See `accelAtMax` in the update kernel.
+   */
+  const uWindPushScale = uniform(float(1));
+  /**
    * Playback rate for the field's own clock — how fast the turbulence churns
    * and, for flame, how fast its archetype silhouette boils. Deliberately
-   * SEPARATE from `uChaosScale` (how STRONG the push is) and `uLifeScale` (how
-   * LONG a particle survives, which happens to also pace flame's boil since its
+   * SEPARATE from chaos (how STRONG the push is) and life (how LONG a
+   * particle survives, which happens to also pace flame's boil since its
    * phase runs over `t01 = age/life` — this multiplier decouples the two so
    * "faster boil" no longer requires "shorter-lived particles"). The param this
    * carries is `animationSpeed` ("Speed", fire.js) — see `fire-geometry.js`'s
@@ -567,7 +589,7 @@ export function createFireParticleEngine({
    * ambient speed already gained by the effect's own `windResponse` dial,
    * gated to exactly 0 when `weatherResponse=0`, and folded with the
    * representative fire's `windExposure`. Refreshed every frame through
-   * `setParams`, exactly like `uLifeScale`/`uChaosScale` below — NOT
+   * `setParams`, exactly like the wind0/wind1 dial pairs above — NOT
    * live-by-reference like `uWindDirDeg` above, because unlike the shared
    * ambient vector this number is PER-EFFECT (an author's own dials feed
    * it), so it takes the same per-frame path every other author dial
@@ -581,6 +603,26 @@ export function createFireParticleEngine({
    * `setParams` call, which matches "no wind" — a safe default.
    */
   const uWindMotion01 = uniform(float(0));
+
+  /**
+   * `effectiveWindMotion` AT AN ARBITRARY POSITION — the same openness-gated
+   * signal the update kernel derives inline for the particle it is already
+   * simulating (see that kernel's own note on `particleOpenness`), factored
+   * out so the SEED kernel and the respawn branch below can roll a fresh
+   * particle's LIFESPAN against real wind exposure AT ITS OWN SPAWN POINT,
+   * not the map-wide dial — a spark born deep indoors gets its Wind-0
+   * lifespan even while the map's dial reads full gale. Wall-deflection
+   * direction is irrelevant to a scalar lifespan roll, so this reads
+   * `cell.openness` alone rather than the full `kernel()` result the force
+   * computation also needs.
+   */
+  const effectiveWindMotionAt = (posVec) => {
+    const openness = windOpennessBuffer
+      ? windHandle.kernel(TSL, { centerXY: posVec, time: uTimeMs, cellBuffer: windOpennessBuffer }).openness
+      : float(1);
+    const gain = openness.pow(float(0.5)).max(float(FIRE_OPENNESS_FLOOR_GAIN));
+    return uWindMotion01.mul(gain);
+  };
 
   const hash11 = (x) => fract(sin(x.mul(12.9898)).mul(43758.5453));
 
@@ -687,10 +729,13 @@ export function createFireParticleEngine({
     const sp = spawnAt(fi.mul(float(1.37)).add(float(5.9)), fi.mul(float(0.61)).add(float(11.3)));
     position.element(i).assign(sp.pos);
     const bright = sp.brightness;
+    // Life rolls against wind exposure AT THIS PARTICLE'S OWN SPAWN POINT
+    // (`effectiveWindMotionAt`, above) — see its own note.
+    const lifeMul = mix(uLifeAtWind0, uLifeAtWind1, effectiveWindMotionAt(sp.pos));
     // V2: `p.life *= (0.3 + 0.7 * brightness)` and `p.size *= (0.4 + 0.6 * brightness)`.
     const lifeSpan = mix(float(K.lifeMsMin), float(K.lifeMsMax), hash11(fi.mul(float(3.7))))
       .mul(float(0.3).add(bright.mul(float(0.7))))
-      .mul(uLifeScale)
+      .mul(lifeMul)
       .max(float(1));
     lifeBuf.element(i).assign(lifeSpan);
     // Stagger ages across the FULL lifespan so the population starts already
@@ -779,6 +824,12 @@ export function createFireParticleEngine({
     // map genuinely gets shoved, instead of every fire on the floor sharing
     // one blended reading (the author's own "averaging is dumb" objection).
     const effectiveWindMotion = uWindMotion01.mul(opennessGain);
+    // Chaos and rise blend the SAME way life does (`effectiveWindMotionAt`'s
+    // own note, construction site) — real per-position exposure, not the
+    // map-wide dial, so THIS particle's own local wind decides how much of
+    // its Wind-0 vs. Wind-1 character shows.
+    const chaosScaleNow = mix(uChaosAtWind0, uChaosAtWind1, effectiveWindMotion);
+    const riseScaleNow = mix(uRiseAtWind0, uRiseAtWind1, effectiveWindMotion);
 
     // ⚠️ 95% of flame particles never move AT REST — V2's `flameStationaryFraction`,
     // and the signature of the whole look (a fire POOL should not translate).
@@ -810,7 +861,7 @@ export function createFireParticleEngine({
       .mul(uMotionSpeed)
       .mul(float(K.curlTimeScale))
       .add(s.mul(float(K.curlPhasePerSeed ?? 0)));
-    const curl = fakeCurl(pos, tSec).mul(motionScale).mul(uChaosScale);
+    const curl = fakeCurl(pos, tSec).mul(motionScale).mul(chaosScaleNow);
     // Wind direction and MAGNITUDE-SHAPE stay a single ambient computation —
     // V2's own one frame-global wind scalar — but the STRENGTH that reaches
     // this particular particle is now real, per-position openness (above),
@@ -872,9 +923,11 @@ export function createFireParticleEngine({
     // what actually gets scaled by it, reached exactly at
     // `effectiveWindMotion = 1`. `referenceSizePx` reads the LIVE size dial
     // (`uSizeScale`) so a fire the author scales up or down keeps the same
-    // sizes-per-second feel rather than a fixed pixel speed.
+    // sizes-per-second feel rather than a fixed pixel speed. `uWindPushScale`
+    // (ROUND 7) is the author's own dial ON TOP of that guarantee — 1 leaves
+    // it untouched, above/below asks for more/less than the guarantee alone.
     const referenceSizePx = float((K.sizeMin + K.sizeMax) * 0.5).mul(uSizeScale);
-    const accelAtMax = referenceSizePx.mul(float(windAccelPerUnitSize));
+    const accelAtMax = referenceSizePx.mul(float(windAccelPerUnitSize)).mul(uWindPushScale);
     const windVec = windDirVec
       .mul(gustPush.div(float(WIND_GUST_MAX_MULT)))
       .mul(accelAtMax)
@@ -906,8 +959,15 @@ export function createFireParticleEngine({
 
     // ── AGE AND RESPAWN ──
     // HEIGHT — the only genuinely integrated state, and what drives perspective.
+    // ⚠️ `riseScaleNow` FIXES A DEAD CONTROL, 2026-09-04, ROUND 7 — the old
+    // single `uRiseScale` uniform was correctly SET by `setParams` but never
+    // READ here at all (`feedback_unconsumed_api_rots_silently`): `emberRise`/
+    // `smokeRise` moved the uniform's value and changed nothing on screen.
+    // Multiplying it in properly, split into the wind0/wind1 blend besides,
+    // is both the fix and the new feature at once.
     const risen = c.w.add(
       float(K.riseZ)
+        .mul(riseScaleNow)
         .mul(uDtSec)
         .mul(motionScale.max(float(0.15)))
     );
@@ -934,9 +994,12 @@ export function createFireParticleEngine({
     age.element(i).assign(respawn.select(float(0), agedMs));
 
     const bright = sp.brightness;
+    // Same spawn-point wind roll the seed kernel uses — see
+    // `effectiveWindMotionAt`'s own note.
+    const newLifeMul = mix(uLifeAtWind0, uLifeAtWind1, effectiveWindMotionAt(sp.pos));
     const newLife = mix(float(K.lifeMsMin), float(K.lifeMsMax), hash11(entropy.mul(float(1.3))))
       .mul(float(0.3).add(bright.mul(float(0.7))))
-      .mul(uLifeScale)
+      .mul(newLifeMul)
       .max(float(1));
     lifeBuf.element(i).assign(respawn.select(newLife, lifeSpan));
     const newHeat = float(0.7).add(hash11(entropy.mul(float(2.7))).mul(float(0.5)));
@@ -1155,12 +1218,16 @@ export function createFireParticleEngine({
       set(uIntensity, p2.intensity);
       set(uSizeScale, p2.sizeScale);
       set(uTemperature, p2.temperature);
-      set(uLifeScale, p2.lifeScale);
+      set(uLifeAtWind0, p2.lifeAtWind0);
+      set(uLifeAtWind1, p2.lifeAtWind1);
       set(uOpacityScale, p2.opacityScale);
       set(uEmissionScale, p2.emissionScale);
-      set(uChaosScale, p2.chaosScale);
-      set(uRiseScale, p2.riseScale);
+      set(uChaosAtWind0, p2.chaosAtWind0);
+      set(uChaosAtWind1, p2.chaosAtWind1);
+      set(uRiseAtWind0, p2.riseAtWind0);
+      set(uRiseAtWind1, p2.riseAtWind1);
       set(uGrowthScale, p2.growthScale);
+      set(uWindPushScale, p2.windPushScale);
       set(uColorAge, p2.colorAge);
       set(uSpawnBias, p2.spawnBias);
       set(uMotionSpeed, p2.motionSpeed);
@@ -1237,6 +1304,16 @@ export function createFireParticleEngine({
         // here so a future audit can read it straight off getFireStatus()
         // instead of re-deriving it by hand.
         windAccelPerUnitSize,
+        // ROUND 7's wind0/wind1 blend pairs, as currently live — useful for
+        // confirming an author dial actually reached the kernel without
+        // re-deriving the blend by hand.
+        lifeAtWind0: uLifeAtWind0.value,
+        lifeAtWind1: uLifeAtWind1.value,
+        chaosAtWind0: uChaosAtWind0.value,
+        chaosAtWind1: uChaosAtWind1.value,
+        riseAtWind0: uRiseAtWind0.value,
+        riseAtWind1: uRiseAtWind1.value,
+        windPushScale: uWindPushScale.value,
       };
     },
   };

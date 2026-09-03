@@ -18,6 +18,7 @@ import {
   computeOcclusionState,
   testTokenOcclusion,
   testItemHoverAlpha,
+  testVegetationHoverAlpha,
   createHoverFadeState,
   HOVER_FADE_CONFIG,
   updateHoverFade,
@@ -533,6 +534,106 @@ export function run(t) {
       'regression: both grids agree at a UV actually painted with vegetation',
       testItemHoverAlpha({ ...paintedUv, grid: hostGrid, alphaThreshold: 0.75 }) === true &&
         testItemHoverAlpha({ ...paintedUv, grid: vegGrid, alphaThreshold: 0.75 }) === true
+    );
+  }
+
+  // --- testVegetationHoverAlpha: THIRD-ROUND REGRESSION (mythica-machina-
+  // press#470, live report 2026-09-02, fixed 2026-09-03 — author, verbatim:
+  // "No matter where the mouse is any place within the scene bounds the
+  // trees/bushes fade out"). The block just above (round 2) fixed WHICH grid
+  // vegetation's hover hit test samples — its OWN, never the host's — but
+  // the hit test still ran that grid through `testItemHoverAlpha`, which
+  // FAILS OPEN on a missing grid, by design, for its OTHER callers.
+  // `entry.coverageGrid` can be null even once an entry is 'ready'
+  // (vt-pan-viewer.js#ensureVegetationOverlay: `requestCoarseAlphaGrid`
+  // resolves `null` on failure, it does not throw), and failing open on THAT
+  // means "the whole HOST quad counts as a hit" — structurally the identical
+  // bug round 2 fixed, one layer down. THIS IS EXACTLY THE GAP ROUND 2's OWN
+  // TEST (just above) DID NOT COVER: it proved two GRIDS can disagree, never
+  // that a MISSING grid needs a different default than
+  // `testItemHoverAlpha`'s own — so a real regression slipped straight past
+  // a green test suite. `testVegetationHoverAlpha` is the fix, and (unlike
+  // `vegetationOverlayContainsWorldPoint`, the private vt-pan-viewer.js
+  // closure that calls it — world bounds + placement + UV conversion, no
+  // logic of its own beyond routing `entry.coverageGrid ?? null` in) it is
+  // an exported, pure function, so it gets tested directly here rather than
+  // only through the primitives it's composed from. ------------------------
+  {
+    const realGrid = { w: 2, h: 2, data: new Uint8Array([255, 0, 0, 0]) }; // top-left painted, rest empty
+
+    // THE BUG, reproduced directly: testItemHoverAlpha — what vegetation's
+    // hit test called before this fix — fails OPEN on a missing grid, a hit
+    // ANYWHERE on the quad. This is the live symptom, verbatim: "no matter
+    // where the mouse is".
+    ok(
+      'the PRE-FIX call (testItemHoverAlpha against a null grid) hits anywhere on the quad — the live bug, reproduced',
+      testItemHoverAlpha({ u: 0.5, v: 0.5, grid: null, alphaThreshold: 0.75 }) === true &&
+        testItemHoverAlpha({ u: 0.99, v: 0.01, grid: null, alphaThreshold: 0.75 }) === true
+    );
+
+    // THE FIX: testVegetationHoverAlpha fails CLOSED on the identical
+    // missing grid, at the identical UVs — no hover-fade until real data
+    // arrives, rather than hover-fade everywhere, forever.
+    ok(
+      'the FIX (testVegetationHoverAlpha) fails CLOSED on a null grid at the SAME UVs — never a hit',
+      testVegetationHoverAlpha({ u: 0.5, v: 0.5, grid: null, alphaThreshold: 0.75 }) === false &&
+        testVegetationHoverAlpha({ u: 0.99, v: 0.01, grid: null, alphaThreshold: 0.75 }) === false
+    );
+
+    // The same fail-closed default for a PRESENT but degenerate grid (w:0):
+    // testItemHoverAlpha's own test (above) treats this identically to a
+    // missing grid, so testVegetationHoverAlpha must too, for the same
+    // reason — a grid with no real cells is not "real alpha data" either.
+    ok(
+      'testVegetationHoverAlpha fails CLOSED on a degenerate grid (w:0) exactly like a missing one',
+      testVegetationHoverAlpha({
+        u: 0.5,
+        v: 0.5,
+        grid: { w: 0, h: 2, data: new Uint8Array([255]) },
+        alphaThreshold: 0.75,
+      }) === false
+    );
+
+    // NOT a blanket "always false" stub — once a REAL grid is available,
+    // testVegetationHoverAlpha must agree with testItemHoverAlpha exactly:
+    // hit on a painted texel, miss on an empty one, off-quad still rejects.
+    // Proves the fix changes ONLY the missing-grid default, nothing else
+    // about the comparison itself.
+    ok(
+      'with a real grid, testVegetationHoverAlpha hits a painted texel exactly like testItemHoverAlpha',
+      testVegetationHoverAlpha({ u: 0, v: 0, grid: realGrid, alphaThreshold: 0.75 }) === true &&
+        testItemHoverAlpha({ u: 0, v: 0, grid: realGrid, alphaThreshold: 0.75 }) === true
+    );
+    ok(
+      'with a real grid, testVegetationHoverAlpha misses an empty texel exactly like testItemHoverAlpha',
+      testVegetationHoverAlpha({ u: 0.99, v: 0.99, grid: realGrid, alphaThreshold: 0.75 }) === false &&
+        testItemHoverAlpha({ u: 0.99, v: 0.99, grid: realGrid, alphaThreshold: 0.75 }) === false
+    );
+    ok(
+      'off the quad entirely, testVegetationHoverAlpha still rejects even with a real grid present',
+      testVegetationHoverAlpha({ u: 1.5, v: 0.5, grid: realGrid, alphaThreshold: 0.75 }) === false
+    );
+    ok(
+      'off the quad AND a missing grid — still false (the bounds check does not depend on the grid check)',
+      testVegetationHoverAlpha({ u: -0.1, v: 0.5, grid: null, alphaThreshold: 0.75 }) === false
+    );
+
+    // THE FULL THIRD-ROUND SCENARIO, composed exactly as
+    // `vegetationOverlayContainsWorldPoint` calls it: a level-background HOST
+    // (opaque virtually everywhere — see round 2's regression block above,
+    // `bareGroundUv`/`hostGrid`) whose vegetation overlay's OWN grid fetch
+    // failed. The OLD call (`testItemHoverAlpha` against `entry.coverageGrid
+    // ?? null`) says "hit" continuously across the host's own bounds; the
+    // NEW call (`testVegetationHoverAlpha`) says "no hit" at the identical
+    // point, until a real grid arrives.
+    const bareGroundUv = { u: 0.9, v: 0.9 }; // the same point round 2's own test used
+    ok(
+      'third-round scenario: a level-background host + a FAILED vegetation grid fetch — the old call still hits',
+      testItemHoverAlpha({ ...bareGroundUv, grid: null, alphaThreshold: 0.75 }) === true
+    );
+    ok(
+      'third-round scenario: the SAME failed fetch — the new call correctly never hits',
+      testVegetationHoverAlpha({ ...bareGroundUv, grid: null, alphaThreshold: 0.75 }) === false
     );
   }
 

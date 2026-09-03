@@ -276,6 +276,12 @@ import {
   isOccludable,
   isHoverFadeEligible,
   testItemHoverAlpha,
+  // FAILS CLOSED, unlike testItemHoverAlpha above — see its own doc
+  // (scene/occlusion.js) and `vegetationOverlayContainsWorldPoint`'s own doc,
+  // just below, for why vegetation's hover hit test needs the opposite
+  // missing-grid default from every other reader of a coarse alpha grid in
+  // this file (mythica-machina-press#470, third round, 2026-09-03).
+  testVegetationHoverAlpha,
   testTokenOcclusion,
   updateHoverFade,
   HOVER_FADE_CONFIG,
@@ -8766,6 +8772,29 @@ export async function startVtPanViewer({
      * `computeOcclusionAlpha`, scene/occlusion.js, do exactly what their own
      * documented math says, at every hoverFadeAmount tested).
      *
+     * ⚠️ THIS FUNCTION FAILS CLOSED ON A MISSING GRID — THIRD ROUND FIX
+     * (mythica-machina-press#470, live regression reported 2026-09-02, fixed
+     * 2026-09-03 — author, verbatim: "No matter where the mouse is any place
+     * within the scene bounds the trees/bushes fade out"). The fix above
+     * fixed WHICH grid gets sampled (this entry's own, never the host's) but
+     * still called `testItemHoverAlpha` directly — which FAILS OPEN on a
+     * missing grid, by design, for its OTHER callers (see its own doc,
+     * scene/occlusion.js). `entry.coverageGrid` CAN be null even once
+     * `entry.status === 'ready'` (`ensureVegetationOverlay`, below — the
+     * grid fetch degrades to a silently resolved `null` on failure, never a
+     * thrown error), and falling open in THAT case reproduces the exact bug
+     * this whole doc comment describes: the entire HOST quad
+     * (`state.worldBounds`) counts as a hit, unconditionally — exactly "no
+     * matter where the mouse is". The fix: call `testVegetationHoverAlpha`
+     * (scene/occlusion.js) instead of `testItemHoverAlpha` — the identical
+     * comparison, opposite missing-grid default — so a vegetation entry with
+     * no real alpha data simply never hover-fades, rather than always
+     * hover-fading. See that function's own doc for the full reasoning; do
+     * NOT revert this call back to `testItemHoverAlpha` by analogy with
+     * `itemContainsWorldPoint`, just above — that function's fail-open
+     * default is correct for ITS OWN caller and wrong for this one, on
+     * purpose, per that same doc.
+     *
      * @param {object} state - the HOST's `itemStates` entry (worldBounds/placement only — never its own coverage grid).
      * @param {object} entry - a `state.vegetationOverlays[kindId]` entry, `status === 'ready'`.
      * @param {number} x @param {number} y - world point.
@@ -8776,7 +8805,7 @@ export async function startVtPanViewer({
       if (!b || x < b.minX || x > b.maxX || y < b.minY || y > b.maxY) return false;
       if (!state.placement) return false;
       const { u, v } = worldToQuadUv({ x, y }, state.placement);
-      return testItemHoverAlpha({
+      return testVegetationHoverAlpha({
         u,
         v,
         grid: entry.coverageGrid ?? null,
@@ -14457,6 +14486,28 @@ export async function startVtPanViewer({
             // testing THIS canopy's own alpha (not the host's) is what fixes
             // the "trees turned black" regression.
             entry.coverageGrid = vegCoverageGrid;
+            // DIAGNOSTIC ADDED THIRD ROUND (mythica-machina-press#470,
+            // 2026-09-03) — the ONLY log line for this outcome. The `catch`
+            // around `requestCoarseAlphaGrid` above only fires on a THROWN
+            // rejection; that call's own degradation-first contract
+            // (compressed-textures.js's header) resolves `null` instead, so a
+            // vegetation entry can reach 'ready' with a permanently-empty
+            // coverage grid with NOTHING logged anywhere — which is exactly
+            // what made the live report this fixes ("No matter where the
+            // mouse is... the trees/bushes fade out") take a full
+            // investigation round to pin down instead of minutes. Logged once
+            // per entry, here, at the one place both facts (`ready` and
+            // `coverageGrid === null`) are known at the same time — never in
+            // the per-frame hover-test path, which would spam this every
+            // frame the vegetation is on screen.
+            if (!vegCoverageGrid) {
+              ingestLog.warn(
+                `vegetation overlay "${kind.id}" for item "${item.id}" (${url}) reached ready with no ` +
+                  `coverage grid — its hover hit test fails closed, so it will never hover-fade until ` +
+                  `this is fixed. requestCoarseAlphaGrid resolved null for this url; see its own and ` +
+                  `the worker's logs for why.`
+              );
+            }
             entry.shadow = shadowBuilt
               ? {
                   mesh: shadowMesh,

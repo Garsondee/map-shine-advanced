@@ -241,6 +241,22 @@ export function testTokenOcclusion({ tokenElevation, objectElevation, testPoints
 }
 
 /**
+ * Does `grid` carry real, sampleable alpha data? The exact condition
+ * {@link testItemHoverAlpha} treats as "no grid" (see its own FAIL OPEN
+ * comment, just below) — factored out to its own name so
+ * {@link testVegetationHoverAlpha} can test the identical condition for the
+ * OPPOSITE (fail-CLOSED) purpose without a second, hand-copied version of it
+ * silently drifting out of sync. Both callers are proven against this one
+ * definition by this file's own test (`__tests__/occlusion.test.mjs`).
+ *
+ * @param {{w:number,h:number,data:Uint8Array}|null|undefined} grid
+ * @returns {boolean}
+ */
+function hasUsableAlphaGrid(grid) {
+  return !!(grid && grid.data && grid.w > 0 && grid.h > 0);
+}
+
+/**
  * Does a point land on this object's actual painted art, thickly enough to
  * count as "there" for a hit test? The CPU mirror of Foundry's real
  * `PrimarySpriteMesh#containsCanvasPoint`/`#containsLocalPoint`
@@ -266,6 +282,19 @@ export function testTokenOcclusion({ tokenElevation, objectElevation, testPoints
  * grid at `floor(u*w), floor(v*h)` is that identical mapping collapsed to
  * UV, not a second one invented here).
  *
+ * ⚠️ FAIL-OPEN IS LOAD-BEARING HERE AND MUST STAY (mythica-machina-press#470,
+ * third round, 2026-09-03) — do not "fix" this by making it fail closed like
+ * {@link testVegetationHoverAlpha}, below. This function's callers use a
+ * missing grid to mean "test against the HOST's own bounds instead", which
+ * is always at least as big as the real art — fail-open there costs at most
+ * a slightly-too-generous hit region for however long the async grid fetch
+ * takes. `testVegetationHoverAlpha` reuses this SAME comparison for a
+ * DIFFERENT contract, where the grid isn't a generous proxy, it IS the whole
+ * test — see that function's own doc for why fail-open is actively wrong
+ * there. One primitive, two callers, two genuinely different correct
+ * defaults for a missing grid — see {@link testVegetationHoverAlpha},
+ * immediately below, for the one where fail-open is dangerous.
+ *
  * @param {object} args
  * @param {number} args.u @param {number} args.v - quad-local UV, 0..1 when on the quad.
  * @param {{w:number,h:number,data:Uint8Array}|null|undefined} args.grid
@@ -284,11 +313,85 @@ export function testItemHoverAlpha({ u, v, grid, alphaThreshold }) {
   // whole quad'") — a roof whose coarse alpha hasn't landed yet must still
   // be hoverable, not permanently un-fadeable for however long that async
   // request takes.
-  if (!grid || !grid.data || !(grid.w > 0) || !(grid.h > 0)) return true;
+  if (!hasUsableAlphaGrid(grid)) return true;
   const gx = Math.min(grid.w - 1, Math.max(0, Math.floor(u * grid.w)));
   const gy = Math.min(grid.h - 1, Math.max(0, Math.floor(v * grid.h)));
   const alpha01 = grid.data[gy * grid.w + gx] / 255;
   return alpha01 >= alphaThreshold;
+}
+
+/**
+ * VEGETATION'S OWN HOVER HIT TEST (mythica-machina-press#470, THIRD round,
+ * live regression reported 2026-09-02, fixed 2026-09-03 — author, verbatim:
+ * *"No matter where the mouse is any place within the scene bounds the
+ * trees/bushes fade out."*). Identical alpha comparison to
+ * {@link testItemHoverAlpha} against the identical grid shape, but with the
+ * OPPOSITE answer when no usable grid is available: this FAILS CLOSED (never
+ * a hit) where that one deliberately fails open.
+ *
+ * ⚠️ DO NOT "FIX" THIS BACK TO FAIL-OPEN BY ANALOGY WITH `testItemHoverAlpha`
+ * — that function's own doc explains why fail-open is correct THERE, and
+ * this doc explains why the identical default is wrong HERE. They are not
+ * the same question with one right answer; they are two different questions
+ * that happen to share a comparison.
+ *
+ * WHY THE TWO MUST DISAGREE. `testItemHoverAlpha`'s fail-open default was
+ * written for callers where "no grid" means "test against the HOST's own
+ * bounds instead" — always at least as big as the real art, so the cost of
+ * guessing wrong is a slightly-too-generous hit region for however long an
+ * async grid fetch takes (that function's own doc, verbatim: "a roof whose
+ * coarse alpha hasn't landed yet must still be hoverable, not permanently
+ * un-fadeable"). This function backs a DIFFERENT caller
+ * (`vegetationOverlayContainsWorldPoint`, vt-pan-viewer.js) that reuses the
+ * SAME grid shape for a different purpose: the grid isn't a proxy for a
+ * smaller shape nested inside a bigger one, it IS the entire test, sampled
+ * against the shared HOST quad's own bounds/placement — and a Case-2
+ * `_Tree`/`_Bush` overlay can be hosted on an entire Level's BACKGROUND
+ * image (`ensureVegetationOverlay`'s own measured note: "`_Tree` paints
+ * 11.9% of its 12000² canvas" — one mask painted across a whole floor, not
+ * one Tile per plant). Failing open there does not mean "slightly too
+ * generous" — it means "the entire visible scene counts as a hit, always",
+ * which is structurally the SAME bug this feature has now shipped and
+ * reverted for TWICE (mythica-machina-press#470's original follow-up, which
+ * tested the host's own grid instead of the vegetation's; and this round,
+ * which tested the vegetation's own grid correctly but still fell through to
+ * fail-open whenever that grid came back missing). A vegetation entry with
+ * no real alpha data to test against should simply never hover-fade —
+ * indistinguishable from ordinary, unfaded vegetation, until real data
+ * arrives — which is a vastly better failure mode than fading everywhere,
+ * always, forever.
+ *
+ * CONFIRMED BY READING (2026-09-03), not assumed: `entry.coverageGrid` can
+ * be null while `entry.status === 'ready'` (the mesh drawing normally)
+ * through an entirely SILENT path, not an exceptional one —
+ * `requestCoarseAlphaGrid` (vt/compressed-textures.js) resolves `null`,
+ * NEVER rejects, for every one of: the worker failing to construct, a
+ * fetch/decode failure for this one url happening INSIDE the worker (caught
+ * there and turned into `{ok:false}`, never a thrown error on this side), or
+ * `Worker#onerror` firing at any point in the page session for any job
+ * (which also permanently latches that module's own `_unavailable` flag —
+ * never reset for the rest of the session). `ensureVegetationOverlay`'s own
+ * `try { await requestCoarseAlphaGrid(...) } catch { ingestLog.warn(...) }`
+ * only fires on a THROWN rejection, which this degradation-first contract
+ * ("DEGRADATION-FIRST... the caller gets `null`", compressed-textures.js's
+ * own header) is specifically designed never to produce — so that existing
+ * log line does not, in practice, catch this outcome. (`ensureVegetationOverlay`
+ * now also logs the resolved-null outcome directly, once per entry, for
+ * exactly this reason.) What remains genuinely UNCONFIRMED: which of the
+ * failure paths above actually fired in the author's live session — that
+ * would need the new diagnostic's output from a real repro, not a read of
+ * the source. This fix does not depend on knowing which one it was.
+ *
+ * @param {object} args
+ * @param {number} args.u @param {number} args.v - quad-local UV, 0..1 when on the quad.
+ * @param {{w:number,h:number,data:Uint8Array}|null|undefined} args.grid - the
+ *   VEGETATION's own coverage grid (`entry.coverageGrid`) — never the host's.
+ * @param {number} args.alphaThreshold
+ * @returns {boolean}
+ */
+export function testVegetationHoverAlpha({ u, v, grid, alphaThreshold }) {
+  if (!hasUsableAlphaGrid(grid)) return false; // FAIL CLOSED — see this function's own doc for why
+  return testItemHoverAlpha({ u, v, grid, alphaThreshold });
 }
 
 /**

@@ -221,8 +221,16 @@ const SPAWN_CAPACITY = 1024;
  * should be *"pushed around in a huge way"* at wind 1. A flat multiply reads
  * as "more wind"; this makes the very top of the dial feel qualitatively
  * different from the middle, while `windMotion01=0` still passes through 0.
+ *
+ * ⚠️ RAISED 3.5 → 8, 2026-09-04, ROUND 2 — once the real per-position grid
+ * (`particleOpenness`, above) started genuinely gating the push, the author
+ * reported it reading weaker than before, not stronger: *"the flames aren't
+ * responding to this new wind very much... considerably boost the
+ * strength."* Real openness readings are rarely a clean 1.0 (see
+ * `opennessGain`'s own note), so the ceiling this constant reaches needs to
+ * cover that shortfall on top of its original job.
  */
-const WIND_GUST_MAX_MULT = 3.5;
+const WIND_GUST_MAX_MULT = 8;
 
 /**
  * V2's camera-to-ground distance, and therefore the strength of the perspective
@@ -624,12 +632,24 @@ export function createFireParticleEngine({
       wallAwayDirY = cell.wallAwayDirY;
       wallProximity = cell.wallProximity;
     }
+    // ⚠️ SQUARE-ROOTED, NOT RAW (2026-09-04, ROUND 2) — author, live, once the
+    // real per-position grid landed: "the flames aren't responding to this
+    // new wind very much... considerably boost the strength". A straight
+    // linear multiply by `openness` punishes anything short of perfectly,
+    // crisply open ground — a real bake's openness is rarely exactly 0 or 1,
+    // and most painted fire spots read somewhere in between (near a wall,
+    // under an eave, in a partly-sheltered yard). `sqrt` still passes through
+    // the two endpoints exactly (0 stays dead calm, 1 stays fully open) but
+    // gives every PARTIAL reading real credit — 0.25 openness now counts as
+    // 0.5, 0.5 counts as ~0.71 — instead of quietly halving or quartering the
+    // whole effect for anywhere that isn't open sky.
+    const opennessGain = particleOpenness.pow(float(0.5));
     // `uWindMotion01` is EXPOSURE-EXCLUDED now (fire-geometry.js#fireRuntimeFromParams's
     // own note) — multiplying it by this particle's own real openness is what
     // makes an indoor fire's flame stay calm while an outdoor one on the same
     // map genuinely gets shoved, instead of every fire on the floor sharing
     // one blended reading (the author's own "averaging is dumb" objection).
-    const effectiveWindMotion = uWindMotion01.mul(particleOpenness);
+    const effectiveWindMotion = uWindMotion01.mul(opennessGain);
 
     // ⚠️ 95% of flame particles never move AT REST — V2's `flameStationaryFraction`,
     // and the signature of the whole look (a fire POOL should not translate).

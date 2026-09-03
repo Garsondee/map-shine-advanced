@@ -580,6 +580,7 @@ export function createSpecularSurfaceSubsystem({
       state.debugChannel ?? 0,
       p.strength,
       p.saturation,
+      p.maskContrast,
       p.shimmerGain,
       p.patternScalePx,
       p.lightFloor,
@@ -608,6 +609,7 @@ export function createSpecularSurfaceSubsystem({
 
     if (Number.isFinite(p.strength)) surface.setStrength(p.strength);
     if (Number.isFinite(p.saturation)) surface.setSaturation(p.saturation);
+    if (Number.isFinite(p.maskContrast)) surface.setMaskContrast(p.maskContrast);
     if (Number.isFinite(p.shimmerGain)) surface.setShimmerGain(p.shimmerGain);
     if (Number.isFinite(p.patternScalePx)) surface.setPatternScale(p.patternScalePx);
     if (Number.isFinite(p.lightFloor)) surface.setLightFloor(p.lightFloor);

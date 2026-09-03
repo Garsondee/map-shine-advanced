@@ -11,16 +11,11 @@ import { validateParamsSchema } from '../../../core/params-schema.js';
 import { validateEffectManifest } from '../../effect-manifest.js';
 import { createEffectRegistry } from '../../registry.js';
 import { resolveEffectEnabled } from '../../effect-cascade.js';
-import {
-  SPECULAR,
-  SPECULAR_PARAMS,
-  SPECULAR_LAYER_PARAMS,
-  SPECULAR_DEBUG_CHANNELS,
-  SPECULAR_DEBUG_BOOST,
-} from '../specular.js';
+import { SPECULAR, SPECULAR_PARAMS, SPECULAR_DEBUG_CHANNELS, SPECULAR_DEBUG_BOOST } from '../specular.js';
 import {
   SPECULAR_DEFAULT_SHIMMER_GAIN,
   SPECULAR_DEFAULT_SATURATION,
+  SPECULAR_DEFAULT_MASK_CONTRAST,
   SPECULAR_DEFAULT_STRENGTH,
   SPECULAR_DEFAULT_PATTERN_SCALE_PX,
   SPECULAR_DEFAULT_PARALLAX_STRENGTH,
@@ -87,29 +82,22 @@ export function run(t) {
   ok('tier 2 is pure ALU too — parallax is an offset, not a fetch', SPECULAR.tiers[2]?.cost.class === 'C1');
 
   // --- every param is a MATERIAL or WORLD property, per the header --------
-  // The V2 corpse this replaces had 30 shimmer sliders, each a property of a
-  // noise generator. The count is the claim; assert it stays honest.
   const keys = Object.keys(SPECULAR_PARAMS);
-  // ⚠️ BOUND RAISED 24 → 32 (2026-08-09) — deliberately, on the author's own
-  // explicit direction: *"give me lots of RoH controls so that I can tune the
-  // curve… give me more rather than less controls in RoH and give me wide
-  // ranges."* Six controls landed that round (two shaping the top of the
-  // light-response curve, four for the firelight flicker).
-  //
-  // WHAT THIS GUARD IS ACTUALLY FOR, restated so the next raise is reasoned
-  // rather than reflexive: V2's corpse had THIRTY shimmer sliders that were
-  // the same nine knobs repeated three times, with no way to tell which layer
-  // you were editing. The disease is UNDIFFERENTIATED REPETITION, not the
-  // count — the count is only its cheapest proxy. Every control added this
-  // round names a distinct mechanism and says in its own help text which
-  // symptom it fixes, which is the property that actually matters and which
-  // the `help` assertion just below independently enforces.
-  //
-  // So: raising this is legitimate when each new control is its own mechanism,
-  // and is NOT legitimate as a way to make room for another eight-slider layer
-  // strip. If a future round wants that, it needs the layer-strip conversation,
-  // not a bigger number here.
-  ok('the whole schema is well under V2’s 61 controls', keys.length + Object.keys(SPECULAR_LAYER_PARAMS).length <= 32);
+  // ⚠️ THE COUNT CEILING ITSELF WAS REMOVED, 2026-09-04 — author, high-level
+  // authority: *"remove ratchets around ROH controls... a limited number of
+  // FOH makes a little bit of sense but not the limited number of ROH
+  // controls."* This guard used to assert `keys.length +
+  // Object.keys(SPECULAR_LAYER_PARAMS).length <= 32` (raised once already,
+  // 24 → 32, on an earlier round of the SAME direction) — but the guard's
+  // own reasoning at the time already argued against itself: V2's corpse had
+  // THIRTY shimmer sliders that were the same nine knobs repeated three
+  // times, with no way to tell which layer you were editing. The disease was
+  // always UNDIFFERENTIATED REPETITION, never the raw count — count was only
+  // ever its cheapest, blunt proxy. That real property (every control names
+  // a distinct mechanism and says in its own help text which symptom it
+  // fixes) is what the `help`/`category` assertions immediately below
+  // actually enforce, unconditionally, with no ceiling attached — keep
+  // adding controls that pass THOSE.
   ok(
     'every param declares a help string an author can act on',
     keys.every((k) => (SPECULAR_PARAMS[k].help ?? '').length > 40)
@@ -150,6 +138,19 @@ export function run(t) {
   ok(
     "the default never exceeds the schema's own declared max — a future max cut must not silently orphan this",
     SPECULAR_DEFAULT_SATURATION <= SPECULAR_PARAMS.saturation.max
+  );
+  // ── SHADOW CONTRAST (mythica-machina-press#432) ──────────────────────────
+  ok(
+    'the shadow-contrast default is an exact pass-through, not a guessed curve',
+    SPECULAR_PARAMS.maskContrast.default === 1
+  );
+  ok(
+    'the schema default and the render module default agree on mask contrast',
+    SPECULAR_PARAMS.maskContrast.default === SPECULAR_DEFAULT_MASK_CONTRAST
+  );
+  ok(
+    '1 sits strictly inside its own declared range, so both directions (crush and lift) are reachable',
+    SPECULAR_PARAMS.maskContrast.min < 1 && 1 < SPECULAR_PARAMS.maskContrast.max
   );
   // ⚠️ `islandSpread: 0` is the documented "give me V2 back" setting: every
   // island moves identically, which is exactly what V2 did with its single

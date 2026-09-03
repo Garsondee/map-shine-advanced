@@ -293,12 +293,28 @@ export function describeSpecularMapping({ maskRect, quadWorld, viewRect }) {
  * @param {number} a - 0..1 alpha, or 0 when the file has no alpha channel.
  * @param {number} [saturation] - 0 = neutral white shine, 1 = the mask's own
  *   colour at full.
+ * @param {number} [contrast] - THE SHADOW-CONTRAST CURVE (mythica-machina-
+ *   press#432), an exponent applied to `strength` right after it is decoded:
+ *   `strength ** contrast`. At 1 (the default) this is an exact pass-through
+ *   — `x ** 1 === x` for every finite x, so an unwired caller renders every
+ *   existing map byte-identical to before. Above 1, dim mask paint is pushed
+ *   toward true black much faster than bright paint is (0.3 ** 2 = 0.09, a
+ *   near-90% cut, against 0.9 ** 2 = 0.81, an 11% one) — the author's own
+ *   ask: dark ink linework in the base artwork was picking up a visible sheen
+ *   from mask values that were dark but not quite zero, "bleaching" it. Below
+ *   1 does the reverse (lifts dark paint up) — kept symmetric on purpose, the
+ *   same posture `incidentSteepness` takes on the light axis. Applied to the
+ *   ALREADY alpha-scaled `strength` rather than to `luma601` alone, so a
+ *   partially-transparent dark texel gets the same protection as an opaque
+ *   one — "how dim does this read overall" is the single quantity this
+ *   curve reshapes, however the dimness arose.
  * @returns {{strength: number, tint: number[]}}
  */
-export function decodeSpecularMask(r, g, b, a, saturation = 1) {
+export function decodeSpecularMask(r, g, b, a, saturation = 1, contrast = 1) {
   const luma601 = clamp01(r * LUMA_601[0] + g * LUMA_601[1] + b * LUMA_601[2]);
   const alpha = clamp01(a);
-  const strength = alpha < SPECULAR_ALPHA_EPSILON ? luma601 : luma601 * alpha;
+  const rawStrength = alpha < SPECULAR_ALPHA_EPSILON ? luma601 : luma601 * alpha;
+  const strength = Math.pow(rawStrength, Math.max(contrast, 1e-3));
 
   const sat = Math.min(Math.max(saturation, 0), 2);
   // Guarded: a pure black texel has no hue to preserve and the divide would be

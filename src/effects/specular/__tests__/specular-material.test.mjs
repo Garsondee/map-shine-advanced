@@ -66,6 +66,42 @@ export function run(t) {
   // has ever been authored.
   ok('a 50% grey texel decodes to 0.5, not to sRGB-linear 0.21', Math.abs(mid.strength - 0.5) < 1e-9);
 
+  // ── SHADOW CONTRAST (mythica-machina-press#432) ─────────────────────────
+  // "a ROH control to make the darker parts of the _Specular mask stronger
+  // so that we get a higher contrast specular with less bleaching of the
+  // dark ink lines" — an exponent on `strength`, default 1 (pass-through).
+  ok(
+    'contrast defaults to an EXACT pass-through — every map painted before this control existed is unaffected',
+    decodeSpecularMask(0.3, 0.3, 0.3, 1).strength === decodeSpecularMask(0.3, 0.3, 0.3, 1, 1, 1).strength
+  );
+  const crushedMid = decodeSpecularMask(0.5, 0.5, 0.5, 1, 1, 2);
+  ok('above 1, a mid-grey texel is pushed below its uncurved strength', crushedMid.strength < mid.strength);
+  ok('…to exactly strength ** contrast', Math.abs(crushedMid.strength - 0.5 ** 2) < 1e-9);
+  const crushedDark = decodeSpecularMask(0.1, 0.1, 0.1, 1, 1, 2);
+  const crushedBright = decodeSpecularMask(0.9, 0.9, 0.9, 1, 1, 2);
+  ok(
+    'THE POINT: contrast suppresses DIM paint proportionally harder than bright paint — dark ink protects itself',
+    crushedDark.strength / 0.1 < crushedBright.strength / 0.9
+  );
+  ok(
+    'below 1, a mid-grey texel is lifted above its uncurved strength (symmetry, not the primary use case)',
+    decodeSpecularMask(0.5, 0.5, 0.5, 1, 1, 0.5).strength > mid.strength
+  );
+  ok('true black stays exactly zero at any contrast', decodeSpecularMask(0, 0, 0, 1, 1, 4).strength === 0);
+  ok(
+    'true white stays exactly one at any contrast',
+    Math.abs(decodeSpecularMask(1, 1, 1, 1, 1, 4).strength - 1) < 1e-9
+  );
+  ok(
+    'a zero/negative contrast is guarded rather than producing NaN or Infinity',
+    Number.isFinite(decodeSpecularMask(0.4, 0.4, 0.4, 1, 1, 0).strength) &&
+      Number.isFinite(decodeSpecularMask(0.4, 0.4, 0.4, 1, 1, -3).strength)
+  );
+  ok(
+    'the tint still carries the CURVED strength as its own luma, not the raw one',
+    Math.abs(luma709(crushedMid.tint) - crushedMid.strength) < 1e-6
+  );
+
   // ── TINT: hue without a second brightness penalty ───────────────────────
   const gold = decodeSpecularMask(1, 0.766, 0.336, 1);
   ok('gold keeps its hue', gold.tint[0] > gold.tint[1] && gold.tint[1] > gold.tint[2]);

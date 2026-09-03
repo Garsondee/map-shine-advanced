@@ -149,6 +149,22 @@ export const SPECULAR_DEFAULT_STRENGTH = 20;
  */
 export const SPECULAR_DEFAULT_SATURATION = 1.25;
 /**
+ * THE SHADOW-CONTRAST CURVE (2026-09-02, mythica-machina-press#432) — an
+ * exponent on `decodeSpecularMask`'s own `strength` axis, direct author ask:
+ * *"a ROH control to make the darker parts of the _Specular mask stronger so
+ * that we get a higher contrast specular with less bleaching of the dark ink
+ * lines that my maps artwork has."* Same family as `incidentKnee`/
+ * `kneeSoftness`, requested in almost these exact words: *"give me lots of
+ * RoH controls so that I can tune the curve."*
+ *
+ * Defaults to 1 — a mathematically exact pass-through (`x ** 1 === x`), so
+ * every map painted before this control existed renders byte-identical to
+ * today until an author actually reaches for it. Not yet live-tuned on a
+ * real scene the way the rest of this file's defaults are — an honest
+ * starting point rather than a guessed "better" one.
+ */
+export const SPECULAR_DEFAULT_MASK_CONTRAST = 1;
+/**
  * THE PATTERN'S WORLD SIZE, in px per pattern unit. **16384, V2's own default,
  * and it is much larger than it looks.**
  *
@@ -530,6 +546,7 @@ export function buildSpecularSurfaceMaterial({
   timeMsNode,
   strength = SPECULAR_DEFAULT_STRENGTH,
   saturation = SPECULAR_DEFAULT_SATURATION,
+  maskContrast = SPECULAR_DEFAULT_MASK_CONTRAST,
   patternScalePx = SPECULAR_DEFAULT_PATTERN_SCALE_PX,
   parallaxStrength = SPECULAR_DEFAULT_PARALLAX_STRENGTH,
   driftSpeed = SPECULAR_DEFAULT_DRIFT_SPEED,
@@ -599,6 +616,7 @@ export function buildSpecularSurfaceMaterial({
 
   const uStrength = uniform(float(strength));
   const uSaturation = uniform(float(saturation));
+  const uMaskContrast = uniform(float(maskContrast));
   const uPatternScale = uniform(float(patternScalePx));
   const uParallaxStrength = uniform(float(parallaxStrength));
   const uDriftSpeed = uniform(float(driftSpeed));
@@ -684,10 +702,14 @@ export function buildSpecularSurfaceMaterial({
   const maskAlpha = clamp(maskSample.a, 0, 1);
   // The alpha-missing fallback: a greyscale `_Specular` with no alpha is the
   // common authoring case and would otherwise decode to pure black.
-  const strengthNode = maskAlpha
-    .lessThan(float(SPECULAR_ALPHA_EPSILON))
-    .select(luma601, luma601.mul(maskAlpha))
-    .toVar('specStrength');
+  const rawStrengthNode = maskAlpha.lessThan(float(SPECULAR_ALPHA_EPSILON)).select(luma601, luma601.mul(maskAlpha));
+  // THE SHADOW-CONTRAST CURVE (mythica-machina-press#432) — transcription of
+  // `decodeSpecularMask`'s own `Math.pow(rawStrength, contrast)`. At the
+  // default (1) this is an exact pass-through; `pow`'s own guard against a
+  // zero/negative exponent lives on the JS side (`Math.max(contrast, 1e-3)`)
+  // and is mirrored by `setMaskContrast`'s clamp below, so the uniform this
+  // reads can never carry a degenerate value in the first place.
+  const strengthNode = pow(rawStrengthNode, uMaskContrast).toVar('specStrength');
   const presence = smoothstep(float(SPECULAR_PRESENCE_EDGE0), float(SPECULAR_PRESENCE_EDGE1), strengthNode).toVar(
     'specPresence'
   );
@@ -1567,6 +1589,15 @@ export function buildSpecularSurfaceMaterial({
     },
     setSaturation(v) {
       uSaturation.value = Math.min(2, Math.max(0, v));
+    },
+    /** The shadow-contrast exponent (mythica-machina-press#432). Floored well
+     * above 0, never at it — same reasoning as `setIncidentKnee`'s own guard:
+     * `pow()` at a zero/negative exponent either degenerates to a flat 1
+     * regardless of how dark the pixel is, or divides by a vanishing base, and
+     * neither is "turn the curve off" (that is what 1 already means).
+     * @param {number} v */
+    setMaskContrast(v) {
+      uMaskContrast.value = Math.max(1e-3, v);
     },
     setPatternScale(v) {
       uPatternScale.value = Math.max(1, v);

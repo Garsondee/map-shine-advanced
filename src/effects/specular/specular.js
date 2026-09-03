@@ -84,6 +84,22 @@ export const SPECULAR_PARAMS = Object.freeze({
     label: 'Metal colour',
     help: "How much of the colour you painted into the specular mask survives into the shine. 0 makes every metal a neutral white sheen; 1 keeps gold gold and copper copper; above 1 pushes the colour further than you painted it — the default sits slightly above 1 to counteract the screen's own tonemap, which desaturates highlights as they brighten. This is the control that decides whether a map reads as treasure or as polished stone.",
   },
+  // NEW (2026-09-02, mythica-machina-press#432) — direct author ask: "a ROH
+  // control to make the darker parts of the _Specular mask stronger so that
+  // we get a higher contrast specular with less bleaching of the dark ink
+  // lines that my maps artwork has." Look, not Response, alongside
+  // `saturation`: both are about how the PAINTED MASK itself reads, not
+  // about this effect's response to the scene's own light.
+  maskContrast: {
+    type: 'float',
+    min: 0.1,
+    max: 10,
+    step: 0.01,
+    default: 1,
+    category: 'Look',
+    label: 'Shadow contrast',
+    help: "How much extra weight the DARK end of your painted specular mask carries before anything else reads it. At 1 the mask is read exactly as painted, with no extra curve. Raise it and dim metal paint fades toward true black much faster than bright paint does — reach for this if dark ink linework or shadowed iron in your artwork is picking up a sheen it shouldn't have (sometimes called \"bleaching\"). Below 1 does the reverse, lifting dark paint up, kept for symmetry. This reshapes the mask's OWN value range only — for how this effect responds to the SCENE's light, see Light response and its neighbours under Response instead.",
+  },
   shimmerGain: {
     type: 'float',
     min: 0,

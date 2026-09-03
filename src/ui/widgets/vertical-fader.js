@@ -25,6 +25,8 @@
  * @module ui/widgets/vertical-fader
  */
 
+import { attachFineDrag } from './fine-drag.js';
+
 const ACCENT = 'var(--shine, rgb(143,214,255))';
 const TEXT = 'var(--ink0, #dcecff)';
 const MUTED = 'var(--ink2, #7f97ba)';
@@ -103,6 +105,9 @@ export function buildVerticalFader(id, decl, { value, onChange }) {
   input.addEventListener('change', () => {
     onChange(parseFloat(input.value));
   });
+  // `axis: 'y'`: this range is visually vertical (writing-mode/direction
+  // trick above), so a Shift-drag must read the pointer's Y movement, not X.
+  attachFineDrag(input, { axis: 'y' });
   trackWrap.appendChild(input);
 
   const label = styled('span', {

@@ -26,6 +26,8 @@
  * @module ui/widgets/param-control
  */
 
+import { attachFineDrag } from './fine-drag.js';
+
 // ---- shared visual language ------------------------------------------------
 // Three accent tiers mirror LANTERN's own `--shine`/`--shine-soft`/`--shine-
 // glow` triad (every other component in the design already reads these three
@@ -97,6 +99,7 @@ function buildRangeRow(id, decl, { value, onChange }) {
   input.addEventListener('change', () => {
     onChange(decl.type === 'int' ? parseInt(input.value, 10) : parseFloat(input.value));
   });
+  attachFineDrag(input, { integer: decl.type === 'int' });
   wrap.append(labelSpan(decl, id), input, readout);
   return wrap;
 }
@@ -500,6 +503,7 @@ export function buildInheritableRangeRow({
     readout.textContent = formatNum(input.value);
   });
   input.addEventListener('change', () => onDrag(parseFloat(input.value)));
+  attachFineDrag(input);
   const resetBtn = styled('button', {
     pointerEvents: 'auto',
     border: 'none',

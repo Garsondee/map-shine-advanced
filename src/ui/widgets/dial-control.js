@@ -16,6 +16,7 @@
  */
 
 import { resolveDialDrives, dialPositionFromParams } from '../../core/dials-schema.js';
+import { attachFineDrag } from './fine-drag.js';
 
 const ACCENT = 'var(--shine, rgb(143,214,255))';
 const TEXT = 'var(--ink0, #dcecff)';
@@ -94,6 +95,7 @@ export function buildDialControl(id, decl, { paramValues, onChange }) {
   input.addEventListener('change', () => {
     onChange(resolveDialDrives(decl, parseFloat(input.value)));
   });
+  attachFineDrag(input);
 
   wrap.append(labelSpan, input, readout);
   return wrap;

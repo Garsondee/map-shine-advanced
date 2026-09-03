@@ -90,7 +90,7 @@
 /** Namespaced so a synthetic id can never collide with a real Foundry
  * source's own `sourceId` format (`AmbientLight.<documentId>` etc.) or the
  * reserved `'globalLight'` id `scene-lights.js` already excludes. */
-const SOURCE_ID_PREFIX = 'msa-vision:';
+export const SOURCE_ID_PREFIX = 'msa-vision:';
 
 /**
  * How much further than the candle/fire's own visual radius its DETECTION

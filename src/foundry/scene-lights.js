@@ -117,6 +117,7 @@
  */
 
 import { computeLightWallClippedShape } from './scene-wall-clip.js';
+import { SOURCE_ID_PREFIX as VISION_SOURCE_ID_PREFIX } from './scene-synthetic-lights.js';
 
 /** @param {*} v @returns {number} clamped to [0,1]; a non-finite input reads as 0 */
 function clamp01(v) {
@@ -414,6 +415,31 @@ export function readActiveLightSources(darkness01, { wallClipCache = null, floor
     let wallClipMisses = 0;
     for (const source of collection) {
       if (!source || source.sourceId === 'globalLight') continue;
+      // ⚠️ SKIP MSA'S OWN VISION-ONLY SYNTHETIC SOURCES (mythica-machina-press
+      // #475, found chasing "fire's cast light throws white" through five
+      // rounds of dead ends). `scene-synthetic-lights.js` registers a real
+      // `PointLightSource` per candle/fire into this SAME `canvas.effects.
+      // lightSources` collection so Foundry's OWN door-reveal/vision math can
+      // see it (`object: null`, its own header's whole point) — its header
+      // even says "NEVER VISUALLY DOUBLE-DRAWN", but that claim only covers
+      // Foundry's OWN PIXI lighting layer (suppressed via `canvas.effects.
+      // renderable = false`). It says nothing about THIS reader, which pulls
+      // from the identical collection with no exclusion — so every candle and
+      // fire was getting a SECOND, colourless point light drawn exactly on
+      // top of its real one, at DOUBLE the radius (`DETECTION_RADIUS_
+      // MULTIPLIER = 2`, scene-synthetic-lights.js's own constant — its dim/
+      // bright detection reach, never meant to be visual). A colourless light
+      // contributes plain, hue-less ambient brightness (this file's own
+      // `hasColor`/hue handling), so that second light was a small correctly-
+      // coloured core (the real light) sitting inside a much bigger,
+      // permanently white halo (the vision-only double) — invisible to every
+      // fix that only ever touched the real fire/candle light's own colour,
+      // falloff, or luminosity, because none of them ever built or drew this
+      // one. Skipping it here does not affect Foundry's own vision/door-
+      // reveal test at all: that reads `canvas.effects.lightSources` directly
+      // (`testPoint()`/`testInsideLight()`), a completely separate consumer
+      // of the same collection this loop only DRAWS from.
+      if (source.sourceId?.startsWith(VISION_SOURCE_ID_PREFIX)) continue;
       seenSourceIds.add(source.sourceId);
       // `source.active` bakes Foundry's OWN darkness-activation verdict in
       // alongside hidden/zero-radius/suppressed (BaseEffectSource#active) —

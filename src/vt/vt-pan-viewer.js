@@ -416,6 +416,7 @@ import {
   buildWindHeatmapMaterial,
 } from '../diag/wind-field-overlay.js';
 import { decomposeWindAt } from '../diag/wind-probe.js';
+import { derivePixelsPerMetre } from '../core/scene-scale.js';
 import {
   computeWindBakeGridSpec,
   rasterizeWallsToGrid,
@@ -3554,6 +3555,19 @@ export async function startVtPanViewer({
       THREE,
       getFireRenderState,
       getWindHandle: () => windHandle,
+      // ⚠️ MISNAMED, AND KNOWINGLY LEFT THAT WAY FOR NOW (2026-09-04,
+      // mythica-machina-press#498). `distancePixels` is pixels per DISTANCE
+      // UNIT (per foot on a feet-authored scene), not per metre — verified
+      // against vendored Foundry (`client/canvas/placeables/light.mjs:110`
+      // scales `config.dim`, authored in scene units, by it). So this is out
+      // by ~3.28x on nearly every real map, which is the unreliability
+      // mythica-machina-press#485 hit and could not pin down. The corrected
+      // derivation now exists (`core/scene-scale.js#derivePixelsPerMetre`)
+      // and the wind probe reports through it. This call site is NOT switched
+      // in the same commit ON PURPOSE: fire and precipitation have both been
+      // tuned by eye against the wrong-by-3.28x value, so correcting it
+      // silently rescales two shipped looks. That is its own change, with its
+      // own live look — filed rather than smuggled in here.
       getPxPerMeter: () => readGridDistancePixels().distancePixels,
       // The particle-engine factory, INJECTED rather than imported by the
       // subsystem: `particles/allocator-only` keeps every `instancedArray`
@@ -3678,6 +3692,19 @@ export async function startVtPanViewer({
       onMantleMeshes: (meshes) => {
         for (const mesh of meshes) scene.add(mesh);
       },
+      // ⚠️ MISNAMED, AND KNOWINGLY LEFT THAT WAY FOR NOW (2026-09-04,
+      // mythica-machina-press#498). `distancePixels` is pixels per DISTANCE
+      // UNIT (per foot on a feet-authored scene), not per metre — verified
+      // against vendored Foundry (`client/canvas/placeables/light.mjs:110`
+      // scales `config.dim`, authored in scene units, by it). So this is out
+      // by ~3.28x on nearly every real map, which is the unreliability
+      // mythica-machina-press#485 hit and could not pin down. The corrected
+      // derivation now exists (`core/scene-scale.js#derivePixelsPerMetre`)
+      // and the wind probe reports through it. This call site is NOT switched
+      // in the same commit ON PURPOSE: fire and precipitation have both been
+      // tuned by eye against the wrong-by-3.28x value, so correcting it
+      // silently rescales two shipped looks. That is its own change, with its
+      // own live look — filed rather than smuggled in here.
       getPxPerMeter: () => readGridDistancePixels().distancePixels,
       // ⚠️ DRAWN AFTER the lit composite (precipitation is in FRONT of the
       // world, roofs included) and BEFORE the vision gate — MSA owns vision
@@ -19766,6 +19793,16 @@ export async function startVtPanViewer({
             // says Y, and Y is what the wind actually does" side by side,
             // the exact confusion the rethink exists to end.
             paintedExposure: sampleWindExposureAt(p.x, p.y),
+            // ⭐ THE DIAL IN REAL UNITS + THE SCENE'S REAL PIXEL SCALE
+            // (2026-09-04, mythica-machina-press#498). Both are read here
+            // rather than inside the probe so that module stays pure — it
+            // does the describing, the glue does the reading.
+            speed01: uWindSpeed01.value,
+            sceneScale: derivePixelsPerMetre({
+              gridSizePixels: globalThis.canvas?.scene?.grid?.size,
+              gridDistance: globalThis.canvas?.scene?.grid?.distance,
+              gridUnits: globalThis.canvas?.scene?.grid?.units,
+            }),
           });
         } else {
           wind = { ok: false, reason: 'no wind bake has run yet' };

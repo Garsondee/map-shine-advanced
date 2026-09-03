@@ -59,9 +59,10 @@
  * stay zero, not repurposed).
  *
  * The ORGANIC gust/flutter term (`result` below, before `wind`/`bakedField`
- * are even considered) is UNCHANGED by this rethink: still damped between
- * `WIND_INDOOR_RESIDUAL` and full strength by the `exposure` parameter,
- * exactly as it always was. `exposure` is a SEPARATE input from `openness` —
+ * are even considered) is UNCHANGED by this rethink, though 2026-09-04's
+ * Stage 1 later gated it by wind SPEED and deleted its indoor floor — see its
+ * own block below. It is scaled by the `exposure` parameter, a SEPARATE input
+ * from `openness` —
  * every existing caller of `sampleWind` already sources it however it always
  * has (candle/light construction-time painted-mask sampling; the particle
  * kernels' own per-cell lookup, itself switched to `openness` — see
@@ -91,7 +92,9 @@ const WIND_DRIFT = 0.6; // how fast the gust DIRECTION wanders
 const WIND_GUST_RATE = 0.35; // the breeze rising and falling
 const WIND_FLUTTER_RATE = 4.0; // a fast quick jitter on top of the gust
 const WIND_FLUTTER_AMP = 0.28; // flutter strength, relative to the gust
-const WIND_INDOOR_RESIDUAL = 0.18; // a sheltered (indoor) candle still moves this much
+// (`WIND_INDOOR_RESIDUAL`, an always-on 0.18 floor on the organic term, was
+// DELETED 2026-09-04 — mythica-machina-press#498. It had no physical cause;
+// its job passes to Stage 5's buoyant convection from real heat sources.)
 
 // ── TURBULENCE (2026-07-22, author request: "make the wind more chaotic
 // ── both inside and outside") — see this function's own body for the full
@@ -122,7 +125,7 @@ const WIND_TURBULENCE_CURL_EPS = 0.4; // finite-difference step, in the SAME alr
 // single AMP × boost-multiplier scheme now that indoor/outdoor are genuinely
 // separate octaves (different frequency/rate), not one shared vector scaled
 // differently by region:
-const WIND_TURBULENCE_SEALED_AMP = 0.08; // sealed-room floor — "nearly still", never quite zero (same allowance WIND_INDOOR_RESIDUAL already makes for the organic term)
+const WIND_TURBULENCE_SEALED_AMP = 0.08; // sealed-room floor — "nearly still", never quite zero. NOTE this is an amplitude, not a floor on the OUTPUT: the energy cap below still collapses the whole turbulence term to 0 at a dead calm, so it cannot reintroduce the "wind 0 is not no wind" bug the organic term's own floor caused (#498).
 // PEAK, AT THE DOORWAY TRANSITION (author: "a wider range of vectors...
 // ideally with some vectors pointing backwards against the wind") —
 // DELIBERATELY bigger than the coherent wind's own max possible magnitude
@@ -744,8 +747,9 @@ export function computeWindTurbulence(TSL, { centerXY, time, openness, exteriorO
  * real draught, not per-caller random noise). A slow gust envelope makes the
  * breeze rise and fall; a fast octave adds flutter. The ORGANIC term (drift +
  * gust + flutter) is scaled by `exposure` (1 = open to the sky/wind, 0 =
- * sheltered indoors) between a small always-on indoor draftiness
- * (`WIND_INDOOR_RESIDUAL`) and full outdoor sway. TURBULENCE (the curl-noise
+ * sheltered indoors) AND by the wind speed itself, so a dead calm is genuinely
+ * still — see its own block below for why the old always-on indoor floor was
+ * deleted rather than reduced. TURBULENCE (the curl-noise
  * swirl, below — TWO independent octaves as of 2026-07-23, see
  * `WIND_TURBULENCE_INDOOR_*`/`WIND_TURBULENCE_OUTDOOR_*`) is gated by DOOR
  * CONNECTIVITY instead, not exposure — a sealed room stays nearly still, a
@@ -901,7 +905,7 @@ export function sampleWind(
     windSpeed01,
   }
 ) {
-  const { float, vec2, mx_noise_float: perlin, clamp, mix, texture } = TSL;
+  const { float, vec2, mx_noise_float: perlin, clamp, texture } = TSL;
   const t = time.mul(float(0.001)); // ms → ~seconds
   const sx = centerXY.x.mul(float(WIND_SPACE_FREQ));
   const sy = centerXY.y.mul(float(WIND_SPACE_FREQ));
@@ -1031,10 +1035,33 @@ export function sampleWind(
     windSpeed01:
       cappedSpeed01 !== undefined && gustEnvelope !== undefined ? cappedSpeed01.mul(gustEnvelope) : cappedSpeed01,
   });
-  // EXPOSURE — indoors keeps a small residual draftiness; outdoors full sway.
-  // Governs dir/flutter ONLY — turbulence (above) has its own, door-gated
-  // amplitude and is added on top, unscaled by this.
-  const amount = mix(float(WIND_INDOOR_RESIDUAL), float(1), clamp(exposure, float(0), float(1)));
+  // ⭐ THE ORGANIC TERM IS NOW GATED BY WIND SPEED — "wind 0 is not no wind"
+  // (mythica-machina-press#497 §3.1, Stage 1 / #498). This was the ONE term in
+  // the whole field that never referenced `speed01`: its scale was
+  // `mix(WIND_INDOOR_RESIDUAL, 1, exposure)` — exposure only — so at a dead
+  // calm an outdoor cell still received full-amplitude drift + flutter (raw
+  // magnitude ~0..1.4). The coherent term reached zero correctly (it is
+  // multiplied by `speed01`) and turbulence reached zero correctly (its energy
+  // cap collapses to 0), and this one did not, which is the entire reported
+  // symptom.
+  //
+  // ⚠️ `WIND_INDOOR_RESIDUAL` IS DELETED, NOT SET TO ZERO. It was an
+  // always-on 0.18 floor with no physical cause behind it — the standing
+  // answer to "a sheltered candle should still move". The real force there is
+  // buoyant convection from the scene's OWN heat sources (fires, braziers,
+  // candles all already exist as first-class objects), which is Stage 5's job
+  // (#502). Until that lands a sealed room is genuinely still, which is the
+  // honest intermediate state: a candle's own flicker does not depend on this
+  // at all (`candle-flicker.js#candleLife` takes `max(noiseDip, windDip)`, so
+  // its atmospheric guttering survives a windless room untouched).
+  //
+  // ABSENT SPEED ⇒ FULL STRENGTH, not zero — a caller with no wind-speed
+  // concept at all (a Tier-0 handle built before the first bake) genuinely
+  // does not know the wind is calm, and must not be told that it is. Resolved
+  // as a JS branch so that caller emits the identical graph it always did
+  // (`tsl/no-uniform-gates`).
+  const organicSpeedGate = cappedSpeed01 !== undefined ? clamp(cappedSpeed01, float(0), float(1)) : float(1);
+  const amount = clamp(exposure, float(0), float(1)).mul(organicSpeedGate);
   const dir = vec2(dirX, dirY).mul(gust);
   const flutter = vec2(flutterX, flutterY).mul(float(WIND_FLUTTER_AMP));
   let result = dir.add(flutter).mul(amount).add(turbulence);

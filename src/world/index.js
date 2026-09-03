@@ -108,6 +108,21 @@ export {
   windFlowVectorNode,
 } from './wind-field.js';
 export { ambientVectorFromWind, windFlowVector, computeWindBakeGridSpec, rasterizeWallsToGrid } from './wind-bake.js';
+// ⭐ WHAT THE DIAL MEANS — the Beaufort scale, so `speed01` has a real-world
+// reading instead of being a unitless 0..1 nothing could check against. The
+// wind probe reports through `describeWindSpeed01`; #497's Stages 2-4 build
+// their physics (turbulence intensity, Taylor advection, vortex shedding)
+// against these units.
+export {
+  BEAUFORT_SCALE,
+  BEAUFORT_MAX,
+  beaufortForSpeed01,
+  speed01ForBeaufort,
+  metresPerSecondForSpeed01,
+  speed01ForMetresPerSecond,
+  beaufortRowForMetresPerSecond,
+  describeWindSpeed01,
+} from './wind-scale.js';
 export {
   floodFillOpenFromBoundary,
   summarizeEnclosure,

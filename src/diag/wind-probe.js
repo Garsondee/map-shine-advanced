@@ -43,7 +43,7 @@ function round2(x) {
 // The ONE shelter-strength constant, imported rather than copied — see its own
 // header. A probe with a private duplicate of a look constant drifts silently
 // the first time the renderer's is retuned.
-import { WIND_SHADOW_DEPTH } from '../world/index.js';
+import { WIND_SHADOW_DEPTH, describeWindSpeed01 } from '../world/index.js';
 
 /**
  * Nearest-cell lookup — DELIBERATELY the exact same formula
@@ -215,6 +215,8 @@ export function decomposeWindAt({
   openness,
   paintedExposure = null,
   nearestSolidSearchCells = 8,
+  speed01 = null,
+  sceneScale = null,
 }) {
   const ax = Number.isFinite(ambientX) ? ambientX : 0;
   const ay = Number.isFinite(ambientY) ? ambientY : 0;
@@ -266,6 +268,26 @@ export function decomposeWindAt({
     ),
     paintedExposureForReference: Number.isFinite(paintedExposure) ? round2(paintedExposure) : null,
     ambientBias: { x: round2(ax), y: round2(ay) },
+    // ⭐ THE DIAL IN REAL UNITS (2026-09-04, mythica-machina-press#498). The
+    // dial used to be a bare 0..1 with no anchor, so a report could say
+    // "speed 0.35" and nobody — including the author — could say whether the
+    // scene should be showing lifted dust or bending trees at that setting.
+    // `land` is the real Beaufort land-observation criterion, which is what
+    // turns "does 35 look right?" into a checkable claim.
+    speed: Number.isFinite(speed01) ? describeWindSpeed01(speed01) : null,
+    // How big a pixel actually is, correctly derived (`core/scene-scale.js`) —
+    // NOT Foundry's `distancePixels`, which is pixels per DISTANCE UNIT and is
+    // the confusion mythica-machina-press#485 could not resolve. `assumed`
+    // flags a scene whose grid units this could not read, so a fallback is
+    // never presented as a measurement.
+    sceneScale: sceneScale
+      ? {
+          pixelsPerMetre: round2(sceneScale.pixelsPerMetre),
+          pixelsPerDistanceUnit: round2(sceneScale.pixelsPerDistanceUnit),
+          assumed: sceneScale.ok === false,
+          reason: sceneScale.reason ?? null,
+        }
+      : null,
     // THE coherent (direction-following) wind this cell ACTUALLY feels —
     // ambientBias × openness × shelterFactor. A sealed cell reads exactly
     // {0,0} regardless of ambientBias's own strength; an open, unsheltered

@@ -59,10 +59,10 @@ function packVec4(cells) {
   return out;
 }
 
-function makeHandle(cells, { ambient = true } = {}) {
+function makeHandle(cells, { ambient = true, speed01 = 0.6 } = {}) {
   return createWindHandle({
     version: 7,
-    ambientWind: ambient ? { directionDeg: T.float(135), speed01: T.float(0.6) } : null,
+    ambientWind: ambient ? { directionDeg: T.float(135), speed01: T.float(speed01) } : null,
     grid: GRID,
     // B = openness, A = exteriorOpenness — the real channel contract.
     opennessTexture: gridTexture(GRID, (i) => [0, 0, cells.openness[i], cells.openness[i]]),
@@ -100,6 +100,56 @@ export function run(t) {
     ok('handle copies the grid rather than aliasing the caller’s object', h.grid !== GRID && h.grid.cols === 8);
     const bare = createWindHandle();
     ok('an un-baked handle is still usable and says so', bare.hasBake === false && bare.grid === null);
+  }
+
+  // --- ⭐ WIND 0 IS EXACTLY ZERO (Stage 1, mythica-machina-press#498) --------
+  // The acceptance criterion, evaluated through the REAL graph rather than by
+  // reading the source and reasoning about it. Before this, the organic
+  // drift/flutter term was scaled by `exposure` ALONE and never referenced
+  // `speed01`, so a dead calm still produced motion of raw magnitude ~0..1.4
+  // at every exposed cell — the author's *"0 wind is not no wind"*.
+  //
+  // "Exactly" is meant literally: `=== 0`, not "small". A tolerance here would
+  // pass just as happily on a residual floor, which is precisely the thing
+  // being removed.
+  {
+    const calm = makeHandle(cells, { speed01: 0 });
+    let worstCalm = 0;
+    let sampled = 0;
+    for (let cy = 0; cy < GRID.rows; cy++) {
+      for (let cx = 0; cx < GRID.cols; cx++) {
+        const [wx, wy] = cellCentre(cx, cy);
+        // Sample at FULL exposure — the outdoor case, where the old floor was
+        // at its strongest and any surviving term would show up largest.
+        const v = values(calm.node(T, { centerXY: T.vec2(wx, wy), time: T.float(4321), exposure: T.float(1) }));
+        worstCalm = Math.max(worstCalm, Math.abs(v[0]), Math.abs(v[1]));
+        sampled++;
+      }
+    }
+    ok(`⭐ at speed01=0 the field is exactly zero at all ${sampled} cells (worst |v| ${worstCalm})`, worstCalm === 0);
+
+    // Sampled across TIME too — the organic term is time-varying, so a single
+    // instant could be zero by coincidence of where the noise happened to sit.
+    let worstOverTime = 0;
+    for (let ms = 0; ms < 20000; ms += 977) {
+      const v = values(calm.node(T, { centerXY: T.vec2(12, -7), time: T.float(ms), exposure: T.float(1) }));
+      worstOverTime = Math.max(worstOverTime, Math.abs(v[0]), Math.abs(v[1]));
+    }
+    ok('⭐ ...and stays exactly zero across a 20s sweep, not just at one instant', worstOverTime === 0);
+
+    // ⚠️ THE NEGATIVE CONTROL. Without it this block would pass just as happily
+    // if the field had been broken to zero at every speed, which is the one
+    // failure a "wind 0 is zero" test cannot otherwise distinguish from success.
+    const blowing = makeHandle(cells, { speed01: 1 });
+    let strongest = 0;
+    for (let cy = 0; cy < GRID.rows; cy++) {
+      for (let cx = 0; cx < GRID.cols; cx++) {
+        const [wx, wy] = cellCentre(cx, cy);
+        const v = values(blowing.node(T, { centerXY: T.vec2(wx, wy), time: T.float(4321), exposure: T.float(1) }));
+        strongest = Math.max(strongest, Math.hypot(v[0], v[1]));
+      }
+    }
+    ok(`the same field at speed01=1 is emphatically NOT zero (max |v| ${strongest.toFixed(3)})`, strongest > 0.1);
   }
 
   // --- THE PARITY TEST: node() and kernel() agree on the coherent term ------

@@ -39,6 +39,25 @@
  * Wind-0/Wind-1 pair (the same "very wide ranges, I'll find the values"
  * philosophy "THE TUNING SET" below already applies) — genuinely new
  * surface area, not a return to V2-style size-redundant filler.
+ *
+ * ⚠️ ROUND 8, SAME DAY — author: *"remove ratchets around ROH controls and
+ * increase limits for FOH."* Every reference-multiplier ("×") dial in "THE
+ * TUNING SET" below (Flame/Ember/Smoke categories) and `perspective`
+ * (Depth) had its MAX raised again — roughly 5-10× further for the ROH
+ * ones (not promoted to any FOH strip — see `ui/widgets/param-groups.js`'s
+ * own FOH/ROH split), a more modest 2-3× for the six params that ARE in
+ * fire's FOH list (`boot.js`'s two `fohKeys` arrays — `flameCount`,
+ * `flameLifeAtWind0`, `flameOpacity`, `flameColorAge`, `emberCount`,
+ * `smokeCount`). Deliberately EXCLUDED, each with its own note at the param
+ * itself: `maskSensitivity` (a threshold against a normalised [0,1] value —
+ * nothing past 1 can mean anything), `lightRadiusScale` (a real, explained
+ * performance cost curve, not an arbitrary ceiling), `flameSpawnBias`/
+ * `flameCohesion` (already documented as saturating well inside their
+ * existing range), and everything in Presence/Look/Motion/Response
+ * (`windResponse` especially — `fireWindMotion01`'s own gain clamp hard-caps
+ * it at 2 regardless of what the schema allows, so widening the slider past
+ * that would be pure theatre). Mins were left untouched throughout — the
+ * ask was for more room to push values UP, not down.
  */
 export const FIRE_PARAMS = Object.freeze({
   // ── Presence ──────────────────────────────────────────────────────────────
@@ -65,6 +84,11 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0.02,
     max: 0.6,
     step: 0.01,
+    // ⚠️ NOT WIDENED IN THE 2026-09-04 ROH RANGE PASS — this is a threshold
+    // against a NORMALISED [0,1] paint value, not a reference multiplier;
+    // 0.6 already means "requires very bold, solid paint", and nothing past
+    // 1 can ever mean anything (no paint value exceeds 1). A real definitional
+    // bound, not an arbitrary ratchet.
     // ⚠️ 0.05, NOT 0.2 (2026-08-16, author live on Tower Bridge — the real
     // multi-blob `_Fire.webp` in example_map/, ~20 painted regions). At 0.2
     // only 3 of the ~20 valid areas produced flame particles; the rest are
@@ -168,7 +192,7 @@ export const FIRE_PARAMS = Object.freeze({
   flameCount: {
     type: 'float',
     min: 0,
-    max: 200,
+    max: 500,
     step: 1,
     default: 20,
     category: 'Flame',
@@ -185,7 +209,7 @@ export const FIRE_PARAMS = Object.freeze({
   flameLifeAtWind0: {
     type: 'float',
     min: 0.05,
-    max: 30,
+    max: 60,
     step: 0.05,
     default: 2.8,
     category: 'Flame',
@@ -195,7 +219,7 @@ export const FIRE_PARAMS = Object.freeze({
   flameLifeAtWind1: {
     type: 'float',
     min: 0.05,
-    max: 30,
+    max: 200,
     step: 0.05,
     default: 1.5,
     category: 'Flame',
@@ -205,7 +229,7 @@ export const FIRE_PARAMS = Object.freeze({
   flameSizeScale: {
     type: 'float',
     min: 0.02,
-    max: 20,
+    max: 100,
     step: 0.02,
     default: 0.52,
     category: 'Flame',
@@ -215,7 +239,7 @@ export const FIRE_PARAMS = Object.freeze({
   flameOpacity: {
     type: 'float',
     min: 0,
-    max: 20,
+    max: 50,
     step: 0.05,
     default: 1.5,
     category: 'Flame',
@@ -225,7 +249,7 @@ export const FIRE_PARAMS = Object.freeze({
   flameEmission: {
     type: 'float',
     min: 0,
-    max: 50,
+    max: 250,
     step: 0.1,
     default: 23.9,
     category: 'Flame',
@@ -235,7 +259,7 @@ export const FIRE_PARAMS = Object.freeze({
   flameColorAge: {
     type: 'float',
     min: 0.1,
-    max: 12,
+    max: 30,
     step: 0.05,
     default: 12,
     category: 'Flame',
@@ -273,7 +297,7 @@ export const FIRE_PARAMS = Object.freeze({
   flameWindPush: {
     type: 'float',
     min: 0,
-    max: 30,
+    max: 200,
     step: 0.05,
     default: 1,
     category: 'Flame',
@@ -285,7 +309,7 @@ export const FIRE_PARAMS = Object.freeze({
   emberCount: {
     type: 'float',
     min: 0,
-    max: 200,
+    max: 500,
     step: 1,
     default: 39,
     category: 'Ember',
@@ -295,7 +319,7 @@ export const FIRE_PARAMS = Object.freeze({
   emberSizeScale: {
     type: 'float',
     min: 0.02,
-    max: 20,
+    max: 100,
     step: 0.02,
     default: 0.52,
     category: 'Ember',
@@ -314,7 +338,7 @@ export const FIRE_PARAMS = Object.freeze({
   emberLifeAtWind0: {
     type: 'float',
     min: 0.05,
-    max: 30,
+    max: 200,
     step: 0.05,
     default: 0.45,
     category: 'Ember',
@@ -324,7 +348,7 @@ export const FIRE_PARAMS = Object.freeze({
   emberLifeAtWind1: {
     type: 'float',
     min: 0.05,
-    max: 30,
+    max: 200,
     step: 0.05,
     default: 0.7,
     category: 'Ember',
@@ -334,7 +358,7 @@ export const FIRE_PARAMS = Object.freeze({
   emberChaosAtWind0: {
     type: 'float',
     min: 0,
-    max: 30,
+    max: 200,
     step: 0.05,
     default: 6.2,
     category: 'Ember',
@@ -344,7 +368,7 @@ export const FIRE_PARAMS = Object.freeze({
   emberChaosAtWind1: {
     type: 'float',
     min: 0,
-    max: 30,
+    max: 200,
     step: 0.05,
     default: 1.5,
     category: 'Ember',
@@ -354,7 +378,7 @@ export const FIRE_PARAMS = Object.freeze({
   emberRiseAtWind0: {
     type: 'float',
     min: 0,
-    max: 30,
+    max: 200,
     step: 0.05,
     default: 1,
     category: 'Ember',
@@ -364,7 +388,7 @@ export const FIRE_PARAMS = Object.freeze({
   emberRiseAtWind1: {
     type: 'float',
     min: 0,
-    max: 30,
+    max: 200,
     step: 0.05,
     default: 0.15,
     category: 'Ember',
@@ -374,7 +398,7 @@ export const FIRE_PARAMS = Object.freeze({
   emberWindPush: {
     type: 'float',
     min: 0,
-    max: 30,
+    max: 200,
     step: 0.05,
     default: 1,
     category: 'Ember',
@@ -384,7 +408,7 @@ export const FIRE_PARAMS = Object.freeze({
   emberEmission: {
     type: 'float',
     min: 0,
-    max: 50,
+    max: 250,
     step: 0.1,
     default: 50,
     category: 'Ember',
@@ -396,7 +420,7 @@ export const FIRE_PARAMS = Object.freeze({
   smokeCount: {
     type: 'float',
     min: 0,
-    max: 400,
+    max: 1000,
     step: 1,
     default: 24,
     category: 'Smoke',
@@ -406,7 +430,7 @@ export const FIRE_PARAMS = Object.freeze({
   smokeSizeScale: {
     type: 'float',
     min: 0.02,
-    max: 20,
+    max: 100,
     step: 0.02,
     default: 1,
     category: 'Smoke',
@@ -416,7 +440,7 @@ export const FIRE_PARAMS = Object.freeze({
   smokeLifeScale: {
     type: 'float',
     min: 0.05,
-    max: 30,
+    max: 200,
     step: 0.05,
     default: 1,
     category: 'Smoke',
@@ -426,7 +450,7 @@ export const FIRE_PARAMS = Object.freeze({
   smokeOpacity: {
     type: 'float',
     min: 0,
-    max: 20,
+    max: 100,
     step: 0.05,
     default: 1,
     category: 'Smoke',
@@ -436,7 +460,7 @@ export const FIRE_PARAMS = Object.freeze({
   smokeGrowth: {
     type: 'float',
     min: 0,
-    max: 30,
+    max: 200,
     step: 0.05,
     default: 1,
     category: 'Smoke',
@@ -446,7 +470,7 @@ export const FIRE_PARAMS = Object.freeze({
   smokeRise: {
     type: 'float',
     min: 0,
-    max: 30,
+    max: 200,
     step: 0.05,
     default: 1,
     category: 'Smoke',
@@ -458,7 +482,7 @@ export const FIRE_PARAMS = Object.freeze({
   perspective: {
     type: 'float',
     min: 0,
-    max: 20,
+    max: 100,
     step: 0.05,
     default: 1,
     category: 'Depth',
@@ -504,6 +528,11 @@ export const FIRE_PARAMS = Object.freeze({
     default: 1,
     category: 'Light',
     label: 'Light reach',
+    // ⚠️ NOT WIDENED IN THE 2026-09-04 ROH RANGE PASS, DELIBERATELY — unlike
+    // the tuning-set "×" dials, this one has a REAL, EXPLAINED cost curve
+    // (own help text: "doubling it roughly quadruples the light's cost"), not
+    // an arbitrary ceiling. A wider max here would be an invitation to a real
+    // performance cliff, not "more room to find a look".
     help: "Scales the light radius the fire's size already implies. This is the single most expensive number in the effect — doubling it roughly quadruples the light's cost.",
   },
   lightColor: {

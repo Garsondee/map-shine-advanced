@@ -108,12 +108,21 @@ const WALL_DOOR_STATE_OPEN = 1; // CONST.WALL_DOOR_STATES.OPEN
 // for why this replaced an initial (wrong) NONE(0) reading.
 const WALL_LIGHT_NORMAL = 20; // CONST.EDGE_SENSE_TYPES.NORMAL — the schema's own default (blocks light)
 const WALL_LIGHT_PROXIMITY = 30; // CONST.EDGE_SENSE_TYPES.PROXIMITY — Foundry's own window convention: opaque beyond threshold.light, passable within it
+const WALL_DIR_BOTH = 0; // CONST.WALL_DIRECTIONS.BOTH === CONST.EDGE_DIRECTIONS.BOTH — the schema's own default (collides from both sides)
 
 /**
  * Is this wall a barrier to wind right now? Pure — no Foundry, no canvas —
  * so the rule is Node-tested independently of ever having a live scene.
  *
- * @param {{move?: number, door?: number, ds?: number}} [wall] - raw field
+ * A one-way wall (`dir !== BOTH`) is treated as non-solid entirely (2026-09-03,
+ * author request: wind particles were being blocked by one-way walls the
+ * same as ordinary walls). Real Foundry movement collision only blocks a
+ * one-way wall from ITS restricted side, which would need the wind's
+ * direction of travel at this edge to reproduce properly; short of that,
+ * treating it as fully open is closer to reality than treating it as fully
+ * solid, and matches the simplicity of every other rule in this file.
+ *
+ * @param {{move?: number, door?: number, ds?: number, dir?: number}} [wall] - raw field
  *   values off a WallDocument (or a plain test fixture of the same shape).
  *   A missing field falls back to the SCHEMA's own default, not an
  *   arbitrary choice (see this file's own header). `sight` is deliberately
@@ -121,14 +130,16 @@ const WALL_LIGHT_PROXIMITY = 30; // CONST.EDGE_SENSE_TYPES.PROXIMITY — Foundry
  *   wind-solidity question.
  * @returns {boolean}
  */
-export function deriveWallSolid({ move, door, ds } = {}) {
+export function deriveWallSolid({ move, door, ds, dir } = {}) {
   const moveVal = Number.isFinite(move) ? move : WALL_MOVEMENT_NORMAL;
   const doorVal = Number.isFinite(door) ? door : WALL_DOOR_NONE;
   const dsVal = Number.isFinite(ds) ? ds : WALL_DOOR_STATE_CLOSED;
+  const dirVal = Number.isFinite(dir) ? dir : WALL_DIR_BOTH;
   const blocksMovement = moveVal !== WALL_MOVEMENT_NONE;
   const isDoor = doorVal !== WALL_DOOR_NONE;
   const isOpenDoor = isDoor && dsVal === WALL_DOOR_STATE_OPEN;
-  return blocksMovement && !isOpenDoor;
+  const isOneWay = dirVal !== WALL_DIR_BOTH;
+  return blocksMovement && !isOpenDoor && !isOneWay;
 }
 
 /**
@@ -216,7 +227,7 @@ export function readSceneWallSegments(levelId = null) {
         y1: c[1],
         x2: c[2],
         y2: c[3],
-        solid: deriveWallSolid({ move: wall.move, door: wall.door, ds: wall.ds }),
+        solid: deriveWallSolid({ move: wall.move, door: wall.door, ds: wall.ds, dir: wall.dir }),
         blocksExterior: deriveWallBlocksExterior({ move: wall.move }),
         // APERTURE (2026-08-03, docs/planning/Aperture-Gobo.md §2.1) — the
         // ONE extra derived fact `effects/lighting/aperture-gobo.js` needs off

@@ -61,6 +61,19 @@ export function run(t) {
   );
   ok('no argument at all is also safe (never throws)', deriveWallSolid() === true);
 
+  // CONST.WALL_DIRECTIONS (an alias of EDGE_DIRECTIONS, verified against
+  // common/constants.mjs): BOTH=0 (schema default, collides from both
+  // sides), LEFT=1, RIGHT=2 (one-way). 2026-09-03, author request: wind
+  // debug particles were being blocked by one-way walls the same as an
+  // ordinary wall. Real movement collision only blocks a one-way wall from
+  // its restricted side; reproducing that would need the wind's direction
+  // of travel at this edge, so a one-way wall is instead treated as fully
+  // non-solid — closer to reality than fully solid, and no more code.
+  ok('a one-way wall (dir:LEFT) is NOT wind-solid', !deriveWallSolid({ move: 20, door: 0, ds: 0, dir: 1 }));
+  ok('a one-way wall (dir:RIGHT) is NOT wind-solid', !deriveWallSolid({ move: 20, door: 0, ds: 0, dir: 2 }));
+  ok('a two-way wall (dir:BOTH, explicit) is still wind-solid', deriveWallSolid({ move: 20, door: 0, ds: 0, dir: 0 }));
+  ok('a missing dir falls back to BOTH (still wind-solid)', deriveWallSolid({ move: 20, door: 0, ds: 0 }));
+
   // deriveWallBlocksExterior (2026-07-22, the door-distance penetration
   // falloff) — `move` alone, `door`/`ds` never even accepted as arguments:
   // a door counts as a permanent barrier here REGARDLESS of open/closed

@@ -233,6 +233,27 @@ const SPAWN_CAPACITY = 1024;
 const WIND_GUST_MAX_MULT = 8;
 
 /**
+ * ⚠️ ADDED 2026-09-04, ROUND 4 — see `opennessGain`'s own note in the update
+ * kernel for the full diagnostic story (a ×10 blunt multiplier on top of the
+ * CPU-side gain's own ×2 maximum still produced no visible flame movement at
+ * all, which rules out "under-tuned strength" and points at the real,
+ * per-position wind-bake sample itself reading at or near 0 for typical
+ * painted fire locations — routinely right against a wall, unlike where
+ * `_Bush`/`_Tree` paint usually sits). The FLOOR this constant sets on
+ * `opennessGain` — applied AFTER the sqrt curve, so it is a direct, easy-to-
+ * reason-about minimum on the FINAL gain rather than the raw sample — is what
+ * turns "a strict single-cell reading can crush wind response to literal
+ * zero" into "the worst case is still a real, visible LOW response", which is
+ * what the author actually asked for from the very first message in this
+ * whole thread ("indoor/sheltered fires be low movement... exposed/outdoors
+ * fires be moved" — never "no movement at all"). 0.3 means even a fully
+ * "sealed" reading still reaches 30% of a fully-open location's gain; a
+ * genuinely open reading (sqrt already close to 1) is barely touched by this
+ * floor at all.
+ */
+const FIRE_OPENNESS_FLOOR_GAIN = 0.3;
+
+/**
  * V2's camera-to-ground distance, and therefore the strength of the perspective
  * every particle applies to itself. Smaller = stronger parallax.
  * `legacy/scene/composer.js` put the camera at z=2000 over ground at z=1000.
@@ -632,47 +653,43 @@ export function createFireParticleEngine({
       wallAwayDirY = cell.wallAwayDirY;
       wallProximity = cell.wallProximity;
     }
-    // ⚠️ SQUARE-ROOTED, NOT RAW (2026-09-04, ROUND 2) — author, live, once the
-    // real per-position grid landed: "the flames aren't responding to this
-    // new wind very much... considerably boost the strength". A straight
-    // linear multiply by `openness` punishes anything short of perfectly,
-    // crisply open ground — a real bake's openness is rarely exactly 0 or 1,
-    // and most painted fire spots read somewhere in between (near a wall,
-    // under an eave, in a partly-sheltered yard). `sqrt` still passes through
-    // the two endpoints exactly (0 stays dead calm, 1 stays fully open) but
-    // gives every PARTIAL reading real credit — 0.25 openness now counts as
-    // 0.5, 0.5 counts as ~0.71 — instead of quietly halving or quartering the
-    // whole effect for anywhere that isn't open sky.
-    const opennessGain = particleOpenness.pow(float(0.5));
+    // ⚠️ SQUARE-ROOTED, THEN FLOORED — NOT RAW (2026-09-04, ROUND 2, revised
+    // ROUND 4 after the ×10 diagnostic). The diagnostic settled the question:
+    // author, live, with the CPU-side "Wind response" dial already at its own
+    // maximum (2×) AND a further ×10 blunt multiplier on top of that — STILL
+    // "nothing in the way of sideways movement". Anything multiplied by
+    // something genuinely at 0 stays 0 no matter how large the OTHER factor
+    // is, which rules out "under-tuned strength" outright — a weak-but-real
+    // signal would have visibly grown at either boost. It also rules out
+    // `windOpennessBuffer` never being allocated at all: this file's own
+    // fallback for that case is `particleOpenness = float(1)` (fully open),
+    // which would have made the ×10 diagnostic read as DRAMATICALLY stronger
+    // motion, not none. So the buffer IS wired and IS returning real sampled
+    // data — data that reads at or near 0 at these particular painted spots.
+    //
+    // Leading theory, not fully provable without live access: fires are
+    // routinely painted RIGHT AGAINST walls (a hearth built into a wall, a
+    // brazier under an eave) in a way `_Bush`/`_Tree` paint typically is not —
+    // and the wind bake's `openness` is a strict flood-fill from genuinely
+    // outdoor cells, so a spot a human calls "outdoors" can still sit in a
+    // cell the geometry calls enclosed. That is not necessarily a bug in the
+    // shared mechanism itself (which the author confirms already looks right
+    // for vegetation/gusts) — it is a mismatch between "looks outdoors" and
+    // "flood-fill says open" for the SPECIFIC locations fire happens to be
+    // painted at. `FIRE_OPENNESS_FLOOR_GAIN` makes the fix robust regardless
+    // of which of these is the exact truth: it guarantees a real, visible
+    // floor on wind response that NO reading — however strict — can crush to
+    // literal zero, matching what the author actually asked for from the
+    // start ("indoor/sheltered fires be LOW movement" — not none) without
+    // touching `world/wind-field.js`/`wind-access.js` and risking the
+    // vegetation/gust look the author confirmed already works.
+    const opennessGain = particleOpenness.pow(float(0.5)).max(float(FIRE_OPENNESS_FLOOR_GAIN));
     // `uWindMotion01` is EXPOSURE-EXCLUDED now (fire-geometry.js#fireRuntimeFromParams's
     // own note) — multiplying it by this particle's own real openness is what
     // makes an indoor fire's flame stay calm while an outdoor one on the same
     // map genuinely gets shoved, instead of every fire on the floor sharing
     // one blended reading (the author's own "averaging is dumb" objection).
-    //
-    // ⚠️⚠️ TEMPORARY ×10 DIAGNOSTIC MULTIPLIER (2026-09-04, ROUND 3) — REMOVE
-    // OR RETUNE ONCE THE ANSWER IS KNOWN. Author, live: raising the CPU-side
-    // "Wind response" dial to its OWN maximum (2×) made no visible difference
-    // at all, and motion is now WORSE than before the real-grid change landed
-    // ("previously flames moved a good long distance at wind 1, now very
-    // little"). That combination — a 2× CPU-side gain producing zero visible
-    // change — is the signature of a term being multiplied by something at or
-    // near ZERO downstream of it, not of an under-tuned strength constant (a
-    // weak-but-nonzero term WOULD have visibly grown at 2× gain). The prime
-    // suspect is `particleOpenness` itself reading near-0 at real painted
-    // fire locations. This ×10 is a blunt, deliberately extreme instrument to
-    // settle that: if flame/ember motion is STILL barely visible with this in
-    // place, the signal reaching this line is genuinely ~0 (confirms the
-    // suspect — likely `windOpennessBuffer` not actually populated, or the
-    // wind bake's own openness reading low for reasons unrelated to fire); if
-    // motion is suddenly obviously, unmissably strong, the signal was real
-    // but weak and this can be retuned down to something reasonable instead
-    // of removed. Deliberately NOT touching `world/wind-field.js` /
-    // `wind-access.js` — those are shared with vegetation/gust-runtime.js,
-    // which the author confirmed already look right; this multiplier is
-    // fire-local so nothing else can regress from it either way.
-    const WIND_DIAGNOSTIC_BOOST_TEMP = 10;
-    const effectiveWindMotion = uWindMotion01.mul(opennessGain).mul(float(WIND_DIAGNOSTIC_BOOST_TEMP));
+    const effectiveWindMotion = uWindMotion01.mul(opennessGain);
 
     // ⚠️ 95% of flame particles never move AT REST — V2's `flameStationaryFraction`,
     // and the signature of the whole look (a fire POOL should not translate).
@@ -767,11 +784,14 @@ export function createFireParticleEngine({
     // upward. Ember/smoke ship `calmRiseY: 0`, so the second term is an
     // exact no-op for them. Fades on THIS particle's own local wind, not the
     // map-wide ceiling, for the same reason `effectiveStationary` does above.
-    // ⚠️ CLAMPED — `effectiveWindMotion` is no longer guaranteed ≤1 now that
-    // the diagnostic multiplier above can push it past that (it was, by
-    // construction, before); an unclamped `calmFade` would go negative and
-    // FLIP the calm-rise term's sign, shoving flame sharply downward instead
-    // of merely fading its upward drift to zero.
+    // ⚠️ CLAMPED — `effectiveWindMotion` is naturally back in [0,1] now (the
+    // product of two [0,1]-bounded terms, `uWindMotion01` and
+    // `opennessGain`), so this is a defensive guard rather than a currently-
+    // load-bearing one. Kept anyway: an unclamped `calmFade` would go
+    // negative and FLIP the calm-rise term's sign the moment either factor's
+    // own bound ever loosens (a future author dial, a future diagnostic),
+    // shoving flame sharply downward instead of merely fading its upward
+    // drift to zero — cheap insurance against a sharp, confusing regression.
     const calmFade = float(1).sub(effectiveWindMotion).clamp(float(0), float(1));
     const buoyancy = vec2(0, float(-K.buoyancyY * 60).sub(float((K.calmRiseY ?? 0) * 60).mul(calmFade))).mul(
       motionScale

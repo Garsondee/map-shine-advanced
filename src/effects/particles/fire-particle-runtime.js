@@ -589,6 +589,29 @@ export function createFireParticleEngine({
     // one frame-global wind scalar, and matching that is what lets this runtime
     // skip the openness grid buffer entirely (see the header).
     //
+    // ⚠️ THE ANGLE FORMULA IS `(sin, −cos)`, DELIBERATELY NOT `world/wind-field.js`'s
+    // `(cos, sin)` — this is the ONE PLACE the two are allowed to disagree, and
+    // it is not a coincidence but a mismatch discovered live (2026-09-03,
+    // author: "if I point wind north, they move east... 90 degree disagreement").
+    // `directionDeg` carries TWO DIFFERENT, ALREADY-ESTABLISHED conventions in
+    // this codebase and `MapShine.setWind()` writes the SAME raw number into
+    // both with no reconciling transform:
+    //   • the GM-facing compass dial (`ui/widgets/param-control.js#buildCompassRow`,
+    //     its own explicit header) treats 0°=NORTH and draws/reads bearings as
+    //     `(sin b, −cos b)` — clockwise from north, needle points TOWARD b.
+    //   • `wind-field.js#sampleWind` / `wind-bake.js#ambientVectorFromWind`
+    //     (candle sway, gust dust motes, rain lean) treat 0°=EAST (`(cos,sin)`,
+    //     an ordinary math angle from +X) and read it as METEOROLOGICAL FROM,
+    //     negating to get the flow — see that function's own header and its
+    //     Node test (`directionDeg:0` asserted as an "East" wind).
+    // These are a genuine, pre-existing 90° reference mismatch, independent of
+    // anything fire does — filed separately (mythica-machina-press#487) rather
+    // than fixed here, since correcting it touches every other wind-driven
+    // effect's already-tuned look. Fire reads `directionDeg` straight off the
+    // SAME dial the author is looking at when they point it, so THIS particle
+    // push uses the compass dial's own formula directly — the one thing in the
+    // scene the GM can actually verify by eye.
+    //
     // ⚠️ THE GUST CURVE IS SUPERLINEAR, DELIBERATELY (2026-09-03) — a flat
     // multiply by `uWindMotion01` reads as merely "more wind"; passes through
     // exactly 0 at `uWindMotion01=0` and grows to `WIND_GUST_MAX_MULT`× a
@@ -596,7 +619,7 @@ export function createFireParticleEngine({
     // dial gets dramatic. See WIND_GUST_MAX_MULT's own header.
     const windRad = uWindDirDeg.mul(float(Math.PI / 180));
     const gustPush = uWindMotion01.mul(float(1).add(uWindMotion01.mul(float(WIND_GUST_MAX_MULT - 1))));
-    const windVec = vec2(cos(windRad), sin(windRad)).mul(gustPush).mul(windPxPerSec).mul(motionScale);
+    const windVec = vec2(sin(windRad), cos(windRad).negate()).mul(gustPush).mul(windPxPerSec).mul(motionScale);
     // Buoyancy: +Y (up-SCREEN) for smoke UNCONDITIONALLY — see the KINDS
     // note — plus flame's own CALM-ONLY rise (2026-09-03, `calmRiseY`): a
     // gentle upward drift on the already-mobile tips, strongest at rest for

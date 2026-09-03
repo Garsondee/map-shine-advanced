@@ -159,7 +159,6 @@ function fireListSignature(fires) {
  *   water shipped its render-state seam declared, defaulted and never passed,
  *   and the ONLY symptom was that every control silently did nothing while all
  *   4,137 tests passed. A missing seam here throws at construction instead.
- * @param {() => object} [deps.getEnvironment] - `env` for weather/wind.
  * @param {() => object} [deps.getWindHandle] - getter, not the handle: the
  *   viewer's binding is reassigned on every rebake and this is constructed
  *   before its first assignment (the same TDZ-safe pattern the light pool uses).
@@ -198,7 +197,6 @@ function fireListSignature(fires) {
 export function createFireSubsystem({
   THREE,
   getFireRenderState,
-  getEnvironment = null,
   getWindHandle = null,
   getPxPerMeter = null,
   createEngine = null,
@@ -339,16 +337,19 @@ export function createFireSubsystem({
     // routed through fire-geometry.js the way the light-merge lever is.
     const firePlan = fireTierPlan(tier);
     const mPerPx = Number.isFinite(state.mPerPx) && state.mPerPx > 0 ? state.mPerPx : 0.02;
-    const env = getEnvironment?.() ?? null;
-    // THE PARTICLE WIND SIGNAL'S OWN INPUT (mythica-machina-press#475 follow-up,
+    // THE WIND SIGNAL'S OWN INPUT (mythica-machina-press#475/#485 follow-up,
     // 2026-09-03) — read straight off the SAME live uniform node the particle
-    // kernel itself samples every frame (`windHandle.ambient.speed01`), not
-    // `env.wind`, so the CPU-computed suppression/lifespan curves below can
-    // never drift a frame behind the GPU-side push. This is the established
-    // idiom this codebase already uses whenever a particle/render system needs
-    // that live number on the CPU too — `precip-runtime.js`, `curtain-render.js`
-    // and the two precip splash/drip runtimes all read `wind.ambient.speed01
-    // ?.value` rather than a separate snapshot, for the same reason.
+    // kernel itself samples every frame (`windHandle.ambient.speed01`), not a
+    // separate `env.wind` snapshot, so the CPU-computed suppression/lifespan
+    // curves below (particles AND, since 2026-09-04, the cast light's own
+    // dimming) can never drift a frame behind the GPU-side push. This is the
+    // established idiom this codebase already uses whenever a particle/render
+    // system needs that live number on the CPU too — `precip-runtime.js`,
+    // `curtain-render.js` and the two precip splash/drip runtimes all read
+    // `wind.ambient.speed01?.value` rather than a separate snapshot, for the
+    // same reason. `getEnvironment` is gone (2026-09-04) — its one live
+    // consumer, `buildFireLightSources`' old `fireWeatherResponse(chain,
+    // env, ...)` call, is gone too; see that function's own orphan note.
     const windHandle = getWindHandle?.() ?? null;
     const windSpeed01 = windHandle?.ambient?.speed01?.value;
     // Representative-fire simplification — the SAME one `expectedDepth` below
@@ -520,9 +521,16 @@ export function createFireSubsystem({
       ? buildFireLightSources(fires, {
           tier,
           mPerPx,
-          env,
           colorHex: runtime.lightColor,
           radiusScale: runtime.lightRadiusScale,
+          // Same three dials feeding the particles' own windMotion01 above —
+          // see buildFireLightSources' own note on why alive01 now comes
+          // from the SAME per-cluster fireWindParticleResponse call instead
+          // of a second, independent wind curve.
+          windSpeed01,
+          windResponseGain: runtime.windResponse,
+          weatherResponse01: runtime.weatherResponse,
+          canBeSnuffed: runtime.canBeSnuffed,
         })
       : [];
 

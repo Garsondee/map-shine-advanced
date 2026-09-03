@@ -3552,7 +3552,6 @@ export async function startVtPanViewer({
     const fireSubsystem = createFireSubsystem({
       THREE,
       getFireRenderState,
-      getEnvironment: () => lastEnvSnapshot?.env ?? null,
       getWindHandle: () => windHandle,
       getPxPerMeter: () => readGridDistancePixels().distancePixels,
       // The particle-engine factory, INJECTED rather than imported by the

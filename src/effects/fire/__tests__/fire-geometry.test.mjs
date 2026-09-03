@@ -530,15 +530,51 @@ export function run(t) {
   }
 
   {
-    // A fire blown out by weather must stop emitting light entirely, not emit a
-    // dim one — a snuffed fire that still lights the room reads as a bug.
-    const gale = { weather: { precip01: 0 }, wind: { speed01: 1 } };
-    const lights = buildFireLightSources([{ id: 'x', x: 0, y: 0, diameterPx: 20, intensity: 1, windExposure: 1 }], {
+    // ⚠️ REWRITTEN 2026-09-04 — `alive01` used to come from its OWN independent
+    // wind-response curve (`fireWeatherResponse`, a hard threshold reaching
+    // exactly 0), which is exactly why a full gale used to kill the light
+    // outright while the flame SPRITES stayed at their own "mostly
+    // suppressed, never literally gone" floor: an author watching both at
+    // once saw the light as "far too strong" relative to what the flame body
+    // was actually doing. The light now reads `flameActiveCountMul` — the
+    // SAME fraction that sizes the sprite population — so it CANNOT reach a
+    // harder floor than the particles do, by construction.
+    const fire = { id: 'x', x: 0, y: 0, diameterPx: 20, intensity: 1, windExposure: 1 };
+    const calm = buildFireLightSources([fire], { tier: 3, mPerPx: M_PER_PX, windSpeed01: 0 });
+    const gale = buildFireLightSources([fire], { tier: 3, mPerPx: M_PER_PX, windSpeed01: 1 });
+    t.ok('a calm fire and a full-gale fire both still emit light', calm.length === 1 && gale.length === 1);
+    t.ok(
+      'a full gale dims the light well below the calm baseline',
+      gale[0].luminosity01 < calm[0].luminosity01 && gale[0].alpha01 < calm[0].alpha01
+    );
+
+    // A fire the author has marked immune to being blown out must dim LESS
+    // than one that can — matching the higher activeCount floor the SAME
+    // param gives the particles (`FLAME_GUTTER_COUNT_FLOOR_IMMUNE`).
+    const galeImmune = buildFireLightSources([fire], {
       tier: 3,
       mPerPx: M_PER_PX,
-      env: gale,
+      windSpeed01: 1,
+      canBeSnuffed: false,
     });
-    t.ok('a blown-out fire emits no light at all', lights.length === 0);
+    t.ok(
+      "canBeSnuffed:false dims the light less than a snuffable fire's identical gale",
+      galeImmune[0].alpha01 > gale[0].alpha01
+    );
+
+    // weatherResponse:0 must leave the light exactly at its calm reading —
+    // the SAME "ignores wind entirely" promise the particles now keep too.
+    const ignoresWind = buildFireLightSources([fire], {
+      tier: 3,
+      mPerPx: M_PER_PX,
+      windSpeed01: 1,
+      weatherResponse01: 0,
+    });
+    t.ok(
+      'weatherResponse01=0 leaves the light exactly at its calm reading regardless of wind speed',
+      near(ignoresWind[0].luminosity01, calm[0].luminosity01, 1e-9) &&
+        near(ignoresWind[0].alpha01, calm[0].alpha01, 1e-9)
+    );
   }
 
   // ── PARAMS → RUNTIME ───────────────────────────────────────────────────────

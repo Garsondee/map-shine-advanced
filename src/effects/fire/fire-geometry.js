@@ -765,6 +765,22 @@ export function fireShearSeconds(hK, heightPx, riseSpeedPx) {
 /**
  * Fold weather and wind into the scale chain's own terms.
  *
+ * ⚠️ ORPHANED FROM THE LIGHT, 2026-09-04 — KEPT FOR ITS OWN TESTED PHYSICS
+ * (`tempScale`/`heightScale`/`smokeScale`/`whiteness` were never live-consumed
+ * downstream of ANY caller to begin with — only the orphaned volumetric
+ * `fire-render.js` reads them), NOT CALLED LIVE FOR `alive01` ANY MORE either.
+ * `buildFireLightSources` used to read this function's `alive01` for the
+ * cast light's own wind-dimming; that reached a hard 0 (fully blown out) via
+ * a formula the live PARTICLE sprite count never agreed with, which is
+ * exactly why an author watching both at once saw the light "far too
+ * strong" relative to what the flame body itself was doing. It now reads
+ * `fireWindMotion01`/`fireWindParticleResponse`'s `flameActiveCountMul`
+ * instead — the SAME fraction that sizes the flame sprite population — so
+ * the two can no longer disagree. This function's own bellows/snuff physics
+ * are real V2-derived work with their own tests below and are left in place
+ * for the same reason `firePuffPhase`/`firePuffEnvelope` are (this file's
+ * own note on that pair, above).
+ *
  * ⚠️ ONE SCALAR PER FIRE PER FRAME. V2 sampled weather PER PARTICLE at spawn
  * (`fire-behaviors.js#applyFireParticleWorldSpawn`) and paid for it with a
  * rotating 1-in-5 slice that traded correctness for frame time. There is
@@ -968,9 +984,10 @@ export function deriveFireSeed(x, y) {
  * flicker — exactly how `candleClusterLightParams` computes candle's OWN
  * baseline once per cluster with no live phase in it at all. Baking a second,
  * independent pulse in here would double it: one rhythm from this function, an
- * unrelated one from the shader. `weather.alive01` stays — a fire dimming or
- * dying in a storm is a real state change, not decoration, and candle's own
- * baseline responds to its analogous input (`strength`) the same way.
+ * unrelated one from the shader. `alive01` stays — a fire dimming or guttering
+ * in a gale is a real state change, not decoration, and candle's own baseline
+ * responds to its analogous input (`strength`) the same way. `alive01` itself
+ * changed source 2026-09-04 — see this function's own body for why.
  *
  * ⚠️ `ownerEffectId` IS SET, unlike the candle's. `light.drawPointLights` and
  * `light.drawColoration` currently bill to NOBODY, which is precisely why
@@ -988,9 +1005,26 @@ export function deriveFireSeed(x, y) {
  *   `params/no-dead-controls` the whole time, because that wall checks the param
  *   is READ somewhere, not that the value it produces is USED
  *   (`feedback_unconsumed_api_rots_silently`).
+ * @param {number} [opts.windSpeed01=0] - `windHandle.ambient.speed01`'s
+ *   current `.value` — see {@link fireWindMotion01}.
+ * @param {number} [opts.windResponseGain=1] - `FIRE_PARAMS.windResponse`, 0..2.
+ * @param {number} [opts.weatherResponse01=1] - `FIRE_PARAMS.weatherResponse`, 0..1.
+ * @param {boolean} [opts.canBeSnuffed=true] - `FIRE_PARAMS.canBeSnuffed`.
  * @returns {Array<object>} light descriptors.
  */
-export function buildFireLightSources(sources, { tier, mPerPx, env = null, colorHex = null, radiusScale = 1 } = {}) {
+export function buildFireLightSources(
+  sources,
+  {
+    tier,
+    mPerPx,
+    colorHex = null,
+    radiusScale = 1,
+    windSpeed01 = 0,
+    windResponseGain = 1,
+    weatherResponse01 = 1,
+    canBeSnuffed = true,
+  } = {}
+) {
   const plan = fireTierPlan(tier);
   const list = Array.isArray(sources) ? sources : [];
   if (list.length === 0) return [];
@@ -1004,8 +1038,40 @@ export function buildFireLightSources(sources, { tier, mPerPx, env = null, color
   const out = [];
   for (const c of clusters) {
     const chain = fireScaleChain(c.diameterPx, mPerPx, { intensity: c.intensity });
-    const weather = fireWeatherResponse(chain, env, 1, c.exposure);
-    if (!(weather.alive01 > 0.02)) continue;
+    // ⚠️ `alive01` NOW COMES FROM THE SAME SIGNAL THAT SIZES THE FLAME SPRITE
+    // POPULATION (2026-09-04) — NOT a second, independent wind-response curve.
+    // Author, live: the light's own wind dimming was "far too strong" and
+    // needed to track "the number of fire particles being created and how
+    // many are alive in that area". The old `fireWeatherResponse(chain, env,
+    // 1, c.exposure).alive01` was a HARD THRESHOLD (exactly 1 below the
+    // fire's own `snuffWind`, then a steep drop to exactly 0) computed from a
+    // totally separate formula than `fireRuntimeFromParams`' particle
+    // `activeCount` — the two could (and did) disagree arbitrarily. Reusing
+    // `fireWindParticleResponse`'s `flameActiveCountMul` — the SAME fraction
+    // `fire-subsystem.js` multiplies into every flame engine's `activeCount`
+    // — makes the light dim in lockstep with the sprite population instead: a
+    // smooth ramp from the very start of the wind range (not a cliff late in
+    // it) that floors at 15%/55% (never a hard blowout, matching the sprites
+    // never fully vanishing either) rather than exactly 0. Computed PER
+    // CLUSTER, using that cluster's own `chain.snuffWind` and `c.exposure` —
+    // MORE precise than the particle engines get, which only have one
+    // map-wide representative fire to work from.
+    //
+    // ⚠️ THIS ALSO FIXES A SECOND DEAD-CONTROL GAP: the old call never routed
+    // through `applyWeatherResponseGain` (itself unreachable dead code — see
+    // that function's own header), so the light's dimming ignored BOTH
+    // `weatherResponse` ("at 0 it burns regardless") and `canBeSnuffed`
+    // ("whether a strong enough wind can put this fire out") entirely, the
+    // same gap `fireWindMotion01` already closed for the particles.
+    const windMotion01 = fireWindMotion01({
+      windSpeed01,
+      windExposure01: c.exposure,
+      windResponseGain,
+      weatherResponse01,
+      snuffWind: chain.snuffWind,
+    });
+    const alive01 = fireWindParticleResponse(windMotion01, canBeSnuffed).flameActiveCountMul;
+    if (!(alive01 > 0.02)) continue;
 
     const seed = deriveFireSeed(c.x, c.y);
 
@@ -1019,9 +1085,9 @@ export function buildFireLightSources(sources, { tier, mPerPx, env = null, color
     // The light pool builds a fan geometry from these and one NaN takes out the
     // whole batch (see `fireCirclePolygon`'s note). A dropped light is a missing
     // glow; a NaN light is a black screen and a console flood.
-    // `alive01` in place of the old live `envelope` — see this function's own
-    // header note on why the pulse moved to the GPU.
-    const alive01 = weather.alive01;
+    // `alive01` — computed above, from the SAME signal the particle sprite
+    // count uses, in place of the old live `envelope` (the pulse itself moved
+    // to the GPU long before this — see this function's own header note).
     // ⚠️ BASELINE DROPPED 0.5 → 0.12, 2026-09-02 (mythica-machina-press#475).
     // THE REAL ROOT CAUSE, found only after two earlier (real, but
     // insufficient) fixes — a live side-by-side the author ran nailed it: a

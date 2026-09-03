@@ -4,7 +4,7 @@
  * (`attachFineDrag`) is browser-verified live, same convention as every
  * other pointer-driven widget in this directory (CONVENTIONS.md §4).
  */
-import { computeFineDragValue, FINE_STEP_DIVISOR } from '../fine-drag.js';
+import { computeFineDragValue, createFineDragHandle, FINE_STEP_DIVISOR } from '../fine-drag.js';
 
 export function run(t) {
   const { ok } = t;
@@ -54,4 +54,13 @@ export function run(t) {
   // float tail into the readout or the committed value.
   const noisy = computeFineDragValue({ startValue: 0.1, deltaPx: 3, min: 0, max: 1, step: 0.1 });
   ok('rounds away float noise instead of returning something like 0.13999999999999999', noisy === 0.13);
+
+  // `integer: true` returns before touching `document` at all — the ONE
+  // corner of the handle factory that is pure enough to check without a
+  // browser (the rest is real DOM, verified live like every other widget in
+  // this directory — CONVENTIONS.md §4).
+  ok(
+    'an int-typed param gets no handle at all — there is nothing finer than its own step of 1 to offer',
+    createFineDragHandle({}, { integer: true }) === null
+  );
 }

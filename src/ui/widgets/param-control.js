@@ -26,7 +26,7 @@
  * @module ui/widgets/param-control
  */
 
-import { attachFineDrag } from './fine-drag.js';
+import { attachFineDrag, createFineDragHandle } from './fine-drag.js';
 
 // ---- shared visual language ------------------------------------------------
 // Three accent tiers mirror LANTERN's own `--shine`/`--shine-soft`/`--shine-
@@ -100,7 +100,8 @@ function buildRangeRow(id, decl, { value, onChange }) {
     onChange(decl.type === 'int' ? parseInt(input.value, 10) : parseFloat(input.value));
   });
   attachFineDrag(input, { integer: decl.type === 'int' });
-  wrap.append(labelSpan(decl, id), input, readout);
+  const handle = createFineDragHandle(input, { integer: decl.type === 'int' });
+  wrap.append(labelSpan(decl, id), input, ...(handle ? [handle] : []), readout);
   return wrap;
 }
 
@@ -504,6 +505,7 @@ export function buildInheritableRangeRow({
   });
   input.addEventListener('change', () => onDrag(parseFloat(input.value)));
   attachFineDrag(input);
+  const handle = createFineDragHandle(input);
   const resetBtn = styled('button', {
     pointerEvents: 'auto',
     border: 'none',
@@ -518,6 +520,6 @@ export function buildInheritableRangeRow({
   resetBtn.title = isOverridden ? 'Match all candles' : 'Already matching all candles';
   resetBtn.disabled = !isOverridden;
   resetBtn.addEventListener('click', () => onResetToShared());
-  wrap.append(labelEl, input, readout, resetBtn);
+  wrap.append(labelEl, input, handle, readout, resetBtn);
   return wrap;
 }

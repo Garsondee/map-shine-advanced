@@ -25,7 +25,7 @@
  * @module ui/widgets/vertical-fader
  */
 
-import { attachFineDrag } from './fine-drag.js';
+import { attachFineDrag, createFineDragHandle } from './fine-drag.js';
 
 const ACCENT = 'var(--shine, rgb(143,214,255))';
 const TEXT = 'var(--ink0, #dcecff)';
@@ -76,6 +76,7 @@ export function buildVerticalFader(id, decl, { value, onChange }) {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
+    gap: '3px',
   });
   // `accent-color` only paints the FILLED portion of the track plus the
   // thumb — the unfilled remainder falls back to the browser's own default,
@@ -106,9 +107,11 @@ export function buildVerticalFader(id, decl, { value, onChange }) {
     onChange(parseFloat(input.value));
   });
   // `axis: 'y'`: this range is visually vertical (writing-mode/direction
-  // trick above), so a Shift-drag must read the pointer's Y movement, not X.
+  // trick above), so a fine drag must read the pointer's Y movement, not X.
   attachFineDrag(input, { axis: 'y' });
   trackWrap.appendChild(input);
+  const handle = createFineDragHandle(input, { axis: 'y' });
+  trackWrap.appendChild(handle);
 
   const label = styled('span', {
     fontSize: '.64rem',

@@ -573,6 +573,26 @@ export function createFireSubsystem({
       return hasContent;
     },
     getStatus: () => ({ ...lastStatus, perEngine: engines.map(({ engine }) => engine.debugState()) }),
+    /**
+     * Fan a rebake out to every engine's own `updateWind` (2026-09-04) — until
+     * now NOTHING called this at all: `vt-pan-viewer.js`'s rebake dispatch
+     * refreshed the dust-mote and gust engines (`particleEngine?.updateWind`/
+     * `gustEngine?.updateWind`) but had no equivalent call for fire, whose
+     * own per-engine `updateWind` methods existed but were dead code. Harmless
+     * before 2026-09-04 (fire read only the live ambient direction/speed
+     * nodes, which need no refresh), but now that each engine also holds its
+     * own wind-cell storage buffer (real per-particle openness — see
+     * `fire-particle-runtime.js`'s own header), a wall/door edit after
+     * construction would otherwise leave that buffer's CONTENTS frozen at
+     * whatever the first bake produced forever. `engines` holds 6 live
+     * engines (4 flame archetypes + ember + smoke); each gets the identical
+     * handle, same as `sync()` already hands every one of them at
+     * construction.
+     * @param {object|null} nextHandle
+     */
+    updateWind(nextHandle) {
+      for (const { engine } of engines) engine.updateWind?.(nextHandle);
+    },
     dispose() {
       // ⚠️ There is no engine dispose path — `ParticleArena` allocates once and
       // never frees (`reference_bufferattribute_no_dispose_trap`: BufferAttribute

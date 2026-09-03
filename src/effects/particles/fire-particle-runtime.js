@@ -19,12 +19,26 @@
  * math it consumes (the sprite shapes, the colour spec, the spawn extraction)
  * stays in `effects/fire/` and is imported.
  *
- * ⚠️ THE SHARED WIND-GRID GLUE WAS NOT EXTRACTED, AND HERE IS WHY.
- * `gust-runtime.js:30` asks the THIRD particle effect to extract the duplicated
- * nearest-cell openness lookup ("two call sites is not yet a pattern"). This is
- * that third effect and it deliberately does not take the buffer at all — see
- * "WIND" below. There is still nothing to share; the extraction trigger fires
- * for the fourth consumer that genuinely needs a per-particle field read.
+ * ⚠️ THIS IS NOW THE FOURTH CONSUMER OF THE SHARED WIND-GRID GLUE
+ * (`world/wind-access.js#kernel`), 2026-09-04 — the extraction trigger
+ * `gust-runtime.js:30` named ("two call sites is not yet a pattern... the
+ * extraction trigger fires for the fourth consumer that genuinely needs a
+ * per-particle field read") finally firing. Author, live, after a map with
+ * both an indoor and an outdoor fire showed the map-wide CPU aggregate for
+ * exactly what it was: *"the solution isn't to make all fires 50% wind, it's
+ * to have the indoor/sheltered fires be low movement and the exposed/outdoors
+ * fires be moved... shouldn't we be testing the actual location?"* Wind
+ * MOTION (mobilisation + push) now samples `windHandle.kernel()`'s real,
+ * geometry-derived per-cell openness LIVE, at each particle's own current
+ * world position, every frame — the SAME mechanism vegetation and
+ * `gust-runtime.js`/dust motes already use, not a second, bespoke one — see
+ * "WIND" below for the construction-site wiring. Suppression (lifespan/
+ * population/opacity) stays a CPU-computed, per-kind, map-wide value —
+ * genuinely no per-particle home for it exists without storage this arena
+ * does not have room for (the wind-cell buffer added below already spends
+ * this arena's last free storage-buffer slot — see its own construction-site
+ * comment), and that limitation is real and left honestly in place rather
+ * than half-solved.
  *
  * ============================================================================
  * WHAT V2 GOT RIGHT THAT THIS COPIES EXACTLY
@@ -46,7 +60,7 @@
  * @module effects/particles/fire-particle-runtime
  */
 import { ParticleArena, BYTES_PER_PARTICLE } from './particle-arena.js';
-import { createWindHandle } from '../../world/index.js';
+import { createWindHandle, packWindCells, WIND_CELL_VEC4_STRIDE, deflectAroundWalls } from '../../world/index.js';
 import { createLogger } from '../../core/log.js';
 import { packSpawnPoints } from '../fire/fire-spawn-points.js';
 import { buildDepthHeightGateNode } from '../lighting/point-light-illumination.js';
@@ -297,6 +311,36 @@ export function createFireParticleEngine({
   const spawnBuffer = TSL.instancedArray(SPAWN_CAPACITY, 'vec4');
   const spawnBacking = spawnBuffer.value.array ?? spawnBuffer.value;
   let spawnCount = 0;
+
+  // ── THE WIND-CELL GRID (2026-09-04) — an EIGHTH buffer, and the LAST free
+  // slot. Six arena buffers (position/velocity/age/life/seed/custom — `phase`
+  // stays unreferenced, so it still doesn't bind) + spawnBuffer above = 7;
+  // this makes 8, the WebGPU-guaranteed floor per stage. There is no room
+  // left for anything else this runtime might want next without either
+  // dropping one of these or widening an existing buffer's own stride
+  // (`world/wind-access.js#WIND_CELL_VEC4_STRIDE`'s own trick) instead of
+  // adding a ninth object — a real, previously-hit failure mode
+  // (`fire-geometry.js`'s own "Vertex buffer count (12) exceeds..." history).
+  //
+  // Nearest-cell storage lookup, NOT a texture sample — the dot engine's own
+  // lesson (`particle-runtime.js:749`) applies identically here: compute-stage
+  // texture sampling has never been proven safe in this renderer. Mirrors
+  // `gust-runtime.js`'s identical construction-site block exactly, including
+  // its "no grid yet ⇒ stay null, kernel skips it" posture — an engine built
+  // before the first wind bake completes (or with wind wholly unwired) gets
+  // exactly today's ungated behaviour, not a crash.
+  let windOpennessBuffer = null;
+  let opnCols = 1;
+  let opnRows = 1;
+  let windHandleVersion = windHandle?.version ?? -1;
+  if (windHandle?.grid && windHandle?.cells) {
+    const { cols, rows } = windHandle.grid;
+    opnCols = cols;
+    opnRows = rows;
+    const cellCount = Math.max(1, cols * rows);
+    windOpennessBuffer = TSL.instancedArray(cellCount * WIND_CELL_VEC4_STRIDE, 'vec4');
+    packWindCells(windOpennessBuffer.value, windHandle.cells, cellCount);
+  }
 
   // ── UNIFORMS ─────────────────────────────────────────────────────────────
   const uDtSec = uniform(0);
@@ -558,19 +602,52 @@ export function createFireParticleEngine({
     const s = seed.element(i);
     const c = custom.element(i).toVar();
     const ageNow = age.element(i);
+
+    // ── THE REAL WIND GRID, SAMPLED LIVE AT THIS PARTICLE'S OWN POSITION
+    // (2026-09-04) — see the module header's own account of why. `openness`
+    // is the wind bake's real, geometry-derived answer to "can moving air
+    // reach exactly here" (walls/doors/enclosure — `world/wind-field.js`),
+    // read fresh every frame off `pos`, so an ember drifting from a hearth
+    // out through a doorway genuinely feels the transition rather than
+    // carrying one map-wide number for its whole life. `windOpennessBuffer`
+    // is null until a wind bake has actually produced one (see its own
+    // construction-site comment) — every read below degrades to "fully
+    // open", byte-identical to this runtime's pre-2026-09-04 behaviour.
+    let particleOpenness = float(1);
+    let wallAwayDirX = float(0);
+    let wallAwayDirY = float(0);
+    let wallProximity = float(0);
+    if (windOpennessBuffer) {
+      const cell = windHandle.kernel(TSL, { centerXY: pos, time: uTimeMs, cellBuffer: windOpennessBuffer });
+      particleOpenness = cell.openness;
+      wallAwayDirX = cell.wallAwayDirX;
+      wallAwayDirY = cell.wallAwayDirY;
+      wallProximity = cell.wallProximity;
+    }
+    // `uWindMotion01` is EXPOSURE-EXCLUDED now (fire-geometry.js#fireRuntimeFromParams's
+    // own note) — multiplying it by this particle's own real openness is what
+    // makes an indoor fire's flame stay calm while an outdoor one on the same
+    // map genuinely gets shoved, instead of every fire on the floor sharing
+    // one blended reading (the author's own "averaging is dumb" objection).
+    const effectiveWindMotion = uWindMotion01.mul(particleOpenness);
+
     // ⚠️ 95% of flame particles never move AT REST — V2's `flameStationaryFraction`,
     // and the signature of the whole look (a fire POOL should not translate).
     //
-    // ⚠️ MOBILISED BY WIND (2026-09-03) — the threshold SHRINKS toward 0 as
-    // `uWindMotion01` rises, so a full gale pulls more of the pool loose
-    // rather than leaving 95% welded down while only the original 5% gets
-    // shoved. Author: flame should be *"pushed around in a huge way"* at
-    // wind 1. Ember/smoke already ship `stationaryFraction: 0`, so this is an
-    // exact no-op for them (0 × anything is still 0) — only flame has a
-    // threshold to shrink.
+    // ⚠️ MOBILISED BY WIND (2026-09-03, now GATED BY REAL LOCAL OPENNESS
+    // 2026-09-04) — the threshold SHRINKS toward 0 as `effectiveWindMotion`
+    // rises, so a full gale pulls more of the pool loose rather than leaving
+    // 95% welded down while only the original 5% gets shoved — but only for
+    // particles whose OWN position genuinely feels that gale. Author: flame
+    // should be *"pushed around in a huge way"* at wind 1 — and only "the
+    // exposed/outdoors fires be moved". Ember/smoke already ship
+    // `stationaryFraction: 0`, so this is an exact no-op for them (0 ×
+    // anything is still 0) — only flame has a threshold to shrink.
     //
     // Derived per life rather than stored, so `custom.w` can hold height.
-    const effectiveStationary = float(K.stationaryFraction).mul(float(1).sub(uWindMotion01)).clamp(float(0), float(1));
+    const effectiveStationary = float(K.stationaryFraction)
+      .mul(float(1).sub(effectiveWindMotion))
+      .clamp(float(0), float(1));
     const motionScale = lifeRandomOf(s, ageNow, 29.0).step(effectiveStationary);
 
     // ── FORCES ──
@@ -585,9 +662,10 @@ export function createFireParticleEngine({
       .mul(float(K.curlTimeScale))
       .add(s.mul(float(K.curlPhasePerSeed ?? 0)));
     const curl = fakeCurl(pos, tSec).mul(motionScale).mul(uChaosScale);
-    // Wind: a single ambient vector, not a per-particle field sample — V2 used
-    // one frame-global wind scalar, and matching that is what lets this runtime
-    // skip the openness grid buffer entirely (see the header).
+    // Wind direction and MAGNITUDE-SHAPE stay a single ambient computation —
+    // V2's own one frame-global wind scalar — but the STRENGTH that reaches
+    // this particular particle is now real, per-position openness (above),
+    // not a map-wide aggregate. See the module header's own account.
     //
     // ⚠️ THE ANGLE FORMULA IS `(sin, −cos)`, DELIBERATELY NOT `world/wind-field.js`'s
     // `(cos, sin)` — this is the ONE PLACE the two are allowed to disagree, and
@@ -613,20 +691,40 @@ export function createFireParticleEngine({
     // scene the GM can actually verify by eye.
     //
     // ⚠️ THE GUST CURVE IS SUPERLINEAR, DELIBERATELY (2026-09-03) — a flat
-    // multiply by `uWindMotion01` reads as merely "more wind"; passes through
-    // exactly 0 at `uWindMotion01=0` and grows to `WIND_GUST_MAX_MULT`× a
-    // flat-linear response at 1, so calm stays calm and only the top of the
-    // dial gets dramatic. See WIND_GUST_MAX_MULT's own header.
+    // multiply by `effectiveWindMotion` reads as merely "more wind"; passes
+    // through exactly 0 at `effectiveWindMotion=0` and grows to
+    // `WIND_GUST_MAX_MULT`× a flat-linear response at 1, so calm stays calm
+    // and only the top of the dial gets dramatic. See WIND_GUST_MAX_MULT's
+    // own header.
     const windRad = uWindDirDeg.mul(float(Math.PI / 180));
-    const gustPush = uWindMotion01.mul(float(1).add(uWindMotion01.mul(float(WIND_GUST_MAX_MULT - 1))));
-    const windVec = vec2(sin(windRad), cos(windRad).negate()).mul(gustPush).mul(windPxPerSec).mul(motionScale);
+    const gustPush = effectiveWindMotion.mul(float(1).add(effectiveWindMotion.mul(float(WIND_GUST_MAX_MULT - 1))));
+    let windDirVec = vec2(sin(windRad), cos(windRad).negate());
+    // WALL DEFLECTION (2026-09-04) — a free bonus of sampling the real grid
+    // above: `deflectAroundWalls` is a purely geometric push-away-from-the-
+    // wall-surface operation on a raw world-space (x,y) vector, so it composes
+    // correctly with OUR OWN compass-dial-matching direction regardless of
+    // that vector's own angle convention (unlike `windHandle.kernel()`'s own
+    // `coherent` term, which is NOT used here — see the mismatch note above;
+    // taking its direction would silently re-break mythica-machina-press#485).
+    // A particle's wind now genuinely curls around a nearby wall corner
+    // instead of blowing straight through it.
+    if (windOpennessBuffer) {
+      windDirVec = deflectAroundWalls(TSL, {
+        vector: windDirVec,
+        awayDirX: wallAwayDirX,
+        awayDirY: wallAwayDirY,
+        proximity: wallProximity,
+      });
+    }
+    const windVec = windDirVec.mul(gustPush).mul(windPxPerSec).mul(motionScale);
     // Buoyancy: +Y (up-SCREEN) for smoke UNCONDITIONALLY — see the KINDS
     // note — plus flame's own CALM-ONLY rise (2026-09-03, `calmRiseY`): a
     // gentle upward drift on the already-mobile tips, strongest at rest for
     // depth/3D and fading out as wind rises so a gale reads as sideways, not
     // upward. Ember/smoke ship `calmRiseY: 0`, so the second term is an
-    // exact no-op for them.
-    const calmFade = float(1).sub(uWindMotion01);
+    // exact no-op for them. Fades on THIS particle's own local wind, not the
+    // map-wide ceiling, for the same reason `effectiveStationary` does above.
+    const calmFade = float(1).sub(effectiveWindMotion);
     const buoyancy = vec2(0, float(-K.buoyancyY * 60).sub(float((K.calmRiseY ?? 0) * 60).mul(calmFade))).mul(
       motionScale
     );
@@ -912,13 +1010,40 @@ export function createFireParticleEngine({
     },
     updateWind(nextHandle) {
       // `uWindDirDeg` is read BY REFERENCE, so a direction change needs no
-      // push at all. Speed/exposure/response no longer are (2026-09-03) —
-      // see `uWindMotion01`'s own header — they arrive through `setParams`
-      // every frame instead, driven by `fire-subsystem.js`'s own fresh read
-      // of this same handle. Only a rebake that mints a NEW handle object
-      // matters here, and this runtime holds no baked grid to resize — so
-      // there is nothing to do but note it. Kept as a method so the viewer
-      // can call it uniformly alongside the other two engines.
+      // push at all. Speed/response/gate no longer are (2026-09-03) — see
+      // `uWindMotion01`'s own header — they arrive through `setParams` every
+      // frame instead, driven by `fire-subsystem.js`'s own fresh read of this
+      // same handle.
+      //
+      // ⚠️ THE WIND-CELL BUFFER'S CONTENTS DO NEED A REAL REFRESH NOW
+      // (2026-09-04) — mirrors `gust-runtime.js#updateWind` exactly,
+      // including its "refresh in place, refuse a genuine regrid" posture.
+      // Unlike a material (which bakes the grid spec in as build-time
+      // constants and must be rebuilt), this engine's storage buffer can be
+      // overwritten IN PLACE, because cols/rows are stable across an
+      // ordinary rebake — only a wall/door edit changing the CONTENTS, not
+      // the scene/grid-size changing the SHAPE. A genuine regrid is refused
+      // loudly rather than hot-patched: the buffer would need reallocating
+      // and every particle-position→cell-index computation above was baked
+      // against `windHandle`'s OWN grid-spec constants (`kernel()`'s own
+      // closure, not reassigned here — see below).
+      if (windOpennessBuffer && nextHandle?.grid && nextHandle?.cells && nextHandle.version !== windHandleVersion) {
+        const { cols, rows } = nextHandle.grid;
+        if (cols !== opnCols || rows !== opnRows) {
+          log.error(
+            `${kind}: wind grid size changed (${opnCols}x${opnRows} -> ${cols}x${rows}) — ignoring this rebake ` +
+              '(the storage buffer would need reallocating; other wind-reading materials still update).'
+          );
+        } else {
+          packWindCells(windOpennessBuffer.value, nextHandle.cells, cols * rows);
+          windHandleVersion = nextHandle.version;
+        }
+      }
+      // The closure's own `windHandle` is DELIBERATELY never reassigned —
+      // same reason gust-runtime.js's isn't: its `.kernel()` method's
+      // origin/cellSize/cols/rows are build-time constants baked at
+      // CONSTRUCTION, and those stay valid across any rebake this branch
+      // didn't just refuse. Only the DATA the buffer holds needed updating.
       if (nextHandle && nextHandle !== windHandle) {
         log.info(`${kind}: wind handle changed; direction is read by reference, no regrid needed`);
       }
@@ -935,6 +1060,7 @@ export function createFireParticleEngine({
         activeCount: uActiveCount.value,
         camHeight: uCamHeight.value,
         windMotion01: uWindMotion01.value,
+        hasOpennessGrid: !!windOpennessBuffer,
       };
     },
   };

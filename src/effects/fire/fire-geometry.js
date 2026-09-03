@@ -1362,8 +1362,8 @@ export function fireWindParticleResponse(windMotion01, canBeSnuffed = true) {
  * @param {object} params - a resolved param bag (`effect-cascade.js#resolveEffectParams`).
  * @param {object} chain - from {@link fireScaleChain}.
  * @param {object} [wind] - `{speed01, exposure01}`. Omitted (the default for
- *   every pre-existing call site and test) resolves `windMotion01` to exactly
- *   0 — byte-identical to before this parameter existed.
+ *   every pre-existing call site and test) resolves both wind signals below
+ *   to exactly 0 — byte-identical to before this parameter existed.
  * @returns {object} plain numbers, ready to assign to uniforms.
  */
 export function fireRuntimeFromParams(params = {}, chain = {}, wind = {}) {
@@ -1374,17 +1374,45 @@ export function fireRuntimeFromParams(params = {}, chain = {}, wind = {}) {
   const weatherResponse = clampNum(num(p.weatherResponse, 1), 0, 1);
   const windResponseGain = clampNum(num(p.windResponse, 1), 0, 2);
   const canBeSnuffed = bool(p.canBeSnuffed, true);
-  // THE ONE PARTICLE WIND SIGNAL — see fireWindMotion01's own header for why
-  // weatherResponse GATES rather than dampens, and why windResponse is read
-  // here at all (a dead control until this call site existed).
-  const windMotion01 = fireWindMotion01({
+  // ⚠️ TWO WIND SIGNALS, DELIBERATELY, SINCE 2026-09-04 — NOT ONE READ TWICE.
+  // Author, live: "test the actual location of the fire... indoor/sheltered
+  // fires be low movement, exposed/outdoors fires be moved" — a single
+  // map-wide exposure number (however it's aggregated) makes every fire on
+  // the floor share one wind reading, which is exactly what was wrong.
+  //
+  //   `windMotionForSuppression01` — EXPOSURE INCLUDED (the map-wide
+  //   representative-fire aggregate `wind.exposure01` already carries, from
+  //   `fire-subsystem.js`). Feeds ONLY `fireWindParticleResponse` below —
+  //   lifespan/population/opacity are CPU-computed once per kind and shared
+  //   across the whole map-wide particle arena, so there is genuinely no
+  //   per-particle home for them without a much larger rearchitecture (see
+  //   fire-particle-runtime.js's own header on the arena's buffer budget).
+  //
+  //   `windMotion01` — EXPOSURE EXCLUDED (fixed to 1). This is the value
+  //   forwarded to every engine's `uWindMotion01` uniform, which now supplies
+  //   only speed/gain/gate/size-normalisation; the kernel multiplies it by
+  //   REAL per-particle exposure sampled live from the wind bake's own
+  //   geometry-derived openness grid (`windHandle.kernel()`, the SAME
+  //   mechanism vegetation/gust-runtime.js/dust motes already use) — see that
+  //   file's own construction-site comment. Including exposure here TOO would
+  //   double-count it: a genuinely sheltered lone fire would read its own low
+  //   exposure from BOTH this term and the per-particle sample and square the
+  //   dampening, suppressing it far harder than either signal alone intends.
+  const windMotionForSuppression01 = fireWindMotion01({
     windSpeed01: wind?.speed01,
     windExposure01: wind?.exposure01,
     windResponseGain,
     weatherResponse01: weatherResponse,
     snuffWind: chain?.snuffWind,
   });
-  const windFx = fireWindParticleResponse(windMotion01, canBeSnuffed);
+  const windMotion01 = fireWindMotion01({
+    windSpeed01: wind?.speed01,
+    windExposure01: 1,
+    windResponseGain,
+    weatherResponse01: weatherResponse,
+    snuffWind: chain?.snuffWind,
+  });
+  const windFx = fireWindParticleResponse(windMotionForSuppression01, canBeSnuffed);
   return {
     // Material uniforms.
     intensity: clampNum(num(p.brightness, 1), 0, 3),
@@ -1504,7 +1532,10 @@ export function fireRuntimeFromParams(params = {}, chain = {}, wind = {}) {
     // this to every engine's setParams (flame/ember/smoke alike), which is
     // what lets ember and smoke inherit the same gust push flame gets, and
     // lets the particle kernel fade flame's own calm-air upward drift as
-    // wind rises (see fire-particle-runtime.js's uWindMotion01).
+    // wind rises. EXPOSURE-EXCLUDED (see this function's own note, above) —
+    // the kernel supplies the real, per-particle exposure itself
+    // (fire-particle-runtime.js's `uWindMotion01`, multiplied by a live
+    // `windHandle.kernel()` sample at each particle's own position).
     windMotion01,
   };
 }

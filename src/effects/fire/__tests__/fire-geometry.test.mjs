@@ -766,6 +766,29 @@ export function run(t) {
       'runtime.windMotion01 is exposed for fire-subsystem.js to forward to every engine',
       fullWind.windMotion01 > 0.9
     );
+
+    // ⚠️ THE SPLIT (2026-09-04) — author, live: "test the actual location...
+    // indoor/sheltered fires low movement, exposed/outdoors fires moved", not
+    // one map-wide number every fire shares. `windMotion01` (returned here,
+    // forwarded to every particle engine's `uWindMotion01`) is now
+    // EXPOSURE-EXCLUDED on purpose — the kernel supplies REAL per-particle
+    // exposure itself, sampled live from the wind bake's own geometry
+    // (`fire-particle-runtime.js`'s own header). Baking the CPU-side
+    // aggregate exposure in HERE TOO would double-count it for any fire
+    // whose own exposure is the map's only (or lowest) one. Suppression
+    // (lifeScale/activeCount) has no per-particle home to move into (a
+    // necessarily shared, map-wide arena — see that same header) and so
+    // correctly KEEPS reading exposure.
+    const fullWindSealed = fireRuntimeFromParams({}, chain66, { speed01: 1, exposure01: 0 });
+    t.ok(
+      'windMotion01 is IDENTICAL whether the representative fire is fully exposed or fully sealed — exposure moved to the kernel',
+      fullWindSealed.windMotion01 === fullWind.windMotion01
+    );
+    t.ok(
+      'flame lifeScale/activeCount, by contrast, still differ with exposure — suppression stays exposure-aware',
+      fullWindSealed.perKind.flame.lifeScale !== fullWind.perKind.flame.lifeScale &&
+        fullWindSealed.perKind.flame.lifeScale > fullWind.perKind.flame.lifeScale
+    );
   }
 
   // ── COLOUR CC (2026-08-30) — color/posterize/bandCount/colorHueShift ───────

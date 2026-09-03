@@ -5120,6 +5120,12 @@ export async function startVtPanViewer({
         // The gust engine reads the SAME handle; refresh it identically
         // (a no-op until it has been constructed, same as the particle engine).
         gustEngine?.updateWind(windHandle);
+        // Fire's own flame/ember/smoke engines now hold the SAME kind of
+        // wind-cell buffer (mythica-machina-press#485 follow-up, 2026-09-04
+        // — real per-particle openness, not a map-wide aggregate). This call
+        // was missing entirely before; fire's own per-engine `updateWind`
+        // existed but nothing ever invoked it.
+        fireSubsystem?.updateWind(windHandle);
 
         // DIAGNOSTICS — a direct INSTRUMENT, not a guess
         // (feedback_instruments_must_not_lie): how much of the mapped area

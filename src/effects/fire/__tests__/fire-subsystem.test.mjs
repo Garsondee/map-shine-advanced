@@ -505,11 +505,15 @@ export function run(t) {
           renderOrder,
           scene: { visible: true, renderOrder: 0 },
           paramCalls: [],
+          updateWindCalls: [],
           setSpawnPoints() {},
           setParams(p) {
             e.paramCalls.push(p);
           },
           step() {},
+          updateWind(nextHandle) {
+            e.updateWindCalls.push(nextHandle);
+          },
           debugState: () => ({ kind, archetype }),
         };
         windEngines.push(e);
@@ -518,6 +522,22 @@ export function run(t) {
     });
 
     windSubsystem.sync(renderer, 0, 0.016, rect);
+
+    // ⚠️ THE FAN-OUT (2026-09-04) — `createFireSubsystem`'s own `updateWind`
+    // is the ONLY thing that reaches every one of fire's 6 engines' own
+    // `updateWind` at all; nothing called it before this existed (see
+    // fire-subsystem.js's own header note — the per-engine method was dead
+    // code, unlike the dust/gust engines' identical methods, which
+    // vt-pan-viewer.js's rebake dispatch already called directly). Engines
+    // are built lazily inside `sync()` (`ensureEngines`), so this has to run
+    // AFTER the first sync above, not before — `windEngines` is empty until
+    // then.
+    windSubsystem.updateWind(fakeWindHandle);
+    t.ok(
+      'subsystem.updateWind fans out to every engine (4 flame archetypes + ember + smoke)',
+      windEngines.length === 6 && windEngines.every((e) => e.updateWindCalls.at(-1) === fakeWindHandle)
+    );
+
     t.ok(
       'a calm wind handle (speed01=0) reaches every engine as windMotion01=0',
       windEngines.every((e) => e.paramCalls.at(-1)?.windMotion01 === 0)
@@ -541,35 +561,78 @@ export function run(t) {
         .every((e) => e.paramCalls.at(-1)?.lifeScale !== e.paramCalls.at(-2)?.lifeScale)
     );
 
-    // A sealed room (windExposure=0 on the representative fire) must stay
-    // wind-immune through the REAL fires[0].windExposure wiring, not just in
-    // fireWindMotion01's own isolated unit test.
-    windState.fires = [{ id: 'f1', x: 50, y: 50, diameterPx: 66, intensity: 1, windExposure: 0 }];
+    // ⚠️ REWRITTEN 2026-09-04 — MOTION (uWindMotion01, what reaches setParams
+    // here) is now DELIBERATELY EXPOSURE-INDEPENDENT. Author, live, on a map
+    // with more than one fire: "test the actual location... the indoor/
+    // sheltered fires be low movement, the exposed/outdoors fires be moved"
+    // — not a single map-wide number every fire's particles share. That real
+    // per-location gating now lives ENTIRELY inside the particle kernel
+    // (`fire-particle-runtime.js` samples `windHandle.kernel()` live, at each
+    // particle's own current world position — the SAME mechanism vegetation/
+    // gust-runtime.js already use), which this CPU-only fake-engine harness
+    // cannot observe. What CAN be proven here is the CPU-side contract that
+    // makes that kernel behaviour correct: `windMotion01` must NOT vary with
+    // `fires[].windExposure` at all (baking exposure in here would DOUBLE-
+    // COUNT it against the kernel's own per-particle sample — see
+    // `fire-geometry.js#fireRuntimeFromParams`'s own note on exactly this).
+    const exposedFire = { id: 'f1', x: 50, y: 50, diameterPx: 66, intensity: 1, windExposure: 1 };
+    const sealedFire = { id: 'f1', x: 50, y: 50, diameterPx: 66, intensity: 1, windExposure: 0 };
+    windState.fires = [exposedFire];
     windSubsystem.sync(renderer, 32, 0.016, rect);
+    const windMotionExposed = windEngines[0]?.paramCalls.at(-1)?.windMotion01;
+    windState.fires = [sealedFire];
+    windSubsystem.sync(renderer, 40, 0.016, rect);
+    const windMotionSealed = windEngines[0]?.paramCalls.at(-1)?.windMotion01;
     t.ok(
-      'a sealed fire (fires[0].windExposure=0) reads windMotion01=0 even at full scene wind speed',
-      windEngines.every((e) => e.paramCalls.at(-1)?.windMotion01 === 0)
+      "windMotion01 (the kernel-facing value) is identical whether the representative fire's own windExposure is 1 or 0 — exposure is no longer baked in here",
+      Number.isFinite(windMotionExposed) && windMotionExposed === windMotionSealed
     );
 
-    // ⚠️ THE REAL BUG (2026-09-04) — author, live, on a map with more than one
-    // fire: an outdoor fire "isn't reacting to wind" while vegetation on the
-    // SAME scene reacted fine. `extractFiresFromMask` (fire-mask.js) sorts
-    // fires WIDEST-FIRST, with no relationship to indoor/outdoor — so a wider
-    // INDOOR fire elsewhere on the floor can land at `fires[0]` ahead of the
-    // outdoor one the author is actually looking at, and that indoor fire's
-    // own correctly-low `windExposure` used to get broadcast to the WHOLE
-    // map's shared particle engines. `f1` here is the wide indoor fire
-    // (`windExposure: 0`, and — as the widest — the one a naive `fires[0]`
-    // read would have picked); `f2` is the narrower outdoor one
-    // (`windExposure: 1`) the author is actually watching burn.
+    // SUPPRESSION (lifeScale/activeCount — the OTHER thing wind drives, still
+    // a necessarily map-wide CPU aggregate, see fire-particle-runtime.js's
+    // own header on why activeCount genuinely cannot be made per-particle)
+    // must STILL respond to exposure — this is `windMotionForSuppression01`,
+    // a SEPARATE internal computation from `windMotion01` above, and this is
+    // its own proof that splitting the two didn't quietly drop the exposure
+    // awareness the previous commit's fix relied on.
+    const flameSealed = windEngines.find((e) => e.kind === 'flame');
+    const lifeScaleSealed = flameSealed?.paramCalls.at(-1)?.lifeScale;
+    windState.fires = [exposedFire];
+    windSubsystem.sync(renderer, 48, 0.016, rect);
+    const lifeScaleExposed = flameSealed?.paramCalls.at(-1)?.lifeScale;
+    t.ok(
+      `flame lifeScale still responds to windExposure (suppression stays exposure-aware even though motion no longer is) — sealed=${lifeScaleSealed}, exposed=${lifeScaleExposed}`,
+      Number.isFinite(lifeScaleSealed) && Number.isFinite(lifeScaleExposed) && lifeScaleSealed !== lifeScaleExposed
+    );
+
+    // ⚠️ THE ORIGINAL REPORTED BUG (2026-09-04) — author, live, on a map with
+    // more than one fire: an outdoor fire "isn't reacting to wind" while
+    // vegetation on the SAME scene reacted fine. `extractFiresFromMask`
+    // (fire-mask.js) sorts fires WIDEST-FIRST, with no relationship to
+    // indoor/outdoor — so a wider INDOOR fire elsewhere on the floor can land
+    // at `fires[0]` ahead of the outdoor one the author is actually looking
+    // at. The FIX for the symptom as originally reported (motion) is the
+    // live per-particle kernel sample above, not observable here; what
+    // remains true and IS observable at this layer is that the map-wide
+    // aggregate this fix's predecessor built (MAX exposure across fires, not
+    // an arbitrary single one's) still reaches `setParams` for the
+    // suppression side. `f1` is the wide indoor fire (windExposure: 0, and —
+    // as the widest — the one a naive `fires[0]` read would have picked);
+    // `f2` is the narrower outdoor one (windExposure: 1).
+    windState.fires = [{ id: 'f1', x: 10, y: 10, diameterPx: 200, intensity: 1, windExposure: 0 }];
+    windSubsystem.sync(renderer, 56, 0.016, rect);
+    const lifeScaleIndoorOnly = flameSealed?.paramCalls.at(-1)?.lifeScale;
     windState.fires = [
       { id: 'f1', x: 10, y: 10, diameterPx: 200, intensity: 1, windExposure: 0 },
       { id: 'f2', x: 500, y: 500, diameterPx: 40, intensity: 1, windExposure: 1 },
     ];
-    windSubsystem.sync(renderer, 48, 0.016, rect);
+    windSubsystem.sync(renderer, 64, 0.016, rect);
+    const lifeScaleWithOutdoor = flameSealed?.paramCalls.at(-1)?.lifeScale;
     t.ok(
-      'a wider INDOOR fire at fires[0] no longer silences wind for a narrower OUTDOOR fire elsewhere on the floor',
-      windEngines.every((e) => (e.paramCalls.at(-1)?.windMotion01 ?? 0) > 0)
+      `adding a narrower OUTDOOR fire alongside a wider INDOOR one still moves suppression — MAX exposure, not fires[0]'s own (indoor-only=${lifeScaleIndoorOnly}, with-outdoor=${lifeScaleWithOutdoor})`,
+      Number.isFinite(lifeScaleIndoorOnly) &&
+        Number.isFinite(lifeScaleWithOutdoor) &&
+        lifeScaleWithOutdoor !== lifeScaleIndoorOnly
     );
   }
 }

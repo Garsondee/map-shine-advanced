@@ -40,6 +40,15 @@
  * comment), and that limitation is real and left honestly in place rather
  * than half-solved.
  *
+ * ⚠️ PUSH MAGNITUDE IS NOW SELF-SCALED TO SPRITE SIZE, NOT GRID-CALIBRATED,
+ * 2026-09-04, ROUND 6 — an audit of the original `pxPerMeter`-based formula
+ * (the author, live: *"audit the wind grid and see if the values it produces
+ * ... would be enough to move flames ... at least x5 their size"*) found it
+ * landing anywhere from ~0.6× to ~6× a flame sprite's own size depending on
+ * a Foundry grid setting this file cannot verify — a real magnitude
+ * shortfall, independent of the openness grid entirely. See
+ * `windAccelPerUnitSize`'s own construction-site note for the fix.
+ *
  * ============================================================================
  * WHAT V2 GOT RIGHT THAT THIS COPIES EXACTLY
  * ============================================================================
@@ -131,6 +140,19 @@ const KINDS = Object.freeze({
     // Small on purpose relative to smoke's own 0.947×0.8 ≈ 0.76 — a wisp of
     // lift on the tips, not a current.
     calmRiseY: 0.35,
+    // ⚠️ ADDED 2026-09-04, ROUND 6 — see `windAccelPerUnitSize`'s own
+    // construction-site note for the full derivation. `windWorstCaseLifeS` is
+    // flame's shortest REPRESENTATIVE life while genuinely windy: `lifeMsMin`
+    // (2400ms) × `FLAME_GUTTER_LIFE_MUL` (0.3, `fire-geometry.js`) = 720ms —
+    // not the absolute dimmest-particle floor (brightness can shorten a life
+    // further still; solving for that outlier would fling every ordinary
+    // particle absurdly far). `windSizesTarget` is the guaranteed MINIMUM
+    // displacement within that life, in multiples of flame's own rendered
+    // sprite size — the author's own explicit bar ("at least x5 their size or
+    // more") plus headroom for curl/motionScale diluting the real-world
+    // average below this idealised, curl-free solve.
+    windWorstCaseLifeS: 0.72,
+    windSizesTarget: 6,
   }),
   ember: Object.freeze({
     lifeMsMin: 367,
@@ -177,6 +199,16 @@ const KINDS = Object.freeze({
     // Already fully mobile with its own strong upward riseZ/chaos — no
     // separate calm-only term needed. See flame's own note above.
     calmRiseY: 0,
+    // See flame's own note above for the derivation. Embers have NO wind-
+    // driven life shortening at all (`fireWindParticleResponse` returns no
+    // ember field), so the worst case is just their own shortest natural life
+    // (`lifeMsMin`). `windSizesTarget` is set far higher than flame's:
+    // embers are tiny (2.3-8.7px), and the author's repeated, explicit ask
+    // was that embers be *"strongly"* wind-affected — a spark that only
+    // crosses a few multiples of its own few-pixel size does not read as
+    // windblown at any zoom level a GM actually plays at.
+    windWorstCaseLifeS: 0.367,
+    windSizesTarget: 18,
   }),
   smoke: Object.freeze({
     lifeMsMin: 1033,
@@ -207,6 +239,15 @@ const KINDS = Object.freeze({
     // Already has its own unconditional buoyancyY, above — see that field's
     // own note on why it does NOT fade with wind the way flame's does.
     calmRiseY: 0,
+    // See flame's own note above. Smoke's PARTICLE COUNT is what wind
+    // suppresses (`smokeActiveCountMul`), not individual life, so the worst
+    // case is its own shortest natural life (`lifeMsMin`). A modest target —
+    // smoke is already fading toward zero count as wind climbs toward 1 (the
+    // author's original "zero smoke at wind 1" ask), so how far a lone
+    // survivor travels matters less at the extreme than at moderate wind,
+    // where `effectiveWindMotion` self-throttles this anyway.
+    windWorstCaseLifeS: 1.033,
+    windSizesTarget: 4,
   }),
 });
 
@@ -229,6 +270,16 @@ const SPAWN_CAPACITY = 1024;
  * strength."* Real openness readings are rarely a clean 1.0 (see
  * `opennessGain`'s own note), so the ceiling this constant reaches needs to
  * cover that shortfall on top of its original job.
+ *
+ * ⚠️ ROLE NARROWED, 2026-09-04, ROUND 6 — since `windAccelPerUnitSize`
+ * (construction site) took over the actual PUSH MAGNITUDE (self-scaled to
+ * sprite size, replacing the old `pxPerMeter`-based `windPxPerSec`), this
+ * constant is purely a SHAPE control again, exactly as its opening paragraph
+ * always described: the update kernel divides `gustPush` by this same value
+ * before scaling it against the real magnitude, so raising or lowering it
+ * only changes how "front-loaded vs. dramatic-at-the-top" the curve feels
+ * between calm and full wind — it no longer changes how far a particle
+ * travels at `effectiveWindMotion = 1`.
  */
 const WIND_GUST_MAX_MULT = 8;
 
@@ -282,7 +333,6 @@ const PERSPECTIVE_CAMERA_HEIGHT = 1000;
  *   accident, not on this value). Taking it here, at the one place the mesh
  *   actually gets constructed, is what makes it real.
  * @param {object} [deps.windHandle]
- * @param {number} [deps.pxPerMeter=100]
  * @param {*} [deps.depthTexNode] - `buf:scene.depth`'s DEPTH attachment (the
  *   SAME node candle/lightning already read — see candle-flame-render.js's own
  *   depth-authority doc). Omitted → the occlusion gate compiles out entirely,
@@ -301,7 +351,6 @@ export function createFireParticleEngine({
   zDepth = 0,
   renderOrder = 0,
   windHandle = TIER0_WIND_HANDLE,
-  pxPerMeter = 100,
   depthTexNode = null,
   depthFlagsTexNode = null,
 }) {
@@ -370,6 +419,40 @@ export function createFireParticleEngine({
     windOpennessBuffer = TSL.instancedArray(cellCount * WIND_CELL_VEC4_STRIDE, 'vec4');
     packWindCells(windOpennessBuffer.value, windHandle.cells, cellCount);
   }
+
+  // ⚠️ SELF-SCALING WIND PUSH MAGNITUDE (2026-09-04, ROUND 6) — replaces the
+  // old `pxPerMeter`-calibrated `windPxPerSec`. Audited live, on the author's
+  // explicit ask ("audit the wind grid and see if the values it produces...
+  // would be enough to move flames... at least x5 their size"): `pxPerMeter`
+  // (fed from Foundry's `canvas.dimensions.distancePixels`, a GRID-DISTANCE
+  // scale — pixels per one grid-square's configured distance, e.g. "per 5 ft"
+  // — not a verified real-world "pixels per metre") could plausibly be
+  // anywhere from ~20 to ~100 depending on the scene's own grid setup, and
+  // running the exact closed-form solution for a damped particle under
+  // constant acceleration (`x(t) = (a/k)·[t − (1/k)(1 − e^-kt)]`, `k` =
+  // `K.dampK`) across that whole range showed flame's displacement landing
+  // anywhere from ~0.6× to ~6× its own sprite size at full wind — genuinely
+  // insufficient across a large share of the plausible range, and only
+  // marginal even at the generous end. Not a rendering confound, not a
+  // suppression-curve bug: an actual magnitude shortfall in the formula
+  // itself, present regardless of anything the openness grid reads.
+  //
+  // The fix: stop depending on a grid constant this file has no way to
+  // verify, and solve DIRECTLY for the acceleration that GUARANTEES
+  // `K.windSizesTarget` × (this kind's own rendered sprite size) of
+  // displacement within `K.windWorstCaseLifeS`, at full `effectiveWindMotion`
+  // — self-scaling to what the particle actually looks like on screen,
+  // correct regardless of the scene's grid configuration. Inverting the same
+  // closed form for `a`:
+  //   a = target·sizePx · k / [t − (1/k)(1 − e^-kt)]
+  // Computed once here at construction (`K.dampK` and the two new KINDS
+  // fields, `windWorstCaseLifeS`/`windSizesTarget`, are all static per kind),
+  // leaving only the one genuinely LIVE part — `uSizeScale`, the author's own
+  // size dial — to apply inside the kernel. See the update kernel's own
+  // `windVec` for how `WIND_GUST_MAX_MULT` still shapes the curve on top of
+  // this fixed ceiling.
+  const windBracketS = K.windWorstCaseLifeS - (1 / K.dampK) * (1 - Math.exp(-K.dampK * K.windWorstCaseLifeS));
+  const windAccelPerUnitSize = (K.windSizesTarget / windBracketS) * K.dampK;
 
   // ── UNIFORMS ─────────────────────────────────────────────────────────────
   const uDtSec = uniform(0);
@@ -479,8 +562,6 @@ export function createFireParticleEngine({
   // only: magnitude comes from `uWindMotion01` below, not this raw speed —
   // see that uniform's own header for why.
   const uWindDirDeg = windHandle?.ambient ? windHandle.ambient.directionDeg : float(0);
-  // Construction-time constant, not a uniform: `pxPerMeter` cannot change mid-session.
-  const windPxPerSec = float(pxPerMeter * 3.2);
   /**
    * THE PARTICLE WIND SIGNAL (fire-geometry.js#fireWindMotion01) — the raw
    * ambient speed already gained by the effect's own `windResponse` dial,
@@ -646,6 +727,14 @@ export function createFireParticleEngine({
     let wallAwayDirX = float(0);
     let wallAwayDirY = float(0);
     let wallProximity = float(0);
+    // ROUND 5's isolation test (openness forced to 1, wall deflection
+    // skipped, `hasOpennessGrid` still reporting true) shipped as a temporary
+    // flag and its answer came back clean: even with sampling fully bypassed,
+    // live-testing still found no reliable movement, so this code was never
+    // the bug. ROUND 6's audit (see `windAccelPerUnitSize`, construction
+    // site) found the real one — the old push MAGNITUDE was marginal-to-
+    // insufficient by the numbers, regardless of openness. This gate is back
+    // to doing exactly what its own header above describes, nothing more.
     if (windOpennessBuffer) {
       const cell = windHandle.kernel(TSL, { centerXY: pos, time: uTimeMs, cellBuffer: windOpennessBuffer });
       particleOpenness = cell.openness;
@@ -776,7 +865,20 @@ export function createFireParticleEngine({
         proximity: wallProximity,
       });
     }
-    const windVec = windDirVec.mul(gustPush).mul(windPxPerSec).mul(motionScale);
+    // Self-scaled magnitude (see `windAccelPerUnitSize`'s construction-site
+    // note) — `gustPush` still carries the superlinear "dramatic at the top"
+    // SHAPE (`WIND_GUST_MAX_MULT`), normalised by its own ceiling so
+    // `accelAtMax` (the guaranteed `K.windSizesTarget`×-sprite-size figure) is
+    // what actually gets scaled by it, reached exactly at
+    // `effectiveWindMotion = 1`. `referenceSizePx` reads the LIVE size dial
+    // (`uSizeScale`) so a fire the author scales up or down keeps the same
+    // sizes-per-second feel rather than a fixed pixel speed.
+    const referenceSizePx = float((K.sizeMin + K.sizeMax) * 0.5).mul(uSizeScale);
+    const accelAtMax = referenceSizePx.mul(float(windAccelPerUnitSize));
+    const windVec = windDirVec
+      .mul(gustPush.div(float(WIND_GUST_MAX_MULT)))
+      .mul(accelAtMax)
+      .mul(motionScale);
     // Buoyancy: +Y (up-SCREEN) for smoke UNCONDITIONALLY — see the KINDS
     // note — plus flame's own CALM-ONLY rise (2026-09-03, `calmRiseY`): a
     // gentle upward drift on the already-mobile tips, strongest at rest for
@@ -1129,6 +1231,12 @@ export function createFireParticleEngine({
         camHeight: uCamHeight.value,
         windMotion01: uWindMotion01.value,
         hasOpennessGrid: !!windOpennessBuffer,
+        // The guaranteed floor from ROUND 6's audit — at effectiveWindMotion=1,
+        // a mobile particle's wind accel reaches referenceSizePx *
+        // windAccelPerUnitSize px/s², independent of grid calibration. Exposed
+        // here so a future audit can read it straight off getFireStatus()
+        // instead of re-deriving it by hand.
+        windAccelPerUnitSize,
       };
     },
   };

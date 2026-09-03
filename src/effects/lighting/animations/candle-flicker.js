@@ -165,28 +165,35 @@ const WARM_TINT = [1.0, 0.96, 0.82];
 const FIRE_CORE_WHITEN = 0.72; // how far the centre blends toward pure white
 const FIRE_EDGE_DEEPEN = 0.8; // how far the edge blends toward the ember colour below
 const FIRE_EDGE_EMBER = [0.42, 0.07, 0.02]; // a dying-ember red-orange, not pure red
-// Candle's own BRIGHT_FLOOR..BRIGHT_CEIL guttering (0.4..1.2, roughly ±40%)
-// is tuned for a small, gutter-prone wick — the author's own "nothing too
-// extreme" ask, and `fire-geometry.js#fireScaleChain`'s own documented
-// physics ("flicker amplitude FALLS with size... a big fire's light breathes
-// slowly and shallowly while a candle guts hard"), both point the same way:
-// compress the swing toward neutral for fire specifically, without touching
-// candle's own constants. 0.5 halves the deviation from 1 in both directions
-// (roughly 0.7..1.1) — still visibly alive, nowhere near a candle's gutter.
-const FIRE_FLICKER_DAMPING = 0.5;
+// ⚠️ REVERSED, ROUND 2 OF THE POLISH PASS (2026-09-03) — first shipped at
+// 0.5× (HALF candle's own swing), on the author's own original "nothing too
+// extreme" ask plus `fire-geometry.js#fireScaleChain`'s documented physics
+// ("flicker amplitude falls with size"). Graded a C once the temperature
+// ramp landed, with new direction: *"Make the flickering stronger, give it
+// more of a candle like wind response too. We can make it more dramatic, a
+// lot more dramatic."* — an explicit reversal of the original ask, not a
+// small nudge. 1.3× now AMPLIFIES candle's own already-chaotic guttering
+// swing beyond its native range (roughly 0.22..1.26, vs. candle's native
+// 0.4..1.2) rather than flattening it — bigger dips read as more dramatic
+// than a taller ceiling does, which is why the amplified range leans low
+// rather than symmetric. `windResponse` (see `fire-geometry.js`'s own
+// `FIRE_WIND_RESPONSE`) is the OTHER half of "more candle like wind
+// response" — this scale is the brightness-swing half only.
+const FIRE_FLICKER_SCALE = 1.3;
 
 /**
- * Compress a `candleLife` `brightnessPulse` toward neutral (1) by `amount`
- * (0 = untouched, 1 = fully flat) — see `FIRE_FLICKER_DAMPING`'s own header.
- * Shared by fire's illumination AND coloration seeds so brightness and hue
- * keep breathing in lockstep, the same guarantee candle's own single shared
- * `brightnessPulse` value already gives its two channels.
- * @param {*} TSL @param {*} pulse @param {number} amount
+ * Scale a `candleLife` `brightnessPulse`'s SWING around neutral (1) by
+ * `scale` — 1 = candle's own untouched swing, below 1 gentler, above 1 more
+ * dramatic. See `FIRE_FLICKER_SCALE`'s own header. Shared by fire's
+ * illumination AND coloration seeds so brightness and hue keep breathing in
+ * lockstep, the same guarantee candle's own single shared `brightnessPulse`
+ * value already gives its two channels.
+ * @param {*} TSL @param {*} pulse @param {number} scale
  * @returns {*}
  */
-function dampenPulse(TSL, pulse, amount) {
+function scalePulse(TSL, pulse, scale) {
   const { float } = TSL;
-  return float(1).add(pulse.sub(float(1)).mul(float(1 - amount)));
+  return float(1).add(pulse.sub(float(1)).mul(float(scale)));
 }
 
 /**
@@ -500,9 +507,9 @@ export function buildFirePuffIlluminationSeed({
   const jitteredRatio = buildFlickerRatioNode(THREE.TSL, uRatio, n);
   const seed = computeSwitchColorBand(jitteredRatio);
 
-  // Gentled, not candle's full guttering swing — see FIRE_FLICKER_DAMPING's
+  // Amplified beyond candle's own guttering swing — see FIRE_FLICKER_SCALE's
   // own header. Same multiply-the-whole-contribution shape as candle's own.
-  const finalColor = seed.mul(dampenPulse(THREE.TSL, brightnessPulse, FIRE_FLICKER_DAMPING));
+  const finalColor = seed.mul(scalePulse(THREE.TSL, brightnessPulse, FIRE_FLICKER_SCALE));
   return { finalColor };
 }
 
@@ -666,9 +673,9 @@ export function buildFirePuffColorationSeed({
     tinted = rampColor.mul(mix(cool, warm, tempMix));
   }
 
-  // Gentled, not candle's full guttering swing — see FIRE_FLICKER_DAMPING's
-  // own header. The SAME damping `buildFirePuffIlluminationSeed` applies, so
+  // Amplified beyond candle's own guttering swing — see FIRE_FLICKER_SCALE's
+  // own header. The SAME scale `buildFirePuffIlluminationSeed` applies, so
   // brightness and hue keep pulsing in lockstep.
-  const finalColor = tinted.mul(dampenPulse(THREE.TSL, brightnessPulse, FIRE_FLICKER_DAMPING)).mul(uColorationAlpha);
+  const finalColor = tinted.mul(scalePulse(THREE.TSL, brightnessPulse, FIRE_FLICKER_SCALE)).mul(uColorationAlpha);
   return { finalColor };
 }

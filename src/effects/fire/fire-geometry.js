@@ -205,6 +205,22 @@ const LIGHT_RADIUS_PER_DIAMETER = 6;
 const LIGHT_RADIUS_MIN_PX = 120;
 const LIGHT_RADIUS_MAX_PX = 1400;
 
+/**
+ * How hard the shared wind field can push fire's cast light around — the
+ * SAME 0..2 scale `effects/candle-flame.js`'s own "Wind response" param
+ * defines (1 = candle's tuned baseline, 2 = "twice as dramatic"), just
+ * fixed rather than author-exposed for fire today. Raised from `1` (candle
+ * parity) 2026-09-03, author's own direction once the temperature ramp
+ * landed and was graded a C: *"give it more of a candle like wind response
+ * too... a lot more dramatic."* 1.6 sits well inside candle's own declared
+ * "up to twice as dramatic" ceiling rather than inventing a new scale.
+ * Read by `candleLife`'s wind-driven gutter/snuff terms
+ * (`animations/candle-flicker.js`) via `buildFireLightSources`'s own
+ * `windResponse` field below — the light's brightness-swing AMPLITUDE is
+ * the separate `FIRE_FLICKER_SCALE` (candle-flicker.js).
+ */
+const FIRE_WIND_RESPONSE = 1.6;
+
 /** Smoke production ramps in above a threshold size — a clean small flame barely smokes. */
 const SMOKE_D_LO = 0.1;
 const SMOKE_D_HI = 1.0;
@@ -1048,7 +1064,7 @@ export function buildFireLightSources(sources, { tier, mPerPx, env = null, color
       elevation,
       radius,
       windExposure: Number.isFinite(c.exposure) ? c.exposure : 1,
-      windResponse: 1,
+      windResponse: FIRE_WIND_RESPONSE,
       shapePoints,
       ratio: 0.35,
       attenuation01: 0.6,

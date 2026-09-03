@@ -473,4 +473,82 @@ export function run(t) {
       )
     );
   }
+
+  // ── WIND (2026-09-03, mythica-machina-press#475 follow-up) — windMotion01
+  // reaching every engine, and reading the LIVE wind handle fresh each sync,
+  // not just once at construction. Own subsystem instance, same reason the
+  // depth-gate blocks above use their own — this must not disturb the long
+  // call-count sequence built up against the first subsystem. ──
+  {
+    const windEngines = [];
+    // Shape matches what fire-particle-runtime.js's real engines bind to
+    // (`windHandle.ambient.speed01`/`directionDeg`) — a plain mutable `.value`
+    // stands in for the live TSL uniform node fire-subsystem.js reads via
+    // `windHandle?.ambient?.speed01?.value`.
+    const fakeWindHandle = { ambient: { speed01: { value: 0 }, directionDeg: { value: 90 } } };
+    const windState = {
+      enabled: true,
+      params: {},
+      perfTier: 2,
+      mPerPx: 0.02,
+      fires: [{ id: 'f1', x: 50, y: 50, diameterPx: 66, intensity: 1 }],
+      spawnCloud: makeCloud([[0, 0]], 1),
+    };
+    const windSubsystem = createFireSubsystem({
+      THREE: { Scene: FakeScene },
+      getFireRenderState: () => windState,
+      getWindHandle: () => fakeWindHandle,
+      createEngine: ({ kind, archetype, renderOrder }) => {
+        const e = {
+          kind,
+          archetype,
+          renderOrder,
+          scene: { visible: true, renderOrder: 0 },
+          paramCalls: [],
+          setSpawnPoints() {},
+          setParams(p) {
+            e.paramCalls.push(p);
+          },
+          step() {},
+          debugState: () => ({ kind, archetype }),
+        };
+        windEngines.push(e);
+        return e;
+      },
+    });
+
+    windSubsystem.sync(renderer, 0, 0.016, rect);
+    t.ok(
+      'a calm wind handle (speed01=0) reaches every engine as windMotion01=0',
+      windEngines.every((e) => e.paramCalls.at(-1)?.windMotion01 === 0)
+    );
+
+    // The handle is read FRESH each sync (fire-subsystem.js calls
+    // getWindHandle?.() inside syncUnguarded, not once at ensureEngines time)
+    // — mutating the SAME object's `.value` and re-syncing must move it.
+    fakeWindHandle.ambient.speed01.value = 1;
+    windSubsystem.sync(renderer, 16, 0.016, rect);
+    t.ok(
+      'a live wind-speed change reaches every engine as windMotion01 on the very next sync, ember and smoke included',
+      windEngines.every(
+        (e) => Number.isFinite(e.paramCalls.at(-1)?.windMotion01) && e.paramCalls.at(-1).windMotion01 > 0
+      )
+    );
+    t.ok(
+      'flame lifeScale/activeCount actually moved from the calm sync — the wiring reaches the tuning, not just a passthrough field',
+      windEngines
+        .filter((e) => e.kind === 'flame')
+        .every((e) => e.paramCalls.at(-1)?.lifeScale !== e.paramCalls.at(-2)?.lifeScale)
+    );
+
+    // A sealed room (windExposure=0 on the representative fire) must stay
+    // wind-immune through the REAL fires[0].windExposure wiring, not just in
+    // fireWindMotion01's own isolated unit test.
+    windState.fires = [{ id: 'f1', x: 50, y: 50, diameterPx: 66, intensity: 1, windExposure: 0 }];
+    windSubsystem.sync(renderer, 32, 0.016, rect);
+    t.ok(
+      'a sealed fire (fires[0].windExposure=0) reads windMotion01=0 even at full scene wind speed',
+      windEngines.every((e) => e.paramCalls.at(-1)?.windMotion01 === 0)
+    );
+  }
 }

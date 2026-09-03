@@ -105,6 +105,18 @@ const KINDS = Object.freeze({
     fadeIn: 0.14,
     fadeOut: 0.16,
     additive: true,
+    // ⚠️ NEW (2026-09-03), AND DELIBERATELY NOT `buoyancyY` — author: *"at wind
+    // 0 I'd like the flame particles and smoke to move upwards to give a
+    // sense of depth and 3D"*. A screen-space up drift for flame was
+    // previously rejected outright (this file's own header once warned
+    // against it — "the side-view teardrop crawl V2 explicitly rejected"),
+    // but that rejection was about translating the WHOLE stationary pool;
+    // this only ever reaches the already-mobile fraction (`motionScale`),
+    // and FADES OUT as wind rises (see `calmFade` in the update kernel) so a
+    // gale reads as sideways, never as the fire body drifting up-screen.
+    // Small on purpose relative to smoke's own 0.947×0.8 ≈ 0.76 — a wisp of
+    // lift on the tips, not a current.
+    calmRiseY: 0.35,
   }),
   ember: Object.freeze({
     lifeMsMin: 367,
@@ -148,6 +160,9 @@ const KINDS = Object.freeze({
     fadeIn: 0.16,
     fadeOut: 0.2,
     additive: true,
+    // Already fully mobile with its own strong upward riseZ/chaos — no
+    // separate calm-only term needed. See flame's own note above.
+    calmRiseY: 0,
   }),
   smoke: Object.freeze({
     lifeMsMin: 1033,
@@ -175,11 +190,25 @@ const KINDS = Object.freeze({
     fadeIn: 0.16,
     fadeOut: 0.2,
     additive: false,
+    // Already has its own unconditional buoyancyY, above — see that field's
+    // own note on why it does NOT fade with wind the way flame's does.
+    calmRiseY: 0,
   }),
 });
 
 /** Map-wide spawn-point capacity. One buffer, shared by every fire on the map. */
 const SPAWN_CAPACITY = 1024;
+
+/**
+ * How much stronger the wind push gets at full `uWindMotion01` than a flat
+ * linear response would give (`fire-geometry.js#fireWindMotion01` already
+ * folds the author's `windResponse` gain in before this ever runs, so this
+ * is purely about SHAPE, not overall strength). Author, 2026-09-03: flame
+ * should be *"pushed around in a huge way"* at wind 1. A flat multiply reads
+ * as "more wind"; this makes the very top of the dial feel qualitatively
+ * different from the middle, while `windMotion01=0` still passes through 0.
+ */
+const WIND_GUST_MAX_MULT = 3.5;
 
 /**
  * V2's camera-to-ground distance, and therefore the strength of the perspective
@@ -373,11 +402,31 @@ export function createFireParticleEngine({
   // point list — see `spawnAt` below and the header of `fire-spawn-points.js`.
   const uSpawnBias = uniform(float(0));
   // Live by reference — a `setWindAmbient` change reaches the kernel with no
-  // resync code, the same contract both existing runtimes rely on.
-  const uWindSpeed01 = windHandle?.ambient ? windHandle.ambient.speed01 : float(0);
+  // resync code, the same contract both existing runtimes rely on. Direction
+  // only: magnitude comes from `uWindMotion01` below, not this raw speed —
+  // see that uniform's own header for why.
   const uWindDirDeg = windHandle?.ambient ? windHandle.ambient.directionDeg : float(0);
   // Construction-time constant, not a uniform: `pxPerMeter` cannot change mid-session.
   const windPxPerSec = float(pxPerMeter * 3.2);
+  /**
+   * THE PARTICLE WIND SIGNAL (fire-geometry.js#fireWindMotion01) — the raw
+   * ambient speed already gained by the effect's own `windResponse` dial,
+   * gated to exactly 0 when `weatherResponse=0`, and folded with the
+   * representative fire's `windExposure`. Refreshed every frame through
+   * `setParams`, exactly like `uLifeScale`/`uChaosScale` below — NOT
+   * live-by-reference like `uWindDirDeg` above, because unlike the shared
+   * ambient vector this number is PER-EFFECT (an author's own dials feed
+   * it), so it takes the same per-frame path every other author dial
+   * already does rather than a second, parallel "live" contract.
+   *
+   * Drives three things in the update kernel: how much of flame's normally-
+   * stationary pool gets mobilised, how hard the mobile fraction gets
+   * shoved (a superlinear gust curve, not a flat multiply — see
+   * WIND_GUST_MAX_MULT), and how far flame's own calm-air upward drift has
+   * faded (see `calmRiseY`, KINDS.flame). Inert (0) until the first
+   * `setParams` call, which matches "no wind" — a safe default.
+   */
+  const uWindMotion01 = uniform(float(0));
 
   const hash11 = (x) => fract(sin(x.mul(12.9898)).mul(43758.5453));
 
@@ -509,10 +558,20 @@ export function createFireParticleEngine({
     const s = seed.element(i);
     const c = custom.element(i).toVar();
     const ageNow = age.element(i);
-    // ⚠️ 95% of flame particles never move — V2's `flameStationaryFraction`, and
-    // the signature of the whole look (a fire POOL should not translate).
+    // ⚠️ 95% of flame particles never move AT REST — V2's `flameStationaryFraction`,
+    // and the signature of the whole look (a fire POOL should not translate).
+    //
+    // ⚠️ MOBILISED BY WIND (2026-09-03) — the threshold SHRINKS toward 0 as
+    // `uWindMotion01` rises, so a full gale pulls more of the pool loose
+    // rather than leaving 95% welded down while only the original 5% gets
+    // shoved. Author: flame should be *"pushed around in a huge way"* at
+    // wind 1. Ember/smoke already ship `stationaryFraction: 0`, so this is an
+    // exact no-op for them (0 × anything is still 0) — only flame has a
+    // threshold to shrink.
+    //
     // Derived per life rather than stored, so `custom.w` can hold height.
-    const motionScale = lifeRandomOf(s, ageNow, 29.0).step(float(K.stationaryFraction));
+    const effectiveStationary = float(K.stationaryFraction).mul(float(1).sub(uWindMotion01)).clamp(float(0), float(1));
+    const motionScale = lifeRandomOf(s, ageNow, 29.0).step(effectiveStationary);
 
     // ── FORCES ──
     // ⚠️ Gated on `motionScale`, which is 0 for 95% of flame particles. V2
@@ -529,10 +588,25 @@ export function createFireParticleEngine({
     // Wind: a single ambient vector, not a per-particle field sample — V2 used
     // one frame-global wind scalar, and matching that is what lets this runtime
     // skip the openness grid buffer entirely (see the header).
+    //
+    // ⚠️ THE GUST CURVE IS SUPERLINEAR, DELIBERATELY (2026-09-03) — a flat
+    // multiply by `uWindMotion01` reads as merely "more wind"; passes through
+    // exactly 0 at `uWindMotion01=0` and grows to `WIND_GUST_MAX_MULT`× a
+    // flat-linear response at 1, so calm stays calm and only the top of the
+    // dial gets dramatic. See WIND_GUST_MAX_MULT's own header.
     const windRad = uWindDirDeg.mul(float(Math.PI / 180));
-    const windVec = vec2(cos(windRad), sin(windRad)).mul(uWindSpeed01).mul(windPxPerSec).mul(motionScale);
-    // Buoyancy: +Y (up-SCREEN) for smoke only — see the KINDS note.
-    const buoyancy = vec2(0, float(-K.buoyancyY * 60)).mul(motionScale);
+    const gustPush = uWindMotion01.mul(float(1).add(uWindMotion01.mul(float(WIND_GUST_MAX_MULT - 1))));
+    const windVec = vec2(cos(windRad), sin(windRad)).mul(gustPush).mul(windPxPerSec).mul(motionScale);
+    // Buoyancy: +Y (up-SCREEN) for smoke UNCONDITIONALLY — see the KINDS
+    // note — plus flame's own CALM-ONLY rise (2026-09-03, `calmRiseY`): a
+    // gentle upward drift on the already-mobile tips, strongest at rest for
+    // depth/3D and fading out as wind rises so a gale reads as sideways, not
+    // upward. Ember/smoke ship `calmRiseY: 0`, so the second term is an
+    // exact no-op for them.
+    const calmFade = float(1).sub(uWindMotion01);
+    const buoyancy = vec2(0, float(-K.buoyancyY * 60).sub(float((K.calmRiseY ?? 0) * 60).mul(calmFade))).mul(
+      motionScale
+    );
 
     const accel = curl.add(windVec).add(buoyancy);
     // Exponential damping, solved from V2's per-update 0.85 at 30 Hz.
@@ -803,6 +877,7 @@ export function createFireParticleEngine({
       set(uPosterize, p2.posterizeAmount);
       set(uBandCount, p2.bandCount);
       set(uExpectedDepth, p2.expectedDepth);
+      set(uWindMotion01, p2.windMotion01);
       if (Array.isArray(p2.tintMul) && p2.tintMul.length === 3) {
         uTintMul.value.set(p2.tintMul[0], p2.tintMul[1], p2.tintMul[2]);
       }
@@ -813,13 +888,16 @@ export function createFireParticleEngine({
       if (Number.isFinite(p2.cameraHeight)) uCamHeight.value = Math.max(1, p2.cameraHeight);
     },
     updateWind(nextHandle) {
-      // The ambient uniforms are read BY REFERENCE, so a speed/direction change
-      // needs no push at all. Only a rebake that mints a new handle matters, and
-      // this runtime holds no baked grid to resize — so there is nothing to do
-      // but note it. Kept as a method so the viewer can call it uniformly
-      // alongside the other two engines.
+      // `uWindDirDeg` is read BY REFERENCE, so a direction change needs no
+      // push at all. Speed/exposure/response no longer are (2026-09-03) —
+      // see `uWindMotion01`'s own header — they arrive through `setParams`
+      // every frame instead, driven by `fire-subsystem.js`'s own fresh read
+      // of this same handle. Only a rebake that mints a NEW handle object
+      // matters here, and this runtime holds no baked grid to resize — so
+      // there is nothing to do but note it. Kept as a method so the viewer
+      // can call it uniformly alongside the other two engines.
       if (nextHandle && nextHandle !== windHandle) {
-        log.info(`${kind}: wind handle changed; ambient is read by reference, no regrid needed`);
+        log.info(`${kind}: wind handle changed; direction is read by reference, no regrid needed`);
       }
     },
     debugState() {
@@ -833,6 +911,7 @@ export function createFireParticleEngine({
         intensity: uIntensity.value,
         activeCount: uActiveCount.value,
         camHeight: uCamHeight.value,
+        windMotion01: uWindMotion01.value,
       };
     },
   };

@@ -30,6 +30,8 @@ import {
   fireShearSeconds,
   fireCoveragePx,
   fireWeatherResponse,
+  fireWindMotion01,
+  fireWindParticleResponse,
   resolveFireCoverageRung,
   clusterFireSources,
   buildFireLightSources,
@@ -572,6 +574,144 @@ export function run(t) {
     const small = fireRuntimeFromParams({ animationSpeed: 1.5 }, fireScaleChain(5, M_PER_PX));
     const huge = fireRuntimeFromParams({ animationSpeed: 1.5 }, fireScaleChain(660, M_PER_PX));
     t.ok('motionSpeed is independent of fire size, unlike the old puff clock', small.motionSpeed === huge.motionSpeed);
+  }
+
+  // ── WIND (2026-09-03) — fireWindMotion01 / fireWindParticleResponse ────────
+  // Author's own endpoints: at wind 0, flame/smoke drift upward for depth and
+  // flame runs lazy/long-lived; at wind 1, flame gutters (short lives, mostly
+  // suppressed, pushed around hard) and smoke production hits zero.
+
+  {
+    t.ok('no wind at all resolves to exactly 0', fireWindMotion01() === 0);
+    t.ok(
+      'zero scene wind speed resolves to 0 regardless of other inputs',
+      fireWindMotion01({ windSpeed01: 0, windResponseGain: 2, weatherResponse01: 1 }) === 0
+    );
+
+    // weatherResponse GATES to exactly 0, not merely dampens — the param's
+    // own help text ("at 0 it burns regardless") must hold for particles too.
+    t.ok(
+      'weatherResponse01=0 zeroes the signal even at full wind',
+      fireWindMotion01({ windSpeed01: 1, windResponseGain: 2, weatherResponse01: 0 }) === 0
+    );
+    // A sealed room (no exposure) is equally wind-immune.
+    t.ok(
+      'windExposure01=0 (a sealed room) zeroes the signal even at full wind',
+      fireWindMotion01({ windSpeed01: 1, windExposure01: 0 }) === 0
+    );
+
+    // ⚠️ SIZE-NORMALISED BY snuffWind — a small fire's own `snuffWind` puts it
+    // deep into its own gutter range at a wind speed a big fire barely
+    // notices, matching `fireWeatherResponse`'s identical "candle guts in a
+    // breeze, bonfire doesn't" physics for the LIGHT. Chosen so neither side
+    // saturates at 0 or 1, to see the actual ratio.
+    const smallFireSignal = fireWindMotion01({ windSpeed01: 0.15, snuffWind: 2 }); // snuffFrac 0.2
+    const bigFireSignal = fireWindMotion01({ windSpeed01: 0.15, snuffWind: 8 }); // snuffFrac 0.8
+    t.ok(
+      `a small fire's own snuffWind reads far more wind than a big fire's does at the same scene speed (small=${smallFireSignal}, big=${bigFireSignal})`,
+      near(smallFireSignal, 0.75, 1e-9) && near(bigFireSignal, 0.1875, 1e-9) && smallFireSignal > bigFireSignal * 3
+    );
+
+    // windResponseGain keeps its own declared meaning regardless of size —
+    // dividing by snuffFrac happens on the GAINED product, not before it, so
+    // raising the gain can still pull a large fire's signal back toward 1.
+    const gained = fireWindMotion01({ windSpeed01: 0.15, snuffWind: 8, windResponseGain: 2 });
+    t.ok('raising windResponseGain moves a size-dampened signal back up', gained > bigFireSignal);
+
+    // Always clamped to 0..1, however large the gain or however small snuffWind.
+    t.ok(
+      'the signal never exceeds 1 even with gain=2 and a tiny snuffWind',
+      fireWindMotion01({ windSpeed01: 1, windResponseGain: 2, snuffWind: 0.1 }) === 1
+    );
+
+    // ── THE CURVES THEMSELVES ──
+    const calm = fireWindParticleResponse(0, true);
+    t.ok(
+      'at windMotion01=0, count/opacity/smoke sit at their neutral 1x — a windless fire is unaffected',
+      calm.flameActiveCountMul === 1 && calm.flameOpacityMul === 1 && calm.smokeActiveCountMul === 1
+    );
+    t.ok(
+      "the ONE asymmetry: lifeScale moves even at zero wind — the author's own 'lazy at low wind' ask",
+      near(calm.flameLifeMul, 1.4, 1e-9)
+    );
+
+    const guttering = fireWindParticleResponse(1, true);
+    t.ok(
+      'at windMotion01=1 (can be snuffed), flame is short-lived and mostly suppressed, never literally zero',
+      near(guttering.flameLifeMul, 0.3, 1e-9) &&
+        near(guttering.flameActiveCountMul, 0.15, 1e-9) &&
+        near(guttering.flameOpacityMul, 0.55, 1e-9) &&
+        guttering.flameActiveCountMul > 0
+    );
+    t.ok(
+      "at windMotion01=1, smoke production is EXACTLY zero — the author's own literal endpoint",
+      guttering.smokeActiveCountMul === 0
+    );
+
+    const immune = fireWindParticleResponse(1, false);
+    t.ok(
+      'canBeSnuffed=false raises the suppression floors so a "cannot blow out" fire never empties',
+      immune.flameActiveCountMul > guttering.flameActiveCountMul &&
+        immune.flameOpacityMul > guttering.flameOpacityMul &&
+        near(immune.flameActiveCountMul, 0.55, 1e-9) &&
+        near(immune.flameOpacityMul, 0.8, 1e-9)
+    );
+    t.ok(
+      'canBeSnuffed does NOT gate the lifespan cut or the smoke shutoff — those are cosmetic, not "did it go out"',
+      near(immune.flameLifeMul, guttering.flameLifeMul, 1e-9) && immune.smokeActiveCountMul === 0
+    );
+
+    // Monotonic across the whole range, and smoke fades AHEAD of flame's own
+    // suppression (real smoke shears apart before a flame actually gutters).
+    const mid = fireWindParticleResponse(0.5, true);
+    t.ok(
+      'lifespan, count and opacity all fall monotonically from calm to guttering',
+      mid.flameLifeMul < calm.flameLifeMul &&
+        mid.flameLifeMul > guttering.flameLifeMul &&
+        mid.flameActiveCountMul < calm.flameActiveCountMul &&
+        mid.flameActiveCountMul > guttering.flameActiveCountMul
+    );
+    t.ok(
+      'at the midpoint, smoke has already faded further than flame has been suppressed',
+      mid.smokeActiveCountMul < mid.flameActiveCountMul
+    );
+
+    // ── THROUGH fireRuntimeFromParams ITSELF ──
+    const chain66 = fireScaleChain(66, M_PER_PX); // snuffWind ≈ 1.2 + 6.5·√(66·M_PER_PX)
+    const noWind = fireRuntimeFromParams({}, chain66);
+    const explicitNoWind = fireRuntimeFromParams({}, chain66, { speed01: 0 });
+    t.ok(
+      'omitting the wind argument entirely matches passing speed01=0 explicitly (backward-compatible default)',
+      noWind.windMotion01 === explicitNoWind.windMotion01 &&
+        noWind.perKind.flame.lifeScale === explicitNoWind.perKind.flame.lifeScale
+    );
+    t.ok(
+      // ⚠️ 1, NOT fire.js's schema default of 2 — `fireRuntimeFromParams`'s
+      // OWN internal fallback for an absent `flameLifeScale` is 1 (this
+      // function is pure and knows nothing of the schema; a real call site
+      // resolves schema defaults into `params` BEFORE calling it).
+      "the calm boost applies even to the function's own default lifeScale — a windless scene's flame is NOT the raw dial value",
+      near(noWind.perKind.flame.lifeScale, 1 * 1.4, 1e-6)
+    );
+    t.ok(
+      'a windless scene leaves smoke/flame activeCount at exactly their author-dialled values',
+      noWind.perKind.smoke.activeCount === 24 && noWind.perKind.flame.activeCount === 12
+    );
+
+    const fullWind = fireRuntimeFromParams({}, chain66, { speed01: 1, exposure01: 1 });
+    t.ok(
+      'a full gale drives smoke activeCount to exactly 0 through the real call path',
+      fullWind.perKind.smoke.activeCount === 0
+    );
+    t.ok(
+      'a full gale shortens flame lifeScale and thins its activeCount below the windless case',
+      fullWind.perKind.flame.lifeScale < noWind.perKind.flame.lifeScale &&
+        fullWind.perKind.flame.activeCount < noWind.perKind.flame.activeCount
+    );
+    t.ok(
+      'runtime.windMotion01 is exposed for fire-subsystem.js to forward to every engine',
+      fullWind.windMotion01 > 0.9
+    );
   }
 
   // ── COLOUR CC (2026-08-30) — color/posterize/bandCount/colorHueShift ───────

@@ -1098,6 +1098,149 @@ export function buildFireLightSources(sources, { tier, mPerPx, env = null, color
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// WIND — how the PARTICLES answer the same dial the light already leans into
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Calm-air lifespan boost / full-gale lifespan cut, flame only.
+ *
+ * ⚠️ AUTHOR'S OWN ENDPOINTS (2026-09-03): *"at very low wind values flames
+ * have longer lifespans to make them feel lazy and slow"* / *"at wind 1...
+ * flame particles should have smaller lifespans."* `FLAME_CALM_LIFE_MUL`
+ * makes "no wind at all" its own distinct, unhurried character rather than
+ * just "whatever `flameLifeScale` already says"; `FLAME_GUTTER_LIFE_MUL`
+ * makes a full gale recycle particles fast — short, flickery puffs.
+ */
+const FLAME_CALM_LIFE_MUL = 1.4;
+const FLAME_GUTTER_LIFE_MUL = 0.3;
+
+/**
+ * How far a guttering flame's population/brightness can be pushed down.
+ * Two floors: a fire that CAN be blown out empties out hard (0.15 —
+ * "mostly suppressed", the author's own phrase, not literally zero, so a
+ * dying flame still reads as a flame rather than a hard cut); one the
+ * author has marked immune (`canBeSnuffed: false` — a magical brazier, a
+ * plot beacon) still visibly struggles in the wind but never drops below a
+ * fire that is obviously still alight.
+ */
+const FLAME_GUTTER_COUNT_FLOOR = 0.15;
+const FLAME_GUTTER_COUNT_FLOOR_IMMUNE = 0.55;
+/**
+ * Opacity floors deliberately GENTLER than the count floors — fewer sprites
+ * that are still clearly flame-coloured reads as "struggling"; fewer AND
+ * faint at once reads as "already out", which is a stronger claim than
+ * "mostly suppressed" asked for.
+ */
+const FLAME_GUTTER_OPACITY_FLOOR = 0.55;
+const FLAME_GUTTER_OPACITY_FLOOR_IMMUNE = 0.8;
+
+/**
+ * Smoke is the most fragile layer — real smoke shears apart in far less wind
+ * than it takes to blow a flame out, which is why "producing zero smoke" is
+ * the author's OWN stated wind-1 endpoint regardless of how suppressed the
+ * flame itself is at the same moment. The exponent below is under 1 so the fade
+ * starts EARLIER than flame's own suppression curve (a bowed ramp, not a
+ * straight one) while still landing on an EXACT 0 at `windMotion01 = 1`.
+ */
+const SMOKE_WIND_FADE_EXPONENT = 0.65;
+
+/**
+ * The GM's wind dial, folded into ONE 0..1 "how hard is this fire being hit"
+ * signal — every curve in {@link fireWindParticleResponse} and the live
+ * particle kernel (`fire-particle-runtime.js`'s `uWindMotion01`) reads THIS,
+ * not the raw scene wind speed, so a slider move tells one coherent story
+ * instead of several terms disagreeing about how windy it is.
+ *
+ * ⚠️ `weatherResponse01` GENUINELY GATES THIS TO 0, not merely dampens it —
+ * `FIRE_PARAMS.weatherResponse`'s own help text already promises "at 0 it
+ * burns regardless"; before this function existed that was true for the
+ * light's `alive01` gate and false for every particle, which still felt the
+ * raw ambient wind unconditionally. This is that promise finally kept end to
+ * end.
+ *
+ * ⚠️ `windResponseGain` reads `FIRE_PARAMS.windResponse` ("How far wind
+ * leans the plume") — computed since the schema shipped and, until this
+ * function, consumed by nothing (`fire-subsystem.js`'s `engine.setParams`
+ * call never mentioned it): a dead control, the same shape this file's own
+ * `lightRadiusScale`/`color`/`posterize` notes already record once each.
+ *
+ * ⚠️ SIZE-NORMALISED BY `snuffWind`, THE SAME SIGNAL THE LIGHT ALREADY USES
+ * (`fireWeatherResponse`'s `alive01`). Without this, a giant bonfire's LIGHT
+ * would sit at full `alive01` through a wind the PARTICLES had already
+ * started suppressing — the two halves of one fire visibly disagreeing about
+ * how hard the wind is hitting it. Dividing by the fire's own
+ * `snuffWind/10` fraction gives a candle-scale hearth (`snuffFrac` ≈ 0.2-0.3)
+ * and a bonfire (`snuffFrac` ≈ 0.8-0.9) the SAME "fully guttering" reading at
+ * roughly the same point their light would also start dying — "a candle
+ * gutters in a breeze, a bonfire does not" (`fireScaleChain`'s own words),
+ * now true for the particles too. Division happens BEFORE the final clamp so
+ * `windResponseGain` above 1 can still push a large fire's normalised signal
+ * back up — the dial keeps its own declared meaning regardless of size.
+ *
+ * @param {object} [args]
+ * @param {number} [args.windSpeed01=0] - the scene's live ambient wind speed,
+ *   0..1 (`windHandle.ambient.speed01`'s current `.value`).
+ * @param {number} [args.windExposure01=1] - the representative fire's own
+ *   `windExposure` (`fires[0].windExposure`) — sealed rooms read low,
+ *   matching `buildFireLightSources`' identical `c.exposure` gate on the
+ *   SAME fires.
+ * @param {number} [args.windResponseGain=1] - `FIRE_PARAMS.windResponse`, 0..2.
+ * @param {number} [args.weatherResponse01=1] - `FIRE_PARAMS.weatherResponse`, 0..1.
+ * @param {number} [args.snuffWind] - `chain.snuffWind` ({@link fireScaleChain}).
+ *   Falls back to `fireWeatherResponse`'s own `?? 4` default (a mid-size
+ *   fire) so this stays callable without a full chain in isolation.
+ * @returns {number} 0..1.
+ */
+export function fireWindMotion01({
+  windSpeed01 = 0,
+  windExposure01 = 1,
+  windResponseGain = 1,
+  weatherResponse01 = 1,
+  snuffWind,
+} = {}) {
+  const speed = clampNum(Number.isFinite(windSpeed01) ? windSpeed01 : 0, 0, 1);
+  const exposure = clampNum(Number.isFinite(windExposure01) ? windExposure01 : 1, 0, 1);
+  const gain = clampNum(Number.isFinite(windResponseGain) ? windResponseGain : 1, 0, 2);
+  const gate = clampNum(Number.isFinite(weatherResponse01) ? weatherResponse01 : 1, 0, 1);
+  const snuffFrac = clampNum((Number.isFinite(snuffWind) ? snuffWind : 4) / 10, 0.05, 1);
+  const sizeNormalised = clampNum((speed * exposure * gain) / snuffFrac, 0, 1);
+  return sizeNormalised * gate;
+}
+
+/**
+ * The particle-side wind story, entirely keyed off {@link fireWindMotion01}'s
+ * one signal so "calm" and "guttering" read as ONE thing changing.
+ *
+ * ⚠️ EVERY MULTIPLIER HERE STACKS ONTO THE AUTHOR'S OWN DIAL, never replaces
+ * it — the same "1.0 = exactly the reference" contract every existing
+ * `perKind` multiplier already keeps (this file's own "THE AUTHOR'S DIALS"
+ * header, `fire-particle-runtime.js`). At `windMotion01 = 0` count/opacity sit
+ * at their neutral 1× (only the calm LIFE boost moves — lazy, not
+ * suppressed) and smoke's multiplier is exactly 1 — a windless fire looks
+ * exactly as it would with no wind system at all.
+ *
+ * @param {number} windMotion01 - from {@link fireWindMotion01}.
+ * @param {boolean} [canBeSnuffed=true] - `FIRE_PARAMS.canBeSnuffed`; false
+ *   raises every floor so wind can rough the fire up but never empty it out.
+ * @returns {{flameLifeMul:number, flameActiveCountMul:number,
+ *   flameOpacityMul:number, smokeActiveCountMul:number}}
+ */
+export function fireWindParticleResponse(windMotion01, canBeSnuffed = true) {
+  const t = clampNum(Number.isFinite(windMotion01) ? windMotion01 : 0, 0, 1);
+  const eased = smoothstep01(0, 1, t);
+  const countFloor = canBeSnuffed ? FLAME_GUTTER_COUNT_FLOOR : FLAME_GUTTER_COUNT_FLOOR_IMMUNE;
+  const opacityFloor = canBeSnuffed ? FLAME_GUTTER_OPACITY_FLOOR : FLAME_GUTTER_OPACITY_FLOOR_IMMUNE;
+  return {
+    flameLifeMul: FLAME_CALM_LIFE_MUL + (FLAME_GUTTER_LIFE_MUL - FLAME_CALM_LIFE_MUL) * eased,
+    flameActiveCountMul: 1 - eased * (1 - countFloor),
+    flameOpacityMul: 1 - eased * (1 - opacityFloor),
+    // Bowed toward an earlier fade (see SMOKE_WIND_FADE_EXPONENT) and an
+    // EXACT 0 at t=1 — "producing zero smoke" is literal, not asymptotic.
+    smokeActiveCountMul: 1 - t ** SMOKE_WIND_FADE_EXPONENT,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // PARAMS → RUNTIME — the one place a control becomes a number
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1120,14 +1263,30 @@ export function buildFireLightSources(sources, { tier, mPerPx, env = null, color
  *
  * @param {object} params - a resolved param bag (`effect-cascade.js#resolveEffectParams`).
  * @param {object} chain - from {@link fireScaleChain}.
+ * @param {object} [wind] - `{speed01, exposure01}`. Omitted (the default for
+ *   every pre-existing call site and test) resolves `windMotion01` to exactly
+ *   0 — byte-identical to before this parameter existed.
  * @returns {object} plain numbers, ready to assign to uniforms.
  */
-export function fireRuntimeFromParams(params = {}, chain = {}) {
+export function fireRuntimeFromParams(params = {}, chain = {}, wind = {}) {
   const p = params ?? {};
   const num = (v, fallback) => (Number.isFinite(v) ? v : fallback);
   const bool = (v, fallback) => (typeof v === 'boolean' ? v : fallback);
 
   const weatherResponse = clampNum(num(p.weatherResponse, 1), 0, 1);
+  const windResponseGain = clampNum(num(p.windResponse, 1), 0, 2);
+  const canBeSnuffed = bool(p.canBeSnuffed, true);
+  // THE ONE PARTICLE WIND SIGNAL — see fireWindMotion01's own header for why
+  // weatherResponse GATES rather than dampens, and why windResponse is read
+  // here at all (a dead control until this call site existed).
+  const windMotion01 = fireWindMotion01({
+    windSpeed01: wind?.speed01,
+    windExposure01: wind?.exposure01,
+    windResponseGain,
+    weatherResponse01: weatherResponse,
+    snuffWind: chain?.snuffWind,
+  });
+  const windFx = fireWindParticleResponse(windMotion01, canBeSnuffed);
   return {
     // Material uniforms.
     intensity: clampNum(num(p.brightness, 1), 0, 3),
@@ -1137,7 +1296,7 @@ export function fireRuntimeFromParams(params = {}, chain = {}) {
     bands: Math.round(clampNum(num(p.bandCount, 7), 3, 12)),
     smokeGain: clampNum(num(p.smokeAmount, 1) * 0.3, 0, 1),
     grainGain: clampNum(num(p.grain, 0.5), 0, 1),
-    windResponse: clampNum(num(p.windResponse, 1), 0, 2),
+    windResponse: windResponseGain,
     /**
      * Playback rate for the particle engines' own motion — the turbulence
      * field's churn and the flame archetype's silhouette boil. Shared by all
@@ -1191,10 +1350,15 @@ export function fireRuntimeFromParams(params = {}, chain = {}) {
     // stored value from an older schema cannot reach past what the slider says.
     perKind: {
       flame: {
-        activeCount: Math.round(clampNum(num(p.flameCount, 12), 0, 200)),
-        lifeScale: clampNum(num(p.flameLifeScale, 1), 0.05, 30),
+        // ⚠️ WIND-MODULATED (2026-09-03) — see fireWindParticleResponse. Each
+        // multiplier STACKS onto the author's own dial rather than replacing
+        // it, and is ~1 at windMotion01=0 (activeCount/opacity) so a windless
+        // fire is unaffected. `lifeScale` moves even at zero wind (the "calm
+        // = lazy" boost) — that is the one asymmetry the author asked for.
+        activeCount: Math.round(clampNum(num(p.flameCount, 12), 0, 200) * windFx.flameActiveCountMul),
+        lifeScale: clampNum(num(p.flameLifeScale, 1), 0.05, 30) * windFx.flameLifeMul,
         sizeScale: clampNum(num(p.flameSizeScale, 1), 0.02, 20),
-        opacityScale: clampNum(num(p.flameOpacity, 1), 0, 20),
+        opacityScale: clampNum(num(p.flameOpacity, 1), 0, 20) * windFx.flameOpacityMul,
         emissionScale: clampNum(num(p.flameEmission, 1), 0, 50),
         colorAge: clampNum(num(p.flameColorAge, 2.5), 0.1, 12),
         // Warps WHICH spawn point gets picked, not how it looks once picked —
@@ -1216,7 +1380,11 @@ export function fireRuntimeFromParams(params = {}, chain = {}) {
         riseScale: clampNum(num(p.emberRise, 1), 0, 30),
       },
       smoke: {
-        activeCount: Math.round(clampNum(num(p.smokeCount, 24), 0, 400)),
+        // ⚠️ WIND-MODULATED (2026-09-03) — fades to a literal ZERO active
+        // count at windMotion01=1 ("producing zero smoke", the author's own
+        // wind-1 endpoint), ahead of flame's own suppression curve — see
+        // SMOKE_WIND_FADE_EXPONENT.
+        activeCount: Math.round(clampNum(num(p.smokeCount, 24), 0, 400) * windFx.smokeActiveCountMul),
         lifeScale: clampNum(num(p.smokeLifeScale, 1), 0.05, 30),
         sizeScale: clampNum(num(p.smokeSizeScale, 1), 0.02, 20),
         opacityScale: clampNum(num(p.smokeOpacity, 1), 0, 20),
@@ -1231,9 +1399,15 @@ export function fireRuntimeFromParams(params = {}, chain = {}) {
      * effectively-infinite height, i.e. perfectly flat.
      */
     cameraHeight: 1000 / Math.max(0.02, clampNum(num(p.perspective, 1), 0, 20)),
-    canBeSnuffed: bool(p.canBeSnuffed, true),
+    canBeSnuffed,
     fuel: typeof p.fuel === 'string' ? p.fuel : 'wood',
     fireIntensity: clampNum(num(p.intensity, 1), 0, 2),
+    // GLOBAL, like motionSpeed/hueShiftRad above — fire-subsystem.js attaches
+    // this to every engine's setParams (flame/ember/smoke alike), which is
+    // what lets ember and smoke inherit the same gust push flame gets, and
+    // lets the particle kernel fade flame's own calm-air upward drift as
+    // wind rises (see fire-particle-runtime.js's uWindMotion01).
+    windMotion01,
   };
 }
 

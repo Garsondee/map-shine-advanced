@@ -438,7 +438,7 @@ export const FIRE_PARAMS = Object.freeze({
     default: 1,
     category: 'Motion',
     label: 'Wind response',
-    help: 'How far wind leans the plume. The lean grows with height on its own, so a tall fire streams further than a short one at the same setting.',
+    help: 'How hard wind leans the plume and scatters the flame/ember/smoke particles themselves — and, toward the top of a gale, how fast flame gutters down toward suppressed. The lean grows with height on its own, so a tall fire streams further than a short one at the same setting.',
   },
   animationSpeed: {
     type: 'float',

@@ -340,6 +340,22 @@ export function createFireSubsystem({
     const firePlan = fireTierPlan(tier);
     const mPerPx = Number.isFinite(state.mPerPx) && state.mPerPx > 0 ? state.mPerPx : 0.02;
     const env = getEnvironment?.() ?? null;
+    // THE PARTICLE WIND SIGNAL'S OWN INPUT (mythica-machina-press#475 follow-up,
+    // 2026-09-03) — read straight off the SAME live uniform node the particle
+    // kernel itself samples every frame (`windHandle.ambient.speed01`), not
+    // `env.wind`, so the CPU-computed suppression/lifespan curves below can
+    // never drift a frame behind the GPU-side push. This is the established
+    // idiom this codebase already uses whenever a particle/render system needs
+    // that live number on the CPU too — `precip-runtime.js`, `curtain-render.js`
+    // and the two precip splash/drip runtimes all read `wind.ambient.speed01
+    // ?.value` rather than a separate snapshot, for the same reason.
+    const windHandle = getWindHandle?.() ?? null;
+    const windSpeed01 = windHandle?.ambient?.speed01?.value;
+    // Representative-fire simplification — the SAME one `expectedDepth` below
+    // already uses and for the same reason (a floor's fires overwhelmingly
+    // share one exposure), and `buildFireLightSources` reads this identical
+    // field off this identical `fires` array as `c.exposure`.
+    const windExposure01 = fires[0]?.windExposure;
     // ⚠️ `{ fuel: params?.fuel }` ADDED 2026-08-30 — without it, `fireScaleChain`
     // defaults to 'wood' regardless of the author's actual "Fuel" selection, so
     // `chain.hueShift` (magical fuel's own built-in 180° shift) would resolve
@@ -350,7 +366,8 @@ export function createFireSubsystem({
     // is safe.
     const runtime = fireRuntimeFromParams(
       params,
-      fireScaleChain(fires[0]?.diameterPx ?? 100, mPerPx, { fuel: params?.fuel })
+      fireScaleChain(fires[0]?.diameterPx ?? 100, mPerPx, { fuel: params?.fuel }),
+      { speed01: windSpeed01, exposure01: windExposure01 }
     );
 
     // THE DEPTH-AUTHORITY OCCLUSION GATE'S INPUT (mythica-machina-press#469) —
@@ -453,6 +470,11 @@ export function createFireSubsystem({
         intensity: runtime.fireIntensity,
         cameraHeight: runtime.cameraHeight,
         motionSpeed: runtime.motionSpeed,
+        // GLOBAL, like motionSpeed above — every engine (flame/ember/smoke)
+        // reads this so ember and smoke inherit the same gust push flame
+        // does, and the particle kernel can fade flame's own calm-air
+        // upward drift as wind rises. See fire-geometry.js#fireWindMotion01.
+        windMotion01: runtime.windMotion01,
         expectedDepth,
         // ⚠️ FIXED ALONGSIDE THE ABOVE (2026-08-30) — `hueShiftRad`/
         // `posterizeAmount`/`bandCount`/`tintMul` were the other three

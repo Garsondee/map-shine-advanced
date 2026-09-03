@@ -1182,23 +1182,43 @@ const FLAME_GUTTER_LIFE_MUL = 0.3;
 
 /**
  * How far a guttering flame's population/brightness can be pushed down.
- * Two floors: a fire that CAN be blown out empties out hard (0.15 —
- * "mostly suppressed", the author's own phrase, not literally zero, so a
- * dying flame still reads as a flame rather than a hard cut); one the
- * author has marked immune (`canBeSnuffed: false` — a magical brazier, a
- * plot beacon) still visibly struggles in the wind but never drops below a
- * fire that is obviously still alight.
+ *
+ * ⚠️ RAISED 2026-09-04 (from 0.15/0.55) — author, live, TWICE: "the amount of
+ * light suppression is far too strong" and then, after the light was linked
+ * to this exact fraction, "still far too strong". The floor itself was only
+ * half the story (see `EASE_POWER`/`SNUFF_FRAC_FLOOR` below for the other
+ * half) but it was also genuinely too severe on its own — 0.15 is an 85%
+ * cut, deep enough that both the flame sprites AND (once linked) the cast
+ * light read as nearly extinguished at the top of the range rather than
+ * "mostly suppressed", the phrase this was originally built to match.
+ *
+ * Two floors: a fire that CAN be blown out empties out harder (0.3) than one
+ * the author has marked immune (`canBeSnuffed: false` — a magical brazier, a
+ * plot beacon, 0.65) — but neither goes anywhere near as low as before.
  */
-const FLAME_GUTTER_COUNT_FLOOR = 0.15;
-const FLAME_GUTTER_COUNT_FLOOR_IMMUNE = 0.55;
+const FLAME_GUTTER_COUNT_FLOOR = 0.3;
+const FLAME_GUTTER_COUNT_FLOOR_IMMUNE = 0.65;
 /**
  * Opacity floors deliberately GENTLER than the count floors — fewer sprites
  * that are still clearly flame-coloured reads as "struggling"; fewer AND
  * faint at once reads as "already out", which is a stronger claim than
  * "mostly suppressed" asked for.
  */
-const FLAME_GUTTER_OPACITY_FLOOR = 0.55;
-const FLAME_GUTTER_OPACITY_FLOOR_IMMUNE = 0.8;
+const FLAME_GUTTER_OPACITY_FLOOR = 0.65;
+const FLAME_GUTTER_OPACITY_FLOOR_IMMUNE = 0.85;
+
+/**
+ * ⚠️ ADDED 2026-09-04, THE OTHER HALF OF THE "TOO STRONG" FIX. Raising the
+ * floors alone (above) does not slow how FAST a fire reaches them —
+ * `smoothstep01` is already halfway to its floor by the midpoint of the
+ * range (`smoothstep01(0,1,0.5) === 0.5`), so a fire at "half wind" read as
+ * roughly half-suppressed, which is a steep ramp for something meant to bite
+ * mainly near the top. Raising this SHAPE exponent keeps the same 0→1
+ * endpoints (still fully calm at `windMotion01=0`, still fully floored at
+ * `windMotion01=1`) while pushing the bulk of the transition later —
+ * `smoothstep01(0,1,0.5) ** 2.2 ≈ 0.22`, not 0.5.
+ */
+const SUPPRESSION_EASE_POWER = 2.2;
 
 /**
  * Smoke is the most fragile layer — real smoke shears apart in far less wind
@@ -1230,18 +1250,26 @@ const SMOKE_WIND_FADE_EXPONENT = 0.65;
  * call never mentioned it): a dead control, the same shape this file's own
  * `lightRadiusScale`/`color`/`posterize` notes already record once each.
  *
- * ⚠️ SIZE-NORMALISED BY `snuffWind`, THE SAME SIGNAL THE LIGHT ALREADY USES
- * (`fireWeatherResponse`'s `alive01`). Without this, a giant bonfire's LIGHT
- * would sit at full `alive01` through a wind the PARTICLES had already
- * started suppressing — the two halves of one fire visibly disagreeing about
- * how hard the wind is hitting it. Dividing by the fire's own
- * `snuffWind/10` fraction gives a candle-scale hearth (`snuffFrac` ≈ 0.2-0.3)
- * and a bonfire (`snuffFrac` ≈ 0.8-0.9) the SAME "fully guttering" reading at
- * roughly the same point their light would also start dying — "a candle
- * gutters in a breeze, a bonfire does not" (`fireScaleChain`'s own words),
- * now true for the particles too. Division happens BEFORE the final clamp so
- * `windResponseGain` above 1 can still push a large fire's normalised signal
- * back up — the dial keeps its own declared meaning regardless of size.
+ * ⚠️ SIZE-NORMALISED BY `snuffWind`, THE SAME SIGNAL THE LIGHT'S OWN
+ * SUPPRESSION NOW READS TOO (`buildFireLightSources`, via
+ * {@link fireWindParticleResponse}). Dividing by the fire's own
+ * `snuffWind/10` fraction gives a candle-scale hearth a lower ceiling before
+ * it saturates than a bonfire gets — "a candle gutters in a breeze, a
+ * bonfire does not" (`fireScaleChain`'s own words). Division happens BEFORE
+ * the final clamp so `windResponseGain` above 1 can still push a large
+ * fire's normalised signal back up — the dial keeps its own declared meaning
+ * regardless of size.
+ *
+ * ⚠️ THE DIVISOR'S OWN FLOOR WAS RAISED 0.05 → 0.4, 2026-09-04 (author, live,
+ * TWICE: "the amount of light suppression is far too strong" / "still far
+ * too strong"). At the old 0.05 floor, a small hearth's own `snuffFrac` could
+ * sit near that floor too, meaning the raw scene wind speed got divided by
+ * as little as 0.05 — up to a 20× amplification, so a small painted fire
+ * reached FULL suppression at a small fraction of the GM's actual wind dial.
+ * Raising the floor caps that amplification at 2.5×, so an ordinary hearth-
+ * scale fire (the size this effect is mostly used at) now needs wind
+ * genuinely close to its own dial maximum before saturating, not a fraction
+ * of it — see `SUPPRESSION_EASE_POWER`, above, for the other half of this fix.
  *
  * @param {object} [args]
  * @param {number} [args.windSpeed01=0] - the scene's live ambient wind speed,
@@ -1268,7 +1296,7 @@ export function fireWindMotion01({
   const exposure = clampNum(Number.isFinite(windExposure01) ? windExposure01 : 1, 0, 1);
   const gain = clampNum(Number.isFinite(windResponseGain) ? windResponseGain : 1, 0, 2);
   const gate = clampNum(Number.isFinite(weatherResponse01) ? weatherResponse01 : 1, 0, 1);
-  const snuffFrac = clampNum((Number.isFinite(snuffWind) ? snuffWind : 4) / 10, 0.05, 1);
+  const snuffFrac = clampNum((Number.isFinite(snuffWind) ? snuffWind : 4) / 10, 0.4, 1);
   const sizeNormalised = clampNum((speed * exposure * gain) / snuffFrac, 0, 1);
   return sizeNormalised * gate;
 }
@@ -1293,7 +1321,11 @@ export function fireWindMotion01({
  */
 export function fireWindParticleResponse(windMotion01, canBeSnuffed = true) {
   const t = clampNum(Number.isFinite(windMotion01) ? windMotion01 : 0, 0, 1);
-  const eased = smoothstep01(0, 1, t);
+  // ⚠️ POWERED, NOT BARE smoothstep01 — see SUPPRESSION_EASE_POWER's own
+  // header. Still 0 at t=0 and 1 at t=1 (a fraction in [0,1] raised to a
+  // positive power stays in [0,1] with the same endpoints); only the MIDDLE
+  // of the ramp moves.
+  const eased = smoothstep01(0, 1, t) ** SUPPRESSION_EASE_POWER;
   const countFloor = canBeSnuffed ? FLAME_GUTTER_COUNT_FLOOR : FLAME_GUTTER_COUNT_FLOOR_IMMUNE;
   const opacityFloor = canBeSnuffed ? FLAME_GUTTER_OPACITY_FLOOR : FLAME_GUTTER_OPACITY_FLOOR_IMMUNE;
   return {

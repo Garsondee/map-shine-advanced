@@ -638,20 +638,27 @@ export function run(t) {
 
     // ⚠️ SIZE-NORMALISED BY snuffWind — a small fire's own `snuffWind` puts it
     // deep into its own gutter range at a wind speed a big fire barely
-    // notices, matching `fireWeatherResponse`'s identical "candle guts in a
-    // breeze, bonfire doesn't" physics for the LIGHT. Chosen so neither side
-    // saturates at 0 or 1, to see the actual ratio.
-    const smallFireSignal = fireWindMotion01({ windSpeed01: 0.15, snuffWind: 2 }); // snuffFrac 0.2
-    const bigFireSignal = fireWindMotion01({ windSpeed01: 0.15, snuffWind: 8 }); // snuffFrac 0.8
+    // notices, matching the LIGHT's identical size-awareness (via this same
+    // function, since 2026-09-04). Chosen so neither side saturates at 0 or
+    // 1, to see the actual ratio. `snuffWind: 4` sits exactly on the
+    // divisor's own floor (raised 0.05 → 0.4, 2026-09-04 — see
+    // fireWindMotion01's own header) — anything at or below it behaves
+    // identically, capping how much a tiny fire can amplify raw wind speed.
+    const smallFireSignal = fireWindMotion01({ windSpeed01: 0.3, snuffWind: 4 }); // snuffFrac 0.4 (floored)
+    const bigFireSignal = fireWindMotion01({ windSpeed01: 0.3, snuffWind: 8 }); // snuffFrac 0.8
     t.ok(
-      `a small fire's own snuffWind reads far more wind than a big fire's does at the same scene speed (small=${smallFireSignal}, big=${bigFireSignal})`,
-      near(smallFireSignal, 0.75, 1e-9) && near(bigFireSignal, 0.1875, 1e-9) && smallFireSignal > bigFireSignal * 3
+      `a small fire's own snuffWind reads more wind than a big fire's does at the same scene speed, capped rather than unbounded (small=${smallFireSignal}, big=${bigFireSignal})`,
+      near(smallFireSignal, 0.75, 1e-9) &&
+        near(bigFireSignal, 0.375, 1e-9) &&
+        near(smallFireSignal, bigFireSignal * 2, 1e-9)
     );
 
     // windResponseGain keeps its own declared meaning regardless of size —
     // dividing by snuffFrac happens on the GAINED product, not before it, so
     // raising the gain can still pull a large fire's signal back toward 1.
-    const gained = fireWindMotion01({ windSpeed01: 0.15, snuffWind: 8, windResponseGain: 2 });
+    // Same windSpeed01/snuffWind as `bigFireSignal` above so the comparison
+    // isolates the gain alone.
+    const gained = fireWindMotion01({ windSpeed01: 0.3, snuffWind: 8, windResponseGain: 2 });
     t.ok('raising windResponseGain moves a size-dampened signal back up', gained > bigFireSignal);
 
     // Always clamped to 0..1, however large the gain or however small snuffWind.
@@ -673,10 +680,12 @@ export function run(t) {
 
     const guttering = fireWindParticleResponse(1, true);
     t.ok(
+      // ⚠️ FLOORS RAISED 2026-09-04 (from 0.15/0.55) — author, live, TWICE:
+      // "far too strong" — see FLAME_GUTTER_COUNT_FLOOR's own header.
       'at windMotion01=1 (can be snuffed), flame is short-lived and mostly suppressed, never literally zero',
       near(guttering.flameLifeMul, 0.3, 1e-9) &&
-        near(guttering.flameActiveCountMul, 0.15, 1e-9) &&
-        near(guttering.flameOpacityMul, 0.55, 1e-9) &&
+        near(guttering.flameActiveCountMul, 0.3, 1e-9) &&
+        near(guttering.flameOpacityMul, 0.65, 1e-9) &&
         guttering.flameActiveCountMul > 0
     );
     t.ok(
@@ -689,8 +698,8 @@ export function run(t) {
       'canBeSnuffed=false raises the suppression floors so a "cannot blow out" fire never empties',
       immune.flameActiveCountMul > guttering.flameActiveCountMul &&
         immune.flameOpacityMul > guttering.flameOpacityMul &&
-        near(immune.flameActiveCountMul, 0.55, 1e-9) &&
-        near(immune.flameOpacityMul, 0.8, 1e-9)
+        near(immune.flameActiveCountMul, 0.65, 1e-9) &&
+        near(immune.flameOpacityMul, 0.85, 1e-9)
     );
     t.ok(
       'canBeSnuffed does NOT gate the lifespan cut or the smoke shutoff — those are cosmetic, not "did it go out"',
@@ -710,6 +719,15 @@ export function run(t) {
     t.ok(
       'at the midpoint, smoke has already faded further than flame has been suppressed',
       mid.smokeActiveCountMul < mid.flameActiveCountMul
+    );
+    t.ok(
+      // ⚠️ THE OTHER HALF OF THE "TOO STRONG" FIX (2026-09-04) —
+      // SUPPRESSION_EASE_POWER. Bare `smoothstep01` would put "half wind" at
+      // `eased = 0.5` — roughly half suppressed. Powered, `eased ≈ 0.22`
+      // (`0.5 ** 2.2`), so activeCountMul stays around 0.85 — barely
+      // suppressed at all until the back half of the range.
+      'half wind leaves flame at roughly 85% of its calm population, not roughly half',
+      mid.flameActiveCountMul > 0.8
     );
 
     // ── THROUGH fireRuntimeFromParams ITSELF ──

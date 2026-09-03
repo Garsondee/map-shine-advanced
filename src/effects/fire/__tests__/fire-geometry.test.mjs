@@ -682,8 +682,11 @@ export function run(t) {
     t.ok(
       // ⚠️ FLOORS RAISED 2026-09-04 (from 0.15/0.55) — author, live, TWICE:
       // "far too strong" — see FLAME_GUTTER_COUNT_FLOOR's own header.
-      'at windMotion01=1 (can be snuffed), flame is short-lived and mostly suppressed, never literally zero',
-      near(guttering.flameLifeMul, 0.3, 1e-9) &&
+      // ⚠️ LIFESPAN CUT TEMPORARILY NEUTRALISED 2026-09-04 (FLAME_GUTTER_LIFE_MUL
+      // 0.3 -> 1, author: "revert that for the moment") — flame is mostly
+      // suppressed (count/opacity) at full wind but no longer short-lived.
+      'at windMotion01=1 (can be snuffed), flame is at its normal lifespan and mostly suppressed, never literally zero',
+      near(guttering.flameLifeMul, 1, 1e-9) &&
         near(guttering.flameActiveCountMul, 0.3, 1e-9) &&
         near(guttering.flameOpacityMul, 0.65, 1e-9) &&
         guttering.flameActiveCountMul > 0

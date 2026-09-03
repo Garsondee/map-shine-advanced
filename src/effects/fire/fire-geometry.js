@@ -1178,7 +1178,17 @@ export function buildFireLightSources(
  * makes a full gale recycle particles fast — short, flickery puffs.
  */
 const FLAME_CALM_LIFE_MUL = 1.4;
-const FLAME_GUTTER_LIFE_MUL = 0.3;
+// ⚠️ TEMPORARILY NEUTRALISED, 2026-09-04 — author: "I think you currently
+// make the flames last less time in high winds but revert that for the
+// moment please." Was 0.3 (a full gale cut flame's life to 30% of normal,
+// recycling particles fast for short flickery puffs). 1 means high wind no
+// longer shortens life AT ALL — it stays at whatever `FLAME_CALM_LIFE_MUL`'s
+// interpolation gives, down to a neutral 1× at `windMotion01=1`, never below
+// baseline. The calm-air boost above is untouched; only the gutter-side cut
+// is reverted. Restore 0.3 (or whatever value the author lands on) once
+// they've evaluated the ROUND 6 wind-push magnitude fix without lifespan
+// also changing at the same time (mythica-machina-press#485).
+const FLAME_GUTTER_LIFE_MUL = 1;
 
 /**
  * How far a guttering flame's population/brightness can be pushed down.

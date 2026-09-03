@@ -9321,6 +9321,28 @@ export async function startVtPanViewer({
             if (!entry || entry.status !== 'ready') continue;
             refreshItemOcclusionUniforms(entry.appearance, value, vegWeights);
             refreshItemOcclusionUniforms(entry.shadow?.appearance, value, null);
+            // THE LIVE DEPTH-AUTHORITY GATE, EXTENDED FROM TILES
+            // (mythica-machina-press#470, fifth round) — the exact same
+            // per-frame push `t.uDepthOcclusionAmount` gets a few dozen
+            // lines above, mirrored here for vegetation's own depth-proxy
+            // uniform (`rebuildSceneDepthProxies`'s vegetationOverlay
+            // branch, vt-pan-viewer.js: `overlay.uDepthOcclusionAmount =
+            // material.uLiveOcclusionAmount`). Only exists once that branch
+            // has built this overlay's depth proxy at least once — a
+            // not-yet-built or never-visible overlay leaves this a no-op,
+            // same guard shape as the tile push just above (harmless: once
+            // the proxy IS built, this fires every frame after). `vegWeights`
+            // is never null here, unlike the tile push's own defensive
+            // `weights ? weights.fade : 0` (where `weights` genuinely can be
+            // null for a non-occludable tile): this loop only runs inside
+            // `if (state.vegetationOverlays)`, which is the exact condition
+            // (`hasVegetation`) that made `vegWeights` get computed, above,
+            // in the first place — so a bare `.fade` read is correct. Pushing
+            // the SAME value the canopy's own visible fade already reads
+            // means the canopy's paint and the light it blocks can never
+            // disagree about whether it's "there" this frame — the identical
+            // guarantee the tile push's own comment describes.
+            if (entry.uDepthOcclusionAmount) entry.uDepthOcclusionAmount.value = vegWeights.fade;
           }
         }
       }
@@ -16917,9 +16939,75 @@ export async function startVtPanViewer({
             // required by the pool whenever a positionNode is present.
             variantKey: nodeEntry ? `veg:${nodeEntry.id}` : undefined,
           };
-          const material = depthProxyMaterialPool.get(computeDepthProxyMaterialSignature(writerArgs), () =>
-            buildSceneDepthWriterMaterial(writerArgs)
+          // THE LIVE DEPTH-AUTHORITY GATE, EXTENDED FROM TILES
+          // (mythica-machina-press#470, fifth round — a live report against
+          // the SAME symptom #480 already fixed for Tiles: "a solid black
+          // version of the vegetation when the fade happens... present even
+          // with shadow strength turned to 0", i.e. not the drop-shadow
+          // twin, which is separate and offset). Mirrors the Tile branch's
+          // own `t.earlyZReason === 'occlusionResponsive'` case, a few
+          // hundred lines below in this same function: `buf:scene.depth`
+          // (this proxy) is a COMPLETELY SEPARATE system from the visible
+          // canopy's own `uOcclusionWeights` (`buildVegetationMaterial`) —
+          // before this, it had no notion of "is the canopy actually here
+          // right now" at all, so a point light's `buildDepthHeightGateNode`
+          // (point-light-illumination.js) kept reading a fully solid canopy
+          // at this pixel forever, gating the light off under whatever the
+          // fade had just revealed.
+          //
+          // A SEPARATE args object from `writerArgs` above, never folded
+          // into it — `writerArgs` is ALSO what `addDepthPrepassTwin` below
+          // builds STAGE 1's own colour-masked twin from (`scene.color`'s
+          // own depth attachment, feeding STAGE 1's "shade once" fast path —
+          // a different render target and consumer from `buf:scene.depth`'s
+          // point-light gate this fix targets). Leaving that twin off this
+          // gate keeps STAGE 1's own behaviour byte-for-byte unchanged by
+          // this fix — see this block's own trailing comment, by the
+          // `addDepthPrepassTwin` call.
+          //
+          // STILL POOLED — unlike the Tile branch's own live-gated material,
+          // deliberately. The Tile branch avoids the pool because ITS
+          // signature (tex/alphaThreshold/floorIndex/flags/alwaysOpaque) has
+          // no per-instance component, so two DIFFERENT tiles sharing that
+          // tuple would blank out each other's occlusion. Vegetation's
+          // signature already carries `variantKey: veg:${nodeEntry.id}`
+          // above — a per-OVERLAY-INSTANCE id, assigned once
+          // (`vegetationProxyNodeSeq`, monotonically incrementing, never
+          // reused — see `vegetationProxyNodeCache`'s own header) and stable
+          // for the overlay's whole lifetime — so
+          // `computeDepthProxyMaterialSignature`'s own `pos:${variantKey}`
+          // component already makes this pool entry impossible to share
+          // with any OTHER overlay, structurally, the same never-shared
+          // guarantee the Tile branch reaches by opting out of the pool
+          // entirely (confirmed by reading `computeDepthProxyMaterialSignature`
+          // itself, not assumed). That function does NOT fold
+          // `liveOcclusionGate` into its own key, but that is harmless here
+          // precisely because `variantKey` alone already makes the signature
+          // unique to this overlay, and this call site always requests
+          // `liveOcclusionGate: true` for it, every pass, never conditionally.
+          const liveWriterArgs = { ...writerArgs, liveOcclusionGate: true };
+          const material = depthProxyMaterialPool.get(computeDepthProxyMaterialSignature(liveWriterArgs), () =>
+            buildSceneDepthWriterMaterial(liveWriterArgs)
           );
+          // PUSHED EVERY PASS THIS BRANCH RUNS, NOT JUST ON A CACHE MISS —
+          // deliberately never gated on `nodeEntry`'s own cache-miss branch
+          // above. THAT cache (`vegetationProxyNodeCache`) and THIS one
+          // (`depthProxyMaterialPool`) are two INDEPENDENT caches, keyed on
+          // two different things (the overlay's motion bag vs. this
+          // signature string, which also folds in `floorIndex`/`tex`) — a
+          // floor change alone (the host item's `levelId`/elevation
+          // changing mid-session, a real if rare event) flips this
+          // signature while `overlay.motion` and therefore `nodeEntry` stay
+          // exactly the same, so the two caches can miss on DIFFERENT
+          // passes. Gating this assignment on the node cache's own miss
+          // branch would then leave `overlay.uDepthOcclusionAmount` pointing
+          // at a since-disposed material's orphaned uniform the instant the
+          // material pool alone rebuilt — silently freezing this overlay's
+          // light-gate at whatever it last held (typically 0, "solid", the
+          // exact bug this fix exists to close) forever after. A plain
+          // property write either way, so there is no cost to doing it
+          // unconditionally.
+          overlay.uDepthOcclusionAmount = material.uLiveOcclusionAmount;
           const mesh = buildSceneDepthProxyMesh({ THREE, geometry: overlay.geometry, material, z });
           depthScene.add(mesh);
           depthProxyEntries.push({ mesh, material, pooled: true });
@@ -16930,6 +17018,19 @@ export async function startVtPanViewer({
           // prepass and the real proxy MUST animate identically, or the canopy
           // would occlude where it is not drawn — see
           // `feedback_depth_proxy_needs_the_same_animation`).
+          //
+          // BUILT FROM `writerArgs`, NEVER `liveWriterArgs` — deliberately.
+          // This twin feeds STAGE 1's OWN `scene.color` depth prepass (see
+          // `addDepthPrepassTwin`'s own header), not `buf:scene.depth` — an
+          // unrelated consumer this fix does not target. Giving it the live
+          // gate too would mean building a material whose own
+          // `uLiveOcclusionAmount` nothing would ever push a live value
+          // into (nothing reaches this twin's material the way `overlay.
+          // uDepthOcclusionAmount` reaches the real proxy's, above), freezing
+          // it at its own build-time default of 0 — functionally identical
+          // to never having added the gate here, just with an extra unused
+          // uniform. Leaving it off instead keeps STAGE 1's own behaviour
+          // byte-for-byte unchanged by this fix.
           addDepthPrepassTwin(writerArgs, overlay.geometry, z, true);
           continue;
         }

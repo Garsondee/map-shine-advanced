@@ -352,11 +352,32 @@ export function createFireSubsystem({
     // env, ...)` call, is gone too; see that function's own orphan note.
     const windHandle = getWindHandle?.() ?? null;
     const windSpeed01 = windHandle?.ambient?.speed01?.value;
-    // Representative-fire simplification — the SAME one `expectedDepth` below
-    // already uses and for the same reason (a floor's fires overwhelmingly
-    // share one exposure), and `buildFireLightSources` reads this identical
-    // field off this identical `fires` array as `c.exposure`.
-    const windExposure01 = fires[0]?.windExposure;
+    // ⚠️ NOT `fires[0]?.windExposure` (2026-09-04, a real live bug) —
+    // `fires[0]` is `extractFiresFromMask`'s WIDEST painted blob on the whole
+    // floor (`fire-mask.js`'s own sort, widest-ridge-first), which has no
+    // relationship to WHERE that fire sits. Author, live, on a map with more
+    // than one fire: an outdoor fire "isn't reacting to wind" while
+    // vegetation on the same scene reacts fine. Root cause: a wider INDOOR
+    // fire elsewhere on the floor was landing at `fires[0]`, and its own
+    // correctly-low `windExposure` (sampled per-fire from the real
+    // `_Outdoors` mask, `boot.js#sampleWindExposureAt` — the data itself was
+    // never wrong) was being broadcast to the WHOLE map's shared particle
+    // engines, silencing the outdoor fire's wind response too. Unlike
+    // vegetation (`vt-pan-viewer.js`'s own wind sample, LIVE per clump
+    // position off geometry-derived openness — never funnelled through one
+    // representative anything), every flame/ember/smoke engine here is
+    // genuinely map-wide, so there is no way to give an indoor and an
+    // outdoor fire independently correct wind without per-particle exposure
+    // data the arena has no spare storage for (`fire-particle-runtime.js`'s
+    // own header). The best available fix short of that restructure: take
+    // the MAXIMUM windExposure across every fire on the floor, not an
+    // arbitrary one's. A floor with any genuinely outdoor fire on it now
+    // engages wind for its shared particles; a purely indoor floor stays
+    // calm exactly as before — this can only ever make the particles MORE
+    // wind-aware than the old single-fire read, never less.
+    const windExposure01 = fires.length
+      ? fires.reduce((max, f) => Math.max(max, Number.isFinite(f?.windExposure) ? f.windExposure : 1), 0)
+      : 1;
     // ⚠️ `{ fuel: params?.fuel }` ADDED 2026-08-30 — without it, `fireScaleChain`
     // defaults to 'wood' regardless of the author's actual "Fuel" selection, so
     // `chain.hueShift` (magical fuel's own built-in 180° shift) would resolve

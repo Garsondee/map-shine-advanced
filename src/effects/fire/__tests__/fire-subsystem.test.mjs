@@ -550,5 +550,26 @@ export function run(t) {
       'a sealed fire (fires[0].windExposure=0) reads windMotion01=0 even at full scene wind speed',
       windEngines.every((e) => e.paramCalls.at(-1)?.windMotion01 === 0)
     );
+
+    // ⚠️ THE REAL BUG (2026-09-04) — author, live, on a map with more than one
+    // fire: an outdoor fire "isn't reacting to wind" while vegetation on the
+    // SAME scene reacted fine. `extractFiresFromMask` (fire-mask.js) sorts
+    // fires WIDEST-FIRST, with no relationship to indoor/outdoor — so a wider
+    // INDOOR fire elsewhere on the floor can land at `fires[0]` ahead of the
+    // outdoor one the author is actually looking at, and that indoor fire's
+    // own correctly-low `windExposure` used to get broadcast to the WHOLE
+    // map's shared particle engines. `f1` here is the wide indoor fire
+    // (`windExposure: 0`, and — as the widest — the one a naive `fires[0]`
+    // read would have picked); `f2` is the narrower outdoor one
+    // (`windExposure: 1`) the author is actually watching burn.
+    windState.fires = [
+      { id: 'f1', x: 10, y: 10, diameterPx: 200, intensity: 1, windExposure: 0 },
+      { id: 'f2', x: 500, y: 500, diameterPx: 40, intensity: 1, windExposure: 1 },
+    ];
+    windSubsystem.sync(renderer, 48, 0.016, rect);
+    t.ok(
+      'a wider INDOOR fire at fires[0] no longer silences wind for a narrower OUTDOOR fire elsewhere on the floor',
+      windEngines.every((e) => (e.paramCalls.at(-1)?.windMotion01 ?? 0) > 0)
+    );
   }
 }

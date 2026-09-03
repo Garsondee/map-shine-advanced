@@ -18,8 +18,15 @@
  * This file only ever renders what it's handed, never computes health
  * itself.
  *
- * `probe`/`export` call real, already-shipping `MapShine.*` diagnostics
- * (armPixelProbe, flight.export) — genuinely wired, not stubs. `HUD` is now
+ * `export` calls a real, already-shipping `MapShine.*` diagnostic
+ * (flight.export) directly, fire-and-forget — safe because that action's
+ * own side effect (a file download) doesn't depend on anyone reading its
+ * return value. `probe` used to be wired the same fire-and-forget way, and
+ * that was wrong for it: a pixel probe's only deliverable IS its return
+ * value (the 5-buffer readback report), so `void`-ing the promise silently
+ * threw the report away every time (mythica-machina-press#489 fix,
+ * 2026-09-03) — it now goes through `MapShine.debug.buildActionButton(
+ * 'pixel-probe')` instead, same as `perfBtn` below. `HUD` is now
  * wired too (mythica-machina-press#173 fix): `ctx.getHudPanel()` hands back
  * boot.js's own `perfHud` (`diag/perf-hud.js#createPerfHud`), and the button
  * mounts its already-embeddable `.el` into a host inside this strip's own
@@ -89,7 +96,7 @@ function plannedDbtn(text, title, plannedReason) {
 
 /**
  * @param {HTMLElement} container
- * @param {{onProbe?: () => void, onExport?: () => void,
+ * @param {{buildPixelProbeButton?: () => HTMLElement|null, onExport?: () => void,
  *   buildPerfSweepButton?: () => HTMLElement|null}} ctx
  * @returns {{update: (snapshot: {fpsText: string, msText: string,
  *   vramText: string, sparkHistory: Array<{ratio: number|null, level: string}>}
@@ -126,7 +133,47 @@ export function renderDebugStrip(container, ctx) {
   tag.className = 'msa-debug-tag';
   tag.innerHTML = `${iconMarkup('flask')}DEBUG`;
 
-  const probeBtn = dbtn('probe', 'Pixel probe — click 3 map points, sample the compositor', () => ctx.onProbe?.());
+  // THE PIXEL PROBE BUTTON — like perfBtn just below, routed through
+  // MapShine.debug.buildActionButton so status text/error-handling/
+  // clipboard-copy come for free. Fixed 2026-09-03 (mythica-machina-press
+  // #489, author: "pixel probe button in the main remote doesn't work, the
+  // other one does") — this used to be a bare `dbtn(...)` firing
+  // `void MapShine.armPixelProbe(3)`: the click-3-points flow armed fine
+  // (on-screen markers still drew) but the probe's only actual deliverable,
+  // the 5-buffer readback report, lived solely in the discarded promise
+  // result — nothing ever read it, so the author saw markers and then
+  // nothing. `buildActionButton('pixel-probe')` reaches the exact SAME
+  // registered action the Studio Lab's own "Pixel Probe (click 3 pts)"
+  // quick-reach button already calls successfully.
+  const probeBtn =
+    ctx.buildPixelProbeButton?.() ??
+    plannedDbtn(
+      'probe',
+      'Pixel probe — click 3 map points, sample the compositor',
+      'The debug panel has not installed yet, or pixel-probe is not registered.'
+    );
+  probeBtn.classList.add('msa-debug-btn');
+  // Same inline-style clobber perfBtn's own comment documents just below —
+  // buildActionButton's button sets font/padding/background/border/color as
+  // INLINE styles, which beat .msa-debug-btn's CSS by specificity regardless
+  // of class order.
+  Object.assign(probeBtn.style, {
+    font: '',
+    fontWeight: '',
+    padding: '',
+    background: '',
+    border: '',
+    borderRadius: '',
+    color: '',
+  });
+  // The registered action's own label ('Pixel Probe (click 3 pts)') is too
+  // long for this compact strip — swap the DISPLAYED text only, the same
+  // "move the full wording to title" move perfBtn makes just below; the
+  // click still runs the real 'pixel-probe' action either way.
+  if (probeBtn.textContent && probeBtn.textContent.length > 'probe'.length) {
+    probeBtn.title = probeBtn.textContent;
+    probeBtn.textContent = 'probe';
+  }
   // The full performance sweep — a REAL registered action (boot.js's own
   // 'perf-run-full', ~5min single floor/20+min multi-floor), reached
   // through MapShine.debug.buildActionButton so it gets the SAME status-

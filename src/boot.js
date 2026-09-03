@@ -1403,14 +1403,22 @@ function install() {
       // closures above). Only the two real, one-line MapShine.* actions live
       // here.
       debugStrip: {
-        onProbe: () => void MapShine.armPixelProbe(3),
-        onExport: () => void MapShine.flight?.export(),
         // UI parity plan, phase 5 follow-up (author: "pixel probe and
         // performance review the only two buttons... all the time") — a
         // ready-made button, not a raw function: MapShine.debug.
         // buildActionButton already wires status text/error handling/
         // clipboard-copy through the SAME registry every other debug action
-        // renders through.
+        // renders through. Originally only perf sweep (below) actually got
+        // this treatment; probe kept the old raw `void MapShine.
+        // armPixelProbe(3)` call, which armed the click-3-points flow but
+        // threw away the resolved report — the probe's only real deliverable
+        // — since nothing ever read it. Fixed 2026-09-03, mythica-machina-
+        // press#489 (author: "pixel probe button in the main remote doesn't
+        // work, the other one does" — "the other one" being the Studio
+        // Lab's quick-reach button, which already reached 'pixel-probe'
+        // through this exact mechanism).
+        buildPixelProbeButton: () => MapShine.debug?.buildActionButton?.('pixel-probe') ?? null,
+        onExport: () => void MapShine.flight?.export(),
         buildPerfSweepButton: () => MapShine.debug?.buildActionButton?.('perf-run-full') ?? null,
         // The standalone HUD entry point (mythica-machina-press#173 fix):
         // perfHud is created further down install()'s own body (createPerfHud

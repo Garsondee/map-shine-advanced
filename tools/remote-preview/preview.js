@@ -365,7 +365,11 @@ const remote = installRemote({
   // has no such loop, so a fake ~250ms tick stands in below, same spirit as
   // tickFades' own preview-only stand-in for the real pump.
   debugStrip: {
-    onProbe: () => log('probe armed (preview stand-in)'),
+    // No `buildPixelProbeButton`/`buildPerfSweepButton` stand-ins here — this
+    // harness has no real `MapShine.debug` action registry to build from, so
+    // both fall back to debug-strip.js's own built-in "planned" stub, same as
+    // perf sweep already did before probe was routed through the same
+    // mechanism (mythica-machina-press#489).
     onExport: () => log('export fired (preview stand-in)'),
   },
 });

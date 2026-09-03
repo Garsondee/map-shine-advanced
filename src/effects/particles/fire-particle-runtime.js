@@ -69,7 +69,13 @@
  * @module effects/particles/fire-particle-runtime
  */
 import { ParticleArena, BYTES_PER_PARTICLE } from './particle-arena.js';
-import { createWindHandle, packWindCells, WIND_CELL_VEC4_STRIDE, deflectAroundWalls } from '../../world/index.js';
+import {
+  createWindHandle,
+  packWindCells,
+  WIND_CELL_VEC4_STRIDE,
+  deflectAroundWalls,
+  windFlowVectorNode,
+} from '../../world/index.js';
 import { createLogger } from '../../core/log.js';
 import { packSpawnPoints } from '../fire/fire-spawn-points.js';
 import { buildDepthHeightGateNode } from '../lighting/point-light-illumination.js';
@@ -867,28 +873,21 @@ export function createFireParticleEngine({
     // this particular particle is now real, per-position openness (above),
     // not a map-wide aggregate. See the module header's own account.
     //
-    // ⚠️ THE ANGLE FORMULA IS `(sin, −cos)`, DELIBERATELY NOT `world/wind-field.js`'s
-    // `(cos, sin)` — this is the ONE PLACE the two are allowed to disagree, and
-    // it is not a coincidence but a mismatch discovered live (2026-09-03,
-    // author: "if I point wind north, they move east... 90 degree disagreement").
-    // `directionDeg` carries TWO DIFFERENT, ALREADY-ESTABLISHED conventions in
-    // this codebase and `MapShine.setWind()` writes the SAME raw number into
-    // both with no reconciling transform:
-    //   • the GM-facing compass dial (`ui/widgets/param-control.js#buildCompassRow`,
-    //     its own explicit header) treats 0°=NORTH and draws/reads bearings as
-    //     `(sin b, −cos b)` — clockwise from north, needle points TOWARD b.
-    //   • `wind-field.js#sampleWind` / `wind-bake.js#ambientVectorFromWind`
-    //     (candle sway, gust dust motes, rain lean) treat 0°=EAST (`(cos,sin)`,
-    //     an ordinary math angle from +X) and read it as METEOROLOGICAL FROM,
-    //     negating to get the flow — see that function's own header and its
-    //     Node test (`directionDeg:0` asserted as an "East" wind).
-    // These are a genuine, pre-existing 90° reference mismatch, independent of
-    // anything fire does — filed separately (mythica-machina-press#487) rather
-    // than fixed here, since correcting it touches every other wind-driven
-    // effect's already-tuned look. Fire reads `directionDeg` straight off the
-    // SAME dial the author is looking at when they point it, so THIS particle
-    // push uses the compass dial's own formula directly — the one thing in the
-    // scene the GM can actually verify by eye.
+    // ⚠️ FIRE USED TO CARRY ITS OWN PRIVATE COPY OF THIS FORMULA, and it was
+    // right to at the time. `(sin, −cos)` was written here deliberately in
+    // 2026-09-03 (author, live: "if I point wind north, they move east... 90
+    // degree disagreement") because `wind-field.js` then read `directionDeg`
+    // as 0°=EAST meteorological-FROM while the GM-facing compass dial read it
+    // as 0°=NORTH pointing-TOWARD — and fire chose the dial, the one thing in
+    // the scene the GM can verify by eye.
+    //
+    // RESOLVED 2026-09-04 (mythica-machina-press#487/#496, #497 Stage 0): the
+    // author settled the convention as the dial's, so fire's reading was the
+    // correct one all along and its VALUE here does not change. What changes
+    // is that the formula is no longer fire's own — it comes from the single
+    // shared helper every consumer now calls (`world/wind-bake.js#
+    // windFlowVector` documents the convention; `windFlowVectorNode` is its
+    // shader twin). One implementation to be right or wrong.
     //
     // ⚠️ THE GUST CURVE IS SUPERLINEAR, DELIBERATELY (2026-09-03) — a flat
     // multiply by `effectiveWindMotion` reads as merely "more wind"; passes
@@ -896,9 +895,8 @@ export function createFireParticleEngine({
     // `WIND_GUST_MAX_MULT`× a flat-linear response at 1, so calm stays calm
     // and only the top of the dial gets dramatic. See WIND_GUST_MAX_MULT's
     // own header.
-    const windRad = uWindDirDeg.mul(float(Math.PI / 180));
     const gustPush = effectiveWindMotion.mul(float(1).add(effectiveWindMotion.mul(float(WIND_GUST_MAX_MULT - 1))));
-    let windDirVec = vec2(sin(windRad), cos(windRad).negate());
+    let windDirVec = windFlowVectorNode(TSL, uWindDirDeg);
     // WALL DEFLECTION (2026-09-04) — a free bonus of sampling the real grid
     // above: `deflectAroundWalls` is a purely geometric push-away-from-the-
     // wall-surface operation on a raw world-space (x,y) vector, so it composes

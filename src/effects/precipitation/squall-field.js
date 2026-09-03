@@ -35,29 +35,30 @@
  * same events the bodies and the vegetation respond to, at a larger wavelength
  * — never a second, private idea of gustiness."*
  *
- * ⚠️ AND IT NEEDED A 90° CORRECTION TO GET THERE, which is a real finding
- * rather than a fudge. The two zones disagree about what `directionDeg` means
- * as a vector:
+ * ⚠️ THIS USED TO NEED A 90° CORRECTION, and the correction is now GONE —
+ * do not reintroduce it. The two zones genuinely disagreed about what
+ * `directionDeg` meant as a vector:
  *
  * ```
  *   world/wind-field.js   flow      = −(cos θ, sin θ)      … θ=0 ⇒ WEST
  *   effects/precipitation windToward = ( −sin θ, cos θ)     … θ=0 ⇒ SOUTH
  * ```
  *
- * Both are "correct" for their own consumers because each was calibrated
- * separately against the map — precipitation's was fixed live by the author
- * after being wrong twice, and the wind field's own consumers were tuned
- * against theirs. That is `feedback_shared_field_two_meanings_two_registries`
- * wearing a compass, and the real repair (one exported helper every consumer
- * calls) is filed against `wind-field.js` because it would retune shipped
- * looks.
+ * Each was "correct" for its own consumers because each had been calibrated
+ * separately against the map, which is
+ * `feedback_shared_field_two_meanings_two_registries` wearing a compass. This
+ * file bridged the gap with a derived, Node-pinned `−90` pre-rotation,
+ * because `computeGustEnvelope`'s own comment warns that a front travelling
+ * at an angle to the wind it modulates *"would read as two unrelated weather
+ * systems"* — and 90° is the most visible angle there is.
  *
- * What CANNOT wait is this field: `computeGustEnvelope`'s own comment says a
- * front travelling at an angle to the wind it modulates *"would read as two
- * unrelated weather systems"* — and 90° is the most visible angle there is.
- * So {@link gustDirectionForPrecip} pre-rotates the angle handed to it, and
- * the rotation is DERIVED (`−(cos(θ−90), sin(θ−90)) = (−sin θ, cos θ)`) and
- * pinned by a Node assertion, never eyeballed.
+ * The real repair — one exported helper every consumer calls — landed
+ * 2026-09-04 (mythica-machina-press#497 Stage 0). Both zones now resolve
+ * through `world/wind-bake.js#windFlowVector` / `windFlowVectorNode`, so the
+ * bridge has nothing left to span and the gust angle is simply the wind
+ * angle. Note the convention ALSO settled the other way in that pass (a
+ * compass bearing naming where the wind blows TOWARD), so precipitation's own
+ * drive direction flipped 180° at the same time.
  *
  * ============================================================================
  * THE TWO ENGINEERING TRAPS, VERBATIM FROM THE WIND RESEARCH
@@ -76,7 +77,7 @@
  *
  * @module effects/precipitation/squall-field
  */
-import { computeGustEnvelope } from '../../world/index.js';
+import { computeGustEnvelope, windFlowVectorNode } from '../../world/index.js';
 
 /**
  * How much coarser the gust envelope is sampled for the curtain than for a
@@ -149,41 +150,6 @@ export const BAND_DEPTH = 0.8;
 export const CELL_CONTRAST = 0.85;
 
 /**
- * ⭐ THE 90° RECONCILIATION — what angle to hand `computeGustEnvelope` so its
- * fronts travel the way precipitation actually falls.
- *
- * DERIVED, not tuned. `computeGustEnvelope` builds `flow = −(cos θ′, sin θ′)`;
- * precipitation drives along `(−sin θ, cos θ)`. Setting them equal:
- *
- * ```
- *   −cos θ′ = −sin θ   ⇒  cos θ′ =  sin θ
- *   −sin θ′ =  cos θ   ⇒  sin θ′ = −cos θ
- *   ⇒ θ′ = θ − 90°
- * ```
- *
- * Pinned in Node against pure twins of BOTH conventions, because a compass
- * error here is invisible in code review and obvious on a map — and this
- * project has paid for that twice already in this very effect.
- *
- * @param {number} directionDeg - meteorological, as the wind handle reports it.
- * @returns {number} the angle to pass to `computeGustEnvelope`.
- */
-export function gustDirectionForPrecip(directionDeg) {
-  return (Number(directionDeg) || 0) - 90;
-}
-
-/**
- * CPU twin of `world/wind-field.js`'s internal flow vector. Exists ONLY so
- * {@link gustDirectionForPrecip}'s derivation is checkable in Node — nothing
- * renders with it.
- * @param {number} deg @returns {{x: number, y: number}}
- */
-export function windFieldFlowVector(deg) {
-  const r = ((Number(deg) || 0) * Math.PI) / 180;
-  return { x: -Math.cos(r), y: -Math.sin(r) };
-}
-
-/**
  * Build the squall field as a TSL node in 0..1.
  *
  * ⚠️ TAKES `TSL` AND NODES, RETURNS A NODE — no uniforms of its own, no state,
@@ -196,7 +162,8 @@ export function windFieldFlowVector(deg) {
  * @param {object} inputs
  * @param {*} inputs.worldXY - vec2 node, world px.
  * @param {*} inputs.timeMs - float node.
- * @param {*} inputs.directionDeg - float node, METEOROLOGICAL. Rotated here.
+ * @param {*} inputs.directionDeg - float node, a compass bearing naming where
+ *   the wind blows TOWARD (`world/wind-bake.js#windFlowVector`). Used as-is.
  * @param {*} inputs.speed01 - float node.
  * @param {*} inputs.gustiness01 - float node.
  * @param {*} [inputs.bandDepth] - float node overriding {@link BAND_DEPTH}.
@@ -209,30 +176,28 @@ export function buildSquallField(
   TSL,
   { worldXY: rawXY, timeMs, directionDeg, speed01, gustiness01, bandDepth = null, scale = null }
 ) {
-  const { float, vec2, mx_noise_float: perlin, mix, sin, cos, clamp } = TSL;
+  const { float, vec2, mx_noise_float: perlin, mix, clamp } = TSL;
   // ONE scaling, applied before anything reads a position — so the gust half
   // and the cell half stay locked to each other at every setting. Scaling them
   // independently is trap 2 wearing a dial.
   const worldXY = scale ? rawXY.mul(scale) : rawXY;
 
-  // ⭐ THE SAME FRONTS THE VEGETATION BENDS TO, at curtain scale and rotated
-  // into precipitation's compass — see this module's header for the derivation.
-  const gustDeg = directionDeg.sub(float(90));
+  // ⭐ THE SAME FRONTS THE VEGETATION BENDS TO, at curtain scale — and now at
+  // the SAME angle, with no rotation between them. See this module's header
+  // for the `−90` bridge that used to be needed here and why it is gone.
   const gust = computeGustEnvelope(TSL, {
     centerXY: worldXY.mul(float(CURTAIN_GUST_SCALE)),
     time: timeMs,
-    directionDeg: gustDeg,
+    directionDeg,
     gustiness01,
     speed01,
   });
 
   // ── THE SLOW WEATHER CELL ──
-  // Precipitation's own drive direction, in this zone's convention. Written out
-  // rather than imported from the runtime because that copy is a local arrow
-  // inside a factory; both are the same rule and the CPU twin
-  // (`precip-species.js#windTowardVector`) pins it for all four cardinals.
-  const rad = directionDeg.mul(float(Math.PI / 180));
-  const toward = vec2(sin(rad).negate(), cos(rad));
+  // Precipitation's own drive direction, through the ONE shared helper every
+  // consumer now calls — so the cell, the gust fronts above, and the bodies
+  // the runtime actually pushes are all reading a single implementation.
+  const toward = windFlowVectorNode(TSL, directionDeg);
   const across = vec2(toward.y.negate(), toward.x);
 
   // ⚠️ ONE ADVECTION TERM, applied to the coordinate BEFORE the octave is

@@ -42,42 +42,67 @@
  */
 
 /**
- * Convert an ambient direction+speed into a vector — still the single
- * ambient term of the new model (`W = A · openness + gusts`,
- * `docs/planning/Wind-Rethink.md` §4.1).
+ * ⭐ THE ONE ANGLE→VECTOR CONVERSION. Every consumer of `directionDeg`, on
+ * CPU or GPU, resolves through this function or its TSL twin
+ * ({@link module:world/wind-field~windFlowVectorNode}). Nothing anywhere else
+ * may write its own `sin`/`cos` of a wind bearing.
  *
- * ANGLE CONVENTION (documented explicitly — a fresh direction↔vector mapping
- * is exactly this project's own recurring Y-flip bug class,
- * feedback_y_flip_recurring_risk): `directionDeg` is METEOROLOGICAL — the
- * direction the wind blows FROM, matching every real-world weather report
- * and the debug panel's own compass-labeled dropdown ("East" means an east
- * wind, blowing FROM the east TOWARD the west — not a wind blowing toward
- * the east). Measured CLOCKWISE from +X in the engine's own RAW WORLD SPACE
- * (+Y down — the same space every world mesh in this codebase already works
- * in with zero manual flipping, per candle-flame-render.js's own header:
- * "the viewer's camera owns the ONE Y-flip"). So 0° ("East") blows FROM +X,
- * i.e. the flow vector points toward -X (screen west); 90° ("South") blows
- * FROM +Y toward -Y (screen north/up); 180° ("West") blows toward +X (east);
- * 270° ("North") blows toward +Y (south/down) — the flow vector is always
- * the NEGATION of the raw (cos,sin) bearing. No camera-space flip is applied
- * here, deliberately: this function's output feeds code that is already on
- * the raw-world-space side of that one camera flip, same as the candle
- * quad's own `center` attribute — the negation below is the FROM→flow
- * correction, an entirely separate thing from a Y-axis flip.
+ * ============================================================================
+ * THE CONVENTION (settled 2026-09-04 by the author; mythica-machina-press#487
+ * / #496 / #497 Stage 0)
+ * ============================================================================
+ * `directionDeg` is a COMPASS BEARING — 0° = NORTH, increasing CLOCKWISE —
+ * and it names the direction the wind **BLOWS TOWARD**. Point the dial at
+ * north and the air travels north. That is the author's own call, made
+ * against the alternative (meteorological "blows FROM"), and it is now the
+ * only reading in the codebase.
  *
- * MUST match `world/wind-field.js#sampleWind`'s own live ambient branch —
- * the two are summed/compared against the same convention throughout the
- * wind system.
+ * In this engine's RAW WORLD SPACE (+X east, +Y SOUTH — the camera owns the
+ * one Y-flip, per candle-flame-render.js's header) the flow vector is
+ * therefore `(sin θ, −cos θ)`:
+ *
+ * ```
+ *   θ =   0° (N) ⇒ ( 0, −1)  → screen up
+ *   θ =  90° (E) ⇒ ( 1,  0)  → screen right
+ *   θ = 180° (S) ⇒ ( 0,  1)  → screen down
+ *   θ = 270° (W) ⇒ (−1,  0)  → screen left
+ * ```
+ *
+ * This is byte-identical to `ui/widgets/param-control.js#buildCompassRow`'s
+ * own needle trig, deliberately: the needle a GM drags and the direction the
+ * air travels are now the same two lines of maths, so the dial cannot lie.
+ *
+ * ⚠️ WHAT THIS REPLACED, so the next reader does not "restore" it. Until
+ * 2026-09-04 this function returned `−(cos θ, sin θ)` — 0° = EAST, read as
+ * meteorological FROM. The codebase held THREE different readings at once
+ * (this one; the dial and fire's `(sin θ, −cos θ)`; precipitation's
+ * `(−sin θ, cos θ)`), a constant 90° apart in one case and a full 180° in
+ * the other, with `effects/precipitation/squall-field.js` carrying a
+ * hand-derived `−90` patch to bridge the gap. Two separate files
+ * (`squall-field.js`, `particles/precip-runtime.js`) had already written down
+ * that the real repair was "one exported helper every consumer calls, so
+ * there is one implementation to be right or wrong". This is that helper.
+ *
+ * @param {number} directionDeg - compass bearing, 0 = north, clockwise.
+ * @returns {{x: number, y: number}} a UNIT vector in raw world space.
+ */
+export function windFlowVector(directionDeg) {
+  const rad = ((Number.isFinite(directionDeg) ? directionDeg : 0) * Math.PI) / 180;
+  return { x: Math.sin(rad), y: -Math.cos(rad) };
+}
+
+/**
+ * The ambient term of the model (`W = A · openness + gusts`) — {@link
+ * windFlowVector} scaled by speed. Kept as its own export because callers
+ * overwhelmingly want the scaled vector, not the bare direction.
  *
  * @param {{directionDeg?: number, speed01?: number}} wind
  * @returns {{x: number, y: number}}
  */
 export function ambientVectorFromWind({ directionDeg = 0, speed01 = 0 } = {}) {
-  const deg = Number.isFinite(directionDeg) ? directionDeg : 0;
   const speed = Number.isFinite(speed01) ? Math.max(0, speed01) : 0;
-  const rad = (deg * Math.PI) / 180;
-  // The FROM→flow negation — see this function's own header.
-  return { x: -Math.cos(rad) * speed, y: -Math.sin(rad) * speed };
+  const dir = windFlowVector(directionDeg);
+  return { x: dir.x * speed, y: dir.y * speed };
 }
 
 /**

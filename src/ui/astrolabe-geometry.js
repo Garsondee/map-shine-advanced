@@ -117,17 +117,25 @@ export function phaseDisplayName(phase, rising) {
 }
 
 /**
- * Meteorological degrees (the direction wind comes FROM) → the arrow's own
- * rotation (it points where the wind GOES). One conversion, one place.
+ * `directionDeg` → the arrow's own rotation. One conversion, one place.
+ *
+ * ⚠️ NO LONGER A 180° FLIP (2026-09-04, mythica-machina-press#497 Stage 0).
+ * This used to add 180 because `directionDeg` was read as METEOROLOGICAL —
+ * the direction wind comes FROM — while the arrow points where the wind
+ * GOES. The convention is now settled the other way (`world/wind-bake.js#
+ * windFlowVector`: a compass bearing naming the direction the wind blows
+ * TOWARD), so the arrow's rotation simply IS the bearing and the flip is
+ * gone. Kept as a named seam, still doing real work — it normalises into
+ * 0..360 — so the one place a convention change would land stays obvious.
  * @param {number} windDeg @returns {number}
  */
 export function windDegToVisualDeg(windDeg) {
-  return ((((Number(windDeg) || 0) + 180) % 360) + 360) % 360;
+  return (((Number(windDeg) || 0) % 360) + 360) % 360;
 }
 
 /** The inverse. @param {number} visualDeg @returns {number} */
 export function visualDegToWindDeg(visualDeg) {
-  return ((((Number(visualDeg) || 0) + 180) % 360) + 360) % 360;
+  return (((Number(visualDeg) || 0) % 360) + 360) % 360;
 }
 
 /** @param {number} hoursPerMinute @returns {number} index into TIME_RATE_STEPS */

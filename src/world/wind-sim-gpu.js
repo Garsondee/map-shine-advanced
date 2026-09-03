@@ -55,6 +55,7 @@
  */
 
 import { WIND_SIM_SPLAT_FOLLOW_RATE_PER_SECOND } from './wind-sim.js';
+import { windFlowVectorNode } from './wind-field.js';
 
 // `pow(remainAfter1s, dt)` reproduces `1 - exp(-rate*dt)`'s own remaining
 // fraction exactly (`exp(-rate) === remainAfter1s`), computed once in plain
@@ -104,7 +105,7 @@ export function buildWindAdvectDissipateMaterial({
   cellSize,
   decayPerSecond = 0.35,
 }) {
-  const { texture, uv, vec2, vec4, float, uniform, cos, sin, clamp, pow, max } = THREE.TSL;
+  const { texture, uv, vec2, vec4, float, uniform, clamp, pow, max } = THREE.TSL;
 
   const uv0 = uv();
   const restD = texture(restFieldTexture, uv0).xy;
@@ -112,13 +113,11 @@ export function buildWindAdvectDissipateMaterial({
   const uDtSec = uniform(float(0));
   const uDecayPerSecond = uniform(float(decayPerSecond));
 
-  // The FROM->flow ambient vector — byte-identical formula to
-  // `world/wind-field.js#sampleWind`'s own `if (wind)` branch and
-  // `world/wind-bake.js#ambientVectorFromWind`; those two already have to
-  // agree with each other (documented in both files), and this is a THIRD
-  // site that must not drift from either.
-  const rad = ambientWind.directionDeg.mul(float(Math.PI / 180));
-  const ambientVec = vec2(cos(rad), sin(rad)).negate().mul(ambientWind.speed01);
+  // The ambient flow vector — through the ONE shared helper
+  // ({@link module:world/wind-field~windFlowVectorNode}), which is what now
+  // makes "this must not drift from `sampleWind`'s own branch" structural
+  // rather than a comment asking three sites to stay in step by hand.
+  const ambientVec = windFlowVectorNode(THREE.TSL, ambientWind.directionDeg).mul(ambientWind.speed01);
 
   const totalW = ambientVec.add(restD);
   // World px -> UV: divide by the grid's own world extent (same conversion

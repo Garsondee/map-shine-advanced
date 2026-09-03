@@ -109,7 +109,7 @@
  * @module effects/particles/precip-runtime
  */
 import { ParticleArena, BYTES_PER_PARTICLE } from './particle-arena.js';
-import { createWindHandle } from '../../world/index.js';
+import { createWindHandle, windFlowVectorNode } from '../../world/index.js';
 import { createLogger } from '../../core/log.js';
 import { resolveSpecies } from '../precipitation/precip-species.js';
 import { buildSquallField } from '../precipitation/squall-field.js';
@@ -595,46 +595,24 @@ export function createPrecipEngine({
 
   const hash11 = (x) => fract(sin(x.mul(12.9898)).mul(43758.5453));
 
-  /**
-   * ⭐ THE DIRECTION THE WIND PUSHES THINGS, from `directionDeg`.
-   *
-   * ⚠️ `directionDeg` IS METEOROLOGICAL — it names the direction the wind blows
-   * **FROM**, not toward. `world/wind-field.js` says so in its own angle-
-   * convention block ("East" means an east wind, blowing FROM the east TOWARD
-   * the west) and its sampler negates accordingly:
-   * `vec2(cos, sin).negate().mul(speed01)`.
-   *
-   * ⚠️ AND IT IS A **+90° ROTATION**, NOT A NEGATION — I got this wrong twice
-   * and the second attempt is instructive. The first cut used a bare
-   * `vec2(cos, sin)`; reading the field's `.negate()` I "fixed" it by negating
-   * too, which is a 180° flip. The author's next report was that precipitation
-   * ran *"90 degrees clockwise of the wind direction — wind heading north, snow
-   * goes east; wind east, snow goes south."* Two data points is enough to solve
-   * exactly: in this engine's Y-DOWN world (the camera is flipped, `top = minY`,
-   * so +Y is SOUTH and +X is EAST) those observations are precisely
-   * `precip = cw90(heading)`, so the true heading is `ccw90` of what the code
-   * produced — which reduces to `(−sin, cos)`, i.e. the raw angle turned +90°.
-   *
-   * ⚠️ THE LESSON: a DIRECTION being wrong does not tell you the CORRECTION is
-   * a sign. Negation fixes 180°; a rotation error needs a rotation. Reaching
-   * for `.negate()` because the reference code contained one was pattern-
-   * matching, not derivation — the two conventions differ by more than a sign
-   * and the honest move was to solve it from observations, as above.
-   *
-   * ⚠️ STILL A SECOND HAND-WRITTEN READING OF A SHARED CONVENTION, which is the
-   * root problem (`feedback_shared_field_two_meanings_two_registries` wearing a
-   * compass). The real fix is for `world/wind-field.js` to EXPORT a
-   * direction→vector helper that every consumer calls, so there is one
-   * implementation to be right or wrong. Filed rather than done here because it
-   * touches shipped consumers (vegetation, gusts, the overlay) whose current
-   * look is calibrated against their own readings, and silently rotating those
-   * is not a change to make in a precipitation commit.
-   *
-   * One helper, both call sites (the kernel's drift and the draw's convergence
-   * shift), so those two can never disagree with each other.
-   * @param {*} rad - `directionDeg` already in radians.
-   */
-  const windToward = (rad) => vec2(sin(rad).negate(), cos(rad));
+  // ⭐ THE DIRECTION THE WIND PUSHES THINGS now comes from the ONE shared
+  // helper, `world/wind-field.js#windFlowVectorNode` — see its CPU twin
+  // `world/wind-bake.js#windFlowVector` for the convention itself.
+  //
+  // ⚠️ THIS FILE USED TO HOLD ITS OWN `windToward`, and its history is worth
+  // keeping: it was wrong twice (a bare `(cos, sin)`, then a `.negate()` that
+  // fixed 180° of a 90° error) before being solved from two live author
+  // observations as `(−sin, cos)`. Its own comment then named the real repair
+  // exactly — *"the real fix is for `world/wind-field.js` to EXPORT a
+  // direction→vector helper that every consumer calls, so there is one
+  // implementation to be right or wrong"* — and deferred it because rotating
+  // shipped consumers was not a change to make in a precipitation commit.
+  // That repair landed 2026-09-04 (mythica-machina-press#497 Stage 0), and
+  // with it the convention settled as the compass dial's (blows TOWARD the
+  // bearing), which is a 180° flip from what this local helper produced. The
+  // lesson the old comment recorded still stands and is why the helper is
+  // shared now: a DIRECTION being wrong does not tell you the CORRECTION is a
+  // sign — negation fixes 180°, a rotation error needs a rotation.
 
   /**
    * WHERE A BODY IS ACTUALLY DRAWN — V2's `M(h) = D/(D−h)` applied to its world
@@ -881,7 +859,6 @@ export function createPrecipEngine({
     // times. (`windPxPerSec` is unused by precipitation: the wind field's
     // foliage-calibrated 320 px/s is the wrong frame for a body falling at
     // thousands — see `uWindAirSpeed`.)
-    const windRad = uWindDirDeg.mul(float(Math.PI / 180));
     // ⭐ AIR-SPEED FIRST. A body's horizontal speed tracks the AIR's speed
     // scaled by how much of it the body catches (`windCarry01`) — it is NOT a
     // function of its own fall speed.
@@ -894,7 +871,11 @@ export function createPrecipEngine({
     // 2210 px/s, rain 1170. The tilt is then DERIVED (snow ~88°, i.e. nearly
     // horizontal — which is what a blizzard actually looks like) rather than
     // dialled, so it can never disagree with the body's real travel.
-    const windVec = windToward(windRad).mul(uWindSpeed01).mul(uWindAirSpeed).mul(uViewScale).mul(float(WIND_CARRY));
+    const windVec = windFlowVectorNode(TSL, uWindDirDeg)
+      .mul(uWindSpeed01)
+      .mul(uWindAirSpeed)
+      .mul(uViewScale)
+      .mul(float(WIND_CARRY));
     // 2. The chaos — V2's dual-frequency lateral sway (`:1450-1505`), phase
     //    offset per body so neighbours never move in lockstep (the ember
     //    lesson: a pure function of position and time makes a swarm drift as

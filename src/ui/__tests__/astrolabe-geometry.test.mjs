@@ -58,12 +58,16 @@ export function run(t) {
 
   // ---- the wind convention, which has bitten this project before -----------
   {
-    // `world/wind-field.js` uses METEOROLOGICAL degrees — the direction wind
-    // comes FROM. The arrow points where it GOES. Exactly one 180° flip, in
-    // exactly one place; a second copy anywhere is how a dial ends up pointing
-    // backwards and nobody can find the sign.
-    t.ok('a northerly wind draws pointing south', close(windDegToVisualDeg(0), 180));
-    t.ok('and back again', close(visualDegToWindDeg(180), 0));
+    // ⚠️ THE 180° FLIP IS GONE (2026-09-04, mythica-machina-press#497 Stage 0).
+    // This used to assert that a northerly wind drew the arrow pointing SOUTH,
+    // because `directionDeg` was read as METEOROLOGICAL — the direction wind
+    // comes FROM — while the arrow points where it GOES. The author settled
+    // the convention as the compass dial's: a bearing names where the wind
+    // blows TOWARD. So the arrow's rotation simply IS the bearing, and the one
+    // remaining job of these two functions is normalising into 0..360.
+    t.ok('the arrow points along the bearing, no flip', close(windDegToVisualDeg(0), 0));
+    t.ok('and back again', close(visualDegToWindDeg(0), 0));
+    t.ok('a southerly bearing draws pointing south', close(windDegToVisualDeg(180), 180));
     for (const d of [0, 45, 90, 180, 270, 359]) {
       t.ok(`wind↔visual round-trip @${d}`, close(visualDegToWindDeg(windDegToVisualDeg(d)), d));
     }

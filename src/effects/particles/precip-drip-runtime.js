@@ -41,6 +41,7 @@
  * @module effects/particles/precip-drip-runtime
  */
 import { ParticleArena, BYTES_PER_PARTICLE } from './particle-arena.js';
+import { windFlowVectorNode } from '../../world/index.js';
 import { createLogger } from '../../core/log.js';
 
 const log = createLogger('precip-drip');
@@ -166,9 +167,11 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
   const uRgbMul = uniform(float(1));
 
   const hash11 = (x) => fract(sin(x.mul(12.9898)).mul(43758.5453));
-  /** Precipitation's compass — `(−sin, cos)`. The CPU twin
-   * (`precip-species.js#windTowardVector`) pins all four cardinals. */
-  const windToward = (rad) => vec2(sin(rad).negate(), cos(rad));
+  // Precipitation's compass is no longer this file's own (2026-09-04,
+  // mythica-machina-press#497 Stage 0) — it resolves through the ONE shared
+  // `windFlowVectorNode`, so a drip can never blow opposite to the rain that
+  // made it. The local `(−sin, cos)` copy that used to live here was one of
+  // FOUR hand-written readings of the same rule across this codebase.
 
   /** Pick a roofline point for this body, from a bounded entropy. */
   const pickPoint = (entropy) => {
@@ -226,13 +229,12 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
     // Wind carries a drip only a little — it has just left a surface and has
     // no time aloft to be blown far. Plus a whisper of curl so a row of eaves
     // does not read as a comb.
-    const rad = uWindDirDeg.mul(float(Math.PI / 180));
     const tSec = uTimeMs.mul(float(0.001));
     const phase = s.mul(float(12.9));
     const curl = vec2(sin(tSec.mul(float(1.7)).add(phase)), cos(tSec.mul(float(1.3)).add(phase.mul(float(1.9))))).mul(
       float(CURL_PX)
     );
-    const drift = windToward(rad).mul(uWindSpeed01).mul(uWindAirSpeed).mul(float(0.12)).add(curl);
+    const drift = windFlowVectorNode(TSL, uWindDirDeg).mul(uWindSpeed01).mul(uWindAirSpeed).mul(float(0.12)).add(curl);
     const nextPos = pos.add(drift.mul(uDtSec));
     const nextH = c.w.sub(c.z.mul(uDtSec));
 
@@ -336,8 +338,7 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
      * movement the M(h) collapse itself produces, which is what makes a drop
      * read as coming down at you rather than sliding sideways.
      */
-    const rad = uWindDirDeg.mul(float(Math.PI / 180));
-    const drift = windToward(rad).mul(uWindSpeed01).mul(uWindAirSpeed).mul(float(0.12));
+    const drift = windFlowVectorNode(TSL, uWindDirDeg).mul(uWindSpeed01).mul(uWindAirSpeed).mul(float(0.12));
     /**
      * Outward from the camera centre, scaled by how fast the body is falling
      * and by the magnification it currently has.

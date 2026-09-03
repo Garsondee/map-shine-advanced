@@ -4,7 +4,7 @@
  * rasterization + the ambient angle convention. 100% pure (no THREE, no
  * Foundry), so the whole thing is Node-tested directly.
  */
-import { ambientVectorFromWind, computeWindBakeGridSpec, rasterizeWallsToGrid } from '../wind-bake.js';
+import { ambientVectorFromWind, windFlowVector, computeWindBakeGridSpec, rasterizeWallsToGrid } from '../wind-bake.js';
 
 function approx(a, b, eps = 1e-4) {
   return Math.abs(a - b) <= eps;
@@ -13,31 +13,54 @@ function approx(a, b, eps = 1e-4) {
 export function run(t) {
   const { ok } = t;
 
-  // --- ambientVectorFromWind — the documented angle convention --------------
-  // METEOROLOGICAL (FIXED 2026-07-21, author-reported live: arrows pointed
-  // "into" the wind for every compass setting): directionDeg is the
-  // direction the wind blows FROM, matching real-world weather reports and
-  // the debug panel's own compass-labeled dropdown ("East" = an east wind,
-  // blowing FROM the east TOWARD the west) — so the flow vector is the
-  // NEGATION of the raw (cos,sin) bearing.
+  // --- windFlowVector / ambientVectorFromWind — THE one angle convention -----
+  // ⚠️ SETTLED 2026-09-04 BY THE AUTHOR (mythica-machina-press#487/#496, #497
+  // Stage 0), REPLACING THE METEOROLOGICAL READING THIS SUITE USED TO PIN.
+  // `directionDeg` is a COMPASS BEARING — 0° = north, clockwise — naming the
+  // direction the wind blows TOWARD. Point the dial north, the air goes north.
+  // In Y-DOWN world space (+X east, +Y south) that is `(sin θ, −cos θ)`, which
+  // is byte-identical to the compass widget's own needle trig, deliberately:
+  // the needle a GM drags and the direction the air travels are now one
+  // formula, so the dial cannot lie.
   {
-    const east = ambientVectorFromWind({ directionDeg: 0, speed01: 1 });
-    ok('an "East" wind (0°) blows FROM +X, i.e. the flow points toward -X', approx(east.x, -1) && approx(east.y, 0));
-    const south = ambientVectorFromWind({ directionDeg: 90, speed01: 1 });
-    ok(
-      'a "South" wind (90°) blows FROM +Y, i.e. the flow points toward -Y (raw world space, no camera flip applied here)',
-      approx(south.x, 0) && approx(south.y, -1)
-    );
-    const west = ambientVectorFromWind({ directionDeg: 180, speed01: 1 });
-    ok('a "West" wind (180°) blows FROM -X, i.e. the flow points toward +X', approx(west.x, 1) && approx(west.y, 0));
-    const north = ambientVectorFromWind({ directionDeg: 270, speed01: 1 });
-    ok('a "North" wind (270°) blows FROM -Y, i.e. the flow points toward +Y', approx(north.x, 0) && approx(north.y, 1));
+    const north = ambientVectorFromWind({ directionDeg: 0, speed01: 1 });
+    ok('a bearing of 0° (north) blows toward -Y, i.e. screen north', approx(north.x, 0) && approx(north.y, -1));
+    const east = ambientVectorFromWind({ directionDeg: 90, speed01: 1 });
+    ok('a bearing of 90° (east) blows toward +X', approx(east.x, 1) && approx(east.y, 0));
+    const south = ambientVectorFromWind({ directionDeg: 180, speed01: 1 });
+    ok('a bearing of 180° (south) blows toward +Y', approx(south.x, 0) && approx(south.y, 1));
+    const west = ambientVectorFromWind({ directionDeg: 270, speed01: 1 });
+    ok('a bearing of 270° (west) blows toward -X', approx(west.x, -1) && approx(west.y, 0));
     const half = ambientVectorFromWind({ directionDeg: 0, speed01: 0.5 });
-    ok('speed01 scales the vector linearly', approx(half.x, -0.5));
+    ok('speed01 scales the vector linearly', approx(half.y, -0.5));
     const defaulted = ambientVectorFromWind();
     ok('missing input defaults to a zero (windless) vector, never throws', defaulted.x === 0 && defaulted.y === 0);
     const negSpeed = ambientVectorFromWind({ directionDeg: 0, speed01: -5 });
-    ok('a negative speed clamps to 0, never blows "backwards"', approx(negSpeed.x, 0));
+    ok('a negative speed clamps to 0, never blows "backwards"', approx(negSpeed.y, 0));
+  }
+
+  // --- the unit-vector helper every consumer resolves through ----------------
+  // ⭐ THE POINT OF THIS BLOCK is that there is exactly ONE implementation. The
+  // codebase previously held THREE readings of `directionDeg` at once (this
+  // file's, the compass dial's, and precipitation's), a constant 90° apart in
+  // one case and 180° in the other, with a hand-derived `−90` patch in
+  // `effects/precipitation/squall-field.js` bridging the gap. If a future
+  // change rotates this helper, every wind-driven effect rotates together —
+  // which is the property that was actually missing.
+  {
+    ok(
+      'the flow vector is unit length at every angle',
+      [0, 37, 90, 211, 359].every((d) => {
+        const v = windFlowVector(d);
+        return approx(Math.hypot(v.x, v.y), 1);
+      })
+    );
+    // Turning the dial must turn the flow the SAME way and by the same amount —
+    // the property whose absence produced "point wind north, they move east".
+    const a = windFlowVector(0);
+    const b = windFlowVector(90);
+    ok('⭐ +90° of bearing rotates the flow by exactly +90°', approx(a.x * b.y - a.y * b.x, 1));
+    ok('a non-finite angle yields a finite vector rather than NaN', Number.isFinite(windFlowVector(NaN).x));
   }
 
   // --- computeWindBakeGridSpec — the [64,256] resolution clamp --------------

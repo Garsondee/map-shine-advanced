@@ -32,15 +32,23 @@ export function run(t) {
   // found TWICE, wrong in two different ways (a missing rotation, then a
   // negation that fixed 180 degrees of a 90-degree error). Y-DOWN world: +X is
   // EAST, +Y is SOUTH (the camera is flipped, top = minY).
+  //
+  // ⚠️ FLIPPED 180° ON 2026-09-04 (mythica-machina-press#497 Stage 0). These
+  // used to assert bearing 0 drives precipitation SOUTH, under the old
+  // METEOROLOGICAL reading (`directionDeg` = where wind comes FROM). The
+  // author settled the convention the other way — a bearing names where wind
+  // blows TOWARD — and `windTowardVector` now simply forwards to the one
+  // shared `world/wind-bake.js#windFlowVector`, so rain travels WITH the
+  // bearing.
   {
     const dir = (d) => {
       const v = windTowardVector(d);
       return Math.abs(v.x) > Math.abs(v.y) ? (v.x > 0 ? 'EAST' : 'WEST') : v.y > 0 ? 'SOUTH' : 'NORTH';
     };
-    t.ok('directionDeg 0 drives precipitation SOUTH', dir(0) === 'SOUTH');
-    t.ok('directionDeg 90 drives it WEST', dir(90) === 'WEST');
-    t.ok('directionDeg 180 drives it NORTH', dir(180) === 'NORTH');
-    t.ok('directionDeg 270 drives it EAST', dir(270) === 'EAST');
+    t.ok('directionDeg 0 drives precipitation NORTH', dir(0) === 'NORTH');
+    t.ok('directionDeg 90 drives it EAST', dir(90) === 'EAST');
+    t.ok('directionDeg 180 drives it SOUTH', dir(180) === 'SOUTH');
+    t.ok('directionDeg 270 drives it WEST', dir(270) === 'WEST');
     // The property that actually failed live: turning the wind must turn the
     // rain the SAME way, not 90 degrees off it.
     const a = windTowardVector(0),

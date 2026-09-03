@@ -106,6 +106,7 @@ import {
   computeWindTurbulence,
   computeGustEnvelope,
   deflectAroundWalls,
+  windFlowVectorNode,
   WIND_SHADOW_DEPTH,
 } from './wind-field.js';
 
@@ -250,7 +251,7 @@ export function createWindHandle({
    *   `turbulence`.
    */
   function kernel(TSL, { centerXY, time, cellBuffer }) {
-    const { float, vec2, int, cos, sin } = TSL;
+    const { float, vec2, int } = TSL;
 
     // --- THE CELL LOOKUP, owned once ---------------------------------------
     // Was duplicated verbatim in both kernels (nearest-cell, floor+clamp, one
@@ -352,8 +353,7 @@ export function createWindHandle({
       get coherent() {
         return once('coherent', () => {
           if (!ambientRef) return vec2(0, 0);
-          const rad = ambientRef.directionDeg.mul(float(Math.PI / 180));
-          let bias = vec2(cos(rad), sin(rad)).negate().mul(ambientRef.speed01);
+          let bias = windFlowVectorNode(TSL, ambientRef.directionDeg).mul(ambientRef.speed01);
           // THE GUST ENVELOPE (2026-08-15) — the kernel's own copy of
           // `sampleWind`'s identical step, in the identical PLACE in the chain
           // (raw bias → gust → deflect → shadow). Both are held to that by the

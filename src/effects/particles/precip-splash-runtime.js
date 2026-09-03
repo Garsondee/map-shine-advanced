@@ -108,7 +108,7 @@
  * @module effects/particles/precip-splash-runtime
  */
 import { ParticleArena, BYTES_PER_PARTICLE } from './particle-arena.js';
-import { createWindHandle } from '../../world/index.js';
+import { createWindHandle, windFlowVectorNode } from '../../world/index.js';
 import { createLogger } from '../../core/log.js';
 import { resolveSpecies } from '../precipitation/precip-species.js';
 import { buildSquallField } from '../precipitation/squall-field.js';
@@ -323,17 +323,17 @@ export function createPrecipSplashEngine({
    * ⭐ THE DIRECTION THE WIND PUSHES THINGS — `(−sin, cos)`, a +90° rotation of
    * the meteorological `directionDeg` in this engine's Y-DOWN world.
    *
-   * ⚠️ A THIRD HAND-WRITTEN COPY OF ONE CONVENTION, and that is the debt, not
-   * the bug. The fall's own header records getting this wrong TWICE live (a
-   * missing rotation, then a `.negate()` that fixed 180° of a 90° error). It is
-   * duplicated here rather than imported because the fall's copy is a local
-   * arrow inside its factory; the real fix — `world/wind-field.js` exporting one
-   * helper every consumer calls — is filed and unchanged by this slice.
-   * `precip-species.js#windTowardVector` is the CPU twin that pins all four
-   * cardinals in Node, and it covers this expression too.
+   * ⚠️ THIS WAS "A THIRD HAND-WRITTEN COPY OF ONE CONVENTION, and that is the
+   * debt, not the bug" — and the debt is now paid (2026-09-04,
+   * mythica-machina-press#497 Stage 0). The fix this comment asked for
+   * (*"`world/wind-field.js` exporting one helper every consumer calls"*) is
+   * `windFlowVectorNode`, and every consumer — the fall, the drip, the splash,
+   * fire, candles, gusts, the overlay and the transient sim — now resolves
+   * through it. The convention also settled the other way in that pass (a
+   * compass bearing naming where the wind blows TOWARD), so this expression's
+   * VALUE flipped 180° at the same time as it stopped being local.
    */
-  const windToward = (rad) => vec2(sin(rad).negate(), cos(rad));
-  const windRad = () => uWindDirDeg.mul(float(Math.PI / 180));
+  const windToward = () => windFlowVectorNode(TSL, uWindDirDeg);
 
   // ── PER-ARCHETYPE CONSTANTS, AS GRAPH LITERALS ───────────────────────────
   // Packed one vec4 per parameter, indexed by a one-hot dot. A refused species
@@ -462,7 +462,7 @@ export function createPrecipSplashEngine({
 
     // Wind drift — V2's `ApplyForce` on each splash system. No gravity, by
     // design: the water spreads, it does not fall.
-    const drift = windToward(windRad()).mul(uWindSpeed01).mul(uWindAirSpeed).mul(float(WIND_DRIFT_CARRY));
+    const drift = windToward().mul(uWindSpeed01).mul(uWindAirSpeed).mul(float(WIND_DRIFT_CARRY));
     pos.assign(pos.add(drift.mul(uDtSec)));
 
     // ── RESPAWN ──
@@ -698,7 +698,7 @@ export function createPrecipSplashEngine({
      * ends up pointing upwind on half the population; giving the quad to the
      * wind and the shape to the hash makes that unrepresentable.
      */
-    const w = windToward(windRad());
+    const w = windToward();
     const elong = float(1).add(uWindSpeed01.mul(uSmearGain).mul(float(ELONGATION_PER_SMEAR)));
     // Area is roughly preserved: what the along-wind axis gains, the across
     // axis gives back. A quad that only grows would make a gale read as bigger

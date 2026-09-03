@@ -68,6 +68,7 @@
  * `feedback_gate_polarity_must_fail_open`: a broken table must never
  * storm-lock a scene, and it must never be silent either).
  */
+import { windFlowVector } from '../../world/index.js';
 import { SNOW_RATE_PER_HOUR, PUDDLE_RATE_PER_HOUR } from './mantle-model.js';
 import { profileRank } from '../effect-cascade.js';
 
@@ -1317,24 +1318,26 @@ function clamp01(v) {
 }
 
 /**
- * ⭐ THE DIRECTION PRECIPITATION IS DRIVEN, from the wind field's
- * `directionDeg` — the CPU twin of `precip-runtime.js#windToward`.
+ * ⭐ THE DIRECTION PRECIPITATION IS DRIVEN, from `directionDeg`.
  *
- * ⚠️ IT EXISTS SO THE MAPPING IS TESTABLE. The shader version is browser-only
- * TSL, so a compass error in it can only be caught by a human looking at a
- * live map — which is exactly how this one was found, twice, after being wrong
- * in two different ways (a missing rotation, then a negation that fixed 180°
- * of a 90° error). Node can now pin all four cardinals.
+ * ⚠️ NO LONGER ITS OWN READING OF THE CONVENTION (2026-09-04,
+ * mythica-machina-press#497 Stage 0). This used to hand-implement
+ * `(−sin, cos)` as the CPU twin of `precip-runtime.js`'s own local
+ * `windToward` — two hand-written copies of a shared rule, which is exactly
+ * the debt both files' comments had already named. Both now resolve through
+ * the single `world/wind-bake.js#windFlowVector` (and its shader twin
+ * `windFlowVectorNode`), so precipitation cannot drift from the wind that
+ * drives it. The convention also CHANGED in that pass — the author settled it
+ * as the compass dial's "blows TOWARD the bearing" — so this is a 180° flip
+ * from what precipitation did before.
  *
- * Y-DOWN world space: +X is EAST, +Y is SOUTH (the camera is flipped,
- * `top = minY`). Keep this in lockstep with the shader helper — they are one
- * rule with two implementations, which is a debt this pays down only by being
- * asserted against.
+ * Kept as a named export because the Node tests pin all four cardinals
+ * through it, which is how a compass error in the browser-only shader path
+ * gets caught without a live map.
  *
  * @param {number} directionDeg
  * @returns {{x: number, y: number}} unit vector precipitation travels along.
  */
 export function windTowardVector(directionDeg) {
-  const r = ((Number(directionDeg) || 0) * Math.PI) / 180;
-  return { x: -Math.sin(r), y: Math.cos(r) };
+  return windFlowVector(directionDeg);
 }

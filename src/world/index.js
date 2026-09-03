@@ -101,8 +101,13 @@ export {
   // one number, not two copies that can drift.
   computeGustEnvelope,
   WIND_DEFAULT_GUSTINESS01,
+  // ⭐ THE ONE angle→vector conversion, shader side. Every consumer of
+  // `directionDeg` outside world/ resolves through this or its CPU twin
+  // below — see `wind-bake.js#windFlowVector` for the convention and for the
+  // three disagreeing readings it replaced.
+  windFlowVectorNode,
 } from './wind-field.js';
-export { ambientVectorFromWind, computeWindBakeGridSpec, rasterizeWallsToGrid } from './wind-bake.js';
+export { ambientVectorFromWind, windFlowVector, computeWindBakeGridSpec, rasterizeWallsToGrid } from './wind-bake.js';
 export {
   floodFillOpenFromBoundary,
   summarizeEnclosure,

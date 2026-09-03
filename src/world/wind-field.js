@@ -325,6 +325,29 @@ export const WIND_GUST_PEAK = 2;
 export const WIND_DEFAULT_GUSTINESS01 = 1;
 
 /**
+ * ⭐ THE TSL TWIN of `world/wind-bake.js#windFlowVector` — the ONE
+ * angle→vector conversion, for every shader-side consumer. Read that
+ * function's header for the convention itself (compass bearing, 0° = north,
+ * clockwise, naming the direction the wind blows TOWARD) and for the account
+ * of the three disagreeing readings this replaced.
+ *
+ * The two implementations are pinned against each other by a Node assertion
+ * in `world/__tests__/wind-bake.test.mjs` — the same discipline
+ * `effects/precipitation/precip-species.js` already used for its own CPU/GPU
+ * twin, and for the same reason: a compass error in TSL is invisible in code
+ * review and glaring on a live map.
+ *
+ * @param {*} TSL - THREE.TSL (needs `float, vec2, cos, sin`).
+ * @param {*} directionDeg - float node, compass bearing in degrees.
+ * @returns {*} a vec2 node — a UNIT vector in raw world space.
+ */
+export function windFlowVectorNode(TSL, directionDeg) {
+  const { float, vec2, cos, sin } = TSL;
+  const rad = directionDeg.mul(float(Math.PI / 180));
+  return vec2(sin(rad), cos(rad).negate());
+}
+
+/**
  * THE GUST ENVELOPE — a 0..N multiplier on the COHERENT wind, travelling
  * downwind. See the constants above for the full "what was missing" account.
  *
@@ -340,20 +363,19 @@ export const WIND_DEFAULT_GUSTINESS01 = 1;
  * @param {object} args
  * @param {*} args.centerXY - vec2 node, the WORLD position being sampled.
  * @param {*} args.time - the shared clock (uGlobalTimeMs, ms).
- * @param {*} args.directionDeg - float node, METEOROLOGICAL (the direction the
- *   wind blows FROM) — the SAME convention and the SAME negation `sampleWind`
- *   and `world/wind-bake.js#ambientVectorFromWind` use. Gusts travel WITH the
- *   flow, so this is negated here exactly as the flow vector is; getting this
- *   backwards would send fronts marching upwind, which is this project's own
- *   recurring frame-of-reference bug class ([[feedback_y_flip_recurring_risk]]).
+ * @param {*} args.directionDeg - float node, a COMPASS BEARING (0° = north,
+ *   clockwise, naming the direction the wind blows TOWARD) — resolved through
+ *   the SAME {@link windFlowVectorNode} helper `sampleWind` uses. Gusts travel
+ *   WITH the flow, so this reads the identical vector the flow does; getting
+ *   it backwards would send fronts marching upwind, which is this project's
+ *   own recurring frame-of-reference bug class ([[feedback_y_flip_recurring_risk]]).
  * @param {*} args.gustiness01 - float node, 0..1.
  * @returns {*} a float node — 1 at gustiness 0, ranging between
  *   `WIND_GUST_LULL` and `WIND_GUST_PEAK` at gustiness 1.
  */
 export function computeGustEnvelope(TSL, { centerXY, time, directionDeg, gustiness01, speed01 }) {
-  const { float, vec2, mx_noise_float: perlin, clamp, mix, smoothstep, cos, sin } = TSL;
+  const { float, vec2, mx_noise_float: perlin, clamp, mix, smoothstep } = TSL;
   const t = time.mul(float(0.001)); // ms → seconds, same conversion every other term here uses
-  const rad = directionDeg.mul(float(Math.PI / 180));
   // THE SPEED LINK — see the "GUST RATE FOLLOWS WIND SPEED" block above. Absent
   // `speed01` ⇒ `float(0)`, i.e. the CALM end of every ramp: rare, slow, coarse
   // gusts. That is the honest default for a caller with no wind-speed concept
@@ -361,11 +383,11 @@ export function computeGustEnvelope(TSL, { centerXY, time, directionDeg, gustine
   // requiring a fourth mandatory argument every existing call site would have
   // to grow.
   const s = speed01 !== undefined ? clamp(speed01, float(0), float(1)) : float(0);
-  // THE FLOW direction (negated — meteorological in, flow out), and its
-  // perpendicular. Same two lines as `sampleWind`'s own coherent term, and they
-  // MUST stay the same: a gust front travelling at an angle to the wind it is
-  // modulating would read as two unrelated weather systems.
-  const flow = vec2(cos(rad), sin(rad)).negate();
+  // THE FLOW direction, and its perpendicular. Through the ONE shared helper
+  // ({@link windFlowVectorNode}) that `sampleWind`'s own coherent term also
+  // uses — they MUST stay the same: a gust front travelling at an angle to
+  // the wind it is modulating would read as two unrelated weather systems.
+  const flow = windFlowVectorNode(TSL, directionDeg);
   const perp = vec2(flow.y.negate(), flow.x);
   // ALONG-FLOW coordinate, advected downwind. Subtracting the travel term means
   // a point reads the pattern value that started upwind of it — i.e. the
@@ -756,13 +778,13 @@ export function computeWindTurbulence(TSL, { centerXY, time, openness, exteriorO
  *   directional ambient bias, layered UNDER the existing organic
  *   drift/gust/flutter (never replacing it) — both float NODES (uniforms),
  *   so a debug lever or a future scene-wind authority can update them every
- *   frame with no material rebuild. Angle convention: METEOROLOGICAL — the
- *   direction the wind blows FROM (matching real-world weather reports and
- *   the debug panel's own compass-labeled dropdown), measured CLOCKWISE from
- *   +X in this engine's own raw world space (+Y down, no camera flip applied
- *   — see `world/wind-bake.js#ambientVectorFromWind`'s identical convention,
- *   documented there in full because a fresh direction↔vector mapping is
- *   this project's own recurring Y-flip bug class). Omitted (every Tier-0
+ *   frame with no material rebuild. Angle convention: a COMPASS BEARING —
+ *   0° = north, clockwise, naming the direction the wind blows TOWARD —
+ *   resolved through the one shared helper, {@link windFlowVectorNode}. See
+ *   `world/wind-bake.js#windFlowVector` for the convention in full, including
+ *   the three disagreeing readings it replaced; a fresh direction↔vector
+ *   mapping is this project's own recurring bug class, which is exactly why
+ *   there is now only one. Omitted (every Tier-0
  *   caller) → byte-identical to before this param existed. ⚠ ADDED AT FULL
  *   STRENGTH, never exposure-scaled (see "THE INDOOR COUNTER-WIND BUG" above)
  *   — a caller supplying `wind` SHOULD also supply `bakedField`, or accept an
@@ -879,7 +901,7 @@ export function sampleWind(
     windSpeed01,
   }
 ) {
-  const { float, vec2, mx_noise_float: perlin, clamp, mix, cos, sin, texture } = TSL;
+  const { float, vec2, mx_noise_float: perlin, clamp, mix, texture } = TSL;
   const t = time.mul(float(0.001)); // ms → ~seconds
   const sx = centerXY.x.mul(float(WIND_SPACE_FREQ));
   const sy = centerXY.y.mul(float(WIND_SPACE_FREQ));
@@ -1017,18 +1039,16 @@ export function sampleWind(
   const flutter = vec2(flutterX, flutterY).mul(float(WIND_FLUTTER_AMP));
   let result = dir.add(flutter).mul(amount).add(turbulence);
 
-  // AMBIENT DIRECTIONAL BIAS (optional) — see this function's own param doc
-  // for the angle convention. FULL STRENGTH, NOT exposure-scaled: shelter now
-  // comes entirely from OPENNESS gating the whole coherent term to zero (see
-  // the comment just below), never from damping the ambient itself — damping
-  // it here AND gating it again would double-suppress it indoors.
-  // NEGATED (author-reported: arrows pointed "into" the wind for every
-  // compass setting) — `directionDeg` is METEOROLOGICAL (the direction wind
-  // blows FROM, matching the debug dropdown's own compass labels), so the
-  // flow vector is the negation of the raw (cos,sin) bearing. MUST match
-  // `world/wind-bake.js#ambientVectorFromWind`'s identical correction — this
-  // live term and Tier 2's live-sim correction are summed into one field
-  // every frame, so they cannot disagree about which way "the ambient" blows.
+  // AMBIENT DIRECTIONAL BIAS (optional) — the direction resolves through the
+  // ONE shared helper, {@link windFlowVectorNode} (see `world/wind-bake.js#
+  // windFlowVector` for the convention itself). This live term and Tier 2's
+  // live-sim term are summed into one field every frame, so they cannot be
+  // allowed to disagree about which way "the ambient" blows — routing both
+  // through one function is what makes that structural rather than a promise.
+  // FULL STRENGTH, NOT exposure-scaled: shelter comes entirely from OPENNESS
+  // gating the whole coherent term to zero (see the comment just below),
+  // never from damping the ambient itself — damping it here AND gating it
+  // again would double-suppress it indoors.
   // COHERENT (directional) wind — the ambient bias alone (2026-07-22, THE
   // RETHINK — the wall-relaxation deviation this used to also add is
   // DELETED, see this file's own header) — accumulated separately from the
@@ -1051,8 +1071,7 @@ export function sampleWind(
   // `wind` alone is byte-identical to before either param existed.
   let coherent = vec2(0, 0);
   if (wind) {
-    const rad = wind.directionDeg.mul(float(Math.PI / 180));
-    coherent = coherent.add(vec2(cos(rad), sin(rad)).negate().mul(wind.speed01));
+    coherent = coherent.add(windFlowVectorNode(TSL, wind.directionDeg).mul(wind.speed01));
     // THE GUST, applied to the PREVAILING wind itself (2026-08-15) — this is
     // the line that makes gusts reach every consumer of the field rather than
     // being a look on one term. Applied to the RAW vector, BEFORE the wall

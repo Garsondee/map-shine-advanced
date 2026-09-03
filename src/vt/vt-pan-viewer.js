@@ -420,6 +420,7 @@ import {
   computeWindBakeGridSpec,
   rasterizeWallsToGrid,
   ambientVectorFromWind,
+  windFlowVector,
   buildWindSimMaterials,
   doorwayImpulseFromWallSegment,
   gatherActiveImpulseSlots,
@@ -4883,15 +4884,22 @@ export async function startVtPanViewer({
         // the shader: `setWindAmbient` already re-bakes on every direction
         // change (its own comment: "the bake depends on the SAME direction/speed
         // it was last computed from"), so the one input that makes this term
-        // move is already a rebake trigger. `directionDeg` is meteorological —
-        // the direction wind blows FROM — so the upwind vector is (cos, sin)
-        // with NO negation; `ambientVectorFromWind` is the one that negates, to
-        // get the FLOW. Reading `uWindDirectionDeg.value` (not the uniform node)
-        // because this is plain CPU arithmetic.
-        const shelterRad = (uWindDirectionDeg.value * Math.PI) / 180;
+        // move is already a rebake trigger.
+        //
+        // UPWIND IS THE NEGATED FLOW (2026-09-04, mythica-machina-press#497
+        // Stage 0). `directionDeg` now names the direction the wind blows
+        // TOWARD (`world/wind-bake.js#windFlowVector`), so the direction it
+        // comes FROM — which is what a shelter search walks toward — is that
+        // vector negated. This used to read `(cos, sin)` with no negation,
+        // correct under the OLD meteorological reading and wrong under this
+        // one; getting it backwards puts every wind shadow on the windward
+        // face instead of the lee, which is the most visible way this bake can
+        // fail. Reading `.value` (not the uniform node) because this is plain
+        // CPU arithmetic.
+        const shelterFlow = windFlowVector(uWindDirectionDeg.value);
         const windShadow = upwindShelter(solidMask, cols, rows, {
-          upwindX: Math.cos(shelterRad),
-          upwindY: Math.sin(shelterRad),
+          upwindX: -shelterFlow.x,
+          upwindY: -shelterFlow.y,
         });
 
         // THE WALL-AVOIDANCE TEXTURE — a SEPARATE texture from the openness one

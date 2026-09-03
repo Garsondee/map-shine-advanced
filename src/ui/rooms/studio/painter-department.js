@@ -233,6 +233,23 @@ export function renderPainterDepartment(container, ctx) {
     const tile = document.createElement('button');
     tile.type = 'button';
     Object.assign(tile.style, {
+      // height/minHeight: Foundry's own core stylesheet (public/css/
+      // foundry2.css) carries an unscoped `button { height: var(--button-
+      // size); min-height: var(--button-size) }` (~2em, a toolbar-icon
+      // height) that otherwise wins here — this tile is a bare <button>
+      // with no class, unlike every other Studio button (`.hbtn`, `.rail
+      // button`), which already gets its own explicit, scoped height from
+      // shell.js and so never meets Foundry's rule. Left uncontested, each
+      // tile's box collapsed to ~2em while its real content (title +
+      // suffixes + reach line + status, 4 lines) kept rendering at full
+      // height and spilled down through the grid rows below it — the
+      // "cards overlapping" report (mythica-machina-press#481/#479).
+      // Confirmed in isolation: painter-department.js's own grid/tile code,
+      // rendered standalone with no Foundry stylesheet loaded, lays out
+      // with zero overlap — the collision needed Foundry's CSS in the page
+      // to reproduce.
+      height: 'auto',
+      minHeight: 'auto',
       display: 'flex',
       flexDirection: 'column',
       alignItems: 'flex-start',

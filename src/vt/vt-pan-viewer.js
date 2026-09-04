@@ -9682,24 +9682,32 @@ export async function startVtPanViewer({
         // upstream of where that fix actually landed. A fresh document (delete
         // + recreate) gets a new id and takes `loadNewItem` below, which is
         // why that was the author's own workaround.
-        if (existing.wholeImage) {
-          for (const t of existing.wholeImage.tiles) {
-            t.floorAttrItem = item;
-            // SAME BUG CLASS, SAME FIX (2026-09-01, mythica-machina-press#104):
-            // `buildWholeImageMaterial`'s uTint/uAlpha are now seeded from
-            // `item` at construction (see that function's own comment), but an
-            // EXISTING token/tile never goes through construction again — only
-            // this fast path, on every document update. Without also refreshing
-            // here, a tint change or a hide/reveal on an already-loaded item
-            // would silently stop taking effect the moment `existing.wholeImage`
-            // was already built, exactly the "resolved once, never revisited"
-            // trap `floorAttrItem` just above already exists to close for a
-            // sibling field.
-            if (t.appearance) {
-              const liveTint = new THREE.Color(item.tint ?? 0xffffff);
-              t.appearance.uTint.value.set(liveTint.r, liveTint.g, liveTint.b);
-              t.appearance.uAlpha.value = item.alpha ?? 1;
-            }
+        // BOTH `existing.wholeImage` AND `existing.wholeImageRebuild`
+        // (mythica-machina-press#440) — not just the former. A second,
+        // independent live tint/alpha edit landing while a #431 flash-free
+        // rebuild is still in flight used to reach only the OLD, still-
+        // visible tiles here; the pending rebuild tiles carried whatever
+        // `item` looked like at THEIR OWN construction time and committed at
+        // that stale tint/alpha when the wait finished. Same "third mesh
+        // location the cleanup forgot" bug class as the dispose loop a few
+        // hundred lines up (`state.wholeImageRebuild`'s own header there) —
+        // this fast path just did not know about that field either.
+        for (const t of [...(existing.wholeImage?.tiles ?? []), ...(existing.wholeImageRebuild?.tiles ?? [])]) {
+          t.floorAttrItem = item;
+          // SAME BUG CLASS, SAME FIX (2026-09-01, mythica-machina-press#104):
+          // `buildWholeImageMaterial`'s uTint/uAlpha are now seeded from
+          // `item` at construction (see that function's own comment), but an
+          // EXISTING token/tile never goes through construction again — only
+          // this fast path, on every document update. Without also refreshing
+          // here, a tint change or a hide/reveal on an already-loaded item
+          // would silently stop taking effect the moment `existing.wholeImage`
+          // was already built, exactly the "resolved once, never revisited"
+          // trap `floorAttrItem` just above already exists to close for a
+          // sibling field.
+          if (t.appearance) {
+            const liveTint = new THREE.Color(item.tint ?? 0xffffff);
+            t.appearance.uTint.value.set(liveTint.r, liveTint.g, liveTint.b);
+            t.appearance.uAlpha.value = item.alpha ?? 1;
           }
         }
         return existing;

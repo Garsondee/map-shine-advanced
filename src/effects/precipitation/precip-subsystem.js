@@ -365,6 +365,12 @@ export function createPrecipitationSubsystem({
     if (rect) splash.setWorldRect(rect);
     if (st.sceneBounds !== undefined) splash.setSceneBounds(st.sceneBounds);
     splash.setFrame(frame);
+    // ⭐ THE SKY'S OWN COLOUR (day/night, whatever the scene's ambient is doing
+    // right now) — a splash is standing water and ought to mirror it, the way
+    // the mantle already mirrors the weather. `null` before the viewer's first
+    // frame is a no-op inside `setAmbient` (fail-open, same polarity as every
+    // other absent-input gate in this subsystem).
+    if (st.ambientRgb) splash.setAmbient(st.ambientRgb);
     splash.step(renderer, dtRealSec, nowMs, getWindHandle());
   }
 

@@ -3747,6 +3747,15 @@ export async function startVtPanViewer({
           // The SAME `dayFactor01` the shadow handle and the daylight tint
           // read — never a second "is it dark" derivation.
           dayFactor01: env.sun?.dayFactor01 ?? 1,
+          // ⭐ THE SAME AMBIENT BACKGROUND `environmental-light.js` LIGHTS THE
+          // WHOLE MAP WITH (`lastAmbientColors.background`, sRGB) — Foundry's
+          // own day/night ambient mix, not a second "what colour is it now"
+          // derivation. A splash is standing water: real wet surfaces mirror
+          // the sky far more than dry ground does, so ground splashes read
+          // this to tint toward it. `null` before the first frame computes
+          // it, which the reader treats as "no tint" — the same fail-open
+          // default `dayRgbMul`/`dayAlphaMul` already use elsewhere here.
+          ambientRgb: lastAmbientColors?.background ?? null,
           flash01: 0, // sky-flash's own consumer is a later slice.
           // BUDGET-AWARE 2026-08-29, LIVE-RESOLVED 2026-08-30 — was hardcoded
           // `1` forever (docs/planning/Effect-Tier-Gradient-Audit-2026-08-29.md

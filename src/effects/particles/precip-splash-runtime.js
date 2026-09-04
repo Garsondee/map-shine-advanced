@@ -277,6 +277,22 @@ export function createPrecipSplashEngine({
    * V2's numbers. */
   const uPeakBoost = uniform(float(2.75));
   /**
+   * ⭐ THE SKY'S OWN COLOUR — Foundry's ambient day/night mix
+   * (`effects/lighting/environmental-light.js#computeAmbientColors`'s own
+   * `.background`, sRGB), pushed in by `setAmbient()` every frame the same way
+   * every other cross-cutting per-frame signal here is (wind, the clock).
+   *
+   * ⚠️ NOT A SECOND LIGHTING MODEL. Splashes are unlit sprites, same as every
+   * other body in this file — this is one uniform read, not a light. The
+   * physical reasoning it stands in for: standing water is close to a mirror,
+   * so it should show the SKY's colour and brightness far more strongly than
+   * dry ground does, not just dim uniformly at night the way `dayRgbMul`-style
+   * scalars do elsewhere in this module family. `[1,1,1]` — full white, i.e.
+   * this file's ORIGINAL hardcoded colour — is the no-op default, so a caller
+   * that never calls `setAmbient()` gets exactly today's look, not a broken one.
+   */
+  const uAmbientRgb = uniform(vec3(1, 1, 1));
+  /**
    * ⭐ WIND SMEAR (§4.1) — *"lashing against the ground is precisely an impact
    * that cannot stay round"*.
    *
@@ -730,7 +746,82 @@ export function createPrecipSplashEngine({
    * (`feedback_membership_beats_derived_threshold`'s cousin — the model should
    * only be able to express real states).
    */
-  material.colorNode = Fn(() => vec3(0.8, 0.9, 1.0))();
+
+  /**
+   * ⭐ THE COLOUR — WHY A CONSTANT PALE BLUE READ AS "GREY PAINT", NOT WATER.
+   *
+   * Every water cue THE SHAPE below already models — the ring, the wobble,
+   * "brighter where a film catches the light at its meniscus" — was expressed
+   * entirely through OPACITY over one unchanging hue. That draws as a
+   * translucent wash whose only variable is how much of the same colour shows
+   * through: a decal, not a material. Real water needs the contrast paint
+   * never has — a genuinely brighter crown against a darker, wetter film —
+   * plus the high-frequency glint water catches and a flat tint cannot.
+   *
+   * ⚠️ A CHEAP, SOFT PROXY FOR THE RING, DELIBERATELY NOT A SECOND COPY OF
+   * `opacityNode`'s beaded/wobbled silhouette. Colour is invisible wherever
+   * that exact shape's alpha is already zero, so this only has to agree with
+   * it approximately — one `length()` and a handful of scalar ops, not the
+   * angular harmonics the alpha path needs for its bead break-up. The wind
+   * centre-bias IS reused as-is (a uniform read this file already pays for),
+   * so the highlight shifts downwind with the real ring instead of sitting
+   * still while the alpha crown moves under it.
+   */
+  /** The water film's own albedo — what it would look like under pure-white
+   * ambient. Multiplied by `uAmbientRgb` below, never used raw. */
+  const SPLASH_WET_ALBEDO = vec3(0.4, 0.5, 0.62);
+
+  material.colorNode = Fn(() => {
+    const ringR = vA.y;
+    const phase = vB.z;
+    const t = vB.w;
+
+    const bias = uWindSpeed01.mul(uSmearGain).mul(float(CENTRE_BIAS_PER_SMEAR)).clamp(float(0), float(0.55));
+    const p = uv().sub(float(0.5)).mul(float(2)).sub(vec2(bias, 0));
+    const d = p.length();
+    const nearRing = float(1)
+      .sub(d.sub(ringR).abs().div(float(0.35)).clamp(float(0), float(1)))
+      .pow(float(1.6));
+
+    // The wet interior is the film's OWN albedo lit by the sky; the crown is a
+    // specular highlight, which physically IS the sky's colour and brightness
+    // reflected near-directly, barely tinted by the water at all — the same
+    // diffuse-vs-specular split real wet-surface shading uses, done with one
+    // extra `mix` because these are unlit sprites rather than a lit material.
+    const wet = SPLASH_WET_ALBEDO.mul(uAmbientRgb);
+    const crown = uAmbientRgb.mul(float(1.2));
+    let rgb = mix(wet, crown, nearRing);
+
+    /**
+     * ⭐ A SPARSE PER-PIXEL SPARKLE. A smooth gradient alone still reads as
+     * airbrushed; real light on water is a scatter of tiny near-white glints,
+     * not an even glow. One 2-D hash off a coarse cell grid, gated to the
+     * brightest few percent of cells and to the crown band only — the cost
+     * everywhere else is one comparison and one multiply.
+     *
+     * ⚠️ SCALED BY THE SKY's OWN LUMINANCE, not a fixed brightness — a moonless
+     * night has nothing bright for water to catch, so the glint fades with the
+     * same signal the crown's colour comes from, rather than staying a fixed
+     * "glint" value that would read as the puddle emitting its own light.
+     */
+    const ambientLum = uAmbientRgb.x
+      .mul(float(0.2126))
+      .add(uAmbientRgb.y.mul(float(0.7152)))
+      .add(uAmbientRgb.z.mul(float(0.0722)));
+    const cell = uv().mul(float(9)).add(vec2(phase, phase)).floor();
+    const g = hash11(
+      cell.x
+        .mul(float(157))
+        .add(cell.y.mul(float(113)))
+        .add(phase)
+    );
+    rgb = rgb.add(vec3(g.greaterThan(float(0.965)).select(float(0.6), float(0)).mul(nearRing).mul(ambientLum)));
+
+    // Freshly-landed water flashes; a settling film calms back toward the wet
+    // base — reuses the `life01` every other consumer here already reads.
+    const freshness = float(1).sub(t).pow(float(1.4));
+    return mix(wet, rgb, mix(float(0.55), float(1), freshness));
+  })();
 
   material.opacityNode = Fn(() => {
     const alpha = vA.x;
@@ -1092,6 +1183,22 @@ export function createPrecipSplashEngine({
       if (Number.isFinite(t.curtainBandScale)) uSquallScale.value = Math.max(0.01, t.curtainBandScale);
     },
 
+    /**
+     * ⭐ THE SKY'S OWN COLOUR — Foundry's current ambient day/night mix
+     * (`environmental-light.js#computeAmbientColors(env).background`, sRGB
+     * 0..1), so standing water mirrors it. Called every frame like the wind
+     * handle, not once at build: the whole point is that it changes as the
+     * clock does. A falsy/malformed `rgb` is a no-op — the caller (
+     * `precip-subsystem.js`) already guards on truthiness before calling, but
+     * guarding here too means a bad upstream read dims nothing rather than
+     * throwing mid-frame.
+     * @param {readonly [number,number,number]|null} rgb
+     */
+    setAmbient(rgb) {
+      if (!rgb || !Number.isFinite(rgb[0])) return;
+      uAmbientRgb.value.set(rgb[0], rgb[1] ?? rgb[0], rgb[2] ?? rgb[0]);
+    },
+
     /** Every factor separately — "no splashes are visible" has half a dozen
      * causes and one boolean names none of them. */
     debugState() {
@@ -1123,6 +1230,10 @@ export function createPrecipSplashEngine({
           inGraph: Boolean(skyReachTex),
           armed: uSkyReachHasBake.value === 1,
         },
+        /** ⭐ Reported so "the splashes don't respond to time of day" is
+         * answerable without guessing — `[1,1,1]` (the file's original
+         * hardcoded colour) means `setAmbient()` has never been called. */
+        ambient: uAmbientRgb.value.toArray(),
       };
     },
   };

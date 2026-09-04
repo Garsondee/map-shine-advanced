@@ -363,6 +363,7 @@ import {
   buildVegetationDepthItems,
   VEG_FLUTTER_FOLD_SAFETY,
   vegetationMeshSegments,
+  vegetationAliasFreeClumpSizePx,
   buildTessellatedQuadGeometry,
   vegetationTierPlan,
   vegetationSpringGridSpec,
@@ -11418,6 +11419,8 @@ export async function startVtPanViewer({
       motion,
       kind,
       kindSwayMul,
+      kindClumpMul,
+      kindSwayFreqMul,
       sceneMin,
       sceneSize,
       asShadow,
@@ -11486,7 +11489,8 @@ export async function startVtPanViewer({
        * the wind sample beside it is a 16-noise-evaluation fBm stack, so this
        * is noise-floor next to what the same shader already pays.
        */
-      const cellF = worldXY.div(motion.uClumpSizePx);
+      const kindClumpSizePx = motion.uClumpSizePx.mul(kindClumpMul);
+      const cellF = worldXY.div(kindClumpSizePx);
       const cell = cellF.floor();
       const cellFrac = cellF.sub(cell);
       const blendX = smoothstep(float(0), float(1), cellFrac.x);
@@ -11578,7 +11582,7 @@ export async function startVtPanViewer({
       const bend = leanDir.mul(localSpeed).mul(galeness).mul(galeness).mul(motion.uGaleBendAmount);
 
       // (3) OSCILLATING SWAY.
-      const rate = motion.uSwayFrequency.mul(float(1).add(galeness.mul(motion.uGaleRateGain)));
+      const rate = motion.uSwayFrequency.mul(kindSwayFreqMul).mul(float(1).add(galeness.mul(motion.uGaleRateGain)));
       const swing = sin(tSec.add(phase).mul(rate).mul(float(6.2831853)));
       const amplitude = pow(max(localSpeed, float(0)), motion.uSwayCurve).mul(ampJitter);
       const oscillate = leanDir.mul(amplitude).mul(swing);
@@ -11650,7 +11654,7 @@ export async function startVtPanViewer({
          * sample this same shader already pays for.
          */
         const rotationAbout = (cellIJ) => {
-          const centre = cellIJ.add(vec2(float(0.5), float(0.5))).mul(motion.uClumpSizePx);
+          const centre = cellIJ.add(vec2(float(0.5), float(0.5))).mul(kindClumpSizePx);
           const uvAt = clamp(centre.sub(gridOriginXY).div(gridExtentXY), vec2(0, 0), vec2(1, 1));
           const angle = texture(vegSpringPublishRT.texture, uvAt).x;
           // Self-weighting: a vertex twice as far from its pivot swings through
@@ -11949,7 +11953,12 @@ export async function startVtPanViewer({
       // friendly, matches ui-window-shadow.js's own `azimuthDeg` precedent)
       // and converted to radians once here, at construction — the conversion
       // itself never changes frame to frame, only the degree value does.
-      const uClumpSizePx = uniform(float(initialParams?.clumpSizePx ?? 150));
+      // ⭐ FLOORED SO THE VERTEX MESH CAN ACTUALLY DRAW IT — see
+      // `effects/vegetation-render.js#vegetationAliasFreeClumpSizePx` for the
+      // full account. A clump finer than ~4 vertices across reconstructs as
+      // flat triangular facets no matter its amplitude, which is the "sharp
+      // lines, triangles" the author photographed at Wind 1.
+      const uClumpSizePx = uniform(float(vegetationAliasFreeClumpSizePx(initialParams?.clumpSizePx ?? 150)));
       const uClumpPhaseSpread = uniform(float(initialParams?.clumpPhaseSpread ?? 0));
       const uClumpAmpSpread = uniform(float(initialParams?.clumpAmpSpread ?? 0));
       const uClumpDirSpreadRad = uniform(float(((initialParams?.clumpDirSpread ?? 0) * Math.PI) / 180));
@@ -11961,6 +11970,10 @@ export async function startVtPanViewer({
       const uGroundLagSec = uniform(float(initialParams?.groundLagSec ?? 0));
       const uGustTurbulence = uniform(float(initialParams?.gustTurbulence ?? 0));
       const uKindSwayMul = uniform(float(kind.swayMultiplier));
+      // See `effects/vegetation.js`'s VEGETATION_KINDS for why these are real
+      // plant mechanics (crown span, stem natural frequency) and not taste.
+      const uKindClumpMul = uniform(float(kind.clumpSizeMultiplier ?? 1));
+      const uKindSwayFreqMul = uniform(float(kind.swayFrequencyMultiplier ?? 1));
       // The prevailing strength dial (0..1) — drives the CHARACTER terms (bend,
       // rate) that must respond to "how windy is the scene" rather than to the
       // local vector's own magnitude alone.
@@ -12024,6 +12037,8 @@ export async function startVtPanViewer({
           },
           kind,
           kindSwayMul: uKindSwayMul,
+          kindClumpMul: uKindClumpMul,
+          kindSwayFreqMul: uKindSwayFreqMul,
           sceneMin: uSceneMin,
           sceneSize: uSceneSize,
           asShadow,
@@ -14906,7 +14921,7 @@ export async function startVtPanViewer({
       motion.uFlutterGaleFrequency.value = p.flutterGaleFrequency ?? 0;
       motion.uFlutterUvScale.value = p.flutterUvScale ?? 0;
       motion.uFlutterScale.value = p.flutterScale ?? 1;
-      motion.uClumpSizePx.value = Math.max(1, p.clumpSizePx ?? 150);
+      motion.uClumpSizePx.value = vegetationAliasFreeClumpSizePx(p.clumpSizePx ?? 150);
       motion.uClumpPhaseSpread.value = p.clumpPhaseSpread ?? 0;
       motion.uClumpAmpSpread.value = p.clumpAmpSpread ?? 0;
       motion.uClumpDirSpreadRad.value = ((p.clumpDirSpread ?? 0) * Math.PI) / 180;
@@ -17063,6 +17078,8 @@ export async function startVtPanViewer({
                 // `buildVegetationSwayDisplacementNode`'s own header).
                 kind: vegKind,
                 kindSwayMul: float(vegKind.swayMultiplier),
+                kindClumpMul: float(vegKind.clumpSizeMultiplier ?? 1),
+                kindSwayFreqMul: float(vegKind.swayFrequencyMultiplier ?? 1),
                 sceneMin,
                 sceneSize,
                 asShadow: false, // this proxy represents the CANOPY, never the shadow

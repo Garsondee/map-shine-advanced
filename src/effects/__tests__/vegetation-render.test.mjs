@@ -18,6 +18,9 @@ import {
   buildVegetationDepthItems,
   flutterFoldFreeAmplitudePx,
   VEG_FLUTTER_FOLD_SAFETY,
+  vegetationAliasFreeClumpSizePx,
+  VEGETATION_MIN_VERTICES_PER_CLUMP,
+  VEGETATION_VERTEX_SPACING_PX,
   springChase,
   vegetationSpringGridSpec,
 } from '../vegetation-render.js';
@@ -26,6 +29,63 @@ import { makeLayerKey, sortByLayer, SORT_LAYERS } from '../../scene/layer-order.
 import { createDepthAuthority } from '../../scene/depth-authority.js';
 
 export function run(t) {
+  // ---- ⭐ THE CLUMP SIZE THE VERTEX MESH CAN ACTUALLY DRAW ------------------
+  // The author photographed this at Wind 1: "sharp lines, triangles, even some
+  // self intersections in the shadows". Straight edges and triangular facets
+  // in a warped sprite mean a displacement sampled at mesh VERTICES and
+  // linearly interpolated between them — so the question is not how big the
+  // displacement is, it is whether the mesh can represent its spatial detail
+  // at all. An under-sampled signal is under-sampled at every amplitude, which
+  // is why the earlier rounds of reducing amplitudes could not have worked.
+  {
+    const spacing = VEGETATION_VERTEX_SPACING_PX;
+    const floor = spacing * VEGETATION_MIN_VERTICES_PER_CLUMP;
+
+    t.ok(
+      'a clump at least 4 vertices across is left alone',
+      vegetationAliasFreeClumpSizePx(floor + 100, spacing) === floor + 100
+    );
+    // The two readings that actually shipped: the default, and the slider's
+    // own minimum. Both were finer than the mesh could carry.
+    t.ok('the shipped default (150px) is raised', vegetationAliasFreeClumpSizePx(150, spacing) === floor);
+    t.ok('the slider minimum (20px) is raised', vegetationAliasFreeClumpSizePx(20, spacing) === floor);
+    t.ok(
+      '⭐ nothing survives finer than Nyquist can represent',
+      [1, 20, 60, 150, 239].every((v) => vegetationAliasFreeClumpSizePx(v, spacing) >= spacing * 2)
+    );
+    // A tile big enough to hit the segment cap has coarser spacing, and the
+    // floor must follow it rather than staying pinned to the target.
+    t.ok('a coarser mesh demands a bigger clump', vegetationAliasFreeClumpSizePx(150, 94) === 94 * 4);
+    t.ok('garbage input yields the floor, never NaN', vegetationAliasFreeClumpSizePx(NaN, spacing) === floor);
+    t.ok(
+      'a zero clump yields the floor rather than dividing by zero later',
+      vegetationAliasFreeClumpSizePx(0, spacing) === floor
+    );
+  }
+
+  // ---- ⭐ TREES AND BUSHES ARE DIFFERENT MECHANISMS -------------------------
+  // Author: "Trees and bushes need to follow different logic." Pinned as a
+  // relationship rather than as two magic numbers, so a future retune can move
+  // both without silently collapsing them back into one behaviour.
+  {
+    const tree = VEGETATION_KINDS.find((k) => k.id === 'tree');
+    const bush = VEGETATION_KINDS.find((k) => k.id === 'bush');
+    t.ok('both kinds declare their own mechanics', !!tree && !!bush);
+    // A crown is 3-8 m across; a bush is 0.5-1.5 m and therefore SMALLER than
+    // the vertex spacing, so it can never be a vertex-stage clump at all.
+    t.ok('a tree clumps at crown scale, wider than a bush', tree.clumpSizeMultiplier > bush.clumpSizeMultiplier);
+    // Short stems are stiffer: real shrubs sit near 1-3 Hz against a mature
+    // tree's 0.2-0.5 Hz.
+    t.ok(
+      'a bush oscillates several times faster than a tree',
+      bush.swayFrequencyMultiplier >= tree.swayFrequencyMultiplier * 2
+    );
+    // ...and takes its fine detail from the fragment stage instead, which is
+    // what its finer flutter frequency and smaller vertex sway already encode.
+    t.ok('a bush flutters finer than a tree', bush.flutterSpaceFreq > tree.flutterSpaceFreq);
+    t.ok('a bush sways less at the vertex stage than a tree', bush.swayMultiplier < tree.swayMultiplier);
+  }
+
   const { ok } = t;
 
   // --- detectSelfVegetationKind: the real, positive cases -------------------

@@ -179,6 +179,18 @@ export const VEGETATION_KINDS = Object.freeze([
     maskKindId: 'tree',
     label: 'Tree canopy',
     swayMultiplier: 1.3,
+    /* ⭐ TREES AND BUSHES ARE DIFFERENT MECHANISMS, NOT ONE MECHANISM AT TWO
+     * VOLUMES (2026-09-04, author: *"Trees and bushes need to follow different
+     * logic"*). The numbers below are real plant mechanics rather than taste.
+     *
+     * A TREE is a tall woody trunk carrying a crown 3-8 m across — at the
+     * standard 65.6 px/m that is 200-500 world px — and the crown moves as one
+     * coherent body pivoting about a fixed base. That is a large, smooth,
+     * low-frequency displacement, which is exactly what a vertex mesh
+     * represents well, so a tree is a VERTEX-STAGE effect and wants clumps at
+     * crown scale. Mature trees sway at roughly 0.2-0.5 Hz. */
+    clumpSizeMultiplier: 1.5,
+    swayFrequencyMultiplier: 1,
     renderOrderNudge: 0.6,
     // A canopy sits well above head height — long, soft shadow.
     shadowHeightPx: 70,
@@ -196,6 +208,24 @@ export const VEGETATION_KINDS = Object.freeze([
     maskKindId: 'bush',
     label: 'Bush foliage',
     swayMultiplier: 0.8,
+    /* A BUSH has no trunk: many short flexible stems straight from the ground,
+     * so it does not translate as a body — its surface RIPPLES. Two
+     * consequences, both structural rather than cosmetic:
+     *
+     *  1. A bush is 0.5-1.5 m across (35-100 px), which is SMALLER THAN THE
+     *     VERTEX SPACING (60 px). It therefore cannot be a vertex-stage clump
+     *     at all — asking for one is what
+     *     `vegetationAliasFreeClumpSizePx` now refuses. A bush's fine detail
+     *     has to come from the FRAGMENT stage, which is why its
+     *     `flutterSpaceFreq` is already the finer of the two (0.06 vs the
+     *     tree's 0.035) and why its vertex sway is the smaller.
+     *  2. Short stems are stiffer: a cantilever's natural frequency rises
+     *     sharply as it shortens, and real shrub stems sit around 1-3 Hz
+     *     against a mature tree's 0.2-0.5 Hz. That is the ~3.5x below — a
+     *     measured ratio, not a look.
+     */
+    clumpSizeMultiplier: 1,
+    swayFrequencyMultiplier: 3.5,
     renderOrderNudge: 0.5,
     // Waist-high — a tight, comparatively crisp shadow hugging its own base.
     shadowHeightPx: 16,

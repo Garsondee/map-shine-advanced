@@ -679,6 +679,70 @@ export const VEGETATION_MAX_SEGMENTS = 128;
  * @param {number} worldH - world-space height (px).
  * @returns {number} segments per axis; the mesh is (n+1)² vertices.
  */
+/**
+ * How many vertices must span one clump before its per-clump variation can be
+ * drawn without faceting.
+ *
+ * Nyquist says 2 samples per period is the bare minimum to represent a wave AT
+ * ALL; 2 reconstructs it as a triangle wave, which through linear interpolation
+ * across a mesh is precisely a row of flat triangular facets. 4 is the smallest
+ * count that reads as a curve rather than as geometry.
+ */
+export const VEGETATION_MIN_VERTICES_PER_CLUMP = 4;
+
+/**
+ * ⭐ THE SMALLEST CLUMP THE VERTEX MESH CAN ACTUALLY DRAW (2026-09-04,
+ * mythica-machina-press#505 round 2).
+ *
+ * ============================================================================
+ * THE ARTEFACT THIS FIXES, AND WHY IT IS A SAMPLING BUG NOT A TUNING ONE
+ * ============================================================================
+ * Author, at Wind 1, with screenshots: *"sharp lines, triangles, even some
+ * self intersections in the shadows"* — big flat-edged wedges across the
+ * canopy.
+ *
+ * Straight edges and triangular facets in a warped sprite are the signature of
+ * a displacement evaluated at MESH VERTICES and linearly interpolated across
+ * the triangles between them. The bulk sway is `positionNode` — vertex stage —
+ * and the mesh is tessellated to {@link VEGETATION_VERTEX_SPACING_PX} (60 px,
+ * coarser on a tile big enough to hit {@link VEGETATION_MAX_SEGMENTS}). But
+ * `clumpSizePx` defaulted to 150 and its slider bottoms out at 20:
+ *
+ * ```
+ *   150 px clump / 60 px spacing = 2.5 vertices per clump   (default)
+ *    20 px clump / 60 px spacing = 0.33 vertices per clump  (slider minimum)
+ * ```
+ *
+ * At 2.5 the per-clump jitter is barely above Nyquist and reconstructs as
+ * facets; at 0.33 the mesh cannot represent it at any amplitude. The dial let
+ * an author ask for detail three times finer than the mesh could carry, and no
+ * amplitude reduction fixes that — an under-sampled signal is under-sampled at
+ * every amplitude.
+ *
+ * ⚠️ THIS IS THE SAMPLING TWIN OF {@link flutterFoldFreeAmplitudePx}. That one
+ * bounds the displacement's GRADIENT so the warp stays injective; this one
+ * bounds its SPATIAL FREQUENCY so the mesh can represent it. Both are derived
+ * limits rather than tuned numbers, and both exist because the previous
+ * attempts to fix the same visual symptom by reducing an amplitude could not
+ * have worked.
+ *
+ * @param {number} authoredClumpSizePx - the `clumpSizePx` param's own value.
+ * @param {number} [vertexSpacingPx] - the real spacing for the tile being
+ *   drawn. Defaults to the target spacing; a tile large enough to hit the
+ *   segment cap is coarser than that and keeps proportionally less margin,
+ *   which is a known limit of feeding this through ONE shared uniform rather
+ *   than a per-tile one.
+ * @returns {number} the clump size to actually use.
+ */
+export function vegetationAliasFreeClumpSizePx(authoredClumpSizePx, vertexSpacingPx = VEGETATION_VERTEX_SPACING_PX) {
+  const authored = Number(authoredClumpSizePx);
+  const spacing = Number(vertexSpacingPx);
+  const safeSpacing = Number.isFinite(spacing) && spacing > 0 ? spacing : VEGETATION_VERTEX_SPACING_PX;
+  const floor = safeSpacing * VEGETATION_MIN_VERTICES_PER_CLUMP;
+  if (!Number.isFinite(authored) || authored <= 0) return floor;
+  return Math.max(authored, floor);
+}
+
 export function vegetationMeshSegments(worldW, worldH) {
   const w = Number.isFinite(worldW) ? Math.abs(worldW) : 0;
   const h = Number.isFinite(worldH) ? Math.abs(worldH) : 0;

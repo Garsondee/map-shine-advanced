@@ -404,6 +404,8 @@ export {
   heightWeight01,
   validateVegetationKinds,
   vegetationMeshSegments,
+  vegetationAliasFreeClumpSizePx,
+  VEGETATION_MIN_VERTICES_PER_CLUMP,
   buildTessellatedQuadGeometry,
   vegetationTierPlan,
   VEGETATION_DEFAULT_TIER,

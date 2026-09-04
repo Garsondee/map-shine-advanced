@@ -32,24 +32,23 @@
  * hits even though the render object itself is new.
  *
  * ============================================================================
- * WHY VEGETATION IS DELIBERATELY EXCLUDED — a scope decision, not an oversight
+ * VEGETATION IS POOLED TOO, kept collision-safe by `variantKey` (since `25b81cff`)
  * ============================================================================
  *
- * Vegetation's proxy carries a FRESH `positionNode` closure (built new, every
- * call, over `overlay.motion` — see `buildVegetationSwayDisplacementNode`'s
- * own header) — pooling it correctly would mean restructuring that branch to
- * check the pool BEFORE building the closure, and getting it wrong risks a
- * pooled material silently animating the wrong item's canopy. The live trace
- * that found this measured vegetation's own share of the rebuild cost at 35ms
- * of 3,831ms (0.9%) — 99%+ of the win is in the tile branch, which has no
- * closures at all (`tex`/`alphaThreshold`/`floorIndex`/`flags`/`alwaysOpaque`
- * are all stable values or a stable texture reference once an item has
- * loaded). `computeDepthProxyMaterialSignature` below still accepts
- * `positionNode` and folds its PRESENCE into the key defensively, so a future
- * caller that accidentally routes a positionNode-bearing item through this
- * pool gets a distinct (never-shared) entry rather than silent aliasing —
- * but the real safety measure is that the vegetation branch never calls this
- * module at all.
+ * Vegetation's proxy carries a `positionNode` closure built over `overlay.motion`
+ * (see `buildVegetationSwayDisplacementNode`'s own header) — this used to be the
+ * reason vegetation was excluded from this pool entirely (pooling it wrong risks
+ * a pooled material silently animating the wrong item's canopy). `25b81cff`
+ * ("Fix the shader-rebuild churn: pool vegetation depth proxies") closed that gap
+ * instead of leaving it open: `vt-pan-viewer.js` caches each overlay's
+ * `positionNode` per `overlay.motion` in `vegetationProxyNodeCache`, and routes
+ * the resulting depth-writer material through `depthProxyMaterialPool.get(...)`
+ * with `variantKey: veg:${nodeEntry.id}` — a per-overlay id, never shared across
+ * canopies. `computeDepthProxyMaterialSignature` below REQUIRES a `variantKey`
+ * whenever `positionNode` is present (throws otherwise, see its own JSDoc) —
+ * that requirement, not "vegetation never calls this module," is the real
+ * safety measure: it is what makes two different canopies' positionNode-bearing
+ * materials collide-proof rather than something a future caller must remember.
  *
  * ============================================================================
  * WHY OPAQUE ITEMS KEY ACROSS TEXTURES BUT ALPHA-TESTED ONES DO NOT

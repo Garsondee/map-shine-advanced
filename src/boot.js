@@ -473,8 +473,6 @@ import {
   getLoadingScreenState,
   resetLoadingSceneMemory,
 } from './ui/loading-screen.js';
-import { LOAD_PHASES } from './ui/load-progress.js';
-import { installCompressionStatusBadge } from './ui/compression-status.js';
 import { buildLoadReport } from './diag/load-report.js';
 import {
   installPainter,
@@ -493,6 +491,8 @@ import {
   installStudio,
   installRemote,
   installPlayer,
+  LOAD_PHASES,
+  installCompressionStatusBadge,
 } from './ui/index.js';
 import {
   SORT_LAYERS,
@@ -9491,7 +9491,8 @@ function install() {
       // day-clock.js#syncTo already applies to todHour, just enforced by
       // staying out of the fade's way instead of re-targeting it.
       const nowMs = wallClockMs();
-      const cloudFading = fadeState['weather.cloudCover01'] && !isEntryExpired(fadeState['weather.cloudCover01'], nowMs);
+      const cloudFading =
+        fadeState['weather.cloudCover01'] && !isEntryExpired(fadeState['weather.cloudCover01'], nowMs);
       const precipFading = fadeState['weather.precip01'] && !isEntryExpired(fadeState['weather.precip01'], nowMs);
       if (!cloudFading) setVtPanViewerCloudCover(sky.cloudCover01, 'sky-settings');
       // ⚠️ ONLY on the `custom` branch, and for exactly the reason the comment

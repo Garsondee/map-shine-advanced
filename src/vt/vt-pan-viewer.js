@@ -191,13 +191,17 @@ import { createGpuProbe } from '../diag/gpu-probe.js';
 import { createGpuZoneTimer } from '../diag/gpu-zone-timer.js';
 import { createShaderRebuildProbe } from '../diag/shader-rebuild-probe.js';
 import { createPipelineRebuildProbe } from '../diag/pipeline-rebuild-probe.js';
-import { resolveElevationFloorIndex, compareLayerKeys } from '../scene/layer-order.js';
-// THE ZONE'S ONE DOOR (zones/one-door) — unlike the layer-order/world-quad/
-// occlusion imports just above and below (pre-existing, tolerated debt at
-// this ratchet's current bound), this is a NEW import: it goes through
-// `scene/index.js` from the start rather than adding a further direct
-// reach-into-internals.
-import { createDepthAuthority, CASTER_HEIGHT_SCALE_PX } from '../scene/index.js';
+// THE ZONE'S ONE DOOR (zones/one-door) — unlike the world-quad/occlusion
+// imports just below (pre-existing, tolerated debt at this ratchet's current
+// bound), layer-order's symbols were routed through here 2026-09-04
+// (mythica-machina-press#437/#474/#484/#493/#503) rather than reaching
+// straight into scene/layer-order.js.
+import {
+  createDepthAuthority,
+  CASTER_HEIGHT_SCALE_PX,
+  resolveElevationFloorIndex,
+  compareLayerKeys,
+} from '../scene/index.js';
 import {
   computeCameraFrustum,
   worldToNdc,

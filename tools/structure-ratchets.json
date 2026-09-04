@@ -5,7 +5,7 @@
   "foundry/adapter-only": 13,
   "log/one-door": 30,
   "time/one-clock": 0,
-  "zones/one-door": 8,
+  "zones/one-door": 3,
   "graph/reachable-from-boot": 2,
   "params/one-owner": 0,
   "ui/canon-only": 9

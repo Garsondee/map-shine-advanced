@@ -61,7 +61,7 @@
  *
  * @module ui/compression-status
  */
-import { getCompressedTextureStats } from '../vt/compressed-textures.js';
+import { getCompressedTextureStats } from '../vt/index.js';
 import { getLoadingScreenState } from './loading-screen.js';
 
 const BADGE_ID = 'msa-compression-status';

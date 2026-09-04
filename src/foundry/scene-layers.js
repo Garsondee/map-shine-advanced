@@ -16,8 +16,7 @@
  * @module foundry/scene-layers
  */
 
-import { SORT_LAYERS, makeLayerKey } from '../scene/layer-order.js';
-import { packOcclusionModes } from '../scene/occlusion.js';
+import { SORT_LAYERS, makeLayerKey, packOcclusionModes } from '../scene/index.js';
 import {
   computeSceneDimensions,
   computeLevelTexturePlacement,

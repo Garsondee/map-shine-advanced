@@ -31,7 +31,7 @@
  * being one flat list is that a new kind of drawable is just another key.
  */
 
-import { SORT_LAYERS, makeLayerKey } from '../scene/layer-order.js';
+import { SORT_LAYERS, makeLayerKey } from '../scene/index.js';
 import { normalizeTint } from './scene-layers.js';
 import { tokenFootprint } from './scene-geometry.js';
 

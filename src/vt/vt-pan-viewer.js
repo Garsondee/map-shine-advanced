@@ -11203,6 +11203,23 @@ export async function startVtPanViewer({
      * a real prevailing speed" — Tier 2's transient door-gust sim is exactly
      * such a contributor. Rescales the WHOLE vector (never distorts
      * direction) down to this ceiling if exceeded. */
+    // ⚠️ NOW SLACK, AND DELIBERATELY LEFT THAT WAY (2026-09-04, #499). Stage 2
+    // rebuilt the field: the organic layer (which contributed ~0..1.4 at all
+    // times) is gone and turbulence became a real intensity (`σ = I·U`, I≈0.16
+    // in the open) instead of a term clamped to `speed01`. An exposed point at
+    // FULL gale now peaks near 1.16 rather than ~3.4, so this ceiling no longer
+    // binds. It stays as the backstop it always was — Tier 2's transient
+    // door-gust sim can still spike a local sample — but a reader should know
+    // it is not currently shaping anything.
+    //
+    // ⚠️ AND THE LOOK GOT WEAKER, WHICH IS A TUNING DEBT THIS COMMIT DOES NOT
+    // PAY. Vegetation reads the field's MAGNITUDE, so roughly half to a third
+    // of the former motion arrives for the same `swayAmount`. The candle
+    // thresholds beside it could be re-derived from real physics (a candle
+    // gutters at a known m/s); "how far should a tree bend" has no such
+    // anchor — it is a look, and picking a number for it without seeing the
+    // map is how a silent regression gets shipped. `swayAmount` /
+    // `galeBendAmount` are the dials; expect to raise them.
     const VEG_MAX_LOCAL_SPEED = 2.5;
     /** Hard ceiling on the FINAL bend+oscillate displacement, world px, AFTER
      * every multiplier (swayAmount/windResponse/kind/curve) is applied — the
@@ -11406,7 +11423,8 @@ export async function startVtPanViewer({
       asShadow,
       rotationLiftEnabled,
     }) {
-      const { vec2, float, positionLocal, sin, cos, length, pow, max, min, smoothstep, clamp, texture } = THREE.TSL;
+      const { vec2, float, positionLocal, sin, cos, length, pow, max, min, mix, smoothstep, clamp, texture } =
+        THREE.TSL;
       const worldXY = vec2(positionLocal.x, positionLocal.y);
       const tSec = uGlobalTimeMs.mul(float(0.001));
       // THE ARRIVAL LAG — see `effects/vegetation.js#VEGETATION_KINDS`'s own
@@ -11433,12 +11451,63 @@ export async function startVtPanViewer({
       // "same time, same direction" half of the 2026-08-15 report, which
       // neither the lag nor the wander below would have fixed on its own.
       const hashSalt = Number.isFinite(kind?.clumpHashSalt) ? kind.clumpHashSalt : 0;
-      const cell = worldXY.div(motion.uClumpSizePx).floor();
-      const phase = vegClumpHash(cell, hashSalt).mul(motion.uClumpPhaseSpread);
+
+      /* =====================================================================
+       * ⭐ THE PER-CLUMP VALUES ARE BLENDED, NOT SNAPPED (2026-09-04,
+       * mythica-machina-press#505) — this is the fix for the trees tearing
+       * themselves apart.
+       * =====================================================================
+       *
+       * Author: *"at gale strength the trees can self intersect... a distorted
+       * dissolved blob"*, and again later: *"we need a more robust and less
+       * prone to self-intersection and strange warping method"*.
+       *
+       * ⚠️ IT WAS NEVER AN AMPLITUDE PROBLEM, WHICH IS WHY CAPPING NEVER FIXED
+       * IT. `cell` is `floor(worldXY / clumpSize)` — a STEP function of
+       * position — and every per-clump quantity was derived from it: the sway
+       * phase, the amplitude jitter, the direction jitter, and the position the
+       * wind field itself was sampled at. So the displacement field had hard
+       * JUMP DISCONTINUITIES on a grid, and a discontinuous warp tears the art
+       * along every clump seam by construction. Two adjacent clumps displacing
+       * different ways pull the pixels between them apart or push them through
+       * each other. No magnitude cap can remove a discontinuity — it can only
+       * make the jump smaller — which is exactly the same shape of mistake as
+       * the fixed-UV flutter cap that failed to stop the liquify before
+       * `flutterFoldFreeAmplitudePx` replaced it with a derived bound.
+       *
+       * THE FIX: bilinearly blend each per-clump value across the four
+       * neighbouring clump cells, with a smoothstep on the fractional
+       * coordinate so the result is C1 (a plain linear blend is continuous but
+       * kinks at cell edges, and a kink in a displacement field is still a
+       * visible crease). Neighbours still decorrelate — they just do it
+       * smoothly instead of with a cliff between them.
+       *
+       * COST: three hashes become twelve. A hash is one `sin` and one `fract`;
+       * the wind sample beside it is a 16-noise-evaluation fBm stack, so this
+       * is noise-floor next to what the same shader already pays.
+       */
+      const cellF = worldXY.div(motion.uClumpSizePx);
+      const cell = cellF.floor();
+      const cellFrac = cellF.sub(cell);
+      const blendX = smoothstep(float(0), float(1), cellFrac.x);
+      const blendY = smoothstep(float(0), float(1), cellFrac.y);
+      /** One per-clump hash, blended over the four cells this point sits between. */
+      const blendedClumpHash = (salt) =>
+        mix(
+          mix(vegClumpHash(cell, salt), vegClumpHash(cell.add(vec2(float(1), float(0))), salt), blendX),
+          mix(
+            vegClumpHash(cell.add(vec2(float(0), float(1))), salt),
+            vegClumpHash(cell.add(vec2(float(1), float(1))), salt),
+            blendX
+          ),
+          blendY
+        );
+
+      const phase = blendedClumpHash(hashSalt).mul(motion.uClumpPhaseSpread);
       const ampJitter = float(1)
         .sub(motion.uClumpAmpSpread)
-        .add(vegClumpHash(cell, 37.7 + hashSalt).mul(motion.uClumpAmpSpread.mul(float(2))));
-      const dirJitter = vegClumpHash(cell, 91.3 + hashSalt)
+        .add(blendedClumpHash(37.7 + hashSalt).mul(motion.uClumpAmpSpread.mul(float(2))));
+      const dirJitter = blendedClumpHash(91.3 + hashSalt)
         .sub(float(0.5))
         .mul(motion.uClumpDirSpreadRad.mul(float(2)));
 
@@ -11447,9 +11516,25 @@ export async function startVtPanViewer({
       // gust envelope, the turbulence and the direction the tree read a second
       // ago, so a front rolls visibly DOWNWARD through the stand instead of the
       // two layers merely being out of step on one shared beat.
-      const cellCenterXY = cell.add(vec2(float(0.5), float(0.5))).mul(motion.uClumpSizePx);
+      /* ⭐ SAMPLED AT THE POINT'S OWN POSITION, NOT THE SNAPPED CELL CENTRE
+       * (2026-09-04, mythica-machina-press#505). The snap was the second
+       * discontinuity — see the blended-hash block above for the first: with
+       * the field read at a cell centre, `localSpeed` and `leanDir` JUMPED at
+       * every clump seam, and they drive the bend and the sway directly.
+       *
+       * ⚠️ THE ORIGINAL "rigidity fix" INTENT IS PRESERVED, not discarded.
+       * Reading at the cell centre existed so a whole clump moves as one body
+       * rather than shearing internally. Bilinearly blending the four
+       * neighbouring cell centres — the continuous version of that idea —
+       * reconstructs (to within half a cell) the sample position itself, so
+       * sampling here IS the smooth limit of what the snap was approximating.
+       * It also costs ONE wind sample rather than four, which matters now that
+       * a sample is a 16-noise-evaluation fBm stack (#499). Intra-clump shear
+       * is negligible in practice because the field's finest eddy is ~260 px,
+       * far larger than a clump.
+       */
       const fieldWindLean = windHandle.node(THREE.TSL, {
-        centerXY: cellCenterXY,
+        centerXY: worldXY,
         time: windTime,
       });
       // (1b) GUST WANDER (2026-08-15, author: *"preserve the direction largely
@@ -11467,7 +11552,9 @@ export async function startVtPanViewer({
       // field itself — a wander that ran on live time while the lean ran on
       // lagged time would put the two back out of physical agreement.
       const wanderVec = curlNoise2D(THREE.TSL, {
-        p: cellCenterXY,
+        // Continuous for the same reason the field sample above is — a wander
+        // that jumped at clump seams would put the discontinuity straight back.
+        p: worldXY,
         timeSec: windTime.mul(float(0.001)),
         spaceFreq: VEG_GUST_WANDER_SPACE_FREQ,
         rate: VEG_GUST_WANDER_RATE,
@@ -11534,31 +11621,60 @@ export async function startVtPanViewer({
           float(vegSpringGrid.cellSize * vegSpringGrid.rows)
         );
         const springUv = clamp(worldXY.sub(gridOriginXY).div(gridExtentXY), vec2(0, 0), vec2(1, 1));
-        // Bilinear (the publish target's own LinearFilter) — smooth across
-        // clump-cell boundaries for free. The PIVOT below is still hard-
-        // snapped to this vertex's own nearest cell centre, not blended the
-        // same way — a known, quantified, documented tradeoff (see
-        // VEGETATION_PARAMS.torqueGain's own help text and `vegetation.js`'s
-        // `true-clump-differentiation` deferred-rung entry).
         const springState = texture(vegSpringPublishRT.texture, springUv);
-        const springAngle = springState.x;
         const springLiftRaw = springState.z;
 
-        // Rotation is inherently self-weighted — a vertex twice as far from
-        // the pivot swings through twice the arc for the same angle, no
-        // separate falloff curve needed the way flat translation sway did.
-        const offsetXY = worldXY.sub(cellCenterXY);
-        const rotCos = cos(springAngle);
-        const rotSin = sin(springAngle);
-        const rotatedOffsetXY = vec2(
-          offsetXY.x.mul(rotCos).sub(offsetXY.y.mul(rotSin)),
-          offsetXY.x.mul(rotSin).add(offsetXY.y.mul(rotCos))
+        /* ⭐ THE ROTATION IS BLENDED ACROSS FOUR PIVOTS (2026-09-04,
+         * mythica-machina-press#505) — the last of the three clump-seam
+         * discontinuities, and the only one that could not be fixed by making
+         * an input continuous.
+         *
+         * The spring ANGLE was already smooth (the publish target is
+         * LinearFilter'd). The PIVOT was not: `worldXY − cellCenterXY` jumps by
+         * a whole clump width across a seam, so the rotation displacement
+         * jumped by roughly `angle × clumpSize` there. The previous code named
+         * this and accepted it as a documented tradeoff.
+         *
+         * ⚠️ SMOOTHING THE PIVOT ITSELF IS DEGENERATE, which is presumably why
+         * it was left. Bilinearly blending the four surrounding cell centres
+         * reconstructs the sample position, so the lever arm `worldXY − pivot`
+         * collapses toward zero and the rotation vanishes. What must be blended
+         * is the DISPLACEMENT: evaluate the rotation about each of the four
+         * cells, each with its own centre and its own angle, and weight them.
+         * Each term's weight reaches zero exactly where that term would
+         * otherwise jump in, so the sum is continuous while every individual
+         * rotation keeps a real lever arm.
+         *
+         * Four fetches from the spring target — one texel per clump cell, a
+         * very small texture — plus four rotations. Cheap next to the fBm wind
+         * sample this same shader already pays for.
+         */
+        const rotationAbout = (cellIJ) => {
+          const centre = cellIJ.add(vec2(float(0.5), float(0.5))).mul(motion.uClumpSizePx);
+          const uvAt = clamp(centre.sub(gridOriginXY).div(gridExtentXY), vec2(0, 0), vec2(1, 1));
+          const angle = texture(vegSpringPublishRT.texture, uvAt).x;
+          // Self-weighting: a vertex twice as far from its pivot swings through
+          // twice the arc for the same angle, so no separate falloff is needed.
+          const offset = worldXY.sub(centre);
+          const c = cos(angle);
+          const sn = sin(angle);
+          const rotated = vec2(offset.x.mul(c).sub(offset.y.mul(sn)), offset.x.mul(sn).add(offset.y.mul(c)));
+          return rotated.sub(offset);
+        };
+        const rotationDisplace = mix(
+          mix(rotationAbout(cell), rotationAbout(cell.add(vec2(float(1), float(0)))), blendX),
+          mix(
+            rotationAbout(cell.add(vec2(float(0), float(1)))),
+            rotationAbout(cell.add(vec2(float(1), float(1)))),
+            blendX
+          ),
+          blendY
         );
         // Folded into the SAME translation term, capped by the SAME final
         // hard cap below — one more slider (torqueGain) that could be maxed
         // out alongside sway/gale, exactly the scenario that cap already
         // exists for.
-        translateDisplace = translateDisplace.add(rotatedOffsetXY.sub(offsetXY).mul(edgeFade));
+        translateDisplace = translateDisplace.add(rotationDisplace.mul(edgeFade));
 
         // LIFT — CANOPY ONLY, deliberately never the shadow (asShadow=true
         // skips this branch entirely, not merely zeroes it): this renderer's
@@ -11572,8 +11688,18 @@ export async function startVtPanViewer({
         // trick, which is what actually reads as height in a flat top-down
         // projection with no perspective cue of its own.
         if (!asShadow) {
-          const halfCell = float(vegSpringGrid.cellSize * 0.5);
-          const radialWeight = clamp(length(offsetXY).div(max(halfCell, float(1e-4))), float(0), float(1));
+          // ⭐ CONTINUOUS RADIAL WEIGHT (2026-09-04, #505). This used to be
+          // `length(worldXY − cellCenterXY)`, which died with the snapped
+          // pivot. `cellFrac − 0.5` is the offset from the clump centre in
+          // cell units, and while that VECTOR flips sign across a seam its
+          // LENGTH does not — so this carries the identical meaning (0 at the
+          // clump's centre, 1 half a cell out) without reintroducing the
+          // discontinuity the rest of this block just removed.
+          const radialWeight = clamp(
+            length(cellFrac.sub(vec2(float(0.5), float(0.5)))).div(float(0.5)),
+            float(0),
+            float(1)
+          );
           liftY = springLiftRaw.mul(radialWeight).mul(edgeFade);
         }
       }

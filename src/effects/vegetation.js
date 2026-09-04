@@ -358,6 +358,25 @@ export const VEGETATION_PARAMS = Object.freeze({
     label: 'Wind response',
     help: 'How much this vegetation reacts to the shared wind field — sealed rooms and courtyards stay nearly still by construction; open ground catches the full gust. 0 = wind cannot touch it; 2 = twice as dramatic as the tuned default.',
   },
+  // ===========================================================================
+  // STAR: RETUNED LIVE, 2026-09-04, AFTER mythica-machina-press#499/#505 --
+  // every default from here through `shadowStrength` was re-set by the author
+  // with a real scene in front of them, not re-derived. Two upstream changes
+  // made the previous defaults stale rather than merely dated:
+  //   #499 rebuilt the wind field's turbulence (a real intensity, sigma = I*U,
+  //   replacing a clamp) and deleted the old organic noise layer -- an exposed
+  //   point at full gale fell from a peak of ~3.4 to ~1.16, so every
+  //   wind-driven amplitude here was tuned against a signal ~3x stronger
+  //   than what now arrives.
+  //   #505 fixed the vertex-mesh sampling and the clump-seam/rotation-pivot
+  //   discontinuities that were tearing the canopy at gale strength, which
+  //   had been silently CAPPING how far several of these dials (Sway
+  //   amount, Gale lean, Torque gain especially) could usefully be pushed
+  //   before the retune -- raising them past the old defaults only used to
+  //   make the tearing worse, not the motion better.
+  // Graded S both times. The session's own values are recorded as the FINAL
+  // number in each param's own comment below; don't re-derive them from
+  // physics or re-tune by eye without a live look.
   swayAmount: {
     type: 'float',
     min: 0,
@@ -372,7 +391,11 @@ export const VEGETATION_PARAMS = Object.freeze({
     // one that cannot: sway is a smooth per-VERTEX displacement of a tessellated
     // mesh, pinned at the root by `heightWeight01`, so it moves the plant
     // without ever folding its texture.
-    default: 34,
+    // 2026-09-04 live retune (see the header just above): 34 -> 12. Counter-
+    // intuitively SMALLER than before #499/#505, not bigger -- with the
+    // seam/sampling tears gone, the same field reads as far more motion at
+    // a lower number than it used to at a higher one.
+    default: 12,
     category: 'Motion',
     label: 'Sway amount',
     help: 'World-pixel displacement at the canopy top under a full-strength wind sample (before the per-kind multiplier and Wind response). This is a smooth per-VERTEX displacement of a tessellated mesh, so it moves the plant without ever folding its texture.',
@@ -382,7 +405,7 @@ export const VEGETATION_PARAMS = Object.freeze({
     min: 0.05,
     max: 3,
     step: 0.01,
-    default: 0.45,
+    default: 0.22, // 2026-09-04 live retune: 0.45 -> 0.22, slower/heavier
     category: 'Motion',
     label: 'Sway frequency',
     help: 'How fast the canopy oscillates back and forth at dead calm, roughly in cycles per second. Rises further with wind strength — see Gale rate gain.',
@@ -392,7 +415,7 @@ export const VEGETATION_PARAMS = Object.freeze({
     min: 0.5,
     max: 3,
     step: 0.05,
-    default: 1.3,
+    default: 0.6, // 2026-09-04 live retune: 1.3 -> 0.6, gentler gusts move more
     category: 'Motion',
     label: 'Sway response curve',
     help: 'Shapes how sway amplitude grows with local wind strength. 1 = proportional; higher makes a strong gust swing disproportionately further than a gentle breeze would suggest.',
@@ -406,7 +429,12 @@ export const VEGETATION_PARAMS = Object.freeze({
     // `swayAmount` above): a gale should visibly lay a canopy over, and the
     // lean is a bulk mesh bend, not a texture warp — it was never what
     // "liquified".
-    default: 1.8,
+    // 2026-09-04 live retune: 1.8 -> 4, the top of this dial's own range --
+    // #505's seam/rotation fixes are what make a full-strength lean-over
+    // usable at all; the old default was a ceiling forced by the tearing,
+    // not the look the author actually wanted. Consider widening `max`
+    // above 4 if a live look calls for more.
+    default: 4,
     category: 'Motion',
     label: 'Gale lean',
     help: 'How far the canopy holds a persistent downwind lean at full gale, relative to its own oscillating swing. 0 = it only oscillates about neutral and never bends over.',
@@ -416,7 +444,7 @@ export const VEGETATION_PARAMS = Object.freeze({
     min: 0,
     max: 6,
     step: 0.05,
-    default: 1.6,
+    default: 5.35, // 2026-09-04 live retune: 1.6 -> 5.35, a gale thrashes now
     category: 'Motion',
     label: 'Gale rate gain',
     help: 'Extra oscillation speed at full gale, as a multiple of the calm-wind frequency above — the difference between a gale that thrashes and one that just swings wider.',
@@ -451,7 +479,12 @@ export const VEGETATION_PARAMS = Object.freeze({
     // `clumpSizePx * angle_radians`. A bigger Clump size (above) makes this
     // worse at the same angle — raise this gradually and watch the seams
     // between clumps, not just the motion itself.
-    default: 0.15,
+    // 2026-09-04 live retune: 0.15 -> 1.14. Was conservative specifically
+    // because the rotation pivot used to hard-snap at clump boundaries
+    // (see this param's own header above) -- #505 blends the rotation
+    // DISPLACEMENT across four pivots instead, so the seam this default
+    // was guarding against no longer exists at this strength.
+    default: 1.14,
     category: 'Motion',
     label: 'Torque gain',
     help: "How strongly a wind difference between one side of a clump and the other twists it — the rotational counterpart to Sway amount. 0 = no rotation at all, translation-only sway exactly as before this existed. Interacts with Clump size: a larger clump makes the same angle's seam at its own boundary more visible, so raise both together carefully.",
@@ -461,7 +494,7 @@ export const VEGETATION_PARAMS = Object.freeze({
     min: 0.1,
     max: 40,
     step: 0.1,
-    default: 6,
+    default: 12.2, // 2026-09-04 live retune: 6 -> 12.2, snaps back faster
     category: 'Motion',
     label: 'Spring stiffness',
     help: 'How strongly the torque/lift spring pulls toward its wind-driven target — higher snaps back faster and rings at a higher frequency. Critical damping for a given stiffness is 2×√stiffness; see Spring damping below.',
@@ -476,7 +509,10 @@ export const VEGETATION_PARAMS = Object.freeze({
     // counter-sway before settling, not glide straight to rest. Raise past
     // critical for a plant that recovers without ever swinging back past
     // neutral.
-    default: 3,
+    // 2026-09-04 live retune: 3 -> 1.8. Still deliberately underdamped
+    // (critical damping at the new stiffness=12.2 is 2*sqrt(12.2)=7.0) --
+    // MORE underdamped than before, a livelier overshoot/counter-sway.
+    default: 1.8,
     category: 'Motion',
     label: 'Spring damping',
     help: 'How quickly the torque/lift spring settles. Below 2×√(Spring stiffness) the plant visibly overshoots and swings back the other way before settling — the "spring" feel. At or above that line it recovers smoothly with no counter-sway.',
@@ -486,7 +522,7 @@ export const VEGETATION_PARAMS = Object.freeze({
     min: 0,
     max: 40,
     step: 0.5,
-    default: 6,
+    default: 36.5, // 2026-09-04 live retune: 6 -> 36.5, a gust visibly lifts the canopy
     category: 'Motion',
     label: 'Lift gain',
     help: 'How much a gust visibly lifts the canopy, in world px, at full local wind strength — drives the SAME spring as Torque gain (Spring stiffness/damping apply to both). Applied to the canopy only, never its ground shadow: the gap that opens between them on a gust is what reads as lift. 0 = no vertical motion, rotation-only.',
@@ -504,7 +540,7 @@ export const VEGETATION_PARAMS = Object.freeze({
     // level."* Trees carry `windLagFraction: 0`, so this dial only ever moves
     // undergrowth — at 0 the whole mechanism is off and both kinds are back
     // in lockstep, which is the honest way to A/B it live.
-    default: 1,
+    default: 2.2, // 2026-09-04 live retune: 1 -> 2.2, the layers read further apart in time
     category: 'Motion',
     label: 'Ground arrival lag (s)',
     help: 'How long a gust takes to work its way down from canopy height to ground level, in seconds. Trees feel the wind first and bushes get the same gust this much later — the whole reason a stand of vegetation reads as air moving through it rather than as one sheet flexing. 0 puts every layer back on the same instant.',
@@ -518,7 +554,7 @@ export const VEGETATION_PARAMS = Object.freeze({
     // low. It is a proportion of the LOCAL wind speed, never an absolute add,
     // so dead calm stays dead calm at any setting (the same energy discipline
     // `world/wind-field.js#computeWindTurbulence`'s own cap enforces).
-    default: 0.3,
+    default: 0.08, // 2026-09-04 live retune: 0.3 -> 0.08, a stand leans together more
     category: 'Motion',
     label: 'Gust wander',
     help: "How much each layer's lean wanders off the prevailing wind direction, as a fraction of the local wind strength. Small values keep a stand leaning together while stopping it reading as one rigid sheet; large values let neighbouring plants visibly disagree about which way the gust is going. Trees and bushes wander independently, so raising this separates the layers as well as roughening them. 0 = every plant leans exactly with the field.",
@@ -536,7 +572,7 @@ export const VEGETATION_PARAMS = Object.freeze({
     // Was 1 — flutter's amplitude scales up to ~5x between calm and gale
     // (see flutterGaleFrequency below), so this needed to come down further
     // than sway did to land at a comparable "very strong" complaint.
-    default: 0.55,
+    default: 3, // 2026-09-04 live retune: 0.55 -> 3, the top of this dial's own range
     category: 'Motion',
     label: 'Leaf flutter',
     help: 'How much individual leaves shimmer and shuffle in the wind, on top of the whole-plant sway. Still at dead calm, more pronounced in a gale. 0 = a perfectly rigid plant. The displacement is capped against the flutter pattern’s own feature size, so raising this brightens the shimmer rather than smearing the artwork.',
@@ -546,7 +582,7 @@ export const VEGETATION_PARAMS = Object.freeze({
     min: 0,
     max: 8,
     step: 0.1,
-    default: 1.6,
+    default: 1.1, // 2026-09-04 live retune: 1.6 -> 1.1
     category: 'Motion',
     label: 'Flutter frequency',
     help: 'How fast the leaf-shimmer pattern evolves at dead calm.',
@@ -558,7 +594,7 @@ export const VEGETATION_PARAMS = Object.freeze({
     step: 0.1,
     // Was 7 (giving up to ~5.4x the calm rate's worth of amplitude at full
     // gale) — turned down alongside swayAmount/galeBendAmount above.
-    default: 4.0,
+    default: 9, // 2026-09-04 live retune: 4 -> 9, alongside flutterAmount's own rise
     category: 'Motion',
     label: 'Flutter frequency (gale)',
     help: 'EXTRA evolution speed added to the flutter pattern at full gale, on top of the calm-wind frequency above.',
@@ -598,7 +634,7 @@ export const VEGETATION_PARAMS = Object.freeze({
     min: 0,
     max: 12,
     step: 0.1,
-    default: 4.0,
+    default: 7.8, // 2026-09-04 live retune: 4 -> 7.8
     category: 'Motion',
     label: 'Clump phase spread',
     help: "Timing offset, in seconds, between neighbouring clumps' sway — the main cure for everything swaying in lockstep. 0 = every clump swings perfectly in sync.",
@@ -608,7 +644,7 @@ export const VEGETATION_PARAMS = Object.freeze({
     min: 0,
     max: 0.9,
     step: 0.01,
-    default: 0.3,
+    default: 0.73, // 2026-09-04 live retune: 0.3 -> 0.73
     category: 'Motion',
     label: 'Clump strength spread',
     help: "How much stronger or weaker one clump's sway is than its neighbour's, as a fraction either way. 0 = every clump sways with identical strength.",

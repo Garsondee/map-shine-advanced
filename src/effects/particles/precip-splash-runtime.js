@@ -270,7 +270,17 @@ export function createPrecipSplashEngine({
   // Look dials — the only mutable numbers here. Everything per-archetype is a
   // graph literal (see the header).
   const uSizeScale = uniform(float(1));
-  const uAlphaScale = uniform(float(1));
+  /**
+   * ⚠️ DEFAULT LOWERED 1 → 0.35 (2026-09-04, live author feedback: "lower
+   * their opacity by a lot"). At `uPeakBoost`'s own V2-harvested 2.75, the
+   * densest archetype (droplets, `peakAlpha` 0.33) peaked at 0.9075 — very
+   * nearly opaque — which read as a solid ring rather than a translucent
+   * splash of water. This is now the one dial that carries the reduction
+   * (`uPeakBoost` stays AT the harvested V2 number so it keeps meaning
+   * exactly what its own comment says); it is also the FIRST params-schema
+   * dial exposed as `splashAlphaScale` (Precipitation control panel).
+   */
+  const uAlphaScale = uniform(float(0.35));
   /** V2's `SPLASH_PEAK_OPACITY_BOOST` (`:115`) — its own comment says the
    * legacy 0.02–0.12 peaks *"read too faint on the map"*. Harvested as a dial
    * rather than folded into the archetype peaks, so the four stay recognisably

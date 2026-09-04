@@ -50,6 +50,16 @@ export const CATEGORY_ORDER = Object.freeze([
   'Flame',
   'Ember',
   'Smoke',
+  // Precipitation's own five bodies (2026-09-04), the identical justification
+  // fire's trio has: five independent sub-engines (ground impact, the falling
+  // body, the distant atmospheric veil, ground accumulation, roof drips), each
+  // with its own size/rate/strength controls — lumping 23 of them into 'Look'
+  // would be the exact unusable-card problem Fire's own comment above names.
+  'Splash',
+  'Fall',
+  'Veil',
+  'Ground',
+  'Drips',
   'Light',
   'Motion',
   // Perspective strength — a BEHAVIOUR of the particles, belonging to none of

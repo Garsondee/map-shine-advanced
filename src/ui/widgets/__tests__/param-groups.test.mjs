@@ -82,7 +82,7 @@ export function run(t) {
   ok(
     'the canonical order runs surface → emission → behaviour → size → couplings → machinery',
     CATEGORY_ORDER.join(',') ===
-      'Presence,Look,Detail,Flame,Ember,Smoke,Light,Motion,Depth,Shape,Extent,Outdoor,Response,Technical'
+      'Presence,Look,Detail,Flame,Ember,Smoke,Splash,Fall,Veil,Ground,Drips,Light,Motion,Depth,Shape,Extent,Outdoor,Response,Technical'
   );
   // ⚠️ Flame/Ember/Smoke/Depth added 2026-08-09 for fire's particle rebuild, and
   // placed by MEANING rather than appended: the three bodies are SURFACE groups
@@ -93,9 +93,18 @@ export function run(t) {
   for (const c of ['Flame', 'Ember', 'Smoke', 'Depth']) {
     ok(`${c} is a real category, not silently swept into Technical`, CATEGORY_ORDER.includes(c));
   }
+  // ⚠️ Splash/Fall/Veil/Ground/Drips added 2026-09-04 for precipitation's own
+  // control panel, by the IDENTICAL reasoning: five independent sub-engines
+  // (ground impact, the falling body, the distant veil, ground accumulation,
+  // roof drips), each a SURFACE group, so they sit in the same surface block
+  // Flame/Ember/Smoke already occupy — right after fire's trio, still before
+  // Light, never appended after Technical.
+  for (const c of ['Splash', 'Fall', 'Veil', 'Ground', 'Drips']) {
+    ok(`${c} is a real category, not silently swept into Technical`, CATEGORY_ORDER.includes(c));
+  }
   ok(
-    'the three body groups stay inside the surface block, before Light',
-    CATEGORY_ORDER.indexOf('Smoke') < CATEGORY_ORDER.indexOf('Light')
+    'the eight body groups (fire`s three, precipitation`s five) stay inside the surface block, before Light',
+    CATEGORY_ORDER.indexOf('Drips') < CATEGORY_ORDER.indexOf('Light')
   );
   ok(
     'Depth sits with behaviour, after Motion and before size',

@@ -1,16 +1,18 @@
 /**
  * Node verification for effects/precipitation/precipitation.js — the
- * declaration. Mirrors fluid.test.mjs's own job: prove the manifest and
- * schema are well-formed as DATA. The interesting assertion is the EMPTY
- * one — `PRECIPITATION_PARAMS` having no keys is a deliberate state (this
- * file's own header has the full account: precipitation's "look" is
- * weather-manager state, not a per-scene author dial), asserted with its
- * reason attached rather than left implicit, the same posture fluid's own
- * manifest test took before that effect had any real params either.
+ * declaration. Mirrors fire.test.mjs's own job now that PRECIPITATION_PARAMS
+ * is no longer empty (2026-09-04, live author request for a real weather-
+ * appearance control panel): prove the manifest and schema are well-formed
+ * as DATA, that every param lands in a category the ROH renderer actually
+ * recognises (`feedback_category_string_must_be_in_closed_list` — a category
+ * missing from `CATEGORY_ORDER` silently sweeps its params into 'Technical',
+ * no error, no warning), and that every default survives its own declared
+ * range unclamped.
  */
 import { PRECIPITATION, PRECIPITATION_PARAMS } from '../precipitation.js';
 import { validateEffectManifest } from '../../effect-manifest.js';
-import { validateParamsSchema } from '../../../core/params-schema.js';
+import { validateParamsSchema, validateParamValue } from '../../../core/params-schema.js';
+import { CATEGORY_ORDER } from '../../../diag/effect-controls.js';
 import { precipTierPlan } from '../precip-species.js';
 
 export function run(t) {
@@ -22,12 +24,49 @@ export function run(t) {
   }
   {
     const r = validateParamsSchema(PRECIPITATION_PARAMS);
-    ok('params schema validates', r.ok === true);
+    ok(`params schema validates (${r.errors.join('; ')})`, r.ok === true);
   }
   ok(
-    'PRECIPITATION_PARAMS is deliberately empty — precipitation`s look is weather-manager state, not an author dial',
-    Object.keys(PRECIPITATION_PARAMS).length === 0
+    'PRECIPITATION_PARAMS now has real weather-appearance controls, not the deliberately-empty placeholder',
+    Object.keys(PRECIPITATION_PARAMS).length > 0
   );
+  {
+    // ⚠️ THE SAME CLOSED-LIST TRAP FIRE'S OWN TEST GUARDS AGAINST — a category
+    // absent from `CATEGORY_ORDER` (ui/widgets/param-groups.js) is not an
+    // error anywhere; it just quietly renders under 'Technical' instead.
+    const unknown = Object.entries(PRECIPITATION_PARAMS)
+      .filter(([, decl]) => !CATEGORY_ORDER.includes(decl.category))
+      .map(([key, decl]) => `${key}=${decl.category}`);
+    ok(`every param category is in the closed list (${JSON.stringify(unknown)})`, unknown.length === 0);
+  }
+  {
+    // Every param needs a label AND a help string — the FOH/ROH card is
+    // generated from this and nothing else, so a missing one ships blank.
+    const missing = Object.entries(PRECIPITATION_PARAMS)
+      .filter(([, d]) => !d.label || !d.help)
+      .map(([k]) => k);
+    ok(`every param has a label and help (${JSON.stringify(missing)})`, missing.length === 0);
+  }
+  {
+    // A default that gets CLAMPED by its own declared range is a schema-
+    // authoring bug `validateParamsSchema` already catches — restated here,
+    // per-param, so a future retune that breaks one range names WHICH key.
+    const clamped = Object.entries(PRECIPITATION_PARAMS)
+      .filter(([, d]) => validateParamValue(d, d.default).clamped)
+      .map(([k]) => k);
+    ok(`no default is silently clamped by its own range (${JSON.stringify(clamped)})`, clamped.length === 0);
+  }
+  {
+    // ⭐ THE ONE DELIBERATE DEVIATION FROM THE ENGINE'S OWN PRE-EXISTING
+    // DEFAULT — every other param's `default` below is copied from what
+    // `precip-subsystem.js`'s sub-engines already hardcode, so a fresh
+    // session needs no "push defaults on boot" step; this is the one the
+    // author asked to change ("lower their opacity by a lot").
+    ok(
+      'splashAlphaScale`s default was lowered from the engine`s original 1.0',
+      PRECIPITATION_PARAMS.splashAlphaScale.default === 0.35
+    );
+  }
   ok('the manifest points at that same schema object', PRECIPITATION.params === PRECIPITATION_PARAMS);
 
   ok('id is the stable camelCase registry key', PRECIPITATION.id === 'precipitation');

@@ -394,6 +394,7 @@ import {
   GRADE,
   GRADE_LOOK_PARAMS,
   PRECIPITATION,
+  PRECIPITATION_PARAMS,
   buildCascadeReadout,
   projectCascadeRenderState,
 } from './effects/index.js';
@@ -1820,10 +1821,12 @@ function install() {
    * manifest already says `enabledFromProfile: 'low'`, so a `false` seed
    * would misrepresent the window between construction and the first
    * cascade resolve — and this effect formalises behaviour that was ALREADY
-   * unconditionally `true` before this manifest existed at all. No `params`
-   * field: `PRECIPITATION_PARAMS` is deliberately empty (precipitation.js's
-   * own header). */
-  let precipReadout = { enabled: true, perfTier: null };
+   * unconditionally `true` before this manifest existed at all. `params:
+   * null` pre-resolve, same seed posture as `fireReadout`/`gradeLookReadout`
+   * above — real values arrive the moment `effectRegistry.register` below
+   * first runs, now that `PRECIPITATION_PARAMS` (2026-09-04) has real weather-
+   * appearance controls rather than the placeholder empty schema. */
+  let precipReadout = { enabled: true, params: null, perfTier: null };
   /** The active floor's renderable door snapshots (foundry/scene-doors.js),
    * refreshed on scene load, floor switch, and any wall CRUD (`refreshDoors`) —
    * NOT re-read every frame. `getDoorRenderState` hands this to the viewer by
@@ -2127,31 +2130,33 @@ function install() {
     doorReadout = { enabled: resolved.enabled, params: resolved.params };
   });
 
-  // PRECIPITATION — MSA's newest registered effect (2026-08-30), and the
-  // last one that had no manifest at all. No live override, no console
-  // setter of its own: PRECIPITATION_PARAMS is empty (precipitation.js's
-  // own header explains why — weather-manager state, not a per-scene author
-  // dial), so `apply` only refreshes the shared readout getPrecipRenderState
-  // reads each frame (vt-pan-viewer.js). The GM/player enable toggle and the
-  // a11y.photosensitive gate both come from this registration existing at
-  // all — the System panel's own `effectRows` (getSystemPanelCtx, below)
-  // already builds itself generically off effectRegistry.list(), so no
-  // separate wiring was needed for either.
+  // PRECIPITATION — MSA's newest registered effect (2026-08-30). The
+  // GM/player enable toggle and the a11y.photosensitive gate both come from
+  // this registration existing at all — the System panel's own `effectRows`
+  // (getSystemPanelCtx, below) already builds itself generically off
+  // effectRegistry.list(), so no separate wiring was needed for either.
   effectRegistry.register(PRECIPITATION, (resolved) => {
     // DELEGATES to the shared, TESTED projection — same shape as every other
     // effect's readout now (see getBloomRenderState's own comment). `params`
-    // rides along even though PRECIPITATION_PARAMS is empty (a harmless {}
-    // no consumer reads) — consistency beats a bespoke 4-field shape here.
+    // now carries real weather-appearance values (2026-09-04's control panel,
+    // PRECIPITATION_PARAMS) rather than the placeholder empty `{}` this
+    // comment used to describe.
     precipReadout = buildCascadeReadout(resolved);
   });
 
-  /** Re-resolve precipitation's cascade from live settings and apply. Mirrors
-   * reapplyDoors, minus the live-override layer neither this effect nor its
-   * empty params schema need. Called on settings change and on ready
-   * (EFFECT_REAPPLIERS, below) — there is no MapShine.setPrecipitation to
-   * call it a third way, unlike every effect with real params. */
+  /** Transient, in-memory precipitation LOOK-dial tuning
+   * (MapShine.setPrecipitation) — mirrors fireLiveOverride/
+   * vegetationLiveOverride exactly, now that PRECIPITATION_PARAMS (2026-09-04)
+   * has real params to override rather than the placeholder empty schema. */
+  const precipLiveOverride = {};
+
+  /** Re-resolve precipitation's cascade from live settings + the live
+   * override and apply. Mirrors reapplyFire/reapplyVegetation. Called on
+   * settings change and on ready (EFFECT_REAPPLIERS, below), and by
+   * MapShine.setPrecipitation. */
   function reapplyPrecipitation() {
     const layers = deriveEffectLayers('precipitation', (key) => readSetting(MODULE_ID, key));
+    layers.paramLayers = [precipLiveOverride];
     effectRegistry.resolveAndApply('precipitation', layers);
   }
 
@@ -2853,6 +2858,50 @@ function install() {
       }
     }
     return { ...fireLiveOverride };
+  };
+
+  /**
+   * MapShine.setPrecipitation — the console tuner AND the Workshop card's
+   * write path for precipitation's LOOK dials (splash opacity/size/rate, the
+   * falling body's size/turbulence/slant, the distant veil, ground
+   * accumulation, roof drips — PRECIPITATION_PARAMS, 2026-09-04). Mirrors
+   * setFire exactly for the `enabled` toggle and the live-override shape.
+   *
+   * ⚠️ ONE EXTRA LINE FIRE DOES NOT NEED. `reapplyPrecipitation()` alone only
+   * refreshes `precipReadout` (what the Studio card DISPLAYS) — nothing today
+   * forwards a cascade re-resolve's `params` into the running particle
+   * engines the way `getFireRenderState()` does for fire (precipitation's own
+   * `getPrecipRenderState()`, vt-pan-viewer.js, does not build its return
+   * object from the cascade at all). `precipitationSubsystem.setTuning(t)`
+   * is the one path that DOES already reach the engines — built for the
+   * shader lab to sweep and exposed today as `MapShine.setPrecipitationTuning`
+   * — so this calls it directly with the same values, rather than leaving the
+   * Studio card's sliders visually update a number nothing renders.
+   *   MapShine.setPrecipitation({ splashAlphaScale: 0.5, chaosScale: 5 })
+   */
+  MapShine.setPrecipitation = (partial = {}) => {
+    const p = partial ?? {};
+    if (typeof p.enabled === 'boolean') {
+      Promise.resolve(writeSetting(MODULE_ID, effectEnableKey('precipitation', 'player'), p.enabled ? 'on' : 'off'))
+        .then(() => reapplyPrecipitation())
+        .catch((err) => log.error('precipitation enable write/reapply failed:', err));
+    }
+    let changed = false;
+    for (const k of Object.keys(PRECIPITATION_PARAMS)) {
+      if (k in p) {
+        precipLiveOverride[k] = p[k];
+        changed = true;
+      }
+    }
+    if (changed) {
+      try {
+        reapplyPrecipitation();
+        setVtPanViewerPrecipitationTuning(precipLiveOverride);
+      } catch (err) {
+        log.error('precipitation reapply (setPrecipitation) failed:', err);
+      }
+    }
+    return { ...precipLiveOverride };
   };
 
   // MapShine.setVegetation — the console tuner AND the FOH/ROH panel's own
@@ -7714,6 +7763,26 @@ function install() {
       if (placed) parts.push(`${placed} placed`);
       return parts.join(' · ');
     },
+  });
+
+  registerSimpleEffectCard('precipitation', {
+    icon: 'rain',
+    title: 'Precipitation',
+    accVar: '--c-particles',
+    // Same category as fire — a particle-simulation weather effect, not a
+    // painted/placed one. `precip01`/species (how much, what kind) stay on
+    // the weather manager's own astrolabe controls; this card is the LOOK —
+    // splash opacity/size/rate, the falling body, the distant veil, ground
+    // accumulation, roof drips (PRECIPITATION_PARAMS, 2026-09-04).
+    filterCategory: 'particles',
+    schema: PRECIPITATION_PARAMS,
+    fohKeys: ['splashAlphaScale', 'splashSizeScale', 'sizeScale', 'streakScale', 'chaosScale', 'curtainStrength'],
+    getReadout: () => precipReadout,
+    setValue: (patch) => MapShine.setPrecipitation(patch),
+    // No `onPaint` — precipitation has no `authoring.paint` (it is not
+    // placed or painted), so the generic helper correctly finds nothing and
+    // leaves the paint button unset, the same shape vegetation's card below
+    // already has.
   });
 
   registerSimpleEffectCard('vegetation', {

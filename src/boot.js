@@ -1258,6 +1258,14 @@ function install() {
             sweepVtPanViewerTimeOfDay(hour, MapShine.__remote?.getFadeOverMs?.() ?? 0);
             if (skyScope.sky?.mode === 'aesthetic') void editSky({ todHour: hour });
           },
+          // An arrow-key press (mythica-machina-press#508) is a discrete jump
+          // with no live-preview phase, same as a tick click — hand-mirrors
+          // onTimeStop just above rather than onTimeChange's drag-release
+          // branch, which has nothing left to fade FROM.
+          onTimeStep: (hour) => {
+            sweepVtPanViewerTimeOfDay(hour, MapShine.__remote?.getFadeOverMs?.() ?? 0);
+            if (skyScope.sky?.mode === 'aesthetic') void editSky({ todHour: hour });
+          },
         });
         container.appendChild(remoteAstrolabe.root);
       },

@@ -211,6 +211,13 @@ function nextUid() {
  *   ring (UI parity plan, phase 6b) — sweeps immediately, same shape as
  *   `ui/astrolabe.js`'s own `onTimeStop`, gated by the SAME `locked` this
  *   dial's own drag gesture already respects.
+ * @param {(hour: number) => void} [opts.onTimeStep] - an arrow-key press on
+ *   the focused ring (mythica-machina-press#508): a discrete 0.25h jump with
+ *   no live-preview phase to justify skipping Fade Time, unlike a drag
+ *   release (which already tracked the cursor live, pointer-move by
+ *   pointer-move — there's nothing left to fade). Falls back to
+ *   `onTimeChange(hour, true)` when not supplied, matching this dial's only
+ *   behavior before this option existed.
  * @param {() => void} [opts.onDateClick]
  * @param {() => void} [opts.onWindClick] - opens the compass popover.
  * @param {() => void} [opts.onLockedAttempt] - fired when a drag/key gesture
@@ -547,7 +554,9 @@ export function buildAstrolabeDial(opts = {}) {
       }
       const dir = e.key === 'ArrowLeft' || e.key === 'ArrowDown' ? -0.25 : 0.25;
       const current = Number(ring.getAttribute('aria-valuenow') ?? 12);
-      opts.onTimeChange?.((current + dir + 24) % 24, true);
+      const next = (current + dir + 24) % 24;
+      if (opts.onTimeStep) opts.onTimeStep(next);
+      else opts.onTimeChange?.(next, true);
     });
   }
 

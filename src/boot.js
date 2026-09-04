@@ -9474,12 +9474,31 @@ function install() {
     if (sky.weatherArchetype && sky.weatherArchetype !== 'custom') {
       setVtPanViewerWeatherArchetype(sky.weatherArchetype, 'sky-settings');
     } else {
-      setVtPanViewerCloudCover(sky.cloudCover01, 'sky-settings');
+      // DON'T STOMP A LIVE WEATHER FADE (mythica-machina-press#507, live
+      // author report echoing the exact 2026-08-27 todHour bug above: "the
+      // fade time doesn't work... it's instant"). `weatherArchetype` flips
+      // to 'custom' the INSTANT a fade starts (fadeWeatherToArchetype's own
+      // doc), but `cloudCover01`/`precip01` are deliberately NOT persisted
+      // until the fade actually arrives — so `sky.cloudCover01`/
+      // `sky.precip01` sit at their STALE pre-fade numbers for the whole
+      // fade window, and this function runs on EVERY editSky() during that
+      // window (including the fade-start gesture's own persistence echo
+      // through watchSceneSky). Unlike todHour, these two axes had no
+      // "already fading toward this, don't reset" guard — so every one of
+      // those calls snapped the sky straight back to where the fade began,
+      // fighting pumpWeatherFades one frame at a time. Skipping the instant
+      // set while a live fadeState entry owns the key is the same law
+      // day-clock.js#syncTo already applies to todHour, just enforced by
+      // staying out of the fade's way instead of re-targeting it.
+      const nowMs = wallClockMs();
+      const cloudFading = fadeState['weather.cloudCover01'] && !isEntryExpired(fadeState['weather.cloudCover01'], nowMs);
+      const precipFading = fadeState['weather.precip01'] && !isEntryExpired(fadeState['weather.precip01'], nowMs);
+      if (!cloudFading) setVtPanViewerCloudCover(sky.cloudCover01, 'sky-settings');
       // ⚠️ ONLY on the `custom` branch, and for exactly the reason the comment
       // above gives for cover: a NAMED row already carries its own `precip01`,
       // so restoring the stored one on top would let a shelf sky and a stale
       // hand-set shower disagree about how hard it is raining.
-      setVtPanViewerWeatherTargets({ precip01: sky.precip01 });
+      if (!precipFading) setVtPanViewerWeatherTargets({ precip01: sky.precip01 });
     }
     // ⭐ CLIMATE RESTORE — unconditional, unlike precipitation above, BECAUSE
     // temperature is deliberately NOT archetype-owned (`ARCHETYPE_OWNED_AXES`:

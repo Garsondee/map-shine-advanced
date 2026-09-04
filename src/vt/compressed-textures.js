@@ -62,6 +62,12 @@
  * order, is the whole fix.
  */
 
+// perfNowMs, not Date.now() directly (time/one-clock, tools/verify-structure.mjs)
+// — this is a worker-retry cooldown timer, exactly the "off-main-thread
+// decode/worker latency" class perfNowMs's own header names, not animation
+// state, so it doesn't belong on env.time either.
+import { perfNowMs } from '../core/frame-clock.js';
+
 /** A texture something is trying to draw right now — always served first. */
 export const PRIORITY_INTERACTIVE = 'interactive';
 /** Work that improves a later frame; nothing on screen is waiting for it. */
@@ -83,6 +89,26 @@ const MAX_IN_FLIGHT = 1;
 
 let _worker = null;
 let _unavailable = false;
+/** Set by `onerror` to a future `perfNowMs()` — `ensureWorker` refuses to build a
+ * new `Worker` before this passes. See the reconstruction comment on
+ * `onerror` below (mythica-machina-press#483) for why this exists instead of
+ * `_unavailable` latching forever on the first error. */
+let _cooldownUntil = 0;
+/** Errors since the last successful reply. Reset to 0 by any `ok:true` reply —
+ * a working reply proves the CURRENT worker is healthy, not just constructed. */
+let _consecutiveFailures = 0;
+/** After this many worker errors with no successful reply in between, stop
+ * reconstructing and fall back to `_unavailable` (the old permanent-latch
+ * behavior) — a bound so a genuinely broken environment (not one bad asset)
+ * still degrades to raw textures for the rest of the session rather than
+ * retrying forever. */
+export const MAX_CONSECUTIVE_WORKER_FAILURES = 3;
+/** How long to wait after a worker error before trying a fresh `Worker`. Long
+ * enough that a transient fault (one bad asset, a momentary OOM) isn't
+ * immediately retried into the same failure; short enough that a real session
+ * recovers within one scene load rather than staying degraded for its whole
+ * length. */
+export const WORKER_RECONSTRUCT_COOLDOWN_MS = 5000;
 /** id -> {resolve, mode} for jobs POSTED to the worker and not yet answered. */
 const _pending = new Map();
 /** Jobs accepted but not yet posted, newest last, one array per lane. */
@@ -110,6 +136,14 @@ const _stats = {
    * priority lanes are not actually being exercised and any conclusion drawn
    * from "the floor switch felt fast" is about the cache, not about this code. */
   maxQueueDepth: 0,
+  /** Total `onerror` events across the whole session — surfaced so a report
+   * can tell "never errored" from "errored once and recovered" from "errored
+   * repeatedly and gave up" (mythica-machina-press#483), none of which read
+   * the same under the old bool-only `unavailable` flag. */
+  workerErrors: 0,
+  /** Successful reconstructions after a cooldown (a fresh `Worker` that went
+   * on to answer at least one job) — 0 forever on a session with no errors. */
+  workerReconstructions: 0,
 };
 
 function _queueDepth() {
@@ -190,7 +224,14 @@ function _enqueue({ message, mode, priority }) {
 }
 
 function ensureWorker() {
-  if (_worker || _unavailable) return _worker;
+  if (_worker) return _worker;
+  if (_unavailable) return null;
+  // A prior `onerror` set a cooldown instead of latching permanently
+  // (mythica-machina-press#483) — refuse to reconstruct until it passes.
+  // `_pump`'s existing "worker died between accepting and dispatching" path
+  // already resolves `null` for whatever called this, so callers during a
+  // cooldown get exactly the same degrade-to-raw contract as a hard failure.
+  if (_cooldownUntil && perfNowMs() < _cooldownUntil) return null;
   try {
     _worker = new Worker(new URL('./bc-compress.worker.js', import.meta.url), { type: 'module' });
     _worker.onmessage = (e) => {
@@ -202,6 +243,13 @@ function ensureWorker() {
       if (!p) return;
       _pending.delete(d.id);
       _inFlight = Math.max(0, _inFlight - 1);
+      // A real reply proves THIS worker is healthy — an error on some earlier,
+      // already-discarded worker must not keep counting against a fresh one
+      // that is actually doing its job.
+      if (d.ok !== false && _consecutiveFailures > 0) {
+        _stats.workerReconstructions++;
+        _consecutiveFailures = 0;
+      }
       try {
         p.resolve(_resultFor(d, p));
       } finally {
@@ -209,13 +257,31 @@ function ensureWorker() {
       }
     };
     _worker.onerror = () => {
-      // A hard worker error dooms the whole worker — mark unavailable and let
-      // every in-flight AND every still-queued request fall back to raw. The
-      // queued ones matter as much as the posted ones: a caller awaiting a job
-      // that was never dispatched would otherwise hang forever, and
-      // `itemsLoading` would never fall to zero, so the scene could never
-      // settle (vt/settle.js).
-      _unavailable = true;
+      // A hard worker error dooms the CURRENT worker instance — drop it and
+      // fail every in-flight AND still-queued request back to raw. The queued
+      // ones matter as much as the posted ones: a caller awaiting a job that
+      // was never dispatched would otherwise hang forever, and `itemsLoading`
+      // would never fall to zero, so the scene could never settle
+      // (vt/settle.js).
+      //
+      // ⚠️ THIS USED TO SET `_unavailable = true` HERE, PERMANENTLY, ON THE
+      // FIRST ERROR (mythica-machina-press#483) — one bad asset, anywhere in
+      // the session, silently condemned every OTHER asset to uncompressed
+      // textures (up to ~7.6x the VRAM) for the rest of the page's life, with
+      // nothing surfaced anywhere. Now: drop the worker, start a cooldown, and
+      // let the NEXT `ensureWorker()` call (any later job, via `_pump`) build
+      // a fresh one — only after `MAX_CONSECUTIVE_WORKER_FAILURES` straight
+      // failures with no successful reply in between does this still fall
+      // back to the old permanent latch, on the theory that the environment
+      // itself (not one asset) is the problem by that point.
+      _worker = null;
+      _stats.workerErrors++;
+      _consecutiveFailures++;
+      if (_consecutiveFailures >= MAX_CONSECUTIVE_WORKER_FAILURES) {
+        _unavailable = true;
+      } else {
+        _cooldownUntil = perfNowMs() + WORKER_RECONSTRUCT_COOLDOWN_MS;
+      }
       for (const [, p] of _pending) p.resolve(null);
       _pending.clear();
       for (const lane of [PRIORITY_INTERACTIVE, PRIORITY_BACKGROUND]) {
@@ -225,7 +291,9 @@ function ensureWorker() {
       _inFlight = 0;
     };
   } catch (_) {
-    // Worker construction blocked (CSP, unsupported) — permanent, silent fallback.
+    // Worker construction itself throwing (CSP, unsupported) is an
+    // environment fact, not a transient fault — permanent, silent fallback,
+    // no cooldown to wait out.
     _unavailable = true;
   }
   return _worker;
@@ -313,6 +381,10 @@ export function getCompressedTextureStats() {
     queuedBackground: _queue[PRIORITY_BACKGROUND].length,
     unavailable: _unavailable,
     workerCreated: !!_worker,
+    // Mid-cooldown after an error, waiting to try a fresh Worker — distinct
+    // from `unavailable` (which means "gave up for the rest of the session").
+    cooldownActive: !_worker && !_unavailable && _cooldownUntil > perfNowMs(),
+    consecutiveWorkerFailures: _consecutiveFailures,
   };
 }
 

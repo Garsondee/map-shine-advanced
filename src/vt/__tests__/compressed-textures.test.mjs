@@ -23,12 +23,15 @@ import {
   requestCoarseAlphaGrid,
   getCompressedTextureStats,
   disposeCompressedTextureWorker,
+  MAX_CONSECUTIVE_WORKER_FAILURES,
+  WORKER_RECONSTRUCT_COOLDOWN_MS,
 } from '../compressed-textures.js';
 
 /** Records what was posted and lets the test answer one job at a time. */
 class FakeWorker {
   constructor() {
     FakeWorker.latest = this;
+    FakeWorker.instanceCount = (FakeWorker.instanceCount || 0) + 1;
     this.posted = [];
     this.onmessage = null;
     this.onerror = null;
@@ -135,6 +138,77 @@ export async function run(t) {
       'every queued caller was RESOLVED by dispose, never left hanging',
       disposed.every((x) => x === null)
     );
+
+    // --- a worker error no longer permanently condemns every OTHER asset ----
+    // (mythica-machina-press#483: one bad asset used to latch `_unavailable`
+    // forever; now it's a bounded cooldown-and-reconstruct.)
+    // The cooldown timer reads perfNowMs() (core/frame-clock.js), which is a
+    // thin wrapper over performance.now() — stub that, not Date.now(). Node's
+    // `performance.now` lives on the prototype and is read-only there, so a
+    // plain assignment throws; shadow it with an own property instead, and
+    // `delete` that shadow afterwards to let the prototype's real one show
+    // back through.
+    let fakeNow = 1_000_000;
+    Object.defineProperty(performance, 'now', { value: () => fakeNow, configurable: true });
+    try {
+      const baseInstances = FakeWorker.instanceCount; // whatever prior scenarios already built
+
+      const errA = requestCompressedTexture('err-a');
+      ok('the job that triggers this section built its own worker', FakeWorker.instanceCount === baseInstances + 1);
+      FakeWorker.latest.onerror();
+      ok('a single worker error resolves the in-flight job null (raw fallback)', (await errA) === null);
+      ok('...but does NOT permanently disable the worker', getCompressedTextureStats().unavailable === false);
+      ok('...it reports a cooldown instead', getCompressedTextureStats().cooldownActive === true);
+
+      const duringCooldown = await requestCompressedTexture('during-cooldown');
+      ok('a request mid-cooldown also falls back to raw, without reconstructing', duringCooldown === null);
+      ok('no second worker was built yet', FakeWorker.instanceCount === baseInstances + 1);
+
+      fakeNow += WORKER_RECONSTRUCT_COOLDOWN_MS + 1;
+      const afterCooldown = requestCompressedTexture('after-cooldown');
+      ok('past the cooldown, a fresh Worker is built', FakeWorker.instanceCount === baseInstances + 2);
+      FakeWorker.latest.replyBc(FakeWorker.latest.current.id);
+      ok('...and it actually serves the job', (await afterCooldown)?.format === 'bc1');
+      ok(
+        'a successful reply on the new worker resets the failure count',
+        getCompressedTextureStats().consecutiveWorkerFailures === 0
+      );
+      ok('...and counts as a recorded reconstruction', getCompressedTextureStats().workerReconstructions === 1);
+
+      // --- repeated errors with no success in between DO still give up -------
+      // The first failure below reuses the still-healthy worker from
+      // `afterCooldown` (no reconstruction needed to fail it); every failure
+      // after that needs its own cooldown to elapse before `ensureWorker`
+      // will even attempt the next Worker. So MAX_CONSECUTIVE_WORKER_FAILURES
+      // errors cost MAX_CONSECUTIVE_WORKER_FAILURES - 1 new constructions.
+      for (let i = 0; i < MAX_CONSECUTIVE_WORKER_FAILURES; i++) {
+        // Cooldown must elapse BEFORE the request, or ensureWorker refuses to
+        // reconstruct and the request resolves null without ever reaching a
+        // (stale) worker to error on.
+        if (i > 0) fakeNow += WORKER_RECONSTRUCT_COOLDOWN_MS + 1;
+        const failing = requestCompressedTexture(`fatal-${i}`);
+        FakeWorker.latest.onerror();
+        await failing; // each error must land before the next request is made
+      }
+      ok(
+        `after ${MAX_CONSECUTIVE_WORKER_FAILURES} straight failures, the worker gives up for good`,
+        getCompressedTextureStats().unavailable === true
+      );
+      ok(
+        'exactly MAX-1 reconstructions happened along the way',
+        FakeWorker.instanceCount === baseInstances + 2 + (MAX_CONSECUTIVE_WORKER_FAILURES - 1)
+      );
+
+      fakeNow += WORKER_RECONSTRUCT_COOLDOWN_MS * 10;
+      const afterGivingUp = await requestCompressedTexture('after-giving-up');
+      ok('...and stays unavailable even long past any cooldown', afterGivingUp === null);
+      ok(
+        '...without building yet another Worker',
+        FakeWorker.instanceCount === baseInstances + 2 + (MAX_CONSECUTIVE_WORKER_FAILURES - 1)
+      );
+    } finally {
+      delete performance.now;
+    }
   } finally {
     globalThis.Worker = priorWorker;
   }

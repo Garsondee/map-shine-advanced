@@ -331,7 +331,7 @@ export function buildLightningMaterial({
     // return stroke connects and stronger toward the tip (V2's own
     // `windT = max(0, uStrikeAge01)` × `uvOffset` timing), off by default
     // (`uWindDriftStrength` defaults to 0, V2's own default).
-    const gust = windHandle.node(THREE.TSL, { centerXY: cur.xy, time: uGlobalTimeMs, exposure: float(1) });
+    const gust = windHandle.node(THREE.TSL, { centerXY: cur.xy, time: uGlobalTimeMs });
     const windT = max(float(0), t).mul(uvOffset);
     world = world.add(gust.mul(uWindDriftStrength).mul(windT).mul(float(40)));
 

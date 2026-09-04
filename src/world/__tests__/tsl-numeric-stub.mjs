@@ -128,6 +128,10 @@ const mix = (a, b, t) =>
     ),
     (p, d) => p + d
   );
+// FUNCTION FORM ONLY, like every other multi-arg op here — see this file's own
+// note on why `.mix()` as a method is deliberately absent. Added 2026-09-04
+// for the Beaufort speed curve in `computeWindTurbulence`'s Taylor advection.
+const pow = (a, b) => zip(a, b, Math.pow);
 const cos = (a) => new N(n(a).c.map(Math.cos));
 const sin = (a) => new N(n(a).c.map(Math.sin));
 
@@ -168,6 +172,7 @@ function texture(tex, uv) {
 
 /** The stub TSL namespace — pass this where the real code expects `THREE.TSL`. */
 export const TSL_STUB = Object.freeze({
+  pow,
   float,
   int,
   vec2,

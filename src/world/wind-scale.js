@@ -45,8 +45,10 @@
  * @module world/wind-scale
  */
 
-/** Beaufort's own defining coefficient: `v = 0.836 · B^1.5` m/s. */
-const BEAUFORT_COEFFICIENT = 0.836;
+/** Beaufort's own defining coefficient: `v = 0.836 · B^1.5` m/s. Exported so
+ *  `world/wind-field.js`'s Taylor advection converts the dial to a real px/sec
+ *  through THIS relation rather than carrying a second copy of it. */
+export const BEAUFORT_COEFFICIENT = 0.836;
 /** The top of the scale. Force 12 is the last one; there is no 13. */
 export const BEAUFORT_MAX = 12;
 

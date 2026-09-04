@@ -200,15 +200,13 @@ export function createWindHandle({
    * @param {object} args
    * @param {*} args.centerXY - vec2 node, the WORLD position being sampled.
    * @param {*} args.time - the shared clock node (uGlobalTimeMs, ms).
-   * @param {*} args.exposure - float node 0..1, sky/shelter exposure here.
    * @returns {*} a vec2 node — a lean direction × strength, exactly as
    *   `sampleWind` returns (each caller scales it into its own space).
    */
-  function node(TSL, { centerXY, time, exposure }) {
+  function node(TSL, { centerXY, time }) {
     return sampleWind(TSL, {
       centerXY,
       time,
-      exposure,
       wind: ambientRef,
       bakedField: bakedFieldRef,
       wallAvoidField: wallAvoidFieldRef,
@@ -379,6 +377,9 @@ export function createWindHandle({
           computeWindTurbulence(TSL, {
             centerXY,
             time,
+            // Same advection the node path applies — held in step by the
+            // node↔kernel parity test.
+            directionDeg: ambientRef ? ambientRef.directionDeg : undefined,
             // This kernel's own real per-cell openness, passed for BOTH slots:
             // there is no spare storage-buffer channel here for a genuine third
             // `exteriorOpenness` signal (both kernels sit at or near the WebGPU
@@ -404,7 +405,7 @@ export function createWindHandle({
           sampleWind(TSL, {
             centerXY,
             time,
-            exposure: openness,
+            directionDeg: ambientRef ? ambientRef.directionDeg : undefined,
             openness,
             exteriorOpenness: openness,
             windSpeed01: cappedSpeed01(),

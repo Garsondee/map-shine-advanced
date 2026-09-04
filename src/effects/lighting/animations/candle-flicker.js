@@ -125,10 +125,15 @@ const SHARED_WIND_LEAN_SCALE = 0.35;
  * the other. See that file's own header for the full reasoning (magnitude
  * ranges, why snuff is stateless) — not repeated here.
  */
-const WIND_GUTTER_MAG_THRESHOLD = 1.3;
-const WIND_GUTTER_MAG_RANGE = 1.0;
-const WIND_SNUFF_MAG_LOW = 2.2;
-const WIND_SNUFF_MAG_HIGH = 3.2;
+// ⭐ RETUNED 2026-09-04 — see `effects/candle-flame-render.js`'s own block for
+// the derivation from real candle behaviour. These MUST stay identical to that
+// file's copies: both sample the same field at the same point, and a candle
+// whose flame and whose cast light gutter at different thresholds is the exact
+// bug `world/wind-field.js` was created to end.
+const WIND_GUTTER_MAG_THRESHOLD = 0.14;
+const WIND_GUTTER_MAG_RANGE = 0.09;
+const WIND_SNUFF_MAG_LOW = 0.27;
+const WIND_SNUFF_MAG_HIGH = 0.4;
 const STRETCH_ALONG = 1.15; // elongation along the lean axis, per unit lean (gentler)
 const STRETCH_PERP = 0.4; // perpendicular squash, per unit lean
 const PERP_MIN = 0.6; // never narrower than this (guards a degenerate sliver)

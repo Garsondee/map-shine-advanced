@@ -24,6 +24,7 @@ import { run as runWeatherPrecip } from './weather-precip.test.mjs';
 import { run as runWindField } from './wind-field.test.mjs';
 import { run as runWindBake } from './wind-bake.test.mjs';
 import { run as runWindScale } from './wind-scale.test.mjs';
+import { run as runWindSpectrum } from './wind-spectrum.test.mjs';
 import { run as runWindSim } from './wind-sim.test.mjs';
 import { run as runWindEnclosure } from './wind-enclosure.test.mjs';
 import { run as runWindAccess } from './wind-access.test.mjs';
@@ -74,6 +75,7 @@ const suites = [
   ['wind-field', runWindField],
   ['wind-bake', runWindBake],
   ['wind-scale', runWindScale],
+  ['wind-spectrum', runWindSpectrum],
   ['wind-sim', runWindSim],
   ['wind-enclosure', runWindEnclosure],
   ['wind-access', runWindAccess],

@@ -383,14 +383,15 @@ export function buildWindArrowMaterial({ THREE, uGlobalTimeMs, windHandle }) {
 
   const centerXY = attribute('center', 'vec2');
   // Real per-point exposure (2026-07-21) — baked per-vertex the SAME way the
-  // candle flame bakes its own (computeWindOverlayArrays' own header has the
-  // "why": without this every arrow read as fully outdoors).
-  const windExposure = attribute('windExposure', 'float');
+  // (The per-vertex `windExposure` attribute this used to read is no longer
+  // consumed: `sampleWind`'s organic term was its only consumer and was
+  // deleted with the spectrum rewrite — mythica-machina-press#499. The
+  // geometry still bakes it; retiring that is a small follow-up, not a
+  // correctness issue.)
   const sampleAt = (pos) =>
     windHandle.node(THREE.TSL, {
       centerXY: pos,
       time: uGlobalTimeMs,
-      exposure: windExposure,
     });
 
   // THE PRIMARY SAMPLE — this cell's own anchor, the SAME field every other
@@ -507,11 +508,9 @@ export function buildWindHeatmapMaterial({ THREE, uGlobalTimeMs, windHandle }) {
   const { attribute, vec3, vec4, float, length, clamp, mix } = THREE.TSL;
 
   const centerXY = attribute('center', 'vec2');
-  const windExposure = attribute('windExposure', 'float');
   const gust = windHandle.node(THREE.TSL, {
     centerXY,
     time: uGlobalTimeMs,
-    exposure: windExposure,
   });
 
   // The SAME magnitude measure the arrow uses (see this function's own doc for

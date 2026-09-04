@@ -11451,7 +11451,6 @@ export async function startVtPanViewer({
       const fieldWindLean = windHandle.node(THREE.TSL, {
         centerXY: cellCenterXY,
         time: windTime,
-        exposure: float(1),
       });
       // (1b) GUST WANDER (2026-08-15, author: *"preserve the direction largely
       // but add a bit of turbulence"*) — one curl-noise octave, decorrelated
@@ -11974,7 +11973,6 @@ export async function startVtPanViewer({
                 windHandle.node(THREE.TSL, {
                   centerXY: vec2(positionLocal.x, positionLocal.y),
                   time: flutterWindTime,
-                  exposure: float(1),
                 })
               ),
               float(0),

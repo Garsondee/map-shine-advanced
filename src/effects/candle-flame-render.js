@@ -228,10 +228,46 @@ const FLAME_WIND_MAX = 0.34;
  * the transient sim's magnitude story) — NOT live-verified (this session has
  * no Foundry access; see the keyhole-wind-tier2-transient-sim memory).
  */
-const WIND_GUTTER_MAG_THRESHOLD = 1.3; // raw wind magnitude where a gust starts adding ITS OWN gutter pressure
-const WIND_GUTTER_MAG_RANGE = 1.0; // span over which that pressure ramps to "as deep as a random gutter"
-const WIND_SNUFF_MAG_LOW = 2.2; // below this, zero snuff pressure
-const WIND_SNUFF_MAG_HIGH = 3.2; // at/above this, fully extinguished (until the gust passes)
+/**
+ * ⭐ RETUNED FROM REAL CANDLE PHYSICS (2026-09-04, mythica-machina-press#499's
+ * consumer-retune pass), REPLACING 1.3 / 1.0 / 2.2 / 3.2.
+ *
+ * ⚠️ THE OLD NUMBERS WERE NOT MERELY MISTUNED, THEY HAD BEEN ORPHANED. They
+ * were set against a field whose magnitude ran to ~3.4 at full wind, because
+ * the old organic drift/gust/flutter layer contributed ~0..1.4 ON TOP of the
+ * coherent term at ALL times. Stage 2 deleted that layer and replaced the
+ * clamped turbulence with a real intensity (`σ = I·U`, I ≈ 0.16 in the open),
+ * so an exposed point at FULL gale now peaks near 1.16. A gutter threshold of
+ * 1.3 and a snuff span of 2.2-3.2 sit above anything the field can now
+ * produce: left alone, a candle would never gutter or blow out again at any
+ * setting — a silent feature loss, which is exactly what the retune step
+ * exists to catch.
+ *
+ * DERIVED, NOT RE-EYEBALLED. Now that the dial has real units
+ * (`world/wind-scale.js`), these come from what actually happens to a candle:
+ * a flame starts to gutter in a 1.5 m/s draught, is guttering hard by 3 m/s,
+ * begins to blow out around 4 m/s and is reliably out by 7 m/s. Converting
+ * through Beaufort and scaling by the field's own composition at an exposed
+ * point (coherent + ~16% turbulence ⇒ magnitude ≈ 1.16 × speed01):
+ *
+ * ```
+ *   1.5 m/s → speed01 0.123 → magnitude 0.14   (dial 12)  gutter begins
+ *   3   m/s → speed01 0.195 → magnitude 0.23   (dial 20)  guttering hard
+ *   4   m/s → speed01 0.237 → magnitude 0.27   (dial 24)  starts to snuff
+ *   7   m/s → speed01 0.344 → magnitude 0.40   (dial 34)  reliably out
+ * ```
+ *
+ * A candle outdoors in a light breeze genuinely does gutter, so the new
+ * numbers make candles MUCH more wind-sensitive in dial terms than the old
+ * ones did — which is correct. An INDOOR candle is unaffected either way:
+ * `openness` gates its coherent term toward zero, so its magnitude never
+ * approaches these thresholds, and its atmospheric flicker comes from
+ * `candleLife`'s own noise regardless.
+ */
+const WIND_GUTTER_MAG_THRESHOLD = 0.14;
+const WIND_GUTTER_MAG_RANGE = 0.09;
+const WIND_SNUFF_MAG_LOW = 0.27;
+const WIND_SNUFF_MAG_HIGH = 0.4;
 
 /** FLAME ANIMATION (2026-07-20, tiered — author: "more chaotic… bend, curl,
  * flicker, gutter, elongate/shorten, evolve; near candles must NOT react the
@@ -468,7 +504,6 @@ export function buildCandleFlameMaterial({
     gust = windHandle.node(THREE.TSL, {
       centerXY,
       time: uGlobalTimeMs,
-      exposure: windExposure,
     });
     windMag = length(gust).mul(uWindResponse);
   }

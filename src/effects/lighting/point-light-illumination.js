@@ -1273,7 +1273,6 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
       wind = windHandle.node(THREE.TSL, {
         centerXY: windInputs.center,
         time: uGlobalTimeMs,
-        exposure: windInputs.exposure,
       });
     }
     const seeded = animation.buildIlluminationSeed({

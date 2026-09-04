@@ -86,12 +86,13 @@
  * @module world/wind-field
  */
 
-// ── The shared GPU wind — tuned by eye (moved verbatim from candle-flame-render.js) ──
-const WIND_SPACE_FREQ = 0.0016; // world-space frequency: a gust spans ~600px (a room)
-const WIND_DRIFT = 0.6; // how fast the gust DIRECTION wanders
-const WIND_GUST_RATE = 0.35; // the breeze rising and falling
-const WIND_FLUTTER_RATE = 4.0; // a fast quick jitter on top of the gust
-const WIND_FLUTTER_AMP = 0.28; // flutter strength, relative to the gust
+import { BEAUFORT_COEFFICIENT, BEAUFORT_MAX } from './wind-scale.js';
+
+// ── The organic drift/gust/flutter constants that used to live here
+// ── (WIND_SPACE_FREQ / WIND_DRIFT / WIND_GUST_RATE / WIND_FLUTTER_RATE /
+// ── WIND_FLUTTER_AMP) were DELETED 2026-09-04 with the layer they tuned —
+// ── mythica-machina-press#499. They were a hand-rolled stand-in for a
+// ── spectrum; `computeWindTurbulence`'s fBm stack is the real thing.
 // (`WIND_INDOOR_RESIDUAL`, an always-on 0.18 floor on the organic term, was
 // DELETED 2026-09-04 — mythica-machina-press#498. It had no physical cause;
 // its job passes to Stage 5's buoyant convection from real heat sources.)
@@ -115,39 +116,124 @@ const WIND_FLUTTER_AMP = 0.28; // flutter strength, relative to the gust
 // original shared value but spans a MUCH larger area (weather-scale eddies,
 // not a room corner). Splitting them means cranking indoor drama can never
 // accidentally speed up the outdoor gale's own swirl, and vice versa.
-const WIND_TURBULENCE_INDOOR_SPACE_FREQ = 0.008; // eddies ~125px, a corner-of-a-room scale — UNCHANGED from the original single octave
-const WIND_TURBULENCE_INDOOR_RATE = 1.8; // was the old shared WIND_TURBULENCE_RATE=0.5 — ~3.6x faster churn, for "more rapid shifting... bigger and more dramatic swings"
-const WIND_TURBULENCE_OUTDOOR_SPACE_FREQ = 0.0015; // eddies ~667px — BIGGER than even the base gust envelope's own ~600px span; "much larger scale"
-const WIND_TURBULENCE_OUTDOOR_RATE = 0.5; // close to the original shared rate — this ask was about SIZE, not speed
+// ─────────────────────────────────────────────────────────────────────────────
+// ⭐ THE SPECTRUM (2026-09-04, mythica-machina-press#497 Stage 2 / #499) —
+// REPLACING THE TWO FIXED OCTAVES ABOVE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// ⚠️ TWO OCTAVES IS TWO RHYTHMS, AND THAT WAS THE BUG. The author's report was
+// *"the distance between gusts is always the same"* and *"the amplitude of
+// waves is identical"* — two symptoms, one cause. A field built from exactly
+// two spatial scales can only ever produce two gust sizes, and the discrete
+// gust envelope's single thresholded frequency saturates every crossing to the
+// same peak. Neither is a tuning miss; there was nothing in the model capable
+// of producing variety.
+//
+// Real turbulence is BROADBAND. Kolmogorov's inertial subrange gives an energy
+// spectrum `E(k) ∝ k^(−5/3)`, which for velocity means an eddy of scale λ
+// carries amplitude ∝ λ^(1/3). So halving the scale each octave multiplies the
+// amplitude by `2^(−1/3) ≈ 0.794` — that ONE number is what makes a stack of
+// curl octaves read as air rather than as noise, and it is why varied gust
+// spacing and varied gust amplitude both fall out for free rather than being
+// two features to add. A spectrum IS a distribution of sizes and strengths.
+const WIND_TURBULENCE_LACUNARITY = 2; // each octave halves the eddy size
+/** The Kolmogorov amplitude ratio, `2^(−1/3)`. NOT a taste constant — deriving
+ *  it from the −5/3 slope is the whole point; a "nicer looking" 0.5 (the usual
+ *  fBm default) would make the fine detail vanish and take the variety with it. */
+const WIND_TURBULENCE_GAIN = Math.pow(2, -1 / 3);
+/**
+ * The LARGEST eddy in the stack, in real metres.
+ *
+ * The atmospheric boundary layer's own integral length scale is ~100-300 m near
+ * the surface — larger than a typical battle map, which is why the very top of
+ * the real spectrum is NOT modelled here: an eddy bigger than the view is
+ * indistinguishable from the mean wind changing, and that is exactly what
+ * {@link computeGustEnvelope}'s travelling fronts already provide. So the
+ * division of labour is physical rather than arbitrary: gust fronts carry the
+ * energy-containing range, this stack carries the inertial subrange below it.
+ *
+ * 32 m spans a good fraction of a scene; four octaves reach 4 m, a
+ * corner-of-a-room eddy, covering the same span the old two octaves did (~667px
+ * and ~125px) with four rungs and a real falloff instead of two flat amplitudes.
+ */
+const WIND_TURBULENCE_BASE_LENGTH_M = 32;
+/**
+ * ⚠️ A DOCUMENTED ASSUMPTION, not a measurement. Converting the metre-denominated
+ * scales above into the world px the shader samples in needs the scene's own
+ * pixel scale, and this function is pure TSL with no scene access. 65.6 px/m is
+ * the standard 5 ft / 100 px square (`core/scene-scale.js` derives it properly),
+ * which is what nearly every map in this catalogue is.
+ *
+ * Making this live per-scene is real follow-up work (it belongs with #506's
+ * real-units pass) — recorded here rather than faked, because a scene at a very
+ * different scale currently gets eddies of the wrong physical size, which is a
+ * known limitation and not a silent one.
+ */
+const WIND_TURBULENCE_ASSUMED_PX_PER_M = 65.6;
+/** How many octaves the stack runs. A build-time QUALITY TIER, never a uniform
+ *  (`tsl/no-uniform-gates`). Honest cost: `curlNoise2D` is 4 noise evaluations,
+ *  so 4 octaves is 16 — against the 13 the old model spent (2 octaves = 8, plus
+ *  the 5 the now-deleted organic term used). Dropping to 3 is cheaper than what
+ *  this replaces. */
+const WIND_TURBULENCE_OCTAVES_DEFAULT = 4;
+/**
+ * How fast the LARGEST eddy evolves in place, per second.
+ *
+ * Deliberately small, because in a Taylor-advected field most of the apparent
+ * churn is the pattern SWEEPING PAST rather than changing shape — see
+ * {@link computeWindTurbulence}'s advection block. Smaller eddies turn over
+ * faster (turnover time ~ λ/u), so each octave's rate is scaled by the
+ * lacunarity: octave `i` churns `2^i` times faster than the base. That is a
+ * real relation, replacing the old pair of hand-set indoor/outdoor rates.
+ */
+const WIND_TURBULENCE_BASE_CHURN_RATE = 0.28;
 const WIND_TURBULENCE_CURL_EPS = 0.4; // finite-difference step, in the SAME already-scaled noise-space as each octave's own frequency — because eps is applied AFTER the world→noise-space scale, the same relative value samples a proportionally-similar fraction of a "feature" at either octave's own scale, no separate eps needed per octave.
 //
-// AMPLITUDES — three independent constants (2026-07-23), replacing the old
-// single AMP × boost-multiplier scheme now that indoor/outdoor are genuinely
-// separate octaves (different frequency/rate), not one shared vector scaled
-// differently by region:
-const WIND_TURBULENCE_SEALED_AMP = 0.08; // sealed-room floor — "nearly still", never quite zero. NOTE this is an amplitude, not a floor on the OUTPUT: the energy cap below still collapses the whole turbulence term to 0 at a dead calm, so it cannot reintroduce the "wind 0 is not no wind" bug the organic term's own floor caused (#498).
-// PEAK, AT THE DOORWAY TRANSITION (author: "a wider range of vectors...
-// ideally with some vectors pointing backwards against the wind") —
-// DELIBERATELY bigger than the coherent wind's own max possible magnitude
-// (speed01=1 → magnitude 1, even after deflectAroundWalls's own energy cap)
-// so the SUMMED result can genuinely swing all the way around and point
-// back against the prevailing wind right where real air actually does break
-// into chaotic eddies, not just wobble around the coherent direction. See
-// `sampleWind`'s own turbulence-amplitude block for exactly where this
-// peaks (the 3-region mix's own middle ground, not fully sealed or fully
-// exterior) and the particle kernel's own ceiling clamp (unaffected by this
-// — it only rescales MAGNITUDE, never direction, so a reversal survives the
-// clamp intact).
-// NOTE (2026-07-23, same day, author follow-up): the PEAK constant above is a
-// how-hard-it-CAN-swing amplitude for the raw curl vector, not a guaranteed
-// final magnitude — the ENERGY CAP below (see `computeWindTurbulence`'s own
-// closing lines) rescales the WHOLE composed vector down to never exceed the
-// real outdoor wind speed, so "bigger than the coherent wind's own max" is
-// now a claim about DIRECTION freedom (it can still point anywhere, including
-// backwards), never about total energy exceeding what is actually blowing
-// outside.
-const WIND_TURBULENCE_INDOOR_PEAK_AMP = 2.4;
-const WIND_TURBULENCE_OUTDOOR_AMP = 0.65; // was the old shared WIND_TURBULENCE_AMP=0.4 — author: "increase the turbulence... outside too"
+// ─────────────────────────────────────────────────────────────────────────────
+// ⭐ TURBULENCE INTENSITY, REPLACING THE THREE HAND-SET AMPLITUDES + THE CAP
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Real turbulence is quoted as an INTENSITY: `I = σ_u / U`, the ratio of the
+// fluctuation to the mean. For a given terrain it is roughly CONSTANT with
+// speed, so the absolute gustiness `σ_u = I · U` grows with the mean while the
+// character stays a property of the ground.
+//
+// ⚠️ WHY THE OLD ENERGY CAP WAS THE WRONG SHAPE, not just the wrong number. It
+// rescaled the composed vector down to never exceed `speed01` — a CLAMP, not a
+// proportionality — which is wrong at both ends: at low speed the fixed
+// amplitudes were proportionally enormous (a whisper of wind with gale-sized
+// swirl on top), and above roughly half dial everything clipped to the same
+// ceiling, so the top half of the dial all looked alike. That is a large part
+// of *"1 wind doesn't actually look hurricane"*: a real gale is DOMINATED by
+// its mean, and the old model kept the noise competing with it at every speed.
+// Multiplying instead of clamping also makes `U = 0` produce exactly zero by
+// construction, with no cap to rely on.
+//
+// The values below are real. Open country sits near 0.15-0.20; built-up and
+// suburban terrain 0.25-0.35; a separated shear layer at an opening is far
+// higher still.
+/** Open, exposed ground — real open-country turbulence intensity. */
+const WIND_TI_OPEN = 0.16;
+/** Built-up / close to geometry — real suburban-to-urban intensity. */
+const WIND_TI_ROUGH = 0.3;
+/**
+ * THE DOORWAY / SHEAR-LAYER PEAK, and why a number far above the others is
+ * physically honest rather than a fudge for drama.
+ *
+ * The author asked for *"a wider range of vectors in interior turbulent
+ * spaces, ideally with some vectors pointing backwards against the wind"*, and
+ * a separated shear layer really does behave that way: intensities of 0.4-0.6
+ * are ordinary in one. Crucially the ratio is to the FREE-STREAM speed, while
+ * the local MEAN at that spot has already been gated toward zero by `openness`
+ * — so a fluctuation of 0.55·U against a local mean near 0 still swings the
+ * total vector all the way around, exactly as before, without the model having
+ * to claim turbulence exceeds the wind that drives it.
+ */
+const WIND_TI_SHEAR_PEAK = 0.55;
+/** A sealed room. Not zero — real rooms have residual air motion — but small
+ *  enough that it reads as still, and multiplied by `U` it reaches exactly zero
+ *  at a dead calm regardless (#498). */
+const WIND_TI_SEALED = 0.02;
 
 // How much of a blocked (into-wall) push reappears as extra sideways push
 // along the wall, relative to how much tangential lean the flow already had
@@ -703,40 +789,83 @@ export function curlNoise2D(TSL, { p, timeSec, spaceFreq, rate, phaseX = 0, phas
  * @returns {*} a vec2 node, its magnitude NEVER exceeding `windSpeed01` (see
  *   the energy cap in this function's own header).
  */
-export function computeWindTurbulence(TSL, { centerXY, time, openness, exteriorOpenness, windSpeed01 }) {
-  const { float, clamp, mix, length, min, max } = TSL;
-  const t = time.mul(float(0.001)); // ms → ~seconds, same conversion sampleWind's own `t` uses
-  // Curl octaves via the SHARED {@link curlNoise2D} (extracted 2026-07-23 —
-  // this function was its only implementation and is now simply its first
-  // caller; behaviour is unchanged, asserted by this file's own existing
-  // suite staying green). `t` is pre-converted to seconds above, so these pass
-  // `timeSec` directly rather than re-dividing.
-  const octave = (spaceFreq, rate, phaseX, phaseY) =>
-    curlNoise2D(TSL, { p: centerXY, timeSec: t, spaceFreq, rate, phaseX, phaseY });
-  const turbIndoorVec = octave(WIND_TURBULENCE_INDOOR_SPACE_FREQ, WIND_TURBULENCE_INDOOR_RATE, 97, 131);
-  const turbOutdoorVec = octave(WIND_TURBULENCE_OUTDOOR_SPACE_FREQ, WIND_TURBULENCE_OUTDOOR_RATE, 401, -227);
-  const opennessVal = openness !== undefined ? openness : float(1);
-  const exteriorOpennessVal = exteriorOpenness !== undefined ? exteriorOpenness : float(1);
-  const indoorTurbulence = turbIndoorVec.mul(
-    mix(
-      float(WIND_TURBULENCE_SEALED_AMP),
-      float(WIND_TURBULENCE_INDOOR_PEAK_AMP),
-      clamp(opennessVal, float(0), float(1))
-    )
-  );
-  const outdoorTurbulence = turbOutdoorVec.mul(float(WIND_TURBULENCE_OUTDOOR_AMP));
-  let turbulence = mix(indoorTurbulence, outdoorTurbulence, clamp(exteriorOpennessVal, float(0), float(1)));
-  // THE ENERGY CAP — see this function's own header, "⚠ THE ENERGY CAP", for
-  // the full "calm/light breeze reads as MORE energetic indoors than outside"
-  // bug this replaces. Rescale (never up) so the composed vector's own
-  // magnitude never exceeds the real outdoor wind speed — the SAME
-  // `min(1, inputSpeed/rawSpeed)` idiom `deflectAroundWalls` uses for its own
-  // energy cap, just capping against `speed01` here instead of an input
-  // vector's own pre-deflection length.
+export function computeWindTurbulence(
+  TSL,
+  { centerXY, time, openness, exteriorOpenness, windSpeed01, directionDeg, octaves = WIND_TURBULENCE_OCTAVES_DEFAULT }
+) {
+  // FUNCTION form for `pow`, never the method — this codebase's own
+  // `reference_tsl_method_chaining_trap`.
+  const { float, clamp, mix, pow } = TSL;
+  const t = time.mul(float(0.001)); // ms → seconds
+
   const speed01 = windSpeed01 !== undefined ? clamp(windSpeed01, float(0), float(1)) : float(1);
-  const rawSpeed = length(turbulence);
-  turbulence = turbulence.mul(min(float(1), speed01.div(max(rawSpeed, float(1e-4)))));
-  return turbulence;
+
+  // ── TAYLOR ADVECTION ────────────────────────────────────────────────────
+  // Taylor's frozen-turbulence hypothesis: eddies are carried past a point by
+  // the mean flow, so the fluctuation you FEEL is the spatial pattern sweeping
+  // over you at the wind speed. Sampling the stack at a position offset
+  // backwards along the flow by `U·t` is that, exactly.
+  //
+  // ⚠️ THIS DELETES A MAGIC NUMBER AND FIXES GUST DURATION FOR FREE. The old
+  // model advected its gust envelope at a hand-tuned `900 px/s × mix(0.4,1,
+  // speed)`. Under Taylor the travel speed simply IS the wind, so a gust's
+  // duration is its own size ÷ U with nothing to tune — which is why a breeze
+  // and a gale stopped being the same field at two volumes. Absent
+  // `directionDeg` ⇒ no advection at all, a JS branch emitting the identical
+  // graph as before (`tsl/no-uniform-gates`).
+  let samplePos = centerXY;
+  if (directionDeg !== undefined) {
+    const metresPerSecond = float(BEAUFORT_COEFFICIENT).mul(pow(speed01.mul(float(BEAUFORT_MAX)), float(1.5)));
+    const pxPerSecond = metresPerSecond.mul(float(WIND_TURBULENCE_ASSUMED_PX_PER_M));
+    samplePos = centerXY.sub(windFlowVectorNode(TSL, directionDeg).mul(pxPerSecond).mul(t));
+  }
+
+  // ── THE fBm STACK ───────────────────────────────────────────────────────
+  // Lacunarity 2, gain `2^(−1/3)` — the Kolmogorov `−5/3` slope. Smaller
+  // eddies also turn over faster (turnover ~ λ/u), so each octave's churn rate
+  // rises with the lacunarity rather than being hand-set per octave.
+  const baseSpaceFreq = 1 / (WIND_TURBULENCE_BASE_LENGTH_M * WIND_TURBULENCE_ASSUMED_PX_PER_M);
+  const octaveCount = Math.max(1, Math.floor(octaves));
+  let stack = null;
+  let amplitudeSum = 0;
+  for (let i = 0; i < octaveCount; i++) {
+    const scale = Math.pow(WIND_TURBULENCE_LACUNARITY, i);
+    const amplitude = Math.pow(WIND_TURBULENCE_GAIN, i);
+    // Decorrelated per octave, so the stack never reads as one swirl merely
+    // rescaled — the same reason the old two octaves carried phase offsets.
+    const vec = curlNoise2D(TSL, {
+      p: samplePos,
+      timeSec: t,
+      spaceFreq: baseSpaceFreq * scale,
+      rate: WIND_TURBULENCE_BASE_CHURN_RATE * scale,
+      phaseX: 97 + i * 131,
+      phaseY: 131 - i * 197,
+    });
+    const contribution = vec.mul(float(amplitude));
+    stack = stack === null ? contribution : stack.add(contribution);
+    amplitudeSum += amplitude;
+  }
+  // Normalised so the stack's own magnitude is ~1 regardless of octave count —
+  // otherwise raising the quality tier would silently raise the wind strength,
+  // which would make the tier a look control instead of a detail control.
+  const unitTurbulence = stack.mul(float(1 / amplitudeSum));
+
+  // ── INTENSITY: σ = I · U ────────────────────────────────────────────────
+  // See the WIND_TI_* constants for why these are real numbers and why the
+  // shear peak is legitimately far above the others. The three-region shape
+  // (sealed → doorway/shear transition → open) is kept from the model this
+  // replaces: it encodes author-validated behaviour, and only its OUTPUT
+  // changed meaning — an intensity now, rather than an absolute amplitude
+  // that then had to be clamped.
+  const opennessVal = openness !== undefined ? clamp(openness, float(0), float(1)) : float(1);
+  const exteriorOpennessVal = exteriorOpenness !== undefined ? clamp(exteriorOpenness, float(0), float(1)) : float(1);
+  const shelteredIntensity = mix(float(WIND_TI_SEALED), float(WIND_TI_SHEAR_PEAK), opennessVal);
+  const openIntensity = mix(float(WIND_TI_ROUGH), float(WIND_TI_OPEN), exteriorOpennessVal);
+  const intensity = mix(shelteredIntensity, openIntensity, exteriorOpennessVal);
+
+  // Multiplied, never clamped — so `U = 0` is exactly zero by construction and
+  // the top of the dial is genuinely dominated by its mean.
+  return unitTurbulence.mul(intensity).mul(speed01);
 }
 
 /**
@@ -895,7 +1024,6 @@ export function sampleWind(
   {
     centerXY,
     time,
-    exposure,
     wind,
     bakedField,
     wallAvoidField,
@@ -903,22 +1031,21 @@ export function sampleWind(
     openness: opennessOverride,
     exteriorOpenness: exteriorOpennessOverride,
     windSpeed01,
+    directionDeg: directionDegOverride,
   }
 ) {
-  const { float, vec2, mx_noise_float: perlin, clamp, texture } = TSL;
-  const t = time.mul(float(0.001)); // ms → ~seconds
-  const sx = centerXY.x.mul(float(WIND_SPACE_FREQ));
-  const sy = centerXY.y.mul(float(WIND_SPACE_FREQ));
-  // Gust DIRECTION — two decorrelated low-frequency world+time noises.
-  const dirX = perlin(vec2(sx.add(t.mul(float(WIND_DRIFT))), sy.add(float(11))));
-  const dirY = perlin(vec2(sx.sub(float(23)), sy.add(t.mul(float(WIND_DRIFT))).add(float(7))));
-  // Gust ENVELOPE — the breeze rising and falling (slow, shared).
-  const gust = perlin(vec2(t.mul(float(WIND_GUST_RATE)), float(3)))
-    .mul(float(0.5))
-    .add(float(0.5)); // [0,1]
-  // FLUTTER — a fast, small jitter on top.
-  const flutterX = perlin(vec2(sx.add(t.mul(float(WIND_FLUTTER_RATE))), float(41)));
-  const flutterY = perlin(vec2(sy.sub(t.mul(float(WIND_FLUTTER_RATE))), float(53)));
+  const { float, vec2, clamp, texture } = TSL;
+  // ⭐ THE ORGANIC DRIFT/GUST/FLUTTER LAYER IS GONE (2026-09-04,
+  // mythica-machina-press#497 Stage 2 / #499). It was five noise evaluations
+  // hand-rolled into a stand-in for a spectrum: one low-frequency wandering
+  // direction, one time-ONLY gust scalar (the same value everywhere on the map
+  // at a given instant), and a fast flutter. `computeWindTurbulence`'s fBm
+  // stack now provides all of it properly, with a real `−5/3` slope, so
+  // keeping this would have been two competing answers to one question at
+  // double the noise cost. Deleting it also removes the painted `_Outdoors`
+  // mask from the wind path ENTIRELY — it was that mask's last consumer here,
+  // which finishes the job the 2026-07-22 rethink started ("geometry decides
+  // where wind is, not paint").
   // TURBULENCE — see the exported `computeWindTurbulence` further down this
   // file for the full curl-noise/two-octave/amplitude/wind-speed-link
   // reasoning. Computed BELOW, after `openness`/`exteriorOpenness` resolve
@@ -1032,39 +1159,21 @@ export function sampleWind(
     time,
     openness,
     exteriorOpenness,
+    // Taylor advection needs to know which way the field is being carried —
+    // see `computeWindTurbulence`'s own advection block.
+    // EXPLICIT OVERRIDE FIRST. A caller that deliberately omits `wind` (the
+    // kernel's own `organic` getter, which wants this function WITHOUT its
+    // ambient term) still needs the field advected the same way, or the two
+    // paths silently disagree — which is exactly what the node↔kernel parity
+    // test caught when this was derived from `wind` alone.
+    directionDeg: directionDegOverride !== undefined ? directionDegOverride : wind ? wind.directionDeg : undefined,
     windSpeed01:
       cappedSpeed01 !== undefined && gustEnvelope !== undefined ? cappedSpeed01.mul(gustEnvelope) : cappedSpeed01,
   });
-  // ⭐ THE ORGANIC TERM IS NOW GATED BY WIND SPEED — "wind 0 is not no wind"
-  // (mythica-machina-press#497 §3.1, Stage 1 / #498). This was the ONE term in
-  // the whole field that never referenced `speed01`: its scale was
-  // `mix(WIND_INDOOR_RESIDUAL, 1, exposure)` — exposure only — so at a dead
-  // calm an outdoor cell still received full-amplitude drift + flutter (raw
-  // magnitude ~0..1.4). The coherent term reached zero correctly (it is
-  // multiplied by `speed01`) and turbulence reached zero correctly (its energy
-  // cap collapses to 0), and this one did not, which is the entire reported
-  // symptom.
-  //
-  // ⚠️ `WIND_INDOOR_RESIDUAL` IS DELETED, NOT SET TO ZERO. It was an
-  // always-on 0.18 floor with no physical cause behind it — the standing
-  // answer to "a sheltered candle should still move". The real force there is
-  // buoyant convection from the scene's OWN heat sources (fires, braziers,
-  // candles all already exist as first-class objects), which is Stage 5's job
-  // (#502). Until that lands a sealed room is genuinely still, which is the
-  // honest intermediate state: a candle's own flicker does not depend on this
-  // at all (`candle-flicker.js#candleLife` takes `max(noiseDip, windDip)`, so
-  // its atmospheric guttering survives a windless room untouched).
-  //
-  // ABSENT SPEED ⇒ FULL STRENGTH, not zero — a caller with no wind-speed
-  // concept at all (a Tier-0 handle built before the first bake) genuinely
-  // does not know the wind is calm, and must not be told that it is. Resolved
-  // as a JS branch so that caller emits the identical graph it always did
-  // (`tsl/no-uniform-gates`).
-  const organicSpeedGate = cappedSpeed01 !== undefined ? clamp(cappedSpeed01, float(0), float(1)) : float(1);
-  const amount = clamp(exposure, float(0), float(1)).mul(organicSpeedGate);
-  const dir = vec2(dirX, dirY).mul(gust);
-  const flutter = vec2(flutterX, flutterY).mul(float(WIND_FLUTTER_AMP));
-  let result = dir.add(flutter).mul(amount).add(turbulence);
+  // The field's non-directional half is now the fBm stack alone. Its own
+  // intensity is already `I · U`, so it reaches exactly zero at a dead calm by
+  // construction (#498's guarantee, preserved) with no floor and no cap.
+  let result = turbulence;
 
   // AMBIENT DIRECTIONAL BIAS (optional) — the direction resolves through the
   // ONE shared helper, {@link windFlowVectorNode} (see `world/wind-bake.js#

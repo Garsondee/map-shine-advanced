@@ -132,9 +132,7 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     driftMul: 3.0, // jet-level wind
     shearDeg: 15,
     // MEASURED by bisection in the shader lab, not modelled — see COVER_LUT_SAMPLES.
-    coverLut: Object.freeze([
-      0.548, 0.496, 0.456, 0.424, 0.394, 0.366, 0.341, 0.315, 0.287, 0.256, 0.214, 0.182, 0.129,
-    ]),
+    coverLut: Object.freeze([0.548, 0.503, 0.463, 0.431, 0.399, 0.372, 0.346, 0.32, 0.293, 0.261, 0.217, 0.184, 0.134]),
   }),
   Object.freeze({
     at: 0.35,
@@ -160,7 +158,9 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     driftMul: 2.0,
     shearDeg: 8,
     // MEASURED by bisection in the shader lab, not modelled — see COVER_LUT_SAMPLES.
-    coverLut: Object.freeze([0.744, 0.709, 0.683, 0.663, 0.644, 0.628, 0.612, 0.597, 0.58, 0.561, 0.535, 0.514, 0.477]),
+    coverLut: Object.freeze([
+      0.747, 0.714, 0.689, 0.671, 0.654, 0.639, 0.624, 0.609, 0.592, 0.573, 0.548, 0.529, 0.495,
+    ]),
   }),
   Object.freeze({
     at: 0.55,
@@ -182,7 +182,7 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     driftMul: 1.5,
     shearDeg: 3,
     // MEASURED by bisection in the shader lab, not modelled — see COVER_LUT_SAMPLES.
-    coverLut: Object.freeze([0.753, 0.719, 0.692, 0.671, 0.643, 0.595, 0.543, 0.564, 0.58, 0.567, 0.538, 0.513, 0.456]),
+    coverLut: Object.freeze([0.749, 0.723, 0.702, 0.686, 0.658, 0.603, 0.539, 0.572, 0.595, 0.587, 0.567, 0.55, 0.512]),
   }),
   Object.freeze({
     at: 0.8,
@@ -204,7 +204,7 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     driftMul: 1.4,
     shearDeg: 2,
     // MEASURED by bisection in the shader lab, not modelled — see COVER_LUT_SAMPLES.
-    coverLut: Object.freeze([0.707, 0.663, 0.631, 0.607, 0.58, 0.534, 0.483, 0.497, 0.508, 0.493, 0.465, 0.441, 0.396]),
+    coverLut: Object.freeze([0.707, 0.671, 0.642, 0.619, 0.591, 0.541, 0.486, 0.506, 0.52, 0.506, 0.48, 0.46, 0.424]),
   }),
   Object.freeze({
     at: 1.0,
@@ -226,9 +226,7 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     driftMul: 1.2,
     shearDeg: 0,
     // MEASURED by bisection in the shader lab, not modelled — see COVER_LUT_SAMPLES.
-    coverLut: Object.freeze([
-      0.564, 0.498, 0.447, 0.409, 0.371, 0.337, 0.304, 0.271, 0.237, 0.198, 0.147, 0.109, 0.047,
-    ]),
+    coverLut: Object.freeze([0.562, 0.501, 0.453, 0.416, 0.379, 0.346, 0.314, 0.282, 0.248, 0.21, 0.16, 0.123, 0.064]),
   }),
 ]);
 
@@ -652,7 +650,19 @@ export function buildCloudFieldNode(
     // cumulus edge is a pile of rounded lobes. `1 - worley` IS a pile of
     // rounded lobes. Schneider's model uses high-frequency Worley here for
     // exactly this reason; the erosion is where a cloud gets its surface.
-    const hf01 = clamp(float(1).sub(mx_worley_noise_float(vec3(ph.x, ph.y, u.boil.mul(float(2))), 1)), 0, 1);
+    // ⭐ TWO OCTAVES, NOT ONE — a single Worley evaluation is a raw F1
+    // distance field, and its cell walls are perfectly sharp, single-frequency
+    // valleys: geometric and crystalline rather than organic. Real cauliflower
+    // detail is FRACTAL — lobes on lobes — which is exactly what a second,
+    // finer, lower-amplitude octave adds. This is also what the design doc
+    // (`reference/clouds/01-cloud-formation-field.md` §4.4) always specified
+    // ("2 [evals] (erosion)") — the first cut under-built it to one tap, and
+    // a close-up render is what exposed the gap between doc and code.
+    const hfA = float(1).sub(mx_worley_noise_float(vec3(ph.x, ph.y, u.boil.mul(float(2))), 1));
+    const hfB = float(1).sub(
+      mx_worley_noise_float(vec3(ph.x.mul(float(2.3)), ph.y.mul(float(2.3)), u.boil.mul(float(2.6))), 1)
+    );
+    const hf01 = clamp(hfA.mul(float(0.65)).add(hfB.mul(float(0.35))), 0, 1);
     // Wispy where the cloud is thin, billowy where it is thick — Schneider's
     // own `mix(hf, 1 - hf, height)` idea, re-keyed from vertical height (which
     // a 2.5-D field does not have) to COVERAGE, which is the analogous "how

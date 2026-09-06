@@ -81,12 +81,32 @@ export const CLOUD_POWDER_AT_HORIZON = 0.25;
  * exactly 1, and at 0.85 the rim alone put the sum past white everywhere the
  * cloud was half-thick — the first lit render came back as a blown-out sheet
  * with no tonal range at all. The rim is a HIGHLIGHT on top of a lit surface,
- * not a second light. */
-export const CLOUD_RIM_GAIN = 0.32;
+ * not a second light. Lowered again, 0.32 → 0.22, once the second lit render
+ * showed rim + full sun + ambient still coinciding near clipping at a
+ * cumulus crown ({@link CLOUD_HIGHLIGHT_KNEE} is the safety net under this,
+ * not a substitute for keeping this honest). */
+export const CLOUD_RIM_GAIN = 0.22;
 
 /** How bright a thick interior is lifted, standing in for multiple scattering
  * (Wrenninge's progressive-octave approximation, collapsed to one term). */
-export const CLOUD_MS_GAIN = 0.09;
+export const CLOUD_MS_GAIN = 0.06;
+
+/**
+ * Where the highlight roll-off begins, on the max-channel value. Below this,
+ * the output is byte-identical to the raw sum — most of a cloud's midtones
+ * sit well under it and are never touched. Above it, {@link CLOUD_HIGHLIGHT_SOFTNESS}
+ * takes over. Same soft-knee IDIOM as `bloom-render.js`'s own bright-pass
+ * threshold (a gentle roll-in beats a hard step, "the classic grainy bloom
+ * source"), applied here for the same reason: a sun-facing crown genuinely
+ * CAN sum past 1.0 (full key + ambient fill + multi-scatter + a rim
+ * highlight, all real and all wanted at once), and a hard clamp turns that
+ * into a flat white plateau with no shape in it at all.
+ */
+export const CLOUD_HIGHLIGHT_KNEE = 0.82;
+
+/** How hard the roll-off compresses above the knee. Higher = a flatter,
+ * more forgiving top end; lower = closer to a hard clip. */
+export const CLOUD_HIGHLIGHT_SOFTNESS = 2.2;
 
 /**
  * The height of a full-relief cloud, as a fraction of the field's own feature
@@ -130,7 +150,7 @@ export function buildCloudTopsNode(
   TSL,
   { worldXY, uniforms: u, buildField, sun, colors, octaves = 5, shadowTaps = 3, footprintPx = null }
 ) {
-  const { float, vec2, vec3, mix, clamp, exp, max, dot, normalize, smoothstep } = TSL;
+  const { float, vec2, vec3, mix, clamp, exp, max, min, dot, normalize, smoothstep } = TSL;
 
   // THE MAIN SAMPLE — full detail, because this is the silhouette and the
   // opacity the eye actually reads.
@@ -254,12 +274,31 @@ export function buildCloudTopsNode(
   // with a ~0.7 wrap-diffuse term put the whole cloud past white before the rim
   // was even added. An overcast dome is bright, but it is bright BECAUSE the
   // sun is behind it, and here the sun is already accounted for separately.
-  const ambient = colors.fillRgb.mul(N.z.mul(float(0.5)).add(float(0.5))).mul(float(0.22));
+  const ambient = colors.fillRgb.mul(N.z.mul(float(0.5)).add(float(0.5))).mul(float(0.16));
   const ms = vec3(1, 1, 1).mul(smoothstep(float(0.35), float(0.9), T).mul(float(CLOUD_MS_GAIN)));
-  const rgb = sunLit
+  const rgbRaw = sunLit
     .add(ambient)
     .add(ms)
     .add(colors.keyRgb.mul(rim.mul(float(CLOUD_RIM_GAIN))));
+
+  // ── THE HIGHLIGHT ROLL-OFF ────────────────────────────────────────────────
+  // Scale ALL THREE CHANNELS BY THE SAME FACTOR (derived from the max channel,
+  // matching `bloom-render.js`'s own "brightness = max channel... does not
+  // desaturate coloured highlights" rule) rather than clamping each channel
+  // independently — an independent per-channel clamp would desaturate a warm
+  // sunset highlight toward white exactly where it should be most colourful.
+  //
+  // `min(peak, knee) + over/(1+over*softness)` is the whole compressor: below
+  // the knee, `over` is 0 and this equals `peak` exactly (an identity, so nothing
+  // south of the knee is touched); above it, `over` grows without bound while
+  // the second term asymptotes, giving the "flatter and flatter" roll-off a
+  // photographic highlight has instead of a hard cutout.
+  const peak = max(max(rgbRaw.r, rgbRaw.g), rgbRaw.b);
+  const over = max(peak.sub(float(CLOUD_HIGHLIGHT_KNEE)), float(0));
+  const compressed = min(peak, float(CLOUD_HIGHLIGHT_KNEE)).add(
+    over.div(float(1).add(over.mul(float(CLOUD_HIGHLIGHT_SOFTNESS))))
+  );
+  const rgb = rgbRaw.mul(compressed.div(max(peak, float(1e-4))));
 
   return { rgb, alpha, normalZ: N.z, thickness: T, diffuse: diff, shadow, rim };
 }

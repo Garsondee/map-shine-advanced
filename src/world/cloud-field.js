@@ -121,6 +121,7 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     cellScale: 1.0,
     edgeWidth: 0.35, // soft — a cirrus edge is a fade, not a boundary
     erosion: 0.25,
+    edgeChaos: 0, // already a fade, not a boundary — nothing here to chaos-up
     detailScale: 0.25,
     warp: 0.6, // the streakiness dial; cirrus is heavily domain-warped
     anisotropy: 4.0, // fibres run 4x longer than they are wide
@@ -151,6 +152,7 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     cellScale: 3.0, // many small elements — a third the size of a cumulus blob
     edgeWidth: 0.12,
     erosion: 0.35,
+    edgeChaos: 0.05, // see cumulus's own note — scaled down, mackerel walls are thin already
     // ⚠️ WAS 0.2 — the SAME order of magnitude as every other keyframe's
     // `detailScale`, which is exactly the bug (author, 2026-09-06, after the
     // warp/wall-breach fixes below had already landed: "Alto is still very
@@ -228,6 +230,16 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     // across, which is what turns cauliflower into trailing tendrils.
     edgeWidth: 0.24,
     erosion: 0.55, // the cauliflower
+    // The type the "very hard edge around the raised parts" report named
+    // directly, and the one the edge-chaos mechanism (§ EDGE CHAOS in
+    // `buildCloudFieldNode`) was tuned against. Swept 0/0.5/1/2/4/8 first —
+    // ALL of those read as television static, the whole body stippled, not
+    // just the edges (the `4·cov·(1-cov)` weighting is nonzero across a wide
+    // mid-coverage band, not a thin line, so a strong amplitude floods that
+    // whole band). Re-swept at 0/0.03/0.06/0.1/0.15/0.25: 0.12 is where a
+    // wide (viewPx 6500) reference render shows a genuinely more frayed,
+    // broken-up edge character without yet reading as sandpaper.
+    edgeChaos: 0.12,
     detailScale: 0.18,
     warp: 0.18,
     anisotropy: 1.15, // slight, from cloud streets
@@ -254,6 +266,7 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     cellScale: 0.6, // the big mesoscale cells (10-40 km in reality)
     edgeWidth: 0.3, // widened for the same reason as cumulus, see its own note
     erosion: 0.35,
+    edgeChaos: 0.08, // same family as cumulus, dialled back — already blends well
     detailScale: 0.22,
     warp: 0.15,
     anisotropy: 1.1,
@@ -278,6 +291,7 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     cellScale: 1.0,
     edgeWidth: 0.45, // no edges at all, really
     erosion: 0.15,
+    edgeChaos: 0, // no edges at all, really — see edgeWidth
     detailScale: 0.3,
     warp: 0.2,
     anisotropy: 1.0,
@@ -308,6 +322,7 @@ export const CLOUD_RECIPE_KEYS = Object.freeze([
   'cellScale',
   'edgeWidth',
   'erosion',
+  'edgeChaos',
   'detailScale',
   'warp',
   'anisotropy',
@@ -924,6 +939,43 @@ export function buildCloudFieldNode(
     const hf = mix(hf01, float(1).sub(hf01), smoothstep(float(0.15), float(0.6), cov));
     const lo = hf.mul(u.erosion).mul(float(0.2));
     cov = clamp(cov.sub(lo).div(float(1).sub(lo).max(float(1e-4))), 0, 1).toVar('cloudCovEroded');
+
+    // ── 5b. EDGE CHAOS — grainy, NON-ANIMATED noise, in VALUE space only ────
+    // Author's ask (2026-09-06): "high frequency grainy noise and a similar
+    // sort of non-animated distortion at very high values to break up the
+    // edges of things and make them more chaotic." Tested literally as a
+    // DOMAIN WARP pushed to "very high values" first — swept cumulus's own
+    // `warp` 0.18 -> 4.0 (`tools/shader-lab/runs/cloud43-warp-foldtest`):
+    // past ~1.0 the field visibly FOLDS, concentric swirl/vortex artifacts
+    // appearing where the warped domain wraps over itself — the exact
+    // failure mode this codebase's vegetation warps are already
+    // gradient-bounded to avoid. A position-space warp cannot be pushed
+    // "very high" without producing that artifact instead of "chaotic".
+    //
+    // This gives the same chaotic, high-frequency character in VALUE SPACE
+    // instead — perturbing `cov` directly rather than the position the shape
+    // is SAMPLED at. A value-space perturbation can never fold the
+    // silhouette no matter how large its amplitude, because it never moves a
+    // sample's position; it only changes the coverage AT that position. That
+    // is what makes "very high values" actually safe here, unlike a warp.
+    //
+    // PERLIN, not Worley — deliberately the OPPOSITE choice from erosion just
+    // above (this file's own established lesson: Worley reads as cauliflower
+    // lobes, Perlin as smoke/grain) — this is meant to look like fine grain,
+    // not more cauliflower stacked on the same cauliflower. A FIXED z (never
+    // `u.boil`) is what makes it non-animated: the grain sits still in world
+    // space and drifts with the cloud like everything else, but never boils.
+    //
+    // Weighted by `4·cov·(1-cov)` — the same edge-proximity bump used by the
+    // silver-lining rim term in `effects/clouds/cloud-shade.js` — so chaos
+    // peaks exactly at the coverage transition and fades to nothing deep
+    // inside a cloud or deep in clear sky: it roughens EDGES, per the ask,
+    // rather than graining the whole interior (the existing lighting-only
+    // `grain` in cloud-shade.js already covers interior surface texture).
+    const chaosP = ph.mul(float(5));
+    const chaosNoise = mx_noise_float(vec3(chaosP.x, chaosP.y, float(41.7)));
+    const edgeProximity = cov.mul(float(1).sub(cov)).mul(float(4));
+    cov = clamp(cov.add(chaosNoise.mul(u.edgeChaos).mul(edgeProximity).mul(float(0.6))), 0, 1).toVar('cloudCovChaos');
   }
 
   // ── 6. THICKNESS AND RELIEF ───────────────────────────────────────────────

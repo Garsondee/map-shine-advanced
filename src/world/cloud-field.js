@@ -148,7 +148,25 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     edgeWidth: 0.12,
     erosion: 0.35,
     detailScale: 0.2,
-    warp: 0.1,
+    // ⚠️ WAS 0.1, THE LOWEST OF ANY KEYFRAME — and that is exactly why the
+    // cell walls read as dead-straight ruled LINES rather than organic seams
+    // (author, 2026-09-06: "the walls of the cells are too obviously lines
+    // between blobs"). A Worley F1 distance field has a genuine kink in its
+    // GRADIENT along the perpendicular bisector between two feature points —
+    // a real geometric crease, not a rendering artefact — and almost nothing
+    // was bending that crease away from dead-straight. `jitter` (0.45, LOW,
+    // unchanged) controls FEATURE-POINT REGULARITY — how evenly spaced the
+    // cells are, which is what "mackerel" needs and must not be touched.
+    // `warp` is the orthogonal lever: it distorts the SAMPLING DOMAIN before
+    // any noise is evaluated, so it bends the crease's shape without moving
+    // the underlying lattice's spacing. Swept 0.1/0.18/0.28/0.4/0.5/0.8 in
+    // the shader lab (tools/shader-lab/cloud-lab.js's `recipeOverride` hook):
+    // below ~0.2 the walls stay visibly ruled; at 0.5 the cells start folding
+    // into marbled streaks and losing their honeycomb identity; at 0.8 the
+    // lattice is gone entirely (a swirl, not mackerel). 0.28 sits in the
+    // window that bends every wall while keeping cells visually distinct,
+    // confirmed at both cover 0.3 and 0.6 and at two view scales.
+    warp: 0.28,
     anisotropy: 1.6, // rows, from the wave that makes them
     smear: 0.15,
     gain: 0.46,
@@ -159,7 +177,7 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     shearDeg: 8,
     // MEASURED by bisection in the shader lab, not modelled — see COVER_LUT_SAMPLES.
     coverLut: Object.freeze([
-      0.747, 0.714, 0.689, 0.671, 0.654, 0.639, 0.624, 0.609, 0.592, 0.573, 0.548, 0.529, 0.495,
+      0.741, 0.707, 0.681, 0.662, 0.644, 0.627, 0.612, 0.597, 0.581, 0.562, 0.536, 0.516, 0.477,
     ]),
   }),
   Object.freeze({

@@ -238,6 +238,17 @@ export class CloudDriver {
     // that makes coverage true while leaving `u.cover` (which the cell-polarity
     // bell reads) at the real target. Never set outside calibration.
     if (Number.isFinite(s.thresholdOverride)) this.u.threshold.value = s.thresholdOverride;
+    // THE RECIPE ITERATION HOOK — for tuning ONE recipe field live against
+    // the real GPU before touching `cloud-field.js`'s own source. Pass e.g.
+    // `{ recipeOverride: { warp: 0.4 } }`; never used by production code, and
+    // cleared automatically on the NEXT `apply()` that omits it (so a portrait
+    // render's own internal `apply()` call can't accidentally inherit a stale
+    // override from a previous experiment).
+    if (s.recipeOverride) {
+      for (const [key, val] of Object.entries(s.recipeOverride)) {
+        if (this.u[key] && Number.isFinite(val)) this.u[key].value = val;
+      }
+    }
     return recipe;
   }
 

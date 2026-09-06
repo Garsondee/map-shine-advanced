@@ -680,3 +680,18 @@ export {
   packSpawnPoints,
   SPAWN_POINT_STRIDE,
 } from './fire/fire-spawn-points.js';
+// CLOUDS — the tops' shading (the field itself is `world/cloud-field.js`).
+// Declared here so the module is reachable while the effect's own manifest,
+// subsystem and registration are still being built; `graph/reachable-from-boot`
+// exists precisely so that gap is visible rather than silent.
+export {
+  buildCloudTopsNode,
+  CLOUD_SIGMA,
+  CLOUD_WRAP_CRISP,
+  CLOUD_WRAP_FLAT,
+  CLOUD_SELF_SHADOW_FLOOR,
+  CLOUD_POWDER_AT_HORIZON,
+  CLOUD_RIM_GAIN,
+  CLOUD_MS_GAIN,
+  CLOUD_RELIEF_SCALE,
+} from './clouds/cloud-shade.js';

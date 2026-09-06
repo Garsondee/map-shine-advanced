@@ -210,3 +210,22 @@ export {
   deriveAllValues,
 } from './fade-engine.js';
 export { schemaFadeSource, createFadeSourceRegistry } from './fade-registry.js';
+// THE CLOUD FIELD (docs/planning/Clouds.md) — the analytic sky every cloud
+// consumer reads. A world module by ruling, not by convenience: at least six
+// effects want a cloud shadow and none of them may own it.
+export {
+  CLOUD_KEYFRAMES,
+  CLOUD_RECIPE_KEYS,
+  COVER_LUT_SAMPLES,
+  CLOUD_CALM_BOIL_PER_SEC,
+  cloudRecipeFor,
+  coverThreshold,
+  cloudDriftStep,
+  cloudDriftBudget01,
+  fbmAmplitudeSum,
+  createCloudUniforms,
+  pushCloudUniforms,
+  buildCloudFieldNode,
+  buildCloudKeyTransmittanceNode,
+  cloudFlowVectorNode,
+} from './cloud-field.js';

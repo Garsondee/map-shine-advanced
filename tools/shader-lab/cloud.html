@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Cloud Lab</title>
+    <style>
+      body { margin: 0; background: #0d0f13; color: #e8e8ea; font: 13px ui-monospace, monospace; padding: 12px; }
+      #log { white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <div id="log">booting…</div>
+    <script type="module">
+      import * as THREE from '/src/vendor/three/three.webgpu.js';
+      import { CloudDriver, contactSheet, coverCalibration, calibrateThresholds, portrait, CLOUD_VIEWS } from './cloud-lab.js';
+
+      const log = (m) => { document.getElementById('log').textContent = String(m); };
+      try {
+        const driver = new CloudDriver({ THREE });
+        await driver.ready;
+        window.THREE = THREE;
+        window.cloudLab = { driver, contactSheet, coverCalibration, calibrateThresholds, portrait, CLOUD_VIEWS };
+        log(`ready — backend: ${driver.backend}`);
+      } catch (e) {
+        log('FAILED: ' + (e && e.stack ? e.stack : e));
+      }
+    </script>
+  </body>
+</html>

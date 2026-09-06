@@ -78,6 +78,7 @@ export const CLOUD_VIEWS = Object.freeze([
   'dbg-alpha', // opacity alone — the true-edge-proximity signal a rim gate needs
   'dbg-diffuse', // the wrap-lit diffuse term alone — does IT trace seams too?
   'dbg-normalz', // the normal's Z component — how flat/tilted the surface reads
+  'dbg-macro-cov', // the cells:false coverage the height/normal taps actually see
 ]);
 
 /**
@@ -178,6 +179,13 @@ function buildViewMaterial(THREE, u, view, octaves, sunU) {
     rgb = vec3(cov, cov, cov);
   } else if (view === 'thickness') {
     rgb = vec3(thickness, thickness, thickness);
+  } else if (view === 'dbg-macro-cov') {
+    // The SAME `worldXY`, SAME `u.threshold`, but `cells: false` — exactly
+    // what `cloud-shade.js#heightAt` samples for the gradient/self-shadow
+    // taps. Compare against 'coverage' (the main, fully-cellular pass) at
+    // the identical setup to measure the areal-extent mismatch directly.
+    const macro = buildCloudFieldNode(TSL, { worldXY, uniforms: u, octaves, cells: false });
+    rgb = vec3(macro.cov, macro.cov, macro.cov);
   } else if (view === 'dbg-cellraw') {
     rgb = vec3(dbgCellRaw, dbgCellRaw, dbgCellRaw);
   } else if (view === 'dbg-crest') {
@@ -583,6 +591,63 @@ export function calibrateThresholds(
     out.push({ type: k.name, at: k.at, rows });
   }
   driver.apply({ thresholdOverride: null });
+  return out;
+}
+
+/**
+ * ⭐ CALIBRATE THE MACRO-ONLY THRESHOLD — the fix for "cumulus has a very
+ * hard edge around the raised parts" (2026-09-06).
+ *
+ * `effects/clouds/cloud-shade.js#heightAt` samples the field with
+ * `cells: false`, so its `base` is bare `per01` — which never receives the
+ * Nubis boost, so it almost never clears a threshold CALIBRATED ASSUMING
+ * the boost (`u.threshold`, what {@link calibrateThresholds} measures).
+ * Measured directly at cumulus's own cover 0.42: the macro-only pass reached
+ * mean coverage 0.021, not 0.42 — relief was OFF almost everywhere, on only
+ * in a tiny island at the statistical peak, and BOTH edges of that island
+ * are, by construction, as hard as an edge can be.
+ *
+ * This bisects a SEPARATE threshold against the `dbg-macro-cov` view (the
+ * SAME `cells: false` pass `heightAt` uses) so the macro shape's own areal
+ * extent matches the true (cellular, alpha-driving) silhouette's — the
+ * relief driving the NORMAL then fades out over the same footprint alpha
+ * does, closing the gap between "richly shaded 3-D bump" and "flat nothing"
+ * that alpha's own soft `edgeWidth` fade was never touching in the first
+ * place.
+ *
+ * @returns {Array<{type: string, at: number, rows: Array<{cover: number, threshold: number, achieved: number}>}>}
+ */
+export function calibrateMacroThresholds(
+  driver,
+  { size = 160, covers = [0.05, 0.15, 0.3, 0.45, 0.6, 0.75, 0.9, 0.97], iterations = 20 } = {}
+) {
+  const out = [];
+  for (const k of CLOUD_KEYFRAMES) {
+    const rows = [];
+    for (const cover of covers) {
+      let lo = -1.5;
+      let hi = 2.5;
+      let achieved = 0;
+      for (let i = 0; i < iterations; i++) {
+        const mid = (lo + hi) / 2;
+        // `recipeOverride` reaches ANY `driver.u[key]` — `macroThreshold` is
+        // a real uniform (see `createCloudUniforms`), so this is the exact
+        // same generic hook `wallBreach`/`warp` iteration used earlier.
+        driver.apply({
+          cloudType01: k.at,
+          cover01: cover,
+          viewPx: CALIBRATION_VIEW_PX,
+          recipeOverride: { macroThreshold: mid },
+        });
+        achieved = CloudDriver.meanRed(driver.readTile({ view: 'dbg-macro-cov', size }));
+        if (achieved > cover) lo = mid;
+        else hi = mid;
+      }
+      rows.push({ cover, threshold: Number(((lo + hi) / 2).toFixed(4)), achieved: Number(achieved.toFixed(3)) });
+    }
+    out.push({ type: k.name, at: k.at, rows });
+  }
+  driver.apply({ recipeOverride: {} });
   return out;
 }
 

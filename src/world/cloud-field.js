@@ -133,6 +133,10 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     shearDeg: 15,
     // MEASURED by bisection in the shader lab, not modelled — see COVER_LUT_SAMPLES.
     coverLut: Object.freeze([0.553, 0.497, 0.456, 0.425, 0.394, 0.367, 0.341, 0.315, 0.287, 0.255, 0.213, 0.18, 0.121]),
+    // MEASURED by bisection against the cells:false pass — see calibrateMacroThresholds.
+    macroCoverLut: Object.freeze([
+      0.536, 0.479, 0.436, 0.405, 0.374, 0.346, 0.32, 0.293, 0.265, 0.233, 0.19, 0.156, 0.095,
+    ]),
   }),
   Object.freeze({
     at: 0.35,
@@ -177,6 +181,10 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     shearDeg: 8,
     // MEASURED by bisection in the shader lab, not modelled — see COVER_LUT_SAMPLES.
     coverLut: Object.freeze([0.746, 0.712, 0.688, 0.669, 0.652, 0.637, 0.623, 0.608, 0.593, 0.575, 0.55, 0.529, 0.493]),
+    // MEASURED by bisection against the cells:false pass — see calibrateMacroThresholds.
+    macroCoverLut: Object.freeze([
+      0.616, 0.569, 0.533, 0.506, 0.48, 0.458, 0.438, 0.418, 0.396, 0.37, 0.335, 0.306, 0.256,
+    ]),
   }),
   Object.freeze({
     at: 0.55,
@@ -206,6 +214,10 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     shearDeg: 3,
     // MEASURED by bisection in the shader lab, not modelled — see COVER_LUT_SAMPLES.
     coverLut: Object.freeze([0.713, 0.672, 0.64, 0.617, 0.588, 0.569, 0.528, 0.532, 0.51, 0.492, 0.46, 0.433, 0.386]),
+    // MEASURED by bisection against the cells:false pass — see calibrateMacroThresholds.
+    macroCoverLut: Object.freeze([
+      0.585, 0.527, 0.485, 0.454, 0.424, 0.399, 0.375, 0.35, 0.325, 0.294, 0.253, 0.22, 0.161,
+    ]),
   }),
   Object.freeze({
     at: 0.8,
@@ -228,6 +240,8 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     shearDeg: 2,
     // MEASURED by bisection in the shader lab, not modelled — see COVER_LUT_SAMPLES.
     coverLut: Object.freeze([0.677, 0.63, 0.594, 0.567, 0.535, 0.512, 0.472, 0.467, 0.442, 0.419, 0.382, 0.353, 0.301]),
+    // MEASURED by bisection against the cells:false pass — see calibrateMacroThresholds.
+    macroCoverLut: Object.freeze([0.57, 0.51, 0.465, 0.432, 0.4, 0.372, 0.346, 0.32, 0.292, 0.26, 0.215, 0.18, 0.117]),
   }),
   Object.freeze({
     at: 1.0,
@@ -251,6 +265,10 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     // MEASURED by bisection in the shader lab, not modelled — see COVER_LUT_SAMPLES.
     coverLut: Object.freeze([
       0.562, 0.497, 0.447, 0.409, 0.371, 0.337, 0.304, 0.272, 0.237, 0.197, 0.146, 0.106, 0.039,
+    ]),
+    // MEASURED by bisection against the cells:false pass — see calibrateMacroThresholds.
+    macroCoverLut: Object.freeze([
+      0.538, 0.47, 0.418, 0.379, 0.34, 0.306, 0.272, 0.239, 0.204, 0.164, 0.111, 0.07, 0.0,
     ]),
   }),
 ]);
@@ -314,6 +332,8 @@ export function cloudRecipeFor(cloudType01) {
   // two genera needs the threshold half-way between their two measured curves,
   // or its coverage would track whichever keyframe happened to be nearer.
   out.coverLut = a.coverLut.map((v, i) => v + (b.coverLut[i] - v) * k);
+  // Same reasoning, same treatment, for the macro-only calibration.
+  out.macroCoverLut = a.macroCoverLut.map((v, i) => v + (b.macroCoverLut[i] - v) * k);
   return out;
 }
 
@@ -563,6 +583,10 @@ export function createCloudUniforms(TSL) {
      * authors per genus. Pushed once, unconditionally, in
      * {@link pushCloudUniforms} — never left to the recipe loop. */
     wallBreach: uniform(float(CLOUD_WALL_BREACH)),
+    /** The SEPARATE calibrated threshold the `cells: false` (macro-only)
+     * pass uses — see the long comment at `cov`'s own computation for why
+     * reusing `threshold` there was a severe bug, not a cosmetic one. */
+    macroThreshold: uniform(float(8)),
   };
   for (const key of CLOUD_RECIPE_KEYS) u[key] = uniform(float(0));
   return u;
@@ -588,6 +612,7 @@ export function pushCloudUniforms(uniforms, { recipe, cover01, scalePx, drift, b
   uniforms.scalePx.value = scalePx;
   uniforms.cover.value = cover01;
   uniforms.threshold.value = coverThreshold(cover01, recipe);
+  uniforms.macroThreshold.value = coverThreshold(cover01, { coverLut: recipe.macroCoverLut });
   for (const key of CLOUD_RECIPE_KEYS) uniforms[key].value = recipe[key];
   uniforms.wallBreach.value = CLOUD_WALL_BREACH;
 }
@@ -807,7 +832,33 @@ export function buildCloudFieldNode(
   // A calibrated threshold, so `mean(cov)` tracks `cloudCover01` and this
   // field agrees with every SCALAR consumer of the same axis. At cover 0 the
   // threshold is unreachable and this is exactly 0 — a provable no-op.
-  let cov = smoothstep(u.threshold, u.threshold.add(u.edgeWidth.max(float(0.01))), base).toVar('cloudCov');
+  //
+  // ⚠️ TWO DIFFERENT THRESHOLDS, PICKED BY `cells` — and conflating them was a
+  // real, severe bug (2026-09-06, author: "cumulus... has a very hard edge
+  // around the raised parts"). `u.threshold` is calibrated against the FULL
+  // cellular `base` (the Nubis remap's boost included), so it assumes that
+  // boost is present. `effects/clouds/cloud-shade.js#heightAt` calls this
+  // function with `cells: false` specifically so the gradient/self-shadow
+  // taps read the smooth MACRO shape alone (see that module's own header) —
+  // but `base` there is bare `per01`, which NEVER receives the boost, so it
+  // clears a boost-calibrated threshold only in the rare pixels where per01
+  // is independently that high. Measured directly (`dbg-macro-cov` in
+  // `tools/shader-lab/cloud-lab.js`): at cumulus's own calibrated cover
+  // 0.42, the macro-only pass reached mean coverage **0.021** — barely 5% of
+  // the intended extent. Relief was effectively OFF everywhere except a tiny
+  // island at the true statistical peak, and BOTH edges of that island (a
+  // real 3-D bump meeting perfectly flat "no relief" nothing) are, by
+  // construction, as hard as an edge can be — independent of how gently
+  // `edgeWidth` fades ALPHA, which reads the (correctly calibrated) cellular
+  // pass and does not share this problem.
+  //
+  // `u.macroThreshold` is a SEPARATE calibration
+  // (`CLOUD_KEYFRAMES[*].macroCoverLut`, measured the same way as
+  // `coverLut` but bisected against the cells:false pass), so the macro
+  // shape's own areal extent matches the true silhouette's, and the relief
+  // driving the NORMAL now fades out over the SAME footprint alpha does.
+  const thr = cells ? u.threshold : u.macroThreshold;
+  let cov = smoothstep(thr, thr.add(u.edgeWidth.max(float(0.01))), base).toVar('cloudCov');
 
   // ── 5. EROSION — high-frequency detail eats the LOW end ───────────────────
   // Always INSIDE the low-frequency hull, never outside it: that is what keeps

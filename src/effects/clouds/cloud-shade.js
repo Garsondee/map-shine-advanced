@@ -75,6 +75,21 @@ export const CLOUD_SELF_SHADOW_FLOOR = 0.45;
 /** Powder's weight with the sun on the horizon — see the header. */
 export const CLOUD_POWDER_AT_HORIZON = 0.25;
 
+/** Where the rim's edge gate starts allowing it through (on `alpha`, 0..1) —
+ * below this, alpha is close enough to true transparency that rim is judged
+ * to be at a real silhouette, not an internal seam. MEASURED, not guessed —
+ * see the edge gate's own long comment at its call site for how this was
+ * found (a bench view rendering `rim` in total isolation, and a second
+ * rendering `alpha` beside it, showed alpha barely registers internal cell
+ * structure at all while rim traces every seam). */
+export const CLOUD_RIM_EDGE_GATE_LO = 0.05;
+
+/** Where the gate fully closes, as a FRACTION of the recipe's own
+ * `thicknessCap` — not an absolute alpha, because a thin type (altocumulus,
+ * cap 0.55) never reaches the same absolute alpha a thick type (cumulus,
+ * cap 1.0) does. */
+export const CLOUD_RIM_EDGE_GATE_FRACTION = 0.16;
+
 /** The silver lining's strength, multiplied by the sun's own colour.
  *
  * ⚠️ MUCH SMALLER THAN IT LOOKS LIKE IT SHOULD BE. `4·T·(1-T)` peaks at
@@ -90,6 +105,16 @@ export const CLOUD_RIM_GAIN = 0.22;
 /** How bright a thick interior is lifted, standing in for multiple scattering
  * (Wrenninge's progressive-octave approximation, collapsed to one term). */
 export const CLOUD_MS_GAIN = 0.06;
+
+/** The fine surface-grain noise's frequency, as a fraction of `scalePx`
+ * (the recipe's own feature wavelength) — small, so grain reads as fine
+ * surface texture much finer than a single cell, never a second cellular
+ * pattern of its own. */
+export const CLOUD_GRAIN_FREQUENCY = 0.07;
+
+/** How strongly grain perturbs brightness, +/- this fraction at full weight
+ * (before `grainWeight` scales it down for already-soft types). */
+export const CLOUD_GRAIN_STRENGTH = 0.14;
 
 /**
  * Where the highlight roll-off begins, on the max-channel value. Below this,
@@ -150,7 +175,7 @@ export function buildCloudTopsNode(
   TSL,
   { worldXY, uniforms: u, buildField, sun, colors, octaves = 5, shadowTaps = 3, footprintPx = null }
 ) {
-  const { float, vec2, vec3, mix, clamp, exp, max, min, dot, normalize, smoothstep } = TSL;
+  const { float, vec2, vec3, mix, clamp, exp, max, min, dot, normalize, smoothstep, mx_noise_float } = TSL;
 
   // THE MAIN SAMPLE — full detail, because this is the silhouette and the
   // opacity the eye actually reads.
@@ -183,9 +208,43 @@ export function buildCloudTopsNode(
   // march is the opposite case: it asks "is a big billow up-sun of me", which
   // is a question about the large-scale shape, and paying for surface detail
   // three more times to answer it buys nothing visible.
+  //
+  // ⚠️ `cells: false`, UNCONDITIONALLY, ON BOTH — and this was found by
+  // rendering, not by reading, the same day as the edge gate above. The
+  // SILHOUETTE (`cov`/`alpha`, read from the MAIN sample below, still fully
+  // cellular) is not the only thing a Voronoi cell partition touches — this
+  // module's own `height` comes from `thickness`, which is gated by `cov`,
+  // which the cell partition carves into a sharp valley at every wall. That
+  // valley is a REAL bump in the height field the normal is built from, and
+  // ordinary physically-based shading has no way to know a cell wall is not
+  // "real" 3D relief the way a cumulus billow is — it just lights whatever
+  // slope it is handed. Rendering `diffuse` and `normalZ` in total isolation
+  // (`dbg-diffuse`/`dbg-normalz`) confirmed this directly: BOTH traced the
+  // entire wall network on their own, independent of the rim edge gate above
+  // (which only ever touched `rim`, and left this untouched) — the "double
+  // distorted white lines" the author reported survived a fully-gated rim
+  // because the diffuse term was drawing its own ridge at every seam the
+  // whole time.
+  //
+  // `cells: false` makes `base` exactly `per01` (`world/cloud-field.js`'s own
+  // `let base = per01; if (cells) { ... }` — a JS-time branch, so this also
+  // SKIPS the Worley evaluation entirely, one fewer noise tap per height
+  // sample, not just a correctness fix). Erosion still runs when `detail` is
+  // true, because it modifies `cov` from a SMOOTH Perlin base now, not a
+  // cellular one — the fine cauliflower grain survives, only the sharp
+  // cell-wall valley is gone. A cloud's LIGHTING now responds to the same
+  // macro undulation its author-facing SILHOUETTE was always built from,
+  // with the cell pattern legible as a coverage texture rather than
+  // relitigated as false relief.
   const cheapOct = Math.max(2, Math.min(octaves, 3));
   const heightAt = (p, detail) =>
-    buildField(TSL, { worldXY: p, uniforms: u, octaves: detail ? octaves : cheapOct, erode: !!detail }).height;
+    buildField(TSL, {
+      worldXY: p,
+      uniforms: u,
+      octaves: detail ? octaves : cheapOct,
+      erode: !!detail,
+      cells: false,
+    }).height;
   //
   // ⚠️ AND THE GRADIENT'S ORIGIN COMES FROM THE SAME CHEAP PATH. Differencing
   // a full-detail height against two reduced-detail ones measures the DETAIL
@@ -264,7 +323,45 @@ export function buildCloudTopsNode(
   // the same parabola the field uses for shadow contrast against cover.
   const slopeXY = vec2(dzdx.negate(), dzdy.negate());
   const facing = clamp(dot(normalize(slopeXY.add(vec2(float(1e-5), float(1e-5)))), sun.dirXY), 0, 1);
-  const rim = T.mul(float(1).sub(T)).mul(float(4)).mul(facing).toVar('topsRim');
+  const rimRaw = T.mul(float(1).sub(T)).mul(float(4)).mul(facing);
+
+  // ⭐ THE EDGE-ONLY GATE — and the reason it exists at all is worth stating
+  // plainly, because it was found by RENDERING, not by reading.
+  //
+  // `T*(1-T)` peaks at T=0.5 REGARDLESS OF SPATIAL CONTEXT — it cannot tell
+  // "a cloud thinning out toward open sky" (a true silhouette edge, where the
+  // silver lining is a real, wanted effect) from "a dip between two solid
+  // lobes of the SAME connected mass" (an internal cellular seam, where
+  // cloud continues on both sides). `world/cloud-field.js`'s own wall-breach
+  // fix (2026-09-06) makes this worse by construction: a partially-breached
+  // seam sits EXACTLY in the T = 0.3-0.7 range rim is most sensitive to, so
+  // the fix that broke the wall's closed OUTLINE simultaneously lit up its
+  // whole length with a bright rim glow — confirmed by the author
+  // ("cells look even more obvious now... double distorted white lines").
+  //
+  // Rendering `rim` in total isolation (`tools/shader-lab/cloud-lab.js`'s
+  // `dbg-rim` view) showed it tracing the ENTIRE cell-wall network, almost
+  // pixel-for-pixel matching the coverage mask's own cellular structure —
+  // not just the true outer silhouette. Rendering `alpha` (already computed,
+  // above) alongside it showed the opposite: alpha barely registers internal
+  // seams at all, because it is built from `thickness`, which the field
+  // derives from how far `base` clears its threshold (`excess`) rather than
+  // from the coverage mask's own binary in/out decision — a seam sits close
+  // to threshold on EITHER side of a breach, so its `excess`, and therefore
+  // its thickness and alpha, stay LOW, while true interior points (genuinely
+  // deep in a cloud mass) accumulate much more excess. Alpha is therefore
+  // the working proxy for "how close is this point to true transparency",
+  // and gating rim by it (rather than by T alone) suppresses the seam glow
+  // while preserving it at the real outer edge, where alpha genuinely falls.
+  //
+  // `edgeGateHi` is NOT a fixed absolute — it is proportional to
+  // `thicknessCap`, because a THIN type (altocumulus, cap 0.55) never
+  // reaches the same absolute alpha a THICK type (cumulus, cap 1.0) does;
+  // gating on a fixed alpha would over-suppress rim everywhere on thin types
+  // and under-suppress it on thick ones.
+  const edgeGateHi = u.thicknessCap.mul(float(CLOUD_RIM_EDGE_GATE_FRACTION));
+  const edgeGate = float(1).sub(smoothstep(float(CLOUD_RIM_EDGE_GATE_LO), edgeGateHi, alpha));
+  const rim = rimRaw.mul(edgeGate).toVar('topsRim');
 
   // ── ASSEMBLY ──────────────────────────────────────────────────────────────
   const sunLit = colors.keyRgb.mul(diff.mul(shadow).mul(powderTerm));
@@ -276,10 +373,42 @@ export function buildCloudTopsNode(
   // sun is behind it, and here the sun is already accounted for separately.
   const ambient = colors.fillRgb.mul(N.z.mul(float(0.5)).add(float(0.5))).mul(float(0.16));
   const ms = vec3(1, 1, 1).mul(smoothstep(float(0.35), float(0.9), T).mul(float(CLOUD_MS_GAIN)));
+
+  // ── SURFACE GRAIN ─────────────────────────────────────────────────────────
+  // Author, 2026-09-06, after the wall-structure fixes above: cumulus and
+  // stratocumulus read as too smooth/glossy ("a bit 'blobby' in terms of the
+  // smoothness of the light and shadow"). The macro-only height fix above
+  // (see `heightAt`'s own header) fixed the WALL-TRACING problem by making
+  // the NORMAL ignore cell/erosion detail entirely — correct for that bug,
+  // but it also means nothing FINE-GRAINED perturbs the shading at all any
+  // more, so a solid billow now lights as a perfectly smooth gradient, which
+  // reads as glossy/plastic rather than as a cloud's own fine, non-uniform
+  // surface.
+  //
+  // ⚠️ DELIBERATELY NOT DERIVED FROM THE CELL/EROSION FIELD — reaching for
+  // either again would reintroduce exactly the wall-tracing artefact the
+  // macro-height fix just removed, since both are keyed to the SAME Voronoi
+  // structure. This is an INDEPENDENT noise, sampled at its own fine
+  // frequency, with no relationship to cell placement at all — it perturbs
+  // brightness UNIFORMLY across the whole surface, cell interiors and true
+  // edges alike, which is what real fine cloud texture (unrelated to the
+  // macro cellular pattern) looks like.
+  //
+  // Weighted DOWN for types that are already soft (`edgeWidth` high — cirrus,
+  // stratus) and UP for types that would otherwise read as smooth/glossy
+  // blobs (`edgeWidth` low — cumulus especially) — reusing an existing
+  // recipe value as the "does this type need it" signal rather than adding a
+  // redundant new one.
+  const grainFreq = u.scalePx.mul(float(CLOUD_GRAIN_FREQUENCY)).max(float(1e-3));
+  const grainNoise = mx_noise_float(vec3(worldXY.x.div(grainFreq), worldXY.y.div(grainFreq), u.boil.mul(float(0.4))));
+  const grainWeight = float(1).sub(smoothstep(float(0.15), float(0.45), u.edgeWidth));
+  const grain = float(1).add(grainNoise.mul(float(CLOUD_GRAIN_STRENGTH)).mul(grainWeight));
+
   const rgbRaw = sunLit
     .add(ambient)
     .add(ms)
-    .add(colors.keyRgb.mul(rim.mul(float(CLOUD_RIM_GAIN))));
+    .add(colors.keyRgb.mul(rim.mul(float(CLOUD_RIM_GAIN))))
+    .mul(grain);
 
   // ── THE HIGHLIGHT ROLL-OFF ────────────────────────────────────────────────
   // Scale ALL THREE CHANNELS BY THE SAME FACTOR (derived from the max channel,

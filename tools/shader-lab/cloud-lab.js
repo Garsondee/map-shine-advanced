@@ -74,6 +74,10 @@ export const CLOUD_VIEWS = Object.freeze([
   'dbg-cellraw', // the cell-polarity signal BEFORE the wall-breach gate
   'dbg-crest', // the isolated wall-crest band (see CLOUD_WALL_CREST_LO/HI)
   'dbg-gate', // the independent noise deciding which crests breach
+  'dbg-rim', // the silver-lining term ALONE, unmixed — to check what it traces
+  'dbg-alpha', // opacity alone — the true-edge-proximity signal a rim gate needs
+  'dbg-diffuse', // the wrap-lit diffuse term alone — does IT trace seams too?
+  'dbg-normalz', // the normal's Z component — how flat/tilted the surface reads
 ]);
 
 /**
@@ -108,6 +112,49 @@ function buildViewMaterial(THREE, u, view, octaves, sunU) {
     // over the map in production, and judging them on black would flatter them.
     const sky = vec3(0.1, 0.17, 0.31);
     rgb = mix(sky, tops.rgb, clamp(tops.alpha, 0, 1));
+  } else if (view === 'dbg-rim') {
+    // The silver-lining term ALONE, over black — not mixed into the sky, so
+    // every pixel it touches at all is visible, including where it fires on
+    // internal structure rather than a true silhouette edge.
+    const tops = buildCloudTopsNode(TSL, {
+      worldXY,
+      uniforms: u,
+      buildField: buildCloudFieldNode,
+      sun: { dirXY: sunU.dir, sinElev: sunU.sinElev, cosElev: sunU.cosElev, tanElev: sunU.tanElev },
+      colors: { keyRgb: sunU.keyRgb, fillRgb: sunU.fillRgb },
+      octaves,
+    });
+    rgb = vec3(tops.rim, tops.rim, tops.rim);
+  } else if (view === 'dbg-alpha') {
+    const tops = buildCloudTopsNode(TSL, {
+      worldXY,
+      uniforms: u,
+      buildField: buildCloudFieldNode,
+      sun: { dirXY: sunU.dir, sinElev: sunU.sinElev, cosElev: sunU.cosElev, tanElev: sunU.tanElev },
+      colors: { keyRgb: sunU.keyRgb, fillRgb: sunU.fillRgb },
+      octaves,
+    });
+    rgb = vec3(tops.alpha, tops.alpha, tops.alpha);
+  } else if (view === 'dbg-diffuse') {
+    const tops = buildCloudTopsNode(TSL, {
+      worldXY,
+      uniforms: u,
+      buildField: buildCloudFieldNode,
+      sun: { dirXY: sunU.dir, sinElev: sunU.sinElev, cosElev: sunU.cosElev, tanElev: sunU.tanElev },
+      colors: { keyRgb: sunU.keyRgb, fillRgb: sunU.fillRgb },
+      octaves,
+    });
+    rgb = vec3(tops.diffuse, tops.diffuse, tops.diffuse);
+  } else if (view === 'dbg-normalz') {
+    const tops = buildCloudTopsNode(TSL, {
+      worldXY,
+      uniforms: u,
+      buildField: buildCloudFieldNode,
+      sun: { dirXY: sunU.dir, sinElev: sunU.sinElev, cosElev: sunU.cosElev, tanElev: sunU.tanElev },
+      colors: { keyRgb: sunU.keyRgb, fillRgb: sunU.fillRgb },
+      octaves,
+    });
+    rgb = vec3(tops.normalZ, tops.normalZ, tops.normalZ);
   } else if (view === 'satellite') {
     // A satellite read: deep sky blue behind, cloud white in front, the cloud's
     // own brightness rising with thickness so a thin veil reads as a veil.
@@ -439,20 +486,20 @@ export async function contactSheet(
 export async function coverCalibration(driver, { size = 192, covers = [0.1, 0.25, 0.4, 0.55, 0.7, 0.85] } = {}) {
   const out = [];
   for (const k of CLOUD_KEYFRAMES) {
-    driver.apply({ cloudType01: k.at, cover01: 0.5 });
+    driver.apply({ cloudType01: k.at, cover01: 0.5, viewPx: CALIBRATION_VIEW_PX });
     const baseBytes = driver.readTile({ view: 'base', size });
     const baseMean = CloudDriver.meanRed(baseBytes);
     const baseStd = CloudDriver.stdRed(baseBytes);
     const measured = [];
     for (const c of covers) {
-      driver.apply({ cloudType01: k.at, cover01: c });
+      driver.apply({ cloudType01: k.at, cover01: c, viewPx: CALIBRATION_VIEW_PX });
       const bytes = driver.readTile({ view: 'coverage', size });
       measured.push({ target: c, actual: Number(CloudDriver.meanRed(bytes).toFixed(3)) });
     }
     // The exact-zero requirement: at cover 0 the field must be EXACTLY 0, not
     // approximately — a clear-sky frame has to be bit-identical to one with the
     // feature absent, which is what lets clouds default on.
-    driver.apply({ cloudType01: k.at, cover01: 0 });
+    driver.apply({ cloudType01: k.at, cover01: 0, viewPx: CALIBRATION_VIEW_PX });
     const zero = CloudDriver.meanRed(driver.readTile({ view: 'coverage', size }));
     out.push({
       type: k.name,
@@ -487,8 +534,25 @@ export async function coverCalibration(driver, { size = 192, covers = [0.1, 0.25
  * depends on cover (the cell-polarity bell reads `u.cover`), so there is no
  * fixed distribution to invert — only a monotone function to search.
  *
+ * ⚠️ SAMPLES A FIXED, EXPLICIT `viewPx` (see {@link CALIBRATION_VIEW_PX}),
+ * NEVER WHATEVER `driver.state.viewPx` HAPPENS TO BE. Found the hard way,
+ * 2026-09-06: a verification sweep run straight after an UNRELATED manual
+ * portrait render (which had left `viewPx` at a small, arbitrary value from
+ * its own framing) showed errors up to 0.046 at points the calibration had
+ * supposedly nailed to <0.006 — not a real miscalibration, but two different
+ * calls sampling two DIFFERENT windows of the same infinite noise field.
+ * `mean(cov)` over a SMALL window is a biased estimate of the field's true
+ * statistical mean — the smaller the window relative to the noise's own
+ * wavelength (`scalePx`), the more the local sample can drift from the
+ * population value by ordinary finite-sample variance, with no bug required
+ * anywhere else. A large, FIXED, explicitly-set window (many multiples of
+ * `scalePx`) is what makes "measured" mean something reproducible rather
+ * than "measured, in whatever window happened to be active".
+ *
  * @returns {Array<{type: string, at: number, rows: Array<{cover: number, threshold: number, achieved: number}>}>}
  */
+export const CALIBRATION_VIEW_PX = 24000;
+
 export function calibrateThresholds(
   driver,
   { size = 160, covers = [0.05, 0.15, 0.3, 0.45, 0.6, 0.75, 0.9, 0.97], iterations = 18 } = {}
@@ -504,7 +568,12 @@ export function calibrateThresholds(
       let achieved = 0;
       for (let i = 0; i < iterations; i++) {
         const mid = (lo + hi) / 2;
-        driver.apply({ cloudType01: k.at, cover01: cover, thresholdOverride: mid });
+        driver.apply({
+          cloudType01: k.at,
+          cover01: cover,
+          viewPx: CALIBRATION_VIEW_PX,
+          thresholdOverride: mid,
+        });
         achieved = CloudDriver.meanRed(driver.readTile({ view: 'coverage', size }));
         if (achieved > cover) lo = mid;
         else hi = mid;

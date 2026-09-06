@@ -132,7 +132,7 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     driftMul: 3.0, // jet-level wind
     shearDeg: 15,
     // MEASURED by bisection in the shader lab, not modelled — see COVER_LUT_SAMPLES.
-    coverLut: Object.freeze([0.545, 0.494, 0.454, 0.424, 0.394, 0.367, 0.342, 0.316, 0.289, 0.257, 0.216, 0.184, 0.13]),
+    coverLut: Object.freeze([0.553, 0.497, 0.456, 0.425, 0.394, 0.367, 0.341, 0.315, 0.287, 0.255, 0.213, 0.18, 0.121]),
   }),
   Object.freeze({
     at: 0.35,
@@ -176,7 +176,7 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     driftMul: 2.0,
     shearDeg: 8,
     // MEASURED by bisection in the shader lab, not modelled — see COVER_LUT_SAMPLES.
-    coverLut: Object.freeze([0.744, 0.71, 0.685, 0.667, 0.649, 0.634, 0.619, 0.605, 0.59, 0.573, 0.55, 0.532, 0.501]),
+    coverLut: Object.freeze([0.746, 0.712, 0.688, 0.669, 0.652, 0.637, 0.623, 0.608, 0.593, 0.575, 0.55, 0.529, 0.493]),
   }),
   Object.freeze({
     at: 0.55,
@@ -185,7 +185,14 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     openCellPeak: 1, // the honeycomb flip lives here and at stratocumulus
     jitter: 1.0, // fully random placement: cumulus is not a lattice
     cellScale: 1.0,
-    edgeWidth: 0.1, // crisp
+    // ⚠️ WIDENED FROM 0.10 (2026-09-06, author: "make cumulus/stratocumulus
+    // grainy and fuzzy... fade into wispy clouds like stratus around the
+    // edges"). A narrow edgeWidth gives a NARROW spatial transition band —
+    // even with erosion eating into it, a narrow band still reads as "a
+    // rounded blob with a damaged edge", not "fraying into wisps". Widening
+    // it gives the SAME erosion noise a much bigger transition zone to work
+    // across, which is what turns cauliflower into trailing tendrils.
+    edgeWidth: 0.24,
     erosion: 0.55, // the cauliflower
     detailScale: 0.18,
     warp: 0.18,
@@ -198,9 +205,7 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     driftMul: 1.5,
     shearDeg: 3,
     // MEASURED by bisection in the shader lab, not modelled — see COVER_LUT_SAMPLES.
-    coverLut: Object.freeze([
-      0.753, 0.719, 0.693, 0.673, 0.648, 0.633, 0.599, 0.605, 0.589, 0.578, 0.555, 0.537, 0.506,
-    ]),
+    coverLut: Object.freeze([0.713, 0.672, 0.64, 0.617, 0.588, 0.569, 0.528, 0.532, 0.51, 0.492, 0.46, 0.433, 0.386]),
   }),
   Object.freeze({
     at: 0.8,
@@ -209,7 +214,7 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     openCellPeak: 1,
     jitter: 0.85,
     cellScale: 0.6, // the big mesoscale cells (10-40 km in reality)
-    edgeWidth: 0.18,
+    edgeWidth: 0.3, // widened for the same reason as cumulus, see its own note
     erosion: 0.35,
     detailScale: 0.22,
     warp: 0.15,
@@ -222,7 +227,7 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     driftMul: 1.4,
     shearDeg: 2,
     // MEASURED by bisection in the shader lab, not modelled — see COVER_LUT_SAMPLES.
-    coverLut: Object.freeze([0.708, 0.665, 0.633, 0.61, 0.584, 0.566, 0.53, 0.533, 0.514, 0.5, 0.473, 0.451, 0.413]),
+    coverLut: Object.freeze([0.677, 0.63, 0.594, 0.567, 0.535, 0.512, 0.472, 0.467, 0.442, 0.419, 0.382, 0.353, 0.301]),
   }),
   Object.freeze({
     at: 1.0,
@@ -244,7 +249,9 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     driftMul: 1.2,
     shearDeg: 0,
     // MEASURED by bisection in the shader lab, not modelled — see COVER_LUT_SAMPLES.
-    coverLut: Object.freeze([0.561, 0.497, 0.447, 0.409, 0.371, 0.338, 0.306, 0.273, 0.239, 0.2, 0.149, 0.111, 0.049]),
+    coverLut: Object.freeze([
+      0.562, 0.497, 0.447, 0.409, 0.371, 0.337, 0.304, 0.272, 0.237, 0.197, 0.146, 0.106, 0.039,
+    ]),
   }),
 ]);
 

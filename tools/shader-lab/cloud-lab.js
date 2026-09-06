@@ -67,6 +67,13 @@ export const CLOUD_VIEWS = Object.freeze([
   'coverage', // raw `cov`, greyscale — for measuring, not for looking
   'thickness',
   'base', // the pre-threshold shape, for the coverage calibration
+  // The three below are diagnostic taps added while chasing the
+  // "walls read as one continuous closed line" fix (2026-09-06) — render
+  // these FIRST when tuning any cellular mechanism, rather than guessing a
+  // band/scale from the nominal 0..1 the maths happens to be written in.
+  'dbg-cellraw', // the cell-polarity signal BEFORE the wall-breach gate
+  'dbg-crest', // the isolated wall-crest band (see CLOUD_WALL_CREST_LO/HI)
+  'dbg-gate', // the independent noise deciding which crests breach
 ]);
 
 /**
@@ -81,7 +88,7 @@ function buildViewMaterial(THREE, u, view, octaves, sunU) {
   const worldXY = TSL.vec2(mix(uRect.x, uRect.z, uv().x), mix(uRect.y, uRect.w, uv().y));
 
   const field = buildCloudFieldNode(TSL, { worldXY, uniforms: u, octaves });
-  const { cov, thickness, base } = field;
+  const { cov, thickness, base, dbgCellRaw, dbgCrest, dbgGate } = field;
 
   let rgb;
   if (view === 'tops') {
@@ -124,6 +131,12 @@ function buildViewMaterial(THREE, u, view, octaves, sunU) {
     rgb = vec3(cov, cov, cov);
   } else if (view === 'thickness') {
     rgb = vec3(thickness, thickness, thickness);
+  } else if (view === 'dbg-cellraw') {
+    rgb = vec3(dbgCellRaw, dbgCellRaw, dbgCellRaw);
+  } else if (view === 'dbg-crest') {
+    rgb = vec3(dbgCrest, dbgCrest, dbgCrest);
+  } else if (view === 'dbg-gate') {
+    rgb = vec3(dbgGate, dbgGate, dbgGate);
   } else {
     rgb = vec3(base, base, base);
   }

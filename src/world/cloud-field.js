@@ -132,7 +132,7 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     driftMul: 3.0, // jet-level wind
     shearDeg: 15,
     // MEASURED by bisection in the shader lab, not modelled — see COVER_LUT_SAMPLES.
-    coverLut: Object.freeze([0.548, 0.503, 0.463, 0.431, 0.399, 0.372, 0.346, 0.32, 0.293, 0.261, 0.217, 0.184, 0.134]),
+    coverLut: Object.freeze([0.545, 0.494, 0.454, 0.424, 0.394, 0.367, 0.342, 0.316, 0.289, 0.257, 0.216, 0.184, 0.13]),
   }),
   Object.freeze({
     at: 0.35,
@@ -176,9 +176,7 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     driftMul: 2.0,
     shearDeg: 8,
     // MEASURED by bisection in the shader lab, not modelled — see COVER_LUT_SAMPLES.
-    coverLut: Object.freeze([
-      0.741, 0.707, 0.681, 0.662, 0.644, 0.627, 0.612, 0.597, 0.581, 0.562, 0.536, 0.516, 0.477,
-    ]),
+    coverLut: Object.freeze([0.744, 0.71, 0.685, 0.667, 0.649, 0.634, 0.619, 0.605, 0.59, 0.573, 0.55, 0.532, 0.501]),
   }),
   Object.freeze({
     at: 0.55,
@@ -200,7 +198,9 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     driftMul: 1.5,
     shearDeg: 3,
     // MEASURED by bisection in the shader lab, not modelled — see COVER_LUT_SAMPLES.
-    coverLut: Object.freeze([0.749, 0.723, 0.702, 0.686, 0.658, 0.603, 0.539, 0.572, 0.595, 0.587, 0.567, 0.55, 0.512]),
+    coverLut: Object.freeze([
+      0.753, 0.719, 0.693, 0.673, 0.648, 0.633, 0.599, 0.605, 0.589, 0.578, 0.555, 0.537, 0.506,
+    ]),
   }),
   Object.freeze({
     at: 0.8,
@@ -222,7 +222,7 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     driftMul: 1.4,
     shearDeg: 2,
     // MEASURED by bisection in the shader lab, not modelled — see COVER_LUT_SAMPLES.
-    coverLut: Object.freeze([0.707, 0.671, 0.642, 0.619, 0.591, 0.541, 0.486, 0.506, 0.52, 0.506, 0.48, 0.46, 0.424]),
+    coverLut: Object.freeze([0.708, 0.665, 0.633, 0.61, 0.584, 0.566, 0.53, 0.533, 0.514, 0.5, 0.473, 0.451, 0.413]),
   }),
   Object.freeze({
     at: 1.0,
@@ -244,7 +244,7 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     driftMul: 1.2,
     shearDeg: 0,
     // MEASURED by bisection in the shader lab, not modelled — see COVER_LUT_SAMPLES.
-    coverLut: Object.freeze([0.562, 0.501, 0.453, 0.416, 0.379, 0.346, 0.314, 0.282, 0.248, 0.21, 0.16, 0.123, 0.064]),
+    coverLut: Object.freeze([0.561, 0.497, 0.447, 0.409, 0.371, 0.338, 0.306, 0.273, 0.239, 0.2, 0.149, 0.111, 0.049]),
   }),
 ]);
 
@@ -387,6 +387,77 @@ export function coverThreshold(cover01, recipe) {
 export const CLOUD_CALM_BOIL_PER_SEC = 3.3e-4;
 
 /**
+ * The wall-floor cap on the cell-polarity signal (`buildCloudFieldNode`'s
+ * own `cell`), 0..1. Never let a Voronoi wall's `cell` value reach exactly 1
+ * — see the long comment at its one call site for the mechanism. 1.0 is a
+ * true no-op (the historical, uncapped behaviour); MEASURED in the shader
+ * lab against the author's own "I can still see cells as cleanly defined
+ * blobs" feedback (2026-09-06): swept 0.7/0.8/0.85/0.9/0.95 at altocumulus,
+ * where the fully-closed-wall problem is most visible (a highly regular
+ * lattice with a strong centre boost) — below ~0.8 too much of the pattern
+ * fuses and the mackerel lattice itself starts dissolving; above ~0.9 the
+ * walls stay too reliably closed. 0.85 sits in the window that breaks the
+ * wall's CONTINUITY (some segments fuse, some don't) without eroding cell
+ * identity.
+ */
+export const CLOUD_WALL_BREACH = 0.6;
+// MEASURED in the shader lab, at altocumulus specifically (where the
+// fully-closed-wall problem is most visible): swept 0/0.3/0.4/0.5/0.6/0.7/1/2
+// at both the raw coverage mask and the lit tops. Below ~0.3 the effect is
+// nearly invisible; at 1.0+ whole regions melt into whichever the coarse
+// gate noise elsewhere touches, losing too much cell identity. 0.6 sits
+// where some wall segments visibly thin/bridge to a neighbour while others
+// stay crisp and separated — patchiness, not uniform closure and not
+// uniform dissolution.
+
+/** Where the wall-crest isolation band starts (on `cellRaw`, 0..1) — below
+ * this, a pixel is deep enough in a cell interior that it is never touched
+ * by the breach gate, regardless of the gate noise.
+ *
+ * ⚠️ MEASURED, NOT GUESSED, AND THE FIRST VALUES (0.86/0.985) WERE WRONG BY
+ * CONSTRUCTION. `cellRaw` (the Worley F1 distance after the ring-polarity
+ * mix) does not range 0..1 in practice — measured via the shader lab's
+ * `dbg-cellraw` view over altocumulus's own recipe: min 0.075, max 0.855,
+ * mean 0.33. A band starting at 0.86 was ABOVE THE OBSERVED MAXIMUM, so it
+ * engaged on literally zero pixels — the reason the first breach sweep
+ * (0..1) showed no visible change at any setting. These two constants are
+ * relative to that measured range, not to the nominal 0..1 the maths
+ * happens to be written in. */
+export const CLOUD_WALL_CREST_LO = 0.42;
+
+/** Where the crest band reaches full strength.
+ *
+ * ⚠️ RECALIBRATED A SECOND TIME. 0.6-0.82 (this constant's OWN previous
+ * value, chosen from the plain min/max) engaged on under 1% of pixels — a
+ * full spatial histogram (not just min/max) showed why: `cellRaw` peaks
+ * around 0.25-0.35 and its upper tail collapses fast, with under 3% of
+ * pixels above 0.55 at all. That upper sliver is dominated by the rare
+ * three-way VORONOI VERTICES (where three cells meet, genuinely farther
+ * from any one feature point than a plain two-cell edge), not the general
+ * wall LINE — confirmed visually: at high `wallBreach` the field showed
+ * isolated star-shaped sparkle artifacts sitting at junctions, never a
+ * length of open wall. 0.42-0.58 sits where the actual visible wall LINE'S
+ * own body lives (per the measured histogram), so the breach now has real
+ * wall LENGTH to work with, not just its rare brightest points. */
+export const CLOUD_WALL_CREST_HI = 0.58;
+
+/** The gate noise's frequency, as a multiplier on `cellScale` (itself already
+ * a multiplier on the base sample position — see `buildCloudFieldNode`'s own
+ * `w` computation). Below 1: several adjacent wall segments share one
+ * verdict, reading as small CLUSTERS of fused cells rather than a pixel-noise
+ * stipple — closer to how real mackerel/altocumulus shows patches of merged
+ * elements, not isolated single breaks. */
+// ⚠️ 0.35 was STILL A MISTAKE, caught by the same star-sparkle symptom: with
+// `cellScale` already multiplying the sample position (3.0 for altocumulus,
+// dense small cells), 0.35 gave an effective gate frequency of ~1.05 — the
+// SAME order as individual cells, so neighbouring wall segments got
+// UNCORRELATED gate values and each rolled its own tiny, isolated verdict.
+// 0.08 gives an effective frequency around a quarter of the cell lattice's
+// own, so several adjacent cells share one verdict — small CLUSTERS of
+// fused cells, which is what "some walls open, some don't" needs.
+export const CLOUD_WALL_GATE_SCALE = 0.08;
+
+/**
  * One step of the cloud phase.
  *
  * ⭐ EVOLUTION IS TIED TO DISTANCE DRIFTED, NOT TO WALL TIME. `turnover` is
@@ -477,6 +548,14 @@ export function createCloudUniforms(TSL) {
     scalePx: uniform(float(1100)),
     cover: uniform(float(0)),
     threshold: uniform(float(8)),
+    /** How strongly a gated-open wall crest gets pulled toward fusing with
+     * its neighbour ({@link CLOUD_WALL_BREACH} default) — SHARED across
+     * every cloud type, not part of the per-keyframe recipe blend, because
+     * the mechanism it guards against (a Voronoi wall's closed graph fully
+     * starving the Nubis boost) is a property of the maths, not a look a GM
+     * authors per genus. Pushed once, unconditionally, in
+     * {@link pushCloudUniforms} — never left to the recipe loop. */
+    wallBreach: uniform(float(CLOUD_WALL_BREACH)),
   };
   for (const key of CLOUD_RECIPE_KEYS) u[key] = uniform(float(0));
   return u;
@@ -503,6 +582,7 @@ export function pushCloudUniforms(uniforms, { recipe, cover01, scalePx, drift, b
   uniforms.cover.value = cover01;
   uniforms.threshold.value = coverThreshold(cover01, recipe);
   for (const key of CLOUD_RECIPE_KEYS) uniforms[key].value = recipe[key];
+  uniforms.wallBreach.value = CLOUD_WALL_BREACH;
 }
 
 /**
@@ -548,8 +628,20 @@ export function buildCloudFieldNode(
   TSL,
   { worldXY, uniforms: u, octaves = 4, warp = true, erode = true, cells = true }
 ) {
-  const { float, vec2, vec3, mix, clamp, smoothstep, pow, exp, dot, mx_fractal_noise_float, mx_worley_noise_float } =
-    TSL;
+  const {
+    float,
+    vec2,
+    vec3,
+    mix,
+    clamp,
+    smoothstep,
+    pow,
+    exp,
+    dot,
+    mx_fractal_noise_float,
+    mx_worley_noise_float,
+    mx_noise_float,
+  } = TSL;
 
   const inv = float(1).div(u.scalePx.max(float(1)));
   const p0 = worldXY.add(u.drift).mul(inv).toVar('cloudP0');
@@ -607,6 +699,9 @@ export function buildCloudFieldNode(
   const per01 = clamp(perRaw.div(ampSum).mul(float(0.5)).add(float(0.5)), 0, 1).toVar('cloudPer01');
 
   let base = per01;
+  let dbgCellRaw = float(0);
+  let dbgCrest = float(0);
+  let dbgGate = float(0);
   if (cells) {
     // `mx_worley_noise_float` returns the EUCLIDEAN F1 DISTANCE to the nearest
     // feature point, in cell units (`three.webgpu.js:54013` takes the sqrt) —
@@ -637,7 +732,64 @@ export function buildCloudFieldNode(
     // produces driver-dependent garbage below cover 0.5.
     const ringX = u.cover.sub(float(0.5)).div(float(0.14));
     const ring = u.openCellPeak.mul(exp(ringX.mul(ringX).negate()));
-    const cell = mix(w, float(1).sub(w), clamp(ring, 0, 1)).toVar('cloudCell');
+    const cellRaw = mix(w, float(1).sub(w), clamp(ring, 0, 1)).toVar('cloudCellRaw');
+    dbgCellRaw = cellRaw;
+    // ⭐ THE WALL-BREACH GATE — let SOME wall CRESTS fuse with a neighbour,
+    // chosen by an independent noise, instead of leaving every wall a
+    // perfectly closed Voronoi graph.
+    //
+    // A Worley F1 distance field's boundary is a genuine Voronoi edge, and a
+    // Voronoi diagram's edges are, BY MATHEMATICAL CONSTRUCTION, always a
+    // fully-connected planar graph — every cell wall joins the next with no
+    // gaps. Left alone, `cellRaw` reaches 1 (no boost, `lo = 0`) all along
+    // that closed graph, so the Nubis remap starves the ENTIRE wall network
+    // down to raw `per01` — which for a keyframe tuned with a strong centre
+    // boost (`cellWeight` high) sits reliably below threshold everywhere
+    // along the wall. The result is a perfect, unbroken, closed moat around
+    // every single cell: cleanly traceable as one continuous line around
+    // each blob, which is exactly what the author's own (2026-09-06)
+    // follow-up flagged after the warp fix landed — the walls were no
+    // longer STRAIGHT, but they were still one continuous unbroken boundary.
+    //
+    // ⚠️ A FLAT CAP ON `cellRaw` WAS TRIED FIRST AND REJECTED. Worley F1
+    // distance spends most of a cell's AREA at moderate-to-high values —
+    // it is only ever near 0 right at a feature point — so capping the
+    // CEILING touches most of the domain, not just the thin crest, and
+    // compresses the whole radial falloff at once. Measured in the shader
+    // lab: nothing visible from a cap of 1.0 down to ~0.6, then a sudden
+    // collapse into one fused mass by ~0.3 — a cliff, not a graceful fade,
+    // because the cap was never a THIN, LOCAL edit.
+    //
+    // This is the local version: `crest` isolates a NARROW band right at
+    // the true wall peak (via a steep smoothstep near 1), so cell interiors
+    // are completely untouched — only pixels that are GENUINELY at a
+    // boundary are ever candidates. Whether a given crest pixel actually
+    // gets pulled down is decided by `gate`, a plain Perlin sample at its
+    // OWN frequency and offset — uncorrelated with the Worley lattice, so
+    // it does not trace the cell structure itself, and coarse enough
+    // (relative to `cellScale`) that several adjacent wall segments share
+    // one verdict, giving small CLUSTERS of fused cells rather than a
+    // pixel-noise stipple. That is what breaks "one continuous traceable
+    // outline" into patchiness — some walls stay closed, some open — rather
+    // than a softer edge (edge width was tried first and rejected too: it
+    // blurs uniformly and does not touch CONTINUITY at all).
+    //
+    // Symmetric under the ring flip by construction: `crest` is measured
+    // from `cellRaw` AFTER the polarity mix, so it isolates whichever region
+    // currently reads as "most starved" — the wall in blob polarity, the
+    // hole's own centre in open-cell polarity.
+    const crest = smoothstep(float(CLOUD_WALL_CREST_LO), float(CLOUD_WALL_CREST_HI), cellRaw);
+    dbgCrest = crest;
+    const gate = clamp(
+      mx_noise_float(vec3(pw.mul(u.cellScale).mul(float(CLOUD_WALL_GATE_SCALE)), u.boil.mul(float(0.3))))
+        .mul(float(0.5))
+        .add(float(0.5)),
+      0,
+      1
+    );
+    dbgGate = gate;
+    const breach = crest.mul(gate).mul(u.wallBreach);
+    const cell = cellRaw.sub(breach).toVar('cloudCell');
     // Nubis's remap: Remap(perlin, -(1 - cell), 1, 0, 1).
     const lo = float(1).sub(cell).negate();
     const remapped = per01.sub(lo).div(float(1).sub(lo).max(float(1e-4)));
@@ -723,7 +875,26 @@ export function buildCloudFieldNode(
     .toVar('cloudThickness');
   const height = thickness.mul(u.reliefGain).toVar('cloudHeight');
 
-  return { cov, thickness, height, base };
+  return {
+    cov,
+    thickness,
+    height,
+    base,
+    // DIAGNOSTIC TAPS — the exact quantities that turned "the walls are
+    // still one continuous line" (2026-09-06) from a guess into a measured
+    // fix: the raw cell-polarity signal before the breach gate, the crest
+    // band it feeds, and the independent gate noise deciding which crests
+    // open. Free (they alias values already computed for `cov`/`base`, no
+    // extra noise evaluations) and wired into the shader lab's `dbg-cellraw`
+    // /`dbg-crest`/`dbg-gate` views (`tools/shader-lab/cloud-lab.js`) —
+    // whatever cellular mechanism changes next, render these FIRST rather
+    // than guessing a band/scale from the 0..1 the maths happens to be
+    // written in, which is exactly the mistake this fix made twice before
+    // finally measuring the real range.
+    dbgCellRaw,
+    dbgCrest,
+    dbgGate,
+  };
 }
 
 /**

@@ -563,10 +563,19 @@ export const CALIBRATION_VIEW_PX = 24000;
 
 export function calibrateThresholds(
   driver,
-  { size = 160, covers = [0.05, 0.15, 0.3, 0.45, 0.6, 0.75, 0.9, 0.97], iterations = 18 } = {}
+  {
+    size = 160,
+    covers = [0.05, 0.15, 0.3, 0.45, 0.6, 0.75, 0.9, 0.97],
+    iterations = 18,
+    // Restrict to a subset of keyframes (same shape `contactSheet`'s own
+    // `types` takes: `{at, name}`) — for re-baking ONE keyframe's LUT after
+    // a recipe change without re-measuring the other four, which have not
+    // changed and would only move by measurement noise.
+    types = null,
+  } = {}
 ) {
   const out = [];
-  for (const k of CLOUD_KEYFRAMES) {
+  for (const k of types ?? CLOUD_KEYFRAMES) {
     const rows = [];
     for (const cover of covers) {
       // The base is bounded well inside [-1, 2] after every stage, so this
@@ -619,10 +628,16 @@ export function calibrateThresholds(
  */
 export function calibrateMacroThresholds(
   driver,
-  { size = 160, covers = [0.05, 0.15, 0.3, 0.45, 0.6, 0.75, 0.9, 0.97], iterations = 20 } = {}
+  {
+    size = 160,
+    covers = [0.05, 0.15, 0.3, 0.45, 0.6, 0.75, 0.9, 0.97],
+    iterations = 20,
+    // See the same param on {@link calibrateThresholds}.
+    types = null,
+  } = {}
 ) {
   const out = [];
-  for (const k of CLOUD_KEYFRAMES) {
+  for (const k of types ?? CLOUD_KEYFRAMES) {
     const rows = [];
     for (const cover of covers) {
       let lo = -1.5;

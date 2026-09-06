@@ -151,7 +151,33 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     cellScale: 3.0, // many small elements — a third the size of a cumulus blob
     edgeWidth: 0.12,
     erosion: 0.35,
-    detailScale: 0.2,
+    // ⚠️ WAS 0.2 — the SAME order of magnitude as every other keyframe's
+    // `detailScale`, which is exactly the bug (author, 2026-09-06, after the
+    // warp/wall-breach fixes below had already landed: "Alto is still very
+    // obviously cells"). `detailScale` is not an absolute size, it is a
+    // DIVISOR applied to the already-`cellScale`-independent warped position
+    // (`ph = pw / detailScale`, § EROSION below), so its size relative to the
+    // MAIN cell lattice is what matters, not its raw value. That relative
+    // size is `detailScale * cellScale`: cumulus (detailScale 0.18,
+    // cellScale 1.0) works out to 0.18; stratocumulus (0.22, 0.6) to 0.132 —
+    // both read fine. Altocumulus's OWN cells are 3x smaller to begin with
+    // (`cellScale: 3.0`, above), so its unchanged detailScale of 0.2 worked
+    // out to 0.6 — three to four times coarser, relative to its own cell
+    // size, than the two keyframes that don't have this complaint. The
+    // erosion Worley noise was, in effect, laying down a SECOND lattice of
+    // cell-like creases at nearly the same scale as the main one, rather
+    // than fine surface micro-texture on top of it — confirmed by isolating
+    // `dbg-normalz` at a wide (viewPx 6500) reference render: the baseline
+    // shows a busy quilted/bubble-wrap texture across every cloud body, on
+    // top of the (correctly warped and wall-breached) main cell boundaries.
+    // Retargeting to the SAME relative scale as cumulus (0.18) — i.e.
+    // `0.18 / cellScale` = 0.06 — removed the quilting in `dbg-normalz` and
+    // in the lit `tops` render at both cover 0.45 and 0.68, while leaving the
+    // main cell shapes (and their own warp-bent, partially-breached walls)
+    // completely untouched. Swept 0.2/0.10/0.06/0.03 first: 0.03 is barely
+    // different from 0.06 (erosion detail is already near its noise floor by
+    // then), so 0.06 was kept rather than pushed further for no visible gain.
+    detailScale: 0.06,
     // ⚠️ WAS 0.1, THE LOWEST OF ANY KEYFRAME — and that is exactly why the
     // cell walls read as dead-straight ruled LINES rather than organic seams
     // (author, 2026-09-06: "the walls of the cells are too obviously lines

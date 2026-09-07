@@ -213,6 +213,20 @@ export function run(t) {
       'a singleton cluster carries that one anchor’s own elevation through unchanged',
       approx(clusterCandleAnchors([{ id: 'a', x: 1, y: 2, elevation: 42 }], 1)[0].elevation, 42)
     );
+    ok(
+      'a cluster with no renderAboveOverhead member defaults to false',
+      clusterCandleAnchors([{ id: 'a', x: 1, y: 2 }], 200)[0].renderAboveOverhead === false
+    );
+    ok(
+      'a cluster with ONE flagged member carries renderAboveOverhead through (OR across members)',
+      clusterCandleAnchors(
+        [
+          { id: 'a', x: 1, y: 2 },
+          { id: 'b', x: 3, y: 4, params: { renderAboveOverhead: true } },
+        ],
+        200
+      )[0].renderAboveOverhead === true
+    );
   }
 
   // --- buildCandleLightSources — the descriptor the light pool expects -----
@@ -262,6 +276,7 @@ export function run(t) {
       approx(L.windExposure, 1)
     );
     ok('a lone anchor with no elevation carries 0 onto its light (never undefined)', approx(L.elevation, 0));
+    ok('a lone anchor with no renderAboveOverhead defaults to false on its light', L.renderAboveOverhead === false);
     ok(
       "a light's elevation is the cluster's averaged member elevation",
       approx(
@@ -487,6 +502,23 @@ export function run(t) {
         { lightRadiusPx: 400, colorHex: '#ffaa00' }
       );
       ok('an overridden candle can legitimately opt OUT of casting light', overrideToDark.length === 0);
+
+      // A per-candle "render above overhead" override never merges either
+      // (mythica-machina-press#515), and its own light carries the flag.
+      const aboveAnchors = [
+        { id: 'a', x: 200, y: 200 },
+        { id: 'b', x: 205, y: 202 },
+        { id: 'roof', x: 201, y: 201, params: { renderAboveOverhead: true } },
+      ];
+      const withAbove = buildCandleLightSources(aboveAnchors, { lightRadiusPx: 400, colorHex: '#ffaa00' });
+      ok('the "render above overhead" candle gets its OWN light, never merged', withAbove.length === 2);
+      const aboveLight = withAbove.find((l) => l.sourceId === 'candle:roof');
+      const restLight = withAbove.find((l) => l.sourceId !== 'candle:roof');
+      ok('the solo "above overhead" light carries the flag through', aboveLight?.renderAboveOverhead === true);
+      ok(
+        'the untouched pair still merges into one shared light, flag OFF',
+        restLight?.sourceId === 'candle:a,b' && restLight?.renderAboveOverhead === false
+      );
     }
   }
 

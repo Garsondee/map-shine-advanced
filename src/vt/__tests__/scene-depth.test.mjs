@@ -11,6 +11,8 @@ import {
   describeSceneDepthTarget,
   rankToDepthZ,
   computeExpectedStoredDepth,
+  computeTieSafeExpectedDepth,
+  RENDER_ABOVE_EVERYTHING_DEPTH,
   DEPTH_PASS_CAMERA_Z,
   DEPTH_PASS_NEAR,
   DEPTH_PASS_FAR,
@@ -121,6 +123,31 @@ export function run(t) {
     ok(
       'computeExpectedStoredDepth: every real rank´s expected depth stays inside the camera´s own (0,1) NDC range',
       low > 0 && low < 1 && high > 0 && high < 1
+    );
+  }
+
+  // RENDER_ABOVE_EVERYTHING_DEPTH (mythica-machina-press#515) — an explicit
+  // occlusion opt-out, not a very-high rank: must sit strictly BELOW every
+  // real computeExpectedStoredDepth/computeTieSafeExpectedDepth result, at
+  // any scene size, so buildDepthHeightGateNode's `depthHere.lessThan(...)`
+  // reads unconditionally false (never occluded) for it.
+  {
+    ok('RENDER_ABOVE_EVERYTHING_DEPTH is a plain finite number', Number.isFinite(RENDER_ABOVE_EVERYTHING_DEPTH));
+    const maxRanksToCheck = [1, 2, 5, 50, 5000];
+    let everyRealDepthIsAbove = true;
+    for (const maxRank of maxRanksToCheck) {
+      for (let rank = 0; rank < maxRank; rank++) {
+        if (computeExpectedStoredDepth(rank, maxRank) <= RENDER_ABOVE_EVERYTHING_DEPTH) everyRealDepthIsAbove = false;
+        if (computeTieSafeExpectedDepth(rank, maxRank) <= RENDER_ABOVE_EVERYTHING_DEPTH) everyRealDepthIsAbove = false;
+      }
+    }
+    ok(
+      'RENDER_ABOVE_EVERYTHING_DEPTH sits strictly below every real expected-depth value, at any scene size',
+      everyRealDepthIsAbove
+    );
+    ok(
+      'RENDER_ABOVE_EVERYTHING_DEPTH sits strictly below the far-plane clear value (1) too — an unwritten texel never reads as "above" it either',
+      RENDER_ABOVE_EVERYTHING_DEPTH < 1
     );
   }
 

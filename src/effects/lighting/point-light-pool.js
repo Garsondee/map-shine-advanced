@@ -641,7 +641,7 @@ function createLightEntry({
  *   uniform node. NOT owned here — see the module header's "deliberately did
  *   not move" section. Written (`.value = env.time.tMs`) once per frame by
  *   `update()`, on the caller's behalf.
- * @param {(elevation: number) => number} deps.resolveExpectedDepth - THE
+ * @param {(elevation: number, renderAboveOverhead?: boolean) => number} deps.resolveExpectedDepth - THE
  *   DEPTH-AUTHORITY HEIGHT GATE's own CPU resolver (STAGE 2, 2026-08-04),
  *   INJECTED rather than imported for the SAME reason
  *   `blendSunVisibilityAcrossFloors` is: `vt/scene-depth.js` (where
@@ -654,7 +654,10 @@ function createLightEntry({
  *   `resolveLightElevationRank`/`resolveAnchorElevationRank` for ordinary
  *   Foundry lights — candle/lightning still use the old resolvers, a
  *   deliberate, named deferral, see `point-light-illumination.js`'s own
- *   "STAGE 2" header).
+ *   "STAGE 2" header). The second arg (2026-09-07, mythica-machina-press#515)
+ *   is checked BEFORE elevation: when true, the resolver skips the rank
+ *   lookup entirely and answers with `RENDER_ABOVE_EVERYTHING_DEPTH` instead
+ *   — an explicit per-light opt-out of occlusion, not a very-high rank.
  * @returns {{
  *   lightScene: object, colorationScene: object, apertureShadowScene: object,
  *   mergedScene: object,
@@ -1753,7 +1756,9 @@ export function createPointLightPool({
         }
         const attenuationEased = easeAttenuation(light.attenuation01);
         const exposure = computeExposure(light.luminosity01);
-        const expectedDepth = resolveExpectedDepth ? resolveExpectedDepth(light.elevation) : 0;
+        const expectedDepth = resolveExpectedDepth
+          ? resolveExpectedDepth(light.elevation, light.renderAboveOverhead === true)
+          : 0;
         const reverseSign = light.animation.reverse ? -1 : 1;
         // Same `?? 1` fallback the per-light path's own uniform write uses
         // (`entry.uIllumWindExposure.value = light.windExposure ?? 1`) —
@@ -2060,7 +2065,7 @@ export function createPointLightPool({
       // lightning keeps its pre-existing, ungated-by-default reach with no
       // branch here.
       if (entry.uLightExpectedDepth && resolveExpectedDepth) {
-        const expectedDepth = resolveExpectedDepth(light.elevation);
+        const expectedDepth = resolveExpectedDepth(light.elevation, light.renderAboveOverhead === true);
         entry.uLightExpectedDepth.value = expectedDepth;
         // The coloration twin carries its OWN copy of this uniform (two
         // independently-built materials, same light) — it must be pushed too,

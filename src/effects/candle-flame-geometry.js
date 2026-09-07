@@ -380,8 +380,15 @@ export function buildCandleLightSources(
   const overridden = [];
   for (const a of list) {
     const p = a?.params;
-    if (p?.useCustomColor === true || p?.useCustomLightRadius === true) overridden.push(a);
-    else plain.push(a);
+    // RENDER-ABOVE-OVERHEAD (2026-09-07, mythica-machina-press#515) joins the
+    // override split for the SAME reason colour/light-radius do: averaging
+    // "always above everything" across a shared cluster with ordinary
+    // candles makes no sense (one flagged candle would drag its whole
+    // room's pool along with it), so it always gets its own, never-merged
+    // light instead.
+    if (p?.useCustomColor === true || p?.useCustomLightRadius === true || p?.renderAboveOverhead === true) {
+      overridden.push(a);
+    } else plain.push(a);
   }
 
   const out = [];
@@ -449,6 +456,12 @@ function buildOneLightSource(c, baseRadius, color, qualityTier, windResponse) {
     // to absolute elevation 0 regardless of which floor the candle was really
     // on — the bug this field exists to close.
     elevation: c.elevation,
+    // THE "ABOVE OVERHEAD" ESCAPE HATCH (2026-09-07, mythica-machina-press#515)
+    // — carried from the cluster centroid (see clusterCandleAnchors' own
+    // accumulation just below) onto the descriptor the light pool reads.
+    // point-light-pool.js's two `resolveExpectedDepth(light.elevation, ...)`
+    // call sites check this BEFORE `elevation` — see that file's own doc.
+    renderAboveOverhead: !!c.renderAboveOverhead,
     radius,
     // Sky exposure, averaged across the cluster's members (Wind.md Tier 0)
     // — so this light's OWN lean (candle-flicker.js) can sample the SAME
@@ -532,7 +545,16 @@ export function clusterCandleAnchors(anchors, cellPx) {
     const key = Math.floor(x / size) * CANDLE_CLUSTER_KEY_MULT + Math.floor(y / size);
     let c = cells.get(key);
     if (!c) {
-      c = { sumX: 0, sumY: 0, n: 0, ids: [], intensity: 0, sumExposure: 0, sumElevation: 0 };
+      c = {
+        sumX: 0,
+        sumY: 0,
+        n: 0,
+        ids: [],
+        intensity: 0,
+        sumExposure: 0,
+        sumElevation: 0,
+        renderAboveOverhead: false,
+      };
       cells.set(key, c);
     }
     c.sumX += x;
@@ -566,6 +588,15 @@ export function clusterCandleAnchors(anchors, cellPx) {
     // per-candle light path below, which never averages anything.
     const elRaw = Number(a?.elevation);
     c.sumElevation += Number.isFinite(elRaw) ? elRaw : 0;
+    // RENDER-ABOVE-OVERHEAD (2026-09-07, mythica-machina-press#515) — an OR
+    // across the cluster's members, matching the "escape hatch, never
+    // averaged" posture: `buildCandleLightSources` already routes a flagged
+    // anchor into its own never-merged singleton cluster, so in practice
+    // this only ever sees ONE member per cluster, but OR is still the
+    // correct, honestly-named rule for any other caller (e.g. a test)
+    // clustering flagged anchors together directly — "any member wants this
+    // above everything" beats a false default, never the reverse.
+    if (a?.params?.renderAboveOverhead === true) c.renderAboveOverhead = true;
     if (typeof a.id === 'string') c.ids.push(a.id);
   }
   const out = [];
@@ -578,6 +609,7 @@ export function clusterCandleAnchors(anchors, cellPx) {
       intensity: c.intensity,
       exposure: c.sumExposure / c.n,
       elevation: c.sumElevation / c.n,
+      renderAboveOverhead: c.renderAboveOverhead,
     });
   }
   return out;

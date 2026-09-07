@@ -37,6 +37,14 @@ export function run(t) {
     'candleFlame declares its own map icon (the click/drag handle)',
     typeof candle?.icon === 'string' && candle.icon.length > 0
   );
+  t.ok(
+    'candleFlame declares elevation and the render-above-overhead escape hatch (mythica-machina-press#515)',
+    ['elevation', 'renderAboveOverhead'].every((k) => k in (candle?.params ?? {}))
+  );
+  t.ok(
+    'renderAboveOverhead defaults false (a candle nobody touched keeps today’s occlusion)',
+    candle?.params?.renderAboveOverhead?.default === false
+  );
 
   // --- the V2 → kind mapping the importer uses ----------------------------
   t.ok(

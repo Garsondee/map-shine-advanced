@@ -158,6 +158,7 @@ import {
   rankToDepthZ,
   computeExpectedStoredDepth,
   computeTieSafeExpectedDepth,
+  RENDER_ABOVE_EVERYTHING_DEPTH,
   computeSceneDepthFlags,
   resolveSceneDepthFloorIndex,
   buildSceneDepthWriterMaterial,
@@ -3530,7 +3531,13 @@ export async function startVtPanViewer({
      * this function, but this is not CALLED until `updateCandleFlame()` runs
      * from the frame loop, long after that declaration has executed.
      */
-    function resolveCandleExpectedDepth(elevation) {
+    function resolveCandleExpectedDepth(elevation, renderAboveOverhead) {
+      // RENDER-ABOVE-OVERHEAD ESCAPE HATCH (2026-09-07, mythica-machina-
+      // press#515) — same short-circuit as the point-light pool's own copy
+      // just above (pointLights' `resolveExpectedDepth`): skip the rank
+      // lookup entirely for a flagged candle's FLAME sprite too, so the
+      // flame and the light it casts always agree on "above everything".
+      if (renderAboveOverhead) return RENDER_ABOVE_EVERYTHING_DEPTH;
       const safeElevation = Number.isFinite(elevation) ? elevation : 0;
       const rank = depthAuthority.rankOfElevation(safeElevation);
       return computeTieSafeExpectedDepth(rank, depthAuthority.maxRank);
@@ -3809,7 +3816,12 @@ export async function startVtPanViewer({
       // long after that declaration has executed (the exact same TDZ-safe
       // pattern as `getWindHandle` just above — see this function's own
       // header, "GETTERS VS VALUES").
-      resolveExpectedDepth: (elevation) => {
+      resolveExpectedDepth: (elevation, renderAboveOverhead) => {
+        // RENDER-ABOVE-OVERHEAD ESCAPE HATCH (2026-09-07, mythica-machina-
+        // press#515) — checked BEFORE elevation: a flagged candle light
+        // skips the rank lookup entirely and reads as "above everything
+        // currently drawn" (see RENDER_ABOVE_EVERYTHING_DEPTH's own doc).
+        if (renderAboveOverhead) return RENDER_ABOVE_EVERYTHING_DEPTH;
         // `light.elevation` is `undefined` for candle/lightning-CAST lights
         // (point-light-pool.js#update's own comment) — normalized to 0 here,
         // mirroring the old `resolveLightElevationRank`'s identical guard,
@@ -5527,7 +5539,10 @@ export async function startVtPanViewer({
       // consumed by this same anchor's cast LIGHT — boot.js#getCandleRenderState's
       // own note) into the tie-safe value the shader compares, mirroring
       // lightning's/pointLights' own composition.
-      const anchors = rawAnchors.map((a) => ({ ...a, expectedDepth: resolveCandleExpectedDepth(a.elevation) }));
+      const anchors = rawAnchors.map((a) => ({
+        ...a,
+        expectedDepth: resolveCandleExpectedDepth(a.elevation, a.params?.renderAboveOverhead === true),
+      }));
       const sizePx = Number(state.params?.sizePx) > 0 ? Number(state.params.sizePx) : 1;
       // The flame's chaotic-life detail is a graph-BUILD-time tier (like the
       // light pool's), so a live animationQuality change rebuilds the material.

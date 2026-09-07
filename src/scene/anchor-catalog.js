@@ -315,6 +315,34 @@ export const ANCHOR_KINDS = Object.freeze([
         label: 'Auto-ignite',
         help: 'Let the effect-wide day/night chances (Candle flames panel → Advanced → Presence) decide whether THIS candle is lit. Turn off to pin this one candle to whatever "Lit" above says, ignoring the roll — for a candle that matters to the story and should never flicker on its own.',
       },
+      // RENDER ABOVE THE OVERHEAD LAYER (2026-09-07, author request,
+      // mythica-machina-press#515: "I need a toggle... so that they are
+      // above the overhead layer, at the moment they are always below").
+      // The depth-authority occlusion gate (buildDepthHeightGateNode) is
+      // already elevation-rank-based and CAN place a candle above a roof —
+      // but only by raising `elevation` ("Height off floor", capped at 50)
+      // past whatever that roof's own authored elevation happens to be,
+      // which an author has no way to read off, and which a tall floor band
+      // can exceed outright. This is the explicit escape hatch: both
+      // resolvers (vt-pan-viewer.js#resolveCandleExpectedDepth for the flame
+      // sprite, point-light-pool.js's own resolveExpectedDepth call for the
+      // cast light) check this flag BEFORE touching `elevation` at all, and
+      // resolve straight to vt/scene-depth.js's RENDER_ABOVE_EVERYTHING_DEPTH
+      // sentinel — so this candle draws over every tile and roof currently
+      // composited on its floor, unconditionally. Default false: a candle
+      // nobody has touched this on keeps today's occlusion behaviour exactly.
+      //
+      // Routes through the SAME override path as useCustomColor/
+      // useCustomLightRadius (candle-flame-geometry.js#buildCandleLightSources)
+      // rather than merging into a shared cluster light — averaging "always
+      // on top" across a cluster with ordinary candles makes no sense, so a
+      // flagged candle always gets its own, never-merged light.
+      renderAboveOverhead: {
+        type: 'bool',
+        default: false,
+        label: 'Render above overhead layer',
+        help: 'When on, this candle’s flame and its light always draw on top of every tile and roof on its floor — including the overhead/foreground layer — ignoring elevation occlusion entirely for this one candle. Use for a candle that should sit visually above everything else, such as one on an open rooftop where the floor below’s roof art would otherwise cover it.',
+      },
     },
     meaning: 'A single placed candle flame — the canonical discrete anchor, successor to a V2 candleFlame map point.',
   },

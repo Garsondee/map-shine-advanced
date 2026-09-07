@@ -241,6 +241,33 @@ export function computeTieSafeExpectedDepth(rank, maxRank) {
 }
 
 /**
+ * A stored-depth value that reads as "above every real drawable, always" —
+ * an explicit opt-out of the rank comparison entirely, for a caller that
+ * wants to skip the occlusion question rather than answer it with a very
+ * high rank (which would still need a real item to compare against, and
+ * could still tie).
+ *
+ * For ANY `rank`/`maxRank`, {@link computeExpectedStoredDepth}'s own formula
+ * confines every real result to `((DEPTH_PASS_CAMERA_Z - DEPTH_PASS_NEAR - 1)
+ * / (DEPTH_PASS_FAR - DEPTH_PASS_NEAR), (DEPTH_PASS_CAMERA_Z - DEPTH_PASS_NEAR)
+ * / (DEPTH_PASS_FAR - DEPTH_PASS_NEAR))` — at this module's own constants,
+ * ≈ (0.3994, 0.4995) — because `rankToDepthZ` confines `z` to the open
+ * interval `(0,1)` regardless of how large `maxRank` grows. That range is
+ * strictly positive and bounded well away from 0 at any scene size, so `0`
+ * is always STRICTLY LESS than any real stored depth or any real
+ * `computeTieSafeExpectedDepth` result.
+ *
+ * `buildDepthHeightGateNode`'s rank gate is `depthHere.lessThan(uLightExpectedDepth)
+ * ? 0 : 1` — with `uLightExpectedDepth` at this sentinel, `depthHere.lessThan(0)`
+ * is always false (an unwritten texel clears to the far plane, `1`, same as
+ * every other real value — also `>= 0`), so the gate always reads "not
+ * occluded", unconditionally, for every pixel this drawable touches.
+ *
+ * @type {number}
+ */
+export const RENDER_ABOVE_EVERYTHING_DEPTH = 0;
+
+/**
  * Presence-flag bits for `buf:scene.depth`'s colour payload, B channel
  * (design doc §4). Independent booleans, not a value field — there is no
  * receiver-elevation quantisation here the way `scene-attr.js`'s presence

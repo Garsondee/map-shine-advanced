@@ -33,6 +33,39 @@ import { renderDebugStrip } from './debug-strip.js';
 
 const ROOM_ID = 'msa-remote';
 const STYLE_ID = 'msa-remote-style';
+const POSITION_STORAGE_KEY = 'msa-remote-position';
+
+// THE REMOTE'S DEFAULT PLACEMENT — vertically centred on the left side of
+// the screen, clear of Foundry's own left toolbar (author: wants it "just
+// slightly away from the other controls", never draggable somewhere it
+// can't be reached back from). #ui-left-column-1 (client/templates/views/
+// game.hbs) is the toolbar's own tight-fitting column — measured live
+// rather than baked in as a constant so a future Foundry toolbar-width
+// change can't silently put the Remote back underneath it; TOOLBAR_CLEAR_FALLBACK
+// (16px #ui-left padding + 72px of a 2-column, 32px control-size toolbar,
+// foundry client/public/less2/views/game.less) is only the guess used on the
+// rare chance that element isn't found.
+//
+// TOOLBAR_GAP is bigger than it looks like it needs to be: the scale strip
+// (installScaleControl below) hangs off the room's OWN left edge, further
+// left again by its own ~38px width plus its 8px inset — measuring only the
+// room itself here would read as "clear of the toolbar" while the strip
+// still overlapped it. The gap actually visible between toolbar and strip
+// is TOOLBAR_GAP minus that ~46px, i.e. still just the "slightly away" the
+// author asked for.
+//
+// Left un-saved to localStorage on its own (see readStored/writeStored in
+// draggable.js) — only an actual drag commits a position, so this
+// recomputes fresh each reload until the user moves it once.
+const TOOLBAR_GAP = 64;
+const TOOLBAR_CLEAR_FALLBACK = 152;
+
+function computeDefaultPosition(rect) {
+  const toolbar = document.getElementById('ui-left-column-1');
+  const left = toolbar ? toolbar.getBoundingClientRect().right + TOOLBAR_GAP : TOOLBAR_CLEAR_FALLBACK;
+  const top = (window.innerHeight - rect.height) / 2;
+  return { left, top };
+}
 
 function injectStyle() {
   if (document.getElementById(STYLE_ID)) return;
@@ -807,13 +840,27 @@ export function installRemote(opts = {}) {
   card.append(head, rendererRow, body, foot);
   room.appendChild(card);
   document.body.appendChild(room);
-  makeDraggable(head, room);
+  const positioning = makeDraggable(head, room, {
+    storageKey: POSITION_STORAGE_KEY,
+    getDefaultPosition: computeDefaultPosition,
+  });
   // THE SCALE STRIP (2026-08-27, author: "a scaling button on the side of
   // the UI... generally helpful for people worried about screen real
   // estate"; round 2, author: "moved to the left till it sits on the
   // outside of the panel") — a sibling of `card`, not a child of it, so it
   // is never clipped by the card's own overflow:hidden.
-  room.appendChild(installScaleControl(room, { storageKey: 'msa-remote-scale' }).root);
+  //
+  // transformOrigin:'top left', NOT installScaleControl's own 'top right'
+  // default (2026-09-07, Remote position-memory work) — that default exists
+  // to pivot from whichever edge the room is actually pinned to (see its own
+  // doc), and the Remote now pins by `left` (computeDefaultPosition above,
+  // or a dragged/restored position), not `right`. Pivoting from the wrong
+  // corner would scale this very strip AWAY from the toolbar gap it's meant
+  // to sit in — at max scale (1.5x) it drifts on the order of 150-200px
+  // further left, which is exactly the "off in the scenery, hard to reach"
+  // failure this whole change is trying to close, and it's the strip's own
+  // +/- buttons a stuck-oversized user would need to click to undo it.
+  room.appendChild(installScaleControl(room, { storageKey: 'msa-remote-scale', transformOrigin: 'top left' }).root);
 
   const openChangeListeners = new Set();
   const controller = {
@@ -821,6 +868,9 @@ export function installRemote(opts = {}) {
       buildBody();
       state.open = true;
       room.hidden = false;
+      // Rect is only real once un-hidden — see makeDraggable's own doc for
+      // why this has to be called here rather than right after it's built.
+      positioning.ensurePositioned();
       for (const fn of openChangeListeners) fn(true);
     },
     close() {

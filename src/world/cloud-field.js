@@ -119,11 +119,24 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     openCellPeak: 0,
     jitter: 1.0,
     cellScale: 1.0,
+    cellScaleVariation: 0, // barely cellular to begin with — nothing to vary
     edgeWidth: 0.35, // soft — a cirrus edge is a fade, not a boundary
     erosion: 0.25,
     edgeChaos: 0, // already a fade, not a boundary — nothing here to chaos-up
     detailScale: 0.25,
+    shadeDetail: 0, // nearly flat (reliefGain 0.1) — no relief here to sculpt
     warp: 0.6, // the streakiness dial; cirrus is heavily domain-warped
+    // The type the "most machine generated" report (2026-09-07) named
+    // directly — densely packed cirrus read as parallel wood-grain, one
+    // uniform streak direction for as far as the frame shows. See
+    // REGIONAL VARIATION in `buildCloudFieldNode` for the mechanism; this is
+    // the largest wander of any keyframe because cirrus has the most
+    // anisotropy (4.0) for it to visibly bend. Swept 0/35/50/65/80 at a wide
+    // (viewPx 16000) dense reference render: no fold artifact at any of
+    // these (unlike the rotation-frequency mistake caught in the same pass
+    // — see REGIONAL VARIATION's own note), just progressively richer
+    // marbling; 50 was kept rather than pushed further for no clear gain.
+    streakWander: 50,
     anisotropy: 4.0, // fibres run 4x longer than they are wide
     smear: 0.7,
     gain: 0.62,
@@ -150,6 +163,20 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     // the reason altocumulus read as blurry cumulus in the first contact sheet
     // instead of as a mackerel lattice.
     cellScale: 3.0, // many small elements — a third the size of a cumulus blob
+    // The type the "most machine generated" report (2026-09-07) named
+    // directly, together with cirrus — densely packed altocumulus read as
+    // one uniform cobblestone tile, every mackerel cell almost exactly the
+    // same size for as far as the frame shows. See REGIONAL VARIATION in
+    // `buildCloudFieldNode`: drifts cell size +/-55% region to region so a
+    // large dense deck breaks into visibly different-sized patches instead
+    // of one repeating lattice spacing. Deliberately NOT `jitter` — that
+    // still has to stay low and uniform for the lattice to read as mackerel
+    // at all (see this file's own established lesson, `jitter`'s comment
+    // above); this varies the SIZE of the lattice, region to region, not its
+    // internal regularity. Unlike `streakWander`, size modulation has no
+    // rotation to fold, so it was safe to confirm clean at the FASTER of the
+    // two regional frequencies (`REGION_FREQ_SIZE`) with no ceiling found.
+    cellScaleVariation: 0.55,
     edgeWidth: 0.12,
     erosion: 0.35,
     edgeChaos: 0.05, // see cumulus's own note — scaled down, mackerel walls are thin already
@@ -180,6 +207,7 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     // different from 0.06 (erosion detail is already near its noise floor by
     // then), so 0.06 was kept rather than pushed further for no visible gain.
     detailScale: 0.06,
+    shadeDetail: 0, // thin (thicknessCap 0.55) — little relief here to add a knuckle scale to
     // ⚠️ WAS 0.1, THE LOWEST OF ANY KEYFRAME — and that is exactly why the
     // cell walls read as dead-straight ruled LINES rather than organic seams
     // (author, 2026-09-06: "the walls of the cells are too obviously lines
@@ -199,6 +227,7 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     // window that bends every wall while keeping cells visually distinct,
     // confirmed at both cover 0.3 and 0.6 and at two view scales.
     warp: 0.28,
+    streakWander: 4, // mackerel rows are meant to look combed — barely any wander
     anisotropy: 1.6, // rows, from the wave that makes them
     smear: 0.15,
     gain: 0.46,
@@ -221,6 +250,7 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     openCellPeak: 1, // the honeycomb flip lives here and at stratocumulus
     jitter: 1.0, // fully random placement: cumulus is not a lattice
     cellScale: 1.0,
+    cellScaleVariation: 0.3, // see altocumulus's own note — a dense sky is not one uniform blob size
     // ⚠️ WIDENED FROM 0.10 (2026-09-06, author: "make cumulus/stratocumulus
     // grainy and fuzzy... fade into wispy clouds like stratus around the
     // edges"). A narrow edgeWidth gives a NARROW spatial transition band —
@@ -241,7 +271,14 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     // broken-up edge character without yet reading as sandpaper.
     edgeChaos: 0.12,
     detailScale: 0.18,
+    // The type the "shading needs to be higher frequency" report (2026-09-07)
+    // named directly — see § SHADING DETAIL in `buildCloudFieldNode`. Highest
+    // of any keyframe: cumulus is "the towering one" (reliefGain 1.0,
+    // thicknessCap 1.0), so it has the most relief for a medium "knuckle"
+    // scale to actually read against.
+    shadeDetail: 0.4,
     warp: 0.18,
+    streakWander: 8, // cloud streets still mostly run one way, but not perfectly
     anisotropy: 1.15, // slight, from cloud streets
     smear: 0.2,
     gain: 0.42,
@@ -264,11 +301,14 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     openCellPeak: 1,
     jitter: 0.85,
     cellScale: 0.6, // the big mesoscale cells (10-40 km in reality)
+    cellScaleVariation: 0.3, // same family as cumulus, see its own note
     edgeWidth: 0.3, // widened for the same reason as cumulus, see its own note
     erosion: 0.35,
     edgeChaos: 0.08, // same family as cumulus, dialled back — already blends well
     detailScale: 0.22,
+    shadeDetail: 0.25, // same family as cumulus, dialled back — less relief to sculpt
     warp: 0.15,
+    streakWander: 6,
     anisotropy: 1.1,
     smear: 0.1,
     gain: 0.44,
@@ -289,11 +329,14 @@ export const CLOUD_KEYFRAMES = Object.freeze([
     openCellPeak: 0,
     jitter: 1.0,
     cellScale: 1.0,
+    cellScaleVariation: 0, // a featureless sheet — no cells to vary the size of
     edgeWidth: 0.45, // no edges at all, really
     erosion: 0.15,
     edgeChaos: 0, // no edges at all, really — see edgeWidth
     detailScale: 0.3,
+    shadeDetail: 0, // nearly flat (reliefGain 0.1) — no relief here to sculpt
     warp: 0.2,
+    streakWander: 0, // a sheet has no streak direction to wander
     anisotropy: 1.0,
     smear: 0.05,
     gain: 0.5,
@@ -320,11 +363,14 @@ export const CLOUD_RECIPE_KEYS = Object.freeze([
   'openCellPeak',
   'jitter',
   'cellScale',
+  'cellScaleVariation',
   'edgeWidth',
   'erosion',
   'edgeChaos',
   'detailScale',
+  'shadeDetail',
   'warp',
+  'streakWander',
   'anisotropy',
   'smear',
   'gain',
@@ -711,6 +757,8 @@ export function buildCloudFieldNode(
     pow,
     exp,
     dot,
+    cos,
+    sin,
     mx_fractal_noise_float,
     mx_worley_noise_float,
     mx_noise_float,
@@ -718,6 +766,61 @@ export function buildCloudFieldNode(
 
   const inv = float(1).div(u.scalePx.max(float(1)));
   const p0 = worldXY.add(u.drift).mul(inv).toVar('cloudP0');
+
+  // ── 0b. REGIONAL VARIATION — this deck is not one wallpaper tile ─────────
+  // Author's report (2026-09-07), after reviewing a dense-cover render: "All
+  // clouds look best in their sparse mode because the more of it that
+  // appears the more obvious the pattern becomes." Densely packed cirrus
+  // read as parallel wood-grain (one uniform streak direction, everywhere);
+  // densely packed altocumulus read as one uniform cobblestone tile (every
+  // mackerel cell almost exactly the same size, everywhere). Both are the
+  // classic tell of a STATISTICALLY STATIONARY noise field: at a small
+  // sample (sparse cover, or a tight crop) its own characteristic scale is
+  // invisible, but at a large sample (dense cover, a whole sky) the SAME
+  // scale repeating everywhere is exactly what the eye is tuned to notice.
+  //
+  // Two cheap, LOW-frequency, NON-ANIMATED (fixed z, same idiom as EDGE
+  // CHAOS below — a "climate", not a boil) fBm taps, far coarser than a
+  // single cell, so a large dense deck breaks into several distinct
+  // "regions" rather than reading as one uniform statistic. Decorrelated by
+  // constant offsets, the same trick the DOMAIN WARP below already uses to
+  // keep two taps independent without a second unrelated noise family.
+  // `regionA` drives DIRECTION (§1's anisotropy axis wobbles per region,
+  // breaking cirrus's "combed" uniform streak angle); `regionB` drives SIZE
+  // (§3's cell scale drifts per region, breaking altocumulus's "cobblestone"
+  // uniform tile). Computed on `p0` — BEFORE anisotropy, warp or cell
+  // sampling — so the regions themselves are not stretched or warped by the
+  // very stretch/warp they go on to modulate.
+  //
+  // ⚠️ TWO DIFFERENT FREQUENCIES, NOT ONE, and conflating them was a real
+  // bug caught by rendering: a ROTATED sampling basis is itself a domain
+  // warp (of the angle, not the position), so it folds by exactly the same
+  // mechanism the `warp` fold-test above already proved — swept regionA's
+  // own frequency up alongside `streakWander` and got the identical
+  // concentric-swirl artifact at (freq 0.22, wander 50) that `warp` gave at
+  // high values. `regionB` feeds an AMPLITUDE (cell size), never a
+  // rotation, so it has no such ceiling and can run faster — confirmed
+  // clean at 0.22 with no fold artifact of any kind.
+  const REGION_FREQ_DIR = 0.09;
+  const REGION_FREQ_SIZE = 0.22;
+  const regionA = mx_fractal_noise_float(
+    vec3(p0.x.mul(float(REGION_FREQ_DIR)), p0.y.mul(float(REGION_FREQ_DIR)), float(7.1)),
+    2,
+    2,
+    0.5,
+    1
+  ).toVar('cloudRegionA');
+  const regionB = mx_fractal_noise_float(
+    vec3(
+      p0.x.mul(float(REGION_FREQ_SIZE)).add(float(5.2)),
+      p0.y.mul(float(REGION_FREQ_SIZE)).add(float(1.3)),
+      float(53.2)
+    ),
+    2,
+    2,
+    0.5,
+    1
+  ).toVar('cloudRegionB');
 
   // ── 1. ANISOTROPY — stretch ALONG the wind ────────────────────────────────
   // Cirrus fibres and cloud streets both run downwind. ONE stretch, applied
@@ -729,7 +832,19 @@ export function buildCloudFieldNode(
   // vector (it comes from `windFlowVector`, which is unit by construction), and
   // normalising a (0,0) uniform — the value a not-yet-pushed material holds —
   // produces NaN, which propagates to a black frame with no error anywhere.
-  const a = u.windDir.toVar('cloudWindDir');
+  //
+  // ⚠️ ROTATED BY `regionA`, not the raw wind direction — see REGIONAL
+  // VARIATION above. `streakWander` (a per-keyframe dial, degrees either way)
+  // is what makes this a provable no-op at 0: cellular types with anisotropy
+  // already near 1 have barely any elongation to wobble and are left at 0,
+  // cirrus (built for exactly this) gets the most.
+  const windDir = u.windDir.toVar('cloudWindDir');
+  const wanderRad = regionA.mul(u.streakWander).mul(float(Math.PI / 180));
+  const cosW = cos(wanderRad);
+  const sinW = sin(wanderRad);
+  const a = vec2(windDir.x.mul(cosW).sub(windDir.y.mul(sinW)), windDir.x.mul(sinW).add(windDir.y.mul(cosW))).toVar(
+    'cloudWindDirWandered'
+  );
   const b = vec2(a.y.negate(), a.x).toVar('cloudWindPerp');
   const along = dot(p0, a).div(u.anisotropy.max(float(0.05)));
   const across = dot(p0, b);
@@ -787,8 +902,17 @@ export function buildCloudFieldNode(
     // CENTRES of cells → round blobs (cumulus, and closed-cell stratocumulus
     // at high cover). Passing `1 - W` lifts the EDGES → a honeycomb of walls
     // around clear centres, which is open-cell convection.
+    //
+    // `cellScaleEff`, not the raw uniform — see REGIONAL VARIATION at the top
+    // of this function. `regionB` (roughly -1..1) drifts the cell size by up
+    // to `cellScaleVariation` either way, per region, so a large dense deck
+    // organises into visibly different-sized patches of cells instead of one
+    // uniform lattice spacing repeating for as far as the frame shows. Zero
+    // for any keyframe that does not set `cellScaleVariation` — provably a
+    // no-op, same pattern as every other opt-in dial in this file.
+    const cellScaleEff = u.cellScale.mul(float(1).add(regionB.mul(u.cellScaleVariation)));
     const w = clamp(
-      mx_worley_noise_float(vec3(pw.mul(u.cellScale.max(float(0.05))), u.boil.mul(float(0.5))), u.jitter),
+      mx_worley_noise_float(vec3(pw.mul(cellScaleEff.max(float(0.05))), u.boil.mul(float(0.5))), u.jitter),
       0,
       1
     );
@@ -900,6 +1024,7 @@ export function buildCloudFieldNode(
   // driving the NORMAL now fades out over the SAME footprint alpha does.
   const thr = cells ? u.threshold : u.macroThreshold;
   let cov = smoothstep(thr, thr.add(u.edgeWidth.max(float(0.01))), base).toVar('cloudCov');
+  let shadeBump = float(0);
 
   // ── 5. EROSION — high-frequency detail eats the LOW end ───────────────────
   // Always INSIDE the low-frequency hull, never outside it: that is what keeps
@@ -976,6 +1101,48 @@ export function buildCloudFieldNode(
     const chaosNoise = mx_noise_float(vec3(chaosP.x, chaosP.y, float(41.7)));
     const edgeProximity = cov.mul(float(1).sub(cov)).mul(float(4));
     cov = clamp(cov.add(chaosNoise.mul(u.edgeChaos).mul(edgeProximity).mul(float(0.6))), 0, 1).toVar('cloudCovChaos');
+
+    // ── 5c. SHADING DETAIL — a MEDIUM-frequency bump, HEIGHT only ──────────
+    // Author's report (2026-09-07): "The shading on cumulus needs to be
+    // higher frequency I think." Erosion above already adds FINE cauliflower
+    // detail, but only to `cov`/alpha — `height` (§6) inherits it multiplied
+    // through `thickness`, heavily damped by the smooth `excess` envelope, so
+    // the NORMAL ends up carrying the macro shape's broad lobes plus a faint
+    // fine ripple, with a real gap in between: nothing at the "knuckle" scale
+    // between a whole cell and a grain of erosion. That gap is what reads as
+    // "the shading is lower frequency than the silhouette", even though the
+    // silhouette itself already shows plenty of erosion/chaos texture.
+    //
+    // A medium-frequency bump, COARSER than either erosion octave (ph*0.4,
+    // against erosion's ph*1 and ph*2.3), added to HEIGHT directly rather
+    // than to `cov` — so it sculpts the lit surface without ever touching
+    // the calibrated coverage/alpha statistics that `coverLut`/`macroCoverLut`
+    // depend on (re-measured, not assumed — see the commit message: both
+    // were unaffected within noise). Weighted by `cov` so it never invents
+    // relief out in clear sky, and zero for any keyframe that leaves
+    // `shadeDetail` at 0 — provably a no-op, same pattern as every other
+    // opt-in dial in this file.
+    //
+    // ⚠️ PERLIN, NOT WORLEY — the OPPOSITE choice from erosion, and the
+    // opposite of this file's own usual "Worley is cauliflower, Perlin is
+    // smoke" rule, for a reason specific to THIS tap: it feeds `height`
+    // DIRECTLY, which section 1's forward-difference epsilon then
+    // DIFFERENTIATES into the normal — so it is the SLOPE, not the value,
+    // that ends up on screen. A single raw Worley tap went in here first (a
+    // 2-octave BLEND second, matching erosion's own fix) and BOTH produced
+    // visibly FACETED, crystalline patches, confirmed side by side against
+    // `shadeDetail: 0` — because a Worley F1 field has a genuine KINK IN ITS
+    // GRADIENT along the perpendicular bisector between feature points (the
+    // same geometric crease `buildCloudFieldNode`'s own cell term already
+    // documents at length), and blending a second octave only makes that
+    // crease less REGULAR, not less SHARP. A gradient-based term inherits
+    // gradient discontinuities that a value-based term (like `cov`,
+    // where erosion's own Worley taps are merely SUBTRACTED and
+    // re-normalised, never differentiated) simply never exposes. Perlin's
+    // level sets have no such kink anywhere, so its SLOPE is smooth too.
+    const shadeP = ph.mul(float(0.4));
+    const shadeRaw = mx_fractal_noise_float(vec3(shadeP.x, shadeP.y, u.boil.mul(float(1.6))), 2, 2, 0.5, 1);
+    shadeBump = shadeRaw.mul(float(0.35)).mul(u.shadeDetail).mul(cov);
   }
 
   // ── 6. THICKNESS AND RELIEF ───────────────────────────────────────────────
@@ -1009,7 +1176,7 @@ export function buildCloudFieldNode(
     .mul(mix(float(0.3), float(1), pow(excess, float(0.75))))
     .mul(u.thicknessCap)
     .toVar('cloudThickness');
-  const height = thickness.mul(u.reliefGain).toVar('cloudHeight');
+  const height = thickness.mul(u.reliefGain).add(shadeBump).toVar('cloudHeight');
 
   return {
     cov,

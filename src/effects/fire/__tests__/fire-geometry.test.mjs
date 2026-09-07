@@ -32,6 +32,7 @@ import {
   fireWeatherResponse,
   fireWindMotion01,
   fireWindParticleResponse,
+  fireIndoorParticleResponse,
   resolveFireCoverageRung,
   clusterFireSources,
   buildFireLightSources,
@@ -791,6 +792,114 @@ export function run(t) {
       'flame activeCount, by contrast, still differs with exposure — suppression stays exposure-aware',
       fullWindSealed.perKind.flame.activeCount !== fullWind.perKind.flame.activeCount &&
         fullWindSealed.perKind.flame.activeCount > fullWind.perKind.flame.activeCount
+    );
+  }
+
+  // ── INDOOR SUPPRESSION (2026-09-07) — fireIndoorParticleResponse ───────────
+  // Author's own endpoints: a fully indoor fire cuts ember/smoke count by 90%
+  // and their lifetime to 15% by default; a fully outdoor fire is untouched;
+  // flame is never touched by either.
+
+  {
+    const outdoors = fireIndoorParticleResponse(0);
+    t.ok(
+      'indoor01=0 (fully outdoors) leaves every multiplier at its neutral 1x',
+      outdoors.emberActiveCountMul === 1 &&
+        outdoors.emberLifeMul === 1 &&
+        outdoors.smokeActiveCountMul === 1 &&
+        outdoors.smokeLifeMul === 1
+    );
+
+    const indoors = fireIndoorParticleResponse(1);
+    t.ok(
+      "indoor01=1 (fully indoors) hits the author's own defaults exactly — 90% count cut, 15% life",
+      near(indoors.emberActiveCountMul, 0.1, 1e-9) &&
+        near(indoors.smokeActiveCountMul, 0.1, 1e-9) &&
+        near(indoors.emberLifeMul, 0.15, 1e-9) &&
+        near(indoors.smokeLifeMul, 0.15, 1e-9)
+    );
+
+    const half = fireIndoorParticleResponse(0.5);
+    t.ok(
+      'a linear blend, not eased like the wind curve — half indoor lands exactly halfway between the two endpoints',
+      near(half.emberActiveCountMul, 0.55, 1e-9) && near(half.emberLifeMul, 1 - 0.5 * (1 - 0.15), 1e-9)
+    );
+
+    const customised = fireIndoorParticleResponse(1, {
+      emberSuppression: 0.5,
+      emberLifeScale: 0.4,
+      smokeSuppression: 0.2,
+      smokeLifeScale: 2,
+    });
+    t.ok(
+      "an author's own suppression/life-scale dials override the defaults",
+      near(customised.emberActiveCountMul, 0.5, 1e-9) &&
+        near(customised.emberLifeMul, 0.4, 1e-9) &&
+        near(customised.smokeActiveCountMul, 0.8, 1e-9) &&
+        near(customised.smokeLifeMul, 2, 1e-9)
+    );
+
+    t.ok(
+      'a non-finite indoor01 falls back to 0 (outdoors), never NaN',
+      fireIndoorParticleResponse(NaN).emberActiveCountMul === 1
+    );
+
+    // ── THROUGH fireRuntimeFromParams ITSELF ──
+    const chain66Indoor = fireScaleChain(66, M_PER_PX);
+    const outdoorRuntime = fireRuntimeFromParams({}, chain66Indoor, { outdoor01: 1 });
+    const noArgRuntime = fireRuntimeFromParams({}, chain66Indoor);
+    t.ok(
+      'omitting `wind` entirely matches passing outdoor01=1 explicitly (backward-compatible default)',
+      outdoorRuntime.perKind.ember.activeCount === noArgRuntime.perKind.ember.activeCount &&
+        outdoorRuntime.perKind.smoke.activeCount === noArgRuntime.perKind.smoke.activeCount
+    );
+
+    const indoorRuntime = fireRuntimeFromParams({}, chain66Indoor, { outdoor01: 0 });
+    t.ok(
+      "a fully indoor fire's ember/smoke activeCount drops to 10% of the outdoor value",
+      near(indoorRuntime.perKind.ember.activeCount, outdoorRuntime.perKind.ember.activeCount * 0.1, 1) &&
+        near(indoorRuntime.perKind.smoke.activeCount, outdoorRuntime.perKind.smoke.activeCount * 0.1, 1)
+    );
+    t.ok(
+      "flame's activeCount is completely untouched by indoor01 — the author's own ask was embers and smoke only",
+      indoorRuntime.perKind.flame.activeCount === outdoorRuntime.perKind.flame.activeCount
+    );
+    t.ok(
+      "ember's lifeAtWind0/lifeAtWind1 both shrink to 15% indoors, together — the wind0/wind1 SHAPE survives, only the scale changes",
+      near(indoorRuntime.perKind.ember.lifeAtWind0, outdoorRuntime.perKind.ember.lifeAtWind0 * 0.15, 1e-6) &&
+        near(indoorRuntime.perKind.ember.lifeAtWind1, outdoorRuntime.perKind.ember.lifeAtWind1 * 0.15, 1e-6)
+    );
+    t.ok(
+      // mythica-machina-press#512 — smoke's life used to be a `lifeScale`
+      // field nothing downstream ever read (fire-particle-runtime.js#setParams
+      // has no handler for that key). Proving a real lifeAtWind0/lifeAtWind1
+      // pair exists and moves with indoor01 is this fix's own regression
+      // test, not just the new feature's.
+      "smoke now carries a real lifeAtWind0/lifeAtWind1 pair (mythica-machina-press#512's fix), and both shrink indoors",
+      Number.isFinite(outdoorRuntime.perKind.smoke.lifeAtWind0) &&
+        Number.isFinite(outdoorRuntime.perKind.smoke.lifeAtWind1) &&
+        near(indoorRuntime.perKind.smoke.lifeAtWind0, outdoorRuntime.perKind.smoke.lifeAtWind0 * 0.15, 1e-6) &&
+        near(indoorRuntime.perKind.smoke.lifeAtWind1, outdoorRuntime.perKind.smoke.lifeAtWind1 * 0.15, 1e-6)
+    );
+    t.ok(
+      "an author's own emberIndoorSuppression dial reaches the real call path",
+      near(
+        fireRuntimeFromParams({ emberIndoorSuppression: 0 }, chain66Indoor, { outdoor01: 0 }).perKind.ember.activeCount,
+        outdoorRuntime.perKind.ember.activeCount,
+        1
+      )
+    );
+
+    // Wind and indoor suppression are independent axes and must stack, not
+    // fight — a windy, sealed-in indoor fire's smoke should be MORE
+    // suppressed than an equally windy outdoor one, never less. Partial wind
+    // speed (not 1) so wind alone has not already zeroed smoke out and
+    // masked whatever indoor01 does on top of it.
+    const windyOutdoor = fireRuntimeFromParams({}, chain66Indoor, { speed01: 0.3, exposure01: 1, outdoor01: 1 });
+    const windyIndoor = fireRuntimeFromParams({}, chain66Indoor, { speed01: 0.3, exposure01: 1, outdoor01: 0 });
+    t.ok(
+      'wind and indoor suppression stack on smoke activeCount rather than one overriding the other',
+      windyIndoor.perKind.smoke.activeCount < windyOutdoor.perKind.smoke.activeCount
     );
   }
 

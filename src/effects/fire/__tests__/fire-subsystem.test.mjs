@@ -640,5 +640,78 @@ export function run(t) {
         Number.isFinite(activeCountWithOutdoor) &&
         activeCountWithOutdoor !== activeCountIndoorOnly
     );
+
+    // ── INDOOR SUPPRESSION (2026-09-07) — outdoors01 reaching setParams ────
+    // Own scenario within the same shared harness. Reset wind to calm first
+    // so indoor suppression's own contribution is not confounded by the wind
+    // suppression already exercised above.
+    fakeWindHandle.ambient.speed01.value = 0;
+    const emberEngine = windEngines.find((e) => e.kind === 'ember');
+    const smokeEngine = windEngines.find((e) => e.kind === 'smoke');
+
+    windState.fires = [{ id: 'f1', x: 50, y: 50, diameterPx: 66, intensity: 1, outdoors01: 1 }];
+    windSubsystem.sync(renderer, 72, 0.016, rect);
+    const emberCountOutdoor = emberEngine?.paramCalls.at(-1)?.activeCount;
+    const smokeCountOutdoor = smokeEngine?.paramCalls.at(-1)?.activeCount;
+    const flameCountOutdoor = flameSealed?.paramCalls.at(-1)?.activeCount;
+
+    windState.fires = [{ id: 'f1', x: 50, y: 50, diameterPx: 66, intensity: 1, outdoors01: 0 }];
+    windSubsystem.sync(renderer, 80, 0.016, rect);
+    const emberCountIndoor = emberEngine?.paramCalls.at(-1)?.activeCount;
+    const smokeCountIndoor = smokeEngine?.paramCalls.at(-1)?.activeCount;
+    const flameCountIndoor = flameSealed?.paramCalls.at(-1)?.activeCount;
+
+    t.ok(
+      `a fully indoor fire cuts ember/smoke activeCount well below the outdoor reading, matching the author's own 90% default (ember outdoor=${emberCountOutdoor} indoor=${emberCountIndoor}, smoke outdoor=${smokeCountOutdoor} indoor=${smokeCountIndoor})`,
+      Number.isFinite(emberCountOutdoor) &&
+        Number.isFinite(emberCountIndoor) &&
+        Number.isFinite(smokeCountOutdoor) &&
+        Number.isFinite(smokeCountIndoor) &&
+        emberCountIndoor < emberCountOutdoor &&
+        smokeCountIndoor < smokeCountOutdoor
+    );
+    t.ok(
+      "flame's own activeCount is untouched by outdoors01 — the author's own ask was embers and smoke only",
+      flameCountOutdoor === flameCountIndoor
+    );
+    t.ok(
+      "an indoor fire's ember/smoke lifeAtWind0 both shrink too, not just their count — mythica-machina-press#512's fix is what makes smoke's half of this observable at all",
+      emberEngine?.paramCalls.at(-1)?.lifeAtWind0 < emberEngine?.paramCalls.at(-2)?.lifeAtWind0 &&
+        smokeEngine?.paramCalls.at(-1)?.lifeAtWind0 < smokeEngine?.paramCalls.at(-2)?.lifeAtWind0
+    );
+
+    // A fire with no `outdoors01` field at all (older data, an anchor from
+    // before this landed, a torture-world fixture) must fall back to fully
+    // outdoors — safe, byte-identical-to-before behaviour, never an
+    // accidental full suppression from a missing field misreading as indoors.
+    windState.fires = [{ id: 'f1', x: 50, y: 50, diameterPx: 66, intensity: 1 }];
+    windSubsystem.sync(renderer, 88, 0.016, rect);
+    const emberCountMissing = emberEngine?.paramCalls.at(-1)?.activeCount;
+    t.ok(
+      `a fire missing outdoors01 entirely reads as fully outdoors, matching the explicit outdoors01=1 case (missing=${emberCountMissing}, explicit-outdoor=${emberCountOutdoor})`,
+      emberCountMissing === emberCountOutdoor
+    );
+
+    // ── THE SAME LESSER-EVIL MAX BIAS windExposure01 ALREADY USES ──
+    // Same fire COUNT (two) in both scenarios below, so this isolates the
+    // bias itself rather than the separate, unrelated "more fires share a
+    // bigger budget" effect fireCount scaling already produces on its own.
+    windState.fires = [
+      { id: 'f1', x: 50, y: 50, diameterPx: 66, intensity: 1, outdoors01: 0 },
+      { id: 'f2', x: 500, y: 500, diameterPx: 40, intensity: 1, outdoors01: 0 },
+    ];
+    windSubsystem.sync(renderer, 96, 0.016, rect);
+    const emberCountBothIndoor = emberEngine?.paramCalls.at(-1)?.activeCount;
+
+    windState.fires = [
+      { id: 'f1', x: 50, y: 50, diameterPx: 66, intensity: 1, outdoors01: 0 },
+      { id: 'f2', x: 500, y: 500, diameterPx: 40, intensity: 1, outdoors01: 1 },
+    ];
+    windSubsystem.sync(renderer, 104, 0.016, rect);
+    const emberCountMixedFloor = emberEngine?.paramCalls.at(-1)?.activeCount;
+    t.ok(
+      `swapping one of two indoor fires for a genuinely outdoor one (same fire count both times) lifts the shared suppression toward "outdoors" rather than staying at the fully-indoor reading — an outdoor bonfire sharing a floor with a sheltered hearth must not have its own embers/smoke silently vanish (both-indoor=${emberCountBothIndoor}, mixed=${emberCountMixedFloor})`,
+      emberCountMixedFloor > emberCountBothIndoor
+    );
   }
 }

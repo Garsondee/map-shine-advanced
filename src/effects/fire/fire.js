@@ -415,6 +415,46 @@ export const FIRE_PARAMS = Object.freeze({
     label: 'Ember brightness ×',
     help: 'Embers are ~8x hotter than flames by design — that ratio is what makes a tiny dot read as a spark rather than a speck.',
   },
+  // ⚠️ INDOOR SUPPRESSION (2026-09-07) — author: "the ability to suppress
+  // embers and smoke by a lot if that fire is indoors... start by suppressing
+  // each by 90%, make them live 15% as long." A spark or a puff that a real
+  // hearth throws has nowhere to go in a sealed room — no draft to carry it,
+  // no open air above it — so an indoor fire's embers/smoke should read as a
+  // small, contained thing even at the same painted size as an outdoor one.
+  //
+  // Gated by `fires[].outdoors01` (boot.js#sampleWindExposureAt, the SAME
+  // `_Outdoors` mask sample `windExposure` already reads — see that field's
+  // own note in fire-subsystem.js on why this is a DIFFERENT question from
+  // wind exposure even though both happen to read one mask today) — 0 under a
+  // roof, 1 under open sky. Aggregated the SAME biased way windExposure01
+  // already is (`fire-subsystem.js`'s own MAX-across-fires note): the LEAST
+  // indoor fire on a shared floor sets how hard the map-wide ember/smoke
+  // engines get cut, so a genuinely outdoor bonfire sharing a floor with a
+  // sheltered hearth never has its own embers/smoke visibly vanish for no
+  // reason a player can see. The cost of that bias is the mirror image — a
+  // lone indoor fire on a floor with any outdoor fire under-suppresses — the
+  // same lesser-evil trade the wind fix already made for the identical
+  // shared-engine limitation.
+  emberIndoorSuppression: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.05,
+    default: 0.9,
+    category: 'Ember',
+    label: 'Indoor suppression',
+    help: 'How much this fire’s ember count is cut once it is fully indoors (under a roof). 0 leaves indoor embers untouched; 1 removes them indoors entirely. Blends with how indoors the fire actually is, so a hearth just inside an open doorway is cut less than one deep in a sealed room.',
+  },
+  emberIndoorLifeScale: {
+    type: 'float',
+    min: 0.05,
+    max: 30,
+    step: 0.05,
+    default: 0.15,
+    category: 'Ember',
+    label: 'Indoor lifetime ×',
+    help: 'Multiplies ember lifetime once this fire is fully indoors, on top of whatever the Wind 0/Wind 1 lifetime dials already give — lower makes sparks die almost the instant they leave the fuel bed instead of drifting across a room they have no draft to cross. 1 leaves indoor embers living exactly as long as outdoor ones.',
+  },
 
   // ── Smoke ─────────────────────────────────────────────────────────────────
   smokeCount: {
@@ -476,6 +516,31 @@ export const FIRE_PARAMS = Object.freeze({
     category: 'Smoke',
     label: 'Smoke rise ×',
     help: 'How fast smoke climbs, which drives its perspective growth and outward drift.',
+  },
+  // Same mechanism as emberIndoorSuppression/emberIndoorLifeScale above — see
+  // that pair's own header for the full account of the gating signal and its
+  // MAX-across-fires bias. Smoke's own base is already the layer most likely
+  // to look wrong indoors (a column that should be pooling under a ceiling,
+  // not streaming off into open sky), so it gets the identical treatment.
+  smokeIndoorSuppression: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.05,
+    default: 0.9,
+    category: 'Smoke',
+    label: 'Indoor suppression',
+    help: 'How much this fire’s smoke count is cut once it is fully indoors (under a roof). 0 leaves indoor smoke untouched; 1 removes it indoors entirely. Blends with how indoors the fire actually is, so a hearth just inside an open doorway is cut less than one deep in a sealed room.',
+  },
+  smokeIndoorLifeScale: {
+    type: 'float',
+    min: 0.05,
+    max: 30,
+    step: 0.05,
+    default: 0.15,
+    category: 'Smoke',
+    label: 'Indoor lifetime ×',
+    help: 'Multiplies smoke lifetime once this fire is fully indoors — lower makes puffs dissipate almost on top of the fire instead of building the tall column an open-air plume would. 1 leaves indoor smoke living exactly as long as outdoor smoke.',
   },
 
   // ── Depth ─────────────────────────────────────────────────────────────────

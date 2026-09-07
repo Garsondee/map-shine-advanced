@@ -1339,6 +1339,69 @@ export function fireWindParticleResponse(windMotion01, canBeSnuffed = true) {
   };
 }
 
+/**
+ * How much a fire's own indoor-ness holds back its embers and smoke — count
+ * AND lifetime, both driven off the SAME `indoor01` signal so "sparser" and
+ * "shorter-lived" read as one thing happening to an indoor fire, not two
+ * independently-tuned effects.
+ *
+ * Author, 2026-09-07: *"the ability to suppress embers and smoke by a lot if
+ * that fire is indoors... start by suppressing each by 90%, make them live
+ * 15% as long."* A spark or a puff a real hearth throws has nowhere to go in
+ * a sealed room — no draft to carry it, no open air above it — so an indoor
+ * fire's embers/smoke should read as a small, contained thing even painted at
+ * the same size as an outdoor one.
+ *
+ * ⚠️ FLAME IS DELIBERATELY UNTOUCHED — the author's own ask was embers and
+ * smoke only. The flame body is the fuel burning; it does not care whether a
+ * roof is overhead the way loose sparks and drifting smoke do.
+ *
+ * ⚠️ GATED BY `outdoors01`, NOT `windExposure`, EVEN THOUGH BOTH READ THE SAME
+ * `_Outdoors` MASK TODAY (`boot.js#sampleWindExposureAt` fills both fields
+ * from one call). `fireWeatherResponse`'s own header already drew this line
+ * for rain: "is there a roof over this fire" and "can moving air reach it"
+ * are not the same question, and collapsing them loses a real case this
+ * effect already relies on elsewhere — a fire can be sheltered from rain by a
+ * roof while still sitting in a genuine draft (or vice versa, a covered but
+ * open-sided space). Reading the field NAMED for the roof question keeps this
+ * correct even if `windExposure` is ever given its own, different sample.
+ *
+ * ⚠️ LINEAR IN `indoor01`, NOT EASED LIKE `fireWindParticleResponse`. That
+ * function's power curve exists because the author reported half-wind
+ * suppression reading "far too strong" — there is no equivalent finding yet
+ * for indoor suppression, so a straight blend is the honest starting point
+ * until live feedback says otherwise.
+ *
+ * @param {number} indoor01 - 0 = this fire reads as outdoors, 1 = fully
+ *   indoors. See `fire-subsystem.js`'s own aggregation note for how the
+ *   map-wide value passed in here is biased across multiple fires sharing one
+ *   engine.
+ * @param {object} [opts]
+ * @param {number} [opts.emberSuppression=0.9] - `FIRE_PARAMS.emberIndoorSuppression`, 0..1.
+ * @param {number} [opts.emberLifeScale=0.15] - `FIRE_PARAMS.emberIndoorLifeScale`.
+ * @param {number} [opts.smokeSuppression=0.9] - `FIRE_PARAMS.smokeIndoorSuppression`, 0..1.
+ * @param {number} [opts.smokeLifeScale=0.15] - `FIRE_PARAMS.smokeIndoorLifeScale`.
+ * @returns {{emberActiveCountMul:number, emberLifeMul:number,
+ *   smokeActiveCountMul:number, smokeLifeMul:number}}
+ */
+export function fireIndoorParticleResponse(indoor01, opts = {}) {
+  const t = clampNum(Number.isFinite(indoor01) ? indoor01 : 0, 0, 1);
+  const emberSuppression = clampNum(Number.isFinite(opts.emberSuppression) ? opts.emberSuppression : 0.9, 0, 1);
+  const emberLifeScale = clampNum(Number.isFinite(opts.emberLifeScale) ? opts.emberLifeScale : 0.15, 0.05, 30);
+  const smokeSuppression = clampNum(Number.isFinite(opts.smokeSuppression) ? opts.smokeSuppression : 0.9, 0, 1);
+  const smokeLifeScale = clampNum(Number.isFinite(opts.smokeLifeScale) ? opts.smokeLifeScale : 0.15, 0.05, 30);
+  return {
+    // At indoor01=0 (outdoors) every multiplier below is exactly 1 — a fire
+    // reading as fully outdoors is byte-identical to before this feature
+    // existed. At indoor01=1 (fully indoors), count lands at
+    // `1 - suppression` and life lands at exactly `lifeScale`.
+    emberActiveCountMul: 1 - t * emberSuppression,
+    emberLifeMul: 1 + t * (emberLifeScale - 1),
+    smokeActiveCountMul: 1 - t * smokeSuppression,
+    smokeLifeMul: 1 + t * (smokeLifeScale - 1),
+  };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // PARAMS → RUNTIME — the one place a control becomes a number
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1362,9 +1425,14 @@ export function fireWindParticleResponse(windMotion01, canBeSnuffed = true) {
  *
  * @param {object} params - a resolved param bag (`effect-cascade.js#resolveEffectParams`).
  * @param {object} chain - from {@link fireScaleChain}.
- * @param {object} [wind] - `{speed01, exposure01}`. Omitted (the default for
- *   every pre-existing call site and test) resolves both wind signals below
- *   to exactly 0 — byte-identical to before this parameter existed.
+ * @param {object} [wind] - `{speed01, exposure01, outdoor01}`. Omitted (the
+ *   default for every pre-existing call site and test) resolves the wind
+ *   signals below to exactly 0 and `outdoor01` to 1 (fully outdoors, so
+ *   indoor suppression is a no-op) — byte-identical to before either
+ *   parameter existed. `outdoor01` is `fires[].outdoors01` (the `_Outdoors`
+ *   mask sample, NOT `exposure01`) aggregated by `fire-subsystem.js` — see
+ *   {@link fireIndoorParticleResponse}'s own header for why this is a
+ *   different question from wind exposure even though both read one mask.
  * @returns {object} plain numbers, ready to assign to uniforms.
  */
 export function fireRuntimeFromParams(params = {}, chain = {}, wind = {}) {
@@ -1414,6 +1482,18 @@ export function fireRuntimeFromParams(params = {}, chain = {}, wind = {}) {
     snuffWind: chain?.snuffWind,
   });
   const windFx = fireWindParticleResponse(windMotionForSuppression01, canBeSnuffed);
+  // ⚠️ `outdoor01` DEFAULTS TO 1 (fully outdoors), NOT 0 — the same
+  // byte-identical-until-touched contract `exposure01` already keeps (this
+  // function's own header). A caller that never passes it (every pre-2026-
+  // 09-07 call site and test) must see indoor suppression as a hard no-op,
+  // not an accidental full cut.
+  const indoor01 = 1 - clampNum(Number.isFinite(wind?.outdoor01) ? wind.outdoor01 : 1, 0, 1);
+  const indoorFx = fireIndoorParticleResponse(indoor01, {
+    emberSuppression: num(p.emberIndoorSuppression, 0.9),
+    emberLifeScale: num(p.emberIndoorLifeScale, 0.15),
+    smokeSuppression: num(p.smokeIndoorSuppression, 0.9),
+    smokeLifeScale: num(p.smokeIndoorLifeScale, 0.15),
+  });
   return {
     // Material uniforms.
     intensity: clampNum(num(p.brightness, 1), 0, 3),
@@ -1507,11 +1587,17 @@ export function fireRuntimeFromParams(params = {}, chain = {}, wind = {}) {
         windPushScale: clampNum(num(p.flameWindPush, 1), 0, 30),
       },
       ember: {
-        activeCount: Math.round(clampNum(num(p.emberCount, 10), 0, 200)),
+        // ⚠️ INDOOR-SUPPRESSED (2026-09-07) — see fireIndoorParticleResponse's
+        // own header. Stacks onto the author's own dial exactly like windFx
+        // does above: 1 at indoor01=0, so an outdoor fire is unaffected.
+        activeCount: Math.round(clampNum(num(p.emberCount, 10), 0, 200) * indoorFx.emberActiveCountMul),
         // Same wind0/wind1 pair as flame's life, above — see that field's own
         // note. Embers previously had NO wind-driven life change at all.
-        lifeAtWind0: clampNum(num(p.emberLifeAtWind0, 0.45), 0.05, 30),
-        lifeAtWind1: clampNum(num(p.emberLifeAtWind1, 0.7), 0.05, 30),
+        // Indoor life scale multiplies BOTH ends, so the existing wind0/wind1
+        // character survives — a sheltered indoor fire caught in a draft
+        // still guts the way an outdoor one would, just uniformly shorter.
+        lifeAtWind0: clampNum(num(p.emberLifeAtWind0, 0.45), 0.05, 30) * indoorFx.emberLifeMul,
+        lifeAtWind1: clampNum(num(p.emberLifeAtWind1, 0.7), 0.05, 30) * indoorFx.emberLifeMul,
         sizeScale: clampNum(num(p.emberSizeScale, 1), 0.02, 20),
         opacityScale: clampNum(num(p.emberOpacity, 1), 0, 20),
         emissionScale: clampNum(num(p.emberEmission, 1), 0, 50),
@@ -1529,12 +1615,28 @@ export function fireRuntimeFromParams(params = {}, chain = {}, wind = {}) {
         windPushScale: clampNum(num(p.emberWindPush, 1), 0, 30),
       },
       smoke: {
-        // ⚠️ WIND-MODULATED (2026-09-03) — fades to a literal ZERO active
+        // ⚠️ WIND- AND INDOOR-MODULATED — fades to a literal ZERO active
         // count at windMotion01=1 ("producing zero smoke", the author's own
-        // wind-1 endpoint), ahead of flame's own suppression curve — see
-        // SMOKE_WIND_FADE_EXPONENT.
-        activeCount: Math.round(clampNum(num(p.smokeCount, 24), 0, 400) * windFx.smokeActiveCountMul),
-        lifeScale: clampNum(num(p.smokeLifeScale, 1), 0.05, 30),
+        // wind-1 endpoint; SMOKE_WIND_FADE_EXPONENT), ahead of flame's own
+        // suppression curve, AND separately cut by indoorFx (2026-09-07) —
+        // see fireIndoorParticleResponse's own header. The two stack: a
+        // sealed, windless room reaches both floors at once.
+        activeCount: Math.round(
+          clampNum(num(p.smokeCount, 24), 0, 400) * windFx.smokeActiveCountMul * indoorFx.smokeActiveCountMul
+        ),
+        // ⚠️ WIND0/WIND1 PAIR, NOT A `lifeScale` FIELD, 2026-09-07
+        // (mythica-machina-press#512) — `lifeScale` reached this object but
+        // nothing downstream ever read it: `fire-particle-runtime.js#setParams`
+        // only assigns `lifeAtWind0`/`lifeAtWind1`, so "Smoke lifetime ×" was a
+        // dead control from the day it shipped. Fixed the same way
+        // `riseAtWind0`/`riseAtWind1` below already were — smoke has no
+        // authored Wind-0/Wind-1 duality for lifetime, so both ends of the
+        // particle kernel's blend get the SAME base value, a no-op blend that
+        // reproduces a flat multiplier exactly — and BOTH ends also carry the
+        // indoor life scale, for the same "still reads as one fire" reason
+        // ember's pair does above.
+        lifeAtWind0: clampNum(num(p.smokeLifeScale, 1), 0.05, 30) * indoorFx.smokeLifeMul,
+        lifeAtWind1: clampNum(num(p.smokeLifeScale, 1), 0.05, 30) * indoorFx.smokeLifeMul,
         sizeScale: clampNum(num(p.smokeSizeScale, 1), 0.02, 20),
         opacityScale: clampNum(num(p.smokeOpacity, 1), 0, 20),
         growthScale: clampNum(num(p.smokeGrowth, 1), 0, 30),

@@ -378,6 +378,23 @@ export function createFireSubsystem({
     const windExposure01 = fires.length
       ? fires.reduce((max, f) => Math.max(max, Number.isFinite(f?.windExposure) ? f.windExposure : 1), 0)
       : 1;
+    // ⚠️ SAME MAX-ACROSS-FIRES SHAPE AS windExposure01 ABOVE, DELIBERATELY
+    // (2026-09-07) — and for the same underlying reason: ember/smoke's indoor
+    // suppression (`fireIndoorParticleResponse`, fire-geometry.js) is ANOTHER
+    // per-kind value shared by every fire on the floor's map-wide particle
+    // engines, so one indoor fire and one outdoor fire sharing a floor cannot
+    // each get their own independently-correct answer without the same
+    // per-particle storage this file's own `windExposure01` note already says
+    // does not exist. Taking the MAXIMUM `outdoors01` biases the shared
+    // answer toward "outdoors" on a mixed floor — i.e. toward LESS
+    // suppression — which is the lesser-evil direction here just as it was
+    // for wind: an outdoor bonfire whose embers/smoke visibly vanish for no
+    // reason a player can see reads as broken, while an indoor hearth sharing
+    // that floor merely under-suppressing is a smaller, quieter miss. A
+    // purely indoor floor still reaches full suppression exactly as before.
+    const outdoor01 = fires.length
+      ? fires.reduce((max, f) => Math.max(max, Number.isFinite(f?.outdoors01) ? f.outdoors01 : 1), 0)
+      : 1;
     // ⚠️ `{ fuel: params?.fuel }` ADDED 2026-08-30 — without it, `fireScaleChain`
     // defaults to 'wood' regardless of the author's actual "Fuel" selection, so
     // `chain.hueShift` (magical fuel's own built-in 180° shift) would resolve
@@ -389,7 +406,7 @@ export function createFireSubsystem({
     const runtime = fireRuntimeFromParams(
       params,
       fireScaleChain(fires[0]?.diameterPx ?? 100, mPerPx, { fuel: params?.fuel }),
-      { speed01: windSpeed01, exposure01: windExposure01 }
+      { speed01: windSpeed01, exposure01: windExposure01, outdoor01 }
     );
 
     // THE DEPTH-AUTHORITY OCCLUSION GATE'S INPUT (mythica-machina-press#469) —

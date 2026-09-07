@@ -38,7 +38,11 @@
  * does not have room for (the wind-cell buffer added below already spends
  * this arena's last free storage-buffer slot — see its own construction-site
  * comment), and that limitation is real and left honestly in place rather
- * than half-solved.
+ * than half-solved. Ember/smoke's INDOOR suppression (2026-09-07,
+ * `fire-geometry.js#fireIndoorParticleResponse`) joins this same CPU-side,
+ * map-wide category for the identical reason — it arrives here pre-folded
+ * into ordinary `activeCount`/`lifeAtWind0`/`lifeAtWind1` params, so this
+ * engine has no idea "indoor" exists as its own concept at all.
  *
  * ⚠️ PUSH MAGNITUDE IS NOW SELF-SCALED TO SPRITE SIZE, NOT GRID-CALIBRATED,
  * 2026-09-04, ROUND 6 — an audit of the original `pxPerMeter`-based formula

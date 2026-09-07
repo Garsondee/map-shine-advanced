@@ -578,25 +578,17 @@ export function installAnchorMode(_MapShine) {
   // the board is a PLACE (unchanged); dragging past the same threshold instead
   // rubber-bands a selection rectangle over the icons, so "select several" has
   // an obvious, discoverable gesture alongside shift-click above.
-
-  function makeMarqueeEl() {
-    const el = styled('div', {
-      position: 'fixed',
-      zIndex: '99',
-      border: `1px solid rgba(${CYAN},0.9)`,
-      background: `rgba(${CYAN},0.12)`,
-      pointerEvents: 'none',
-    });
-    document.body.appendChild(el);
-    return el;
-  }
-
-  function updateMarqueeRect(el, x0, y0, x1, y1) {
-    el.style.left = `${Math.min(x0, x1)}px`;
-    el.style.top = `${Math.min(y0, y1)}px`;
-    el.style.width = `${Math.abs(x1 - x0)}px`;
-    el.style.height = `${Math.abs(y1 - y0)}px`;
-  }
+  //
+  // NO MSA-drawn rectangle here (2026-09-07 fix) — this file only reads
+  // `e.target === ctx.boardElement` in the CAPTURE phase and never calls
+  // `stopPropagation`/`preventDefault`, so the same pointerdown/move/up also
+  // reaches Foundry's own canvas underneath and Foundry ALREADY draws its
+  // native selection rectangle (`canvas.controls.select`, a PIXI Graphics —
+  // see `board.mjs#onDragSelect`) for that exact gesture. Drawing a second,
+  // MSA-owned `<div>` on top produced two overlapping boxes (author-reported
+  // visual bug). `idsInRect` below never depended on that div for its own
+  // hit-testing — only the drag-vs-click threshold did — so dropping the
+  // visual costs nothing.
 
   /** Icons whose current on-screen box (post-transform, via getBoundingClientRect
    * so the icon's own centering transform is already accounted for) falls
@@ -620,18 +612,16 @@ export function installAnchorMode(_MapShine) {
     const additive = e.shiftKey || e.ctrlKey || e.metaKey;
     const startX = e.clientX;
     const startY = e.clientY;
-    let marqueeEl = null;
+    let dragging = false;
     const onMove = (ev) => {
       const dist = Math.max(Math.abs(ev.clientX - startX), Math.abs(ev.clientY - startY));
-      if (!marqueeEl && dist >= DRAG_THRESHOLD_PX) marqueeEl = makeMarqueeEl();
-      if (marqueeEl) updateMarqueeRect(marqueeEl, startX, startY, ev.clientX, ev.clientY);
+      if (dist >= DRAG_THRESHOLD_PX) dragging = true;
     };
     const onUp = (ev) => {
       window.removeEventListener('pointermove', onMove, true);
       window.removeEventListener('pointerup', onUp, true);
-      if (marqueeEl) {
+      if (dragging) {
         const ids = idsInRect(startX, startY, ev.clientX, ev.clientY);
-        marqueeEl.remove();
         if (!additive) state.selectedIds = new Set();
         for (const id of ids) state.selectedIds.add(id);
         paintSelection();

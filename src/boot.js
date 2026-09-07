@@ -7059,16 +7059,33 @@ function install() {
   });
 
   // ---------------------------------------------------------------------------
-  // MSA ANCHOR VIEW MODE (2026-08-06, author request) — "a button just below
+  // MSA ANCHOR VIEW MODE (2026-08-06, author request: "a button just below
   // the MSA button... to quickly see the anchor handles for effects [and]
-  // turn things on and off". Listed by hand, exactly like the two Workshop
-  // panels just above register themselves by hand: there are only two anchor
-  // kinds today, and each needs its OWN setEnabled (updateCandleAnchor vs
-  // updateLightningAnchor each do their own persistence snapshot), so looping
+  // turn things on and off"; extended to full move/edit/delete/place,
+  // mythica-machina-press#517, 2026-09-07: "I would like to be able to move
+  // and delete things in anchor view... a palette... select 'candle'... and
+  // then be able to place more of them"). Listed by hand, exactly like the
+  // two Workshop panels just above register themselves by hand: there are
+  // only two anchor kinds with real CRUD helpers today (fire's `addAnchor`
+  // equivalent doesn't exist yet — see buildFirePanel's own comment on that —
+  // so it stays out of this list and therefore out of the palette), and each
+  // needs its OWN add/update/remove (addCandle/updateCandleAnchor/
+  // removeCandleAnchor vs. addLightningEndpoint/updateLightningAnchor/
+  // removeLightningAnchor each do their own persistence snapshot), so looping
   // ANCHOR_KINDS generically would not skip any real work, just hide these
-  // two lines behind a lookup. The scene-controls button itself is
+  // two entries behind a lookup. The scene-controls button itself is
   // registered further down, in the same init hook the MSA button's own
   // lives in (foundry/scene-controls-button.js).
+  //
+  // Reuses the EXACT same functions enterCandlePlacement/enterLightningPlacement
+  // (above) pass to ui/anchor-mode.js — including buildCandleEditForm/
+  // buildLightningEditForm, which are boot.js-level closures with no
+  // dependency on anchor-mode.js internals — so an edit made from this
+  // unified view and one made from a kind's own "➕ Place" button go through
+  // the identical validate-and-persist path. No `setEnabled` field anymore:
+  // ui/anchor-view-mode.js derives a right-click toggle from `updateAnchor`
+  // itself (`updateAnchor(id, {enabled})`), which every kind here already
+  // needs for dragging anyway.
   // ---------------------------------------------------------------------------
 
   function enterAnchorViewMode() {
@@ -7083,14 +7100,20 @@ function install() {
           label: 'candle',
           icon: anchorKindById('candleFlame')?.icon,
           listAnchors: () => anchorAuthority.anchorsForKindOnFloor('candleFlame', activeFloorContext),
-          setEnabled: (id, enabled) => updateCandleAnchor(id, { enabled }),
+          addAnchor: (wx, wy) => addCandle(wx, wy),
+          updateAnchor: (id, patch) => updateCandleAnchor(id, patch),
+          removeAnchor: (id) => removeCandleAnchor(id),
+          buildEditForm: buildCandleEditForm,
         },
         {
           kindId: 'lightning',
           label: 'lightning bolt',
           icon: lightningRoleIcon,
           listAnchors: () => anchorAuthority.anchorsForKindOnFloor('lightning', activeFloorContext),
-          setEnabled: (id, enabled) => updateLightningAnchor(id, { enabled }),
+          addAnchor: (wx, wy) => addLightningEndpoint(wx, wy),
+          updateAnchor: (id, patch) => updateLightningAnchor(id, patch),
+          removeAnchor: (id) => removeLightningAnchor(id),
+          buildEditForm: buildLightningEditForm,
         },
       ],
       // The toolbar's own Done button and Escape both call MapShine.__anchor

@@ -253,6 +253,19 @@ export { readSceneDoors, deriveDoorSnapshot, normalizeDoorAnimationType, watchDo
 // own "Adjust Darkness Level" behavior) is read. `readSuppressWeatherStub` is
 // a deliberate, documented no-op — see scene-regions.js's own header.
 export { readActiveDarknessRegions, deriveRegionDarknessAdjuster, readSuppressWeatherStub } from './scene-regions.js';
+
+// THE REGION DARKNESS OVERRIDE — a GM-set, world-scoped consistency value
+// every scene's darkening `adjustDarknessLevel` behaviors are forced to on
+// scene load (own header: `region-darkness-override.js`).
+export {
+  registerRegionDarknessOverrideSettings,
+  readRegionDarknessOverrideSettings,
+  writeRegionDarknessOverrideSettings,
+  applyRegionDarknessOverride,
+  isDarkeningRegionBehavior,
+  REGION_DARKNESS_OVERRIDE_PARAMS,
+  DEFAULT_REGION_DARKNESS_OVERRIDE_VALUE,
+} from './region-darkness-override.js';
 export { readPaintContext, savePaintedMasks, loadPaintedMasks } from './paint-adapter.js';
 
 // GRID-GEOMETRY + POINTER READERS — feeds the masks.occlusion producer's

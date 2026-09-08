@@ -466,6 +466,11 @@ import {
   installActiveCalendar,
   standDownPf2eDarknessSync,
   buildAlmanacDiagnosticsReport,
+  registerRegionDarknessOverrideSettings,
+  readRegionDarknessOverrideSettings,
+  writeRegionDarknessOverrideSettings,
+  applyRegionDarknessOverride,
+  REGION_DARKNESS_OVERRIDE_PARAMS,
 } from './foundry/index.js';
 import { engageFoundryFallback, getDescribeRenderModeStats } from './diag/render-fallback.js';
 import { registerMarkerSource, getAllMarkerPoints } from './diag/marker-overlay.js';
@@ -7894,6 +7899,39 @@ function install() {
     presets: { table: GRADE_PRESETS, pick: gradePreset },
   });
 
+  // REGION DARKNESS OVERRIDE — deliberately NOT wired through MapShine.setGrade's
+  // own pattern (an in-memory, per-client, non-persisted `paramLayers` override):
+  // this card edits two genuine world-scoped `game.settings` (see
+  // foundry/region-darkness-override.js's header for why), so `setValue` writes
+  // straight through `writeRegionDarknessOverrideSettings` + re-applies, and
+  // `getReadout` reads the settings fresh every call — never a captured/cached
+  // value — the same "always a live accessor" contract this card factory
+  // requires of every getReadout.
+  registerSimpleEffectCard('regionDarknessOverride', {
+    icon: 'moon',
+    title: 'Region Darkness Override',
+    accVar: '--c-post',
+    filterCategory: 'post',
+    schema: REGION_DARKNESS_OVERRIDE_PARAMS,
+    fohKeys: ['value'],
+    getReadout: () => {
+      const { enabled, value } = readRegionDarknessOverrideSettings();
+      return { enabled, params: { value } };
+    },
+    setValue: (patch) => {
+      const next = {};
+      if (typeof patch?.enabled === 'boolean') next.enabled = patch.enabled;
+      if (typeof patch?.value === 'number') next.value = patch.value;
+      writeRegionDarknessOverrideSettings(next)
+        .then(() => applyRegionDarknessOverride())
+        .then(({ ok, reason }) => {
+          if (!ok && reason) log.info(`region darkness override (Studio edit): ${reason}`);
+        })
+        .catch((err) => log.error('region darkness override setValue failed:', err));
+    },
+    status: (readout) => collapsedStatusLine({ enabled: readout.enabled }),
+  });
+
   registerSimpleEffectCard('fluid', {
     icon: 'water',
     title: 'Fluid',
@@ -12672,6 +12710,17 @@ function install() {
         } catch (err) {
           log.error('sky resolve (canvasReady) failed:', err);
         }
+        // THE REGION DARKNESS OVERRIDE — re-applied on every scene load/floor
+        // switch, same as the sky resolve just above. Cheap and idempotent
+        // (skips any behavior already at the target value), and GM-gated
+        // internally, so a "not GM"/"override is off" reason here is benign,
+        // not an error — logged at `info`, matching the fade-state block below.
+        try {
+          const { ok, reason } = await applyRegionDarknessOverride();
+          if (!ok && reason) log.info(`region darkness override (canvasReady): ${reason}`);
+        } catch (err) {
+          log.error('region darkness override (canvasReady) failed:', err);
+        }
         // THE FADE ENGINE'S OWN SCENE LOAD (U2 checkpoint 3) — fade state is
         // scene-scoped exactly like the sky, so a scene SWITCH must re-load
         // it here too, not carry the previous scene's in-flight fades into
@@ -13084,6 +13133,25 @@ function install() {
         registerSkySettings({ onChange: resolveAndApplySky });
       } catch (err) {
         log.error('sky settings registration failed:', err);
+      }
+
+      // THE REGION DARKNESS OVERRIDE SETTING — same "own init-hook try/catch,
+      // own onChange, kept out of the effect cascade" placement as the sky
+      // setting just above (see foundry/region-darkness-override.js's own
+      // header for why this isn't part of describeEffectSettings()'s cascade).
+      // `applyRegionDarknessOverride` is GM-gated internally, so wiring its
+      // result straight into `onChange` is safe to call unconditionally on
+      // every client — a player's client just gets a benign "not GM" reason.
+      try {
+        registerRegionDarknessOverrideSettings({
+          onChange: () => {
+            applyRegionDarknessOverride().then(({ ok, reason }) => {
+              if (!ok && reason) log.info(`region darkness override (settings change): ${reason}`);
+            });
+          },
+        });
+      } catch (err) {
+        log.error('region darkness override settings registration failed:', err);
       }
 
       // THE ALMANAC (docs/holy/Almanac-Testament.md, stage A1) — installs the

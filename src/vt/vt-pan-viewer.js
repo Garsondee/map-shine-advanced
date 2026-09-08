@@ -10084,6 +10084,35 @@ export async function startVtPanViewer({
      */
     const vegetationProxyNodeCache = new WeakMap();
     let vegetationProxyNodeSeq = 0;
+    /**
+     * TILE-MOTION DEPTH-PROXY POSITION NODES — same shape and same reason as
+     * `vegetationProxyNodeCache` immediately above: `rebuildSceneDepthProxies`'s
+     * Tile branch used to build `writerArgs` with no `positionNode` at all, so
+     * a `mode:'transform'` tile-motion tile's depth proxy AND Stage-1 prepass
+     * twin rasterized its silhouette permanently at its REST orientation while
+     * the real mesh (which gets its `positionNode` from `buildWholeImageMaterial`,
+     * a few hundred lines up, keyed off the SAME `t.tileMotion` uniform bag)
+     * spun away from it every frame — `scene.color`'s depth attachment then won
+     * the `EqualDepth` race under the tile's ORIGINAL footprint forever, so the
+     * floor beneath never received real colour there: a static, tile-shaped,
+     * solid-black hole trailing the live art, exactly `docs/planning/
+     * Depth-Buffer.md` §9k's already-documented failure shape (mythica-machina-
+     * press#470) for the identical reason, just a different consumer of the
+     * same rest-pose-only bug. Fixed the same way: build ONE positionNode Fn
+     * graph per tile-motion bag (reusing `t.tileMotion`'s own live
+     * `uMotionPivot`/`uMotionRot`/`uMotionTranslate` uniforms — already updated
+     * every frame by `syncAllTileMotionForFrame`, so this needs no new per-frame
+     * write of its own), cached here keyed by that bag so a residency pass that
+     * re-visits the same tile-piece reuses the same node instead of forcing a
+     * fresh shader compile (see `depth-proxy-material-pool.js`'s own header for
+     * why that rebuild is expensive). `tileMotionDepthProxyNodeSeq` backs each
+     * cache entry's `variantKey` — REQUIRED whenever a positionNode is passed to
+     * `computeDepthProxyMaterialSignature` (it throws otherwise), which is what
+     * stops two different rotating tiles from ever being able to share one
+     * pooled material and rotate each other's depth proxy.
+     */
+    const tileMotionDepthProxyNodeCache = new WeakMap();
+    let tileMotionDepthProxyNodeSeq = 0;
     // HIT/MISS COUNTERS (perf-instrumentation-audit-2026-08-12) — a WeakMap
     // has no `.size`/iteration, so unlike `depth-proxy-material-pool.js`'s own
     // `stats()` this cannot report current occupancy, only lifetime
@@ -17399,6 +17428,43 @@ export async function startVtPanViewer({
           // own `uOcclusionWeights` — see that loop's own comment) rather
           // than a residency-pass snapshot.
           if (t.earlyZReason === 'authoredAlpha') continue;
+          // TILE MOTION'S OWN DEPTH-PROXY POSITION NODE — see
+          // `tileMotionDepthProxyNodeCache`'s own header (above,
+          // `rebuildSceneDepthProxies`'s construction site) for the bug this
+          // closes. `t.tileMotion` is the same per-tile-piece uniform bag
+          // `buildWholeImageMaterial` gave the VISIBLE mesh's own
+          // `positionNode` (vt-pan-viewer.js, `if (tileMotion) { material.
+          // positionNode = Fn(...) }`) — reusing its live uniforms here,
+          // rather than new ones, is what keeps the depth proxy and the real
+          // mesh mathematically identical every frame with no extra
+          // per-frame write of this function's own.
+          let depthMotionPositionNode;
+          let depthMotionVariantKey;
+          if (t.tileMotion) {
+            let nodeEntry = tileMotionDepthProxyNodeCache.get(t.tileMotion);
+            if (!nodeEntry) {
+              const { Fn, vec2, vec3, positionLocal } = THREE.TSL;
+              const tm = t.tileMotion;
+              // BYTE-FOR-BYTE the same formula as the visible mesh's own
+              // positionNode above (`v' = pivot + Rot(delta)*(v-pivot) +
+              // translate`) — the prepass twin and the real proxy must
+              // animate identically to the mesh they stand in for, the same
+              // requirement vegetation's own cached node already meets.
+              const positionNode = Fn(() => {
+                const rel = positionLocal.xy.sub(tm.uMotionPivot);
+                const rotated = vec2(
+                  rel.x.mul(tm.uMotionRot.x).sub(rel.y.mul(tm.uMotionRot.y)),
+                  rel.x.mul(tm.uMotionRot.y).add(rel.y.mul(tm.uMotionRot.x))
+                );
+                const xy = tm.uMotionPivot.add(rotated).add(tm.uMotionTranslate);
+                return vec3(xy.x, xy.y, positionLocal.z);
+              })();
+              nodeEntry = { id: ++tileMotionDepthProxyNodeSeq, positionNode };
+              tileMotionDepthProxyNodeCache.set(t.tileMotion, nodeEntry);
+            }
+            depthMotionPositionNode = nodeEntry.positionNode;
+            depthMotionVariantKey = `tile:${nodeEntry.id}`;
+          }
           const writerArgs = {
             THREE,
             tex: t.tex,
@@ -17406,6 +17472,8 @@ export async function startVtPanViewer({
             floorIndex,
             flags,
             alwaysOpaque,
+            positionNode: depthMotionPositionNode,
+            variantKey: depthMotionVariantKey,
           };
           if (t.earlyZReason === 'occlusionResponsive') {
             // UNPOOLED, ON PURPOSE — never depthProxyMaterialPool. That pool

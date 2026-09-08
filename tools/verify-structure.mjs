@@ -343,7 +343,13 @@ export const RULES = [
     // vt/ is the DECODE path: its getImageData runs in the worker at decode time on
     // 256px pages — which is exactly what this rule PRESCRIBES as the fix, not the
     // runtime GPU stall it forbids. diag/ reads back for instruments, deliberately.
-    allow: [`${sep}diag${sep}`, `${sep}vt${sep}`],
+    // tile-thumbnail.js (2026-09-08, [structure-change]) reads a PLAIN <canvas 2d>
+    // holding a decoded <img>, never a WebGPU/WebGL render target or this engine's
+    // own render pipeline — a 128px offscreen analysis buffer to find a texture's
+    // alpha bounding box for a UI thumbnail, off the main render loop entirely. Same
+    // shape as vt/'s own exemption (CPU-side, off the live pipeline), different
+    // directory because it's a UI concern, not a decode-path one.
+    allow: [`${sep}diag${sep}`, `${sep}vt${sep}`, `${sep}tile-thumbnail.js`],
     why:
       'V2: 46 getImageData, 41 readRenderTargetPixels, 8 readPixels, 7 gl.finish() — each a full ' +
       'pipeline stall. The defining example reached through a global to read back ONE PIXEL. The ' +

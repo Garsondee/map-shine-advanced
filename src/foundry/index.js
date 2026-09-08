@@ -357,6 +357,7 @@ export {
   getTileMotionRuntimeStatus,
   getTileMotionSummary,
   setTileMotionConfig,
+  pushTileMotionToTileScroll,
   startTileMotion,
   stopTileMotion,
   pauseTileMotion,

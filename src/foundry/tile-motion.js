@@ -537,6 +537,61 @@ export function resolveTexturePose(config, elapsedSec) {
   };
 }
 
+// tile-scroll's own conversion constant (mythica-machina-press#521): its
+// shader adds `serverTime_ms * (scrollSpeed / 10000)` RADIANS per ms, i.e.
+// `radPerSec = scrollSpeed / 10`, so `degPerSec = scrollSpeed * (180/PI)/10`
+// = `scrollSpeed * 5.729578`. Kept here, not just in that issue's own
+// comment thread, because `convertTileMotionToTileScrollFlags` below needs
+// the exact same number to invert it.
+const TILE_SCROLL_DEG_PER_SCROLL_SPEED = 5.729578;
+
+/**
+ * The inverse of #521's original (manual, one-time) tile-scroll -> MSA
+ * conversion — this direction, MSA config -> tile-scroll flags, so a GM who
+ * only ever touches MSA's own dialog can still keep a tile spinning
+ * correctly for players NOT running MSA, without hand-maintaining two
+ * configs (mythica-machina-press#529 — the exact class of bug that let one
+ * tile's speed silently drift from the other's).
+ *
+ * SIGN: tile-scroll's shader spins the visible image counter-clockwise for
+ * a POSITIVE scrollSpeed; this module's own convention (this file's header)
+ * spins clockwise for a positive `speed`/`rotateSpeed`, matching Foundry's
+ * native rotation handle. Opposite conventions — confirmed live 2026-09-08
+ * after the original #521 conversion table copied the sign across unchanged
+ * and both clock hands came out spinning backwards. Negated here so this
+ * function is the one place that fact has to be remembered.
+ *
+ * Only `mode:'texture'` (textureMotion.rotateSpeed) and a `mode:'transform'`
+ * `motion.type:'rotation'` (motion.speed) have a real tile-scroll
+ * equivalent — tile-scroll has no notion of orbit/pingPong/sine motion or
+ * parenting. Anything else comes back `supported:false` with `flags` still
+ * set to a safe "not rotating" state, rather than silently writing a
+ * meaningless number.
+ *
+ * @param {TileMotionConfig} config
+ * @returns {{supported:boolean, reason:string|null, flags:{enableRotate:boolean, scrollSpeed:number}}}
+ */
+export function convertTileMotionToTileScrollFlags(config) {
+  if (!config?.enabled) {
+    return { supported: true, reason: null, flags: { enableRotate: false, scrollSpeed: 0 } };
+  }
+  let degPerSec = null;
+  if (config.mode === 'texture') {
+    degPerSec = num(config.textureMotion?.rotateSpeed, 0);
+  } else if (config.motion?.type === 'rotation') {
+    degPerSec = num(config.motion?.speed, 0);
+  }
+  if (degPerSec === null) {
+    return {
+      supported: false,
+      reason: `motion type "${config.motion?.type}" has no tile-scroll equivalent — a player without MSA will not see this tile move`,
+      flags: { enableRotate: false, scrollSpeed: 0 },
+    };
+  }
+  const scrollSpeed = degPerSec === 0 ? 0 : -(degPerSec / TILE_SCROLL_DEG_PER_SCROLL_SPEED);
+  return { supported: true, reason: null, flags: { enableRotate: degPerSec !== 0, scrollSpeed } };
+}
+
 /**
  * @param {TileMotionConfig} config @param {{x:number,y:number,rotationRad:number}} inherited
  * @param {number} elapsedSec @param {string} tileId @returns {RigidDelta}

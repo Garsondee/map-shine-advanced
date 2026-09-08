@@ -31,6 +31,7 @@ import {
   computeTileWorldTransforms,
   reanchorTransport,
   buildMotionGraph,
+  convertTileMotionToTileScrollFlags,
 } from './tile-motion.js';
 import { wallClockMs, perfNowMs } from '../core/frame-clock.js';
 
@@ -154,6 +155,42 @@ export async function writeTileMotionConfig(tileId, patch) {
     return { ok: true, reason: null };
   } catch (err) {
     return { ok: false, reason: `setFlag failed (GM only?): ${err?.message ?? err}` };
+  }
+}
+
+/**
+ * Writes this tile's MSA motion config back out as the equivalent
+ * tile-scroll flags, so a player without MSA still sees it move correctly —
+ * see `convertTileMotionToTileScrollFlags` (tile-motion.js) for the
+ * conversion and the sign-convention note. Touches ONLY
+ * `flags.tile-scroll.enableRotate`/`.scrollSpeed` via two dotted-path keys
+ * in one `update()` — every other tile-scroll field (parallax, repeat,
+ * pivot, offset) is left exactly as it is, since MSA's config has no
+ * equivalent for any of those.
+ * @param {string} tileId
+ * @returns {Promise<{ok:boolean, reason:string|null, supported?:boolean, warning?:string|null}>}
+ */
+export async function pushTileMotionToTileScroll(tileId) {
+  const tileDoc = getTileDoc(tileId);
+  if (!tileDoc) return { ok: false, reason: 'tile not found on the active scene' };
+  if (!canEditTile(tileDoc)) return { ok: false, reason: 'insufficient permission to edit this tile' };
+
+  const config = configCache.get(tileId) || normalizeTileMotionConfig(readTileMotionConfigRaw(tileDoc), tileId);
+  const result = convertTileMotionToTileScrollFlags(config);
+  try {
+    await tileDoc.update({
+      'flags.tile-scroll.enableRotate': result.flags.enableRotate,
+      'flags.tile-scroll.scrollSpeed': result.flags.scrollSpeed,
+    });
+    const tileScrollActive = typeof game !== 'undefined' ? !!game.modules?.get('tile-scroll')?.active : true;
+    const warning = !result.supported
+      ? result.reason
+      : !tileScrollActive
+        ? 'tile-scroll is not installed/active here — wrote the flags anyway, for whenever it is'
+        : null;
+    return { ok: true, reason: null, supported: result.supported, warning };
+  } catch (err) {
+    return { ok: false, reason: `update failed (GM only?): ${err?.message ?? err}` };
   }
 }
 
@@ -486,14 +523,14 @@ export function resolveTileMotionFrame() {
 // QUERIES
 // ===========================================================================
 
-/** @returns {Array<{id:string, label:string}>} every tile on the active scene, sorted by label. */
+/** @returns {Array<{id:string, label:string, textureSrc:string}>} every tile on the active scene, sorted by label. */
 export function getTileMotionTileList() {
   const list = [];
   for (const tileDoc of tileDocsOf(activeScene())) {
     if (!tileDoc?.id) continue;
     const src = String(tileDoc?.texture?.src || '');
     const file = src ? src.split('/').pop() || src : '';
-    list.push({ id: tileDoc.id, label: file ? `${tileDoc.id} — ${file}` : tileDoc.id });
+    list.push({ id: tileDoc.id, label: file ? `${tileDoc.id} — ${file}` : tileDoc.id, textureSrc: src });
   }
   list.sort((a, b) => String(a.label).localeCompare(String(b.label)));
   return list;

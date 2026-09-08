@@ -19,6 +19,7 @@ import {
   combineRigidDeltas,
   applyRigidDelta,
   computeTileWorldTransforms,
+  convertTileMotionToTileScrollFlags,
 } from '../tile-motion.js';
 
 function cfg(overrides = {}) {
@@ -301,6 +302,60 @@ export function run(t) {
     ok(
       'stopped transport yields an empty transform map (identity everywhere, no restore path needed)',
       transforms.size === 0
+    );
+  }
+
+  // ── convertTileMotionToTileScrollFlags — mythica-machina-press#529/#521 ───
+  // The sign flip here is exactly the bug this whole function exists to stop
+  // recurring: #521's original tile-scroll -> MSA table copied scrollSpeed's
+  // sign across unchanged, and live output confirmed 2026-09-08 that the two
+  // systems' rotation conventions are actually OPPOSITE. Every case below
+  // pins that down numerically so a future edit can't silently reintroduce it.
+  {
+    const disabled = convertTileMotionToTileScrollFlags(cfg({ enabled: false }));
+    ok('disabled config is supported and inert', disabled.supported === true && disabled.flags.enableRotate === false);
+    ok('disabled config produces zero scrollSpeed', disabled.flags.scrollSpeed === 0);
+
+    const zero = convertTileMotionToTileScrollFlags(cfg({ motion: { type: 'rotation', speed: 0 } }));
+    ok('zero speed does not enable rotation', zero.flags.enableRotate === false && zero.flags.scrollSpeed === 0);
+
+    // The large hand's own real, shipped values (mythica-machina-press#521's table).
+    const large = convertTileMotionToTileScrollFlags(cfg({ motion: { type: 'rotation', speed: 4.297 } }));
+    ok('positive (clockwise) MSA speed enables tile-scroll rotation', large.flags.enableRotate === true);
+    ok(
+      `positive MSA speed produces a NEGATIVE scrollSpeed (opposite conventions), got ${large.flags.scrollSpeed}`,
+      large.flags.scrollSpeed < 0 && near(large.flags.scrollSpeed, -0.75, 1e-3)
+    );
+
+    // Round-trip: a known tile-scroll scrollSpeed, converted forward by the
+    // documented formula (#521) into an MSA speed, then back through this
+    // function, must recover the ORIGINAL scrollSpeed exactly — the one
+    // invariant that actually matters for #529's "push to tile-scroll" tool.
+    for (const originalScrollSpeed of [-0.75, -0.15, 5, -5]) {
+      const equivalentMsaSpeed = -originalScrollSpeed * 5.729578;
+      const roundTripped = convertTileMotionToTileScrollFlags(
+        cfg({ motion: { type: 'rotation', speed: equivalentMsaSpeed } })
+      );
+      ok(
+        `round-trips scrollSpeed ${originalScrollSpeed} through MSA speed ${equivalentMsaSpeed.toFixed(3)} and back, got ${roundTripped.flags.scrollSpeed}`,
+        near(roundTripped.flags.scrollSpeed, originalScrollSpeed, 1e-6)
+      );
+    }
+
+    const orbiting = convertTileMotionToTileScrollFlags(cfg({ motion: { type: 'orbit', speed: 10, radius: 50 } }));
+    ok('a motion type with no tile-scroll equivalent reports unsupported', orbiting.supported === false);
+    ok('unsupported motion still returns a safe, non-rotating flag set', orbiting.flags.enableRotate === false);
+    ok(
+      'unsupported motion explains why, in the reason string',
+      typeof orbiting.reason === 'string' && orbiting.reason.length > 0
+    );
+
+    const textureMode = convertTileMotionToTileScrollFlags(
+      cfg({ mode: 'texture', textureMotion: { rotateSpeed: -4.297 } })
+    );
+    ok(
+      'texture mode converts textureMotion.rotateSpeed, not motion.speed',
+      textureMode.supported === true && textureMode.flags.enableRotate === true && textureMode.flags.scrollSpeed > 0
     );
   }
 }

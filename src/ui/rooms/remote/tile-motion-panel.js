@@ -41,6 +41,7 @@ import {
   getTileMotionRestPose,
   getTileMotionRuntimeStatus,
   setTileMotionConfig,
+  pushTileMotionToTileScroll,
   getTileMotionTransportState,
   startTileMotion,
   stopTileMotion,
@@ -60,6 +61,7 @@ import { installTokens } from '../../tokens.js';
 import { installIconSprite, iconMarkup } from '../../widgets/icon-sprite.js';
 import { makeDraggable } from '../../widgets/draggable.js';
 import { buildParamControl } from '../../widgets/param-control.js';
+import { createTileThumbnailCanvas } from '../../widgets/tile-thumbnail.js';
 
 const ROOM_ID = 'msa-tile-motion';
 const STYLE_ID = 'msa-tile-motion-style';
@@ -98,6 +100,14 @@ function injectStyle() {
 #${ROOM_ID} button.msa-tm-ghost:hover{border-color:var(--shine-glow); color:var(--ink0)}
 #${ROOM_ID} button.msa-tm-ghost:disabled{opacity:.5; cursor:default}
 #${ROOM_ID} .msa-tm-status{font-size:.68rem; color:var(--ink2); margin:4px 0}
+#${ROOM_ID} .msa-tm-thumbs{display:grid; grid-template-columns:repeat(auto-fill, 56px); gap:6px;
+  max-height:220px; overflow-y:auto; padding:2px 2px 8px; margin-bottom:4px}
+#${ROOM_ID} .msa-tm-thumb{width:56px; height:56px; border-radius:6px; border:1px solid var(--line);
+  background:var(--bg2); cursor:pointer; padding:0; display:grid; place-items:center; overflow:hidden;
+  pointer-events:auto}
+#${ROOM_ID} .msa-tm-thumb canvas{display:block}
+#${ROOM_ID} .msa-tm-thumb:hover{border-color:var(--shine-glow)}
+#${ROOM_ID} .msa-tm-thumb[aria-current="true"]{border-color:var(--shine); box-shadow:0 0 0 1px var(--shine)}
 `.trim();
   document.head.appendChild(el);
 }
@@ -214,6 +224,39 @@ export function installTileMotionPanel() {
     const result = await setTileMotionConfig(selectedTileId, patch);
     if (!result.ok) setStatus(`Save failed: ${result.reason}`);
     render();
+  }
+
+  // THUMBNAIL GRID (2026-09-08, author request: "select a tile by its
+  // graphics... thumbnails would maximise the visible (not transparent)
+  // parts"). A SEPARATE section from the dropdown below, not a replacement
+  // for it — the dropdown stays as the compact/keyboard/many-tiles path,
+  // this is the fast visual one. Rebuilt fresh every `render()` call, same
+  // as everything else in this panel (the 1s poll timer); each thumbnail's
+  // own image + alpha-bbox analysis is cached by `tile-thumbnail.js` across
+  // renders by src, so a poll-driven rebuild only ever repeats a cheap
+  // already-decoded `drawImage`, not a re-fetch or re-analysis.
+  function buildThumbnailGrid() {
+    const list = getTileMotionTileList();
+    if (!list.length) return document.createDocumentFragment();
+    const wrap = document.createElement('div');
+    wrap.appendChild(sectionHeading('Tiles'));
+    const grid = document.createElement('div');
+    grid.className = 'msa-tm-thumbs';
+    for (const t of list) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'msa-tm-thumb';
+      btn.title = t.label;
+      btn.setAttribute('aria-current', String(t.id === selectedTileId));
+      if (t.textureSrc) btn.appendChild(createTileThumbnailCanvas(t.textureSrc, 52));
+      btn.addEventListener('click', () => {
+        selectedTileId = t.id;
+        render();
+      });
+      grid.appendChild(btn);
+    }
+    wrap.appendChild(grid);
+    return wrap;
   }
 
   function buildTileSelector() {
@@ -542,6 +585,7 @@ export function installTileMotionPanel() {
       wrap.appendChild(buildPivotSection(config));
     }
     wrap.appendChild(buildRenderingSection(config));
+    wrap.appendChild(buildTileScrollSyncSection());
     return wrap;
   }
 
@@ -570,6 +614,38 @@ export function installTileMotionPanel() {
         'tileMotionRenderAboveTokens',
         { type: 'bool', label: 'render above tokens' },
         { value: config.renderAboveTokens, onChange: (v) => patchSelectedTile({ renderAboveTokens: v }) }
+      )
+    );
+    return wrap;
+  }
+
+  // NON-MSA FALLBACK (2026-09-08, mythica-machina-press#529) — tile-scroll
+  // has NO knowledge of MSA's config and vice versa (confirmed: zero
+  // references to tile-scroll anywhere else in this engine's source), so a
+  // tile-scroll-driven tile keeps working for a player without MSA ONLY as
+  // long as its own flags stay correct BY HAND. This button is the one
+  // place that hand-maintenance happens now — read MSA's own config, push
+  // the equivalent to tile-scroll's fields, done. Not automatic on every
+  // save: a deliberate, visible action, so a GM always knows exactly when
+  // the two last agreed, rather than a silent background sync masking the
+  // exact class of drift that caused #529's incident.
+  function buildTileScrollSyncSection() {
+    const wrap = document.createElement('div');
+    wrap.appendChild(sectionHeading('Non-MSA Fallback (tile-scroll)'));
+    const note = document.createElement('div');
+    note.className = 'msa-tm-status';
+    note.textContent =
+      'Players without MSA see tile-scroll instead. Push this tile’s speed/direction there so both stay correct.';
+    wrap.appendChild(note);
+    wrap.appendChild(
+      row(
+        ghostButton('Push to tile-scroll', 'Writes this tile’s equivalent scrollSpeed/enableRotate', async () => {
+          const result = await pushTileMotionToTileScroll(selectedTileId);
+          if (!result.ok) setStatus(`Push failed: ${result.reason}`);
+          else if (result.warning) setStatus(`Pushed, but: ${result.warning}`);
+          else setStatus('Pushed to tile-scroll.');
+          render();
+        })
       )
     );
     return wrap;
@@ -628,6 +704,7 @@ export function installTileMotionPanel() {
 
   function render() {
     body.innerHTML = '';
+    body.appendChild(buildThumbnailGrid());
     body.appendChild(buildTileSelector());
     body.appendChild(buildSelectedTileForm());
     body.appendChild(buildTransportSection());

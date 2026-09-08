@@ -10001,10 +10001,26 @@ export async function startVtPanViewer({
      * nothing moved, so the steady-state cost is a handful of numeric `!==`
      * checks per token, every frame, no allocation. Visibility
      * and streaming are untouched here — still owned by `updateResidency()`.
+     *
+     * ALSO COVERS TILES since 2026-09-08 (mythica-machina-press#524) — name
+     * kept as-is to avoid a wider rename, but the loop below now includes
+     * `kind === 'tile'` too. A map that animates a tile's rotation by writing
+     * `TileDocument#x/y/rotation` directly and repeatedly (a document-driven
+     * "clockwork mechanism" doing this ~30x/second was the live report) used
+     * to have NO cheap path at all: every one of those writes fired `updateTile`
+     * → `refreshVtPanViewerItems` → a FULL `scheduleResidencyUpdate()` pass —
+     * exactly the "real GPU/streaming work... must stay event-driven, not run
+     * every frame" cost this function's own token half already exists to
+     * avoid, just never extended to the other placeable type that can move
+     * this same way. `boot.js`'s `updateTile` handler now skips that full pass
+     * specifically for a placement-only change (x/y/rotation only, nothing
+     * else) — this per-frame poll is what replaces it, using the exact same
+     * proven mechanism as the token half right below, not a new one.
      */
     function syncTokenPlacements() {
       for (const state of itemStates.values()) {
-        if (state.item?._placement?.kind !== 'token') continue;
+        const kind = state.item?._placement?.kind;
+        if (kind !== 'token' && kind !== 'tile') continue;
         const changed = refreshItemPlacement(state, state.item);
         // `refreshItemPlacement` only refreshes `state.placement`/`worldBounds`
         // (and a dead `state.geometry` field nothing ever assigns — tokens

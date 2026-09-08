@@ -12530,8 +12530,51 @@ function install() {
       }
     };
 
+    // PLACEMENT-ONLY updateTile CHANGES SKIP THE REDRAW BELOW (mythica-machina-
+    // press#524, live report: "rotating tiles is extremely slow and laggy").
+    // A document-driven tile-rotation animation (a "clockwork mechanism"
+    // repeatedly writing TileDocument#x/y/rotation, ~30 writes/second for the
+    // duration of one rotation) used to fire `refreshVtPanViewerItems` — a FULL
+    // `scheduleResidencyUpdate()`, real GPU/streaming work documented at that
+    // function's own call site as needing to "stay event-driven, not run every
+    // frame" — on EVERY one of those writes. `vt-pan-viewer.js#
+    // syncTokenPlacements` now also polls tile placement every frame (the exact
+    // mechanism already proven for tokens, which have always needed this), so
+    // a placement-only tile change reaches the screen just as smoothly WITHOUT
+    // the residency pass — this check is what stops ALSO asking for that pass
+    // when nothing but placement changed. Anything else about a tile (a new
+    // tile, a deleted one, a texture swap, a dimension/flag change) still goes
+    // through the exact same full path as before — this only recognises the
+    // narrow x/y/rotation shape, everything else falls through to it.
+    //
+    // Folded into `redrawOn`'s own single handler, not a second `Hooks.on`
+    // call — `foundry/adapter-only`'s ratchet counts call SITES, and a second
+    // registration for the same hook would only add to that debt for zero
+    // real benefit, since this handler already receives every argument Foundry
+    // hands the hook, `change` included.
+    /**
+     * @param {string} hook
+     * @param {object} change - the raw hook's own change payload (exactly what
+     *   was passed to `.update()`/`updateEmbeddedDocuments()`, never expanded/
+     *   normalised further by Foundry itself).
+     * @returns {boolean} true only for `updateTile` where EVERY key in `change`
+     *   is one of the three placement fields (or `_id`, always present in a
+     *   real update and never itself a content change) — false for any other
+     *   hook, or an empty/malformed change, so an unrecognised shape always
+     *   falls through to the full path rather than silently skipping a redraw
+     *   it should not.
+     */
+    function isPlacementOnlyTileChange(hook, change) {
+      if (hook !== 'updateTile') return false;
+      if (!change || typeof change !== 'object') return false;
+      const keys = Object.keys(change);
+      if (keys.length === 0) return false;
+      const PLACEMENT_ONLY_KEYS = new Set(['_id', 'x', 'y', 'rotation']);
+      return keys.every((k) => PLACEMENT_ONLY_KEYS.has(k));
+    }
     const redrawOn = (hook) => {
-      Hooks.on(hook, (doc) => {
+      Hooks.on(hook, (doc, change) => {
+        if (isPlacementOnlyTileChange(hook, change)) return;
         // Fire-and-forget: a redraw must never make a document update await GPU
         // work, and a failed redraw must not break Foundry's own bookkeeping.
         // The hook NAME is passed through: diagnostics' documentSync.byHook is

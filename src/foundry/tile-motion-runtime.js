@@ -41,6 +41,7 @@ const TRANSPORT_FLAG_KEY = 'tileMotionTransport';
 let initialized = false;
 let unwatchTransport = null;
 let unwatchTiles = null;
+let unwatchPauseGame = null;
 
 /** @type {Map<string, import('./tile-motion.js').TileMotionConfig>} every tile with a saved config, enabled or not. */
 let configCache = new Map();
@@ -197,6 +198,49 @@ export function watchTransportState(onChange) {
   return () => {
     try {
       Hooks.off('updateScene', id);
+    } catch (_) {
+      // already gone.
+    }
+  };
+}
+
+/**
+ * GATES TILE MOTION BY FOUNDRY'S OWN PAUSE STATE (mythica-machina-press#524,
+ * live request: "starting and stopping of all these rotational animations
+ * should be gated by... the pause/unpause"). `Hooks.callAll("pauseGame",
+ * this.data.paused, options)` — confirmed in the real v14 source
+ * (`client/game.mjs`) — fires with the RESULTING paused state as its one
+ * argument, not a toggle; `pauseTileMotion`/`resumeTileMotion` are called
+ * directly off that value, not off `game.paused` read separately, so this
+ * cannot race a paused state that has not actually committed yet.
+ *
+ * Both functions are already idempotent against their own state
+ * (`pauseTileMotion` no-ops if already paused or not playing;
+ * `resumeTileMotion` no-ops if not currently paused) — see their own bodies —
+ * so this needs no extra guard here against firing on an unrelated update or
+ * being called twice.
+ *
+ * Deliberately did not try to distinguish "paused because the GM paused the
+ * GAME" from "paused because the GM (or a future UI) paused just the
+ * ANIMATION" — there is only one transport `paused` flag, matching the
+ * request's own framing (pause/unpause as the single gate), not two
+ * independent ones. If that distinction is ever wanted, it needs a second
+ * flag, not a change here.
+ * @returns {() => void} unsubscribe.
+ */
+export function watchGamePause() {
+  if (typeof Hooks === 'undefined') return () => {};
+  const id = Hooks.on('pauseGame', (paused) => {
+    try {
+      if (paused) void pauseTileMotion();
+      else void resumeTileMotion();
+    } catch (_) {
+      // mid-teardown update; nothing to recover.
+    }
+  });
+  return () => {
+    try {
+      Hooks.off('pauseGame', id);
     } catch (_) {
       // already gone.
     }
@@ -386,6 +430,7 @@ export function initializeTileMotionRuntime() {
       transportCache = normalizeTransportState(readTransportStateRaw());
     });
     unwatchTiles = watchTileMotionConfigs(onTileDocChanged);
+    unwatchPauseGame = watchGamePause();
     initialized = true;
   }
 
@@ -405,8 +450,10 @@ export function disposeTileMotionRuntime() {
   if (!initialized) return;
   unwatchTransport?.();
   unwatchTiles?.();
+  unwatchPauseGame?.();
   unwatchTransport = null;
   unwatchTiles = null;
+  unwatchPauseGame = null;
   configCache = new Map();
   restPoseCache = new Map();
   externalTileEditSuppressed = false;

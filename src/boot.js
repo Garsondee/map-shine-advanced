@@ -442,6 +442,11 @@ import {
   watchDoorGraphics,
   initializeTileMotionRuntime,
   getTileMotionSummary,
+  getTileMotionTransportState,
+  startTileMotion,
+  stopTileMotion,
+  pauseTileMotion,
+  resumeTileMotion,
   saveAuthoredAnchors,
   loadAuthoredAnchors,
   registerSkySettings,
@@ -1192,6 +1197,22 @@ function install() {
       // closure reference here already relies on).
       getTileMotionSummary: () => getTileMotionSummary(),
       openTileMotionDialog: () => tileMotionPanel.open(),
+      // DIRECT CONSOLE TRANSPORT CONTROLS (mythica-machina-press#524, live
+      // report: "sometimes when I load the scene up none of the motion is
+      // happening and I don't have a way to start it"). The auto-play path
+      // (`initializeTileMotionRuntime`'s own 250ms-after-settle check) can
+      // legitimately miss its own window — `canEditScene()` false at that
+      // exact moment, or the scene still settling past 250ms on a heavy load —
+      // and until now the ONLY manual recovery was opening the full Tile
+      // Motion dialog (`openTileMotionDialog()` above) and using its own
+      // transport buttons. These four are the same underlying functions
+      // (`tile-motion-runtime.js`), exposed directly so a GM (or another
+      // module/macro) can recover without the dialog at all.
+      getTileMotionTransportState: () => getTileMotionTransportState(),
+      startTileMotion: () => startTileMotion(),
+      stopTileMotion: () => stopTileMotion(),
+      pauseTileMotion: () => pauseTileMotion(),
+      resumeTileMotion: () => resumeTileMotion(),
       // THE SCENE DEPARTMENT's Darkness-at-max card (UI parity plan, phase
       // 4a) — the SAME real functions the old panel's own 'darkness-realism'
       // select already calls (see that registration's own comment, below,

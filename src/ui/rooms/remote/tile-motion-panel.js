@@ -370,7 +370,6 @@ export function installTileMotionPanel() {
             'clockwork steps',
             numberInput(m.clockworkSteps, 1, (v) => patchSelectedTile({ motion: { clockworkSteps: v } }), {
               min: 1,
-              max: 48,
             })
           )
         );
@@ -711,6 +710,26 @@ export function installTileMotionPanel() {
     body.appendChild(statusEl);
   }
 
+  // THE POLL TIMER'S OWN GUARD (2026-09-08, author: "I can't type numbers...
+  // the number box keeps losing focus every second"). `render()` rebuilds
+  // the WHOLE body from scratch — the only way this panel picks up an
+  // external change (another client's edit, the transport ticking) without
+  // its own echo-suppression machinery (see this file's own header on why:
+  // V2 needed that, this design doesn't). That rebuild necessarily replaces
+  // every `<input>`/`<select>` with a fresh one, which drops focus and
+  // whatever the author had just typed — fine for a value already committed
+  // by a `change` event (those call `render()` directly, deliberately), not
+  // fine for the 1s BACKGROUND poll firing mid-keystroke. Skipping THAT one
+  // render while a field inside this panel has focus costs nothing real:
+  // the field the author is editing wouldn't want to be overwritten by a
+  // poll anyway, and everything else just catches up on the next tick after
+  // they blur or commit.
+  function renderUnlessEditing() {
+    const active = document.activeElement;
+    if (active && body.contains(active) && (active.tagName === 'INPUT' || active.tagName === 'SELECT')) return;
+    render();
+  }
+
   room.append(head, body);
   document.body.appendChild(room);
   makeDraggable(head, room);
@@ -744,7 +763,7 @@ export function installTileMotionPanel() {
           render();
         });
       }
-      if (!pollTimer) pollTimer = setInterval(render, 1000);
+      if (!pollTimer) pollTimer = setInterval(renderUnlessEditing, 1000);
       render();
     },
     close() {

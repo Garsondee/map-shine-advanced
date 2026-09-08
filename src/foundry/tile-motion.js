@@ -123,7 +123,12 @@ export function normalizeTileMotionConfig(raw, tileId = '') {
       phase: num(motion.phase, 0),
       rotationEasing: EASING_SET.has(motion.rotationEasing) ? motion.rotationEasing : 'linear',
       easeStrength: clampNum(motion.easeStrength, 0, 1, 1),
-      clockworkSteps: Math.round(clampNum(motion.clockworkSteps, 1, 48, 8)),
+      // Only floored at 1 (0 or fewer steps breaks the divide in
+      // computeClockworkProgress01) — no creative-choice ceiling. The old
+      // 48 cap was an arbitrary authoring limit, not a technical one
+      // (author, 2026-09-08: "why limit... that's really silly"); 100000
+      // here is a sanity backstop against a stray typo, not a design bound.
+      clockworkSteps: Math.round(clampNum(motion.clockworkSteps, 1, 100000, 8)),
       clockworkHold: clampNum(motion.clockworkHold, 0, 0.95, 0.55),
       clockworkJank: clampNum(motion.clockworkJank, 0, 1, 0),
       loopMode,
@@ -299,7 +304,7 @@ export function applyJankWarp01(u, tileId, cycleIndex, jank) {
  */
 export function computeClockworkProgress01(u, motion, tileId, cycleIndex, chaosScale = 1) {
   const t = clampNum(u, 0, 1, 0);
-  const steps = Math.max(1, Math.round(clampNum(motion?.clockworkSteps, 1, 48, 8)));
+  const steps = Math.max(1, Math.round(clampNum(motion?.clockworkSteps, 1, 100000, 8)));
   const holdBase = clampNum(motion?.clockworkHold, 0, 0.95, 0.55);
   const jank = clampNum(motion?.clockworkJank, 0, 1, 0);
 

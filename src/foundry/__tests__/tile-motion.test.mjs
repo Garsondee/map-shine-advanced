@@ -59,9 +59,13 @@ export function run(t) {
       normalizeTileMotionConfig({ motion: { easeStrength: -5 } }, 'x').motion.easeStrength === 0
   );
   ok(
-    'clockworkSteps clamps to [1,48] and rounds',
-    normalizeTileMotionConfig({ motion: { clockworkSteps: 200 } }, 'x').motion.clockworkSteps === 48 &&
-      normalizeTileMotionConfig({ motion: { clockworkSteps: 0 } }, 'x').motion.clockworkSteps === 1
+    // No creative-choice ceiling (author, 2026-09-08: the old 48 cap was "really
+    // silly") — only floored at 1, which is a real technical necessity
+    // (computeClockworkProgress01 divides by step count).
+    'clockworkSteps floors at 1, rounds, and has no low practical ceiling',
+    normalizeTileMotionConfig({ motion: { clockworkSteps: 500 } }, 'x').motion.clockworkSteps === 500 &&
+      normalizeTileMotionConfig({ motion: { clockworkSteps: 0 } }, 'x').motion.clockworkSteps === 1 &&
+      normalizeTileMotionConfig({ motion: { clockworkSteps: 12.4 } }, 'x').motion.clockworkSteps === 12
   );
   ok('a tile cannot be its own parent', normalizeTileMotionConfig({ parentId: 'self' }, 'self').parentId === null);
   ok('a genuine parentId survives', normalizeTileMotionConfig({ parentId: 'other' }, 'self').parentId === 'other');

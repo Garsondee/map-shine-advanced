@@ -211,6 +211,7 @@ import {
   computeEasedValue,
   isEntryExpired,
   createFadeSourceRegistry,
+  schemaFadeSource,
   WEATHER_ARCHETYPES,
 } from './world/index.js';
 import {
@@ -712,6 +713,17 @@ const effectRegistry = createEffectRegistry();
 effectRegistry.register(UI_WINDOW_SHADOW, (resolved) => {
   setUiShadow({ enabled: resolved.enabled, ...resolved.params });
 });
+
+// THE FADE SOURCE REGISTRY (world/fade-registry.js) — declared here, at module
+// scope beside effectRegistry, rather than down in the weather board's own
+// setup (its original home), so `registerSimpleEffectCard` — defined and
+// CALLED for every simple effect long before the weather board runs — can
+// register each effect's existing Studio-card triple as a fade source the
+// moment the card itself is registered (mythica-machina-press#180: the fade
+// engine's "any configuration to any other" was proven generic in tests but
+// never reachable from a live scene for anything beyond the two weather
+// axes). One registry, module-scoped, exactly like effectRegistry above it.
+const fadeSourceRegistry = createFadeSourceRegistry();
 
 // Transient, in-memory param tuning (MapShine.setUiShadow / the debug panel).
 // Stage A has no per-scene/-client PARAM persistence yet (Stage B), so live look
@@ -7672,6 +7684,24 @@ function install() {
    *   status?: (readout: object) => string}} opts
    */
   function registerSimpleEffectCard(id, opts) {
+    // FADE-REACHABLE FOR FREE (mythica-machina-press#180) — the exact
+    // {schema, getValue, onChange} triple the model below builds for the
+    // Studio card, wrapped once via `schemaFadeSource` and registered under
+    // this effect's own id. This runs exactly ONCE, here, at call time — never
+    // inside the `registerEffectCardSafe` factory closure below, which the
+    // Studio can invoke repeatedly (a second `registerSource('bloom', …)`
+    // would throw "already registered"). `opts.getReadout`/`opts.setValue`
+    // are the same live accessor and writer the card's own `getValue`/
+    // `onChange` are built from a few lines down — one pair of functions,
+    // two consumers, so a fade write and a Studio-panel edit can never drift.
+    fadeSourceRegistry.registerSource(
+      id,
+      schemaFadeSource({
+        schema: opts.schema,
+        getValue: (key) => opts.getReadout().params?.[key] ?? opts.schema[key]?.default,
+        onChange: (key, value) => opts.setValue({ [key]: value }),
+      })
+    );
     registerEffectCardSafe(id, () => {
       // `readLive` stays a live ACCESSOR, called fresh at every field below
       // — never captured into a `const readout = ...` snapshot closed over
@@ -9096,11 +9126,12 @@ function install() {
   // until a fade actually starts, well after skyScope/editSky exist.
   // ══════════════════════════════════════════════════════════════════════
 
-  /** id -> {typeOf, readLive, write}. 'weather' is this checkpoint's only
-   * registered source; a future effect becomes fadeable by registering its
-   * OWN {schema, getValue, onChange} (world/fade-registry.js#schemaFadeSource)
-   * — no change here when that day comes. */
-  const fadeSourceRegistry = createFadeSourceRegistry();
+  // `fadeSourceRegistry` itself is declared at MODULE scope, beside
+  // effectRegistry (mythica-machina-press#180) — every `registerSimpleEffectCard`
+  // call already registered its own {schema, getValue, onChange} triple as a
+  // fade source by the time install() reaches this point, so 'weather' below
+  // joins an already-populated registry rather than starting a second,
+  // shadowed one. id -> {typeOf, readLive, write}.
   fadeSourceRegistry.registerSource('weather', {
     keys: () => ['cloudCover01', 'precip01'],
     typeOf: () => 'float',

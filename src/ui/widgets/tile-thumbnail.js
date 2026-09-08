@@ -41,7 +41,16 @@ function loadImage(src) {
     img.crossOrigin = 'anonymous'; // same-origin is unaffected; guards a future off-origin asset host
     img.onload = () => resolve(img);
     img.onerror = () => reject(new Error(`tile-thumbnail: failed to load ${src}`));
-    img.src = src;
+    // A Tile document's texture.src is route-relative ("modules/foo/assets/x.webp"),
+    // never an absolute URL — resolving it through the browser's own relative-URL
+    // rules (by just assigning it to img.src) depends on the CURRENT PAGE's own
+    // path shape lining up by coincidence, and silently breaks whenever it
+    // doesn't (a blank thumbnail, no error surfaced anywhere an author would see
+    // it — live report, 2026-09-08: "no thumbnail"). foundry.utils.getRoute() is
+    // Foundry's own official resolver for exactly this, honoring any configured
+    // route prefix — the same thing every other asset load in Foundry itself
+    // goes through.
+    img.src = typeof foundry !== 'undefined' ? foundry.utils.getRoute(src) : src;
   });
 }
 

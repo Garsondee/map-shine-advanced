@@ -19095,6 +19095,27 @@ export async function startVtPanViewer({
     // extension it is genuinely parallel; on one without, it is at least MEASURED.
     // A worker cannot help with either — GL programs belong to the context that
     // made them, so a worker's program is unusable here (Shaders.md §2).
+    //
+    // NAME THE PHASE BEFORE BLOCKING (mythica-machina-press#533). Every
+    // onLoadProgress call from here down through warmUpDrawState() omits
+    // `phase`, so boot.js's wrapper (`phase ?? LOAD_PHASES.ART`) was silently
+    // attributing this entire compile/bake/warm-up stretch to the ART phase —
+    // meaning the curtain kept showing a stale "Streaming map art"/"Compressing
+    // textures" line, frozen, for the whole synchronous cost below, instead of
+    // LOAD_PHASES.WARMING (whose own doc names exactly this gap: "pipelines
+    // compiling lazily on first draw... That gap is the 10-20 seconds the
+    // author reported"). boot.js doesn't open WARMING itself until AFTER this
+    // function returns and the first frame has painted — too late to cover any
+    // of this. One explicit phase tag, using the same {done,total,detail,phase}
+    // contract already proven for LOAD_PHASES.DEVICE a few hundred lines up,
+    // is enough: it opens the WARMING span here, so the text left on screen
+    // during the freeze below actually describes what is happening.
+    onLoadProgress?.({
+      phase: 'warming',
+      done: 0,
+      total: 1,
+      detail: 'Compiling shaders — the screen may pause briefly',
+    });
     try {
       const t0 = perfNowMs();
       await renderer.compileAsync(scene, camera);

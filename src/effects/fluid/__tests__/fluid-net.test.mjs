@@ -27,6 +27,7 @@ import {
   weightedCorrelation,
   fillEmptyBins,
   FLUID_HINT_MIN_CORRELATION,
+  FLUID_SUSPICIOUS_COVERAGE_FRACTION,
 } from '../fluid-net.js';
 
 const TEXEL = 10;
@@ -489,6 +490,42 @@ export function run(t) {
     ok('empty mask: zero tubes', net.tubeCount === 0);
     ok('empty mask: no warnings (nothing was lost)', net.warnings.length === 0);
     ok('empty mask: tubes array is empty, not null', Array.isArray(net.tubes) && net.tubes.length === 0);
+  }
+
+  // ── A near-fully-"present" mask is reported as suspicious, not trusted ────
+  // (mythica-machina-press#532 — the confirmed real-world shape: a mask
+  // exported with its true shape in ALPHA and a flat/matted R channel reads
+  // back as r >= 1 across the ENTIRE canvas.)
+  {
+    const g = makeGrid(20, 20);
+    rect(g, 0, 0, 19, 19); // every texel present — the degenerate case itself
+    const net = extractTubeNet({ grid: g, samplesPerTube: 8 });
+    ok(
+      'fully covered: a suspicious-coverage warning fires',
+      net.warnings.some((s) => s.includes('100.0%') && s.includes('ALPHA'))
+    );
+    ok('fully covered: still extracts SOMETHING rather than crashing', net.tubeCount === 1);
+  }
+  {
+    // Exactly the threshold: FLUID_SUSPICIOUS_COVERAGE_FRACTION is inclusive
+    // ("at or above"), so a grid at precisely that fraction must warn too —
+    // this is the boundary a `>` instead of `>=` would silently miss.
+    const g = makeGrid(10, 10); // 100 texels
+    rect(g, 0, 0, 9, 4); // rows 0-4 = 50 texels = exactly 50%
+    const net = extractTubeNet({ grid: g, minTubeTexels: 1, samplesPerTube: 8 });
+    ok(
+      `at-threshold (${FLUID_SUSPICIOUS_COVERAGE_FRACTION * 100}%): the warning fires`,
+      net.warnings.some((s) => s.includes('50.0%'))
+    );
+  }
+  {
+    // A real, sparse tube shape must never trip this — re-uses the disjoint
+    // fixture (two thin ramps on a 40x20 grid, well under 1% coverage).
+    const g = makeGrid(40, 20);
+    rampX(g, 2, 3, 30, 4);
+    rampX(g, 6, 14, 37, 16);
+    const net = extractTubeNet({ grid: g, samplesPerTube: 16 });
+    ok('sparse real tubes: no suspicious-coverage warning', !net.warnings.some((s) => s.includes('reads as tube')));
   }
 
   // ── A missing grid is a WIRING fault and must be loud ────────────────────

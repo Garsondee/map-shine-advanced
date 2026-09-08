@@ -101,6 +101,29 @@ export const FLUID_PRESENCE_MIN_BYTE = 1;
 export const FLUID_MIN_TUBE_TEXELS = 6;
 
 /**
+ * Above this fraction of the WHOLE grid reading as present, the mask is
+ * reported as suspicious rather than trusted at face value.
+ *
+ * ⚠️ Named after a real, confirmed bug (mythica-machina-press#532), not a
+ * theoretical guard. A tube network is a thin, elongated shape by construction
+ * — even a busy multi-tube apparatus covers a small fraction of its own
+ * canvas — so a mask reading back at or above 50% present is far more likely
+ * to be a MIS-EXPORTED file than a real dense painting. The confirmed failure
+ * shape: an image editor exports the artist's paint with its true coverage
+ * kept in ALPHA and the RGB channels flattened against a white/opaque matte
+ * for preview purposes (`R = G = B = 255` at full transparency, `G/B → 0` as
+ * alpha rises) — which pins R at 255 EVERYWHERE, since `matte-blend(255, W,
+ * α) = 255` regardless of `α` when the matte itself is white. `extractTubeNet`
+ * has no way to tell that apart from a genuinely enormous tube without this
+ * check: `present[i] = data[i] >= presenceMinByte` reads true for the entire
+ * canvas, `labelComponents` labels ONE component spanning nearly the whole
+ * grid, and nothing before this warning existed said why. This is the same
+ * "instruments must not lie" discipline as the speckle/cap warnings just
+ * below — a degenerate result must name itself, not just render wrong.
+ */
+export const FLUID_SUSPICIOUS_COVERAGE_FRACTION = 0.5;
+
+/**
  * How many arc-length bins each tube's 1-D profile carries. This is the width
  * of one row of the sim state and profile textures (`Fluid.md` §5.3), so it is
  * a texture dimension, not a tuning knob: 512 samples along a 3,000 world-px
@@ -585,6 +608,7 @@ export function weightedCorrelation(hint, dist, weight) {
  * @param {number} [args.maxTubes]
  * @param {number} [args.samplesPerTube]
  * @param {number} [args.hintMinCorrelation]
+ * @param {number} [args.suspiciousCoverageFraction]
  * @returns {TubeNet}
  */
 export function extractTubeNet({
@@ -594,6 +618,7 @@ export function extractTubeNet({
   maxTubes = FLUID_MAX_TUBES,
   samplesPerTube = FLUID_PROFILE_SAMPLES,
   hintMinCorrelation = FLUID_HINT_MIN_CORRELATION,
+  suspiciousCoverageFraction = FLUID_SUSPICIOUS_COVERAGE_FRACTION,
 } = {}) {
   if (!grid || !grid.spec || !grid.data) {
     throw new Error(
@@ -609,7 +634,27 @@ export function extractTubeNet({
   const warnings = [];
 
   const present = new Uint8Array(w * h);
-  for (let i = 0; i < present.length; i++) present[i] = data[i] >= presenceMinByte ? 1 : 0;
+  let presentCount = 0;
+  for (let i = 0; i < present.length; i++) {
+    present[i] = data[i] >= presenceMinByte ? 1 : 0;
+    presentCount += present[i];
+  }
+
+  // See FLUID_SUSPICIOUS_COVERAGE_FRACTION's own header — this is a real,
+  // previously-silent failure shape (mythica-machina-press#532), not a
+  // theoretical guard. Checked BEFORE labelling, so it fires even in the
+  // degenerate case where the "tube" is one component spanning the whole grid.
+  const presentFraction = present.length > 0 ? presentCount / present.length : 0;
+  if (presentFraction >= suspiciousCoverageFraction) {
+    warnings.push(
+      `${(presentFraction * 100).toFixed(1)}% of the mask reads as tube (r >= ${presenceMinByte}), which is ` +
+        'far more than a real hand-painted tube network ever covers. This usually means the file was ' +
+        'exported with its true shape kept in the ALPHA channel and a flat/matted RED channel (e.g. ' +
+        '"painted on a white canvas, alpha carries the coverage") instead of the presence + flow-hint data ' +
+        'the `fluid` mask kind reads directly from R (see the `fluid` entry in scene/mask-catalog.js). ' +
+        "Check the source PNG's raw R channel for real per-pixel variation before trusting this bake."
+    );
+  }
 
   const { tubeId, sizes } = labelComponents(present, w, h);
 

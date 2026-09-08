@@ -17,11 +17,15 @@
  * all), and unlike every other effect's params it must NOT have a per-client
  * override layer — per-client divergence is exactly what this feature exists
  * to eliminate. Shape borrowed from `sky-persistence.js` instead:
- *   - `regionDarknessOverrideEnabled` (bool, world) — OFF by default.
- *     Flipping it on rewrites real Scene/RegionBehavior documents (GM-only,
- *     Foundry's rule) — a bigger, more persistent effect than any other MSA
- *     toggle, so it defaults off rather than silently rewriting a GM's
- *     hand-authored scenes the moment the module updates.
+ *   - `regionDarknessOverrideEnabled` (bool, world) — ON by default. This is
+ *     a deliberate, confirmed choice (author, 2026-09-09): the whole point of
+ *     the feature is that EVERY map in the catalogue darkens interiors by the
+ *     same amount automatically, not an opt-in a GM has to remember to flip
+ *     on per world. It DOES mean updating the module can rewrite a scene's
+ *     hand-authored `modifier` the first time it loads post-update — accepted
+ *     outright in favour of catalogue-wide consistency, which is exactly why
+ *     the pre-override `{mode, modifier}` is still stashed in a flag below
+ *     (not a safety rail against this default, just cheap insurance).
  *   - `regionDarknessOverrideValue` (world) — the override level, 0..1,
  *     default 0.75. Stored as a string: the settings adapter only has
  *     `bool`/`enum` kinds (its own header: "a thin, dumb wrapper... widening
@@ -110,7 +114,7 @@ export function registerRegionDarknessOverrideSettings(options = {}) {
         key: REGION_DARKNESS_OVERRIDE_ENABLED_KEY,
         scope: 'world',
         kind: 'bool',
-        default: false,
+        default: true,
         config: false,
         name: 'Region darkness override',
         hint: "Force every scene's darkening region behaviors to one consistent value.",
@@ -139,7 +143,12 @@ export function readRegionDarknessOverrideSettings() {
     const raw = readSetting(REGION_DARKNESS_OVERRIDE_NAMESPACE, REGION_DARKNESS_OVERRIDE_VALUE_KEY);
     return { enabled, value: clamp01(raw) };
   } catch {
-    return { enabled: false, value: DEFAULT_REGION_DARKNESS_OVERRIDE_VALUE };
+    // A read this early (before `registerRegionDarknessOverrideSettings` has
+    // run) is a wiring bug, not a normal state — but if it ever happens, fall
+    // back to the same "on" default the setting itself registers with, not
+    // the old off-by-default posture, so a bug here never silently reverts
+    // the catalogue-wide-consistency intent this feature exists for.
+    return { enabled: true, value: DEFAULT_REGION_DARKNESS_OVERRIDE_VALUE };
   }
 }
 

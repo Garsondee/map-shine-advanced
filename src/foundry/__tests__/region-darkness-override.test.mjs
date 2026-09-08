@@ -67,18 +67,30 @@ export async function run(t) {
       "both settings are config:false — edited from the Studio card, not Foundry's settings sheet",
       enabledCall.data.config === false && valueCall.data.config === false
     );
-    ok('the toggle defaults to off', enabledCall.data.default === false);
+    ok(
+      'the toggle defaults to ON — catalogue-wide consistency happens automatically, not opt-in (author-confirmed 2026-09-09)',
+      enabledCall.data.default === true
+    );
     ok(
       'the value defaults to 0.75, stored as a string (the settings adapter has no numeric kind)',
       valueCall.data.default === String(DEFAULT_REGION_DARKNESS_OVERRIDE_VALUE)
     );
 
     const initial = readRegionDarknessOverrideSettings();
-    ok('read reflects the registered defaults', initial.enabled === false && initial.value === 0.75);
+    ok('read reflects the registered defaults', initial.enabled === true && initial.value === 0.75);
 
-    await writeRegionDarknessOverrideSettings({ enabled: true, value: 0.4 });
-    const afterWrite = readRegionDarknessOverrideSettings();
-    ok('write-then-read round-trips both fields', afterWrite.enabled === true && afterWrite.value === 0.4);
+    await writeRegionDarknessOverrideSettings({ value: 0.4 });
+    const afterValueWrite = readRegionDarknessOverrideSettings();
+    ok(
+      'a value-only write round-trips and leaves the (still-on) toggle untouched',
+      afterValueWrite.enabled === true && afterValueWrite.value === 0.4
+    );
+
+    await writeRegionDarknessOverrideSettings({ enabled: false });
+    ok('a GM can still explicitly turn the override off', readRegionDarknessOverrideSettings().enabled === false);
+
+    await writeRegionDarknessOverrideSettings({ enabled: true });
+    ok('...and back on again', readRegionDarknessOverrideSettings().enabled === true);
 
     await writeRegionDarknessOverrideSettings({ value: 5 });
     ok('an out-of-range value is clamped to 1 on write', readRegionDarknessOverrideSettings().value === 1);

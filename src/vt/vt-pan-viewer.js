@@ -6779,8 +6779,20 @@ export async function startVtPanViewer({
       // LIGHTNING — spawn/reap scheduling + population-driven geometry
       // rebuild, BEFORE pointLights.update() so its origin-flash light reads
       // THIS frame's fresh strand snapshot, not last frame's.
+      //
+      // `env.time?.tMs ?? uGlobalTimeMs.value` — NOT the unguarded `env.time.tMs`
+      // this was before (found 2026-09-08, live report: a dark scene with
+      // "lights have no attenuation" and console errors under WebGL2 fallback).
+      // `env` defaults to `{}` at the top of this pass when `lastEnvSnapshot` is
+      // still null, which is exactly the case on `warmUpDrawState`'s pre-first-
+      // frame warm-up call: `env.time` is undefined there, so `env.time.tMs`
+      // threw, aborting this WHOLE pass before ambient/regions/point-lights/sun
+      // ever ran — not the dark-scene root cause itself (warm-up failure is
+      // caught and logged as "pipelines will compile lazily", same as every
+      // other guarded `tMs` read in this file), but a real bug in its own
+      // right and worth closing on the same pass.
       profiler?.begin(Z.lightLightningSync);
-      lightningSubsystem.sync(env.time.tMs);
+      lightningSubsystem.sync(env.time?.tMs ?? uGlobalTimeMs.value);
       profiler?.end(Z.lightLightningSync);
 
       // FIRE's compute step does NOT happen here — see the `sims` block, which
@@ -6801,7 +6813,13 @@ export async function startVtPanViewer({
       // skips. `env.time.realMs`, NEVER `env.time.tMs` — sim time freezes
       // on pause, which would latch the throttle shut forever (the exact
       // bug already paid for once, see scene-synthetic-lights.js's header).
-      syntheticLights.sync(env.time.realMs);
+      // The `?? uGlobalTimeMs.value` fallback (added alongside the lightning
+      // sync fix just above) only ever fires on `warmUpDrawState`'s discarded
+      // pre-first-frame call, where `env.time` doesn't exist yet — nothing
+      // reads or persists this throttle's state from that call, so borrowing
+      // the shared clock here does NOT reintroduce the tMs pause-latch bug
+      // the comment above warns about.
+      syntheticLights.sync(env.time?.realMs ?? uGlobalTimeMs.value);
       // Every loaded vegetation mesh's live motion/shadow uniforms — SAME
       // "every frame, not just on residency pass" placement as the candle
       // call just above (see `syncAllVegetationMotionForFrame`'s own header

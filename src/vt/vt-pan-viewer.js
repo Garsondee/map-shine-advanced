@@ -161,6 +161,7 @@ import {
   RENDER_ABOVE_EVERYTHING_DEPTH,
   computeSceneDepthFlags,
   resolveSceneDepthFloorIndex,
+  computeAlwaysOpaqueForDepthWriter,
   buildSceneDepthWriterMaterial,
   buildSceneDepthProxyMesh,
   querySceneDepth,
@@ -17301,6 +17302,28 @@ export async function startVtPanViewer({
       const maxRank = depthAuthority.maxRank;
       const sceneDoc = globalThis.canvas?.scene ?? null;
       const viewedFloorIndex = view?.floorIndex ?? 0;
+      // FLUID CARRIER TILES MUST OCCLUDE WHERE THEIR MASK IS, NOT WHERE THEIR
+      // BASE ART IS (mythica-machina-press#543). A Fluid tile is commonly a
+      // nearly-transparent "carrier" — `fluid-surface-subsystem.js`'s own
+      // header — whose visible glow is a SEPARATE depthTest:false pass
+      // (`fluid-render.js`), never the tile's own base-texture alpha this
+      // depth-writer discard tests below. Without this, `alwaysOpaque` stays
+      // false for such a tile (its real art alpha never clears
+      // `alphaThreshold`), `buf:scene.depth` never marks its footprint solid,
+      // and fire/smoke/embers' own depth-height gate
+      // (point-light-illumination.js#buildDepthHeightGateNode, read via
+      // fire-particle-runtime.js's `occlusionGate`) finds nothing to test
+      // against there — so it draws straight through regardless of the
+      // tile's elevation. `getFluidMaskItems` (already injected from boot's
+      // `createFluidSeams`, `scene/mask-authority.js#authoredStatusForItem`
+      // underneath — URL-only, synchronous, no texture/decode wait) is the
+      // SAME per-item authored-fluid-mask signal the visible fluid mesh
+      // itself is built from, reused here rather than a second lookup. Just
+      // the ids: this pass needs a boolean per item, not the mask's own
+      // corners/url, and every mask suffix's own file-convention knowledge
+      // stays inside `scene/mask-authority.js` (`masks/authority-only`) —
+      // this file never inspects a URL or a suffix itself.
+      const fluidMaskedItemIds = new Set(getFluidMaskItems(viewedFloorIndex).map((f) => f.id));
       for (const item of items) {
         // VEGETATION CASE-2 OVERLAY (STAGE 2, 2026-08-04) — a synthetic item
         // (`buildVegetationDepthItems`) with no `itemStates` entry of its
@@ -17600,7 +17623,18 @@ export async function startVtPanViewer({
         // comparison the discard below would have made, not a coincidentally
         // near-always-true one.
         const alphaStats = state.wholeImage.alphaStats;
-        const alwaysOpaque = alphaStats != null && alphaStats.min / 255 >= (item.alphaThreshold ?? 0.75);
+        // mythica-machina-press#543 — `hasFluidMask` (computed once above,
+        // from the SAME per-item authored-fluid-mask signal the visible
+        // fluid mesh itself is built from) now feeds
+        // `computeAlwaysOpaqueForDepthWriter` alongside the original
+        // `alphaStats` proof — see that function's own header for why both
+        // are safe to fold into one boolean.
+        const hasFluidMask = fluidMaskedItemIds.has(item.id);
+        const alwaysOpaque = computeAlwaysOpaqueForDepthWriter({
+          alphaStats,
+          alphaThreshold: item.alphaThreshold ?? 0.75,
+          hasFluidMask,
+        });
         for (const t of tiles) {
           // EARLY OCCLUSION REJECT (see buildWholeImageMaterial's own
           // comment) — kept fresh here, every residency pass, the exact
@@ -17653,9 +17687,21 @@ export async function startVtPanViewer({
           // from being able to drift apart on what "safe to force" means.
           // `needsUpdate` forces the NodeMaterial to recompile its pipeline
           // with the new blend state.
+          //
+          // FOURTH EXCLUSION, mythica-machina-press#543: `hasFluidMask` is
+          // now a THIRD, independent way `alwaysOpaque` can read true (see
+          // that flag's own comment above) — a Fluid carrier tile's real
+          // base texture is commonly nearly fully transparent BY DESIGN
+          // (`fluid-surface-subsystem.js`'s own header), same "100%-opaque
+          // signal, genuinely-translucent real draw" shape the three checks
+          // below already exist to catch. Forcing `transparent:false` on the
+          // carrier's own visible material here would blank out the glow the
+          // author's map depends on seeing THROUGH it, for as long as this
+          // debug flag stays armed.
           if (
             debugForceOpaqueBlendOff &&
             alwaysOpaque &&
+            !hasFluidMask &&
             t.earlyZReason !== 'vegetation' &&
             t.earlyZReason !== 'occlusionResponsive' &&
             t.earlyZReason !== 'authoredAlpha' &&

@@ -23,6 +23,7 @@ import {
   DEPTH_FLAG_IS_LEVEL_FOREGROUND,
   DEPTH_FLAG_IS_TILE,
   resolveSceneDepthFloorIndex,
+  computeAlwaysOpaqueForDepthWriter,
   buildSceneDepthWriterMaterial,
   buildSceneDepthProxyMesh,
   querySceneDepth,
@@ -186,6 +187,38 @@ export function run(t) {
         DEPTH_FLAG_IS_LEVEL_FOREGROUND +
         DEPTH_FLAG_IS_TILE <=
         255
+    );
+  }
+
+  // computeAlwaysOpaqueForDepthWriter (mythica-machina-press#543) — the
+  // Fluid-carrier-tile occlusion fix. Two independent, ORed proofs of
+  // "no real texel-level discard would ever fire here": the original
+  // alphaStats-vs-threshold proof, and the new hasFluidMask proof.
+  {
+    ok('alwaysOpaque: no alphaStats, no fluid mask — false', computeAlwaysOpaqueForDepthWriter({}) === false);
+    ok(
+      'alwaysOpaque: alphaStats below threshold, no fluid mask — false (unchanged original behaviour)',
+      computeAlwaysOpaqueForDepthWriter({ alphaStats: { min: 100 }, alphaThreshold: 0.75 }) === false
+    );
+    ok(
+      'alwaysOpaque: alphaStats at/above threshold — true, exactly as before this fix',
+      computeAlwaysOpaqueForDepthWriter({ alphaStats: { min: 200 }, alphaThreshold: 0.75 }) === true
+    );
+    ok(
+      'alwaysOpaque: a Fluid carrier with a NEARLY TRANSPARENT base texture — true anyway ' +
+        '(the bug this fix closes: alphaStats alone would have read false here)',
+      computeAlwaysOpaqueForDepthWriter({ alphaStats: { min: 0 }, alphaThreshold: 0.75, hasFluidMask: true }) === true
+    );
+    ok(
+      'alwaysOpaque: hasFluidMask true with NO alphaStats at all (raw-fallback decode path) — still true',
+      computeAlwaysOpaqueForDepthWriter({ alphaStats: null, hasFluidMask: true }) === true
+    );
+    ok(
+      'alwaysOpaque: hasFluidMask false is a true no-op — behaves exactly like the pre-#543 signature',
+      computeAlwaysOpaqueForDepthWriter({ alphaStats: { min: 200 }, alphaThreshold: 0.75, hasFluidMask: false }) ===
+        true &&
+        computeAlwaysOpaqueForDepthWriter({ alphaStats: { min: 100 }, alphaThreshold: 0.75, hasFluidMask: false }) ===
+          false
     );
   }
 

@@ -386,6 +386,50 @@ export function resolveSceneDepthFloorIndex({ item, sceneDoc, viewedFloorIndex, 
 }
 
 /**
+ * Whether an item's depth-proxy write should skip the alpha discard
+ * entirely — `buildSceneDepthWriterMaterial`'s own `alwaysOpaque` input —
+ * folding TWO independent proofs of the same "no real texel-level discard
+ * would ever fire here" outcome into one boolean, rather than a new writer-
+ * args field per proof (mythica-machina-press#543):
+ *
+ *   1. THE BASE TEXTURE ITSELF is opaque everywhere (`alphaStats.min`, the
+ *      real decoded source alpha's floor, at or above the item's own
+ *      `alphaThreshold`) — the ORIGINAL proof, unchanged.
+ *   2. THE ITEM CARRIES AN AUTHORED FLUID MASK (`hasFluidMask`, from
+ *      `scene/mask-authority.js#authoredStatusForItem(itemId, 'fluid')` via
+ *      `effects/fluid/fluid-registration.js#createFluidSeams`'s
+ *      `getFluidMaskItems`) — a NEW proof, added for #543. A Fluid "carrier"
+ *      tile is commonly nearly fully transparent BY DESIGN
+ *      (`effects/fluid/fluid-surface-subsystem.js`'s own header: the visible
+ *      glow is a SEPARATE `depthTest:false` pass, `fluid-render.js`, never
+ *      this tile's own base-texture alpha) — so proof 1 above structurally
+ *      can never hold for one, and `buf:scene.depth` never marked its
+ *      footprint solid at all. Fire/smoke/embers' own depth-height gate
+ *      (`effects/lighting/point-light-illumination.js#buildDepthHeightGateNode`)
+ *      then found nothing to test against there and drew straight through,
+ *      regardless of the tile's real elevation rank — the reported bug. A
+ *      Fluid host tile carries no OTHER content sharing that same quad, so
+ *      treating its WHOLE footprint as solid is exactly as safe as proof 1's
+ *      own texel-level certainty, just reached a different way: by the
+ *      mask's own authored coverage instead of the base texture's alpha.
+ *
+ * @param {object} args
+ * @param {{min:number}|null} [args.alphaStats] - the item's whole-image
+ *   alpha stats (`{min,max,mean}`, raw 0-255 bytes), or null when unknown
+ *   (the raw-fallback decode path).
+ * @param {number} [args.alphaThreshold=0.75] - the SAME 0-1 fraction
+ *   `buildSceneDepthWriterMaterial`'s own discard tests against.
+ * @param {boolean} [args.hasFluidMask=false] - true iff THIS item's id is in
+ *   `getFluidMaskItems(viewedFloorIndex)`'s result — cheap, synchronous, no
+ *   texture/decode wait (`authoredStatusForItem` is URL-only discovery).
+ * @returns {boolean}
+ */
+export function computeAlwaysOpaqueForDepthWriter({ alphaStats, alphaThreshold = 0.75, hasFluidMask = false }) {
+  if (hasFluidMask) return true;
+  return alphaStats != null && alphaStats.min / 255 >= alphaThreshold;
+}
+
+/**
  * THE DEPTH-WRITER MATERIAL — one per item, drawn into this pass's own
  * scene (design doc §7: "its own scene, its own meshes… not a material
  * swap on the production meshes",

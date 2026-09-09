@@ -204,12 +204,32 @@ export function windowTierPlan(tier) {
  *   zero. Defaults OFF (behaviour byte-identical to before this existed) —
  *   see "THE FLOOR GATE" below for the measurement that motivates this and
  *   why it needs a live visual check before it can default on.
+ * @param {*} [args.positionNode] - mythica-machina-press#538/#539: a per-
+ *   TILE surface's LIVE tile-motion transform (`effects/tile-motion-nodes.js
+ *   #buildTileMotionPositionNode`), assigned onto BOTH materials below so
+ *   picking a debug channel never un-sticks the animation. `null`/omitted
+ *   (every floor caller, today) leaves `positionNode` unset — THREE's own
+ *   default — which is byte-identical to this material's behaviour before
+ *   this parameter existed. `positionWorld` reads everywhere else in this
+ *   file (the glass field, the floor gate's screen UV) need no change: once
+ *   a live `positionNode` moves the vertex, THREE's own varying pass-through
+ *   is what makes every fragment-stage `positionWorld` read follow it.
+ * @param {*} [args.maskUvNode] - mythica-machina-press#538/#539: replaces
+ *   the quad's own `uv()` as the base coordinate the crop (`uMaskUvBounds`)
+ *   is applied to. A per-tile `texture`-mode surface passes `effects/tile-
+ *   motion-nodes.js#buildTileMotionMaskUvNode`'s output here so the mask
+ *   scrolls/rotates the same way the tile's own albedo does; every floor
+ *   caller and every `transform`-mode/static tile omits it, leaving the
+ *   lookup exactly `uv()` as before — see this file's own "THE MASK UV"
+ *   comment below.
  * @returns {object} the material plus its setters.
  */
 export function buildWindowSurfaceMaterial({
   THREE,
   maskTexture,
   depthTexture = null,
+  positionNode = null,
+  maskUvNode = null,
   uViewRect,
   cloudFactorNode = null,
   strength = WINDOW_DEFAULT_STRENGTH,
@@ -353,9 +373,14 @@ export function buildWindowSurfaceMaterial({
   // ── THE MASK UV — the quad's own `uv()`, remapped by the crop ────────────
   // Same reasoning as specular-render.js's own note: `uv()` cannot exceed
   // 0..1, so this lookup cannot leave the texture, correct by construction.
+  // ⚠️ `maskUvNode ?? uv()` (mythica-machina-press#538/#539) — a per-tile
+  // `texture`-mode surface's own scrolled/rotated coordinate substitutes for
+  // the raw quad UV here; every existing (floor) caller passes nothing and
+  // gets exactly `uv()`, so this crop math is otherwise untouched.
+  const baseMaskUv = maskUvNode ?? uv();
   const maskUv = vec2(
-    mix(uMaskUvBounds.x, uMaskUvBounds.z, uv().x),
-    mix(uMaskUvBounds.y, uMaskUvBounds.w, uv().y)
+    mix(uMaskUvBounds.x, uMaskUvBounds.z, baseMaskUv.x),
+    mix(uMaskUvBounds.y, uMaskUvBounds.w, baseMaskUv.y)
   ).toVar('winMaskUv');
 
   /**
@@ -760,6 +785,9 @@ export function buildWindowSurfaceMaterial({
   // whatever convention illum's alpha carries.
   const windowMaterial = new THREE.NodeMaterial();
   windowMaterial.colorNode = vec4(cookieLight, 1);
+  // mythica-machina-press#538/#539 — see `positionNode`'s own JSDoc above.
+  // Omitted (every floor caller) leaves THREE's own unset default, unchanged.
+  if (positionNode) windowMaterial.positionNode = positionNode;
   configureShared(windowMaterial);
   windowMaterial.blending = THREE.CustomBlending;
   windowMaterial.blendEquation = THREE.AddEquation;
@@ -809,6 +837,9 @@ export function buildWindowSurfaceMaterial({
   });
   const debugMaterial = new THREE.NodeMaterial();
   debugMaterial.colorNode = vec4(debugColor, 1);
+  // Same live transform as the add pass, above — a debug channel must not
+  // un-stick the animation (the mesh swaps material, never geometry).
+  if (positionNode) debugMaterial.positionNode = positionNode;
   configureShared(debugMaterial);
   // OPAQUE where the effect ADDS: a diagnostic whose "this is zero" answer
   // rendered as *nothing added* would reproduce the ambiguity it removes.

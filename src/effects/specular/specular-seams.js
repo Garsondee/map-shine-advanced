@@ -1,12 +1,12 @@
 /**
- * HOW SHINE ASKS THE MASK AUTHORITY FOR THINGS — the two seams `boot.js`
- * injects into the viewer, in one place. Same shape and same reasoning as
+ * HOW SHINE ASKS THE MASK AUTHORITY FOR THINGS — the seams `boot.js` injects
+ * into the viewer, in one place. Same shape and same reasoning as
  * `water-seams.js`; `vt/` owns the GPU lifecycle and never reaches the mask
  * authority itself, so these closures are the whole conversation between them.
  *
- * ⚠️ THE TWO ASK DIFFERENT QUESTIONS AT DIFFERENT RESOLUTIONS, and conflating
- * them is the mistake that cost water four rounds of "the shoreline is
- * pixelated" (`feedback_sdf_does_not_draw_the_edge`):
+ * ⚠️ THE FIRST TWO ASK DIFFERENT QUESTIONS AT DIFFERENT RESOLUTIONS, and
+ * conflating them is the mistake that cost water four rounds of "the
+ * shoreline is pixelated" (`feedback_sdf_does_not_draw_the_edge`):
  *
  *   getSpecularMaskRect → the COARSE derivation grid's SPEC, and only its spec.
  *                         The world rect the authored file covers, which is what
@@ -19,6 +19,11 @@
  *                         mask R is not presence (a blue-painted steel object
  *                         has r = 0).
  *
+ * `getSpecularMaskItems` (mythica-machina-press#538/#539) is a THIRD, LATER
+ * seam answering a different question entirely — "which TILES have their OWN
+ * authored `_Specular` file" — see its own header for why it exists
+ * alongside, not instead of, the two above.
+ *
  * @module effects/specular/specular-seams
  */
 
@@ -29,9 +34,18 @@
  *   scene's floor list. A GETTER: the list is replaced on every scene load and
  *   floor switch, and capturing the array would pin the first scene's floors
  *   forever.
- * @returns {{getSpecularMaskRect: Function, getSpecularMaskUrl: Function, getSpecularBackgroundItemId: Function}}
+ * @param {() => Array<object>} [args.getItems] - the scene's current item
+ *   list, mirroring `createFluidSeams`'s own `getItems` exactly — a GETTER,
+ *   for the same reason `getFloors` is one. Only `getSpecularMaskItems` reads
+ *   this; omit it and that one function simply returns `[]` every time.
+ * @param {(item: object) => Array<{x:number,y:number}>|null} [args.getItemCorners] -
+ *   the item's world-space quad corners, same contract as `createFluidSeams`'s
+ *   own parameter of the same name.
+ * @param {(item: object) => number|null} [args.getItemRenderOrder] - the
+ *   item's CURRENT `renderOrder`, same contract as `createFluidSeams`'s own.
+ * @returns {{getSpecularMaskRect: Function, getSpecularMaskUrl: Function, getSpecularBackgroundItemId: Function, getSpecularMaskItems: Function}}
  */
-export function createSpecularSeams({ maskAuthority, getFloors }) {
+export function createSpecularSeams({ maskAuthority, getFloors, getItems, getItemCorners, getItemRenderOrder }) {
   return {
     /**
      * The world rect the authored file covers. `specular` is NOT a `required`
@@ -90,6 +104,63 @@ export function createSpecularSeams({ maskAuthority, getFloors }) {
       const floors = getFloors() ?? [];
       const floor = floors.find((f) => f.index === floorIndex) ?? floors[floorIndex] ?? null;
       return floor?.id ? `level:${floor.id}:background` : null;
+    },
+
+    /**
+     * TILES with their OWN authored `_Specular` file (mythica-machina-press#538)
+     * — the door `getSpecularMaskUrl` cannot open, because it only ever
+     * resolves a LEVEL's background item.
+     *
+     * ============================================================================
+     * ⚠️ THE SAME BUG FLUID ALREADY FOUND AND FIXED, ONE EFFECT LATER
+     * ============================================================================
+     * `getSpecularMaskUrl` above is `authoredStatus(levelId, 'specular')` —
+     * exactly right for metal painted into a level's own background art, and
+     * exactly blind to a tile's own file: see `window-seams.js#
+     * getWindowMaskItems`'s own header for the full account (the identical
+     * bug, one effect over) — `authoredStatusForItem`, keyed by ITEM id
+     * rather than by level id, is the fix, and `fluid-registration.js#
+     * createFluidSeams` is the reference implementation this mirrors.
+     *
+     * ⚠️ TILE-ONLY, UNLIKE FLUID'S OWN VERSION. Specular already has a
+     * shipped, working floor-level surface (`specular-surface-subsystem.js`,
+     * wired through `getSpecularMaskUrl` above — a SINGLE SHARED instance for
+     * the whole scene, reloaded on floor change, unlike Window's one-per-
+     * floor) that many maps already rely on. Including a level's background/
+     * foreground item here too would sample the SAME file through a SECOND
+     * mesh, double-drawing every floor-painted shine the moment a per-tile
+     * surface exists to consume this list. Tiles are a NEW population ADDED
+     * beside the floor-level one, never a replacement for it —
+     * `item.kind === 'tile'` is the whole of that boundary.
+     *
+     * @param {number} floorIndex
+     * @returns {Array<{id:string, url:string, corners:Array<{x:number,y:number}>, renderOrder:number|null}>}
+     */
+    getSpecularMaskItems: (floorIndex) => {
+      const floors = getFloors() ?? [];
+      const floor = floors.find((f) => f.index === floorIndex) ?? floors[floorIndex] ?? null;
+      if (!floor?.id) return [];
+      if (typeof getItems !== 'function' || typeof getItemCorners !== 'function') return [];
+
+      const out = [];
+      for (const item of getItems() ?? []) {
+        if (item.hidden) continue;
+        if (item.kind !== 'tile') continue; // level hosts stay on the floor-level door above
+        if (!Array.isArray(item.visibleOnLevelIds) || !item.visibleOnLevelIds.includes(floor.id)) continue;
+
+        const status = maskAuthority.authoredStatusForItem(item.id, 'specular');
+        if (status.source !== 'authored') continue;
+
+        const corners = getItemCorners(item);
+        if (!corners) continue; // art not resolved yet — try again next frame
+        out.push({
+          id: item.id,
+          url: status.url,
+          corners,
+          renderOrder: typeof getItemRenderOrder === 'function' ? getItemRenderOrder(item) : null,
+        });
+      }
+      return out;
     },
   };
 }

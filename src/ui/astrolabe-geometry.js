@@ -35,8 +35,46 @@ export const TIME_STOPS = Object.freeze([
   { hour: 21, label: 'Night' },
 ]);
 
-/** Rate presets, in game-hours per real minute. 0 is the default (frozen). */
-export const TIME_RATE_STEPS = Object.freeze([0, 0.25, 1, 4, 12, 24]);
+/**
+ * Time-flow ratios (the astrolabe's Play/Speed corner, astrolabe-panel.js) as
+ * TRUE multipliers of real time — ported verbatim from the mock's own ladder
+ * (tools/ui-mock/index.html's `SPEEDS`, "author's call, round 4": "×10 is
+ * the practical ceiling — a whole day in 2.4 real hours... at a truthful ×1
+ * you would watch the clock for an hour to see the light move"). `N` means a
+ * real second passes `N` game-seconds, so a day takes `24/N` real hours.
+ *
+ * ⚠️ NOT `world/day-clock.js`'s own `rateHoursPerMinute` unit (game-hours per
+ * real MINUTE) — {@link multiplierToHoursPerMinute} is the one conversion
+ * point. An earlier build of this ladder fed the bare multiplier straight in
+ * AS an hours-per-minute rate (author report: "the 'Play Time' button
+ * advances time by one minute per second, which is obviously wrong") — `1`
+ * read as "1 hour of game time per real minute" instead of "1 real second
+ * per real second," a 60× overspeed hiding behind an honest-looking "×1".
+ */
+export const TIME_RATE_MULTIPLIERS = Object.freeze([0, 0.5, 1, 2, 3, 4, 5, 10]);
+
+/** @param {number} multiplier @returns {number} the equivalent `world/day-clock.js` `rateHoursPerMinute`. */
+export function multiplierToHoursPerMinute(multiplier) {
+  return (Number(multiplier) || 0) / 60;
+}
+
+/** The inverse — a stored/live `rateHoursPerMinute` back to its real-time
+ * "×N", for display. @param {number} hoursPerMinute @returns {number} */
+export function hoursPerMinuteToMultiplier(hoursPerMinute) {
+  return (Number(hoursPerMinute) || 0) * 60;
+}
+
+/** {@link TIME_RATE_MULTIPLIERS} converted once into `world/day-clock.js`'s
+ * own unit, so every consumer reads/writes the same thing day-clock itself
+ * does instead of re-deriving the ×60 conversion at its own call site.
+ * Index-aligned with `TIME_RATE_MULTIPLIERS` — the same index into either
+ * array names the same preset. 0 is the default (frozen). */
+export const TIME_RATE_STEPS = Object.freeze(TIME_RATE_MULTIPLIERS.map(multiplierToHoursPerMinute));
+
+/** The real-time multiplier ("×1") in day-clock's own unit — the astrolabe's
+ * Play button default the first time it is pressed in a session, before any
+ * rate has been chosen. */
+export const REALTIME_RATE_HOURS_PER_MINUTE = multiplierToHoursPerMinute(1);
 
 /**
  * Hour → the angle on the dial, in SVG degrees (0 = up, clockwise).

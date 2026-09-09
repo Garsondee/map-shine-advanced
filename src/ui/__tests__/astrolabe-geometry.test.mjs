@@ -22,6 +22,10 @@ import {
   nearestRateIndex,
   formatRate,
   TIME_RATE_STEPS,
+  TIME_RATE_MULTIPLIERS,
+  multiplierToHoursPerMinute,
+  hoursPerMinuteToMultiplier,
+  REALTIME_RATE_HOURS_PER_MINUTE,
 } from '../astrolabe-geometry.js';
 
 export function run(t) {
@@ -105,7 +109,7 @@ export function run(t) {
   {
     t.ok('frozen is the first step', TIME_RATE_STEPS[0] === 0);
     t.ok('exact match', nearestRateIndex(TIME_RATE_STEPS[3]) === 3);
-    t.ok('snaps to the nearest step', nearestRateIndex(0.9) === nearestRateIndex(1));
+    t.ok('snaps to the nearest step', nearestRateIndex(0.03) === nearestRateIndex(0.035));
     t.ok('a wild value clamps to the top step', nearestRateIndex(1e6) === TIME_RATE_STEPS.length - 1);
     t.ok('a non-finite rate reads as frozen', nearestRateIndex(NaN) === 0);
 
@@ -115,5 +119,25 @@ export function run(t) {
     t.ok('24 h/min is one day per minute', formatRate(24) === '60 s/day');
     t.ok('1 h/min is a 24-minute day', formatRate(1) === '24 min/day');
     t.ok('a slow drift reads in hours', formatRate(0.25).endsWith('h/day'));
+  }
+
+  // ---- the real-time multiplier ladder (astrolabe Play/Speed corner) -------
+  // mythica-machina-press: "the 'Play Time' button advances time by one
+  // minute per second, which is obviously wrong" — TIME_RATE_STEPS used to
+  // BE these multipliers verbatim, so picking "×1" actually ran at 1 hour of
+  // game time per real MINUTE (day-clock's own unit) instead of 1 real
+  // second per real second. These pin the conversion so that regression
+  // can't creep back in silently.
+  {
+    t.ok('frozen multiplier is 0', TIME_RATE_MULTIPLIERS[0] === 0);
+    t.ok("the mock's honest default is ×1", TIME_RATE_MULTIPLIERS[2] === 1);
+    t.ok('×1 is real time: 1/60 game-hour per real minute', multiplierToHoursPerMinute(1) === 1 / 60);
+    t.ok('×10 is a day in 2.4 real hours', formatRate(multiplierToHoursPerMinute(10)) === '2.4 h/day');
+    t.ok(
+      'TIME_RATE_STEPS is TIME_RATE_MULTIPLIERS/60, index-aligned',
+      TIME_RATE_STEPS.every((v, i) => v === TIME_RATE_MULTIPLIERS[i] / 60)
+    );
+    t.ok('multiplier <-> hoursPerMinute round-trips', hoursPerMinuteToMultiplier(multiplierToHoursPerMinute(5)) === 5);
+    t.ok('the Play button default IS real time', REALTIME_RATE_HOURS_PER_MINUTE === multiplierToHoursPerMinute(1));
   }
 }

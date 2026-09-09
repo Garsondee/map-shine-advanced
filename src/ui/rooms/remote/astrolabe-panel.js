@@ -24,7 +24,7 @@
 import { jumpToHour, advanceDays, advanceWeeks, isPenArmed } from '../../../foundry/index.js';
 import { iconMarkup } from '../../widgets/icon-sprite.js';
 import { buildImpulseButton } from '../../widgets/impulse-button.js';
-import { TIME_RATE_STEPS } from '../../astrolabe-geometry.js';
+import { TIME_RATE_STEPS, TIME_RATE_MULTIPLIERS, nearestRateIndex, formatRate } from '../../astrolabe-geometry.js';
 
 /** Dawn/Noon/Dusk/Midnight — matches the mock's own #jumpPop quick-taps. */
 const HOUR_JUMPS = Object.freeze([
@@ -60,8 +60,14 @@ function ghostSlotBtn(onClick) {
 }
 
 /** Non-zero steps only — 0 is "paused," owned entirely by the play/pause
- * toggle below, matching TIME_RATE_STEPS' own "0 = paused" convention. */
-const FLOW_SPEED_STEPS = TIME_RATE_STEPS.filter((s) => s > 0);
+ * toggle below, matching TIME_RATE_STEPS' own "0 = paused" convention.
+ * `.slice(1)`, not a value filter — TIME_RATE_STEPS[0] is guaranteed 0 by
+ * construction (see its own doc), so this stays index-aligned with
+ * TIME_RATE_MULTIPLIERS.slice(1) below rather than risking two independent
+ * filters silently drifting apart. */
+const FLOW_SPEED_STEPS = TIME_RATE_STEPS.slice(1);
+/** The real-time "×N" label for each entry in FLOW_SPEED_STEPS, same index. */
+const FLOW_SPEED_MULTIPLIERS = TIME_RATE_MULTIPLIERS.slice(1);
 
 /** world/day-clock.js's own three postures (ALMANAC_POSTURES) — labels
  * shortened from the old astrolabe.js's own <select> option text for a
@@ -197,19 +203,28 @@ function buildCornerTL(ctx) {
   speedBtn.className = 'msa-corner-txt';
   speedBtn.title = 'Time speed — how fast the world clock runs';
   speedBtn.style.position = 'relative';
+  // The badge shows the real-time "×N" (TIME_RATE_MULTIPLIERS), never the
+  // raw day-clock rate directly — that mismatch (a stored 1, meaning "1 hour
+  // of game time per real minute," displayed verbatim as "×1") is the exact
+  // labelling bug behind the author's "Play Time... obviously wrong" report.
+  // `nearestRateIndex` snaps a live rate that doesn't hit a step exactly (a
+  // foreign client, a future default) to its nearest preset for display.
   function syncSpeedBtn() {
     const rate = ctx.getFlowRate?.() ?? 0;
-    speedBtn.textContent = `×${rate > 0 ? rate : FLOW_SPEED_STEPS[0]}`;
+    const idx = nearestRateIndex(rate > 0 ? rate : FLOW_SPEED_STEPS[0]);
+    speedBtn.textContent = `×${TIME_RATE_MULTIPLIERS[idx]}`;
+    speedBtn.title = `Time speed — how fast the world clock runs (${formatRate(TIME_RATE_STEPS[idx])})`;
   }
   speedBtn.addEventListener('click', () => {
     if (!aestheticActive()) return explainNotAesthetic();
     const current = ctx.getFlowRate?.() ?? 0;
     const menu = document.createElement('div');
     menu.className = 'msa-jump-menu';
-    for (const step of FLOW_SPEED_STEPS) {
+    FLOW_SPEED_STEPS.forEach((step, i) => {
       const b = document.createElement('button');
       b.type = 'button';
-      b.textContent = `×${step}`;
+      b.textContent = `×${FLOW_SPEED_MULTIPLIERS[i]}`;
+      b.title = `×${FLOW_SPEED_MULTIPLIERS[i]} — ${formatRate(step)}`;
       b.setAttribute('aria-pressed', String(step === current));
       b.addEventListener('click', (e) => {
         // Without this, the click bubbles from b -> menu -> speedBtn, and
@@ -224,7 +239,7 @@ function buildCornerTL(ctx) {
         syncFlowBtn();
       });
       menu.appendChild(b);
-    }
+    });
     speedBtn.appendChild(menu);
     const closeOnOutside = (e) => {
       if (!menu.contains(e.target) && e.target !== speedBtn) {

@@ -206,18 +206,24 @@ function nextUid() {
  * `update(state)`, every gesture calls a handler the caller supplied.
  *
  * @param {object} opts
- * @param {(hour: number, committed: boolean) => void} opts.onTimeChange - ring drag.
+ * @param {(hour: number, committed: boolean) => void} opts.onTimeChange - ring
+ *   drag. Fired continuously with `committed: false` while dragging — this
+ *   dial already paints its OWN live cosmetic preview internally for that
+ *   phase (see the drag block's own doc), so a caller only has real work to
+ *   do on `committed: true` (2026-09-09 fix, author: dragging "should obey
+ *   the fade time like everything else should" — the real engine must stay
+ *   at its pre-drag value until commit, or Fade Time has nothing left to
+ *   ease FROM). `committed: false` calls are informational only, kept for a
+ *   caller that wants to observe the live drag without owning its preview.
  * @param {(hour: number) => void} [opts.onTimeStop] - a time-stop dot on the
  *   ring (UI parity plan, phase 6b) — sweeps immediately, same shape as
  *   `ui/astrolabe.js`'s own `onTimeStop`, gated by the SAME `locked` this
  *   dial's own drag gesture already respects.
  * @param {(hour: number) => void} [opts.onTimeStep] - an arrow-key press on
- *   the focused ring (mythica-machina-press#508): a discrete 0.25h jump with
- *   no live-preview phase to justify skipping Fade Time, unlike a drag
- *   release (which already tracked the cursor live, pointer-move by
- *   pointer-move — there's nothing left to fade). Falls back to
- *   `onTimeChange(hour, true)` when not supplied, matching this dial's only
- *   behavior before this option existed.
+ *   the focused ring (mythica-machina-press#508): a discrete 0.25h jump,
+ *   same shape as a tick click. Falls back to `onTimeChange(hour, true)`
+ *   when not supplied, matching this dial's only behavior before this
+ *   option existed.
  * @param {() => void} [opts.onDateClick]
  * @param {() => void} [opts.onWindClick] - opens the compass popover.
  * @param {() => void} [opts.onLockedAttempt] - fired when a drag/key gesture
@@ -228,7 +234,9 @@ function nextUid() {
  *   hour: number, phase?: string, dateText?: string,
  *   windDirectionDeg?: number, windSpeed01?: number, cloudCover01?: number,
  *   canSetHour?: boolean,
- * }) => void}}
+ * }) => void, isDragging: () => boolean}} `isDragging` (2026-09-09) lets a
+ *   caller's own repaint loop avoid fighting this dial's local drag preview
+ *   with a stale/frozen "real" value (see boot.js's own `pumpAstrolabe`).
  */
 export function buildAstrolabeDial(opts = {}) {
   const ns = nextUid();
@@ -237,6 +245,19 @@ export function buildAstrolabeDial(opts = {}) {
   // Set by `update()`, read by the drag-gesture block below — both live in
   // this same function's scope, so no indirection is needed to share it.
   let locked = false;
+  /** True while a ring drag is in progress (2026-09-09 fix). Read by the
+   * caller's own repaint loop (boot.js's `pumpAstrolabe`) via `isDragging()`
+   * below, so it can skip pushing the real engine's hour — deliberately
+   * frozen at its pre-drag value until release, so Fade Time has something
+   * to ease FROM — back into this widget while the drag's own local preview
+   * (the `move` closure, below) already owns it. */
+  let dragging = false;
+  /** The last full state `update()` was given (2026-09-09 fix) — reused by
+   * the drag's own local preview so it can repaint with a live `hour` while
+   * leaving every other field (wind, cloud, phase, lock) exactly as last
+   * reported, rather than keeping a second, separate copy of "what this
+   * dial currently shows". */
+  let lastState = {};
 
   // ---- the ring: a static conic-gradient colour wheel + a rotating handle --
   const ring = styled('div', { position: 'absolute', inset: '0', borderRadius: '50%' });
@@ -486,7 +507,6 @@ export function buildAstrolabeDial(opts = {}) {
   // panel's own, differently-shaped lock). Gated at gesture-START only, same
   // fidelity as the old file's own `onDown` check — not re-polled mid-drag.
   {
-    let dragging = false;
     const move = (e) => {
       if (!dragging) return;
       const r = ring.getBoundingClientRect();
@@ -494,6 +514,12 @@ export function buildAstrolabeDial(opts = {}) {
       const dy = e.clientY - (r.top + r.height / 2);
       const deg = ((Math.atan2(dx, -dy) * 180) / Math.PI + 360) % 360;
       const hour = ((deg / 360) * 24 + 12) % 24;
+      // Paint the widget's own cosmetic preview LOCALLY (2026-09-09 fix) —
+      // the real engine's hour is deliberately left untouched during a drag
+      // (see mountAstrolabeDial's own onTimeChange doc, boot.js), so without
+      // this the dial would sit frozen and unresponsive for the whole drag
+      // instead of tracking the cursor the way it always visually has.
+      update({ ...lastState, hour });
       opts.onTimeChange?.(hour, false);
     };
     ring.addEventListener('pointerdown', (e) => {
@@ -570,6 +596,7 @@ export function buildAstrolabeDial(opts = {}) {
    *   canSetHour?: boolean}} [state]
    */
   function update(state = {}) {
+    lastState = state;
     const hour = Number.isFinite(state.hour) ? state.hour : 12;
     ring.setAttribute('aria-valuenow', hour.toFixed(1));
     handleG.setAttribute('transform', `rotate(${hourToDialDeg(hour)} ${RIM_C} ${RIM_C})`);
@@ -634,5 +661,5 @@ export function buildAstrolabeDial(opts = {}) {
     windDirText.textContent = speed01 > 0 ? `${compassLabel(dir)} · ${Math.round(speed01 * 100)}%` : 'calm';
   }
 
-  return { root, update };
+  return { root, update, isDragging: () => dragging };
 }

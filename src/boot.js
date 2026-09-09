@@ -504,6 +504,7 @@ import {
   installAnchorViewMode,
   buildAstrolabeDial,
   phaseDisplayName,
+  REALTIME_RATE_HOURS_PER_MINUTE,
   showPerfProgress,
   hidePerfProgress,
   formatPerfProgressText,
@@ -1299,10 +1300,34 @@ function install() {
       // dial.js's own header for the full story; that old dial was deleted
       // whole in the UI parity plan's phase 7b — this is the only one now).
       mountAstrolabeDial: (container, dialCtx) => {
+        // Every discrete "set a new hour" gesture — a drag release, a tick
+        // click, an arrow-key nudge — eases over the SAME Fade Time the
+        // weather chips already ease over (weather-board.js's own fadeTime),
+        // read through the Remote's own controller since this dial has no
+        // access to shell.js's weatherBoardHandle closure directly (see
+        // shell.js's own getFadeOverMs for the full reasoning). One function
+        // instead of three near-identical copies, so the call sites below
+        // can never drift apart the way onTimeChange's drag-release branch
+        // once did (see its own comment).
+        const sweepToHourWithFade = (hour) => {
+          sweepVtPanViewerTimeOfDay(hour, MapShine.__remote?.getFadeOverMs?.() ?? 0);
+          if (skyScope.sky?.mode === 'aesthetic') void editSky({ todHour: hour });
+        };
         remoteAstrolabe = buildAstrolabeDial({
+          // Live drag preview (`committed === false`) is now a deliberate
+          // no-op here (2026-09-09 fix, author: dragging "should obey the
+          // fade time like everything else should") — astrolabe-dial.js's
+          // own `move()` paints the widget's cosmetic preview LOCALLY while
+          // dragging, without touching the real engine, so the environment
+          // stays exactly where it was until release. An earlier build
+          // special-cased drag-release as "nothing left to fade," which was
+          // true only because that build ALSO live-set the real engine on
+          // every pointer move — the exact thing this fix removes, and
+          // pumpAstrolabe's own dial-sync (below) skips this dial entirely
+          // while `remoteAstrolabe.isDragging()` so it can't fight the local
+          // preview by re-painting the still-frozen real hour over it.
           onTimeChange: (hour, committed) => {
-            setVtPanViewerSunHour(hour);
-            if (committed) void editSky({ todHour: hour });
+            if (committed) sweepToHourWithFade(hour);
           },
           // Ring-lock explanation (2026-08-18 fix) — astrolabe-panel.js supplies
           // this, routed through the Remote's own shared status line, same
@@ -1311,31 +1336,12 @@ function install() {
           // shell.js's own wind-popover.js instance — this dial only fires the
           // click, shell.js owns what opens (UI parity plan, phase 6a).
           onWindClick: dialCtx?.onWindClick,
-          // UI parity plan, phase 6b — hand-mirrors buildAstrolabeOptions()'s
-          // own onTimeStop exactly (same two lines, same reasoning in its own
-          // comment a few hundred lines down), not a call to that factory as a
-          // whole: matches onTimeChange's own precedent two lines above, which
-          // has never delegated to buildAstrolabeOptions() either — both
-          // instances share STATE (skyScope, editSky), never a hand-copied
-          // function reference.
-          // overMs (2026-08-27 fix, author: "I select 10s transition time...
-          // it happens instantly") — the SAME Fade Time the weather chips
-          // already ease over (weather-board.js's own fadeTime), read through
-          // the Remote's own controller since this dial has no access to
-          // shell.js's weatherBoardHandle closure directly (see shell.js's
-          // own getFadeOverMs for the full reasoning).
-          onTimeStop: (hour) => {
-            sweepVtPanViewerTimeOfDay(hour, MapShine.__remote?.getFadeOverMs?.() ?? 0);
-            if (skyScope.sky?.mode === 'aesthetic') void editSky({ todHour: hour });
-          },
+          // UI parity plan, phase 6b — a tick click sweeps immediately, same
+          // shape as ui/astrolabe.js's own old onTimeStop.
+          onTimeStop: sweepToHourWithFade,
           // An arrow-key press (mythica-machina-press#508) is a discrete jump
-          // with no live-preview phase, same as a tick click — hand-mirrors
-          // onTimeStop just above rather than onTimeChange's drag-release
-          // branch, which has nothing left to fade FROM.
-          onTimeStep: (hour) => {
-            sweepVtPanViewerTimeOfDay(hour, MapShine.__remote?.getFadeOverMs?.() ?? 0);
-            if (skyScope.sky?.mode === 'aesthetic') void editSky({ todHour: hour });
-          },
+          // with no live-preview phase, same as a tick click.
+          onTimeStep: sweepToHourWithFade,
         });
         container.appendChild(remoteAstrolabe.root);
       },
@@ -1353,7 +1359,7 @@ function install() {
           lastNonZeroRateHoursPerMinute = current;
           void editSky({ rateHoursPerMinute: 0 });
         } else {
-          void editSky({ rateHoursPerMinute: lastNonZeroRateHoursPerMinute || 1 });
+          void editSky({ rateHoursPerMinute: lastNonZeroRateHoursPerMinute || REALTIME_RATE_HOURS_PER_MINUTE });
         }
       },
       // The TL corner's speed badge (2026-08-18 fix) — real TIME_RATE_STEPS,
@@ -1366,7 +1372,7 @@ function install() {
       // every pause instead of the speed flow will actually resume at.
       getFlowRate: () => {
         const live = skyScope.sky?.rateHoursPerMinute ?? 0;
-        return live > 0 ? live : lastNonZeroRateHoursPerMinute || 1;
+        return live > 0 ? live : lastNonZeroRateHoursPerMinute || REALTIME_RATE_HOURS_PER_MINUTE;
       },
       onSetFlowRate: (rate) => {
         lastNonZeroRateHoursPerMinute = rate;
@@ -9486,8 +9492,11 @@ function install() {
    * flow-pause corner button froze it, so un-pausing restores it rather than
    * guessing a default. Session-only, matching the astrolabe's own "no
    * dial keeps its own copy of the hour" rule — this ISN'T a second store
-   * of the rate itself, only of "what to go back to". */
-  let lastNonZeroRateHoursPerMinute = 1;
+   * of the rate itself, only of "what to go back to". Defaults to real time
+   * ("×1", the mock's own "honest default" — ui/astrolabe-geometry.js) —
+   * NOT the bare number `1`, which is `world/day-clock.js`'s own unit for
+   * "1 hour of game time per real MINUTE," 60× too fast for a first press. */
+  let lastNonZeroRateHoursPerMinute = REALTIME_RATE_HOURS_PER_MINUTE;
   let windDirectionDeg = 0;
   let windSpeed01 = 0;
   /** Unsubscribe for the scene-sky watcher (a second GM's edit reaching here). */
@@ -10294,7 +10303,14 @@ function install() {
           // on why the two are deliberately kept separate. `dateText` has no
           // real source yet (see astrolabe-dial.js's own header) — omitted,
           // the dial's own `?? '—'` fallback shows honestly, not faked.
-          if (remoteAstrolabe?.root?.isConnected) {
+          // Skipped mid-drag (2026-09-09 fix) — the dial is already painting
+          // its own local, live cosmetic preview of the dragged-to hour (see
+          // mountAstrolabeDial's own onTimeChange doc); the real engine's
+          // hour is deliberately frozen at its pre-drag value until release,
+          // so pushing THAT back into the widget here would fight the local
+          // preview every ~100ms (this loop's own throttle) instead of
+          // leaving it alone until the drag actually commits.
+          if (remoteAstrolabe?.root?.isConnected && !remoteAstrolabe.isDragging?.()) {
             remoteAstrolabe.update({
               hour: payload.todHour,
               phase: payload.phase,

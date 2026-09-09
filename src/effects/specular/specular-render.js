@@ -129,8 +129,15 @@ export const SPECULAR_LAYER_COUNT = 6;
  * panel, not a request to try something. Shipping what worked, not a
  * conservative fraction of it: an author who never opens this panel should
  * see the effect the author actually confirmed, not a fainter version of it.
+ *
+ * ⚠️ LOWERED 20 → 3.79 (ROUND 22, 2026-09-09) — new live-tuned defaults; no
+ * longer the schema's own max — the author's own dialled-in scene, recorded
+ * exactly.
+ *
+ * ⚠️ RAISED 3.79 → 9.96 (ROUND 23, 2026-09-09) — new live-tuned defaults;
+ * the author's own dialled-in scene, recorded exactly.
  */
-export const SPECULAR_DEFAULT_STRENGTH = 20;
+export const SPECULAR_DEFAULT_STRENGTH = 9.96;
 /**
  * ⚠️ RAISED FROM 1 TO 1.3 (ROUND 16, 2026-08-03) — now that the shader
  * actually honours values past 1 (see the tint mix's own comment), a MODEST
@@ -146,8 +153,12 @@ export const SPECULAR_DEFAULT_STRENGTH = 20;
  * ⚠️ LOWERED 2 → 1.25 (ROUND 21, 2026-08-05) — new live-tuned defaults; no
  * longer the schema's own max, but still above 1, i.e. still a deliberate
  * oversaturation rather than a return to neutral colour.
+ *
+ * ⚠️ RAISED 1.25 → 2 = THE SCHEMA'S OWN MAX AGAIN (ROUND 22, 2026-09-09) —
+ * new live-tuned defaults; the author's own dialled-in scene, recorded
+ * exactly.
  */
-export const SPECULAR_DEFAULT_SATURATION = 1.25;
+export const SPECULAR_DEFAULT_SATURATION = 2;
 /**
  * THE SHADOW-CONTRAST CURVE (2026-09-02, mythica-machina-press#432) — an
  * exponent on `decodeSpecularMask`'s own `strength` axis, direct author ask:
@@ -162,8 +173,16 @@ export const SPECULAR_DEFAULT_SATURATION = 1.25;
  * today until an author actually reaches for it. Not yet live-tuned on a
  * real scene the way the rest of this file's defaults are — an honest
  * starting point rather than a guessed "better" one.
+ *
+ * ⚠️ RAISED 1 → 2.03 (ROUND 22, 2026-09-09) — new live-tuned defaults; no
+ * longer the pass-through — the author's own dialled-in scene now pushes
+ * dark-mask weight up deliberately, recorded exactly.
+ *
+ * ⚠️ LOWERED 2.03 → 1.74 (ROUND 23, 2026-09-09) — new live-tuned defaults;
+ * still well above the pass-through, the author's own dialled-in scene,
+ * recorded exactly.
  */
-export const SPECULAR_DEFAULT_MASK_CONTRAST = 1;
+export const SPECULAR_DEFAULT_MASK_CONTRAST = 1.74;
 /**
  * THE PATTERN'S WORLD SIZE, in px per pattern unit. **16384, V2's own default,
  * and it is much larger than it looks.**
@@ -199,8 +218,12 @@ export const SPECULAR_DEFAULT_PATTERN_SCALE_PX = 10816;
  * own max" pin for this param was updated alongside, not left stale). Close
  * to V2's own ≈1:1 baseline (this constant's own opening paragraph) rather
  * than the exaggerated 3x slide Round 18 shipped.
+ *
+ * ⚠️ RAISED 0.9 → 3 = THE SCHEMA'S OWN MAX AGAIN (ROUND 22, 2026-09-09) —
+ * new live-tuned defaults; back to the exaggerated slide, the author's own
+ * dialled-in scene, recorded exactly.
  */
-export const SPECULAR_DEFAULT_PARALLAX_STRENGTH = 0.9;
+export const SPECULAR_DEFAULT_PARALLAX_STRENGTH = 3;
 /**
  * How far islands' hashed parallax may diverge. 1 = the full hashed range,
  * 0 = every island moves identically (exactly V2's behaviour).
@@ -227,8 +250,12 @@ export const SPECULAR_DEFAULT_ISLAND_SPREAD = 2;
  * to its own max (above), camera pan alone is a great deal of motion — the
  * author's own working scene has the idle drift switched off entirely, not
  * merely slowed.
+ *
+ * ⚠️ RAISED 0 → 0.0015 (ROUND 23, 2026-09-09) — new live-tuned defaults; a
+ * small idle drift is back, the author's own dialled-in scene, recorded
+ * exactly.
  */
-export const SPECULAR_DEFAULT_DRIFT_SPEED = 0;
+export const SPECULAR_DEFAULT_DRIFT_SPEED = 0.0015;
 /** Global brightness breathing, ± this fraction. Small on purpose: a visible
  * pulse reads as a shader, an imperceptible one reads as a surface.
  *
@@ -262,8 +289,12 @@ export const SPECULAR_DEFAULT_PULSE = 0.28;
  * term is algebraically eliminated, see that constant's own header), so
  * shimmer modulation is the ONLY source of contrast left, and it now
  * defaults to the most it can possibly contribute.
+ *
+ * ⚠️ LOWERED 40 → 5.55 (ROUND 22, 2026-09-09) — new live-tuned defaults; no
+ * longer the schema's own max — the author's own dialled-in scene, recorded
+ * exactly.
  */
-export const SPECULAR_DEFAULT_SHIMMER_GAIN = 40;
+export const SPECULAR_DEFAULT_SHIMMER_GAIN = 5.55;
 /**
  * THE LIGHT FLOOR. **0, corrected DOWN from 0.18 (2026-07-27) on direct live
  * feedback: metal was reading as SELF-ILLUMINATING in genuinely dark rooms —
@@ -305,8 +336,11 @@ export const SPECULAR_DEFAULT_LIGHT_FLOOR = 0;
  * ⚠️ LOWERED 1 → 0.99 (ROUND 21, 2026-08-05) — new live-tuned defaults;
  * functionally identical to V2's own full swing, not a meaningfully
  * different behaviour — the author's own dialled-in scene, recorded exactly
- * rather than rounded back to 1. */
-export const SPECULAR_DEFAULT_SUN_BIAS = 0.99;
+ * rather than rounded back to 1.
+ *
+ * ⚠️ RAISED 0.99 → 1 = THE SCHEMA'S OWN MAX (ROUND 23, 2026-09-09) — new
+ * live-tuned defaults; back to V2's own full swing exactly. */
+export const SPECULAR_DEFAULT_SUN_BIAS = 1;
 
 /**
  * Per-layer defaults, transcribed from V2's tuned values.

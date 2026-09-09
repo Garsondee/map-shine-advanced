@@ -174,6 +174,80 @@ export async function run(t) {
   const debugMesh = debugSub.scene.children.find((c) => c.isMesh);
   ok('on a debug channel the mesh still carries a real positionNode', !!debugMesh?.material?.positionNode);
 
+  // ── A LOOK PARAM CHANGE REACHES A TILE-MOTION ENTRY'S LIVE UNIFORM ──────
+  // Direct author question (2026-09-09): "I change the settings for
+  // metallic but they stay looking the same" on motion tiles. A full trace
+  // found the wiring correct (no bug — this closes the coverage gap rather
+  // than fixing a regression). The three tests above only prove ATTACHMENT
+  // and positionNode wiring;
+  // none of them prove a param pushed through `getSpecularRenderState()`
+  // after the fact actually reaches the live shader uniform on an entry
+  // that carries a positionNode, rather than getting silently stuck at
+  // `buildSurfaceForEntry`'s own construction-time schema defaults (it does
+  // not forward strength/etc. at build time — see that function's own body
+  // — relying entirely on `sync()`'s "LOOK PARAMS" push block to apply the
+  // live values afterward). THREE is injected specifically so a caller CAN
+  // substitute pieces of it (this module's own header) — spy on
+  // `THREE.TSL.uniform` to capture the real `uStrength` node
+  // `buildSpecularSurfaceMaterial` creates, then read its `.value` back
+  // after driving the subsystem exactly the way production does: one
+  // `sync()` to attach (fires the async mask load), a settle, then a SECOND
+  // `sync()` — the next real frame — which is what actually applies
+  // `state.params` (see `loadAndBuild`'s own `lastParamsKey = ''` reset).
+  {
+    const capturedUniforms = [];
+    const realUniform = THREE.TSL.uniform;
+    const spyTHREE = {
+      ...THREE,
+      TSL: {
+        ...THREE.TSL,
+        uniform(val) {
+          const node = realUniform(val);
+          capturedUniforms.push(node);
+          return node;
+        },
+      },
+    };
+
+    let renderState = { enabled: true, params: { strength: 111 } };
+    const liveTm = makeTileMotionBag();
+    const liveItem = {
+      id: 'tileLiveParams',
+      url: 'stub://tileLiveParams_Specular.webp',
+      corners: squareCorners(400, 0, 100),
+      renderOrder: 4,
+    };
+    const liveSub = createSpecularTileSurfaceSubsystem(
+      baseArgs({
+        THREE: spyTHREE,
+        getSpecularMaskItems: (floorIndex) => (floorIndex === 0 ? [liveItem] : []),
+        getItemTileMotion: () => liveTm,
+        getSpecularRenderState: () => renderState,
+      })
+    );
+
+    liveSub.sync(0, { minX: 0, minY: 0, maxX: 1000, maxY: 1000 });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    liveSub.sync(0, { minX: 0, minY: 0, maxX: 1000, maxY: 1000 });
+
+    const uStrength = capturedUniforms.find((n) => n?.value === 111);
+    ok(
+      'a tile-motion entry’s strength uniform reads the live params push, not the schema construction default',
+      !!uStrength
+    );
+
+    renderState = { enabled: true, params: { strength: 222 } };
+    liveSub.sync(0, { minX: 0, minY: 0, maxX: 1000, maxY: 1000 });
+    ok(
+      'changing the effect-wide strength param live-updates that SAME uniform on the tile-motion entry',
+      uStrength?.value === 222
+    );
+
+    liveSub.dispose();
+  }
+
   // ── AN ITEM LEAVING THE FLOOR'S LIST TEARS ITS MESH DOWN ────────────────
   let items = [staticItem];
   const flip = createSpecularTileSurfaceSubsystem(

@@ -140,9 +140,14 @@ export function run(t) {
     SPECULAR_DEFAULT_SATURATION <= SPECULAR_PARAMS.saturation.max
   );
   // ── SHADOW CONTRAST (mythica-machina-press#432) ──────────────────────────
+  // ⚠️ ROUND 22 (2026-09-09): the default moved off the exact pass-through
+  // (1) to a live-tuned 2.03 — dark ink linework now deliberately loses more
+  // sheen than it did before this round. ROUND 23 (same day) moved it again,
+  // to 1.74 — still well above the pass-through, still the same direction.
+  // See SPECULAR_DEFAULT_MASK_CONTRAST's own header (specular-render.js).
   ok(
-    'the shadow-contrast default is an exact pass-through, not a guessed curve',
-    SPECULAR_PARAMS.maskContrast.default === 1
+    'the shadow-contrast default is above 1 — dark linework is deliberately suppressed further, live-tuned',
+    SPECULAR_PARAMS.maskContrast.default > 1
   );
   ok(
     'the schema default and the render module default agree on mask contrast',
@@ -295,8 +300,8 @@ export function run(t) {
   // defaults enough to justify one. A live-confirmed number is exactly the
   // kind of number worth protecting from silent drift.
   ok(
-    'strength: schema and render module agree, and it now defaults to its own max',
-    SPECULAR_PARAMS.strength.default === SPECULAR_DEFAULT_STRENGTH && SPECULAR_PARAMS.strength.default === 20
+    'strength: schema and render module agree on the live-confirmed value',
+    SPECULAR_PARAMS.strength.default === SPECULAR_DEFAULT_STRENGTH
   );
   ok(
     'patternScalePx: schema and render module agree on the live-confirmed (smaller) scale',
@@ -312,8 +317,8 @@ export function run(t) {
       SPECULAR_PARAMS.islandSpread.default === SPECULAR_PARAMS.islandSpread.max
   );
   ok(
-    'driftSpeed: schema and render module agree the idle drift is now fully OFF by default',
-    SPECULAR_PARAMS.driftSpeed.default === SPECULAR_DEFAULT_DRIFT_SPEED && SPECULAR_PARAMS.driftSpeed.default === 0
+    'driftSpeed: schema and render module agree — ROUND 18 shipped it fully OFF',
+    SPECULAR_PARAMS.driftSpeed.default === SPECULAR_DEFAULT_DRIFT_SPEED
   );
   // shimmerGain/saturation/sheenCeiling/glintCeiling/incidentSteepness are
   // already pinned above/earlier by EQUALITY, not by literal — their values
@@ -354,6 +359,35 @@ export function run(t) {
   ok(
     'the glint ceiling now defaults to its own schema max, carrying the whole effect alone',
     SPECULAR_PARAMS.glintCeiling.default === SPECULAR_PARAMS.glintCeiling.max
+  );
+
+  // ── ROUND 22 (2026-09-09) — THIRD SET OF LIVE-CONFIRMED DEFAULTS. The
+  // author dialled the whole panel again on a real scene — strength/
+  // saturation/maskContrast/shimmerGain/incidentSteepness/parallaxStrength
+  // all moved. All are already covered by the equality pins above; the one
+  // relationship worth calling out is that parallaxStrength is back at its
+  // schema's own max, which Round 21 had deliberately moved away from.
+  ok(
+    'parallaxStrength is back at its schema max — a return to the exaggerated slide Round 21 moved away from',
+    SPECULAR_PARAMS.parallaxStrength.default === SPECULAR_PARAMS.parallaxStrength.max
+  );
+
+  // ── ROUND 23 (2026-09-09) — FOURTH SET OF LIVE-CONFIRMED DEFAULTS, SAME
+  // DAY AS ROUND 22. The author kept tuning the same live scene and pasted a
+  // second dump: strength/maskContrast/incidentSteepness/incidentKnee/
+  // flickerAmount/flickerSpeed/flickerRoughness/driftSpeed/sunBias all moved.
+  // Most are already covered by the equality pins above; the one relationship
+  // worth calling out is driftSpeed, which ROUND 18 shipped at EXACTLY 0 (the
+  // "idle drift fully off" assertion just above still pins that AGREEMENT,
+  // not the literal) — this round brings a small idle drift back.
+  ok('driftSpeed is no longer exactly zero — a small idle drift shipped again', SPECULAR_PARAMS.driftSpeed.default > 0);
+  ok(
+    'sunBias is back at its schema max — V2’s own full swing, exactly',
+    SPECULAR_PARAMS.sunBias.default === SPECULAR_PARAMS.sunBias.max
+  );
+  ok(
+    'flickerAmount is back at its schema max',
+    SPECULAR_PARAMS.flickerAmount.default === SPECULAR_PARAMS.flickerAmount.max
   );
 
   // --- it registers through the ONE door ----------------------------------

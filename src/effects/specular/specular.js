@@ -64,7 +64,12 @@ export const SPECULAR_PARAMS = Object.freeze({
     // 18 default below, and reported "we have a basic specular effect
     // working again." See `SPECULAR_DEFAULT_STRENGTH`'s own header
     // (specular-render.js) for the full account.
-    default: 20,
+    // LOWERED 20 → 3.79 (ROUND 22, 2026-09-09) — new live-tuned defaults; no
+    // longer the schema's own max. See SPECULAR_DEFAULT_STRENGTH's own
+    // header (specular-render.js).
+    // RAISED 3.79 → 9.96 (ROUND 23, 2026-09-09) — new live-tuned defaults;
+    // see SPECULAR_DEFAULT_STRENGTH's own header (specular-render.js).
+    default: 9.96,
     category: 'Look',
     label: 'Shine strength',
     help: 'Master strength of everything this effect draws. Turn it to 0 to see what the map looks like with no shine at all — turn it up past 5-10 to brute-force the shine through anything else that might be dimming it, as a diagnostic before reaching for the more targeted controls under Response.',
@@ -79,7 +84,10 @@ export const SPECULAR_PARAMS = Object.freeze({
     // `SPECULAR_DEFAULT_SATURATION`'s header for the full account.
     // LOWERED 2 → 1.25 (ROUND 21, 2026-08-05) — new live-tuned defaults; see
     // SPECULAR_DEFAULT_SATURATION's own header (specular-render.js).
-    default: 1.25,
+    // RAISED 1.25 → 2 = THE SCHEMA'S OWN MAX (ROUND 22, 2026-09-09) — new
+    // live-tuned defaults; see SPECULAR_DEFAULT_SATURATION's own header
+    // (specular-render.js).
+    default: 2,
     category: 'Look',
     label: 'Metal colour',
     help: "How much of the colour you painted into the specular mask survives into the shine. 0 makes every metal a neutral white sheen; 1 keeps gold gold and copper copper; above 1 pushes the colour further than you painted it — the default sits slightly above 1 to counteract the screen's own tonemap, which desaturates highlights as they brighten. This is the control that decides whether a map reads as treasure or as polished stone.",
@@ -95,7 +103,12 @@ export const SPECULAR_PARAMS = Object.freeze({
     min: 0.1,
     max: 10,
     step: 0.01,
-    default: 1,
+    // RAISED 1 → 2.03 (ROUND 22, 2026-09-09) — new live-tuned defaults; no
+    // longer the mathematically-exact pass-through it shipped with — see
+    // SPECULAR_DEFAULT_MASK_CONTRAST's own header (specular-render.js).
+    // LOWERED 2.03 → 1.74 (ROUND 23, 2026-09-09) — new live-tuned defaults;
+    // see SPECULAR_DEFAULT_MASK_CONTRAST's own header (specular-render.js).
+    default: 1.74,
     category: 'Look',
     label: 'Shadow contrast',
     help: "How much extra weight the DARK end of your painted specular mask carries before anything else reads it. At 1 the mask is read exactly as painted, with no extra curve. Raise it and dim metal paint fades toward true black much faster than bright paint does — reach for this if dark ink linework or shadowed iron in your artwork is picking up a sheen it shouldn't have (sometimes called \"bleaching\"). Below 1 does the reverse, lifting dark paint up, kept for symmetry. This reshapes the mask's OWN value range only — for how this effect responds to the SCENE's light, see Light response and its neighbours under Response instead.",
@@ -114,7 +127,10 @@ export const SPECULAR_PARAMS = Object.freeze({
     // RAISED 2.2 → 40 = THE SCHEMA'S OWN MAX (ROUND 21, 2026-08-05) —
     // new live-tuned defaults; see SPECULAR_DEFAULT_SHIMMER_GAIN's own
     // header (specular-render.js).
-    default: 40,
+    // LOWERED 40 → 5.55 (ROUND 22, 2026-09-09) — new live-tuned defaults; no
+    // longer the schema's own max; see SPECULAR_DEFAULT_SHIMMER_GAIN's own
+    // header (specular-render.js).
+    default: 5.55,
     category: 'Look',
     label: 'Shimmer contrast',
     help: 'How far the moving patterns may brighten the metal above its resting shine. Low gives an even satin surface; high gives hard bright glints against darker metal, which is what reads as polished and slightly blown out. At 0 the metal still shines, it just stops moving.',
@@ -164,7 +180,12 @@ export const SPECULAR_PARAMS = Object.freeze({
     // moved from the Round 17 default, unlike several of its neighbours.
     // RAISED 2.85 → 7.15 (ROUND 21, 2026-08-05) — new live-tuned defaults;
     // see SPECULAR_INCIDENT_STEEPNESS's own header (specular-pattern.js).
-    default: 200,
+    // LOWERED 200 → 36.75 (ROUND 22, 2026-09-09) — new live-tuned defaults;
+    // see SPECULAR_INCIDENT_STEEPNESS's own header (specular-pattern.js).
+    // LOWERED 36.75 → 16.55 (ROUND 23, 2026-09-09) — new live-tuned
+    // defaults; see SPECULAR_INCIDENT_STEEPNESS's own header
+    // (specular-pattern.js).
+    default: 16.55,
     category: 'Response',
     label: 'Light response',
     // NEW (2026-08-03, ROUND 17) — exposes `SPECULAR_INCIDENT_STEEPNESS`
@@ -193,7 +214,10 @@ export const SPECULAR_PARAMS = Object.freeze({
     min: 0.01,
     max: 1,
     step: 0.01,
-    default: 0.15,
+    // RAISED 0.15 → 0.22 (ROUND 23, 2026-09-09) — new live-tuned defaults,
+    // the first live-tuned value this control has shipped; see
+    // SPECULAR_INCIDENT_KNEE's own header (specular-pattern.js).
+    default: 0.22,
     category: 'Response',
     label: 'Full-shine light level',
     help: 'How much light a surface needs before its metal shines at full strength. Low values mean even a single candle makes gold flash; high values mean only direct sunlight does. This is the control to reach for when metal looks right outdoors but stays dead indoors near lamps and candles — it moves where "brightly lit" begins, while "Light response" above decides how fast the shine dies away below that point. At 1 only a pure white, fully-lit pixel counts as bright, which is how this behaved before the control existed.',
@@ -234,7 +258,10 @@ export const SPECULAR_PARAMS = Object.freeze({
     min: 0,
     max: 3,
     step: 0.01,
-    default: 0.5,
+    // RAISED 0.5 → 3 = THE SCHEMA'S OWN MAX (ROUND 23, 2026-09-09) — new
+    // live-tuned defaults, the first live-tuned value this control has
+    // shipped; see SPECULAR_FLICKER_AMOUNT's own header (specular-pattern.js).
+    default: 3,
     category: 'Motion',
     label: 'Firelight flicker',
     help: 'How much lamp-lit metal flutters, as if catching a nearby flame. 0 turns it off entirely. Around 0.3 is a subtle live shimmer; past 1 the metal visibly surges and dims. It only ever appears where light actually falls, so unlit metal stays perfectly still no matter how high this goes.',
@@ -244,7 +271,11 @@ export const SPECULAR_PARAMS = Object.freeze({
     min: 0,
     max: 12,
     step: 0.05,
-    default: 1.6,
+    // LOWERED 1.6 → 0.1 (ROUND 23, 2026-09-09) — new live-tuned defaults,
+    // the first live-tuned value this control has shipped; a slow breathing
+    // flutter rather than a fast candle-gutter one — see
+    // SPECULAR_FLICKER_SPEED's own header (specular-pattern.js).
+    default: 0.1,
     category: 'Motion',
     label: 'Flicker speed',
     help: 'How fast that flutter moves. Low values breathe slowly like a hearth; high values gutter and snap like a candle in a draught. Very high values will read as a fast strobe, so raise it with the amount turned down first.',
@@ -264,7 +295,10 @@ export const SPECULAR_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.5,
+    // RAISED 0.5 → 0.64 (ROUND 23, 2026-09-09) — new live-tuned defaults,
+    // the first live-tuned value this control has shipped; see
+    // SPECULAR_FLICKER_ROUGHNESS's own header (specular-pattern.js).
+    default: 0.64,
     category: 'Motion',
     label: 'Flicker character',
     help: 'The texture of the flutter, blending two speeds of movement. Toward 0 it is a broad slow swell, like firelight on a wall. Toward 1 it is finer and more agitated, like a flame guttering. Midway gives a mix of both.',
@@ -316,7 +350,10 @@ export const SPECULAR_PARAMS = Object.freeze({
     // LOWERED 3 → 0.9 (ROUND 21, 2026-08-05) — new live-tuned defaults, no
     // longer the schema's own max; see SPECULAR_DEFAULT_PARALLAX_STRENGTH's
     // own header (specular-render.js).
-    default: 0.9,
+    // RAISED 0.9 → 3 = THE SCHEMA'S OWN MAX AGAIN (ROUND 22, 2026-09-09) —
+    // new live-tuned defaults; see SPECULAR_DEFAULT_PARALLAX_STRENGTH's own
+    // header (specular-render.js).
+    default: 3,
     category: 'Motion',
     label: 'Parallax',
     help: 'How much the shimmer slides across the metal as you pan the map. This is the single most important control for making the shine feel like a REFLECTION rather than a texture someone painted on. At 1 the patterns are nearly locked to your screen, sweeping over the map as you move, which is what light actually does. At 0 they are glued to the map and the illusion collapses.',
@@ -344,7 +381,10 @@ export const SPECULAR_PARAMS = Object.freeze({
     // LOWERED TO EXACTLY 0 (2026-08-03, ROUND 18) — live-confirmed; with
     // `parallaxStrength` now at its own max, camera pan alone is a lot of
     // motion. See `SPECULAR_DEFAULT_DRIFT_SPEED`'s own header.
-    default: 0,
+    // RAISED 0 → 0.0015 (ROUND 23, 2026-09-09) — new live-tuned defaults; a
+    // small idle drift, back on. See SPECULAR_DEFAULT_DRIFT_SPEED's own
+    // header (specular-render.js).
+    default: 0.0015,
     category: 'Motion',
     label: 'Drift speed',
     help: 'How fast the patterns evolve on their own when nobody is moving the camera. Deliberately slow — the camera is meant to be the main source of movement and this only stops a parked view from being frozen. At 0 the metal is perfectly still until you pan, which is how the original effect behaved.',
@@ -371,7 +411,10 @@ export const SPECULAR_PARAMS = Object.freeze({
     // LOWERED 1 → 0.99 (ROUND 21, 2026-08-05) — new live-tuned defaults,
     // functionally identical to the full swing; see
     // SPECULAR_DEFAULT_SUN_BIAS's own header (specular-render.js).
-    default: 0.99,
+    // RAISED 0.99 → 1 = THE SCHEMA'S OWN MAX (ROUND 23, 2026-09-09) — new
+    // live-tuned defaults; see SPECULAR_DEFAULT_SUN_BIAS's own header
+    // (specular-render.js).
+    default: 1,
     category: 'Outdoor',
     label: 'Sun direction',
     help: 'How strongly the sun favours metal whose grain runs across its light, outdoors. This is what makes brushed metal brighten and dim through the day as the sun swings round, and on a flat top-down map it is the only way the sun direction reaches this effect at all. Indoors it does nothing, because indoors there is no sun to be angled against.',

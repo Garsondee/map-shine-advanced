@@ -471,8 +471,16 @@ export function steepenIncidentRgb(rgb, lumaWeights, steepness) {
  * side, not the param. See `specular-pattern.test.mjs`'s own
  * `litMetalLuma` scenario for the recomputed contrast thresholds this
  * forced — a jump this large changes what "well-lit" produces there too.
+ *
+ * ⚠️ LOWERED 200 → 36.75 (ROUND 22, 2026-09-09) — new live-tuned defaults;
+ * still decisively aggressive suppression of dim/shadowed metal (well past
+ * the original 3), just no longer at the extreme this round-21 value shipped.
+ *
+ * ⚠️ LOWERED 36.75 → 16.55 (ROUND 23, 2026-09-09) — new live-tuned defaults;
+ * still well past the original 3, the author's own dialled-in scene,
+ * recorded exactly.
  */
-export const SPECULAR_INCIDENT_STEEPNESS = 200;
+export const SPECULAR_INCIDENT_STEEPNESS = 16.55;
 
 /**
  * THE KNEE — the incident-light level at which metal reaches its FULL shine.
@@ -527,8 +535,13 @@ export const SPECULAR_INCIDENT_STEEPNESS = 200;
  * EXACTLY** (see `specular-render.js`'s own note at the use site — the
  * algebra is identical at K=1), which is what makes this safe to add to a
  * live-tuned effect rather than a retune of it.
+ *
+ * ⚠️ RAISED 0.15 → 0.22 (ROUND 23, 2026-09-09) — new live-tuned defaults,
+ * the first live-tuned value this control has shipped; still just above the
+ * author's own measured "ordinarily lit" reading of 0.115, the same posture
+ * the original 0.15 argued for, moved slightly higher on a real scene.
  */
-export const SPECULAR_INCIDENT_KNEE = 0.15;
+export const SPECULAR_INCIDENT_KNEE = 0.22;
 
 /**
  * ============================================================================
@@ -596,17 +609,28 @@ export const SPECULAR_INCIDENT_GAIN = 0.55;
  * capturing the frame at amount 0 vs 3 and diffing: visible organic mottling,
  * and a 29% larger PNG (identical images compress identically). Do not "fix"
  * a future flat mean reading here by raising this — read
- * `feedback_aggregate_cannot_name_the_source` first. */
-export const SPECULAR_FLICKER_AMOUNT = 0.5;
-/** Flutter rate. Candle-ish: fast enough to read as flame, slow enough not to strobe. */
-export const SPECULAR_FLICKER_SPEED = 1.6;
+ * `feedback_aggregate_cannot_name_the_source` first.
+ *
+ * ⚠️ RAISED 0.5 → 3 = THE SCHEMA'S OWN MAX (ROUND 23, 2026-09-09) — new
+ * live-tuned defaults, the first live-tuned value this control has shipped —
+ * the author's own dialled-in scene, recorded exactly. */
+export const SPECULAR_FLICKER_AMOUNT = 3;
+/** Flutter rate. Candle-ish: fast enough to read as flame, slow enough not to strobe.
+ *
+ * ⚠️ LOWERED 1.6 → 0.1 (ROUND 23, 2026-09-09) — new live-tuned defaults, the
+ * first live-tuned value this control has shipped; a slow breathing flutter
+ * rather than a fast candle-gutter one. */
+export const SPECULAR_FLICKER_SPEED = 0.1;
 /** World-space size of one coherent flutter patch, in px. Roughly a candle's
  * own pool of light, so nearby metal flickers together and distant metal does
  * not. */
 export const SPECULAR_FLICKER_SCALE_PX = 320;
 /** Blend between the two noise octaves: 0 = the broad slow one alone (smooth
- * breathing), 1 = the fine fast one alone (busy guttering). */
-export const SPECULAR_FLICKER_ROUGHNESS = 0.5;
+ * breathing), 1 = the fine fast one alone (busy guttering).
+ *
+ * ⚠️ RAISED 0.5 → 0.64 (ROUND 23, 2026-09-09) — new live-tuned defaults, the
+ * first live-tuned value this control has shipped. */
+export const SPECULAR_FLICKER_ROUGHNESS = 0.64;
 
 /**
  * How brightly the SHEEN (the always-on base, no shimmer) may peak before its

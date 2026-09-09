@@ -261,6 +261,7 @@ import {
   readSceneWallSegments,
   readSetting,
   resolveTileMotionFrame,
+  getTileMotionConfig,
   // VIDEO TILES (mythica-machina-press#430) — isVideoUrl is the sibling of
   // isImageUrl (active-scene-source.js) that lets ensureWholeImageMeshes
   // route a video src to its own construction path; playTileVideo
@@ -18206,7 +18207,34 @@ export async function startVtPanViewer({
           });
           if (tokenPassLog.length > TOKEN_PASS_LOG_MAX) tokenPassLog.shift();
         }
-        const onScreen = rectsOverlap(state.worldBounds, worldRect);
+        // TILE-MOTION EXEMPTION (live-test bug, author 2026-09-09: "When I
+        // zoom in towards the tiles some of them disappear... pieces
+        // vanish"). `state.worldBounds` is `computeQuadBounds(state.placement)`
+        // — `refreshItemPlacement`'s own REST-POSE quad, from the Tile
+        // document's own x/y/width/height/rotation alone. Tile-motion NEVER
+        // writes its live pose back to that document (`tile-motion-
+        // runtime.js`'s own header, quoted elsewhere in this file) — an
+        // orbiting/swinging piece can sit far from its rest-pose bounds at
+        // any given moment, so panning/zooming until THOSE stale bounds
+        // cross the view edge hides a piece that may still be squarely on
+        // screen at its actual, animated position. The mesh itself already
+        // has `frustumCulled = false` for the identical reason
+        // (`ensureWholeImageMeshes`'s own ~line 13564) — this is that same
+        // fix's residency-streaming counterpart: THIS gate decides whether
+        // the mesh is even considered `show`n at all, upstream of GPU-side
+        // culling entirely.
+        //
+        // Exempts only tiles with an ENABLED motion config — an ordinary
+        // static tile's rest-pose bounds ARE its real bounds, and streaming
+        // it unconditionally would be a real (if small) residency cost for
+        // no correctness gain. `getTileMotionConfig` degrades to
+        // `enabled:false` for any id with no config at all
+        // (`normalizeTileMotionConfig`'s own default), so a non-tile or a
+        // never-configured tile falls straight through to the ordinary
+        // rect-overlap check, unchanged.
+        const tileMotionEnabled =
+          item.kind === 'tile' && getTileMotionConfig(item._placement?.tileDoc?.id ?? '')?.enabled === true;
+        const onScreen = tileMotionEnabled || rectsOverlap(state.worldBounds, worldRect);
         const show = onScreen && (isolateItemId === '' || item.id === isolateItemId);
 
         // Load the art whole and draw it — no page streaming, no atlas upload

@@ -113,6 +113,36 @@ export function run(t) {
     t.ok('and stops reporting as syncing once it has', c.read().isSyncing === false);
   }
 
+  // ---- syncRemainingSec — the Remote's "Now Playing... Ns left" readout ----
+  // mythica-machina-press: the label always said "Holding", even mid-sweep,
+  // because nothing exposed how long a syncTo() walk had left.
+  {
+    const c = createDayClock({ todHour: 12 });
+    t.ok('not syncing reads zero remaining, never a stale number', c.read().syncRemainingSec === 0);
+
+    // A caller-requested 10s fade (the astrolabe's own Fade Time) should
+    // start off reporting ~10s left, independent of syncHoursPerSecond.
+    c.syncTo(18, 10_000); // 6 hours over 10s
+    t.ok('a fresh 10s fade reports ~10s left', close(c.read().syncRemainingSec, 10, 1e-6));
+    for (let i = 0; i < 60 * 4; i++) c.tick(1 / 60); // 4 real seconds elapse
+    t.ok('4s in, ~6s remain', close(c.read().syncRemainingSec, 6, 0.05));
+    for (let i = 0; i < 60 * 6; i++) c.tick(1 / 60); // the remaining 6s
+    t.ok('arrived: remaining drops back to zero, not negative', c.read().syncRemainingSec === 0);
+    t.ok('and it actually reached the target', close(c.read().todHour, 18, 1e-6));
+  }
+
+  {
+    // overMs omitted (a foreign client, a scene load, day-clock.js's own
+    // applyLookToEngines-style re-sync) falls back to the fixed walk rate —
+    // syncRemainingSec must still be a real, finite, non-negative number,
+    // not Infinity/NaN from a caller that forgot to pass a duration.
+    const c = createDayClock({ todHour: 0, syncHoursPerSecond: 6 });
+    c.syncTo(12);
+    const remaining = c.read().syncRemainingSec;
+    t.ok('a rate-derived (no overMs) sync still reports a finite remaining time', Number.isFinite(remaining));
+    t.ok('12 hours at 6 hours/sec is 2s', close(remaining, 2, 1e-6));
+  }
+
   {
     // A combat round is +6 world-seconds. That must land essentially at once —
     // an eased sync that takes a visible beat for a 6-second nudge would read

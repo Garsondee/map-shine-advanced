@@ -8,7 +8,7 @@
  * (`[structure-change]`) and update the governing UI docs (docs/planning/UI.md,
  * Effects-UI.md, Authoring-and-Distribution.md).
  */
-export { phaseDisplayName, REALTIME_RATE_HOURS_PER_MINUTE } from './astrolabe-geometry.js';
+export { phaseDisplayName, REALTIME_RATE_HOURS_PER_MINUTE, formatClock } from './astrolabe-geometry.js';
 export { buildAstrolabeDial } from './rooms/remote/astrolabe-dial.js';
 export { installPainter } from './paint-mode.js';
 export { openCameraPathDialog, closeCameraPathDialog } from './camera-path-dialog.js';

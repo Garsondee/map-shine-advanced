@@ -505,6 +505,7 @@ import {
   buildAstrolabeDial,
   phaseDisplayName,
   REALTIME_RATE_HOURS_PER_MINUTE,
+  formatClock,
   showPerfProgress,
   hidePerfProgress,
   formatPerfProgressText,
@@ -1357,7 +1358,22 @@ function install() {
         const current = skyScope.sky?.rateHoursPerMinute ?? 0;
         if (current > 0) {
           lastNonZeroRateHoursPerMinute = current;
-          void editSky({ rateHoursPerMinute: 0 });
+          // Freeze exactly HERE, not wherever `sky.todHour` was last
+          // persisted (2026-09-09 fix, companion to applyLookToEngines' own
+          // "freely drifting" guard above) — pausing must capture the LIVE
+          // hour in the SAME patch that zeroes the rate, or the very next
+          // resolve (now rate===0, so the guard no longer applies) would
+          // snap the just-paused clock back to its stale pre-drift snapshot
+          // instead of leaving it where playback actually stopped. The live
+          // hour is only ever `null` before the viewer's first frame, which
+          // this button cannot be reached before — but the key is still
+          // OMITTED rather than sent as `undefined` in that case, since
+          // sky-settings.js#normalizeSky treats a present-but-non-finite
+          // todHour as "reset to noon," not "leave it alone."
+          void editSky({
+            rateHoursPerMinute: 0,
+            ...(Number.isFinite(getVtPanViewerTodHour()) ? { todHour: getVtPanViewerTodHour() } : {}),
+          });
         } else {
           void editSky({ rateHoursPerMinute: lastNonZeroRateHoursPerMinute || REALTIME_RATE_HOURS_PER_MINUTE });
         }
@@ -9627,9 +9643,17 @@ function install() {
    * "Passage" sweep state, Drift-mode climate phrasing, a precip-description
    * "weatherWord" taxonomy) — `state.passage` has no real production
    * equivalent (grepped, none), and the precip-phrase taxonomy is its own
-   * scoped follow-up, not invented here. Two real states only: a weather
-   * archetype fade genuinely in flight, or the settled default.
-   * @param {{phase?: string, rising?: boolean}} dial - pumpAstrolabe's own payload.
+   * scoped follow-up, not invented here. Three real states now (2026-09-09
+   * added the third): a weather-archetype fade genuinely in flight, a
+   * time-of-day SWEEP genuinely in flight, or the settled default. The sweep
+   * case reads day-clock.js's own `isSyncing`/`syncRemainingSec` — nothing
+   * read those here before, so the label said "Holding" even mid-sweep
+   * (author: "this should say if it's in the middle of a transition and
+   * should say how long is left"). Checked weather-first, same as before —
+   * the rare case of both running at once shows the weather fade, keeping
+   * this a single line rather than concatenating two.
+   * @param {{phase?: string, rising?: boolean, isSyncing?: boolean,
+   *   targetHour?: number|null, syncRemainingSec?: number}} dial - pumpAstrolabe's own payload.
    * @param {number} nowMs
    * @returns {string}
    */
@@ -9641,6 +9665,10 @@ function install() {
       const entry = fading[1];
       const remainS = Math.max(0, Math.round((entry.startedAtMs + entry.overMs - nowMs) / 1000));
       return `Fading to ${entry.label ?? 'a new sky'} — ${remainS}s left`;
+    }
+    if (dial.isSyncing && Number.isFinite(dial.targetHour)) {
+      const remainS = Math.max(0, Math.round(dial.syncRemainingSec ?? 0));
+      return `Sweeping to ${formatClock(dial.targetHour)} — ${remainS}s left`;
     }
     return `Holding — ${phaseDisplayName(dial.phase, dial.rising)}`;
   }
@@ -10015,6 +10043,10 @@ function install() {
   // between them and the engines — it holds NO sky state of its own, because a
   // third copy is how a value acquires seven homes (Environment.md §0.4).
   let skyScope = { sky: null, source: 'world', sceneOverrides: false };
+  /** True once `applyLookToEngines` has run at least once — see its own
+   * "stale todHour vs. a live free drift" comment below for why the very
+   * FIRST call is deliberately exempt from that guard. */
+  let hasAppliedInitialTodHour = false;
 
   /** Push one resolved look block at every engine it drives — sky AND grade,
    * in one place so the resolve path and the edit path can never push different
@@ -10037,7 +10069,39 @@ function install() {
     // sweep genuinely in progress — it only matters for a foreign change
     // (another client, a scene load), where it still walks, just at the
     // fast default rate (well under a scene load's own loading curtain).
-    if (sky.mode === 'aesthetic') sweepVtPanViewerTimeOfDay(sky.todHour);
+    //
+    // ⚠️ 2026-09-09 fix (author: "changing a mood changes the time of day...
+    // I clicked 'Snow' and it changed the time of day"). `sky.todHour` is a
+    // SNAPSHOT, written only by an explicit commit (a tick click, a drag
+    // release, a scene save) — nothing re-persists it continuously while
+    // Play Time is freely drifting (`rate !== 0`, `world/day-clock.js#tick`'s
+    // own free-drift branch). So the moment ANY unrelated editSky() call
+    // landed here — clicking a weather chip, nudging a slider, anything —
+    // this line re-targeted the STALE pre-drift hour as if it were a fresh
+    // request, and day-clock.js#syncTo's own "same target = no-op" guard
+    // does not save it here because the target genuinely IS new (the live
+    // hour has moved on since). Confirmed end to end with a direct
+    // day-clock.js simulation: 5s of drift at 4h/min, then one echoed
+    // `syncTo(staleHour)` — the clock visibly snapped backward before
+    // resuming its drift from there, exactly the reported symptom.
+    //
+    // Fix: skip this resync whenever the clock is currently free-drifting —
+    // EXCEPT on this function's own very first call ever (`!
+    // hasAppliedInitialTodHour`), which must stay unconditional or a scene
+    // saved mid-drift would load at day-clock's construction default (noon)
+    // instead of the hour it was actually saved at, then start drifting
+    // from there. Every later call, once drift already owns the hour, is a
+    // "something else changed" edit — todHour hasn't moved intentionally,
+    // and reasserting the snapshot would only fight the live tick(). Pausing
+    // (astrolabe-panel.js's flow toggle) persists the CURRENT hour into the
+    // SAME patch that zeroes the rate, precisely so this guard's next call
+    // (rate now 0) resyncs to where playback actually stopped, not to the
+    // pre-drift snapshot.
+    const freelyDrifting = sky.mode === 'aesthetic' && sky.rateHoursPerMinute > 0;
+    if (sky.mode === 'aesthetic' && (!freelyDrifting || !hasAppliedInitialTodHour)) {
+      sweepVtPanViewerTimeOfDay(sky.todHour);
+    }
+    hasAppliedInitialTodHour = true;
     // ⭐ THE ALMANAC'S OWN MODE + CLIMATE, restored BEFORE the weather-archetype
     // restore just below — order matters here. `setWeatherArchetype`/
     // `setCloudCover` route through `weather.applyArchetype`, which (in

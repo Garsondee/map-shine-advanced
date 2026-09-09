@@ -22056,6 +22056,12 @@ export async function startVtPanViewer({
           mode: clock?.mode ?? 'aesthetic',
           canSetHour: clock?.canSetHour !== false,
           rateHoursPerMinute: clock?.rateHoursPerMinute ?? 0,
+          // A syncTo() walk in flight, and how long it has left — the
+          // Remote's "Now Playing" label reads these for its own
+          // "Sweeping to X — Ns left" readout (day-clock.js#read's own doc).
+          isSyncing: clock?.isSyncing === true,
+          targetHour: clock?.targetHour ?? null,
+          syncRemainingSec: clock?.syncRemainingSec ?? 0,
           windDirectionDeg: env.wind.directionDeg,
           windSpeed01: env.wind.speed01,
           timeScale: lastEnvSnapshot.timeScale ?? 1,

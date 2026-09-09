@@ -311,6 +311,16 @@ export function createDayClock({
         /** True while a `syncTo` walk is in flight — the dial shows it moving. */
         isSyncing: targetHour !== null,
         targetHour,
+        /** Seconds left until a `syncTo` walk arrives, at the CURRENT walk
+         * rate — 0 when not syncing. The Remote's "Now Playing" label reads
+         * this for its "Fading/Sweeping to X — Ns left" readout (mythica-
+         * machina-press: the label used to always say "Holding", even mid-
+         * sweep, because nothing exposed this). `activeWalkRate` itself is
+         * deliberately never exposed — this derived, already-in-real-seconds
+         * number is what every caller actually wants, and exposing the raw
+         * rate too would just invite a second, potentially-buggy re-
+         * derivation of the exact same division at the call site. */
+        syncRemainingSec: targetHour === null ? 0 : Math.abs(shortestHourDelta(hour, targetHour)) / activeWalkRate,
         /** False when the ring must render read-only (synced mode). */
         canSetHour: currentMode === 'aesthetic',
       });

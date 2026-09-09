@@ -2240,12 +2240,14 @@ function install() {
    * show at once without being persisted. Mirrors vegetationLiveOverride. */
   const bloomLiveOverride = {};
 
-  /** Re-resolve bloom's cascade from live settings + the live override and
-   * apply. Mirrors reapplyVegetation; called on settings change, on ready, and
-   * by MapShine.setBloom. */
+  /** Re-resolve bloom's cascade from live settings + the scene's own authored
+   * params (Stage B, mythica-machina-press#288/#389 — same shape as
+   * reapplyUiShadow's own Stage B) + the live override, and apply. Called on
+   * settings change, on ready, and by MapShine.setBloom. */
   function reapplyBloom() {
     const layers = deriveEffectLayers('bloom', (key) => readSetting(MODULE_ID, key));
-    layers.paramLayers = [bloomLiveOverride];
+    const { params: sceneParams } = readSceneEffectParams('bloom');
+    layers.paramLayers = [sceneParams, bloomLiveOverride].filter(Boolean);
     effectRegistry.resolveAndApply('bloom', layers);
   }
 
@@ -2253,30 +2255,36 @@ function install() {
    * FOH-ROH card / a preset pick). Mirrors bloomLiveOverride exactly. */
   const dofLiveOverride = {};
 
-  /** Re-resolve depth-of-field's cascade from live settings + the live
-   * override and apply. Mirrors reapplyBloom exactly; called on settings
+  /** Re-resolve depth-of-field's cascade from live settings + the scene's own
+   * authored params (Stage B, mythica-machina-press#288/#389) + the live
+   * override, and apply. Mirrors reapplyBloom exactly; called on settings
    * change, on ready, and by MapShine.setDof. */
   function reapplyDof() {
     const layers = deriveEffectLayers('depthOfField', (key) => readSetting(MODULE_ID, key));
-    layers.paramLayers = [dofLiveOverride];
+    const { params: sceneParams } = readSceneEffectParams('depthOfField');
+    layers.paramLayers = [sceneParams, dofLiveOverride].filter(Boolean);
     effectRegistry.resolveAndApply('depthOfField', layers);
   }
 
   /** Transient live override + re-resolve for SUN SHADOWS. Mirrors reapplyBloom
-   * exactly (docs/planning/Sun-Shadows.md). */
+   * exactly (docs/planning/Sun-Shadows.md), including its Stage B scene-param
+   * layer (mythica-machina-press#288/#389). */
   const sunShadowLiveOverride = {};
   function reapplySunShadows() {
     const layers = deriveEffectLayers('sunShadows', (key) => readSetting(MODULE_ID, key));
-    layers.paramLayers = [sunShadowLiveOverride];
+    const { params: sceneParams } = readSceneEffectParams('sunShadows');
+    layers.paramLayers = [sceneParams, sunShadowLiveOverride].filter(Boolean);
     effectRegistry.resolveAndApply('sunShadows', layers);
   }
 
   /** Transient live override + re-resolve for the Colour Grade effect. Mirrors
-   * reapplyBloom exactly. */
+   * reapplyBloom exactly, including its Stage B scene-param layer
+   * (mythica-machina-press#288/#389). */
   const gradeLookLiveOverride = {};
   function reapplyGradeLook() {
     const layers = deriveEffectLayers('grade', (key) => readSetting(MODULE_ID, key));
-    layers.paramLayers = [gradeLookLiveOverride];
+    const { params: sceneParams } = readSceneEffectParams('grade');
+    layers.paramLayers = [sceneParams, gradeLookLiveOverride].filter(Boolean);
     effectRegistry.resolveAndApply('grade', layers);
   }
 
@@ -3047,6 +3055,16 @@ function install() {
     // Every key SUN_SHADOW_PARAMS declares, spelled out — the same explicitness
     // setBloom/setVegetation use, so a rename shows up as a visible typo here
     // rather than as a slider that silently stops doing anything.
+    //
+    // ⚠️ `debugView` is EXCLUDED from the scene write-through below, on
+    // purpose — it is the author's own per-client diagnosis dropdown ("a
+    // dropdown in the ROH controls, allowing me to see just a single shadow
+    // at a time... on a white background", sun-shadows.js#SUN_SHADOW_PARAMS),
+    // not an authored look. Persisting it to the scene would force every
+    // connected PLAYER onto the GM's own debug view the moment they picked
+    // one — exactly the kind of wrong-boundary sync #194's own scoping
+    // comment warns a blanket "sync the whole override" pass would produce.
+    const scenePatch = {};
     for (const k of [
       'strength01',
       'buildingHeightPx',
@@ -3058,10 +3076,20 @@ function install() {
     ]) {
       if (k in p) {
         sunShadowLiveOverride[k] = p[k];
+        if (k !== 'debugView') scenePatch[k] = p[k];
         changed = true;
       }
     }
     if (changed) {
+      if (Object.keys(scenePatch).length > 0) {
+        // STAGE B (mythica-machina-press#288/#389) — mirrors setBloom's own write-through.
+        Promise.resolve(writeSceneEffectParams('sunShadows', scenePatch)).then(
+          (result) => {
+            if (!result.ok) log.warn(`sun shadows scene param write not persisted: ${result.reason}`);
+          },
+          (err) => log.error('sun shadows scene param write failed:', err)
+        );
+      }
       try {
         reapplySunShadows();
       } catch (err) {
@@ -3087,6 +3115,7 @@ function install() {
     // Every key BLOOM_PARAMS declares (Presence's `enabled` is handled above,
     // through the settings write, not this list) — explicit, matching
     // setVegetation's precedent so a rename is a visible typo, not a silent no-op.
+    const scenePatch = {};
     for (const k of [
       'threshold',
       'knee',
@@ -3103,10 +3132,19 @@ function install() {
     ]) {
       if (k in p) {
         bloomLiveOverride[k] = p[k];
+        scenePatch[k] = p[k];
         changed = true;
       }
     }
     if (changed) {
+      // STAGE B (mythica-machina-press#288/#389) — same "write through to the
+      // scene alongside the instant local override" shape as setUiShadow's own.
+      Promise.resolve(writeSceneEffectParams('bloom', scenePatch)).then(
+        (result) => {
+          if (!result.ok) log.warn(`bloom scene param write not persisted: ${result.reason}`);
+        },
+        (err) => log.error('bloom scene param write failed:', err)
+      );
       try {
         reapplyBloom();
       } catch (err) {
@@ -3131,13 +3169,22 @@ function install() {
     let changed = false;
     // Every key DOF_PARAMS declares — explicit, matching setBloom's precedent
     // so a rename is a visible typo, not a silent no-op.
+    const scenePatch = {};
     for (const k of ['strength', 'blurPerFloor', 'maxBlur']) {
       if (k in p) {
         dofLiveOverride[k] = p[k];
+        scenePatch[k] = p[k];
         changed = true;
       }
     }
     if (changed) {
+      // STAGE B (mythica-machina-press#288/#389) — mirrors setBloom's own write-through.
+      Promise.resolve(writeSceneEffectParams('depthOfField', scenePatch)).then(
+        (result) => {
+          if (!result.ok) log.warn(`depth of field scene param write not persisted: ${result.reason}`);
+        },
+        (err) => log.error('depth of field scene param write failed:', err)
+      );
       try {
         reapplyDof();
       } catch (err) {
@@ -3158,13 +3205,22 @@ function install() {
         .catch((err) => log.error('grade enable write/reapply failed:', err));
     }
     let changed = false;
+    const scenePatch = {};
     for (const k of Object.keys(GRADE_LOOK_PARAMS)) {
       if (k in p) {
         gradeLookLiveOverride[k] = p[k];
+        scenePatch[k] = p[k];
         changed = true;
       }
     }
     if (changed) {
+      // STAGE B (mythica-machina-press#288/#389) — mirrors setBloom's own write-through.
+      Promise.resolve(writeSceneEffectParams('grade', scenePatch)).then(
+        (result) => {
+          if (!result.ok) log.warn(`grade scene param write not persisted: ${result.reason}`);
+        },
+        (err) => log.error('grade scene param write failed:', err)
+      );
       try {
         reapplyGradeLook();
       } catch (err) {

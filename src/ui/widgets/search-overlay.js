@@ -27,7 +27,7 @@ function injectStyle() {
   // (not id-scoped like the pre-extraction copy) so any number of instances
   // share one injected stylesheet.
   el.textContent = `
-.msa-search-overlay{position:fixed; inset:0; z-index:350; display:none; align-items:flex-start;
+.msa-search-overlay{position:fixed; inset:0; z-index:450; display:none; align-items:flex-start;
   justify-content:center; padding-top:14vh; background:rgba(6,8,14,.45)}
 .msa-search-overlay.open{display:flex}
 .msa-search-overlay .box{width:560px; max-width:92vw; background:var(--glass);
@@ -51,8 +51,16 @@ function injectStyle() {
   background:none; color:var(--ink2); font-size:.72rem; cursor:pointer; pointer-events:auto}
 .msa-search-overlay .rail button:hover{background:var(--bg2); color:var(--ink0)}
 .msa-search-overlay .rail button.active{background:var(--shine-soft); color:var(--shine); font-weight:600}
+/* Greyed and inert while a search query is live (2026-09-10 fix, full-audit
+   pass) -- with a query typed, drawHits() below renders a FLAT hit list with
+   no .grouphead sections at all (grouping and free-text ranking don't mix,
+   this file's own header), so every rail button's own scrollIntoView target
+   has vanished. Before this fix the rail stayed fully lit and clickable
+   regardless, promising a jump that silently did nothing -- opacity+inert
+   here rather than hiding it outright, so the rail's own width doesn't
+   reflow the results column out from under the GM's eye mid-search. */
+.msa-search-overlay .rail.searching{opacity:.35; pointer-events:none}
 .msa-search-overlay .results{max-height:380px; overflow-y:auto; padding:6px; scrollbar-width:thin; flex:1; min-width:0}
-.msa-search-overlay.wide .results{max-height:600px}
 .msa-search-overlay .hit{display:flex; align-items:center; gap:9px; padding:7px 11px; border-radius:8px;
   width:100%; text-align:left; color:var(--ink1); font-size:.78rem; pointer-events:auto}
 .msa-search-overlay .hit:hover, .msa-search-overlay .hit.sel{background:var(--bg2); color:var(--ink0)}
@@ -65,10 +73,57 @@ function injectStyle() {
 .msa-search-overlay .grouphead{padding:9px 11px 4px; font-size:.62rem; letter-spacing:.18em;
   text-transform:uppercase; color:var(--ink2); display:flex; align-items:center}
 .msa-search-overlay .grouphead .cnt{margin-left:auto; color:var(--ink2); opacity:.7}
-/* Bigger, less-cramped hit rows for the wide variant specifically (author:
+/* ============================================================================
+   THE GRID REDESIGN (2026-09-10 full-audit pass, author: "the CSS causes a
+   lot of overlap and collisions and the system is too small to reveal a
+   decent number of options currently and the menu isn't organised to
+   display ideally a three column wide row of weather buttons").
+   ============================================================================
+   Measured directly in tools/remote-preview across viewports from 980px to
+   1600px and both Direct/Drift catalogs (16 and 10 items) before touching
+   any rule here: no element was literally rendering on top of another at
+   those sizes (see this fix's own commit message for the full measurement).
+   The real, confirmed defects were structural, not overlapping pixels:
+     1. Every hit rendered ONE PER ROW at the box's own full width, so most
+        of each row sat empty past its label+blurb text -- the "three column
+        wide row" the author asked for outright did not exist.
+     2. The box itself was a flat, VIEWPORT-INDEPENDENT 860x600 -- a GM on a
+        4K monitor and a GM on a cramped laptop window got the identical
+        cramped ~600px-tall scroll well, which is what "too small to reveal
+        a decent number of options" describes: the box never grew to use
+        whatever screen the GM actually has.
+   Fixed by turning .results itself into the grid -- .hit/.grouphead
+   are already its own direct children (weather-picker.js#drawHits appends
+   both straight into results, no wrapper divs), so no DOM change was
+   needed, only this container's own display mode. auto-fill/minmax
+   rather than a hardcoded repeat(3, ...): it lands on 3 columns at this
+   box's own typical width (measured) while still degrading gracefully
+   rather than overflowing/crushing if the box is ever narrower (a small
+   window, max-width:92vw engaging) -- the explicit ask was "ideally a
+   three column wide row", not "exactly three, always, no matter the
+   width". grid-column:1/-1 on .grouphead is the one thing a grid
+   conversion can silently get wrong (a section title squeezed into one
+   card-width column while hits flow beside it) -- confirmed correct in
+   the browser (tools/remote-preview) before landing, not assumed. Only
+   .wide changes shape here -- search-palette.js's own compact list,
+   which never sets rail/opts into this class, is untouched. */
+.msa-search-overlay.wide{padding-top:6vh}
+.msa-search-overlay.wide .box{width:min(1200px, 94vw); max-height:88vh}
+.msa-search-overlay.wide .frame{flex:1; min-height:0}
+.msa-search-overlay.wide .rail{max-height:none}
+.msa-search-overlay.wide .results{max-height:none; display:grid; align-content:start;
+  grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:8px}
+.msa-search-overlay.wide .grouphead{grid-column:1/-1; margin-top:6px}
+.msa-search-overlay.wide .grouphead:first-child{margin-top:0}
+/* Bigger, less-cramped hit CARDS for the wide variant specifically (author:
    "lots of things compressed together") -- the compact default stays as-is
-   for search-palette.js's own dense Studio-wide param search. */
-.msa-search-overlay.wide .hit{padding:9px 12px; font-size:.82rem; gap:11px}
+   for search-palette.js's own dense Studio-wide param search. height:100%
+   is what lets every card in an uneven-blurb-length ROW share that row's
+   own tallest card's height, matching a normal card grid's own look rather
+   than each card hugging just its own text. */
+.msa-search-overlay.wide .hit{padding:9px 12px; font-size:.82rem; gap:11px; height:100%; box-sizing:border-box;
+  align-items:flex-start}
+.msa-search-overlay.wide .hit .dot{margin-top:6px}
 .msa-search-overlay.wide .hit .htext .sub{white-space:normal}
 `.trim();
   document.head.appendChild(el);

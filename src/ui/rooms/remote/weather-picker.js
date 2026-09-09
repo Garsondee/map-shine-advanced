@@ -111,6 +111,14 @@ export function installWeatherPicker({ getWeatherMode, onPickArchetype, onPickBi
     const byId = new Map(index.map((h) => [h.id, h]));
     const ql = q.trim().toLowerCase();
 
+    // The rail's own buttons scroll to a `[data-group]` heading that only
+    // exists in the BROWSING render below — a live query renders the flat,
+    // ungrouped hit list this file's own header already explains, so every
+    // rail button's own target has vanished (2026-09-10 fix, full-audit
+    // pass). Greyed + inert here (search-overlay.js's own `.searching`
+    // rule) rather than promising a jump that would silently do nothing.
+    railEl?.classList.toggle('searching', Boolean(ql));
+
     if (!ql) {
       // BROWSING: grouped, with a real `data-group` heading per section so
       // the overlay's own rail can scroll to it.

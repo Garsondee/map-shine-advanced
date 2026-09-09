@@ -69,6 +69,49 @@ export async function writeSceneEffectParams(effectId, patch) {
 }
 
 /**
+ * Read EVERY effect's authored params off the active scene at once —
+ * `{ [effectId]: { [paramKey]: value } }`, the flag's own raw shape.
+ * mythica-machina-press#12 (copy/paste scene settings): a "copy" reads this
+ * whole block from the source scene rather than one effect at a time.
+ * @returns {{all: Record<string, Record<string, unknown>>|null, reason: string|null}}
+ *   `all: null` means "nothing authored on this scene yet" (or no active
+ *   scene, or a read error) — never confused with "authored as an empty
+ *   object", which stays a real, distinct, copyable state.
+ */
+export function readSceneAllEffectParams() {
+  try {
+    const scene = typeof canvas !== 'undefined' ? (canvas?.scene ?? null) : null;
+    if (!scene) return { all: null, reason: 'no active scene' };
+    const all = scene.getFlag(EFFECT_PARAM_NAMESPACE, SCENE_EFFECT_PARAMS_FLAG);
+    return { all: all && typeof all === 'object' ? all : null, reason: null };
+  } catch (err) {
+    return { all: null, reason: `reading this scene's effect params failed: ${err?.message ?? err}` };
+  }
+}
+
+/**
+ * REPLACE the active scene's entire effect-params flag in one write —
+ * mythica-machina-press#12's "paste", and the reason this is a separate door
+ * from `writeSceneEffectParams`'s per-effect MERGE: a paste is "make this
+ * scene's whole block match that one", not "add these few keys to whatever
+ * is already here" (a merge here would leave the target scene's OWN prior
+ * tuning bleeding through wherever the copied source never touched a key,
+ * which is not what "paste" means to whoever asked for it).
+ * @param {Record<string, Record<string, unknown>>} all
+ * @returns {Promise<{ok: boolean, reason: string|null}>}
+ */
+export async function writeSceneAllEffectParams(all) {
+  try {
+    const scene = typeof canvas !== 'undefined' ? (canvas?.scene ?? null) : null;
+    if (!scene) return { ok: false, reason: 'no active scene to write to' };
+    await scene.setFlag(EFFECT_PARAM_NAMESPACE, SCENE_EFFECT_PARAMS_FLAG, all ?? {});
+    return { ok: true, reason: null };
+  } catch (err) {
+    return { ok: false, reason: `writing this scene's effect params failed (GM only?): ${err?.message ?? err}` };
+  }
+}
+
+/**
  * Watch for another GM's client writing an effect's scene params, so this
  * client re-derives at once rather than waiting for its own next scene load.
  * Mirrors `sky-persistence.js#watchSceneSky` exactly, filtered to the active

@@ -224,6 +224,7 @@ function buildStudioEffectCard(model) {
   if (model.tier) head.append(tierChip(model.tier));
   head.append(
     scopeGlyph({
+      schema: model.schema,
       plannedReason:
         model.scopePlannedReason ??
         'Full scene/world/client scope is not wired yet — only an effect’s own enable state has a real world/client duality today.',

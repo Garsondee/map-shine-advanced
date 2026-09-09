@@ -27,6 +27,7 @@ import { run as runDoorGraphics } from './door-graphics.test.mjs';
 import { run as runDoorGraphicsRender } from './door-graphics-render.test.mjs';
 import { run as runApertureGobo } from './aperture-gobo.test.mjs';
 import { run as runEffectReadiness } from './effect-readiness.test.mjs';
+import { run as runTileMotionNodes } from './tile-motion-nodes.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -77,6 +78,7 @@ const suites = [
   ['door-graphics-render', runDoorGraphicsRender],
   ['aperture-gobo', runApertureGobo],
   ['effect-readiness', runEffectReadiness],
+  ['tile-motion-nodes', runTileMotionNodes],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

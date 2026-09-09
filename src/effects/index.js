@@ -285,6 +285,9 @@ export {
   SPECULAR_LAYER_COUNT,
 } from './specular/specular-render.js';
 export { createSpecularSurfaceSubsystem } from './specular/specular-surface-subsystem.js';
+// mythica-machina-press#538/#539 — the per-TILE population, ADDED beside the
+// floor-level subsystem above; see that file's own header for why.
+export { createSpecularTileSurfaceSubsystem } from './specular/specular-tile-surface-subsystem.js';
 export { createSpecularSeams } from './specular/specular-seams.js';
 export { createSpecularRegistration } from './specular/specular-registration.js';
 // FLUID — goo in thin glass tubes (docs/planning/Fluid.md). Phase 1 only: the
@@ -374,6 +377,9 @@ export {
   WINDOW_DEFAULT_CONTRAST,
 } from './window/window-render.js';
 export { createWindowSurfaceSubsystem } from './window/window-surface-subsystem.js';
+// mythica-machina-press#538/#539 — the per-TILE population, ADDED beside the
+// per-floor subsystem above; see that file's own header for why.
+export { createWindowTileSurfaceSubsystem } from './window/window-tile-surface-subsystem.js';
 export { createWindowSeams } from './window/window-seams.js';
 export { createWindowRegistration } from './window/window-registration.js';
 

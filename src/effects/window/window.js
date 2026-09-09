@@ -39,7 +39,9 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 3,
     step: 0.01,
-    default: 1,
+    // RAISED 1 → 3 = THE SCHEMA'S OWN MAX (2026-09-09) — new live-tuned
+    // defaults; the author's own dialled-in scene, recorded exactly.
+    default: 3,
     category: 'Look',
     label: 'Window light',
     help: 'Master strength of every light cookie this effect draws. Turn it to 0 to see the map with no window light at all.',

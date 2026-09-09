@@ -117,7 +117,7 @@ export function run(t) {
     Math.abs(softShoulder(0.05) - 0.05) / 0.05 < 0.05
   );
   ok(
-    'a fully-painted, default-strength cookie (raw=1) lands close to the documented ≈0.556',
+    'a fully-painted, unit-strength cookie (raw=1) lands close to the documented ≈0.556',
     Math.abs(softShoulder(1) - 1 / (1 + WINDOW_SHOULDER_K)) < 1e-9
   );
   ok(
@@ -171,7 +171,9 @@ export function run(t) {
   const dimAmbient = 0.3; // a typical dim-to-moderate lit interior before this effect touches it
   const brightAmbient = 0.9; // a bright daylight interior — little headroom left, the worst realistic case
 
-  // The common case: a fully-painted, default-strength cookie in a dim room
+  // The common case: a fully-painted, unit-strength cookie (raw=1 — no
+  // longer the shipped default, which is now 3 = the schema's own max, but
+  // still a meaningful, moderate waypoint independent of it) in a dim room
   // must brighten the room WITHOUT clipping.
   const dimTotal = dimAmbient + shoulderedContribution([1, 1, 1])[0];
   ok('typical dim interior + a full cookie: illum rises well above ambient', dimTotal > dimAmbient * 1.5);

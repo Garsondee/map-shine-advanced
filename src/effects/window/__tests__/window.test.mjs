@@ -11,6 +11,7 @@ import { validateEffectManifest } from '../../effect-manifest.js';
 import { createEffectRegistry } from '../../registry.js';
 import { resolveEffectEnabled } from '../../effect-cascade.js';
 import { WINDOW, WINDOW_PARAMS, WINDOW_DEBUG_CHANNELS, WINDOW_DEBUG_BOOST } from '../window.js';
+import { WINDOW_DEFAULT_STRENGTH } from '../window-render.js';
 
 export function run(t) {
   const { ok } = t;
@@ -93,6 +94,16 @@ export function run(t) {
   );
   ok('a master strength control exists and can reach 0', WINDOW_PARAMS.strength.min === 0);
   ok('…and defaults ON', WINDOW_PARAMS.strength.default > 0);
+  // ⚠️ TWO PLACES STORE THIS SAME NUMBER — the schema default (what a new
+  // scene actually ships with) and `window-render.js`'s own JS default (what
+  // a caller gets for free if it never touches this param), same shape
+  // `specular.test.mjs` already pins for its own effect. Nothing forces them
+  // to agree; only a test does. RAISED 1 → 3 = the schema's own max
+  // (2026-09-09, live-tuned).
+  ok(
+    'the schema default and the render module default agree on strength',
+    WINDOW_PARAMS.strength.default === WINDOW_DEFAULT_STRENGTH
+  );
 
   // ⚠️ There must be NO "cloud shadows" or "cloud" param yet — the field does
   // not exist, and `params/no-dead-controls` would fail the build on a

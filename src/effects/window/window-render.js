@@ -74,7 +74,9 @@ export const WINDOW_MASK_IMAGE_SCALE = 0.5;
 
 /** Defaults, mirroring `WINDOW_PARAMS` — the single source of truth for the
  * values; the schema quotes them. A change lands in both or neither. */
-export const WINDOW_DEFAULT_STRENGTH = 1;
+// RAISED 1 → 3 = WINDOW_PARAMS.strength's own max (2026-09-09) — new
+// live-tuned defaults; a change lands in both or neither.
+export const WINDOW_DEFAULT_STRENGTH = 3;
 export const WINDOW_DEFAULT_CONTRAST = 1;
 /** Hex source for the two daylight keyframes — mirrors `WINDOW_PARAMS.dawnDuskTint`/
  * `.nightTint`'s own `default`. Decoded once here rather than per frame; noon has

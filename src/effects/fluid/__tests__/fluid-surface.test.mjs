@@ -12,8 +12,16 @@
  * is a per-item effect and the author's tubes live on a tile — so there is no
  * crop to compute and no rect to get wrong. Two bugs (the world-rect mask
  * mapping, and rotation being unrepresentable) were deleted rather than fixed.
+ *
+ * ⚠️ A DIFFERENT AABB CAME BACK, ON PURPOSE, mythica-machina-press#546.
+ * `worldRectFromCorners` is NOT the crop helper above reincarnated — it feeds
+ * a SCREEN-SPACE composite term (the fluid-shadow-tint add in
+ * `environmental-light.js`), which has no per-item local `uv()` to fall back
+ * on the way this file's own mesh does, so it accepts the same "no rotation"
+ * gap that mesh's own header names, rather than reintroducing a crop the mesh
+ * itself no longer needs.
  */
-import { downsample } from '../fluid-surface-subsystem.js';
+import { downsample, worldRectFromCorners } from '../fluid-surface-subsystem.js';
 
 export function run(t) {
   const { ok } = t;
@@ -57,5 +65,62 @@ export function run(t) {
     // to agree or every tube renders vertically mirrored
     // (feedback_y_flip_recurring_risk).
     ok('downsample: row 0 is still the source’s row 0 — no vertical flip', g.data[0] === 200);
+  }
+
+  // ── worldRectFromCorners (mythica-machina-press#546) ────────────────────
+  {
+    // An axis-aligned quad, corners in an arbitrary (non-sorted) order — the
+    // function must not assume any particular winding.
+    const axisAligned = [
+      { x: 100, y: 50 },
+      { x: 300, y: 50 },
+      { x: 300, y: 200 },
+      { x: 100, y: 200 },
+    ];
+    const r1 = worldRectFromCorners(axisAligned);
+    ok(
+      'axis-aligned quad: rect is exactly its own corners',
+      r1.minX === 100 && r1.minY === 50 && r1.maxX === 300 && r1.maxY === 200
+    );
+
+    // A rotated quad's rect must be its BOUNDING box, not its own tight
+    // shape — this is the exact, named, accepted gap this helper's own doc
+    // states (a rotated fluid tile's tint footprint samples through a
+    // skewed mapping, not a wrong one).
+    const rotated = [
+      { x: 200, y: 0 },
+      { x: 300, y: 100 },
+      { x: 200, y: 200 },
+      { x: 100, y: 100 },
+    ];
+    const r2 = worldRectFromCorners(rotated);
+    ok(
+      'rotated quad: rect is the BOUNDING box of all four corners',
+      r2.minX === 100 && r2.minY === 0 && r2.maxX === 300 && r2.maxY === 200
+    );
+
+    // Corner order must not matter — the same four points, shuffled, give
+    // the identical rect.
+    const shuffled = [rotated[2], rotated[0], rotated[3], rotated[1]];
+    const r3 = worldRectFromCorners(shuffled);
+    ok(
+      'corner order does not matter — min/max over the SET, not the sequence',
+      r3.minX === r2.minX && r3.minY === r2.minY && r3.maxX === r2.maxX && r3.maxY === r2.maxY
+    );
+
+    // A degenerate (zero-area) quad is a real value, never NaN/Infinity —
+    // `vt-pan-viewer.js`'s own per-frame push relies on being able to test
+    // `maxX > minX` against a genuine number to skip it safely.
+    const pointLike = [
+      { x: 50, y: 50 },
+      { x: 50, y: 50 },
+      { x: 50, y: 50 },
+      { x: 50, y: 50 },
+    ];
+    const r4 = worldRectFromCorners(pointLike);
+    ok(
+      'a zero-area quad reports minX === maxX (a real, checkable degenerate rect)',
+      r4.minX === 50 && r4.maxX === 50 && r4.minY === 50 && r4.maxY === 50
+    );
   }
 }

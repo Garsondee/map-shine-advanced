@@ -47,6 +47,16 @@
  */
 
 import { buildSunVisibilityNode } from './sun-occlusion-render.js';
+// FLUID'S OWN SHADOW TINT (mythica-machina-press#546) — reused, not
+// reinvented: the SAME footprint threshold `fluid-render.js`'s own mesh
+// gates its silhouette on (`smoothstep(EDGE0, EDGE1, maskTexNode.r)`), so a
+// fluid tile's shadow tint and its visible goo agree about where the tube
+// actually is. Both zone/lighting and zone/fluid live under `effects/`, so
+// this is an intra-zone sibling import, not a cross-zone reach (`zones/
+// one-door` only walls imports that cross a TOP-LEVEL zone boundary) — same
+// shape as `grade-present.js`'s own direct `../lighting/environmental-
+// light.js` import.
+import { FLUID_PRESENCE_EDGE0, FLUID_PRESENCE_EDGE1 } from '../fluid/fluid-render.js';
 
 /**
  * Linear-interpolate two rgb triples, clamping t to [0,1].
@@ -205,6 +215,41 @@ export function maxRgb(rgb, floor) {
 }
 
 /**
+ * How many simultaneous fluid-tinted-shadow ITEMS this composite carries,
+ * fixed-length slots built once at construction — same shape, and the same
+ * reasoning, as `sun-shadow-subsystem.js`'s own `SUN_SHADOW_MAX_FLOORS` (§5
+ * of that file): comfortably above what one map actually needs for a
+ * decorative per-tile effect, comfortably below any hard GPU stage limit. A
+ * scene with MORE fluid-tinted tiles than this degrades by simply not
+ * tinting the overflow ones' shadows (their ordinary colourless shadow is
+ * completely unaffected) rather than risking a limit.
+ */
+export const FLUID_SHADOW_TINT_MAX_ITEMS = 4;
+
+/**
+ * How strongly a fluid item's own liquid colour bleeds into its shadow, at
+ * full footprint coverage and full shadow depth (`sunVis = 0`) — a
+ * multiplier on `ambient`, ADDED on top of the existing `ambient.mul(sunVis)`
+ * term, never multiplied into it (see `buildEnvironmentalLightMaterials`'s
+ * own "FLUID'S OWN SHADOW TINT" doc block for why the shared bake itself
+ * must stay untouched).
+ *
+ * ⚠️ REASONED, NOT YET LIVE-TUNED — stated plainly rather than dressed up as
+ * a measured default. Worked through by hand against this file's own
+ * daylight example: `ambient ≈ [0.93,0.93,0.93]`, `sunShadows.strength01`'s
+ * own default (0.85) leaving `sunVis ≈ 0.15` at full shadow, fluid's own
+ * default tint `FLUID_TIER0_TINT = [0.15, 0.95, 0.7]`. At this strength the
+ * shadow's G channel moves from a flat ≈0.14 to ≈0.40 — a plainly visible
+ * green cast that stays well under the ≈0.93 a FULLY LIT patch would show,
+ * so a shadowed, tinted patch can never read as brighter than an unshadowed
+ * one. Even at the extreme (`ambient` and `tint` both saturated white, full
+ * footprint, full shadow depth) the added term alone tops out at exactly
+ * this constant, comfortably short of blowing a channel to 1. If the author
+ * wants it stronger or weaker by eye, THIS is the one number to change.
+ */
+export const FLUID_SHADOW_TINT_STRENGTH = 0.35;
+
+/**
  * Build the two fullscreen materials of the environmental-light pass:
  *   - `illumMaterial`     → fills `buf:scene.illum` with the ambient background
  *                           (sRGB). Constant per frame today; becomes per-pixel
@@ -290,6 +335,15 @@ export function maxRgb(rgb, floor) {
  *   a `select()`/branch fold over the array, which would strand every branch
  *   but the last (`feedback_tsl_select_chain_strands_vars`). Omitted or empty
  *   → the whole block compiles out, byte-identical to before shadows existed.
+ * @param {*} [args.fluidShadowTintTexture] - a tiny (1×1 is fine) PLACEHOLDER
+ *   texture, created by the caller (`vt/`-side `new ...Texture(` wall — this
+ *   module may not allocate one itself) and bound to every
+ *   `FLUID_SHADOW_TINT_MAX_ITEMS` slot at construction; each slot's OWN
+ *   texture node is later REBOUND (`.value =`, never rebuilt) to a real fluid
+ *   item's mask via `setFluidShadowTintSlot` — the same "rebind, not rebuild"
+ *   posture `outdoorsTexNode`'s own doc already states. Omitted → fluid's
+ *   shadow-tint slots are never built and the whole term compiles out,
+ *   byte-identical to before this feature existed (mythica-machina-press#546).
  * @returns {{
  *   illumMaterial: *, compositeMaterial: *,
  *   uBackgroundSrgb: *, albedoTexNode: *, illumTexNode: *, colorationTexNode: *,
@@ -298,6 +352,7 @@ export function maxRgb(rgb, floor) {
  *   setSky: (multiplierRgb: number[]) => void,
  *   setViewRect: (rect: object) => void,
  *   setOutdoorsRect: (rect: object) => void,
+ *   setFluidShadowTintSlot: (slotIndex: number, entry: ({texture: *, rect: {minX:number,minY:number,maxX:number,maxY:number}, tint: number[]}|null)) => void,
  * }}
  */
 export function buildEnvironmentalLightMaterials({
@@ -311,8 +366,10 @@ export function buildEnvironmentalLightMaterials({
   attrTexture,
   depthTexture,
   depthFlagsTexture,
+  fluidShadowTintTexture,
 }) {
-  const { uniform, texture, uv, vec3, vec4, float, mix, sRGBTransferEOTF, sRGBTransferOETF } = THREE.TSL;
+  const { uniform, texture, uv, vec2, vec3, vec4, float, mix, smoothstep, step, sRGBTransferEOTF, sRGBTransferOETF } =
+    THREE.TSL;
 
   // ═══════════════════════════════════════════════════════════════════════
   // THE SKY LIGHT (docs/planning/Sky.md) — atmosphere as LIGHT, not a grade.
@@ -427,6 +484,82 @@ export function buildEnvironmentalLightMaterials({
   const depthTexNode = depthTexture ? texture(depthTexture) : null;
   const depthFlagsTexNode = depthFlagsTexture ? texture(depthFlagsTexture) : null;
 
+  // ═══════════════════════════════════════════════════════════════════════
+  // FLUID'S OWN SHADOW TINT (mythica-machina-press#546) — a `_Fluid` mask's
+  // liquid colour bleeding into the shadow ITS OWN host tile already casts,
+  // like light through stained glass, instead of the flat/neutral shadow
+  // every caster produces by construction today.
+  // ═══════════════════════════════════════════════════════════════════════
+  //
+  // ⚠️ ADDITIVE, NEVER INTO THE SHARED BAKE. The colourless `sunVis` scalar
+  // resolved below is ONE texture, shared by every caster whose smeared
+  // silhouette happens to overlap this texel (a wall, a roof, another tile)
+  // — `sun-shadow-subsystem.js`'s own layer-smear model MULTIPLIES occluder
+  // transmittances together precisely because they are independent occluders
+  // in series. Recolouring THAT texture would tint every OTHER caster's
+  // shadow sharing it, not just this one fluid tile's own footprint. So this
+  // term is bolted on AFTER `ambient.mul(sunVis)` is resolved, in the illum
+  // fragmentNode below — an ADD, never a second multiply into that scalar.
+  //
+  // ⚠️ UNDER THE TILE'S OWN FOOTPRINT, NOT REPROJECTED TO THE SHADOW'S
+  // OFFSET POSITION — a deliberate, simpler choice, not an oversight.
+  // `effects/shadow-access.js#forCaster()` CAN compute a caster's throw
+  // offset (`projectShadowOffset`, a SOFT-KNEE saturating cap keyed off
+  // `MAX_THROW_HEIGHT_RATIO`), and the more "complete"-looking version of
+  // this feature would reproject the fluid mask by that offset so the tint
+  // lands under the smear's FAR edge instead of under the tile itself. But
+  // the layer-smear bake that actually produces the overhead layer's shadow
+  // does NOT call `forCaster()` at all — `layer-smear.js#layerThrowPx` caps
+  // the SAME `h/tan(elevation)` throw with a HARD tan-floor
+  // (`effTan = max(scaledTan, 1/maxLengthMul)`) instead of `forCaster()`'s
+  // soft knee, and the two curves only agree away from dawn/dusk — exactly
+  // the regime this codebase's own `dawnDuskLength` history says the author
+  // has tuned the hardest (`sun-shadows.js`'s own param doc). Reprojecting
+  // by `forCaster()`'s own offset would therefore visibly DRIFT from the
+  // REAL colourless shadow's position at low sun angles — worse than not
+  // reprojecting at all. What the layer-smear model's own maths GUARANTEES
+  // instead (`smearFalloff01(0) === 1`, always, regardless of sun angle):
+  // the point directly under a solid occluder is the SINGLE DARKEST point of
+  // its own shadow, at every hour. Tinting exactly there is not a lesser
+  // approximation of "the shadow" — it is the one part of it that is
+  // invariant to every offset-formula question above.
+  //
+  // ⚠️ AN AXIS-ALIGNED RECT, NOT THE TILE'S TRUE (POSSIBLY ROTATED) QUAD.
+  // `fluid-render.js`'s own header says why the mesh itself samples its mask
+  // at the quad's own local `uv()` rather than a world rect: "a rect has no
+  // rotation." This composite is a SCREEN-SPACE fullscreen quad with no
+  // notion of any one item's local UV, so it samples the SAME mask through
+  // an axis-aligned bounding rect of the item's corners instead
+  // (`fluid-surface-subsystem.js#getFootprintRects`). Correct for an
+  // unrotated tile (the common case — an overhead "glass tubes" tile authored
+  // square to the grid); a meaningfully ROTATED fluid tile's tint footprint
+  // will be sampled through a skewed mapping and may not land exactly on its
+  // true silhouette. Named here rather than discovered later.
+  //
+  // ⚠️ GATED BY `(1 − sunVis)`, NEVER FREESTANDING. This reads as coloured
+  // light bleeding through an EXISTING shadow, not a second light source —
+  // at `sunVis = 1` (nothing shadowed here at all) this term is exactly
+  // zero, so a fully-lit patch is never brightened or tinted no matter how
+  // large the fluid item or how strong `FLUID_SHADOW_TINT_STRENGTH` is.
+  //
+  // Omitted (`fluidShadowTintTexture` not supplied) → `fluidTintSlots` is
+  // empty and every line below compiles out, byte-identical to before this
+  // feature existed — same "compiles out, never a zero-multiply" posture
+  // every other optional texture in this file already has.
+  const fluidTintSlots = fluidShadowTintTexture
+    ? Array.from({ length: FLUID_SHADOW_TINT_MAX_ITEMS }, () => ({
+        texNode: texture(fluidShadowTintTexture),
+        uRect: uniform(vec4(0, 0, 1, 1)),
+        // Black — the neutral/no-op tint, the additive identity. An
+        // unclaimed slot (or one whose item just left the scene) contributes
+        // exactly zero regardless of whatever rect/mask it still holds —
+        // simpler than `uFloorIndex01`'s own sentinel trick above, because
+        // zero genuinely IS this term's identity, no arithmetic needed to
+        // reach it.
+        uTint: uniform(vec3(0, 0, 0)),
+      }))
+    : [];
+
   // --- illum pass: ambient fill, tinted by the sky where it is open --------
   const uBackgroundSrgb = uniform(vec3(0.93, 0.93, 0.93));
   const illumMaterial = new THREE.NodeMaterial();
@@ -477,7 +610,46 @@ export function buildEnvironmentalLightMaterials({
               uShadowRect: sunShadowSlots[0].uRect,
               shadowTexNode: sunShadowSlots[0].texNode,
             });
-    illumMaterial.fragmentNode = vec4(sunVis ? ambient.mul(sunVis) : ambient, float(1));
+
+    // FLUID'S OWN SHADOW TINT — see this function's own "FLUID'S OWN SHADOW
+    // TINT" doc block, above, for the full design and its honesty notes.
+    // `sunVis` is only ever non-null once real shadow data exists at all
+    // (see the ternary just above), so a scene with sun-shadows disabled
+    // pays nothing extra here either.
+    let fluidTintAdd = null;
+    if (fluidTintSlots.length > 0 && sunVis) {
+      const worldX = mix(uViewRect.x, uViewRect.z, uv().x);
+      const worldY = mix(uViewRect.y, uViewRect.w, uv().y);
+      let contribution = vec3(0, 0, 0);
+      for (const slot of fluidTintSlots) {
+        const rectU = worldX.sub(slot.uRect.x).div(slot.uRect.z.sub(slot.uRect.x));
+        const rectV = worldY.sub(slot.uRect.y).div(slot.uRect.w.sub(slot.uRect.y));
+        // Hard-gated to INSIDE this item's own rect. Unlike the whole-scene
+        // outdoors/sun-shadow masks (whose rect genuinely covers the whole
+        // map, so a clamped sample past their edge is a rare, accepted edge
+        // case — `sampleOutdoorsAtWorldXY`'s own comment), a fluid item's
+        // rect is TINY relative to the screen: a clamped-only sample would
+        // smear its edge texel across the ENTIRE rest of the map, wherever a
+        // shadow also happens to fall.
+        const insideRect = step(float(0), rectU)
+          .mul(step(rectU, float(1)))
+          .mul(step(float(0), rectV))
+          .mul(step(rectV, float(1)));
+        const maskR = slot.texNode.sample(vec2(rectU.clamp(0, 1), rectV.clamp(0, 1))).r;
+        // THE SAME footprint definition `fluid-render.js`'s own mesh gates its
+        // silhouette on — not a second, possibly-disagreeing threshold.
+        const footprint = smoothstep(float(FLUID_PRESENCE_EDGE0), float(FLUID_PRESENCE_EDGE1), maskR);
+        contribution = contribution.add(slot.uTint.mul(footprint).mul(insideRect));
+      }
+      // Clamped BEFORE it meets ambient/strength/deficit — bounds the ADDED
+      // term alone (several overlapping fluid footprints cannot compound
+      // past "one fully-tinted layer's" worth of colour) without touching
+      // the EXISTING, unclamped `ambient`/`sunVis` maths above it.
+      contribution = contribution.clamp(0, 1);
+      fluidTintAdd = ambient.mul(contribution).mul(float(FLUID_SHADOW_TINT_STRENGTH)).mul(float(1).sub(sunVis));
+    }
+    const ambientLit = sunVis ? ambient.mul(sunVis) : ambient;
+    illumMaterial.fragmentNode = vec4(fluidTintAdd ? ambientLit.add(fluidTintAdd) : ambientLit, float(1));
   }
 
   // --- composite pass: lit = EOTF( OETF(albedo) × illum × uiShadowVis + coloration ) ------
@@ -567,6 +739,41 @@ export function buildEnvironmentalLightMaterials({
     slot.uFloorIndex01.value = Number.isFinite(index) && index >= 0 ? Math.min(255, index) / 255 : -1 / 255;
   }
 
+  /**
+   * Push one fluid item's shadow-tint contribution into slot `slotIndex` —
+   * its mask texture (REBOUND via `.value =`, never a new TextureNode, same
+   * "rebind not rebuild" posture `outdoorsTexNode`'s own doc states), its
+   * current world-space footprint rect (`fluid-surface-subsystem.js
+   * #getFootprintRects`), and its live tint colour
+   * (`fluid-surface-subsystem.js#getTintForItem`).
+   *
+   * `entry` falsy CLEARS the slot: only the tint is reset to black, which
+   * alone zeroes this slot's contribution regardless of whatever rect/mask
+   * it still holds (see `fluidTintSlots`' own construction comment on why
+   * black is sufficient) — cheaper than also touching the texture/rect, and
+   * avoids briefly rebinding to a `null` texture on the very frame an item
+   * leaves the scene.
+   *
+   * Silently a no-op past `FLUID_SHADOW_TINT_MAX_ITEMS`, same posture as
+   * {@link setSunShadowRect}'s identical guard — a caller iterating more
+   * fluid items than there are slots simply stops tinting the overflow
+   * ones' shadows.
+   *
+   * @param {number} slotIndex
+   * @param {{texture: *, rect: {minX:number,minY:number,maxX:number,maxY:number}, tint: number[]}|null} entry
+   */
+  function setFluidShadowTintSlot(slotIndex, entry) {
+    const slot = fluidTintSlots[slotIndex];
+    if (!slot) return;
+    if (!entry) {
+      slot.uTint.value.set(0, 0, 0);
+      return;
+    }
+    if (entry.texture) slot.texNode.value = entry.texture;
+    if (entry.rect) slot.uRect.value.set(entry.rect.minX, entry.rect.minY, entry.rect.maxX, entry.rect.maxY);
+    if (Array.isArray(entry.tint)) slot.uTint.value.set(entry.tint[0], entry.tint[1], entry.tint[2]);
+  }
+
   return {
     illumMaterial,
     compositeMaterial,
@@ -580,6 +787,13 @@ export function buildEnvironmentalLightMaterials({
     setOutdoorsRect,
     setSunShadowRect,
     setSunShadowFloorIndex,
+    setFluidShadowTintSlot,
+    /** True when at least one fluid-shadow-tint slot was actually built
+     * (`fluidShadowTintTexture` was supplied) — same diagnostic posture as
+     * `sunShadowCompiled` below: "no tinted shadow" should be answerable
+     * without guessing whether the feature is even in the shader
+     * (mythica-machina-press#546). */
+    fluidShadowTintCompiled: fluidTintSlots.length > 0,
     /** True when SOME floor buffer was supplied and the per-floor shadow gate
      * is actually compiled into the ambient fill — same diagnostic posture as
      * `skyGateCompiled` below and `specular-render.js`'s `floorGateCompiled`. */

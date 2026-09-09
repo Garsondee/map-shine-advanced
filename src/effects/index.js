@@ -79,6 +79,9 @@ export {
   FOUNDRY_LIGHT_WEIGHTS,
   mixRgb,
   buildWorldSpaceOutdoorsGate,
+  // FLUID'S OWN SHADOW TINT (mythica-machina-press#546) — `vt-pan-viewer.js`
+  // needs the slot cap to know how many slots to push/clear per frame.
+  FLUID_SHADOW_TINT_MAX_ITEMS,
 } from './lighting/environmental-light.js';
 export {
   buildPointLightIlluminationMaterial,

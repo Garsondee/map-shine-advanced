@@ -1,15 +1,29 @@
 /**
  * Node verification for effects/lighting/environmental-light.js.
  *
- * Only the PURE ambient-ladder math is tested here — `mixRgb`,
- * `computeAmbientBackground`, `computeAmbientColors`.
- * `buildEnvironmentalLightMaterials` builds TSL and is browser-only (verified
- * live via the debug panel / an A/B screenshot vs Foundry, not a mocked THREE
- * — CONVENTIONS.md §4).
+ * Most of this file is the PURE ambient-ladder math — `mixRgb`,
+ * `computeAmbientBackground`, `computeAmbientColors` — which is what the
+ * ladder-parity checks below exercise: it must equal Foundry's own
+ * `background = mix(ambientDaylight, ambientDarkness, darknessLevel)`
+ * (Light-Parity.md §5). Whether the shadowed picture actually LOOKS right is
+ * still browser-only (an A/B screenshot vs Foundry, CONVENTIONS.md §4) — no
+ * test here claims otherwise.
  *
- * The ladder is the parity checkpoint Light-Parity.md §5 names: it must equal
- * Foundry's own `background = mix(ambientDaylight, ambientDarkness, darknessLevel)`.
+ * ⚠️ `buildEnvironmentalLightMaterials` ITSELF is now ALSO exercised, though
+ * narrowly (mythica-machina-press#546's own fluid-shadow-tint addition) —
+ * mirroring `fluid-sim-render.test.mjs`'s "THE TSL GRAPHS ARE ACTUALLY
+ * CONSTRUCTED, IN NODE" precedent: the REAL vendored `three.webgpu.js`
+ * imports cleanly under plain Node, so a builder this size going completely
+ * uncalled by any test (a temporal-dead-zone crash, a typo'd TSL destructure,
+ * a wrong argument order on `step`/`clamp`) is a gap worth closing for the
+ * one branch this issue actually added, even though the file's older claim
+ * above ("browser-only") is still true of the ladder's VISUAL correctness.
+ * These new checks prove construction + the JS-level plumbing
+ * (`fluidShadowTintCompiled`, `setFluidShadowTintSlot`'s no-throw contract) —
+ * nothing about WGSL/GLSL codegen, nothing about what it looks like on
+ * screen.
  */
+import * as THREE from '../../../vendor/three/three.webgpu.js';
 import {
   mixRgb,
   computeAmbientBackground,
@@ -17,7 +31,16 @@ import {
   computeGlobalLightFloor,
   maxRgb,
   FOUNDRY_LIGHT_WEIGHTS,
+  buildEnvironmentalLightMaterials,
+  FLUID_SHADOW_TINT_MAX_ITEMS,
 } from '../environmental-light.js';
+
+/** A 1×1 texture — enough for a node to reference; never sampled here. */
+function stubTexture(data = new Uint8Array([0, 0, 0, 255])) {
+  const t = new THREE.DataTexture(data, 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
+  t.needsUpdate = true;
+  return t;
+}
 
 const near = (a, b) => Math.abs(a - b) < 1e-9;
 const nearRgb = (a, b) => a.length === 3 && near(a[0], b[0]) && near(a[1], b[1]) && near(a[2], b[2]);
@@ -206,5 +229,155 @@ export function run(t) {
       'a floor entirely below the base changes nothing',
       nearRgb(maxRgb([0.8, 0.8, 0.8], [0.1, 0.1, 0.1]), [0.8, 0.8, 0.8])
     );
+  }
+
+  // ======================================================================
+  // buildEnvironmentalLightMaterials — FLUID'S OWN SHADOW TINT
+  // (mythica-machina-press#546), constructed in Node against the REAL
+  // vendored THREE (see this file's own header for why that is enough to
+  // catch a startup crash without a live GPU).
+  // ======================================================================
+  const requiredTextures = () => ({
+    albedoTexture: stubTexture(),
+    illumTexture: stubTexture(),
+    colorationTexture: stubTexture(),
+  });
+
+  // ---- omitted entirely: byte-identical-path guarantee -------------------
+  {
+    let built = null;
+    let buildError = null;
+    try {
+      built = buildEnvironmentalLightMaterials({ THREE, ...requiredTextures() });
+    } catch (err) {
+      buildError = err;
+    }
+    ok(
+      `buildEnvironmentalLightMaterials CONSTRUCTS with no optional args (${buildError ? buildError.message : 'clean'})`,
+      buildError === null
+    );
+    if (built) {
+      ok(
+        'fluidShadowTintCompiled is false when fluidShadowTintTexture is omitted',
+        built.fluidShadowTintCompiled === false
+      );
+      ok(
+        'setFluidShadowTintSlot is a safe no-op with zero slots built (never throws)',
+        (() => {
+          try {
+            built.setFluidShadowTintSlot(0, {
+              texture: stubTexture(),
+              rect: { minX: 0, minY: 0, maxX: 1, maxY: 1 },
+              tint: [1, 0, 0],
+            });
+            built.setFluidShadowTintSlot(0, null);
+            return true;
+          } catch {
+            return false;
+          }
+        })()
+      );
+    }
+  }
+
+  // ---- fluidShadowTintTexture supplied, NO sun-shadow fields --------------
+  // `sunVis` is null whenever no shadow field exists at all (this file's own
+  // illum-pass ternary) — so this proves the slots BUILD and the setter
+  // WORKS even on the frame before any real shadow data exists, without
+  // needing the fluidTintAdd branch (gated on `sunVis`) to engage at all.
+  {
+    let built = null;
+    let buildError = null;
+    try {
+      built = buildEnvironmentalLightMaterials({
+        THREE,
+        ...requiredTextures(),
+        fluidShadowTintTexture: stubTexture(),
+      });
+    } catch (err) {
+      buildError = err;
+    }
+    ok(
+      `buildEnvironmentalLightMaterials CONSTRUCTS with fluidShadowTintTexture, no sun-shadow fields (${buildError ? buildError.message : 'clean'})`,
+      buildError === null
+    );
+    if (built) {
+      ok(
+        'fluidShadowTintCompiled is true once a placeholder texture is supplied',
+        built.fluidShadowTintCompiled === true
+      );
+      ok(
+        'setFluidShadowTintSlot(0, entry) does not throw',
+        (() => {
+          try {
+            built.setFluidShadowTintSlot(0, {
+              texture: stubTexture(),
+              rect: { minX: 10, minY: 20, maxX: 110, maxY: 220 },
+              tint: [0.15, 0.95, 0.7],
+            });
+            return true;
+          } catch {
+            return false;
+          }
+        })()
+      );
+      ok(
+        'setFluidShadowTintSlot(slotIndex, null) clears without throwing',
+        (() => {
+          try {
+            built.setFluidShadowTintSlot(0, null);
+            return true;
+          } catch {
+            return false;
+          }
+        })()
+      );
+      ok(
+        `setFluidShadowTintSlot is silently a no-op past FLUID_SHADOW_TINT_MAX_ITEMS (${FLUID_SHADOW_TINT_MAX_ITEMS})`,
+        (() => {
+          try {
+            built.setFluidShadowTintSlot(FLUID_SHADOW_TINT_MAX_ITEMS + 5, {
+              texture: stubTexture(),
+              rect: { minX: 0, minY: 0, maxX: 1, maxY: 1 },
+              tint: [1, 1, 1],
+            });
+            return true;
+          } catch {
+            return false;
+          }
+        })()
+      );
+    }
+  }
+
+  // ---- fluidShadowTintTexture AND a real sun-shadow field ----------------
+  // ⚠️ THE ONE CASE THAT ACTUALLY BUILDS THE fluidTintAdd GRAPH. `sunVis` is
+  // only non-null once `sunShadowFields` is non-empty (this file's own
+  // illum-pass ternary), and the whole additive term is gated behind
+  // `fluidTintSlots.length > 0 && sunVis` — so this is the ONLY combination
+  // among these three that actually constructs the new `step`/`smoothstep`/
+  // `clamp` chain this issue added, rather than leaving it compiled out.
+  {
+    let built = null;
+    let buildError = null;
+    try {
+      built = buildEnvironmentalLightMaterials({
+        THREE,
+        ...requiredTextures(),
+        fluidShadowTintTexture: stubTexture(),
+        sunShadowFields: [{ texture: stubTexture() }],
+      });
+    } catch (err) {
+      buildError = err;
+    }
+    ok(
+      `buildEnvironmentalLightMaterials CONSTRUCTS the fluidTintAdd graph for real (${buildError ? buildError.message : 'clean'})`,
+      buildError === null
+    );
+    if (built) {
+      ok('sunShadowCompiled is true (one field supplied)', built.sunShadowCompiled === true);
+      ok('fluidShadowTintCompiled is true alongside it', built.fluidShadowTintCompiled === true);
+      ok('illumMaterial is a real NodeMaterial with a fragmentNode', !!built.illumMaterial?.fragmentNode);
+    }
   }
 }

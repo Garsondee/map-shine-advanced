@@ -146,7 +146,7 @@ const FLUID_RENDER_ORDER_EMIT_MAGNITUDE = 0.01;
  * @param {(rt: *) => void} args.disposeSimRenderTarget - `allocator.dispose(rt)`.
  * @param {() => {enabled: boolean, params: object}} [args.getFluidRenderState]
  * @param {*} args.timeMsNode - THE SHARED CLOCK.
- * @returns {{sync: (floorIndex: number) => void, prepareSimTick: (nowMs: number, dtSec: number) => {clears: Array<*>, advects: Array<{quad: *, destRT: *}>}, getStatus: () => object, dispose: () => void, getMaskTextureForItem: (itemId: string) => (*|null), setFadeForItem: (itemId: string, fadeMul: number) => void}}
+ * @returns {{sync: (floorIndex: number) => void, prepareSimTick: (nowMs: number, dtSec: number) => {clears: Array<*>, advects: Array<{quad: *, destRT: *}>}, getStatus: () => object, dispose: () => void, getMaskTextureForItem: (itemId: string) => (*|null), setFadeForItem: (itemId: string, fadeMul: number) => void, getTintForItem: (itemId: string) => ([number,number,number]|null), getFootprintRects: () => Array<{id: string, rect: {minX:number,minY:number,maxX:number,maxY:number}}>}}
  */
 export function createFluidSurfaceSubsystem({
   THREE,
@@ -852,7 +852,74 @@ export function createFluidSurfaceSubsystem({
     if (uniforms) uniforms.uFadeMul.value = fadeMul;
   }
 
-  return { sync, prepareSimTick, getStatus, dispose, getMaskTextureForItem, setFadeForItem };
+  /**
+   * THE THIRD accessor of this shape (mythica-machina-press#546), mirroring
+   * {@link getMaskTextureForItem} exactly: a cheap, no-throw PULL, never a
+   * push. Returns the item's CURRENT authored liquid colour — the same
+   * `uTint` Beer-Lambert absorption colour `fluid-render.js` builds both its
+   * absorb and emit passes from — as a plain `[r, g, b]` snapshot (0..1-ish,
+   * linear), so a caller never has to know whether the live uniform value is
+   * a `Vector3` or a `Color` internally.
+   *
+   * Added for the shadow-tint composite term (`environmental-light.js`): a
+   * `_Fluid` tile's cast shadow reads as tinted by ITS OWN liquid colour
+   * instead of neutral grey, and the composite needs to pull that colour
+   * fresh every frame (a live param tweak — `MapShine.setFluid({tint: ...})`
+   * — must reach the tinted shadow exactly as fast as it already reaches the
+   * visible goo).
+   *
+   * `null` — never throws — whenever this item has no fluid entry at all, or
+   * its material hasn't finished building yet (`entry.built` is only set at
+   * the end of `buildMesh`, same gate {@link setFadeForItem} already uses).
+   *
+   * @param {string} itemId
+   * @returns {[number, number, number]|null}
+   */
+  function getTintForItem(itemId) {
+    const uTint = entries.get(itemId)?.built?.uniforms?.uTint;
+    return uTint ? uTint.value.toArray() : null;
+  }
+
+  /**
+   * Every resident masked item's id + CURRENT world-space footprint rect —
+   * the axis-aligned bounding box of `entry.corners`, the SAME corners
+   * `sync()` already tracks (moved on drag/rotate/resize, replaced wholesale
+   * on a rebake). Added alongside {@link getTintForItem} for
+   * mythica-machina-press#546: the shadow-tint composite needs to know
+   * WHERE each fluid item sits in world space, and walking `entries` here
+   * costs nothing extra — it does NOT re-call `getFluidMaskItems` (that walk
+   * over every item in the scene already happened once, inside `sync()`,
+   * this same frame).
+   *
+   * The rect is the corners' BOUNDING BOX, not their exact (possibly
+   * rotated) quad — see `fluid-render.js`'s own header for why the mesh
+   * itself avoids a world-rect mapping ("a rect has no rotation") and
+   * `environmental-light.js`'s own fluid-shadow-tint doc for why the
+   * composite accepts that gap anyway (a screen-space fullscreen quad has no
+   * per-item local UV to fall back on). Correct for an axis-aligned tile;
+   * approximate for a rotated one.
+   *
+   * @returns {Array<{id: string, rect: {minX:number,minY:number,maxX:number,maxY:number}}>}
+   */
+  function getFootprintRects() {
+    const out = [];
+    for (const entry of entries.values()) {
+      if (!Array.isArray(entry.corners) || entry.corners.length === 0) continue;
+      out.push({ id: entry.id, rect: worldRectFromCorners(entry.corners) });
+    }
+    return out;
+  }
+
+  return {
+    sync,
+    prepareSimTick,
+    getStatus,
+    dispose,
+    getMaskTextureForItem,
+    setFadeForItem,
+    getTintForItem,
+    getFootprintRects,
+  };
 }
 
 /** Have any of the four corners actually moved? */
@@ -862,6 +929,34 @@ function cornersMoved(a, b) {
     if (a[i].x !== b[i].x || a[i].y !== b[i].y) return true;
   }
   return false;
+}
+
+/**
+ * The axis-aligned bounding box of a quad's corners, world px. Used only by
+ * {@link getFootprintRects} for a SCREEN-SPACE consumer that samples the mask
+ * through a world rect (mythica-machina-press#546) — never by the mesh
+ * itself, which samples its own local `uv()` and so needs no rect at all
+ * (see `fluid-render.js`'s own header).
+ *
+ * Exported (like {@link downsample}) because it is PURE — no THREE, no
+ * scene, no browser — so it is directly Node-testable, unlike the rest of
+ * this subsystem (`fluid-surface.test.mjs`'s own header names why).
+ *
+ * @param {Array<{x:number,y:number}>} corners
+ * @returns {{minX:number,minY:number,maxX:number,maxY:number}}
+ */
+export function worldRectFromCorners(corners) {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const c of corners) {
+    if (c.x < minX) minX = c.x;
+    if (c.x > maxX) maxX = c.x;
+    if (c.y < minY) minY = c.y;
+    if (c.y > maxY) maxY = c.y;
+  }
+  return { minX, minY, maxX, maxY };
 }
 
 /**

@@ -314,6 +314,9 @@ import {
   computeGlobalLightFloor,
   maxRgb,
   mixRgb,
+  // FLUID'S OWN SHADOW TINT (mythica-machina-press#546) — the fixed slot cap
+  // this file's own per-frame push/clear loop iterates up to.
+  FLUID_SHADOW_TINT_MAX_ITEMS,
   computeShapeMeshBounds,
   writeRegionPolygonPoints,
   applyDarknessAdjustment,
@@ -2869,6 +2872,15 @@ export async function startVtPanViewer({
      *  mask, so a mechanism that silently stopped is visible as a number in
      *  the report rather than only inferable from a screenshot. */
     let lastDoorLeafOcclusion = { activeLeaves: 0, sourcesTotal: 0 };
+    // FLUID'S OWN SHADOW TINT (mythica-machina-press#546) — a 1×1 all-zero
+    // placeholder, bound to every `FLUID_SHADOW_TINT_MAX_ITEMS` slot at
+    // `envLight`'s own construction below (`environmental-light.js` may not
+    // allocate a texture itself — same `gpu/textures-in-vt-only` wall
+    // `createCasterTexture` exists to satisfy just above). Each slot's real
+    // fluid mask is bound later, per frame, by REBINDING this same node's
+    // `.value` (`envLight.setFluidShadowTintSlot`) — never by rebuilding the
+    // material — exactly like `sunShadows`' own 1×1 "off" placeholder.
+    const fluidShadowTintPlaceholder = createMaskDataTexture(new Uint8Array([0, 0, 0, 0]), 1, 1, 'linear', false);
     const envLight = buildEnvironmentalLightMaterials({
       THREE,
       albedoTexture: sceneColor.texture,
@@ -2876,6 +2888,7 @@ export async function startVtPanViewer({
       colorationTexture: sceneColoration.texture,
       uiShadowVisNode: uiShadow.visNode,
       outdoorsTexture,
+      fluidShadowTintTexture: fluidShadowTintPlaceholder,
       // `sunShadows.fields` is FIXED-LENGTH (one entry per resident floor
       // slot — `sun-shadow-subsystem.js` §5), built once at `sunShadows`'
       // OWN construction just above, so every slot's texture identity is
@@ -6767,6 +6780,41 @@ export async function startVtPanViewer({
       // nothing changed, and it owns its own mask-url change detection.
       profiler?.begin(Z.lightFluidSync);
       fluidSurface.sync(view?.floorIndex ?? 0);
+      // FLUID'S OWN SHADOW TINT (mythica-machina-press#546) — right after
+      // sync() (not a separate profiler zone: this is the cheap, "at most a
+      // handful of Map lookups" cost class `setSunShadowFloorIndex`'s own
+      // per-slot loop already folds into its bake's zone, not its own), so
+      // `getFootprintRects`/`getTintForItem`/`getMaskTextureForItem` all read
+      // THIS frame's freshly-synced entries. `getFootprintRects` walks
+      // fluid's OWN small `entries` map — it does NOT re-call
+      // `getFluidMaskItems` (that already walked every item in the scene
+      // once, inside sync() just above).
+      {
+        const fluidFootprints = fluidSurface.getFootprintRects();
+        let tintSlot = 0;
+        for (const { id, rect } of fluidFootprints) {
+          if (tintSlot >= FLUID_SHADOW_TINT_MAX_ITEMS) break;
+          // A zero-area rect (a degenerate/not-yet-placed quad) would divide
+          // by zero mapping a world position into this item's UV — skip it
+          // rather than push a rect the composite shader cannot safely
+          // sample; sync() will have real corners for it by a later frame.
+          if (!(rect.maxX > rect.minX) || !(rect.maxY > rect.minY)) continue;
+          const maskTexture = fluidSurface.getMaskTextureForItem(id);
+          const tint = fluidSurface.getTintForItem(id);
+          // Either missing means this item's bake/material hasn't finished
+          // yet — skip THIS frame rather than push a half-ready slot; both
+          // accessors go null → real together, the instant `buildMesh`
+          // finishes (see their own docs), so this self-corrects with no
+          // separate retry needed.
+          if (!maskTexture || !tint) continue;
+          envLight.setFluidShadowTintSlot(tintSlot, { texture: maskTexture, rect, tint });
+          tintSlot++;
+        }
+        // Clear whatever slots this frame did NOT claim — an item that left
+        // the scene (or hasn't finished baking) must not leave its LAST
+        // frame's tint lingering in a slot nobody is updating anymore.
+        for (; tintSlot < FLUID_SHADOW_TINT_MAX_ITEMS; tintSlot++) envLight.setFluidShadowTintSlot(tintSlot, null);
+      }
       profiler?.end(Z.lightFluidSync);
 
       // REGION-DRIVEN DARKNESS ("Adjust Darkness Level", 2026-07-19) — the
@@ -21282,6 +21330,13 @@ export async function startVtPanViewer({
         // it leaks VRAM per scene switch if it is not freed with its materials.
         outdoorsTexture?.dispose();
         outdoorsTexture = null;
+        // FLUID'S OWN SHADOW TINT placeholder (mythica-machina-press#546) — a
+        // tiny (1×1) real DataTexture, same per-scene VRAM-leak risk as the
+        // sky gate above even though it never grows past one texel. Every
+        // slot's texNode may still point at it (an item never claimed that
+        // slot, or all of them left the scene) right up to this teardown —
+        // harmless to free here alongside the materials that reference it.
+        fluidShadowTintPlaceholder?.dispose();
         // FIRE's mask-clip texture — same per-scene VRAM leak risk as the sky gate above.
         fireMaskTexture?.dispose();
         fireMaskTexture = null;

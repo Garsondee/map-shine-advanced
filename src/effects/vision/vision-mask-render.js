@@ -201,6 +201,61 @@ function buildRevealedNode({ THREE, mask, illum, threshold }) {
 }
 
 /**
+ * THE SHARED REVEAL QUERY (mythica-machina-press#386) — `buildRevealedNode`
+ * above, exposed OUTSIDE this file, plus the texture-sample step every
+ * external caller would otherwise have to copy from `buildVisionGateMaterial`
+ * by hand. This is the "one shared occlusion/visibility contract" #386 asks
+ * for, for the vision/fog-of-war half specifically (the floor/tile-rank half
+ * already has one: `vt/scene-depth.js#querySceneDepth`).
+ *
+ * ⚠️ THIS FUNCTION DOES NOT WIRE ANY NEW CONSUMER. It makes the rule callable
+ * from outside this file for the first time — closing #49 (fire smoke poking
+ * through walls) or the reverse half of #39 (a visible source's bloom
+ * smearing into an already-gated pixel) is real, separate shader work in
+ * each effect's OWN render module, using this. Not attempted here: neither
+ * of those two consumers can be added and verified without a live GPU
+ * session, which this pass does not have. What IS here is proven —
+ * `buildRevealedNode` is the exact function `buildVisionGateMaterial` (the
+ * one shipped, live consumer) already builds the whole-frame gate from; nothing
+ * about the rule itself is new or unverified, only its being callable a second
+ * place is.
+ *
+ * A caller wanting the SAME door-fog-transition softening
+ * {@link buildVisionGateMaterial} applies is not served by this function —
+ * that transition is specific to the one whole-frame composite gate, not a
+ * property of "is this pixel revealed" in general. A future caller that
+ * genuinely needs it should take `doorFogProgress` the same way that
+ * function already does, not invent a second copy of that logic here.
+ *
+ * @param {object} args
+ * @param {*} args.THREE
+ * @param {*} args.maskTexture - this subsystem's own R/G/B mask (the SAME
+ *   texture `buildVisionGateMaterial`'s own `maskTexture` param takes —
+ *   typically a live `createVisionMaskSubsystem()` instance's `.texture`).
+ * @param {*} args.illumTexture - `buf:scene.illum`.
+ * @param {*} args.screenUV - a vec2 TSL node; pass `THREE.TSL.uv()` for a
+ *   fullscreen quad reading screen-space directly, or a reprojected UV for
+ *   a caller sampling from a different geometry's own fragment position
+ *   (mirrors `buildVisionSnapshotPublishMaterial`'s own reprojection use of
+ *   the identical mask/illum pair, a few functions below).
+ * @param {number} args.threshold - `REVEAL_ILLUMINATION_THRESHOLD`
+ *   (`./vision-mask.js`) — pass the SAME constant `buildVisionGateMaterial`
+ *   is given, never a second, independently-chosen number.
+ * @returns {{revealed: *, factor: *}} `revealed`: the boolean TSL node.
+ *   `factor`: `1` where revealed, `0` where not — the same multiplicative
+ *   shape `buildVisionGateMaterial`'s own gate quad uses (minus the door-fog
+ *   softening; see this function's own header), ready to multiply into a
+ *   caller's own additive contribution.
+ */
+export function sampleVisionRevealFactor({ THREE, maskTexture, illumTexture, screenUV, threshold }) {
+  const { texture, float, select } = THREE.TSL;
+  const mask = texture(maskTexture).sample(screenUV);
+  const illum = texture(illumTexture).sample(screenUV);
+  const revealed = buildRevealedNode({ THREE, mask, illum, threshold });
+  return { revealed, factor: select(revealed, float(1), float(0)) };
+}
+
+/**
  * Build the FULLSCREEN GATE — one MULTIPLY quad that finishes the reveal rule
  * over the whole composited frame.
  *

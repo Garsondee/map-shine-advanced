@@ -568,7 +568,7 @@ import {
   buildSpecularReport,
   buildWindowLightReport,
 } from './diag/effect-status-reports.js';
-import { getParamHealth } from './diag/param-read-health.js';
+import { getParamHealth, wrapForReadTracking } from './diag/param-read-health.js';
 import { beginUiTick, endUiTick } from './diag/ui-perf.js';
 
 const MODULE_ID = 'map-shine-advanced';
@@ -3222,7 +3222,19 @@ function install() {
   // render seam. Same fix as water/specular/window/fluid's own
   // registrations. DELEGATES to the shared, TESTED projection (same day) —
   // see effect-readout.js's own header.
-  const getBloomRenderState = () => projectCascadeRenderState(bloomReadout);
+  // U6 READ TRACKING (mythica-machina-press#194) — wrapped HERE, the real
+  // render-consumption boundary (this seam's only caller is runPostBloomPass,
+  // which reads `p.threshold` etc. directly with no intervening spread —
+  // confirmed by reading that function; a spread of `params` itself between
+  // here and there would silently mark every key "read" on frame one, the
+  // exact false-positive `param-read-health.js`'s own header warns about).
+  // The Studio card's `getReadout` reads `bloomReadout` directly, never this
+  // function, so wrapping here does not also mark params "read" just because
+  // a slider drew.
+  const getBloomRenderState = () => {
+    const state = projectCascadeRenderState(bloomReadout);
+    return { ...state, params: wrapForReadTracking('bloom', state.params ?? {}) };
+  };
   // DEPTH OF FIELD's render-state seam — same shape as bloom's own, above.
   // perfTier ADDED 2026-08-30, same fix; DELEGATES the same way.
   const getDofRenderState = () => projectCascadeRenderState(dofReadout);
@@ -7696,6 +7708,17 @@ function install() {
         onToggleEnabled: (next) => opts.setValue({ enabled: next }),
         status: opts.status ? opts.status(readLive()) : collapsedStatusLine({ enabled: readLive().enabled }),
       };
+      // U6 CONTROL HEALTH (mythica-machina-press#194) — opt-in: an effect
+      // without a real `wrapForReadTracking` seam at its render-consumption
+      // boundary must NOT get a health field at all, or `getParamHealth`
+      // would honestly report "0 read, all orphaned" for params nothing has
+      // wrapped yet — a false "every control is dead" reading, worse than
+      // the "planned" placeholder it would replace. Only effects that pass
+      // `opts.getHealth` (having done that per-effect wiring, like water's
+      // own hand-written card and getBloomRenderState's own comment) get a
+      // real badge. Computed FRESH every call — `read` counts grow across
+      // the session — never cached at registration time.
+      if (typeof opts.getHealth === 'function') model.health = opts.getHealth();
       // maxTier/source added 2026-08-19 alongside the readout fix that
       // makes them real (see water-registration.js's own comment on the
       // same gap) — matches water's own hand-written card a few dozen
@@ -7862,6 +7885,10 @@ function install() {
     getReadout: () => bloomReadout,
     setValue: (patch) => MapShine.setBloom(patch),
     presets: { table: BLOOM_PRESETS, pick: bloomPreset },
+    // U6 (mythica-machina-press#194) — real, not "planned": getBloomRenderState
+    // wraps its params with wrapForReadTracking('bloom', ...) at the actual
+    // render-consumption boundary (see that seam's own comment).
+    getHealth: () => getParamHealth('bloom', BLOOM_PARAMS),
   });
 
   registerSimpleEffectCard('depthOfField', {
@@ -7991,14 +8018,17 @@ function install() {
   });
 
   // THE CONTROL HEALTH REPORT (U6, docs/holy/UI-Testament.md §9) — what the
-  // Studio water card's health badge deep-links to. `READ_TRACKED_EFFECTS`
+  // Studio card health badges deep-link to. `READ_TRACKED_EFFECTS`
   // is deliberately a small, explicit, extend-as-you-go map rather than a
   // derived enumeration: `param-read-health.js`'s own tracked-reads Map has
   // no way to know a SCHEMA (each effect owns its own), so this report is
-  // honest only about what is actually listed here — water today, more as
-  // future petitions wire their own `getRenderState()`-equivalent (see
-  // water-registration.js's own U6 comment for the wrapping pattern).
-  const READ_TRACKED_EFFECTS = { water: WATER_PARAMS };
+  // honest only about what is actually listed here — water and bloom today
+  // (mythica-machina-press#194), more as future petitions wire their own
+  // `getRenderState()`-equivalent (see water-registration.js's and
+  // getBloomRenderState's own U6 comments for the wrapping pattern, and why
+  // each effect needs its OWN traced consumption boundary rather than a
+  // blanket wrap).
+  const READ_TRACKED_EFFECTS = { water: WATER_PARAMS, bloom: BLOOM_PARAMS };
   MapShine.debug.registerReport('control-health', 'Control health (declared vs read)', () => {
     const effects = {};
     for (const [effectId, schema] of Object.entries(READ_TRACKED_EFFECTS)) {

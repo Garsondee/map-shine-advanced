@@ -187,6 +187,11 @@ export {
 // and writes, mirroring sky-persistence.js's own shape.
 export { readFadeState, writeFadeState, watchFadeState } from './fade-persistence.js';
 
+// EFFECT PARAM PERSISTENCE (mythica-machina-press#288, #389, Stage B of
+// effect-settings.js's own "no per-scene PARAM persistence yet" note) — one
+// scene flag, keyed by effect id, mirroring sky/fade persistence's shape.
+export { readSceneEffectParams, writeSceneEffectParams, watchSceneEffectParams } from './effect-param-persistence.js';
+
 // CUE PERSISTENCE (U3, docs/holy/UI-Testament.md §4.3) — one scene flag,
 // the authored cue stack. core/cues-schema.js validates; this only reads
 // and writes, mirroring fade-persistence.js's own shape.

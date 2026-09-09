@@ -459,6 +459,9 @@ import {
   readFadeState,
   writeFadeState,
   watchFadeState,
+  readSceneEffectParams,
+  writeSceneEffectParams,
+  watchSceneEffectParams,
   readCueStack,
   writeCueStack,
   watchCueStack,
@@ -721,25 +724,39 @@ const uiShadowLiveOverride = {};
 const UI_SHADOW_PARAM_KEYS = Object.keys(UI_SHADOW_PARAMS);
 
 /**
- * Re-resolve UI-shadow's whole cascade from the live settings + the transient
- * override and apply it. Reads settings through the foundry adapter ONLY. Callers
- * guard + ANNOUNCE (never swallow — feedback_instruments_must_not_lie), because
- * a read before the `init` registration would throw (a wiring bug, not silence).
+ * Re-resolve UI-shadow's whole cascade from the live settings + the scene's
+ * own authored params + the transient override, and apply it. Reads settings
+ * through the foundry adapter ONLY. Callers guard + ANNOUNCE (never swallow —
+ * feedback_instruments_must_not_lie), because a read before the `init`
+ * registration would throw (a wiring bug, not silence).
+ *
+ * STAGE B (mythica-machina-press#288, #389) — `effectEnableKey`'s world/client
+ * split already gave `enabled` this shape; `readSceneEffectParams` is the
+ * equivalent for the VALUES, so a GM's tuning now actually reaches every
+ * player instead of living only in this client's `uiShadowLiveOverride`. The
+ * override stays as the TOP layer, same reason `editSky` applies locally
+ * before its write resolves: a control that waits on a document round-trip
+ * before moving reads as broken even when it is working.
  */
 function reapplyUiShadow() {
   const layers = deriveEffectLayers('uiWindowShadow', (key) => readSetting(MODULE_ID, key));
-  layers.paramLayers = [uiShadowLiveOverride];
+  const { params: sceneParams } = readSceneEffectParams('uiWindowShadow');
+  layers.paramLayers = [sceneParams, uiShadowLiveOverride].filter(Boolean);
   effectRegistry.resolveAndApply('uiWindowShadow', layers);
 }
 
 // MapShine.setUiShadow — the console/API control, now routed THROUGH the cascade
 // instead of mutating render state directly. `enabled` writes the PLAYER's client
 // setting (persisted; its onChange re-resolves); look/technical params ride the
-// transient override and re-resolve at once. To turn the effect on after the
-// default-off flip: `MapShine.setUiShadow({ enabled: true })`, or set "UI window
-// shadows: my setting" to On (or the performance profile to Extreme) in Foundry's
-// Settings. Tuning is unchanged: `MapShine.setUiShadow({ strength01, offsetScale,
-// azimuthDeg, elevationDeg, heightPx, flipY, ... })`.
+// transient override for INSTANT local feedback and are also written through to
+// the scene's own authored params (Stage B, #288/#389) so every other client
+// picks them up too — GM-only, Foundry's own rule (`scene.setFlag` rejects a
+// non-GM; a player's own attempt reports a warning, never a silent no-op). To
+// turn the effect on after the default-off flip: `MapShine.setUiShadow({ enabled:
+// true })`, or set "UI window shadows: my setting" to On (or the performance
+// profile to Extreme) in Foundry's Settings. Tuning is unchanged:
+// `MapShine.setUiShadow({ strength01, offsetScale, azimuthDeg, elevationDeg,
+// heightPx, flipY, ... })`.
 MapShine.setUiShadow = (partial = {}) => {
   const p = partial ?? {};
   if (typeof p.enabled === 'boolean') {
@@ -748,13 +765,21 @@ MapShine.setUiShadow = (partial = {}) => {
     ).catch((err) => log.error('ui-shadow enable write failed:', err));
   }
   let changedParam = false;
+  const scenePatch = {};
   for (const k of UI_SHADOW_PARAM_KEYS) {
     if (k in p) {
       uiShadowLiveOverride[k] = p[k];
+      scenePatch[k] = p[k];
       changedParam = true;
     }
   }
   if (changedParam) {
+    Promise.resolve(writeSceneEffectParams('uiWindowShadow', scenePatch)).then(
+      (result) => {
+        if (!result.ok) log.warn(`ui-shadow scene param write not persisted: ${result.reason}`);
+      },
+      (err) => log.error('ui-shadow scene param write failed:', err)
+    );
     try {
       reapplyUiShadow();
     } catch (err) {
@@ -9131,6 +9156,11 @@ function install() {
   /** Unsubscribe for the scene-fade watcher (a second GM's fade reaching
    * here) — re-armed on every canvasReady, mirroring skyUnsub's own shape. */
   let fadeUnsub = null;
+  /** Unsubscribe for the scene-effect-params watcher (mythica-machina-press
+   * #288/#389, Stage B) — a second GM tuning UI-shadow's look reaching THIS
+   * client mid-session. Re-armed on every canvasReady, same shape as
+   * fadeUnsub/skyUnsub above it. */
+  let effectParamsUnsub = null;
 
   /**
    * Start a REAL fade toward a named archetype's own declared axis values.
@@ -12746,6 +12776,12 @@ function install() {
           fadeState = state;
           MapShine.__remote?.refreshWeatherBoard();
         });
+        // EFFECT SCENE PARAMS (Stage B, #288/#389) — this scene's own load
+        // already picked up UI-shadow's authored params via reapplyAll('scene
+        // load') below; this watcher is the LIVE half, for a second client
+        // already sitting in this same scene when the GM tunes it.
+        effectParamsUnsub?.();
+        effectParamsUnsub = watchSceneEffectParams(() => reapplyUiShadow());
         // THE CUE STACK'S OWN SCENE LOAD (U3) — scene-scoped exactly like the
         // fade state above; a sold map's authored cues travel WITH its scene,
         // so a scene SWITCH must re-load this scene's own stack, never carry

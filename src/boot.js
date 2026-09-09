@@ -769,7 +769,7 @@ MapShine.setUiShadow = (partial = {}) => {
   for (const k of UI_SHADOW_PARAM_KEYS) {
     if (k in p) {
       uiShadowLiveOverride[k] = p[k];
-      scenePatch[k] = p[k];
+      if (UI_SHADOW_PARAMS[k]?.scope !== 'client') scenePatch[k] = p[k];
       changedParam = true;
     }
   }
@@ -2834,7 +2834,7 @@ function install() {
     for (const k of Object.keys(CANDLE_FLAME_PARAMS)) {
       if (k in p) {
         candleLiveOverride[k] = p[k];
-        scenePatch[k] = p[k];
+        if (CANDLE_FLAME_PARAMS[k]?.scope !== 'client') scenePatch[k] = p[k];
         changed = true;
       }
     }
@@ -2883,7 +2883,7 @@ function install() {
     for (const k of Object.keys(LIGHTNING_PARAMS)) {
       if (k in p) {
         lightningLiveOverride[k] = p[k];
-        scenePatch[k] = p[k];
+        if (LIGHTNING_PARAMS[k]?.scope !== 'client') scenePatch[k] = p[k];
         changed = true;
       }
     }
@@ -2942,7 +2942,7 @@ function install() {
     for (const k of Object.keys(FIRE_PARAMS)) {
       if (k in p) {
         fireLiveOverride[k] = p[k];
-        scenePatch[k] = p[k];
+        if (FIRE_PARAMS[k]?.scope !== 'client') scenePatch[k] = p[k];
         changed = true;
       }
     }
@@ -3034,7 +3034,7 @@ function install() {
     for (const k of VEGETATION_LIVE_PARAM_KEYS) {
       if (k in p) {
         vegetationLiveOverride[k] = p[k];
-        scenePatch[k] = p[k];
+        if (VEGETATION_PARAMS[k]?.scope !== 'client') scenePatch[k] = p[k];
         changed = true;
       }
     }
@@ -3101,14 +3101,11 @@ function install() {
     // setBloom/setVegetation use, so a rename shows up as a visible typo here
     // rather than as a slider that silently stops doing anything.
     //
-    // ⚠️ `debugView` is EXCLUDED from the scene write-through below, on
-    // purpose — it is the author's own per-client diagnosis dropdown ("a
-    // dropdown in the ROH controls, allowing me to see just a single shadow
-    // at a time... on a white background", sun-shadows.js#SUN_SHADOW_PARAMS),
-    // not an authored look. Persisting it to the scene would force every
-    // connected PLAYER onto the GM's own debug view the moment they picked
-    // one — exactly the kind of wrong-boundary sync #194's own scoping
-    // comment warns a blanket "sync the whole override" pass would produce.
+    // `debugView` declares `scope: 'client'` (sun-shadows.js#SUN_SHADOW_PARAMS,
+    // mythica-machina-press#389's declared-scope field) — a DATA fact this loop
+    // now reads instead of a hand-coded name check, so the next effect with a
+    // genuinely client-only param needs a schema declaration, not someone
+    // re-tracing the same param-by-param audit this one needed by hand.
     const scenePatch = {};
     for (const k of [
       'strength01',
@@ -3121,7 +3118,7 @@ function install() {
     ]) {
       if (k in p) {
         sunShadowLiveOverride[k] = p[k];
-        if (k !== 'debugView') scenePatch[k] = p[k];
+        if (SUN_SHADOW_PARAMS[k]?.scope !== 'client') scenePatch[k] = p[k];
         changed = true;
       }
     }
@@ -3177,7 +3174,7 @@ function install() {
     ]) {
       if (k in p) {
         bloomLiveOverride[k] = p[k];
-        scenePatch[k] = p[k];
+        if (BLOOM_PARAMS[k]?.scope !== 'client') scenePatch[k] = p[k];
         changed = true;
       }
     }
@@ -3218,7 +3215,7 @@ function install() {
     for (const k of ['strength', 'blurPerFloor', 'maxBlur']) {
       if (k in p) {
         dofLiveOverride[k] = p[k];
-        scenePatch[k] = p[k];
+        if (DOF_PARAMS[k]?.scope !== 'client') scenePatch[k] = p[k];
         changed = true;
       }
     }
@@ -3254,7 +3251,7 @@ function install() {
     for (const k of Object.keys(GRADE_LOOK_PARAMS)) {
       if (k in p) {
         gradeLookLiveOverride[k] = p[k];
-        scenePatch[k] = p[k];
+        if (GRADE_LOOK_PARAMS[k]?.scope !== 'client') scenePatch[k] = p[k];
         changed = true;
       }
     }

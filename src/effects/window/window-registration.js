@@ -136,7 +136,9 @@ export function createWindowRegistration({
         continue;
       }
       liveOverride[key] = value;
-      scenePatch[key] = value;
+      // mythica-machina-press#389's declared-scope field — see water-
+      // registration.js's own identical comment.
+      if (WINDOW_PARAMS[key]?.scope !== 'client') scenePatch[key] = value;
       changed = true;
     }
     if (changed) {

@@ -17,7 +17,9 @@ import { run as runSpecularPattern } from './specular-pattern.test.mjs';
 import { run as runSpecularIslands } from './specular-islands.test.mjs';
 import { run as runSpecularRender } from './specular-render.test.mjs';
 import { run as runSpecularSubsystem } from './specular-surface-subsystem.test.mjs';
+import { run as runSpecularTileSubsystem } from './specular-tile-surface-subsystem.test.mjs';
 import { run as runSpecular } from './specular.test.mjs';
+import { run as runSpecularSeams } from './specular-seams.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -52,7 +54,9 @@ const suites = [
   ['specular-islands', runSpecularIslands],
   ['specular-render', runSpecularRender],
   ['specular-surface-subsystem', runSpecularSubsystem],
+  ['specular-tile-surface-subsystem', runSpecularTileSubsystem],
   ['specular', runSpecular],
+  ['specular-seams', runSpecularSeams],
 ];
 // AWAITED, not called-and-dropped: `specular-surface-subsystem.test.mjs` has to
 // let the mask load settle (the subsystem's own `.then`) before it can assert

@@ -46,7 +46,7 @@
  */
 import * as THREE from '../../../../src/vendor/three/three.webgpu.js';
 import { buildOutdoorsGate, buildWorldSpaceOutdoorsGate } from '../../lighting/environmental-light.js';
-import { buildSpecularSurfaceMaterial, SPECULAR_LAYER_COUNT } from '../specular-render.js';
+import { buildSpecularSurfaceMaterial, SPECULAR_LAYER_COUNT, SPECULAR_MAX_TIER } from '../specular-render.js';
 import { SPECULAR_DEBUG_CHANNELS } from '../specular.js';
 
 /** A 1×1 texture — enough for a node to reference; never sampled here. */
@@ -378,4 +378,58 @@ export function run(t) {
     'the island pack node is returned so the bake can re-point it',
     !!built.packTexNode && 'value' in built.packTexNode
   );
+
+  // ── mythica-machina-press#538/#539 — A PER-TILE SURFACE'S LIVE TRANSFORM ──
+  // `positionNode`/`maskUvNode` are the whole wiring point of the tile-attach
+  // fix: a per-tile Specular surface (specular-tile-surface-subsystem.js)
+  // passes both, built from the tile's own live tileMotion bag
+  // (effects/tile-motion-nodes.js). Every assertion ABOVE this block already
+  // proves the floor path (neither parameter passed) is unchanged.
+  {
+    const { Fn, vec2, vec3, uv, positionLocal } = THREE.TSL;
+    // A stand-in for buildTileMotionPositionNode's own returned graph — the
+    // real one is proven separately (tile-motion-nodes.test.mjs); this only
+    // has to be A node, to prove the WIRING here, not re-derive the formula.
+    const fakePositionNode = Fn(() => vec3(positionLocal.x, positionLocal.y, positionLocal.z))();
+    const fakeMaskUvNode = uv().add(vec2(0.01, -0.01));
+
+    let tileError = null;
+    let tileBuilt = null;
+    try {
+      tileBuilt = buildSpecularSurfaceMaterial(args({ positionNode: fakePositionNode, maskUvNode: fakeMaskUvNode }));
+    } catch (err) {
+      tileError = err;
+    }
+    ok(
+      `positionNode + maskUvNode together construct without throwing (${tileError ? tileError.message : 'clean'})`,
+      tileError === null
+    );
+    ok('positionNode reaches the ADD material', tileBuilt?.specularMaterial?.positionNode === fakePositionNode);
+    ok(
+      'positionNode ALSO reaches the debug material — a channel must not un-stick the animation',
+      tileBuilt?.debugMaterial?.positionNode === fakePositionNode
+    );
+
+    // `maskUv` feeds BOTH the mask sample and the island-pack sample (they
+    // share one node — this file's own header on `packTexNode`) — must
+    // survive at the top performance tier, where shimmer/parallax/life/
+    // islands/sunAndSky are all compiled in together.
+    let tileTierError = null;
+    try {
+      buildSpecularSurfaceMaterial(
+        args({ positionNode: fakePositionNode, maskUvNode: fakeMaskUvNode, tier: SPECULAR_MAX_TIER })
+      );
+    } catch (err) {
+      tileTierError = err;
+    }
+    ok(
+      `positionNode + maskUvNode survive at the top tier, every gate compiled in (${tileTierError ? tileTierError.message : 'clean'})`,
+      tileTierError === null
+    );
+
+    ok(
+      'a floor caller (neither param passed) leaves positionNode unset, exactly as before',
+      !built.specularMaterial.positionNode
+    );
+  }
 }

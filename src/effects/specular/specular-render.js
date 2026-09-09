@@ -531,6 +531,24 @@ export function specularTierPlan(tier) {
  *   (`specularTierPlan`, above) — gates shimmer/parallax/life/islands/
  *   sunAndSky at JS-construction time. Defaults to `SPECULAR_DEFAULT_TIER`
  *   (today's unconditional look), so an unwired caller sees no change.
+ * @param {*} [args.positionNode] - mythica-machina-press#538/#539: a per-
+ *   TILE surface's LIVE tile-motion transform (`effects/tile-motion-nodes.js
+ *   #buildTileMotionPositionNode`), assigned onto BOTH materials below so
+ *   picking a debug channel never un-sticks the animation. `null`/omitted
+ *   (every floor caller, today) leaves `positionNode` unset — byte-identical
+ *   to this material's behaviour before this parameter existed. Every other
+ *   `positionWorld` read in this file (the shimmer's world-space pattern,
+ *   the illum sample, the floor gate) needs no change: once a live
+ *   `positionNode` moves the vertex, THREE's own varying pass-through is
+ *   what makes every fragment-stage `positionWorld` read follow it.
+ * @param {*} [args.maskUvNode] - mythica-machina-press#538/#539: replaces
+ *   the quad's own `uv()` as the base coordinate the crop (`uMaskUvBounds`)
+ *   is applied to, for BOTH the mask sample and the island-pack sample
+ *   (they already share one `maskUv` — see that node's own comment). A
+ *   per-tile `texture`-mode surface passes `effects/tile-motion-nodes.js
+ *   #buildTileMotionMaskUvNode`'s output here; every floor caller and every
+ *   `transform`-mode/static tile omits it, leaving the lookup exactly
+ *   `uv()` as before.
  * @returns {object} the material plus its setters.
  */
 export function buildSpecularSurfaceMaterial({
@@ -539,6 +557,8 @@ export function buildSpecularSurfaceMaterial({
   islandPackTexture,
   illumTexture,
   depthTexture = null,
+  positionNode = null,
+  maskUvNode = null,
   uViewRect,
   uOutdoorsRect,
   outdoorsTexNode,
@@ -689,9 +709,14 @@ export function buildSpecularSurfaceMaterial({
   // rendered the whole map's gold. `uv()` cannot exceed 0..1, so this lookup
   // cannot leave the texture — correct by construction rather than by an
   // arithmetic identity that has to hold across two functions.
+  // ⚠️ `maskUvNode ?? uv()` (mythica-machina-press#538/#539) — a per-tile
+  // `texture`-mode surface's own scrolled/rotated coordinate substitutes for
+  // the raw quad UV here; every existing (floor) caller passes nothing and
+  // gets exactly `uv()`, so this crop math is otherwise untouched.
+  const baseMaskUv = maskUvNode ?? uv();
   const maskUv = vec2(
-    mix(uMaskUvBounds.x, uMaskUvBounds.z, uv().x),
-    mix(uMaskUvBounds.y, uMaskUvBounds.w, uv().y)
+    mix(uMaskUvBounds.x, uMaskUvBounds.z, baseMaskUv.x),
+    mix(uMaskUvBounds.y, uMaskUvBounds.w, baseMaskUv.y)
   ).toVar('specMaskUv');
   const maskTexNode = texture(maskTexture, maskUv);
   const maskSample = maskTexNode.toVar('specMaskSample');
@@ -1370,6 +1395,9 @@ export function buildSpecularSurfaceMaterial({
   // with no highlight reads as a shader bug rather than as a missing mask).
   const specularMaterial = new THREE.NodeMaterial();
   specularMaterial.colorNode = vec4(shine, 1);
+  // mythica-machina-press#538/#539 — see `positionNode`'s own JSDoc above.
+  // Omitted (every floor caller) leaves THREE's own unset default, unchanged.
+  if (positionNode) specularMaterial.positionNode = positionNode;
   configureShared(specularMaterial);
   specularMaterial.blendSrc = THREE.OneFactor;
   specularMaterial.blendDst = THREE.OneFactor;
@@ -1511,6 +1539,9 @@ export function buildSpecularSurfaceMaterial({
   });
   const debugMaterial = new THREE.NodeMaterial();
   debugMaterial.colorNode = vec4(debugColor, 1);
+  // Same live transform as the add pass, above — a debug channel must not
+  // un-stick the animation (the mesh swaps material, never geometry).
+  if (positionNode) debugMaterial.positionNode = positionNode;
   configureShared(debugMaterial);
   // OPAQUE where the effect ADDS: a diagnostic whose "this is zero" answer
   // rendered as *nothing added* would reproduce the ambiguity it removes.

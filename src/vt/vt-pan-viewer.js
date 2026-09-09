@@ -397,7 +397,9 @@ import {
   createWaterRefractionSubsystem,
   createFluidSurfaceSubsystem,
   createSpecularSurfaceSubsystem,
+  createSpecularTileSurfaceSubsystem,
   createWindowSurfaceSubsystem,
+  createWindowTileSurfaceSubsystem,
   // `surface.response`'s outdoor/indoor split reads the SAME world-space
   // outdoors gate `buf:scene.attr`'s G channel does — injected rather than
   // re-derived, so "world XY → mask UV → sample" still exists exactly once.
@@ -1156,16 +1158,20 @@ export async function startVtPanViewer({
   getSpecularMaskUrl,
   getSpecularMaskRect,
   getSpecularBackgroundItemId,
+  getSpecularMaskItems,
   getSpecularRenderState,
   getWindowMaskUrl,
   getWindowMaskRect,
   getWindowBackgroundItemId,
+  getWindowMaskItems,
   getWindowRenderState,
   getApertureGoboRenderState,
   getFluidMaskItems,
   getFluidRenderState,
   onFluidCornersResolver,
   onFluidRenderOrderResolver,
+  onMaskItemCornersResolver,
+  onMaskItemRenderOrderResolver,
 }) {
   extraLayersForItem ??= () => [];
   getOcclusionInputs ??= () => ({ occluders: [], visionActive: false });
@@ -1269,6 +1275,13 @@ export async function startVtPanViewer({
   // itself unwired — inert by construction, same posture as the two seams
   // just above.
   getSpecularBackgroundItemId ??= () => null;
+  // TILES with their OWN authored `_Specular` file (mythica-machina-
+  // press#538/#539) — a THIRD population, alongside the two seams above,
+  // never a replacement for either (see `specular-seams.js#
+  // getSpecularMaskItems`'s own header). Unwired means no tile-attached
+  // shine at all, which is inert by construction — the floor-level surface
+  // above is completely unaffected either way.
+  getSpecularMaskItems ??= () => [];
   // Default-ON, matching the manifest's `enabledFromProfile: 'low'`. Safe to
   // default on in a way water's is not even quite: with no `_Specular` file the
   // effect renders literally nothing, so a scene that never opted in cannot be
@@ -1291,6 +1304,13 @@ export async function startVtPanViewer({
   // default and the effect behaves exactly as it would with `depthTexture`
   // itself unwired — inert by construction, not silently broken.
   getWindowBackgroundItemId ??= () => null;
+  // TILES with their OWN authored `_Window` file (mythica-machina-
+  // press#538/#539) — a THIRD population, alongside the two seams above,
+  // never a replacement for either (see `window-seams.js#
+  // getWindowMaskItems`'s own header). Unwired means no tile-attached
+  // cookie at all, which is inert by construction — the floor-level surface
+  // above is completely unaffected either way.
+  getWindowMaskItems ??= () => [];
   // Default-ON, matching the manifest's `enabledFromProfile: 'low'`. Safe in
   // the same way specular's is: with no `_Window` file the effect renders
   // literally nothing, so a scene that never opted in cannot be surprised.
@@ -1314,6 +1334,14 @@ export async function startVtPanViewer({
   getFluidMaskItems ??= () => [];
   onFluidCornersResolver ??= () => {};
   onFluidRenderOrderResolver ??= () => {};
+  // SHARED PER-ITEM PLACEMENT HANDBACK (mythica-machina-press#538/#539) —
+  // same shape as Fluid's own pair just above, reused by Window's and
+  // Specular's new per-tile mask seams (`getWindowMaskItems`/
+  // `getSpecularMaskItems`) rather than duplicated per effect — see
+  // `resolveItemWorldCorners`/`resolveItemRenderOrder`'s own call sites
+  // below for where these are actually wired.
+  onMaskItemCornersResolver ??= () => {};
+  onMaskItemRenderOrderResolver ??= () => {};
   // Deliberately NOT defaulted. `feedback_seam_default_hides_unwired`: water
   // shipped its render-state seam declared, defaulted and never passed, and the
   // only symptom was that every control silently did nothing while every test
@@ -6766,6 +6794,14 @@ export async function startVtPanViewer({
         rawDarkness[1] * realismScale,
         rawDarkness[2] * realismScale
       );
+      // mythica-machina-press#538/#539 — the per-TILE population's own
+      // entries need the SAME floor pushed onto them; there is no shared
+      // uniform between the two populations to piggy-back on.
+      specularTileSurface.setDarknessFloor(
+        rawDarkness[0] * realismScale,
+        rawDarkness[1] * realismScale,
+        rawDarkness[2] * realismScale
+      );
       // Read ONCE, shared by both — see readElevationFilteredDarknessRegions'
       // own header for why a light needs the SAME active-region set a
       // region-mesh draw uses (2026-07-19, the per-light-region-aware-
@@ -7027,6 +7063,16 @@ export async function startVtPanViewer({
         windowSurface.sync(floor.index);
         if (windowSurface.hasContent()) renderer.render(windowSurface.scene, camera);
       }
+      // mythica-machina-press#538/#539 — the per-TILE population, same
+      // ADD/same target/same guarded sequence, single-viewed-floor scope
+      // (see `windowTileSurface`'s own construction for why). `sync()`
+      // brackets its own cost internally (`light.windowTileSync`, mirroring
+      // `windowSurface.sync()`'s own self-bracketing above) — the render
+      // call, like every per-floor render call in this same loop, rides
+      // inside the outer `Z.lightDrawWindow` zone rather than getting a
+      // bracket of its own.
+      windowTileSurface.sync(view?.floorIndex ?? 0);
+      if (windowTileSurface.hasContent()) renderer.render(windowTileSurface.scene, camera);
       profiler?.end(Z.lightDrawWindow);
       renderer.autoClearColor = previousAutoClearColor;
 
@@ -7456,13 +7502,26 @@ export async function startVtPanViewer({
       profiler?.begin(Z.surfSpecularSync);
       specularSurface.sync(view?.floorIndex ?? 0, view ? viewToWorldRect(view, canvasW / canvasH) : null);
       profiler?.end(Z.surfSpecularSync);
-      if (!specularSurface.hasContent()) return;
+      // mythica-machina-press#538/#539 — the per-TILE population, synced
+      // right alongside the floor one; see `specularTileSurface`'s own
+      // construction for why this stays single-viewed-floor scope.
+      specularTileSurface.sync(view?.floorIndex ?? 0, view ? viewToWorldRect(view, canvasW / canvasH) : null);
+      const floorHasContent = specularSurface.hasContent();
+      const tilesHaveContent = specularTileSurface.hasContent();
+      // ⚠️ EITHER, NOT JUST THE FLOOR — a scene with metal painted ONLY on
+      // tiles (no floor-level `_Specular` at all) must still reach the
+      // render calls below; gating this early-return on the floor alone
+      // would silently drop every tile-attached shine on exactly that scene.
+      if (!floorHasContent && !tilesHaveContent) return;
       const previousAutoClear = renderer.autoClearColor;
       renderer.setRenderTarget(sceneLit);
       renderer.autoClearColor = false;
-      profiler?.begin(Z.surfSpecular);
-      renderer.render(specularSurface.scene, camera);
-      profiler?.end(Z.surfSpecular);
+      if (floorHasContent) {
+        profiler?.begin(Z.surfSpecular);
+        renderer.render(specularSurface.scene, camera);
+        profiler?.end(Z.surfSpecular);
+      }
+      if (tilesHaveContent) renderer.render(specularTileSurface.scene, camera);
       renderer.autoClearColor = previousAutoClear;
       renderer.setRenderTarget(null);
     }
@@ -10514,7 +10573,7 @@ export async function startVtPanViewer({
       profiler,
     });
 
-    // THE ITEM → WORLD QUAD resolver, handed back to boot's fluid seam.
+    // THE ITEM → WORLD QUAD resolver, handed back to boot's per-item seams.
     //
     // It lives HERE because resolving a placement needs the item's TEXTURE
     // SIZE, and only the viewer knows that — it is what `itemStates` tracks.
@@ -10527,23 +10586,70 @@ export async function startVtPanViewer({
     // defers that item to a later frame rather than baking a quad of the wrong
     // size — a tile whose mask baked against a placeholder size would sit
     // permanently misaligned with no error anywhere.
-    onFluidCornersResolver((item) => {
+    //
+    // ⚠️ NAMED (not inline) as of mythica-machina-press#538/#539: originally
+    // built for Fluid's own `onFluidCornersResolver` alone; Window's and
+    // Specular's new per-tile seams (`getWindowMaskItems`/
+    // `getSpecularMaskItems`) need the IDENTICAL generic answer — an item's
+    // corners are its corners regardless of which effect is asking — so this
+    // is handed to BOTH Fluid's own resolver setter and the new shared one
+    // below, rather than copied a second time.
+    function resolveItemWorldCorners(item) {
       const state = itemStates.get(item.id);
       const size = state?.imageSize;
       if (!size || !(size.width > 0) || !(size.height > 0)) return null;
       return computeQuadCorners(computeItemPlacement(item, size, dimensions));
-    });
+    }
+    onFluidCornersResolver(resolveItemWorldCorners);
+    onMaskItemCornersResolver(resolveItemWorldCorners);
 
     // THE ITEM's OWN RENDER ORDER, same resolver shape as corners above and
     // for the same reason: `sortByLayer`'s stamped integer lives on the
     // viewer's own draw-list items (`refreshWholeImageItem` copies it onto
     // `itemStates` each residency pass), never on boot's unfiltered
-    // `coverItems` fluid's seam otherwise reads. Null defers the item to a
-    // later frame exactly like a not-yet-resolved corner does.
-    onFluidRenderOrderResolver((item) => {
+    // `coverItems` these seams otherwise read. Null defers the item to a
+    // later frame exactly like a not-yet-resolved corner does. NAMED and
+    // shared for the same reason as `resolveItemWorldCorners` above.
+    function resolveItemRenderOrder(item) {
       const state = itemStates.get(item.id);
       return typeof state?.renderOrder === 'number' ? state.renderOrder : null;
-    });
+    }
+    onFluidRenderOrderResolver(resolveItemRenderOrder);
+    onMaskItemRenderOrderResolver(resolveItemRenderOrder);
+
+    /**
+     * THE ITEM's OWN LIVE TILE-MOTION UNIFORM BAG (mythica-machina-press#539)
+     * — never resolved through boot.js: unlike corners/renderOrder above,
+     * this subsystem's per-tile Window/Specular surfaces are constructed
+     * AND driven entirely from inside this file (see their construction
+     * sites below), so there is no cross-file seam boundary to cross for it
+     * at all — a plain local function is enough.
+     *
+     * Returns the SAME bag object `buildWholeImageMaterial` gave the tile's
+     * own visible mesh (`state.wholeImage.tiles[N].tileMotion`), never a
+     * fresh copy — `syncAllTileMotionForFrame` already keeps it live every
+     * frame, and reusing it is what makes a tile-attached Window/Specular
+     * surface need no per-frame write of its own (mirrors
+     * `tileMotionDepthProxyNodeCache`'s own reasoning, above).
+     *
+     * ⚠️ PIECE 0, NOT EVERY PIECE — a genuinely huge tile (bigger than one
+     * GPU texture) decodes into MULTIPLE `wholeImage.tiles[]` entries
+     * (`planImageTiles`'s own col×row split), each with its OWN, separate
+     * `tileMotion` bag object — but every one of those bags receives the
+     * IDENTICAL numeric pose from `syncAllTileMotionForFrame` each frame
+     * (same tile, same `tileId`), so picking the first piece's bag is
+     * numerically correct for the overwhelming common case (one piece) and
+     * for the rare multi-piece one alike; only the JS object reference
+     * differs, never the transform it carries.
+     * @param {object} item
+     * @returns {object|null}
+     */
+    function resolveItemTileMotion(item) {
+      const state = itemStates.get(item.id);
+      const pieces = state?.wholeImage?.tiles;
+      if (!Array.isArray(pieces) || pieces.length === 0) return null;
+      return pieces[0]?.tileMotion ?? null;
+    }
 
     // ── SHINE, tiers 0-2 (effects/specular/specular-surface-subsystem.js) ──
     // Constructed beside water's surface for the same trap-#4 reason, but it
@@ -10602,6 +10708,47 @@ export async function startVtPanViewer({
       // So bakeIslandPack can bracket its own async-triggered bake
       // (surface.specularIslandBake) — see this subsystem's own doc for why
       // that can't be bracketed from outside the way water's bake is.
+      profiler,
+    });
+
+    // ── SHINE, PER-TILE POPULATION (mythica-machina-press#538/#539) ────────
+    // ADDED beside `specularSurface` above, never instead of it — see
+    // `specular-tile-surface-subsystem.js`'s own header for why a single
+    // shared floor instance and a per-item population are genuinely
+    // different shapes, not two ways of writing the same thing. A SINGLE
+    // instance for the whole scene (not one per floor, mirroring
+    // `specularSurface`'s own "ONE MESH, NOT TWO" cardinality), synced
+    // against ONLY the VIEWED floor at the call site below — the SAME
+    // single-floor scope `fluidSurface` (the reference pattern this whole
+    // fix mirrors) already uses. See `windowTileSurface`'s own construction,
+    // below, for why BOTH new populations share this scope rather than one
+    // of them attempting "every visible floor" — a real, considered
+    // narrowing given this fix's already-large scope, not an oversight.
+    const specularTileSurface = createSpecularTileSurfaceSubsystem({
+      THREE,
+      getSpecularMaskItems,
+      loadMaskImage: (opts) => loadMaskImageTexture({ ...opts, THREE }),
+      createMaskTexture: createMaskDataTexture,
+      createPackTexture: createSpecularPackTexture,
+      illumTexture: sceneIllum.texture,
+      depthTexture: sceneDepth.depthTexture ?? null,
+      // PER ITEM, not per floor — `depthAuthority.rankOf` takes any item id,
+      // and a tile-attached surface's own quad IS that tile, so its expected
+      // depth is simply the TILE's own rank: "is anything ranked above ME"
+      // rather than "above my floor's background", the identical composition
+      // `specularSurface` above uses for a level's background item.
+      resolveExpectedDepth: (itemId) => {
+        const rank = depthAuthority.rankOf({ id: itemId });
+        return rank === null ? 0 : computeTieSafeExpectedDepth(rank, depthAuthority.maxRank);
+      },
+      getItemTileMotion: resolveItemTileMotion,
+      timeMsNode: uGlobalTimeMs,
+      uViewRect: envLight.uViewRect,
+      uOutdoorsRect: envLight.uOutdoorsRect,
+      outdoorsTexNode: envLight.outdoorsTexNode,
+      buildOutdoorsGate: buildWorldSpaceOutdoorsGate,
+      getSpecularRenderState,
+      getSkyHandle: () => skyHandle,
       profiler,
     });
 
@@ -10704,6 +10851,54 @@ export async function startVtPanViewer({
       return surface;
     }
 
+    // ── WINDOW LIGHT, PER-TILE POPULATION (mythica-machina-press#538/#539) ─
+    // ADDED beside `windowSurfacesByFloor` above, never instead of it — see
+    // `window-tile-surface-subsystem.js`'s own header. A SINGLE instance for
+    // the whole scene (unlike `windowSurfacesByFloor`'s own one-per-floor
+    // cardinality), synced against ONLY the VIEWED floor
+    // (`view?.floorIndex ?? 0`, at the call site below) — the SAME
+    // single-floor scope `specularTileSurface` above and `fluidSurface`
+    // (the reference pattern this whole fix mirrors) both already use.
+    //
+    // ⚠️ DELIBERATELY NOT "every visible floor" — a real, considered
+    // narrowing, not an oversight. `windowSurfacesByFloor` above walks EVERY
+    // scene floor because each of ITS instances is disposable per-floor
+    // state keyed by floor index, and `sync(floor.index)` only ever touches
+    // that ONE floor's own entry. This population's `entries` Map is keyed
+    // by ITEM id and reconciled in ONE PASS per `sync()` call (`seen` vs
+    // stale-prune, mirroring `fluid-surface-subsystem.js`) — calling it once
+    // per floor in a loop would prune floor A's tiles the instant floor B's
+    // call ran, since each call only "sees" the ONE floor it queried. Making
+    // this population genuinely multi-floor-aware needs a `sync()` that
+    // accepts (or a seam that returns) the union across every visible floor,
+    // not a per-floor loop — real, buildable, but a second design decision
+    // this fix's already-large scope does not also make; a tile is visible
+    // on whatever floor the author actually placed it, so a tile seen
+    // through a hole in the floor above (the same edge case
+    // `windowSurfacesByFloor`'s own history fixed) simply defers to a later
+    // frame here, exactly like Specular's own per-tile population already
+    // does one floor's worth of masks at a time.
+    const windowTileSurface = createWindowTileSurfaceSubsystem({
+      THREE,
+      getWindowMaskItems,
+      loadMaskImage: (opts) => loadMaskImageTexture({ ...opts, THREE }),
+      createMaskTexture: createMaskDataTexture,
+      depthTexture: sceneDepth.depthTexture ?? null,
+      // PER ITEM, not per floor — see `specularTileSurface`'s own identical
+      // composition just above for the full reasoning.
+      resolveExpectedDepth: (itemId) => {
+        const rank = depthAuthority.rankOf({ id: itemId });
+        return rank === null ? 0 : computeTieSafeExpectedDepth(rank, depthAuthority.maxRank);
+      },
+      getItemTileMotion: resolveItemTileMotion,
+      uViewRect: envLight.uViewRect,
+      getWindowRenderState,
+      getEnvSun: () => lastEnvSnapshot?.env?.sun ?? null,
+      getAmbientCeilingRgb: () =>
+        lastAmbientColors ? maxRgb(lastAmbientColors.background, lastGlobalLightFloor) : null,
+      profiler,
+    });
+
     // ── PER-EFFECT READINESS PROBES ─────────────────────────────────────────
     // Registered HERE, at the one point where all four owners exist
     // (`doorGraphics`, `specularSurface`, and the two per-floor maps), and
@@ -10740,6 +10935,17 @@ export async function startVtPanViewer({
       stage: READINESS_STAGE.STREAM,
       read: () => (specularSurface?.isLoadingMask?.() ? 1 : 0),
     });
+    // mythica-machina-press#538/#539 — the per-TILE populations' own masks
+    // are a SEPARATE async fetch per attached tile, so they need their own
+    // probes rather than folding into the floor-level ones just above/below
+    // (a scene with tile-attached masks still loading but no floor-level
+    // mask in flight at all must not report itself settled early).
+    readiness.register({
+      id: 'specularTileMaskLoad',
+      label: 'specular tile masks still loading',
+      stage: READINESS_STAGE.STREAM,
+      read: () => (specularTileSurface?.isLoadingMask?.() ? 1 : 0),
+    });
     readiness.register({
       id: 'windowMaskLoad',
       label: 'window cookie masks still loading',
@@ -10749,6 +10955,12 @@ export async function startVtPanViewer({
         for (const s of windowSurfacesByFloor.values()) if (s?.isLoadingMask?.()) n++;
         return n;
       },
+    });
+    readiness.register({
+      id: 'windowTileMaskLoad',
+      label: 'window tile masks still loading',
+      stage: READINESS_STAGE.STREAM,
+      read: () => (windowTileSurface?.isLoadingMask?.() ? 1 : 0),
     });
     readiness.register({
       id: 'doorTextures',
@@ -20492,6 +20704,10 @@ export async function startVtPanViewer({
           depthProxySplitMaterials,
           prepassSplitMaterials,
           windowSurfacesAlive: windowSurfacesByFloor.size,
+          // mythica-machina-press#538/#539 — the per-TILE populations' own
+          // live counts, alongside the per-floor one just above.
+          windowTilesAttached: windowTileSurface.getStatus().maskedTileCount,
+          specularTilesAttached: specularTileSurface.getStatus().maskedTileCount,
         };
       },
       /**
@@ -20930,6 +21146,10 @@ export async function startVtPanViewer({
        * header budgets for. */
       disposeSpecular() {
         specularSurface.dispose();
+        // mythica-machina-press#538/#539 — the per-TILE population, torn
+        // down alongside the floor one: same leak risk (an uploaded
+        // `_Specular` texture PER masked tile), same Stop/Restart cadence.
+        specularTileSurface.dispose();
       },
       /** SHINE's own state — for the debug report. `visible: false` with a
        * loaded mask means the resolved floor has no painted metal (the honest
@@ -20938,6 +21158,10 @@ export async function startVtPanViewer({
        * `floorGate` report which branches actually COMPILED — both are silent
        * on screen if they did not, which is precisely why they are reported. */
       getSpecularInfo: () => specularSurface.getStatus(),
+      /** mythica-machina-press#538/#539 — the per-TILE population's own
+       * state, ONE ENTRY PER ATTACHED TILE, mirroring `getSpecularInfo`'s own
+       * reporting posture for the floor-level surface. */
+      getSpecularTileInfo: () => specularTileSurface.getStatus(),
       /** Tear down EVERY floor's WINDOW LIGHT mesh, geometry, both
        * NodeMaterials and uploaded `_Window` DataTexture — same shape as
        * `disposeSpecular`, same reason: a missed dispose here is a
@@ -20947,6 +21171,9 @@ export async function startVtPanViewer({
       disposeWindowLight() {
         for (const surface of windowSurfacesByFloor.values()) surface.dispose();
         windowSurfacesByFloor.clear();
+        // mythica-machina-press#538/#539 — the per-TILE population, same
+        // leak risk, same cadence as the per-floor loop just above.
+        windowTileSurface.dispose();
       },
       /** WINDOW LIGHT's own state, ONE ENTRY PER FLOOR that has ever synced
        * (2026-08-09 — this used to be a single object) — for the debug
@@ -20960,6 +21187,10 @@ export async function startVtPanViewer({
         Array.from(windowSurfacesByFloor.entries())
           .sort((a, b) => a[0] - b[0])
           .map(([floorIndex, surface]) => ({ floorIndex, ...surface.getStatus() })),
+      /** mythica-machina-press#538/#539 — the per-TILE population's own
+       * state, ONE ENTRY PER ATTACHED TILE, mirroring `getWindowLightInfo`'s
+       * own reporting posture for the per-floor surfaces. */
+      getWindowTileInfo: () => windowTileSurface.getStatus(),
       /** Tear down the candle flame billboard's own mesh/material/geometry (its
        * lights live in the shared pool, freed by disposePointLights). */
       disposeCandleFlame,

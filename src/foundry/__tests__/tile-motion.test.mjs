@@ -20,6 +20,8 @@ import {
   applyRigidDelta,
   computeTileWorldTransforms,
   convertTileMotionToTileScrollFlags,
+  resolveTexturePose,
+  applyTileMotionTextureUv,
 } from '../tile-motion.js';
 
 function cfg(overrides = {}) {
@@ -360,6 +362,56 @@ export function run(t) {
     ok(
       'texture mode converts textureMotion.rotateSpeed, not motion.speed',
       textureMode.supported === true && textureMode.flags.enableRotate === true && textureMode.flags.scrollSpeed > 0
+    );
+  }
+
+  // ── applyTileMotionTextureUv — the CPU twin of the GPU texture-mode UV
+  // transform (mythica-machina-press#538/#539's own tile-attach work). No
+  // shader runs in Node (`keyhole-tsl-constructs-in-node`'s own boundary), so
+  // this proves the FORMULA'S arithmetic is sane and internally consistent —
+  // not that `effects/tile-motion-nodes.js`'s TSL transcription byte-matches
+  // it on a real GPU.
+  {
+    const identityTex = { offsetU: 0, offsetV: 0, rotCos: 1, rotSin: 0, pivotU: 0.5, pivotV: 0.5 };
+    const p = applyTileMotionTextureUv(0.2, 0.7, identityTex);
+    ok(
+      'identity pose (no scroll, no rotation) leaves the UV exactly unchanged',
+      near(p.u, 0.2, 1e-12) && near(p.v, 0.7, 1e-12)
+    );
+
+    const scrollOnly = { offsetU: 0.3, offsetV: -0.1, rotCos: 1, rotSin: 0, pivotU: 0.5, pivotV: 0.5 };
+    const s = applyTileMotionTextureUv(0.2, 0.7, scrollOnly);
+    ok('pure scroll is a plain UV translation', near(s.u, 0.5, 1e-12) && near(s.v, 0.6, 1e-12));
+
+    // A 90° rotation about the DEFAULT centre pivot (0.5, 0.5): the point
+    // (1, 0.5) — one full unit to the right of the pivot — must land at
+    // (0.5, 0) — one full unit BELOW it in UV space (V grows downward) —
+    // for a rotCos/rotSin of a genuine +90° turn, matching THREE.Texture's
+    // own `Matrix3#setUvTransform` sign convention (verified against its
+    // source in `buildWholeImageMaterial`'s own comment, not re-guessed here).
+    const rot90 = { offsetU: 0, offsetV: 0, rotCos: 0, rotSin: 1, pivotU: 0.5, pivotV: 0.5 };
+    const r = applyTileMotionTextureUv(1, 0.5, rot90);
+    ok(
+      `a +90° rotation about the centre pivot turns (1, 0.5) to (0.5, 0), got (${r.u.toFixed(6)}, ${r.v.toFixed(6)})`,
+      near(r.u, 0.5, 1e-9) && near(r.v, 0, 1e-9)
+    );
+
+    // A round trip through the REAL resolver: at elapsed = 0 with a non-zero
+    // phase, resolveTexturePose still reports a real (non-identity) rotation
+    // — feeding its own output back through applyTileMotionTextureUv must not
+    // throw and must return finite numbers, proving the two functions' shapes
+    // genuinely compose (the live uniform bag holds exactly this triple —
+    // see `syncAllTileMotionForFrame` in vt-pan-viewer.js).
+    const texCfg = cfg({
+      mode: 'texture',
+      textureMotion: { scrollU: 0.05, scrollV: -0.02, rotateSpeed: 30, pivotU: 0.5, pivotV: 0.5 },
+      motion: { type: 'rotation', speed: 0, phase: 45 },
+    });
+    const pose = resolveTexturePose(texCfg, 2);
+    const composed = applyTileMotionTextureUv(0, 0, pose);
+    ok(
+      'resolveTexturePose’s own output composes with applyTileMotionTextureUv without throwing, finite result',
+      Number.isFinite(composed.u) && Number.isFinite(composed.v)
     );
   }
 }

@@ -343,4 +343,61 @@ export function run(t) {
     debugSetterError === null
   );
   ok('the floor-gate channel is wired even when the gate compiles out', !!noDepth.debugMaterial);
+
+  // ── mythica-machina-press#538/#539 — A PER-TILE SURFACE'S LIVE TRANSFORM ──
+  // `positionNode`/`maskUvNode` are the whole wiring point of the tile-attach
+  // fix: a per-tile Window surface (window-tile-surface-subsystem.js) passes
+  // both, built from the tile's own live tileMotion bag
+  // (effects/tile-motion-nodes.js). Every assertion ABOVE this block already
+  // proves the floor path (neither parameter passed) is unchanged.
+  {
+    const { Fn, vec2, vec3, uv, positionLocal } = THREE.TSL;
+    // A stand-in for buildTileMotionPositionNode's own returned graph — the
+    // real one is proven separately (tile-motion-nodes.test.mjs); this only
+    // has to be A node, to prove the WIRING here, not re-derive the formula.
+    const fakePositionNode = Fn(() => vec3(positionLocal.x, positionLocal.y, positionLocal.z))();
+    const fakeMaskUvNode = uv().add(vec2(0.01, -0.01));
+
+    let tileError = null;
+    let tileBuilt = null;
+    try {
+      tileBuilt = buildWindowSurfaceMaterial(args({ positionNode: fakePositionNode, maskUvNode: fakeMaskUvNode }));
+    } catch (err) {
+      tileError = err;
+    }
+    ok(
+      `positionNode + maskUvNode together construct without throwing (${tileError ? tileError.message : 'clean'})`,
+      tileError === null
+    );
+    ok('positionNode reaches the ADD material', tileBuilt?.windowMaterial?.positionNode === fakePositionNode);
+    ok(
+      'positionNode ALSO reaches the debug material — a channel must not un-stick the animation',
+      tileBuilt?.debugMaterial?.positionNode === fakePositionNode
+    );
+
+    // The glass subgraph reads `positionWorld` for its own world-space noise
+    // field AND reads the crop off `maskUv` for its dispersion taps — the two
+    // busiest consumers of exactly the values this fix touches. Must survive
+    // together, not just in isolation.
+    let tileGlassError = null;
+    try {
+      buildWindowSurfaceMaterial(
+        args({ positionNode: fakePositionNode, maskUvNode: fakeMaskUvNode, glass: true, gateGlass: true })
+      );
+    } catch (err) {
+      tileGlassError = err;
+    }
+    ok(
+      `positionNode + maskUvNode survive alongside glass:true/gateGlass:true (${tileGlassError ? tileGlassError.message : 'clean'})`,
+      tileGlassError === null
+    );
+
+    // Every floor caller in this file (every `built`/`noDepth`/`gated`/... above)
+    // never passed either — confirms the default truly is "unset", not merely
+    // "unobserved" in this file's own earlier assertions.
+    ok(
+      'a floor caller (neither param passed) leaves positionNode unset, exactly as before',
+      !built.windowMaterial.positionNode
+    );
+  }
 }

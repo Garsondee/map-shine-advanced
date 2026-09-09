@@ -5,10 +5,13 @@
  * control.js) because none of them render a PARAM — they describe the
  * EFFECT the card belongs to.
  *
- * ⚠️ `scopeGlyph` STAYS `status:'planned'` FOR EVERY CARD — a full scene/
- * world/client scope per param does not exist yet (only a world/client
- * duality exists today, for an effect's own enable state, not "where does
- * the Studio believe THIS param lives"). `tierChip` was already live
+ * `scopeGlyph` GAINED REAL DATA AT mythica-machina-press#389 (2026-09-09) —
+ * `core/params-schema.js#PARAM_SCOPE`'s declared `scope: 'scene'|'client'`
+ * field. Reports `scene` (everything syncs) or `mixed` (N controls stay
+ * client-only); never `world` — that scope does not exist in this codebase
+ * yet (#11's own still-open question). A card whose model has no `schema`
+ * (should not happen — every card sets one) falls back to the original
+ * dashed `planned` chip. `tierChip` was already live before this
  * (`resolveAndApply`'s `perfTier`/`maxPerfTier`/`perfTierSource`, effects/
  * effect-cascade.js#resolveEffectTier).
  *
@@ -63,15 +66,36 @@ export function tierChip({ tier, maxTier, source }) {
 }
 
 /**
- * The scope glyph — planned chrome for U1 (see module doc). `plannedReason`
- * is required so a future caller can't accidentally ship this silently
- * un-real; matches the `status:'planned'` contract's own requirement.
- * @param {{plannedReason: string}} args
+ * The scope glyph — real as of mythica-machina-press#389's declared `scope`
+ * field (`core/params-schema.js#PARAM_SCOPE`), same "real when the caller
+ * has the data, planned fallback otherwise" split `healthBadge` already
+ * uses below. Every card's `model.schema` is the SAME schema object already
+ * driving its FOH/ROH controls (every effect card sets it, hand-written or
+ * `registerSimpleEffectCard`-built alike) — no per-effect wiring needed to
+ * make this real everywhere at once, the same "N+1 is free" property
+ * mythica-machina-press#180 already proved for fade sources.
+ *
+ * Only ever reports `scene`/`mixed` today, never `world` — this codebase
+ * has no world-scoped effect-param layer yet (mythica-machina-press#11's
+ * own still-open question), and a glyph claiming a scope that does not
+ * exist would be exactly the kind of lying instrument this project's own
+ * doctrine rejects elsewhere.
+ * @param {{schema?: Record<string, {scope?: string}>, plannedReason?: string}} args
  * @returns {HTMLElement}
  */
-export function scopeGlyph({ plannedReason }) {
-  const el = chip(`${iconMarkup('map', 'style="width:9px;height:9px"')} ?`, { planned: true, title: plannedReason });
-  return el;
+export function scopeGlyph({ schema, plannedReason } = {}) {
+  if (!schema || typeof schema !== 'object') {
+    return chip(`${iconMarkup('map', 'style="width:9px;height:9px"')} ?`, { planned: true, title: plannedReason });
+  }
+  const clientOnly = Object.keys(schema).filter((k) => schema[k]?.scope === 'client');
+  if (clientOnly.length === 0) {
+    return chip(`${iconMarkup('map', 'style="width:9px;height:9px"')} scene`, {
+      title: 'Every control here is an authored look, synced to every player.',
+    });
+  }
+  return chip(`${iconMarkup('map', 'style="width:9px;height:9px"')} mixed`, {
+    title: `Synced to every player, except ${clientOnly.length} control${clientOnly.length === 1 ? '' : 's'} that stay on this client only: ${clientOnly.join(', ')}.`,
+  });
 }
 
 /**

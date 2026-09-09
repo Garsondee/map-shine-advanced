@@ -195,7 +195,10 @@ export function createWaterRegistration({
         continue;
       }
       liveOverride[key] = value;
-      scenePatch[key] = value;
+      // mythica-machina-press#389's declared-scope field (core/params-schema.js
+      // #PARAM_SCOPE) — none of WATER_PARAMS declares `scope: 'client'` today,
+      // but this check makes that declaration honest the moment one does.
+      if (WATER_PARAMS[key]?.scope !== 'client') scenePatch[key] = value;
       changed = true;
     }
     if (changed) {

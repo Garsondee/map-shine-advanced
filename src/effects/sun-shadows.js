@@ -246,6 +246,13 @@ export const SUN_SHADOW_PARAMS = Object.freeze({
     category: 'Technical',
     label: 'Debug view',
     help: 'Diagnosis. Shows one shadow at a time, or one of the raw data layers, as greyscale on white — white = lit or present, black = shadowed or absent. Compare "occluder coverage" against "occluder height": a shape visible in coverage but BLACK in height means the things overhead exist but have no height recorded, which is why they cast nothing.',
+    // mythica-machina-press#389's declared-scope field (core/params-schema.js
+    // #PARAM_SCOPE) — this is the FIRST real example: a GM's own diagnosis
+    // dropdown, never an authored look, so it must never reach a player's
+    // screen just because the GM picked one. Was a hand-coded name check in
+    // boot.js#setSunShadows ("`debugView` is EXCLUDED... on purpose"); now a
+    // declared fact `setSunShadows` reads instead of hard-coding.
+    scope: 'client',
   },
 });
 

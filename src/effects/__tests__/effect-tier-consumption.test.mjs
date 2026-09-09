@@ -95,7 +95,12 @@ function stubDeps() {
     writeSetting: () => Promise.resolve(),
     moduleId: 'test-module',
     effectEnableKey: () => 'test-key',
-    log: { error() {} },
+    // Stage B (mythica-machina-press#288/#389) — not exercised by this file's
+    // own reapply-free test path, stubbed anyway so a future addition here
+    // doesn't have to rediscover the shape.
+    readSceneEffectParams: () => ({ params: null, reason: 'no active scene' }),
+    writeSceneEffectParams: () => Promise.resolve({ ok: false, reason: 'no active scene to write to' }),
+    log: { error() {}, warn() {} },
   };
 }
 

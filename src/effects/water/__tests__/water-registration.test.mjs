@@ -20,7 +20,12 @@ function makeFakes() {
     writeSetting: async () => undefined,
     moduleId: 'map-shine-advanced',
     effectEnableKey: (id, scope) => `${id}.${scope}.enabled`,
-    log: { error: () => {} },
+    // Stage B (mythica-machina-press#288/#389) — no scene in this fake
+    // environment, mirroring foundry/effect-param-persistence.js's own
+    // "no active scene" fallback shape.
+    readSceneEffectParams: () => ({ params: null, reason: 'no active scene' }),
+    writeSceneEffectParams: async () => ({ ok: false, reason: 'no active scene to write to' }),
+    log: { error: () => {}, warn: () => {} },
   };
 }
 

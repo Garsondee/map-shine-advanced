@@ -4110,6 +4110,8 @@ function install() {
     writeSetting,
     moduleId: MODULE_ID,
     effectEnableKey,
+    readSceneEffectParams,
+    writeSceneEffectParams,
     log,
   });
 
@@ -4145,6 +4147,8 @@ function install() {
     writeSetting,
     moduleId: MODULE_ID,
     effectEnableKey,
+    readSceneEffectParams,
+    writeSceneEffectParams,
     log,
   });
   const specular = createSpecularRegistration({
@@ -4154,6 +4158,8 @@ function install() {
     writeSetting,
     moduleId: MODULE_ID,
     effectEnableKey,
+    readSceneEffectParams,
+    writeSceneEffectParams,
     log,
   });
 
@@ -4173,6 +4179,8 @@ function install() {
     writeSetting,
     moduleId: MODULE_ID,
     effectEnableKey,
+    readSceneEffectParams,
+    writeSceneEffectParams,
     log,
   });
 
@@ -4187,6 +4195,8 @@ function install() {
     writeSetting,
     moduleId: MODULE_ID,
     effectEnableKey,
+    readSceneEffectParams,
+    writeSceneEffectParams,
     log,
   });
 

@@ -25,7 +25,11 @@ import { APERTURE_GOBO, APERTURE_GOBO_PARAMS } from './aperture-gobo.js';
  * @param {(moduleId: string, key: string, value: any) => Promise<any>} args.writeSetting
  * @param {string} args.moduleId
  * @param {(effectId: string, scope: string) => string} args.effectEnableKey
- * @param {{error: Function}} args.log
+ * @param {(effectId: string) => {params: object|null, reason: string|null}} args.readSceneEffectParams
+ *   Stage B (mythica-machina-press#288/#389) — injected, matching this file's
+ *   own "knows nothing about Foundry" rule.
+ * @param {(effectId: string, patch: object) => Promise<{ok: boolean, reason: string|null}>} args.writeSceneEffectParams
+ * @param {{error: Function, warn: Function}} args.log
  * @returns {{reapply: () => void, getRenderState: () => object,
  *   setApertureGobo: (partial?: object) => void, setDebug: (on: boolean) => object,
  *   getDebug: () => boolean, setDebugChannel: (id: 'off'|'pattern') => object,
@@ -38,6 +42,8 @@ export function createApertureGoboRegistration({
   writeSetting,
   moduleId,
   effectEnableKey,
+  readSceneEffectParams,
+  writeSceneEffectParams,
   log,
 }) {
   /**
@@ -86,7 +92,10 @@ export function createApertureGoboRegistration({
 
   function reapply() {
     const layers = deriveEffectLayers('apertureGobo', readSetting);
-    layers.paramLayers = [liveOverride];
+    // STAGE B (mythica-machina-press#288/#389) — same posture as
+    // window-registration.js's own reapply.
+    const { params: sceneParams } = readSceneEffectParams('apertureGobo');
+    layers.paramLayers = [sceneParams, liveOverride].filter(Boolean);
     effectRegistry.resolveAndApply('apertureGobo', layers);
   }
 
@@ -112,6 +121,7 @@ export function createApertureGoboRegistration({
         .catch((err) => log.error('aperture gobo enable write/reapply failed:', err));
     }
     let changed = false;
+    const scenePatch = {};
     for (const [key, value] of Object.entries(p)) {
       if (key === 'enabled') continue;
       // Silently accepting an unknown key is how a typo becomes a control
@@ -122,9 +132,19 @@ export function createApertureGoboRegistration({
         continue;
       }
       liveOverride[key] = value;
+      scenePatch[key] = value;
       changed = true;
     }
-    if (changed) reapply();
+    if (changed) {
+      // STAGE B (mythica-machina-press#288/#389) — mirrors setBloom's own write-through.
+      Promise.resolve(writeSceneEffectParams('apertureGobo', scenePatch)).then(
+        (result) => {
+          if (!result.ok) log.warn(`aperture gobo scene param write not persisted: ${result.reason}`);
+        },
+        (err) => log.error('aperture gobo scene param write failed:', err)
+      );
+      reapply();
+    }
   }
 
   /**

@@ -110,6 +110,10 @@ export function run(t) {
       },
       moduleId: 'msa',
       effectEnableKey: (id, scope) => `msa.${id}.${scope}`,
+      // Stage B (mythica-machina-press#288/#389) — no scene in this fake
+      // environment.
+      readSceneEffectParams: () => ({ params: null, reason: 'no active scene' }),
+      writeSceneEffectParams: () => Promise.resolve({ ok: false, reason: 'no active scene to write to' }),
       log,
     });
 

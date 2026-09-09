@@ -78,6 +78,15 @@
 
 import { getActiveSceneFloors } from '../foundry/index.js';
 import { resolveElevationFloorIndex } from '../scene/index.js';
+// `vt/` importing FROM `effects/` is the established one-way layering
+// direction (`vt/scene-attr.js` already does this; see
+// `effects/lighting/point-light-illumination.js`'s own header for why the
+// REVERSE — `effects/` importing `vt/scene-depth.js` — is not allowed and
+// has to mirror constants by hand instead). `FLUID_PRESENCE_EDGE0` is
+// `buildSceneDepthWriterMaterial`'s own `fluidMaskEpsilon` default — see
+// that parameter's doc for why it must match `fluid-render.js`'s own
+// silhouette cutoff exactly, not a second hand-tuned number.
+import { FLUID_PRESENCE_EDGE0 } from '../effects/index.js';
 
 /**
  * THE DEDICATED DEPTH-PASS CAMERA'S OWN CONSTANTS — see this module's own
@@ -386,50 +395,6 @@ export function resolveSceneDepthFloorIndex({ item, sceneDoc, viewedFloorIndex, 
 }
 
 /**
- * Whether an item's depth-proxy write should skip the alpha discard
- * entirely — `buildSceneDepthWriterMaterial`'s own `alwaysOpaque` input —
- * folding TWO independent proofs of the same "no real texel-level discard
- * would ever fire here" outcome into one boolean, rather than a new writer-
- * args field per proof (mythica-machina-press#543):
- *
- *   1. THE BASE TEXTURE ITSELF is opaque everywhere (`alphaStats.min`, the
- *      real decoded source alpha's floor, at or above the item's own
- *      `alphaThreshold`) — the ORIGINAL proof, unchanged.
- *   2. THE ITEM CARRIES AN AUTHORED FLUID MASK (`hasFluidMask`, from
- *      `scene/mask-authority.js#authoredStatusForItem(itemId, 'fluid')` via
- *      `effects/fluid/fluid-registration.js#createFluidSeams`'s
- *      `getFluidMaskItems`) — a NEW proof, added for #543. A Fluid "carrier"
- *      tile is commonly nearly fully transparent BY DESIGN
- *      (`effects/fluid/fluid-surface-subsystem.js`'s own header: the visible
- *      glow is a SEPARATE `depthTest:false` pass, `fluid-render.js`, never
- *      this tile's own base-texture alpha) — so proof 1 above structurally
- *      can never hold for one, and `buf:scene.depth` never marked its
- *      footprint solid at all. Fire/smoke/embers' own depth-height gate
- *      (`effects/lighting/point-light-illumination.js#buildDepthHeightGateNode`)
- *      then found nothing to test against there and drew straight through,
- *      regardless of the tile's real elevation rank — the reported bug. A
- *      Fluid host tile carries no OTHER content sharing that same quad, so
- *      treating its WHOLE footprint as solid is exactly as safe as proof 1's
- *      own texel-level certainty, just reached a different way: by the
- *      mask's own authored coverage instead of the base texture's alpha.
- *
- * @param {object} args
- * @param {{min:number}|null} [args.alphaStats] - the item's whole-image
- *   alpha stats (`{min,max,mean}`, raw 0-255 bytes), or null when unknown
- *   (the raw-fallback decode path).
- * @param {number} [args.alphaThreshold=0.75] - the SAME 0-1 fraction
- *   `buildSceneDepthWriterMaterial`'s own discard tests against.
- * @param {boolean} [args.hasFluidMask=false] - true iff THIS item's id is in
- *   `getFluidMaskItems(viewedFloorIndex)`'s result — cheap, synchronous, no
- *   texture/decode wait (`authoredStatusForItem` is URL-only discovery).
- * @returns {boolean}
- */
-export function computeAlwaysOpaqueForDepthWriter({ alphaStats, alphaThreshold = 0.75, hasFluidMask = false }) {
-  if (hasFluidMask) return true;
-  return alphaStats != null && alphaStats.min / 255 >= alphaThreshold;
-}
-
-/**
  * THE DEPTH-WRITER MATERIAL — one per item, drawn into this pass's own
  * scene (design doc §7: "its own scene, its own meshes… not a material
  * swap on the production meshes",
@@ -475,6 +440,45 @@ export function computeAlwaysOpaqueForDepthWriter({ alphaStats, alphaThreshold =
  *   `alphaThreshold`, so the discard below could structurally never fire.
  *   See the comment beside its use for why this is a separate parameter and
  *   not just a runtime-false condition.
+ * @param {*} [args.fluidMaskTex] - mythica-machina-press#543, SECOND ROUND.
+ *   A Fluid carrier tile's occlusion footprint must follow its ACTUAL
+ *   pipe/glass silhouette, not its whole rectangular quad — the round-one
+ *   regression this replaces (`alwaysOpaque` folded in a whole-item
+ *   `hasFluidMask` boolean, which cannot express "solid HERE, transparent
+ *   THERE" within one tile, and painted a big rectangular cutout instead of
+ *   the tube shapes). When present, this is the item's OWN authored fluid
+ *   mask texture — the SAME object `fluid-surface-subsystem.js`'s
+ *   `getMaskTextureForItem(itemId)` returns, which is the SAME texture the
+ *   visible fluid mesh already samples for its silhouette
+ *   (`fluid-render.js#buildFluidSurfaceMaterials`'s `maskTexNode =
+ *   texture(maskTexture, uv())`) — sampled here the SAME way, so the two can
+ *   never disagree. A pixel counts as solid if EITHER `tex`'s own alpha
+ *   clears `alphaThreshold` OR this mask's coverage (its R channel — traced
+ *   in `fluid-render.js`'s own `inside = smoothstep(EDGE0, EDGE1,
+ *   maskTexNode.r)`, the file's own three-source rule: the SILHOUETTE always
+ *   comes from this file at its own resolution, never the derived tube pack)
+ *   clears `fluidMaskEpsilon` — never a fold into one pre-computed boolean.
+ *   Absent/`null` (the overwhelmingly common non-Fluid case) reproduces
+ *   today's alpha-only discard exactly.
+ * @param {number[]} [args.fluidMaskUvOffset=[0,0]] @param {number[]} [args.fluidMaskUvScale=[1,1]] -
+ *   remaps THIS tile's own local 0..1 `uv()` into the mask's own quad UV
+ *   space before sampling `fluidMaskTex`. Identity for an item whose base
+ *   art was never split by `vt/texture-limits.js#planImageTiles` (`tex`'s
+ *   own uv() already covers the whole item there, same as the mask's). A
+ *   SPLIT item's sub-tile, though, samples `tex` from a texture that is
+ *   itself only THAT sub-tile's own crop (`scene/world-quad.js
+ *   #computeTileSubPlacement`'s own header: "each sub-tile is its OWN
+ *   texture holding one source rect") — `fluidMaskTex` is never cropped like
+ *   that (one texture for the whole item), so this tile's own uv() has to be
+ *   rescaled into the mask's full-item space first, or every sub-tile past
+ *   the first would sample the WRONG corner of the mask. See
+ *   `vt-pan-viewer.js#rebuildSceneDepthProxies`'s own call site for how this
+ *   is derived from `t.tile`'s crop rect.
+ * @param {number} [args.fluidMaskEpsilon] - the mask-byte cutoff below which
+ *   a pixel counts as "no tube here at all" — defaults to
+ *   `FLUID_PRESENCE_EDGE0`, this module's own import of the EXACT constant
+ *   `fluid-render.js`'s `inside` term ramps from, so the occlusion boundary
+ *   can never sit at a different cutoff than the visible glow's own fade-in.
  * @param {boolean} [args.liveOcclusionGate=false] - mythica-machina-press#480.
  *   When true, adds a SECOND, independent discard driven by a live uniform
  *   (`material.uLiveOcclusionAmount`, returned at 0 — "fully solid" — and
@@ -501,8 +505,12 @@ export function buildSceneDepthWriterMaterial({
   alwaysOpaque = false,
   colorWrite = true,
   liveOcclusionGate = false,
+  fluidMaskTex,
+  fluidMaskUvOffset = [0, 0],
+  fluidMaskUvScale = [1, 1],
+  fluidMaskEpsilon = FLUID_PRESENCE_EDGE0,
 }) {
-  const { Fn, float, uniform, vec4, texture } = THREE.TSL;
+  const { Fn, float, uniform, vec4, vec2, uv, texture } = THREE.TSL;
   const material = new THREE.NodeMaterial();
   material.side = THREE.DoubleSide;
   material.transparent = false;
@@ -567,7 +575,16 @@ export function buildSceneDepthWriterMaterial({
   // textured/untextured and positionNode/not in the comment above: every
   // opaque item shares this leaner shape and compiles once, not once per
   // item.
-  if (alwaysOpaque || !tex) {
+  //
+  // `!fluidMaskTex` is folded into this SAME condition, not a separate one:
+  // mythica-machina-press#543's second round replaced the round-one
+  // "hasFluidMask forces alwaysOpaque" shortcut with a genuine per-pixel
+  // test below, so a Fluid-masked tile MUST reach that per-pixel branch
+  // (never this early-return) whenever it carries a mask — this early-Z
+  // path is only ever safe for a tile that truly has NOTHING to test
+  // per-pixel (no tex AND no fluid mask), or one already proven fully
+  // opaque (`alwaysOpaque`, unchanged, proof 1 only).
+  if (alwaysOpaque || (!tex && !fluidMaskTex)) {
     material.fragmentNode = Fn(() => {
       discardIfFading();
       return vec4(uFloorIndex, float(0), uFlags, float(1));
@@ -575,10 +592,46 @@ export function buildSceneDepthWriterMaterial({
     if (uLiveOcclusionAmount) material.uLiveOcclusionAmount = uLiveOcclusionAmount;
     return material;
   }
-  const uAlphaThreshold = uniform(float(alphaThreshold));
+  const uAlphaThreshold = tex ? uniform(float(alphaThreshold)) : null;
+  // THE FLUID-MASK UNIFORMS — only allocated when a mask was actually
+  // supplied, mirroring `uAlphaThreshold`'s own "no tex, no threshold
+  // uniform" discipline just above. `fluidMaskUvOffset`/`Scale` are
+  // `uniform(vec2(...))`, never baked `float(literal)`s, for the EXACT same
+  // pipeline-recompile reason `uFloorIndex`/`uFlags` are uniforms (see this
+  // function's own comment above them): a SPLIT Fluid item's several
+  // sub-tiles each get a DIFFERENT offset/scale, and a fresh material is
+  // built for every one of them on every residency pass.
+  const uFluidMaskEpsilon = fluidMaskTex ? uniform(float(fluidMaskEpsilon)) : null;
+  const uFluidMaskUvOffset = fluidMaskTex ? uniform(vec2(fluidMaskUvOffset[0], fluidMaskUvOffset[1])) : null;
+  const uFluidMaskUvScale = fluidMaskTex ? uniform(vec2(fluidMaskUvScale[0], fluidMaskUvScale[1])) : null;
   material.fragmentNode = Fn(() => {
-    const a = texture(tex).level(float(0)).a;
-    a.lessThan(uAlphaThreshold).discard();
+    // THE OR — mirrors the SAME discard-based shape the alpha-only branch
+    // this replaces already used (a single `.discard()` call, never a
+    // second mechanism): solid wherever EITHER proof holds, so this only
+    // discards when BOTH fail. `tex` absent (no real item today, but a
+    // synthetic/test caller's case — this function's own long-standing
+    // doc) contributes an unconditional "fails" of its own so the mask
+    // alone can still decide.
+    let discardCond = null;
+    if (tex) {
+      const a = texture(tex).level(float(0)).a;
+      discardCond = a.lessThan(uAlphaThreshold);
+    }
+    if (fluidMaskTex) {
+      // Remap THIS tile's own local uv() into the mask's full-item quad UV
+      // space (identity for an unsplit item — see `fluidMaskUvOffset`'s own
+      // doc above) before sampling — the mask covers the WHOLE item's quad,
+      // the same way the item's albedo does, never one sub-tile's own crop.
+      const maskUv = uv().mul(uFluidMaskUvScale).add(uFluidMaskUvOffset);
+      // `.level(float(0))` — the SAME round-10 fix `tex`'s own alpha read
+      // uses just above, for the identical reason: an implicitly-selected
+      // mip on a real texture can read near-zero coverage over a texel that
+      // is visibly, fully inside the authored tube.
+      const maskCoverage = texture(fluidMaskTex, maskUv).level(float(0)).r;
+      const maskFails = maskCoverage.lessThan(uFluidMaskEpsilon);
+      discardCond = discardCond ? discardCond.and(maskFails) : maskFails;
+    }
+    discardCond.discard();
     discardIfFading();
     // G (outdoors) is a KNOWN GAP, stated honestly, not faked: wiring it
     // needs the same envLight/uOutdoorsRect plumbing scene-attr.js's real

@@ -23,24 +23,32 @@ import {
   DEPTH_FLAG_IS_LEVEL_FOREGROUND,
   DEPTH_FLAG_IS_TILE,
   resolveSceneDepthFloorIndex,
-  computeAlwaysOpaqueForDepthWriter,
   buildSceneDepthWriterMaterial,
   buildSceneDepthProxyMesh,
   querySceneDepth,
 } from '../scene-depth.js';
+import { FLUID_PRESENCE_EDGE0 } from '../../effects/fluid/fluid-render.js';
 
 /** A minimal chainable node — supports the TSL method chains this module's
- * own TSL-building functions call (`.level().a`, `.lessThan()`, `.not()`,
- * `.discard()`) — the same "minimal mock, not the real vendored TSL"
- * posture scene-attr.test.mjs's own header establishes. */
+ * own TSL-building functions call (`.level().a`/`.r`, `.lessThan()`,
+ * `.and()`, `.mul()`, `.add()`, `.not()`, `.discard()`) — the same "minimal
+ * mock, not the real vendored TSL" posture scene-attr.test.mjs's own header
+ * establishes. */
 function chainable(kind, extra = {}) {
   const node = { __kind: kind, ...extra };
   node.level = (lvl) => chainable('level', { subject: node, lvl });
   Object.defineProperty(node, 'a', { get: () => chainable('swizzle-a', { subject: node }) });
+  Object.defineProperty(node, 'r', { get: () => chainable('swizzle-r', { subject: node }) });
   node.lessThan = (other) => chainable('lessThan', { subject: node, other });
   node.greaterThan = (other) => chainable('greaterThan', { subject: node, other });
   node.not = () => chainable('not', { subject: node });
   node.discard = () => chainable('discard', { subject: node });
+  // mythica-machina-press#543, SECOND ROUND — the fluid-mask OR needs
+  // `.and()` (combining the two "fails" conditions), and the UV remap needs
+  // `.mul()`/`.add()` (rescaling `uv()` into the mask's own quad space).
+  node.and = (other) => chainable('and', { subject: node, other });
+  node.mul = (other) => chainable('mul', { subject: node, other });
+  node.add = (other) => chainable('add', { subject: node, other });
   return node;
 }
 
@@ -53,6 +61,11 @@ function makeTSL() {
     // not a claim about three's internals (this file's own header).
     uniform: (v) => chainable('uniform', { value: v && typeof v === 'object' && 'value' in v ? v.value : v }),
     vec4: (...args) => chainable('vec4', { args }),
+    // `.value` is `{x,y}`, not unwrapped further — mirrors a real Vector2
+    // uniform's own shape closely enough for `uniform(vec2(...)).value.x/y`
+    // assertions below, without claiming to BE three's Vector2.
+    vec2: (x, y) => chainable('vec2', { x, y }),
+    uv: () => chainable('uv'),
     texture: (tex, uv) => chainable('texture', { tex, uv }),
     screenUV: chainable('screenUV'),
   };
@@ -190,36 +203,162 @@ export function run(t) {
     );
   }
 
-  // computeAlwaysOpaqueForDepthWriter (mythica-machina-press#543) — the
-  // Fluid-carrier-tile occlusion fix. Two independent, ORed proofs of
-  // "no real texel-level discard would ever fire here": the original
-  // alphaStats-vs-threshold proof, and the new hasFluidMask proof.
+  // buildSceneDepthWriterMaterial — fluidMaskTex (mythica-machina-press#543,
+  // SECOND ROUND). Round one's `computeAlwaysOpaqueForDepthWriter` (a
+  // whole-item `hasFluidMask` boolean folded into `alwaysOpaque`) is GONE —
+  // it could only ever say "this whole tile is solid" or "not", never
+  // "solid HERE, transparent THERE" within one tile, which is exactly the
+  // author's reported regression (fire/smoke hidden across the tile's whole
+  // rectangular quad instead of just its pipe/glass shapes). These pin the
+  // REPLACEMENT shape: a second, genuinely per-pixel texture sample, ORed
+  // with the original alpha discard via `.and()` on the two "fails"
+  // conditions — never a second boolean folded into `alwaysOpaque`.
   {
-    ok('alwaysOpaque: no alphaStats, no fluid mask — false', computeAlwaysOpaqueForDepthWriter({}) === false);
+    // ── fluidMaskTex forces the per-pixel branch even with no base tex ──────
+    const THREE = makeTHREE();
+    const sampledTexes = [];
+    const originalTexture = THREE.TSL.texture;
+    THREE.TSL.texture = (tex, uv) => {
+      sampledTexes.push(tex);
+      return originalTexture(tex, uv);
+    };
+    const fluidMaskTex = { __kind: 'fluid-mask-texture' };
+    const mat = buildSceneDepthWriterMaterial({ THREE, fluidMaskTex, floorIndex: 0, flags: 0 });
     ok(
-      'alwaysOpaque: alphaStats below threshold, no fluid mask — false (unchanged original behaviour)',
-      computeAlwaysOpaqueForDepthWriter({ alphaStats: { min: 100 }, alphaThreshold: 0.75 }) === false
+      'fluidMaskTex alone (no base tex): the early-Z "always solid" fast path is NOT taken — ' +
+        'the mask is genuinely sampled per pixel, unlike round one\'s whole-item boolean',
+      sampledTexes.length === 1 && sampledTexes[0] === fluidMaskTex
+    );
+    ok('fluidMaskTex alone: still returns the same vec4 payload shape', mat.fragmentNode.__kind === 'vec4');
+  }
+  {
+    // ── alwaysOpaque still wins over fluidMaskTex — proof 1 alone is enough ──
+    const THREE = makeTHREE();
+    const sampledTexes = [];
+    const originalTexture = THREE.TSL.texture;
+    THREE.TSL.texture = (tex, uv) => {
+      sampledTexes.push(tex);
+      return originalTexture(tex, uv);
+    };
+    const tex = { __kind: 'real-texture' };
+    const fluidMaskTex = { __kind: 'fluid-mask-texture' };
+    buildSceneDepthWriterMaterial({ THREE, tex, fluidMaskTex, alwaysOpaque: true, floorIndex: 0, flags: 0 });
+    ok(
+      'alwaysOpaque:true skips BOTH textures, even when a fluidMaskTex was also supplied — ' +
+        'proof 1 (real decoded alpha) alone already made the discard unreachable',
+      sampledTexes.length === 0
+    );
+  }
+  {
+    // ── tex AND fluidMaskTex together: BOTH sampled — only possible if the ──
+    // per-pixel branch (never the fast path) built both discard operands.
+    // The two are then combined with `.and()` on their own two `.lessThan()`
+    // "fails" results, exactly the discard-based shape the alpha-only branch
+    // already used (never a second mechanism) — see this module's own
+    // comment beside that `.and()` call for the full reasoning; a mock TSL
+    // node has no independent way to observe an internal `.and()` call that
+    // never escapes the fragment closure, so this test pins the one part of
+    // the contract that IS externally observable: both textures are read,
+    // in the documented order (base alpha first, mask coverage second).
+    const THREE = makeTHREE();
+    const sampledTexes = [];
+    const originalTexture = THREE.TSL.texture;
+    THREE.TSL.texture = (tex, uv) => {
+      sampledTexes.push(tex);
+      return originalTexture(tex, uv);
+    };
+    const tex = { __kind: 'real-texture' };
+    const fluidMaskTex = { __kind: 'fluid-mask-texture' };
+    const mat = buildSceneDepthWriterMaterial({ THREE, tex, fluidMaskTex, floorIndex: 2, flags: 0 });
+    ok(
+      'tex + fluidMaskTex together: BOTH textures are sampled — tex first (the base alpha test), ' +
+        'then fluidMaskTex (the mask coverage test)',
+      sampledTexes.length === 2 && sampledTexes[0] === tex && sampledTexes[1] === fluidMaskTex
+    );
+    ok('tex + fluidMaskTex: still returns the same vec4 payload shape', mat.fragmentNode.__kind === 'vec4');
+  }
+  {
+    // ── the UV remap: uv().mul(scale).add(offset), not the bare uv() tex uses ──
+    const THREE = makeTHREE();
+    let fluidMaskUvArg = null;
+    const originalTexture = THREE.TSL.texture;
+    THREE.TSL.texture = (tex, uv) => {
+      if (tex && tex.__kind === 'fluid-mask-texture') fluidMaskUvArg = uv;
+      return originalTexture(tex, uv);
+    };
+    const fluidMaskTex = { __kind: 'fluid-mask-texture' };
+    buildSceneDepthWriterMaterial({
+      THREE,
+      fluidMaskTex,
+      fluidMaskUvOffset: [0.25, 0.5],
+      fluidMaskUvScale: [0.1, 0.2],
+      floorIndex: 0,
+      flags: 0,
+    });
+    ok(
+      'fluidMaskTex is sampled at uv().mul(scale).add(offset), never the bare uv() tex would use',
+      fluidMaskUvArg?.__kind === 'add' && fluidMaskUvArg.subject?.__kind === 'mul'
     );
     ok(
-      'alwaysOpaque: alphaStats at/above threshold — true, exactly as before this fix',
-      computeAlwaysOpaqueForDepthWriter({ alphaStats: { min: 200 }, alphaThreshold: 0.75 }) === true
+      'the mul() operand IS the scale, unwrapped down to its own {x,y} — [0.1, 0.2]',
+      fluidMaskUvArg.subject.other.value.x === 0.1 && fluidMaskUvArg.subject.other.value.y === 0.2
     );
     ok(
-      'alwaysOpaque: a Fluid carrier with a NEARLY TRANSPARENT base texture — true anyway ' +
-        '(the bug this fix closes: alphaStats alone would have read false here)',
-      computeAlwaysOpaqueForDepthWriter({ alphaStats: { min: 0 }, alphaThreshold: 0.75, hasFluidMask: true }) === true
+      'the add() operand IS the offset, unwrapped down to its own {x,y} — [0.25, 0.5]',
+      fluidMaskUvArg.other.value.x === 0.25 && fluidMaskUvArg.other.value.y === 0.5
     );
+    ok('the mul()\'s own subject is the tile\'s bare uv() — never a world-space UV', fluidMaskUvArg.subject.subject.__kind === 'uv');
+  }
+  {
+    // ── fluidMaskUvOffset/Scale default to identity — the unsplit-item case ──
+    const THREE = makeTHREE();
+    let fluidMaskUvArg = null;
+    const originalTexture = THREE.TSL.texture;
+    THREE.TSL.texture = (tex, uv) => {
+      if (tex && tex.__kind === 'fluid-mask-texture') fluidMaskUvArg = uv;
+      return originalTexture(tex, uv);
+    };
+    const fluidMaskTex = { __kind: 'fluid-mask-texture' };
+    buildSceneDepthWriterMaterial({ THREE, fluidMaskTex, floorIndex: 0, flags: 0 });
     ok(
-      'alwaysOpaque: hasFluidMask true with NO alphaStats at all (raw-fallback decode path) — still true',
-      computeAlwaysOpaqueForDepthWriter({ alphaStats: null, hasFluidMask: true }) === true
+      'no fluidMaskUvOffset/Scale supplied: defaults to identity, [0,0]/[1,1] — the common unsplit item',
+      fluidMaskUvArg.subject.other.value.x === 1 &&
+        fluidMaskUvArg.subject.other.value.y === 1 &&
+        fluidMaskUvArg.other.value.x === 0 &&
+        fluidMaskUvArg.other.value.y === 0
     );
+  }
+  {
+    // ── fluidMaskEpsilon defaults to FLUID_PRESENCE_EDGE0 — never a second, ──
+    // independently hand-tuned cutoff that could drift from the visible
+    // glow's own silhouette fade-in (`fluid-render.js`'s own `inside` term).
+    const THREE = makeTHREE();
+    const uniformValues = [];
+    const originalUniform = THREE.TSL.uniform;
+    THREE.TSL.uniform = (v) => {
+      const node = originalUniform(v);
+      uniformValues.push(node.value);
+      return node;
+    };
+    const fluidMaskTex = { __kind: 'fluid-mask-texture' };
+    buildSceneDepthWriterMaterial({ THREE, fluidMaskTex, floorIndex: 0, flags: 0 });
     ok(
-      'alwaysOpaque: hasFluidMask false is a true no-op — behaves exactly like the pre-#543 signature',
-      computeAlwaysOpaqueForDepthWriter({ alphaStats: { min: 200 }, alphaThreshold: 0.75, hasFluidMask: false }) ===
-        true &&
-        computeAlwaysOpaqueForDepthWriter({ alphaStats: { min: 100 }, alphaThreshold: 0.75, hasFluidMask: false }) ===
-          false
+      'fluidMaskEpsilon defaults to the imported FLUID_PRESENCE_EDGE0, not a second hand-tuned constant',
+      uniformValues.includes(FLUID_PRESENCE_EDGE0)
     );
+  }
+  {
+    // ── no tex, no fluidMaskTex: unaffected — the ORIGINAL "always solid" ──
+    // fast path this module has always had, byte-for-byte.
+    const THREE = makeTHREE();
+    const sampledTexes = [];
+    const originalTexture = THREE.TSL.texture;
+    THREE.TSL.texture = (tex, uv) => {
+      sampledTexes.push(tex);
+      return originalTexture(tex, uv);
+    };
+    buildSceneDepthWriterMaterial({ THREE, floorIndex: 0, flags: 0 });
+    ok('no tex, no fluidMaskTex: never samples anything — unchanged pre-#543 behaviour', sampledTexes.length === 0);
   }
 
   // resolveSceneDepthFloorIndex — membership first, elevation fallback,

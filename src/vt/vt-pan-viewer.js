@@ -161,7 +161,6 @@ import {
   RENDER_ABOVE_EVERYTHING_DEPTH,
   computeSceneDepthFlags,
   resolveSceneDepthFloorIndex,
-  computeAlwaysOpaqueForDepthWriter,
   buildSceneDepthWriterMaterial,
   buildSceneDepthProxyMesh,
   querySceneDepth,
@@ -17302,28 +17301,21 @@ export async function startVtPanViewer({
       const maxRank = depthAuthority.maxRank;
       const sceneDoc = globalThis.canvas?.scene ?? null;
       const viewedFloorIndex = view?.floorIndex ?? 0;
-      // FLUID CARRIER TILES MUST OCCLUDE WHERE THEIR MASK IS, NOT WHERE THEIR
-      // BASE ART IS (mythica-machina-press#543). A Fluid tile is commonly a
-      // nearly-transparent "carrier" — `fluid-surface-subsystem.js`'s own
+      // FLUID CARRIER TILES MUST OCCLUDE BY THEIR ACTUAL PIPE/GLASS
+      // SILHOUETTE, NOT BY THEIR WHOLE RECTANGULAR QUAD
+      // (mythica-machina-press#543, SECOND ROUND). A Fluid tile is commonly
+      // a nearly-transparent "carrier" — `fluid-surface-subsystem.js`'s own
       // header — whose visible glow is a SEPARATE depthTest:false pass
       // (`fluid-render.js`), never the tile's own base-texture alpha this
-      // depth-writer discard tests below. Without this, `alwaysOpaque` stays
-      // false for such a tile (its real art alpha never clears
-      // `alphaThreshold`), `buf:scene.depth` never marks its footprint solid,
-      // and fire/smoke/embers' own depth-height gate
-      // (point-light-illumination.js#buildDepthHeightGateNode, read via
-      // fire-particle-runtime.js's `occlusionGate`) finds nothing to test
-      // against there — so it draws straight through regardless of the
-      // tile's elevation. `getFluidMaskItems` (already injected from boot's
-      // `createFluidSeams`, `scene/mask-authority.js#authoredStatusForItem`
-      // underneath — URL-only, synchronous, no texture/decode wait) is the
-      // SAME per-item authored-fluid-mask signal the visible fluid mesh
-      // itself is built from, reused here rather than a second lookup. Just
-      // the ids: this pass needs a boolean per item, not the mask's own
-      // corners/url, and every mask suffix's own file-convention knowledge
-      // stays inside `scene/mask-authority.js` (`masks/authority-only`) —
-      // this file never inspects a URL or a suffix itself.
-      const fluidMaskedItemIds = new Set(getFluidMaskItems(viewedFloorIndex).map((f) => f.id));
+      // depth-writer discard tests below. ROUND ONE folded a per-item
+      // `hasFluidMask` boolean into `alwaysOpaque`, which fixed the
+      // "occludes nothing at all" bug but replaced it with "occludes its
+      // whole bounding box" — the author's own report (fire/smoke hidden
+      // across a big rectangular zone that doesn't match the round glass
+      // vessel + pipe shapes underneath). Fixed properly below, PER TILE,
+      // by reading the item's actual mask TEXTURE (not just whether one
+      // exists) and sampling it per-pixel in `buildSceneDepthWriterMaterial`
+      // — see that function's own `fluidMaskTex` doc.
       for (const item of items) {
         // VEGETATION CASE-2 OVERLAY (STAGE 2, 2026-08-04) — a synthetic item
         // (`buildVegetationDepthItems`) with no `itemStates` entry of its
@@ -17623,18 +17615,20 @@ export async function startVtPanViewer({
         // comparison the discard below would have made, not a coincidentally
         // near-always-true one.
         const alphaStats = state.wholeImage.alphaStats;
-        // mythica-machina-press#543 — `hasFluidMask` (computed once above,
-        // from the SAME per-item authored-fluid-mask signal the visible
-        // fluid mesh itself is built from) now feeds
-        // `computeAlwaysOpaqueForDepthWriter` alongside the original
-        // `alphaStats` proof — see that function's own header for why both
-        // are safe to fold into one boolean.
-        const hasFluidMask = fluidMaskedItemIds.has(item.id);
-        const alwaysOpaque = computeAlwaysOpaqueForDepthWriter({
-          alphaStats,
-          alphaThreshold: item.alphaThreshold ?? 0.75,
-          hasFluidMask,
-        });
+        const alwaysOpaque = alphaStats != null && alphaStats.min / 255 >= (item.alphaThreshold ?? 0.75);
+        // mythica-machina-press#543, SECOND ROUND — the ACTUAL mask texture
+        // (never just a boolean), so `buildSceneDepthWriterMaterial` can
+        // test coverage PER PIXEL instead of treating this item's whole quad
+        // as solid. `getMaskTextureForItem` returns the SAME already-loaded
+        // texture (`fluid-surface-subsystem.js#entry.maskTexture`) this
+        // item's own visible fluid mesh samples for its silhouette
+        // (`fluid-render.js#buildFluidSurfaceMaterials`'s `maskTexNode`) —
+        // reused, never re-fetched — or `null` for the common non-Fluid
+        // case, or for a Fluid item whose bake hasn't finished yet (never
+        // throws; see that accessor's own doc for why this residency pass
+        // must not crash on a bake still in flight).
+        const fluidMaskTex = fluidSurface.getMaskTextureForItem(item.id);
+        const hasFluidMask = fluidMaskTex != null;
         for (const t of tiles) {
           // EARLY OCCLUSION REJECT (see buildWholeImageMaterial's own
           // comment) — kept fresh here, every residency pass, the exact
@@ -17688,16 +17682,19 @@ export async function startVtPanViewer({
           // `needsUpdate` forces the NodeMaterial to recompile its pipeline
           // with the new blend state.
           //
-          // FOURTH EXCLUSION, mythica-machina-press#543: `hasFluidMask` is
-          // now a THIRD, independent way `alwaysOpaque` can read true (see
-          // that flag's own comment above) — a Fluid carrier tile's real
-          // base texture is commonly nearly fully transparent BY DESIGN
-          // (`fluid-surface-subsystem.js`'s own header), same "100%-opaque
-          // signal, genuinely-translucent real draw" shape the three checks
-          // below already exist to catch. Forcing `transparent:false` on the
-          // carrier's own visible material here would blank out the glow the
+          // FOURTH EXCLUSION, mythica-machina-press#543 — kept even after
+          // the SECOND ROUND fix moved `hasFluidMask` off of `alwaysOpaque`
+          // entirely (it is now purely `fluidMaskTex != null`, unrelated to
+          // this item's OWN alpha-stats proof): `alwaysOpaque` and
+          // `hasFluidMask` are independent booleans today, so a Fluid item
+          // whose real base art HAPPENS to be fully opaque everywhere (an
+          // unusual authoring choice, but not an impossible one) would
+          // otherwise still hit this branch and force `transparent:false` on
+          // the carrier's own VISIBLE material — blanking out the glow the
           // author's map depends on seeing THROUGH it, for as long as this
-          // debug flag stays armed.
+          // debug flag stays armed. Same "don't force opaque a thing that
+          // must stay able to show something through it" reasoning the three
+          // checks below already exist to catch, just for a fourth cause.
           if (
             debugForceOpaqueBlendOff &&
             alwaysOpaque &&
@@ -17784,6 +17781,30 @@ export async function startVtPanViewer({
             depthMotionPositionNode = nodeEntry.positionNode;
             depthMotionVariantKey = `tile:${nodeEntry.id}`;
           }
+          // FLUID MASK UV REMAP, PER TILE (mythica-machina-press#543, SECOND
+          // ROUND) — `fluidMaskTex` covers the ITEM's WHOLE quad (0..1), the
+          // same way `fluid-render.js`'s own visible mesh samples it, but
+          // `t.tex` for a SPLIT item is only THIS sub-tile's own crop
+          // (`scene/world-quad.js#computeTileSubPlacement`'s own header:
+          // "each sub-tile is its OWN texture holding one source rect"), so
+          // `t`'s local 0..1 uv() is not the mask's uv() for anything but an
+          // unsplit item. `t.tile` (`{sx,sy,sw,sh}`, this sub-tile's own crop
+          // rect in the item's native image pixels — the SAME object
+          // `setTileGeometry` already built this tile's own geometry from,
+          // never re-derived) and `state.wholeImage.imageSize` (the item's
+          // native pixel dimensions) are exactly what's needed to rescale:
+          // identity ([0,0]/[1,1]) for the overwhelmingly common unsplit
+          // case, where sx=sy=0 and sw/sh already equal the whole image.
+          let fluidMaskUvOffset;
+          let fluidMaskUvScale;
+          if (fluidMaskTex && t.tile) {
+            const imgW = state.wholeImage.imageSize?.width;
+            const imgH = state.wholeImage.imageSize?.height;
+            if (imgW > 0 && imgH > 0) {
+              fluidMaskUvOffset = [t.tile.sx / imgW, t.tile.sy / imgH];
+              fluidMaskUvScale = [t.tile.sw / imgW, t.tile.sh / imgH];
+            }
+          }
           const writerArgs = {
             THREE,
             tex: t.tex,
@@ -17793,6 +17814,9 @@ export async function startVtPanViewer({
             alwaysOpaque,
             positionNode: depthMotionPositionNode,
             variantKey: depthMotionVariantKey,
+            fluidMaskTex: fluidMaskTex ?? undefined,
+            fluidMaskUvOffset,
+            fluidMaskUvScale,
           };
           if (t.earlyZReason === 'occlusionResponsive') {
             // UNPOOLED, ON PURPOSE — never depthProxyMaterialPool. That pool

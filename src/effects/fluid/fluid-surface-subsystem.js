@@ -146,7 +146,7 @@ const FLUID_RENDER_ORDER_EMIT_MAGNITUDE = 0.01;
  * @param {(rt: *) => void} args.disposeSimRenderTarget - `allocator.dispose(rt)`.
  * @param {() => {enabled: boolean, params: object}} [args.getFluidRenderState]
  * @param {*} args.timeMsNode - THE SHARED CLOCK.
- * @returns {{sync: (floorIndex: number) => void, prepareSimTick: (nowMs: number, dtSec: number) => {clears: Array<*>, advects: Array<{quad: *, destRT: *}>}, getStatus: () => object, dispose: () => void}}
+ * @returns {{sync: (floorIndex: number) => void, prepareSimTick: (nowMs: number, dtSec: number) => {clears: Array<*>, advects: Array<{quad: *, destRT: *}>}, getStatus: () => object, dispose: () => void, getMaskTextureForItem: (itemId: string) => (*|null)}}
  */
 export function createFluidSurfaceSubsystem({
   THREE,
@@ -788,7 +788,38 @@ export function createFluidSurfaceSubsystem({
     entries.clear();
   }
 
-  return { sync, prepareSimTick, getStatus, dispose };
+  /**
+   * The RAW mask texture for one masked item — the EXACT SAME texture object
+   * (`entry.maskTexture`, set once in `buildMesh` from `loadAndBake`'s own
+   * `loadMaskImage` result) that this item's own visible fluid mesh already
+   * samples for its silhouette (`fluid-render.js#buildFluidSurfaceMaterials`'s
+   * `maskTexNode = texture(maskTexture, uv())`). Added for
+   * mythica-machina-press#543's SECOND round: the depth-proxy occlusion
+   * writer (`vt-pan-viewer.js#rebuildSceneDepthProxies`) needs this same
+   * texture, sampled the same way, so a Fluid carrier tile occludes
+   * fire/smoke/embers by its ACTUAL pipe/glass silhouette — round one's
+   * whole-item `alwaysOpaque` boolean had no way to say "solid HERE,
+   * transparent THERE" within one tile, which is why it painted a big
+   * rectangular cutout instead of the tube shapes.
+   *
+   * Returns `null` — NEVER throws — whenever this item has no fluid entry at
+   * all, or its mask hasn't finished loading/baking yet (`entry.maskTexture`
+   * is only set at the END of `loadAndBake`'s async chain, in `buildMesh`).
+   * A residency pass that races a fresh bake must fall back to the ORIGINAL
+   * alpha-threshold-only depth test for that tile this pass, never crash
+   * (`buildSceneDepthWriterMaterial`'s own `fluidMaskTex` parameter already
+   * treats `null`/`undefined` as "no fluid mask" — the exact same fail-open
+   * shape `getFluidRenderState`'s own absent-seam guard uses elsewhere in
+   * this file).
+   *
+   * @param {string} itemId
+   * @returns {*|null}
+   */
+  function getMaskTextureForItem(itemId) {
+    return entries.get(itemId)?.maskTexture ?? null;
+  }
+
+  return { sync, prepareSimTick, getStatus, dispose, getMaskTextureForItem };
 }
 
 /** Have any of the four corners actually moved? */

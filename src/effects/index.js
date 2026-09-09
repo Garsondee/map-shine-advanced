@@ -318,7 +318,17 @@ export {
   FLUID_PACK_MAX_DIM,
   FLUID_PACK_CHANNELS,
 } from './fluid/fluid-pack.js';
-export { buildFluidSurfaceMaterials, FLUID_ABSORPTION_STRENGTH } from './fluid/fluid-render.js';
+export {
+  buildFluidSurfaceMaterials,
+  FLUID_ABSORPTION_STRENGTH,
+  // mythica-machina-press#543, SECOND ROUND — the depth-proxy occlusion
+  // writer (`vt/scene-depth.js#buildSceneDepthWriterMaterial`'s own
+  // `fluidMaskEpsilon` default) needs the SAME "is there any real tube here
+  // at all" cutoff this file's own `inside` term uses, so the occlusion
+  // silhouette can never disagree with the visible glow's — re-exported
+  // rather than duplicated as a second magic number that could drift.
+  FLUID_PRESENCE_EDGE0,
+} from './fluid/fluid-render.js';
 export { createFluidSurfaceSubsystem } from './fluid/fluid-surface-subsystem.js';
 export { createFluidRegistration, createFluidSeams } from './fluid/fluid-registration.js';
 export {

@@ -55,15 +55,34 @@
  * ============================================================================
  *
  * `buildSceneDepthWriterMaterial`'s own early-return branch
- * (`alwaysOpaque || !tex`) never calls `texture(tex)` at all — the returned
- * material's fragment graph is `Fn(() => vec4(uFloorIndex, float(0), uFlags,
- * float(1)))()`, identical regardless of which texture the caller passed.
- * Two opaque items with DIFFERENT textures therefore share ONE pooled
- * material correctly; the non-opaque (alpha-tested) branch DOES sample
- * `tex`, so its signature must include the texture's own identity
- * (`tex.uuid`) or two different items' art would render through the wrong
- * proxy. Read from `scene-depth.js` directly before encoding this, not
- * guessed from the parameter names.
+ * (`alwaysOpaque || (!tex && !fluidMaskTex)`, extended for
+ * mythica-machina-press#543's second round — see below) never calls
+ * `texture(tex)` at all — the returned material's fragment graph is
+ * `Fn(() => vec4(uFloorIndex, float(0), uFlags, float(1)))()`, identical
+ * regardless of which texture the caller passed. Two opaque items with
+ * DIFFERENT textures therefore share ONE pooled material correctly; the
+ * non-opaque (alpha-tested) branch DOES sample `tex`, so its signature must
+ * include the texture's own identity (`tex.uuid`) or two different items'
+ * art would render through the wrong proxy. Read from `scene-depth.js`
+ * directly before encoding this, not guessed from the parameter names.
+ *
+ * ============================================================================
+ * SECOND ROUND, mythica-machina-press#543 — `fluidMaskTex` extends the SAME
+ * RULE, NOT A NEW ONE
+ * ============================================================================
+ *
+ * A Fluid carrier tile's depth-writer material now OPTIONALLY samples a
+ * SECOND texture (`fluidMaskTex`, its authored fluid mask — see
+ * `scene-depth.js#buildSceneDepthWriterMaterial`'s own doc) at a per-tile UV
+ * remap (`fluidMaskUvOffset`/`fluidMaskUvScale` — a SPLIT item's several
+ * sub-tiles each need a different one). Exactly the same reasoning as `tex`
+ * above applies: whenever the fragment graph genuinely samples a texture,
+ * that texture's identity (and, here, the offset/scale that address it) must
+ * be part of the key, or two items — or two sub-tiles of the SAME item —
+ * would collide onto one pooled material and one of them would occlude by
+ * the WRONG silhouette. The opaque bucket is unaffected either way: neither
+ * `tex` nor `fluidMaskTex` is ever sampled there, so it still keys the same
+ * regardless of what either one is.
  *
  * @module vt/depth-proxy-material-pool
  */
@@ -98,6 +117,27 @@
  *   frame's real picture, the other must not), and they cannot share a
  *   single `THREE.NodeMaterial` object at all since `colorWrite` is a
  *   material-level property, not a per-draw one.
+ * @param {*} [args.fluidMaskTex] - mythica-machina-press#543, SECOND ROUND.
+ *   `buildSceneDepthWriterMaterial`'s new second texture (see its own doc):
+ *   when present, the fragment graph samples it too, at a per-tile UV remap
+ *   (`fluidMaskUvOffset`/`fluidMaskUvScale`, below), so — exactly like `tex`
+ *   in the alpha-tested branch — its IDENTITY must be part of the key, or
+ *   two items with different masks (or the same item's different sub-tile
+ *   crops) would collide onto one pooled material and occlude by the WRONG
+ *   silhouette. Absent/`null` reproduces today's key exactly (see the
+ *   `alwaysOpaque` fast-path branch below, which now also covers `!tex &&
+ *   !fluidMaskTex`, mirroring the material builder's own condition).
+ * @param {number[]} [args.fluidMaskUvOffset] @param {number[]} [args.fluidMaskUvScale] -
+ *   folded into the key alongside `fluidMaskTex`'s own identity — a SPLIT
+ *   item's several sub-tiles share one `fluidMaskTex` but need DIFFERENT
+ *   offset/scale uniforms, so two of them must never share one pooled
+ *   material either (the exact `variantKey` aliasing class this module's own
+ *   `positionNode` guard above already exists to prevent, applied here to a
+ *   value instead of a node identity).
+ * @param {number} [args.fluidMaskEpsilon] - folded in too, even though every
+ *   real caller today passes the same constant (`scene-depth.js`'s own
+ *   `FLUID_PRESENCE_EDGE0` default) — a signature describes the material's
+ *   ACTUAL shader inputs, not just the ones some caller happens to vary yet.
  * @returns {string}
  */
 export function computeDepthProxyMaterialSignature({
@@ -109,6 +149,10 @@ export function computeDepthProxyMaterialSignature({
   positionNode,
   variantKey,
   colorWrite = true,
+  fluidMaskTex,
+  fluidMaskUvOffset,
+  fluidMaskUvScale,
+  fluidMaskEpsilon,
 }) {
   const cw = colorWrite === false ? 0 : 1;
   // FAIL LOUD RATHER THAN ALIAS (2026-08-11). The original version folded only
@@ -127,11 +171,28 @@ export function computeDepthProxyMaterialSignature({
     );
   }
   const pos = positionNode ? `pos:${variantKey}` : 'nopos';
-  if (alwaysOpaque || !tex) {
+  // mythica-machina-press#543, SECOND ROUND — matches
+  // `buildSceneDepthWriterMaterial`'s OWN early-Z fast-path condition
+  // exactly (`alwaysOpaque || (!tex && !fluidMaskTex)`): that is the ONLY
+  // shape whose fragment graph samples no texture at all, so it is the only
+  // one two DIFFERENT items may still share one pooled material for,
+  // regardless of which tex/fluidMaskTex either happens to carry (see this
+  // module's own header, "WHY OPAQUE ITEMS KEY ACROSS TEXTURES").
+  if (alwaysOpaque || (!tex && !fluidMaskTex)) {
     return `opaque|${floorIndex}|${flags}|${cw}|${pos}`;
   }
-  const texId = tex.uuid ?? String(tex.id ?? 'notex');
-  return `alpha|${texId}|${floorIndex}|${flags}|${alphaThreshold}|${cw}|${pos}`;
+  const texId = tex ? (tex.uuid ?? String(tex.id ?? 'notex')) : 'notex';
+  // The fluid-mask part of the key is OMITTED entirely when no mask was
+  // passed — an ordinary alpha-tested (non-Fluid) tile's key stays
+  // byte-for-byte what it was before this round, so nothing already pooled
+  // gets evicted and rebuilt for a change that does not concern it.
+  const fluidPart = fluidMaskTex
+    ? `|fluid:${fluidMaskTex.uuid ?? String(fluidMaskTex.id ?? 'nofluidtex')}` +
+      `:${fluidMaskUvOffset?.[0] ?? 0},${fluidMaskUvOffset?.[1] ?? 0}` +
+      `:${fluidMaskUvScale?.[0] ?? 1},${fluidMaskUvScale?.[1] ?? 1}` +
+      `:${fluidMaskEpsilon ?? ''}`
+    : '';
+  return `alpha|${texId}|${floorIndex}|${flags}|${alphaThreshold}|${cw}|${pos}${fluidPart}`;
 }
 
 /**

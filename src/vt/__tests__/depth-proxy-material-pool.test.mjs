@@ -216,6 +216,106 @@ export function run(t) {
       computeDepthProxyMaterialSignature({ floorIndex: 1, flags: 0, alwaysOpaque: true })
   );
 
+  // ── signature: fluidMaskTex (mythica-machina-press#543, SECOND ROUND) ─────
+  // `buildSceneDepthWriterMaterial` now optionally samples a SECOND texture
+  // (the item's own fluid mask) at a per-tile UV remap — the identical
+  // "genuinely sampled → identity MUST be in the key" rule `tex` already
+  // gets above, extended to this new input.
+  const fluidTexA = { uuid: 'fluid-a' };
+  const fluidTexB = { uuid: 'fluid-b' };
+  t.ok(
+    'signature: two alpha-tested items with the SAME tex but DIFFERENT fluidMaskTex get DIFFERENT keys',
+    computeDepthProxyMaterialSignature({
+      tex: texA,
+      floorIndex: 1,
+      flags: 0,
+      alphaThreshold: 0.75,
+      fluidMaskTex: fluidTexA,
+    }) !==
+      computeDepthProxyMaterialSignature({
+        tex: texA,
+        floorIndex: 1,
+        flags: 0,
+        alphaThreshold: 0.75,
+        fluidMaskTex: fluidTexB,
+      })
+  );
+  t.ok(
+    'signature: a fluidMaskTex-bearing call differs from the SAME tex with none at all — ' +
+      'the fragment graph genuinely samples one more texture',
+    computeDepthProxyMaterialSignature({ tex: texA, floorIndex: 1, flags: 0, alphaThreshold: 0.75 }) !==
+      computeDepthProxyMaterialSignature({
+        tex: texA,
+        floorIndex: 1,
+        flags: 0,
+        alphaThreshold: 0.75,
+        fluidMaskTex: fluidTexA,
+      })
+  );
+  t.ok(
+    'signature: identical tex + fluidMaskTex + offset + scale + epsilon match — the pool can actually hit',
+    computeDepthProxyMaterialSignature({
+      tex: texA,
+      floorIndex: 1,
+      flags: 0,
+      alphaThreshold: 0.75,
+      fluidMaskTex: fluidTexA,
+      fluidMaskUvOffset: [0, 0],
+      fluidMaskUvScale: [1, 1],
+      fluidMaskEpsilon: 0.04,
+    }) ===
+      computeDepthProxyMaterialSignature({
+        tex: texA,
+        floorIndex: 1,
+        flags: 0,
+        alphaThreshold: 0.75,
+        fluidMaskTex: fluidTexA,
+        fluidMaskUvOffset: [0, 0],
+        fluidMaskUvScale: [1, 1],
+        fluidMaskEpsilon: 0.04,
+      })
+  );
+  t.ok(
+    'signature: the SAME fluidMaskTex but a DIFFERENT UV offset gets a DIFFERENT key — ' +
+      "a split item's two sub-tiles must never collide onto one pooled material",
+    computeDepthProxyMaterialSignature({
+      tex: texA,
+      floorIndex: 1,
+      flags: 0,
+      alphaThreshold: 0.75,
+      fluidMaskTex: fluidTexA,
+      fluidMaskUvOffset: [0, 0],
+      fluidMaskUvScale: [0.5, 0.5],
+    }) !==
+      computeDepthProxyMaterialSignature({
+        tex: texA,
+        floorIndex: 1,
+        flags: 0,
+        alphaThreshold: 0.75,
+        fluidMaskTex: fluidTexA,
+        fluidMaskUvOffset: [0.5, 0],
+        fluidMaskUvScale: [0.5, 0.5],
+      })
+  );
+  t.ok(
+    'signature: the opaque branch (alwaysOpaque:true) ignores fluidMaskTex entirely — ' +
+      'that fragment graph never samples it, matching buildSceneDepthWriterMaterial\'s own fast path',
+    computeDepthProxyMaterialSignature({ tex: texA, floorIndex: 1, flags: 0, alwaysOpaque: true }) ===
+      computeDepthProxyMaterialSignature({
+        tex: texA,
+        floorIndex: 1,
+        flags: 0,
+        alwaysOpaque: true,
+        fluidMaskTex: fluidTexA,
+      })
+  );
+  t.ok(
+    'signature: fluidMaskTex alone (no base tex, no alwaysOpaque) still reaches the per-pixel ' +
+      '(never opaque) bucket — mirrors buildSceneDepthWriterMaterial\'s own !tex && !fluidMaskTex condition',
+    computeDepthProxyMaterialSignature({ floorIndex: 1, flags: 0, fluidMaskTex: fluidTexA }) !==
+      computeDepthProxyMaterialSignature({ floorIndex: 1, flags: 0 })
+  );
+
   // ── pool: basic hit/miss/build-only-on-miss ────────────────────────────────
   {
     const pool = createDepthProxyMaterialPool();

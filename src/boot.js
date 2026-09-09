@@ -465,6 +465,8 @@ import {
   readSceneEffectParams,
   writeSceneEffectParams,
   watchSceneEffectParams,
+  readSceneAllEffectParams,
+  writeSceneAllEffectParams,
   readCueStack,
   writeCueStack,
   watchCueStack,
@@ -2453,6 +2455,54 @@ function install() {
       }
     }
   }
+
+  // COPY/PASTE SCENE EFFECT SETTINGS (mythica-machina-press#12) — depended on
+  // real settings persistence existing first (#11), which Stage B
+  // (#288/#389, the effectParams scene flag) now provides. A session-only,
+  // in-memory clipboard — not itself persisted anywhere — so "copy scene A,
+  // then paste onto scene B" is the natural GM workflow (navigate, copy,
+  // navigate, paste), with no scene-id lookups and nothing to clean up if a
+  // GM copies and never pastes.
+  let copiedSceneEffectParams = null;
+
+  /**
+   * `MapShine.copySceneEffectSettings()` — snapshot every effect's authored
+   * look on the CURRENT scene into the in-memory clipboard.
+   * @returns {{ok: boolean, reason?: string, effectIds?: string[]}}
+   */
+  MapShine.copySceneEffectSettings = () => {
+    const { all, reason } = readSceneAllEffectParams();
+    if (!all) {
+      return { ok: false, reason: reason ?? 'this scene has no authored effect settings to copy yet' };
+    }
+    copiedSceneEffectParams = all;
+    return { ok: true, effectIds: Object.keys(all) };
+  };
+
+  /**
+   * `MapShine.pasteSceneEffectSettings()` — REPLACE the current scene's
+   * whole authored effect-params block with whatever was last copied, then
+   * re-resolve every effect so the paste is visible at once rather than on
+   * the next reload. GM-only (Foundry's own `scene.setFlag` rule) — a
+   * player's attempt reports a warning, never a silent no-op.
+   * @returns {Promise<{ok: boolean, reason?: string, effectIds?: string[]}>}
+   */
+  MapShine.pasteSceneEffectSettings = () => {
+    if (!copiedSceneEffectParams) {
+      return Promise.resolve({
+        ok: false,
+        reason: 'nothing copied yet — call MapShine.copySceneEffectSettings() on a source scene first',
+      });
+    }
+    return Promise.resolve(writeSceneAllEffectParams(copiedSceneEffectParams)).then((result) => {
+      if (result.ok) {
+        reapplyAll('paste scene effect settings');
+        return { ok: true, effectIds: Object.keys(copiedSceneEffectParams) };
+      }
+      log.warn(`paste scene effect settings not persisted: ${result.reason}`);
+      return result;
+    });
+  };
 
   /**
    * PREPARE, THEN COMMIT a same-scene floor switch (2026-08-15, unified

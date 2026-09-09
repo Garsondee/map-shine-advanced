@@ -164,6 +164,13 @@ export {
   buildVisionGateMaterial,
   buildVisionExploredDimMaterial,
   buildVisionSnapshotPublishMaterial,
+  // THE SHARED REVEAL QUERY (mythica-machina-press#386) — the SAME rule
+  // buildVisionGateMaterial's own whole-frame gate already enforces, made
+  // callable by an effect OUTSIDE this file for the first time (closing #49
+  // / the reverse half of #39 is real, separate shader work for whoever
+  // wires fire-render.js / bloom-render.js to it; this only makes the door
+  // exist).
+  sampleVisionRevealFactor,
 } from './vision/vision-mask-render.js';
 export {
   clipPolygonBySegmentShadow,

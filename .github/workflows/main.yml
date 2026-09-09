@@ -80,7 +80,7 @@ jobs:
       # structure walls, the full Node suite) — running it here means a
       # release can never ship something the project's own gate would reject.
       - name: Set Up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
 

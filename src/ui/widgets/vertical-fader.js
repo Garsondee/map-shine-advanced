@@ -47,10 +47,20 @@ function formatNum(v) {
  * @param {string} id
  * @param {{min?: number, max?: number, step?: number, label: string, help?: string}} decl
  * @param {{value: number, onChange: (v: number) => void}} io
- * @returns {HTMLElement} a small vertical stack (readout/track/label) —
- *   callers append extras (a drift-bracket caption, a pin glyph) the same
- *   way `renderFaders()` already appends onto `buildParamControl`'s own
- *   horizontal rows; both are plain block children of a flex column here.
+ * @returns {{root: HTMLElement, update: (v: number) => void}} `root` is a
+ *   small vertical stack (readout/track/label) — callers append extras (a
+ *   drift-bracket caption, a pin glyph) onto `root` the same way
+ *   `renderFaders()` already appended onto `buildParamControl`'s own
+ *   horizontal rows; both are plain block children of a flex column there.
+ *   `update` (2026-09-10 fix, author: "the sliders and weather buttons feel
+ *   like two completely detached systems") repaints the thumb/readout from
+ *   OUTSIDE — a live weather fade pushing its eased value every frame — the
+ *   same `root`/`update` shape `ui/rooms/remote/astrolabe-dial.js` already
+ *   established for its own dial, instead of the caller tearing the whole
+ *   control down and rebuilding it. No-ops while the user's own pointer is
+ *   down on this control (a native drag OR a fine-drag session, either) —
+ *   the same "the hand actually on the control wins" rule that dial's own
+ *   `isDragging` guard already applies to its ring.
  */
 export function buildVerticalFader(id, decl, { value, onChange }) {
   const wrap = styled('div', {
@@ -113,6 +123,26 @@ export function buildVerticalFader(id, decl, { value, onChange }) {
   const handle = createFineDragHandle(input, { axis: 'y' });
   trackWrap.appendChild(handle);
 
+  // Tracked independently of fine-drag.js's own private `dragging` flag
+  // (2026-09-10 fix) — a pointerdown on EITHER `input` (a native drag or a
+  // Shift-held fine drag) or `handle` (a handle-driven fine drag) starts
+  // SOME kind of drag on this control; `update()` below must not fight
+  // whichever one is currently live by yanking the thumb to a fade's own
+  // value mid-gesture.
+  let dragging = false;
+  const markDragging = () => {
+    dragging = true;
+  };
+  const markReleased = () => {
+    dragging = false;
+  };
+  input.addEventListener('pointerdown', markDragging);
+  input.addEventListener('pointerup', markReleased);
+  input.addEventListener('pointercancel', markReleased);
+  handle.addEventListener('pointerdown', markDragging);
+  handle.addEventListener('pointerup', markReleased);
+  handle.addEventListener('pointercancel', markReleased);
+
   const label = styled('span', {
     fontSize: '.64rem',
     color: TEXT,
@@ -122,5 +152,12 @@ export function buildVerticalFader(id, decl, { value, onChange }) {
   label.textContent = decl.label ?? id;
 
   wrap.append(readout, trackWrap, label);
-  return wrap;
+  return {
+    root: wrap,
+    update(v) {
+      if (dragging || !Number.isFinite(v)) return;
+      input.value = String(v);
+      readout.textContent = formatNum(v);
+    },
+  };
 }

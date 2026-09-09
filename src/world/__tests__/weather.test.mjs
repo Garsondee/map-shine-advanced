@@ -276,6 +276,66 @@ export function run(t) {
     );
   }
 
+  // ---- setTargets({immediate: true}): no second, stacked ease --------------------
+  // mythica-machina-press: "the sliders and weather buttons feel like two
+  // completely detached systems". Root cause traced to HERE: `pumpWeatherFades`
+  // (boot.js) calls setCloudCover/setVtPanViewerWeatherTargets every frame with
+  // world/fade-engine.js's OWN already-eased value — before this fix, that value
+  // was treated as a fresh TARGET for this manager's own SEPARATE tau-based ease
+  // on top, so the true rendered sky lagged the fade engine's own "arrived" state
+  // by tens of seconds (confirmed by direct simulation: a 10s fade left `state`
+  // only 38% of the way there at the 10s mark). `{immediate: true}` is the fix —
+  // land `state` on the same value as `targets`, no re-ease.
+  {
+    const mgr = createWeatherManager();
+    mgr.setTargets({ cloudCover01: 0.7 }, { immediate: true });
+    t.ok('{immediate:true} lands `state` on the target in the SAME call', mgr.read().state.cloudCover01 === 0.7);
+    t.ok('...not just `targets`', mgr.read().targets.cloudCover01 === 0.7);
+    const seenAfterOneTick = mgr.tick(1 / 60).state.cloudCover01;
+    t.ok('...and a subsequent tick does not move it (nothing left to ease)', seenAfterOneTick === 0.7);
+
+    // The default (immediate omitted/false) must keep behaving EXACTLY as
+    // before this fix — a single hand-set target the manager eases toward
+    // over its own "brisk" tau. This is what a real slider drag's `change`
+    // commit relies on; it must never become instant by accident.
+    const hand = createWeatherManager();
+    hand.setTargets({ cloudCover01: 1 });
+    t.ok('without {immediate}, state does NOT jump to the target', hand.read().state.cloudCover01 === 0);
+    runFor(hand, 5);
+    t.ok(
+      '...it still eases there the normal way',
+      hand.read().state.cloudCover01 > 0 && hand.read().state.cloudCover01 < 1
+    );
+
+    // The exact bug scenario: a caller (the fade engine) hands in a smoothly
+    // CHANGING value every "frame". With {immediate: true}, state must track
+    // it in perfect lockstep — no lag, regardless of how fast the caller's
+    // own value is moving.
+    const live = createWeatherManager();
+    for (let i = 1; i <= 20; i++) {
+      const externallyEasedValue = i / 20; // stands in for computeEasedValue(entry, nowMs)
+      live.setTargets({ cloudCover01: externallyEasedValue }, { immediate: true });
+      live.tick(1 / 60);
+      t.ok(
+        `frame ${i}: state matches the externally-eased value exactly, no lag`,
+        live.read().state.cloudCover01 === externallyEasedValue
+      );
+    }
+
+    // {immediate} must not change any of setTargets' other, already-tested
+    // contracts — applied/rejected/version/pinnedAxes all stay themselves.
+    const combo = createWeatherManager({ mode: 'almanac' });
+    const res = combo.setTargets({ cloudCover01: 0.4, notAnAxis: 1 }, { immediate: true });
+    t.ok(
+      'applied/rejected reporting is unaffected by {immediate}',
+      res.applied.includes('cloudCover01') && res.rejected.includes('notAnAxis')
+    );
+    t.ok('almanac-mode pinning is unaffected by {immediate}', res.pinnedAxes.includes('cloudCover01'));
+    const v0 = combo.read().version;
+    combo.setTargets({ cloudCover01: 0.4 }, { immediate: true });
+    t.ok('re-setting the SAME target under {immediate} is still not a version bump', combo.read().version === v0);
+  }
+
   // ---- version semantics: intent, not motion ------------------------------------
   {
     const mgr = createWeatherManager();

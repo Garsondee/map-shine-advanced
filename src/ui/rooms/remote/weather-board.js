@@ -431,6 +431,13 @@ export function renderWeatherBoard(container, ctx) {
     }
   }
 
+  /** axis name -> the LIVE_CHANNELS fader's own `{root, update}` handle,
+   * rebuilt every `renderFaders()` call (2026-09-10 fix) — what
+   * `updateLiveAxisValues()` below pushes a live-easing weather fade's value
+   * into, so the slider animates instead of sitting frozen until the fade
+   * completes and the whole board rebuilds. */
+  let liveFaderHandles = {};
+
   function renderFaders() {
     faderHost.innerHTML = '';
     const mode = ctx.getWeatherMode();
@@ -445,12 +452,18 @@ export function renderWeatherBoard(container, ctx) {
     // own widget-canon discipline warns against).
     const rack = document.createElement('div');
     rack.className = 'msa-wx-fader-rack';
+    // Rebuilt fresh every call (this function's own `faderHost.innerHTML =
+    // ''` above already discards the old DOM) — updateLiveAxisValues() below
+    // reads whatever this holds NOW, so a stale handle from a torn-down
+    // fader can never be written into by accident.
+    liveFaderHandles = {};
     for (const channel of LIVE_CHANNELS) {
       const decl = { type: 'float', min: 0, max: 1, step: 0.01, default: 0, label: channel.label, help: channel.help };
       const fader = buildVerticalFader(channel.axis, decl, {
         value: ctx.getAxisValue(channel.axis),
         onChange: (v) => ctx.onAxisCommit(channel.axis, v),
       });
+      liveFaderHandles[channel.axis] = fader;
       if (biome) {
         const bracket = driftBracket(biome, channel.axis);
         if (bracket) {
@@ -458,7 +471,7 @@ export function renderWeatherBoard(container, ctx) {
           note.className = 'msa-wx-bracket';
           note.textContent = `${bracket[0].toFixed(2)}–${bracket[1].toFixed(2)}`;
           note.title = `${biome.label} can wander this ${channel.label.toLowerCase()} range on its own in Drift mode.`;
-          fader.appendChild(note);
+          fader.root.appendChild(note);
         }
       }
       // THE CLOUD PIN GLYPH (2026-08-18 fix — gap-audit against the old
@@ -466,7 +479,7 @@ export function renderWeatherBoard(container, ctx) {
       // the Almanac can pin today (weather.js's own `pinnedAxes`) — visible
       // only in Drift mode while genuinely pinned, same two facts astrolabe.js
       // keys off, so it can't say "pinned" when Direct mode makes the concept
-      // meaningless. Same `fader.appendChild` shape as the drift-bracket
+      // meaningless. Same `fader.root.appendChild` shape as the drift-bracket
       // note just above, not a new attachment mechanism.
       if (mode === 'almanac' && channel.axis === 'cloudCover01' && ctx.getCloudPinned?.()) {
         const pin = document.createElement('button');
@@ -475,20 +488,25 @@ export function renderWeatherBoard(container, ctx) {
         pin.textContent = '📌';
         pin.title = 'Pinned — the Almanac will not change this. Click to release.';
         pin.addEventListener('click', () => ctx.onUnpinCloudCover?.());
-        fader.appendChild(pin);
+        fader.root.appendChild(pin);
       }
-      rack.appendChild(fader);
+      rack.appendChild(fader.root);
     }
     // Sky Light + Atmosphere (2026-08-18 fix) — own commit path per channel
     // (ctx[channel.getValue]/ctx[channel.onCommit]), never ctx.onAxisCommit,
     // since these aren't weather axes and must NOT stamp
-    // weatherArchetype:'custom' the way LIVE_CHANNELS' own commit does.
+    // weatherArchetype:'custom' the way LIVE_CHANNELS' own commit does. Never
+    // live-updated from outside (unlike LIVE_CHANNELS, above) — nothing fades
+    // these today; a mood/climate chip only ever touches the two axes in
+    // ARCHETYPE_OWNED_AXES.
     for (const channel of ENV_CHANNELS) {
       const decl = { type: 'float', min: 0, max: 1, step: 0.01, default: 0, label: channel.label, help: channel.help };
       const getValue = ctx[channel.getValue];
       const onCommit = ctx[channel.onCommit];
       if (typeof getValue !== 'function') continue;
-      rack.appendChild(buildVerticalFader(channel.key, decl, { value: getValue(), onChange: (v) => onCommit?.(v) }));
+      rack.appendChild(
+        buildVerticalFader(channel.key, decl, { value: getValue(), onChange: (v) => onCommit?.(v) }).root
+      );
     }
     faderHost.appendChild(rack);
     // Scene override — copy rewritten 2026-08-18 (author, verbatim: "'This
@@ -613,6 +631,25 @@ export function renderWeatherBoard(container, ctx) {
       renderForecast();
       renderPace();
       syncBrowseBtn();
+    },
+    /**
+     * Push a live weather value into its own fader WITHOUT the full
+     * `refresh()` rebuild above (2026-09-10 fix — author: "the sliders and
+     * weather buttons feel like two completely detached systems"). boot.js's
+     * own per-tick pump calls this with the fader's own `{root, update}`
+     * handle no-opping while the GM's own pointer is down on that control
+     * (buildVerticalFader's own doc) — so a live fade never fights a hand
+     * actually on the slider. Silently ignores any axis with no live fader
+     * built (LIVE_CHANNELS only) rather than throwing — a future caller
+     * passing e.g. `temperature01` here is a no-op, not a crash.
+     * @param {Record<string, number>} values - axis name -> its current,
+     *   actually-rendered value (`getVtPanViewerTimeDialState()`'s own
+     *   `cloudCoverEased01`/`precipEased01`, read by boot.js).
+     */
+    updateLiveAxisValues(values) {
+      for (const [axis, v] of Object.entries(values ?? {})) {
+        liveFaderHandles[axis]?.update(v);
+      }
     },
   };
 }

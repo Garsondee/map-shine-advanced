@@ -910,6 +910,14 @@ export function installRemote(opts = {}) {
     refreshWeatherBoard() {
       weatherBoardHandle?.refresh();
     },
+    /** Push a live weather value into the board's own fader mid-fade
+     * (2026-09-10 fix) — boot.js's pumpAstrolabe calls this every tick
+     * alongside syncAstrolabePanel/updateNowPlaying below, matching their
+     * own "never polls, it's told" shape. No-op before the body exists or
+     * when no weather board was supplied. */
+    updateLiveWeatherAxisValues(values) {
+      weatherBoardHandle?.updateLiveAxisValues?.(values);
+    },
     /** Re-paint the cue deck's next-cue card and jump list — boot.js calls
      * this whenever the scene's own cue stack changes (a capture, another
      * GM's edit, a scene switch), matching refreshWeatherBoard's own

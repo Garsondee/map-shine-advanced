@@ -9545,7 +9545,12 @@ function install() {
     // codebase already named and designed away from once already.
     write: (field, value) => {
       if (field === 'cloudCover01') setVtPanViewerCloudCover(value, 'fade-engine');
-      else if (field === 'precip01') setVtPanViewerWeatherTargets({ precip01: value });
+      // {immediate: true} — same reason setCloudCover passes 'fade-engine'
+      // as its own source just above (see that function's own doc): this
+      // value is ALREADY eased, every frame, by the fade engine, and must
+      // land on the manager's real `state` directly rather than becoming yet
+      // another target for the manager's own separate "brisk" ease to chase.
+      else if (field === 'precip01') setVtPanViewerWeatherTargets({ precip01: value }, { immediate: true });
     },
   });
 
@@ -10398,6 +10403,19 @@ function install() {
             // for the full story. Riding the same ~10Hz throttle as the dial
             // itself, not a second timer.
             MapShine.__remote?.updateNowPlaying?.({ label: buildNowPlayingLabel(payload, nowMs) });
+            // The weather board's own Clouds/Rain faders (2026-09-10 fix,
+            // author: "the sliders and weather buttons feel like two
+            // completely detached systems") — `cloudCoverEased01`/
+            // `precipEased01` are the SAME "what the map is actually
+            // rendering" values the dial's own Face reads a few lines above,
+            // reused rather than re-derived, riding this same ~10Hz throttle
+            // rather than a second timer. Harmless while no fade is running
+            // (the values just aren't moving); `updateLiveWeatherAxisValues`
+            // itself no-ops on any fader the GM's own hand is currently on.
+            MapShine.__remote?.updateLiveWeatherAxisValues?.({
+              cloudCover01: payload.cloudCoverEased01,
+              precip01: payload.precipEased01,
+            });
           }
         }
       }

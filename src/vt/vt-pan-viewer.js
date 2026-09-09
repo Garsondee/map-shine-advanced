@@ -8514,6 +8514,17 @@ export async function startVtPanViewer({
      * former label, from before sky-settings existed) would tell a GM reading a
      * live scene's own authored weather that they are looking at a console poke
      * nobody made (feedback_instruments_must_not_lie).
+     *
+     * ⚠️ `source === 'fade-engine'` lands `{immediate: true}` on the manager's
+     * own `setTargets` (2026-09-10 fix) — `pumpWeatherFades` (boot.js) calls
+     * this EVERY FRAME with `world/fade-engine.js`'s own already-eased value,
+     * and without `immediate` the manager treated each frame's value as a
+     * fresh TARGET for its own SEPARATE "brisk" tau-based ease on top —
+     * confirmed by direct simulation to leave the true rendered sky only 38%
+     * of the way through a 10s mood-chip fade at the 10s mark, still not
+     * fully arrived a minute later. Every other source keeps the manager's
+     * own ease exactly as before — a hand-dragged slider's single commit is
+     * exactly the "one target, ease over ~brisk" case that ease is for.
      * @param {number|null} cover01 @param {string} [source]
      * @returns {object}
      */
@@ -8528,7 +8539,7 @@ export async function startVtPanViewer({
       // First write = scene load ⇒ land it; later writes = a real edit ⇒ ease.
       // See `weatherEverApplied`'s own declaration for why this lives here and
       // not in boot.js.
-      if (weatherEverApplied) weather.setTargets({ cloudCover01: target });
+      if (weatherEverApplied) weather.setTargets({ cloudCover01: target }, { immediate: source === 'fade-engine' });
       else weather.jumpTo({ cloudCover01: target });
       weatherEverApplied = true;
 
@@ -8634,10 +8645,14 @@ export async function startVtPanViewer({
      * class for those (`feedback_hand_maintained_dispatch_list_forgets_new_effects`).
      * `setTargets` already reports unknown keys rather than dropping them, so
      * a typo here is loud rather than silent.
-     * @param {object} patch @returns {object}
+     * @param {object} patch
+     * @param {{immediate?: boolean}} [options] - forwarded to
+     *   `weather.setTargets` verbatim; see `setCloudCover`'s own doc on why
+     *   an externally-eased per-frame caller (the fade engine) needs this.
+     * @returns {object}
      */
-    function setWeatherTargets(patch) {
-      const res = weather.setTargets(patch);
+    function setWeatherTargets(patch, options) {
+      const res = weather.setTargets(patch, options);
       weatherEverApplied = true;
       return { ...res, state: weather.read().state };
     }
@@ -22085,6 +22100,12 @@ export async function startVtPanViewer({
           // targets-vs-state split the manager itself keeps; collapsing them
           // would make one of the two lie for the whole ease.
           cloudCoverEased01: env.weather.cloudCover01,
+          // The same "actually rendering" value for rain (2026-09-10 fix) —
+          // the weather board's own Rain fader reads this to animate live
+          // during a mood-chip fade instead of sitting frozen at its
+          // pre-fade number until the fade completes and the board rebuilds
+          // (see ui/rooms/remote/weather-board.js's own updateLiveAxisValues).
+          precipEased01: env.weather.precip01,
           // The Face darkens at night. `dayFactor01` is the same signal the
           // shadow handle and the daylight tint already read — not a second
           // "is it dark" derivation.
@@ -24177,11 +24198,13 @@ export function getVtPanViewerWeatherActiveEvents() {
  * Set any weather axis by name — the general form of `setVtPanViewerCloudCover`
  * (P1 needs `precip01`/`temperature01`, and a per-axis wrapper per axis is a
  * hand-maintained dispatch list waiting to forget the next one).
- * @param {object} patch @returns {object}
+ * @param {object} patch
+ * @param {{immediate?: boolean}} [options]
+ * @returns {object}
  */
-export function setVtPanViewerWeatherTargets(patch) {
+export function setVtPanViewerWeatherTargets(patch, options) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
-  return _active.setWeatherTargets(patch);
+  return _active.setWeatherTargets(patch, options);
 }
 /** @param {string} kind @returns {object} */
 export function setVtPanViewerPrecipKind(kind) {

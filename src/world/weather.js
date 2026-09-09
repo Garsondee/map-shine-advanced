@@ -818,9 +818,26 @@ export function createWeatherManager({
      * touch, not a no-op.
      *
      * @param {object} patch - axis name → value.
+     * @param {object} [options]
+     * @param {boolean} [options.immediate] - land `state` on the same value
+     *   too, bypassing this manager's own `tick()` ease (2026-09-10 fix,
+     *   mythica-machina-press: "the sliders and weather buttons feel like two
+     *   completely detached systems"). For a caller that is ALREADY handing
+     *   in an externally-eased value one frame at a time (`world/fade-
+     *   engine.js`'s own `computeEasedValue`, driven by the astrolabe's Fade
+     *   Time) — treating that as merely a new TARGET for this manager's own
+     *   independent "brisk" tau (`tauForDuration`, above) means two eases
+     *   stack: confirmed by direct simulation, a 10s fade-engine fade left
+     *   the TRUE `state` only 38% of the way there at t=10s and still not
+     *   fully arrived at t=60s — six times the GM's own selected duration,
+     *   silently, since the fade-engine's own bookkeeping considers itself
+     *   "arrived" at t=10s regardless. Default `false` — a single, one-time
+     *   target (a hand-dragged slider's own `change` commit, `sky-settings`'
+     *   resolve, the Almanac's own walk) is exactly what this manager's own
+     *   ease is FOR and must keep working unchanged.
      * @returns {Readonly<{applied: string[], rejected: string[], version: number}>}
      */
-    setTargets(patch) {
+    setTargets(patch, { immediate = false } = {}) {
       const applied = [];
       const rejected = [];
       const p = patch && typeof patch === 'object' ? patch : {};
@@ -835,6 +852,7 @@ export function createWeatherManager({
           targets[key] = next;
           applied.push(key);
         }
+        if (immediate) state[key] = next;
         if (currentMode === 'almanac') pinnedAxes.add(key);
       }
       if (applied.length > 0) {

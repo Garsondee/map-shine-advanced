@@ -2225,13 +2225,15 @@ function install() {
    * being persisted. */
   const vegetationLiveOverride = {};
 
-  /** Re-resolve vegetation's cascade from live settings + the live override and
-   * apply — mirrors `reapplyCandle` just below. Called on settings change (see
-   * the `init` hook's `onChange`), once after each scene's mask discovery
-   * completes, and by `MapShine.setVegetation`. */
+  /** Re-resolve vegetation's cascade from live settings + the scene's own
+   * authored params (Stage B, mythica-machina-press#288/#389) + the live
+   * override, and apply — mirrors `reapplyCandle` just below. Called on
+   * settings change (see the `init` hook's `onChange`), once after each
+   * scene's mask discovery completes, and by `MapShine.setVegetation`. */
   function reapplyVegetation() {
     const layers = deriveEffectLayers('vegetation', (key) => readSetting(MODULE_ID, key));
-    layers.paramLayers = [vegetationLiveOverride];
+    const { params: sceneParams } = readSceneEffectParams('vegetation');
+    layers.paramLayers = [sceneParams, vegetationLiveOverride].filter(Boolean);
     effectRegistry.resolveAndApply('vegetation', layers);
   }
 
@@ -2293,12 +2295,15 @@ function install() {
    * persisted (Stage B adds per-scene persistence). Mirrors uiShadowLiveOverride. */
   const candleLiveOverride = {};
 
-  /** Re-resolve the candle's cascade from live settings + the live override and
-   * apply. Mirrors reapplyUiShadow; called on settings change, on ready, after
-   * each scene's anchor import, and by MapShine.setCandle. */
+  /** Re-resolve the candle's cascade from live settings + the scene's own
+   * authored params (Stage B, mythica-machina-press#288/#389 — this is the
+   * "Stage B adds per-scene persistence" this file already promised above)
+   * + the live override, and apply. Called on settings change, on ready,
+   * after each scene's anchor import, and by MapShine.setCandle. */
   function reapplyCandle() {
     const layers = deriveEffectLayers('candleFlame', (key) => readSetting(MODULE_ID, key));
-    layers.paramLayers = [candleLiveOverride];
+    const { params: sceneParams } = readSceneEffectParams('candleFlame');
+    layers.paramLayers = [sceneParams, candleLiveOverride].filter(Boolean);
     effectRegistry.resolveAndApply('candleFlame', layers);
   }
 
@@ -2306,12 +2311,14 @@ function install() {
    * the highest-precedence param layer, mirrors candleLiveOverride exactly. */
   const lightningLiveOverride = {};
 
-  /** Re-resolve lightning's cascade from live settings + the live override and
-   * apply. Mirrors reapplyCandle; called on settings change, on ready, after
-   * each scene's anchor import, and by MapShine.setLightning. */
+  /** Re-resolve lightning's cascade from live settings + the scene's own
+   * authored params (Stage B, mythica-machina-press#288/#389) + the live
+   * override, and apply. Mirrors reapplyCandle; called on settings change,
+   * on ready, after each scene's anchor import, and by MapShine.setLightning. */
   function reapplyLightning() {
     const layers = deriveEffectLayers('lightning', (key) => readSetting(MODULE_ID, key));
-    layers.paramLayers = [lightningLiveOverride];
+    const { params: sceneParams } = readSceneEffectParams('lightning');
+    layers.paramLayers = [sceneParams, lightningLiveOverride].filter(Boolean);
     effectRegistry.resolveAndApply('lightning', layers);
   }
 
@@ -2319,10 +2326,12 @@ function install() {
    * candleLiveOverride/lightningLiveOverride exactly. */
   const fireLiveOverride = {};
 
-  /** Re-resolve fire's cascade from live settings + the live override. */
+  /** Re-resolve fire's cascade from live settings + the scene's own authored
+   * params (Stage B, mythica-machina-press#288/#389) + the live override. */
   function reapplyFire() {
     const layers = deriveEffectLayers('fire', (key) => readSetting(MODULE_ID, key));
-    layers.paramLayers = [fireLiveOverride];
+    const { params: sceneParams } = readSceneEffectParams('fire');
+    layers.paramLayers = [sceneParams, fireLiveOverride].filter(Boolean);
     effectRegistry.resolveAndApply('fire', layers);
   }
 
@@ -2821,13 +2830,22 @@ function install() {
     // un-settable from the debug panel — declared, defaulted, validated, and
     // reachable from nowhere — until someone noticed the sliders looked live
     // but did nothing.
+    const scenePatch = {};
     for (const k of Object.keys(CANDLE_FLAME_PARAMS)) {
       if (k in p) {
         candleLiveOverride[k] = p[k];
+        scenePatch[k] = p[k];
         changed = true;
       }
     }
     if (changed) {
+      // STAGE B (mythica-machina-press#288/#389) — mirrors setUiShadow's own write-through.
+      Promise.resolve(writeSceneEffectParams('candleFlame', scenePatch)).then(
+        (result) => {
+          if (!result.ok) log.warn(`candle scene param write not persisted: ${result.reason}`);
+        },
+        (err) => log.error('candle scene param write failed:', err)
+      );
       try {
         reapplyCandle();
         // A slider drag under Advanced → Presence (auto-ignite on/off, either
@@ -2861,13 +2879,22 @@ function install() {
         .catch((err) => log.error('lightning enable write/reapply failed:', err));
     }
     let changed = false;
+    const scenePatch = {};
     for (const k of Object.keys(LIGHTNING_PARAMS)) {
       if (k in p) {
         lightningLiveOverride[k] = p[k];
+        scenePatch[k] = p[k];
         changed = true;
       }
     }
     if (changed) {
+      // STAGE B (mythica-machina-press#288/#389) — mirrors setBloom's own write-through.
+      Promise.resolve(writeSceneEffectParams('lightning', scenePatch)).then(
+        (result) => {
+          if (!result.ok) log.warn(`lightning scene param write not persisted: ${result.reason}`);
+        },
+        (err) => log.error('lightning scene param write failed:', err)
+      );
       try {
         reapplyLightning();
       } catch (err) {
@@ -2911,13 +2938,22 @@ function install() {
         .catch((err) => log.error('fire enable write/reapply failed:', err));
     }
     let changed = false;
+    const scenePatch = {};
     for (const k of Object.keys(FIRE_PARAMS)) {
       if (k in p) {
         fireLiveOverride[k] = p[k];
+        scenePatch[k] = p[k];
         changed = true;
       }
     }
     if (changed) {
+      // STAGE B (mythica-machina-press#288/#389) — mirrors setBloom's own write-through.
+      Promise.resolve(writeSceneEffectParams('fire', scenePatch)).then(
+        (result) => {
+          if (!result.ok) log.warn(`fire scene param write not persisted: ${result.reason}`);
+        },
+        (err) => log.error('fire scene param write failed:', err)
+      );
       try {
         reapplyFire();
       } catch (err) {
@@ -2994,13 +3030,22 @@ function install() {
     // (vegetation.test.mjs) checks against the real schema, so a forgotten
     // new param is a red test now — see that constant's own doc for the live
     // bug (groundLagSec/gustTurbulence, 2026-08-15) this fixes.
+    const scenePatch = {};
     for (const k of VEGETATION_LIVE_PARAM_KEYS) {
       if (k in p) {
         vegetationLiveOverride[k] = p[k];
+        scenePatch[k] = p[k];
         changed = true;
       }
     }
     if (changed) {
+      // STAGE B (mythica-machina-press#288/#389) — mirrors setBloom's own write-through.
+      Promise.resolve(writeSceneEffectParams('vegetation', scenePatch)).then(
+        (result) => {
+          if (!result.ok) log.warn(`vegetation scene param write not persisted: ${result.reason}`);
+        },
+        (err) => log.error('vegetation scene param write failed:', err)
+      );
       try {
         reapplyVegetation();
       } catch (err) {

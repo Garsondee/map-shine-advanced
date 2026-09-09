@@ -23,7 +23,11 @@ import { hexToRgb01 } from '../candle-flame-geometry.js';
  * @param {(moduleId: string, key: string, value: any) => Promise<any>} args.writeSetting
  * @param {string} args.moduleId
  * @param {(effectId: string, scope: string) => string} args.effectEnableKey
- * @param {{error: Function}} args.log
+ * @param {(effectId: string) => {params: object|null, reason: string|null}} args.readSceneEffectParams
+ *   Stage B (mythica-machina-press#288/#389) — injected, matching this file's
+ *   own "knows nothing about Foundry" rule.
+ * @param {(effectId: string, patch: object) => Promise<{ok: boolean, reason: string|null}>} args.writeSceneEffectParams
+ * @param {{error: Function, warn: Function}} args.log
  * @returns {{reapply: () => void, getRenderState: () => object, setFluid: (partial?: object) => void,
  *   getReadout: () => object}}
  */
@@ -34,6 +38,8 @@ export function createFluidRegistration({
   writeSetting,
   moduleId,
   effectEnableKey,
+  readSceneEffectParams,
+  writeSceneEffectParams,
   log,
 }) {
   /**
@@ -68,7 +74,10 @@ export function createFluidRegistration({
 
   function reapply() {
     const layers = deriveEffectLayers('fluid', readSetting);
-    layers.paramLayers = [liveOverride];
+    // STAGE B (mythica-machina-press#288/#389) — same posture as
+    // window-registration.js's own reapply.
+    const { params: sceneParams } = readSceneEffectParams('fluid');
+    layers.paramLayers = [sceneParams, liveOverride].filter(Boolean);
     effectRegistry.resolveAndApply('fluid', layers);
   }
 
@@ -110,6 +119,7 @@ export function createFluidRegistration({
         .catch((err) => log.error('fluid enable write/reapply failed:', err));
     }
     let changed = false;
+    const scenePatch = {};
     for (const [key, value] of Object.entries(p)) {
       if (key === 'enabled') continue;
       // Silently accepting an unknown key is how a typo becomes a control that
@@ -120,9 +130,21 @@ export function createFluidRegistration({
         continue;
       }
       liveOverride[key] = value;
+      // mythica-machina-press#389's declared-scope field — see water-
+      // registration.js's own identical comment.
+      if (FLUID_PARAMS[key]?.scope !== 'client') scenePatch[key] = value;
       changed = true;
     }
-    if (changed) reapply();
+    if (changed) {
+      // STAGE B (mythica-machina-press#288/#389) — mirrors setBloom's own write-through.
+      Promise.resolve(writeSceneEffectParams('fluid', scenePatch)).then(
+        (result) => {
+          if (!result.ok) log.warn(`fluid scene param write not persisted: ${result.reason}`);
+        },
+        (err) => log.error('fluid scene param write failed:', err)
+      );
+      reapply();
+    }
   }
 
   return { reapply, getRenderState, setFluid, getReadout: () => readout };

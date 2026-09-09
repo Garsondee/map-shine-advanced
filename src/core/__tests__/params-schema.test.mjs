@@ -7,6 +7,7 @@ import {
   PARAM_TYPES,
   COLOR_SPACES,
   PARAM_STATUS,
+  PARAM_SCOPE,
   validateParamsSchema,
   validateParamValue,
   serializeParams,
@@ -347,6 +348,43 @@ export function run(t) {
     t.ok(
       'status/plannedReason are NOT forbidden-in-contract fields',
       !r.errors.some((e) => /renderer\/view state|not part of the contract/i.test(e))
+    );
+  }
+
+  // ---- 11. DECLARED SYNC SCOPE: scope:'scene'|'client' (mythica-machina-
+  // press#389) — where a param's value lives and travels, replacing a
+  // hand-coded per-effect exclusion name-check with a checkable fact about
+  // the value itself, the same category `status` already occupies. --------
+  {
+    const base = { type: 'float', min: 0, max: 1, default: 0.5, label: 'X' };
+
+    t.ok(
+      'PARAM_SCOPE is frozen vocabulary of exactly scene/client',
+      Object.isFrozen(PARAM_SCOPE) &&
+        PARAM_SCOPE.length === 2 &&
+        PARAM_SCOPE.includes('scene') &&
+        PARAM_SCOPE.includes('client')
+    );
+    t.ok(
+      'scope is entirely OPTIONAL — the overwhelming majority of params say nothing here (default is scene, enforced by the CALLER, not this validator)',
+      validateParamsSchema({ x: base }).ok
+    );
+    t.ok("scope:'scene' is legal and explicit", validateParamsSchema({ x: { ...base, scope: 'scene' } }).ok);
+    t.ok(
+      "scope:'client' is legal — sun-shadows.js's debugView is the real example",
+      validateParamsSchema({ x: { ...base, scope: 'client' } }).ok
+    );
+    t.ok('REJECTS a bogus scope', !validateParamsSchema({ x: { ...base, scope: 'world' } }).ok);
+    t.ok('REJECTS a bogus scope (arbitrary string)', !validateParamsSchema({ x: { ...base, scope: 'global' } }).ok);
+
+    // `scope` must NOT trip the renderer/view-state rejection `throttle`/
+    // `expanded`/etc get — a fact about the value ("does this reach other
+    // clients"), not about how a renderer draws the control.
+    const withScope = { x: { ...base, scope: 'client' } };
+    const rs = validateParamsSchema(withScope);
+    t.ok(
+      'scope is NOT a forbidden-in-contract field',
+      !rs.errors.some((e) => /renderer\/view state|not part of the contract/i.test(e))
     );
   }
 }

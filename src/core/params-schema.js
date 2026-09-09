@@ -114,6 +114,37 @@ const FORBIDDEN_IN_CONTRACT = Object.freeze(['throttle', 'expanded', 'advanced',
 export const PARAM_STATUS = Object.freeze(['live', 'planned']);
 
 /**
+ * WHERE A PARAM'S VALUE LIVES (mythica-machina-press#389, #288's audit) —
+ * `scene` is the default and the overwhelming majority: a GM-authored LOOK
+ * value, synced to every client via `foundry/effect-param-persistence.js`'s
+ * scene flag, same posture `status`'s own default (`live`) takes. `client`
+ * is the declared exception: a param that must NEVER leave the client that
+ * set it — a per-GM diagnosis toggle (sun-shadows.js's own `debugView` is
+ * the first real example: "a dropdown... allowing me to see just a single
+ * shadow at a time... on a white background") is the wrong thing to push
+ * onto every connected player's screen the moment a GM picks one.
+ *
+ * This is a FACT ABOUT THE VALUE'S OWN NATURE — the same category `status`
+ * already occupies (Params.md §2's contract, not view-state) — never a
+ * `FORBIDDEN_IN_CONTRACT` concern: "does writing this reach other clients"
+ * is not "how does a renderer draw this control".
+ *
+ * Declared here as data specifically so the exclusion becomes CHECKABLE
+ * instead of a name a human has to remember to hand-list in every effect's
+ * own `setX` (`boot.js`'s sun-shadows exclusion, written by hand, is the
+ * pattern this field replaces — grepped for once, correct once, and never
+ * again dependent on someone re-tracing the same param-by-param audit for
+ * the next 13 effects).
+ *
+ * A THIRD VALUE (`'world'`) is a deliberately open, NOT YET ADDED question
+ * — see mythica-machina-press#11's own still-open "should an effect's look
+ * be shareable across scenes" — adding it later is additive to this same
+ * shape; guessing it wrong now would mean redoing it, the exact risk #197
+ * already names for its own sibling question.
+ */
+export const PARAM_SCOPE = Object.freeze(['scene', 'client']);
+
+/**
  * The Fade Engine's own closed curve vocabulary (docs/holy/UI-Testament.md
  * §4.2, `world/fade-engine.js`). Declared HERE rather than in `world/` so
  * `core/cues-schema.js` (U3 — a cue's own `curve` field needs the identical
@@ -143,7 +174,7 @@ export function isFadeableParamType(type) {
   return FADEABLE_PARAM_TYPES.includes(type);
 }
 
-/** @typedef {{type: string, default?: unknown, min?: number, max?: number, step?: number, values?: string[], label?: string, help?: string, status?: 'live'|'planned', plannedReason?: string}} ParamDecl */
+/** @typedef {{type: string, default?: unknown, min?: number, max?: number, step?: number, values?: string[], label?: string, help?: string, status?: 'live'|'planned', plannedReason?: string, scope?: 'scene'|'client'}} ParamDecl */
 
 /**
  * Validate an effect's params declaration. Pure; Node-testable today, months
@@ -207,6 +238,13 @@ export function validateParamsSchema(schema) {
       fail(
         `${key}: a plannedReason with no status:'planned' is a stale claim — either the control shipped and the reason should go, or the status was never set`
       );
+    }
+
+    // WHERE THIS VALUE LIVES (mythica-machina-press#389): optional, defaults
+    // to 'scene' (the overwhelming majority — an authored look, synced to
+    // every client), same posture PARAM_STATUS's own default takes.
+    if ('scope' in d && !PARAM_SCOPE.includes(d.scope)) {
+      fail(`${key}: scope '${d.scope}' is not one of: ${PARAM_SCOPE.join(', ')}`);
     }
 
     // A COLOUR MUST DECLARE ITS SPACE. Harvest finding (2026-07-17): V2 had 39

@@ -42,7 +42,11 @@ import { wrapForReadTracking } from '../../diag/param-read-health.js';
  * @param {(moduleId: string, key: string, value: any) => Promise<any>} args.writeSetting
  * @param {string} args.moduleId
  * @param {(effectId: string, scope: string) => string} args.effectEnableKey
- * @param {{error: Function}} args.log
+ * @param {(effectId: string) => {params: object|null, reason: string|null}} args.readSceneEffectParams
+ *   Stage B (mythica-machina-press#288/#389) — injected, matching this file's
+ *   own "knows nothing about Foundry" rule.
+ * @param {(effectId: string, patch: object) => Promise<{ok: boolean, reason: string|null}>} args.writeSceneEffectParams
+ * @param {{error: Function, warn: Function}} args.log
  * @returns {{reapply: () => void, getRenderState: () => object, setWater: (partial?: object) => void,
  *   setDebugChannel: (n: number) => object, getDebugChannel: () => number, getReadout: () => object}}
  */
@@ -53,6 +57,8 @@ export function createWaterRegistration({
   writeSetting,
   moduleId,
   effectEnableKey,
+  readSceneEffectParams,
+  writeSceneEffectParams,
   log,
 }) {
   /**
@@ -122,7 +128,10 @@ export function createWaterRegistration({
 
   function reapply() {
     const layers = deriveEffectLayers('water', readSetting);
-    layers.paramLayers = [liveOverride];
+    // STAGE B (mythica-machina-press#288/#389) — same posture as
+    // boot.js#reapplyUiShadow's own Stage B.
+    const { params: sceneParams } = readSceneEffectParams('water');
+    layers.paramLayers = [sceneParams, liveOverride].filter(Boolean);
     effectRegistry.resolveAndApply('water', layers);
   }
 
@@ -175,6 +184,7 @@ export function createWaterRegistration({
         .catch((err) => log.error('water enable write/reapply failed:', err));
     }
     let changed = false;
+    const scenePatch = {};
     for (const [key, value] of Object.entries(p)) {
       if (key === 'enabled') continue;
       // Silently accepting an unknown key is how a typo becomes a control that
@@ -185,9 +195,22 @@ export function createWaterRegistration({
         continue;
       }
       liveOverride[key] = value;
+      // mythica-machina-press#389's declared-scope field (core/params-schema.js
+      // #PARAM_SCOPE) — none of WATER_PARAMS declares `scope: 'client'` today,
+      // but this check makes that declaration honest the moment one does.
+      if (WATER_PARAMS[key]?.scope !== 'client') scenePatch[key] = value;
       changed = true;
     }
-    if (changed) reapply();
+    if (changed) {
+      // STAGE B (mythica-machina-press#288/#389) — mirrors setBloom's own write-through.
+      Promise.resolve(writeSceneEffectParams('water', scenePatch)).then(
+        (result) => {
+          if (!result.ok) log.warn(`water scene param write not persisted: ${result.reason}`);
+        },
+        (err) => log.error('water scene param write failed:', err)
+      );
+      reapply();
+    }
   }
 
   /**

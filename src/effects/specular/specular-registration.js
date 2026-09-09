@@ -24,7 +24,14 @@ import { SPECULAR_LAYER_COUNT } from './specular-render.js';
  * @param {(moduleId: string, key: string, value: any) => Promise<any>} args.writeSetting
  * @param {string} args.moduleId
  * @param {(effectId: string, scope: string) => string} args.effectEnableKey
- * @param {{error: Function}} args.log
+ * @param {(effectId: string) => {params: object|null, reason: string|null}} args.readSceneEffectParams
+ *   Stage B (mythica-machina-press#288/#389) — injected, matching this file's
+ *   own "knows nothing about Foundry" rule. Covers `SPECULAR_PARAMS` only —
+ *   the per-layer `layerOverrides` below stay transient/unpersisted for now,
+ *   a separate design question (a nested key shape, not this shape) left for
+ *   its own follow-up rather than folded in here.
+ * @param {(effectId: string, patch: object) => Promise<{ok: boolean, reason: string|null}>} args.writeSceneEffectParams
+ * @param {{error: Function, warn: Function}} args.log
  * @returns {{reapply: () => void, getRenderState: () => object,
  *   setSpecular: (partial?: object) => void, setDebugChannel: (n: number) => object,
  *   getDebugChannel: () => number, getReadout: () => object}}
@@ -36,6 +43,8 @@ export function createSpecularRegistration({
   writeSetting,
   moduleId,
   effectEnableKey,
+  readSceneEffectParams,
+  writeSceneEffectParams,
   log,
 }) {
   /**
@@ -101,7 +110,11 @@ export function createSpecularRegistration({
 
   function reapply() {
     const layers = deriveEffectLayers('specular', readSetting);
-    layers.paramLayers = [liveOverride];
+    // STAGE B (mythica-machina-press#288/#389) — same posture as
+    // window-registration.js's own reapply. Top-level params only; the
+    // per-layer overrides stay transient (see this file's own header note).
+    const { params: sceneParams } = readSceneEffectParams('specular');
+    layers.paramLayers = [sceneParams, liveOverride].filter(Boolean);
     effectRegistry.resolveAndApply('specular', layers);
   }
 
@@ -139,6 +152,7 @@ export function createSpecularRegistration({
         .catch((err) => log.error('specular enable write/reapply failed:', err));
     }
     let changed = false;
+    const scenePatch = {};
     for (const [key, value] of Object.entries(p)) {
       if (key === 'enabled') continue;
       // Silently accepting an unknown key is how a typo becomes a control that
@@ -149,9 +163,21 @@ export function createSpecularRegistration({
         continue;
       }
       liveOverride[key] = value;
+      // mythica-machina-press#389's declared-scope field — see water-
+      // registration.js's own identical comment.
+      if (SPECULAR_PARAMS[key]?.scope !== 'client') scenePatch[key] = value;
       changed = true;
     }
-    if (changed) reapply();
+    if (changed) {
+      // STAGE B (mythica-machina-press#288/#389) — mirrors setBloom's own write-through.
+      Promise.resolve(writeSceneEffectParams('specular', scenePatch)).then(
+        (result) => {
+          if (!result.ok) log.warn(`specular scene param write not persisted: ${result.reason}`);
+        },
+        (err) => log.error('specular scene param write failed:', err)
+      );
+      reapply();
+    }
   }
 
   /**

@@ -22,7 +22,11 @@ import { hexToRgb01 } from '../candle-flame-geometry.js';
  * @param {(moduleId: string, key: string, value: any) => Promise<any>} args.writeSetting
  * @param {string} args.moduleId
  * @param {(effectId: string, scope: string) => string} args.effectEnableKey
- * @param {{error: Function}} args.log
+ * @param {(effectId: string) => {params: object|null, reason: string|null}} args.readSceneEffectParams
+ *   Stage B (mythica-machina-press#288/#389) — injected, never imported
+ *   directly, matching this file's own "knows nothing about Foundry" rule.
+ * @param {(effectId: string, patch: object) => Promise<{ok: boolean, reason: string|null}>} args.writeSceneEffectParams
+ * @param {{error: Function, warn: Function}} args.log
  * @returns {{reapply: () => void, getRenderState: () => object,
  *   setWindowLight: (partial?: object) => void, setDebugChannel: (n: number) => object,
  *   getDebugChannel: () => number, getReadout: () => object}}
@@ -34,6 +38,8 @@ export function createWindowRegistration({
   writeSetting,
   moduleId,
   effectEnableKey,
+  readSceneEffectParams,
+  writeSceneEffectParams,
   log,
 }) {
   /**
@@ -70,7 +76,11 @@ export function createWindowRegistration({
 
   function reapply() {
     const layers = deriveEffectLayers('window', readSetting);
-    layers.paramLayers = [liveOverride];
+    // STAGE B (mythica-machina-press#288/#389) — the scene's own authored
+    // params, under the transient live override, same posture as
+    // boot.js#reapplyUiShadow's own Stage B.
+    const { params: sceneParams } = readSceneEffectParams('window');
+    layers.paramLayers = [sceneParams, liveOverride].filter(Boolean);
     effectRegistry.resolveAndApply('window', layers);
   }
 
@@ -115,6 +125,7 @@ export function createWindowRegistration({
         .catch((err) => log.error('window light enable write/reapply failed:', err));
     }
     let changed = false;
+    const scenePatch = {};
     for (const [key, value] of Object.entries(p)) {
       if (key === 'enabled') continue;
       // Silently accepting an unknown key is how a typo becomes a control
@@ -125,9 +136,21 @@ export function createWindowRegistration({
         continue;
       }
       liveOverride[key] = value;
+      // mythica-machina-press#389's declared-scope field — see water-
+      // registration.js's own identical comment.
+      if (WINDOW_PARAMS[key]?.scope !== 'client') scenePatch[key] = value;
       changed = true;
     }
-    if (changed) reapply();
+    if (changed) {
+      // STAGE B (mythica-machina-press#288/#389) — mirrors setBloom's own write-through.
+      Promise.resolve(writeSceneEffectParams('window', scenePatch)).then(
+        (result) => {
+          if (!result.ok) log.warn(`window light scene param write not persisted: ${result.reason}`);
+        },
+        (err) => log.error('window light scene param write failed:', err)
+      );
+      reapply();
+    }
   }
 
   /**

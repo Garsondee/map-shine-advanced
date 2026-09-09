@@ -462,6 +462,9 @@ import {
   readFadeState,
   writeFadeState,
   watchFadeState,
+  readSceneEffectParams,
+  writeSceneEffectParams,
+  watchSceneEffectParams,
   readCueStack,
   writeCueStack,
   watchCueStack,
@@ -735,25 +738,39 @@ const uiShadowLiveOverride = {};
 const UI_SHADOW_PARAM_KEYS = Object.keys(UI_SHADOW_PARAMS);
 
 /**
- * Re-resolve UI-shadow's whole cascade from the live settings + the transient
- * override and apply it. Reads settings through the foundry adapter ONLY. Callers
- * guard + ANNOUNCE (never swallow — feedback_instruments_must_not_lie), because
- * a read before the `init` registration would throw (a wiring bug, not silence).
+ * Re-resolve UI-shadow's whole cascade from the live settings + the scene's
+ * own authored params + the transient override, and apply it. Reads settings
+ * through the foundry adapter ONLY. Callers guard + ANNOUNCE (never swallow —
+ * feedback_instruments_must_not_lie), because a read before the `init`
+ * registration would throw (a wiring bug, not silence).
+ *
+ * STAGE B (mythica-machina-press#288, #389) — `effectEnableKey`'s world/client
+ * split already gave `enabled` this shape; `readSceneEffectParams` is the
+ * equivalent for the VALUES, so a GM's tuning now actually reaches every
+ * player instead of living only in this client's `uiShadowLiveOverride`. The
+ * override stays as the TOP layer, same reason `editSky` applies locally
+ * before its write resolves: a control that waits on a document round-trip
+ * before moving reads as broken even when it is working.
  */
 function reapplyUiShadow() {
   const layers = deriveEffectLayers('uiWindowShadow', (key) => readSetting(MODULE_ID, key));
-  layers.paramLayers = [uiShadowLiveOverride];
+  const { params: sceneParams } = readSceneEffectParams('uiWindowShadow');
+  layers.paramLayers = [sceneParams, uiShadowLiveOverride].filter(Boolean);
   effectRegistry.resolveAndApply('uiWindowShadow', layers);
 }
 
 // MapShine.setUiShadow — the console/API control, now routed THROUGH the cascade
 // instead of mutating render state directly. `enabled` writes the PLAYER's client
 // setting (persisted; its onChange re-resolves); look/technical params ride the
-// transient override and re-resolve at once. To turn the effect on after the
-// default-off flip: `MapShine.setUiShadow({ enabled: true })`, or set "UI window
-// shadows: my setting" to On (or the performance profile to Extreme) in Foundry's
-// Settings. Tuning is unchanged: `MapShine.setUiShadow({ strength01, offsetScale,
-// azimuthDeg, elevationDeg, heightPx, flipY, ... })`.
+// transient override for INSTANT local feedback and are also written through to
+// the scene's own authored params (Stage B, #288/#389) so every other client
+// picks them up too — GM-only, Foundry's own rule (`scene.setFlag` rejects a
+// non-GM; a player's own attempt reports a warning, never a silent no-op). To
+// turn the effect on after the default-off flip: `MapShine.setUiShadow({ enabled:
+// true })`, or set "UI window shadows: my setting" to On (or the performance
+// profile to Extreme) in Foundry's Settings. Tuning is unchanged:
+// `MapShine.setUiShadow({ strength01, offsetScale, azimuthDeg, elevationDeg,
+// heightPx, flipY, ... })`.
 MapShine.setUiShadow = (partial = {}) => {
   const p = partial ?? {};
   if (typeof p.enabled === 'boolean') {
@@ -762,13 +779,21 @@ MapShine.setUiShadow = (partial = {}) => {
     ).catch((err) => log.error('ui-shadow enable write failed:', err));
   }
   let changedParam = false;
+  const scenePatch = {};
   for (const k of UI_SHADOW_PARAM_KEYS) {
     if (k in p) {
       uiShadowLiveOverride[k] = p[k];
+      if (UI_SHADOW_PARAMS[k]?.scope !== 'client') scenePatch[k] = p[k];
       changedParam = true;
     }
   }
   if (changedParam) {
+    Promise.resolve(writeSceneEffectParams('uiWindowShadow', scenePatch)).then(
+      (result) => {
+        if (!result.ok) log.warn(`ui-shadow scene param write not persisted: ${result.reason}`);
+      },
+      (err) => log.error('ui-shadow scene param write failed:', err)
+    );
     try {
       reapplyUiShadow();
     } catch (err) {
@@ -2214,13 +2239,15 @@ function install() {
    * being persisted. */
   const vegetationLiveOverride = {};
 
-  /** Re-resolve vegetation's cascade from live settings + the live override and
-   * apply — mirrors `reapplyCandle` just below. Called on settings change (see
-   * the `init` hook's `onChange`), once after each scene's mask discovery
-   * completes, and by `MapShine.setVegetation`. */
+  /** Re-resolve vegetation's cascade from live settings + the scene's own
+   * authored params (Stage B, mythica-machina-press#288/#389) + the live
+   * override, and apply — mirrors `reapplyCandle` just below. Called on
+   * settings change (see the `init` hook's `onChange`), once after each
+   * scene's mask discovery completes, and by `MapShine.setVegetation`. */
   function reapplyVegetation() {
     const layers = deriveEffectLayers('vegetation', (key) => readSetting(MODULE_ID, key));
-    layers.paramLayers = [vegetationLiveOverride];
+    const { params: sceneParams } = readSceneEffectParams('vegetation');
+    layers.paramLayers = [sceneParams, vegetationLiveOverride].filter(Boolean);
     effectRegistry.resolveAndApply('vegetation', layers);
   }
 
@@ -2229,12 +2256,14 @@ function install() {
    * show at once without being persisted. Mirrors vegetationLiveOverride. */
   const bloomLiveOverride = {};
 
-  /** Re-resolve bloom's cascade from live settings + the live override and
-   * apply. Mirrors reapplyVegetation; called on settings change, on ready, and
-   * by MapShine.setBloom. */
+  /** Re-resolve bloom's cascade from live settings + the scene's own authored
+   * params (Stage B, mythica-machina-press#288/#389 — same shape as
+   * reapplyUiShadow's own Stage B) + the live override, and apply. Called on
+   * settings change, on ready, and by MapShine.setBloom. */
   function reapplyBloom() {
     const layers = deriveEffectLayers('bloom', (key) => readSetting(MODULE_ID, key));
-    layers.paramLayers = [bloomLiveOverride];
+    const { params: sceneParams } = readSceneEffectParams('bloom');
+    layers.paramLayers = [sceneParams, bloomLiveOverride].filter(Boolean);
     effectRegistry.resolveAndApply('bloom', layers);
   }
 
@@ -2242,30 +2271,36 @@ function install() {
    * FOH-ROH card / a preset pick). Mirrors bloomLiveOverride exactly. */
   const dofLiveOverride = {};
 
-  /** Re-resolve depth-of-field's cascade from live settings + the live
-   * override and apply. Mirrors reapplyBloom exactly; called on settings
+  /** Re-resolve depth-of-field's cascade from live settings + the scene's own
+   * authored params (Stage B, mythica-machina-press#288/#389) + the live
+   * override, and apply. Mirrors reapplyBloom exactly; called on settings
    * change, on ready, and by MapShine.setDof. */
   function reapplyDof() {
     const layers = deriveEffectLayers('depthOfField', (key) => readSetting(MODULE_ID, key));
-    layers.paramLayers = [dofLiveOverride];
+    const { params: sceneParams } = readSceneEffectParams('depthOfField');
+    layers.paramLayers = [sceneParams, dofLiveOverride].filter(Boolean);
     effectRegistry.resolveAndApply('depthOfField', layers);
   }
 
   /** Transient live override + re-resolve for SUN SHADOWS. Mirrors reapplyBloom
-   * exactly (docs/planning/Sun-Shadows.md). */
+   * exactly (docs/planning/Sun-Shadows.md), including its Stage B scene-param
+   * layer (mythica-machina-press#288/#389). */
   const sunShadowLiveOverride = {};
   function reapplySunShadows() {
     const layers = deriveEffectLayers('sunShadows', (key) => readSetting(MODULE_ID, key));
-    layers.paramLayers = [sunShadowLiveOverride];
+    const { params: sceneParams } = readSceneEffectParams('sunShadows');
+    layers.paramLayers = [sceneParams, sunShadowLiveOverride].filter(Boolean);
     effectRegistry.resolveAndApply('sunShadows', layers);
   }
 
   /** Transient live override + re-resolve for the Colour Grade effect. Mirrors
-   * reapplyBloom exactly. */
+   * reapplyBloom exactly, including its Stage B scene-param layer
+   * (mythica-machina-press#288/#389). */
   const gradeLookLiveOverride = {};
   function reapplyGradeLook() {
     const layers = deriveEffectLayers('grade', (key) => readSetting(MODULE_ID, key));
-    layers.paramLayers = [gradeLookLiveOverride];
+    const { params: sceneParams } = readSceneEffectParams('grade');
+    layers.paramLayers = [sceneParams, gradeLookLiveOverride].filter(Boolean);
     effectRegistry.resolveAndApply('grade', layers);
   }
 
@@ -2274,12 +2309,15 @@ function install() {
    * persisted (Stage B adds per-scene persistence). Mirrors uiShadowLiveOverride. */
   const candleLiveOverride = {};
 
-  /** Re-resolve the candle's cascade from live settings + the live override and
-   * apply. Mirrors reapplyUiShadow; called on settings change, on ready, after
-   * each scene's anchor import, and by MapShine.setCandle. */
+  /** Re-resolve the candle's cascade from live settings + the scene's own
+   * authored params (Stage B, mythica-machina-press#288/#389 — this is the
+   * "Stage B adds per-scene persistence" this file already promised above)
+   * + the live override, and apply. Called on settings change, on ready,
+   * after each scene's anchor import, and by MapShine.setCandle. */
   function reapplyCandle() {
     const layers = deriveEffectLayers('candleFlame', (key) => readSetting(MODULE_ID, key));
-    layers.paramLayers = [candleLiveOverride];
+    const { params: sceneParams } = readSceneEffectParams('candleFlame');
+    layers.paramLayers = [sceneParams, candleLiveOverride].filter(Boolean);
     effectRegistry.resolveAndApply('candleFlame', layers);
   }
 
@@ -2287,12 +2325,14 @@ function install() {
    * the highest-precedence param layer, mirrors candleLiveOverride exactly. */
   const lightningLiveOverride = {};
 
-  /** Re-resolve lightning's cascade from live settings + the live override and
-   * apply. Mirrors reapplyCandle; called on settings change, on ready, after
-   * each scene's anchor import, and by MapShine.setLightning. */
+  /** Re-resolve lightning's cascade from live settings + the scene's own
+   * authored params (Stage B, mythica-machina-press#288/#389) + the live
+   * override, and apply. Mirrors reapplyCandle; called on settings change,
+   * on ready, after each scene's anchor import, and by MapShine.setLightning. */
   function reapplyLightning() {
     const layers = deriveEffectLayers('lightning', (key) => readSetting(MODULE_ID, key));
-    layers.paramLayers = [lightningLiveOverride];
+    const { params: sceneParams } = readSceneEffectParams('lightning');
+    layers.paramLayers = [sceneParams, lightningLiveOverride].filter(Boolean);
     effectRegistry.resolveAndApply('lightning', layers);
   }
 
@@ -2300,10 +2340,12 @@ function install() {
    * candleLiveOverride/lightningLiveOverride exactly. */
   const fireLiveOverride = {};
 
-  /** Re-resolve fire's cascade from live settings + the live override. */
+  /** Re-resolve fire's cascade from live settings + the scene's own authored
+   * params (Stage B, mythica-machina-press#288/#389) + the live override. */
   function reapplyFire() {
     const layers = deriveEffectLayers('fire', (key) => readSetting(MODULE_ID, key));
-    layers.paramLayers = [fireLiveOverride];
+    const { params: sceneParams } = readSceneEffectParams('fire');
+    layers.paramLayers = [sceneParams, fireLiveOverride].filter(Boolean);
     effectRegistry.resolveAndApply('fire', layers);
   }
 
@@ -2802,13 +2844,22 @@ function install() {
     // un-settable from the debug panel — declared, defaulted, validated, and
     // reachable from nowhere — until someone noticed the sliders looked live
     // but did nothing.
+    const scenePatch = {};
     for (const k of Object.keys(CANDLE_FLAME_PARAMS)) {
       if (k in p) {
         candleLiveOverride[k] = p[k];
+        if (CANDLE_FLAME_PARAMS[k]?.scope !== 'client') scenePatch[k] = p[k];
         changed = true;
       }
     }
     if (changed) {
+      // STAGE B (mythica-machina-press#288/#389) — mirrors setUiShadow's own write-through.
+      Promise.resolve(writeSceneEffectParams('candleFlame', scenePatch)).then(
+        (result) => {
+          if (!result.ok) log.warn(`candle scene param write not persisted: ${result.reason}`);
+        },
+        (err) => log.error('candle scene param write failed:', err)
+      );
       try {
         reapplyCandle();
         // A slider drag under Advanced → Presence (auto-ignite on/off, either
@@ -2842,13 +2893,22 @@ function install() {
         .catch((err) => log.error('lightning enable write/reapply failed:', err));
     }
     let changed = false;
+    const scenePatch = {};
     for (const k of Object.keys(LIGHTNING_PARAMS)) {
       if (k in p) {
         lightningLiveOverride[k] = p[k];
+        if (LIGHTNING_PARAMS[k]?.scope !== 'client') scenePatch[k] = p[k];
         changed = true;
       }
     }
     if (changed) {
+      // STAGE B (mythica-machina-press#288/#389) — mirrors setBloom's own write-through.
+      Promise.resolve(writeSceneEffectParams('lightning', scenePatch)).then(
+        (result) => {
+          if (!result.ok) log.warn(`lightning scene param write not persisted: ${result.reason}`);
+        },
+        (err) => log.error('lightning scene param write failed:', err)
+      );
       try {
         reapplyLightning();
       } catch (err) {
@@ -2892,13 +2952,22 @@ function install() {
         .catch((err) => log.error('fire enable write/reapply failed:', err));
     }
     let changed = false;
+    const scenePatch = {};
     for (const k of Object.keys(FIRE_PARAMS)) {
       if (k in p) {
         fireLiveOverride[k] = p[k];
+        if (FIRE_PARAMS[k]?.scope !== 'client') scenePatch[k] = p[k];
         changed = true;
       }
     }
     if (changed) {
+      // STAGE B (mythica-machina-press#288/#389) — mirrors setBloom's own write-through.
+      Promise.resolve(writeSceneEffectParams('fire', scenePatch)).then(
+        (result) => {
+          if (!result.ok) log.warn(`fire scene param write not persisted: ${result.reason}`);
+        },
+        (err) => log.error('fire scene param write failed:', err)
+      );
       try {
         reapplyFire();
       } catch (err) {
@@ -2975,13 +3044,22 @@ function install() {
     // (vegetation.test.mjs) checks against the real schema, so a forgotten
     // new param is a red test now — see that constant's own doc for the live
     // bug (groundLagSec/gustTurbulence, 2026-08-15) this fixes.
+    const scenePatch = {};
     for (const k of VEGETATION_LIVE_PARAM_KEYS) {
       if (k in p) {
         vegetationLiveOverride[k] = p[k];
+        if (VEGETATION_PARAMS[k]?.scope !== 'client') scenePatch[k] = p[k];
         changed = true;
       }
     }
     if (changed) {
+      // STAGE B (mythica-machina-press#288/#389) — mirrors setBloom's own write-through.
+      Promise.resolve(writeSceneEffectParams('vegetation', scenePatch)).then(
+        (result) => {
+          if (!result.ok) log.warn(`vegetation scene param write not persisted: ${result.reason}`);
+        },
+        (err) => log.error('vegetation scene param write failed:', err)
+      );
       try {
         reapplyVegetation();
       } catch (err) {
@@ -3036,6 +3114,13 @@ function install() {
     // Every key SUN_SHADOW_PARAMS declares, spelled out — the same explicitness
     // setBloom/setVegetation use, so a rename shows up as a visible typo here
     // rather than as a slider that silently stops doing anything.
+    //
+    // `debugView` declares `scope: 'client'` (sun-shadows.js#SUN_SHADOW_PARAMS,
+    // mythica-machina-press#389's declared-scope field) — a DATA fact this loop
+    // now reads instead of a hand-coded name check, so the next effect with a
+    // genuinely client-only param needs a schema declaration, not someone
+    // re-tracing the same param-by-param audit this one needed by hand.
+    const scenePatch = {};
     for (const k of [
       'strength01',
       'buildingHeightPx',
@@ -3047,10 +3132,20 @@ function install() {
     ]) {
       if (k in p) {
         sunShadowLiveOverride[k] = p[k];
+        if (SUN_SHADOW_PARAMS[k]?.scope !== 'client') scenePatch[k] = p[k];
         changed = true;
       }
     }
     if (changed) {
+      if (Object.keys(scenePatch).length > 0) {
+        // STAGE B (mythica-machina-press#288/#389) — mirrors setBloom's own write-through.
+        Promise.resolve(writeSceneEffectParams('sunShadows', scenePatch)).then(
+          (result) => {
+            if (!result.ok) log.warn(`sun shadows scene param write not persisted: ${result.reason}`);
+          },
+          (err) => log.error('sun shadows scene param write failed:', err)
+        );
+      }
       try {
         reapplySunShadows();
       } catch (err) {
@@ -3076,6 +3171,7 @@ function install() {
     // Every key BLOOM_PARAMS declares (Presence's `enabled` is handled above,
     // through the settings write, not this list) — explicit, matching
     // setVegetation's precedent so a rename is a visible typo, not a silent no-op.
+    const scenePatch = {};
     for (const k of [
       'threshold',
       'knee',
@@ -3092,10 +3188,19 @@ function install() {
     ]) {
       if (k in p) {
         bloomLiveOverride[k] = p[k];
+        if (BLOOM_PARAMS[k]?.scope !== 'client') scenePatch[k] = p[k];
         changed = true;
       }
     }
     if (changed) {
+      // STAGE B (mythica-machina-press#288/#389) — same "write through to the
+      // scene alongside the instant local override" shape as setUiShadow's own.
+      Promise.resolve(writeSceneEffectParams('bloom', scenePatch)).then(
+        (result) => {
+          if (!result.ok) log.warn(`bloom scene param write not persisted: ${result.reason}`);
+        },
+        (err) => log.error('bloom scene param write failed:', err)
+      );
       try {
         reapplyBloom();
       } catch (err) {
@@ -3120,13 +3225,22 @@ function install() {
     let changed = false;
     // Every key DOF_PARAMS declares — explicit, matching setBloom's precedent
     // so a rename is a visible typo, not a silent no-op.
+    const scenePatch = {};
     for (const k of ['strength', 'blurPerFloor', 'maxBlur']) {
       if (k in p) {
         dofLiveOverride[k] = p[k];
+        if (DOF_PARAMS[k]?.scope !== 'client') scenePatch[k] = p[k];
         changed = true;
       }
     }
     if (changed) {
+      // STAGE B (mythica-machina-press#288/#389) — mirrors setBloom's own write-through.
+      Promise.resolve(writeSceneEffectParams('depthOfField', scenePatch)).then(
+        (result) => {
+          if (!result.ok) log.warn(`depth of field scene param write not persisted: ${result.reason}`);
+        },
+        (err) => log.error('depth of field scene param write failed:', err)
+      );
       try {
         reapplyDof();
       } catch (err) {
@@ -3147,13 +3261,22 @@ function install() {
         .catch((err) => log.error('grade enable write/reapply failed:', err));
     }
     let changed = false;
+    const scenePatch = {};
     for (const k of Object.keys(GRADE_LOOK_PARAMS)) {
       if (k in p) {
         gradeLookLiveOverride[k] = p[k];
+        if (GRADE_LOOK_PARAMS[k]?.scope !== 'client') scenePatch[k] = p[k];
         changed = true;
       }
     }
     if (changed) {
+      // STAGE B (mythica-machina-press#288/#389) — mirrors setBloom's own write-through.
+      Promise.resolve(writeSceneEffectParams('grade', scenePatch)).then(
+        (result) => {
+          if (!result.ok) log.warn(`grade scene param write not persisted: ${result.reason}`);
+        },
+        (err) => log.error('grade scene param write failed:', err)
+      );
       try {
         reapplyGradeLook();
       } catch (err) {
@@ -4020,6 +4143,8 @@ function install() {
     writeSetting,
     moduleId: MODULE_ID,
     effectEnableKey,
+    readSceneEffectParams,
+    writeSceneEffectParams,
     log,
   });
 
@@ -4082,6 +4207,8 @@ function install() {
     writeSetting,
     moduleId: MODULE_ID,
     effectEnableKey,
+    readSceneEffectParams,
+    writeSceneEffectParams,
     log,
   });
   const specular = createSpecularRegistration({
@@ -4091,6 +4218,8 @@ function install() {
     writeSetting,
     moduleId: MODULE_ID,
     effectEnableKey,
+    readSceneEffectParams,
+    writeSceneEffectParams,
     log,
   });
 
@@ -4115,6 +4244,8 @@ function install() {
     writeSetting,
     moduleId: MODULE_ID,
     effectEnableKey,
+    readSceneEffectParams,
+    writeSceneEffectParams,
     log,
   });
 
@@ -4129,6 +4260,8 @@ function install() {
     writeSetting,
     moduleId: MODULE_ID,
     effectEnableKey,
+    readSceneEffectParams,
+    writeSceneEffectParams,
     log,
   });
 
@@ -9260,6 +9393,11 @@ function install() {
   /** Unsubscribe for the scene-fade watcher (a second GM's fade reaching
    * here) — re-armed on every canvasReady, mirroring skyUnsub's own shape. */
   let fadeUnsub = null;
+  /** Unsubscribe for the scene-effect-params watcher (mythica-machina-press
+   * #288/#389, Stage B) — a second GM tuning UI-shadow's look reaching THIS
+   * client mid-session. Re-armed on every canvasReady, same shape as
+   * fadeUnsub/skyUnsub above it. */
+  let effectParamsUnsub = null;
 
   /**
    * Start a REAL fade toward a named archetype's own declared axis values.
@@ -12896,6 +13034,12 @@ function install() {
           fadeState = state;
           MapShine.__remote?.refreshWeatherBoard();
         });
+        // EFFECT SCENE PARAMS (Stage B, #288/#389) — this scene's own load
+        // already picked up UI-shadow's authored params via reapplyAll('scene
+        // load') below; this watcher is the LIVE half, for a second client
+        // already sitting in this same scene when the GM tunes it.
+        effectParamsUnsub?.();
+        effectParamsUnsub = watchSceneEffectParams(() => reapplyUiShadow());
         // THE CUE STACK'S OWN SCENE LOAD (U3) — scene-scoped exactly like the
         // fade state above; a sold map's authored cues travel WITH its scene,
         // so a scene SWITCH must re-load this scene's own stack, never carry

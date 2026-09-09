@@ -3237,7 +3237,17 @@ function install() {
   };
   // DEPTH OF FIELD's render-state seam — same shape as bloom's own, above.
   // perfTier ADDED 2026-08-30, same fix; DELEGATES the same way.
-  const getDofRenderState = () => projectCascadeRenderState(dofReadout);
+  // U6 READ TRACKING (mythica-machina-press#194) — wrapped HERE, the real
+  // render-consumption boundary. Confirmed by reading `vt-pan-viewer.js`'s
+  // own consumer: `p.strength`/`p.blurPerFloor`/`p.maxBlur` are read
+  // directly off `st.params`, no intervening spread. `buildDofPanel`'s own
+  // `getValue` (boot.js) reads `dofReadout.params` DIRECTLY, bypassing this
+  // function entirely — a second UI surface, not a second render consumer,
+  // so wrapping only here still means only a real render touch counts.
+  const getDofRenderState = () => {
+    const state = projectCascadeRenderState(dofReadout);
+    return { ...state, params: wrapForReadTracking('depthOfField', state.params ?? {}) };
+  };
 
   // SUN SHADOWS' two seams into the viewer (docs/planning/Sun-Shadows.md).
   // The resolved rung is read fresh by the subsystem on EVERY `maybeBake` —
@@ -7901,6 +7911,10 @@ function install() {
     getReadout: () => dofReadout,
     setValue: (patch) => MapShine.setDof(patch),
     presets: { table: DOF_PRESETS, pick: dofPreset },
+    // U6 (mythica-machina-press#194) — real, not "planned": getDofRenderState
+    // wraps its params with wrapForReadTracking('depthOfField', ...) at the
+    // actual render-consumption boundary (see that seam's own comment).
+    getHealth: () => getParamHealth('depthOfField', DOF_PARAMS),
   });
 
   registerSimpleEffectCard('sunShadows', {
@@ -8028,7 +8042,7 @@ function install() {
   // getBloomRenderState's own U6 comments for the wrapping pattern, and why
   // each effect needs its OWN traced consumption boundary rather than a
   // blanket wrap).
-  const READ_TRACKED_EFFECTS = { water: WATER_PARAMS, bloom: BLOOM_PARAMS };
+  const READ_TRACKED_EFFECTS = { water: WATER_PARAMS, bloom: BLOOM_PARAMS, depthOfField: DOF_PARAMS };
   MapShine.debug.registerReport('control-health', 'Control health (declared vs read)', () => {
     const effects = {};
     for (const [effectId, schema] of Object.entries(READ_TRACKED_EFFECTS)) {

@@ -573,10 +573,23 @@ export const ZONES = Object.freeze(
       'syncAllVegetationMotionForFrame'
     ),
     z(
-      'light.tileMotionSync',
+      'tick.tileMotionSync',
       'Tile motion sync',
-      'lighting',
-      'light.accumulate',
+      // MOVED (mythica-machina-press#538/#539's live-test fix) from inside
+      // light.accumulate to the pre-pass-plan tick block, alongside
+      // tick.camera — same category/pass shape as that zone (a frame-wide
+      // uniform sync with no one pass to attribute it to), for the identical
+      // reason: this sync must land BEFORE geometry.world's depth write
+      // reads the SAME tileMotion uniforms, and geometry.world runs before
+      // light.accumulate even starts. Left at the old call site, the depth
+      // buffer and the tile's own drawn position always disagreed by
+      // exactly one frame — invisible on a static tile (nothing moved, so
+      // last frame's pose equals this frame's), total for anything actually
+      // animating. See the new call site's own comment (vt-pan-viewer.js,
+      // beside envLight.setViewRect) for the full account — the identical
+      // bug shape water's own view-rect staleness fix already solved once.
+      'frame',
+      null,
       null, // not a registered effect (effects/registry.js) — a standalone GM tool, like camera-path
       'cpu',
       'steady',

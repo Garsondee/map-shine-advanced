@@ -6864,11 +6864,15 @@ export async function startVtPanViewer({
       profiler?.begin(Z.lightVegSync);
       syncAllVegetationMotionForFrame();
       profiler?.end(Z.lightVegSync);
-      // Tile motion's own per-frame uniform sync — same placement, same
-      // reason (see syncAllTileMotionForFrame's own header).
-      profiler?.begin(Z.lightTileMotionSync);
-      syncAllTileMotionForFrame();
-      profiler?.end(Z.lightTileMotionSync);
+      // Tile motion's own per-frame uniform sync used to run HERE — MOVED
+      // (mythica-machina-press#538/#539's live-test fix) to the pre-pass-plan
+      // tick block, beside `envLight.setViewRect`. See that call site's own
+      // comment for why: geometry.world's depth write reads these same
+      // uniforms and runs BEFORE light.accumulate even starts, so syncing
+      // here left the depth buffer permanently one frame stale relative to
+      // a tile-attached Window/Specular surface's own draw — the exact bug
+      // shape water's view-rect staleness fix (same call site, below) had
+      // already solved once, just not yet applied to this newer consumer.
       // Keep every drawn item's `buf:scene.attr` floor-index LIVE — see
       // `syncAllFloorAttrUniformsForFrame`'s own header for the live bug this
       // fixes (specular invisible on one specific floor, forever, because
@@ -15879,6 +15883,7 @@ export async function startVtPanViewer({
       tickEnv: profiler?.indexOf('tick.envSnapshot') ?? -1,
       tickWindPoll: profiler?.indexOf('tick.windRebakePoll') ?? -1,
       tickCamera: profiler?.indexOf('tick.camera') ?? -1,
+      tickTileMotionSync: profiler?.indexOf('tick.tileMotionSync') ?? -1,
       simsWind: profiler?.indexOf('sims.wind') ?? -1,
       simsFluid: profiler?.indexOf('sims.fluid') ?? -1,
       simsVegSpring: profiler?.indexOf('sims.vegSpring') ?? -1,
@@ -15910,7 +15915,6 @@ export async function startVtPanViewer({
       lightCandleSync: profiler?.indexOf('light.candleSync') ?? -1,
       lightLightningSync: profiler?.indexOf('light.lightningSync') ?? -1,
       lightVegSync: profiler?.indexOf('light.vegetationSync') ?? -1,
-      lightTileMotionSync: profiler?.indexOf('light.tileMotionSync') ?? -1,
       lightWindOverlaySync: profiler?.indexOf('light.windOverlaySync') ?? -1,
       lightUiShadow: profiler?.indexOf('light.uiShadowStamps') ?? -1,
       lightDrawIllum: profiler?.indexOf('light.drawIllum') ?? -1,
@@ -16284,14 +16288,34 @@ export async function startVtPanViewer({
       // sub-pixel) and increasingly visible the faster the camera moves,
       // exactly the "lags behind during rapid panning, around tokens and
       // where we're masking the water" the author reported live 2026-08-15.
-      // Specular and window never had this problem — both draw AFTER
-      // `light.accumulate` starts (specular in its own post-lighting scene;
-      // window from inside `light.accumulate` itself), so the OLD call site
-      // was already fresh by the time either of them read it. Moving the
-      // ONE shared push earlier fixes it for every consumer, present and
-      // future, rather than special-casing water's own earlier pass — see
-      // `keyhole-water-depth-authority-migration.md` for the fuller account.
+      // Specular and window's own FLOOR-LEVEL surfaces never had this
+      // problem — both draw AFTER `light.accumulate` starts (specular in
+      // its own post-lighting scene; window from inside `light.accumulate`
+      // itself), so the OLD call site was already fresh by the time either
+      // of them read it. Moving the ONE shared push earlier fixes it for
+      // every consumer, present and future, rather than special-casing
+      // water's own earlier pass — see `keyhole-water-depth-authority-
+      // migration.md` for the fuller account.
+      //
+      // ⚠️ NO LONGER TRUE FOR THEIR TILE-ATTACHED SURFACES (mythica-machina-
+      // press#538/#539) — those read `buf:scene.depth`, which IS written
+      // inside `geometry.world`, so they inherited the identical staleness
+      // this comment describes for water. Fixed the same way, right below:
+      // `syncAllTileMotionForFrame()` moves here too, for the identical
+      // reason — a live-test bug report ("motion tiles don't shine, don't
+      // get lit by windows") traced to the tile-motion pose used by
+      // `geometry.world`'s depth-proxy write and the tile surfaces' own
+      // draw disagreeing by exactly one frame: invisible on a static tile
+      // (nothing moved, so last frame's pose equals this frame's), total
+      // for anything actually animating (near-zero footprint overlap
+      // between the stale depth write and the current draw).
       if (view) envLight.setViewRect(currentViewRect);
+      // Tile motion's own per-frame uniform sync — see this block's own
+      // comment just above for why it has to land here, not inside
+      // light.accumulate (its old home, see that call site's own note).
+      profiler?.begin(Z.tickTileMotionSync);
+      syncAllTileMotionForFrame();
+      profiler?.end(Z.tickTileMotionSync);
       profiler?.end(Z.tickCamera);
 
       // TWO PASSES, FOR REAL (2026-07-17), NOW GRAPH-DRIVEN (2026-07-18).

@@ -205,7 +205,22 @@ const STORE = 'blocks';
 // record still bumps together: this file has never special-cased "which old
 // records happen to be unaffected," and there is no cheap way to know that
 // without re-scanning the source, which is exactly the work a bump avoids.
-const CACHE_VERSION = 12;
+// v13 (2026-09-09, mythica-machina-press#438, landed together with
+// mythica-machina-press#544's depth-authority fix — see that issue's own
+// "Suggested fix" step 3 for why): BC7 modes 6 and 7 now FORCE the shared
+// p-bit that governs a block's alpha channel, rather than letting the usual
+// total-4-channel-error vote pick it, whenever a block's SOURCE alpha is
+// uniformly 0 or uniformly 255 across all 16 texels — block-compress.js's
+// own `detectUniformBlockAlpha`/`quantizeBC7Endpoint`. Measured before this
+// fix (a 2048² crop, `mythica-machina-press#438`'s own numbers): 39.9% of
+// source-alpha-255 texels decoded below 255, worst case 230/255. Every v12
+// BC7 record for an image with such content holds visibly less-exact alpha
+// than this encoder now produces at its flat interiors and transparent
+// padding — re-encoded, not re-served, the same all-or-nothing trade every
+// bump above has made. BC1 is unaffected (it carries no alpha) but shares
+// this key, so its records ride along unchanged, same as v9's note on the
+// identical situation.
+const CACHE_VERSION = 13;
 
 /**
  * The coarse-alpha cache is versioned SEPARATELY from the BC blocks: the two

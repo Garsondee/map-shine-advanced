@@ -1019,8 +1019,17 @@ function expandBits(v, bits) {
  * "first candidate seen" rule so mode 6's bytes are unaffected by this
  * generalisation). Writes raw quantized values into `raw` and the 8-bit
  * reconstruction the GPU will interpolate into `rec`; returns the chosen p-bit.
+ *
+ * @param {number} [forcedP] - mythica-machina-press#438; the SAME "skip the
+ *   vote, use this p-bit" override `quantizeBC7Endpoint` documents (its own
+ *   doc has the full reasoning and the measured bound — this is mode 7's
+ *   version of the identical fix, since mode 7's endpoints share this exact
+ *   function and its exact one-shared-p-bit-per-endpoint format constraint).
+ *   Mode 5 never passes this: its alpha track has no p-bit at all (8 explicit
+ *   bits, `usePbit:false` — see this file's own MODE 5 bit-layout doc), so it
+ *   already reconstructs a uniform alpha exactly with no forcing needed.
  */
-function quantizeEndpointInto(src, nc, qbits, usePbit, raw, rec) {
+function quantizeEndpointInto(src, nc, qbits, usePbit, raw, rec, forcedP) {
   if (!usePbit) {
     for (let c = 0; c < nc; c++) {
       raw[c] = quantRawChannel(src[c], qbits);
@@ -1042,21 +1051,26 @@ function quantizeEndpointInto(src, nc, qbits, usePbit, raw, rec) {
     const q = Math.round(((v * levels) / 255 - p) / 2);
     return q < 0 ? 0 : q > maxQ ? maxQ : q;
   };
-  let bestP = 0;
-  let bestErr = Infinity;
-  for (let p = 0; p <= 1; p++) {
-    let err = 0;
-    for (let c = 0; c < nc; c++) {
-      const v = src[c] < 0 ? 0 : src[c] > 255 ? 255 : src[c];
-      const d = v - expandBits((solveQ(v, p) << 1) | p, total);
-      err += d * d;
-    }
-    // Strictly less, so p=0 keeps a tie — the same rule `quantizeBC7Endpoint`
-    // already used, which is what leaves mode 6's bytes untouched by this
-    // generalisation.
-    if (err < bestErr) {
-      bestErr = err;
-      bestP = p;
+  let bestP;
+  if (forcedP === 0 || forcedP === 1) {
+    bestP = forcedP;
+  } else {
+    bestP = 0;
+    let bestErr = Infinity;
+    for (let p = 0; p <= 1; p++) {
+      let err = 0;
+      for (let c = 0; c < nc; c++) {
+        const v = src[c] < 0 ? 0 : src[c] > 255 ? 255 : src[c];
+        const d = v - expandBits((solveQ(v, p) << 1) | p, total);
+        err += d * d;
+      }
+      // Strictly less, so p=0 keeps a tie — the same rule `quantizeBC7Endpoint`
+      // already used, which is what leaves mode 6's bytes untouched by this
+      // generalisation.
+      if (err < bestErr) {
+        bestErr = err;
+        bestP = p;
+      }
     }
   }
   for (let c = 0; c < nc; c++) {
@@ -1219,8 +1233,19 @@ const _scratchFitRaw1 = new Int32Array(4);
  * covariance points along the gap, so both endpoints land in empty space
  * between the clusters rather than on them). Scoring both costs one extra index
  * pass and removes the failure mode entirely.
+ *
+ * @param {number} [forcedP] - mythica-machina-press#438, forwarded verbatim to
+ *   every `quantizeEndpointInto` call this fit makes (seeding AND every
+ *   refine round) — never applied only at the end, because `score()` here is
+ *   what the seed/refine loop itself compares candidates BY; scoring with the
+ *   unforced (auto-vote) quantization and only forcing at a later emit step
+ *   would let the search converge on a line/index assignment optimized for a
+ *   reconstruction the block will not actually ship. Only mode 7's caller
+ *   (the sole `usePbit:true` fit in this file) ever passes this — see
+ *   `quantizeEndpointInto`'s own doc for mode 5's independent reason it needs
+ *   no forcing at all.
  */
-function fitLine(texels, members, count, chans, nc, weights, nLevels, qbits, usePbit, outLo, outHi, outIdx) {
+function fitLine(texels, members, count, chans, nc, weights, nLevels, qbits, usePbit, outLo, outHi, outIdx, forcedP) {
   const lo = _scratchFitLo;
   const hi = _scratchFitHi;
   const rec0 = _scratchFitRec0;
@@ -1233,8 +1258,8 @@ function fitLine(texels, members, count, chans, nc, weights, nLevels, qbits, use
   let bestErr = Infinity;
 
   const score = () => {
-    quantizeEndpointInto(lo, nc, qbits, usePbit, _scratchFitRaw0, rec0);
-    quantizeEndpointInto(hi, nc, qbits, usePbit, _scratchFitRaw1, rec1);
+    quantizeEndpointInto(lo, nc, qbits, usePbit, _scratchFitRaw0, rec0, forcedP);
+    quantizeEndpointInto(hi, nc, qbits, usePbit, _scratchFitRaw1, rec1, forcedP);
     return assignLineIndices(texels, members, count, chans, nc, rec0, rec1, weights, nLevels, workIdx);
   };
   const keepIfBetter = (err) => {
@@ -1320,26 +1345,68 @@ function fitLine(texels, members, count, chans, nc, weights, nLevels, qbits, use
 function makeBC7Endpoint() {
   return { q: new Uint8Array(4), rec: new Uint8Array(4), p: 0, err: 0 };
 }
-function quantizeBC7Endpoint(texels, base, out) {
-  // Cost p=1 first WITHOUT writing anything, so the common p=0 answer is
-  // written exactly once instead of being written and then overwritten.
+/**
+ * `forcedP` — mythica-machina-press#438. When the CALLER has already proven
+ * (`detectUniformBlockAlpha`, below) that every one of this block's 16
+ * SOURCE texels shares one alpha value and that value is exactly 0 or
+ * exactly 255, the normal "vote by total 4-channel error" below is skipped:
+ * the shared p-bit is instead FORCED to whichever value reconstructs that
+ * exact alpha (`p=1` hits 255 via `(127<<1)|1`; `p=0` hits 0 via `(0<<1)|0`
+ * — the only two bit patterns that CAN land on 0 or 255 exactly, since a
+ * clamped-at-127 p=0 endpoint tops out at 254). Without this, the auto-vote
+ * measurably prefers the OTHER parity whenever R/G/B's own combined error
+ * saving there exceeds alpha's (at most 1, since both `base+c` texel values
+ * passed in already equal the uniform target exactly, being real members of
+ * the uniform block) — mythica-machina-press#438's own measurement: 39.9% of
+ * source-alpha-255 texels decoded below 255, worst case 230/255, because
+ * mode 6 (and mode 7, `quantizeEndpointInto`'s own `forcedP`) share ONE p-bit
+ * across all 4 channels and had no way to know alpha's target was exact
+ * rather than merely close.
+ *
+ * R/G/B still quantize at this SAME forced bit — the format has only one
+ * p-bit per endpoint, so there is no way to free alpha from this without
+ * touching colour too — so a channel that would have preferred the other
+ * parity now costs at most 1/255 MORE than the unconstrained vote would have
+ * picked for it alone. That bound is why this is safe to force unconditionally
+ * whenever the block genuinely has zero alpha variance: alpha's own
+ * reconstruction error drops from as much as 25/255 (mid-distribution) or
+ * 1/255 (the P-BIT-conflict-only case, 81% of #438's measured population) to
+ * exactly 0, in exchange for a same-endpoint colour channel losing at most
+ * 1/255 it would otherwise have kept — see `block-compress.test.mjs`'s own
+ * pinned uniform-alpha fixtures for the measured colour-side cost on real
+ * mixed-colour blocks (not the abstract bound above).
+ *
+ * Deliberately gated on EXACT block-wide uniformity, not "this one candidate
+ * endpoint texel happens to be 0 or 255" — a genuinely mixed-alpha block (a
+ * real antialiased edge, the case mode 5's separate index tracks exist for)
+ * is explicitly OUT OF SCOPE here; forcing one endpoint's alpha to a texel
+ * value that is not representative of the whole block's ramp would distort
+ * the interpolation's calibration for the texels in between, which is a
+ * different and unrelated failure mode this fix must not introduce.
+ */
+function quantizeBC7Endpoint(texels, base, out, forcedP) {
+  const forced = forcedP === 0 || forcedP === 1;
   let err1 = 0;
-  for (let c = 0; c < 4; c++) {
-    const v = texels[base + c];
-    let qc = v >> 1;
-    if (qc > 127) qc = 127;
-    const d = v - ((qc << 1) | 1);
-    err1 += d * d;
-  }
   let err0 = 0;
-  for (let c = 0; c < 4; c++) {
-    const v = texels[base + c];
-    let qc = (v + 1) >> 1;
-    if (qc > 127) qc = 127;
-    const d = v - (qc << 1);
-    err0 += d * d;
+  if (!forced) {
+    // Cost p=1 first WITHOUT writing anything, so the common p=0 answer is
+    // written exactly once instead of being written and then overwritten.
+    for (let c = 0; c < 4; c++) {
+      const v = texels[base + c];
+      let qc = v >> 1;
+      if (qc > 127) qc = 127;
+      const d = v - ((qc << 1) | 1);
+      err1 += d * d;
+    }
+    for (let c = 0; c < 4; c++) {
+      const v = texels[base + c];
+      let qc = (v + 1) >> 1;
+      if (qc > 127) qc = 127;
+      const d = v - (qc << 1);
+      err0 += d * d;
+    }
   }
-  const p = err1 < err0 ? 1 : 0;
+  const p = forced ? forcedP : err1 < err0 ? 1 : 0;
   const q = out.q,
     rec = out.rec;
   for (let c = 0; c < 4; c++) {
@@ -1350,8 +1417,42 @@ function quantizeBC7Endpoint(texels, base, out) {
     rec[c] = (qc << 1) | p;
   }
   out.p = p;
-  out.err = p === 1 ? err1 : err0;
+  out.err = forced ? 0 : p === 1 ? err1 : err0;
   return out;
+}
+
+/**
+ * Does this 4×4 block's SOURCE alpha (`texels[t*4+3]` for t=0..15) share ONE
+ * value across every texel, AND is that value exactly 0 or exactly 255 — the
+ * two cases mythica-machina-press#438 names as "by far the common case in
+ * interior paint and in empty regions"? Returns that value when true, else
+ * `null`. A block straddling a genuine alpha transition (any spread of
+ * values, or a uniform-but-arbitrary value like 200 — see the "exactly-
+ * representable block" test's own comment on why THAT case is a property of
+ * the format, not a defect) is explicitly not this function's concern: #438's
+ * fix targets only the fully-flat, should-read-exactly-solid-or-empty case,
+ * never a block with a real ramp to represent.
+ * @param {Uint8Array|Uint8ClampedArray} texels - flat RGBA, length 64.
+ * @returns {number|null}
+ */
+function detectUniformBlockAlpha(texels) {
+  const a0 = texels[3];
+  if (a0 !== 0 && a0 !== 255) return null;
+  for (let t = 1; t < 16; t++) {
+    if (texels[t * 4 + 3] !== a0) return null;
+  }
+  return a0;
+}
+
+/** `detectUniformBlockAlpha`'s result, converted to the p-bit that lands a
+ * mode 6/7 endpoint's alpha channel exactly on it (see `quantizeBC7Endpoint`'s
+ * own `forcedP` doc for why only these two bit patterns can). `undefined` —
+ * never `null` — for "no forcing", matching `quantizeBC7Endpoint`'s own
+ * `forcedP === 0 || forcedP === 1` gate exactly (a stray `null` would fail
+ * that check anyway, but `undefined` is what every OTHER caller of these
+ * functions already passes implicitly by omitting the argument). */
+function uniformAlphaForcedP(uniformAlpha) {
+  return uniformAlpha === 255 ? 1 : uniformAlpha === 0 ? 0 : undefined;
 }
 
 /**
@@ -1385,10 +1486,18 @@ const _scratchBC7PalA = new Uint8Array(16);
  * inside the 16-texel loop — 256 four-channel lerps per pair where 16 suffice,
  * and this inner search is where essentially the whole BC7 encode budget goes.
  * Same arithmetic, same tie-breaking (`<` keeps the lowest index), same bytes.
+ *
+ * @param {number} [forcedP] - mythica-machina-press#438; see
+ *   `quantizeBC7Endpoint`'s own doc. Threaded straight through to BOTH
+ *   endpoints unchanged — a uniform-alpha block forces the SAME p-bit at
+ *   both ends, which is what makes the interpolated alpha land on the exact
+ *   uniform value at every index (see `DEPTH_AUTHORITY_SOLID_ALPHA_FLOOR`'s
+ *   own doc, scene-depth.js, for why both endpoints sharing one alpha value
+ *   is what removes alpha from the per-texel distance search entirely).
  */
-function scoreBC7Pair(texels, bi, bj, out) {
-  const q0 = quantizeBC7Endpoint(texels, bi * 4, out.q0);
-  const q1 = quantizeBC7Endpoint(texels, bj * 4, out.q1);
+function scoreBC7Pair(texels, bi, bj, out, forcedP) {
+  const q0 = quantizeBC7Endpoint(texels, bi * 4, out.q0, forcedP);
+  const q1 = quantizeBC7Endpoint(texels, bj * 4, out.q1, forcedP);
   const palR = _scratchBC7PalR,
     palG = _scratchBC7PalG,
     palB = _scratchBC7PalB,
@@ -1440,8 +1549,14 @@ function scoreBC7Pair(texels, bi, bj, out) {
  * Score MODE 6 for this block: the single RGBA line, both endpoint-pair
  * heuristics, exactly as the single-mode encoder always did. Returns the winning
  * candidate (its `.total` is the comparable error).
+ *
+ * @param {number} [forcedP] - mythica-machina-press#438;
+ *   `encodeBC7Block`'s own `detectUniformBlockAlpha` result, converted via
+ *   `uniformAlphaForcedP`, threaded into both candidate pairs' quantization
+ *   so the WINNER — whichever pair scores lower — already carries exact
+ *   alpha rather than needing a second pass.
  */
-function scoreBC7Mode6(texels) {
+function scoreBC7Mode6(texels, forcedP) {
   // Endpoints = the two texels farthest apart in 4-D RGBA space (same rationale
   // as BC1: a max-distance pair lands both endpoints on the real colour+alpha
   // axis, unlike a bounding box whose corners can be values present in neither).
@@ -1475,10 +1590,10 @@ function scoreBC7Mode6(texels) {
   // of the two options actually evaluated. Skipped outright when the two
   // heuristics named the same pair, which `isSamePair`'s own doc proves is
   // bit-identical, not an approximation.
-  let winner = scoreBC7Pair(texels, bi, bj, _scratchBC7A);
+  let winner = scoreBC7Pair(texels, bi, bj, _scratchBC7A, forcedP);
   const lumaPair = lumaExtremalPair(texels);
   if (lumaPair !== null && !isSamePair(lumaPair[0], lumaPair[1], bi, bj)) {
-    const candidate = scoreBC7Pair(texels, lumaPair[0], lumaPair[1], _scratchBC7B);
+    const candidate = scoreBC7Pair(texels, lumaPair[0], lumaPair[1], _scratchBC7B, forcedP);
     if (candidate.total < winner.total) winner = candidate;
   }
   return winner;
@@ -1875,14 +1990,26 @@ function makeBC7Mode7Candidate() {
     hi: [new Float64Array(4), new Float64Array(4)],
     idx: new Uint8Array(16),
     total: 0,
+    // mythica-machina-press#438 — carried from scoring through to
+    // `emitBC7Mode7`, which re-quantizes `lo`/`hi` from scratch (see that
+    // function's own doc: "what ships is exactly what was measured") and
+    // must use the SAME forcedP the winning score was computed with, or the
+    // emitted bytes would revert to the auto-voted p-bit this fix exists to
+    // override.
+    forcedP: undefined,
   };
 }
 const _scratchBC7M7 = makeBC7Mode7Candidate();
 const _scratchBC7M7Try = makeBC7Mode7Candidate();
 
 /** Fit ONE partition: split the texels, fit each subset its own RGBA line, and
- * return the block's total error. */
-function scoreBC7Mode7Partition(texels, partition, out) {
+ * return the block's total error.
+ * @param {number} [forcedP] - mythica-machina-press#438; see `fitLine`'s own
+ *   doc. Forwarded to BOTH subsets — a block only reaches this uniform-alpha
+ *   path when its alpha is uniform ACROSS THE WHOLE BLOCK, so both subsets
+ *   share the same forced target regardless of which texels the partition
+ *   assigns to which. */
+function scoreBC7Mode7Partition(texels, partition, out, forcedP) {
   const m0 = _scratchPartMembers0;
   const m1 = _scratchPartMembers1;
   let n0 = 0;
@@ -1896,23 +2023,26 @@ function scoreBC7Mode7Partition(texels, partition, out) {
   // tests assert it — but a fit over zero texels would silently produce garbage
   // endpoints rather than throw, so this stays as a real guard.
   if (n0 === 0 || n1 === 0) return Infinity;
-  const e0 = fitLine(texels, m0, n0, CHANS_RGBA, 4, BC7_WEIGHTS2, 4, 5, true, out.lo[0], out.hi[0], out.idx);
-  const e1 = fitLine(texels, m1, n1, CHANS_RGBA, 4, BC7_WEIGHTS2, 4, 5, true, out.lo[1], out.hi[1], out.idx);
+  const e0 = fitLine(texels, m0, n0, CHANS_RGBA, 4, BC7_WEIGHTS2, 4, 5, true, out.lo[0], out.hi[0], out.idx, forcedP);
+  const e1 = fitLine(texels, m1, n1, CHANS_RGBA, 4, BC7_WEIGHTS2, 4, 5, true, out.lo[1], out.hi[1], out.idx, forcedP);
   out.partition = partition;
   out.total = e0 + e1;
+  out.forcedP = forcedP;
   return out.total;
 }
 
 /** Score MODE 7 across the shortlisted partitions, keeping the best. Two slots
  * alternate so a losing trial never overwrites the winner and no candidate ever
- * has to be copied. */
-function scoreBC7Mode7(texels) {
+ * has to be copied.
+ * @param {number} [forcedP] - mythica-machina-press#438; see
+ *   `scoreBC7Mode7Partition`'s own doc. */
+function scoreBC7Mode7(texels, forcedP) {
   rankBC7Partitions(texels, _scratchPartOrder);
   let best = null;
   let trial = _scratchBC7M7;
   let other = _scratchBC7M7Try;
   for (let k = 0; k < BC7_PARTITION_SHORTLIST; k++) {
-    const err = scoreBC7Mode7Partition(texels, _scratchPartOrder[k], trial);
+    const err = scoreBC7Mode7Partition(texels, _scratchPartOrder[k], trial, forcedP);
     if (best === null || err < best.total) {
       best = trial;
       trial = other;
@@ -1934,14 +2064,23 @@ function emitBC7Mode7(cand, out, off) {
   const base = partition * 16;
 
   for (let s = 0; s < 2; s++) {
-    _scratchM7P[s * 2] = quantizeEndpointInto(cand.lo[s], 4, 5, true, _scratchM7Raw[s * 2], _scratchM7Rec[s * 2]);
+    _scratchM7P[s * 2] = quantizeEndpointInto(
+      cand.lo[s],
+      4,
+      5,
+      true,
+      _scratchM7Raw[s * 2],
+      _scratchM7Rec[s * 2],
+      cand.forcedP
+    );
     _scratchM7P[s * 2 + 1] = quantizeEndpointInto(
       cand.hi[s],
       4,
       5,
       true,
       _scratchM7Raw[s * 2 + 1],
-      _scratchM7Rec[s * 2 + 1]
+      _scratchM7Rec[s * 2 + 1],
+      cand.forcedP
     );
   }
 
@@ -2012,7 +2151,16 @@ function makeBitWriter(out, off) {
  * made per block rather than per image.
  */
 function encodeBC7Block(texels, out, off) {
-  const m6 = scoreBC7Mode6(texels);
+  // mythica-machina-press#438 — computed ONCE per block, before any mode is
+  // scored, and threaded into every mode whose endpoints share a p-bit across
+  // channels (6 and 7; mode 5 needs no such override — see
+  // `quantizeEndpointInto`'s own doc). `undefined` (never forcing) for a
+  // block whose alpha is not uniform, or is uniform at some OTHER value —
+  // see `detectUniformBlockAlpha`'s own doc for why only exactly-0 and
+  // exactly-255 are in scope.
+  const forcedP = uniformAlphaForcedP(detectUniformBlockAlpha(texels));
+
+  const m6 = scoreBC7Mode6(texels, forcedP);
   let bestMode = 6;
   let bestErr = m6.total;
   let m7 = null;
@@ -2036,7 +2184,7 @@ function encodeBC7Block(texels, out, off) {
     // defect, and paying mode 7's cost to confirm so is the difference between a
     // 5-second and a 50-second encode for one floor (measured, 6750²).
     if (bestErr > BC7_MODE7_ERROR_GATE) {
-      m7 = scoreBC7Mode7(texels);
+      m7 = scoreBC7Mode7(texels, forcedP);
       if (m7 !== null && m7.total < bestErr) {
         bestErr = m7.total;
         bestMode = 7;

@@ -104,6 +104,82 @@ export const DEPTH_PASS_NEAR = 0.01;
 export const DEPTH_PASS_FAR = 10;
 
 /**
+ * THE FLOOR for `buildSceneDepthWriterMaterial`'s "safe to skip what's
+ * beneath me" test — mythica-machina-press#544. NOT the same question as
+ * Foundry's own `tile.texture.alphaThreshold`, and must never be replaced by
+ * it alone (see this constant's use, below, and `alphaThreshold`'s own param
+ * doc on `buildSceneDepthWriterMaterial`).
+ *
+ * THE BUG THIS FIXES: before this constant existed, the discard test below
+ * compared a fragment's real alpha directly against the item's OWN authored
+ * `alphaThreshold` (Foundry's per-Tile field, default 0.75) — a value that,
+ * in REAL Foundry, governs an unrelated question (token vision-occlusion
+ * fade through a tile), never texture-to-texture alpha COMPOSITING, which
+ * real Foundry/PIXI always does as normal blending with no threshold at all.
+ * Reusing it here meant ANY tile whose art has a soft/antialiased silhouette
+ * — a cutout prop, a window, a roof overlay, essentially every hand-painted
+ * cutout in the catalogue — got a hard, binary flip at whatever pixel
+ * happened to cross 0.75: below it, the tile discarded itself (its own real
+ * partial coverage thrown away); at/above it, whatever was BENEATH the tile
+ * discarded INSTEAD, so the tile composited against void, not against the
+ * layer it should be blending over. Neither side is a blend. Reported by the
+ * author as tile edges reading "pixelated and crunchy."
+ *
+ * `querySceneDepth`'s `expectedDepth` comes from `computeTieSafeExpectedDepth
+ * (rank, maxRank)` — real per-item RANK, not floor-level granularity — so
+ * this early-occlusion-reject test fires for ANY two overlapping items with
+ * real alpha, not just cross-floor Levels roofs (e.g. an ordinary rug under a
+ * decorative chair Tile). Its OWN correctness invariant (see
+ * `buildWholeImageMaterial`'s "EARLY OCCLUSION REJECT" comment,
+ * vt-pan-viewer.js) requires it to skip drawing what's beneath ONLY when the
+ * layer on top is genuinely, safely fully opaque there — a low,
+ * author/default-configurable Foundry field can never stand in for that on
+ * its own.
+ *
+ * THE FIX: `max(alphaThreshold, DEPTH_AUTHORITY_SOLID_ALPHA_FLOOR)` — an
+ * author who deliberately configured a HIGHER threshold than this floor is
+ * still honoured (this floor is a MINIMUM, not a replacement value), but the
+ * common low default can no longer alone decide "safe to skip".
+ *
+ * VALUE, MEASURED NOT GUESSED — 0.90. mythica-machina-press#438 (landed in
+ * the SAME commit as this constant, by design — see that issue's own
+ * "Suggested fix" step 3: "land together... so the new, stricter threshold
+ * doesn't regress solid-roof floor-bleed in the other direction") fixed the
+ * PRE-existing BC7 worst case for a texel whose SOURCE alpha is uniformly 255
+ * (interior paint, empty regions — "by far the common case", #438's own
+ * measurement: 39.9% of such texels decoded below 255, worst 230/255 = 0.90)
+ * down to an EXACT 255/255 for every genuinely-uniform-alpha block, by
+ * forcing mode 6/7's shared endpoint p-bit rather than letting the usual
+ * total-error vote pick it (`block-compress.js#quantizeBC7Endpoint`'s own
+ * `forcedP` doc has the mechanism).
+ *
+ * That fix does NOT reach a MIXED block — one genuinely straddling an
+ * antialiased edge, where some texels are source-255 and others are not —
+ * which is a different, harder problem #438 explicitly leaves alone (forcing
+ * one endpoint to an unrepresentative value would distort the ramp for the
+ * texels in between). So the number this floor actually has to clear is the
+ * POST-#438 worst case AT such an edge, not the flat-interior case #438 makes
+ * exact. Measured directly (a 256×256 "soft antialiased cutout" fixture —
+ * flat opaque interior plus a real antialiased silhouette, `softCutout`'s own
+ * shape in `block-compress.test.mjs`): of 25,488 source-alpha-255 texels,
+ * 98.46% now decode EXACT (0 error, up from #438's pre-fix ~60%), and the
+ * worst remaining case is 8/255 → 247/255 = 0.9686 (0.565% of texels sit
+ * there; the next-worst band is 5/255 → 250/255, 0.094%). 0.90 clears that
+ * 0.9686 floor with real margin (0.0686, ~15× the worst residual byte error
+ * measured) while sitting comfortably above BC7 mode 5/7's second-highest
+ * quantization level (0.672, `BC7_WEIGHTS2`) — a genuinely-PARTIAL
+ * antialiased edge texel lands on one of those 4 discrete levels and clears
+ * this floor only at the very top of its own ramp, never in the middle of a
+ * real fade. This file's own `alwaysOpaque` fast path, mirrored at
+ * `vt-pan-viewer.js#rebuildSceneDepthProxies`, still requires the STRICT
+ * `alphaStats.min/255 >= this-same-max(...)` proof before skipping the
+ * discard below entirely — see that call site's own comment for why it has to
+ * track this floor, not just the raw `alphaThreshold`, to keep its own
+ * "the discard could structurally never fire" guarantee true.
+ */
+export const DEPTH_AUTHORITY_SOLID_ALPHA_FLOOR = 0.9;
+
+/**
  * The render-target format for `buf:scene.depth` (design doc §4) — a real,
  * samplable `depth32float` attachment plus an RGBA8 payload, both
  * screen-sized. Mirrors `scene-attr.js#describeSceneAttrMrt`'s own shape
@@ -592,7 +668,14 @@ export function buildSceneDepthWriterMaterial({
     if (uLiveOcclusionAmount) material.uLiveOcclusionAmount = uLiveOcclusionAmount;
     return material;
   }
-  const uAlphaThreshold = tex ? uniform(float(alphaThreshold)) : null;
+  // mythica-machina-press#544 — floored at DEPTH_AUTHORITY_SOLID_ALPHA_FLOOR,
+  // never the item's own raw `alphaThreshold` alone. See that constant's own
+  // doc (this module's header block) for the full mechanism and the measured
+  // value; `max()` keeps an author's own HIGHER configured threshold in
+  // effect (this floor is a minimum, not a replacement), while stopping the
+  // common low default (0.75) from alone deciding "safe to skip what's
+  // beneath me" — the exact hard-void-edge bug this fix targets.
+  const uAlphaThreshold = tex ? uniform(float(Math.max(alphaThreshold, DEPTH_AUTHORITY_SOLID_ALPHA_FLOOR))) : null;
   // THE FLUID-MASK UNIFORMS — only allocated when a mask was actually
   // supplied, mirroring `uAlphaThreshold`'s own "no tex, no threshold
   // uniform" discipline just above. `fluidMaskUvOffset`/`Scale` are

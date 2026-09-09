@@ -167,6 +167,7 @@ import {
   DEPTH_PASS_CAMERA_Z,
   DEPTH_PASS_NEAR,
   DEPTH_PASS_FAR,
+  DEPTH_AUTHORITY_SOLID_ALPHA_FLOOR,
 } from './scene-depth.js';
 import { computeDepthProxyMaterialSignature, createDepthProxyMaterialPool } from './depth-proxy-material-pool.js';
 import {
@@ -17614,8 +17615,26 @@ export async function startVtPanViewer({
         // quantities; dividing by 255 here is what makes this the same
         // comparison the discard below would have made, not a coincidentally
         // near-always-true one.
+        // ⚠️ mythica-machina-press#544 — MUST track scene-depth.js's OWN
+        // floored comparison, not the raw `item.alphaThreshold` alone.
+        // `buildSceneDepthWriterMaterial`'s own `alwaysOpaque` doc is explicit
+        // that this flag is trusted only when "the discard below could
+        // structurally never fire". That discard now tests
+        // `a.lessThan(max(alphaThreshold, DEPTH_AUTHORITY_SOLID_ALPHA_FLOOR))`
+        // (scene-depth.js), so a proof checked only against the raw threshold
+        // is no longer sufficient: an item whose real minimum alpha sits
+        // between the old default (0.75) and the new floor (e.g. a uniformly
+        // 80%-opaque roof overlay, painted deliberately translucent rather
+        // than cut out) would wrongly claim "always opaque" and skip the
+        // per-pixel discard entirely, reproducing #544's own void-edge defect
+        // through this fast path instead of the general one. Matching the
+        // SAME `max(...)` scene-depth.js's discard uses is what keeps this
+        // JS-side shortcut a faithful precomputation of that GPU-side test,
+        // not a second, driftable copy of it.
         const alphaStats = state.wholeImage.alphaStats;
-        const alwaysOpaque = alphaStats != null && alphaStats.min / 255 >= (item.alphaThreshold ?? 0.75);
+        const alwaysOpaque =
+          alphaStats != null &&
+          alphaStats.min / 255 >= Math.max(item.alphaThreshold ?? 0.75, DEPTH_AUTHORITY_SOLID_ALPHA_FLOOR);
         // mythica-machina-press#543, SECOND ROUND — the ACTUAL mask texture
         // (never just a boolean), so `buildSceneDepthWriterMaterial` can
         // test coverage PER PIXEL instead of treating this item's whole quad

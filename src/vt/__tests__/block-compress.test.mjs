@@ -766,6 +766,48 @@ export function run(t) {
     ok('an exactly-representable block is still exact', maxRgbaError(src, decodeBC7(blocks, 4, 4)) === 0);
   }
   {
+    // mythica-machina-press#438 — UNIFORM ALPHA, VARYING COLOUR, PICKING MODE
+    // 7. This is the fix's own headline case: interior paint and empty
+    // regions are, by far, the common pattern in real map art, and BEFORE
+    // this fix mode 6/7's shared endpoint p-bit could sacrifice a whole-
+    // block-uniform alpha's exactness for a colour win the total-error vote
+    // preferred (measured on real art in #438 itself: 39.9% of source-255
+    // texels decoded below 255, worst 230/255). This fixture is not
+    // hypothetical: searched for and confirmed pre-fix to actually round-trip
+    // alpha=255 as {255,255,255,255,255,255,255,251,255,255,252,254,255,252,
+    // 254,255} (four of sixteen texels wrong, up to 4/255 off) — the "exactly-
+    // representable block" test just above only covers the coincidence where
+    // every channel's own preferred parity already agrees, which this
+    // fixture deliberately avoids.
+    const uniformAlphaColour = (x, y) => [(20 + x * 10) & 254, (60 + y * 14) & 254, (100 + x * y * 6) & 254];
+    const src255 = makeImage(4, 4, (x, y) => [...uniformAlphaColour(x, y), 255]);
+    const blocks255 = encodeBC7(src255, 4, 4);
+    const dec255 = decodeBC7(blocks255, 4, 4);
+    let allExact255 = true;
+    for (let i = 3; i < dec255.length; i += 4) if (dec255[i] !== 255) allExact255 = false;
+    ok('uniform alpha=255 + varying colour decodes alpha EXACTLY 255 everywhere', allExact255);
+
+    const src0 = makeImage(4, 4, (x, y) => [...uniformAlphaColour(x, y), 0]);
+    const blocks0 = encodeBC7(src0, 4, 4);
+    const dec0 = decodeBC7(blocks0, 4, 4);
+    let allExact0 = true;
+    for (let i = 3; i < dec0.length; i += 4) if (dec0[i] !== 0) allExact0 = false;
+    ok('uniform alpha=0 + varying colour decodes alpha EXACTLY 0 everywhere', allExact0);
+
+    // THE COLOUR SIDE DOES NOT REGRESS. Forcing the shared p-bit to satisfy
+    // alpha only ever costs R/G/B at most 1/255 EACH versus the unconstrained
+    // vote (see `quantizeBC7Endpoint`'s own `forcedP` doc for the bound) — on
+    // THIS fixture it measured zero additional cost at all (16/255, same as
+    // the unfixed encoder), asserted here with headroom rather than pinned
+    // exactly, since the bound — not this one fixture's coincidental exact
+    // figure — is the actual guarantee.
+    let maxColourErr = 0;
+    for (let i = 0; i < src255.length; i += 4) {
+      for (let c = 0; c < 3; c++) maxColourErr = Math.max(maxColourErr, Math.abs(src255[i + c] - dec255[i + c]));
+    }
+    ok('forcing alpha exact does not blow up colour error (measured 16, ≤ 20)', maxColourErr <= 20);
+  }
+  {
     // BC1: the fitted line. Mean error is the honest headline (the max is a
     // 1-texel-wide feature BC1's 2-endpoint format genuinely cannot hold —
     // documented as a known residual, not silently hidden).

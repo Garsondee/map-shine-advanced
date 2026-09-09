@@ -296,6 +296,23 @@ export function buildFluidSurfaceMaterials({
   const uGlow = uniform(float(glow));
   const uIridescence = uniform(float(iridescence));
   const uOpacity = uniform(float(opacity));
+  // THE HOST'S OWN FADE, SYNCED IN (mythica-machina-press#545) — a `_Fluid`
+  // mask used to stay fully opaque while its host tile faded under an
+  // overhead occlusion mode (Fade on Hover, etc.), because nothing here had
+  // ever been told about the host's fade at all. NOT a constructor
+  // parameter, deliberately: there is no `fadeMul` argument above and
+  // `fluid-surface-subsystem.js#pickParams` does not whitelist one, so this
+  // uniform can never be reached by `sync()`'s own `lastParamsKey` param-sync
+  // cache (Law: authored params rebuild-or-cache through that key; this is a
+  // PER-FRAME live bridge value, written directly by
+  // `fluid-surface-subsystem.js#setFadeForItem`, which `vt-pan-viewer.js
+  // #runMaskOcclusionPass` calls every frame beside its existing
+  // `t.uDepthOcclusionAmount` push). Default 1 = fully opaque/authored — a
+  // freshly built material (a rebake, or a tier change) starts here and stays
+  // here for at most one frame, until the next occlusion pass re-pushes the
+  // live value, exactly like a fresh `uOcclusionWeights` starting all-zero
+  // until the next `refreshItemOcclusionUniforms` call.
+  const uFadeMul = uniform(float(1));
   const uFlowSpeed = uniform(float(flowSpeed));
   const uStructure = uniform(float(structure));
   // `tubeCount` is a per-item BAKE-TIME constant (fixed until the next
@@ -493,7 +510,12 @@ export function buildFluidSurfaceMaterials({
     .add(meniscus.mul(float(0.8)))
     .add(rim.mul(fill).mul(float(0.35)))
     .mul(grain);
-  const radiance = marbled.mul(body).mul(uGlow).mul(inside).mul(uOpacity);
+  // `uFadeMul` multiplies in HERE, at the exact same site as `uOpacity` (see
+  // that uniform's own declaration, above, for the full mechanism): driving
+  // it to 0 collapses `radiance` to 0, the additive pass's own blend
+  // identity (`emitMaterial.mrtNode`'s `vec4(0,0,0,0)`, below) — a fully
+  // faded host suppresses the glow exactly as if it were never drawn.
+  const radiance = marbled.mul(body).mul(uGlow).mul(inside).mul(uOpacity).mul(uFadeMul);
 
   // ── ABSORB (MULTIPLY) — Beer–Lambert, THE SAME FORMULA water's tier 1 uses ──
   // σ = −log(tint) / mean(−log(tint)) · strength — normalising by the mean
@@ -511,7 +533,12 @@ export function buildFluidSurfaceMaterials({
   // NOW — which makes `transmit` equal `exp(0) = 1` (WHITE, the multiply
   // identity) there automatically, with no separate outside-the-tube gate to
   // get wrong.
-  const opticalDepth = thickness.mul(fill).mul(inside).mul(uOpacity);
+  // Same `uFadeMul` term, same reasoning as `radiance` above: at 0 this sends
+  // `opticalDepth` to 0, so `transmit = exp(0) = 1` (WHITE) — the multiply
+  // pass's own blend identity (`absorbMaterial.mrtNode`'s `vec4(1,1,1,1)`,
+  // below), the same "goo isn't here" no-op the tube's own empty-stretch case
+  // already produces, just driven by the host's fade instead of by `fill`.
+  const opticalDepth = thickness.mul(fill).mul(inside).mul(uOpacity).mul(uFadeMul);
   const transmit = exp(sigma.negate().mul(opticalDepth));
 
   // Shared by both meshes. Split out so the two materials cannot drift apart
@@ -593,6 +620,7 @@ export function buildFluidSurfaceMaterials({
       uGlow,
       uIridescence,
       uOpacity,
+      uFadeMul,
       uFlowSpeed,
       uStructure,
     },

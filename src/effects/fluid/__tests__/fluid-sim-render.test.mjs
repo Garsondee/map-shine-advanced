@@ -148,6 +148,49 @@ export function run(t) {
       ok('uTint is present exactly once, shared by construction', !!built.uniforms.uTint);
       ok('uOpacity is present exactly once, shared by construction', !!built.uniforms.uOpacity);
 
+      // ── uFadeMul — the host's live occlusion-fade sync (mythica-machina-
+      // press#545) — checked structurally, the same way the blend contract
+      // above is: this file has no live GPU to render a pixel against, but
+      // it CAN prove the uniform exists, defaults to "untouched", and sits
+      // in the SAME shared bag `uOpacity` does (so one write from
+      // `fluid-surface-subsystem.js#setFadeForItem` reaches both the absorb
+      // and emit materials, never just one).
+      ok('uFadeMul is exposed — the live fade-on-hover sync input', !!built.uniforms.uFadeMul);
+      ok(
+        'uFadeMul defaults to 1 — fully opaque/authored until a live occlusion push says otherwise',
+        built.uniforms.uFadeMul.value === 1
+      );
+      ok(
+        'a live write to uFadeMul.value is a plain mutable uniform, not frozen/rebuilt',
+        (() => {
+          built.uniforms.uFadeMul.value = 0;
+          const ok2 = built.uniforms.uFadeMul.value === 0;
+          built.uniforms.uFadeMul.value = 1; // restore — other assertions below still expect the default
+          return ok2;
+        })()
+      );
+
+      // `fadeMul` passed as a BUILDER ARG is silently ignored (there is no
+      // such constructor parameter — see `uFadeMul`'s own declaration in
+      // fluid-render.js) proves it structurally CANNOT be threaded through
+      // `fluid-surface-subsystem.js#pickParams` (which forwards builder
+      // kwargs, not arbitrary ones) into `sync()`'s `lastParamsKey` cache —
+      // the one thing point 5 of mythica-machina-press#545's fix required.
+      const builtWithBogusArg = buildFluidSurfaceMaterials({
+        THREE,
+        maskTexture: stubTexture(),
+        packTexture: stubTexture(THREE.RGBAFormat, THREE.FloatType, new Float32Array([0, 0, 0, 0])),
+        stateTexture: stubTexture(THREE.RGBAFormat, THREE.FloatType, new Float32Array([1, 0, 0, 1])),
+        tubeCount: 3,
+        timeMsNode: THREE.TSL.float(0),
+        tier: FLUID_MAX_TIER,
+        fadeMul: 0, // not a real param — must have zero effect
+      });
+      ok(
+        'uFadeMul ignores an attempted `fadeMul` BUILDER kwarg — only setFadeForItem ever moves it',
+        builtWithBogusArg.uniforms.uFadeMul.value === 1
+      );
+
       // ── THE DEPENDENT READ — φ comes from the SIM now, not a scroll ───────
       // `stateTexNode` is the one piece of evidence (short of a live GPU) that
       // the dependent read was actually built rather than skipped: a builder

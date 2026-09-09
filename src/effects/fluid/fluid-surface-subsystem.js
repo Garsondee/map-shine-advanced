@@ -146,7 +146,7 @@ const FLUID_RENDER_ORDER_EMIT_MAGNITUDE = 0.01;
  * @param {(rt: *) => void} args.disposeSimRenderTarget - `allocator.dispose(rt)`.
  * @param {() => {enabled: boolean, params: object}} [args.getFluidRenderState]
  * @param {*} args.timeMsNode - THE SHARED CLOCK.
- * @returns {{sync: (floorIndex: number) => void, prepareSimTick: (nowMs: number, dtSec: number) => {clears: Array<*>, advects: Array<{quad: *, destRT: *}>}, getStatus: () => object, dispose: () => void, getMaskTextureForItem: (itemId: string) => (*|null)}}
+ * @returns {{sync: (floorIndex: number) => void, prepareSimTick: (nowMs: number, dtSec: number) => {clears: Array<*>, advects: Array<{quad: *, destRT: *}>}, getStatus: () => object, dispose: () => void, getMaskTextureForItem: (itemId: string) => (*|null), setFadeForItem: (itemId: string, fadeMul: number) => void}}
  */
 export function createFluidSurfaceSubsystem({
   THREE,
@@ -819,7 +819,40 @@ export function createFluidSurfaceSubsystem({
     return entries.get(itemId)?.maskTexture ?? null;
   }
 
-  return { sync, prepareSimTick, getStatus, dispose, getMaskTextureForItem };
+  /**
+   * The OPPOSITE direction of {@link getMaskTextureForItem}: instead of the
+   * viewer PULLING something out of fluid, this PUSHES the host's live
+   * occlusion fade weight INTO one item's fluid material, per frame.
+   * Added for mythica-machina-press#545 — a `_Fluid` mask's own glow used to
+   * stay fully opaque while its host tile faded under an overhead occlusion
+   * mode ("Fade on Hover", etc.), because nothing here had ever been told
+   * about the host's fade at all. `vt-pan-viewer.js#runMaskOcclusionPass`
+   * calls this beside its existing `t.uDepthOcclusionAmount.value =
+   * weights.fade` push, passing `1 - weights.fade` — see that call site's own
+   * comment for the polarity derivation (`scene/occlusion.js`: `fade` is 0 =
+   * fully visible, 1 = fully faded; `fadeMul` runs the other way, 1 = fully
+   * opaque goo, 0 = fully suppressed).
+   *
+   * Same defensive shape as {@link getMaskTextureForItem}: a missing entry
+   * (this item carries no fluid mask at all — the vastly more common case,
+   * checked by the SAME cheap `entries.get` this function already needs, so
+   * there is no separate existence check to pay for) or one whose material
+   * hasn't finished building yet (`entry.built` is only set at the end of
+   * `buildMesh`) is a silent no-op, never a throw.
+   *
+   * @param {string} itemId
+   * @param {number} fadeMul - 0..1. Multiplies straight into
+   *   `fluid-render.js`'s own `radiance`/`opticalDepth` terms, alongside
+   *   `uOpacity` — 1 leaves the authored look untouched, 0 collapses both
+   *   passes to their blend-identity output (the same "goo isn't here"
+   *   result an empty stretch of tube already produces).
+   */
+  function setFadeForItem(itemId, fadeMul) {
+    const uniforms = entries.get(itemId)?.built?.uniforms;
+    if (uniforms) uniforms.uFadeMul.value = fadeMul;
+  }
+
+  return { sync, prepareSimTick, getStatus, dispose, getMaskTextureForItem, setFadeForItem };
 }
 
 /** Have any of the four corners actually moved? */

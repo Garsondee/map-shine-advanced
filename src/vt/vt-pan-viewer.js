@@ -9351,6 +9351,39 @@ export async function startVtPanViewer({
             if (t.uDepthOcclusionAmount) t.uDepthOcclusionAmount.value = weights ? weights.fade : 0;
           }
         }
+        // FLUID'S OWN FADE SYNC (mythica-machina-press#545) — a `_Fluid`
+        // mask's glow used to stay fully opaque while its host tile faded
+        // under an overhead occlusion mode ("Fade on Hover" etc.), because
+        // fluid-surface-subsystem.js had no path to receive this weight at
+        // all before now. ONE push per ITEM, not per wholeImage chunk (unlike
+        // `t.uDepthOcclusionAmount` just above, which is genuinely per-chunk
+        // because each streamed tile owns its own depth-proxy material):
+        // fluid's own entry is keyed by `item.id` and shared by its whole
+        // quad, so this sits right after that loop rather than inside it —
+        // calling it once per chunk would just write the identical value
+        // several times.
+        //
+        // `1 - weights.fade`: `scene/occlusion.js#computeOcclusionState`'s
+        // own `fade` is 0 = fully visible, 1 = fully faded (confirmed by
+        // reading `computeOcclusionAlpha`, occlusion.js:509-522 — `amount`
+        // reaches 1, i.e. the OCCLUDED alpha, only when `state.fade` is 1;
+        // `occlusionAlphaFactor` just above mirrors it exactly for this
+        // file's own live materials). `fluid-render.js`'s `uFadeMul` runs the
+        // OPPOSITE way (1 = fully opaque goo, 0 = fully suppressed, matching
+        // `uOpacity`'s own polarity), so the two invert here. An unoccludable
+        // item (`weights === null`) is never faded by definition — `1` keeps
+        // it at fluid's own fully-opaque default, matching this same
+        // ternary's `: 0` fallback for `uDepthOcclusionAmount` just above
+        // (that one's "0 = not occluded"; this one's "1 = not faded" — same
+        // fallback CASE, opposite-polarity uniform).
+        //
+        // `setFadeForItem` is itself the cheap existence check (one
+        // `entries.get(itemId)`, a silent no-op for the vastly-more-common
+        // case of an item with no fluid mask at all) — calling it
+        // unconditionally here costs exactly one Map lookup more than this
+        // loop already pays per item, never a second lookup on top of a
+        // separate `getMaskTextureForItem` pre-check.
+        fluidSurface.setFadeForItem(item.id, weights ? 1 - weights.fade : 1);
         // VEGETATION OVERLAYS (mythica-machina-press#470) — a Case-1/Case-2
         // vegetation mesh shares its HOST item's uOcclusionElevation (the
         // SAME `item` this loop already has; `ensureVegetationOverlay` is

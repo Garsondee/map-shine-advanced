@@ -182,6 +182,7 @@ import { resolveBiome, evalTodCurve } from './weather-biomes.js';
 import { createRng, fromState, triangular, weightedPick } from './weather-rng.js';
 import { normalizeHour } from './sun.js';
 import { resolveEventKind, envelopePhase, applyEventOverrides, OVERRIDE_OPS } from './weather-events.js';
+import { deriveBandedKind } from '../core/axis-derivation.js';
 
 /**
  * The two authority modes. A CLOSED LIST — an unknown mode string falls back to
@@ -397,17 +398,26 @@ export const PRECIP_SLEET_BAND = Object.freeze({ coldEdge: 0.2, warmEdge: 0.3 })
  */
 export function derivePrecipKind(authored, temperature01) {
   const t = Number.isFinite(temperature01) ? Math.min(1, Math.max(0, temperature01)) : 0.55;
-  if (PRECIP_KINDS.includes(authored) && authored !== 'auto') {
-    return Object.freeze({ kind: authored, mixWeight: authored === 'snow' ? 1 : 0, authored: true });
-  }
-  const { coldEdge, warmEdge } = PRECIP_SLEET_BAND;
-  if (t < coldEdge) return Object.freeze({ kind: 'snow', mixWeight: 1, authored: false });
-  if (t > warmEdge) return Object.freeze({ kind: 'rain', mixWeight: 0, authored: false });
-  // Inside the band, inclusive of both edges. The weight runs 1 (all snow) at
-  // the cold edge to 0 (all rain) at the warm one.
-  const span = warmEdge - coldEdge;
-  const w = span > 0 ? 1 - (t - coldEdge) / span : 0.5;
-  return Object.freeze({ kind: 'sleet', mixWeight: Math.min(1, Math.max(0, w)), authored: false });
+  // DELEGATES to core/axis-derivation.js#deriveBandedKind (mythica-machina-
+  // press#390) — the generic "authored wins outright, else blend across a
+  // value-space band" shape, extracted so the next derived-axis feature
+  // doesn't re-derive this math. Domain knowledge stays HERE: the 0..1 clamp
+  // + 0.55 fallback (temperature01's own range and "a temperate day"
+  // default), PRECIP_KINDS as the valid-authored list, and "authored snow is
+  // the one authored answer that reports full-cold mixWeight" — the generic
+  // helper knows none of that.
+  return deriveBandedKind({
+    authored,
+    autoSentinel: 'auto',
+    validAuthored: PRECIP_KINDS,
+    value: t,
+    coldEdge: PRECIP_SLEET_BAND.coldEdge,
+    warmEdge: PRECIP_SLEET_BAND.warmEdge,
+    coldKind: 'snow',
+    midKind: 'sleet',
+    warmKind: 'rain',
+    mixWeightForAuthored: (kind) => (kind === 'snow' ? 1 : 0),
+  });
 }
 
 /**

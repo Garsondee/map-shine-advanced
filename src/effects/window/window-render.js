@@ -84,6 +84,16 @@ export const WINDOW_DEFAULT_NIGHT_TINT_HEX = '#5c7cff';
 export const WINDOW_DEFAULT_DAWN_DUSK_TINT_RGB = hexToRgb01(WINDOW_DEFAULT_DAWN_DUSK_TINT_HEX);
 export const WINDOW_DEFAULT_NIGHT_TINT_RGB = hexToRgb01(WINDOW_DEFAULT_NIGHT_TINT_HEX);
 
+/**
+ * MIRRORS `vt/scene-depth.js#DEPTH_FLAG_RESTRICTS_LIGHT`/`DEPTH_FLAG_IS_TILE`
+ * EXACTLY — same reason `effects/lighting/point-light-illumination.js#
+ * DEPTH_FLAG_RESTRICTS_LIGHT_MIRROR` is a duplicate rather than an import:
+ * `vt/scene-depth.js` cannot be imported from `effects/` (one-way zone
+ * layering). Pinned against the real values in `window-render.test.mjs`.
+ */
+export const WINDOW_DEPTH_FLAG_RESTRICTS_LIGHT_MIRROR = 1;
+export const WINDOW_DEPTH_FLAG_IS_TILE_MIRROR = 16;
+
 /** The glass defaults, mirroring `WINDOW_PARAMS`'s own `Glass` category. */
 export const WINDOW_DEFAULT_GLASS_WARP_PX = 20;
 export const WINDOW_DEFAULT_GLASS_DISPERSION = 1;
@@ -182,6 +192,12 @@ export function windowTierPlan(tier) {
  *   JS-time branch, never a uniform × 0) — see "THE FLOOR GATE" below for
  *   the depth-authority gate this replaced `attrTexture` with (2026-08-05),
  *   mirroring `specular-render.js`'s own STAGE 3 migration.
+ * @param {*} [args.depthFlagsTexture] - `buf:scene.depth`'s COLOUR attachment
+ *   (B channel carries the presence-flag byte, `vt/scene-depth.js#
+ *   computeSceneDepthFlags`); null compiles the tile-restrict-light
+ *   exemption below OUT, falling back to the bare rank gate — see "THE
+ *   FLOOR GATE"'s own tile-exemption section for why window light needs
+ *   this and specular's identical-looking gate deliberately does not.
  * @param {*} args.uViewRect - envLight's OWN view-rect uniform, shared rather
  *   than duplicated: two rects on different cadences is how two consumers of
  *   one frame stop agreeing where a world point is.
@@ -228,6 +244,7 @@ export function buildWindowSurfaceMaterial({
   THREE,
   maskTexture,
   depthTexture = null,
+  depthFlagsTexture = null,
   positionNode = null,
   maskUvNode = null,
   uViewRect,
@@ -256,6 +273,8 @@ export function buildWindowSurfaceMaterial({
     mix,
     Fn,
     If,
+    floor,
+    mod,
   } = TSL;
 
   const uStrength = uniform(float(strength));
@@ -673,11 +692,41 @@ export function buildWindowSurfaceMaterial({
   // exactly the "punch a hole the same way the eye does" doctrine this
   // effect's own header already commits to — so a Tile now correctly blocks
   // the cookie it sits on top of, where before it did not.
+  //
+  // ⚠️ ORDINARY TILES ARE EXEMPTED FROM THAT RANK BLOCK (mythica-machina-
+  // press#538 live-test follow-up, author 2026-09-09): "The _Window is
+  // lighting that comes from above and cascades downwards onto things in
+  // the room. The tiles ... need to be illuminated by this light" — not
+  // shadowed by it. `specular-render.js`'s own floor gate stays a bare rank
+  // comparison on purpose (it decides whether the floor's SHINE is visually
+  // COVERED — ordinary opaque-on-top occlusion, unrelated to lighting), but
+  // window light is Foundry's "Restrict Lighting" concept made visible: a
+  // Tile the GM has NOT ticked "Restrict Lighting" on (the default —
+  // `restrictions.light` is false unless a GM explicitly checks it,
+  // `foundry/scene-layers.js#collectTiles`) is not meant to cast a hard
+  // shadow on its own floor's ambient fill just by sitting in it. A Level's
+  // own foreground/roof (a genuinely separate floor's structure, not a
+  // GM-configurable Tile) is NOT exempted — this reads DEPTH_FLAG_IS_TILE
+  // and only relaxes the gate for that bit. Mirrors `point-light-
+  // illumination.js#buildDepthHeightGateNode`'s bit-decode exactly, but
+  // OPPOSITE in effect: that gate uses `restrictsLight` to ADD a block rank
+  // alone would miss (a light and an occluder at the same rank
+  // neighbourhood); this one uses it to LIFT a block rank alone over-applies
+  // (an ordinary Tile the GM never asked to restrict anything).
   let visibility01 = float(1);
   let debugFloorGate = vec3(1, 1, 0);
   if (depthTexture) {
     const depthHere = texture(depthTexture, screenUv).toVar('winDepthHere');
-    const notOccluded = step(uExpectedDepth, depthHere).toVar('winNotOccluded');
+    const rankGate = step(uExpectedDepth, depthHere);
+    let notOccluded = rankGate;
+    if (depthFlagsTexture) {
+      const flagsByte = floor(texture(depthFlagsTexture, screenUv).b.mul(float(255)).add(float(0.5)));
+      const restrictsLightBit = mod(floor(flagsByte.div(float(WINDOW_DEPTH_FLAG_RESTRICTS_LIGHT_MIRROR))), float(2));
+      const isTileBit = mod(floor(flagsByte.div(float(WINDOW_DEPTH_FLAG_IS_TILE_MIRROR))), float(2));
+      const tileExempt = isTileBit.mul(float(1).sub(restrictsLightBit));
+      notOccluded = notOccluded.max(tileExempt);
+    }
+    notOccluded = notOccluded.toVar('winNotOccluded');
     visibility01 = notOccluded;
     debugFloorGate = vec3(notOccluded, depthHere, uExpectedDepth);
   }
@@ -962,4 +1011,26 @@ export function buildWindowSurfaceMaterial({
     // the WIRING setMaskTexture depends on actually moves.
     debugGetLiveMaskTexture: () => liveMaskTexture,
   };
+}
+
+/**
+ * THE CPU TWIN of "THE FLOOR GATE"'s tile-restrict-light exemption
+ * (`buildWindowSurfaceMaterial`, above) — Node-testable so the bit
+ * arithmetic is verified before a live scene ever runs it, the same
+ * discipline `point-light-illumination.js#computeDepthHeightGate`'s own
+ * header names ("a genuinely easy place to get a shift/mask subtly wrong").
+ *
+ * @param {object} args
+ * @param {number} args.storedDepth - a `buf:scene.depth` DEPTH sample.
+ * @param {number} args.expectedDepth - `computeTieSafeExpectedDepth`'s result.
+ * @param {number} [args.flagsByte=0] - a raw 0-255 `buf:scene.depth` COLOUR
+ *   sample's B channel. Omitted → the tile exemption never fires (bare rank gate).
+ * @returns {number} 0 or 1 — `visibility01`'s value.
+ */
+export function computeWindowFloorGateVisibility({ storedDepth, expectedDepth, flagsByte = 0 }) {
+  const rankGate = storedDepth < expectedDepth ? 0 : 1;
+  const restrictsLightBit = Math.floor(flagsByte / WINDOW_DEPTH_FLAG_RESTRICTS_LIGHT_MIRROR) % 2;
+  const isTileBit = Math.floor(flagsByte / WINDOW_DEPTH_FLAG_IS_TILE_MIRROR) % 2;
+  const tileExempt = isTileBit && !restrictsLightBit ? 1 : 0;
+  return Math.max(rankGate, tileExempt);
 }

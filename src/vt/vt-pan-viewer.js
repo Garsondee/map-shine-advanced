@@ -10806,6 +10806,7 @@ export async function startVtPanViewer({
         loadMaskImage: (opts) => loadMaskImageTexture({ ...opts, THREE }),
         createMaskTexture: createMaskDataTexture,
         depthTexture: sceneDepth.depthTexture ?? null,
+        depthFlagsTexture: sceneDepth.texture ?? null,
         // Composed exactly like specular's own `resolveExpectedDepth` above:
         // resolved by ITEM ID rather than by elevation, since window has real
         // drawn geometry of its own (the floor's background), unlike a light.
@@ -10888,6 +10889,7 @@ export async function startVtPanViewer({
       loadMaskImage: (opts) => loadMaskImageTexture({ ...opts, THREE }),
       createMaskTexture: createMaskDataTexture,
       depthTexture: sceneDepth.depthTexture ?? null,
+      depthFlagsTexture: sceneDepth.texture ?? null,
       // PER ITEM, not per floor — see `specularTileSurface`'s own identical
       // composition just above for the full reasoning.
       resolveExpectedDepth: (itemId) => {

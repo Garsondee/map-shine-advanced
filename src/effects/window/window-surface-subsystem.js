@@ -94,6 +94,10 @@ const WINDOW_MATERIAL_SIDE_NAMES = Object.freeze({ 0: 'front', 1: 'back', 2: 'do
  * @param {*} [args.depthTexture] - `buf:scene.depth`'s DEPTH attachment; null
  *   compiles the floor gate out. Replaces `attrTexture` (2026-08-05),
  *   mirroring `specular-surface-subsystem.js`'s own STAGE 3 migration.
+ * @param {*} [args.depthFlagsTexture] - `buf:scene.depth`'s COLOUR attachment;
+ *   null compiles the tile-restrict-light exemption out, falling back to the
+ *   bare rank gate — see `window-render.js#buildWindowSurfaceMaterial`'s own
+ *   "THE FLOOR GATE" section (mythica-machina-press#538 live-test follow-up).
  * @param {(floorIndex: number) => number} [args.resolveExpectedDepth] - given
  *   the VIEWED floor, returns `computeTieSafeExpectedDepth` for THIS quad's
  *   OWN background item's rank. Composed in `vt-pan-viewer.js` from
@@ -139,6 +143,7 @@ export function createWindowSurfaceSubsystem({
   loadMaskImage,
   createMaskTexture,
   depthTexture = null,
+  depthFlagsTexture = null,
   resolveExpectedDepth,
   uViewRect,
   cloudFactorNode = null,
@@ -206,6 +211,7 @@ export function createWindowSurfaceSubsystem({
       THREE,
       maskTexture,
       depthTexture,
+      depthFlagsTexture,
       uViewRect,
       cloudFactorNode,
       // Every floor's window mesh stays visible for as long as that floor

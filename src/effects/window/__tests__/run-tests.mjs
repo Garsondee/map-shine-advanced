@@ -17,6 +17,8 @@ import { run as runWindowGlass } from './window-glass.test.mjs';
 import { run as runWindow } from './window.test.mjs';
 import { run as runWindowRender } from './window-render.test.mjs';
 import { run as runWindowSurfaceSubsystem } from './window-surface-subsystem.test.mjs';
+import { run as runWindowTileSurfaceSubsystem } from './window-tile-surface-subsystem.test.mjs';
+import { run as runWindowSeams } from './window-seams.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -51,6 +53,8 @@ const suites = [
   ['window', runWindow],
   ['window-render', runWindowRender],
   ['window-surface-subsystem', runWindowSurfaceSubsystem],
+  ['window-tile-surface-subsystem', runWindowTileSurfaceSubsystem],
+  ['window-seams', runWindowSeams],
 ];
 // AWAITED, not called-and-dropped — the subsystem suite lets a mask load
 // settle before asserting on visibility, same reasoning as specular's own

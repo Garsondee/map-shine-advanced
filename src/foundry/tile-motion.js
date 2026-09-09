@@ -542,6 +542,41 @@ export function resolveTexturePose(config, elapsedSec) {
   };
 }
 
+/**
+ * THE CPU TWIN of `mode:'texture'`'s GPU UV transform — proving what the
+ * shader computes, the same role `applyRigidDelta` plays for `mode:'transform'`
+ * above. Byte-for-byte the same formula as `vt-pan-viewer.js#buildWholeImage
+ * Material`'s `colorNode` texture-mode branch (mythica-machina-press#538/#539's
+ * own `effects/tile-motion-nodes.js` TSL transcription reads this same shape):
+ * translate to the pivot, rotate, translate back, then scroll — verified
+ * against `THREE.Texture`'s own `Matrix3#setUvTransform` composition, not
+ * guessed.
+ *
+ * ⚠️ THE ROTATION SIGN IS DELIBERATELY THE MIRROR of `applyRigidDelta`'s own
+ * (`+rel.y*rs` / `-rel.x*rs` here, vs `-rel.y*s` / `+rel.x*s` there) — a
+ * texture scrolling UNDER a still window and a mesh vertex rotating WITH the
+ * world are inverse-facing by construction, and this is not a typo to
+ * "correct" into agreement with the position formula.
+ *
+ * @param {number} u @param {number} v - the UNTRANSFORMED base UV (this
+ *   effect's own `uv() * uUvScale` on the GPU side).
+ * @param {{offsetU:number, offsetV:number, rotCos:number, rotSin:number,
+ *   pivotU:number, pivotV:number}} tex - `resolveTexturePose`'s own return
+ *   shape, which is also exactly what `uTexPivotUV`/`uTexScrollUV`/
+ *   `uTexRotUV` hold once `syncAllTileMotionForFrame` pushes it.
+ * @returns {{u:number, v:number}}
+ */
+export function applyTileMotionTextureUv(u, v, tex) {
+  const relU = u - tex.pivotU;
+  const relV = v - tex.pivotV;
+  const rotatedU = relU * tex.rotCos + relV * tex.rotSin;
+  const rotatedV = relV * tex.rotCos - relU * tex.rotSin;
+  return {
+    u: tex.pivotU + tex.offsetU + rotatedU,
+    v: tex.pivotV + tex.offsetV + rotatedV,
+  };
+}
+
 // tile-scroll's own conversion constant (mythica-machina-press#521): its
 // shader adds `serverTime_ms * (scrollSpeed / 10000)` RADIANS per ms, i.e.
 // `radPerSec = scrollSpeed / 10`, so `degPerSec = scrollSpeed * (180/PI)/10`

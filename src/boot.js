@@ -3999,13 +3999,40 @@ function install() {
     log,
   });
 
-  // SHINE's two mask-authority seams (docs/planning/Specular.md) — see
+  // SHARED PER-ITEM PLACEMENT RESOLVERS (mythica-machina-press#538/#539) —
+  // "an item's world-space quad corners" and "an item's current renderOrder"
+  // are questions with no per-effect answer: `getItems()` here is boot's own
+  // unfiltered `coverItems` list, which never goes through `sortByLayer` and
+  // so never carries texture sizes or a real `renderOrder` of its own — only
+  // the VIEWER knows either (`itemStates`), which is why `createFluidSeams`
+  // (below) already needed this exact resolver-handback shape for its own
+  // per-item seam. SHARED here, rather than one dedicated pair per effect,
+  // because the answer is identical regardless of which effect is asking —
+  // unlike `fluidItemCorners`/`fluidItemRenderOrder` immediately below,
+  // which stay Fluid's own (already shipped, already tested; not renamed or
+  // folded into this pair to avoid touching working code for a cosmetic
+  // gain). `getWindowMaskItems`/`getSpecularMaskItems` are the two NEW
+  // per-item seams that read these.
+  /* eslint-disable-next-line prefer-const -- reassigned by the viewer's resolver callback below */
+  let maskItemCorners = () => null;
+  /* eslint-disable-next-line prefer-const -- reassigned by the viewer's resolver callback below */
+  let maskItemRenderOrder = () => null;
+
+  // SHINE's mask-authority seams (docs/planning/Specular.md) — see
   // effects/specular/specular-seams.js for why the RECT comes from the coarse
   // grid and the COLOUR can only come from the authored file.
-  const { getSpecularMaskRect, getSpecularMaskUrl, getSpecularBackgroundItemId } = createSpecularSeams({
-    maskAuthority,
-    getFloors: () => lastKnownFloors,
-  });
+  // `getSpecularMaskItems` (mythica-machina-press#538/#539) is the newer,
+  // THIRD seam — every TILE with its own authored `_Specular` file, the
+  // population `getSpecularMaskUrl` (level-keyed) cannot see at all. See
+  // that function's own header in specular-seams.js for the full account.
+  const { getSpecularMaskRect, getSpecularMaskUrl, getSpecularBackgroundItemId, getSpecularMaskItems } =
+    createSpecularSeams({
+      maskAuthority,
+      getFloors: () => lastKnownFloors,
+      getItems: () => coverItems,
+      getItemCorners: (item) => maskItemCorners(item),
+      getItemRenderOrder: (item) => maskItemRenderOrder(item),
+    });
   // FLUID (docs/planning/Fluid.md) — one seam (the authored file; there is no
   // coarse-grid consumer, correction #2) plus the same registration shape.
   // ⚠️ PER ITEM, not per floor — a `_Fluid` mask lives on a TILE as often as on
@@ -4047,10 +4074,15 @@ function install() {
   // split as SHINE's, for the same reason: the RECT comes from the coarse
   // grid, the COLOUR can only come from the authored file. `getWindowBackground
   // ItemId` is the depth-authority migration's own seam (2026-08-05), mirroring
-  // SHINE's `getSpecularBackgroundItemId` above.
-  const { getWindowMaskRect, getWindowMaskUrl, getWindowBackgroundItemId } = createWindowSeams({
+  // SHINE's `getSpecularBackgroundItemId` above. `getWindowMaskItems`
+  // (mythica-machina-press#538/#539) is the newer, THIRD seam — see
+  // `getSpecularMaskItems`'s own comment just above for the shared reasoning.
+  const { getWindowMaskRect, getWindowMaskUrl, getWindowBackgroundItemId, getWindowMaskItems } = createWindowSeams({
     maskAuthority,
     getFloors: () => lastKnownFloors,
+    getItems: () => coverItems,
+    getItemCorners: (item) => maskItemCorners(item),
+    getItemRenderOrder: (item) => maskItemRenderOrder(item),
   });
   const windowLight = createWindowRegistration({
     effectRegistry,
@@ -11049,6 +11081,18 @@ function install() {
         onFluidRenderOrderResolver: (fn) => {
           fluidItemRenderOrder = fn;
         },
+        // SHARED PER-ITEM PLACEMENT HANDBACK (mythica-machina-press#538/#539)
+        // — the same "viewer hands its resolver back" shape as Fluid's own
+        // pair just above, but shared by Window's and Specular's new
+        // per-tile seams rather than duplicated per effect (see
+        // `maskItemCorners`'s own declaration for why one pair is correct
+        // here where Fluid's stays its own).
+        onMaskItemCornersResolver: (fn) => {
+          maskItemCorners = fn;
+        },
+        onMaskItemRenderOrderResolver: (fn) => {
+          maskItemRenderOrder = fn;
+        },
         getSpecularMaskUrl,
         getSpecularMaskRect,
         // STAGE 3 (2026-08-05) — the depth-authority migration's own seam,
@@ -11058,6 +11102,11 @@ function install() {
         // compiles out entirely (fails OPEN, not silently broken — see
         // `specular-render.js`'s own `uExpectedDepth` doc).
         getSpecularBackgroundItemId,
+        // TILES with their OWN authored `_Specular` file (mythica-machina-
+        // press#538/#539) — see `specular-seams.js#getSpecularMaskItems`'s
+        // own header for why this is a THIRD, separate population from the
+        // two mask seams above rather than a change to either of them.
+        getSpecularMaskItems,
         getSpecularRenderState: specular.getRenderState,
         // WINDOW LIGHT's four seams (Windows.md). Same real-scene-only
         // reasoning as SHINE's directly above: unwired, both mask seams
@@ -11070,6 +11119,10 @@ function install() {
         // rank for and the floor gate fails OPEN (see window-render.js's
         // own `uExpectedDepth` doc), not silently broken.
         getWindowBackgroundItemId,
+        // TILES with their OWN authored `_Window` file (mythica-machina-
+        // press#538/#539) — see `window-seams.js#getWindowMaskItems`'s own
+        // header for why this is a THIRD, separate population.
+        getWindowMaskItems,
         getWindowRenderState: windowLight.getRenderState,
         // APERTURE GOBO's one seam (docs/planning/Aperture-Gobo.md) — no mask
         // URL/rect pair, unlike SHINE/window just above: its only input is

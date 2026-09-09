@@ -134,6 +134,9 @@ function worldSpanOf(corners) {
  * @param {(data: Uint8Array, w: number, h: number, filter: string) => *} args.createMaskTexture
  * @param {*} [args.depthTexture] - `buf:scene.depth`'s DEPTH attachment; null
  *   compiles the floor gate out, mirroring the floor subsystem exactly.
+ * @param {*} [args.depthFlagsTexture] - `buf:scene.depth`'s COLOUR attachment;
+ *   null compiles the tile-restrict-light exemption out, mirroring the floor
+ *   subsystem exactly (mythica-machina-press#538 live-test follow-up).
  * @param {(itemId: string) => number} [args.resolveExpectedDepth] - THIS
  *   item's own rank (`depthAuthority.rankOf({id: itemId})`, composed by the
  *   viewer) — per ITEM, not per floor, unlike the floor subsystem's own
@@ -162,6 +165,7 @@ export function createWindowTileSurfaceSubsystem({
   // moment of its own to build one for.
   createMaskTexture: _createMaskTexture,
   depthTexture = null,
+  depthFlagsTexture = null,
   resolveExpectedDepth,
   getItemTileMotion,
   uViewRect,
@@ -211,6 +215,7 @@ export function createWindowTileSurfaceSubsystem({
       THREE,
       maskTexture: entry.maskTexture,
       depthTexture,
+      depthFlagsTexture,
       uViewRect,
       cloudFactorNode,
       positionNode,

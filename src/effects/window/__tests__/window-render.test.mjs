@@ -10,9 +10,17 @@
  * it looks like on screen.
  */
 import * as THREE from '../../../../src/vendor/three/three.webgpu.js';
-import { buildWindowSurfaceMaterial, WINDOW_DEFAULT_STRENGTH, WINDOW_DEFAULT_CONTRAST } from '../window-render.js';
+import {
+  buildWindowSurfaceMaterial,
+  WINDOW_DEFAULT_STRENGTH,
+  WINDOW_DEFAULT_CONTRAST,
+  computeWindowFloorGateVisibility,
+  WINDOW_DEPTH_FLAG_RESTRICTS_LIGHT_MIRROR,
+  WINDOW_DEPTH_FLAG_IS_TILE_MIRROR,
+} from '../window-render.js';
 import { WINDOW_DEBUG_CHANNELS } from '../window.js';
 import { WINDOW_DEFAULT_AMBIENT_CEILING } from '../window-cookie.js';
+import { DEPTH_FLAG_RESTRICTS_LIGHT, DEPTH_FLAG_IS_TILE } from '../../../vt/scene-depth.js';
 
 /** A 1×1 texture — enough for a node to reference; never sampled here. */
 function stubTexture() {
@@ -72,6 +80,24 @@ export function run(t) {
   ok('a null depth texture compiles the floor gate OUT rather than throwing', noDepth.floorGateCompiled === false);
   ok('…and still produces the material', !!noDepth.windowMaterial);
   ok('with depth present the floor gate IS compiled', built.floorGateCompiled === true);
+
+  // ── THE TILE-RESTRICT-LIGHT EXEMPTION (mythica-machina-press#538 live-test
+  // follow-up) — the SAME "construct in Node, no throw" ceiling as the rest
+  // of this file; the VALUES are pinned separately below via the CPU twin.
+  let withFlagsBuilt = null;
+  let withFlagsError = null;
+  try {
+    withFlagsBuilt = buildWindowSurfaceMaterial(args({ depthFlagsTexture: stubTexture() }));
+  } catch (err) {
+    withFlagsError = err;
+  }
+  ok(
+    `a depthFlagsTexture compiles the tile-exemption graph without throwing (${withFlagsError ? withFlagsError.message : 'clean'})`,
+    withFlagsError === null
+  );
+  ok('…and still produces the material', !!withFlagsBuilt?.windowMaterial);
+  const noFlags = buildWindowSurfaceMaterial(args({ depthFlagsTexture: null }));
+  ok('a null depthFlagsTexture (the default) compiles cleanly too — the bare rank gate', !!noFlags.windowMaterial);
 
   // ── THE CLOUD SEAM — the whole point of this increment's TODO ───────────
   // No cloudFactorNode passed: must not throw, and must still produce a
@@ -398,6 +424,58 @@ export function run(t) {
     ok(
       'a floor caller (neither param passed) leaves positionNode unset, exactly as before',
       !built.windowMaterial.positionNode
+    );
+  }
+
+  // ── computeWindowFloorGateVisibility — THE CPU TWIN, VALUES PINNED ───────
+  {
+    ok(
+      'the mirrors match vt/scene-depth.js real flag values exactly',
+      WINDOW_DEPTH_FLAG_RESTRICTS_LIGHT_MIRROR === DEPTH_FLAG_RESTRICTS_LIGHT &&
+        WINDOW_DEPTH_FLAG_IS_TILE_MIRROR === DEPTH_FLAG_IS_TILE
+    );
+
+    ok(
+      'nothing occluding (rank passes) is visible regardless of flags',
+      computeWindowFloorGateVisibility({ storedDepth: 0.9, expectedDepth: 0.5, flagsByte: 0 }) === 1
+    );
+    ok(
+      'occluded by something with NO flags (flagsByte omitted) stays blocked — bare rank gate',
+      computeWindowFloorGateVisibility({ storedDepth: 0.1, expectedDepth: 0.5 }) === 0
+    );
+
+    // THE ORRERY CASE — an ordinary Tile (IS_TILE, restrictsLight left at
+    // Foundry's own default of false) sitting ranked above the floor must
+    // NOT block that floor's own window light.
+    ok(
+      'occluded by a plain Tile (IS_TILE, not restrictsLight) is EXEMPT — visible',
+      computeWindowFloorGateVisibility({
+        storedDepth: 0.1,
+        expectedDepth: 0.5,
+        flagsByte: DEPTH_FLAG_IS_TILE,
+      }) === 1
+    );
+    // A GM who explicitly ticks "Restrict Lighting" on that same Tile keeps
+    // it blocking — the exemption is an opt-OUT default, not a hard removal
+    // of the GM's own Foundry-native control.
+    ok(
+      'a Tile the GM explicitly marked restrictsLight still blocks',
+      computeWindowFloorGateVisibility({
+        storedDepth: 0.1,
+        expectedDepth: 0.5,
+        flagsByte: DEPTH_FLAG_RESTRICTS_LIGHT | DEPTH_FLAG_IS_TILE,
+      }) === 0
+    );
+    // restrictsLight WITHOUT IS_TILE (a Level background, which carries
+    // restrictsLight unconditionally per computeSceneDepthFlags's own doc) —
+    // the exemption must stay scoped to tiles only; a floor/roof still blocks.
+    ok(
+      'restrictsLight on a non-Tile (a Level background/foreground) still blocks — exemption is Tile-scoped',
+      computeWindowFloorGateVisibility({
+        storedDepth: 0.1,
+        expectedDepth: 0.5,
+        flagsByte: DEPTH_FLAG_RESTRICTS_LIGHT,
+      }) === 0
     );
   }
 }

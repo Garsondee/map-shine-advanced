@@ -6,6 +6,7 @@ import { run as runCuesSchema } from './cues-schema.test.mjs';
 import { run as runDialsSchema } from './dials-schema.test.mjs';
 import { run as runImpulseSchema } from './impulse-schema.test.mjs';
 import { run as runSceneScale } from './scene-scale.test.mjs';
+import { run as runAxisDerivation } from './axis-derivation.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -29,6 +30,7 @@ const suites = [
   ['dials-schema', runDialsSchema],
   ['impulse-schema', runImpulseSchema],
   ['scene-scale', runSceneScale],
+  ['axis-derivation', runAxisDerivation],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

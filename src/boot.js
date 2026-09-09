@@ -212,6 +212,8 @@ import {
   isEntryExpired,
   createFadeSourceRegistry,
   WEATHER_ARCHETYPES,
+  WEATHER_AXES,
+  auditAxisConsumers,
 } from './world/index.js';
 import {
   runVtLiveDecodeTest,
@@ -8010,6 +8012,26 @@ function install() {
         'never the UI card display) — a read is never later un-read. An orphaned param may be genuinely dead, or ' +
         'simply not yet exercised this session (e.g. before the surface has synced once).',
       effects,
+    };
+  });
+
+  // THE WEATHER AXIS-CONSUMER AUDIT (mythica-machina-press#390) — wires
+  // world/axis-consumer-registry.js into the one place `graph/reachable-
+  // from-boot` actually checks: a real import, called from something boot.js
+  // reaches. Mirrors the control-health report's own shape immediately
+  // above — a GM/dev-facing diagnostic, not a build-time assertion (the
+  // Node test in world/__tests__/axis-consumer-registry.test.mjs is that;
+  // this is the same check, live, against whatever WEATHER_AXES actually
+  // says at runtime).
+  MapShine.debug.registerReport('weather-axis-consumers', 'Weather axis consumers (declared vs real)', () => {
+    const problems = auditAxisConsumers(WEATHER_AXES);
+    return {
+      note:
+        "cross-checks each axis's declared consumerStatus ('live'/'pending') against AXIS_CONSUMERS' own " +
+        'real, file:line-verified consumer list (world/axis-consumer-registry.js) — catches an axis going ' +
+        'live with nobody updating its status, or a status claiming live for nothing anyone has wired.',
+      ok: problems.length === 0,
+      problems,
     };
   });
 

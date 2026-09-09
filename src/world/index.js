@@ -47,6 +47,13 @@ export {
   PRECIP_SLEET_BAND,
   derivePrecipKind,
 } from './weather.js';
+// THE REAL AXIS-CONSUMER TABLE (mythica-machina-press#390) — replaces three
+// independently hand-maintained lists (WEATHER_AXES's own free-text
+// `consumers`, a separate hardcoded list in tools/verify-structure.mjs, and
+// boot.js's own fade-source registration array) with one checkable source.
+// See axis-consumer-registry.js's own header for why this is a reviewed,
+// static table rather than a live runtime registration call.
+export { AXIS_CONSUMERS, hasRealConsumer, auditAxisConsumers } from './axis-consumer-registry.js';
 // THE ARCHETYPE TABLE (slice 2) — the astrolabe's shelf renders straight from
 // this, so the row order, icons and blurbs are one edit here rather than two.
 export {

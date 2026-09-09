@@ -31,6 +31,7 @@ import { run as runWindAccess } from './wind-access.test.mjs';
 import { run as runAlmanac } from './almanac.test.mjs';
 import { run as runFadeEngine } from './fade-engine.test.mjs';
 import { run as runFadeRegistry } from './fade-registry.test.mjs';
+import { run as runAxisConsumerRegistry } from './axis-consumer-registry.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -82,6 +83,7 @@ const suites = [
   ['almanac', runAlmanac],
   ['fade-engine', runFadeEngine],
   ['fade-registry', runFadeRegistry],
+  ['axis-consumer-registry', runAxisConsumerRegistry],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

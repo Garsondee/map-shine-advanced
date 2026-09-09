@@ -198,6 +198,12 @@ export {
   writeSceneAllEffectParams,
 } from './effect-param-persistence.js';
 
+// EFFECT PRESET PERSISTENCE (mythica-machina-press#102) — one WORLD setting,
+// a named per-effect snapshot library, deliberately narrower than #177's
+// still-needs-research whole-scene preset system (see this file's own
+// header for why the two are not the same thing).
+export { registerEffectPresetSettings, readEffectPresets, writeEffectPresets } from './effect-preset-persistence.js';
+
 // CUE PERSISTENCE (U3, docs/holy/UI-Testament.md §4.3) — one scene flag,
 // the authored cue stack. core/cues-schema.js validates; this only reads
 // and writes, mirroring fade-persistence.js's own shape.

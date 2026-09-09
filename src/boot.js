@@ -467,6 +467,9 @@ import {
   watchSceneEffectParams,
   readSceneAllEffectParams,
   writeSceneAllEffectParams,
+  registerEffectPresetSettings,
+  readEffectPresets,
+  writeEffectPresets,
   readCueStack,
   writeCueStack,
   watchCueStack,
@@ -2500,6 +2503,99 @@ function install() {
         return { ok: true, effectIds: Object.keys(copiedSceneEffectParams) };
       }
       log.warn(`paste scene effect settings not persisted: ${result.reason}`);
+      return result;
+    });
+  };
+
+  // EFFECT PRESETS (mythica-machina-press#102) — a named, reusable snapshot
+  // of ONE effect's authored params, shared across the whole table (world-
+  // scoped, unlike the scene-scoped copy/paste just above). Deliberately NOT
+  // #177's whole-scene preset system — see foundry/effect-preset-
+  // persistence.js's own header for why that stays untouched here.
+
+  /**
+   * `MapShine.saveEffectPreset('bloom', 'Cozy Tavern')` — snapshot this
+   * effect's CURRENT SCENE-AUTHORED params (whatever `MapShine.setX` has
+   * already written through, not an unsaved live-only tweak) under a name,
+   * into the shared world library.
+   * @param {string} effectId @param {string} presetName
+   * @returns {Promise<{ok: boolean, reason?: string}>}
+   */
+  MapShine.saveEffectPreset = (effectId, presetName) => {
+    if (typeof effectId !== 'string' || !effectId) {
+      return Promise.resolve({ ok: false, reason: 'effectId is required' });
+    }
+    if (typeof presetName !== 'string' || !presetName) {
+      return Promise.resolve({ ok: false, reason: 'presetName is required' });
+    }
+    const { params: sceneParams } = readSceneEffectParams(effectId);
+    if (!sceneParams) {
+      return Promise.resolve({
+        ok: false,
+        reason: `'${effectId}' has no authored params on this scene yet — tune it (MapShine.set${effectId[0].toUpperCase()}${effectId.slice(1)}(...)) before saving a preset`,
+      });
+    }
+    const { presets } = readEffectPresets();
+    const next = {
+      ...presets,
+      [effectId]: { ...(presets[effectId] ?? {}), [presetName]: sceneParams },
+    };
+    return Promise.resolve(writeEffectPresets(next)).then((result) => {
+      if (!result.ok) log.warn(`save effect preset not persisted: ${result.reason}`);
+      return result;
+    });
+  };
+
+  /**
+   * `MapShine.applyEffectPreset('bloom', 'Cozy Tavern')` — write a saved
+   * preset onto the CURRENT scene's authored params (merging into that
+   * effect's own scene block, same as a normal `MapShine.setX` tune would),
+   * then re-resolve everything so it is visible at once.
+   * @param {string} effectId @param {string} presetName
+   * @returns {Promise<{ok: boolean, reason?: string}>}
+   */
+  MapShine.applyEffectPreset = (effectId, presetName) => {
+    const { presets } = readEffectPresets();
+    const preset = presets?.[effectId]?.[presetName];
+    if (!preset) {
+      return Promise.resolve({ ok: false, reason: `no preset '${presetName}' saved for '${effectId}'` });
+    }
+    return Promise.resolve(writeSceneEffectParams(effectId, preset)).then((result) => {
+      if (result.ok) reapplyAll(`apply effect preset (${effectId}/${presetName})`);
+      else log.warn(`apply effect preset not persisted: ${result.reason}`);
+      return result;
+    });
+  };
+
+  /**
+   * `MapShine.listEffectPresets()` — the whole library. `MapShine.
+   * listEffectPresets('bloom')` — just that effect's preset names.
+   * @param {string} [effectId]
+   * @returns {Record<string, string[]>|string[]}
+   */
+  MapShine.listEffectPresets = (effectId) => {
+    const { presets } = readEffectPresets();
+    if (typeof effectId === 'string' && effectId) return Object.keys(presets[effectId] ?? {});
+    const byEffect = {};
+    for (const [id, named] of Object.entries(presets)) byEffect[id] = Object.keys(named);
+    return byEffect;
+  };
+
+  /**
+   * `MapShine.deleteEffectPreset('bloom', 'Cozy Tavern')`.
+   * @param {string} effectId @param {string} presetName
+   * @returns {Promise<{ok: boolean, reason?: string}>}
+   */
+  MapShine.deleteEffectPreset = (effectId, presetName) => {
+    const { presets } = readEffectPresets();
+    if (!presets[effectId] || !(presetName in presets[effectId])) {
+      return Promise.resolve({ ok: false, reason: `no preset '${presetName}' saved for '${effectId}'` });
+    }
+    const remaining = { ...presets[effectId] };
+    delete remaining[presetName];
+    const next = { ...presets, [effectId]: remaining };
+    return Promise.resolve(writeEffectPresets(next)).then((result) => {
+      if (!result.ok) log.warn(`delete effect preset not persisted: ${result.reason}`);
       return result;
     });
   };
@@ -13477,6 +13573,18 @@ function install() {
         registerSkySettings({ onChange: resolveAndApplySky });
       } catch (err) {
         log.error('sky settings registration failed:', err);
+      }
+
+      // THE EFFECT PRESETS SETTING (mythica-machina-press#102) — same
+      // "own init-hook try/catch, same shared `init` hook" placement as the
+      // sky setting just above. No `onChange` needed: unlike sky (which
+      // drives the live render every time it changes), a preset LIBRARY
+      // changing has nothing to re-apply until a GM explicitly applies one —
+      // `MapShine.applyEffectPreset` re-resolves at that point itself.
+      try {
+        registerEffectPresetSettings();
+      } catch (err) {
+        log.error('effect presets settings registration failed:', err);
       }
 
       // THE REGION DARKNESS OVERRIDE SETTING — same "own init-hook try/catch,

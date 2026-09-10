@@ -215,6 +215,7 @@ import {
   WEATHER_ARCHETYPES,
   WEATHER_AXES,
   auditAxisConsumers,
+  CLOUD_COVER_VISUAL_MAX,
 } from './world/index.js';
 import {
   runVtLiveDecodeTest,
@@ -10027,6 +10028,45 @@ function install() {
         ? `${compassOf(windDirectionDeg)} · ${Math.round(windSpeed01 * 100)}%`
         : 'calm — raise Wind on the astrolabe',
     extra: () => MapShine.debug.buildEffectAttachments('wind'),
+  }));
+
+  // ── CLOUDS (docs/planning/Clouds.md, mythica-machina-press#40/#41/#305) ──
+  // Cover/type/altitude/scale are WEATHER axes (Weather-Manager LAW 3), owned
+  // by the astrolabe/weather board, not by this card — same reasoning
+  // `wind`'s own card above already follows (`schema: {}`, no fohKeys), and
+  // WHY this has no `effectRegistry.register(...)` manifest either: `wind`
+  // demonstrates a Studio card needs no manifest to exist (the two registries
+  // are independent — `DOOR_GRAPHICS` is the opposite proof, a manifest with
+  // no card). A real manifest (tiers, readiness, `enabledFromProfile`) is
+  // real follow-up work once there is an actual per-effect param to hang off
+  // it (shadow-depth bias, a debug view) — not a blocker for the one thing
+  // the author asked for first: a place to SEE that the effect is alive.
+  //
+  // `cloudCoverEased01` (not the manager's raw TARGET) — the SAME "shows what
+  // the map is actually rendering, not what the slider is mid-ease toward"
+  // reasoning the astrolabe's own Face reads it for
+  // (`getTimeDialState`'s own doc, vt-pan-viewer.js).
+  registerEffectCardSafe('clouds', () => ({
+    id: 'clouds',
+    icon: 'cloud',
+    title: 'Clouds',
+    accVar: '--c-atmos',
+    filterCategory: 'atmos',
+    schema: {},
+    fohKeys: [],
+    getValue: () => undefined,
+    onChange: () => {},
+    status: () => {
+      const cover = getVtPanViewerTimeDialState()?.cloudCoverEased01 ?? 0;
+      if (cover <= 0.02) return 'clear';
+      // ⚠️ THE FIELD'S OWN RENDERED SILHOUETTE IS CAPPED — see
+      // `CLOUD_COVER_VISUAL_MAX`'s own header (world/cloud-field.js). Shown
+      // here, not silently, so "I set cover to 90% but the sky only looks
+      // ~45% covered" reads as documented behaviour instead of a bug report.
+      const shown = Math.min(cover, CLOUD_COVER_VISUAL_MAX);
+      const capped = cover > CLOUD_COVER_VISUAL_MAX;
+      return `${Math.round(shown * 100)}% cover${capped ? ` (silhouette capped at ${Math.round(CLOUD_COVER_VISUAL_MAX * 100)}%)` : ''}`;
+    },
   }));
 
   // UI parity plan, phase 7b: buildAstrolabeOptions() + its registerPanel

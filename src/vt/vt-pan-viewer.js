@@ -2948,6 +2948,10 @@ export async function startVtPanViewer({
      * OWN soft knee. Generous: a cloud's cause being off toward the map's
      * edge at a low sun is correct (Clouds.md), unlike a tree's. */
     const CLOUD_SHADOW_MAX_OFFSET_PX = 9000;
+    /** The floor this deck's own drift reads on `windSpeed01` — see the live
+     * push's own comment (`updateEnvSnapshot`) for why a scene at genuine
+     * ground-level dead calm still gets a cloud deck that visibly moves. */
+    const CLOUD_MIN_WIND_SPEED01 = 0.12;
     /** THE OVERCAST MOOD (window-render.js's own header) — the RAW, UNCAPPED
      * `env.weather.cloudCover01`, read by window light's global blur/dim.
      * Deliberately the SAME axis `resolveEnvGrade`'s desaturation already
@@ -8482,7 +8486,19 @@ export async function startVtPanViewer({
           gridDistance: globalThis.canvas?.scene?.grid?.distance,
           gridUnits: globalThis.canvas?.scene?.grid?.units,
         });
-        const windSpeedPxPerSec = metresPerSecondForSpeed01(uWindSpeed01.value) * pxPerMetre;
+        // ⚠️ FLOORED, NOT THE BARE DIAL — author's live report (2026-09-10):
+        // "there is no clear evidence of cloud shadows, they don't move."
+        // `windSpeed01` defaults to 0 (a real dead calm at GROUND level,
+        // correct for grass/particles), but most scenes never touch that
+        // dial at all, and a cloud deck sitting at altitude is physically
+        // never becalmed the same way — upper-level wind exists even on a
+        // still surface day. `CLOUD_MIN_WIND_SPEED01` is the floor this
+        // deck's OWN drift reads (never fed back into `uWindSpeed01` itself,
+        // so vegetation/particles still see genuine calm) — a gentle breeze
+        // by default, so a cloud drifts one `cloudScalePx`-wide cell roughly
+        // every 10-12 s even when nothing else on the map is moving at all.
+        const effectiveWindSpeed01 = Math.max(CLOUD_MIN_WIND_SPEED01, uWindSpeed01.value);
+        const windSpeedPxPerSec = metresPerSecondForSpeed01(effectiveWindSpeed01) * pxPerMetre;
         const step = cloudDriftStep({
           dtSec: time.dtSec,
           windDirX: flow.x,

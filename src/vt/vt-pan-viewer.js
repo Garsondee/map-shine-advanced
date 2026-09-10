@@ -2960,6 +2960,12 @@ export async function startVtPanViewer({
      * feel maximally gloomy through every atmospheric consumer, even though
      * the FIELD's own rendered silhouette never paints solid white. */
     const uCloudOvercast01 = THREE.TSL.uniform(THREE.TSL.float(0));
+    /** The previous `getEnvSnapshotInfo()` call's own cloud drift + when it
+     * ran — kept so THAT report can show real movement (`driftPxSinceLastCall`,
+     * `pxPerSecSinceLastCall`) between two runs of the SAME button, rather
+     * than a snapshot that can only ever show a static number. `null` until
+     * the report has run once. See `getEnvSnapshotInfo`'s own `clouds` block. */
+    let lastCloudDiagnosticSample = null;
 
     /**
      * A cloud-shadow node for a window subsystem — see `world/cloud-field.js
@@ -8548,8 +8554,39 @@ export async function startVtPanViewer({
         // (no additional darkening), the same "nothing to report, fall back
         // to neutral" posture `sky-access.js`'s own blended-hue fallback
         // takes rather than a divide-by-zero.
-        const totalSkyStrength = skyHandle.key.strength + skyHandle.fill.strength;
-        uCloudFillShare.value = totalSkyStrength > 1e-6 ? skyHandle.fill.strength / totalSkyStrength : 1;
+        //
+        // ⚠️ READ FROM A SEPARATE, CAPPED-COVER HANDLE — REAL BUG, found while
+        // building the diagnostic report below (author's live report,
+        // 2026-09-10: raised wind, still "no clear evidence of cloud
+        // shadows... _Window in no way being darkened"). `skyHandle` above
+        // deliberately reads the RAW, uncapped `cloudCover01` — correct for
+        // IT, because `sky-access.js`'s own "cloud kills the key" curve
+        // (`keyStrength = dayFactor01 * (1 - cloud01)`) is real physics other
+        // consumers (water's lighting, the sky tint) need un-clamped. But
+        // that SAME curve also starves `key.strength` toward 0 as cover
+        // climbs PAST `CLOUD_COVER_VISUAL_MAX` — and this shadow floor is
+        // `fill/(key+fill)`, so a starved key pushes it toward 1, which is
+        // exactly the value that makes `buildCloudKeyTransmittanceNode`
+        // (`mix(1, fillShare, t)`) a no-op REGARDLESS of `t`. The field's own
+        // silhouette stays capped at the 0.45 morphology (the line above),
+        // but its shadow DEPTH kept draining toward nothing every step the
+        // author raised cover past that cap — so the cloud kept LOOKING like
+        // ~45% overcast while casting a shadow too shallow to see, on both
+        // consumers that read this one uniform (ground ambient AND the
+        // window). Capping the cover THIS handle sees at the same
+        // `CLOUD_COVER_VISUAL_MAX` the silhouette already obeys keeps the
+        // depth ceiling matched to the shape it is shadowing, at any raw
+        // cover setting — a second, throwaway call to the same function
+        // (doc 03 D2: match it by calling it), never a local reimplementation
+        // of `sky-access.js`'s own curve, and `skyHandle` itself (water, the
+        // sky tint, the shadow handle) stays reading the real, uncapped axis.
+        const cloudSkyHandle = createSkyHandle({
+          sun: env.sun,
+          weather: { cloudCover01: Math.min(env.weather.cloudCover01, CLOUD_COVER_VISUAL_MAX) },
+          realism01: skyRealism01,
+        });
+        const totalSkyStrength = cloudSkyHandle.key.strength + cloudSkyHandle.fill.strength;
+        uCloudFillShare.value = totalSkyStrength > 1e-6 ? cloudSkyHandle.fill.strength / totalSkyStrength : 1;
 
         // THE OVERCAST MOOD (window-render.js's own header) — window light's
         // global blur/dim reads the RAW axis, uncapped; see `uCloudOvercast01`'s
@@ -22529,6 +22566,137 @@ export async function startVtPanViewer({
             artToneMapping: getGradeLookState()?.params?.toneMapping ?? null,
             gateCompiled: gradePresent.gateCompiled,
           },
+          // ⭐ CLOUDS (docs/planning/Clouds.md doc 03) — added for the live bug
+          // report (author, 2026-09-10): raised wind speed, "no evidence of
+          // moving shadows... _Window... in no way being darkened". Same
+          // instruments-must-not-lie bar as `sky`/`grade` above — every number
+          // a consumer actually multiplies by is read from where it is BOUND
+          // (`cloudUniforms.*.value`, the live GPU uniforms), never
+          // re-derived, so a push that computed the right thing but never
+          // assigned it cannot hide behind a correct-looking local variable.
+          // Read top to bottom: `gate` says whether the mechanism is even IN
+          // the shader; `rawAxes`/`pushed` says whether the visual cap is
+          // doing its documented job; `shadowDepth` says how dark a shadow
+          // COULD get this frame regardless of where the field currently is;
+          // `motion`/`wind` says whether the deck is actually advancing.
+          clouds: (() => {
+            const w = lastEnvSnapshot.env.weather;
+            const cover01 = w.cloudCover01;
+            const pushedCover01 = Math.min(cover01, CLOUD_COVER_VISUAL_MAX);
+            const recipe = cloudRecipeFor(w.cloudType01);
+            const pxPerMetre = derivePixelsPerMetre({
+              gridSizePixels: globalThis.canvas?.scene?.grid?.size,
+              gridDistance: globalThis.canvas?.scene?.grid?.distance,
+              gridUnits: globalThis.canvas?.scene?.grid?.units,
+            });
+            const rawWindSpeed01 = uWindSpeed01.value;
+            const effectiveWindSpeed01 = Math.max(CLOUD_MIN_WIND_SPEED01, rawWindSpeed01);
+            const windSpeedPxPerSec = metresPerSecondForSpeed01(effectiveWindSpeed01) * pxPerMetre;
+
+            const nowMs = perfNowMs();
+            const sample = { atMs: nowMs, driftX: cloudDriftX, driftY: cloudDriftY, boil: cloudBoil };
+            const prev = lastCloudDiagnosticSample;
+            const motionSinceLastCall =
+              prev == null
+                ? 'no previous call yet — run this report a second time, a few seconds apart, and this field will show the real drift between the two'
+                : (() => {
+                    const dtSec = (nowMs - prev.atMs) / 1000;
+                    const dx = sample.driftX - prev.driftX;
+                    const dy = sample.driftY - prev.driftY;
+                    const distPx = Math.hypot(dx, dy);
+                    return {
+                      secondsSincePreviousCall: Math.round(dtSec * 10) / 10,
+                      driftDeltaPx: { x: Math.round(dx), y: Math.round(dy) },
+                      boilDelta: Math.round((sample.boil - prev.boil) * 1000) / 1000,
+                      impliedPxPerSec:
+                        dtSec > 0.05 ? Math.round((distPx / dtSec) * 10) / 10 : 'dtSec too small to trust',
+                      note:
+                        'near-zero px/sec across two calls seconds apart (with the frame loop confirmed ' +
+                        'running — see the top-level frame/fps fields) means the deck genuinely is not ' +
+                        'advancing, check `wind` below. A real speed here with no visible motion on the map ' +
+                        'means the deck IS moving and the bug is in `shadowDepth`/`gate`, not in motion.',
+                    };
+                  })();
+            lastCloudDiagnosticSample = sample;
+
+            return {
+              gate: {
+                // false ⇒ the GROUND-ambient cloud term compiled OUT of this
+                // floor's illum material entirely (it rides the SAME
+                // `_Outdoors`-mask gate the sky tint does — no mask baked, no
+                // term). The WINDOW term below is NOT gated by this at all
+                // (it samples world position directly), so this reading
+                // `false` while the window ALSO shows nothing points at
+                // `shadowDepth`/`offset` below, not at a missing mask.
+                groundShadowGateCompiled: envLight?.cloudGateCompiled ?? 'unavailable',
+                skyGateCompiled: envLight?.skyGateCompiled ?? 'unavailable',
+              },
+              rawAxes: {
+                cloudCover01: cover01,
+                cloudType01: w.cloudType01,
+                cloudAltitudePx: w.cloudAltitudePx,
+                cloudScalePx: w.cloudScalePx,
+              },
+              pushed: {
+                cover01: pushedCover01,
+                cappedByVisualMax: cover01 > CLOUD_COVER_VISUAL_MAX,
+                recipe: { shearDeg: recipe.shearDeg, edgeWidth: recipe.edgeWidth, thicknessCap: recipe.thicknessCap },
+              },
+              // What the SHADER ACTUALLY READS this frame — bound uniform
+              // values, not the JS locals that computed them.
+              boundUniforms: {
+                cover: cloudUniforms.cover.value,
+                scalePx: cloudUniforms.scalePx.value,
+                threshold: cloudUniforms.threshold.value,
+                drift: { x: cloudUniforms.drift.value.x, y: cloudUniforms.drift.value.y },
+                boil: cloudUniforms.boil.value,
+                windDir: { x: cloudUniforms.windDir.value.x, y: cloudUniforms.windDir.value.y },
+              },
+              motion: { sample, sinceLastCall: motionSinceLastCall },
+              wind: {
+                rawWindSpeed01,
+                effectiveWindSpeed01,
+                floorApplied: CLOUD_MIN_WIND_SPEED01,
+                windDirectionDeg: uWindDirectionDeg.value,
+                pxPerMetre,
+                windSpeedPxPerSec,
+                gridAvailable: Number.isFinite(globalThis.canvas?.scene?.grid?.size),
+              },
+              // THE SHADOW DEPTH CEILING (doc 03 §0.3, fixed 2026-09-10 — see
+              // `uCloudFillShare`'s own push comment in `updateEnvSnapshot`
+              // for the bug this was: reading the SHARED `skyHandle`'s
+              // uncapped-cover key/fill split let raising cover PAST
+              // `CLOUD_COVER_VISUAL_MAX` crush this toward 1 even though the
+              // field's own silhouette stayed capped at the 0.45 morphology —
+              // so the cloud kept its shape but lost its ability to darken
+              // anything). `maxShadowDepthPct` answers "how dark COULD the
+              // darkest visible cloud get right now": with a real cloud
+              // present (`boundUniforms.cover` > 0) and a healthy midday sun,
+              // expect roughly 35-70%; a single-digit reading in daylight is
+              // the bug, not deep night/dusk where a low reading is correct.
+              shadowDepth: {
+                fillShare: uCloudFillShare.value,
+                maxShadowDepthPct: Math.round((1 - uCloudFillShare.value) * 1000) / 10,
+                offset: { x: uCloudOffset.value.x, y: uCloudOffset.value.y },
+                offsetLengthPx: Math.round(Math.hypot(uCloudOffset.value.x, uCloudOffset.value.y)),
+                streakSpread: CLOUD_SHADOW_STREAK_SPREAD,
+              },
+              overcastWindowMood: {
+                cloudOvercast01: uCloudOvercast01.value,
+              },
+              interpretation:
+                'READ TOP TO BOTTOM. `gate.groundShadowGateCompiled:false` means the GROUND term is not in ' +
+                'the shader at all for this floor (no outdoors mask baked for it) — the window term has no ' +
+                'such gate and is unaffected by this. `pushed.cappedByVisualMax:true` is EXPECTED once raw cover ' +
+                'exceeds 0.45 — the silhouette holding at ~45% cover is correct, by design, not a bug. ' +
+                '`boundUniforms` should match `pushed`/`rawAxes` up to that cap; a mismatch means a push is ' +
+                'not reaching the GPU. `motion.sinceLastCall` needs TWO runs of this report a few seconds ' +
+                'apart to mean anything. `shadowDepth.maxShadowDepthPct` is the single most likely culprit ' +
+                'if everything above looks healthy and the map still shows no shadow: a real cloud with this ' +
+                'under ~10% in daylight means almost no direct key light is left for a cloud to block right ' +
+                'now — paste this whole report back rather than re-guessing from a screenshot.',
+            };
+          })(),
           notYetBuilt: ['res:view', 'res:scene'],
         };
       },

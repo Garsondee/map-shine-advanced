@@ -585,6 +585,11 @@ export function buildEnvironmentalLightMaterials({
   const illumMaterial = new THREE.NodeMaterial();
   illumMaterial.depthTest = false;
   illumMaterial.depthWrite = false;
+  // Hoisted out of the block below — `cloudVis` itself is scoped to that
+  // block (TSL node graphs are built once, at construction, never touched
+  // again), but the diagnostics returned at the bottom of this function need
+  // to say whether the term actually got built at all.
+  let cloudGateCompiled = false;
   {
     const outdoors = outdoorsAt();
     // `mix(1, skyMultiplier, outdoors)` — indoors keeps the untouched Foundry
@@ -663,6 +668,7 @@ export function buildEnvironmentalLightMaterials({
         fillShare: cloudFillShareNode ?? float(1),
       });
       cloudVis = mix(float(1), cloudVisRaw, outdoors).toVar('envCloudVis');
+      cloudGateCompiled = true;
     }
 
     // FLUID'S OWN SHADOW TINT — see this function's own "FLUID'S OWN SHADOW
@@ -899,6 +905,18 @@ export function buildEnvironmentalLightMaterials({
      * in — reported by the diagnostics so "the sky does nothing" is always
      * answerable (feedback_instruments_must_not_lie). */
     skyGateCompiled: !!outdoorsTexNode,
+    /** True when the cloud ground-shadow term is actually compiled into the
+     * ambient fill — the SAME "don't make a reader guess" posture as
+     * `skyGateCompiled` just above, added for the live bug report (author,
+     * 2026-09-10: "no clear evidence of cloud shadows"). Piggybacks on the
+     * outdoors gate (`cloudVis` is only built `if (outdoors && ...)` above),
+     * so this reads `false` on any scene with no `_Outdoors` mask baked —
+     * which means the ground term compiles out even though the WINDOW cloud
+     * term (window-render.js's `cloudFactorNode`) does not, since that one
+     * samples world position directly and carries no such gate. A report
+     * showing this `false` and the window still not darkening points at the
+     * window's own inputs (offset/fillShare), not at this gate. */
+    cloudGateCompiled,
   };
 }
 

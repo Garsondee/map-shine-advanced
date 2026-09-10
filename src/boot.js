@@ -581,6 +581,7 @@ import {
   buildWaterHealthReport,
   buildSpecularReport,
   buildWindowLightReport,
+  buildCloudsReport,
 } from './diag/effect-status-reports.js';
 import { getParamHealth, wrapForReadTracking } from './diag/param-read-health.js';
 import { beginUiTick, endUiTick } from './diag/ui-perf.js';
@@ -8813,6 +8814,23 @@ function install() {
     { effect: 'window' }
   );
 
+  // CLOUDS (docs/planning/Clouds.md doc 03) — the author's own ask, live bug
+  // report 2026-09-10: *"create a diagnostic button in the Cloud effect panel
+  // I can run to output to the copy buffer a report."* `{ effect: 'clouds' }`
+  // is what makes the button appear on the Clouds Studio card itself, the
+  // SAME `buildEffectAttachments('clouds')` wiring `wind`'s own card already
+  // uses — see that card's `extra` field just below.
+  MapShine.debug.registerReport(
+    'clouds',
+    'Clouds (why is it not visible?)',
+    () =>
+      buildCloudsReport({
+        viewer: getVtPanViewerDiagnostics?.() ?? null,
+        generatedAt: new Date().toISOString(),
+      }),
+    { effect: 'clouds' }
+  );
+
   // APERTURE GOBO (docs/planning/Aperture-Gobo.md) — reads NO mask, so
   // unlike window/specular there is no `buildXReport` cross-referencing the
   // mask authority; the whole state worth reporting is the resolved params
@@ -10067,6 +10085,14 @@ function install() {
       const capped = cover > CLOUD_COVER_VISUAL_MAX;
       return `${Math.round(shown * 100)}% cover${capped ? ` (silhouette capped at ${Math.round(CLOUD_COVER_VISUAL_MAX * 100)}%)` : ''}`;
     },
+    // THE DIAGNOSTIC BUTTON — author's own ask, live bug report (2026-09-10):
+    // *"create a diagnostic button in the Cloud effect panel I can run to
+    // output to the copy buffer a report."* Same door `wind`'s own card uses
+    // just above (`buildEffectAttachments('wind')`) — any report registered
+    // with `{ effect: 'clouds' }` (the 'clouds' report, just above this card)
+    // shows up here automatically as a click-to-copy button, no hand-built
+    // button/clipboard code in this file.
+    extra: () => MapShine.debug.buildEffectAttachments('clouds'),
   }));
 
   // UI parity plan, phase 7b: buildAstrolabeOptions() + its registerPanel

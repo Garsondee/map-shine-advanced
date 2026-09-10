@@ -595,6 +595,18 @@ export const CLOUD_WALL_GATE_SCALE = 0.08;
  * cools) — keep their FULL authored response. A sky that is genuinely,
  * meteorologically 100% overcast should still feel maximally gloomy and
  * desaturated; it just does not need to paint every pixel white to say so.
+ *
+ * ⚠️ ONE DELIBERATE EXCEPTION (2026-09-10, real bug, not a design choice):
+ * the cloud SHADOW's own depth ceiling (`vt-pan-viewer.js`'s
+ * `uCloudFillShare` push — `fill/(key+fill)` from a `createSkyHandle` call)
+ * reads THIS capped value instead of the raw axis, unlike every other
+ * `sky-access.js` consumer this header just described. `keyStrength` falls
+ * with raw cover uncapped, so past this cap the shadow's own darkness kept
+ * draining toward nothing while the silhouette above stayed put — the shape
+ * kept looking like a believable ~45% overcast sky while losing the ability
+ * to visibly darken anything under it. See that push's own comment for the
+ * full reasoning; the water/sky-tint consumers this header names are NOT
+ * affected, only the cloud deck's own local, throwaway handle is.
  */
 export const CLOUD_COVER_VISUAL_MAX = 0.45;
 

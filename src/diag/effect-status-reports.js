@@ -323,6 +323,68 @@ export function buildWindowLightReport({ floorIndex, viewer, maskAuthority, read
 }
 
 /**
+ * THE CLOUDS REPORT — "why is it not visible?", clouds' own version, built
+ * for the author's live bug report (2026-09-10): raised wind speed, "no
+ * evidence of moving shadows... _Window... in no way being darkened", and a
+ * request for a diagnostic button rather than another round of guessing.
+ *
+ * Unlike `buildSpecularReport`/`buildWindowLightReport`, clouds have no
+ * per-floor authored mask and no `maskAuthority`/`readout` cascade to read —
+ * the field is procedural and world-space, one deck for the whole scene — so
+ * this is a thinner wrapper than its siblings. Nearly everything worth
+ * reporting is already assembled, per-field, inside
+ * `vt-pan-viewer.js#getEnvSnapshotInfo`'s own `clouds` block (bound uniform
+ * values, the shadow-depth ceiling, a two-call motion diff, gate flags) —
+ * this function's job is just to hand that over next to the render backend
+ * (a WebGPU-specific shader bug is a live, un-ruled-out hypothesis: every
+ * bench verification of this feature so far has run forced to WebGL2) and a
+ * short pointer at where the real interpretation already lives, rather than
+ * duplicating it.
+ *
+ * @param {object} args
+ * @param {object|null} args.viewer - `getVtPanViewerDiagnostics()`, or null.
+ * @param {string} args.generatedAt
+ * @returns {object}
+ */
+export function buildCloudsReport({ viewer, generatedAt }) {
+  return {
+    report: 'clouds',
+    generatedAt,
+    // 'msa' confirms MSA's own canvas is what is actually on screen (separate
+    // question from the backend below) — see `describeRenderMode`'s own doc.
+    renderMode: viewer?.renderMode ?? 'viewer not started',
+    // ⚠️ REAL, UN-RULED-OUT SUSPECT: every isolated verification of this
+    // feature so far (the shader-lab bench, the smoke-test construction
+    // checks) ran with `forceWebGL: true` — the live viewer never forces
+    // this, it picks real WebGPU whenever the browser/GPU offer it
+    // (`new THREE.WebGPURenderer({ canvas, ... })`, no override,
+    // vt-pan-viewer.js's own renderer construction). Nothing built into this
+    // feature has ever actually been rendered on the WebGPU backend and
+    // checked. If this reads `'webgpu'` and everything else below looks
+    // healthy, that backend is the next thing to isolate — not a new theory.
+    rendererBackend: viewer?.backend ?? 'unavailable',
+    clouds: viewer?.envSnapshot?.clouds ?? 'viewer not started, or envSnapshot unavailable',
+    // Cross-referenced because both are read by the SAME shared `skyHandle`
+    // the clouds block's own `shadowDepth` derives from, and both were
+    // already-established, working instruments before this feature existed —
+    // if `sky.gateCompiled` or `grade.envResolved.saturation` look broken
+    // too, the bug is upstream of clouds entirely (the sky/weather pipeline
+    // itself), not in anything this feature added.
+    sky: viewer?.envSnapshot?.sky ?? 'unavailable',
+    grade: viewer?.envSnapshot?.grade ?? 'unavailable',
+    interpretation:
+      'READ `clouds.interpretation` FIRST — it is generated fresh every call and already walks the exact ' +
+      'fields in this report top to bottom for the live symptom (no visible shadow, no window darkening, ' +
+      "no visible motion). THIS report's own job is just the two things `clouds` cannot see about itself: " +
+      "`rendererBackend` (a WebGPU-only shader bug is real and un-ruled-out — see this field's own note " +
+      "above) and `renderMode` (if this ever reads anything but 'msa', MSA is not even the thing on screen " +
+      'and nothing below is worth reading yet). Paste this WHOLE report back — do not summarise it — since ' +
+      'the fastest past finding in this feature (a suspected null TSL function) turned out wrong the moment ' +
+      'someone checked the actual runtime value instead of guessing from the surrounding code.',
+  };
+}
+
+/**
  * THE WATER HEALTH REPORT — "absolutely anything and everything to do with
  * foam health and water health in general" (author, 2026-08-17, asked for
  * after a live round where a tier-gate theory was reported with confidence

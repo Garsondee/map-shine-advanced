@@ -489,7 +489,6 @@ import {
   pushCloudUniforms,
   buildCloudFieldNode,
   buildCloudGroundVisNode,
-  CLOUD_COVER_VISUAL_MAX,
   CLOUD_SHADOW_STREAK_SPREAD,
 } from '../world/index.js';
 
@@ -2974,28 +2973,44 @@ export async function startVtPanViewer({
     /** The floor this deck's own drift reads on `windSpeed01` — see the live
      * push's own comment (`updateEnvSnapshot`) for why a scene at genuine
      * ground-level dead calm still gets a cloud deck that visibly moves. */
-    let cloudMinWindSpeed01 = 0.12;
-    /** ⚠️ REAL BUG, author's live-test round 2: "Clouds move far too fast at
-     * full wind speed, halve all wind speed effects on cloud movement."
-     * Multiplies the wind-derived drift speed AFTER the floor above is
-     * applied — never fed back into `uWindSpeed01` itself, so vegetation/
-     * particles keep reading the ambient wind unchanged. `0.5` is the
-     * author's own literal ask, as the new DEFAULT — tunable past 1 for a
-     * deliberately storm-fast deck, or to 0 for a deck that holds still. */
-    let cloudSpeedMul = 0.5;
+    let cloudMinWindSpeed01 = 0.1;
+    /** ⚠️ REAL FINDING, author's live-test round 3: round 2's `0.5` (the
+     * author's own literal "halve it" ask) was STILL too fast at full wind —
+     * "it needs to go a minimal of half the current speed at full wind."
+     * Root cause worth recording: `world/wind-scale.js`'s Beaufort curve puts
+     * "full wind" at ~35 m/s, genuinely hurricane force by design (that
+     * module's own header) — correct for the ground-level effects it was
+     * built for, but a linear multiplier on top of that curve was always
+     * going to need a much bigger cut for a cloud deck than the author's
+     * first guess assumed. `0.25` is round 3's floor. Applied AFTER the
+     * calm-day floor above — never fed back into `uWindSpeed01` itself, so
+     * vegetation/particles keep reading the ambient wind unchanged. */
+    let cloudSpeedMul = 0.25;
     /** The live-tunable twin of `CLOUD_COVER_VISUAL_MAX` (`world/cloud-
-     * field.js`) — that export stays the DEFAULT (and the bench's own full-
-     * range sweep still calls `pushCloudUniforms` directly, uncapped, per
-     * its own header), but the author asked to be able to move this dial
-     * themselves rather than have it fixed in source. */
-    let cloudVisualCoverMax = CLOUD_COVER_VISUAL_MAX;
-    /** `buildCloudGroundVisNode`'s own `strength` — `mix(1, <shadow>, this)`,
-     * applied identically to BOTH consumers below (ground ambient, window)
-     * since they read the SAME physical shadow. `1` is today's natural
-     * depth (the sky-derived ceiling this session's earlier fix already
-     * capped sensibly); `0` removes the shadow entirely. A real TSL uniform
-     * (not a JS local) because it is read INSIDE the compiled shader graph. */
-    const uCloudShadowStrength = THREE.TSL.uniform(THREE.TSL.float(1));
+     * field.js`) — that export is now a DIFFERENT number on purpose (0.45,
+     * the bench's own full-range-sweep reference ceiling; see its own
+     * header) from this live default (0.3, the author's own round-3 tuned
+     * value) — the two were only ever the same value by coincidence at
+     * round 2's ship, never a hard requirement that they match. */
+    let cloudVisualCoverMax = 0.3;
+    /** `buildCloudGroundVisNode`'s own `strength` for the GROUND ambient
+     * consumer ONLY — `mix(1, <shadow>, this)`. `2` is the author's own
+     * round-3 tuned value (round 2 shipped `1`, today's natural depth from
+     * the sky's own key/fill split); `0` removes the ground shadow entirely.
+     * The WINDOW'S OWN direct cloud factor reads a SEPARATE uniform,
+     * `uWindowCloudContrast` below — round 3 split them apart on the
+     * author's own ask ("controls to increase the contrast of the _Windows
+     * darkening too... hard to make out the cloud shapes") once one shared
+     * dial for two visually different surfaces stopped being enough. A real
+     * TSL uniform (not a JS local) because it is read INSIDE the compiled
+     * shader graph. */
+    const uCloudShadowStrength = THREE.TSL.uniform(THREE.TSL.float(2));
+    /** The window's OWN direct-cloud-factor strength — see `uCloudShadow
+     * Strength`'s own doc for why round 3 split this off as its own dial
+     * rather than continuing to share the ground's. `1.5` is the author's
+     * own round-3 starting point for "make the passing shape read clearly
+     * against the window's own glow." */
+    const uWindowCloudContrast = THREE.TSL.uniform(THREE.TSL.float(1.5));
     /** `buildCloudGroundVisNode`'s own `blurFieldUnits` — widens the
      * silhouette's coverage transition before either shadow consumer reads
      * it. Recomputed every frame as `cloudShadowBlurBase +
@@ -3026,7 +3041,32 @@ export async function startVtPanViewer({
      * Studio-card slider moves every window on the map at once. */
     const uWindowOvercastEdgeWiden = THREE.TSL.uniform(THREE.TSL.float(0.22));
     const uWindowOvercastContrastSoften = THREE.TSL.uniform(THREE.TSL.float(0.6));
-    const uWindowOvercastMinStrength = THREE.TSL.uniform(THREE.TSL.float(0.5));
+    // 0.05 — author's own round-3 tuned value (round 2 shipped 0.5, "drop
+    // its overall brightness by up to 50%"); overcast can now extinguish
+    // window light almost entirely.
+    const uWindowOvercastMinStrength = THREE.TSL.uniform(THREE.TSL.float(0.05));
+    // ═══════════════════════════════════════════════════════════════════
+    // THE CLEAR-NOON LOOK (round 3, 2026-09-10) — the deliberate OPPOSITE
+    // condition from every cloud/overcast dial above. Author's ask: "at noon
+    // with no clouds I'd actually like the CC to brighten and increase the
+    // contrast of the scene and the light to have the right colour
+    // temperature for a clear noon. This also needs to boost the brightness
+    // of the _Window effect." `clearNoon01` (computed per-frame, below) is
+    // `(1 - cloudCover01) * dayFactor01` — 1 at a genuinely clear, high sun,
+    // fading to 0 under any cloud or away from midday — and drives all three
+    // boosts below by the SAME fade, so they can never disagree about when
+    // "clear noon" currently is.
+    // ═══════════════════════════════════════════════════════════════════
+    let noonExposureBoost = 0.15;
+    let noonContrastBoost = 0.15;
+    let noonWarmth = 0.1;
+    let windowNoonBoost = 0.3;
+    /** The window's own noon-brightness multiplier — `1 + windowNoonBoost *
+     * clearNoon01`, recomputed every frame (see the cloud cascade's own
+     * per-frame block). A real uniform because window-render.js reads it
+     * inside the compiled shader; `1` (the constructor default) is a
+     * provable no-op before the first frame pushes a real value. */
+    const uWindowNoonBoostMul = THREE.TSL.uniform(THREE.TSL.float(1));
     /** The previous `getEnvSnapshotInfo()` call's own cloud drift + when it
      * ran — kept so THAT report can show real movement (`driftPxSinceLastCall`,
      * `pxPerSecSinceLastCall`) between two runs of the SAME button, rather
@@ -3058,13 +3098,15 @@ export async function startVtPanViewer({
         offset: uCloudOffset,
         streakSpread: CLOUD_SHADOW_STREAK_SPREAD,
         fillShare: uCloudFillShare,
-        // SAME strength/blur uniforms the ground consumer reads just below
-        // (`buildEnvironmentalLightMaterials`'s own `cloudStrengthNode`/
-        // `cloudBlurNode`) — one physical shadow, one pair of controls,
-        // shared rather than doubled (window's OWN separate "overcast mood"
-        // trio — blur/flatten/min-strength — already covers what is
-        // genuinely window-specific; see `uCloudOvercast01`'s own doc).
-        strength: uCloudShadowStrength,
+        // SAME blur uniform the ground consumer reads just below
+        // (`buildEnvironmentalLightMaterials`'s own `cloudBlurNode`) — blur
+        // stayed shared (a physical softening property of the one shadow),
+        // but `strength` did NOT: `uWindowCloudContrast`, a SEPARATE uniform
+        // from the ground's own `uCloudShadowStrength`, per that uniform's
+        // own doc (round 3, author's ask — one shared dial stopped being
+        // enough once the ground and window needed genuinely different
+        // amounts to each read clearly).
+        strength: uWindowCloudContrast,
         blurFieldUnits: uCloudShadowBlur,
       });
     }
@@ -8583,11 +8625,25 @@ export async function startVtPanViewer({
         // the schema's own `shadowStrength` value — see CLOUD_LOOK's own
         // header for why this is the one param the toggle overrides rather
         // than the field/grade/sky terms this manifest does not own.
-        uCloudShadowStrength.value = cloudsOn ? (Number.isFinite(cp.shadowStrength) ? cp.shadowStrength : 1) : 0;
+        uCloudShadowStrength.value = cloudsOn ? (Number.isFinite(cp.shadowStrength) ? cp.shadowStrength : 2) : 0;
+        // SAME `enabled:false` override as the ground's own strength above —
+        // a passing cloud's window darkening is part of what this toggle
+        // turns off, the window's separate "overcast mood" trio below is not
+        // (that is a global sky-mood response, not this manifest's own
+        // per-pixel cloud term).
+        uWindowCloudContrast.value = cloudsOn
+          ? Number.isFinite(cp.windowCloudContrast)
+            ? cp.windowCloudContrast
+            : 1.5
+          : 0;
         if (Number.isFinite(cp.windowOvercastBlur)) uWindowOvercastEdgeWiden.value = cp.windowOvercastBlur;
         if (Number.isFinite(cp.windowOvercastFlatten)) uWindowOvercastContrastSoften.value = cp.windowOvercastFlatten;
         if (Number.isFinite(cp.windowOvercastMinStrength))
           uWindowOvercastMinStrength.value = cp.windowOvercastMinStrength;
+        if (Number.isFinite(cp.noonExposureBoost)) noonExposureBoost = cp.noonExposureBoost;
+        if (Number.isFinite(cp.noonContrastBoost)) noonContrastBoost = cp.noonContrastBoost;
+        if (Number.isFinite(cp.noonWarmth)) noonWarmth = cp.noonWarmth;
+        if (Number.isFinite(cp.windowNoonBoost)) windowNoonBoost = cp.windowNoonBoost;
 
         const recipe = cloudRecipeFor(env.weather.cloudType01);
         const flow = windFlowVector(uWindDirectionDeg.value + recipe.shearDeg);
@@ -8739,7 +8795,26 @@ export async function startVtPanViewer({
       // deleted sky veil), scaled by the strength lever so it ships neutral, and
       // pushed to the present-pass grade. Cheap enough to do every frame (a
       // handful of scalars); no rebuild-guard needed, unlike the handles above.
-      gradePresent.setEnvGrade(scaleGradeToIdentity(resolveEnvGrade(env), gradeEnvStrength));
+      //
+      // ⭐ THE CLEAR-NOON LOOK (round 3, 2026-09-10) — a POST-step on top of
+      // `resolveEnvGrade`'s own result, deliberately never a change to that
+      // function itself: `resolveEnvGrade` is a pure, already-tested function
+      // shared by nothing else that needs touching, and the noon boost is a
+      // genuinely separate artistic layer ("what should a clear midday feel
+      // like on its own") from what that function already owns ("how does
+      // weather/time desaturate and darken"). `clearNoon01` — 1 at a truly
+      // clear, high sun, fading to 0 under any cloud or away from midday —
+      // drives the SAME three boosts `uCloudShadowStrength`'s own sibling
+      // dials do for the opposite condition, so "clear" and "overcast" are
+      // symmetric halves of one mood rather than two unrelated mechanisms.
+      const clearNoon01 = Math.max(0, Math.min(1, (1 - env.weather.cloudCover01) * (env.sun?.dayFactor01 ?? 0)));
+      const envGradeResolved = resolveEnvGrade(env);
+      envGradeResolved.exposure += noonExposureBoost * clearNoon01;
+      envGradeResolved.contrast *= 1 + noonContrastBoost * clearNoon01;
+      envGradeResolved.temperature += noonWarmth * clearNoon01;
+      gradePresent.setEnvGrade(scaleGradeToIdentity(envGradeResolved, gradeEnvStrength));
+      // THE WINDOW'S OWN MIRROR — see `uWindowNoonBoostMul`'s own doc.
+      uWindowNoonBoostMul.value = 1 + windowNoonBoost * clearNoon01;
 
       // THE ARTISTIC (Look) GRADE — read the effect's resolved params and push.
       // Converts the authored schema (split-tone COLOURS, a tone-map NAME, a LUT
@@ -11307,6 +11382,7 @@ export async function startVtPanViewer({
         cloudOvercastEdgeWidenNode: uWindowOvercastEdgeWiden,
         cloudOvercastContrastSoftenNode: uWindowOvercastContrastSoften,
         cloudOvercastMinStrengthNode: uWindowOvercastMinStrength,
+        cloudNoonBoostNode: uWindowNoonBoostMul,
         getWindowRenderState,
         // THE DAYLIGHT TINT's own sun read — a GETTER, matching `getSkyHandle`
         // above: `lastEnvSnapshot` is REASSIGNED every `updateEnvSnapshot()`
@@ -11389,6 +11465,7 @@ export async function startVtPanViewer({
       cloudOvercastEdgeWidenNode: uWindowOvercastEdgeWiden,
       cloudOvercastContrastSoftenNode: uWindowOvercastContrastSoften,
       cloudOvercastMinStrengthNode: uWindowOvercastMinStrength,
+      cloudNoonBoostNode: uWindowNoonBoostMul,
       getWindowRenderState,
       getEnvSun: () => lastEnvSnapshot?.env?.sun ?? null,
       getAmbientCeilingRgb: () =>

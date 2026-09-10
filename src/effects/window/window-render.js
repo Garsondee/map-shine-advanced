@@ -315,6 +315,15 @@ export function buildWindowSurfaceMaterial({
   cloudOvercastEdgeWidenNode = null,
   cloudOvercastContrastSoftenNode = null,
   cloudOvercastMinStrengthNode = null,
+  // THE CLEAR-NOON MIRROR (round 3, 2026-09-10) — author's ask: "This also
+  // needs to boost the brightness of the _Window effect" (at a clear, high
+  // sun). A single pre-multiplied uniform (`1 + windowNoonBoost *
+  // clearNoon01`, computed in vt-pan-viewer.js — see `uWindowNoonBoostMul`'s
+  // own doc), not a separate 01 fade + strength pair here: the fade math is
+  // identical to `cloudOvercastNode`'s own, no reason to duplicate it
+  // shader-side when the caller already has the one number this material
+  // needs. `null`/omitted ⇒ `float(1)`, a provable no-op.
+  cloudNoonBoostNode = null,
   strength = WINDOW_DEFAULT_STRENGTH,
   contrast = WINDOW_DEFAULT_CONTRAST,
   glass = true,
@@ -863,6 +872,7 @@ export function buildWindowSurfaceMaterial({
         'winCloudOvercastDim'
       )
     : float(1);
+  const noonBoost = (cloudNoonBoostNode ?? float(1)).toVar('winNoonBoost');
 
   // ── THE COMPOSITE — this ADDS onto buf:scene.illum. Nothing here touches
   // composed scene colour (see this module's header). ─────────────────────
@@ -871,6 +881,7 @@ export function buildWindowSurfaceMaterial({
     .mul(coverage)
     .mul(cloudFactor)
     .mul(cloudOvercastDim)
+    .mul(noonBoost)
     .toVar('winRawLight');
 
   // ── THE HIGHLIGHT SHOULDER — the transcription of

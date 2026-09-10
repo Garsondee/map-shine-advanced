@@ -120,6 +120,8 @@ const WINDOW_MATERIAL_SIDE_NAMES = Object.freeze({ 0: 'front', 1: 'back', 2: 'do
  *   header. Passed straight through.
  * @param {*} [args.cloudOvercastMinStrengthNode] - see `window-render.js`'s
  *   header. Passed straight through.
+ * @param {*} [args.cloudNoonBoostNode] - see `window-render.js`'s header.
+ *   Passed straight through.
  * @param {() => object} [args.getWindowRenderState] - the look/enable seam.
  * @param {() => object|null} [args.getEnvSun] - `world/sun.js#computeSun`'s
  *   own return value, as a GETTER (not a captured value) — the same reason
@@ -159,6 +161,7 @@ export function createWindowSurfaceSubsystem({
   cloudOvercastEdgeWidenNode = null,
   cloudOvercastContrastSoftenNode = null,
   cloudOvercastMinStrengthNode = null,
+  cloudNoonBoostNode = null,
   getWindowRenderState,
   getEnvSun,
   getAmbientCeilingRgb,
@@ -230,6 +233,7 @@ export function createWindowSurfaceSubsystem({
       cloudOvercastEdgeWidenNode,
       cloudOvercastContrastSoftenNode,
       cloudOvercastMinStrengthNode,
+      cloudNoonBoostNode,
       // Every floor's window mesh stays visible for as long as that floor
       // exists in the scene (see this file's own header), not just while it is
       // the VIEWED floor — so on a multi-floor map, every hidden floor was

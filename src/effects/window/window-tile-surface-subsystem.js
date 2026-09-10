@@ -154,6 +154,8 @@ function worldSpanOf(corners) {
  *   header. Passed straight through.
  * @param {*} [args.cloudOvercastMinStrengthNode] - see `window-render.js`'s
  *   header. Passed straight through.
+ * @param {*} [args.cloudNoonBoostNode] - see `window-render.js`'s header.
+ *   Passed straight through.
  * @param {() => object} [args.getWindowRenderState] - the SAME effect-wide
  *   look/enable seam the floor subsystem reads; Window has one param set for
  *   the whole effect, not one per surface.
@@ -182,6 +184,7 @@ export function createWindowTileSurfaceSubsystem({
   cloudOvercastEdgeWidenNode = null,
   cloudOvercastContrastSoftenNode = null,
   cloudOvercastMinStrengthNode = null,
+  cloudNoonBoostNode = null,
   getWindowRenderState,
   getEnvSun,
   getAmbientCeilingRgb,
@@ -234,6 +237,7 @@ export function createWindowTileSurfaceSubsystem({
       cloudOvercastEdgeWidenNode,
       cloudOvercastContrastSoftenNode,
       cloudOvercastMinStrengthNode,
+      cloudNoonBoostNode,
       positionNode,
       maskUvNode,
       // Same production wiring the floor subsystem uses — see that file's

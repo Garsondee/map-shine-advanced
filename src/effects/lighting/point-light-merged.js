@@ -101,6 +101,14 @@ export function buildMergedPointLightShadingCore({ THREE, inputs, shared, flags 
     albedoTexture,
     uGlobalTimeMs,
     windHandle,
+    cloudUniforms,
+    buildCloudField,
+    buildCloudGroundVis,
+    cloudOffsetNode,
+    cloudFillShareNode,
+    cloudStreakSpread,
+    cloudStrengthNode,
+    cloudBlurNode,
   } = shared;
   const { animation, animationQuality = 0, falloffModel = 'foundry' } = flags;
   const {
@@ -225,6 +233,26 @@ export function buildMergedPointLightShadingCore({ THREE, inputs, shared, flags 
           })
         : sampleSlot(sunShadowSlotNodes[0]);
     backgroundFloor = uBackgroundColor.mul(sunVis);
+  }
+
+  // THE CLOUD SHADOW — identical to buildIlluminationShadingCore's own (see
+  // that function's own "THE CLOUD SHADOW, PER-FRAGMENT" comment for the
+  // full reasoning). This channel is not wired into the live render path yet
+  // (point-light-pool.js never calls createBatchedLightMesh with
+  // channel:'merged') — added anyway so it does not become a silent trap the
+  // day S2.15 turns it on.
+  if (buildCloudField && buildCloudGroundVis && cloudUniforms) {
+    const cloudVis = buildCloudGroundVis(THREE.TSL, {
+      worldXY: positionWorld.xy,
+      uniforms: cloudUniforms,
+      buildField: buildCloudField,
+      offset: cloudOffsetNode ?? vec2(0, 0),
+      streakSpread: cloudStreakSpread,
+      fillShare: cloudFillShareNode ?? float(1),
+      strength: cloudStrengthNode,
+      blurFieldUnits: cloudBlurNode,
+    });
+    backgroundFloor = backgroundFloor.mul(cloudVis);
   }
 
   const illumFinal = mix(backgroundFloor, illumFinalColorExposed, combinedFalloff);

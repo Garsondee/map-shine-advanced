@@ -1123,6 +1123,30 @@ export function createPointLightPool({
       apertureGoboShared,
       uGlobalTimeMs,
       windHandle,
+      // THE CLOUD SHADOW — REAL BUG, found 2026-09-10 chasing the author's
+      // "lights still not attenuated correctly" report. The per-light,
+      // non-batched call to buildPointLightIlluminationMaterial (below, "SUN
+      // SHADOWS, PER-FRAGMENT AND PER-FLOOR") already carries these — but a
+      // BATCHED illumination bucket (createBatchedLightMesh → buildBatched
+      // Material → the SAME buildIlluminationShadingCore, point-light-batch-
+      // mesh.js:541) reads its `shared` from THIS object, which never had
+      // them: every batched light was compiling with cloudUniforms literally
+      // `undefined`, silently skipping the whole term (the same JS-time
+      // `if (buildCloudField && buildCloudGroundVis && cloudUniforms)` gate
+      // that correctly compiles it OUT for a caller that omits it on
+      // purpose also hides a caller that omitted it BY ACCIDENT). Whether
+      // this is the live path depends on `pointLightBatchingEnabled` just
+      // above — a scene with enough lights to batch got zero cloud
+      // interaction on every one of them, regardless of how correct the
+      // per-light path already was.
+      cloudUniforms: envLight.cloudUniforms,
+      buildCloudField: envLight.buildCloudField,
+      buildCloudGroundVis: envLight.buildCloudGroundVis,
+      cloudOffsetNode: envLight.cloudOffsetNode,
+      cloudFillShareNode: envLight.cloudFillShareNode,
+      cloudStreakSpread: envLight.cloudStreakSpread,
+      cloudStrengthNode: envLight.cloudStrengthNode,
+      cloudBlurNode: envLight.cloudBlurNode,
     };
     const colorSharedResources = {
       albedoTexture: sceneColor.texture,

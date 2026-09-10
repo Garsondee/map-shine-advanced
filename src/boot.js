@@ -10145,7 +10145,7 @@ function install() {
     accVar: '--c-atmos',
     filterCategory: 'atmos',
     schema: CLOUD_LOOK_PARAMS,
-    fohKeys: ['shadowStrength', 'shadowBlur', 'shadowBlurCoverGain', 'speedMul', 'windowOvercastMinStrength'],
+    fohKeys: ['shadowStrength', 'windowCloudContrast', 'speedMul', 'windowOvercastMinStrength', 'noonExposureBoost'],
     getReadout: () => cloudsReadout,
     setValue: (patch) => MapShine.setClouds(patch),
     // THE COVER READOUT — unchanged from the old stub: cover/type/altitude/
@@ -10154,13 +10154,17 @@ function install() {
     status: () => {
       const cover = getVtPanViewerTimeDialState()?.cloudCoverEased01 ?? 0;
       if (cover <= 0.02) return 'clear';
-      // ⚠️ THE FIELD'S OWN RENDERED SILHOUETTE IS CAPPED — see
-      // `CLOUD_COVER_VISUAL_MAX`'s own header (world/cloud-field.js). Shown
-      // here, not silently, so "I set cover to 90% but the sky only looks
-      // ~45% covered" reads as documented behaviour instead of a bug report.
-      const shown = Math.min(cover, CLOUD_COVER_VISUAL_MAX);
-      const capped = cover > CLOUD_COVER_VISUAL_MAX;
-      return `${Math.round(shown * 100)}% cover${capped ? ` (silhouette capped at ${Math.round(CLOUD_COVER_VISUAL_MAX * 100)}%)` : ''}`;
+      // ⚠️ THE FIELD'S OWN RENDERED SILHOUETTE IS CAPPED — by this card's OWN
+      // `visualCoverMax` param now (round 3), not the fixed `CLOUD_COVER_
+      // VISUAL_MAX` export (world/cloud-field.js's own header explains why
+      // that stayed a separate, unrelated bench-reference constant once the
+      // author asked to move this cap themselves). Read live off the SAME
+      // cascade the viewer's own per-frame push reads, so this label can
+      // never show a stale percentage after the GM moves the slider.
+      const visualCoverMax = getCloudsRenderState().params?.visualCoverMax ?? CLOUD_COVER_VISUAL_MAX;
+      const shown = Math.min(cover, visualCoverMax);
+      const capped = cover > visualCoverMax;
+      return `${Math.round(shown * 100)}% cover${capped ? ` (silhouette capped at ${Math.round(visualCoverMax * 100)}%)` : ''}`;
     },
     // THE DIAGNOSTIC BUTTON — unchanged from the old stub. Same door `wind`'s
     // own card uses (`buildEffectAttachments('wind')`) — any report

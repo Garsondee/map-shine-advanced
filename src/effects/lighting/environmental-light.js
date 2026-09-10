@@ -387,6 +387,12 @@ export function buildEnvironmentalLightMaterials({
   // (Law 8 only forbids importing world/'s CODE from here); 0 is the safe
   // no-op every other opt-in dial in this codebase defaults to.
   cloudStreakSpread = 0,
+  // AUTHORING CONTROLS (live-test round 2, 2026-09-10) — real TSL uniform
+  // nodes (unlike `cloudStreakSpread` above), forwarded straight into
+  // `buildCloudGroundVisNode`'s own `strength`/`blurFieldUnits` params. `null`
+  // is a provable no-op in both (see that function's own header).
+  cloudStrengthNode = null,
+  cloudBlurNode = null,
 }) {
   const { uniform, texture, uv, vec2, vec3, vec4, float, mix, smoothstep, step, sRGBTransferEOTF, sRGBTransferOETF } =
     THREE.TSL;
@@ -666,6 +672,8 @@ export function buildEnvironmentalLightMaterials({
         // already obeys.
         streakSpread: cloudStreakSpread,
         fillShare: cloudFillShareNode ?? float(1),
+        strength: cloudStrengthNode,
+        blurFieldUnits: cloudBlurNode,
       });
       cloudVis = mix(float(1), cloudVisRaw, outdoors).toVar('envCloudVis');
       cloudGateCompiled = true;
@@ -917,6 +925,20 @@ export function buildEnvironmentalLightMaterials({
      * showing this `false` and the window still not darkening points at the
      * window's own inputs (offset/fillShare), not at this gate. */
     cloudGateCompiled,
+    /** Echoed straight back out — the SAME "read a shared resource off
+     * envLight" door `sunShadowSlotNodes`/`attrTexNode` already are, so
+     * `point-light-pool.js` can hand these to a point light's own
+     * illumination material (`point-light-illumination.js`'s own
+     * `cloudUniforms` doc has the reasoning) without vt-pan-viewer.js having
+     * to pass the same five values to two different builders by hand. */
+    cloudUniforms,
+    buildCloudField,
+    buildCloudGroundVis,
+    cloudOffsetNode,
+    cloudFillShareNode,
+    cloudStreakSpread,
+    cloudStrengthNode,
+    cloudBlurNode,
   };
 }
 

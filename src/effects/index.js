@@ -722,3 +722,8 @@ export {
   CLOUD_MS_GAIN,
   CLOUD_RELIEF_SCALE,
 } from './clouds/cloud-shade.js';
+// CLOUDS — the LOOK layer's own manifest + params schema (shadow/window/
+// point-light mood), same declaration-only shape as depth-of-field.js's own
+// door just above. The field/tops exports just above this are UNRELATED to
+// this one (a field property vs an authored look), not a duplicate door.
+export { CLOUD_LOOK, CLOUD_LOOK_PARAMS, cloudLookDefaults } from './clouds/clouds.js';

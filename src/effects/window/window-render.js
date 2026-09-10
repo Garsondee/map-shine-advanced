@@ -239,6 +239,12 @@ export function windowTierPlan(tier) {
  *   identity this effect ships with — a fully overcast sky blurs and dims
  *   this window's own light, independent of whether a cloud happens to sit
  *   directly overhead it right now.
+ * @param {*} [args.cloudOvercastEdgeWidenNode] - live-tunable twin of
+ *   `WINDOW_OVERCAST_EDGE_WIDEN`; `null`/omitted uses that constant.
+ * @param {*} [args.cloudOvercastContrastSoftenNode] - live-tunable twin of
+ *   `WINDOW_OVERCAST_CONTRAST_SOFTEN`; `null`/omitted uses that constant.
+ * @param {*} [args.cloudOvercastMinStrengthNode] - live-tunable twin of
+ *   `WINDOW_OVERCAST_MIN_STRENGTH`; `null`/omitted uses that constant.
  * @param {boolean} [args.glass] - build the refraction/dispersion/caustic
  *   subgraph at all. A JS-TIME branch: `false` constructs none of it, so the
  *   compiled shader shrinks by five noise taps and two mask taps rather than
@@ -300,6 +306,15 @@ export function buildWindowSurfaceMaterial({
   // below compile to their own identity and this material is byte-identical
   // to before this existed.
   cloudOvercastNode = null,
+  // AUTHORING CONTROLS (live-test round 2, 2026-09-10): live-tunable twins of
+  // `WINDOW_OVERCAST_EDGE_WIDEN`/`CONTRAST_SOFTEN`/`MIN_STRENGTH` just above —
+  // those three stay the DEFAULTS (`?? float(CONST)` below), but a caller
+  // that wants the Studio card to move them without rebuilding this material
+  // now passes real uniform nodes, the SAME "external, shared uniform" shape
+  // `cloudFactorNode`/`cloudOvercastNode` already use.
+  cloudOvercastEdgeWidenNode = null,
+  cloudOvercastContrastSoftenNode = null,
+  cloudOvercastMinStrengthNode = null,
   strength = WINDOW_DEFAULT_STRENGTH,
   contrast = WINDOW_DEFAULT_CONTRAST,
   glass = true,
@@ -337,10 +352,14 @@ export function buildWindowSurfaceMaterial({
   // graph with NEITHER term in it, byte-identical to before this existed.
   const overcast01 = cloudOvercastNode;
   const contrastEff = overcast01
-    ? mix(uContrast, float(1), overcast01.mul(float(WINDOW_OVERCAST_CONTRAST_SOFTEN)))
+    ? mix(
+        uContrast,
+        float(1),
+        overcast01.mul(cloudOvercastContrastSoftenNode ?? float(WINDOW_OVERCAST_CONTRAST_SOFTEN))
+      )
     : uContrast;
   const presenceEdge1Eff = overcast01
-    ? float(WINDOW_PRESENCE_EDGE1).add(overcast01.mul(float(WINDOW_OVERCAST_EDGE_WIDEN)))
+    ? float(WINDOW_PRESENCE_EDGE1).add(overcast01.mul(cloudOvercastEdgeWidenNode ?? float(WINDOW_OVERCAST_EDGE_WIDEN)))
     : float(WINDOW_PRESENCE_EDGE1);
 
   // ── THE GLASS (effects/window/window-glass.js holds the model) ────────────
@@ -840,7 +859,9 @@ export function buildWindowSurfaceMaterial({
   // more `mix`) that the JS-time branch above already governs whether the
   // TERM exists at all, and this is just its value at that term's identity.
   const cloudOvercastDim = overcast01
-    ? mix(float(1), float(WINDOW_OVERCAST_MIN_STRENGTH), overcast01).toVar('winCloudOvercastDim')
+    ? mix(float(1), cloudOvercastMinStrengthNode ?? float(WINDOW_OVERCAST_MIN_STRENGTH), overcast01).toVar(
+        'winCloudOvercastDim'
+      )
     : float(1);
 
   // ── THE COMPOSITE — this ADDS onto buf:scene.illum. Nothing here touches

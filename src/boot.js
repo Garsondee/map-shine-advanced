@@ -376,6 +376,8 @@ import {
   DOF_PARAMS,
   DOF_PRESETS,
   dofPreset,
+  CLOUD_LOOK,
+  CLOUD_LOOK_PARAMS,
   SUN_SHADOWS,
   layerSmearTierPlan,
   SUN_SHADOW_PARAMS,
@@ -1913,6 +1915,9 @@ function install() {
    * construction and the first cascade resolve. `EFFECT_REAPPLIERS` (below)
    * is what actually closes that window at boot. */
   let dofReadout = { enabled: true, params: null };
+  /** Clouds LOOK readout — same seed posture as DOF's own, above, and for
+   * the identical reason (`CLOUD_LOOK.enabledFromProfile === 'low'`). */
+  let cloudsReadout = { enabled: true, params: null };
   let sunShadowReadout = { enabled: false, params: null };
   /** Door-graphics READOUT — same posture as the readouts above: what the last
    * apply resolved (enable + the motion params the viewer's door manager reads). */
@@ -2125,6 +2130,10 @@ function install() {
     dofReadout = buildCascadeReadout(resolved);
   });
 
+  effectRegistry.register(CLOUD_LOOK, (resolved) => {
+    cloudsReadout = buildCascadeReadout(resolved);
+  });
+
   // SUN SHADOWS (docs/planning/Sun-Shadows.md) — building + overhead +
   // sky-reach as ONE height field. `apply` does two things rather than one,
   // because this effect's params split across two owners:
@@ -2311,6 +2320,19 @@ function install() {
     effectRegistry.resolveAndApply('depthOfField', layers);
   }
 
+  /** Transient, in-memory clouds-look param tuning. Mirrors dofLiveOverride
+   * exactly. */
+  const cloudsLiveOverride = {};
+
+  /** Re-resolve the clouds-look cascade. Mirrors reapplyDof exactly; called
+   * on settings change, on ready, and by MapShine.setClouds. */
+  function reapplyClouds() {
+    const layers = deriveEffectLayers('clouds', (key) => readSetting(MODULE_ID, key));
+    const { params: sceneParams } = readSceneEffectParams('clouds');
+    layers.paramLayers = [sceneParams, cloudsLiveOverride].filter(Boolean);
+    effectRegistry.resolveAndApply('clouds', layers);
+  }
+
   /** Transient live override + re-resolve for SUN SHADOWS. Mirrors reapplyBloom
    * exactly (docs/planning/Sun-Shadows.md), including its Stage B scene-param
    * layer (mythica-machina-press#288/#389). */
@@ -2452,6 +2474,7 @@ function install() {
     ['aperture gobo', () => apertureGobo.reapply()],
     ['bloom', () => reapplyBloom()],
     ['depth of field', () => reapplyDof()],
+    ['clouds', () => reapplyClouds()],
     ['colour grade', () => reapplyGradeLook()],
     // Sun shadows MUST run per scene, not only at boot: this apply is what pushes
     // the new scene's `distancePixels` into the caster-height derivation, and an
@@ -3420,6 +3443,39 @@ function install() {
     return { ...dofLiveOverride };
   };
 
+  // MapShine.setClouds — the Clouds card's write path. Mirrors setDof exactly.
+  MapShine.setClouds = (partial = {}) => {
+    const p = partial ?? {};
+    if (typeof p.enabled === 'boolean') {
+      Promise.resolve(writeSetting(MODULE_ID, effectEnableKey('clouds', 'player'), p.enabled ? 'on' : 'off'))
+        .then(() => reapplyClouds())
+        .catch((err) => log.error('clouds enable write/reapply failed:', err));
+    }
+    let changed = false;
+    const scenePatch = {};
+    for (const k of Object.keys(CLOUD_LOOK_PARAMS)) {
+      if (k in p) {
+        cloudsLiveOverride[k] = p[k];
+        if (CLOUD_LOOK_PARAMS[k]?.scope !== 'client') scenePatch[k] = p[k];
+        changed = true;
+      }
+    }
+    if (changed) {
+      Promise.resolve(writeSceneEffectParams('clouds', scenePatch)).then(
+        (result) => {
+          if (!result.ok) log.warn(`clouds scene param write not persisted: ${result.reason}`);
+        },
+        (err) => log.error('clouds scene param write failed:', err)
+      );
+      try {
+        reapplyClouds();
+      } catch (err) {
+        log.error('clouds reapply (setClouds) failed:', err);
+      }
+    }
+    return { ...cloudsLiveOverride };
+  };
+
   // MapShine.setGrade — the Colour Grade card's + preset picker's + console
   // write path (mirrors MapShine.setBloom). A full preset object (gradePreset
   // (name)) or a single knob: MapShine.setGrade({ contrast: 1.2, toneMapping: 'aces' })
@@ -3554,6 +3610,15 @@ function install() {
   const getDofRenderState = () => {
     const state = projectCascadeRenderState(dofReadout);
     return { ...state, params: wrapForReadTracking('depthOfField', state.params ?? {}) };
+  };
+
+  /** Clouds LOOK's own render-consumption seam. Mirrors getDofRenderState
+   * exactly — read fresh, every frame, by the viewer's cloud push (never
+   * captured), same "no stale readout" posture every render-state getter
+   * in this file already takes. */
+  const getCloudsRenderState = () => {
+    const state = projectCascadeRenderState(cloudsReadout);
+    return { ...state, params: wrapForReadTracking('clouds', state.params ?? {}) };
   };
 
   // SUN SHADOWS' two seams into the viewer (docs/planning/Sun-Shadows.md).
@@ -10064,16 +10129,28 @@ function install() {
   // the map is actually rendering, not what the slider is mid-ease toward"
   // reasoning the astrolabe's own Face reads it for
   // (`getTimeDialState`'s own doc, vt-pan-viewer.js).
-  registerEffectCardSafe('clouds', () => ({
-    id: 'clouds',
+  // CLOUDS — upgraded from a read-only status stub to a REAL FOH/ROH card
+  // (author, live-test round 2, 2026-09-10: "Every effect needs a very wide
+  // selection of controls to author the look of them... you've provided me
+  // with nothing"). `registerSimpleEffectCard` — the SAME door DOF/sun-
+  // shadows/grade already use — replaces the old stub's `registerEffectCard
+  // Safe` call entirely rather than adding alongside it: Studio's own card
+  // registry (`ui/rooms/studio/shell.js`) is a plain `Map.set(id, factory)`,
+  // so a second call for the same id would silently overwrite the first —
+  // better to make that overwrite explicit by deleting the old block than
+  // leave dead competing code behind.
+  registerSimpleEffectCard('clouds', {
     icon: 'cloud',
     title: 'Clouds',
     accVar: '--c-atmos',
     filterCategory: 'atmos',
-    schema: {},
-    fohKeys: [],
-    getValue: () => undefined,
-    onChange: () => {},
+    schema: CLOUD_LOOK_PARAMS,
+    fohKeys: ['shadowStrength', 'shadowBlur', 'shadowBlurCoverGain', 'speedMul', 'windowOvercastMinStrength'],
+    getReadout: () => cloudsReadout,
+    setValue: (patch) => MapShine.setClouds(patch),
+    // THE COVER READOUT — unchanged from the old stub: cover/type/altitude/
+    // scale are WEATHER AXES (Weather-Manager LAW 3), not this card's own
+    // params, so they ride the status line rather than the schema above.
     status: () => {
       const cover = getVtPanViewerTimeDialState()?.cloudCoverEased01 ?? 0;
       if (cover <= 0.02) return 'clear';
@@ -10085,15 +10162,12 @@ function install() {
       const capped = cover > CLOUD_COVER_VISUAL_MAX;
       return `${Math.round(shown * 100)}% cover${capped ? ` (silhouette capped at ${Math.round(CLOUD_COVER_VISUAL_MAX * 100)}%)` : ''}`;
     },
-    // THE DIAGNOSTIC BUTTON — author's own ask, live bug report (2026-09-10):
-    // *"create a diagnostic button in the Cloud effect panel I can run to
-    // output to the copy buffer a report."* Same door `wind`'s own card uses
-    // just above (`buildEffectAttachments('wind')`) — any report registered
-    // with `{ effect: 'clouds' }` (the 'clouds' report, just above this card)
-    // shows up here automatically as a click-to-copy button, no hand-built
-    // button/clipboard code in this file.
+    // THE DIAGNOSTIC BUTTON — unchanged from the old stub. Same door `wind`'s
+    // own card uses (`buildEffectAttachments('wind')`) — any report
+    // registered with `{ effect: 'clouds' }` (the 'clouds' report, above)
+    // shows up here automatically as a click-to-copy button.
     extra: () => MapShine.debug.buildEffectAttachments('clouds'),
-  }));
+  });
 
   // UI parity plan, phase 7b: buildAstrolabeOptions() + its registerPanel
   // ('astrolabe', the old panel's own dial via createAstrolabe()) are both
@@ -11509,6 +11583,12 @@ function install() {
         // bloom's own seam just above — a whole-image screen effect needing
         // no scene data, so the torture-soak harness omits it the same way.
         getDofRenderState,
+        // CLOUDS LOOK (effects/clouds/clouds.js) — same shape as DOF's own
+        // seam just above. The viewer's own cloud-authoring block (inside
+        // updateEnvSnapshot) reads `.params` off this fresh every frame,
+        // replacing the plain-JS defaults/uniform-at-construction-value it
+        // used before this cascade existed.
+        getCloudsRenderState,
         // PRECIPITATION's CASCADE STATE (2026-08-30) — only `enabled`/
         // `perfTier`; vt-pan-viewer.js's own getPrecipRenderState still owns
         // everything else (env snapshot, viewport size, scene bounds) it has

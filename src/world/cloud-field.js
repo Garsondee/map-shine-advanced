@@ -780,11 +780,19 @@ export function fbmAmplitudeSum(octaves, diminish) {
  * @param {boolean} [args.warp] - build the domain-warp stage at all (tier).
  * @param {boolean} [args.erode] - build the erosion stage at all (tier).
  * @param {boolean} [args.cells] - build the Worley stage at all (tier).
+ * @param {*} [args.edgeWidthBoost] - float node, ADDED to `u.edgeWidth`
+ *   before the coverage smoothstep — widens the transition band, i.e. softens
+ *   the silhouette's edge, without touching the calibrated threshold or any
+ *   other stage. `0`/omitted is a provable no-op (every existing caller).
+ *   Added for {@link buildCloudGroundVisNode}'s own shadow-blur dial — see
+ *   that function's header for why blurring HERE (before `cov`) rather than
+ *   after `thickness` is the cheap option: one scalar add ahead of a
+ *   smoothstep that already runs, versus extra taps.
  * @returns {{cov: *, thickness: *, height: *, base: *}}
  */
 export function buildCloudFieldNode(
   TSL,
-  { worldXY, uniforms: u, octaves = 4, warp = true, erode = true, cells = true }
+  { worldXY, uniforms: u, octaves = 4, warp = true, erode = true, cells = true, edgeWidthBoost = null }
 ) {
   const {
     float,
@@ -1062,7 +1070,8 @@ export function buildCloudFieldNode(
   // shape's own areal extent matches the true silhouette's, and the relief
   // driving the NORMAL now fades out over the SAME footprint alpha does.
   const thr = cells ? u.threshold : u.macroThreshold;
-  let cov = smoothstep(thr, thr.add(u.edgeWidth.max(float(0.01))), base).toVar('cloudCov');
+  const edgeWidthEff = edgeWidthBoost ? u.edgeWidth.add(edgeWidthBoost) : u.edgeWidth;
+  let cov = smoothstep(thr, thr.add(edgeWidthEff.max(float(0.01))), base).toVar('cloudCov');
   let shadeBump = float(0);
 
   // ── 5. EROSION — high-frequency detail eats the LOW end ───────────────────
@@ -1361,20 +1370,69 @@ export const CLOUD_SHADOW_STREAK_SPREAD = 0.35;
  * @param {*} args.fillShare - float node, `fill/(key+fill)` from the sky
  *   handle, forwarded to {@link buildCloudKeyTransmittanceNode}.
  * @param {*} [args.depthBias] - float node, the effect card's own bias.
+ * @param {*} [args.blurFieldUnits] - float node, forwarded to
+ *   {@link buildCloudFieldNode} as `edgeWidthBoost` on every tap — widens the
+ *   silhouette's own transition band before the shadow reads it, i.e. softens
+ *   the shadow's edge. `0`/omitted is a provable no-op. Author's ask
+ *   (2026-09-10, live-test round 2): *"cloud shadows need to be blurred on
+ *   the ground and the blur increases as the overcast/cloud increases"* — the
+ *   caller is expected to derive this from cover itself (a base amount plus a
+ *   cover-scaled gain), this function only ever applies whatever it is handed.
+ * @param {*} [args.strength] - float node, 0..~2, `mix(1, <shadow>, strength)`
+ *   applied ONCE after the streak combine (never per-tap — a strength blend
+ *   commutes with `min()`, so doing it once after is identical to doing it
+ *   before, for the cost of one `mix` instead of up to `streakTaps`).
+ *   `1`/omitted is today's natural depth (a provable no-op); `0` removes the
+ *   shadow entirely without touching the field or the offset — the "how dark"
+ *   dial the author asked for, independent of "how blurred" and "how far".
  * @returns {*} float node, 0..1, 1 = full sun.
  */
 export function buildCloudGroundVisNode(
   TSL,
-  { worldXY, uniforms, buildField, octaves = 2, offset, streakSpread = 0, streakTaps = 3, fillShare, depthBias = null }
+  {
+    worldXY,
+    uniforms,
+    buildField,
+    octaves = 2,
+    offset,
+    streakSpread = 0,
+    streakTaps = 3,
+    fillShare,
+    depthBias = null,
+    blurFieldUnits = null,
+    strength = null,
+  }
 ) {
-  const { float, min } = TSL;
+  const { float, min, mix } = TSL;
   const taps = Math.max(1, streakTaps | 0);
+  // ⚠️ `cells: false, erode: false` — REAL PERF BUG, found 2026-09-10 (author,
+  // live-test round 2: "performance of the cloud system is currently
+  // PAINFULLY bad... gone from around 50fps to 15fps"). This is a SHADOW
+  // TEST — `octaves = 2` above already says so — but until this fix it still
+  // ran the FULL field: the Worley cellular term, its wall-breach gate, AND
+  // erosion's own two extra Worley taps, all at full cost, on EVERY one of
+  // `streakTaps` samples. `effects/clouds/cloud-shade.js#heightAt` already
+  // established the correct cheap-resample pattern (`cells: false`, `erode`
+  // only when detail is actually wanted) for exactly this situation — this
+  // function just never adopted it. Silhouette shape (what `cov`/`thickness`
+  // read before either flag) is UNCHANGED; only the cellular wall structure
+  // and fine erosion grain are dropped from this cheap re-sample, which two
+  // consumers (the fullscreen ground pass, and EVERY window quad in view,
+  // each paying this `streakTaps` times over) were never meant to carry.
   const sampleAt = (k) => {
     const p = k === 1 ? worldXY.sub(offset) : worldXY.sub(offset.mul(float(k)));
-    const thickness = buildField(TSL, { worldXY: p, uniforms, octaves }).thickness;
+    const thickness = buildField(TSL, {
+      worldXY: p,
+      uniforms,
+      octaves,
+      cells: false,
+      erode: false,
+      edgeWidthBoost: blurFieldUnits,
+    }).thickness;
     return buildCloudKeyTransmittanceNode(TSL, { thickness, fillShare, depthBias });
   };
-  if (taps === 1 || streakSpread <= 0) return sampleAt(1);
+  const applyStrength = (vis) => (strength ? mix(float(1), vis, strength) : vis);
+  if (taps === 1 || streakSpread <= 0) return applyStrength(sampleAt(1));
   let vis = sampleAt(1 - streakSpread);
   for (let i = 1; i < taps; i++) {
     const k = 1 - streakSpread + (2 * streakSpread * i) / (taps - 1);
@@ -1382,5 +1440,5 @@ export function buildCloudGroundVisNode(
     // back on `k = 1` — a wasted, identical field evaluation otherwise.
     vis = Math.abs(k - 1) < 1e-6 ? min(vis, sampleAt(1)) : min(vis, sampleAt(k));
   }
-  return vis;
+  return applyStrength(vis);
 }

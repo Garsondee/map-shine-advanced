@@ -1133,6 +1133,14 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
     apertureGoboShared,
     uGlobalTimeMs,
     windHandle,
+    cloudUniforms,
+    buildCloudField,
+    buildCloudGroundVis,
+    cloudOffsetNode,
+    cloudFillShareNode,
+    cloudStreakSpread,
+    cloudStrengthNode,
+    cloudBlurNode,
   } = shared;
   const {
     animation,
@@ -1437,6 +1445,29 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
     backgroundFloor = uBackgroundColor.mul(sunVis);
   }
 
+  // ⭐ THE CLOUD SHADOW, PER-FRAGMENT — see `buildPointLightIlluminationMaterial`'s
+  // own `cloudUniforms` doc for the bug this fixes ("shadows are clipped at
+  // the light's outermost dim radius"). Independent of the sun-shadow block
+  // above (a scene can have one baked field without the other) — both, when
+  // present, multiply into the SAME `backgroundFloor` this light's falloff
+  // ultimately mixes toward at its own dim edge (see this function's own
+  // `outputColor = mix(backgroundFloor, finalColorExposed, ...)` below), so
+  // a light sitting in a cloud's shadow now fades OUT into that same shadow
+  // rather than into an un-shadowed flat colour the field never knew about.
+  if (buildCloudField && buildCloudGroundVis && cloudUniforms) {
+    const cloudVis = buildCloudGroundVis(THREE.TSL, {
+      worldXY: positionWorld.xy,
+      uniforms: cloudUniforms,
+      buildField: buildCloudField,
+      offset: cloudOffsetNode ?? vec2(0, 0),
+      streakSpread: cloudStreakSpread,
+      fillShare: cloudFillShareNode ?? float(1),
+      strength: cloudStrengthNode,
+      blurFieldUnits: cloudBlurNode,
+    });
+    backgroundFloor = backgroundFloor.mul(cloudVis);
+  }
+
   // THE GOBO IS PART OF THIS LIGHT'S OWN FALLOFF (round 10, 2026-08-04) —
   // NOT a separate pass drawn after this material MAX-blends. Three earlier
   // rounds this SAME session tried a separate pass (`aperture-gobo-
@@ -1676,6 +1707,48 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
  * @param {object} [args.apertureGoboShared] - `aperture-gobo-render.js#
  *   createApertureGoboSharedUniforms`'s own return, ONE instance for the
  *   whole pool, forwarded verbatim.
+ * @param {object} [args.cloudUniforms] - `world/cloud-field.js#
+ *   createCloudUniforms`'s own return, SHARED with `environmental-light.js`
+ *   (not rebuilt here) — see `buildCloudGroundVis` below. Added 2026-09-10
+ *   (real bug, author's live report: "cloud shadows and lights don't
+ *   interact correctly... shadows are clipped at the light's outermost dim
+ *   radius"). Root cause: `uBackgroundColor` (this light's own "as if I
+ *   weren't here" colour) is a FLAT value sampled ONCE on the CPU
+ *   (`point-light-pool.js`'s own `localAmbient`), which — same as sun
+ *   shadows, see `sunShadowSlotNodes`' own doc and this file's "SUN-SHADOW
+ *   ATTENUATION" header — cannot carry a shadow that varies smoothly across
+ *   this light's own footprint; two earlier attempts to scale it by a
+ *   per-light CPU scalar both failed for exactly that reason
+ *   (`point-light-pool.js`'s own comment on why sun shadows are NOT applied
+ *   there). Sampling the cloud field PER-FRAGMENT here, the same way the
+ *   sun-shadow slots already are, is the same fix applied to the same class
+ *   of problem a second time.
+ * @param {Function} [args.buildCloudField] - `world/cloud-field.js#
+ *   buildCloudFieldNode`, injected (Law 8 — this module stays inside
+ *   `zones/one-door`, the identical reason `environmental-light.js` takes it
+ *   as a param rather than importing `world/`).
+ * @param {Function} [args.buildCloudGroundVis] - `world/cloud-field.js#
+ *   buildCloudGroundVisNode`, injected. Called with the SAME shape
+ *   `environmental-light.js` calls it with — `strength`/`blurFieldUnits`
+ *   included, so the Studio card's shadow-strength/blur sliders reach a
+ *   light's own background exactly as they reach the ambient and the window.
+ * @param {*} [args.cloudOffsetNode] - `environmental-light.js`'s own
+ *   `cloudOffsetNode`, SHARED (the same sun-relative offset every consumer
+ *   reads — doc 03's D2, "match it by calling it").
+ * @param {*} [args.cloudFillShareNode] - `environmental-light.js`'s own
+ *   `cloudFillShareNode`, SHARED.
+ * @param {number} [args.cloudStreakSpread] - `environmental-light.js`'s own
+ *   `cloudStreakSpread` — a plain number (graph-build-time, like
+ *   `falloffModel`), so it must match whatever the ambient/window consumers
+ *   were built with for the streak to look identical across all three; see
+ *   `world/cloud-field.js#CLOUD_SHADOW_STREAK_SPREAD`.
+ * @param {*} [args.cloudStrengthNode] - `environmental-light.js`'s own
+ *   `cloudStrengthNode`, SHARED — the Studio card's shadow-strength dial.
+ * @param {*} [args.cloudBlurNode] - `environmental-light.js`'s own
+ *   `cloudBlurNode`, SHARED — the Studio card's shadow-blur dial.
+ *   All five `cloud*` params omitted together ⇒ this term compiles out
+ *   entirely, byte-identical to before this fix existed (same JS-time-branch
+ *   posture `sunShadowSlotNodes` already has).
  * @returns {{material: *, uRatio: *, uAttenuationEased: *, uExposure: *,
  *   uEdgeCount: *, uEdgeSoftMargin: *, edgePoints: object[],
  *   uSpeedRaw: (*|null), uReverseSign: (*|null), uSeed: (*|null),
@@ -1712,6 +1785,14 @@ export function buildPointLightIlluminationMaterial({
   apGoboCols,
   apGoboRows,
   apertureGoboShared,
+  cloudUniforms,
+  buildCloudField,
+  buildCloudGroundVis,
+  cloudOffsetNode,
+  cloudFillShareNode,
+  cloudStreakSpread,
+  cloudStrengthNode,
+  cloudBlurNode,
 }) {
   const { uniform, uniformArray, float, int, vec2, vec4, positionLocal } = THREE.TSL;
 
@@ -1789,6 +1870,14 @@ export function buildPointLightIlluminationMaterial({
         apertureGoboShared,
         uGlobalTimeMs,
         windHandle,
+        cloudUniforms,
+        buildCloudField,
+        buildCloudGroundVis,
+        cloudOffsetNode,
+        cloudFillShareNode,
+        cloudStreakSpread,
+        cloudStrengthNode,
+        cloudBlurNode,
       },
       flags: { animation, animationQuality, falloffModel, apertureCount, apGoboCols, apGoboRows },
     });

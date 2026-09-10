@@ -1159,6 +1159,7 @@ export async function startVtPanViewer({
   getVegetationRenderState,
   getBloomRenderState,
   getDofRenderState,
+  getCloudsRenderState,
   getGradeLookState,
   // PRECIPITATION'S CASCADE STATE (2026-08-30) — deliberately separate from
   // getPrecipRenderState below, which stays defined IN this file (it mixes
@@ -1418,6 +1419,15 @@ export async function startVtPanViewer({
   // above. Default = the effect off, so an un-wired caller (the torture
   // fixture) runs no DoF pass at all.
   getDofRenderState ??= () => ({ enabled: false, params: {} });
+  // CLOUDS LOOK's data seam (effects/clouds/clouds.js#CLOUD_LOOK_PARAMS) —
+  // same injection discipline as bloom/DOF just above, EXCEPT the default:
+  // an un-wired caller gets `enabled: true` with empty params, not `false`
+  // — matching `CLOUD_LOOK.enabledFromProfile: 'low'` (on everywhere by
+  // default) and, more locally, matching every JS default this file's own
+  // cloud-state block already declares (`cloudSpeedMul = 0.5` etc.), which
+  // an empty `params` object leaves untouched (see the per-frame cascade
+  // read's own `Number.isFinite(cp.x)` guards) rather than silently zeroing.
+  getCloudsRenderState ??= () => ({ enabled: true, params: {} });
   // PRECIPITATION'S CASCADE STATE — same injection discipline as bloom/dof
   // just above. Default = enabled true, matching this effect's own manifest
   // (`enabledFromProfile: 'low'`) and its pre-2026-08-30 unconditional
@@ -2943,15 +2953,63 @@ export async function startVtPanViewer({
      * derived from the sky, never authored, so it is automatically shallow
      * at dawn and absent at night. */
     const uCloudFillShare = THREE.TSL.uniform(THREE.TSL.float(0.3));
+    // ═══════════════════════════════════════════════════════════════════
+    // AUTHORING CONTROLS — live-test round 2 (author, 2026-09-10): "Every
+    // effect needs a very wide selection of controls to author the look of
+    // them... blur, tightness, strength, darkness of shadows and lots and
+    // lots more, with very wide ranges." These are the ones read PER FRAME
+    // in plain JS (`updateEnvSnapshot`, below) or pushed straight into a
+    // TSL uniform's `.value` — either way, a Studio-card `onChange` can
+    // write them directly with NO material rebuild, unlike `octaves`/
+    // `cells`/`erode`/`streakSpread`/`streakTaps` (JS-time constants baked
+    // into the compiled shader graph's own STRUCTURE at construction —
+    // deliberately left as tuned constants, not exposed live, this round).
+    // The Studio card wiring itself lives in `boot.js` (`CLOUD_LOOK_PARAMS`).
+    // ═══════════════════════════════════════════════════════════════════
     /** How far past the deck's own altitude the sun-angle streak is allowed
      * to reach, world px — `maxOffsetPx` for {@link projectShadowOffset}'s
      * OWN soft knee. Generous: a cloud's cause being off toward the map's
      * edge at a low sun is correct (Clouds.md), unlike a tree's. */
-    const CLOUD_SHADOW_MAX_OFFSET_PX = 9000;
+    let cloudShadowMaxOffsetPx = 9000;
     /** The floor this deck's own drift reads on `windSpeed01` — see the live
      * push's own comment (`updateEnvSnapshot`) for why a scene at genuine
      * ground-level dead calm still gets a cloud deck that visibly moves. */
-    const CLOUD_MIN_WIND_SPEED01 = 0.12;
+    let cloudMinWindSpeed01 = 0.12;
+    /** ⚠️ REAL BUG, author's live-test round 2: "Clouds move far too fast at
+     * full wind speed, halve all wind speed effects on cloud movement."
+     * Multiplies the wind-derived drift speed AFTER the floor above is
+     * applied — never fed back into `uWindSpeed01` itself, so vegetation/
+     * particles keep reading the ambient wind unchanged. `0.5` is the
+     * author's own literal ask, as the new DEFAULT — tunable past 1 for a
+     * deliberately storm-fast deck, or to 0 for a deck that holds still. */
+    let cloudSpeedMul = 0.5;
+    /** The live-tunable twin of `CLOUD_COVER_VISUAL_MAX` (`world/cloud-
+     * field.js`) — that export stays the DEFAULT (and the bench's own full-
+     * range sweep still calls `pushCloudUniforms` directly, uncapped, per
+     * its own header), but the author asked to be able to move this dial
+     * themselves rather than have it fixed in source. */
+    let cloudVisualCoverMax = CLOUD_COVER_VISUAL_MAX;
+    /** `buildCloudGroundVisNode`'s own `strength` — `mix(1, <shadow>, this)`,
+     * applied identically to BOTH consumers below (ground ambient, window)
+     * since they read the SAME physical shadow. `1` is today's natural
+     * depth (the sky-derived ceiling this session's earlier fix already
+     * capped sensibly); `0` removes the shadow entirely. A real TSL uniform
+     * (not a JS local) because it is read INSIDE the compiled shader graph. */
+    const uCloudShadowStrength = THREE.TSL.uniform(THREE.TSL.float(1));
+    /** `buildCloudGroundVisNode`'s own `blurFieldUnits` — widens the
+     * silhouette's coverage transition before either shadow consumer reads
+     * it. Recomputed every frame as `cloudShadowBlurBase +
+     * cloudShadowBlurCoverGain * cover01` (both JS locals below), which is
+     * how "the blur increases as the overcast/cloud increases" (author's
+     * own ask) is satisfied — the TWO tunables stay separate controls
+     * because "how soft at zero cloud" and "how much softer under heavy
+     * cloud" are different artistic questions, but the shader only ever
+     * needs their sum. Same field-relative units as the recipe's own
+     * `edgeWidth` (roughly 0.1-0.45 across the five keyframes), so a value
+     * in that same range reads as a comparable amount of softening. */
+    const uCloudShadowBlur = THREE.TSL.uniform(THREE.TSL.float(0));
+    let cloudShadowBlurBase = 0.08;
+    let cloudShadowBlurCoverGain = 0.4;
     /** THE OVERCAST MOOD (window-render.js's own header) — the RAW, UNCAPPED
      * `env.weather.cloudCover01`, read by window light's global blur/dim.
      * Deliberately the SAME axis `resolveEnvGrade`'s desaturation already
@@ -2960,6 +3018,15 @@ export async function startVtPanViewer({
      * feel maximally gloomy through every atmospheric consumer, even though
      * the FIELD's own rendered silhouette never paints solid white. */
     const uCloudOvercast01 = THREE.TSL.uniform(THREE.TSL.float(0));
+    /** Live-tunable twins of `window-render.js`'s own `WINDOW_OVERCAST_
+     * EDGE_WIDEN`/`CONTRAST_SOFTEN`/`MIN_STRENGTH` constants (0.22/0.6/0.5
+     * — mirrored here as the starting `.value`s, not imported, the SAME
+     * "shared external uniform" shape `uCloudOvercast01` above already is)
+     * — one instance, handed to every window subsystem below, so a single
+     * Studio-card slider moves every window on the map at once. */
+    const uWindowOvercastEdgeWiden = THREE.TSL.uniform(THREE.TSL.float(0.22));
+    const uWindowOvercastContrastSoften = THREE.TSL.uniform(THREE.TSL.float(0.6));
+    const uWindowOvercastMinStrength = THREE.TSL.uniform(THREE.TSL.float(0.5));
     /** The previous `getEnvSnapshotInfo()` call's own cloud drift + when it
      * ran — kept so THAT report can show real movement (`driftPxSinceLastCall`,
      * `pxPerSecSinceLastCall`) between two runs of the SAME button, rather
@@ -2991,6 +3058,14 @@ export async function startVtPanViewer({
         offset: uCloudOffset,
         streakSpread: CLOUD_SHADOW_STREAK_SPREAD,
         fillShare: uCloudFillShare,
+        // SAME strength/blur uniforms the ground consumer reads just below
+        // (`buildEnvironmentalLightMaterials`'s own `cloudStrengthNode`/
+        // `cloudBlurNode`) — one physical shadow, one pair of controls,
+        // shared rather than doubled (window's OWN separate "overcast mood"
+        // trio — blur/flatten/min-strength — already covers what is
+        // genuinely window-specific; see `uCloudOvercast01`'s own doc).
+        strength: uCloudShadowStrength,
+        blurFieldUnits: uCloudShadowBlur,
       });
     }
 
@@ -3029,6 +3104,11 @@ export async function startVtPanViewer({
       cloudOffsetNode: uCloudOffset,
       cloudFillShareNode: uCloudFillShare,
       cloudStreakSpread: CLOUD_SHADOW_STREAK_SPREAD,
+      // SAME strength/blur uniforms `buildWindowCloudFactorNode` reads —
+      // see that function's own doc for why the two consumers share one pair
+      // rather than each carrying an independent copy.
+      cloudStrengthNode: uCloudShadowStrength,
+      cloudBlurNode: uCloudShadowBlur,
     });
     envLight.setOutdoorsRect(outdoorsRect);
 
@@ -8482,6 +8562,33 @@ export async function startVtPanViewer({
       // gating the push behind a change-guard would freeze a cloud in place
       // between two frames that happened to share a sun/cover reading.)
       {
+        // THE AUTHORING CASCADE (effects/clouds/clouds.js#CLOUD_LOOK_PARAMS) —
+        // read fresh every frame, unconditionally, the SAME "no change-cache,
+        // just re-assign" posture DOF's own per-frame uniform push already
+        // takes (cheap enough — a handful of scalars — that a cache would be
+        // pure ceremony). `getCloudsRenderState` is optional so a caller that
+        // never wires it (a bench, a test harness) still gets the sensible
+        // JS-default `let`s/uniform-construction-values declared above,
+        // unchanged from before this cascade existed.
+        const cloudsState = getCloudsRenderState?.() ?? null;
+        const cp = cloudsState?.params ?? {};
+        const cloudsOn = cloudsState?.enabled ?? true;
+        if (Number.isFinite(cp.maxOffsetPx)) cloudShadowMaxOffsetPx = cp.maxOffsetPx;
+        if (Number.isFinite(cp.minWindSpeed01)) cloudMinWindSpeed01 = cp.minWindSpeed01;
+        if (Number.isFinite(cp.speedMul)) cloudSpeedMul = cp.speedMul;
+        if (Number.isFinite(cp.visualCoverMax)) cloudVisualCoverMax = cp.visualCoverMax;
+        if (Number.isFinite(cp.shadowBlur)) cloudShadowBlurBase = cp.shadowBlur;
+        if (Number.isFinite(cp.shadowBlurCoverGain)) cloudShadowBlurCoverGain = cp.shadowBlurCoverGain;
+        // `enabled:false` forces the shadow's own strength to 0 regardless of
+        // the schema's own `shadowStrength` value — see CLOUD_LOOK's own
+        // header for why this is the one param the toggle overrides rather
+        // than the field/grade/sky terms this manifest does not own.
+        uCloudShadowStrength.value = cloudsOn ? (Number.isFinite(cp.shadowStrength) ? cp.shadowStrength : 1) : 0;
+        if (Number.isFinite(cp.windowOvercastBlur)) uWindowOvercastEdgeWiden.value = cp.windowOvercastBlur;
+        if (Number.isFinite(cp.windowOvercastFlatten)) uWindowOvercastContrastSoften.value = cp.windowOvercastFlatten;
+        if (Number.isFinite(cp.windowOvercastMinStrength))
+          uWindowOvercastMinStrength.value = cp.windowOvercastMinStrength;
+
         const recipe = cloudRecipeFor(env.weather.cloudType01);
         const flow = windFlowVector(uWindDirectionDeg.value + recipe.shearDeg);
         // THE SAME BEAUFORT CONVERSION turbulence/gusts already use, and the
@@ -8519,8 +8626,16 @@ export async function startVtPanViewer({
         // so vegetation/particles still see genuine calm) — a gentle breeze
         // by default, so a cloud drifts one `cloudScalePx`-wide cell roughly
         // every 10-12 s even when nothing else on the map is moving at all.
-        const effectiveWindSpeed01 = Math.max(CLOUD_MIN_WIND_SPEED01, uWindSpeed01.value);
-        const windSpeedPxPerSec = metresPerSecondForSpeed01(effectiveWindSpeed01) * sceneScale.pixelsPerMetre;
+        const effectiveWindSpeed01 = Math.max(cloudMinWindSpeed01, uWindSpeed01.value);
+        // ⚠️ `cloudSpeedMul` — author's live-test round 2: "Clouds move far
+        // too fast at full wind speed, halve all wind speed effects on
+        // cloud movement." Applied HERE, after the floor above, so the
+        // floor and the multiplier stay two independent questions ("is
+        // there a minimum" vs "how fast does the dial itself translate") —
+        // multiplying a Studio-tunable INTO the floor constant would make
+        // one dial silently change the other's meaning.
+        const windSpeedPxPerSec =
+          metresPerSecondForSpeed01(effectiveWindSpeed01) * sceneScale.pixelsPerMetre * cloudSpeedMul;
         const step = cloudDriftStep({
           dtSec: time.dtSec,
           windDirX: flow.x,
@@ -8542,7 +8657,7 @@ export async function startVtPanViewer({
         // paints solid white.
         pushCloudUniforms(cloudUniforms, {
           recipe,
-          cover01: Math.min(env.weather.cloudCover01, CLOUD_COVER_VISUAL_MAX),
+          cover01: Math.min(env.weather.cloudCover01, cloudVisualCoverMax),
           scalePx: env.weather.cloudScalePx,
           drift: { x: cloudDriftX, y: cloudDriftY },
           boil: cloudBoil,
@@ -8557,11 +8672,19 @@ export async function startVtPanViewer({
           azimuthDeg: skyHandle.key.azimuthDeg,
           elevationDeg: skyHandle.key.elevationDeg,
           heightPx: env.weather.cloudAltitudePx,
-          maxOffsetPx: CLOUD_SHADOW_MAX_OFFSET_PX,
+          maxOffsetPx: cloudShadowMaxOffsetPx,
           offsetScale: 1,
           softKnee: true,
         });
         uCloudOffset.value.set(offset.x, offset.y);
+        // THE BLUR (author's live-test round 2: "cloud shadows need to be
+        // blurred on the ground and the blur increases as the overcast/
+        // cloud increases") — recomputed every frame from the RAW cover
+        // (not the capped `pushedCover01`): a raw cover past the visual cap
+        // still means "very overcast" even though the silhouette itself
+        // stops changing there, and blur is a MOOD response to that, not a
+        // property of the silhouette's own shape.
+        uCloudShadowBlur.value = cloudShadowBlurBase + cloudShadowBlurCoverGain * env.weather.cloudCover01;
 
         // THE SHADOW FLOOR (doc 03 §0.3) — derived from the sky's OWN
         // key/fill split, never authored: shallow at dawn, absent at night,
@@ -8598,7 +8721,7 @@ export async function startVtPanViewer({
         // sky tint, the shadow handle) stays reading the real, uncapped axis.
         const cloudSkyHandle = createSkyHandle({
           sun: env.sun,
-          weather: { cloudCover01: Math.min(env.weather.cloudCover01, CLOUD_COVER_VISUAL_MAX) },
+          weather: { cloudCover01: Math.min(env.weather.cloudCover01, cloudVisualCoverMax) },
           realism01: skyRealism01,
         });
         const totalSkyStrength = cloudSkyHandle.key.strength + cloudSkyHandle.fill.strength;
@@ -11181,6 +11304,9 @@ export async function startVtPanViewer({
         uViewRect: envLight.uViewRect,
         cloudFactorNode: buildWindowCloudFactorNode(),
         cloudOvercastNode: uCloudOvercast01,
+        cloudOvercastEdgeWidenNode: uWindowOvercastEdgeWiden,
+        cloudOvercastContrastSoftenNode: uWindowOvercastContrastSoften,
+        cloudOvercastMinStrengthNode: uWindowOvercastMinStrength,
         getWindowRenderState,
         // THE DAYLIGHT TINT's own sun read — a GETTER, matching `getSkyHandle`
         // above: `lastEnvSnapshot` is REASSIGNED every `updateEnvSnapshot()`
@@ -11260,6 +11386,9 @@ export async function startVtPanViewer({
       // own identical wiring, just above, for the full reasoning.
       cloudFactorNode: buildWindowCloudFactorNode(),
       cloudOvercastNode: uCloudOvercast01,
+      cloudOvercastEdgeWidenNode: uWindowOvercastEdgeWiden,
+      cloudOvercastContrastSoftenNode: uWindowOvercastContrastSoften,
+      cloudOvercastMinStrengthNode: uWindowOvercastMinStrength,
       getWindowRenderState,
       getEnvSun: () => lastEnvSnapshot?.env?.sun ?? null,
       getAmbientCeilingRgb: () =>
@@ -22598,7 +22727,7 @@ export async function startVtPanViewer({
           clouds: (() => {
             const w = lastEnvSnapshot.env.weather;
             const cover01 = w.cloudCover01;
-            const pushedCover01 = Math.min(cover01, CLOUD_COVER_VISUAL_MAX);
+            const pushedCover01 = Math.min(cover01, cloudVisualCoverMax);
             const recipe = cloudRecipeFor(w.cloudType01);
             // `.pixelsPerMetre` — see the live push's own comment (`updateEnvSnapshot`)
             // for the bug this bare object was: multiplying a speed by the
@@ -22609,8 +22738,9 @@ export async function startVtPanViewer({
               gridUnits: globalThis.canvas?.scene?.grid?.units,
             });
             const rawWindSpeed01 = uWindSpeed01.value;
-            const effectiveWindSpeed01 = Math.max(CLOUD_MIN_WIND_SPEED01, rawWindSpeed01);
-            const windSpeedPxPerSec = metresPerSecondForSpeed01(effectiveWindSpeed01) * sceneScale.pixelsPerMetre;
+            const effectiveWindSpeed01 = Math.max(cloudMinWindSpeed01, rawWindSpeed01);
+            const windSpeedPxPerSec =
+              metresPerSecondForSpeed01(effectiveWindSpeed01) * sceneScale.pixelsPerMetre * cloudSpeedMul;
 
             const nowMs = perfNowMs();
             const sample = { atMs: nowMs, driftX: cloudDriftX, driftY: cloudDriftY, boil: cloudBoil };
@@ -22658,7 +22788,8 @@ export async function startVtPanViewer({
               },
               pushed: {
                 cover01: pushedCover01,
-                cappedByVisualMax: cover01 > CLOUD_COVER_VISUAL_MAX,
+                visualCoverMax: cloudVisualCoverMax,
+                cappedByVisualMax: cover01 > cloudVisualCoverMax,
                 recipe: { shearDeg: recipe.shearDeg, edgeWidth: recipe.edgeWidth, thicknessCap: recipe.thicknessCap },
               },
               // What the SHADER ACTUALLY READS this frame — bound uniform
@@ -22675,7 +22806,8 @@ export async function startVtPanViewer({
               wind: {
                 rawWindSpeed01,
                 effectiveWindSpeed01,
-                floorApplied: CLOUD_MIN_WIND_SPEED01,
+                floorApplied: cloudMinWindSpeed01,
+                speedMul: cloudSpeedMul,
                 windDirectionDeg: uWindDirectionDeg.value,
                 sceneScale,
                 windSpeedPxPerSec,
@@ -22700,6 +22832,18 @@ export async function startVtPanViewer({
                 offsetLengthPx: Math.round(Math.hypot(uCloudOffset.value.x, uCloudOffset.value.y)),
                 streakSpread: CLOUD_SHADOW_STREAK_SPREAD,
               },
+              // AUTHORING CONTROLS (live-test round 2) — the live values every
+              // Studio-card slider actually writes into, so "did my drag reach
+              // the GPU" is answerable the same way `boundUniforms` above
+              // already answers it for the field itself.
+              controls: {
+                strength: uCloudShadowStrength.value,
+                blur: {
+                  bound: uCloudShadowBlur.value,
+                  base: cloudShadowBlurBase,
+                  coverGain: cloudShadowBlurCoverGain,
+                },
+              },
               overcastWindowMood: {
                 cloudOvercast01: uCloudOvercast01.value,
               },
@@ -22707,13 +22851,15 @@ export async function startVtPanViewer({
                 'READ TOP TO BOTTOM. `gate.groundShadowGateCompiled:false` means the GROUND term is not in ' +
                 'the shader at all for this floor (no outdoors mask baked for it) — the window term has no ' +
                 'such gate and is unaffected by this. `pushed.cappedByVisualMax:true` is EXPECTED once raw cover ' +
-                'exceeds 0.45 — the silhouette holding at ~45% cover is correct, by design, not a bug. ' +
-                '`boundUniforms` should match `pushed`/`rawAxes` up to that cap; a mismatch means a push is ' +
-                'not reaching the GPU. `motion.sinceLastCall` needs TWO runs of this report a few seconds ' +
+                'exceeds `pushed.visualCoverMax` — the silhouette holding there is correct, by design, not a ' +
+                'bug. `boundUniforms` should match `pushed`/`rawAxes` up to that cap; a mismatch means a push ' +
+                'is not reaching the GPU. `motion.sinceLastCall` needs TWO runs of this report a few seconds ' +
                 'apart to mean anything. `shadowDepth.maxShadowDepthPct` is the single most likely culprit ' +
                 'if everything above looks healthy and the map still shows no shadow: a real cloud with this ' +
                 'under ~10% in daylight means almost no direct key light is left for a cloud to block right ' +
-                'now — paste this whole report back rather than re-guessing from a screenshot.',
+                'now. `controls.strength` at 0 means the shadow is deliberately turned off, not broken — check ' +
+                'it before anything else if a scene that used to show shadows suddenly does not. Paste this ' +
+                'whole report back rather than re-guessing from a screenshot.',
             };
           })(),
           notYetBuilt: ['res:view', 'res:scene'],

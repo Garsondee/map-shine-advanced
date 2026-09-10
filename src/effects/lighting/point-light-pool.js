@@ -404,6 +404,19 @@ function createLightEntry({
     // never a second copy of any of the three.
     sunShadowSlotNodes: envLight.sunShadowSlotNodes,
     attrTexNode: envLight.attrTexNode,
+    // THE CLOUD SHADOW, PER-FRAGMENT (2026-09-10) — same "share envLight's
+    // own copy, never a second one" posture as the sun-shadow slots just
+    // above. See point-light-illumination.js's own `cloudUniforms` doc for
+    // the bug this fixes (a light's dim edge clipping the shadow because its
+    // CPU-computed background never knew about clouds).
+    cloudUniforms: envLight.cloudUniforms,
+    buildCloudField: envLight.buildCloudField,
+    buildCloudGroundVis: envLight.buildCloudGroundVis,
+    cloudOffsetNode: envLight.cloudOffsetNode,
+    cloudFillShareNode: envLight.cloudFillShareNode,
+    cloudStreakSpread: envLight.cloudStreakSpread,
+    cloudStrengthNode: envLight.cloudStrengthNode,
+    cloudBlurNode: envLight.cloudBlurNode,
     // THE HEIGHT/ELEVATION GATE — STAGE 2 (2026-08-04). See point-light-
     // illumination.js's own "STAGE 2" header. `attrTexNode` just above stays
     // wired for the SEPARATE sun-shadow floor blend it also feeds; it no

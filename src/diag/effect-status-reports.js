@@ -362,7 +362,12 @@ export function buildCloudsReport({ viewer, generatedAt }) {
     // feature has ever actually been rendered on the WebGPU backend and
     // checked. If this reads `'webgpu'` and everything else below looks
     // healthy, that backend is the next thing to isolate — not a new theory.
-    rendererBackend: viewer?.backend ?? 'unavailable',
+    // ⚠️ NESTED under `shaders`, not top-level — real bug in THIS report,
+    // found from the author's own first paste (`rendererBackend:
+    // 'unavailable'` when the viewer was plainly running): copied the wrong
+    // path. `vt-pan-viewer-diagnostics.js` puts it at `shaders.backend`
+    // (next to `parallelShaderCompile`/`programCount`), never at the top level.
+    rendererBackend: viewer?.shaders?.backend ?? 'unavailable',
     clouds: viewer?.envSnapshot?.clouds ?? 'viewer not started, or envSnapshot unavailable',
     // Cross-referenced because both are read by the SAME shared `skyHandle`
     // the clouds block's own `shadowDepth` derives from, and both were

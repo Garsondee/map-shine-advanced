@@ -8487,12 +8487,28 @@ export async function startVtPanViewer({
         // THE SAME BEAUFORT CONVERSION turbulence/gusts already use, and the
         // SAME real scene scale the wind probe already derives (2026-09-04,
         // mythica-machina-press#498) — see this file's own import comment.
-        const pxPerMetre = derivePixelsPerMetre({
+        // ⚠️ AN OBJECT, NOT A NUMBER — REAL BUG, found 2026-09-10 via the
+        // diagnostic report below (`clouds.wind.windSpeedPxPerSec` came back
+        // `null`, i.e. JSON's own encoding of `NaN`). `derivePixelsPerMetre`
+        // returns `{pixelsPerMetre, ok, reason, ...}` (`core/scene-scale.js`,
+        // `diag/wind-probe.js`'s own `sceneScale.pixelsPerMetre` is the
+        // established read) — multiplying a speed by the WHOLE object below
+        // produced `NaN` every frame, silently, since the very first commit
+        // that wired clouds into the engine. `cloudDriftStep`'s own
+        // `Number.isFinite(windSpeedPxPerSec) ? windSpeedPxPerSec : 0` guard
+        // then quietly zeroed it back out — which is why drift read a clean,
+        // unsuspicious `0` instead of `NaN`, and why the `CLOUD_MIN_WIND_
+        // SPEED01` floor below this comment (added for the SAME "they don't
+        // move" report, one round earlier) never actually helped: raising
+        // `effectiveWindSpeed01` from 0 to 0.12 changes nothing once it is
+        // immediately multiplied into a broken object reference regardless
+        // of its own value.
+        const sceneScale = derivePixelsPerMetre({
           gridSizePixels: globalThis.canvas?.scene?.grid?.size,
           gridDistance: globalThis.canvas?.scene?.grid?.distance,
           gridUnits: globalThis.canvas?.scene?.grid?.units,
         });
-        // ⚠️ FLOORED, NOT THE BARE DIAL — author's live report (2026-09-10):
+        // FLOORED, NOT THE BARE DIAL — author's live report (2026-09-10):
         // "there is no clear evidence of cloud shadows, they don't move."
         // `windSpeed01` defaults to 0 (a real dead calm at GROUND level,
         // correct for grass/particles), but most scenes never touch that
@@ -8504,7 +8520,7 @@ export async function startVtPanViewer({
         // by default, so a cloud drifts one `cloudScalePx`-wide cell roughly
         // every 10-12 s even when nothing else on the map is moving at all.
         const effectiveWindSpeed01 = Math.max(CLOUD_MIN_WIND_SPEED01, uWindSpeed01.value);
-        const windSpeedPxPerSec = metresPerSecondForSpeed01(effectiveWindSpeed01) * pxPerMetre;
+        const windSpeedPxPerSec = metresPerSecondForSpeed01(effectiveWindSpeed01) * sceneScale.pixelsPerMetre;
         const step = cloudDriftStep({
           dtSec: time.dtSec,
           windDirX: flow.x,
@@ -22584,14 +22600,17 @@ export async function startVtPanViewer({
             const cover01 = w.cloudCover01;
             const pushedCover01 = Math.min(cover01, CLOUD_COVER_VISUAL_MAX);
             const recipe = cloudRecipeFor(w.cloudType01);
-            const pxPerMetre = derivePixelsPerMetre({
+            // `.pixelsPerMetre` — see the live push's own comment (`updateEnvSnapshot`)
+            // for the bug this bare object was: multiplying a speed by the
+            // WHOLE `derivePixelsPerMetre` return produces `NaN`, silently.
+            const sceneScale = derivePixelsPerMetre({
               gridSizePixels: globalThis.canvas?.scene?.grid?.size,
               gridDistance: globalThis.canvas?.scene?.grid?.distance,
               gridUnits: globalThis.canvas?.scene?.grid?.units,
             });
             const rawWindSpeed01 = uWindSpeed01.value;
             const effectiveWindSpeed01 = Math.max(CLOUD_MIN_WIND_SPEED01, rawWindSpeed01);
-            const windSpeedPxPerSec = metresPerSecondForSpeed01(effectiveWindSpeed01) * pxPerMetre;
+            const windSpeedPxPerSec = metresPerSecondForSpeed01(effectiveWindSpeed01) * sceneScale.pixelsPerMetre;
 
             const nowMs = perfNowMs();
             const sample = { atMs: nowMs, driftX: cloudDriftX, driftY: cloudDriftY, boil: cloudBoil };
@@ -22658,7 +22677,7 @@ export async function startVtPanViewer({
                 effectiveWindSpeed01,
                 floorApplied: CLOUD_MIN_WIND_SPEED01,
                 windDirectionDeg: uWindDirectionDeg.value,
-                pxPerMetre,
+                sceneScale,
                 windSpeedPxPerSec,
                 gridAvailable: Number.isFinite(globalThis.canvas?.scene?.grid?.size),
               },

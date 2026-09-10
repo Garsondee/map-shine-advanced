@@ -213,14 +213,42 @@ export const DEFAULT_ENV_GRADE_CONFIG = Object.freeze({
   nightSaturation: 0.8,
   /** How hard full overcast drains saturation (the cloud fix). */
   cloudDesaturation: 0.55,
-  /** How much full overcast flattens contrast. */
+  /** How much full overcast flattens contrast — DAYTIME ONLY (weighted by
+   * `dayFactor01` below); see that weighting's own comment at its call site
+   * for why. */
   cloudFlatten: 0.28,
   /** Slight cool the grade adds under cloud (temperature units, negative). */
   cloudCool: 0.25,
   /** Slight cool at deep night. */
   nightCool: 0.15,
-  /** A gentle exposure trim under heavy overcast (stops, negative = dimmer). */
+  /** A gentle exposure trim under heavy overcast (stops, negative = dimmer).
+   * Applied at every hour, day or night — `cloudNightDarken` below is the
+   * ADDITIONAL night-specific term. */
   cloudExposure: -0.1,
+  /** ⚠️ REAL BUG, author's report (2026-09-10): "night + full cloud makes it
+   * look grey and it ends up looking actually brighter and 'foggy' instead
+   * of darker." Root cause was `cloudFlatten` above, applied with no regard
+   * for time of day: contrast rotates around `CONTRAST_PIVOT` (0.18 linear,
+   * ≈0.46 sRGB — a moderately BRIGHT value), and REDUCING contrast pulls
+   * whatever the scene actually is TOWARD that pivot — correct for an
+   * overcast DAY (the sun scattered into one big diffuse source, genuinely
+   * flatter but still brightly lit overall), wrong for an overcast NIGHT
+   * (there is barely any light to begin with, so pulling near-black toward
+   * 0.18 linear LIFTS it substantially — measured, not guessed: a linear
+   * 0.01 night pixel at the daytime `contrast=0.72` (cloud=1) lands around
+   * 0.058, nearly 6× brighter, which is exactly "brighter and foggy" instead
+   * of the requested "even darker"). Two independent fixes, not one bigger
+   * knob: `cloudFlatten` above is now WEIGHTED BY `dayFactor01` at its call
+   * site (fades to a no-op at night, so contrast can never lift a night
+   * scene's blacks), and THIS is the author's other explicit ask — "night +
+   * cloud should mean even darker" — a genuinely darkening EXPOSURE term
+   * (never a contrast pivot, so it can only ever multiply toward black, not
+   * lift toward grey), active ONLY at night (weighted by `1 - dayFactor01`
+   * at its call site) and stacking with `cloudExposure` above. `1.1` stops
+   * is a deliberately strong default (2^-1.1 ≈ 0.47× brightness at full
+   * night + full cloud, on top of the small -0.1 baseline) — "even darker"
+   * was the author's own emphasis, not a subtle nudge. */
+  cloudNightDarken: 1.1,
 });
 
 /**
@@ -241,12 +269,24 @@ export function resolveEnvGrade(env, config = DEFAULT_ENV_GRADE_CONFIG) {
   // ToD owns saturation depth (vivid day → muted night); the sky light owns hue.
   const todSat = lerp(cfg.nightSaturation, cfg.daySaturation, day);
   // Weather owns the big desaturation + the flatten (the "flatter, cooler,
-  // dimmer" Environment.md §2.3 always specified for overcast).
+  // dimmer" Environment.md §2.3 always specified for overcast). Desaturation
+  // is luminance-PRESERVING (this file's own header) so it never needs the
+  // day-weighting contrast does below — draining colour from an already-dark
+  // night pixel leaves it exactly as dark, just monochrome, which is correct.
   const weatherSat = 1 - cfg.cloudDesaturation * cloud;
+  // ⚠️ DAY-WEIGHTED — see `cloudFlatten`'s own doc for the bug this fixes.
+  // Fades to a hard no-op at night (contrast stays 1, never lifting a dark
+  // scene's blacks toward CONTRAST_PIVOT), unchanged at day (identical to
+  // the value this always computed before this fix).
+  const cloudFlattenNow = cfg.cloudFlatten * cloud * day;
+  // ⚠️ NIGHT-ONLY — see `cloudNightDarken`'s own doc. Fades to a hard no-op
+  // at day (this term never touches the already-approved daytime overcast
+  // look), strongest at a fully clouded, fully dark night.
+  const cloudNightDarkenNow = cfg.cloudNightDarken * cloud * (1 - day);
 
   return {
-    exposure: cfg.cloudExposure * cloud,
-    contrast: 1 - cfg.cloudFlatten * cloud,
+    exposure: cfg.cloudExposure * cloud - cloudNightDarkenNow,
+    contrast: 1 - cloudFlattenNow,
     saturation: todSat * weatherSat,
     temperature: -(cfg.cloudCool * cloud + cfg.nightCool * (1 - day)),
     tint: 0,

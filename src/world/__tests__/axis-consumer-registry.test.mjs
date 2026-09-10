@@ -25,54 +25,56 @@ export function run(t) {
     );
   }
 
-  // ---- hasRealConsumer ------------------------------------------------------
+  // ---- hasRealConsumer, against the REAL table -----------------------------
   {
     ok('cloudCover01 (declared live) has a real consumer', hasRealConsumer('cloudCover01') === true);
-    ok('cloudType01 (declared pending) has none', hasRealConsumer('cloudType01') === false);
+    ok('cloudType01 (declared live, wired 2026-09-10) has a real consumer', hasRealConsumer('cloudType01') === true);
     ok('an unknown axis name reports no consumer, never a crash', hasRealConsumer('nonsenseAxis') === false);
   }
 
-  // ---- the audit catches BOTH directions of drift, on synthetic data ------
+  // ---- the audit's OWN logic, on a small injected fixture — NOT the real
+  // table, which this file's own header says is expected to keep filling in
+  // (every axis it once used as "the genuinely still-empty example" has,
+  // correctly, stopped being empty over time; hardcoding a real axis name
+  // here would make this block a flake waiting for the next wiring pass) ---
   {
-    const problems1 = auditAxisConsumers({ cloudType01: { consumerStatus: 'live' } });
+    const fixture = Object.freeze({
+      wiredAxis: Object.freeze([Object.freeze({ module: 'some/real-file.js', describe: 'a real consumer' })]),
+      emptyAxis: Object.freeze([]),
+    });
+
+    const problems1 = auditAxisConsumers({ emptyAxis: { consumerStatus: 'live' } }, fixture);
     ok(
       "flags 'live' with zero registered consumers",
-      problems1.some((p) => /cloudType01.*live.*no real consumer/.test(p))
+      problems1.some((p) => /emptyAxis.*live.*no real consumer/.test(p))
     );
 
-    const problems2 = auditAxisConsumers({ cloudCover01: { consumerStatus: 'pending' } });
+    const problems2 = auditAxisConsumers({ wiredAxis: { consumerStatus: 'pending' } }, fixture);
     ok(
       "flags 'pending' when real consumers already exist (the axis went live silently)",
-      problems2.some((p) => /cloudCover01.*pending.*real consumer/.test(p))
+      problems2.some((p) => /wiredAxis.*pending.*real consumer/.test(p))
     );
 
-    const problems3 = auditAxisConsumers({ someNewAxis: { consumerStatus: 'pending' } });
+    const problems3 = auditAxisConsumers({ someNewAxis: { consumerStatus: 'pending' } }, fixture);
     ok(
       'flags an axis with no AXIS_CONSUMERS entry at all',
       problems3.some((p) => /someNewAxis.*no entry in AXIS_CONSUMERS/.test(p))
     );
 
-    const clean = auditAxisConsumers({
-      cloudCover01: { consumerStatus: 'live' },
-      cloudType01: { consumerStatus: 'pending' },
-    });
-    // NOTE: this subset intentionally omits precip01/temperature01/etc., so
-    // the REVERSE check (AXIS_CONSUMERS has an entry the caller's axes object
-    // doesn't) fires for every omitted key — that's the audit function
-    // working correctly against a partial input, not a bug in this test.
-    // Filtered out here to isolate the two directions this block actually
-    // means to test.
-    const relevant = clean.filter((p) => p.includes('cloudCover01') || p.includes('cloudType01'));
-    ok('a genuinely consistent pair of entries raises nothing for those two axes', relevant.length === 0);
+    const clean = auditAxisConsumers(
+      { wiredAxis: { consumerStatus: 'live' }, emptyAxis: { consumerStatus: 'pending' } },
+      fixture
+    );
+    ok('a genuinely consistent pair of entries raises nothing', clean.length === 0);
 
     // `undefined` degrades to "no axes declared at all", which correctly
-    // flags every REAL AXIS_CONSUMERS entry as stale against that empty
-    // input (there's nothing left to agree with) — the point of this
-    // assertion is only that it returns an array and never throws.
+    // flags every fixture entry as stale against that empty input (there's
+    // nothing left to agree with) — the point of this assertion is only
+    // that it returns an array and never throws.
     let threw = false;
     let result = null;
     try {
-      result = auditAxisConsumers(undefined);
+      result = auditAxisConsumers(undefined, fixture);
     } catch (_e) {
       threw = true;
     }

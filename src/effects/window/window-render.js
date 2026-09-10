@@ -78,6 +78,33 @@ export const WINDOW_MASK_IMAGE_SCALE = 0.5;
 // live-tuned defaults; a change lands in both or neither.
 export const WINDOW_DEFAULT_STRENGTH = 3;
 export const WINDOW_DEFAULT_CONTRAST = 1;
+
+/**
+ * THE OVERCAST MOOD — author, 2026-09-10: *"overcast days should blur the
+ * window light and drop its overall brightness by up to 50%... clear
+ * bright noon is sharp bright light with dark shadows, an overcast day
+ * leaves very blurred interior light which is much more dim and gloomy."*
+ *
+ * No real blur (a multi-tap kernel over the mask texture) — this codebase's
+ * own established posture (Clouds.md: "softness is octave count", V2's
+ * abandoned 9-tap cloud blur) is that a parametric softening reads the same
+ * to the eye for far less cost. Two levers, both already load-bearing dials
+ * on the SAME cookie decode `sampleCookieAt` builds:
+ *   - `WINDOW_PRESENCE_EDGE1` (window-cookie.js) is the mask-VALUE band the
+ *     cookie's own silhouette fades over — widening it (this fraction, at
+ *     full overcast) softens the light patch's own EDGE, the same way a
+ *     blurred light's boundary is soft rather than a hard cutout.
+ *   - `contrast` (this file's own dial) is the mids-shaping power on that
+ *     same decode — pulling it toward 1 (neutral) flattens the cookie's
+ *     INTERNAL gradient, reading as a hazier, less-defined light shape
+ *     rather than a crisp one. `WINDOW_OVERCAST_CONTRAST_SOFTEN` is how far
+ *     toward neutral full overcast pulls it (1 = fully flat, 0 = untouched).
+ */
+export const WINDOW_OVERCAST_EDGE_WIDEN = 0.22;
+export const WINDOW_OVERCAST_CONTRAST_SOFTEN = 0.6;
+/** The floor `strength` is allowed to dim to at full overcast — 0.5 is
+ * exactly the author's own "up to 50%". */
+export const WINDOW_OVERCAST_MIN_STRENGTH = 0.5;
 /** Hex source for the two daylight keyframes — mirrors `WINDOW_PARAMS.dawnDuskTint`/
  * `.nightTint`'s own `default`. Decoded once here rather than per frame; noon has
  * no colour of its own — it is the neutral (1,1,1) this effect falls back to. */
@@ -206,6 +233,12 @@ export function windowTierPlan(tier) {
  * @param {*} [args.cloudFactorNode] - see this module's header. A TSL node
  *   evaluating 0..1 (1 = no cloud shadow), or `null`/omitted for the constant
  *   1 this effect ships with until `world/cloud-field.js` exists.
+ * @param {*} [args.cloudOvercastNode] - see this module's header, the
+ *   "CLOUD FACTOR IS A SEAM" section. A TSL node evaluating 0..1 (the
+ *   scalar `env.weather.cloudCover01`, uncapped), or `null`/omitted for the
+ *   identity this effect ships with — a fully overcast sky blurs and dims
+ *   this window's own light, independent of whether a cloud happens to sit
+ *   directly overhead it right now.
  * @param {boolean} [args.glass] - build the refraction/dispersion/caustic
  *   subgraph at all. A JS-TIME branch: `false` constructs none of it, so the
  *   compiled shader shrinks by five noise taps and two mask taps rather than
@@ -251,6 +284,22 @@ export function buildWindowSurfaceMaterial({
   maskUvNode = null,
   uViewRect,
   cloudFactorNode = null,
+  // ⚠️ A SEPARATE MECHANISM FROM `cloudFactorNode` — READ THIS BEFORE
+  // TOUCHING EITHER. `cloudFactorNode` answers "is a cloud directly
+  // overhead THIS window right now" (per-pixel, moves as the deck drifts).
+  // `cloudOvercastNode` answers "how overcast does the WHOLE SKY feel right
+  // now" (the scalar `env.weather.cloudCover01`, UNCAPPED — see
+  // `CLOUD_COVER_VISUAL_MAX`'s own header for why the atmospheric feel and
+  // the field's rendered silhouette are deliberately different numbers).
+  // Author, 2026-09-10: *"overcast days should blur the window light and
+  // drop its overall brightness by up to 50%... clear bright noon is sharp
+  // bright light with dark shadows, an overcast day leaves very blurred
+  // interior light which is much more dim and gloomy."* That is a global
+  // mood shift, not a moving shadow, so it rides a SEPARATE scalar rather
+  // than overloading the per-pixel one. `null`/omitted ⇒ both new terms
+  // below compile to their own identity and this material is byte-identical
+  // to before this existed.
+  cloudOvercastNode = null,
   strength = WINDOW_DEFAULT_STRENGTH,
   contrast = WINDOW_DEFAULT_CONTRAST,
   glass = true,
@@ -281,6 +330,18 @@ export function buildWindowSurfaceMaterial({
 
   const uStrength = uniform(float(strength));
   const uContrast = uniform(float(contrast));
+
+  // ── THE OVERCAST MOOD — see `WINDOW_OVERCAST_EDGE_WIDEN`'s own header.
+  // `overcast01` is a JS-time branch (`cloudOvercastNode ?? null`), never a
+  // uniform gated by a constant 0 — a caller that omits it gets a compiled
+  // graph with NEITHER term in it, byte-identical to before this existed.
+  const overcast01 = cloudOvercastNode;
+  const contrastEff = overcast01
+    ? mix(uContrast, float(1), overcast01.mul(float(WINDOW_OVERCAST_CONTRAST_SOFTEN)))
+    : uContrast;
+  const presenceEdge1Eff = overcast01
+    ? float(WINDOW_PRESENCE_EDGE1).add(overcast01.mul(float(WINDOW_OVERCAST_EDGE_WIDEN)))
+    : float(WINDOW_PRESENCE_EDGE1);
 
   // ── THE GLASS (effects/window/window-glass.js holds the model) ────────────
   const uGlassWarpPx = uniform(float(WINDOW_DEFAULT_GLASS_WARP_PX));
@@ -456,11 +517,12 @@ export function buildWindowSurfaceMaterial({
     // is the common authoring case and would otherwise decode to pure black.
     const effectiveAlpha = alpha.lessThan(float(WINDOW_ALPHA_EPSILON)).select(float(1), alpha);
     const gated = value.mul(effectiveAlpha).toVar(`${label}Gated`);
-    const presence = smoothstep(float(WINDOW_PRESENCE_EDGE0), float(WINDOW_PRESENCE_EDGE1), gated).toVar(
-      `${label}Presence`
-    );
+    // `presenceEdge1Eff`, not the raw `WINDOW_PRESENCE_EDGE1` — see "THE
+    // OVERCAST MOOD" above: overcast widens this band, which is what softens
+    // the cookie's own silhouette edge (the "blur" half of the author's ask).
+    const presence = smoothstep(float(WINDOW_PRESENCE_EDGE0), presenceEdge1Eff, gated).toVar(`${label}Presence`);
     const level = clamp(gated, 0, 1)
-      .pow(max(uContrast, float(0.001)))
+      .pow(max(contrastEff, float(0.001)))
       .toVar(`${label}Level`);
     // Re-normalised so the tint carries `level` as its own peak — a naive
     // `rgb × level` would darken saturated paint twice, once for being dark
@@ -771,10 +833,24 @@ export function buildWindowSurfaceMaterial({
 
   // ── THE CLOUD SEAM — see this module's header ────────────────────────────
   const cloudFactor = (cloudFactorNode ?? float(1)).toVar('winCloudFactor');
+  // THE OVERCAST DIM — the other half of the author's ask, "drop its overall
+  // brightness by up to 50%". `overcast01` at 0 is exactly `float(1)` here
+  // too, so a caller that never passes `cloudOvercastNode` still compiles
+  // this to a no-op multiply rather than skipping it — cheap enough (one
+  // more `mix`) that the JS-time branch above already governs whether the
+  // TERM exists at all, and this is just its value at that term's identity.
+  const cloudOvercastDim = overcast01
+    ? mix(float(1), float(WINDOW_OVERCAST_MIN_STRENGTH), overcast01).toVar('winCloudOvercastDim')
+    : float(1);
 
   // ── THE COMPOSITE — this ADDS onto buf:scene.illum. Nothing here touches
   // composed scene colour (see this module's header). ─────────────────────
-  const rawLight = cookieTinted.mul(uStrength).mul(coverage).mul(cloudFactor).toVar('winRawLight');
+  const rawLight = cookieTinted
+    .mul(uStrength)
+    .mul(coverage)
+    .mul(cloudFactor)
+    .mul(cloudOvercastDim)
+    .toVar('winRawLight');
 
   // ── THE HIGHLIGHT SHOULDER — the transcription of
   // `window-cookie.js#shoulderedContribution`. Shapes on the PEAK channel and

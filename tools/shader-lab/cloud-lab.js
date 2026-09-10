@@ -54,6 +54,8 @@ import {
   createCloudUniforms,
   pushCloudUniforms,
   buildCloudFieldNode,
+  buildCloudGroundVisNode,
+  CLOUD_SHADOW_STREAK_SPREAD,
 } from '../../src/world/cloud-field.js';
 import { windFlowVector } from '../../src/world/wind-bake.js';
 import { buildCloudTopsNode } from '../../src/effects/clouds/cloud-shade.js';
@@ -79,13 +81,14 @@ export const CLOUD_VIEWS = Object.freeze([
   'dbg-diffuse', // the wrap-lit diffuse term alone — does IT trace seams too?
   'dbg-normalz', // the normal's Z component — how flat/tilted the surface reads
   'dbg-macro-cov', // the cells:false coverage the height/normal taps actually see
+  'dbg-groundvis', // buildCloudGroundVisNode — the offset+streak ground shadow sample
 ]);
 
 /**
  * Build the visualisation graph for one view over the real field.
  * @param {object} THREE @param {object} u @param {string} view @param {number} octaves
  */
-function buildViewMaterial(THREE, u, view, octaves, sunU) {
+function buildViewMaterial(THREE, u, view, octaves, sunU, groundU) {
   const TSL = THREE.TSL;
   const { uv, vec3, vec4, float, uniform, mix, clamp } = TSL;
 
@@ -179,6 +182,24 @@ function buildViewMaterial(THREE, u, view, octaves, sunU) {
     rgb = vec3(cov, cov, cov);
   } else if (view === 'thickness') {
     rgb = vec3(thickness, thickness, thickness);
+  } else if (view === 'dbg-groundvis') {
+    // `buildCloudGroundVisNode` — the SHARED node the ambient pass and
+    // window light both read in production (`vt-pan-viewer.js`'s own
+    // `buildWindowCloudFactorNode`). Real offset, real streak, so a sun
+    // sweep here is a direct proof of the streak mechanism, not a
+    // stand-in — the same "real production shader code" posture every
+    // other view on this bench already takes.
+    const vis = buildCloudGroundVisNode(TSL, {
+      worldXY,
+      uniforms: u,
+      buildField: buildCloudFieldNode,
+      octaves: 2,
+      offset: groundU.offset,
+      streakSpread: CLOUD_SHADOW_STREAK_SPREAD,
+      streakTaps: 3,
+      fillShare: groundU.fillShare,
+    });
+    rgb = vec3(vis, vis, vis);
   } else if (view === 'dbg-macro-cov') {
     // The SAME `worldXY`, SAME `u.threshold`, but `cells: false` — exactly
     // what `cloud-shade.js#heightAt` samples for the gradient/self-shadow
@@ -213,7 +234,24 @@ export class CloudDriver {
   constructor({ THREE, canvas = null, octaves = 5 }) {
     this.THREE = THREE;
     this.octaves = octaves;
-    this.renderer = new THREE.WebGPURenderer({ canvas: canvas ?? undefined, antialias: false, alpha: false });
+    // ⚠️ `forceWebGL: true` — this bench's `readTile` reads back with a
+    // SYNCHRONOUS `gl.readPixels` (see that method's own header on why: the
+    // async path never resolves in this environment because `requestAnimationFrame`
+    // never fires here). That path only exists on the WebGL2 backend.
+    // Previously moot (this environment reported no WebGPU adapter at all,
+    // so `WebGPURenderer` always fell back to WebGL2 on its own); once an
+    // adapter became available the SAME renderer silently switched to a real
+    // WebGPU backend instead, which has no `.gl` — `readTile` threw
+    // `Cannot read properties of undefined (reading 'readPixels')` on every
+    // call. Forcing WebGL2 here keeps this bench's whole measurement
+    // methodology valid regardless of what the host environment offers;
+    // production rendering is untouched (this option is bench-only).
+    this.renderer = new THREE.WebGPURenderer({
+      canvas: canvas ?? undefined,
+      antialias: false,
+      alpha: false,
+      forceWebGL: true,
+    });
     this.camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
     this.scene = new THREE.Scene();
     this.u = createCloudUniforms(THREE.TSL);
@@ -226,6 +264,14 @@ export class CloudDriver {
       tanElev: T.uniform(T.float(0.577)),
       keyRgb: T.uniform(T.vec3(1.0, 0.93, 0.84)),
       fillRgb: T.uniform(T.vec3(0.46, 0.63, 1.0)),
+    };
+    // THE GROUND SHADOW SAMPLE's own inputs (`buildCloudGroundVisNode`) —
+    // stands in for `vt-pan-viewer.js`'s own `uCloudOffset`/`uCloudFillShare`,
+    // settable live via `apply({ groundOffset: {x,y}, groundFillShare })` so
+    // the sun-angle streak can be swept without touching production code.
+    this.groundU = {
+      offset: T.uniform(T.vec2(0, 0)),
+      fillShare: T.uniform(T.float(0.3)),
     };
     this.materials = new Map();
     this.quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), null);
@@ -246,6 +292,9 @@ export class CloudDriver {
       sunElevationDeg: 35,
       keyRgb: [1.0, 0.93, 0.84],
       fillRgb: [0.46, 0.63, 1.0],
+      // `buildCloudGroundVisNode`'s own inputs — see `dbg-groundvis`.
+      groundOffset: { x: 0, y: 0 },
+      groundFillShare: 0.3,
     };
   }
 
@@ -259,7 +308,7 @@ export class CloudDriver {
 
   materialFor(view) {
     if (!this.materials.has(view)) {
-      this.materials.set(view, buildViewMaterial(this.THREE, this.u, view, this.octaves, this.sunU));
+      this.materials.set(view, buildViewMaterial(this.THREE, this.u, view, this.octaves, this.sunU, this.groundU));
       // ⚠️ WARM-UP FLAG. A material's FIRST render is the one that compiles it,
       // and on the WebGL backend the very first `gl.readPixels` after that
       // compile came back all zeros — a fully black frame with no GL error
@@ -301,6 +350,8 @@ export class CloudDriver {
     this.sunU.tanElev.value = Math.max(0.02, Math.tan(e));
     this.sunU.keyRgb.value.set(...s.keyRgb);
     this.sunU.fillRgb.value.set(...s.fillRgb);
+    this.groundU.offset.value.set(s.groundOffset.x, s.groundOffset.y);
+    this.groundU.fillShare.value = s.groundFillShare;
     // THE CALIBRATION HOOK — overwrite the threshold the production pusher
     // just derived, so {@link calibrateThresholds} can search for the value
     // that makes coverage true while leaving `u.cover` (which the cell-polarity

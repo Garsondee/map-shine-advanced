@@ -56,12 +56,12 @@ export const DEFAULT_WEATHER = Object.freeze({
   cloudCover01: 0,
   wetness01: 0,
   // ── THE CLOUD AXES (weather manager slice 1) ──────────────────────────────
-  // Carried on the call sheet; `world/cloud-field.js` does not exist yet, so
-  // nothing reads these three today. That is deliberate and it is REPORTED
-  // rather than hidden: `WEATHER_AXES[name].consumerStatus` says `'pending'`
-  // for each, and the env diagnostics print it. Precedent is directly above —
-  // `precip01`/`wetness01` have ridden this object with no consumer since it
-  // was written; the difference now is that the absence is machine-readable.
+  // Carried on the call sheet; LIVE as of 2026-09-10 — `vt-pan-viewer.js`
+  // reads all three every frame to resolve `world/cloud-field.js`'s recipe
+  // and push its uniforms, and `cloudAltitudePx` also drives the ground
+  // shadow's own sun-relative offset (`effects/lighting/light-visibility.js
+  // #projectShadowOffset`). See `WEATHER_AXES[name].consumerStatus` /
+  // `world/axis-consumer-registry.js` for the verified, checked record.
   cloudType01: 0.5,
   cloudAltitudePx: 1400,
   cloudScalePx: 1100,

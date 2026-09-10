@@ -367,6 +367,26 @@ export function buildEnvironmentalLightMaterials({
   depthTexture,
   depthFlagsTexture,
   fluidShadowTintTexture,
+  // THE CLOUD SHADOW (docs/planning/Clouds.md, mythica-machina-press#40) —
+  // consumer #1, the money slice: ".mul(cloudVis)" on the ambient a passing
+  // cloud is meant to darken. All four omitted together (the default) skip
+  // the whole term — a JS-time branch, never a uniform multiplied by 1
+  // (`tsl/no-uniform-gates`) — so a caller that has not built the cloud
+  // field yet gets byte-identical output to before this existed.
+  // `buildCloudField`/`buildCloudGroundVis` are `world/cloud-field.js`'s
+  // `buildCloudFieldNode`/`buildCloudGroundVisNode`, INJECTED rather than
+  // imported (Law 8: this module stays inside `zones/one-door`, the same
+  // reason `effects/clouds/cloud-shade.js` takes `buildField` as a param).
+  cloudUniforms = null,
+  buildCloudField = null,
+  buildCloudGroundVis = null,
+  cloudOffsetNode = null,
+  cloudFillShareNode = null,
+  // `world/cloud-field.js#CLOUD_SHADOW_STREAK_SPREAD` — a plain number, not
+  // injected as a function, because it is DATA the caller already imports
+  // (Law 8 only forbids importing world/'s CODE from here); 0 is the safe
+  // no-op every other opt-in dial in this codebase defaults to.
+  cloudStreakSpread = 0,
 }) {
   const { uniform, texture, uv, vec2, vec3, vec4, float, mix, smoothstep, step, sRGBTransferEOTF, sRGBTransferOETF } =
     THREE.TSL;
@@ -611,6 +631,40 @@ export function buildEnvironmentalLightMaterials({
               shadowTexNode: sunShadowSlots[0].texNode,
             });
 
+    // THE WORLD POSITION UNDER THIS PIXEL — shared by fluid's own shadow
+    // tint below and by the cloud shadow (doc 03 §2's consumer #1), rather
+    // than each re-deriving `quadUvToWorld` (this file's own header on
+    // `uViewRect`'s orientation). Computed once, whichever of the two
+    // actually needs it, so having both active never pays for it twice.
+    const needsWorldXY =
+      (fluidTintSlots.length > 0 && sunVis) || (buildCloudField && buildCloudGroundVis && cloudUniforms);
+    const worldX = needsWorldXY ? mix(uViewRect.x, uViewRect.z, uv().x) : null;
+    const worldY = needsWorldXY ? mix(uViewRect.y, uViewRect.w, uv().y) : null;
+
+    // ── THE CLOUD SHADOW — doc 03 §2's consumer #1, "the money slice": a
+    // passing cloud darkens the outdoor ambient. Gated by the SAME outdoors
+    // amount the sky tint above already mixes by (a roof already blocks the
+    // sun; the cloud must not darken an interior floor a second time) —
+    // `mix(1, cloudVisRaw, outdoors)`, the identical idiom `skyTint` uses.
+    let cloudVis = null;
+    if (outdoors && buildCloudField && buildCloudGroundVis && cloudUniforms) {
+      const cloudVisRaw = buildCloudGroundVis(THREE.TSL, {
+        worldXY: vec2(worldX, worldY),
+        uniforms: cloudUniforms,
+        buildField: buildCloudField,
+        offset: cloudOffsetNode ?? vec2(0, 0),
+        // The sun-angle streak (author, 2026-09-10: "sun angle has a big
+        // effect on the cloud shadow shape... streaking them") — see
+        // `buildCloudGroundVisNode`'s own header for why scaling the SAME
+        // offset vector, rather than a second dial, is what makes the
+        // streak grow with the SAME `1/tan(elev)` law the offset itself
+        // already obeys.
+        streakSpread: cloudStreakSpread,
+        fillShare: cloudFillShareNode ?? float(1),
+      });
+      cloudVis = mix(float(1), cloudVisRaw, outdoors).toVar('envCloudVis');
+    }
+
     // FLUID'S OWN SHADOW TINT — see this function's own "FLUID'S OWN SHADOW
     // TINT" doc block, above, for the full design and its honesty notes.
     // `sunVis` is only ever non-null once real shadow data exists at all
@@ -618,8 +672,6 @@ export function buildEnvironmentalLightMaterials({
     // pays nothing extra here either.
     let fluidTintAdd = null;
     if (fluidTintSlots.length > 0 && sunVis) {
-      const worldX = mix(uViewRect.x, uViewRect.z, uv().x);
-      const worldY = mix(uViewRect.y, uViewRect.w, uv().y);
       let contribution = vec3(0, 0, 0);
       for (const slot of fluidTintSlots) {
         const rectU = worldX.sub(slot.uRect.x).div(slot.uRect.z.sub(slot.uRect.x));
@@ -648,7 +700,8 @@ export function buildEnvironmentalLightMaterials({
       contribution = contribution.clamp(0, 1);
       fluidTintAdd = ambient.mul(contribution).mul(float(FLUID_SHADOW_TINT_STRENGTH)).mul(float(1).sub(sunVis));
     }
-    const ambientLit = sunVis ? ambient.mul(sunVis) : ambient;
+    const ambientLitSun = sunVis ? ambient.mul(sunVis) : ambient;
+    const ambientLit = cloudVis ? ambientLitSun.mul(cloudVis) : ambientLitSun;
     illumMaterial.fragmentNode = vec4(fluidTintAdd ? ambientLit.add(fluidTintAdd) : ambientLit, float(1));
   }
 

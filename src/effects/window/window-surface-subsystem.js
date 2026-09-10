@@ -112,6 +112,8 @@ const WINDOW_MATERIAL_SIDE_NAMES = Object.freeze({ 0: 'front', 1: 'back', 2: 'do
  *   than duplicated.
  * @param {*} [args.cloudFactorNode] - see `window-render.js`'s header. Passed
  *   straight through; `null` until `world/cloud-field.js` exists.
+ * @param {*} [args.cloudOvercastNode] - see `window-render.js`'s header, "THE
+ *   OVERCAST MOOD". Passed straight through.
  * @param {() => object} [args.getWindowRenderState] - the look/enable seam.
  * @param {() => object|null} [args.getEnvSun] - `world/sun.js#computeSun`'s
  *   own return value, as a GETTER (not a captured value) — the same reason
@@ -147,6 +149,7 @@ export function createWindowSurfaceSubsystem({
   resolveExpectedDepth,
   uViewRect,
   cloudFactorNode = null,
+  cloudOvercastNode = null,
   getWindowRenderState,
   getEnvSun,
   getAmbientCeilingRgb,
@@ -214,6 +217,7 @@ export function createWindowSurfaceSubsystem({
       depthFlagsTexture,
       uViewRect,
       cloudFactorNode,
+      cloudOvercastNode,
       // Every floor's window mesh stays visible for as long as that floor
       // exists in the scene (see this file's own header), not just while it is
       // the VIEWED floor — so on a multi-floor map, every hidden floor was

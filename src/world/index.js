@@ -225,6 +225,7 @@ export {
   CLOUD_RECIPE_KEYS,
   COVER_LUT_SAMPLES,
   CLOUD_CALM_BOIL_PER_SEC,
+  CLOUD_COVER_VISUAL_MAX,
   cloudRecipeFor,
   coverThreshold,
   cloudDriftStep,
@@ -234,5 +235,7 @@ export {
   pushCloudUniforms,
   buildCloudFieldNode,
   buildCloudKeyTransmittanceNode,
+  buildCloudGroundVisNode,
+  CLOUD_SHADOW_STREAK_SPREAD,
   cloudFlowVectorNode,
 } from './cloud-field.js';

@@ -372,9 +372,10 @@ export {
 // author-confirmed 2026-07-27, `_Window` is a hand-painted INTERIOR light
 // cookie (value = level, hue+saturation = tint) — not an aperture to project
 // through. ADDS onto buf:scene.illum, never onto composed scene colour. Cloud
-// shadows are a WIRED SEAM (window-render.js#cloudFactorNode, defaults to a
-// constant 1) — world/cloud-field.js does not exist yet; see window.js's own
-// header and its `deferredRungs` entry for what plugs in there.
+// shadows and the overcast mood are LIVE (2026-09-10) —
+// `window-render.js#cloudFactorNode`/`cloudOvercastNode`, built once per
+// window subsystem in `vt-pan-viewer.js` from `world/cloud-field.js`'s
+// `buildCloudGroundVisNode` (see that function's own header).
 export {
   decodeWindowMask,
   cookieRgb,

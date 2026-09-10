@@ -17,13 +17,16 @@
  * (`feedback_plausible_diagnosis_rots` — a doc describing an unbuilt rung as
  * built is exactly the rot that memory names).
  *
- * ⚠️ **Cloud shadows are WIRED, not built.** `window-render.js` takes an
- * injectable `cloudFactorNode` (TSL node, 0..1) that defaults to a constant 1
- * — no dimming. The day `world/cloud-field.js` exists (Windows.md §4), the
- * caller passes a real per-fragment sample instead of the constant and NOTHING
- * else in this effect changes. That is the whole TODO: a seam with a safe
- * default, not a stub slider (`params/no-dead-controls` would fail the build
- * on a "Cloud shadows" param with no consumer, so it is not one yet).
+ * ⚠️ **Cloud shadows are LIVE (2026-09-10).** `window-render.js` takes
+ * `cloudFactorNode` (the per-fragment cloud transmittance, 0..1 — a real
+ * cloud passing overhead dims this window's own light) and `cloudOvercastNode`
+ * (the scalar `cloudCover01`, driving a global blur + up-to-50% dim under a
+ * fully overcast sky). `vt-pan-viewer.js` builds both from `world/cloud-field.js
+ * #buildCloudGroundVisNode` and passes them to every window subsystem; a
+ * caller that omits either still gets the old constant-1/no-op default, so
+ * this remains a safe seam, not a stub slider (`params/no-dead-controls`
+ * still has no "Cloud shadows" PARAM, on purpose — the sky/weather panel
+ * owns cover/type/altitude, this effect only reads them).
  *
  * @module effects/window/window
  */
@@ -420,12 +423,17 @@ export const WINDOW = Object.freeze({
     Object.freeze({
       name: 'cloud',
       note:
-        '⚠️ THE NAMED GOAL, not yet built. world/cloud-field.js (Windows.md §4) — a two-octave analytic ' +
-        'noise drifting on the wind, sampled at world position, killing the KEY lobe and leaving the ' +
-        'FILL. Windows is its forcing function, NOT its owner: shadow-access/environmental-light/water/ ' +
-        'specular all want the same field, and owning it here re-runs the eight-suns failure in the ' +
-        'weather domain. The SEAM for this already exists today (window-render.js#cloudFactorNode) — ' +
-        'this rung is "build the field and pass a real node", not "add a new uniform".',
+        'PARTIALLY BUILT (2026-09-10). `world/cloud-field.js` exists and is the shared field ' +
+        'shadow-access/environmental-light/water/specular all read too, never owned here — ' +
+        '`window-render.js#cloudFactorNode` now carries a real per-fragment ground-shadow sample ' +
+        '(`buildCloudGroundVisNode`, built once per subsystem in `vt-pan-viewer.js`), and ' +
+        '`cloudOvercastNode` adds a global blur (widened presence edge + flattened contrast) and an ' +
+        'up-to-50% dim keyed to the scalar `cloudCover01`, independent of whether a cloud is directly ' +
+        "overhead right now. What is STILL missing, and is genuinely this rung's own remaining half: " +
+        'the field killing the KEY lobe specifically and leaving the FILL, as one term of the `skyDriven` ' +
+        "rung above's two-lobe sample — today's dim is a flat multiply on the whole cookie, not a " +
+        'colour-character change. Landing `skyDriven` first and folding cloud into its key term is the ' +
+        'natural next step, not a second mechanism bolted beside this one.',
     }),
     Object.freeze({
       name: 'pointLights',

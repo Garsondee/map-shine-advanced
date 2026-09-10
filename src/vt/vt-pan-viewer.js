@@ -420,6 +420,12 @@ import {
   profileRank,
   GLOBAL_SETTING_KEYS,
   extractDripEdges,
+  // THE CLOUD GROUND SHADOW's OWN OFFSET — the SAME function
+  // `effects/shadow-access.js` calls for every vegetation caster (doc 03's
+  // D2: "match it by calling it, never reimplementing"), called here once
+  // per frame so the ambient/window cloud sample and a tree's own shadow
+  // agree about where the sun is throwing things.
+  projectShadowOffset,
 } from '../effects/index.js';
 import { makeFrameClock, DEFAULT_PAUSE_RAMP_SEC, perfNowMs } from '../core/frame-clock.js';
 import {
@@ -467,6 +473,24 @@ import {
   // first happens to push a value (a startup-ordering dependency this way
   // simply does not have).
   WIND_DEFAULT_GUSTINESS01,
+  // The dial in real units (Beaufort curve) — cloud drift ties its own speed
+  // to the SAME ambient wind speed01 dial turbulence/gusts already read,
+  // rather than inventing a second conversion (world/cloud-field.js's own
+  // `cloudDriftStep` takes world px/s, not a 0..1 dial).
+  metresPerSecondForSpeed01,
+  // THE CLOUD FIELD (docs/planning/Clouds.md) — see the dedicated import
+  // block below this one for the full set; kept separate so a reader
+  // scanning wind imports is not also scanning cloud ones.
+} from '../world/index.js';
+import {
+  cloudRecipeFor,
+  cloudDriftStep,
+  createCloudUniforms,
+  pushCloudUniforms,
+  buildCloudFieldNode,
+  buildCloudGroundVisNode,
+  CLOUD_COVER_VISUAL_MAX,
+  CLOUD_SHADOW_STREAK_SPREAD,
 } from '../world/index.js';
 
 /**
@@ -2881,6 +2905,85 @@ export async function startVtPanViewer({
     // `.value` (`envLight.setFluidShadowTintSlot`) — never by rebuilding the
     // material — exactly like `sunShadows`' own 1×1 "off" placeholder.
     const fluidShadowTintPlaceholder = createMaskDataTexture(new Uint8Array([0, 0, 0, 0]), 1, 1, 'linear', false);
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // THE CLOUD FIELD (docs/planning/Clouds.md, world/cloud-field.js) — one
+    // analytic sky, read by the ambient pass (just below) and window light
+    // (wherever a floor's window subsystem is created). Built HERE, before
+    // either consumer, for the mundane reason every other shared resource on
+    // this file obeys: a `const` referenced before its own declaration line
+    // is a ReferenceError, and both consumers construct their materials
+    // eagerly rather than lazily.
+    //
+    // ⚠️ UNLIKE `skyHandle`/`shadowHandle` (declared further down), THIS IS
+    // NOT AN IMMUTABLE VALUE REBUILT ON CHANGE — it is CONTINUOUS state,
+    // exactly like `dayClock`/`weather`: `drift`/`boil` accumulate every
+    // frame (a cloud deck is still moving between two identical sun
+    // readings), so `updateEnvSnapshot` pushes it unconditionally, every
+    // frame, the same posture `gradePresent.setEnvGrade` already takes and
+    // for the same reason.
+    /** GPU uniforms, created once — `world/cloud-field.js#createCloudUniforms`. */
+    const cloudUniforms = createCloudUniforms(THREE.TSL);
+    /** World-px drift accumulator, CPU-integrated by `cloudDriftStep`. Starts
+     * at the origin; where a cloud happens to be when a scene loads is not a
+     * fact worth persisting (same posture `boil`'s own 0-start takes). */
+    let cloudDriftX = 0;
+    let cloudDriftY = 0;
+    /** The third noise axis — see `cloud-field.js`'s own header on why this
+     * is tied to distance drifted, not wall time. */
+    let cloudBoil = 0;
+    /** The sun-relative shadow offset (world px) — `projectShadowOffset`,
+     * the SAME function every vegetation caster's shadow already calls
+     * (doc 03's D2), computed once per frame and read by both cloud
+     * consumers below. `buildCloudGroundVisNode`'s own header has the sign
+     * convention. */
+    const uCloudOffset = THREE.TSL.uniform(THREE.TSL.vec2(0, 0));
+    /** `fill.strength / (key.strength + fill.strength)` from the sky handle
+     * — the floor a cloud shadow can darken the ground to (doc 03 §0.3):
+     * derived from the sky, never authored, so it is automatically shallow
+     * at dawn and absent at night. */
+    const uCloudFillShare = THREE.TSL.uniform(THREE.TSL.float(0.3));
+    /** How far past the deck's own altitude the sun-angle streak is allowed
+     * to reach, world px — `maxOffsetPx` for {@link projectShadowOffset}'s
+     * OWN soft knee. Generous: a cloud's cause being off toward the map's
+     * edge at a low sun is correct (Clouds.md), unlike a tree's. */
+    const CLOUD_SHADOW_MAX_OFFSET_PX = 9000;
+    /** THE OVERCAST MOOD (window-render.js's own header) — the RAW, UNCAPPED
+     * `env.weather.cloudCover01`, read by window light's global blur/dim.
+     * Deliberately the SAME axis `resolveEnvGrade`'s desaturation already
+     * reads, and deliberately NOT `CLOUD_COVER_VISUAL_MAX`-capped (see that
+     * constant's own header): a meteorologically 100% overcast sky should
+     * feel maximally gloomy through every atmospheric consumer, even though
+     * the FIELD's own rendered silhouette never paints solid white. */
+    const uCloudOvercast01 = THREE.TSL.uniform(THREE.TSL.float(0));
+
+    /**
+     * A cloud-shadow node for a window subsystem — see `world/cloud-field.js
+     * #buildCloudGroundVisNode`'s own header. Reads `THREE.TSL.positionWorld`,
+     * the SAME builtin `window-render.js`'s own glass striation already reads
+     * (`positionWorld.xy` there too) — a "magic" varying that resolves to
+     * whichever mesh the compiled material actually renders, so the SAME
+     * node object is safe to hand to a subsystem that builds several
+     * materials from one call (`createWindowTileSurfaceSubsystem`, one
+     * subsystem for every tile item). Called ONCE PER SUBSYSTEM
+     * CONSTRUCTION here (once per floor for the floor subsystem, since
+     * `createWindowSurfaceForFloor` itself runs once per floor; once, total,
+     * for the tile subsystem) — never built once for the viewer's whole
+     * lifetime and passed to every subsystem, so a future second subsystem
+     * cannot end up silently sharing this one's uniforms by accident.
+     * @returns {*} float node, 0..1.
+     */
+    function buildWindowCloudFactorNode() {
+      return buildCloudGroundVisNode(THREE.TSL, {
+        worldXY: THREE.TSL.positionWorld.xy,
+        uniforms: cloudUniforms,
+        buildField: buildCloudFieldNode,
+        offset: uCloudOffset,
+        streakSpread: CLOUD_SHADOW_STREAK_SPREAD,
+        fillShare: uCloudFillShare,
+      });
+    }
+
     const envLight = buildEnvironmentalLightMaterials({
       THREE,
       albedoTexture: sceneColor.texture,
@@ -2907,6 +3010,15 @@ export async function startVtPanViewer({
       // reassigns it — see `scene-depth.js#describeSceneDepthTarget`).
       depthTexture: sceneDepth.depthTexture ?? null,
       depthFlagsTexture: sceneDepth.texture ?? null,
+      // THE CLOUD SHADOW (docs/planning/Clouds.md) — consumer #1. Injected
+      // rather than imported (Law 8) — see this file's own construction
+      // comment on `cloudUniforms`, just above.
+      cloudUniforms,
+      buildCloudField: buildCloudFieldNode,
+      buildCloudGroundVis: buildCloudGroundVisNode,
+      cloudOffsetNode: uCloudOffset,
+      cloudFillShareNode: uCloudFillShare,
+      cloudStreakSpread: CLOUD_SHADOW_STREAK_SPREAD,
     });
     envLight.setOutdoorsRect(outdoorsRect);
 
@@ -8354,6 +8466,82 @@ export async function startVtPanViewer({
         envLight.setSky(skyHandle.ambientMultiplierRgb);
       }
 
+      // ── THE CLOUD FIELD — ticked every frame, never gated on `skyKey` ────
+      // (see this module's own declaration comment on why: `drift`/`boil`
+      // are continuous state, not a function of the current instant, so
+      // gating the push behind a change-guard would freeze a cloud in place
+      // between two frames that happened to share a sun/cover reading.)
+      {
+        const recipe = cloudRecipeFor(env.weather.cloudType01);
+        const flow = windFlowVector(uWindDirectionDeg.value + recipe.shearDeg);
+        // THE SAME BEAUFORT CONVERSION turbulence/gusts already use, and the
+        // SAME real scene scale the wind probe already derives (2026-09-04,
+        // mythica-machina-press#498) — see this file's own import comment.
+        const pxPerMetre = derivePixelsPerMetre({
+          gridSizePixels: globalThis.canvas?.scene?.grid?.size,
+          gridDistance: globalThis.canvas?.scene?.grid?.distance,
+          gridUnits: globalThis.canvas?.scene?.grid?.units,
+        });
+        const windSpeedPxPerSec = metresPerSecondForSpeed01(uWindSpeed01.value) * pxPerMetre;
+        const step = cloudDriftStep({
+          dtSec: time.dtSec,
+          windDirX: flow.x,
+          windDirY: flow.y,
+          windSpeedPxPerSec,
+          scalePx: env.weather.cloudScalePx,
+          recipe,
+        });
+        cloudDriftX += step.dx;
+        cloudDriftY += step.dy;
+        cloudBoil += step.dBoil;
+        // ⚠️ THE VISUAL CAP (`CLOUD_COVER_VISUAL_MAX`'s own header) — applied
+        // HERE, at the live push, never inside `pushCloudUniforms` itself
+        // (the shader-lab bench calls that directly to sweep the FULL
+        // range) and never to `env.weather.cloudCover01` at its source —
+        // `shadowHandle`/`skyHandle` above and the grade below all keep
+        // reading the UNCAPPED axis, so a meteorologically 100% overcast sky
+        // still feels maximally gloomy even though its silhouette never
+        // paints solid white.
+        pushCloudUniforms(cloudUniforms, {
+          recipe,
+          cover01: Math.min(env.weather.cloudCover01, CLOUD_COVER_VISUAL_MAX),
+          scalePx: env.weather.cloudScalePx,
+          drift: { x: cloudDriftX, y: cloudDriftY },
+          boil: cloudBoil,
+          windDir: flow,
+        });
+
+        // THE SHADOW OFFSET (+ the streak's own basis) — the SAME function
+        // `effects/shadow-access.js` calls for every vegetation caster (doc
+        // 03's D2). `buildCloudGroundVisNode`'s own header has the sign
+        // convention and the streak reasoning.
+        const offset = projectShadowOffset({
+          azimuthDeg: skyHandle.key.azimuthDeg,
+          elevationDeg: skyHandle.key.elevationDeg,
+          heightPx: env.weather.cloudAltitudePx,
+          maxOffsetPx: CLOUD_SHADOW_MAX_OFFSET_PX,
+          offsetScale: 1,
+          softKnee: true,
+        });
+        uCloudOffset.value.set(offset.x, offset.y);
+
+        // THE SHADOW FLOOR (doc 03 §0.3) — derived from the sky's OWN
+        // key/fill split, never authored: shallow at dawn, absent at night,
+        // for free. `total <= 0` is deep night with no fill either — there
+        // is no key light for a cloud to occlude, so the honest floor is 1
+        // (no additional darkening), the same "nothing to report, fall back
+        // to neutral" posture `sky-access.js`'s own blended-hue fallback
+        // takes rather than a divide-by-zero.
+        const totalSkyStrength = skyHandle.key.strength + skyHandle.fill.strength;
+        uCloudFillShare.value = totalSkyStrength > 1e-6 ? skyHandle.fill.strength / totalSkyStrength : 1;
+
+        // THE OVERCAST MOOD (window-render.js's own header) — window light's
+        // global blur/dim reads the RAW axis, uncapped; see `uCloudOvercast01`'s
+        // own declaration comment for why this is deliberately a different
+        // number from the field's own capped silhouette.
+        uCloudOvercast01.value = env.weather.cloudCover01;
+      }
+
       // THE ENVIRONMENTAL GRADE (docs/planning/Grade.md) — resolved from THIS
       // frame's env (ToD saturation + the weather desaturation that replaces the
       // deleted sky veil), scaled by the strength lever so it ships neutral, and
@@ -10871,10 +11059,11 @@ export async function startVtPanViewer({
     // `light.accumulate` (this pass) even starts, so the depth attachment is
     // always fully written by the time this reads it — no ordering hazard.
     //
-    // `cloudFactorNode` is deliberately OMITTED — `world/cloud-field.js`
-    // (docs/planning/Windows.md §4) does not exist yet, so the builder's own
-    // constant-1 default is what ships. The day that field lands, this is a
-    // one-line addition here and nowhere else.
+    // `cloudFactorNode`/`cloudOvercastNode` (docs/planning/Windows.md §4,
+    // Clouds.md) — wired below via `buildWindowCloudFactorNode()` and
+    // `uCloudOvercast01`, this file's own shared cloud state (see its own
+    // construction comment, near `envLight`'s). A fresh node per floor's own
+    // material, never one built once and shared (see that helper's header).
     //
     // ⚠️ ONE SUBSYSTEM PER FLOOR, NOT ONE FOR "THE VIEWED FLOOR" (2026-08-09)
     // — `feedback_single_floor_bake_vs_multi_floor_render` named this exact
@@ -10921,6 +11110,8 @@ export async function startVtPanViewer({
           return rank === null ? 0 : computeTieSafeExpectedDepth(rank, depthAuthority.maxRank);
         },
         uViewRect: envLight.uViewRect,
+        cloudFactorNode: buildWindowCloudFactorNode(),
+        cloudOvercastNode: uCloudOvercast01,
         getWindowRenderState,
         // THE DAYLIGHT TINT's own sun read — a GETTER, matching `getSkyHandle`
         // above: `lastEnvSnapshot` is REASSIGNED every `updateEnvSnapshot()`
@@ -10996,6 +11187,10 @@ export async function startVtPanViewer({
       },
       getItemTileMotion: resolveItemTileMotion,
       uViewRect: envLight.uViewRect,
+      // THE CLOUD SHADOW / OVERCAST MOOD — see `createWindowSurfaceForFloor`'s
+      // own identical wiring, just above, for the full reasoning.
+      cloudFactorNode: buildWindowCloudFactorNode(),
+      cloudOvercastNode: uCloudOvercast01,
       getWindowRenderState,
       getEnvSun: () => lastEnvSnapshot?.env?.sun ?? null,
       getAmbientCeilingRgb: () =>

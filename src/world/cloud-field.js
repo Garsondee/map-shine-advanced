@@ -572,6 +572,33 @@ export const CLOUD_WALL_CREST_HI = 0.58;
 export const CLOUD_WALL_GATE_SCALE = 0.08;
 
 /**
+ * ⭐ THE VISUAL COVER CEILING — a live-engine choice, not a field property.
+ *
+ * Author, 2026-09-10: *"the best clouds are the cover values of less than
+ * 0.45 and we don't need the entire scene to be covered for overcast, so we
+ * can make that the upper bounds for cloud cover so that the map doesn't
+ * just become a useless white."*
+ *
+ * `weather-data.js`'s own archetypes push `cloudCover01` to 0.9-1.0 for
+ * overcast/fog/storm — meteorologically honest (a real overcast sky IS
+ * ~100% covered), but this field's SILHOUETTE approaches a flat white sheet
+ * at high cover (most visibly on `stratus`, "a sheet, with only faint
+ * mottling" by design), which is a rendering limitation, not a weather fact.
+ *
+ * ⚠️ THIS CAPS ONLY THE FIELD'S OWN RENDERED SILHOUETTE — the live engine
+ * applies it where `cover01` feeds {@link pushCloudUniforms}, NEVER inside
+ * that function itself (the shader-lab bench calls it directly to sweep the
+ * FULL 0..1 range on purpose) and never to `env.weather.cloudCover01` at its
+ * source. The scalar atmospheric consumers that already read the raw axis —
+ * `shadow-access.js` (softens/fades every caster), `sky-access.js` (kills the
+ * key, lifts the fill), the environmental grade (desaturates, flattens,
+ * cools) — keep their FULL authored response. A sky that is genuinely,
+ * meteorologically 100% overcast should still feel maximally gloomy and
+ * desaturated; it just does not need to paint every pixel white to say so.
+ */
+export const CLOUD_COVER_VISUAL_MAX = 0.45;
+
+/**
  * One step of the cloud phase.
  *
  * ⭐ EVOLUTION IS TIED TO DISTANCE DRIFTED, NOT TO WALL TIME. `turnover` is
@@ -1248,4 +1275,100 @@ export function buildCloudKeyTransmittanceNode(TSL, { thickness, fillShare, dept
  */
 export function cloudFlowVectorNode(TSL, directionDeg, shearDeg) {
   return windFlowVectorNode(TSL, directionDeg.add(shearDeg));
+}
+
+/**
+ * The cloud shadow's sun-angle streak span, as a fraction of the shadow
+ * offset's own length — {@link buildCloudGroundVisNode}'s own `streakSpread`
+ * param, shared by every consumer that builds one (ambient, window) so a
+ * cloud shadow does not streak one amount over a floor and a different
+ * amount over the window light in its wall. Tuned by eye: wide enough that
+ * a low sun visibly elongates a cloud's shadow rather than just sliding it
+ * further away, narrow enough that an overhead sun (`offset → 0`, so the
+ * streak collapses with it regardless) never shows a seam between taps.
+ */
+export const CLOUD_SHADOW_STREAK_SPREAD = 0.35;
+
+/**
+ * ⭐ THE GROUND SHADOW SAMPLE — every ambient/window/specular/water consumer
+ * calls this ONE function to ask "how much sun survives the cloud deck at
+ * this ground position", instead of each re-deriving the offset+streak+field
+ * dance at its own call site (doc 03 §1's "the one node every shadow
+ * consumer reads", extended to cover the sampling that feeds it).
+ *
+ * ⚠️ THE OFFSET ARRIVES PRE-COMPUTED, ON THE CPU, ONCE PER FRAME —
+ * `effects/lighting/light-visibility.js#projectShadowOffset`, the EXACT
+ * function `effects/shadow-access.js` already calls for every vegetation
+ * caster. Doc 03's D2 ruling was "match it by calling it, never
+ * reimplementing", and a per-pixel shader cannot literally call a CPU
+ * function — so the caller (whoever owns the frame) calls it once and hands
+ * the RESULT in here as a uniform vec2, which is the closest a GPU consumer
+ * can get to "the same function" without a second, possibly-drifting
+ * trig re-derivation.
+ *
+ * `offset` points from the cloud toward its own shadow (a real-world vector,
+ * in the sun's own azimuth), so the cloud that shadows ground point `p` sits
+ * at `p - offset`.
+ *
+ * ⚠️ THE STREAK — author's ask (2026-09-10): *"If we could make it so that
+ * the sun angle has a big effect on the cloud shadow shape that would be
+ * nice, streaking them."* A rigid single-sample offset translates the WHOLE
+ * silhouette but never touches its SHAPE. A real cloud has vertical extent:
+ * at a low sun, its TOP casts a shadow further from directly-underneath than
+ * its BOTTOM does, so the true shadow is a SMEAR along the sun axis, not a
+ * rigid copy. `offset`'s own LENGTH already grows at low elevation
+ * (`h/tan(elev)` — the same law `shadow-access.js`'s own header names as the
+ * "emergent, not a second model" dawn/dusk elongation), so scaling `offset`
+ * itself by a few factors around 1 — rather than adding a second,
+ * independently-tuned vector — makes the streak's absolute length grow with
+ * the SAME physical quantity that already governs the offset: compact at
+ * noon (`offset → 0`, every tap collapses to one point), elongated at a low
+ * sun (`offset` large, the taps spread proportionally far apart). Combined
+ * by the MINIMUM transmittance across taps — a streaked shadow is as dark as
+ * its darkest point along the smear, not an average of it, the same
+ * "darkest wins" reasoning the self-shadow march (doc 02 §2.3) already uses.
+ *
+ * @param {object} TSL
+ * @param {object} args
+ * @param {*} args.worldXY - vec2 node, the ground point asking "am I shadowed".
+ * @param {object} args.uniforms - from {@link createCloudUniforms}.
+ * @param {Function} args.buildField - {@link buildCloudFieldNode}, injected
+ *   (this module stays TSL-pure; the caller supplies the graph builder).
+ * @param {number} [args.octaves] - shape tier for this ground sample. Cheap
+ *   by design (default 2: this is a shadow TEST, not the picture the tops
+ *   draw) — and paid for `streakTaps` times, so keep it low.
+ * @param {*} args.offset - vec2 node, world px, from `projectShadowOffset`
+ *   (CPU, once per frame) — see this function's own header.
+ * @param {number} [args.streakSpread] - the taps span `offset` scaled from
+ *   `(1 - streakSpread)` to `(1 + streakSpread)`. 0 disables the streak (a
+ *   single rigid sample) — a provable no-op, same pattern as every other
+ *   opt-in dial in this file.
+ * @param {number} [args.streakTaps] - odd count ≥ 1. 1 ignores `streakSpread`
+ *   entirely (JS-time branch, so a caller that wants the cheap rung pays
+ *   nothing extra, never a spread multiplied by zero).
+ * @param {*} args.fillShare - float node, `fill/(key+fill)` from the sky
+ *   handle, forwarded to {@link buildCloudKeyTransmittanceNode}.
+ * @param {*} [args.depthBias] - float node, the effect card's own bias.
+ * @returns {*} float node, 0..1, 1 = full sun.
+ */
+export function buildCloudGroundVisNode(
+  TSL,
+  { worldXY, uniforms, buildField, octaves = 2, offset, streakSpread = 0, streakTaps = 3, fillShare, depthBias = null }
+) {
+  const { float, min } = TSL;
+  const taps = Math.max(1, streakTaps | 0);
+  const sampleAt = (k) => {
+    const p = k === 1 ? worldXY.sub(offset) : worldXY.sub(offset.mul(float(k)));
+    const thickness = buildField(TSL, { worldXY: p, uniforms, octaves }).thickness;
+    return buildCloudKeyTransmittanceNode(TSL, { thickness, fillShare, depthBias });
+  };
+  if (taps === 1 || streakSpread <= 0) return sampleAt(1);
+  let vis = sampleAt(1 - streakSpread);
+  for (let i = 1; i < taps; i++) {
+    const k = 1 - streakSpread + (2 * streakSpread * i) / (taps - 1);
+    // Skip re-sampling the centre tap twice when `taps` is odd and `i` lands
+    // back on `k = 1` — a wasted, identical field evaluation otherwise.
+    vis = Math.abs(k - 1) < 1e-6 ? min(vis, sampleAt(1)) : min(vis, sampleAt(k));
+  }
+  return vis;
 }

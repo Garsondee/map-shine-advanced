@@ -268,8 +268,14 @@ export const WEATHER_AXES = Object.freeze({
     consumerStatus: 'live',
     /** effects/shadow-access.js (softens + fades every caster),
      *  effects/sky-access.js (kills the key, lifts the fill, raises the veil),
-     *  effects/grade (the environmental ToD/weather look). */
-    consumers: 'shadow-access, sky-access, env grade',
+     *  effects/grade (the environmental ToD/weather look),
+     *  world/cloud-field.js (the rendered silhouette — `CLOUD_COVER_VISUAL_MAX`
+     *  caps THIS one reading, live-only, at 0.45; the three consumers above
+     *  keep reading the raw axis, see that constant's own header),
+     *  effects/lighting/environmental-light.js + effects/window/window-render.js
+     *  (the cloud ground shadow + window's own overcast blur/dim, wired
+     *  2026-09-10 via vt-pan-viewer.js). */
+    consumers: 'shadow-access, sky-access, env grade, cloud-field (capped), environmental-light, window-render',
   }),
   cloudType01: Object.freeze({
     min: 0,
@@ -281,9 +287,12 @@ export const WEATHER_AXES = Object.freeze({
     durationUpSec: 90,
     durationDownSec: 90,
     epsilon: AXIS_EPSILON_UNIT,
-    consumerStatus: 'pending',
-    /** The cirrus(0) → cumulus(0.5) → stratus(1) ramp, Clouds.md §3.1. */
-    consumers: 'world/cloud-field.js (not built)',
+    consumerStatus: 'live',
+    /** The cirrus(0) → cumulus(0.5) → stratus(1) ramp, Clouds.md §3.1. Wired
+     * 2026-09-10: `world/cloud-field.js#cloudRecipeFor`, read once per frame
+     * in `vt/vt-pan-viewer.js#updateEnvSnapshot` to resolve the recipe the
+     * ambient/window ground-shadow sample and the drift step both use. */
+    consumers: 'world/cloud-field.js (cloudRecipeFor, via vt-pan-viewer.js)',
   }),
   cloudAltitudePx: Object.freeze({
     min: 100,
@@ -292,9 +301,12 @@ export const WEATHER_AXES = Object.freeze({
     durationUpSec: 90,
     durationDownSec: 90,
     epsilon: AXIS_EPSILON_LENGTH_PX,
-    consumerStatus: 'pending',
-    /** Clouds.md's ONE knob: shadow offset, softness, parallax, drift, sky hidden. */
-    consumers: 'world/cloud-field.js (not built)',
+    consumerStatus: 'live',
+    /** Clouds.md's ONE knob: shadow offset (+ its sun-angle streak), softness,
+     * parallax (tops, not yet wired), drift, sky hidden. Wired 2026-09-10:
+     * `effects/lighting/light-visibility.js#projectShadowOffset`'s `heightPx`,
+     * called once per frame in `vt-pan-viewer.js`. */
+    consumers: 'lighting/light-visibility.js#projectShadowOffset (via vt-pan-viewer.js)',
   }),
   cloudScalePx: Object.freeze({
     min: 50,
@@ -303,8 +315,11 @@ export const WEATHER_AXES = Object.freeze({
     durationUpSec: 90,
     durationDownSec: 90,
     epsilon: AXIS_EPSILON_LENGTH_PX,
-    consumerStatus: 'pending',
-    consumers: 'world/cloud-field.js (not built)',
+    consumerStatus: 'live',
+    /** Wired 2026-09-10: `world/cloud-field.js#pushCloudUniforms`'s
+     * `scalePx`, the field's own feature wavelength (cell spacing, streak
+     * length) — pushed once per frame in `vt-pan-viewer.js`. */
+    consumers: 'world/cloud-field.js (pushCloudUniforms, via vt-pan-viewer.js)',
   }),
 
   // ── PRECIPITATION (P1, docs/planning/Precipitation.md) ────────────────────

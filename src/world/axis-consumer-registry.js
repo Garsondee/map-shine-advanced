@@ -54,6 +54,18 @@ export const AXIS_CONSUMERS = Object.freeze({
     Object.freeze({ module: 'effects/sky-access.js', describe: 'key/fill/veil outdoor light mix' }),
     Object.freeze({ module: 'effects/grade/grade-ops.js', describe: 'environmental (auto) grade' }),
     Object.freeze({ module: 'boot.js (fadeSourceRegistry)', describe: "the weather board's fade/cue target" }),
+    Object.freeze({
+      module: 'world/cloud-field.js (via vt-pan-viewer.js)',
+      describe: 'the rendered silhouette — capped at CLOUD_COVER_VISUAL_MAX for this reading only',
+    }),
+    Object.freeze({
+      module: 'effects/lighting/environmental-light.js',
+      describe: 'the cloud ground shadow on outdoor ambient (consumer #1)',
+    }),
+    Object.freeze({
+      module: 'effects/window/window-render.js',
+      describe: "window light's overcast blur (edge/contrast) + up-to-50% dim",
+    }),
   ]),
   precip01: Object.freeze([
     Object.freeze({
@@ -66,22 +78,44 @@ export const AXIS_CONSUMERS = Object.freeze({
     Object.freeze({ module: 'world/weather.js#derivePrecipKind', describe: 'the rain/snow/sleet split' }),
     Object.freeze({ module: 'effects/precipitation/precip-subsystem.js', describe: "the mantle's dry-rate input" }),
   ]),
-  // PENDING, genuinely — `world/cloud-field.js` (a real, 1200+ line
-  // shape/shading/drift implementation) reads all three, but is exported
-  // only through `world/index.js` and imported by NOTHING in `graph/
-  // passes.js` or `boot.js` — a built module with zero wired consumers,
-  // confirmed by grep, not assumed from `WEATHER_AXES`'s own claim.
-  cloudType01: Object.freeze([]),
-  cloudAltitudePx: Object.freeze([]),
-  cloudScalePx: Object.freeze([]),
+  // LIVE as of 2026-09-10 — `vt/vt-pan-viewer.js#updateEnvSnapshot` now
+  // resolves the cloud recipe and pushes the field's uniforms every frame
+  // (the "THE CLOUD FIELD" block, ticked unconditionally alongside the
+  // weather/grade pushes), and the ground-shadow sample reads the deck's
+  // own altitude for its sun-relative offset.
+  cloudType01: Object.freeze([
+    Object.freeze({
+      module: 'world/cloud-field.js#cloudRecipeFor (via vt-pan-viewer.js)',
+      describe: 'resolves the cirrus/altocumulus/cumulus/stratocumulus/stratus recipe blend',
+    }),
+  ]),
+  cloudAltitudePx: Object.freeze([
+    Object.freeze({
+      module: 'effects/lighting/light-visibility.js#projectShadowOffset (via vt-pan-viewer.js)',
+      describe: "the ground shadow's own sun-relative offset length (and, via that length, its streak span)",
+    }),
+  ]),
+  cloudScalePx: Object.freeze([
+    Object.freeze({
+      module: 'world/cloud-field.js#pushCloudUniforms (via vt-pan-viewer.js)',
+      describe: "the field's own feature wavelength — cell spacing, streak/erosion scale",
+    }),
+  ]),
 });
 
 /**
  * @param {string} axisName
+ * @param {Record<string, ReadonlyArray<unknown>>} [consumersTable] - defaults
+ *   to the real {@link AXIS_CONSUMERS}. Injectable so a test can exercise the
+ *   "an axis has zero consumers" branch on a small fixture rather than
+ *   depending on some REAL axis staying permanently unwired — a table that,
+ *   by this file's own stated purpose, is expected to keep filling in over
+ *   time (see `axis-consumer-registry.test.mjs`'s own header on why this
+ *   parameter exists).
  * @returns {boolean} true when at least one real, verified consumer is on record.
  */
-export function hasRealConsumer(axisName) {
-  return (AXIS_CONSUMERS[axisName]?.length ?? 0) > 0;
+export function hasRealConsumer(axisName, consumersTable = AXIS_CONSUMERS) {
+  return (consumersTable[axisName]?.length ?? 0) > 0;
 }
 
 /**
@@ -93,30 +127,33 @@ export function hasRealConsumer(axisName) {
  * not a discovery six months later during another research pass.
  *
  * @param {Record<string, {consumerStatus?: string}>} axes - `WEATHER_AXES`.
+ * @param {Record<string, ReadonlyArray<unknown>>} [consumersTable] - defaults
+ *   to the real {@link AXIS_CONSUMERS} — see {@link hasRealConsumer}'s own
+ *   doc on why this is injectable.
  * @returns {string[]} problems found; empty means consistent.
  */
-export function auditAxisConsumers(axes) {
+export function auditAxisConsumers(axes, consumersTable = AXIS_CONSUMERS) {
   const problems = [];
   for (const [name, axis] of Object.entries(axes ?? {})) {
-    if (!(name in AXIS_CONSUMERS)) {
+    if (!(name in consumersTable)) {
       problems.push(
         `${name}: no entry in AXIS_CONSUMERS at all — add one (even an empty array) so a future audit covers it`
       );
       continue;
     }
-    const has = hasRealConsumer(name);
+    const has = hasRealConsumer(name, consumersTable);
     if (axis.consumerStatus === 'live' && !has) {
       problems.push(`${name}: WEATHER_AXES declares consumerStatus 'live' but AXIS_CONSUMERS lists no real consumer`);
     }
     if (axis.consumerStatus === 'pending' && has) {
       problems.push(
-        `${name}: WEATHER_AXES declares consumerStatus 'pending' but AXIS_CONSUMERS lists ${AXIS_CONSUMERS[name].length} real consumer(s) — this axis went live and consumerStatus was never updated`
+        `${name}: WEATHER_AXES declares consumerStatus 'pending' but AXIS_CONSUMERS lists ${consumersTable[name].length} real consumer(s) — this axis went live and consumerStatus was never updated`
       );
     }
   }
   // The reverse gap: an AXIS_CONSUMERS entry for an axis WEATHER_AXES no
   // longer declares (a renamed or removed axis, this table left stale).
-  for (const name of Object.keys(AXIS_CONSUMERS)) {
+  for (const name of Object.keys(consumersTable)) {
     if (!(name in (axes ?? {}))) {
       problems.push(
         `${name}: AXIS_CONSUMERS has an entry but WEATHER_AXES no longer declares this axis — stale, remove it`

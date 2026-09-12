@@ -426,6 +426,14 @@ import {
   // per frame so the ambient/window cloud sample and a tree's own shadow
   // agree about where the sun is throwing things.
   projectShadowOffset,
+  // CLOUD TOPS (2026-09-12) — the lit cloud shapes themselves. The shading
+  // (`buildCloudTopsNode`) has existed since slice A; `runCloudTopsPass`
+  // below is its first real caller. `cloudTopsGate`/`buildCloudTopsParallaxWorldXY`
+  // are the zoom-gate + "rising through the decks" parallax this session adds
+  // (effects/clouds/cloud-shade.js's own header has the full model).
+  buildCloudTopsNode,
+  cloudTopsGate,
+  buildCloudTopsParallaxWorldXY,
 } from '../effects/index.js';
 import { makeFrameClock, DEFAULT_PAUSE_RAMP_SEC, perfNowMs } from '../core/frame-clock.js';
 import {
@@ -1159,6 +1167,7 @@ export async function startVtPanViewer({
   getBloomRenderState,
   getDofRenderState,
   getCloudsRenderState,
+  getCloudTopsRenderState,
   getGradeLookState,
   // PRECIPITATION'S CASCADE STATE (2026-08-30) — deliberately separate from
   // getPrecipRenderState below, which stays defined IN this file (it mixes
@@ -1427,6 +1436,14 @@ export async function startVtPanViewer({
   // an empty `params` object leaves untouched (see the per-frame cascade
   // read's own `Number.isFinite(cp.x)` guards) rather than silently zeroing.
   getCloudsRenderState ??= () => ({ enabled: true, params: {} });
+  // CLOUD TOPS' own data seam (effects/clouds/cloud-tops.js#CLOUD_TOPS_PARAMS)
+  // — a genuinely separate cascade from CLOUD_LOOK just above. Default
+  // `enabled: false`, matching bloom/DOF's own posture rather than the
+  // ground-shadow's `true`: `CLOUD_TOPS.enabledFromProfile` is `'standard'`,
+  // not `'low'`, so an unwired caller (a bench, a test harness, which has no
+  // real performance profile to resolve against) should not silently get an
+  // expensive C8 draw switched on.
+  getCloudTopsRenderState ??= () => ({ enabled: false, params: {} });
   // PRECIPITATION'S CASCADE STATE — same injection discipline as bloom/dof
   // just above. Default = enabled true, matching this effect's own manifest
   // (`enabledFromProfile: 'low'`) and its pre-2026-08-30 unconditional
@@ -3073,6 +3090,122 @@ export async function startVtPanViewer({
      * than a snapshot that can only ever show a static number. `null` until
      * the report has run once. See `getEnvSnapshotInfo`'s own `clouds` block. */
     let lastCloudDiagnosticSample = null;
+
+    // ═══════════════════════════════════════════════════════════════════
+    // CLOUD TOPS (2026-09-12) — the lit cloud shapes themselves, drawn only
+    // when zoomed out past the deck's own altitude. `cloud-shade.js#
+    // buildCloudTopsNode` has built the full shading model since slice A
+    // (2026-09-06); `runCloudTopsPass` (below, near `runSurfacePrecipitation
+    // Pass`) is its first real caller. See that file's own header for the
+    // zoom-gate/parallax model ("rising through the decks").
+    //
+    // ⚠️ READS THE SAME `cloudUniforms` THE GROUND SHADOW ALREADY PUSHES,
+    // ABOVE — never a second field/recipe/drift phase. Doc 02's own claim
+    // ("the tops are the SAME field, lit") is what this shares; a tops mesh
+    // with its own field could show a different cloud than its own shadow
+    // is falling from.
+    // ═══════════════════════════════════════════════════════════════════
+    /** Unit XY toward the sun, and its elevation trig — `skyHandle.key`'s own
+     * azimuth/elevation, converted once per frame (see the per-frame cloud
+     * block, below). Mirrors the shader-lab bench's own `sunU` shape exactly
+     * (`tools/shader-lab/cloud-lab.js`), the one place in the repo this exact
+     * uniform set already existed before this session. */
+    const uTopsSunDir = THREE.TSL.uniform(THREE.TSL.vec2(1, 0));
+    const uTopsSinElev = THREE.TSL.uniform(THREE.TSL.float(0.5));
+    const uTopsCosElev = THREE.TSL.uniform(THREE.TSL.float(0.866));
+    const uTopsTanElev = THREE.TSL.uniform(THREE.TSL.float(0.577));
+    /** `key.colorRgb * key.strength` / `fill.colorRgb * fill.strength` —
+     * ⚠️ THE SUN'S STRENGTH IS PRE-MULTIPLIED IN HERE, not applied inside the
+     * shading function, because `buildCloudTopsNode` multiplies `colors.
+     * keyRgb`/`fillRgb` directly with no separate strength factor of its own
+     * (cloud-shade.js §2.8: "`key.strength` already carries `dayFactor01`, so
+     * at night the sun term vanishes on its own" — that sentence is only
+     * true if strength is baked into the colour BEFORE it reaches the
+     * shading function). Getting this backwards would leave the tops fully
+     * bright at midnight. */
+    const uTopsKeyRgb = THREE.TSL.uniform(THREE.TSL.vec3(1, 0.93, 0.84));
+    const uTopsFillRgb = THREE.TSL.uniform(THREE.TSL.vec3(0.46, 0.63, 1.0));
+    /** The current view's world-space centre — doc 02 §4.2: "the tops draw
+     * is the ONLY consumer of the view centre; no other consumer of the
+     * field may read it, or two consumers would disagree about where a
+     * cloud is." Never read by the ground shadow (`uCloudOffset`, above) — a
+     * cloud shadow is a fact about the ground and must not move when the
+     * camera does. */
+    const uTopsViewCentre = THREE.TSL.uniform(THREE.TSL.vec2(0, 0));
+    /** `cloudTopsGate`'s own `magnification` (`M = 1/(1-parallax)`). `1` =
+     * no parallax — a provable no-op, since `buildCloudTopsParallaxWorldXY`
+     * at `M=1` is the identity remap. */
+    const uTopsMagnification = THREE.TSL.uniform(THREE.TSL.float(1));
+    /** Master opacity — the Studio `opacity` dial × `cloudTopsGate`'s own
+     * `fade` (0 below the fade band, 1 once fully clear of it). Starts at 0:
+     * a provable no-op before the first frame ever pushes a real value, the
+     * same "fails asleep" default {@link cloudTopsGate} itself takes. */
+    const uTopsOpacity = THREE.TSL.uniform(THREE.TSL.float(0));
+    /** Whether THIS frame's gate is open — read by `runCloudTopsPass`'s own
+     * scene-inclusion check (Effects.md Law 4: gate the DRAW, not a uniform;
+     * `uTopsOpacity` above still ramps smoothly across the frames the draw
+     * IS submitted, but a fully-closed gate must not submit it at all — the
+     * precipitation zoom gate's own "shrinks the submitted draw list" test). */
+    let cloudTopsAwake = false;
+    /** The lazily-built quad + its own tiny scene — mirrors `precip-
+     * subsystem.js#curtainFor`'s "wait for real data rather than build
+     * against a placeholder" posture, here waiting for the gate to open once
+     * rather than for scene bounds. Sized to the current view and
+     * repositioned every awake frame (`runCloudTopsPass`) via a transform
+     * update rather than rebuilt — geometry churn buys nothing a `position`/
+     * `scale` write doesn't already do for free. */
+    let cloudTopsMesh = null;
+    let cloudTopsScene = null;
+
+    /** Build the tops quad + material on first use. `positionWorld.xy` (not
+     * `positionGeometry.xy`, unlike the precipitation curtain's STATIC quad)
+     * because this mesh's `position`/`scale` are rewritten every frame in
+     * `runCloudTopsPass` to track the current view — `positionWorld` always
+     * reflects the true post-transform world position, `positionGeometry`
+     * would not. */
+    function ensureCloudTopsMesh() {
+      if (cloudTopsMesh) return cloudTopsMesh;
+      const worldXY = buildCloudTopsParallaxWorldXY(
+        THREE.TSL,
+        THREE.TSL.positionWorld.xy,
+        uTopsViewCentre,
+        uTopsMagnification
+      );
+      const tops = buildCloudTopsNode(THREE.TSL, {
+        worldXY,
+        uniforms: cloudUniforms,
+        buildField: buildCloudFieldNode,
+        sun: { dirXY: uTopsSunDir, sinElev: uTopsSinElev, cosElev: uTopsCosElev, tanElev: uTopsTanElev },
+        colors: { keyRgb: uTopsKeyRgb, fillRgb: uTopsFillRgb },
+      });
+      const material = new THREE.NodeMaterial();
+      material.colorNode = tops.rgb;
+      material.opacityNode = tops.alpha.mul(uTopsOpacity);
+      material.transparent = true;
+      material.depthTest = false;
+      material.depthWrite = false;
+      // ⚠️ REQUIRED — same reason as the precipitation curtain's own comment:
+      // the flipped camera (top = minY) inverts winding; FrontSide renders
+      // NOTHING, silently.
+      material.side = THREE.DoubleSide;
+      // A cloud is translucent grey/white air, not a light source — Normal-
+      // Blending, the precip curtain's own reasoning word for word:
+      // additive would brighten what it should obscure.
+      material.blending = THREE.NormalBlending;
+      // 1x1 local space; `runCloudTopsPass` rewrites `position`/`scale` every
+      // awake frame to cover the current view — no per-frame geometry churn.
+      const geometry = new THREE.PlaneGeometry(1, 1);
+      cloudTopsMesh = new THREE.Mesh(geometry, material);
+      cloudTopsMesh.frustumCulled = false;
+      // Between the light/particle draws (below 19) and precipitation
+      // (~19.5-20, `renderOrder - 0.5` off its own `renderOrder: 20`) —
+      // clouds sit physically ABOVE rain, so rain must draw AFTER (on top
+      // of) them, one layer further out than precipitation's own §3.5 rule.
+      cloudTopsMesh.renderOrder = 19;
+      cloudTopsScene = new THREE.Scene();
+      cloudTopsScene.add(cloudTopsMesh);
+      return cloudTopsMesh;
+    }
 
     /**
      * A cloud-shadow node for a window subsystem — see `world/cloud-field.js
@@ -7855,6 +7988,41 @@ export async function startVtPanViewer({
      * `hasContent` is false on a clear day, so LAW 5 costs one boolean rather
      * than a bind and a submitted draw (Effects.md Law 4).
      */
+    /**
+     * `surface.cloudTops` (graph/passes.js) — the lit cloud shapes, drawn
+     * only on a frame `cloudTopsAwake` (the per-frame cloud block, above,
+     * inside `updateEnvSnapshot`) — a JS `if`/early-return, so a closed gate
+     * genuinely submits nothing (Effects.md Law 4), the identical shape
+     * `runSurfacePrecipitationPass` just below already uses for its own
+     * zoom-sleeping specimens (`if (!scenes.length) return;`).
+     *
+     * Positioned BEFORE `runSurfacePrecipitationPass` in the frame plan
+     * (`graph/passes.js`'s own array order) deliberately: clouds sit
+     * physically above rain, so rain must draw on top of/in front of them —
+     * `cloudTopsMesh.renderOrder` (19, below precipitation's own ~19.5-20)
+     * says the same thing a second way, belt-and-braces against a future
+     * pass-plan reorder silently flipping the visual stacking.
+     */
+    function runCloudTopsPass() {
+      if (!cloudTopsAwake) return;
+      const topsViewRect = view ? viewToWorldRect(view, canvasW / canvasH) : null;
+      if (!topsViewRect) return;
+      const mesh = ensureCloudTopsMesh();
+      const w = Math.max(1, topsViewRect.maxX - topsViewRect.minX);
+      const h = Math.max(1, topsViewRect.maxY - topsViewRect.minY);
+      // Padded 2% past the exact view rect — cheap ALU, guards against the
+      // quad's own edge landing exactly on the viewport edge (aspect-ratio
+      // rounding) rather than genuinely covering it.
+      mesh.position.set((topsViewRect.minX + topsViewRect.maxX) / 2, (topsViewRect.minY + topsViewRect.maxY) / 2, 0);
+      mesh.scale.set(w * 1.02, h * 1.02, 1);
+      const prevAutoClear = renderer.autoClearColor;
+      renderer.setRenderTarget(sceneLit);
+      renderer.autoClearColor = false;
+      renderer.render(cloudTopsScene, camera);
+      renderer.autoClearColor = prevAutoClear;
+      renderer.setRenderTarget(null);
+    }
+
     function runSurfacePrecipitationPass() {
       const scenes = precipitationSubsystem.scenes;
       if (!scenes.length) return;
@@ -8221,6 +8389,7 @@ export async function startVtPanViewer({
       'surface.response': runSurfaceResponsePass,
       'surface.water': runWaterRefractionCapturePass,
       'surface.particles': runSurfaceParticlesPass,
+      'surface.cloudTops': runCloudTopsPass,
       'surface.precipitation': runSurfacePrecipitationPass,
       'vision.gate': runVisionGatePass,
       'post.bloom': runPostBloomPass,
@@ -8788,6 +8957,53 @@ export async function startVtPanViewer({
         // own declaration comment for why this is deliberately a different
         // number from the field's own capped silhouette.
         uCloudOvercast01.value = env.weather.cloudCover01;
+
+        // ── CLOUD TOPS (2026-09-12) — same recipe/field/drift phase as the
+        // ground shadow above, lit and drawn only when the camera has pulled
+        // back far enough (`cloudTopsGate`) — see cloud-shade.js's own header
+        // for the "rising through the decks" model this reads from.
+        const topsState = getCloudTopsRenderState?.() ?? null;
+        const tp = topsState?.params ?? {};
+        const topsOn = topsState?.enabled ?? false;
+        const topsOpacityDial = Number.isFinite(tp.opacity) ? tp.opacity : 1;
+        const topsZoomSensitivity = Number.isFinite(tp.zoomSensitivity) ? tp.zoomSensitivity : 1;
+        // ⚠️ FAILS ASLEEP (cloudTopsGate's own header) — no `view` this frame
+        // (the very first frame, or a caller with no camera at all) means no
+        // measurement, and an absent measurement must not draw a luxury sky
+        // view on top of whatever the caller IS trying to show.
+        const topsViewRect = topsOn && view ? viewToWorldRect(view, canvasW / canvasH) : null;
+        const topsGate = cloudTopsGate({
+          viewWidthWorldPx: topsViewRect ? topsViewRect.maxX - topsViewRect.minX : 0,
+          deckAltitudePx: env.weather.cloudAltitudePx,
+          zoomSensitivity: topsZoomSensitivity,
+        });
+        cloudTopsAwake = topsOn && topsGate.awake;
+        if (cloudTopsAwake) {
+          const topsElevRad = (skyHandle.key.elevationDeg * Math.PI) / 180;
+          uTopsSunDir.value.set(skyHandle.key.dirX, skyHandle.key.dirY);
+          uTopsSinElev.value = Math.sin(topsElevRad);
+          uTopsCosElev.value = Math.cos(topsElevRad);
+          uTopsTanElev.value = Math.max(0.02, Math.tan(topsElevRad));
+          // PRE-MULTIPLIED STRENGTH — see `uTopsKeyRgb`'s own construction
+          // comment for why this is load-bearing, not a style choice.
+          const [topsKr, topsKg, topsKb] = skyHandle.key.colorRgb;
+          uTopsKeyRgb.value.set(
+            topsKr * skyHandle.key.strength,
+            topsKg * skyHandle.key.strength,
+            topsKb * skyHandle.key.strength
+          );
+          const [topsFr, topsFg, topsFb] = skyHandle.fill.colorRgb;
+          uTopsFillRgb.value.set(
+            topsFr * skyHandle.fill.strength,
+            topsFg * skyHandle.fill.strength,
+            topsFb * skyHandle.fill.strength
+          );
+          uTopsViewCentre.value.set(view.centerXPx, view.centerYPx);
+          uTopsMagnification.value = topsGate.magnification;
+          uTopsOpacity.value = topsOpacityDial * topsGate.fade;
+        } else {
+          uTopsOpacity.value = 0;
+        }
       }
 
       // THE ENVIRONMENTAL GRADE (docs/planning/Grade.md) — resolved from THIS

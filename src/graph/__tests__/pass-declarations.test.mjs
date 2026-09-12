@@ -43,7 +43,15 @@ export function run(t) {
     // image, not the raw current frame. Neither bloom nor DoF could absorb
     // this (unrelated jobs); present.composite is the safety-slide boundary
     // and must not also own temporal-resolve logic.
-    t.ok('a sane number of passes (10-18, the promised ~10-12)', PASSES.length >= 10 && PASSES.length <= 18);
+    // ⚠️ CEILING RAISED 18 → 19 (2026-09-12, `surface.cloudTops`). Same bar
+    // again: load-bearing between two real neighbours (surface.particles,
+    // surface.precipitation — see run-frame.test.mjs's own comment on this
+    // exact ordering), not a pass that could have been folded into an
+    // existing one. Precipitation itself could not absorb this job — it is a
+    // genuinely separate mesh (the sky, not the rain), zoom-gated on its own,
+    // independent axis (camera height vs. deck altitude, never precipitation's
+    // own coverage/zoom rule).
+    t.ok('a sane number of passes (10-19, the promised ~10-12)', PASSES.length >= 10 && PASSES.length <= 19);
     t.ok(
       'every stage used is declared',
       PASSES.every((p) => STAGES.includes(p.stage))

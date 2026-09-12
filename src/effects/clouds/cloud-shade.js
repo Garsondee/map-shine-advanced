@@ -169,7 +169,7 @@ export const CLOUD_RELIEF_SCALE = 0.55;
  * @param {*} [args.footprintPx] - float node, world px per screen px. The
  *   gradient epsilon is floored at this, so the relief band-limits itself as
  *   the camera pulls back instead of turning to noise.
- * @returns {{rgb: *, alpha: *, normalZ: *, thickness: *}}
+ * @returns {{rgb: *, alpha: *, normalZ: *, thickness: *, diffuse: *, shadow: *, rim: *}}
  */
 export function buildCloudTopsNode(
   TSL,
@@ -430,4 +430,138 @@ export function buildCloudTopsNode(
   const rgb = rgbRaw.mul(compressed.div(max(peak, float(1e-4))));
 
   return { rgb, alpha, normalZ: N.z, thickness: T, diffuse: diff, shadow, rim };
+}
+
+// ---------------------------------------------------------------------------
+// THE ZOOM GATE AND PARALLAX — doc 02 §9, "rising through the decks"
+// ---------------------------------------------------------------------------
+//
+// Everything above answers "what does a lit cloud look like". This answers
+// two different questions: "should it be drawn at all right now" and "where,
+// exactly, does the camera see it relative to the ground". Both are pure CPU
+// math (no TSL) — see `cloudTopsGate` — plus one TSL remap of the sample
+// position (`buildCloudTopsParallaxWorldXY`) that every consumer applies
+// before calling `buildCloudTopsNode` above.
+//
+// ⭐ THE MODEL, per the design doc's own addendum (2026-09-06, superseding its
+// own earlier hand-picked-threshold draft): give the camera a virtual eye
+// height that RISES as the view pulls back, and let the gate, the fade and
+// the parallax all fall out of one comparison — `eyeHeightPx` vs. the deck's
+// own altitude — rather than three independently-tuned numbers. "Zooming out
+// should feel like pulling upwards through the cloud layers" (author,
+// verbatim) is what this buys: the tops appear exactly when the eye clears
+// the deck, loom largest right at that crossing, and flatten as the eye
+// keeps rising — a position, not a fudge factor.
+
+/** The eye height, as a multiple of the visible view WIDTH (world px) — the
+ * same "height as a multiple of view span, never an absolute" convention
+ * `water-light.js#WATER_TIER3_VIEWER_HEIGHT` and `specular-render.js#
+ * SPECULAR_DEFAULT_VIEWER_HEIGHT` already use, for the identical reason: an
+ * absolute height makes the effect vanish exactly when the author zooms in
+ * to look closely at it.
+ *
+ * Derived, not guessed: doc 02 §9 ties it to V2's own shipped, liked zoom
+ * thresholds (`CLOUD_TOP_FADE_START`/`END`, read back through V2's zoom
+ * convention) so that the low weather deck (a typical `cloudAltitudePx` of
+ * ~1400) starts clearing the eye at the same view width V2's tops began
+ * fading in at — "reusing a number that shipped and was liked beats
+ * inventing one." */
+export const CLOUD_TOPS_CAMERA_HEIGHT_PER_VIEW_WIDTH = 0.23;
+
+/** The hard ceiling on parallax magnification, `M = 1/(1 - parallax)`. As the
+ * eye height approaches the deck's own altitude, `deckAltitudePx/eyeHeightPx`
+ * grows without bound — at the singularity the whole screen would sample one
+ * point of the field, a flat wash. Doc 02 §9: "The clamp caps magnification
+ * at 1.82" (`1/(1-0.45)`), required, not cosmetic. */
+export const CLOUD_TOPS_MAX_PARALLAX = 0.45;
+
+/** How wide the appear/disappear fade band is, as a fraction of the deck's
+ * own altitude, centred on the `eyeHeightPx === deckAltitudePx` crossing.
+ *
+ * ⚠️ AN ENGINEERING CHOICE, NOT A NUMBER FROM THE DESIGN DOC OR FROM V2. Doc
+ * 02 §9 names the REQUIREMENT ("the fade band ... the eye crossing the
+ * deck's own thickness ... the band has a physical width") but a cloud
+ * deck's own vertical thickness is never given a number anywhere in this
+ * codebase (weather axes carry altitude, not thickness) — inventing one
+ * would be designing past what is actually specified. 0.35 is a middle
+ * ground picked to satisfy the doc's actual constraint (nothing pops: the
+ * band must be wide enough that `zoomFade`'s smoothstep has real width in
+ * eye-height terms) without unmoored guessing. Revisit by rendering once
+ * this is visible in a real scene, the same way every other look constant in
+ * this feature was tuned. */
+export const CLOUD_TOPS_DECK_THICKNESS_FRACTION = 0.35;
+
+/**
+ * Resolve the zoom gate for one cloud deck, from the current view's world
+ * width alone. Pure, Node-testable — no TSL, no THREE, no state.
+ *
+ * ⚠️ FAILS ASLEEP — the deliberate OPPOSITE of the precipitation zoom gate
+ * (`precip-subsystem.js#updateZoomGate`, which fails AWAKE so an absent
+ * measurement never silently deletes falling weather). Doc 02 §5.2: a
+ * missing cloud top is a missing luxury nobody is harmed by, while a top
+ * drawn at playing zoom sits on top of the map the players are using,
+ * obscuring tokens, with no way for the user to tell why — a usability
+ * failure the absent-awake default would create by accident on every scene
+ * that fails to report a view width (there is no such scene today, but the
+ * asymmetry is the honest default regardless).
+ *
+ * @param {object} args
+ * @param {number} args.viewWidthWorldPx - the current view's world-px width
+ *   (e.g. `viewToWorldRect(view, aspect).maxX - .minX`). Non-finite or <= 0
+ *   is treated as "no measurement".
+ * @param {number} args.deckAltitudePx - `env.weather.cloudAltitudePx`.
+ * @param {number} [args.zoomSensitivity] - author-facing multiplier on
+ *   {@link CLOUD_TOPS_CAMERA_HEIGHT_PER_VIEW_WIDTH} (CLOUD_TOPS_PARAMS'
+ *   `zoomSensitivity`, default 1). Higher = the eye rises faster per unit of
+ *   zoom-out = tops appear at a LESS zoomed-out view. This whole feature has
+ *   never been seen in a real Foundry scene (shader-lab-only to date), so a
+ *   live multiplier on the one derived constant is the honest way to let an
+ *   author correct it without a code change, the same "ship wide ranges, let
+ *   the author find the value" posture every other Clouds dial already took.
+ * @returns {{eyeHeightPx: number, awake: boolean, fade: number, parallax: number, magnification: number}}
+ *   `awake`: whether the draw should be submitted at all (Law 4 — the test
+ *   at the START of the fade band, per doc 02 §5.3, not the end, so nothing
+ *   pops). `fade`: 0..1, multiply into alpha/opacity. `parallax`/
+ *   `magnification`: doc 02 §4.1's `M = 1/(1-parallax)`, for
+ *   {@link buildCloudTopsParallaxWorldXY}.
+ */
+export function cloudTopsGate({ viewWidthWorldPx, deckAltitudePx, zoomSensitivity = 1 }) {
+  const width = Number.isFinite(viewWidthWorldPx) ? viewWidthWorldPx : 0;
+  const altitude = Number.isFinite(deckAltitudePx) ? deckAltitudePx : 0;
+  const sensitivity = Number.isFinite(zoomSensitivity) && zoomSensitivity > 0 ? zoomSensitivity : 1;
+  if (width <= 0 || altitude <= 0) {
+    return { eyeHeightPx: 0, awake: false, fade: 0, parallax: 0, magnification: 1 };
+  }
+  const eyeHeightPx = CLOUD_TOPS_CAMERA_HEIGHT_PER_VIEW_WIDTH * sensitivity * width;
+  const bandHalfWidth = altitude * CLOUD_TOPS_DECK_THICKNESS_FRACTION;
+  const fadeStart = altitude - bandHalfWidth;
+  const fadeEnd = altitude + bandHalfWidth;
+  const awake = eyeHeightPx > fadeStart;
+  const fadeT =
+    fadeEnd > fadeStart ? (eyeHeightPx - fadeStart) / (fadeEnd - fadeStart) : eyeHeightPx > fadeStart ? 1 : 0;
+  const s = fadeT < 0 ? 0 : fadeT > 1 ? 1 : fadeT;
+  const fade = s * s * (3 - 2 * s);
+  const parallaxRaw = eyeHeightPx > 1e-6 ? altitude / eyeHeightPx : CLOUD_TOPS_MAX_PARALLAX;
+  const parallax = Math.min(CLOUD_TOPS_MAX_PARALLAX, Math.max(0, parallaxRaw));
+  const magnification = 1 / (1 - parallax);
+  return { eyeHeightPx, awake, fade, parallax, magnification };
+}
+
+/**
+ * The one TSL remap every tops consumer applies before sampling the field:
+ * "magnified about the view centre by `M`" (doc 02 §4.1). Never applied to
+ * the shadow path — a cloud shadow is a fact about the ground and must not
+ * move when the camera does; only the tops draw reads the view centre at
+ * all (doc 02 §4.2's two numbered consequences).
+ *
+ * @param {object} TSL
+ * @param {*} worldXY - vec2 node, the fragment's true world position (e.g.
+ *   `positionWorld.xy` on the tops quad).
+ * @param {*} viewCentre - vec2 uniform node, the current view's world-space
+ *   centre (e.g. `(view.centerXPx, view.centerYPx)`).
+ * @param {*} magnification - float uniform node, `cloudTopsGate`'s own `M`.
+ * @returns {*} vec2 node — pass this as `buildCloudTopsNode`'s `worldXY`.
+ */
+export function buildCloudTopsParallaxWorldXY(TSL, worldXY, viewCentre, magnification) {
+  return viewCentre.add(worldXY.sub(viewCentre).div(magnification));
 }

@@ -113,8 +113,16 @@ export function run(t) {
     // present.composite: AFTER bloom/DoF, so temporal accumulation includes
     // every additive effect, and BEFORE present so grade tonemaps the
     // RESOLVED image, not the raw current frame.
+    // `surface.cloudTops` joined 2026-09-12, between surface.particles and
+    // surface.precipitation — both neighbours load-bearing: AFTER the light/
+    // particle draws (nothing about "is there a cloud in front of the sky
+    // here" depends on them), and BEFORE surface.precipitation because
+    // clouds sit physically ABOVE rain, so rain must draw on top of/in front
+    // of them (the same "AFTER additive draws, BEFORE the next thing that is
+    // physically in front" reasoning surface.precipitation's own comment
+    // above already states for its relationship to vision.gate).
     const expected =
-      'masks.occlusion,geometry.world,light.accumulate,surface.response,surface.water,surface.particles,surface.precipitation,vision.gate,post.bloom,post.dof,post.taaResolve,present.composite';
+      'masks.occlusion,geometry.world,light.accumulate,surface.response,surface.water,surface.particles,surface.cloudTops,surface.precipitation,vision.gate,post.bloom,post.dof,post.taaResolve,present.composite';
     ok(`today's real masks..present plan is exactly [${expected}] (got: ${ids.join(',')})`, ids.join(',') === expected);
     ok(
       'surface.response is planned AFTER light.accumulate — it reads what that pass writes',

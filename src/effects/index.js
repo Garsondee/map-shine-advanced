@@ -721,9 +721,22 @@ export {
   CLOUD_RIM_GAIN,
   CLOUD_MS_GAIN,
   CLOUD_RELIEF_SCALE,
+  // THE ZOOM GATE + PARALLAX (2026-09-12) — doc 02 §9's "rising through the
+  // decks" model. Pure CPU math plus one TSL sample remap; see cloud-shade.js's
+  // own header for why these sit beside the shading rather than in a new file.
+  cloudTopsGate,
+  buildCloudTopsParallaxWorldXY,
+  CLOUD_TOPS_CAMERA_HEIGHT_PER_VIEW_WIDTH,
+  CLOUD_TOPS_MAX_PARALLAX,
+  CLOUD_TOPS_DECK_THICKNESS_FRACTION,
 } from './clouds/cloud-shade.js';
 // CLOUDS — the LOOK layer's own manifest + params schema (shadow/window/
 // point-light mood), same declaration-only shape as depth-of-field.js's own
 // door just above. The field/tops exports just above this are UNRELATED to
 // this one (a field property vs an authored look), not a duplicate door.
 export { CLOUD_LOOK, CLOUD_LOOK_PARAMS, cloudLookDefaults } from './clouds/clouds.js';
+// CLOUD TOPS — a genuinely separate effect manifest from CLOUD_LOOK above
+// (see cloud-tops.js's own header for why): the lit cloud shapes seen from
+// above, zoom-gated with parallax. Landed 2026-09-12 — previously a
+// deferred rung on CLOUD_LOOK with zero callers of the shading it already had.
+export { CLOUD_TOPS, CLOUD_TOPS_PARAMS, cloudTopsDefaults } from './clouds/cloud-tops.js';

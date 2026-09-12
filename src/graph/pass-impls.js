@@ -150,6 +150,20 @@ export const PASS_IMPLS = Object.freeze({
       'driven like the wind sim, not by runPassPlan. Not separately invocable: the loop lives inside ' +
       'startVtPanViewer, same caveat as geometry.world.',
   },
+  'surface.cloudTops': {
+    fn: startVtPanViewer,
+    module: 'vt/index.js',
+    export: 'startVtPanViewer',
+    separatelyInvocable: false,
+    note:
+      'REAL as of 2026-09-12: runCloudTopsPass (a closure inside startVtPanViewer, in the local ' +
+      "passImpls map runPassPlan walks) renders a lazily-built quad — cloud-shade.js's own " +
+      'buildCloudTopsNode, parallax-remapped by cloudTopsGate — over the lit world, positioned before ' +
+      'surface.precipitation so rain draws in front of the clouds it falls from. Gated on `cloudTopsAwake` ' +
+      "(the zoom gate; JS early-return, no GPU work below it — Effects.md Law 4), same 'submits nothing " +
+      "on a clear/zoomed-in frame' shape surface.precipitation's own gate already takes. Same " +
+      'invocability caveat as geometry.world: the loop lives inside startVtPanViewer.',
+  },
   'surface.precipitation': {
     fn: startVtPanViewer,
     module: 'vt/index.js',

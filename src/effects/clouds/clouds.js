@@ -301,14 +301,13 @@ export const CLOUD_LOOK = Object.freeze({
     }),
   ]),
   // Recorded, NOT built — honest rungs (Effects.md §0).
+  //
+  // ⚠️ `cloud-tops` USED TO BE HERE. Landed 2026-09-12 as its own manifest,
+  // `effects/clouds/cloud-tops.js#CLOUD_TOPS` — not promoted to a tier of
+  // THIS manifest, per the note this entry used to carry verbatim: "a
+  // genuinely separate feature ... not a missing tier of them." See that
+  // file's own header for the full split.
   deferredRungs: Object.freeze([
-    Object.freeze({
-      name: 'cloud-tops',
-      note:
-        'lit cloud shapes seen from above, zoom-gated with parallax (docs 02) — effects/clouds/cloud-shade.js ' +
-        'already builds the shading; nothing calls it from the live viewer yet. A genuinely separate feature ' +
-        "from this manifest's own shadow/mood params, not a missing tier of them.",
-    }),
     Object.freeze({
       name: 'streak-and-tap-count-as-live-params',
       note:

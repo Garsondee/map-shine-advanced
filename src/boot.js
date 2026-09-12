@@ -378,6 +378,8 @@ import {
   dofPreset,
   CLOUD_LOOK,
   CLOUD_LOOK_PARAMS,
+  CLOUD_TOPS,
+  CLOUD_TOPS_PARAMS,
   SUN_SHADOWS,
   layerSmearTierPlan,
   SUN_SHADOW_PARAMS,
@@ -1918,6 +1920,13 @@ function install() {
   /** Clouds LOOK readout — same seed posture as DOF's own, above, and for
    * the identical reason (`CLOUD_LOOK.enabledFromProfile === 'low'`). */
   let cloudsReadout = { enabled: true, params: null };
+  /** Cloud TOPS readout — same seed posture, even though `CLOUD_TOPS.
+   * enabledFromProfile === 'standard'` (not `'low'`): seeding `false` would
+   * misrepresent the boot window on any profile that DOES already clear
+   * 'standard', the same gap `EFFECT_REAPPLIERS` exists to close for every
+   * other effect here. The real cascade resolve (at ready) is what actually
+   * decides, same as every other readout on this list. */
+  let cloudTopsReadout = { enabled: true, params: null };
   let sunShadowReadout = { enabled: false, params: null };
   /** Door-graphics READOUT — same posture as the readouts above: what the last
    * apply resolved (enable + the motion params the viewer's door manager reads). */
@@ -2134,6 +2143,10 @@ function install() {
     cloudsReadout = buildCascadeReadout(resolved);
   });
 
+  effectRegistry.register(CLOUD_TOPS, (resolved) => {
+    cloudTopsReadout = buildCascadeReadout(resolved);
+  });
+
   // SUN SHADOWS (docs/planning/Sun-Shadows.md) — building + overhead +
   // sky-reach as ONE height field. `apply` does two things rather than one,
   // because this effect's params split across two owners:
@@ -2333,6 +2346,20 @@ function install() {
     effectRegistry.resolveAndApply('clouds', layers);
   }
 
+  /** Transient, in-memory cloud-tops param tuning. Mirrors cloudsLiveOverride
+   * exactly — a genuinely separate cascade from 'clouds' (CLOUD_TOPS is its
+   * own manifest, see cloud-tops.js's own header). */
+  const cloudTopsLiveOverride = {};
+
+  /** Re-resolve the cloud-tops cascade. Mirrors reapplyClouds exactly; called
+   * on settings change, on ready, and by MapShine.setCloudTops. */
+  function reapplyCloudTops() {
+    const layers = deriveEffectLayers('cloudTops', (key) => readSetting(MODULE_ID, key));
+    const { params: sceneParams } = readSceneEffectParams('cloudTops');
+    layers.paramLayers = [sceneParams, cloudTopsLiveOverride].filter(Boolean);
+    effectRegistry.resolveAndApply('cloudTops', layers);
+  }
+
   /** Transient live override + re-resolve for SUN SHADOWS. Mirrors reapplyBloom
    * exactly (docs/planning/Sun-Shadows.md), including its Stage B scene-param
    * layer (mythica-machina-press#288/#389). */
@@ -2475,6 +2502,7 @@ function install() {
     ['bloom', () => reapplyBloom()],
     ['depth of field', () => reapplyDof()],
     ['clouds', () => reapplyClouds()],
+    ['cloud tops', () => reapplyCloudTops()],
     ['colour grade', () => reapplyGradeLook()],
     // Sun shadows MUST run per scene, not only at boot: this apply is what pushes
     // the new scene's `distancePixels` into the caster-height derivation, and an
@@ -3476,6 +3504,40 @@ function install() {
     return { ...cloudsLiveOverride };
   };
 
+  // MapShine.setCloudTops — the Cloud Tops card's write path. Mirrors
+  // setClouds exactly (a genuinely separate cascade — see cloud-tops.js).
+  MapShine.setCloudTops = (partial = {}) => {
+    const p = partial ?? {};
+    if (typeof p.enabled === 'boolean') {
+      Promise.resolve(writeSetting(MODULE_ID, effectEnableKey('cloudTops', 'player'), p.enabled ? 'on' : 'off'))
+        .then(() => reapplyCloudTops())
+        .catch((err) => log.error('cloud tops enable write/reapply failed:', err));
+    }
+    let changed = false;
+    const scenePatch = {};
+    for (const k of Object.keys(CLOUD_TOPS_PARAMS)) {
+      if (k in p) {
+        cloudTopsLiveOverride[k] = p[k];
+        if (CLOUD_TOPS_PARAMS[k]?.scope !== 'client') scenePatch[k] = p[k];
+        changed = true;
+      }
+    }
+    if (changed) {
+      Promise.resolve(writeSceneEffectParams('cloudTops', scenePatch)).then(
+        (result) => {
+          if (!result.ok) log.warn(`cloud tops scene param write not persisted: ${result.reason}`);
+        },
+        (err) => log.error('cloud tops scene param write failed:', err)
+      );
+      try {
+        reapplyCloudTops();
+      } catch (err) {
+        log.error('cloud tops reapply (setCloudTops) failed:', err);
+      }
+    }
+    return { ...cloudTopsLiveOverride };
+  };
+
   // MapShine.setGrade — the Colour Grade card's + preset picker's + console
   // write path (mirrors MapShine.setBloom). A full preset object (gradePreset
   // (name)) or a single knob: MapShine.setGrade({ contrast: 1.2, toneMapping: 'aces' })
@@ -3619,6 +3681,13 @@ function install() {
   const getCloudsRenderState = () => {
     const state = projectCascadeRenderState(cloudsReadout);
     return { ...state, params: wrapForReadTracking('clouds', state.params ?? {}) };
+  };
+
+  /** Cloud tops' own render-state getter — mirrors getCloudsRenderState
+   * exactly, reading the separate `cloudTopsReadout` cascade. */
+  const getCloudTopsRenderState = () => {
+    const state = projectCascadeRenderState(cloudTopsReadout);
+    return { ...state, params: wrapForReadTracking('cloudTops', state.params ?? {}) };
   };
 
   // SUN SHADOWS' two seams into the viewer (docs/planning/Sun-Shadows.md).
@@ -10173,6 +10242,30 @@ function install() {
     extra: () => MapShine.debug.buildEffectAttachments('clouds'),
   });
 
+  // CLOUD TOPS — a separate card for a separate manifest (CLOUD_TOPS), landed
+  // 2026-09-12: the lit cloud shapes seen from above, zoom-gated with
+  // parallax. `cloud-shade.js#buildCloudTopsNode` had built the shading since
+  // slice A (2026-09-06); nothing called it until this card's own effect went
+  // live. Same door as the 'clouds' card just above.
+  registerSimpleEffectCard('cloudTops', {
+    icon: 'cloud',
+    title: 'Cloud Tops',
+    accVar: '--c-atmos',
+    filterCategory: 'atmos',
+    schema: CLOUD_TOPS_PARAMS,
+    fohKeys: ['opacity'],
+    getReadout: () => cloudTopsReadout,
+    setValue: (patch) => MapShine.setCloudTops(patch),
+    // `enabledFromProfile: 'standard'` (cloud-tops.js's own header) means a
+    // `performance`/`low` profile resolves `enabled: false` here the same way
+    // an explicit off-toggle would (`resolveEffectEnabled`, shared with every
+    // other card) — worth saying plainly rather than leaving a silent
+    // "opacity slider does nothing" report on a lower-tier client.
+    status: () =>
+      getCloudTopsRenderState().enabled === false ? 'off (or below Standard performance)' : 'zoom out to see',
+    extra: () => MapShine.debug.buildEffectAttachments('cloudTops'),
+  });
+
   // UI parity plan, phase 7b: buildAstrolabeOptions() + its registerPanel
   // ('astrolabe', the old panel's own dial via createAstrolabe()) are both
   // deleted along with the rest of the old UI. Every handler that lived
@@ -11593,6 +11686,12 @@ function install() {
         // replacing the plain-JS defaults/uniform-at-construction-value it
         // used before this cascade existed.
         getCloudsRenderState,
+        // CLOUD TOPS (effects/clouds/cloud-tops.js) — a genuinely separate
+        // cascade from CLOUD_LOOK just above (see that file's own header).
+        // The viewer's own runCloudTopsPass reads `.params`/`.enabled` off
+        // this fresh every frame, the identical posture the ground-shadow
+        // seam just above already takes.
+        getCloudTopsRenderState,
         // PRECIPITATION's CASCADE STATE (2026-08-30) — only `enabled`/
         // `perfTier`; vt-pan-viewer.js's own getPrecipRenderState still owns
         // everything else (env snapshot, viewport size, scene bounds) it has

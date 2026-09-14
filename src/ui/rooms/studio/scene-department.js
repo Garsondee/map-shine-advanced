@@ -75,6 +75,9 @@ function realCard(icon, title, bodyHtml) {
  * @param {() => number} [ctx.getDarknessRealism] - 0..1, the real value MapShine.getDarknessRealism()
  *   reads; omitted hides the card (UI parity plan, phase 4a).
  * @param {(v: number) => void} [ctx.setDarknessRealism]
+ * @param {() => {ok: boolean, reason?: string, effectIds?: string[]}} [ctx.copySceneEffectSettings] -
+ *   MapShine.copySceneEffectSettings (mythica-machina-press#12); omitted hides the card.
+ * @param {() => Promise<{ok: boolean, reason?: string, effectIds?: string[]}>} [ctx.pasteSceneEffectSettings]
  * @returns {string} department subtitle.
  */
 export function renderSceneDepartment(container, ctx) {
@@ -119,6 +122,61 @@ export function renderSceneDepartment(container, ctx) {
           .join('')}</div>`
       : `<p style="margin:0; font-size:.72rem; color:var(--ink2)">Mask board data not available.</p>`;
   grid.append(realCard('gem', 'Masks aboard', maskBody));
+
+  // COPY/PASTE SCENE SETTINGS (mythica-machina-press#12) — the backend
+  // (MapShine.copySceneEffectSettings/pasteSceneEffectSettings,
+  // foundry/effect-param-persistence.js) has existed since that issue's own
+  // commit; this card is the one piece that was still missing — a Studio
+  // button, rather than requiring the console. An in-memory clipboard, not a
+  // saved/named library (that's #102's separate, per-EFFECT preset system,
+  // on each effect's own card) — "copy this scene, go paste it on that one"
+  // in the same session, nothing persisted between reloads.
+  if (typeof ctx.copySceneEffectSettings === 'function' && typeof ctx.pasteSceneEffectSettings === 'function') {
+    const copyPasteCard = realCard(
+      'map',
+      'Copy/paste scene settings',
+      '<p style="margin:0 0 8px; font-size:.72rem; color:var(--ink2)">Copy every effect\'s authored look from this scene, then switch scenes and paste — an in-memory clipboard for this session only.</p>'
+    );
+    const status = document.createElement('p');
+    Object.assign(status.style, { margin: '0 0 8px', fontSize: '.7rem', color: 'var(--ink2)' });
+    status.textContent = 'Nothing copied yet.';
+    const btnRow = document.createElement('div');
+    Object.assign(btnRow.style, { display: 'flex', gap: '6px' });
+    const mkBtn = (label) => {
+      const b = document.createElement('button');
+      b.textContent = label;
+      Object.assign(b.style, {
+        background: 'var(--bg2, #23262d)',
+        color: 'var(--ink0)',
+        border: '1px solid var(--line)',
+        borderRadius: '6px',
+        padding: '3px 10px',
+        cursor: 'pointer',
+        fontSize: '.72rem',
+      });
+      return b;
+    };
+    const copyBtn = mkBtn('Copy from this scene');
+    copyBtn.addEventListener('click', () => {
+      const res = ctx.copySceneEffectSettings();
+      status.textContent = res.ok
+        ? `Copied ${res.effectIds.length} effect(s) — switch scenes, then Paste.`
+        : `Nothing to copy: ${res.reason}`;
+      status.style.color = res.ok ? 'var(--ok, #6c6)' : 'var(--ink2)';
+    });
+    const pasteBtn = mkBtn('Paste into this scene');
+    pasteBtn.addEventListener('click', () => {
+      Promise.resolve(ctx.pasteSceneEffectSettings()).then((res) => {
+        status.textContent = res.ok
+          ? `Pasted ${res.effectIds.length} effect(s) onto this scene.`
+          : `Paste failed: ${res.reason}`;
+        status.style.color = res.ok ? 'var(--ok, #6c6)' : 'var(--fail)';
+      });
+    });
+    btnRow.append(copyBtn, pasteBtn);
+    copyPasteCard.append(status, btnRow);
+    grid.append(copyPasteCard);
+  }
 
   // DARKNESS AT MAX (UI parity plan, phase 4a) — the old panel's own
   // Bridge-zone 'darkness-realism' select, real port: same real backend

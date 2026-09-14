@@ -1309,6 +1309,11 @@ function install() {
       // a second implementation.
       getDarknessRealism: () => getDarknessRealism(),
       setDarknessRealism: (v) => setDarknessRealism(v),
+      // COPY/PASTE SCENE SETTINGS (mythica-machina-press#12) — thin
+      // pass-throughs onto the console/macro API of the same name, which
+      // already existed; this Scene-department card was the missing UI.
+      copySceneEffectSettings: () => MapShine.copySceneEffectSettings(),
+      pasteSceneEffectSettings: () => MapShine.pasteSceneEffectSettings(),
     });
     // Flush every card registered before __studio existed (see
     // registerEffectCardSafe's own comment above) — one-time, in the same

@@ -1178,6 +1178,8 @@ export async function startVtPanViewer({
   getCloudsRenderState,
   getCloudTopsRenderState,
   getGradeLookState,
+  // STYLIZE (mythica-machina-press#36) — same injected-state shape as grade.
+  getStylizeState,
   // PRECIPITATION'S CASCADE STATE (2026-08-30) — deliberately separate from
   // getPrecipRenderState below, which stays defined IN this file (it mixes
   // in viewer-internal state — the env snapshot, viewport size, scene
@@ -1462,6 +1464,9 @@ export async function startVtPanViewer({
   // THE COLOUR GRADE (Look) effect's resolved state — same injection shape as
   // bloom. Default disabled ⇒ the artistic grade is identity (parity holds).
   getGradeLookState ??= () => ({ enabled: false, params: {} });
+  // STYLIZE (mythica-machina-press#36) — default disabled ⇒ no style applied
+  // (parity holds), same posture as grade's own default just above.
+  getStylizeState ??= () => ({ enabled: false, params: {} });
   // THE SAFETY SLIDE'S seam-restore hook (see the renderer.onDeviceLost handler
   // below). Injected exactly like the others so vt/ stays ignorant of the
   // interface seam: the composition root (boot.js) wires this to
@@ -9054,6 +9059,11 @@ export async function startVtPanViewer({
       // ⇒ identity + no tone map, so parity holds. The LUT texture is swapped
       // lazily when the name changes (loadNamedLut), not per frame.
       pushGradeLook();
+      // STYLIZE (mythica-machina-press#36) — reads its own resolved cascade
+      // state independently of grade's, since it is a separate registered
+      // effect; runs strictly after grade in grade-present.js's own tail
+      // either way, so ordering here doesn't matter.
+      pushStylize();
 
       const clock = dayClock.read();
       lastEnvSnapshot = {
@@ -9497,6 +9507,23 @@ export async function startVtPanViewer({
       stage: READINESS_STAGE.STREAM,
       read: () => (lutLoadInFlight ? 1 : 0),
     });
+
+    /**
+     * Read the Stylize effect's resolved params and push them to the present
+     * material (mythica-machina-press#36). A separate registered effect from
+     * Colour Grade — disabled or style 'none' both resolve to "no style",
+     * matching grade-present.js's own `styled ? mix(...) : gradedArt` no-op
+     * contract when nothing is picked.
+     */
+    function pushStylize() {
+      const st = getStylizeState();
+      if (!st?.enabled) {
+        gradePresent.setStylize('none', 0);
+        return;
+      }
+      const p = st.params || {};
+      gradePresent.setStylize(p.style ?? 'none', p.amount ?? 1);
+    }
 
     // THE OCCLUSION MASK — a REAL render target as of 2026-07-18. The MASK
     // TEXTURE ITSELF is still RADIAL-only (see the clear-value breakdown

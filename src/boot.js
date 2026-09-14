@@ -401,6 +401,8 @@ import {
   gradePreset,
   GRADE,
   GRADE_LOOK_PARAMS,
+  STYLIZE,
+  STYLIZE_PARAMS,
   PRECIPITATION,
   PRECIPITATION_PARAMS,
   buildCascadeReadout,
@@ -2274,6 +2276,15 @@ function install() {
     };
   });
 
+  // STYLIZE (mythica-machina-press#36) — the selectable whole-frame look
+  // (Sepia/Invert today), folded into grade-present.js's own final tail.
+  // Same "readout-only apply, viewer's per-frame push does the real work"
+  // shape as Colour Grade just above.
+  let stylizeReadout = { enabled: false, params: null };
+  effectRegistry.register(STYLIZE, (resolved) => {
+    stylizeReadout = { enabled: resolved.enabled, params: resolved.params };
+  });
+
   // DOOR GRAPHICS — MSA's fifth registered effect, ported from V2's
   // DoorMeshManager, through the SAME one door. Not anchor-driven: its
   // "instances" are the scene's own textured door walls (foundry/scene-doors.js),
@@ -2410,6 +2421,16 @@ function install() {
     const { params: sceneParams } = readSceneEffectParams('grade');
     layers.paramLayers = [sceneParams, gradeLookLiveOverride].filter(Boolean);
     effectRegistry.resolveAndApply('grade', layers);
+  }
+
+  /** Transient live override + re-resolve for the Stylize effect
+   * (mythica-machina-press#36). Mirrors reapplyGradeLook exactly. */
+  const stylizeLiveOverride = {};
+  function reapplyStylize() {
+    const layers = deriveEffectLayers('stylize', (key) => readSetting(MODULE_ID, key));
+    const { params: sceneParams } = readSceneEffectParams('stylize');
+    layers.paramLayers = [sceneParams, stylizeLiveOverride].filter(Boolean);
+    effectRegistry.resolveAndApply('stylize', layers);
   }
 
   /** Transient, in-memory candle param tuning (MapShine.setCandle) — the
@@ -3604,9 +3625,46 @@ function install() {
     return { ...gradeLookLiveOverride };
   };
 
+  // MapShine.setStylize (mythica-machina-press#36) — mirrors MapShine.setGrade
+  // exactly, same shape, smaller schema: MapShine.setStylize({ style: 'sepia' })
+  MapShine.setStylize = (partial = {}) => {
+    const p = partial ?? {};
+    if (typeof p.enabled === 'boolean') {
+      Promise.resolve(writeSetting(MODULE_ID, effectEnableKey('stylize', 'player'), p.enabled ? 'on' : 'off'))
+        .then(() => reapplyStylize())
+        .catch((err) => log.error('stylize enable write/reapply failed:', err));
+    }
+    let changed = false;
+    const scenePatch = {};
+    for (const k of Object.keys(STYLIZE_PARAMS)) {
+      if (k in p) {
+        stylizeLiveOverride[k] = p[k];
+        if (STYLIZE_PARAMS[k]?.scope !== 'client') scenePatch[k] = p[k];
+        changed = true;
+      }
+    }
+    if (changed) {
+      Promise.resolve(writeSceneEffectParams('stylize', scenePatch)).then(
+        (result) => {
+          if (!result.ok) log.warn(`stylize scene param write not persisted: ${result.reason}`);
+        },
+        (err) => log.error('stylize scene param write failed:', err)
+      );
+      try {
+        reapplyStylize();
+      } catch (err) {
+        log.error('stylize reapply (setStylize) failed:', err);
+      }
+    }
+    return { ...stylizeLiveOverride };
+  };
+
   /** The Colour Grade effect's render state, injected into the viewer (which
    * owns the GPU and must not reach the registry). Cheap per-frame read. */
   const getGradeLookState = () => ({ enabled: gradeLookReadout.enabled, params: gradeLookReadout.params ?? {} });
+  /** The Stylize effect's render state (mythica-machina-press#36), same
+   * injected-getter shape as getGradeLookState just above. */
+  const getStylizeState = () => ({ enabled: stylizeReadout.enabled, params: stylizeReadout.params ?? {} });
 
   // THE CANDLE EFFECT's render-state seam, injected into the viewer (vt-pan-
   // viewer.js owns the GPU; it must not reach the authority/registry). Returns
@@ -8483,6 +8541,18 @@ function install() {
     presets: { table: GRADE_PRESETS, pick: gradePreset },
   });
 
+  registerSimpleEffectCard('stylize', {
+    icon: 'camera',
+    title: 'Stylize',
+    accVar: '--c-post',
+    filterCategory: 'post',
+    schema: STYLIZE_PARAMS,
+    fohKeys: ['style', 'amount'],
+    getReadout: () => stylizeReadout,
+    setValue: (patch) => MapShine.setStylize(patch),
+    getHealth: () => getParamHealth('stylize', STYLIZE_PARAMS),
+  });
+
   // REGION DARKNESS OVERRIDE — deliberately NOT wired through MapShine.setGrade's
   // own pattern (an in-memory, per-client, non-persisted `paramLayers` override):
   // this card edits two genuine world-scoped `game.settings` (see
@@ -11758,6 +11828,9 @@ function install() {
         // THE COLOUR GRADE (Look) effect — same shape as bloom; the viewer's
         // per-frame pushGradeLook reads the cascade-resolved enable + params.
         getGradeLookState,
+        // STYLIZE (mythica-machina-press#36) — same injected-getter shape,
+        // read by the viewer's own per-frame push alongside pushGradeLook.
+        getStylizeState,
         // THE WIND OVERLAY's per-point exposure seam (Wind.md) — same
         // real-scene-only reasoning as getCandleRenderState just above (the
         // torture fixture has no mask authority data to sample either).

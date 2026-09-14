@@ -35,6 +35,9 @@
 
 import { buildGradeNode, IDENTITY_GRADE } from './grade-ops.js';
 import { buildOutdoorsGate } from '../lighting/environmental-light.js';
+import { STYLIZE_LOOK_NAMES } from '../stylize.js';
+
+const STYLE_NAMES_SAFE = new Set(STYLIZE_LOOK_NAMES);
 
 /** Make the grade's uniform nodes (the primary ops + the live LUT strength). */
 function makeGradeUniforms(TSL, withTail) {
@@ -94,7 +97,7 @@ function writeGradeUniforms(u, params) {
  *   use for "this material needs something from outside its own zone."
  *   Omit → the render-scale governor's post-upscale sharpen never compiles
  *   in, same as never calling `setPostUpscaleSharpenActive`.
- * @returns {{ material, presentTexNode, setEnvGrade, setArtGrade, setLut, setPostUpscaleSharpenActive, rebindLit, gateCompiled }}
+ * @returns {{ material, presentTexNode, setEnvGrade, setArtGrade, setStylize, setLut, setPostUpscaleSharpenActive, rebindLit, gateCompiled }}
  */
 export function buildGradePresentMaterial({
   THREE,
@@ -106,7 +109,7 @@ export function buildGradePresentMaterial({
   buildPostUpscaleSharpenNode,
 }) {
   const TSL = THREE.TSL;
-  const { texture, vec4, mix, uv } = TSL;
+  const { texture, vec3, vec4, mix, uv, dot, uniform, float } = TSL;
 
   const presentTexNode = texture(litTexture);
   const uEnv = makeGradeUniforms(TSL, false);
@@ -128,6 +131,41 @@ export function buildGradePresentMaterial({
    * Ships `false`: neutral until the governor ever actually renders below
    * native, matching this whole file's "ships neutral" header promise. */
   let sharpenActive = false;
+  /** The Stylize effect's `style` currently BAKED into the fragment
+   * (mythica-machina-press#36) — same "different Fn per choice, so a
+   * compile-time rebuild, not a uniform switch" reasoning as
+   * `currentToneMapping` right above. `amount` (how much to blend the style
+   * in) is a live uniform, `uStylizeAmount` below — it doesn't need a
+   * rebuild, only the CHOICE of transform does. */
+  let currentStyle = 'none';
+  const uStylizeAmount = uniform(float(0));
+
+  /**
+   * The Stylize effect's per-style colour transform, applied to the fully
+   * graded/tone-mapped/LUT'd colour (i.e. strictly AFTER Colour Grade's own
+   * tail) — matching V2's own `post.grade absorbs SepiaEffectV2` placement.
+   * `null` for 'none' (and any future not-yet-built style) so the caller can
+   * skip the mix entirely rather than blending toward a no-op.
+   * @param {*} rgb - the graded colour node to transform.
+   * @param {string} style
+   * @returns {*|null}
+   */
+  function buildStylizeNode(rgb, style) {
+    if (style === 'sepia') {
+      // The standard sepia matrix (W3C Filter Effects' own `feColorMatrix`
+      // sepia values) — a real, published formula, not a from-scratch guess.
+      // Clamped: the matrix's row sums exceed 1, so a bright input can
+      // overshoot before this.
+      const r = dot(rgb, vec3(0.393, 0.769, 0.189));
+      const g = dot(rgb, vec3(0.349, 0.686, 0.168));
+      const b = dot(rgb, vec3(0.272, 0.534, 0.131));
+      return vec3(r, g, b).clamp(0, 1);
+    }
+    if (style === 'invert') {
+      return vec3(1, 1, 1).sub(rgb);
+    }
+    return null;
+  }
 
   /** (Re)build the fragment node for the current tone-map selection AND the
    * current post-upscale-sharpen active state. The env grade and the LUT are
@@ -156,7 +194,14 @@ export function buildGradePresentMaterial({
       lutTexture: lutTexNode,
       lutStrength: uArt.lutStrength,
     });
-    material.fragmentNode = vec4(gradedArt, presentTexNode.a);
+    // STYLIZE (mythica-machina-press#36) — strictly after Colour Grade's own
+    // tail, so a picked style layers on top of exposure/tone-map/LUT rather
+    // than competing with them. `null` (style 'none', the default) skips the
+    // mix entirely — byte-identical to before this effect existed, same
+    // "omitted input compiles to nothing" contract as `lutTexture` above.
+    const styled = buildStylizeNode(gradedArt, currentStyle);
+    const finalRgb = styled ? mix(gradedArt, styled, uStylizeAmount) : gradedArt;
+    material.fragmentNode = vec4(finalRgb, presentTexNode.a);
     material.needsUpdate = true;
   }
   rebuildFragment();
@@ -166,6 +211,20 @@ export function buildGradePresentMaterial({
     presentTexNode,
     /** Push this frame's environmental grade (resolved from env). */
     setEnvGrade: (params) => writeGradeUniforms(uEnv, params),
+    /**
+     * Push the Stylize effect's resolved params (mythica-machina-press#36).
+     * Rebuilds ONLY if `style` actually changed (compile-time, same posture
+     * as `setArtGrade`'s tone-map handling) — `amount` alone never rebuilds.
+     * @param {string} style @param {number} amount
+     */
+    setStylize: (style, amount) => {
+      const next = STYLE_NAMES_SAFE.has(style) ? style : 'none';
+      if (next !== currentStyle) {
+        currentStyle = next;
+        rebuildFragment();
+      }
+      uStylizeAmount.value = Number.isFinite(Number(amount)) ? Math.min(1, Math.max(0, Number(amount))) : 0;
+    },
     /**
      * Push the artistic grade. `gradeParams` are the primary ops; `tail` is
      * `{toneMapping, lutStrength}`. Rebuilds the fragment ONLY if the tone-map

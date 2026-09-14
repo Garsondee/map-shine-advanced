@@ -513,6 +513,9 @@ export { parseCubeLut, identityCubeLut } from './grade/lut-cube.js';
 // effect (schema + manifest), plumbed through the same cascade + generated
 // FOH/ROH card as bloom. docs/planning/Grade.md §14.
 export { GRADE, GRADE_LOOK_PARAMS, BUNDLED_LUT_NAMES } from './grade/grade.js';
+// STYLIZE — selectable whole-frame looks (mythica-machina-press#36), folded
+// into grade-present.js's own final tail; see stylize.js's own header.
+export { STYLIZE, STYLIZE_PARAMS, STYLIZE_LOOK_NAMES } from './stylize.js';
 // BLOOM (docs/planning/Bloom.md) — the first `post` stage effect. The declaration
 // (schema + manifest + presets) and the TSL pyramid builders, imported through
 // this door exactly as grade/candle are.

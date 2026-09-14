@@ -400,6 +400,9 @@ export {
   watchTileMotionSelection,
 } from './tile-motion-runtime.js';
 
+// SCENE INTRO ZOOM (mythica-machina-press#6) — see that module's own header.
+export { scheduleSceneIntroZoom, runSceneIntroZoom } from './scene-intro-zoom.js';
+
 // THE SCENE-CONTROLS (left palette) TOGGLES — one per room. The old panel's
 // own `map-shine-advanced` toggle (registerControlPanelButton/
 // syncControlPanelButtonState) was deleted in the UI parity plan's phase 7b,

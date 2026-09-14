@@ -452,6 +452,7 @@ import {
   readSceneDoors,
   watchDoorGraphics,
   initializeTileMotionRuntime,
+  scheduleSceneIntroZoom,
   getTileMotionSummary,
   getTileMotionTransportState,
   startTileMotion,
@@ -11671,6 +11672,19 @@ function install() {
       initializeTileMotionRuntime();
     } catch (err) {
       log.error('tile motion runtime init (scene load) failed:', err);
+    }
+    // SCENE INTRO ZOOM (mythica-machina-press#6) — same "scene load only,
+    // never a floor switch" posture as door refresh/tile motion just above.
+    // Respects the reduced-motion accessibility setting explicitly: a
+    // sudden camera zoom is exactly the kind of motion that setting exists
+    // to suppress, and this is the one caller with the settings-reading
+    // access to check it (scene-intro-zoom.js itself stays foundry/-pure
+    // mechanism, no settings reads of its own).
+    try {
+      const reducedMotion = readSetting(MODULE_ID, GLOBAL_SETTING_KEYS.reducedMotion) === true;
+      if (!reducedMotion) scheduleSceneIntroZoom();
+    } catch (err) {
+      log.error('scene intro zoom scheduling (scene load) failed:', err);
     }
 
     return {

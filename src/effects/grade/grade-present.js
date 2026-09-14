@@ -297,6 +297,19 @@ export function buildGradePresentMaterial({
     setLitSource: (tex) => {
       presentTexNode.value = tex;
     },
+    /**
+     * The texture `setLitSource`/`rebindLit` most recently pointed present
+     * at — a plain read of the SAME backing value, for a LATER post-stage
+     * pass that needs to keep chaining off whatever the pipeline has
+     * arrived at so far (mythica-machina-press#57's `post.lens`: reads
+     * this as its own input, writes a transformed copy, then calls
+     * `setLitSource` again to hand the chain forward). Never mutates
+     * anything itself — a getter paired with the existing setter, same
+     * shape as `windHandle`'s own `.node()`/`.ambient` split (read vs.
+     * write, two different doors on one piece of state).
+     * @returns {*}
+     */
+    getLitSource: () => presentTexNode.value,
     gateCompiled: !!outdoors,
   };
 }

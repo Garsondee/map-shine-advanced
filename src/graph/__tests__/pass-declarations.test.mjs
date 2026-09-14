@@ -51,7 +51,16 @@ export function run(t) {
     // genuinely separate mesh (the sky, not the rain), zoom-gated on its own,
     // independent axis (camera height vs. deck altitude, never precipitation's
     // own coverage/zoom rule).
-    t.ok('a sane number of passes (10-19, the promised ~10-12)', PASSES.length >= 10 && PASSES.length <= 19);
+    // ⚠️ CEILING RAISED 19 → 20 (mythica-machina-press#57, `post.lens`). Same
+    // bar a third time: a genuinely different job from its neighbours
+    // (post.taaResolve resolves TEMPORAL history; post.lens re-samples the
+    // RESOLVED frame at a distorted UV — neither could absorb the other
+    // without conflating "which pixel of last frame" with "which pixel of
+    // this frame"), and it could not fold into post.grade either, since that
+    // whole 13-class absorption remains unbuilt — see post.grade's own note
+    // for why post.bloom already set the "ship standalone, absorb later if
+    // ever" precedent this pass follows.
+    t.ok('a sane number of passes (10-20, the promised ~10-12)', PASSES.length >= 10 && PASSES.length <= 20);
     t.ok(
       'every stage used is declared',
       PASSES.every((p) => STAGES.includes(p.stage))

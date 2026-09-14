@@ -412,6 +412,22 @@ import {
   createSkyHandle,
   buildGradePresentMaterial,
   buildBloomMaterials,
+  // LENS (mythica-machina-press#57) — see effects/lens-render.js's own
+  // header for the two materials' shapes and effects/lens-motion.js's own
+  // header for why the autofocus/motion/light-burn MATHS is imported
+  // separately from the material builders (pure functions, no THREE).
+  buildLensCompositeMaterial,
+  buildLightBurnAccumulateMaterial,
+  lensTierPlan,
+  computeAutoFocusAmount,
+  pickAutoFocusIntervalSec,
+  computeAutoFocusEventDurationSec,
+  computeAutoFocusShiftPx,
+  computeZoomTriggerStrength,
+  computeCameraMotionBlurPx,
+  computeZoomMotionBlurPx,
+  computeLightBurnDecayFactor,
+  computeLightBurnDarknessGate,
   buildDofMaterials,
   hexToRgb01,
   resolveEnvGrade,
@@ -1174,6 +1190,7 @@ export async function startVtPanViewer({
   getDoorRenderState,
   getVegetationRenderState,
   getBloomRenderState,
+  getLensRenderState,
   getDofRenderState,
   getCloudsRenderState,
   getCloudTopsRenderState,
@@ -1432,6 +1449,11 @@ export async function startVtPanViewer({
   // injection discipline as the candle/vegetation seams. Default = the effect
   // off, so an un-wired caller (the torture fixture) runs no bloom pass at all.
   getBloomRenderState ??= () => ({ enabled: false, params: {} });
+  // LENS's data seam (effects/lens-render.js, mythica-machina-press#57): same
+  // injection discipline as bloom's own seam just above. Default = the
+  // effect off, so an un-wired caller (the torture fixture) runs no lens
+  // pass at all.
+  getLensRenderState ??= () => ({ enabled: false, params: {} });
   // DEPTH OF FIELD's data seam (effects/depth-of-field-render.js): boot
   // injects `{ enabled, params }` (the resolved DOF_PARAMS). vt/ owns the GPU
   // mip chain + composite; same injection discipline as bloom's own seam just
@@ -8150,6 +8172,352 @@ export async function startVtPanViewer({
       }
     }
 
+    // ═══════════════════════════════════════════════════════════════════
+    // LENS (mythica-machina-press#57, graph/passes.js `post.lens`) — the
+    // camera's own glass, grain and shutter. See effects/lens-render.js's
+    // own header for the "read a snapshot, hand back a new texture, never
+    // write scene.lit itself" shape (mirrors post.taaResolve exactly) and
+    // effects/lens-motion.js's own header for why the autofocus/motion
+    // state MACHINE lives here as plain closure state rather than inside
+    // the pure-maths module — the same split world/weather.js#tick() takes
+    // around its own pure envelopePhase/advanceWalk helpers.
+    // ═══════════════════════════════════════════════════════════════════
+    /** LAZY, same posture as taaHistoryA/B above — a whole extra HalfFloat
+     * internal-tier buffer is real, avoidable cost for a player who never
+     * turns Lens on. */
+    let lensOutputRT = null;
+    function ensureLensOutputRT() {
+      if (!lensOutputRT) lensOutputRT = allocator.create('lens.output', describeSceneColor());
+      return lensOutputRT;
+    }
+
+    /** Tier 2's own persistence pair — QUARTER internal resolution (V2's own
+     * posture: an afterimage is a soft, low-frequency glow, not detail that
+     * needs full res). LAZY, same reasoning as lensOutputRT above. */
+    let lensLightBurnReadRT = null;
+    let lensLightBurnWriteRT = null;
+    let lensLightBurnNeedsClear = false;
+    const describeLensLightBurn = (w, h) => ({
+      resolvedW: Math.max(1, w),
+      resolvedH: Math.max(1, h),
+      screenSized: true,
+      type: THREE.HalfFloatType,
+      colorSpace: THREE.NoColorSpace,
+      filter: 'linear',
+      depth: false,
+    });
+    const lensLightBurnW = () => Math.max(1, Math.ceil(internalW / 4));
+    const lensLightBurnH = () => Math.max(1, Math.ceil(internalH / 4));
+    function ensureLensLightBurnRTs() {
+      if (lensLightBurnReadRT && lensLightBurnWriteRT) return;
+      lensLightBurnReadRT = allocator.create(
+        'lens.lightBurn.A',
+        describeLensLightBurn(lensLightBurnW(), lensLightBurnH())
+      );
+      lensLightBurnWriteRT = allocator.create(
+        'lens.lightBurn.B',
+        describeLensLightBurn(lensLightBurnW(), lensLightBurnH())
+      );
+      // Fresh GPU memory is undefined content — mirrors fluid-sim's own
+      // `simNeedsClear` doc for the identical reason (a NaN entering a
+      // ping-ponged accumulator propagates forever through every future
+      // `max(prev, fresh)`).
+      lensLightBurnNeedsClear = true;
+    }
+
+    let lensBuilt = null;
+    let lensBuiltForTier = null;
+    let lensQuad = null;
+    let lensLightBurnBuilt = null;
+    let lensLightBurnQuad = null;
+    /** A 1×1 all-zero placeholder — bound whenever tier 2 has not (yet)
+     * built the real accumulator, the same "always a real texture, never a
+     * conditionally-absent slot" discipline fluid/water's own placeholders
+     * use. Built lazily (needs `THREE`, not available at closure-top). */
+    let lensLightBurnPlaceholder = null;
+
+    /** Rebuild (or build for the first time) the composite material at a
+     * given tier — mirrors `rebuildDofForTier`'s own shape: a tier is a
+     * JS-time branch INSIDE the builder (Law 4), so a tier change compiles
+     * a genuinely different graph and needs a genuinely new material, never
+     * a live uniform toggle on the existing one. */
+    function rebuildLensForTier(tier) {
+      lensLightBurnPlaceholder ??= createMaskDataTexture(new Uint8Array([0, 0, 0, 0]), 1, 1, 'linear', false);
+      const prev = lensBuilt;
+      lensBuilt = buildLensCompositeMaterial({
+        THREE,
+        sceneTexture: gradePresent.getLitSource?.() ?? sceneLit.texture,
+        lightBurnTexture: lensLightBurnReadRT?.texture ?? lensLightBurnPlaceholder,
+        resolutionWidth: internalW,
+        resolutionHeight: internalH,
+        tier,
+      });
+      lensQuad = new THREE.QuadMesh(lensBuilt.material);
+      prev?.material?.dispose?.();
+      lensBuiltForTier = lensBuilt.tier;
+    }
+
+    // ── Autofocus state (V2's own event-scheduler shape, see lens-motion.js) ──
+    let lensAutoFocusScheduled = false;
+    let lensAutoFocusEventActive = false;
+    let lensAutoFocusEventElapsedSec = 0;
+    let lensAutoFocusEventDurationSec = 0.35;
+    let lensAutoFocusTimeToNextEventSec = 10;
+    let lensAutoFocusZoomCooldownSec = 0;
+    let lensAutoFocusShiftPx = { x: 0, y: 0 };
+    let lensAutoFocusAmount = 0;
+
+    // ── Camera motion state ────────────────────────────────────────────────
+    /** @type {{centerXPx:number, centerYPx:number, viewW:number, viewH:number, zoom:number}|null} */
+    let lensCameraLast = null;
+    let lensCameraSmoothedPx = { x: 0, y: 0 };
+    let lensCameraZoomVelocity = 0;
+
+    /** @param {*} x @param {number} d */
+    const lensNum = (x, d) => (Number.isFinite(Number(x)) ? Number(x) : d);
+
+    /**
+     * `post.lens` (mythica-machina-press#57). Runs AFTER post.taaResolve,
+     * BEFORE present.composite — reads whichever texture the chain has
+     * arrived at (`gradePresent.getLitSource()`), writes a distorted copy
+     * into `lensOutputRT`, and redirects present at THAT. A true no-op
+     * (zero GPU work, present left pointing at whatever the previous pass
+     * already set) while disabled.
+     */
+    function runPostLensPass() {
+      const st = getLensRenderState();
+      if (!st.enabled) return;
+      const p = st.params || {};
+
+      const plan = lensTierPlan(Number.isFinite(st.perfTier) ? st.perfTier : undefined);
+      const lightBurnWanted = plan.lightBurnEnabled && p.lightBurnEnabled === true;
+      if (lightBurnWanted) ensureLensLightBurnRTs();
+
+      if (!lensBuilt || lensBuiltForTier !== plan.tier) rebuildLensForTier(plan.tier);
+
+      // Re-point the two input nodes EVERY frame — see lens-render.js's own
+      // header for why these two are enough to keep every derived
+      // `.sample()` tap (dozens of them) correct.
+      lensBuilt.sceneTexNode.value = gradePresent.getLitSource?.() ?? sceneLit.texture;
+      if (lensBuilt.lightBurnTexNode) {
+        lensBuilt.lightBurnTexNode.value = lensLightBurnReadRT?.texture ?? lensLightBurnPlaceholder;
+      }
+
+      const dtSec = Math.max(0, lastEnvSnapshot?.env?.time?.dtSec ?? 0);
+      const nowSec = (lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value) / 1000;
+      const u = lensBuilt.uniforms;
+
+      // ── TIER 0 — always pushed; the shader compiles these in from tier 0
+      // regardless of which higher tiers are also active. ─────────────────
+      u.uTimeSec.value = nowSec;
+      u.uDistortion.value = lensNum(p.distortion, -0.08);
+      u.uChromaticAmountPx.value = lensNum(p.chromaticAmountPx, 4.22);
+      u.uChromaticEdgePower.value = lensNum(p.chromaticEdgePower, 2.11);
+      u.uVignetteIntensity.value = lensNum(p.vignetteIntensity, 1);
+      u.uVignetteSoftness.value = lensNum(p.vignetteSoftness, 0.34);
+      u.uGrainAmount.value = lensNum(p.grainAmount, 0.01);
+      u.uGrainSpeed.value = lensNum(p.grainSpeed, 1);
+      u.uAdaptiveGrainEnabled.value = p.adaptiveGrainEnabled === false ? 0 : 1;
+      u.uGrainLowLightBoost.value = lensNum(p.grainLowLightBoost, 0.25);
+      u.uGrainCellSizeBright.value = lensNum(p.grainCellSizeBright, 1.4);
+      u.uGrainCellSizeDark.value = lensNum(p.grainCellSizeDark, 3);
+      u.uDigitalNoiseEnabled.value = p.digitalNoiseEnabled === true ? 1 : 0;
+      u.uDigitalNoiseAmount.value = lensNum(p.digitalNoiseAmount, 0.066);
+      u.uDigitalNoiseChance.value = lensNum(p.digitalNoiseChance, 0.004);
+      u.uDigitalNoiseGreenBias.value = lensNum(p.digitalNoiseGreenBias, 1);
+      u.uDigitalNoiseLowLightBoost.value = lensNum(p.digitalNoiseLowLightBoost, 3.37);
+
+      // ── TIER 1 — AUTOFOCUS + MOTION BLUR STATE. The bookkeeping runs
+      // regardless of tier (cheap CPU-only — mirrors fluid-surface-
+      // subsystem.js#prepareSimTick's own "state advances regardless, only
+      // the expensive GPU work is tier-gated" posture); only the resulting
+      // UNIFORM push is gated, further down, by whether tier 1's own extra
+      // shader taps are even compiled in. ──────────────────────────────────
+      const autoFocusEnabled = p.autoFocusEnabled === true;
+      if (!autoFocusEnabled) {
+        lensAutoFocusEventActive = false;
+        lensAutoFocusAmount = 0;
+        lensAutoFocusShiftPx = { x: 0, y: 0 };
+        lensAutoFocusScheduled = false;
+      } else {
+        if (!lensAutoFocusScheduled) {
+          lensAutoFocusTimeToNextEventSec = pickAutoFocusIntervalSec(
+            lensNum(p.autoFocusMinIntervalSeconds, 10),
+            lensNum(p.autoFocusMaxIntervalSeconds, 45)
+          );
+          lensAutoFocusScheduled = true;
+        }
+        if (lensAutoFocusEventActive) {
+          lensAutoFocusEventElapsedSec += dtSec;
+          const phase = lensAutoFocusEventElapsedSec / Math.max(lensAutoFocusEventDurationSec, 0.001);
+          lensAutoFocusAmount = computeAutoFocusAmount(phase);
+          if (phase >= 1) {
+            lensAutoFocusEventActive = false;
+            lensAutoFocusAmount = 0;
+            lensAutoFocusShiftPx = { x: 0, y: 0 };
+            lensAutoFocusTimeToNextEventSec = pickAutoFocusIntervalSec(
+              lensNum(p.autoFocusMinIntervalSeconds, 10),
+              lensNum(p.autoFocusMaxIntervalSeconds, 45)
+            );
+          }
+        } else {
+          lensAutoFocusTimeToNextEventSec -= dtSec;
+          lensAutoFocusZoomCooldownSec = Math.max(0, lensAutoFocusZoomCooldownSec - dtSec);
+          if (lensAutoFocusTimeToNextEventSec <= 0) {
+            lensAutoFocusEventActive = true;
+            lensAutoFocusEventElapsedSec = 0;
+            lensAutoFocusEventDurationSec = computeAutoFocusEventDurationSec(
+              lensNum(p.autoFocusDefocusDurationSeconds, 2),
+              1.0
+            );
+            lensAutoFocusShiftPx = computeAutoFocusShiftPx(lensNum(p.autoFocusMaxShiftPx, 6), 1.0);
+          }
+        }
+      }
+
+      // ── CAMERA TRACKING — feeds BOTH the zoom-triggered refocus above's
+      // own next tick AND motion blur below. Runs every frame regardless of
+      // whether either consumer is enabled, so re-enabling one mid-session
+      // never reads a stale, minutes-old delta. ───────────────────────────
+      const halfSpan = Math.max(1e-3, view?.halfSpanPx ?? 1);
+      const aspect = canvasH > 0 ? canvasW / canvasH : 1;
+      const cameraCurr = {
+        centerXPx: view?.centerXPx ?? 0,
+        centerYPx: view?.centerYPx ?? 0,
+        viewW: halfSpan * aspect * 2,
+        viewH: halfSpan * 2,
+        zoom: 1 / halfSpan,
+      };
+      let motionBlurPx = { x: 0, y: 0 };
+      let zoomBlurPx = 0;
+      if (!lensCameraLast) {
+        lensCameraZoomVelocity = 0;
+      } else {
+        const motion = computeCameraMotionBlurPx(
+          {
+            dxWorld: cameraCurr.centerXPx - lensCameraLast.centerXPx,
+            dyWorld: cameraCurr.centerYPx - lensCameraLast.centerYPx,
+            viewW: cameraCurr.viewW,
+            viewH: cameraCurr.viewH,
+            screenW: canvasW,
+            screenH: canvasH,
+          },
+          lensCameraSmoothedPx,
+          dtSec,
+          {
+            strength: lensNum(p.motionBlurStrength, 1.77),
+            maxPx: lensNum(p.motionBlurMaxPx, 10),
+            smoothingSeconds: lensNum(p.motionBlurSmoothingSeconds, 0.8),
+          }
+        );
+        lensCameraSmoothedPx = motion.smoothedPx;
+        motionBlurPx = motion.blurPx;
+        lensCameraZoomVelocity = dtSec > 0 ? (cameraCurr.zoom - lensCameraLast.zoom) / dtSec : 0;
+        zoomBlurPx = computeZoomMotionBlurPx(
+          lensCameraZoomVelocity,
+          lensNum(p.motionBlurZoomStrength, 1.25),
+          lensNum(p.motionBlurMaxPx, 10)
+        );
+
+        // Zoom-triggered refocus — checked every frame a real previous
+        // sample exists, independent of the timed scheduler above (V2's own
+        // `_maybeTriggerZoomRefocus`: can fire while the timed countdown is
+        // still mid-flight, but never while an event is already active or
+        // its own cooldown is still running).
+        if (
+          autoFocusEnabled &&
+          p.autoFocusZoomTriggerEnabled !== false &&
+          !lensAutoFocusEventActive &&
+          lensAutoFocusZoomCooldownSec <= 0
+        ) {
+          const triggerStrength = computeZoomTriggerStrength(
+            lensCameraZoomVelocity,
+            lensNum(p.autoFocusZoomTriggerThreshold, 3),
+            lensNum(p.autoFocusZoomTriggerStrength, 0.15)
+          );
+          if (triggerStrength !== null) {
+            lensAutoFocusEventActive = true;
+            lensAutoFocusEventElapsedSec = 0;
+            lensAutoFocusEventDurationSec = computeAutoFocusEventDurationSec(
+              lensNum(p.autoFocusDefocusDurationSeconds, 2),
+              triggerStrength
+            );
+            lensAutoFocusShiftPx = computeAutoFocusShiftPx(lensNum(p.autoFocusMaxShiftPx, 6), triggerStrength);
+            lensAutoFocusZoomCooldownSec = lensNum(p.autoFocusZoomTriggerCooldownSeconds, 6);
+          }
+        }
+      }
+      lensCameraLast = cameraCurr;
+
+      if (plan.motionEnabled) {
+        u.uAutoFocusAmount.value = autoFocusEnabled ? lensAutoFocusAmount : 0;
+        u.uAutoFocusBlurPx.value = lensNum(p.autoFocusMaxBlurPx, 2.5);
+        u.uAutoFocusShiftPx.value.set(lensAutoFocusShiftPx.x, lensAutoFocusShiftPx.y);
+        const motionOn = p.motionBlurEnabled === true;
+        u.uCameraMotionBlurPx.value.set(motionOn ? motionBlurPx.x : 0, motionOn ? motionBlurPx.y : 0);
+        u.uZoomMotionBlurPx.value = motionOn ? zoomBlurPx : 0;
+      }
+
+      // ── TIER 2 — LIGHT BURN ──────────────────────────────────────────────
+      if (lightBurnWanted) {
+        if (!lensLightBurnBuilt) {
+          lensLightBurnBuilt = buildLightBurnAccumulateMaterial({
+            THREE,
+            sceneTexture: lensBuilt.sceneTexNode.value,
+            prevBurnTexture: lensLightBurnReadRT.texture,
+          });
+          lensLightBurnQuad = new THREE.QuadMesh(lensLightBurnBuilt.material);
+        }
+        lensLightBurnBuilt.sceneTexNode.value = lensBuilt.sceneTexNode.value;
+        lensLightBurnBuilt.prevBurnTexNode.value = lensLightBurnReadRT.texture;
+
+        const bu = lensLightBurnBuilt.uniforms;
+        bu.uThreshold.value = lensNum(p.lightBurnThreshold, 0.98);
+        bu.uSoftness.value = lensNum(p.lightBurnThresholdSoftness, 0.5);
+        bu.uResponse.value = lensNum(p.lightBurnResponse, 1.15);
+        bu.uDecayFactor.value = computeLightBurnDecayFactor(dtSec, lensNum(p.lightBurnPersistenceSeconds, 0.05));
+        bu.uBurnWriteGain.value = computeLightBurnDarknessGate({
+          darkness01: lastEnvSnapshot?.env?.darkness01 ?? 0,
+          start: lensNum(p.lightBurnDarknessStart, 0),
+          end: lensNum(p.lightBurnDarknessEnd, 1),
+          influence: lensNum(p.lightBurnDarknessInfluence, 0.5),
+          enabled: p.lightBurnDarknessGateEnabled !== false,
+        });
+
+        if (lensLightBurnNeedsClear) {
+          renderer.setRenderTarget(lensLightBurnReadRT);
+          renderer.clear(true, false, false);
+          renderer.setRenderTarget(lensLightBurnWriteRT);
+          renderer.clear(true, false, false);
+          lensLightBurnNeedsClear = false;
+        }
+        renderer.setRenderTarget(lensLightBurnWriteRT);
+        lensLightBurnQuad.render(renderer);
+        renderer.setRenderTarget(null);
+
+        const tmp = lensLightBurnReadRT;
+        lensLightBurnReadRT = lensLightBurnWriteRT;
+        lensLightBurnWriteRT = tmp;
+        lensBuilt.lightBurnTexNode.value = lensLightBurnReadRT.texture;
+
+        u.uLightBurnIntensity.value = lensNum(p.lightBurnIntensity, 0.1);
+        u.uLightBurnBlurPx.value = lensNum(p.lightBurnBlurPx, 8);
+      } else {
+        u.uLightBurnIntensity.value = 0;
+      }
+
+      // ── RENDER — read the snapshot, write the transformed copy, hand the
+      // chain forward. ──────────────────────────────────────────────────
+      const outputRT = ensureLensOutputRT();
+      const prevAutoClear = renderer.autoClearColor;
+      renderer.autoClearColor = true;
+      renderer.setRenderTarget(outputRT);
+      lensQuad.render(renderer);
+      renderer.autoClearColor = prevAutoClear;
+      renderer.setRenderTarget(null);
+      gradePresent.setLitSource(outputRT.texture);
+    }
+
     /**
      * post.bloom (docs/planning/Bloom.md) — the dual-filter bloom pyramid, run
      * AFTER surface.particles (scene.lit fully composited) and BEFORE
@@ -8430,6 +8798,7 @@ export async function startVtPanViewer({
       'post.bloom': runPostBloomPass,
       'post.dof': runPostDofPass,
       'post.taaResolve': runPostTaaResolvePass,
+      'post.lens': runPostLensPass,
       'present.composite': runPresentCompositePass,
     };
     // Today this resolves to exactly ['masks.occlusion', 'geometry.world',
@@ -20211,6 +20580,28 @@ export async function startVtPanViewer({
         allocator.resize(taaHistoryA, internalW, internalH, describeSceneColor());
         allocator.resize(taaHistoryB, internalW, internalH, describeSceneColor());
         taaHistoryValid = false;
+      }
+      // LENS's own scratch targets (mythica-machina-press#57) — same "only
+      // if it exists" lazy-allocation guard as TAA's history pair above.
+      if (lensOutputRT) allocator.resize(lensOutputRT, internalW, internalH, describeSceneColor());
+      if (lensLightBurnReadRT && lensLightBurnWriteRT) {
+        allocator.resize(
+          lensLightBurnReadRT,
+          lensLightBurnW(),
+          lensLightBurnH(),
+          describeLensLightBurn(lensLightBurnW(), lensLightBurnH())
+        );
+        allocator.resize(
+          lensLightBurnWriteRT,
+          lensLightBurnW(),
+          lensLightBurnH(),
+          describeLensLightBurn(lensLightBurnW(), lensLightBurnH())
+        );
+        // A resize can change the QUARTER-RES target's own rounded pixel
+        // dimensions even when internalW/H changed only slightly — stale
+        // (wrong-resolution) content either way, same reasoning TAA's own
+        // history invalidation gives just above.
+        lensLightBurnNeedsClear = true;
       }
       allocator.resize(sceneColorMapOnly, internalW, internalH, describeSceneColorMapOnlyMrt());
       allocator.resize(

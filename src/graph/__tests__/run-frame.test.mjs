@@ -113,6 +113,12 @@ export function run(t) {
     // present.composite: AFTER bloom/DoF, so temporal accumulation includes
     // every additive effect, and BEFORE present so grade tonemaps the
     // RESOLVED image, not the raw current frame.
+    // `post.lens` joined 2026-09-14 (mythica-machina-press#57) between
+    // post.taaResolve and present.composite — AFTER temporal resolve, so the
+    // whole-frame distortion/aberration warps the RESOLVED image (the same
+    // ordering reason post.taaResolve itself sits before present), and
+    // BEFORE present because present's own tonemap must see the fully
+    // warped/vignetted/grained frame, not an unfinished one.
     // `surface.cloudTops` joined 2026-09-12, between surface.particles and
     // surface.precipitation — both neighbours load-bearing: AFTER the light/
     // particle draws (nothing about "is there a cloud in front of the sky
@@ -122,7 +128,7 @@ export function run(t) {
     // physically in front" reasoning surface.precipitation's own comment
     // above already states for its relationship to vision.gate).
     const expected =
-      'masks.occlusion,geometry.world,light.accumulate,surface.response,surface.water,surface.particles,surface.cloudTops,surface.precipitation,vision.gate,post.bloom,post.dof,post.taaResolve,present.composite';
+      'masks.occlusion,geometry.world,light.accumulate,surface.response,surface.water,surface.particles,surface.cloudTops,surface.precipitation,vision.gate,post.bloom,post.dof,post.taaResolve,post.lens,present.composite';
     ok(`today's real masks..present plan is exactly [${expected}] (got: ${ids.join(',')})`, ids.join(',') === expected);
     ok(
       'surface.response is planned AFTER light.accumulate — it reads what that pass writes',

@@ -28,6 +28,9 @@ import { run as runDoorGraphicsRender } from './door-graphics-render.test.mjs';
 import { run as runApertureGobo } from './aperture-gobo.test.mjs';
 import { run as runEffectReadiness } from './effect-readiness.test.mjs';
 import { run as runTileMotionNodes } from './tile-motion-nodes.test.mjs';
+import { run as runLens } from './lens.test.mjs';
+import { run as runLensMotion } from './lens-motion.test.mjs';
+import { run as runLensRender } from './lens-render.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -79,6 +82,9 @@ const suites = [
   ['aperture-gobo', runApertureGobo],
   ['effect-readiness', runEffectReadiness],
   ['tile-motion-nodes', runTileMotionNodes],
+  ['lens', runLens],
+  ['lens-motion', runLensMotion],
+  ['lens-render', runLensRender],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

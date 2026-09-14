@@ -662,7 +662,6 @@ export const PASSES = [
       'ContextualSceneGradeEffectV2',
       'AtmosphericFogEffectV2',
       'DistortionManager',
-      'LensEffectV2',
       'AsciiEffectV2',
       'HalftoneEffectV2',
       'DotScreenEffectV2',
@@ -683,8 +682,34 @@ export const PASSES = [
     note:
       'THE GRADE STACK, in fixed node order: base → ToD (8-anchor timeline) → weather → context ' +
       'gate (indoor/outdoor from attr) → manual trim — then fog, distortion, stylizers (bloom is now ' +
-      'the separate post.bloom pass, just above). Four ' +
+      'the separate post.bloom pass, just above; LensEffectV2 is now the separate post.lens pass, ' +
+      "mythica-machina-press#57, the SAME precedent bloom already set — see that pass's own note). Four " +
       'colorists become one node chain with labeled layers.',
+  },
+  {
+    id: 'post.lens',
+    stage: 'post',
+    kind: 'gpu',
+    status: 'live',
+    owns: "effects/lens.js (docs recovered from V2's own LensEffectV2.js/lens-shader.js, see that module's own header)",
+    creates: [],
+    reads: [],
+    modifies: ['buf:scene.color'],
+    absorbs: ['LensEffectV2'],
+    note:
+      'THE FOURTH POST-STAGE EFFECT, sitting AFTER post.taaResolve (the whole-frame distortion below ' +
+      'must warp the TEMPORALLY RESOLVED image, not the raw current frame — the same ordering reason ' +
+      "post.grade itself must tonemap the resolved image) and, per this rung's own note above, standing " +
+      "IN FOR the LensEffectV2 slice of post.grade's own still-unbuilt 13-class absorption — see that " +
+      "entry's own note for the precedent (post.bloom already took the identical path). Reads the " +
+      'CURRENT lit source (`grade-present.js#getLitSource`, whatever post.taaResolve/post.dof/post.bloom ' +
+      'left it pointing at), writes a distorted+aberrated+vignetted+grained copy into a fresh scratch ' +
+      'target, and re-points present at THAT — the same "read a snapshot, hand back a new texture, never ' +
+      'write into scene.color/scene.lit itself" shape post.taaResolve already established (a full-frame ' +
+      'UV re-sample cannot read and write the same texture in one draw). Tier 2 (light burn) ALSO runs a ' +
+      'small persistent ping-ponged accumulator, its own extra draw call, entirely separate from the main ' +
+      "composite's read/write pair. Runtime: runPostLensPass, a closure in the viewer's local passImpls " +
+      '(mirrors post.bloom/post.dof/post.taaResolve, their own template).',
   },
   {
     id: 'present.composite',

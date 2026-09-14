@@ -271,4 +271,21 @@ export const PASS_IMPLS = Object.freeze({
       'present exactly once. Same invocability caveat as geometry.world — the loop lives inside ' +
       'startVtPanViewer.',
   },
+  'post.lens': {
+    fn: startVtPanViewer,
+    module: 'vt/index.js',
+    export: 'startVtPanViewer',
+    separatelyInvocable: false,
+    note:
+      'REAL as of 2026-09-14 (mythica-machina-press#57): runPostLensPass (a closure inside ' +
+      'startVtPanViewer, in the local passImpls map runPassPlan walks) reads whichever texture ' +
+      'grade-present.js#getLitSource currently names (post.taaResolve`s own redirect, or scene.lit if ' +
+      'that never ran), applies distortion/chromatic aberration/vignette/grain/autofocus-blur/motion-' +
+      'blur (effects/lens-render.js builds the TSL; effects/lens-motion.js the pure autofocus/motion ' +
+      'maths), writes the result into an allocator-owned scratch target, and redirects present at THAT ' +
+      '(setLitSource again — a value swap, no rebuild, same mechanism post.taaResolve already uses). ' +
+      'Tier 2 (light burn) additionally ticks its own small ping-ponged accumulator, a real extra draw ' +
+      'call. Skips entirely (JS early-return, no GPU work) when the effect is disabled. Same ' +
+      'invocability caveat as geometry.world — the loop lives inside startVtPanViewer.',
+  },
 });

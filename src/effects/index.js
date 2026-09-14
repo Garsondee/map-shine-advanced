@@ -520,6 +520,29 @@ export { STYLIZE, STYLIZE_PARAMS, STYLIZE_LOOK_NAMES } from './stylize.js';
 // (schema + manifest + presets) and the TSL pyramid builders, imported through
 // this door exactly as grade/candle are.
 export { BLOOM, BLOOM_PARAMS, BLOOM_PRESETS, bloomPreset } from './bloom.js';
+// LENS (mythica-machina-press#57) — the THIRD `post` stage effect: the
+// camera's own glass, grain and shutter, ported from V2's own real
+// LensEffectV2.js/lens-shader.js (recovered from git history — see
+// lens.js's own header). Same declaration + TSL-builder split as bloom/DoF.
+export { LENS, LENS_PARAMS, LENS_PRESETS, lensPreset } from './lens.js';
+export {
+  buildLensCompositeMaterial,
+  buildLightBurnAccumulateMaterial,
+  lensTierPlan,
+  LENS_MAX_TIER,
+  LENS_DEFAULT_TIER,
+} from './lens-render.js';
+export {
+  computeAutoFocusAmount,
+  pickAutoFocusIntervalSec,
+  computeAutoFocusEventDurationSec,
+  computeAutoFocusShiftPx,
+  computeZoomTriggerStrength,
+  computeCameraMotionBlurPx,
+  computeZoomMotionBlurPx,
+  computeLightBurnDecayFactor,
+  computeLightBurnDarknessGate,
+} from './lens-motion.js';
 // DEPTH OF FIELD (docs/planning/Depth-of-Field.md) — the SECOND `post` stage
 // effect, and the first post-stage consumer of buf:scene.depth. Same
 // declaration + TSL-builder split as bloom, imported through this door

@@ -373,6 +373,14 @@ import {
   BLOOM_PARAMS,
   BLOOM_PRESETS,
   bloomPreset,
+  // LENS (mythica-machina-press#57) — MSA's third post-processing effect,
+  // through the same one door. See effects/lens.js's own header for why it
+  // sits BESIDE post.grade rather than waiting to be absorbed into it (the
+  // same precedent post.bloom itself already set).
+  LENS,
+  LENS_PARAMS,
+  LENS_PRESETS,
+  lensPreset,
   DEPTH_OF_FIELD,
   DOF_PARAMS,
   DOF_PRESETS,
@@ -1963,6 +1971,11 @@ function install() {
    * is the real fix; this seed is the belt-and-braces half, the same posture
    * `water-registration.js` takes for the same reason. */
   let bloomReadout = { enabled: true, params: null };
+  // LENS (mythica-machina-press#57) — same pre-resolve posture as bloom's
+  // own readout immediately above: a whole-image post pass with no mask of
+  // its own, so "not resolved yet" defaulting to ON costs nothing before
+  // the first real cascade resolve lands.
+  let lensReadout = { enabled: true, params: null };
   /** Depth-of-field READOUT — same seed posture as bloom's own, above, and
    * for the identical reason: the manifest already says `enabledFromProfile:
    * 'low'`, so a `false` seed would misrepresent the window between
@@ -2179,6 +2192,15 @@ function install() {
     bloomReadout = buildCascadeReadout(resolved);
   });
 
+  // LENS (mythica-machina-press#57) — MSA's THIRD post-processing effect,
+  // through the SAME one door. Same shape as bloom's own registration just
+  // above: a whole-image screen pass with no anchor/item of its own, so
+  // `apply` only refreshes the shared readout the viewer's runPostLensPass
+  // reads each frame (see getLensRenderState below).
+  effectRegistry.register(LENS, (resolved) => {
+    lensReadout = buildCascadeReadout(resolved);
+  });
+
   // DEPTH OF FIELD — MSA's SECOND post-processing effect, through the SAME
   // one door. Same shape as bloom's own registration just above: a
   // whole-image screen pass with no anchor/item of its own, so `apply` only
@@ -2379,6 +2401,24 @@ function install() {
     effectRegistry.resolveAndApply('bloom', layers);
   }
 
+  /** Transient, in-memory lens param tuning (MapShine.setLens / the FOH-ROH
+   * card). Mirrors bloomLiveOverride exactly. */
+  const lensLiveOverride = {};
+
+  /** Re-resolve lens's cascade from live settings + the scene's own authored
+   * params (Stage B) + the live override, and apply. Mirrors reapplyBloom
+   * exactly; called on settings change, on ready, and by MapShine.setLens.
+   * ⚠️ MUST ALSO be in the reapply-ALL table below (the `['bloom', ...]`
+   * list) — that list's own header names the exact bug an effect left out
+   * of it suffers (fire, 2026-08-08: silently stuck at its pre-resolve seed
+   * until a console command, invisible to every green test). */
+  function reapplyLens() {
+    const layers = deriveEffectLayers('lens', (key) => readSetting(MODULE_ID, key));
+    const { params: sceneParams } = readSceneEffectParams('lens');
+    layers.paramLayers = [sceneParams, lensLiveOverride].filter(Boolean);
+    effectRegistry.resolveAndApply('lens', layers);
+  }
+
   /** Transient, in-memory depth-of-field param tuning (MapShine.setDof / the
    * FOH-ROH card / a preset pick). Mirrors bloomLiveOverride exactly. */
   const dofLiveOverride = {};
@@ -2571,6 +2611,7 @@ function install() {
     ['window light', () => windowLight.reapply()],
     ['aperture gobo', () => apertureGobo.reapply()],
     ['bloom', () => reapplyBloom()],
+    ['lens', () => reapplyLens()],
     ['depth of field', () => reapplyDof()],
     ['clouds', () => reapplyClouds()],
     ['cloud tops', () => reapplyCloudTops()],
@@ -3502,6 +3543,86 @@ function install() {
     return { ...bloomLiveOverride };
   };
 
+  // MapShine.setLens — the console tuner AND the FOH/ROH card's write path
+  // (mirrors MapShine.setBloom exactly). Accepts a single knob or several:
+  //   MapShine.setLens({ distortion: -0.12, chromaticAmountPx: 6 })
+  MapShine.setLens = (partial = {}) => {
+    const p = partial ?? {};
+    if (typeof p.enabled === 'boolean') {
+      Promise.resolve(writeSetting(MODULE_ID, effectEnableKey('lens', 'player'), p.enabled ? 'on' : 'off'))
+        .then(() => reapplyLens())
+        .catch((err) => log.error('lens enable write/reapply failed:', err));
+    }
+    let changed = false;
+    // Every key LENS_PARAMS declares — explicit, matching setBloom's
+    // precedent so a rename is a visible typo, not a silent no-op.
+    const scenePatch = {};
+    for (const k of [
+      'distortion',
+      'chromaticAmountPx',
+      'chromaticEdgePower',
+      'vignetteIntensity',
+      'vignetteSoftness',
+      'grainAmount',
+      'grainSpeed',
+      'adaptiveGrainEnabled',
+      'grainLowLightBoost',
+      'grainCellSizeBright',
+      'grainCellSizeDark',
+      'digitalNoiseEnabled',
+      'digitalNoiseAmount',
+      'digitalNoiseChance',
+      'digitalNoiseGreenBias',
+      'digitalNoiseLowLightBoost',
+      'autoFocusEnabled',
+      'autoFocusMinIntervalSeconds',
+      'autoFocusMaxIntervalSeconds',
+      'autoFocusDefocusDurationSeconds',
+      'autoFocusMaxBlurPx',
+      'autoFocusMaxShiftPx',
+      'autoFocusZoomTriggerEnabled',
+      'autoFocusZoomTriggerThreshold',
+      'autoFocusZoomTriggerCooldownSeconds',
+      'autoFocusZoomTriggerStrength',
+      'motionBlurEnabled',
+      'motionBlurStrength',
+      'motionBlurMaxPx',
+      'motionBlurZoomStrength',
+      'motionBlurSmoothingSeconds',
+      'lightBurnEnabled',
+      'lightBurnThreshold',
+      'lightBurnThresholdSoftness',
+      'lightBurnIntensity',
+      'lightBurnResponse',
+      'lightBurnPersistenceSeconds',
+      'lightBurnBlurPx',
+      'lightBurnDarknessGateEnabled',
+      'lightBurnDarknessStart',
+      'lightBurnDarknessEnd',
+      'lightBurnDarknessInfluence',
+    ]) {
+      if (k in p) {
+        lensLiveOverride[k] = p[k];
+        if (LENS_PARAMS[k]?.scope !== 'client') scenePatch[k] = p[k];
+        changed = true;
+      }
+    }
+    if (changed) {
+      Promise.resolve(writeSceneEffectParams('lens', scenePatch)).then(
+        (result) => {
+          if (!result.ok) log.warn(`lens scene param write not persisted: ${result.reason}`);
+        },
+        (err) => log.error('lens scene param write failed:', err)
+      );
+      try {
+        reapplyLens();
+      } catch (err) {
+        log.error('lens reapply (setLens) failed:', err);
+      }
+    }
+    return { ...lensLiveOverride };
+  };
+
   // MapShine.setDof — the console tuner AND the FOH/ROH card's + preset
   // picker's write path (mirrors MapShine.setBloom exactly, including the
   // "enabled writes the PLAYER setting, then reapplies once the write lands"
@@ -3768,6 +3889,10 @@ function install() {
     const state = projectCascadeRenderState(bloomReadout);
     return { ...state, params: wrapForReadTracking('bloom', state.params ?? {}) };
   };
+  // LENS's render-state seam — same shape as bloom's own, above, minus the
+  // U6 read-tracking wrap (lens is not in READ_TRACKED_EFFECTS; that wrap is
+  // opt-in instrumentation, not a correctness requirement).
+  const getLensRenderState = () => projectCascadeRenderState(lensReadout);
   // DEPTH OF FIELD's render-state seam — same shape as bloom's own, above.
   // perfTier ADDED 2026-08-30, same fix; DELEGATES the same way.
   // U6 READ TRACKING (mythica-machina-press#194) — wrapped HERE, the real
@@ -8510,6 +8635,34 @@ function install() {
     getHealth: () => getParamHealth('bloom', BLOOM_PARAMS),
   });
 
+  // LENS (mythica-machina-press#57, docs recovered from V2's own
+  // LensEffectV2.js) — the camera's own glass, grain and shutter.
+  registerSimpleEffectCard('lens', {
+    icon: 'aperture',
+    title: 'Lens',
+    accVar: '--c-post',
+    filterCategory: 'post',
+    schema: LENS_PARAMS,
+    // FOH is the "which cinematic techniques are active right now" strip —
+    // three ON/OFF toggles a GM plausibly reaches for mid-session (autofocus
+    // hunting, motion blur, light burn all read as distinct MOODS to switch
+    // on for a scene) alongside the three core look dials that shape the
+    // always-on optics tier. Fine per-technique tuning (interval seconds,
+    // threshold, blur radius…) stays ROH — set-once, not a live-performance
+    // knob (feedback_foh_roh_must_differ).
+    fohKeys: [
+      'distortion',
+      'vignetteIntensity',
+      'grainAmount',
+      'autoFocusEnabled',
+      'motionBlurEnabled',
+      'lightBurnEnabled',
+    ],
+    getReadout: () => lensReadout,
+    setValue: (patch) => MapShine.setLens(patch),
+    presets: { table: LENS_PRESETS, pick: lensPreset },
+  });
+
   registerSimpleEffectCard('depthOfField', {
     icon: 'eye',
     title: 'Depth of Field',
@@ -11823,6 +11976,12 @@ function install() {
         // harness staying minimal, not a data dependency — wire it there too if
         // bloom ever needs soak-perf coverage.
         getBloomRenderState,
+        // LENS (effects/lens-render.js, mythica-machina-press#57): same shape
+        // as bloom's own seam just above — a whole-image screen effect
+        // needing no scene data of its own (the autofocus/motion-blur inputs
+        // it DOES need — elapsed time, the viewer's own camera state — are
+        // read directly inside runPostLensPass, not injected here).
+        getLensRenderState,
         // DEPTH OF FIELD (effects/depth-of-field-render.js): same shape as
         // bloom's own seam just above — a whole-image screen effect needing
         // no scene data, so the torture-soak harness omits it the same way.

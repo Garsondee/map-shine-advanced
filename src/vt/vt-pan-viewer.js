@@ -8201,6 +8201,25 @@ export async function startVtPanViewer({
      * write target. Mirrors `taaHistoryWriteIndex`'s own naming/semantics
      * (0 = A is next to receive a write) intentionally. */
     let lensOutputWriteIndex = 0;
+    /** ⚠️ SELF-FEEDBACK GUARD — a second real, live-caught bug (author
+     * report, 2026-09-14: screen going black-with-noise, "the noise gets
+     * modified and then RGB shifted and then more noise... so on and so
+     * forth"). The ping-pong pair above fixed the GPU CRASH but not this:
+     * `post.taaResolve` only re-redirects `gradePresent`'s lit source while
+     * TAA is actually on (a deliberate TRUE no-op while off — see that
+     * pass's own doc). TAA is OFF by default, so with TAA off, NOTHING
+     * upstream ever re-points the lit source away from Lens's own last
+     * output — meaning `getLitSource()` below hands Lens back exactly what
+     * Lens itself wrote last frame, forever. Each pass through then adds
+     * MORE grain/vignette/fringing on top of already-processed noise,
+     * unbounded, frame after frame — precisely the runaway feedback the
+     * author saw. Fix: remember what texture Lens itself last handed to
+     * present; if `getLitSource()` still names that SAME texture (nobody
+     * else has refreshed the chain since), treat the chain as stale and
+     * fall back to `sceneLit.texture` — the base composited buffer every
+     * frame's geometry/lighting/particle passes rewrite fresh regardless
+     * of TAA/Lens state — instead of reprocessing Lens's own prior frame. */
+    let lensLastOutputTexture = null;
     function ensureLensOutputRTs() {
       if (lensOutputA && lensOutputB) return;
       lensOutputA = allocator.create('lens.outputA', describeSceneColor());
@@ -8295,11 +8314,15 @@ export async function startVtPanViewer({
     /**
      * `post.lens` (mythica-machina-press#57). Runs AFTER post.taaResolve,
      * BEFORE present.composite — reads whichever texture the chain has
-     * arrived at (`gradePresent.getLitSource()`), writes a distorted copy
-     * into WHICHEVER of `lensOutputA`/`B` is not that same texture (see
-     * that pair's own declaration for why one buffer is unsafe), and
-     * redirects present at THAT. A true no-op (zero GPU work, present left
-     * pointing at whatever the previous pass already set) while disabled.
+     * arrived at (`gradePresent.getLitSource()`, UNLESS that's actually
+     * Lens's own last output with nobody having refreshed it since — see
+     * `lensLastOutputTexture`'s own declaration for why that self-read
+     * must be caught and redirected to `sceneLit.texture` instead), writes
+     * a distorted copy into WHICHEVER of `lensOutputA`/`B` is not that same
+     * texture (see that pair's own declaration for why one buffer is
+     * unsafe), and redirects present at THAT. A true no-op (zero GPU work,
+     * present left pointing at whatever the previous pass already set)
+     * while disabled.
      */
     function runPostLensPass() {
       const st = getLensRenderState();
@@ -8315,7 +8338,15 @@ export async function startVtPanViewer({
       // Re-point the two input nodes EVERY frame — see lens-render.js's own
       // header for why these two are enough to keep every derived
       // `.sample()` tap (dozens of them) correct.
-      lensBuilt.sceneTexNode.value = gradePresent.getLitSource?.() ?? sceneLit.texture;
+      //
+      // SELF-FEEDBACK GUARD — see `lensLastOutputTexture`'s own declaration.
+      // If the chain still names the exact texture Lens itself wrote last
+      // frame, nobody has refreshed it since (TAA off — the default — never
+      // re-redirects while inactive) — read the true fresh scene instead of
+      // reprocessing our own prior output.
+      const lensChainSource = gradePresent.getLitSource?.() ?? sceneLit.texture;
+      lensBuilt.sceneTexNode.value =
+        lensChainSource === lensLastOutputTexture ? sceneLit.texture : lensChainSource;
       if (lensBuilt.lightBurnTexNode) {
         lensBuilt.lightBurnTexNode.value = lensLightBurnReadRT?.texture ?? lensLightBurnPlaceholder;
       }
@@ -8536,6 +8567,10 @@ export async function startVtPanViewer({
       renderer.autoClearColor = prevAutoClear;
       renderer.setRenderTarget(null);
       gradePresent.setLitSource(writeTarget.texture);
+      // Remember what we just handed present — see `lensLastOutputTexture`'s
+      // own declaration: this is how NEXT frame's self-feedback guard knows
+      // whether the chain was refreshed by someone else in between.
+      lensLastOutputTexture = writeTarget.texture;
       lensOutputWriteIndex = 1 - lensOutputWriteIndex;
     }
 

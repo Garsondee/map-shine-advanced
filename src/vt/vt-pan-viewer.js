@@ -650,6 +650,10 @@ const _uiShadowState = {
   // the shadow offset x5"). Deliberately independent of heightPx, which alone
   // still drives the penumbra — see DEFAULT_WORKSPACE_LIGHT's own comment.
   offsetScale: DEFAULT_WORKSPACE_LIGHT.offsetScale,
+  // ui-window-shadow.js's `tintColor` param default, mirrored — the colour
+  // the shadow darkens toward (environmental-light.js#setUiShadowTint), not
+  // the light-visibility.js occlusion geometry above.
+  tintColor: '#40312a',
   // How many frames between DOM window-rect re-scans (2026-07-20 v5, author-
   // measured perf fix: 120fps → 78fps at scanEveryNFrames:1). See
   // updateUiShadowStamps' own header for why the DOM read — not the shader —
@@ -673,6 +677,10 @@ export function setUiShadow(partial = {}) {
   const p = partial ?? {};
   if (typeof p.enabled === 'boolean') _uiShadowState.enabled = p.enabled;
   if (typeof p.flipY === 'boolean') _uiShadowState.flipY = p.flipY;
+  // A hex string (ui-window-shadow.js's `tintColor`, type 'color') — no
+  // clamp, just a same-shape guard as the booleans above; a malformed value
+  // is caught downstream by hexToRgb01's own fallback where it's consumed.
+  if (typeof p.tintColor === 'string') _uiShadowState.tintColor = p.tintColor;
   const num = (k, lo, hi) => {
     if (Number.isFinite(p[k])) _uiShadowState[k] = Math.min(hi, Math.max(lo, p[k]));
   };
@@ -3778,6 +3786,10 @@ export async function startVtPanViewer({
       const canvasRect = canvas.getBoundingClientRect();
       uiShadow.setResolution(canvasRect.width, canvasRect.height);
       uiShadow.setFlipY(_uiShadowState.flipY);
+      // Same throttle as every other "Look" field read in this function
+      // (azimuthDeg/strength01/etc. below) — the tint only needs to move as
+      // often as the geometry scan does.
+      envLight.setUiShadowTint(hexToRgb01(_uiShadowState.tintColor));
       const light = {
         azimuthDeg: _uiShadowState.azimuthDeg,
         elevationDeg: _uiShadowState.elevationDeg,

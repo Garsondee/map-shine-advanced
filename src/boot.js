@@ -8431,7 +8431,7 @@ function install() {
     accVar: '--c-post',
     filterCategory: 'post',
     schema: UI_SHADOW_PARAMS,
-    fohKeys: ['strength01', 'azimuthDeg', 'elevationDeg', 'offsetScale'],
+    fohKeys: ['strength01', 'azimuthDeg', 'elevationDeg', 'offsetScale', 'tintColor'],
     getReadout: () => uiShadowReadout,
     setValue: (patch) => MapShine.setUiShadow(patch),
     getHealth: () => getParamHealth('uiWindowShadow', UI_SHADOW_PARAMS),

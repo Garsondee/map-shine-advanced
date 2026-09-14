@@ -719,12 +719,30 @@ export function buildEnvironmentalLightMaterials({
     illumMaterial.fragmentNode = vec4(fluidTintAdd ? ambientLit.add(fluidTintAdd) : ambientLit, float(1));
   }
 
+  // UI-SHADOW TINT (mythica-machina-press#171-adjacent rung, ui-window-
+  // shadow.js's own 'tinted-shadow' tier) — owned here, not in light-
+  // visibility.js, same split as everywhere else in this file: that module
+  // computes pure OCCLUSION geometry (`uiShadowVisNode`, 1..0, correct for
+  // N overlapping stamps via multiplicative accumulation); this is the ONE
+  // place colour ever gets multiplied in, so it can be a single live
+  // uniform rather than something the geometry pass would need to thread
+  // per-stamp. `mix(uUiShadowTint, vec3(1), vis)` — at vis=1 (no shadow) this
+  // is EXACTLY vec3(1), so `illumWithUiShadow` is byte-identical to before
+  // this existed there; at vis=0 (`strength01` maxed) illum is multiplied by
+  // the authored tint directly instead of by zero, so "fully dark" now reads
+  // as a warm dark colour, never pure black, unless the author sets the tint
+  // to white themselves. Ships at #40312a (a warm umber) — see
+  // ui-window-shadow.js's own default.
+  const uUiShadowTint = uniform(vec3(0.251, 0.192, 0.165));
+
   // --- composite pass: lit = EOTF( OETF(albedo) × illum × uiShadowVis + coloration ) ------
   const albedoTexNode = texture(albedoTexture);
   const illumTexNode = texture(illumTexture);
   const colorationTexNode = texture(colorationTexture);
   const mapSrgb = sRGBTransferOETF(albedoTexNode.rgb);
-  const illumWithUiShadow = uiShadowVisNode ? illumTexNode.rgb.mul(uiShadowVisNode) : illumTexNode.rgb;
+  const illumWithUiShadow = uiShadowVisNode
+    ? illumTexNode.rgb.mul(mix(uUiShadowTint, vec3(1, 1, 1), uiShadowVisNode))
+    : illumTexNode.rgb;
   const litSrgb = mapSrgb.mul(illumWithUiShadow);
   // (The sky "veil" that used to add a neutral desaturating term here is GONE,
   // 2026-07-23 — it was the wrong mechanism, a light cannot drain chroma. The
@@ -761,6 +779,18 @@ export function buildEnvironmentalLightMaterials({
    */
   function setSky(multiplierRgb) {
     uSkyMultiplier.value.set(multiplierRgb[0], multiplierRgb[1], multiplierRgb[2]);
+  }
+
+  /**
+   * Push the UI-window-shadow tint colour (mythica-machina-press ui-window-
+   * shadow.js `tintColor` param). A no-op call if `uiShadowVisNode` was never
+   * supplied — the uniform still exists (cheap, unconditional) but nothing
+   * reads it, same "harmless to call, provably inert" posture as every other
+   * optional setter here.
+   * @param {readonly number[]} rgb - 0..1 linear-ish triple (hexToRgb01's shape).
+   */
+  function setUiShadowTint(rgb) {
+    uUiShadowTint.value.set(rgb[0], rgb[1], rgb[2]);
   }
 
   /** The camera's world rect this frame — the screen→world half of the gate. */
@@ -850,6 +880,7 @@ export function buildEnvironmentalLightMaterials({
     colorationTexNode,
     setAmbient,
     setSky,
+    setUiShadowTint,
     setViewRect,
     setOutdoorsRect,
     setSunShadowRect,

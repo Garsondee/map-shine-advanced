@@ -59,6 +59,14 @@ export const UI_SHADOW_PARAMS = Object.freeze({
     label: 'Light height (angle)',
     help: 'How high the light sits. 90 = straight overhead (shadow directly under the window); lower = a longer, softer throw.',
   },
+  tintColor: {
+    type: 'color',
+    space: 'srgb',
+    default: '#40312a',
+    category: 'Look',
+    label: 'Shadow tint',
+    help: 'The colour the shadow darkens toward, instead of neutral black. Warm by default (a workspace-key feel) — white gives the old plain-grey look back.',
+  },
   offsetScale: {
     type: 'float',
     min: 0.1,
@@ -149,7 +157,9 @@ export const UI_WINDOW_SHADOW = Object.freeze({
       n: 0,
       name: 'soft-offset',
       cost: Object.freeze({ class: 'C1', estMsPerMp: 0.1 }),
-      adds: 'open UI windows cast a soft, offset shadow on the map',
+      adds:
+        'open UI windows cast a soft, offset shadow on the map, darkening toward an authored tint colour ' +
+        '(warm by default) instead of neutral black — no extra cost, same multiply, a different target vector',
     }),
   ]),
   // Recorded, NOT built — rungs so the deferred features do not rot (Effects.md §0).
@@ -158,7 +168,6 @@ export const UI_WINDOW_SHADOW = Object.freeze({
       name: 'parallax-by-floor',
       note: "scale the shadow's throw + softness by the active floor's elevation (native scene.levels) — the illusion of height when looking at an upper floor",
     }),
-    Object.freeze({ name: 'tinted-shadow', note: 'a warm workspace-key tint instead of neutral grey' }),
     Object.freeze({
       name: 'per-window-height',
       note: 'a small tooltip floats lower (shorter shadow) than a full character sheet',

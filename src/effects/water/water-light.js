@@ -315,6 +315,17 @@ export function waterKeyLightDirection(key) {
  *   all** — see the header. Absent yields the flat `N = (0,0,1)` this module
  *   shipped with until 2026-07-29, kept ONLY so an un-wired caller degrades to
  *   the old look rather than throwing.
+ * @param {*} [args.cloudVisNode] - `world/cloud-field.js#buildCloudGroundVisNode`'s
+ *   0..1 output (mythica-machina-press#152), same shared field
+ *   `environmental-light.js`/`point-light-illumination.js`/`window.js` already
+ *   read — a real, drifting cloud shape darkening the SUN DISC term only
+ *   (`sunSpec`, not the isotropic sky dome `skySpec`: the dome's own
+ *   brightness already comes from `fillStrength`/`fillColor`, which the
+ *   broader weather pipeline already dims under overcast — multiplying it
+ *   again here would double-count the same cloud cover two different ways).
+ *   Absent compiles the whole gate out — Effects.md Law 4 — so an un-wired
+ *   caller (a test, a future tier that never builds the cloud field) renders
+ *   exactly as it did before this existed.
  * @returns {{reflection:*, setViewCentre:(x:number,y:number)=>void,
  *   setSky:(sky:object)=>void, setGlossiness:(v:number)=>void,
  *   setViewerHeight:(v:number)=>void, setSunGlint:(v:number)=>void,
@@ -335,6 +346,7 @@ export function buildWaterSpecular({
   shadowResponse = WATER_TIER3_SHADOW_RESPONSE,
   sunShadowTexture = null,
   slopeXY = null,
+  cloudVisNode = null,
 }) {
   const { vec2, vec3, vec4, float, uniform, texture, clamp, max, dot, normalize, sqrt, mix } = TSL;
 
@@ -465,7 +477,15 @@ export function buildWaterSpecular({
   // fill's own `sunVis` (which this term was already riding, downstream) was
   // never enough: a lobe that reaches ten times the buffer's white point is
   // still blown out after a 0.3× ambient.
-  const sunSpec = lobe(uKeyDir, uKeyColor.mul(uKeyStrength)).mul(uSunGlint).mul(sunShadowFactor);
+  // CLOUD SHADOWS ON THE GLINT (mythica-machina-press#152) — same
+  // multiplicative "another occluder between here and the sun" composition
+  // `sunShadowFactor` already is; clouds and buildings stack the same way a
+  // real scene would. `cloudVisNode ?? 1` keeps an un-wired caller a
+  // no-op (Law 4).
+  const sunSpec = lobe(uKeyDir, uKeyColor.mul(uKeyStrength))
+    .mul(uSunGlint)
+    .mul(sunShadowFactor)
+    .mul(cloudVisNode ?? float(1));
 
   // THE SKY DOME. The reflection vector is `R = 2(N·V)N − V`.
   //

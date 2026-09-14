@@ -3042,6 +3042,14 @@ export async function startVtPanViewer({
      * own round-3 starting point for "make the passing shape read clearly
      * against the window's own glow." */
     const uWindowCloudContrast = THREE.TSL.uniform(THREE.TSL.float(1.5));
+    /** Water's OWN direct-cloud-factor strength (mythica-machina-press#152) —
+     * a separate dial from both siblings above, same "one shared dial stops
+     * being enough once a second surface needs its own amount" precedent.
+     * 1.5 borrows window's own round-3 starting point (no live-tested value
+     * exists yet for water's specular glint specifically) — a first guess,
+     * not a tuned constant; worth the author's own look before treating it
+     * as settled. */
+    const uWaterCloudContrast = THREE.TSL.uniform(THREE.TSL.float(1.5));
     /** `buildCloudGroundVisNode`'s own `blurFieldUnits` — widens the
      * silhouette's coverage transition before either shadow consumer reads
      * it. Recomputed every frame as `cloudShadowBlurBase +
@@ -3254,6 +3262,27 @@ export async function startVtPanViewer({
         // enough once the ground and window needed genuinely different
         // amounts to each read clearly).
         strength: uWindowCloudContrast,
+        blurFieldUnits: uCloudShadowBlur,
+      });
+    }
+
+    /**
+     * Water's OWN cloud-factor node (mythica-machina-press#152) — darkens
+     * `water-light.js#buildWaterSpecular`'s sun-disc glint only, same
+     * "own uniforms, own call, never shared across subsystems" discipline
+     * `buildWindowCloudFactorNode`'s own doc states just above. Called once
+     * per FLOOR (water's own subsystem is built per floor, like window's).
+     * @returns {*} float node, 0..1.
+     */
+    function buildWaterCloudFactorNode() {
+      return buildCloudGroundVisNode(THREE.TSL, {
+        worldXY: THREE.TSL.positionWorld.xy,
+        uniforms: cloudUniforms,
+        buildField: buildCloudFieldNode,
+        offset: uCloudOffset,
+        streakSpread: CLOUD_SHADOW_STREAK_SPREAD,
+        fillShare: uCloudFillShare,
+        strength: uWaterCloudContrast,
         blurFieldUnits: uCloudShadowBlur,
       });
     }
@@ -11172,6 +11201,10 @@ export async function startVtPanViewer({
         uOutdoorsRect: envLight.uOutdoorsRect,
         outdoorsTexNode: envLight.outdoorsTexNode,
         buildOutdoorsGate: buildWorldSpaceOutdoorsGate,
+        // CLOUD REFLECTIONS ON WATER (mythica-machina-press#152) — a fresh
+        // node per floor's own subsystem construction, same discipline
+        // buildWaterCloudFactorNode's own doc states.
+        cloudVisNode: buildWaterCloudFactorNode(),
         getSkyHandle: () => skyHandle,
         // THE DEPTH-AUTHORITY GATE (2026-08-15) — composed exactly like
         // specular's/window's own `resolveExpectedDepth` below, resolved by

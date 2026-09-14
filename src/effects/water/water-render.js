@@ -900,6 +900,9 @@ export const WATER_TIER5_DISABLED_PENDING_SELF_CAPTURE_FIX = false;
  *   zoomed in (live-reported the same day: "when I zoom in you can see a
  *   pixelated look"). `buildSmoothTexelUv` (the SAME C2 reconstruction the
  *   body pack already uses, for the same reason) needs this to correct it.
+ * @param {*} [args.cloudVisNode] - mythica-machina-press#152; see
+ *   `water-light.js#buildWaterSpecular`'s own doc — darkens the sun-disc
+ *   glint only. `null` (the default) compiles the whole gate out.
  * @returns {{absorbMaterial:*, inscatterMaterial:*, debugMaterial:*, maskTexNode:*, maskTexNodes:Array<*>,
  *   bodyTexNode:*|null, flowPackTexNode:*, waterSimTexNode:*,
  *   setMaskRect:(r:object)=>void, setTint:(rgb:readonly number[])=>void,
@@ -947,6 +950,10 @@ export function buildWaterSurfaceMaterial({
   viewerHeight = WATER_TIER3_VIEWER_HEIGHT,
   shadowResponse = WATER_TIER3_SHADOW_RESPONSE,
   chop = WATER_TIER3_CHOP,
+  // CLOUD SHADOWS ON THE SUN GLINT (mythica-machina-press#152) — see
+  // water-light.js#buildWaterSpecular's own doc for what this darkens and
+  // why only the sun-disc term, not the sky dome.
+  cloudVisNode = null,
   tier = WATER_DEFAULT_TIER,
   // ── THE DEPTH-AUTHORITY GATE (2026-08-15) ──────────────────────────────────
   depthTexture = null,
@@ -1752,6 +1759,7 @@ export function buildWaterSurfaceMaterial({
       glossiness,
       viewerHeight,
       shadowResponse,
+      cloudVisNode,
       // THE SUN-SHADOW GATE (2026-08-16). A JS-time branch, Law 4: with no
       // field texture the whole lookup is compiled OUT, and the rung renders
       // exactly as it did before shadows reached water. `Water.md` §7 has

@@ -215,6 +215,10 @@ export function createWaterSurfaceSubsystem({
   sunShadowTexture = null,
   getSunShadowSlot,
   waterRefraction = null,
+  // CLOUD SHADOWS ON THE SUN GLINT (mythica-machina-press#152) — threaded
+  // straight through to water-render.js#buildWaterSurfaceMaterial; see
+  // water-light.js#buildWaterSpecular's own doc for what this does.
+  cloudVisNode = null,
   // ⚠️ TIER 5's OWN SCENE (2026-08-23, the self-capture fix) — see
   // `water-render.js#WATER_TIER5_DISABLED_PENDING_SELF_CAPTURE_FIX`'s own
   // doc. `meshes[2]` (refraction) is added to THIS scene, never `scene`,
@@ -390,6 +394,7 @@ export function createWaterSurfaceSubsystem({
       uOutdoorsRect,
       outdoorsTexNode,
       buildOutdoorsGate,
+      cloudVisNode,
       tier,
       // DIAGNOSTIC-ONLY — see `setWaterCausticsGateForce`'s own doc above.
       // Read FRESH on every build (never captured earlier), same discipline

@@ -206,4 +206,64 @@ export function run(t) {
     );
     t.ok('getStatus and getActiveEvents agree', status.events.active[0].id === mgr.getActiveEvents()[0].id);
   }
+
+  // ---- an active event's precipKindOverride wins over both temperature and
+  // the GM's own authored pick (mythica-machina-press#141: ash-storm actually
+  // makes ash fall, not just raise cloud cover) ----------------------------------
+  {
+    const mgr = createWeatherManager();
+    mgr.jumpTo({ temperature01: 1 }); // as warm as possible — would derive 'rain' with no event
+    mgr.addEvent({
+      kind: 'ash-storm',
+      envelope: { attackSec: 0, sustainSec: 'held', releaseSec: 1 }, // instant, isolate from ramping
+    });
+    mgr.tick(1 / 60);
+    t.ok(
+      "an active ash-storm's precipKindOverride wins over the warm-derived 'rain'",
+      mgr.toSnapshotWeather().precipKind === 'ash'
+    );
+
+    mgr.setPrecipKindAuthored('snow');
+    mgr.tick(1 / 60);
+    t.ok(
+      "the event's override wins even over the GM's own authored pick — the whole point of an ash-storm " +
+        'is that it is raining ash right now, not "unless the GM set something else"',
+      mgr.toSnapshotWeather().precipKind === 'ash'
+    );
+  }
+
+  // ---- the precipKind override stops once the event's envelope actually ends,
+  // not merely once release() is called (an event ramping down over several
+  // seconds should still be raining ash partway through release) -----------------
+  {
+    const mgr = createWeatherManager();
+    mgr.jumpTo({ temperature01: 1 });
+    const { id } = mgr.addEvent({
+      kind: 'ash-storm',
+      envelope: { attackSec: 0, sustainSec: 'held', releaseSec: 2 },
+    });
+    mgr.tick(1 / 60);
+    t.ok('ash falls while the event is live', mgr.toSnapshotWeather().precipKind === 'ash');
+
+    mgr.releaseEvent(id);
+    mgr.tick(1 / 60); // one frame into a 2s release — still ramping, not done yet
+    t.ok(
+      'the override still applies mid-release, before the envelope actually reaches done',
+      mgr.toSnapshotWeather().precipKind === 'ash'
+    );
+
+    for (let i = 0; i < 200; i++) mgr.tick(1 / 60); // well past the 2s release
+    t.ok(
+      'once the envelope is fully done the override stops and temperature-derived rain returns',
+      mgr.toSnapshotWeather().precipKind === 'rain'
+    );
+  }
+
+  // ---- no active event ⇒ toSnapshotWeather().precipKind is unaffected by this
+  // change — pure regression safety on the ordinary temperature-derived path ----
+  {
+    const mgr = createWeatherManager();
+    mgr.jumpTo({ temperature01: 1 });
+    t.ok('no active event ⇒ still the plain temperature-derived kind', mgr.toSnapshotWeather().precipKind === 'rain');
+  }
 }

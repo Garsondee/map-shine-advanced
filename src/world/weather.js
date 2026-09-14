@@ -1330,7 +1330,31 @@ export function createWeatherManager({
       // that drives the map cold must actually change what falls out of the
       // sky, or the overlay would be visible in every term except the one a
       // player would name first.
-      const precip = derivePrecipKind(precipKindAuthored, composed.temperature01);
+      //
+      // AN ACTIVE EVENT'S precipKindOverride WINS OVER THE GM'S OWN AUTHORED
+      // PICK (mythica-machina-press#141) — ash-storm's whole point is "it is
+      // raining ash right now," not "unless the GM happened to leave Precip
+      // Kind on Auto." Reuses derivePrecipKind's EXISTING "authored wins
+      // outright" contract unchanged (its own doc: "anything but 'auto' wins
+      // outright") — this just sources that argument from an event instead
+      // of only ever the GM's own setting, the same way `composed` above
+      // already lets an event's AXIS overrides outrank the GM's raw sliders.
+      // Same "is this event actually live" phase check `applyEventOverrides`
+      // just used two lines up (a `releaseSec`-expired event must not keep
+      // overriding forever) — NOT reusing that function itself, since its
+      // return shape is the composed AXES, not an event's own metadata.
+      // First match wins if more than one active event somehow both name a
+      // kind (not expected in practice today — only ash-storm ('ash') and
+      // volcanic-unrest ('embers') carry a non-null value, and running both
+      // at once would be an unusual scene to begin with).
+      const eventPrecipKind = [...activeEvents.values()]
+        .filter((ev) => {
+          const elapsedSinceStart = elapsedRealSec - ev.startedAtRealSec;
+          const elapsedSinceRelease = ev.releasedAtRealSec == null ? null : elapsedRealSec - ev.releasedAtRealSec;
+          return envelopePhase(ev.spec.envelope, elapsedSinceStart, elapsedSinceRelease).phase !== 'done';
+        })
+        .find((ev) => ev.spec.precipKindOverride)?.spec.precipKindOverride;
+      const precip = derivePrecipKind(eventPrecipKind ?? precipKindAuthored, composed.temperature01);
       return Object.freeze({
         preset: currentPreset,
         ...composed,

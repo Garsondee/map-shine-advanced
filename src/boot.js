@@ -728,8 +728,15 @@ MapShine.resetAlbedoClarity = resetAlbedoClarity;
 // store or UI state (the V2 `resolve-effect-enabled` race is unreachable). After
 // this rewire the low-level setUiShadow has exactly ONE caller — this apply.
 const effectRegistry = createEffectRegistry();
+// Studio-card readout (mythica-machina-press#175) — same `buildCascadeReadout`
+// shape every other simple effect card's readout uses; declared right beside
+// this effect's own register() call rather than in the big readout cluster
+// further down, since uiWindowShadow is registered here on its own, well
+// before that cluster exists.
+let uiShadowReadout = { enabled: false, params: null };
 effectRegistry.register(UI_WINDOW_SHADOW, (resolved) => {
   setUiShadow({ enabled: resolved.enabled, ...resolved.params });
+  uiShadowReadout = buildCascadeReadout(resolved);
 });
 
 // THE FADE SOURCE REGISTRY (world/fade-registry.js) — declared here, at module
@@ -8416,6 +8423,18 @@ function install() {
     // wraps its params with wrapForReadTracking('depthOfField', ...) at the
     // actual render-consumption boundary (see that seam's own comment).
     getHealth: () => getParamHealth('depthOfField', DOF_PARAMS),
+  });
+
+  registerSimpleEffectCard('uiWindowShadow', {
+    icon: 'layers',
+    title: 'UI window shadows',
+    accVar: '--c-post',
+    filterCategory: 'post',
+    schema: UI_SHADOW_PARAMS,
+    fohKeys: ['strength01', 'azimuthDeg', 'elevationDeg', 'offsetScale'],
+    getReadout: () => uiShadowReadout,
+    setValue: (patch) => MapShine.setUiShadow(patch),
+    getHealth: () => getParamHealth('uiWindowShadow', UI_SHADOW_PARAMS),
   });
 
   registerSimpleEffectCard('sunShadows', {

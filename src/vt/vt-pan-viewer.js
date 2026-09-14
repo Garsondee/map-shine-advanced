@@ -8182,18 +8182,34 @@ export async function startVtPanViewer({
     // the pure-maths module — the same split world/weather.js#tick() takes
     // around its own pure envelopePhase/advanceWalk helpers.
     // ═══════════════════════════════════════════════════════════════════
-    /** LAZY, same posture as taaHistoryA/B above — a whole extra HalfFloat
-     * internal-tier buffer is real, avoidable cost for a player who never
-     * turns Lens on. */
-    let lensOutputRT = null;
-    function ensureLensOutputRT() {
-      if (!lensOutputRT) lensOutputRT = allocator.create('lens.output', describeSceneColor());
-      return lensOutputRT;
+    /** ⚠️ A PING-PONGED PAIR, NOT ONE BUFFER — a real, live-caught bug
+     * (author report, WebGPU validation: "usage includes writable usage and
+     * another usage in the same synchronization scope") fixed BEFORE this
+     * comment existed. `gradePresent.setLitSource()` is a PERSISTENT
+     * redirect, not a one-frame value — on the frame AFTER lens first runs,
+     * `getLitSource()` returns lens's OWN previous output, so a single
+     * buffer means reading and writing the SAME texture in the SAME render
+     * pass the very next tick. `taaHistoryA`/`B` above solve the identical
+     * problem the identical way; this now mirrors that exactly: write into
+     * whichever half is NOT the one present currently reads, then hand
+     * THAT one to present, then flip. LAZY, same posture as taaHistoryA/B —
+     * two whole extra HalfFloat internal-tier buffers is real, avoidable
+     * cost for a player who never turns Lens on. */
+    let lensOutputA = null;
+    let lensOutputB = null;
+    /** Which of A/B present currently reads — the OTHER one is this tick's
+     * write target. Mirrors `taaHistoryWriteIndex`'s own naming/semantics
+     * (0 = A is next to receive a write) intentionally. */
+    let lensOutputWriteIndex = 0;
+    function ensureLensOutputRTs() {
+      if (lensOutputA && lensOutputB) return;
+      lensOutputA = allocator.create('lens.outputA', describeSceneColor());
+      lensOutputB = allocator.create('lens.outputB', describeSceneColor());
     }
 
     /** Tier 2's own persistence pair — QUARTER internal resolution (V2's own
      * posture: an afterimage is a soft, low-frequency glow, not detail that
-     * needs full res). LAZY, same reasoning as lensOutputRT above. */
+     * needs full res). LAZY, same reasoning as lensOutputA/B above. */
     let lensLightBurnReadRT = null;
     let lensLightBurnWriteRT = null;
     let lensLightBurnNeedsClear = false;
@@ -8280,9 +8296,10 @@ export async function startVtPanViewer({
      * `post.lens` (mythica-machina-press#57). Runs AFTER post.taaResolve,
      * BEFORE present.composite — reads whichever texture the chain has
      * arrived at (`gradePresent.getLitSource()`), writes a distorted copy
-     * into `lensOutputRT`, and redirects present at THAT. A true no-op
-     * (zero GPU work, present left pointing at whatever the previous pass
-     * already set) while disabled.
+     * into WHICHEVER of `lensOutputA`/`B` is not that same texture (see
+     * that pair's own declaration for why one buffer is unsafe), and
+     * redirects present at THAT. A true no-op (zero GPU work, present left
+     * pointing at whatever the previous pass already set) while disabled.
      */
     function runPostLensPass() {
       const st = getLensRenderState();
@@ -8506,16 +8523,20 @@ export async function startVtPanViewer({
         u.uLightBurnIntensity.value = 0;
       }
 
-      // ── RENDER — read the snapshot, write the transformed copy, hand the
-      // chain forward. ──────────────────────────────────────────────────
-      const outputRT = ensureLensOutputRT();
+      // ── RENDER — read the snapshot, write the transformed copy into
+      // whichever of A/B isn't the buffer present currently reads, hand
+      // THAT forward, then flip. See lensOutputA/B's own declaration for
+      // why a single buffer is a same-texture read+write hazard. ────────
+      ensureLensOutputRTs();
+      const writeTarget = lensOutputWriteIndex === 0 ? lensOutputA : lensOutputB;
       const prevAutoClear = renderer.autoClearColor;
       renderer.autoClearColor = true;
-      renderer.setRenderTarget(outputRT);
+      renderer.setRenderTarget(writeTarget);
       lensQuad.render(renderer);
       renderer.autoClearColor = prevAutoClear;
       renderer.setRenderTarget(null);
-      gradePresent.setLitSource(outputRT.texture);
+      gradePresent.setLitSource(writeTarget.texture);
+      lensOutputWriteIndex = 1 - lensOutputWriteIndex;
     }
 
     /**
@@ -20583,7 +20604,10 @@ export async function startVtPanViewer({
       }
       // LENS's own scratch targets (mythica-machina-press#57) — same "only
       // if it exists" lazy-allocation guard as TAA's history pair above.
-      if (lensOutputRT) allocator.resize(lensOutputRT, internalW, internalH, describeSceneColor());
+      if (lensOutputA && lensOutputB) {
+        allocator.resize(lensOutputA, internalW, internalH, describeSceneColor());
+        allocator.resize(lensOutputB, internalW, internalH, describeSceneColor());
+      }
       if (lensLightBurnReadRT && lensLightBurnWriteRT) {
         allocator.resize(
           lensLightBurnReadRT,

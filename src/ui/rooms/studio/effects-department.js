@@ -197,26 +197,53 @@ function buildStudioEffectCard(model) {
   head.append(spacer);
 
   if (typeof model.onToggleEnabled === 'function') {
-    // The status dot stays a small 9px circle (it's a glance-indicator, not
-    // a button that should visually dominate the header) — but a 9px CLICK
-    // target is real trouble to hit precisely. `.hbtn` (shell.js) wraps it
-    // in the same 24px hit box every other header tool button here uses,
-    // same trick as a checkbox's own padded label: small visual, real target.
+    // A real track+thumb switch (mythica-machina-press#550) — the old
+    // control was a bare 9px status dot, indistinguishable from the health/
+    // tier/scope badges sitting right beside it, so even a correct redraw
+    // didn't read as "a toggle, and here's its new state." Colour AND thumb
+    // position both flip now, matching the standard on/off idiom.
+    // `model.enabled === false` is the one explicit "off" case (mirrors the
+    // card's own opacity check above) — undefined reads as on, same default.
+    const isOn = model.enabled !== false;
     const enableBtn = document.createElement('button');
     enableBtn.type = 'button';
-    enableBtn.className = 'hbtn';
-    enableBtn.title = model.enabled ? 'Enabled — click to turn off' : 'Disabled — click to turn on';
-    enableBtn.style.flex = '0 0 auto';
-    const dot = document.createElement('span');
-    Object.assign(dot.style, {
-      width: '9px',
-      height: '9px',
+    enableBtn.setAttribute('role', 'switch');
+    enableBtn.setAttribute('aria-checked', String(isOn));
+    enableBtn.title = isOn ? 'Enabled — click to turn off' : 'Disabled — click to turn on';
+    Object.assign(enableBtn.style, {
+      flex: '0 0 auto',
+      width: '28px',
+      height: '16px',
+      padding: '2px',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: isOn ? 'flex-end' : 'flex-start',
+      borderRadius: '999px',
+      border: '1px solid ' + (isOn ? 'transparent' : 'var(--line, rgba(196,208,232,.13))'),
+      background: isOn ? 'var(--ok, #4bd48c)' : 'var(--bg3, rgba(196,208,232,.13))',
+      cursor: 'pointer',
+    });
+    const thumb = document.createElement('span');
+    Object.assign(thumb.style, {
+      width: '12px',
+      height: '12px',
       borderRadius: '50%',
-      background: model.enabled ? 'var(--ok, #4bd48c)' : 'var(--ink2, #7f97ba)',
+      background: isOn ? '#0d1016' : 'var(--ink2, #7f97ba)',
       display: 'block',
     });
-    enableBtn.append(dot);
-    enableBtn.addEventListener('click', () => model.onToggleEnabled(!model.enabled));
+    enableBtn.append(thumb);
+    enableBtn.addEventListener('click', () => {
+      model.onToggleEnabled(!isOn);
+      // The write behind onToggleEnabled settles through a Promise chain
+      // (write the setting, then re-resolve the cascade — see e.g.
+      // boot.js#setCandle) even though it's a same-tick client setting under
+      // the hood, so a synchronous rerender here would just redraw this
+      // exact pre-click snapshot. Every microtask that chain queues has
+      // drained by the next animation frame — the earliest rerender that's
+      // guaranteed to read the settled state rather than guess at it, and
+      // still effectively instant to the eye.
+      requestAnimationFrame(() => model.onRequestRerender?.());
+    });
     head.append(enableBtn);
   }
   head.append(

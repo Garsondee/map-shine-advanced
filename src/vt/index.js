@@ -61,6 +61,7 @@ export {
   getVtPanViewerTodHour,
   setVtPanViewerSkyRealism,
   setVtPanViewerGradeEnvStrength,
+  setVtPanViewerSunLatitude,
   setVtPanViewerCloudCover,
   setVtPanViewerWeatherArchetype,
   setVtPanViewerWeatherMode,

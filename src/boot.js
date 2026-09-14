@@ -267,6 +267,7 @@ import {
   getVtPanViewerTodHour,
   setVtPanViewerSkyRealism,
   setVtPanViewerGradeEnvStrength,
+  setVtPanViewerSunLatitude,
   setVtPanViewerCloudCover,
   setVtPanViewerWeatherArchetype,
   setVtPanViewerWeatherMode,
@@ -1482,6 +1483,10 @@ function install() {
         onSkyRealismCommit: (v) => void editSky({ realism01: v }),
         getGradeEnvStrength: () => skyScope.sky?.gradeEnvStrength ?? 0,
         onGradeEnvStrengthCommit: (v) => void editSky({ gradeEnvStrength: v }),
+        // SUN LATITUDE (mythica-machina-press#170) — same shape as the two
+        // env channels just above (its own scope, not a weather axis).
+        getSunLatitude: () => skyScope.sky?.latitudeDeg ?? 30,
+        onSunLatitudeCommit: (v) => void editSky({ latitudeDeg: v }),
         // Temperature (2026-08-18 fix — author pressing again on "still
         // missing a lot of sliders"; re-checked WEATHER_AXES fresh rather than
         // repeating the old finding unverified). `temperature01` genuinely IS
@@ -10540,6 +10545,8 @@ function install() {
     // automatic ToD/weather look + cloud desaturation. (The ARTISTIC grade is a
     // separate effect now, resolved through its own cascade, not from here.)
     setVtPanViewerGradeEnvStrength(sky.gradeEnvStrength);
+    // SUN LATITUDE (mythica-machina-press#170).
+    setVtPanViewerSunLatitude(sky.latitudeDeg);
   };
 
   /** Re-read both stores, decide which wins, and push it at the engines. */

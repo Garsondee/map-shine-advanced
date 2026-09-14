@@ -133,6 +133,18 @@ export const DEFAULT_SKY = Object.freeze({
    * home, not two: the astrolabe Look dropdown + a `lookPreset` field here
    * would have been a second persistence home for the same value.) */
   gradeEnvStrength: 0,
+  /**
+   * SUN LATITUDE (mythica-machina-press#170), degrees, -90..90. Feeds
+   * `world/sun.js#DEFAULT_SUN_CONFIG.maxElevationDeg` via the real equinox
+   * relationship `maxElevationDeg = 90 - |latitudeDeg|` (the sun's peak
+   * altitude at solar noon on an equinox, no seasonal/day-of-year term —
+   * this model has neither, so an equinox is the one honest anchor to use).
+   * Default 30° reproduces `DEFAULT_SUN_CONFIG`'s own shipped 60° exactly
+   * (90-30=60), so every existing scene's sun is byte-identical until an
+   * author actually moves this. Higher magnitude (toward either pole) ⇒ a
+   * lower, longer-shadowed arc; 0° (equator) ⇒ the sun passes overhead.
+   */
+  latitudeDeg: 30,
 });
 
 /**
@@ -175,6 +187,7 @@ export function normalizeSky(raw) {
       : DEFAULT_SKY.precipKindAuthored,
     realism01: clampRange(r.realism01, 0, 1, DEFAULT_SKY.realism01),
     gradeEnvStrength: clampRange(r.gradeEnvStrength, 0, 1, DEFAULT_SKY.gradeEnvStrength),
+    latitudeDeg: clampRange(r.latitudeDeg, -90, 90, DEFAULT_SKY.latitudeDeg),
   });
 }
 

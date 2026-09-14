@@ -173,6 +173,20 @@ const ENV_CHANNELS = Object.freeze([
     getValue: 'getWindSpeed01',
     onCommit: 'onWindSpeed01Commit',
   },
+  {
+    key: 'sunLatitude',
+    label: 'Sun latitude',
+    help: 'How high the sun peaks at noon — 0° (equator) passes near overhead, ±90° (poles) barely clears the horizon even at noon.',
+    getValue: 'getSunLatitude',
+    onCommit: 'onSunLatitudeCommit',
+    // mythica-machina-press#170 — the one channel here that ISN'T 0..1 (a
+    // real degrees value, world/sun.js's own unit), hence the per-channel
+    // range override the render loop below now supports.
+    min: -90,
+    max: 90,
+    step: 1,
+    default: 30,
+  },
 ]);
 
 function chip(text, title, onClick) {
@@ -500,7 +514,18 @@ export function renderWeatherBoard(container, ctx) {
     // these today; a mood/climate chip only ever touches the two axes in
     // ARCHETYPE_OWNED_AXES.
     for (const channel of ENV_CHANNELS) {
-      const decl = { type: 'float', min: 0, max: 1, step: 0.01, default: 0, label: channel.label, help: channel.help };
+      // Per-channel range override (mythica-machina-press#170) — every
+      // channel before Sun latitude was happily 0..1, so this defaults to
+      // exactly that rather than needing every existing entry touched.
+      const decl = {
+        type: 'float',
+        min: channel.min ?? 0,
+        max: channel.max ?? 1,
+        step: channel.step ?? 0.01,
+        default: channel.default ?? 0,
+        label: channel.label,
+        help: channel.help,
+      };
       const getValue = ctx[channel.getValue];
       const onCommit = ctx[channel.onCommit];
       if (typeof getValue !== 'function') continue;

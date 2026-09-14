@@ -8555,6 +8555,11 @@ export async function startVtPanViewer({
      * neutral (the automatic ToD/weather look is off). This is the lever that
      * carries the cloud desaturation the deleted sky veil couldn't. */
     let gradeEnvStrength = 0;
+    /** Sun latitude, degrees (mythica-machina-press#170). Default 30 matches
+     * `sky-settings.js#DEFAULT_SKY.latitudeDeg` — 90-30=60, `world/sun.js`'s
+     * own shipped `DEFAULT_SUN_CONFIG.maxElevationDeg`, so a fresh viewer's
+     * sun is byte-identical to before this existed until a GM moves it. */
+    let sunLatitudeDeg = 30;
     /** The bundled cinematic LUT (mythica-machina-press#38) currently loaded
      * (or in flight) into `gradePresent`'s real LUT slot — 'none' at boot,
      * matching `GRADE_LOOK_PARAMS.lutName`'s own default. `pushGradeLook`
@@ -8665,6 +8670,13 @@ export async function startVtPanViewer({
         // "supplied as zero", which would read as a considered choice about a
         // GM input that no longer exists on this path.
         ambientInput: { daylight: ambient.daylight, darkness: ambient.darkness, brightest: ambient.brightest },
+        // SUN LATITUDE (mythica-machina-press#170) — the real equinox peak-
+        // altitude relationship; see setSunLatitude's own doc. Omitted at
+        // the default 30° would also compute to exactly 60 (this engine's
+        // own shipped DEFAULT_SUN_CONFIG value), but passing it unconditionally
+        // means a GM's own edit takes effect with no separate "is this
+        // customised" branch to maintain.
+        sunConfig: { maxElevationDeg: 90 - Math.abs(sunLatitudeDeg) },
       });
 
       // ── PUBLISH DARKNESS BACK TO FOUNDRY (2026-08-15) ────────────────────
@@ -9384,6 +9396,21 @@ export async function startVtPanViewer({
     function setGradeEnvStrength(strength01) {
       gradeEnvStrength = Math.min(1, Math.max(0, Number(strength01) || 0));
       return { gradeEnvStrength };
+    }
+
+    /**
+     * SUN LATITUDE, degrees, -90..90 (mythica-machina-press#170). Feeds
+     * `world/sun.js`'s `maxElevationDeg` via the real equinox relationship
+     * `maxElevationDeg = 90 - |latitudeDeg|` — see sky-settings.js#DEFAULT_SKY's
+     * own doc for why an equinox is the one honest anchor this no-season
+     * model can use. Read once per frame by the `buildEnvSnapshot` call
+     * below, the same "plain closure variable, no rebuild" shape every other
+     * simple sky scalar here already uses.
+     * @param {number} latitudeDeg @returns {object}
+     */
+    function setSunLatitude(latitudeDeg) {
+      sunLatitudeDeg = Number.isFinite(Number(latitudeDeg)) ? Math.min(90, Math.max(-90, Number(latitudeDeg))) : 30;
+      return { sunLatitudeDeg };
     }
 
     /**
@@ -22380,6 +22407,8 @@ export async function startVtPanViewer({
       /** The environmental grade strength, 0..1 (the ToD/weather look + cloud
        * desaturation). 0 = neutral. docs/planning/Grade.md. */
       setGradeEnvStrength,
+      /** Sun latitude, degrees -90..90 (mythica-machina-press#170). */
+      setSunLatitude,
       /** Rebuild the sky's `_Outdoors` gate for a floor (floor switch). */
       bakeOutdoorsTexture,
       /** Re-read walls/doors and re-bake without touching direction/speed —
@@ -25043,6 +25072,20 @@ export function setVtPanViewerSkyRealism(realism01) {
 export function setVtPanViewerGradeEnvStrength(strength01) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.setGradeEnvStrength(strength01);
+}
+
+/**
+ * SUN LATITUDE, degrees -90..90 (mythica-machina-press#170). Feeds
+ * `world/sun.js`'s `maxElevationDeg` via `maxElevationDeg = 90 - |latitudeDeg|`
+ * (the real equinox peak-altitude relationship — see sky-settings.js's own
+ * doc for why an equinox, not a season, is this no-day-of-year model's one
+ * honest anchor). Default 30° reproduces the shipped `DEFAULT_SUN_CONFIG`
+ * (`maxElevationDeg: 60`) exactly.
+ * @param {number} latitudeDeg
+ */
+export function setVtPanViewerSunLatitude(latitudeDeg) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setSunLatitude(latitudeDeg);
 }
 
 /**

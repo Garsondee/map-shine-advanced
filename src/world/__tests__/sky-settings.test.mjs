@@ -217,6 +217,32 @@ export function run(t) {
     t.ok('an out-of-range env strength clamps', messy.gradeEnvStrength === 1);
   }
 
+  // ---- SUN LATITUDE (mythica-machina-press#170) — same per-world/per-scene
+  // resolution as everything else here, degrees rather than 0..1 -------------
+  {
+    t.ok(
+      'latitude defaults to 30° — exactly reproduces the shipped 60° max elevation (90-30=60)',
+      DEFAULT_SKY.latitudeDeg === 30
+    );
+
+    const world = { latitudeDeg: 55 };
+    const off = resolveSky({ world });
+    t.ok('the world latitude is used by every scene', off.sky.latitudeDeg === 55);
+
+    const on = resolveSky({ world, scene: { latitudeDeg: -40 }, sceneOverrides: true });
+    t.ok('a scene can override the latitude independently', on.sky.latitudeDeg === -40);
+
+    const edit = applySkyEdit({ world }, { latitudeDeg: 0 });
+    t.ok('a latitude edit targets the world with no override', edit.target === 'world' && edit.sky.latitudeDeg === 0);
+
+    t.ok('an out-of-range positive latitude clamps to the pole', normalizeSky({ latitudeDeg: 200 }).latitudeDeg === 90);
+    t.ok(
+      'an out-of-range negative latitude clamps to the other pole',
+      normalizeSky({ latitudeDeg: -200 }).latitudeDeg === -90
+    );
+    t.ok('a non-numeric latitude falls back to the default', normalizeSky({ latitudeDeg: 'north' }).latitudeDeg === 30);
+  }
+
   // ---- THE NAMED SKY (weather manager slice 2) --------------------------------
   // `weatherArchetype` and `cloudCover01` are NOT two copies of one fact —
   // exactly one is authoritative at a time. These pin that contract, because the

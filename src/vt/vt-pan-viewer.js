@@ -417,6 +417,7 @@ import {
   resolveEnvGrade,
   scaleGradeToIdentity,
   identityCubeLut,
+  parseCubeLut,
   profileRank,
   GLOBAL_SETTING_KEYS,
   extractDripEdges,
@@ -6407,11 +6408,15 @@ export async function startVtPanViewer({
     // grade can never gate different halves of the map. QuadMesh, not a
     // hand-rolled quad — the whole Y-flip essay above still applies (grade-
     // present builds a NodeMaterial that a QuadMesh wraps below).
-    // NOT PASSED AS `lutTexture` (2026-08-29, see below) — kept constructed
-    // and ready, ONLY so `MapShine.setGradeLut`-style reconnection (the day
-    // `deferredRungs.bundled-lut-loading` ships a real .cube) is a one-line
-    // change: swap this back into the call and pass a genuine strength
-    // param through. 2³ is the smallest identity — plenty as a no-op.
+    // `lutTexture` RESTORED (mythica-machina-press#38) — was deliberately
+    // omitted 2026-08-29 while `lutName`/`lutStrength` were undeclared (see
+    // this file's own git history for that reasoning), on the explicit
+    // condition that it be reconnected "in the SAME commit that declares the
+    // two params and ships the asset load — never before, or the schema
+    // would describe a control with no consumer" (`params/no-dead-controls`).
+    // Both landed together: grade.js now declares the params, and
+    // `loadNamedLut`/`pushGradeLook` below own swapping this placeholder for
+    // a real loaded LUT via `gradePresent.setLut`.
     const lutPlaceholder = makeIdentityLutTexture(THREE);
     const gradePresent = buildGradePresentMaterial({
       THREE,
@@ -6419,23 +6424,7 @@ export async function startVtPanViewer({
       outdoorsTexNode: envLight.outdoorsTexNode,
       uViewRect: envLight.uViewRect,
       uOutdoorsRect: envLight.uOutdoorsRect,
-      // `lutTexture` DELIBERATELY OMITTED (2026-08-29 — was `lutPlaceholder`
-      // unconditionally, per this project's own tier-gradient audit, §3.3:
-      // "GRADE... always-on ALU+LUT sample in present pass, even when
-      // 'disabled' — cannot get cheaper"). `GRADE_LOOK_PARAMS`' own header
-      // states `lutName`/`lutStrength` are "DELIBERATELY not declared yet" —
-      // no author-facing control can ever push `lutStrength` above its
-      // built-in-zero default until `deferredRungs.bundled-lut-loading`
-      // ships, so the 3D-texture fetch this would compile in could NEVER
-      // contribute anything but a wasted always-zero-weighted sample, at
-      // every profile, forever, until that rung lands.
-      // `buildGradePresentMaterial`'s own `lutTexture ? ... : null` branch
-      // (Effects.md Law 4) already does the right thing with an omitted
-      // texture — this is the one line that needed to stop feeding it one. Restore
-      // `lutTexture: lutPlaceholder` (or the real loaded texture) in the
-      // SAME commit that declares the two params and ships the asset load —
-      // never before, or the schema would describe a control with no
-      // consumer (`params/no-dead-controls`' own rule, one level up).
+      lutTexture: lutPlaceholder,
       // INJECTED, not imported by grade-present.js itself — see that
       // function's own param doc for why (a real circular zone dependency,
       // not just a door-rule technicality).
@@ -8549,6 +8538,21 @@ export async function startVtPanViewer({
      * neutral (the automatic ToD/weather look is off). This is the lever that
      * carries the cloud desaturation the deleted sky veil couldn't. */
     let gradeEnvStrength = 0;
+    /** The bundled cinematic LUT (mythica-machina-press#38) currently loaded
+     * (or in flight) into `gradePresent`'s real LUT slot — 'none' at boot,
+     * matching `GRADE_LOOK_PARAMS.lutName`'s own default. `pushGradeLook`
+     * compares the resolved param against this every frame so `loadNamedLut`
+     * fires once per actual name change, never per frame. */
+    let currentLutName = 'none';
+    /** Is a `loadNamedLut` fetch+parse+upload currently in flight? Read by
+     * the `gradeLut` readiness probe below (grade.js's own `readiness.why`
+     * names it) so the curtain waits for a picked preset to actually arrive
+     * instead of presenting one frame of the wrong look. */
+    let lutLoadInFlight = false;
+    /** Already-loaded LUT textures, keyed by name — flipping a preset back
+     * and forth re-fetches nothing after the first load. Small: at most the
+     * bundled-name count of 17³ RGBA float textures. */
+    const lutTextureCache = new Map();
     // THE ARTISTIC GRADE — a first-class effect (`effects/grade/grade.js`). Its
     // resolved {enabled, params} arrive via the injected `getGradeLookState`
     // (like getBloomRenderState), read + pushed each frame below. Disabled ⇒
@@ -9361,6 +9365,70 @@ export async function startVtPanViewer({
     }
 
     /**
+     * Swap `gradePresent`'s real LUT slot to the named bundled preset
+     * (mythica-machina-press#38), fetching+parsing+uploading on first use
+     * and reusing `lutTextureCache` after that. 'none' (or anything falsy)
+     * resolves to the identity placeholder, matching the effect's own
+     * default. A stale-response guard (`currentLutName` re-checked after the
+     * `await`) means rapidly flipping presets can never let an earlier,
+     * slower fetch clobber a later, faster one. Errors are logged and fall
+     * back to identity — the same "throw in the pure parser, log-and-recover
+     * at the vt/ boundary" contract `lut-cube.js#parseCubeLut`'s own header
+     * documents, mirroring how a failed mask/outdoors bake is handled.
+     *
+     * A rapid toggle away from and back to the SAME name before its first
+     * fetch resolves can start a second, redundant fetch for it (the cache
+     * is still empty when the second call checks) — harmless for
+     * correctness (`currentLutName` still gates which one ever gets
+     * APPLIED), but left unguarded would leak whichever Data3DTexture loses
+     * the race, never disposed once its own `lutTextureCache.set` overwrote
+     * — the exact per-scene VRAM-leak class this file's own dispose() block
+     * already treats as a first-class bug elsewhere. Guarded below by
+     * re-checking the cache immediately before committing: whichever
+     * request resolves first wins the cache slot, and a later redundant one
+     * disposes its own now-unneeded texture and adopts the winner's instead.
+     * @param {string} name
+     */
+    async function loadNamedLut(name) {
+      const wanted = name && name !== 'none' ? name : 'none';
+      if (wanted === 'none') {
+        gradePresent.setLut(lutPlaceholder);
+        return;
+      }
+      const cached = lutTextureCache.get(wanted);
+      if (cached) {
+        gradePresent.setLut(cached);
+        return;
+      }
+      lutLoadInFlight = true;
+      try {
+        const url = `modules/${MODULE_ID}/assets/luts/${wanted}.cube`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${url}`);
+        const text = await res.text();
+        const parsed = parseCubeLut(text);
+        const tex = buildLutDataTexture(THREE, parsed);
+        const winner = lutTextureCache.get(wanted);
+        if (winner) {
+          // Lost the race to a concurrent duplicate fetch for this same
+          // name — don't leave two live GPU textures for one cache slot.
+          tex.dispose?.();
+        } else {
+          lutTextureCache.set(wanted, tex);
+        }
+        // Only apply if this is STILL the wanted preset — `currentLutName` is
+        // the live source of truth `pushGradeLook` maintains; a superseded
+        // request (the author flipped presets again before this one landed)
+        // must not stomp a newer, already-applied texture.
+        if (currentLutName === wanted) gradePresent.setLut(winner ?? tex);
+      } catch (err) {
+        log.error(`grade LUT "${wanted}" failed to load, falling back to none:`, err);
+      } finally {
+        lutLoadInFlight = false;
+      }
+    }
+
+    /**
      * Read the Colour Grade effect's resolved params and push them to the
      * present grade — the artistic scope. Converts the authored SCHEMA
      * (`grade.js#GRADE_LOOK_PARAMS`: split-tone colours as hex, a tone-map name,
@@ -9382,6 +9450,15 @@ export async function startVtPanViewer({
       const highRgb = hexToRgb01(p.highlights ?? '#ffffff');
       const lift = [shadowRgb[0] * 0.15, shadowRgb[1] * 0.15, shadowRgb[2] * 0.15];
       const gain = [mix1(1, highRgb[0], 0.3), mix1(1, highRgb[1], 0.3), mix1(1, highRgb[2], 0.3)];
+      // The LUT texture is swapped lazily when the name changes (not per
+      // frame — `loadNamedLut` is async network+GPU work); the STRENGTH is a
+      // live uniform pushed every frame like everything else here.
+      const lutName = p.lutName || 'none';
+      if (lutName !== currentLutName) {
+        currentLutName = lutName;
+        loadNamedLut(lutName).catch((err) => log.error('grade loadNamedLut rejected unexpectedly:', err));
+      }
+      const lutStrength = lutName === 'none' ? 0 : Math.min(1, Math.max(0, Number(p.lutStrength ?? 1) || 0));
       gradePresent.setArtGrade(
         {
           exposure: p.exposure,
@@ -9394,12 +9471,20 @@ export async function startVtPanViewer({
           gamma: [1, 1, 1],
           gain,
         },
-        // LUT strength stays 0 for now: the LUT shader path + placeholder are
-        // wired, but bundled .cube loading is the next rung (grade.js's
-        // `bundled-lut-loading`), so there is no real LUT to blend toward yet.
-        { toneMapping: p.toneMapping ?? 'none', lutStrength: 0 }
+        { toneMapping: p.toneMapping ?? 'none', lutStrength }
       );
     }
+    // GRADE LUT READINESS (mythica-machina-press#38) — registered next to the
+    // feature it measures rather than folded into the surface-mask cluster
+    // above (a different effect, a different kind of asset). Same "in-flight
+    // fails open" shape as those: a scene that never picks a bundled preset
+    // reads `lutLoadInFlight === false` forever, exactly as intended.
+    readiness.register({
+      id: 'gradeLut',
+      label: 'bundled colour-grade LUT still loading',
+      stage: READINESS_STAGE.STREAM,
+      read: () => (lutLoadInFlight ? 1 : 0),
+    });
 
     // THE OCCLUSION MASK — a REAL render target as of 2026-07-18. The MASK
     // TEXTURE ITSELF is still RADIAL-only (see the clear-value breakdown
@@ -22043,6 +22128,12 @@ export async function startVtPanViewer({
         fireMaskTexture = null;
         // The grade's identity LUT placeholder (a real Data3DTexture).
         lutPlaceholder?.dispose?.();
+        // Every bundled cinematic LUT this viewer instance ever loaded
+        // (mythica-machina-press#38) — same per-scene VRAM-leak risk as the
+        // placeholder just above; a floor switch or Stop/Restart that skips
+        // this leaks one Data3DTexture per distinct preset the author tried.
+        for (const tex of lutTextureCache.values()) tex?.dispose?.();
+        lutTextureCache.clear();
         presentMaterial.dispose?.();
         envLight.compositeMaterial.dispose();
       },
@@ -24841,8 +24932,18 @@ export function getVtPanViewerOpaqueBlendOffForce() {
  * @param {*} THREE @returns {*}
  */
 function makeIdentityLutTexture(THREE) {
-  const { size, data } = identityCubeLut(2);
-  const tex = new THREE.Data3DTexture(data, size, size, size);
+  return buildLutDataTexture(THREE, identityCubeLut(2));
+}
+
+/**
+ * Build a `THREE.Data3DTexture` from a parsed `.cube` (or `identityCubeLut`)
+ * result — the one shared format/filter/wrap setup every 3D LUT texture in
+ * this engine uses, so a real bundled LUT (mythica-machina-press#38) is
+ * indistinguishable from the identity placeholder except for its data.
+ * @param {*} THREE @param {{size:number, data:Float32Array}} parsed @returns {*}
+ */
+function buildLutDataTexture(THREE, parsed) {
+  const tex = new THREE.Data3DTexture(parsed.data, parsed.size, parsed.size, parsed.size);
   tex.format = THREE.RGBAFormat;
   tex.type = THREE.FloatType;
   tex.minFilter = THREE.LinearFilter;

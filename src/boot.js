@@ -8454,7 +8454,7 @@ function install() {
     accVar: '--c-post',
     filterCategory: 'post',
     schema: GRADE_LOOK_PARAMS,
-    fohKeys: ['exposure', 'contrast', 'saturation', 'temperature', 'vibrance', 'toneMapping'],
+    fohKeys: ['exposure', 'contrast', 'saturation', 'temperature', 'vibrance', 'toneMapping', 'lutName'],
     getReadout: () => gradeLookReadout,
     setValue: (patch) => MapShine.setGrade(patch),
     presets: { table: GRADE_PRESETS, pick: gradePreset },

@@ -1314,6 +1314,15 @@ function install() {
       // already existed; this Scene-department card was the missing UI.
       copySceneEffectSettings: () => MapShine.copySceneEffectSettings(),
       pasteSceneEffectSettings: () => MapShine.pasteSceneEffectSettings(),
+      // MY PRESETS (mythica-machina-press#102) — same thin pass-through
+      // shape as the copy/paste pair just above, onto the console/macro API
+      // of the same name that already existed. Generic over effectId, so
+      // effects-department.js binds these once per card rather than this
+      // call site needing to know which effects exist.
+      listEffectPresets: (effectId) => MapShine.listEffectPresets(effectId),
+      saveEffectPreset: (effectId, name) => MapShine.saveEffectPreset(effectId, name),
+      applyEffectPreset: (effectId, name) => MapShine.applyEffectPreset(effectId, name),
+      deleteEffectPreset: (effectId, name) => MapShine.deleteEffectPreset(effectId, name),
     });
     // Flush every card registered before __studio existed (see
     // registerEffectCardSafe's own comment above) — one-time, in the same

@@ -331,19 +331,86 @@ function buildStudioEffectCard(model) {
   // ---- FOH strip: presets (if any) + fohKeys --------------------------------
   const foh = document.createElement('div');
   Object.assign(foh.style, { display: 'flex', flexWrap: 'wrap', gap: '4px' });
-  if (Array.isArray(model.presets) && model.presets.length > 0) {
+  const hasBuiltinPresets = Array.isArray(model.presets) && model.presets.length > 0;
+  // MY PRESETS (mythica-machina-press#102) — the world-scoped named-preset
+  // library (MapShine.saveEffectPreset/applyEffectPreset/listEffectPresets/
+  // deleteEffectPreset, foundry/effect-preset-persistence.js) has existed
+  // since that issue's own commit; this is the missing UI, added generically
+  // here rather than per-effect so EVERY card gets it, not just the four
+  // that happen to declare a built-in `presets` table. Merged into the SAME
+  // dropdown as any built-in presets (a GM shouldn't need to know or care
+  // which kind a given name is) via <optgroup>, with a `user:`-prefixed
+  // option value so the change handler can tell the two apart without a
+  // second data structure — built-ins keep calling the existing
+  // `onPresetPick`, user ones go through `applyMyPreset` instead. Delete
+  // only ever targets a user preset — a built-in one isn't in the library
+  // this deletes from at all.
+  const hasMyPresetsApi = typeof model.listMyPresets === 'function';
+  if (hasBuiltinPresets || hasMyPresetsApi) {
     const presetRow = document.createElement('div');
-    presetRow.style.flexBasis = '100%';
+    Object.assign(presetRow.style, { flexBasis: '100%', display: 'flex', gap: '4px', alignItems: 'center' });
     const select = document.createElement('select');
     select.style.cssText =
-      'background:var(--bg2); border:1px solid var(--line); border-radius:var(--r-ctl,6px); padding:3px 6px; color:var(--ink0); font-size:.72rem';
-    select.append(new Option('— preset —', ''));
-    for (const p of model.presets) select.append(new Option(p, p));
+      'background:var(--bg2); border:1px solid var(--line); border-radius:var(--r-ctl,6px); padding:3px 6px; color:var(--ink0); font-size:.72rem; flex:1; min-width:0';
+    const myPresetNames = hasMyPresetsApi ? model.listMyPresets() : [];
+    function fillOptions() {
+      select.innerHTML = '';
+      select.append(new Option('— preset —', ''));
+      if (hasBuiltinPresets) {
+        const grp = hasMyPresetsApi ? document.createElement('optgroup') : null;
+        if (grp) {
+          grp.label = 'Built-in';
+          select.append(grp);
+        }
+        for (const p of model.presets) (grp ?? select).append(new Option(p, `builtin:${p}`));
+      }
+      if (myPresetNames.length > 0) {
+        const grp = document.createElement('optgroup');
+        grp.label = 'My presets';
+        for (const p of myPresetNames) grp.append(new Option(p, `user:${p}`));
+        select.append(grp);
+      }
+    }
+    fillOptions();
     select.addEventListener('change', () => {
-      if (select.value) model.onPresetPick?.(select.value);
+      const [kind, ...rest] = select.value.split(':');
+      const name = rest.join(':');
+      if (kind === 'builtin') model.onPresetPick?.(name);
+      else if (kind === 'user') model.applyMyPreset?.(name);
       select.value = '';
     });
     presetRow.append(select);
+    if (hasMyPresetsApi) {
+      const saveBtn = document.createElement('button');
+      saveBtn.type = 'button';
+      saveBtn.textContent = '💾';
+      saveBtn.title = 'Save the current settings as a named preset, shared with the whole table.';
+      Object.assign(saveBtn.style, { flex: '0 0 auto', padding: '2px 6px', fontSize: '.72rem', cursor: 'pointer' });
+      saveBtn.addEventListener('click', async () => {
+        const name = window.prompt(`Save "${model.title}" settings as a preset named:`, '');
+        if (!name || !name.trim()) return;
+        const res = await model.saveMyPreset?.(name.trim());
+        if (res && !res.ok) window.alert(`Couldn't save preset: ${res.reason}`);
+        else model.onRequestRerender?.();
+      });
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.textContent = '🗑';
+      delBtn.title = 'Delete the selected "My presets" entry (built-in presets can\'t be deleted here).';
+      Object.assign(delBtn.style, { flex: '0 0 auto', padding: '2px 6px', fontSize: '.72rem', cursor: 'pointer' });
+      delBtn.addEventListener('click', async () => {
+        const [kind, ...rest] = select.value.split(':');
+        const name = rest.join(':');
+        if (kind !== 'user' || !name) {
+          window.alert('Pick one of "My presets" from the dropdown first — built-in presets can\'t be deleted here.');
+          return;
+        }
+        if (!window.confirm(`Delete the preset "${name}"?`)) return;
+        await model.deleteMyPreset?.(name);
+        model.onRequestRerender?.();
+      });
+      presetRow.append(saveBtn, delBtn);
+    }
     foh.append(presetRow);
   }
   // U6: authored dials REPLACE the raw fohKeys strip where an effect
@@ -561,8 +628,19 @@ export function renderEffectsDepartment(container, ctx) {
   // just to call this in one more place — a filter-chip click re-persisting
   // the same array is harmless.
   ctx.setPinnedEffects?.([...pinned]);
-  for (const { model } of visible) {
+  for (const { id, model } of visible) {
     model.onRequestRerender = () => renderEffectsDepartment(container, ctx);
+    // MY PRESETS (mythica-machina-press#102) — thin per-model bindings onto
+    // ctx's generic (any effectId) preset API, same "attach what the card
+    // needs onto model itself" shape onRequestRerender just above already
+    // uses. Omitted (ctx doesn't supply them) ⇒ `hasMyPresetsApi` above is
+    // false and the whole UI section for this simply doesn't render.
+    if (typeof ctx.listEffectPresets === 'function') {
+      model.listMyPresets = () => ctx.listEffectPresets(id);
+      model.saveMyPreset = (name) => ctx.saveEffectPreset(id, name);
+      model.applyMyPreset = (name) => ctx.applyEffectPreset(id, name);
+      model.deleteMyPreset = (name) => ctx.deleteEffectPreset(id, name);
+    }
     // U6: the health badge's own click target — "deep-links to the Lab
     // report" (UI-Testament.md §9's own U6 checklist wording). Switches the
     // Studio to LAB, where the Control Health report boot.js registers

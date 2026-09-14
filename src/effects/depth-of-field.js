@@ -173,13 +173,18 @@ export const DEPTH_OF_FIELD = Object.freeze({
     }),
   ]),
   // Recorded, NOT built — honest rungs (Effects.md §0).
+  //
+  // ⚠️ 'soft-floor-edge' REMOVED (2026-09-14), not just left unbuilt — it
+  // asked for a smoothstep feather across the floor-index boundary, but
+  // `depth-of-field-blur.js#computeDofAlpha`'s own (later, more considered)
+  // header directly argues against it: the boundary is a REAL spatial edge
+  // (a wall, a railing, the rim of a hole), not a soft depth transition, so
+  // feathering it would blur across an edge that should stay crisp rather
+  // than fix an artifact. That function's comment is the live, reasoned
+  // answer here — this note predated it and is superseded, not merely
+  // stale, so it is deleted rather than carried forward to avoid
+  // contradicting doc drift.
   deferredRungs: Object.freeze([
-    Object.freeze({
-      name: 'soft-floor-edge',
-      note:
-        'a smoothstep-based feather across the floor-index boundary instead of a hard cut — cosmetic polish, ' +
-        'the hard edge is already pixel-crisp (NEAREST full-screen-res sample), not blocky',
-    }),
     Object.freeze({
       name: 'fog-of-war-clip',
       note: "darken/skip the blur under fog-of-war once MSA renders its own fog — same deferred hook bloom's own clamp names (keyhole-vision-fog-direction)",

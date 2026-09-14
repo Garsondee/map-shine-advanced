@@ -606,11 +606,15 @@ export const PRECIP_SPECIES = Object.freeze({
    *    half. ONE gap, TWO features waiting on it. `ember` is deliberately still
    *    not a row: fire owns embers rising FROM fires, weather owns them falling
    *    from the sky, and unifying them is a named disease here.
-   *  · `body.emissive01` has **no consumer yet** — the draw multiplies a
-   *    per-body brightness and never adds. So `spore` and `mote` are correctly
-   *    coloured and correctly moving, and do not yet glow past bloom's
-   *    threshold. Carried because the value is real and its consumer is a known
-   *    rung (§3.5), not because it does anything today.
+   *  · `body.emissive01` **had no consumer at P6** — the draw multiplied a
+   *    per-body brightness and never added, so `spore` and `mote` were
+   *    correctly coloured and correctly moving but did not yet glow past
+   *    bloom's threshold. ⚠️ STALE AS OF P7 (2026-08-16, `9a65ecb4`,
+   *    mythica-machina-press#33): `particles/precip-runtime.js`'s
+   *    `colorNode` now branches on `EMISSIVE > 0` at build time and adds the
+   *    authored value, so `spore` (5.5) and `mote` (4.5) genuinely bloom
+   *    today — kept here as the historical record of the gap, not a live
+   *    claim that it's still open.
    */
   ash: Object.freeze({
     id: 'ash',

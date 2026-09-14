@@ -8724,16 +8724,16 @@ function install() {
         diagnostics: attachments,
         icon: '🧪',
         title: 'Fluid',
-        subtitle: 'tiers 0–5 — placement · tube · flow · film · fill · structure',
+        subtitle: 'tiers 0–6 — placement · tube · flow · film · fill · structure · bubbles',
         status: () => collapsedStatusLine({ enabled: readLive().enabled }),
         schema: FLUID_PARAMS,
         // FOH is a strict, SMALL subset (feedback_foh_roh_must_differ). The
         // test is "would they change it mid-session, or only while tuning?" —
         // colour, brightness and speed are things a GM reaches for while
-        // players are watching; overall strength and how marbled the goo
-        // looks are set-once tuning and stay rear-of-house. `slugCount`/
-        // `slugWidth` are GONE (fluid.js's own comment on `flowSpeed`
-        // explains why), not merely demoted to ROH.
+        // players are watching; overall strength, how marbled the goo looks
+        // and how bubbly it looks are all set-once tuning and stay
+        // rear-of-house. `slugCount`/`slugWidth` are GONE (fluid.js's own
+        // comment on `flowSpeed` explains why), not merely demoted to ROH.
         fohKeys: ['tint', 'glow', 'flowSpeed', 'iridescence'],
         getValue: (id) => readLive().params?.[id] ?? FLUID_PARAMS[id]?.default,
         onChange: (id, value) => MapShine.setFluid({ [id]: value }),

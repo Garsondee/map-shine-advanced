@@ -117,6 +117,14 @@
  *                V2's eight abandoned decoration families were screen-space
  *                noise for exactly this reason (`fluid.js`'s own `structure`
  *                tier text).
+ *   BUBBLES      tier `bubbles`' decorative gas field — ONE `mx_worley_noise_
+ *                float` fetch at `(τ, across)`, τ's OWN lattice frequency
+ *                scaled by `radiusPx` (the pack's fourth channel, idle since
+ *                Phase 3 until this tier) so the cell spacing compresses at a
+ *                constriction. Gated by `fill`/`meniscus` exactly like `body`
+ *                itself. NOT a second simulated channel — `fluid.js`'s own
+ *                tier 6 text has the full honesty argument for why not, and
+ *                for why "pinning to a wall" stayed a `deferredRungs` entry.
  *   ABSORPTION   Beer–Lambert per channel, the SAME formula
  *                `water-render.js`'s tier 1 already uses (`sigma = -log(tint)
  *                / mean(-log(tint))`, `transmit = exp(-sigma · depth)`) —
@@ -187,8 +195,51 @@ const FLUID_STRUCTURE_FREQ_ACROSS = 3.0;
 const FLUID_STRUCTURE_TINT_SCALE = 0.15;
 const FLUID_STRUCTURE_GRAIN_SCALE = 0.25;
 
-/** How many performance-cascade rungs this effect declares (0..5, `fluid.js#FLUID.tiers`). */
-export const FLUID_MAX_TIER = 5;
+/** Tier 6 (`bubbles`) default strength. Matches FLUID_PARAMS.bubbles. */
+export const FLUID_TIER6_BUBBLES = 0.5;
+
+/** How many bubble-lattice cells fit along one tube's full normalised length
+ * (at the reference radius, before the constriction scale below adjusts it
+ * locally) and across its width — tuned to read as bubbles at a typical tube
+ * width, the same "not derived from anything physical" posture `structure`'s
+ * own frequency pair already admits above. */
+const FLUID_BUBBLE_FREQ_ALONG = 24.0;
+const FLUID_BUBBLE_FREQ_ACROSS = 2.5;
+
+/** The tube half-width (world px) the lattice frequency above is TUNED
+ * AGAINST — `fluid-pack.js`'s own header cites "a 40 px glass tube" as its
+ * own sizing example, so half of that. A tube at exactly this radius shows
+ * the frequency above unmodified; narrower or wider tubes scale it (see
+ * `constrictionScale`, `fluid-render.js`'s own bubbles block). */
+const FLUID_BUBBLE_REF_RADIUS_PX = 20.0;
+
+/** Floor under `radiusPx` before it becomes a divisor. `fluid-pack.js`'s own
+ * header names the degenerate case this guards: a tube one texel wide bakes a
+ * local radius of exactly 0 at the chamfer's own boundary correction — a real
+ * value, not a bug, and one this rung must not divide by. */
+const FLUID_BUBBLE_MIN_RADIUS_PX = 2.0;
+
+/** Worley jitter, 0 (a rigid grid) .. 1 (fully randomised cell centres). 1 —
+ * maximally organic — because a visible grid is the one failure mode a
+ * cellular noise can have that a fractal one (tier `structure`'s own) cannot. */
+const FLUID_BUBBLE_JITTER = 1.0;
+
+/** Squared-distance threshold (cell units) below which a pixel is "inside" a
+ * bubble. Squared, not linear, because `mx_worley_noise_float`'s own default
+ * metric (`three.webgpu.js`'s public wrapper) already returns squared
+ * Euclidean distance — smoothstepping THAT directly still traces perfectly
+ * round bubbles (a squared-distance contour is the same circle as its linear
+ * counterpart, just relabelled), for one fewer `sqrt` than converting first. */
+const FLUID_BUBBLE_RADIUS_SQ = 0.05;
+
+/** How much brighter a bubble reads right at the free surface (`meniscus`),
+ * on top of its own base glow — the shader-space stand-in for "popping": a
+ * flare at the front, never a simulated burst event (this shader has no
+ * per-bubble identity to hang one on). */
+const FLUID_BUBBLE_POP_BOOST = 1.5;
+
+/** How many performance-cascade rungs this effect declares (0..6, `fluid.js#FLUID.tiers`). */
+export const FLUID_MAX_TIER = 6;
 
 /** What `resolveEffectTier(FLUID, {profile: DEFAULT_PERFORMANCE_PROFILE})` resolves to —
  * `standard` reaches tier 3 ('film') contiguously; tier 4 ('fill') needs `quality`. Used as
@@ -210,7 +261,7 @@ export const FLUID_DEFAULT_TIER = 3;
  *
  * @param {number} tier
  * @returns {{tier: number, cylinderEnabled: boolean, filmEnabled: boolean,
- *   fillEnabled: boolean, structureEnabled: boolean}}
+ *   fillEnabled: boolean, structureEnabled: boolean, bubblesEnabled: boolean}}
  */
 export function fluidTierPlan(tier) {
   const t = Number.isFinite(tier) ? Math.max(0, Math.min(FLUID_MAX_TIER, Math.floor(tier))) : FLUID_DEFAULT_TIER;
@@ -220,6 +271,10 @@ export function fluidTierPlan(tier) {
     filmEnabled: t >= 3,
     fillEnabled: t >= 4,
     structureEnabled: t >= 5,
+    // Implies BOTH fillEnabled and structureEnabled by construction (6 ≥ 5 ≥
+    // 4) — `fluid-render.js`'s own bubbles block leans on that ordering to
+    // reuse `fill`/`meniscus`/`tau` without a second dependent read.
+    bubblesEnabled: t >= 6,
   };
 }
 
@@ -248,6 +303,7 @@ export function fluidTierPlan(tier) {
  *   ACTUALLY moves, rather than drifting at a rate the user's own speed
  *   control has no effect on.
  * @param {number} [args.structure] - tier 5's marbling/grain strength, 0..1.
+ * @param {number} [args.bubbles] - tier 6's bubble-field strength, 0..1.
  * @returns {{absorbMaterial: *, emitMaterial: *, uniforms: object, maskTexNode: *, packTexNode: *,
  *   stateTexNodes: Array<*>}} `stateTexNodes` has exactly TWO entries (the
  *   `fill` sample and the meniscus's `fillAhead` sample) — re-point BOTH
@@ -267,6 +323,7 @@ export function buildFluidSurfaceMaterials({
   opacity = 1,
   flowSpeed = 1,
   structure = FLUID_TIER5_STRUCTURE,
+  bubbles = FLUID_TIER6_BUBBLES,
   tier = FLUID_DEFAULT_TIER,
 }) {
   const plan = fluidTierPlan(tier);
@@ -290,6 +347,7 @@ export function buildFluidSurfaceMaterials({
     abs,
     mrt,
     mx_fractal_noise_vec3,
+    mx_worley_noise_float,
   } = THREE.TSL;
 
   const uTint = uniform(vec3(tint[0], tint[1], tint[2]));
@@ -315,6 +373,7 @@ export function buildFluidSurfaceMaterials({
   const uFadeMul = uniform(float(1));
   const uFlowSpeed = uniform(float(flowSpeed));
   const uStructure = uniform(float(structure));
+  const uBubbles = uniform(float(bubbles));
   // `tubeCount` is a per-item BAKE-TIME constant (fixed until the next
   // rebake), not a per-frame value — a plain `float()` literal, never a
   // `uniform()`, matching Law 4: nothing here can change without rebuilding
@@ -402,9 +461,16 @@ export function buildFluidSurfaceMaterials({
   // (SPATIALLY CONSTANT, the safe half of `water-field.js`'s per-pixel-time
   // trap). Computed HERE, inside the same gate as the noise fetch that is
   // its only consumer, rather than hoisted unconditionally: τ has no other
-  // use, and `s` is only in scope when `cylinderEnabled` also held — which
-  // it always does whenever `structureEnabled` does, tier 5 ≥ tier 1 by
-  // construction.
+  // use IN THIS TIER, and `s` is only in scope when `cylinderEnabled` also
+  // held — which it always does whenever `structureEnabled` does, tier 5 ≥
+  // tier 1 by construction.
+  //
+  // `tau` itself is declared OUTSIDE this block (with the `let` below) even
+  // though it is only ASSIGNED here: tier 6 (`bubbles`) reuses the identical
+  // value for its own lattice coordinate, and `bubblesEnabled` implies
+  // `structureEnabled` by construction (6 ≥ 5) — so hoisting the declaration
+  // costs nothing on any path where tier 6 could not otherwise reach it, and
+  // saves recomputing the same subtraction a second time.
   //
   // ONE `mx_fractal_noise_vec3` fetch (Law 8: the vendored MaterialX node,
   // never a hand-rolled hash), reading TWO of its three channels rather than
@@ -412,9 +478,9 @@ export function buildFluidSurfaceMaterials({
   // channels below are read as a SMALL fractional swing around 1, clamped to
   // a sane band rather than left able to invert a colour channel on an
   // extreme sample.
-  let marbled, grain;
+  let marbled, grain, tau;
   if (plan.structureEnabled) {
-    const tau = s.sub(uFlowSpeed.div(float(FLUID_TARGET_TRAVERSAL_SECONDS)).mul(tSec)).toVar();
+    tau = s.sub(uFlowSpeed.div(float(FLUID_TARGET_TRAVERSAL_SECONDS)).mul(tSec)).toVar();
     const structureNoise = mx_fractal_noise_vec3(
       vec3(tau.mul(float(FLUID_STRUCTURE_FREQ_ALONG)), across.mul(float(FLUID_STRUCTURE_FREQ_ACROSS)), float(0)),
       3,
@@ -503,13 +569,73 @@ export function buildFluidSurfaceMaterials({
     meniscus = float(0);
   }
 
+  // ── TIER 6: BUBBLES — τ again, `radiusPx` for the first time, `fill`/
+  // `meniscus` reused ──────────────────────────────────────────────────────
+  // ⚠️ HONEST SCOPE (`fluid.js`'s own tier 6 `adds` text has the full
+  // argument): a DECORATIVE bubble field, not a second simulated channel —
+  // `fill` above is the only thing `fluid-sim.js` transports. Everything
+  // below reads values already resident by the time `bubblesEnabled` can be
+  // true at all (tier 6 ⟹ tier 5 ⟹ tier 4 ⟹ tier 1): `tau` (structure's own
+  // coordinate), `across` (tier 1's pack read), `fill`/`meniscus` (tier 4's
+  // dependent read) and, for the FIRST time anywhere in this file,
+  // `packTexNode.a` — the pack's fourth channel, baked by `fluid-pack.js`
+  // since Phase 3 and never sampled by any consumer until now.
+  let bubbleGlow;
+  if (plan.bubblesEnabled) {
+    const radiusPx = packTexNode.a;
+    // BUNCHING AT CONSTRICTIONS — stylised, not a real velocity field
+    // (`fluid.js`'s tier 6 text names why a genuine one is out of scope
+    // here). `radiusPx` is a real, local, world-px measurement, so scaling
+    // τ's own lattice frequency by `REF / radiusPx` makes the lattice pass
+    // through more cycles per world-px exactly where the tube is thinner —
+    // bubbles read as closer together at a constriction, continuously (no
+    // seam where the scale crosses 1), because `radiusPx` itself is a
+    // smoothly-varying baked profile, never a per-pixel-noisy value.
+    const constrictionScale = float(FLUID_BUBBLE_REF_RADIUS_PX).div(max(radiusPx, float(FLUID_BUBBLE_MIN_RADIUS_PX)));
+    const bubbleCoord = vec2(
+      tau.mul(float(FLUID_BUBBLE_FREQ_ALONG)).mul(constrictionScale),
+      across.mul(float(FLUID_BUBBLE_FREQ_ACROSS))
+    );
+    // ONE Worley (cellular) fetch (Law 8) — the SAME vendored primitive
+    // `world/cloud-field.js` already uses for a jittered-point field, here
+    // standing in for a gas field the way `structure`'s fractal fetch stands
+    // in for real marbling. Squared-distance to the nearest jittered lattice
+    // point (the public wrapper's own default metric — see
+    // `FLUID_BUBBLE_RADIUS_SQ`'s own doc for why no `sqrt` is spent turning
+    // it into a bubble mask).
+    const cellDistSq = mx_worley_noise_float(bubbleCoord, float(FLUID_BUBBLE_JITTER));
+    const bubbleMask = float(1).sub(smoothstep(float(0), float(FLUID_BUBBLE_RADIUS_SQ), cellDistSq));
+    // POPPING AT THE FREE SURFACE — `meniscus` is already "bright right
+    // where φ changes" (tier 4's own comment); reused here as a flare on top
+    // of a bubble's base glow, never a separate simulated burst. Gated by
+    // `fill` like everything else in `body` below, for the identical reason
+    // `opticalDepth`'s own comment gives: zero liquid, zero bubble, with no
+    // separate "outside the tube" test to get wrong.
+    bubbleGlow = bubbleMask
+      .mul(fill)
+      .mul(float(1).add(meniscus.mul(float(FLUID_BUBBLE_POP_BOOST))))
+      .toVar();
+  } else {
+    bubbleGlow = float(0);
+  }
+
   // ── EMIT (ADD) — the goo's own light ─────────────────────────────────────
+  // `bubbleGlow` joins AFTER the `grain` multiply, not inside it: grain is a
+  // fine brightness texture that belongs to the marbled goo body, and a
+  // bubble is a distinct highlight riding on top of it, not a further
+  // modulation of it — the same "additive layer, never a competing colour
+  // source" posture `marbled`'s own comment already states for FILM and
+  // STRUCTURE. Scaled by `thickness` again (the SAME value, no new fetch) so
+  // a bubble reads brightest down the centreline and fades toward the glass,
+  // matching every other term in `body`; scaled by `uBubbles` last so 0
+  // reproduces the exact pre-tier-6 `body` byte for byte.
   const body = thickness
     .mul(fill)
     .mul(float(0.9))
     .add(meniscus.mul(float(0.8)))
     .add(rim.mul(fill).mul(float(0.35)))
-    .mul(grain);
+    .mul(grain)
+    .add(bubbleGlow.mul(uBubbles).mul(thickness));
   // `uFadeMul` multiplies in HERE, at the exact same site as `uOpacity` (see
   // that uniform's own declaration, above, for the full mechanism): driving
   // it to 0 collapses `radiance` to 0, the additive pass's own blend
@@ -623,6 +749,7 @@ export function buildFluidSurfaceMaterials({
       uFadeMul,
       uFlowSpeed,
       uStructure,
+      uBubbles,
     },
   };
 }

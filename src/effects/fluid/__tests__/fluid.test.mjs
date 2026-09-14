@@ -26,7 +26,7 @@ export function run(t) {
   // Every key must be consumed by fluid-render.js — `params/no-dead-controls`
   // enforces that across the tree; this pins the SHAPE so a key cannot be added
   // here without someone noticing it needs a consumer.
-  ok('FLUID_PARAMS carries the Look + Motion + Detail knobs', Object.keys(FLUID_PARAMS).length === 6);
+  ok('FLUID_PARAMS carries the Look + Motion + Detail knobs', Object.keys(FLUID_PARAMS).length === 7);
   ok(
     'every param declares a category so the ROH card can group it',
     Object.values(FLUID_PARAMS).every((p) => typeof p.category === 'string' && p.category.length > 0)
@@ -46,10 +46,10 @@ export function run(t) {
   ok('on by default at every profile', FLUID.enabledFromProfile === 'low');
   ok('tier 0 is declared — a manifest without one is malformed', FLUID.tiers[0]?.n === 0);
   ok('tier 0 is the C4 admission price (the mask read)', FLUID.tiers[0]?.cost?.class === 'C4');
-  ok('tiers 0-5 are real code now', FLUID.tiers.length === 6);
+  ok('tiers 0-6 are real code now', FLUID.tiers.length === 7);
   ok(
     'the ladder is named in build order',
-    FLUID.tiers.map((t) => t.name).join() === 'placement,tube,flow,film,fill,structure'
+    FLUID.tiers.map((t) => t.name).join() === 'placement,tube,flow,film,fill,structure,bubbles'
   );
   ok('no tier still claims to be unbuilt', !FLUID.tiers.some((t) => /NOT BUILT/.test(t.adds)));
   ok(
@@ -75,8 +75,9 @@ export function run(t) {
   // complete — a rung quietly dropped here is a feature quietly cancelled.
   const rungNames = FLUID.deferredRungs.map((r) => r.name);
   ok(
-    'the four UNBUILT rungs are recorded, in ladder order — and the three now shipped as tiers are not',
-    rungNames.join() === 'bubbles,optics,emission,spray'
+    'the four UNBUILT rungs are recorded, in ladder order — `bubbles` itself now ships as tier 6, ' +
+      'replaced here by the narrower `bubble-wall-pin` gap it could not honestly close',
+    rungNames.join() === 'bubble-wall-pin,optics,emission,spray'
   );
   ok(
     'every deferred rung carries a note explaining what it buys',

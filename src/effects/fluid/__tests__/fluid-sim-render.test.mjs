@@ -217,7 +217,45 @@ export function run(t) {
       // this line, not silently produced a wrong picture.
       ok('uFlowSpeed is exposed — τ`s own drift rate follows the live speed control', !!built.uniforms.uFlowSpeed);
       ok('uStructure is exposed — the marbling/grain strength control', !!built.uniforms.uStructure);
+
+      // ── TIER 6: BUBBLES — the Worley fetch actually runs ──────────────────
+      // Constructs cleanly only if `mx_worley_noise_float` is a real export on
+      // this vendored TSL (confirmed already by world/cloud-field.js's own
+      // usage) AND the constriction-scale/lattice-coordinate algebra it feeds
+      // type-checks against the vec2/float nodes built above — a typo would
+      // have thrown before reaching this line. The stub pack's own alpha
+      // channel is 0 (`new Float32Array([0, 0, 0, 0])` above), which exercises
+      // the `max(radiusPx, FLUID_BUBBLE_MIN_RADIUS_PX)` floor specifically —
+      // the one path a nonzero-stub pack would never reach at all.
+      ok('uBubbles is exposed — the bubble-field strength control', !!built.uniforms.uBubbles);
     }
+  }
+
+  // ── TIER 6 AGAIN, WITH A REAL radiusPx ────────────────────────────────────
+  // The block above stubs the pack's alpha channel at 0, which only proves
+  // the MIN-radius floor path. A second build with a genuine positive
+  // `radiusPx` (channel A = 18, a plausible half-width in world px) proves
+  // the ordinary `constrictionScale = REF / radiusPx` division constructs too
+  // — the two stubs together cover both sides of the `max()` guard.
+  {
+    let buildError = null;
+    try {
+      buildFluidSurfaceMaterials({
+        THREE,
+        maskTexture: stubTexture(),
+        packTexture: stubTexture(THREE.RGBAFormat, THREE.FloatType, new Float32Array([0.4, 0.6, 1, 18])),
+        stateTexture: stubTexture(THREE.RGBAFormat, THREE.FloatType, new Float32Array([1, 0, 0, 1])),
+        tubeCount: 3,
+        timeMsNode: THREE.TSL.float(0),
+        tier: FLUID_MAX_TIER,
+      });
+    } catch (err) {
+      buildError = err;
+    }
+    ok(
+      `tier 6 with a real (non-zero) radiusPx CONSTRUCTS without throwing (${buildError ? buildError.message : 'clean'})`,
+      buildError === null
+    );
   }
 
   // ── fluidTierPlan — the gate a live profile change actually branches on ───
@@ -244,10 +282,17 @@ export function run(t) {
       })()
     );
     ok(
-      'tier 5 (max): every gate on',
+      'tier 5: structure on, bubbles not yet (bubblesEnabled needs tier 6)',
+      (() => {
+        const p = fluidTierPlan(5);
+        return p.cylinderEnabled && p.filmEnabled && p.fillEnabled && p.structureEnabled && !p.bubblesEnabled;
+      })()
+    );
+    ok(
+      'tier 6 (max): every gate on, including bubbles',
       (() => {
         const p = fluidTierPlan(FLUID_MAX_TIER);
-        return p.cylinderEnabled && p.filmEnabled && p.fillEnabled && p.structureEnabled;
+        return p.cylinderEnabled && p.filmEnabled && p.fillEnabled && p.structureEnabled && p.bubblesEnabled;
       })()
     );
     ok(

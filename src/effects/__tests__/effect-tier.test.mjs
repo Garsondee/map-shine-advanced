@@ -707,9 +707,23 @@ export function run(t) {
       return p.fillEnabled && p.structureEnabled;
     })()
   );
+  // === 🔒 TIER 6 (BUBBLES) ANTI-DRIFT, 2026-09-14 ===========================
+  // Mirrors vegetation.js's own tier-6 (`torque-sway`) anti-drift block: a
+  // genuinely NEW top rung, not an extension of tier 5's own reservation —
+  // `bubbles` needed its own `fromProfile: 'extreme'` once built, so `extreme`
+  // now climbs one rung past `quality` for fluid, unlike the water precedent
+  // this assertion used to cite (water`s own ladder really does still stop
+  // at `quality` — see that effect`s own test block a few dozen lines up).
   ok(
-    'extreme resolves identically to quality — no rung declared above it, matching water`s own precedent',
-    resolveEffectTier(FLUID, { profile: 'extreme' }).tier === resolveEffectTier(FLUID, { profile: 'quality' }).tier
+    "extreme resolves to tier 6, not 5 — bubbles is the ladder's new, genuinely-highest rung",
+    resolveEffectTier(FLUID, { profile: 'extreme' }).tier === 6
+  );
+  ok(
+    'quality (one rung below extreme) does NOT reach bubbles — only extreme does',
+    (() => {
+      const p = fluidTierPlan(resolveEffectTier(FLUID, { profile: 'quality' }).tier);
+      return !p.bubblesEnabled;
+    })()
   );
   ok(
     'the fluid fallback tier IS what the default profile resolves to — no second authority',

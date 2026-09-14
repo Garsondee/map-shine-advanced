@@ -511,6 +511,7 @@ export function createFluidSurfaceSubsystem({
     if (Number.isFinite(p.opacity)) out.opacity = p.opacity;
     if (Number.isFinite(p.flowSpeed)) out.flowSpeed = p.flowSpeed;
     if (Number.isFinite(p.structure)) out.structure = p.structure;
+    if (Number.isFinite(p.bubbles)) out.bubbles = p.bubbles;
     return out;
   }
 
@@ -616,7 +617,7 @@ export function createFluidSurfaceSubsystem({
     // uniform, `fluid-render.js`) — it is ALSO read fresh every tick in
     // `prepareSimTick` below to scale the pump's `Q`, a genuinely separate
     // JS-side use of the SAME param value, not a duplicate of this write.
-    const key = JSON.stringify([p.tint, p.glow, p.iridescence, p.opacity, p.flowSpeed, p.structure]);
+    const key = JSON.stringify([p.tint, p.glow, p.iridescence, p.opacity, p.flowSpeed, p.structure, p.bubbles]);
     if (key !== lastParamsKey) {
       lastParamsKey = key;
       for (const entry of entries.values()) {
@@ -633,6 +634,7 @@ export function createFluidSurfaceSubsystem({
         if (Number.isFinite(p.opacity)) u.uOpacity.value = p.opacity;
         if (Number.isFinite(p.flowSpeed)) u.uFlowSpeed.value = p.flowSpeed;
         if (Number.isFinite(p.structure)) u.uStructure.value = p.structure;
+        if (Number.isFinite(p.bubbles)) u.uBubbles.value = p.bubbles;
       }
     }
     refreshVisibility();

@@ -9,7 +9,7 @@
  * WHAT EXISTS TODAY (Phase 6) — read this before trusting the manifest
  * ============================================================================
  *
- * Tiers 0–5 RENDER, as BOTH halves of the two-blend split, the real 1-D sim,
+ * Tiers 0–6 RENDER, as BOTH halves of the two-blend split, the real 1-D sim,
  * AND the material coordinate: `fluid-net.js` extracts the tube net,
  * `fluid-pack.js` bakes it, `fluid-pump.js` decides what each tube's
  * apparatus is doing, `fluid-sim.js` transports it (a genuine semi-Lagrangian
@@ -18,14 +18,18 @@
  * geometry), `fluid-render.js` builds the MULTIPLY (absorb) and ADD (emit)
  * materials — reading the SIM's state (superseding tier `flow`'s original
  * analytic windowing the same phase it was built, see that tier's own `adds`
- * text) and sampling ONE noise fetch at τ for tier `structure`'s marbling and
- * grain — and `fluid-registration.js` gives it a card and a console setter.
- * The six `tiers` entries below are real code.
+ * text), sampling ONE noise fetch at τ for tier `structure`'s marbling and
+ * grain, and ONE Worley fetch at τ (frequency-modulated by the pack's own
+ * `radiusPx` channel) for tier `bubbles`' riding/bunching/popping — and
+ * `fluid-registration.js` gives it a card and a console setter. The seven
+ * `tiers` entries below are real code.
  *
  * **Still NOT built, so the manifest must not be read as claiming them:**
- * bubbles, optics, emission-as-a-light and spray. Those are the
- * `deferredRungs` below, named and ordered, and none of them has a line of
- * code.
+ * optics, emission-as-a-light and spray — plus the ONE half of `bubbles`
+ * itself that shipping tier 6 could not honestly claim (pinning to a
+ * specific wall, see `deferredRungs`' own `bubble-wall-pin` entry for why).
+ * Those are the `deferredRungs` below, named and ordered, and none of them
+ * has a line of code.
  *
  * @module effects/fluid/fluid
  */
@@ -109,6 +113,16 @@ export const FLUID_PARAMS = Object.freeze({
     category: 'Detail',
     label: 'Structure',
     help: 'Marbling and grain that ride WITH the flow rather than sitting still on top of it — driven by the material coordinate τ, not the mask`s own fixed position. At 0 the goo is a flat colour with no visible texture; higher values read as a more mottled, organic liquid.',
+  },
+  bubbles: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.5,
+    category: 'Detail',
+    label: 'Bubbles',
+    help: 'Gas riding the flow — small bright bubbles that drift with τ the same way Structure`s marbling does, bunch visibly where a tube narrows, and flare where the liquid ends. At 0 the goo carries no bubbles at all.',
   },
 });
 
@@ -273,6 +287,38 @@ export const FLUID = Object.freeze({
         'for this tier) — they failed because they sampled noise in screen space, never riding with ' +
         'the flow.',
     }),
+    Object.freeze({
+      n: 6,
+      name: 'bubbles',
+      fromProfile: 'extreme',
+      // C5, inheriting tier 5's own ceiling (Law 3 — non-decreasing), NOT the
+      // C4 this rung's own deferred note guessed before anything was built —
+      // the SAME correction `fill` and `structure` above each already had to
+      // make once real, for the identical reason: "popping at a free surface"
+      // needs `fill`/`meniscus` (tier 4, C5) and "riding" needs τ (tier 5,
+      // C5), so nothing below C5 could honestly gate this rung. Its OWN
+      // marginal cost is small (one more texture-channel swizzle off the
+      // ALREADY-BOUND pack, one Worley fetch), same shape as `structure`'s
+      // own honestly-tiny `estMsPerMp` against a ceiling it did not itself set.
+      cost: Object.freeze({ class: 'C5', estMsPerMp: 0.03 }),
+      adds:
+        '⚠️ HONEST SCOPE, the same discipline `fill`/`structure` above already set: this is a DECORATIVE ' +
+        'bubble field, not a two-phase gas simulation. `fluid-sim.js` transports exactly one scalar (φ, ' +
+        'the liquid fill fraction) — there is no separate gas-transport state, and building one (its own ' +
+        'conservation law, its own pump coupling) is a materially bigger effort than this rung`s own ' +
+        'former deferred note ("C4, same fetch, more ALU") assumed before anything was built, the same ' +
+        'gap `fill` and `structure` each had to close honestly once real. What IS cheap, and is what this ' +
+        'rung actually buys: bubbles that RIDE the flow (τ, tier 5`s own coordinate — nothing here ' +
+        'recomputes it), visibly BUNCH where the tube narrows (the pack`s own `radiusPx` channel, baked ' +
+        'since Phase 3 and read by no consumer until this rung — the literal "same fetch" the original ' +
+        'note promised, just idle until today), and flare where they POP at the free surface (`fill`/' +
+        '`meniscus`, tier 4`s own dependent read). One `mx_worley_noise_float` fetch (Law 8) at ' +
+        '(τ·constriction, across) stands in for a real gas field — the SAME "one procedural fetch, tuned ' +
+        'rather than derived" posture tier `structure` already takes for its own noise fetch, applied to a ' +
+        'different MaterialX primitive because a cellular field reads as discrete bubbles where a fractal ' +
+        'one reads as continuous marbling. NOT built here: pinning to a specific wall — see the ' +
+        '`bubble-wall-pin` deferred rung below for the real, still-open reason.',
+    }),
   ]),
   /**
    * Recorded, NOT built — the honest rungs (`Effects.md` §0). Each becomes a
@@ -280,18 +326,29 @@ export const FLUID = Object.freeze({
    * code, in build order.
    *
    * Built ladder so far: `placement C4 → tube C1 → flow C4 → film C4 → fill
-   * C5 → structure C5`. Non-decreasing, as Law 3 requires. `structure`'s OWN
-   * marginal cost (`estMsPerMp: 0.02`) is genuinely tiny — the C5 CLASS
-   * records what it runs on TOP OF (tier 4's dependent read), not what it
-   * itself newly costs; see that tier's own comment for why `cost.class` is
-   * a ceiling, not a marginal-operation label, in this manifest's convention.
+   * C5 → structure C5 → bubbles C5`. Non-decreasing, as Law 3 requires.
+   * `structure`'s and `bubbles`' OWN marginal costs (`estMsPerMp` 0.02/0.03)
+   * are genuinely tiny — the C5 CLASS records what each runs on TOP OF (tier
+   * 4's dependent read), not what either itself newly costs; see `structure`'s
+   * own comment for why `cost.class` is a ceiling, not a marginal-operation
+   * label, in this manifest's convention.
    */
   deferredRungs: Object.freeze([
     Object.freeze({
-      name: 'bubbles',
+      name: 'bubble-wall-pin',
       note:
-        'C4. The gas channel rendered as real bubbles in (τ, w) — riding, bunching at constrictions, ' +
-        'pinning to the upper wall, popping at a free surface. Same fetch, more ALU.',
+        'C5 (inherits tier `bubbles`s own ceiling). The narrower half of the ORIGINAL "bubbles" rung ' +
+        'that tier 6 could not honestly build: real bubbles pin to ONE side of the tube, not both ' +
+        'symmetrically, and telling which side needs a SIGNED `across` — `fluid-pack.js`s own header ' +
+        'names exactly this: `across` is unsigned today because nothing below this rung needs a sign, ' +
+        'and a sign needs the OFFSET to the nearest wall texel, which the current chamfer distance ' +
+        'transform does not store (a jump-flood-style FEATURE transform would, at real CPU cost in ' +
+        '`fluid-net.js` — not a shader-only change). Faking a side from anything else available today ' +
+        '(e.g. world-space screen Y) would pin every tube to the same visual edge regardless of the ' +
+        'tube`s own local orientation, which is not "pinning to a wall", it is pinning to the screen — a ' +
+        'corner this rung deliberately does not cut. When `across` widens to −1..1, every existing ' +
+        'consumer (`abs(across)` throughout tier 1`s cylinder math) keeps working unchanged, exactly as ' +
+        'that header promises.',
     }),
     Object.freeze({
       name: 'optics',

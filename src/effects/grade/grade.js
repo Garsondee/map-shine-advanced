@@ -93,6 +93,24 @@ export const GRADE_LOOK_PARAMS = Object.freeze({
     label: 'Film response',
     help: 'The HDR→display curve. None (default, "off") keeps the raw rolloff — the most basic option, so picking a look here is a deliberate choice, not something the author has to opt out of. Neutral keeps colour and contrast close to the source; AgX compresses highlights hardest but reads flatter/desaturated without extra contrast; ACES is punchier/contrastier.',
   },
+  lutName: {
+    type: 'enum',
+    values: [...BUNDLED_LUT_NAMES],
+    default: 'none',
+    category: 'Look',
+    label: 'Cinematic preset',
+    help: 'A one-click bundled film-style look (Grade.md §15). None (default) applies no LUT — every other Look slider above still works normally either way. Layers on top of Film response, not instead of it.',
+  },
+  lutStrength: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 1,
+    category: 'Look',
+    label: 'Preset strength',
+    help: 'How much of the cinematic preset to blend in — 1 is the full look, lower values ease it back toward the ungraded image. Has no effect while the preset above is None.',
+  },
 
   // ── Technical (behind Advanced) ──────────────────────────────────────────
   tint: {
@@ -148,9 +166,10 @@ export const GRADE = Object.freeze({
   a11y: Object.freeze({ photosensitive: false }),
   enabledFromProfile: 'low',
   readiness: Object.freeze({
-    firstRunWork: false,
-    coverage: 'none',
-    why: 'Folded into the present composite shader with a placeholder identity 3D LUT built at graph time — nothing is fetched or baked today. ⚠️ THIS ANSWER EXPIRES: the bundled .cube asset load (deferredRungs, Grade.md §15) is exactly a first-run fetch+upload, so whoever builds that rung must flip this to “full” and add a probe, or the curtain will lift while the LUT is still loading and the scene will visibly re-grade itself afterwards.',
+    firstRunWork: true,
+    coverage: 'full',
+    probes: Object.freeze(['gradeLut']),
+    why: 'Folded into the present composite shader with a placeholder identity 3D LUT built at graph time, but picking a non-"none" `lutName` now fetches+parses that bundled .cube and uploads it as a real Data3DTexture (vt-pan-viewer.js#loadNamedLut) — real first-run network+GPU work, counted by the gradeLut probe (vt/settle.js) so the curtain waits for it exactly once per name change.',
   }),
   params: GRADE_LOOK_PARAMS,
   tiers: Object.freeze([
@@ -162,10 +181,6 @@ export const GRADE = Object.freeze({
     }),
   ]),
   deferredRungs: Object.freeze([
-    Object.freeze({
-      name: 'bundled-lut-loading',
-      note: 'ship assets/luts/*.cube (warm/cool/bleach film looks) + fetch→parseCubeLut→Data3DTexture→setLut, then re-declare the lutName/lutStrength params. The whole SHADER path (buildGradeNode tail, the parser, grade-present.setLut, the placeholder identity texture) is already built and tested; only the asset load + upload remain (Grade.md §15)',
-    }),
     Object.freeze({
       name: 'author-supplied-luts',
       note: 'a Foundry file-picker path param → parseCubeLut → Data3DTexture, so an author can load their own .cube beyond the bundled set (Grade.md §15)',

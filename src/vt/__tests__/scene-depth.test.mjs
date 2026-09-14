@@ -226,7 +226,7 @@ export function run(t) {
     const mat = buildSceneDepthWriterMaterial({ THREE, fluidMaskTex, floorIndex: 0, flags: 0 });
     ok(
       'fluidMaskTex alone (no base tex): the early-Z "always solid" fast path is NOT taken — ' +
-        'the mask is genuinely sampled per pixel, unlike round one\'s whole-item boolean',
+        "the mask is genuinely sampled per pixel, unlike round one's whole-item boolean",
       sampledTexes.length === 1 && sampledTexes[0] === fluidMaskTex
     );
     ok('fluidMaskTex alone: still returns the same vec4 payload shape', mat.fragmentNode.__kind === 'vec4');
@@ -307,7 +307,10 @@ export function run(t) {
       'the add() operand IS the offset, unwrapped down to its own {x,y} — [0.25, 0.5]',
       fluidMaskUvArg.other.value.x === 0.25 && fluidMaskUvArg.other.value.y === 0.5
     );
-    ok('the mul()\'s own subject is the tile\'s bare uv() — never a world-space UV', fluidMaskUvArg.subject.subject.__kind === 'uv');
+    ok(
+      "the mul()'s own subject is the tile's bare uv() — never a world-space UV",
+      fluidMaskUvArg.subject.subject.__kind === 'uv'
+    );
   }
   {
     // ── fluidMaskUvOffset/Scale default to identity — the unsplit-item case ──

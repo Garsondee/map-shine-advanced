@@ -299,7 +299,7 @@ export function run(t) {
   );
   t.ok(
     'signature: the opaque branch (alwaysOpaque:true) ignores fluidMaskTex entirely — ' +
-      'that fragment graph never samples it, matching buildSceneDepthWriterMaterial\'s own fast path',
+      "that fragment graph never samples it, matching buildSceneDepthWriterMaterial's own fast path",
     computeDepthProxyMaterialSignature({ tex: texA, floorIndex: 1, flags: 0, alwaysOpaque: true }) ===
       computeDepthProxyMaterialSignature({
         tex: texA,
@@ -311,7 +311,7 @@ export function run(t) {
   );
   t.ok(
     'signature: fluidMaskTex alone (no base tex, no alwaysOpaque) still reaches the per-pixel ' +
-      '(never opaque) bucket — mirrors buildSceneDepthWriterMaterial\'s own !tex && !fluidMaskTex condition',
+      "(never opaque) bucket — mirrors buildSceneDepthWriterMaterial's own !tex && !fluidMaskTex condition",
     computeDepthProxyMaterialSignature({ floorIndex: 1, flags: 0, fluidMaskTex: fluidTexA }) !==
       computeDepthProxyMaterialSignature({ floorIndex: 1, flags: 0 })
   );

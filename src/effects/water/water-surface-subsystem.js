@@ -193,6 +193,13 @@ export function getWaterCausticsGateForce() {
  *   reaches it (Law 4), so an unwired caller is not merely ungated, it is
  *   byte-identical to before this existed. `getStatus().sunShadow` is what
  *   makes that state visible rather than silent.
+ * @param {() => object|null} [args.getWindHandle] - `world/wind-access.js`'s
+ *   handle (mythica-machina-press#18), a GETTER for the identical reason
+ *   `getSkyHandle` above is one: the real handle is rebuilt (new object, new
+ *   `.version`) on every wind rebake, and this subsystem polls the version
+ *   every `sync()` the same way it already polls the resolved tier, rebuilding
+ *   its materials on a mismatch rather than trying to live-patch a compiled
+ *   graph's own baked-in grid constants. Absent = no wind contribution at all.
  * @returns {{sync: (floorIndex: number, viewRect?: object|null) => void,
  *   getStatus: () => object, dispose: () => void}}
  */
@@ -229,11 +236,22 @@ export function createWaterSurfaceSubsystem({
   // exactly as it did before this fix existed, same convention every other
   // optional dependency here follows.
   refractScene = null,
+  // WIND-DRIVEN RIPPLE (mythica-machina-press#18) — a GETTER, same shape as
+  // `getSkyHandle`/`getWaterCausticsGateForce` immediately below and the
+  // SAME reason several other viewer-side consumers already take one
+  // (`vt-pan-viewer.js`'s own `getWindHandle: () => windHandle` pattern):
+  // `windHandle` is declared further down that file and rebuilt on every
+  // rebake, so passing the CURRENT one by value at construction time would
+  // freeze this subsystem on the startup (pre-bake) handle forever.
+  getWindHandle = null,
 }) {
   // Default-off shape matching every other effect seam: an un-wired caller
   // (the torture fixture) renders exactly as it did before water existed.
   getWaterRenderState ??= () => ({ enabled: true, params: {} });
   getSkyHandle ??= () => null;
+  // No wind field at all — the SAME "unwired caller behaves exactly as
+  // before this existed" contract every other optional seam here follows.
+  getWindHandle ??= () => null;
   // Fails OPEN — matches `buildWaterSurfaceMaterial`'s own `uExpectedDepth`
   // default (0) for an unwired caller: with no resolver at all (the torture
   // fixture, a caller predating this migration), water renders exactly as it
@@ -314,6 +332,16 @@ export function createWaterSurfaceSubsystem({
    * because a diagnostic force change must trigger the identical rebuild
    * path WITHOUT the resolved tier itself having moved at all. */
   let builtForCausticsGateForce = getWaterCausticsGateForce().forced;
+  /** The `windHandle.version` the CURRENT materials were built against
+   * (mythica-machina-press#18) — same reasoning as `builtForCausticsGate
+   * Force` immediately above: `world/wind-access.js`'s own handle is
+   * immutable and versioned specifically because a rebake bakes new grid
+   * constants into the compiled graph, so a version change must trigger the
+   * identical rebuild path, without the resolved TIER itself needing to
+   * move at all. `-1` (never a real version) so the very first build is
+   * always seen as "the handle changed" if a real one is already wired at
+   * construction time. */
+  let builtForWindVersion = getWindHandle()?.version ?? -1;
   /** The last value `resolveExpectedDepth` actually returned (raw, BEFORE
    * `setExpectedDepth`'s own null→0 coercion) — see `refreshVisibility`'s own
    * use of it, and `resolveExpectedDepth`'s doc above for why `null` must hide
@@ -400,6 +428,12 @@ export function createWaterSurfaceSubsystem({
       // Read FRESH on every build (never captured earlier), same discipline
       // `waterBody`/`maskTexture` right above already follow.
       causticsGateForce: getWaterCausticsGateForce().forced,
+      // WIND-DRIVEN RIPPLE (mythica-machina-press#18) — read FRESH on every
+      // build, same discipline as `causticsGateForce` immediately above:
+      // `getWindHandle()` may return a NEWER handle than whatever `sync()`
+      // last compared, and building against a stale closed-over reference
+      // here would be the exact bug this getter shape exists to prevent.
+      windHandle: getWindHandle(),
       // THE DEPTH-AUTHORITY GATE (2026-08-15) — floor-INDEPENDENT (the SAME
       // `buf:scene.depth` attachment every instance reads), so it rebuilds
       // fine on a tier change like everything else here; only `uExpectedDepth`
@@ -750,7 +784,20 @@ export function createWaterSurfaceSubsystem({
     // already cheap (this whole block), unlike the whole-image compositing
     // materials that toggle need a full viewer restart to reach.
     const resolvedCausticsGateForce = getWaterCausticsGateForce().forced;
-    if (resolvedTier !== builtForTier || resolvedCausticsGateForce !== builtForCausticsGateForce) {
+    // ⚠️ WIND REBAKE ALSO REBUILDS (mythica-machina-press#18) — same `!==`
+    // shape as the caustics-force check immediately above, and for the
+    // identical reason `world/wind-access.js`'s own header gives: a rebake
+    // makes a NEW, differently-versioned handle whose `.node()` closure
+    // bakes fresh grid constants into the graph, so this is a genuine
+    // rebuild, never a live uniform re-point. `?? -1` matches
+    // `builtForWindVersion`'s own initial value, so "no handle at all"
+    // never misreads as a version change on every single sync().
+    const resolvedWindVersion = getWindHandle()?.version ?? -1;
+    if (
+      resolvedTier !== builtForTier ||
+      resolvedCausticsGateForce !== builtForCausticsGateForce ||
+      resolvedWindVersion !== builtForWindVersion
+    ) {
       const prev = surface;
       surface = buildSurfaceForTier(resolvedTier);
       meshes[0].material = surface.absorbMaterial;
@@ -781,6 +828,7 @@ export function createWaterSurfaceSubsystem({
       // rather than depending on winning that race.
       builtForTier = surface.tier;
       builtForCausticsGateForce = resolvedCausticsGateForce;
+      builtForWindVersion = resolvedWindVersion;
       // Force every cached value below to re-push onto the FRESH material — it
       // starts back at its constructor defaults, and the key-based caches
       // below exist to skip REDUNDANT writes, not the first write to a new
@@ -925,6 +973,7 @@ export function createWaterSurfaceSubsystem({
       p.simClumpLo,
       p.simClumpHi,
       p.simClumpAaPx,
+      p.windRipple,
     ].join('|');
     if (key !== lastParamsKey) {
       lastParamsKey = key;
@@ -937,6 +986,7 @@ export function createWaterSurfaceSubsystem({
       if (Number.isFinite(p.depthScalePx)) surface.setDepthScalePx(p.depthScalePx);
       if (Number.isFinite(p.inscatter)) surface.setInscatter(p.inscatter);
       if (Number.isFinite(p.foam)) surface.setFoam(p.foam);
+      if (Number.isFinite(p.windRipple)) surface.setWindRipple(p.windRipple);
       if (Number.isFinite(p.flowSpeedPx)) surface.setFlowSpeedPx(p.flowSpeedPx);
       if (Number.isFinite(p.flowAngleDeg)) surface.setFlowAngleDeg(p.flowAngleDeg);
       if (Number.isFinite(p.waveScalePx)) surface.setWaveScalePx(p.waveScalePx);

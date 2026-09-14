@@ -11206,6 +11206,12 @@ export async function startVtPanViewer({
         // buildWaterCloudFactorNode's own doc states.
         cloudVisNode: buildWaterCloudFactorNode(),
         getSkyHandle: () => skyHandle,
+        // WIND-DRIVEN RIPPLE (mythica-machina-press#18) — a GETTER, same
+        // shape and same reason as `getSkyHandle` immediately above:
+        // `windHandle` (declared further up this function) is REBUILT, not
+        // mutated, on every wind rebake, so this subsystem needs the CURRENT
+        // one on every poll, never the one that existed at construction time.
+        getWindHandle: () => windHandle,
         // THE DEPTH-AUTHORITY GATE (2026-08-15) — composed exactly like
         // specular's/window's own `resolveExpectedDepth` below, resolved by
         // ITEM ID rather than by elevation: water has real drawn geometry of

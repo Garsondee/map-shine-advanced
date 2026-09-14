@@ -263,6 +263,7 @@ import {
   WATER_TIER2_FLOW_SPEED_PX,
   WATER_TIER2_FLOW_ANGLE_DEG,
   WATER_TIER2_FOAM,
+  WATER_TIER2_WIND_RIPPLE,
   WATER_TIER3_CHOP,
   WATER_BANK_INFLUENCE,
   WATER_FLOW_WARP_INFLUENCE,
@@ -936,6 +937,14 @@ export function buildWaterSurfaceMaterial({
   flowSpeedPx = WATER_TIER2_FLOW_SPEED_PX,
   flowAngleDeg = WATER_TIER2_FLOW_ANGLE_DEG,
   foam = WATER_TIER2_FOAM,
+  // WIND-DRIVEN RIPPLE (mythica-machina-press#18) — see `water-field.js`'s
+  // own "WIND-DRIVEN RIPPLE" section for the full mechanism and why it is a
+  // strength dial over the wind field's own magnitude, not a physical unit.
+  // `windHandle` is an OBJECT (`world/wind-access.js`), never a number, so
+  // it has no `WATER_TIER2_...` JS-default the way every other tier-2 knob
+  // here does — `null` (omitted) is itself the "no wind" default.
+  windRipple = WATER_TIER2_WIND_RIPPLE,
+  windHandle = null,
   timeMsNode = null,
   wetBandPx = WATER_TIER1_WET_BAND_PX,
   wetStrength = WATER_TIER1_WET_STRENGTH,
@@ -1155,6 +1164,7 @@ export function buildWaterSurfaceMaterial({
   const flow0 = waterFlowVector(flowAngleDeg);
   const uFlowDir = uniform(vec2(flow0[0], flow0[1]));
   const uFoam = uniform(float(foam));
+  const uWindRipple = uniform(float(windRipple));
   // THE BODY PACK's OWN SIZE IN TEXELS — for the smooth (C2) reconstruction
   // that stops its ~21-world-px grid from creasing every steep read downstream
   // (`water-sampling.js`). Seeded at the real grid the caller has, and re-pushed
@@ -1658,6 +1668,14 @@ export function buildWaterSurfaceMaterial({
       // Effects.md Law 4 — below tier 4 neither branch is even entered.
       shoaling: activeTier >= 4,
       caustics: causticsGateForce ?? activeTier >= 4,
+      // WIND-DRIVEN RIPPLE (mythica-machina-press#18) — UNCONDITIONAL, not
+      // gated behind an `if (activeTier >= N)` the way shoaling/caustics
+      // are: it rides tier 2's own fetch (the SAME "no new fetch" reasoning
+      // shoaling's own comment gives), and `windHandle` being `null` already
+      // makes it a provable no-op on its own — a second gate here would only
+      // duplicate that, never change it.
+      windHandle,
+      uWindRipple,
     });
   }
 
@@ -2769,6 +2787,14 @@ export function buildWaterSurfaceMaterial({
     },
     setFoam(v) {
       uFoam.value = v;
+    },
+    /** WATER_PARAMS `windRipple` (mythica-machina-press#18) — a live strength
+     * push; `windHandle` itself is NOT live-settable here (it is baked into
+     * the compiled graph at construction — see `water-field.js`'s own doc on
+     * why a wind rebake needs a rebuild, not a uniform push; that rebuild is
+     * `water-surface-subsystem.js`'s job, not this material's). */
+    setWindRipple(v) {
+      uWindRipple.value = v;
     },
     /** WATER_PARAMS `chop` — tier 3's wave steepness. Floored at 0 (a mirror
      * pond) rather than allowed negative: a negative slope scale would flip

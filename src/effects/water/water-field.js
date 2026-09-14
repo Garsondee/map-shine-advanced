@@ -175,6 +175,14 @@ export function waterFlowVector(bearingDeg) {
 /** Tier 2 — how much foam the crests produce, 0..1. */
 export const WATER_TIER2_FOAM = 1;
 
+/** Tier 2 — how visibly the wind roughens the surface, 0..2ish (mythica-
+ * machina-press#18). Not a physical unit: the wind field's own `.node()`
+ * magnitude is a "lean direction × strength" quantity with no fixed scale
+ * (`world/wind-access.js`'s own doc), so this is a taste knob over it, the
+ * same posture `uChop`/`WATER_TIER3_CHOP` already take over their own raw
+ * channel. 1 is a visible-but-not-overpowering starting point. */
+export const WATER_TIER2_WIND_RIPPLE = 1;
+
 /**
  * TIER 3's WAVE STEEPNESS — the scale factor from the raw noise channels to a
  * surface SLOPE (rise over run), and therefore the single control over how
@@ -762,6 +770,13 @@ export const WATER_CAUSTICS_LINE_FLOOR = 0.14;
  * @param {*} [args.uCausticLineFloor] - float uniform, `WATER_PARAMS.
  *   causticLineFloor`. How dim a plain edge reads relative to a junction's
  *   own ceiling of 1; `null` falls back to `WATER_CAUSTICS_LINE_FLOOR`.
+ * @param {object} [args.windHandle] - `world/wind-access.js`'s handle
+ *   (mythica-machina-press#18). Omitted → no wind contribution at all, byte-
+ *   identical to before this rung existed — see this function's own
+ *   "WIND-DRIVEN RIPPLE" section for why it contributes no domain drift.
+ * @param {*} [args.uWindRipple] - float uniform, `WATER_PARAMS.windRipple`.
+ *   How visibly wind roughens the surface; `null` falls back to
+ *   `WATER_TIER2_WIND_RIPPLE`.
  * @returns {{foam: *, turbidity: *, slope: *, domainOffset: *,
  *   causticBrightness: *}} ⚠️ `foam` and `causticBrightness` are BOTH contracted
  *   to be exactly ZERO OUTSIDE THE WATER — not merely small, zero — because
@@ -828,6 +843,15 @@ export function buildWaterSurfaceField({
   uCausticEvolveSpeed = null,
   uCausticJunctionWidth = null,
   uCausticLineFloor = null,
+  // WIND-DRIVEN RIPPLE (mythica-machina-press#18) — `null` is the SAME
+  // "this consumer does not exist yet" contract every other optional
+  // dependency in this function already uses (`localFlowDir`'s own doc):
+  // omitting it is byte-for-byte the pre-wind behaviour, never a thrown
+  // "undefined is not a node". `world/wind-access.js`'s own handle, never
+  // imported directly (`wind/handle-only`) — this function only ever calls
+  // its `.node()` method.
+  windHandle = null,
+  uWindRipple = null,
 }) {
   const {
     vec2,
@@ -857,6 +881,7 @@ export function buildWaterSurfaceField({
   const causticEvolveSpeedNode = uCausticEvolveSpeed ?? float(WATER_CAUSTICS_EVOLVE_SPEED);
   const causticJunctionWidthNode = uCausticJunctionWidth ?? float(WATER_CAUSTICS_JUNCTION_FRACTION);
   const causticLineFloorNode = uCausticLineFloor ?? float(WATER_CAUSTICS_LINE_FLOOR);
+  const windRippleNode = uWindRipple ?? float(WATER_TIER2_WIND_RIPPLE);
 
   const tSec = timeMsNode.mul(float(1 / 1000));
 
@@ -1080,6 +1105,54 @@ export function buildWaterSurfaceField({
   // couples, for no saving. Shoaling amplifies BOTH `shoaledY`/`shoaledZ`
   // identically, so that pairing survives tier 4 exactly as tier 2 built it.
   const slope = uChop ? vec2(shoaledY, shoaledZ).mul(uChop) : vec2(0, 0);
+
+  // ── WIND-DRIVEN RIPPLE (mythica-machina-press#18) ───────────────────────
+  // "Gusts sweep visible dark ripple patches across open water; glassy-calm
+  // in sheltered spots — using the same wind field vegetation already
+  // obeys."
+  //
+  // ⚠️ WHY THIS DOES NOT ADD ITS OWN DOMAIN DRIFT — the SAME trap this
+  // file's own header names for flow direction applies here just as hard.
+  // `windHandle.node()` returns a vector that varies PER PIXEL (openness
+  // gating, wall deflection near shelter, organic turbulence) — exactly the
+  // "smoothly varying across space" shape that turns into a fan of hard
+  // rays the moment it is multiplied by unbounded time (`drift`'s own
+  // header, above). `wind/handle-only` (the enforced wall in `world/`) also
+  // means this function has no door to reach PAST the handle for a pure,
+  // spatially-uniform ambient-only vector the way `current`/`uFlowDir` are
+  // authored as. So wind contributes NO drift term: only its MAGNITUDE,
+  // used as a bounded, per-pixel, non-time-multiplied scale on a pattern
+  // that already exists — the one combination that is always safe
+  // regardless of how the input varies across space.
+  //
+  // The TEXTURE wind reveals is `shoaledY`/`shoaledZ` — tier 2's own
+  // crest/slope pair, ALREADY a live, animating, correctly-shoaled read of
+  // this same fetch (no new fetch, no new fields to keep in step) — rather
+  // than `turbidity` (`n.x`), because wind roughens the surface, it does
+  // not make the water murkier; reusing the channel that already means
+  // "how much surface structure is here" is the honest choice, not a
+  // convenient one. The RESULT rides `turbidity` in the return below
+  // because that is the one channel already wired to visible DARKENING
+  // (`water-render.js`'s own `turbid` term scales optical depth) — "dark
+  // ripple patches" is a statement about depth reading darker, which is
+  // exactly what turbidity already does for tier 2's own pattern.
+  //
+  // Deliberately independent of `uChop`: `slope` above goes to exactly zero
+  // at `uChop = 0` (an author choice about specular chop), but wind
+  // roughening open water is a different question from how hard the water
+  // glitters, so this reads `shoaledY`/`shoaledZ` directly rather than
+  // `slope`.
+  let windRipple = float(0);
+  if (windHandle) {
+    const windVec = windHandle.node(TSL, { centerXY: worldXY, time: timeMsNode });
+    const windStrength = length(windVec);
+    // Shelter-aware for free: `windStrength` is already near zero in a
+    // sheltered spot (the SAME `openness`/wall-deflection every other wind
+    // consumer reads through this handle), which is what makes "glassy-calm
+    // in sheltered spots" fall out of this multiply rather than needing a
+    // second, hand-rolled shelter test.
+    windRipple = windStrength.mul(length(vec2(shoaledY, shoaledZ))).mul(windRippleNode);
+  }
 
   // ⚠️ TIER 4 — CAUSTICS, REBUILT 2026-08-27 AS A WORLEY F2−F1 CELL-EDGE NET.
   //
@@ -1374,7 +1447,11 @@ export function buildWaterSurfaceField({
     causticBrightness = combinedNet.mul(float(WATER_CAUSTICS_MAX)).mul(chopGate).mul(shoalBoost).mul(insideWater);
   }
 
-  return { foam, turbidity, slope, domainOffset, causticBrightness, flowWarp };
+  // `windRipple` is exactly `float(0)` (a compile-time literal, not a live
+  // zero) whenever `windHandle` is omitted — `.add()` on it is a genuine
+  // no-op, so an unwired caller gets byte-identical `turbidity` to before
+  // this rung existed.
+  return { foam, turbidity: turbidity.add(windRipple), slope, domainOffset, causticBrightness, flowWarp };
 }
 
 // waterCausticsCpu (the Jacobian-focus CPU twin) was REMOVED 2026-08-27 along

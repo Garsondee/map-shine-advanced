@@ -58,6 +58,7 @@ import {
 } from '../water-render.js';
 import { WATER_DEBUG_CHANNELS } from '../water.js';
 import { buildFoamCellularStructure } from '../water-shore.js';
+import { createWindHandle } from '../../../world/wind-access.js';
 
 /** A 1×1 texture — enough for a node to reference; never sampled here. */
 function stubTexture() {
@@ -109,6 +110,60 @@ export function run(t) {
     built[tier] = result;
   }
   if (!built[5]) return; // everything below would cascade meaninglessly
+
+  // ── WIND-DRIVEN RIPPLE (mythica-machina-press#18) ────────────────────────
+  // A REAL `world/wind-access.js` handle, not a hand-rolled stub — the
+  // fidelity a stub can't offer: proving the actual `.node()` contract this
+  // builder calls, including a real (if minimal) ambient wind, constructs
+  // cleanly through `buildWaterSurfaceField`'s own wind block. Built at tier
+  // 2 (the lowest tier the wind block can even run at) and tier 5 (every
+  // rung on top of it still constructing).
+  {
+    // `ambientWind` takes LIVE TSL UNIFORM NODES, never plain numbers
+    // (`world/wind-access.js#createWindHandle`'s own doc) — a raw number
+    // here would fail differently and much less clearly than production
+    // code ever could (a real caller only ever has uniforms to hand it).
+    const { uniform: windUniform, float: windFloat } = THREE.TSL;
+    const windHandle = createWindHandle({
+      ambientWind: { directionDeg: windUniform(windFloat(90)), speed01: windUniform(windFloat(0.6)) },
+    });
+    for (const tier of [2, 5]) {
+      let err = null;
+      try {
+        buildWaterSurfaceMaterial(args({ tier, windHandle }));
+      } catch (e) {
+        err = e;
+      }
+      ok(
+        `tier ${tier} with a real windHandle CONSTRUCTS without throwing (${err ? err.message : 'clean'})`,
+        err === null
+      );
+    }
+    // A handle with NO ambient wind at all (a windless scene) is the OTHER
+    // real shape `createWindHandle()` produces — `sampleWind`'s own "no
+    // geometry data ⇒ open outdoors" convention extends to "no ambient ⇒
+    // wind vector is exactly zero", which this must survive too (a `length()`
+    // of a zero vector is well-defined, but worth proving rather than
+    // assuming).
+    let windlessErr = null;
+    try {
+      buildWaterSurfaceMaterial(args({ tier: 2, windHandle: createWindHandle() }));
+    } catch (e) {
+      windlessErr = e;
+    }
+    ok(
+      `a windless handle (no ambient wind) CONSTRUCTS without throwing (${windlessErr ? windlessErr.message : 'clean'})`,
+      windlessErr === null
+    );
+  }
+  ok(
+    'setWindRipple is exposed and is a plain mutable uniform push',
+    (() => {
+      const b = buildWaterSurfaceMaterial(args({ tier: 2 }));
+      b.setWindRipple(0.4);
+      return true; // constructing + calling without throwing IS the assertion — no live GPU to read the uniform back from
+    })()
+  );
 
   // ── WATER IS TWO MESHES AT EVERY TIER ──────────────────────────────────
   // Half a water surface (absorption with no in-scatter, or the reverse) is a

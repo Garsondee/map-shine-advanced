@@ -186,6 +186,16 @@ export const WATER_PARAMS = Object.freeze({
     label: 'Foam',
     help: 'White broken water where the surface crests, concentrated near the bank because that is where real water shoals and breaks. This is the strongest "that is a liquid, not a tinted sheet" cue available before the lighting rung lands — turn it to 0 for a glassy pond.',
   },
+  windRipple: {
+    type: 'float',
+    min: 0,
+    max: 2,
+    step: 0.02,
+    default: 1,
+    category: 'Motion',
+    label: 'Wind ripple',
+    help: 'How visibly the map`s own wind roughens open water — gusts read as darker ripple patches, sheltered nooks and lee sides of walls stay glassy-calm, using the same wind field vegetation already leans in. At 0 the surface never responds to wind at all.',
+  },
   flowSpeedPx: {
     type: 'float',
     min: 0,
@@ -961,7 +971,14 @@ export const WATER = Object.freeze({
         'as TURBIDITY modulating optical depth so the absorption varies across the surface instead of ' +
         'being one flat number. Deliberately NOT slope-shading: from directly above a slope is invisible ' +
         'without refraction (rung 5) or specular (rung 3), and a fake light here would fight the real ' +
-        'one later. This is the rung where water stops being a decal.',
+        'one later. This is the rung where water stops being a decal. ' +
+        'WIND-DRIVEN RIPPLE (mythica-machina-press#18) rides this same fetch: `world/wind-access.js`s ' +
+        'own handle, its MAGNITUDE only (never a domain drift — the per-pixel-varying shelter term this ' +
+        'handle carries would reproduce the exact ray-fan shearing this rung`s own flow-drift already had ' +
+        'to solve once, the identical trap under a different name), scaling the ALREADY-COMPUTED crest/ ' +
+        'slope pair`s visible contribution to turbidity. Shelter-aware for free: a sheltered spot`s wind ' +
+        'sample is already near zero, so glassy calm there is the multiply`s own arithmetic, not a second ' +
+        'hand-rolled test.',
     }),
     Object.freeze({
       n: 3,
@@ -1503,6 +1520,10 @@ export const WATER_PRESETS = Object.freeze({
     viewerHeight: 0.3,
     shadowResponse: 1,
     foam: 0.75,
+    // NEW (mythica-machina-press#18) — matches the schema default; no
+    // author-tuned value of its own yet, same posture as
+    // `foamEdgeSharpness`'s own note below.
+    windRipple: 1,
     flowSpeedPx: 70,
     flowAngleDeg: 180,
     waveScalePx: 88,

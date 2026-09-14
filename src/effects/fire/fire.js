@@ -781,12 +781,18 @@ export const FIRE = Object.freeze({
     },
   ]),
 
-  /** Recorded, genuinely not built — the list this effect is judged against. */
+  /** Recorded, genuinely not built — the list this effect is judged against.
+   * ⚠️ 'smoke-as-a-second-pass' REMOVED (2026-09-14, mythica-machina-press#49)
+   * — stale, not merely unbuilt: smoke has been its own separate, genuinely
+   * NormalBlending-composited mesh/material/draw call for a while now
+   * (`fire-particle-runtime.js`'s own `KINDS.smoke.additive: false`,
+   * `fire-subsystem.js`'s `renderOrder` note on why smoke draws over the
+   * additive flame/embers) — this note described the pre-fix state and was
+   * never updated once the fix landed. The real remaining gap in that same
+   * issue (smoke's buoyancy never being deflected around nearby walls the
+   * way its wind-driven motion already is) is fixed in the same commit that
+   * removed this note. */
   deferredRungs: Object.freeze([
-    {
-      name: 'smoke-as-a-second-pass',
-      note: "Smoke is drawn in the flame's ADDITIVE pass today, so it can only add light and reads as a warm haze rather than something that darkens the map beneath it. The correct shape is a second, alpha-blended pass — which is what V2 did (flame additive, smoke NormalBlending).",
-    },
     {
       name: 'embers-and-sparks',
       note: "Via the shared ParticleArena and SPAWN_KINDS.extracted, which was explicitly designed for fire spawn points. Must add ZERO new storage buffers — the arena already uses 6 of WebGPU's guaranteed 8.",

@@ -934,9 +934,25 @@ export function createFireParticleEngine({
     // shoving flame sharply downward instead of merely fading its upward
     // drift to zero — cheap insurance against a sharp, confusing regression.
     const calmFade = float(1).sub(effectiveWindMotion).clamp(float(0), float(1));
-    const buoyancy = vec2(0, float(-K.buoyancyY * 60).sub(float((K.calmRiseY ?? 0) * 60).mul(calmFade))).mul(
-      motionScale
-    );
+    let buoyancy = vec2(0, float(-K.buoyancyY * 60).sub(float((K.calmRiseY ?? 0) * 60).mul(calmFade))).mul(motionScale);
+    // WALL DEFLECTION FOR BUOYANCY TOO (mythica-machina-press#49) — smoke's
+    // own UNCONDITIONAL vertical rise (`buoyancyY` above) was never run
+    // through `deflectAroundWalls` the way the wind-driven term just above
+    // already is, so a plume drifting straight up next to (or through) a
+    // wall sailed on through it regardless of wind — the reported "pokes
+    // through walls" bug. Depth OCCLUSION was never the gap here (all three
+    // kinds already draw through the same real depth-height gate as every
+    // other particle system); this is a MOTION gap, the position itself
+    // reaching the far side of the wall. Same guard, same helper, same
+    // already-sampled wall grid — a free extension of work already paid for.
+    if (windOpennessBuffer) {
+      buoyancy = deflectAroundWalls(TSL, {
+        vector: buoyancy,
+        awayDirX: wallAwayDirX,
+        awayDirY: wallAwayDirY,
+        proximity: wallProximity,
+      });
+    }
 
     const accel = curl.add(windVec).add(buoyancy);
     // Exponential damping, solved from V2's per-update 0.85 at 30 Hz.

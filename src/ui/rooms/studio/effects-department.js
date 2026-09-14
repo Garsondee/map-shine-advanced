@@ -571,6 +571,32 @@ const FILTER_CATEGORIES = Object.freeze({
 });
 
 let activeFilter = null;
+/** In-grid search query (mythica-machina-press#548) — module-level so it
+ * survives a chip click's full re-render, same posture as `activeFilter`.
+ * Deliberately separate from search-palette.js's own global overlay: that
+ * one jumps OUT to a flat cross-effect result list (finds one param
+ * anywhere); this filters the grid IN PLACE (finds which whole cards are
+ * relevant), a different question with a different answer shape. */
+let searchQuery = '';
+
+/**
+ * Does this card match a search query? Same plain-substring convention
+ * search-palette.js's own header documents as the validated, non-fuzzy
+ * behaviour (label+title+help) — applied here at the CARD level (title, or
+ * any one of its params' label/help/category) rather than the param level,
+ * since this filters whole cards, not individual rows.
+ * @param {EffectCardModel} model @param {string} ql - already lowercased/trimmed.
+ * @returns {boolean}
+ */
+function cardMatchesSearch(model, ql) {
+  if (!ql) return true;
+  if ((model.title ?? model.id ?? '').toLowerCase().includes(ql)) return true;
+  for (const decl of Object.values(model.schema ?? {})) {
+    const hay = `${decl.label ?? ''} ${decl.help ?? ''} ${decl.category ?? ''}`.toLowerCase();
+    if (hay.includes(ql)) return true;
+  }
+  return false;
+}
 
 /**
  * Render the EFFECTS department body into `container` (a `.deptscroll`).
@@ -619,6 +645,28 @@ export function renderEffectsDepartment(container, ctx) {
   strip.append(makeChip('All', '--shine', null));
   for (const [key, { label, accVar }] of Object.entries(FILTER_CATEGORIES)) strip.append(makeChip(label, accVar, key));
 
+  // IN-GRID SEARCH (mythica-machina-press#548) — filters the ALREADY
+  // category-filtered grid live, without a full re-render (which would
+  // rebuild this very input and drop keyboard focus after every character —
+  // confirmed by reading how this department commits to the DOM,
+  // `container.innerHTML = ''` on every render, below). Toggles `.hidden`
+  // on the already-built card elements instead.
+  const searchBox = document.createElement('input');
+  searchBox.type = 'search';
+  searchBox.placeholder = 'Filter this list by name or control…';
+  searchBox.value = searchQuery;
+  searchBox.setAttribute('aria-label', 'Filter effects in this category');
+  Object.assign(searchBox.style, {
+    flexBasis: '100%',
+    background: 'var(--bg2)',
+    border: '1px solid var(--line)',
+    borderRadius: 'var(--r-ctl,6px)',
+    padding: '4px 8px',
+    color: 'var(--ink0)',
+    fontSize: '.74rem',
+  });
+  strip.append(searchBox);
+
   const visible = models
     .filter(({ model }) => !activeFilter || model.filterCategory === activeFilter)
     .filter(({ id }) => !poppedOut.has(id))
@@ -628,6 +676,8 @@ export function renderEffectsDepartment(container, ctx) {
   // just to call this in one more place — a filter-chip click re-persisting
   // the same array is harmless.
   ctx.setPinnedEffects?.([...pinned]);
+  /** @type {Array<{model: EffectCardModel, el: HTMLElement}>} */
+  const cardEls = [];
   for (const { id, model } of visible) {
     model.onRequestRerender = () => renderEffectsDepartment(container, ctx);
     // MY PRESETS (mythica-machina-press#102) — thin per-model bindings onto
@@ -658,7 +708,9 @@ export function renderEffectsDepartment(container, ctx) {
       );
       renderEffectsDepartment(container, ctx);
     };
-    grid.append(buildStudioEffectCard(model));
+    const cardEl = buildStudioEffectCard(model);
+    cardEls.push({ model, el: cardEl });
+    grid.append(cardEl);
   }
   if (visible.length === 0) {
     const empty = document.createElement('div');
@@ -671,6 +723,31 @@ export function renderEffectsDepartment(container, ctx) {
           : 'No effects in this category.';
     grid.append(empty);
   }
+  // Search-only empty state — distinct from the category one above, since
+  // the category empty state renders INSTEAD of cards (no cardEls to
+  // toggle), while this one hides ALREADY-BUILT cards live.
+  const noSearchMatch = document.createElement('div');
+  noSearchMatch.hidden = true;
+  noSearchMatch.style.cssText = 'color:var(--ink2); font-size:.8rem; padding:20px';
+  noSearchMatch.textContent = 'Nothing in this category matches your search.';
+  grid.append(noSearchMatch);
+
+  /** Apply `query` live to the already-built cards — no re-render, so the
+   * search box itself never loses focus mid-type. Re-run on every render
+   * too (a chip click rebuilds the grid from scratch), so an active search
+   * survives switching categories. */
+  function applySearchFilter(query) {
+    searchQuery = (query ?? '').trim().toLowerCase();
+    let anyVisible = false;
+    for (const { model, el } of cardEls) {
+      const match = cardMatchesSearch(model, searchQuery);
+      el.hidden = !match;
+      if (match) anyVisible = true;
+    }
+    noSearchMatch.hidden = cardEls.length === 0 || anyVisible;
+  }
+  searchBox.addEventListener('input', () => applySearchFilter(searchBox.value));
+  applySearchFilter(searchQuery);
 
   container.innerHTML = '';
   container.append(strip, grid);

@@ -27,8 +27,16 @@
 import { buildSearchOverlay } from '../../widgets/search-overlay.js';
 
 const STYLE_ID = 'msa-studio-palette-style';
-const EMPTY_QUERY_BROWSE_COUNT = 8;
-const MAX_RESULTS = 12;
+// Raised 2026-09-14 (8/12 → 15/40): with 19 registered effects now averaging
+// ~18 params each (340+ rows total, still growing), the old caps were
+// already truncating most real queries by roughly 28x — `.results` has
+// scrolled since U1 (search-overlay.js `max-height:380px;overflow-y:auto`),
+// so there was no layout reason for either number to stay this low. Same
+// substring-match algorithm, untouched (see this file's own header on why
+// that stays as the mock validated it) — only how much of what it already
+// finds gets shown.
+const EMPTY_QUERY_BROWSE_COUNT = 15;
+const MAX_RESULTS = 40;
 
 function injectStyle() {
   if (document.getElementById(STYLE_ID)) return;

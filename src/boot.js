@@ -1247,6 +1247,29 @@ function install() {
       // disagree about which kind a given effect opens.
       listPaintableEffects: () => listPaintableEffects(),
       armBrush: (effectId) => paintAffordance(effectId)?.onAdd?.(),
+      // PINNED EFFECTS PERSISTENCE (2026-09-14) — the Effects grid's pin
+      // state used to reset every reload (effects-department.js's own
+      // `pinned` Set had nowhere to live between sessions). A malformed or
+      // pre-this-feature stored value degrades to "nothing pinned" rather
+      // than throwing — the read happens once per Studio open, not worth
+      // wedging the whole panel over a corrupt string.
+      getPinnedEffects: () => {
+        try {
+          const raw = JSON.parse(readSetting(MODULE_ID, GLOBAL_SETTING_KEYS.studioPinnedEffects) || '[]');
+          return Array.isArray(raw) ? raw.filter((id) => typeof id === 'string') : [];
+        } catch {
+          return [];
+        }
+      },
+      setPinnedEffects: (ids) => {
+        Promise.resolve(
+          writeSetting(
+            MODULE_ID,
+            GLOBAL_SETTING_KEYS.studioPinnedEffects,
+            JSON.stringify(Array.isArray(ids) ? ids : [])
+          )
+        ).catch((err) => log.error('studio pinned-effects write failed:', err));
+      },
       // THE SYSTEM DEPARTMENT (U5) — getSystemPanelCtx is declared much
       // further down install() (it closes over PROFILE_CHOICE_LIST/
       // ENABLE_CHOICE_LIST, built right next to the old settings panel's own

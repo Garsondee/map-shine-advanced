@@ -381,8 +381,8 @@ export function run(t) {
     const descriptors = describeEffectSettings([UI_WINDOW_SHADOW]);
     const byKey = (k) => descriptors.find((d) => d.key === k);
 
-    // 8 global (2026-08-30: +hidpiRendering, project_albedo_zoom_out_clarity_audit_2026-08-30 Stage 1A) + 2 per-effect.
-    ok('one effect → 8 global + 2 per-effect descriptors', descriptors.length === 10);
+    // 9 global (2026-09-14: +studioPinnedEffects, hidden internal UI state) + 2 per-effect.
+    ok('one effect → 9 global + 2 per-effect descriptors', descriptors.length === 11);
 
     const master = byKey(GLOBAL_SETTING_KEYS.msaEnabled);
     ok(
@@ -487,10 +487,15 @@ export function run(t) {
       effectEnableKey('x', 'gm') === 'x.gmEnable' && effectEnableKey('x', 'player') === 'x.playerEnable'
     );
     ok(
-      'every descriptor is config:true (shows in Foundry Settings)',
-      descriptors.every((d) => d.config === true)
+      // studioPinnedEffects (2026-09-14) is the ONE deliberate exception —
+      // internal Studio UI state, never meant to appear in Foundry's own
+      // Settings dialog. Named explicitly rather than weakening this to
+      // "most" descriptors, so a FUTURE accidental config:false still fails
+      // this test loudly.
+      'every descriptor is config:true, except the one deliberate internal exception',
+      descriptors.every((d) => d.config === true || d.key === GLOBAL_SETTING_KEYS.studioPinnedEffects)
     );
-    ok('no manifests → just the 8 global descriptors', describeEffectSettings([]).length === 8);
+    ok('no manifests → just the 9 global descriptors', describeEffectSettings([]).length === 9);
     ok(
       'the master off-switch exists even with zero effects registered — it gates BEFORE the cascade',
       describeEffectSettings([]).some((d) => d.key === GLOBAL_SETTING_KEYS.msaEnabled)

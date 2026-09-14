@@ -63,6 +63,15 @@ export const GLOBAL_SETTING_KEYS = Object.freeze({
    * while `MAX_PIXEL_RATIO` still protects them from Foundry's own opaque
    * value regardless of which mode they pick. */
   renderScale: 'renderScale',
+  /** STUDIO PINNED EFFECTS (client, 2026-09-14) — a JSON-encoded array of
+   * effect ids pinned to the top of the Effects grid (`ui/rooms/studio/
+   * effects-department.js`). Hidden (`config: false`, describeEffectSettings)
+   * — purely internal UI state, not something to hand-edit from Foundry's
+   * own Settings dialog. String-typed like every non-bool descriptor this
+   * adapter registers (`foundry/settings-adapter.js` has no array/object
+   * kind); the JSON encode/decode lives at the read/write call sites, not
+   * here. */
+  studioPinnedEffects: 'studioPinnedEffects',
   /** HIDPI RENDERING (client, 2026-08-30) — replaces an unconditional
    * one-way write to Foundry's OWN `core.pixelRatioResolutionScaling`
    * setting (boot.js's `ready` hook used to force it `false` for every
@@ -151,7 +160,11 @@ export function renderScaleChoices() {
  * @typedef {object} SettingDescriptor
  * @property {string} key
  * @property {'client'|'world'} scope
- * @property {'enum'|'bool'} kind
+ * @property {'enum'|'bool'|'json'} [kind] - omitted (or 'json') both resolve
+ *   to a plain String setting at the adapter (`foundry/settings-adapter.js`
+ *   has no dedicated array/object type) — 'json' is purely a self-documenting
+ *   label at the call site for "this string holds JSON.stringify'd data",
+ *   with the encode/decode living at whoever reads/writes it.
  * @property {Record<string, string>} [choices] - for enum: Foundry's `{value: label}` map.
  * @property {unknown} default
  * @property {boolean} config - whether it appears in Foundry's Settings dialog.
@@ -206,6 +219,15 @@ export function describeEffectSettings(manifests = []) {
       config: true,
       name: 'Map Shine — Render resolution',
       hint: 'Auto lets Map Shine automatically balance sharpness against your frame rate — it can never be pushed higher than a safe ceiling, regardless of your own display or Foundry resolution setting. A fixed value locks the render resolution and turns automatic adjustment off.',
+    },
+    {
+      key: GLOBAL_SETTING_KEYS.studioPinnedEffects,
+      scope: 'client',
+      kind: 'json',
+      default: '[]',
+      config: false,
+      name: 'Map Shine Studio — pinned effects (internal)',
+      hint: 'Internal UI state — which effect cards are pinned to the top of the Studio Effects grid.',
     },
     {
       key: GLOBAL_SETTING_KEYS.hidpiRendering,

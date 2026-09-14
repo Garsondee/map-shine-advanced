@@ -22,8 +22,15 @@ import { rohGroups, collapsedStatusLine, buildSettingsSnapshot } from '../../wid
 import { iconMarkup } from '../../widgets/icon-sprite.js';
 import { tierChip, scopeGlyph, healthBadge } from '../../widgets/badges.js';
 
-/** Pinned card ids — client-side only, one Set for the module's lifetime (matches the mock's own state.pinned; not persisted across reloads yet). */
+/** Pinned card ids — one Set for the module's lifetime, seeded once from the
+ * persisted client setting (see `pinnedSeeded` below) and written back on
+ * every render. Matches the mock's own `state.pinned`. */
 const pinned = new Set();
+/** Has `pinned` been seeded from `ctx.getPinnedEffects()` yet? Guards against
+ * re-seeding (and so clobbering a live toggle) on every render — this
+ * module has no per-instance state to hang it on, same reasoning as
+ * `activeFilter` just below being module-level too. */
+let pinnedSeeded = false;
 /** Popped-out card ids -> their floating mini-panel element, so the main
  * grid can skip re-rendering a card currently shown as its own window (the
  * FOH/ROH double-control bug's shape, one level up: never render the same
@@ -501,10 +508,15 @@ let activeFilter = null;
 /**
  * Render the EFFECTS department body into `container` (a `.deptscroll`).
  * @param {HTMLElement} container
- * @param {{effectCardFactories: Map<string, () => EffectCardModel>}} ctx
+ * @param {{effectCardFactories: Map<string, () => EffectCardModel>,
+ *   getPinnedEffects?: () => string[], setPinnedEffects?: (ids: string[]) => void}} ctx
  * @returns {string} the department subtitle for the shell's deptHead.
  */
 export function renderEffectsDepartment(container, ctx) {
+  if (!pinnedSeeded) {
+    pinnedSeeded = true;
+    for (const id of ctx.getPinnedEffects?.() ?? []) pinned.add(id);
+  }
   const models = [...ctx.effectCardFactories.entries()].map(([id, factory]) => ({ id, model: factory() }));
 
   const strip = document.createElement('div');
@@ -544,6 +556,11 @@ export function renderEffectsDepartment(container, ctx) {
     .filter(({ model }) => !activeFilter || model.filterCategory === activeFilter)
     .filter(({ id }) => !poppedOut.has(id))
     .sort((a, b) => (pinned.has(b.id) ? 1 : 0) - (pinned.has(a.id) ? 1 : 0));
+  // Persisted every render (cheap, idempotent when nothing changed) rather
+  // than threading ctx into buildStudioEffectCard's own pin-button handler
+  // just to call this in one more place — a filter-chip click re-persisting
+  // the same array is harmless.
+  ctx.setPinnedEffects?.([...pinned]);
   for (const { model } of visible) {
     model.onRequestRerender = () => renderEffectsDepartment(container, ctx);
     // U6: the health badge's own click target — "deep-links to the Lab

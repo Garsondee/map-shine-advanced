@@ -83,6 +83,7 @@ import {
 import { createLogger } from '../../core/log.js';
 import { packSpawnPoints } from '../fire/fire-spawn-points.js';
 import { buildDepthHeightGateNode } from '../lighting/point-light-illumination.js';
+import { fakeCurl2D } from './curl-noise.js';
 import {
   buildFlameShapeAlpha,
   buildFlameShading,
@@ -365,8 +366,7 @@ export function createFireParticleEngine({
   depthFlagsTexNode = null,
 }) {
   const TSL = THREE.TSL;
-  const { Fn, instanceIndex, float, vec2, vec3, vec4, uniform, sin, cos, fract, uv, mix, positionGeometry, screenUV } =
-    TSL;
+  const { Fn, instanceIndex, float, vec2, vec3, vec4, uniform, sin, fract, uv, mix, positionGeometry, screenUV } = TSL;
 
   const K = KINDS[kind] ?? KINDS.flame;
   const p = system?.params ?? {};
@@ -660,32 +660,16 @@ export function createFireParticleEngine({
   };
 
   /**
-   * V2's FAST FAKE CURL, ported verbatim (`fire-behaviors.js:64`).
-   *
-   * ⚠️ THIS IS EXACTLY DIVERGENCE-FREE, NOT AN APPROXIMATION OF ONE, and that is
-   * why it is not "upgraded" to real 3D curl noise here. `vx` depends only on
-   * `y` and `vy` only on `x`, so `∂vx/∂x = ∂vy/∂y = 0` — a genuinely
-   * incompressible flow. Real simplex curl is also divergence-free but has
-   * isotropic-blob character where this has crossed shear bands, so swapping it
-   * is a LOOK change to be A/B'd, not a modernisation
-   * (`feedback_port_faithfully_then_modernize_opportunistically`).
-   *
-   * V2 advanced the field's clock ONCE PER FRAME rather than per particle — a
-   * recorded bug fix, since per-particle advance multiplied the noise speed by
-   * the particle count. A compute kernel gets that for free: `uTimeMs` is one
-   * uniform read shared by every invocation.
+   * V2's FAST FAKE CURL, ported verbatim (`fire-behaviors.js:64`) — now the
+   * shared `curl-noise.js#fakeCurl2D`, extracted so a second consumer (dust
+   * motes — see `particle-runtime.js`'s own header) doesn't have to
+   * re-derive or copy-paste this exact math. See that module's own header
+   * for why this is EXACTLY divergence-free rather than an approximation,
+   * and why the field's clock must advance once per frame, never per
+   * particle. Byte-identical formula and constants to before this
+   * extraction — a pure move, no behavior change.
    */
-  const fakeCurl = (pos, tSec) => {
-    const px = pos.x.div(float(K.curlScale));
-    const py = pos.y.div(float(K.curlScale));
-    const vx = sin(py.mul(float(2.13)).add(tSec))
-      .add(cos(py.mul(float(3.71)).sub(tSec)))
-      .mul(float(0.5));
-    const vy = cos(px.mul(float(2.27)).add(tSec))
-      .add(sin(px.mul(float(3.43)).sub(tSec)))
-      .mul(float(0.5));
-    return vec2(vx, vy).mul(float(K.curlStrength));
-  };
+  const fakeCurl = (pos, tSec) => fakeCurl2D(TSL, pos, tSec, { scale: K.curlScale, strength: K.curlStrength });
 
   /**
    * Pick a spawn point and write a fresh particle over the given slot.

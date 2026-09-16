@@ -938,6 +938,28 @@ export const ZONES = Object.freeze(
       false,
       'runCloudTopsPass'
     ),
+    // Added 2026-09-16 (perf-instrumentation-audit, mythica-machina-press#553)
+    // — `surface.precipitation` (graph/passes.js, live) had NO declared zone
+    // at all: `runSurfacePrecipitationPass` draws a real, ordered list of
+    // scenes (the falling curtain + the splash carpet, per that function's
+    // own comment) via `for (const s of scenes) renderer.render(s, camera)`,
+    // with zero profiler bracket anywhere — the identical Cloud-Tops-shaped
+    // gap (measured only as the anonymous, unattributed `pass.surface.
+    // precipitation` row), just never found until this pass swept every
+    // live pass in `passes.js` looking for exactly this shape. ONE zone
+    // around the whole loop, not per-scene: the loop body is a bare
+    // `renderer.render()` call, nothing to split further.
+    z(
+      'surface.precipitationDraw',
+      'Precipitation draw (fall + splash)',
+      'surface',
+      'surface.precipitation',
+      'precipitation',
+      'gpu',
+      'conditional',
+      false,
+      'runSurfacePrecipitationPass'
+    ),
 
     // ---- post.bloom: 11 draws, 5 zones. A mip chain is ONE decision, not four.
     z(
@@ -1041,6 +1063,54 @@ export const ZONES = Object.freeze(
       'conditional',
       false,
       'dofCompositeQuad.render'
+    ),
+
+    // ---- post.lens: `runPostLensPass` (graph/passes.js's own note: distort +
+    // chromatic aberration + vignette + grain, tier 2 an extra persistent
+    // ping-ponged light-burn accumulator) — the SAME "no zone at all despite
+    // a live pass with real draws" gap `surface.precipitationDraw` above just
+    // closed, found by the identical sweep. THREE zones, not one: the
+    // per-frame param/autofocus/motion-blur bookkeeping is substantial CPU
+    // work (mirrors bloom.uniformPush/dof.uniformPush's own precedent for
+    // "the state block is worth its own number"), and the two draws are
+    // independently conditional — light burn only runs at tier 2 AND when
+    // the author has it on, the main composite runs whenever lens itself is
+    // enabled — so collapsing them into one zone would hide which half a
+    // measured cost belongs to, the exact ambiguity light.pointLightUpdate's
+    // own five-way split (this file's header, S2.6) was built to avoid.
+    // Added 2026-09-16 (perf-instrumentation-audit, mythica-machina-press#553).
+    z(
+      'lens.uniformPush',
+      'Lens param/autofocus/motion-blur state + uniform push',
+      'post',
+      'post.lens',
+      'lens',
+      'cpu',
+      'conditional',
+      true,
+      'runPostLensPass'
+    ),
+    z(
+      'lens.lightBurn',
+      'Lens light-burn accumulator (tier 2)',
+      'post',
+      'post.lens',
+      'lens',
+      'gpu',
+      'conditional',
+      false,
+      'lensLightBurnQuad.render'
+    ),
+    z(
+      'lens.composite',
+      'Lens composite (distort + chromatic + vignette + grain)',
+      'post',
+      'post.lens',
+      'lens',
+      'gpu',
+      'conditional',
+      false,
+      'lensQuad.render'
     ),
 
     // ---- present -------------------------------------------------------------
@@ -1279,6 +1349,17 @@ export const EFFECT_ZONING = Object.freeze({
     coverage: 'none',
     why: 'Folded into the present composite shader (gradePresent) rather than adding a pass, so present.blit costs the same whether grade is on or off. Sweep-only.',
   }),
+  // Added 2026-09-16 (perf-instrumentation-audit, #553) — stylize had NO
+  // zones AND no EFFECT_ZONING entry: the exact same structural shape as
+  // `grade` immediately above, just never written down. pushStylize() only
+  // pushes uniforms (uStylizeAmount, the style index); the real per-fragment
+  // cost is buildStylizeNode's own colour transform, mixed directly into
+  // grade-present.js's shader chain strictly after grade's own tail — so
+  // present.blit costs the same whether stylize is on or off, same as grade.
+  stylize: Object.freeze({
+    coverage: 'none',
+    why: "Folded into the SAME present composite shader as grade (grade-present.js#buildStylizeNode, mixed in via uStylizeAmount strictly after grade's own tail) rather than adding a pass — present.blit costs the same whether stylize is on or off. Sweep-only, identical structural shape to `grade` above.",
+  }),
   vegetation: Object.freeze({
     coverage: 'partial',
     why: "Its per-frame uniform sync is zoned (light.vegetationSync), as is the residency-pass rank stamp/build (vegetation.rankStamp, vegetation.depthItemsBuild), but the meshes draw inside geometry.world's shared scene in the one flat sort list — no render call of its own to bracket.",
@@ -1305,6 +1386,73 @@ export const EFFECT_ZONING = Object.freeze({
   fire: Object.freeze({
     coverage: 'partial',
     why: "light.fireSync (state read, spawn-cloud/cohesion bookkeeping, the per-engine TSL-compute step loop) and light.drawFire (the particle billboard draw — flame/ember/smoke sprites) are both zoned, but fire's LIGHT SOURCES (buildFireLightSources, built inside sync() and merged into the point-light pool via getFireLightSources) draw through the shared, null-owned light.drawPointLights/light.drawColoration zones — the exact same structural gap that hid candles' cost for as long as it did (Performance-Insights.md §5B/§5C), now true of fire too and not fixable without restructuring how source types share those two zones.",
+  }),
+  // Added 2026-09-16 (perf-instrumentation-audit, mythica-machina-press#553) —
+  // candleFlame owned zones (light.candleSync, light.drawCandleFlame) with no
+  // EFFECT_ZONING entry at all, same one-directional drift window/fire/
+  // specular/apertureGobo each already had closed once. The 'partial' verdict
+  // (not 'full') matters: this is the ORIGINAL instance of the exact gap
+  // fire's own entry above cites ("the same structural gap that hid candles'
+  // cost for as long as it did") — candles' light SOURCE was never fixed,
+  // only fire's analogous gap got written down when it was found.
+  candleFlame: Object.freeze({
+    coverage: 'partial',
+    why: "light.candleSync (per-frame anchor/placement sync) and light.drawCandleFlame (the flame-sprite draw, candleFlameScene) are both zoned, but each candle's LIGHT SOURCE (buildCandleLightSources, candle-flame-geometry.js, merged into the point-light pool) draws through the shared, null-owned light.drawPointLights/light.drawColoration zones — the original instance of the structural gap that once hid 13.1ms of a 20.4ms frame (Performance-Insights.md §5B) and that fire's own entry above now also documents; not fixable without restructuring how source types share those two zones.",
+  }),
+  // Added 2026-09-16 (perf-instrumentation-audit, #553) — same shape as
+  // candleFlame just above: lightning owned zones but no EFFECT_ZONING entry,
+  // and its light source has the identical shared-draw gap.
+  lightning: Object.freeze({
+    coverage: 'partial',
+    why: "light.lightningSync (strand/strike state) and light.drawLightning (the bolt draw, lightningSubsystem.scene) are both zoned, but each strike's LIGHT SOURCE (buildLightningLightSources, lightning-geometry.js, merged into the point-light pool) draws through the shared, null-owned light.drawPointLights/light.drawColoration zones — the same structural gap fire's and candleFlame's own entries above document, not fixable without restructuring how source types share those two zones.",
+  }),
+  // Added 2026-09-16 (perf-instrumentation-audit, #553) — sunShadows owned
+  // ONE zone (the bake) with no EFFECT_ZONING entry. 'partial', not 'full':
+  // the bake is the only bracketable half. The per-frame APPLY — sunShadows.
+  // fields multiplying into the ambient/illum shader via environmental-
+  // light.js's own blend — is fused into the null-owned light.ambient/
+  // light.drawIllum zones, the same "world-aligned field folded into a
+  // shared shader rather than its own pass" shape light.visibility's own
+  // pass-graph note already states in plain language.
+  sunShadows: Object.freeze({
+    coverage: 'partial',
+    why: "light.sunShadowBake (the throttled world-space occluder-height march, sunShadows.maybeBake) is zoned, but the per-frame APPLY — sunShadows.fields sampled and multiplied into the ambient fill inside environmental-light.js's own blend — runs as part of the null-owned light.ambient/light.drawIllum zones, with no render call or CPU tick of its own to bracket separately.",
+  }),
+  // Added 2026-09-16 (perf-instrumentation-audit, #553) — bloom/depthOfField/
+  // doorGraphics all owned complete zone coverage (post.bloom's 6 zones,
+  // post.dof's 3, doorGraphics' sync+draw pair) with no EFFECT_ZONING entry
+  // at all — pure declaration gaps, not measurement gaps.
+  bloom: Object.freeze({
+    coverage: 'full',
+    why: "post.bloom is entirely this effect's own pass — bloom.uniformPush (cpu), bloom.bright, bloom.downsample, bloom.upsampleCore, bloom.upsampleAtmo and bloom.composite (all gpu) cover the whole dual-filter pyramid with nothing shared with another effect and nothing left un-zoned.",
+  }),
+  depthOfField: Object.freeze({
+    coverage: 'full',
+    why: "post.dof is entirely this effect's own pass — dof.uniformPush (cpu), dof.downsample and dof.composite (gpu) cover the whole downsample-pyramid + composite chain with nothing shared with another effect and nothing left un-zoned.",
+  }),
+  doorGraphics: Object.freeze({
+    coverage: 'full',
+    why: 'tick.doorSync (the per-frame animation-state sync) and geometry.doorDraw (renderDoorGraphicsInto, its own render call inside geometry.world) cover its entire cost — door leaves emit no light and have no bake, unlike candleFlame/lightning/fire.',
+  }),
+  // Added 2026-09-16 (perf-instrumentation-audit, #553) — precipitation had
+  // NO zone at all: `runSurfacePrecipitationPass` (surface.precipitation,
+  // live) drew a real, unbracketed scene list every frame it had content,
+  // measured only as the anonymous pass.surface.precipitation row. Now
+  // bracketed as surface.precipitationDraw, added alongside this entry —
+  // the same Cloud-Tops-shaped gap, closed the same way.
+  precipitation: Object.freeze({
+    coverage: 'full',
+    why: "surface.precipitationDraw brackets runSurfacePrecipitationPass's entire draw (the falling curtain + splash carpet, both ordered scenes rendered in one loop) — its per-frame compute/sync work is a TSL transform-feedback step folded into the shared sims.particles-style dispatch, not a separate CPU cost of its own to bracket. Draw is the whole of its measurable cost.",
+  }),
+  // Added 2026-09-16 (perf-instrumentation-audit, #553) — lens had NO zone at
+  // all despite TWO real, unbracketed draw calls (the main composite, and a
+  // tier-2 persistent light-burn accumulator) plus a substantial per-frame
+  // CPU state block (autofocus scheduling, camera-motion tracking) — closed
+  // with three new zones (lens.uniformPush, lens.lightBurn, lens.composite),
+  // added alongside this entry.
+  lens: Object.freeze({
+    coverage: 'full',
+    why: "lens.uniformPush (the per-frame param/autofocus/motion-blur bookkeeping and uniform push), lens.lightBurn (the tier-2 persistent ping-ponged accumulator, gated on plan.lightBurnEnabled) and lens.composite (the main distort+chromatic+vignette+grain draw) together cover runPostLensPass's entire cost with nothing left un-zoned.",
   }),
   // Added 2026-08-06 (perf-zone-coverage-audit found this effect had NO entry
   // at all, despite owning zones — exactly the drift validateEffectZoning

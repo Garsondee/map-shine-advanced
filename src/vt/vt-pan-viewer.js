@@ -8093,7 +8093,15 @@ export async function startVtPanViewer({
       const prevAutoClear = renderer.autoClearColor;
       renderer.setRenderTarget(sceneLit);
       renderer.autoClearColor = false;
+      // mythica-machina-press#553 — this pass ran measured-but-unattributed
+      // from the day it shipped, the identical gap runCloudTopsPass's own
+      // comment (above) already closed for clouds: the pass-level hook timed
+      // it as pass.surface.precipitation, but that auto-synthesised row
+      // carries no ownerEffectId. ONE bracket around the whole scene list —
+      // it is a bare render() loop, nothing finer to split.
+      profiler?.begin(Z.precipitationDraw);
       for (const s of scenes) renderer.render(s, camera);
+      profiler?.end(Z.precipitationDraw);
       renderer.autoClearColor = prevAutoClear;
       renderer.setRenderTarget(null);
     }
@@ -8342,6 +8350,12 @@ export async function startVtPanViewer({
 
       if (!lensBuilt || lensBuiltForTier !== plan.tier) rebuildLensForTier(plan.tier);
 
+      // mythica-machina-press#553 — runPostLensPass had NO profiler coverage
+      // at all despite two real draws and this substantial per-frame CPU
+      // state block (autofocus scheduling, camera-motion tracking, the whole
+      // uniform push). Brackets the CPU half; lens.lightBurn/lens.composite
+      // (below) bracket the two draws separately.
+      profiler?.begin(Z.lensUniforms);
       // Re-point the two input nodes EVERY frame — see lens-render.js's own
       // header for why these two are enough to keep every derived
       // `.sample()` tap (dozens of them) correct.
@@ -8511,6 +8525,7 @@ export async function startVtPanViewer({
         u.uCameraMotionBlurPx.value.set(motionOn ? motionBlurPx.x : 0, motionOn ? motionBlurPx.y : 0);
         u.uZoomMotionBlurPx.value = motionOn ? zoomBlurPx : 0;
       }
+      profiler?.end(Z.lensUniforms);
 
       // ── TIER 2 — LIGHT BURN ──────────────────────────────────────────────
       if (lightBurnWanted) {
@@ -8546,7 +8561,9 @@ export async function startVtPanViewer({
           lensLightBurnNeedsClear = false;
         }
         renderer.setRenderTarget(lensLightBurnWriteRT);
+        profiler?.begin(Z.lensLightBurn);
         lensLightBurnQuad.render(renderer);
+        profiler?.end(Z.lensLightBurn);
         renderer.setRenderTarget(null);
 
         const tmp = lensLightBurnReadRT;
@@ -8569,7 +8586,9 @@ export async function startVtPanViewer({
       const prevAutoClear = renderer.autoClearColor;
       renderer.autoClearColor = true;
       renderer.setRenderTarget(writeTarget);
+      profiler?.begin(Z.lensComposite);
       lensQuad.render(renderer);
+      profiler?.end(Z.lensComposite);
       renderer.autoClearColor = prevAutoClear;
       renderer.setRenderTarget(null);
       gradePresent.setLitSource(writeTarget.texture);
@@ -17350,6 +17369,9 @@ export async function startVtPanViewer({
       // Added 2026-09-16 (mythica-machina-press#552) — see runCloudTopsPass's
       // own bracket and perf-zones.js's matching declaration.
       cloudTopsDraw: profiler?.indexOf('surface.cloudTopsDraw') ?? -1,
+      // Added 2026-09-16 (perf-instrumentation-audit, #553) — see
+      // runSurfacePrecipitationPass's own bracket.
+      precipitationDraw: profiler?.indexOf('surface.precipitationDraw') ?? -1,
       bloomUniforms: profiler?.indexOf('bloom.uniformPush') ?? -1,
       bloomBright: profiler?.indexOf('bloom.bright') ?? -1,
       bloomDown: profiler?.indexOf('bloom.downsample') ?? -1,
@@ -17359,6 +17381,11 @@ export async function startVtPanViewer({
       dofUniforms: profiler?.indexOf('dof.uniformPush') ?? -1,
       dofDownsample: profiler?.indexOf('dof.downsample') ?? -1,
       dofComposite: profiler?.indexOf('dof.composite') ?? -1,
+      // Added 2026-09-16 (perf-instrumentation-audit, #553) — see
+      // runPostLensPass's own three brackets.
+      lensUniforms: profiler?.indexOf('lens.uniformPush') ?? -1,
+      lensLightBurn: profiler?.indexOf('lens.lightBurn') ?? -1,
+      lensComposite: profiler?.indexOf('lens.composite') ?? -1,
       presentBlit: profiler?.indexOf('present.blit') ?? -1,
       // Added 2026-08-06 (perf-zone-coverage-audit) — see each bracket's own
       // comment at its call site for what was previously invisible.

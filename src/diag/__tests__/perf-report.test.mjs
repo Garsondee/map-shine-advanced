@@ -60,6 +60,23 @@ import {
 const acc = (sumMs, count, maxMs) => ({ sumMs, count, maxMs });
 const zs = (id, over = {}) => ({ id, cpu: null, gpu: null, drawCalls: null, triangles: null, ...over });
 
+// Perf-instrumentation-audit (mythica-machina-press#553) gave the REAL
+// sunShadows entry coverage:'partial' — its per-frame APPLY (the field
+// multiplied into light.ambient/light.drawIllum) is fused into null-owned
+// zones, only the bake itself is bracketed. The two "all-bake effect" report-
+// formatting tests below are testing that code path in general (how the
+// report describes an effect whose ENTIRE declared zone coverage is a bake),
+// not sunShadows' real-world classification specifically — so they use this
+// synthetic override to keep exercising a genuinely FULL-coverage, bake-only
+// effect, decoupled from the real (now honestly partial) entry.
+const SUN_SHADOWS_FULL_BAKE_ZONING = Object.freeze({
+  ...EFFECT_ZONING,
+  sunShadows: Object.freeze({
+    coverage: 'full',
+    why: "Test fixture only — treats the bake as this effect's entire zoned cost, to exercise the all-bake/full-coverage report path independent of the real (partial) EFFECT_ZONING.sunShadows entry.",
+  }),
+});
+
 export function run(t) {
   const { ok } = t;
 
@@ -464,7 +481,7 @@ export function run(t) {
         zoneStats: [zs('light.sunShadowBake', { gpu: acc(14.4, 3, 5.4) })],
       }),
       manifests: [SUN_SHADOWS],
-      effectZoning: EFFECT_ZONING,
+      effectZoning: SUN_SHADOWS_FULL_BAKE_ZONING,
       megapixels: 3.56,
     });
     ok('an all-bake effect does not get a steady zoneGpuMs', sun.zoneGpuMs === null);
@@ -833,7 +850,7 @@ export function run(t) {
     const [sun] = attributeZonesToEffects({
       rows,
       manifests: [SUN_SHADOWS],
-      effectZoning: EFFECT_ZONING,
+      effectZoning: SUN_SHADOWS_FULL_BAKE_ZONING,
       megapixels: 7.32,
     });
     ok('a check-only bake is flagged as not fired', sun.sparse.bakeFired === false);
@@ -852,7 +869,7 @@ export function run(t) {
     const [firedSun] = attributeZonesToEffects({
       rows: fired,
       manifests: [SUN_SHADOWS],
-      effectZoning: EFFECT_ZONING,
+      effectZoning: SUN_SHADOWS_FULL_BAKE_ZONING,
       megapixels: 7.32,
     });
     ok('a real bake is flagged as fired', firedSun.sparse.bakeFired === true);

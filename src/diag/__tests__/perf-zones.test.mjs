@@ -23,8 +23,11 @@ import {
   DOOR_GRAPHICS,
   FLUID,
   GRADE,
+  LENS,
   LIGHTNING,
+  PRECIPITATION,
   SPECULAR,
+  STYLIZE,
   SUN_SHADOWS,
   UI_WINDOW_SHADOW,
   VEGETATION,
@@ -75,6 +78,16 @@ const MANIFESTS = [
   // before this, regardless of what perf-zones.js itself declared.
   CLOUD_LOOK,
   CLOUD_TOPS,
+  // Missing entirely until the #552 follow-up audit (perf-instrumentation-
+  // audit, #553) — stylize/precipitation/lens all shipped without ever being
+  // added here. stylize owns no zone (EFFECT_ZONING coverage:'none', folded
+  // into grade-present.js same as grade); precipitation and lens each owned
+  // NO zone AND had unbracketed real draw calls — the exact Cloud-Tops-shaped
+  // gap, now closed alongside these entries (surface.precipitationDraw,
+  // lens.lightBurn, lens.composite).
+  STYLIZE,
+  PRECIPITATION,
+  LENS,
 ];
 
 export function run(t) {

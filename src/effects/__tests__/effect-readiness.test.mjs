@@ -36,8 +36,11 @@ import { DOOR_GRAPHICS } from '../door-graphics.js';
 import { FIRE } from '../fire/fire.js';
 import { FLUID } from '../fluid/fluid.js';
 import { GRADE } from '../grade/grade.js';
+import { LENS } from '../lens.js';
 import { LIGHTNING } from '../lightning.js';
+import { PRECIPITATION } from '../precipitation/precipitation.js';
 import { SPECULAR } from '../specular/specular.js';
+import { STYLIZE } from '../stylize.js';
 import { SUN_SHADOWS } from '../sun-shadows.js';
 import { UI_WINDOW_SHADOW } from '../ui-window-shadow.js';
 import { VEGETATION } from '../vegetation.js';
@@ -61,8 +64,16 @@ const MANIFESTS = [
   FIRE,
   FLUID,
   GRADE,
+  // Missing until the #552 follow-up audit (perf-instrumentation-audit, #553)
+  // — lens and precipitation both owned NO zone and had real, unbracketed
+  // draw calls (the exact Cloud-Tops-shaped gap); stylize owns no zone at all
+  // (folded into grade-present.js, same structural shape as grade) but is
+  // added for the same "check 1 validates its shape too" reason CLOUD_LOOK is.
+  LENS,
   LIGHTNING,
+  PRECIPITATION,
   SPECULAR,
+  STYLIZE,
   SUN_SHADOWS,
   UI_WINDOW_SHADOW,
   VEGETATION,

@@ -828,8 +828,24 @@ export function buildCloudFieldNode(
   // two samples in the same shader never contend for one declaration.
   const vn = (name) => (varTag ? `${name}_${varTag}` : name);
 
+  // ⚠️ `.sub`, NOT `.add` (2026-09-16, live-reported: "clouds are currently
+  // going in the opposite direction to the wind"). Same family of bug as
+  // `water-field.js#waterFlowVector`'s own history and `WATER_FLOW_WARP_
+  // INFLUENCE`'s doc: "a pattern moves opposite to its domain." `drift`
+  // accumulates in the TRUE wind direction (`cloudDriftStep`'s own dx/dy,
+  // never negated there, and correctly so — the accumulator's magnitude
+  // also drives `dBoil`, which only cares about distance travelled). The
+  // bug was applying that accumulator with the wrong sign at the one place
+  // it meets the sampling position: for a FIXED worldXY, sampling further
+  // along +drift over time shows content that was, a moment ago, further
+  // ALONG THE WIND from here — i.e. the visible pattern drifts toward
+  // -wind, not +wind. Subtracting instead makes a fixed screen point track
+  // FORWARD through the field in the wind's own direction, which is the
+  // one thing every consumer (`buildCloudGroundVisNode`'s streak taps,
+  // `buildCloudTopsNode`'s main/gradient/shadow-march taps) shares through
+  // this single `p0`, so the fix is complete here, not per-consumer.
   const inv = float(1).div(u.scalePx.max(float(1)));
-  const p0 = worldXY.add(u.drift).mul(inv).toVar(vn('cloudP0'));
+  const p0 = worldXY.sub(u.drift).mul(inv).toVar(vn('cloudP0'));
 
   // ── 0b. REGIONAL VARIATION — this deck is not one wallpaper tile ─────────
   // Author's report (2026-09-07), after reviewing a dense-cover render: "All

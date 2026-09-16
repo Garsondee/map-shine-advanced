@@ -304,6 +304,25 @@ export function buildLensCompositeMaterial({
     return vec3(r, g, b);
   }
 
+  // ⚠️ 1 FETCH, NOT 3 (2026-09-16, mythica-machina-press#556 perf audit).
+  // `sampleSceneWithCA` costs THREE real texture fetches — R/G/B each at a
+  // DIFFERENT uv, never swizzles of one fetch — because chromatic aberration
+  // needs a genuine per-channel offset. The Kawase blur and the motion-blur
+  // taps below don't: both exist to produce an already-soft, low-frequency
+  // result (a defocused or motion-smeared image), and a 1-4px per-channel
+  // fringe is not something the eye resolves inside content that's already
+  // blurred across many pixels — CA is a CRISP-image cue. This is the one
+  // real, avoidable cost the audit found: those two mechanisms were paying
+  // full CA price (up to 33 fetches/fragment between them) on every frame
+  // tier 1 is active, not just the fraction of frames actually blurring
+  // (autofocus pulses are rare — `lens-motion.js`'s own pulses fire on the
+  // order of once per several seconds). `sharp` below (the actual in-focus,
+  // full-fidelity sample) keeps real CA — that's the one place the eye
+  // genuinely sees it.
+  function sampleSceneCheap(sampleUv) {
+    return sceneTexNode.sample(clamp(sampleUv, vec2(0, 0), vec2(1, 1))).rgb;
+  }
+
   let focusUv = distortedUv;
   let sceneColor;
   /** `null` below tier 2 — nothing was built to re-point (see the return
@@ -323,15 +342,15 @@ export function buildLensCompositeMaterial({
       const r2 = r1.mul(2);
       const d1 = texelSize.mul(r1);
       const d2 = texelSize.mul(r2);
-      let accum = sampleSceneWithCA(focusUv).mul(0.2);
-      accum = accum.add(sampleSceneWithCA(focusUv.add(vec2(d1.x, d1.y))).mul(0.12));
-      accum = accum.add(sampleSceneWithCA(focusUv.add(vec2(d1.x.negate(), d1.y))).mul(0.12));
-      accum = accum.add(sampleSceneWithCA(focusUv.add(vec2(d1.x, d1.y.negate()))).mul(0.12));
-      accum = accum.add(sampleSceneWithCA(focusUv.add(vec2(d1.x.negate(), d1.y.negate()))).mul(0.12));
-      accum = accum.add(sampleSceneWithCA(focusUv.add(vec2(d2.x, 0))).mul(0.08));
-      accum = accum.add(sampleSceneWithCA(focusUv.add(vec2(d2.x.negate(), 0))).mul(0.08));
-      accum = accum.add(sampleSceneWithCA(focusUv.add(vec2(0, d2.y))).mul(0.08));
-      accum = accum.add(sampleSceneWithCA(focusUv.add(vec2(0, d2.y.negate()))).mul(0.08));
+      let accum = sampleSceneCheap(focusUv).mul(0.2);
+      accum = accum.add(sampleSceneCheap(focusUv.add(vec2(d1.x, d1.y))).mul(0.12));
+      accum = accum.add(sampleSceneCheap(focusUv.add(vec2(d1.x.negate(), d1.y))).mul(0.12));
+      accum = accum.add(sampleSceneCheap(focusUv.add(vec2(d1.x, d1.y.negate()))).mul(0.12));
+      accum = accum.add(sampleSceneCheap(focusUv.add(vec2(d1.x.negate(), d1.y.negate()))).mul(0.12));
+      accum = accum.add(sampleSceneCheap(focusUv.add(vec2(d2.x, 0))).mul(0.08));
+      accum = accum.add(sampleSceneCheap(focusUv.add(vec2(d2.x.negate(), 0))).mul(0.08));
+      accum = accum.add(sampleSceneCheap(focusUv.add(vec2(0, d2.y))).mul(0.08));
+      accum = accum.add(sampleSceneCheap(focusUv.add(vec2(0, d2.y.negate()))).mul(0.08));
       return accum;
     })();
     const sharp = sampleSceneWithCA(focusUv);
@@ -346,8 +365,8 @@ export function buildLensCompositeMaterial({
     const radialDirSafe = radialDir.add(vec2(1e-5, 1e-5)).normalize();
     const motionUv = uCameraMotionBlurPx.add(radialDirSafe.mul(uZoomMotionBlurPx)).mul(texelSize);
     const mLen = length(motionUv);
-    const mA = sampleSceneWithCA(focusUv.add(motionUv));
-    const mB = sampleSceneWithCA(focusUv.sub(motionUv));
+    const mA = sampleSceneCheap(focusUv.add(motionUv));
+    const mB = sampleSceneCheap(focusUv.sub(motionUv));
     const motionBlend = clamp(mLen.mul(2.2), 0, 0.65);
     sceneColor = mix(sceneColor, mA.add(mB).mul(0.5), motionBlend);
   } else {

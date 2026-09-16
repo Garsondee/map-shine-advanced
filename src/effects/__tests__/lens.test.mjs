@@ -8,6 +8,7 @@
 import { LENS, LENS_PARAMS, LENS_PRESETS, lensPreset } from '../lens.js';
 import { validateEffectManifest } from '../effect-manifest.js';
 import { validateParamsSchema } from '../../core/params-schema.js';
+import { resolveEffectEnabled } from '../effect-cascade.js';
 
 export function run(t) {
   const { ok } = t;
@@ -37,7 +38,27 @@ export function run(t) {
 
   ok('id is the stable camelCase registry key', LENS.id === 'lens');
   ok('a mood tool is defended mid-weight, not first or last', LENS.visualWeight > 0.2 && LENS.visualWeight < 0.5);
-  ok('on by default at every profile', LENS.enabledFromProfile === 'low');
+  // ⚠️ CHANGED 2026-09-16, mythica-machina-press#556 — deliberately the
+  // OPPOSITE pin from bloom/depth-of-field's own "on by default at every
+  // profile" block (effect-registration.test.mjs). Author, direct
+  // instruction: lens "needs to be fine tuned and off by default." This pin
+  // exists (same file header's own words) so a FUTURE accidental change back
+  // toward "on by default" gets caught, not so this one is permanent —
+  // update it again only alongside another deliberate author decision.
+  ok(
+    'off by default (author instruction) — not on at any profile short of extreme',
+    LENS.enabledFromProfile === 'extreme'
+  );
+  ok('resolves OFF at standard, the default profile', resolveEffectEnabled(LENS, { profile: 'standard' }) === false);
+  ok(
+    'resolves OFF at quality too — extreme is the floor',
+    resolveEffectEnabled(LENS, { profile: 'quality' }) === false
+  );
+  ok('resolves ON at extreme, the ceiling', resolveEffectEnabled(LENS, { profile: 'extreme' }) === true);
+  ok(
+    'a GM can still opt a scene in at any profile (the Studio effect switch)',
+    resolveEffectEnabled(LENS, { profile: 'standard', gmEnable: 'on' }) === true
+  );
   ok('tier 0 is declared — a manifest without one is malformed', LENS.tiers[0]?.n === 0);
   ok('tiers 0-2 are real code', LENS.tiers.length === 3);
   ok('the ladder is named in build order', LENS.tiers.map((t2) => t2.name).join() === 'optics,motion,light-burn');

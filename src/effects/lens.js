@@ -512,6 +512,23 @@ export function lensPreset(name) {
  * flicker risk, not a flag to revisit at a faster tier the way fluid's own
  * bubbles/emission tiers have to.
  *
+ * ⚠️ `enabledFromProfile: 'extreme'` — CHANGED 2026-09-16, mythica-machina-press#556,
+ * author direct instruction: "the lens effect is nice but it needs to be
+ * fine tuned and off by default." Was `'low'` (`PERFORMANCE_PROFILES[0]`,
+ * the very bottom) — every player at every profile got camera-glass
+ * distortion, chromatic aberration and film grain imposed on their view
+ * with no choice in the matter, the only manifest in this codebase gated
+ * that permissively. `enabledFromProfile` is this system's ONLY
+ * on-by-default axis (`effect-manifest.js`'s own doc; there is no separate
+ * "default enabled" flag) — `'extreme'`, the top of {@link
+ * import('./effect-cascade.js').PERFORMANCE_PROFILES}, is what makes an
+ * effect need a DELIBERATE choice rather than come along for the ride with
+ * unrelated quality settings a GM cranked up for better water or clouds.
+ * This does not remove the look: `effect-cascade.js#resolveEffectEnabled`'s
+ * `gmEnable`/`playerEnable` override still turns it on for any scene whose
+ * GM actually wants it, at any profile — the Studio effect switch is that
+ * override, live. Off by default; on by choice.
+ *
  * @type {import('./effect-manifest.js').EffectManifest}
  */
 export const LENS = Object.freeze({
@@ -519,7 +536,7 @@ export const LENS = Object.freeze({
   title: 'Lens',
   visualWeight: 0.35,
   a11y: Object.freeze({ photosensitive: false }),
-  enabledFromProfile: 'low',
+  enabledFromProfile: 'extreme',
   readiness: Object.freeze({
     firstRunWork: false,
     coverage: 'none',

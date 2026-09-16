@@ -1502,7 +1502,13 @@ function install() {
         getWeatherArchetype: () => skyScope.sky?.weatherArchetype ?? 'custom',
         fadeToArchetype: (archetypeId, overMs) => fadeWeatherToArchetype(archetypeId, overMs),
         getAxisValue: (axisName) => fadeSourceRegistry.readLive(`weather.${axisName}`),
-        onAxisCommit: (axisName, value) => void editSky({ [axisName]: value, weatherArchetype: 'custom' }),
+        // Routes through the real fade engine (Remote UI pass), NOT a direct
+        // editSky() — see `fadeWeatherAxisTo`'s own doc for why a direct
+        // commit here was landing as an un-bypassed target for vt-pan-
+        // viewer's own separate multi-minute "brisk" ease, ignoring Fade
+        // Time in both directions (too slow at Now, too fast at 1h).
+        onAxisCommit: (axisName, value) =>
+          fadeWeatherAxisTo(axisName, value, MapShine.__remote?.getFadeOverMs?.() ?? 0),
         // Pace, Sky Light, Atmosphere, Scene override (2026-08-18 fix —
         // gap-audit against the old astrolabe.js's own tuning-drawer sliders,
         // entirely missing from the new Remote before this). Same real
@@ -10248,7 +10254,10 @@ function install() {
    * second shape joined it): a STRING is an archetype id ('custom' for a
    * Baseline fade, which has no named row to relight — skipped, not
    * persisted); an OBJECT is a raw `editSky()` patch, for a fade with no
-   * archetype at all (`fadeTemperatureTo`'s own single-axis gesture). */
+   * archetype id to relight — `fadeTemperatureTo`'s own single-axis gesture,
+   * and `fadeWeatherAxisTo`'s own direct Channels-fader commit (which DOES
+   * stamp `weatherArchetype:'custom'`, just immediately rather than through
+   * this map — see that function's own doc for why the two still differ). */
   const pendingSkyFadeCompletions = new Map();
   /** Captured once per scene — "the scene's authored resting look" the
    * Baseline button fades back to. `null` until the first canvasReady for
@@ -10319,6 +10328,70 @@ function install() {
     }
     fadeState = mergeFadeState(fadeState, { id: gestureId, label: 'Baseline', targets }, nowMs);
     pendingSkyFadeCompletions.set(gestureId, 'custom'); // no named row to relight
+    void editSky({ weatherArchetype: 'custom' });
+    void writeFadeState(fadeState);
+  }
+
+  /** Display label for a LIVE_CHANNELS axis's own fade gesture — matches
+   * weather-board.js's own LIVE_CHANNELS labels, duplicated rather than
+   * imported (boot.js doesn't otherwise reach into ui/rooms/remote/). */
+  const LIVE_CHANNEL_LABELS = { cloudCover01: 'Clouds', precip01: 'Rain' };
+
+  /**
+   * The Channels rack's own direct-drag commit for a LIVE_CHANNELS axis
+   * (cloudCover01 or precip01) — the missing counterpart to
+   * `fadeWeatherToArchetype`'s mood-chip fade, found from a live report
+   * pinning down BOTH directions of the bug at once: "Fade Time = Now,
+   * dragging Clouds crawled down over roughly two minutes instead of
+   * snapping instantly" and "Fade Time = 1h, dragging Rain arrived in
+   * roughly two minutes instead of an hour." Root cause: `onAxisCommit`
+   * called `editSky({[axisName]: value, weatherArchetype:'custom'})`
+   * directly — an INSTANT commit, the exact same shape Temperature's own
+   * bug had (see `fadeTemperatureTo`'s doc) — which for cloudCover01/
+   * precip01 lands via `applyLookToEngines`'s restore line as a fresh,
+   * un-bypassed target for vt-pan-viewer's own separate ~120-150s "brisk"
+   * tau ease, completely deaf to Fade Time in EITHER direction: too slow
+   * when Fade Time is short (or Now), too fast when Fade Time is long.
+   * Missed when Temperature was fixed because LIVE_CHANNELS already had a
+   * WORKING live-push mechanism for its fader thumb (`updateLiveAxisValues`)
+   * — that covers the fade already IN PROGRESS via a mood chip, but says
+   * nothing about whether a DIRECT drag ever started a real fade at all.
+   *
+   * Unlike `fadeTemperatureTo`, this DOES stamp `weatherArchetype:'custom'`
+   * — immediately, matching `onAxisCommit`'s own original behaviour — since
+   * cloudCover01/precip01 ARE archetype-owned axes (a mood chip must
+   * un-light the instant a hand drag starts, the same "a value
+   * mid-transition is not the row it left" rule `fadeWeatherToArchetype`
+   * already establishes). Because `'custom'` is the one state where the RAW
+   * stored number is authoritative (`world/sky-settings.js#DEFAULT_SKY`'s
+   * own doc: "only a hand-tuned custom sky is described by the stored
+   * cover"), the actual dragged value is persisted via a raw `editSky()`
+   * patch on arrival — the same object-shaped `pendingSkyFadeCompletions`
+   * entry `fadeTemperatureTo` uses, and for the identical reason: there is
+   * no archetype id to relight, only a number to remember.
+   * @param {'cloudCover01'|'precip01'} axisName @param {number} value @param {number} overMs
+   */
+  function fadeWeatherAxisTo(axisName, value, overMs) {
+    const nowMs = wallClockMs();
+    const gestureId = `axis:${axisName}:${nowMs}`;
+    fadeState = mergeFadeState(
+      fadeState,
+      {
+        id: gestureId,
+        label: LIVE_CHANNEL_LABELS[axisName] ?? axisName,
+        targets: {
+          [`weather.${axisName}`]: {
+            to: value,
+            type: 'float',
+            overMs,
+            curve: 'ease',
+            from: fadeSourceRegistry.readLive(`weather.${axisName}`),
+          },
+        },
+      },
+      nowMs
+    );
+    pendingSkyFadeCompletions.set(gestureId, { [axisName]: value });
     void editSky({ weatherArchetype: 'custom' });
     void writeFadeState(fadeState);
   }
@@ -10658,9 +10731,38 @@ function install() {
   function pumpWeatherFades(nowMs) {
     const keys = Object.keys(fadeState);
     if (keys.length === 0) return;
+    // ⚠️ WRITES EVEN AN EXPIRED ENTRY, ONE LAST TIME — NOT `if (isEntryExpired)
+    // continue`. A real, confirmed bug (author report: Fade Time = Now,
+    // dragging Clouds to 0% crawled down over roughly two minutes instead of
+    // snapping instantly; Fade Time = 1h, dragging Rain to 100% arrived in
+    // roughly two minutes instead of an hour — both symptoms of the SAME
+    // mechanism, just visible from opposite ends). `rawProgress` (fade-
+    // engine.js) returns 1 UNCONDITIONALLY for `overMs:0` — "an instant cut,
+    // always arrived" — so a fresh `overMs:0` entry (Fade Time = Now) reads
+    // as expired from the very first tick it is ever examined. Skipping an
+    // expired entry here meant that write NEVER happened through this loop's
+    // own `{immediate:true}`-bypassed path (fadeSourceRegistry's own `write`
+    // always passes `source:'fade-engine'`) — the ONLY application left was
+    // the completion loop below's own `editSky(completion)`, whose
+    // `applyLookToEngines` re-lands the value via `setVtPanViewerCloudCover(
+    // value, 'sky-settings')` — `source:'sky-settings'`, NOT `'fade-engine'`,
+    // so `{immediate: false}` — a fresh, un-bypassed target for vt-pan-
+    // viewer's own separate ~120-150s "brisk" tau ease, deaf to Fade Time.
+    // For a real multi-second-or-longer fade this was invisible (by the time
+    // it expires, this same per-tick loop's own immediate writes over the
+    // preceding frames have already driven the manager's internal state to
+    // within a hair of the target, so the brisk-tau "re-target" at arrival
+    // has essentially no distance left to cover) — it only ever bit an
+    // instant (`overMs:0`) commit, which is exactly why nobody had reported
+    // it before now: mythica-machina-press#507's own test plan only ever
+    // exercised 1m+ fades, never explicitly "Now". Writing through once more
+    // even after expiry costs nothing (`computeEasedValue` at t=1 is exactly
+    // `entry.to`, and this same entry is pruned below in this same tick
+    // regardless) and guarantees the manager's own internal state is forced
+    // to the exact target, via the real bypass, before anything else ever
+    // touches that key again.
     for (const key of keys) {
       const entry = fadeState[key];
-      if (isEntryExpired(entry, nowMs)) continue;
       fadeSourceRegistry.write(key, computeEasedValue(entry, nowMs));
     }
     let anyCompleted = false;

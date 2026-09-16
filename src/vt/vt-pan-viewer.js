@@ -17713,14 +17713,26 @@ export async function startVtPanViewer({
       // place. `sims` also runs before the light pass, so the light descriptors
       // this produces are ready for `pointLights.update()` later in the frame.
       if (view && fireSubsystem) {
-        profiler?.begin(Z.lightDrawFire);
+        // mythica-machina-press#553 — this used to wrap the SYNC call in
+        // Z.lightDrawFire, the DRAW zone (site:'fireSubsystem.scene',
+        // matching ONLY the renderer.render() call at the real draw site,
+        // light.accumulate's own candle/lightning/fire block, below).
+        // fireSubsystem.sync() already self-brackets its own real cost via
+        // beginById('light.fireSync') internally — this outer bracket was
+        // additionally, wrongly, accumulating the sync+compute-dispatch cost
+        // into "Fire draw" every frame, inflating that zone with a second,
+        // non-overlapping begin/end cycle unrelated to what it's labelled as
+        // measuring. Removed; light.fireSync's own self-bracket is the sole,
+        // correct instrument for this call now (see its kind:'both' fix in
+        // perf-zones.js, alongside this one — without it, removing this
+        // outer wrap would have made the real GPU compute-dispatch cost
+        // invisible instead of merely mislabelled).
         fireSubsystem.sync(
           renderer,
           lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value,
           lastEnvSnapshot?.env?.time?.dtSec ?? 0,
           windSpawnRect
         );
-        profiler?.end(Z.lightDrawFire);
       }
       // PRECIPITATION — its compute step, in the same no-target-bound block as
       // fire and the two wind engines above, and for the same reason.

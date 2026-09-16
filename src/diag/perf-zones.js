@@ -196,6 +196,48 @@ export const ZONES = Object.freeze(
       'particleEngine.step'
     ),
     z('sims.particlesGusts', 'Gust ribbon step', 'sims', null, null, 'both', 'conditional', false, 'gustEngine.step'),
+    // RELOCATED + CORRECTED 2026-09-16 (perf-instrumentation-audit, #553).
+    // This zone used to live in the 'lighting'/light.accumulate section
+    // (added 2026-08-12) with kind:'cpu' — TWO independent bugs, found
+    // together while auditing fire for the broader "every manager and piece
+    // of infrastructure" pass:
+    //   1. `pass:'light.accumulate'` was simply wrong. fireSubsystem.sync()
+    //      runs from the SAME pre-pass-plan "sims" block as tickWindSim/
+    //      particleEngine.step/gustEngine.step (vt-pan-viewer.js's own
+    //      comment there: "FIRE's compute step does NOT happen here [inside
+    //      light.accumulate] — see the sims block, which runs before any
+    //      pass binds a render target"), never inside light.accumulate at
+    //      all. Moved here, pass:null, alongside its true siblings.
+    //   2. `kind:'cpu'` was actively dangerous, not just imprecise:
+    //      fireSubsystem.sync()'s own doc states outright that it "Covers
+    //      the per-engine engine.step() loop too" — a REAL renderer.
+    //      compute() dispatch (fire-subsystem.js#syncUnguarded calls
+    //      engine.step(renderer, ...), which itself calls renderer.compute()
+    //      in fire-particle-runtime.js). frame-profiler.js's own slot
+    //      allocation (`zones[i]?.kind !== 'cpu' ? 1 : 0`) means a 'cpu'-kind
+    //      zone gets NO GPU timestamp query slot at all — this zone's real
+    //      GPU compute cost was structurally impossible to measure, not
+    //      merely mislabelled. Corrected to 'both', matching sims.fluid/
+    //      sims.particlesDust/sims.particlesGusts's identical shape (a real
+    //      compute dispatch driven from this same pre-plan block).
+    // Separately (see vt-pan-viewer.js's own 2026-09-16 comment at the call
+    // site), the OUTER caller was ALSO wrapping this same sync() call in
+    // Z.lightDrawFire — the DRAW zone, not this one — double-counting a
+    // second, non-overlapping begin/end cycle into "Fire draw" every frame.
+    // That wrap is now removed; this zone's own self-bracket
+    // (beginById('light.fireSync') inside fireSubsystem.sync() itself) is
+    // the sole instrument for this cost.
+    z(
+      'light.fireSync',
+      'Fire sync (engine step loop, incl. GPU compute dispatch)',
+      'sims',
+      null,
+      'fire',
+      'both',
+      'conditional',
+      false,
+      'fireSubsystem.sync'
+    ),
 
     // ---- masks.occlusion -----------------------------------------------------
     z(
@@ -607,13 +649,16 @@ export const ZONES = Object.freeze(
       true,
       'updateWindFieldOverlay'
     ),
-    // FOUND UNWIRED 2026-08-12 (perf-instrumentation-audit) — the two
+    // FOUND UNWIRED 2026-08-12 (perf-instrumentation-audit) — one of two
     // remaining instances of the exact "sync() runs before its own draw
     // bracket opens" shape already fixed for specular/water/fluid/wind
     // (2026-08-06). windowSurface.sync() pushes a per-frame depth-authority
-    // query plus a ~17-field dirty-check key; fireSubsystem.sync() drives the
-    // per-engine TSL-compute step loop — brand new, never audited at all
-    // (Performance-Audit-2026-08.md §11).
+    // query plus a ~17-field dirty-check key. (The OTHER instance found the
+    // same day, fireSubsystem.sync(), now lives with the `sims` stage zones
+    // below — see its own declaration and 2026-09-16 comment for why: it
+    // runs in the pre-pass-plan sims block, never inside light.accumulate,
+    // a second, independent error this same declaration also carried until
+    // #553's own sweep caught it.)
     z(
       'light.windowSync',
       'Window light sync',
@@ -646,17 +691,6 @@ export const ZONES = Object.freeze(
       'steady',
       false,
       'windowTileSurface.sync'
-    ),
-    z(
-      'light.fireSync',
-      'Fire sync (engine step loop)',
-      'lighting',
-      'light.accumulate',
-      'fire',
-      'cpu',
-      'conditional',
-      false,
-      'fireSubsystem.sync'
     ),
     z(
       'light.uiShadowStamps',
@@ -1499,7 +1533,16 @@ export const EFFECT_ZONING = Object.freeze({
   }),
   fire: Object.freeze({
     coverage: 'partial',
-    why: "light.fireSync (state read, spawn-cloud/cohesion bookkeeping, the per-engine TSL-compute step loop) and light.drawFire (the particle billboard draw — flame/ember/smoke sprites) are both zoned, but fire's LIGHT SOURCES (buildFireLightSources, built inside sync() and merged into the point-light pool via getFireLightSources) draw through the shared, null-owned light.drawPointLights/light.drawColoration zones — the exact same structural gap that hid candles' cost for as long as it did (Performance-Insights.md §5B/§5C), now true of fire too and not fixable without restructuring how source types share those two zones.",
+    // 2026-09-16 (#553): light.fireSync corrected in the same pass this
+    // why-text was last touched — it lives in the `sims` stage now (was
+    // wrongly declared under light.accumulate), is kind:'both' now (was
+    // 'cpu', which meant its real GPU compute-dispatch cost had no
+    // timestamp-query slot allocated at all), and the caller-side double-
+    // bracket that was ALSO merging this cost into light.drawFire (inflating
+    // "Fire draw" with a second, unrelated begin/end cycle every frame) is
+    // removed. See perf-zones.js's own comment on the relocated declaration
+    // for the full account.
+    why: "light.fireSync (state read, spawn-cloud/cohesion bookkeeping, and the per-engine TSL-compute step loop — including its real renderer.compute() dispatch, now actually measurable) and light.drawFire (the particle billboard draw — flame/ember/smoke sprites, no longer double-counting the sync call) are both zoned, but fire's LIGHT SOURCES (buildFireLightSources, built inside sync() and merged into the point-light pool via getFireLightSources) draw through the shared, null-owned light.drawPointLights/light.drawColoration zones — the exact same structural gap that hid candles' cost for as long as it did (Performance-Insights.md §5B/§5C), now true of fire too and not fixable without restructuring how source types share those two zones.",
   }),
   // Added 2026-09-16 (perf-instrumentation-audit, mythica-machina-press#553) —
   // candleFlame owned zones (light.candleSync, light.drawCandleFlame) with no

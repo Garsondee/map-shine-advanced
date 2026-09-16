@@ -356,6 +356,12 @@ import {
   getVtPanViewerPointLightBatching,
   setVtPanViewerPointLightMrtMerge,
   getVtPanViewerPointLightMrtMerge,
+  setVtPanViewerCloudTopsNoShadowMarch,
+  getVtPanViewerCloudTopsNoShadowMarch,
+  setVtPanViewerCloudTopsCheapGradient,
+  getVtPanViewerCloudTopsCheapGradient,
+  setVtPanViewerCloudTopsLowOctaves,
+  getVtPanViewerCloudTopsLowOctaves,
   getVtPanViewerSceneSettle,
   startVtPanViewerLiveMarkers,
   stopVtPanViewerLiveMarkers,
@@ -943,6 +949,20 @@ MapShine.getPointLightBatching = getVtPanViewerPointLightBatching;
 // viewer.js for the full reasoning.
 MapShine.setPointLightMrtMerge = setVtPanViewerPointLightMrtMerge;
 MapShine.getPointLightMrtMerge = getVtPanViewerPointLightMrtMerge;
+// mythica-machina-press#553's CLOUD TOPS DIAGNOSTIC TOGGLES — three
+// independent, transient force-hooks for a live A/B against
+// `surface.cloudTopsDraw` (measured 55.98ms/frame, 73% of frame GPU,
+// mythica-machina-press#552), NOT a shipped quality tier — CLOUD_TOPS still
+// has exactly one (`cloud-tops.js`'s own header). All three default OFF
+// (byte-identical to shipped). See `cloudTopsDiagOverride`'s own declaration
+// in vt-pan-viewer.js for exactly what each one forces, or drive all three
+// together via `perf-structural-ab.js`'s matching catalog entries.
+MapShine.setCloudTopsNoShadowMarch = setVtPanViewerCloudTopsNoShadowMarch;
+MapShine.getCloudTopsNoShadowMarch = getVtPanViewerCloudTopsNoShadowMarch;
+MapShine.setCloudTopsCheapGradient = setVtPanViewerCloudTopsCheapGradient;
+MapShine.getCloudTopsCheapGradient = getVtPanViewerCloudTopsCheapGradient;
+MapShine.setCloudTopsLowOctaves = setVtPanViewerCloudTopsLowOctaves;
+MapShine.getCloudTopsLowOctaves = getVtPanViewerCloudTopsLowOctaves;
 // Console-exposed directly (2026-08-12, S2.7) so a pixel-diff gate can prove
 // NON-VACUITY without paying for a full perf-run-full capture — illumBuckets/
 // colorBuckets `.size` answers "did batching actually admit any lights this
@@ -4967,11 +4987,29 @@ function install() {
         const s = getVtPanViewerPointLightBatching();
         return typeof s?.pointLightBatching === 'boolean' ? s.pointLightBatching : null;
       }
+      // CLOUD TOPS DIAGNOSTIC TOGGLES (mythica-machina-press#553) — same
+      // generic dispatcher, three more ids. See `cloudTopsDiagOverride`'s own
+      // declaration in vt-pan-viewer.js for what each forces.
+      if (id === 'cloudTopsNoShadowMarch') {
+        const s = getVtPanViewerCloudTopsNoShadowMarch();
+        return typeof s?.noShadowMarch === 'boolean' ? s.noShadowMarch : null;
+      }
+      if (id === 'cloudTopsCheapGradient') {
+        const s = getVtPanViewerCloudTopsCheapGradient();
+        return typeof s?.cheapGradient === 'boolean' ? s.cheapGradient : null;
+      }
+      if (id === 'cloudTopsLowOctaves') {
+        const s = getVtPanViewerCloudTopsLowOctaves();
+        return typeof s?.lowOctaves === 'boolean' ? s.lowOctaves : null;
+      }
       return null;
     },
     setStructuralToggle: (id, on) => {
       if (id === 'earlyZComposition') return setVtPanViewerEarlyZComposition(on);
       if (id === 'pointLightBatching') return setVtPanViewerPointLightBatching(on);
+      if (id === 'cloudTopsNoShadowMarch') return setVtPanViewerCloudTopsNoShadowMarch(on);
+      if (id === 'cloudTopsCheapGradient') return setVtPanViewerCloudTopsCheapGradient(on);
+      if (id === 'cloudTopsLowOctaves') return setVtPanViewerCloudTopsLowOctaves(on);
       return null;
     },
   };
@@ -5430,6 +5468,41 @@ function install() {
       } else return { ok: false, error: `unknown forced shader variant id: ${id}` };
       return restartRealSceneViewerAndSettle(`${id} A/B`);
     },
+  };
+
+  // mythica-machina-press#553's CLOUD TOPS DIAGNOSTIC A/B, ON DEMAND — the
+  // console entry point the comment on `perf-run-full`'s own structural-AB
+  // call site (a few hundred lines down) points at. Deliberately NOT part of
+  // that routine floor sweep (see that call site's own comment for why); this
+  // is the whole reason it needs a door of its own. Runs the SAME
+  // `runStructuralAB` every other structural toggle uses, restricted to just
+  // the three `cloudTopsNoShadowMarch`/`cloudTopsCheapGradient`/
+  // `cloudTopsLowOctaves` catalog entries — see each one's own `question` in
+  // `perf-structural-ab.js` for exactly what it measures.
+  //
+  // ⚠️ THE CAMERA MUST BE PARKED SOMEWHERE CLOUD TOPS IS ACTUALLY AWAKE
+  // (zoomed out past its own zoom gate) before calling this — otherwise
+  // `ensureCloudTopsMesh` never runs, no toggle has anything to rebuild, and
+  // every block comes back with zero attributed GPU time for
+  // `surface.cloudTopsDraw` (an honest `unmeasured` result per
+  // `compareAbBlocks`'s own rule 1, not a silent zero).
+  //
+  // Call as `await MapShine.runCloudTopsDiagnosticAB()` from the browser
+  // console with the map zoomed out and clouds visible; returns the same
+  // `{toggles: [...]}` shape every other `runStructuralAB` call produces —
+  // read `toggles[i].deltaGpuMs` per toggle (how many ms THAT tap group
+  // costs) and `toggles[i].verdict` ('within-noise' means this run could not
+  // tell, not "zero cost" — see `compareAbBlocks`'s own note field).
+  MapShine.runCloudTopsDiagnosticAB = async () => {
+    return runStructuralAB(profileHarness, {
+      toggleIds: ['cloudTopsNoShadowMarch', 'cloudTopsCheapGradient', 'cloudTopsLowOctaves'],
+      routeZones: null,
+      cycles: 2,
+      onProgress: (phase, detail) => {
+        log.info(`Cloud Tops diagnostic A/B: ${phase}${detail ? ` — ${detail}` : ''}`);
+        showPerfProgress(formatPerfProgressText(phase, detail));
+      },
+    });
   };
 
   /**
@@ -6034,6 +6107,23 @@ function install() {
             let structuralAB;
             try {
               structuralAB = await runStructuralAB(profileHarness, {
+                // ⚠️ EXPLICIT, NOT "every toggle in the catalog" (mythica-
+                // machina-press#553) — the three `cloudTopsNoShadowMarch`/
+                // `cloudTopsCheapGradient`/`cloudTopsLowOctaves` entries added
+                // alongside this comment are a targeted, temporary diagnostic
+                // for the #552 investigation, not standing infrastructure
+                // this routine floor-wide sweep should pay for on every
+                // ordinary `perf-run-full` call — each toggle costs a real
+                // settleFrames+measureFrames×cycles block, and three more
+                // would meaningfully lengthen a run this comment's own header
+                // already clocks at "~2-4 minutes end to end". Run them on
+                // demand instead, from the console: `await MapShine.
+                // runCloudTopsDiagnosticAB()` (defined a few hundred lines up,
+                // right after `profileHarness`) — camera parked somewhere
+                // Cloud Tops is actually awake (zoomed out past its own gate)
+                // first, same "one toggle at a time first" precedent
+                // `runShaderVariantAB`'s own doc already recommends.
+                toggleIds: ['earlyZComposition', 'pointLightBatching'],
                 routeZones: null,
                 cycles: 2,
                 onProgress: (phase, detail) => {

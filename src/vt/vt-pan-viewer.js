@@ -3200,15 +3200,65 @@ export async function startVtPanViewer({
      * `scale` write doesn't already do for free. */
     let cloudTopsMesh = null;
     let cloudTopsScene = null;
+    /** The diagnostic-override key `cloudTopsMesh` was last built with, or
+     * `null` before the first build — see `cloudTopsDiagOverride`'s own doc. */
+    let cloudTopsMeshBuiltForKey = null;
 
-    /** Build the tops quad + material on first use. `positionWorld.xy` (not
+    // ⚠️ mythica-machina-press#553 (perf-instrumentation-audit) — CLOUD TOPS
+    // DIAGNOSTIC OVERRIDES, NOT A TIER LADDER. `cloud-tops.js`'s own header
+    // states plainly that octaves/shadow-tap-count are "JS-time constants...
+    // never exposed as a live param, because changing them rebuilds the
+    // compiled shader graph" — true, and unchanged by this: CLOUD_TOPS still
+    // ships with exactly one tier (n:0), running the full-detail shape at
+    // every quality profile that has it on at all. This is a SEPARATE,
+    // narrower thing: three independently-flippable, transient force-hooks
+    // (mirroring `forceEffectEnabled`'s "never persists a setting"
+    // discipline, `earlyZComposition`'s own STRUCTURAL_TOGGLES shape) so a
+    // live A/B (`perf-structural-ab.js`'s `cloudTopsNoShadowMarch`/
+    // `cloudTopsCheapGradient`/`cloudTopsLowOctaves`) can re-measure
+    // `surface.cloudTopsDraw` with ONE of the eight per-fragment field
+    // evaluations cheapened at a time, to find out which one(s) the 55.98ms
+    // measured live 2026-09-16 (mythica-machina-press#552) actually lives in
+    // — before any of them changes what a real scene ships. All three default
+    // `false`: byte-identical to the shipped behaviour until a toggle flips.
+    const cloudTopsDiagOverride = { noShadowMarch: false, cheapGradient: false, lowOctaves: false };
+    /** The octave count `cloudTopsLowOctaves` forces the WHOLE field down to
+     * (main sample AND, via `cheapOct = max(2, min(octaves,3))`, every
+     * reduced-detail tap too) — 2 is this codebase's own established floor
+     * for "still a recognisable field, not just noise" (matches
+     * `cheapOct`'s own `Math.max(2, ...)`). */
+    const CLOUD_TOPS_DIAG_LOW_OCTAVES = 2;
+
+    /** Which build `ensureCloudTopsMesh` should have, from the live override
+     * state — a plain string so "does the built mesh match what's wanted"
+     * is one string compare, not three separate boolean checks scattered
+     * through the function. */
+    function cloudTopsWantedBuildKey() {
+      const o = cloudTopsDiagOverride;
+      return `${o.noShadowMarch ? 1 : 0}:${o.cheapGradient ? 1 : 0}:${o.lowOctaves ? 1 : 0}`;
+    }
+
+    /** Build the tops quad + material on first use, OR rebuild it if a
+     * diagnostic override has flipped since the last build — see
+     * `cloudTopsDiagOverride`'s own doc. `positionWorld.xy` (not
      * `positionGeometry.xy`, unlike the precipitation curtain's STATIC quad)
      * because this mesh's `position`/`scale` are rewritten every frame in
      * `runCloudTopsPass` to track the current view — `positionWorld` always
      * reflects the true post-transform world position, `positionGeometry`
      * would not. */
     function ensureCloudTopsMesh() {
-      if (cloudTopsMesh) return cloudTopsMesh;
+      const wantedKey = cloudTopsWantedBuildKey();
+      if (cloudTopsMesh && cloudTopsMeshBuiltForKey === wantedKey) return cloudTopsMesh;
+      if (cloudTopsMesh) {
+        // A live diagnostic rebuild, not first-build — dispose what the
+        // PREVIOUS override state compiled before replacing it, same
+        // discipline `window-tile-surface-subsystem.js#rebuildEntryMaterials`
+        // already uses for its own per-entry material swap.
+        cloudTopsMesh.material?.dispose?.();
+        cloudTopsMesh.geometry?.dispose?.();
+        cloudTopsScene = null;
+        cloudTopsMesh = null;
+      }
       const worldXY = buildCloudTopsParallaxWorldXY(
         THREE.TSL,
         THREE.TSL.positionWorld.xy,
@@ -3221,6 +3271,9 @@ export async function startVtPanViewer({
         buildField: buildCloudFieldNode,
         sun: { dirXY: uTopsSunDir, sinElev: uTopsSinElev, cosElev: uTopsCosElev, tanElev: uTopsTanElev },
         colors: { keyRgb: uTopsKeyRgb, fillRgb: uTopsFillRgb },
+        octaves: cloudTopsDiagOverride.lowOctaves ? CLOUD_TOPS_DIAG_LOW_OCTAVES : undefined,
+        shadowTaps: cloudTopsDiagOverride.noShadowMarch ? 0 : undefined,
+        gradientDetail: !cloudTopsDiagOverride.cheapGradient,
       });
       const material = new THREE.NodeMaterial();
       material.colorNode = tops.rgb;
@@ -3248,6 +3301,7 @@ export async function startVtPanViewer({
       cloudTopsMesh.renderOrder = 19;
       cloudTopsScene = new THREE.Scene();
       cloudTopsScene.add(cloudTopsMesh);
+      cloudTopsMeshBuiltForKey = wantedKey;
       return cloudTopsMesh;
     }
 
@@ -22195,6 +22249,50 @@ export async function startVtPanViewer({
         return { pointLightMrtMerge, drawCount: pointLightMrtMergeDrawCount };
       },
       /**
+       * mythica-machina-press#553's THREE CLOUD TOPS DIAGNOSTIC TOGGLES — see
+       * `cloudTopsDiagOverride`'s own declaration for what each one forces
+       * and why. No residency nudge, unlike `setEarlyZComposition`: the
+       * rebuild happens lazily inside `ensureCloudTopsMesh` itself, on
+       * whichever frame next calls it (every awake frame — `runCloudTopsPass`
+       * calls it unconditionally once `cloudTopsAwake`), so there is nothing
+       * else to nudge. A toggle flipped while the tops are asleep (camera not
+       * zoomed out past the gate) takes effect the next time they wake, same
+       * as every other setting this effect reads only while awake.
+       */
+      setCloudTopsNoShadowMarch(on) {
+        const next = !!on;
+        if (next === cloudTopsDiagOverride.noShadowMarch) {
+          return { noShadowMarch: cloudTopsDiagOverride.noShadowMarch, changed: false };
+        }
+        cloudTopsDiagOverride.noShadowMarch = next;
+        return { noShadowMarch: next, changed: true };
+      },
+      getCloudTopsNoShadowMarch() {
+        return { noShadowMarch: cloudTopsDiagOverride.noShadowMarch };
+      },
+      setCloudTopsCheapGradient(on) {
+        const next = !!on;
+        if (next === cloudTopsDiagOverride.cheapGradient) {
+          return { cheapGradient: cloudTopsDiagOverride.cheapGradient, changed: false };
+        }
+        cloudTopsDiagOverride.cheapGradient = next;
+        return { cheapGradient: next, changed: true };
+      },
+      getCloudTopsCheapGradient() {
+        return { cheapGradient: cloudTopsDiagOverride.cheapGradient };
+      },
+      setCloudTopsLowOctaves(on) {
+        const next = !!on;
+        if (next === cloudTopsDiagOverride.lowOctaves) {
+          return { lowOctaves: cloudTopsDiagOverride.lowOctaves, changed: false };
+        }
+        cloudTopsDiagOverride.lowOctaves = next;
+        return { lowOctaves: next, changed: true };
+      },
+      getCloudTopsLowOctaves() {
+        return { lowOctaves: cloudTopsDiagOverride.lowOctaves };
+      },
+      /**
        * The flag AND the evidence that it is actually doing something.
        *
        * A pixel-diff of a flag that changed nothing is byte-identical for the
@@ -26177,6 +26275,44 @@ export function setVtPanViewerPointLightMrtMerge(on) {
 export function getVtPanViewerPointLightMrtMerge() {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.getPointLightMrtMerge();
+}
+
+/**
+ * mythica-machina-press#553's THREE CLOUD TOPS DIAGNOSTIC TOGGLES — transient
+ * force-hooks for a live A/B against `surface.cloudTopsDraw`, never a shipped
+ * quality setting (`cloud-tops.js`'s own header: CLOUD_TOPS still has exactly
+ * one tier). All three default OFF (the shipped, full-detail behaviour).
+ * See `cloudTopsDiagOverride`'s own declaration inside `startVtPanViewer` for
+ * exactly what each one forces. Call as
+ * `MapShine.setCloudTopsNoShadowMarch(true)` /
+ * `MapShine.setCloudTopsCheapGradient(true)` /
+ * `MapShine.setCloudTopsLowOctaves(true)`, or drive all three together via
+ * `perf-structural-ab.js`'s `cloudTopsNoShadowMarch`/`cloudTopsCheapGradient`/
+ * `cloudTopsLowOctaves` catalog entries.
+ */
+export function setVtPanViewerCloudTopsNoShadowMarch(on) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setCloudTopsNoShadowMarch(on);
+}
+export function getVtPanViewerCloudTopsNoShadowMarch() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.getCloudTopsNoShadowMarch();
+}
+export function setVtPanViewerCloudTopsCheapGradient(on) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setCloudTopsCheapGradient(on);
+}
+export function getVtPanViewerCloudTopsCheapGradient() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.getCloudTopsCheapGradient();
+}
+export function setVtPanViewerCloudTopsLowOctaves(on) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setCloudTopsLowOctaves(on);
+}
+export function getVtPanViewerCloudTopsLowOctaves() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.getCloudTopsLowOctaves();
 }
 
 /**

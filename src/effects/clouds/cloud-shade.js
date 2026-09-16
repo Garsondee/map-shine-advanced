@@ -169,11 +169,33 @@ export const CLOUD_RELIEF_SCALE = 0.55;
  * @param {*} [args.footprintPx] - float node, world px per screen px. The
  *   gradient epsilon is floored at this, so the relief band-limits itself as
  *   the camera pulls back instead of turning to noise.
+ * @param {boolean} [args.gradientDetail] - whether the THREE normal/gradient
+ *   taps (h0c, hx, hy) sample at full detail (`octaves` + erosion) like the
+ *   main sample, or at the same cheap setting (`cheapOct`, no erosion) the
+ *   shadow-march taps already use. `true` (the shipped behaviour, unchanged)
+ *   — dropping erosion from these was tried once and reverted as a real bug
+ *   (see the comment on `heightAt` below: it broke the tops into "bright
+ *   ribbons with dark interiors"). Exposed ONLY as a mythica-machina-press#553
+ *   diagnostic — a live A/B needs to know whether that quality choice is
+ *   actually where Cloud Tops' measured cost lives, since it triples the
+ *   full-detail field evaluations per fragment (main + 3 gradient taps vs.
+ *   main alone). Never set outside `perf-structural-ab.js`'s
+ *   `cloudTopsCheapGradient` toggle.
  * @returns {{rgb: *, alpha: *, normalZ: *, thickness: *, diffuse: *, shadow: *, rim: *}}
  */
 export function buildCloudTopsNode(
   TSL,
-  { worldXY, uniforms: u, buildField, sun, colors, octaves = 5, shadowTaps = 3, footprintPx = null }
+  {
+    worldXY,
+    uniforms: u,
+    buildField,
+    sun,
+    colors,
+    octaves = 5,
+    shadowTaps = 3,
+    footprintPx = null,
+    gradientDetail = true,
+  }
 ) {
   const { float, vec2, vec3, mix, clamp, exp, max, min, dot, normalize, smoothstep, mx_noise_float } = TSL;
 
@@ -250,7 +272,7 @@ export function buildCloudTopsNode(
   // a full-detail height against two reduced-detail ones measures the DETAIL
   // that was dropped, not the slope — a difference of two different functions
   // is not a derivative of either.
-  const h0c = heightAt(worldXY, true).toVar('topsH0Detail');
+  const h0c = heightAt(worldXY, gradientDetail).toVar('topsH0Detail');
   const h0s = heightAt(worldXY, false).toVar('topsH0Shape');
 
   // ── THE NORMAL ────────────────────────────────────────────────────────────
@@ -262,8 +284,8 @@ export function buildCloudTopsNode(
   // the relief band-limit itself instead.
   const epsBase = u.scalePx.mul(float(0.015));
   const eps = (footprintPx ? max(epsBase, footprintPx.mul(float(1.5))) : epsBase).toVar('topsEps');
-  const hx = heightAt(worldXY.add(vec2(eps, float(0))), true);
-  const hy = heightAt(worldXY.add(vec2(float(0), eps)), true);
+  const hx = heightAt(worldXY.add(vec2(eps, float(0))), gradientDetail);
+  const hy = heightAt(worldXY.add(vec2(float(0), eps)), gradientDetail);
   const dzdx = hx.sub(h0c).mul(reliefPx).div(eps);
   const dzdy = hy.sub(h0c).mul(reliefPx).div(eps);
   const N = normalize(vec3(dzdx.negate(), dzdy.negate(), float(1))).toVar('topsN');

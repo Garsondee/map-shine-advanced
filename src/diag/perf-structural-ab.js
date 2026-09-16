@@ -177,6 +177,51 @@ export const STRUCTURAL_TOGGLES = Object.freeze([
     // needed... runs every frame regardless and will read the new value on
     // its very next call"), so the default settle is already enough.
   }),
+  // ══════════════════════════════════════════════════════════════════════
+  // CLOUD TOPS PER-CONTRIBUTOR DIAGNOSIS (2026-09-16, mythica-machina-press
+  // #553, following #552's live measurement: 55.98ms/frame, 73.3% of frame
+  // GPU, 18.3× its own declared budget). Three separate toggles, not one —
+  // `buildCloudTopsNode` costs 8 field evaluations per fragment across THREE
+  // independent design choices (the main sample's octave count; the 3 extra
+  // full-detail taps that build the surface normal; the up-to-3-tap self-
+  // shadow march), and the whole point of measuring each on its own zone
+  // (`surface.cloudTopsDraw`, already real — unlike earlyZComposition/
+  // pointLightBatching this is NOT a trade between two zones, it is "how
+  // much of ONE already-measured zone's cost does this one design choice
+  // account for") is to find out which one actually dominates before any of
+  // them changes what a real scene ships. `watchZones` is the same single
+  // zone for all three on purpose — see `question` on each.
+  //
+  // A GENUINELY DIFFERENT SHAPE FROM earlyZComposition/pointLightBatching:
+  // those trade cost between TWO zones (their own `watchZones` list several).
+  // These three each ask "how much does removing ONE tap group change this
+  // ONE zone's own number" — closer to a cost-reduction test than a trade.
+  // `compareAbBlocks`'s own onGpuMs/offGpuMs/deltaGpuMs vocabulary ("pays
+  // for itself" / "costs more than it saves") reads oddly for a pure removal
+  // — read `deltaGpuMs` here as "how many ms this tap group costs", full
+  // stop, and ignore the pays-for-itself/costs-more-than-it-saves framing
+  // it's not built for this shape.
+  Object.freeze({
+    id: 'cloudTopsNoShadowMarch',
+    label: 'Cloud Tops: self-shadow march (up to 3 reduced-detail taps)',
+    question:
+      'buildCloudTopsNode marches up to shadowTaps=3 additional reduced-detail field samples toward the sun for the self-shadow term. Forcing shadowTaps=0 (this toggle ON) removes them entirely. How many of the 55.98ms does this one design choice cost?',
+    watchZones: Object.freeze(['surface.cloudTopsDraw']),
+  }),
+  Object.freeze({
+    id: 'cloudTopsCheapGradient',
+    label: 'Cloud Tops: full-detail gradient/normal taps (3 extra 5-octave+erosion samples)',
+    question:
+      'The surface normal is built by finite-differencing THREE extra taps (center h0c, +x hx, +y hy) at the SAME full detail (octaves + erosion) as the main silhouette sample — the single largest suspected contributor, per the #552 code-reading hypothesis (it roughly QUADRUPLES the full-detail field-evaluation count per fragment: main + 3 gradient taps, vs. main alone). Forcing gradientDetail=false (this toggle ON) drops these three taps to the same cheap setting the shadow-march taps already use — same octave count, no erosion. Dropping erosion from these was tried once in production and reverted as a real visual bug (cloud-shade.js\'s own comment: "bright ribbons with dark interiors") — this toggle is for MEASURING that cost, not proposing to ship it as-is.',
+    watchZones: Object.freeze(['surface.cloudTopsDraw']),
+  }),
+  Object.freeze({
+    id: 'cloudTopsLowOctaves',
+    label: 'Cloud Tops: base octave count (5 -> 2, cascades to every tap)',
+    question:
+      "Forcing octaves down to 2 (this toggle ON, from the shipped 5) cheapens EVERY field evaluation this effect makes — the main sample AND, via buildCloudTopsNode's own cheapOct = max(2, min(octaves,3)), the already-cheap gradient-origin/shadow-march taps too. This is the coarsest, most visually damaging of the three toggles (a real quality drop the author explicitly does not want to ship blind) — measure it anyway, so the real cost of the octave count itself is known even though shipping this exact change is very unlikely.",
+    watchZones: Object.freeze(['surface.cloudTopsDraw']),
+  }),
 ]);
 
 /** @param {string} id @returns {object|null} */

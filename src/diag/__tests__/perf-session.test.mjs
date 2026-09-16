@@ -600,6 +600,136 @@ export async function run(t) {
     ok('...and telling the user what to do', err.message.includes('load a scene'));
   }
 
+  {
+    // THE FIX (2026-09-14, live, author-caught): "generated less than 300
+    // frames" on a scene that WAS loaded and rendering, just slower than a
+    // flat total-wait timeout assumed. The timeout must measure time since
+    // the LAST counted frame, not time since the call started — a scene that
+    // keeps producing frames, however slowly, must never be mistaken for a
+    // stopped one. Total elapsed time here (1950ms) comfortably exceeds
+    // timeoutMs (1000ms); the OLD "now() - startedAt > timeoutMs" check would
+    // have rejected this run incorrectly.
+    let clock = 0;
+    let profiled = { frames: 0, settleFramesDiscarded: 0 };
+    const pending = [];
+    const waitFrames = createProfiledFrameWaiter({
+      readProfile: () => profiled,
+      raf: (cb) => pending.push(cb),
+      now: () => clock,
+      timeoutMs: 1000,
+      maxWaitMs: 100000,
+    });
+    let resolved = false;
+    let err = null;
+    waitFrames(3)
+      .then(() => {
+        resolved = true;
+      })
+      .catch((e) => {
+        err = e;
+      });
+
+    clock = 900; // under the 1000ms stall threshold, still zero progress
+    pending.shift()?.();
+    await flushTicks();
+    ok('no false alarm before the stall threshold', resolved === false && err === null);
+
+    profiled = { frames: 1, settleFramesDiscarded: 0 }; // 1 of 3 — resets the stall clock
+    clock = 950;
+    pending.shift()?.();
+    await flushTicks();
+    ok('progress keeps it alive', resolved === false && err === null);
+
+    // Another 900ms with no NEW frame — only 900ms since the last progress
+    // (at 950), so still under timeoutMs, even though total elapsed (1850ms)
+    // is already past it.
+    clock = 1850;
+    pending.shift()?.();
+    await flushTicks();
+    ok('measured against the LAST frame, not the call start', resolved === false && err === null);
+
+    profiled = { frames: 2, settleFramesDiscarded: 0 };
+    clock = 1900;
+    pending.shift()?.();
+    await flushTicks();
+
+    profiled = { frames: 3, settleFramesDiscarded: 0 };
+    clock = 1950;
+    pending.shift()?.();
+    await flushTicks();
+    ok(
+      'resolves once enough frames land, despite total elapsed time exceeding timeoutMs',
+      resolved === true && err === null
+    );
+  }
+
+  {
+    // A scene that DOES stop must still fail loudly — progress happening
+    // first, then genuinely ceasing, must not be read as "still fine forever"
+    // just because it once made progress.
+    let clock = 0;
+    let profiled = { frames: 0, settleFramesDiscarded: 0 };
+    const pending = [];
+    const waitFrames = createProfiledFrameWaiter({
+      readProfile: () => profiled,
+      raf: (cb) => pending.push(cb),
+      now: () => clock,
+      timeoutMs: 1000,
+    });
+    let err = null;
+    waitFrames(5).catch((e) => {
+      err = e;
+    });
+
+    profiled = { frames: 2, settleFramesDiscarded: 0 };
+    clock = 100;
+    pending.shift()?.();
+    await flushTicks();
+    ok('progress happened, no error yet', err === null);
+
+    clock = 100 + 1500; // past timeoutMs measured from the LAST progress (100), not from 0
+    pending.shift()?.();
+    await flushTicks();
+    ok('a scene that stops producing frames after real progress still rejects', err !== null);
+    ok('...naming the count it actually reached before stalling', err?.message.includes('only 2'));
+    ok('...with stall wording', err?.message.includes('stalled'));
+  }
+
+  {
+    // The SEPARATE absolute backstop (maxWaitMs): a scene that never stalls —
+    // it keeps producing frames right up against the stall threshold every
+    // time — but is simply far slower than this call expected, must still
+    // give up eventually, with WORDING THAT DOES NOT ACCUSE THE VIEWER OF
+    // BEING STOPPED (it demonstrably is not: frames kept arriving).
+    let clock = 0;
+    let seen = 0;
+    const pending = [];
+    const waitFrames = createProfiledFrameWaiter({
+      readProfile: () => ({ frames: seen, settleFramesDiscarded: 0 }),
+      raf: (cb) => pending.push(cb),
+      now: () => clock,
+      timeoutMs: 1000,
+      maxWaitMs: 5000,
+    });
+    let err = null;
+    waitFrames(100).catch((e) => {
+      err = e;
+    });
+
+    for (let i = 0; i < 8 && err === null; i++) {
+      seen += 1;
+      clock += 900; // under timeoutMs every single tick — never once stalls
+      pending.shift()?.();
+      await flushTicks();
+    }
+    ok('gives up once the absolute ceiling is crossed, even with continuous progress', err !== null);
+    ok(
+      '...via the separate "still arriving" wording, not the stalled-viewer wording',
+      err?.message.includes('still waiting') && err?.message.includes('ARE still arriving')
+    );
+    ok('...and never claims the viewer is not running', !err?.message.includes('probably not running'));
+  }
+
   // ---- createSceneSettleWaiter — multi-floor-sweep-2026-08-12 --------------
   {
     // Already settled on the very first read — no polling needed at all.

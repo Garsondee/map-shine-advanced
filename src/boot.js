@@ -123,6 +123,17 @@ const BENCHMARK_SWEEP_MS = 60000;
  */
 const RAPID_STRESS_SWEEP_MS = 5000;
 /**
+ * The QUICK CHECK route's own duration (2026-09-14, author's own ask: a
+ * button that gathers "lots of good information" without "doing absolutely
+ * everything", fast enough to reach for often). A quarter of BENCHMARK_SWEEP_MS
+ * above — long enough to be real camera motion (the paging/streaming cost a
+ * parked view never triggers) and cross a meaningful span of the scene, short
+ * enough that the WHOLE action (pre-pause + settle + this + report assembly)
+ * lands around 20s, not minutes. See the `perf-quick-check` action's own
+ * header for what this trades away to get there.
+ */
+const QUICK_CHECK_SWEEP_MS = 15000;
+/**
  * How long to watch AFTER the scripted rapid sweep above ends before giving up
  * (rapid-pan-hitch-2026-08-12, chasing the author's own report: "when the
  * rapid camera pan happens in the test it always results in a hitch that
@@ -6434,6 +6445,92 @@ function install() {
     { zone: 'lab', primary: true }
   );
 
+  // ===========================================================================
+  // QUICK PERFORMANCE CHECK (2026-09-14, author's own ask: after the full
+  // report above false-failed with "generated less than 300 frames" on a
+  // scene that WAS loaded — see createProfiledFrameWaiter's own fix in
+  // perf-session.js for that bug — asked separately for a button that
+  // gathers real diagnostic value without "doing absolutely everything" and
+  // "doesn't take enormous amounts of time".
+  //
+  // The full report above is deliberately exhaustive: a 60s route, a
+  // multi-floor pass, a 5s rapid-diagonal stress test + recovery wait, a
+  // floor-wide structural A/B sweep, a full tier sweep, and an edit-cascade
+  // stress burst — each justified on its own, but together they are why that
+  // button's own label says "~5 min single floor, 20+ min multi-floor". This
+  // is the SAME instrument — `runProfileSession`, the SAME `profileHarness`,
+  // the SAME report shape, the SAME "Last result" panel (`lastPerfProfile` is
+  // shared across every report-producing action here, by design — see that
+  // panel's own header) — with everything that makes that number big turned
+  // off, keeping only what a zone profile gets for free just by measuring at
+  // all, no toggle flip or second floor required:
+  //   - per-pass CPU+GPU zone costs — WHERE the frame's time goes, and the
+  //     tool that actually resolves per-effect cost (`includeSweep`'s own
+  //     comment above: the whole-frame effect sweep does not; this is why
+  //     `includeSweep` stays false here too, not an oversight);
+  //   - hitch/frame-gap stats, from real (if brief) camera motion;
+  //   - pipeline/shader-rebuild churn, cache health, VRAM peak;
+  //   - the coverage/honesty findings (unattributed zones, `gpuStatus`,
+  //     `effects-unpriceable`, window/geometry composition) that answer the
+  //     SECOND half of the author's ask — which effects/zones are not
+  //     reporting cleanly, not just which are slow.
+  // None of that needs a long route, another floor, or a toggle flip to
+  // exist; it needs one settled, armed window. Structural A/B, multi-floor,
+  // rapid-stress, tier-sweep and edit-cascade all stay exclusive to the full
+  // report — each answers a real but NARROWER question ("does early-Z pay
+  // for itself", "does the floor above regress", …) that "is anything slow,
+  // and is anything mis-reporting" does not need answered every time.
+  // ===========================================================================
+  MapShine.debug.registerAction(
+    'perf-quick-check',
+    '⚡ Quick Performance Check (~20s, zone profile + hitches + coverage, no A/B / multi-floor / tier sweep)',
+    async () => {
+      const path = buildQuickCheckPath(); // throws BEFORE anything runs if no scene is loaded
+      // Same fixed pre-pause the full report uses, and for the same reason
+      // (MIN_ACTION_PAUSE_MS's own doc) — a lingering load hitch from
+      // whatever the author was just doing would otherwise corrupt the first
+      // seconds of a route this short far more than it would a 60s one.
+      await pause(MIN_ACTION_PAUSE_MS);
+      const started = new Date().toISOString();
+      const playing = playCameraPath(path, { capFrameRate: false }).catch((err) => {
+        log.error('camera path playback failed during the quick performance check:', err);
+      });
+      try {
+        lastPerfProfile = await runProfileSession(profileHarness, {
+          generatedAt: started,
+          measureUntil: playing,
+          includeSweep: false,
+          includeStructuralAB: false,
+          // Same 90 the full report settles for — that reasoning (shader
+          // compiles / first residency pass / first bake clearing before the
+          // timed window starts) is about SCENE state, not run length, so it
+          // applies exactly as much to a short run as a long one.
+          settleFrames: 90,
+          route: `n_to_s (quick):${path.keyframes.length}kf/${QUICK_CHECK_SWEEP_MS}ms`,
+          onProgress: (phase, detail) => {
+            log.info(`perf quick check: ${phase}${detail ? ` — ${detail}` : ''}`);
+            showPerfProgress(formatPerfProgressText(phase, detail));
+          },
+        });
+      } finally {
+        stopCameraPath();
+        await playing;
+        hidePerfProgress();
+      }
+
+      if (lastPerfProfile.summary) log.info(formatOffenderSummaryText(lastPerfProfile.summary));
+      // Same shared "Last result" panel the full report updates — see that
+      // panel's own header (`buildPerfLastResultPanel`) for why no separate
+      // display code is needed here.
+      MapShine.debug.refreshControls();
+      return lastPerfProfile;
+    },
+    // `primary: true` too — a fast tool earns its place in the quick-reach
+    // row precisely BECAUSE it is fast enough to reach for often; demote if
+    // that ever feels like clutter next to the other two vital tools.
+    { zone: 'lab', primary: true }
+  );
+
   // EARLY-Z A/B, THE FULL SWEEP TWICE (2026-08-12) — author directive, given
   // directly in response to the combined report's first early-Z verdict:
   // *"Make the Early-Z part of the performance sweep. Make it do something
@@ -6587,6 +6684,37 @@ function install() {
       keyframes: preset.keyframes,
       settings: {
         sweepMs: RAPID_STRESS_SWEEP_MS,
+        easing: 'linear',
+        hideUi: false,
+        fadeInMs: 0,
+        fadeOutMs: 0,
+        longJumpFadeCut: preset.suggestedLongJumpFadeCut,
+      },
+    });
+  }
+
+  /**
+   * Build the QUICK CHECK route — the SAME north-to-south preset
+   * `buildBenchmarkPath` uses above (so a quick run tours the same KIND of
+   * path, just less of it), at `QUICK_CHECK_SWEEP_MS` instead of the full
+   * `BENCHMARK_SWEEP_MS`. Still real camera motion, not a parked view: motion
+   * is what triggers the paging/streaming costs a static view never sees, and
+   * the quick check exists to catch those too, just faster. See the
+   * `perf-quick-check` action's own header for the rest of what makes it quick.
+   * @returns {object} a normalized camera path, ready for `playCameraPath`.
+   */
+  function buildQuickCheckPath() {
+    const preset = generatePresetKeyframes('n_to_s');
+    if (!preset?.keyframes?.length) {
+      throw new Error(
+        'perf quick check: could not derive a north-to-south route from this scene. That needs the live scene ' +
+          'dimensions, so load a scene first.'
+      );
+    }
+    return normalizeCameraPath({
+      keyframes: preset.keyframes,
+      settings: {
+        sweepMs: QUICK_CHECK_SWEEP_MS,
         easing: 'linear',
         hideUi: false,
         fadeInMs: 0,

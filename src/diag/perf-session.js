@@ -60,7 +60,9 @@ import { runStructuralAB } from './perf-structural-ab.js';
 
 /** Default measured window. ~10s at 60fps — long enough for a bake to appear. */
 export const DEFAULT_MEASURE_FRAMES = 600;
-/** A window that has not advanced in this long means the viewer is not running. */
+/** A window that has gone this long with NOT ONE NEW FRAME COUNTED means the
+ * viewer is not running — see `createProfiledFrameWaiter`'s own header for why
+ * this is a STALL detector now, not a total-wait-time detector. */
 export const WAIT_TIMEOUT_MS = 30000;
 /**
  * Safety net for `createSceneSettleWaiter` — deliberately much longer than
@@ -71,6 +73,16 @@ export const WAIT_TIMEOUT_MS = 30000;
  * see that module's own `waitingFor` for what a timeout was actually stuck on.
  */
 export const DEFAULT_SETTLE_WAIT_TIMEOUT_MS = 240000;
+/**
+ * Absolute backstop on a single `waitFrames(n)` call, independent of progress —
+ * `createProfiledFrameWaiter`'s own header explains why this exists alongside
+ * `WAIT_TIMEOUT_MS` rather than instead of it. 20 minutes: generous next to the
+ * largest real `n` this file asks for (`DEFAULT_AB_MEASURE_FRAMES`, 300, inside
+ * `runStructuralAB`'s own multi-cycle loop, called several times per report) and
+ * already the same order of magnitude as the combined report's own documented
+ * worst case ("20+ min multi-floor" — `boot.js`'s Performance Report button).
+ */
+export const MAX_WAIT_MS = 20 * 60 * 1000;
 
 /**
  * Build the `waitFrames` half of a harness.
@@ -81,6 +93,31 @@ export const DEFAULT_SETTLE_WAIT_TIMEOUT_MS = 240000;
  * far fewer frames in it than the report goes on to claim. Bounded, so a stopped
  * viewer fails loudly instead of hanging the button forever.
  *
+ * ⚠️ THE TIMEOUT IS A STALL DETECTOR, NOT A TOTAL-WAIT-TIME DETECTOR
+ * (2026-09-14, live, author-caught). The first cut compared elapsed time
+ * since the CALL STARTED against `timeoutMs` — which silently assumes the
+ * scene sustains at least `n / (timeoutMs/1000)` fps for the ENTIRE wait, with
+ * zero slack. For `runStructuralAB`'s own `measureFrames` block
+ * (`DEFAULT_AB_MEASURE_FRAMES = 300`, perf-structural-ab.js) that is an
+ * implicit "never drops below 10fps, not even briefly" requirement — and a
+ * structural-toggle flip is exactly the kind of moment a real scene CAN dip
+ * under that for a few seconds (a residency pass or shader rebuild the toggle
+ * itself triggers — `earlyZComposition`'s own settleFrames comment already
+ * documents this class of cost). The live report: "generated less than 300
+ * frames" and the wording below, on a scene that was genuinely loaded and
+ * rendering the whole time — just not fast enough, briefly, for a flat 30s
+ * ceiling on 300 frames. That is real, useful, SLOW, not the "viewer is not
+ * running at all" condition this message claims.
+ *
+ * The fix: `timeoutMs` now measures time since the LAST newly-counted frame,
+ * not time since the call started. A scene rendering at any nonzero rate,
+ * however slow, keeps resetting that clock and is never mistaken for a dead
+ * loop; only a window with truly ZERO progress for the full `timeoutMs` trips
+ * it — which is what "the viewer is probably not running" actually means.
+ * `MAX_WAIT_MS` stays as a SEPARATE, much longer absolute backstop so a
+ * viewer dribbling out one frame every few seconds forever still cannot hang
+ * the button indefinitely — see its own doc for why 20 minutes.
+ *
  * Lives here rather than in `boot.js` because it reads a clock, and
  * `time/one-clock` allows that in `diag/` and nowhere near the composition root.
  */
@@ -89,24 +126,44 @@ export function createProfiledFrameWaiter({
   raf = (cb) => requestAnimationFrame(cb),
   now = () => performance.now(),
   timeoutMs = WAIT_TIMEOUT_MS,
+  maxWaitMs = MAX_WAIT_MS,
 } = {}) {
   return function waitFrames(n) {
     return new Promise((resolve, reject) => {
       const before = readProfile();
       const startCount = before.frames + before.settleFramesDiscarded;
       const startedAt = now();
+      let bestSeen = 0;
+      let lastProgressAt = startedAt;
       const tick = () => {
         const s = readProfile();
         const seen = s.frames + s.settleFramesDiscarded - startCount;
+        if (seen > bestSeen) {
+          bestSeen = seen;
+          lastProgressAt = now();
+        }
         if (seen >= n) {
           resolve();
           return;
         }
-        if (now() - startedAt > timeoutMs) {
+        const sinceProgressMs = now() - lastProgressAt;
+        if (sinceProgressMs > timeoutMs) {
           reject(
             new Error(
-              `perf profile: waited ${Math.round(timeoutMs / 1000)}s for ${n} frames but only ${seen} were ` +
-                'counted. The viewer is probably not running — load a scene first.'
+              `perf profile: no new frames were counted for ${Math.round(timeoutMs / 1000)}s while waiting for ` +
+                `${n} (only ${seen} were counted before it stalled). The viewer is probably not running — load a ` +
+                'scene first.'
+            )
+          );
+          return;
+        }
+        if (now() - startedAt > maxWaitMs) {
+          reject(
+            new Error(
+              `perf profile: still waiting for ${n} frames after ${Math.round(maxWaitMs / 1000)}s (${seen} were ` +
+                'counted, and frames ARE still arriving — this is not a stopped viewer). The scene is rendering ' +
+                'far slower than this measurement expected to need; investigate the frame rate directly before ' +
+                're-running, or ask for fewer frames.'
             )
           );
           return;

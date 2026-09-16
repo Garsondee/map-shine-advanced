@@ -3348,9 +3348,50 @@ export async function startVtPanViewer({
         shadowTaps: cloudTopsDiagOverride.noShadowMarch ? 0 : undefined,
         gradientDetail: !cloudTopsDiagOverride.cheapGradient,
       });
+      // ⚠️ MAP-BOUNDS SOFT MASK (author, 2026-09-16: "we're creating clouds
+      // that extend a long way outside the region of the map... large enough
+      // to cover the whole map + 20% more", "ideally with a very soft edge,
+      // not a hard one"). Before this, the tops quad was sized to the
+      // CURRENT VIEW ONLY (`topsViewRect`, `runCloudTopsPass`) with no tie to
+      // the map's own bounds — panned/zoomed past the map edge (Foundry's own
+      // scene padding, or simply zooming out far enough), the tops kept
+      // covering the whole screen regardless of whether any of it was real
+      // map. Same "SCENE-EDGE-FADE PINNING" technique this file's own
+      // vegetation sway edge fade already ships (`uSceneMin`/`uSceneSize`
+      // built from `dimensions.sceneRect`, "the same bounds every other
+      // wind/particle system is already clamped to" — see that construction
+      // site's own comment), applied here to OPACITY instead of displacement:
+      // full strength anywhere inside the true map rect, smoothly to zero
+      // across a padding band OUTSIDE it, never a hard cutoff.
+      //
+      // `CLOUD_TOPS_MAP_PAD_FRACTION` is PER SIDE — 0.1 on each of 4 sides
+      // grows the covered rect by 20% total per axis, matching "+20% more"
+      // literally (not 20% per side / 40% total). `THREE.TSL.positionWorld.
+      // xy`, NOT `worldXY` above (the parallax-shifted NOISE-SAMPLING
+      // position) — this mask is about where the quad sits ON THE GROUND,
+      // which parallax deliberately distorts away from for the field sample
+      // but must not distort for "is this over the map at all".
+      const { float, max: tslMax, smoothstep, clamp: tslClamp, positionWorld } = THREE.TSL;
+      const CLOUD_TOPS_MAP_PAD_FRACTION = 0.1;
+      const sceneMinX = dimensions.sceneRect.x;
+      const sceneMinY = dimensions.sceneRect.y;
+      const sceneMaxX = dimensions.sceneRect.x + dimensions.sceneRect.width;
+      const sceneMaxY = dimensions.sceneRect.y + dimensions.sceneRect.height;
+      const scenePadX = Math.max(1, dimensions.sceneRect.width * CLOUD_TOPS_MAP_PAD_FRACTION);
+      const scenePadY = Math.max(1, dimensions.sceneRect.height * CLOUD_TOPS_MAP_PAD_FRACTION);
+      const groundXY = positionWorld.xy;
+      // How far PAST the true edge, normalised to pad-widths (<=0 inside the
+      // map, >=1 at/past the padded boundary) — one term per side, so a
+      // non-square map's own aspect ratio never distorts the fade band.
+      const outsideLeft = float(sceneMinX).sub(groundXY.x).div(float(scenePadX));
+      const outsideRight = groundXY.x.sub(float(sceneMaxX)).div(float(scenePadX));
+      const outsideBottom = float(sceneMinY).sub(groundXY.y).div(float(scenePadY));
+      const outsideTop = groundXY.y.sub(float(sceneMaxY)).div(float(scenePadY));
+      const outsideMost = tslMax(tslMax(outsideLeft, outsideRight), tslMax(outsideBottom, outsideTop));
+      const mapBoundsMask = float(1).sub(smoothstep(0, 1, tslClamp(outsideMost, 0, 1)));
       const material = new THREE.NodeMaterial();
       material.colorNode = tops.rgb;
-      material.opacityNode = tops.alpha.mul(uTopsOpacity);
+      material.opacityNode = tops.alpha.mul(uTopsOpacity).mul(mapBoundsMask);
       material.transparent = true;
       material.depthTest = false;
       material.depthWrite = false;

@@ -482,13 +482,24 @@ export function buildCloudTopsNode(
  * absolute height makes the effect vanish exactly when the author zooms in
  * to look closely at it.
  *
- * Derived, not guessed: doc 02 §9 ties it to V2's own shipped, liked zoom
- * thresholds (`CLOUD_TOP_FADE_START`/`END`, read back through V2's zoom
- * convention) so that the low weather deck (a typical `cloudAltitudePx` of
- * ~1400) starts clearing the eye at the same view width V2's tops began
- * fading in at — "reusing a number that shipped and was liked beats
- * inventing one." */
-export const CLOUD_TOPS_CAMERA_HEIGHT_PER_VIEW_WIDTH = 0.23;
+ * Originally derived, not guessed: doc 02 §9 tied it to V2's own shipped,
+ * liked zoom thresholds (`CLOUD_TOP_FADE_START`/`END`, read back through
+ * V2's zoom convention) so that the low weather deck (a typical
+ * `cloudAltitudePx` of ~1400) started clearing the eye at the same view
+ * width V2's tops began fading in at — "reusing a number that shipped and
+ * was liked beats inventing one."
+ *
+ * ⚠️ CORRECTED 2026-09-16, LIVE — the first real look at this in an actual
+ * Foundry scene (V2's own liked threshold was never re-verified against a
+ * real render, only carried forward by formula). Author: tops "appear a bit
+ * too soon," want them to need 50% MORE zoom-out before waking. Since
+ * `eyeHeightPx` (and therefore the whole gate — wake point, fade band,
+ * parallax) is linear in this one constant, dividing it by 1.5 delays
+ * every stage of the gate by exactly that factor at any given zoom, without
+ * changing the shape of the fade/loom curve doc 02 §9 derived — the same
+ * "one physical model, one number to correct" property the eye-height
+ * redesign was built for. */
+export const CLOUD_TOPS_CAMERA_HEIGHT_PER_VIEW_WIDTH = 0.23 / 1.5;
 
 /** The hard ceiling on parallax magnification, `M = 1/(1 - parallax)`. As the
  * eye height approaches the deck's own altitude, `deckAltitudePx/eyeHeightPx`

@@ -3238,6 +3238,79 @@ export async function startVtPanViewer({
       return `${o.noShadowMarch ? 1 : 0}:${o.cheapGradient ? 1 : 0}:${o.lowOctaves ? 1 : 0}`;
     }
 
+    // ═══════════════════════════════════════════════════════════════════
+    // mythica-machina-press#555 — HALF-INTERNAL-RESOLUTION RENDER, the
+    // downsample step doc 02/#552 already named as the gap between Cloud
+    // Tops and Bloom/DoF ("both of which work at half-res... nothing in
+    // this function downsamples before that eight-tap cost"). Quarters the
+    // fragment count (half width x half height) with NO change to the
+    // shader graph itself — every one of the 8 field evaluations still
+    // runs, just for 1/4 as many fragments — so this is the one lever that
+    // touches NEITHER the known-regression-prone gradient/erosion taps
+    // (#553's own "bright ribbons with dark interiors" incident) NOR the
+    // fractal detail an author would actually notice (octave count). Same
+    // technique, same mip-sizing convention (`describeBloomMip`/
+    // `describeDofMip`'s own `Math.ceil(internal/2)`), reused here rather
+    // than invented fresh.
+    //
+    // ⚠️ PREMULTIPLIED-ALPHA COMPOSITE, ON PURPOSE — a cloud's edge is
+    // already soft (Beer-law alpha, never a hard cutout), but naive
+    // (non-premultiplied) bilinear upsampling of a separately-stored
+    // alpha channel is a well-known source of dark/light fringing at
+    // exactly this kind of soft, partially-transparent edge. Rendering the
+    // cloud (its own material's real NormalBlending, untouched) into a
+    // target CLEARED to (0,0,0,0) produces PREMULTIPLIED colour for free —
+    // "over" onto black leaves `rgb*a` in the colour channels — so the
+    // composite step below reads it back with CustomBlending's
+    // OneFactor/OneMinusSrcAlphaFactor pair (the standard "premultiplied
+    // alpha over" equation), the same explicit-blend-state idiom
+    // `buildOcclusionDisc`'s own MIN-blending already uses in this file,
+    // never `material.blending = THREE.NormalBlending` (which would
+    // multiply by alpha a SECOND time and make edges too faint).
+    const cloudTopsLowResW = () => Math.max(1, Math.ceil(internalW / 2));
+    const cloudTopsLowResH = () => Math.max(1, Math.ceil(internalH / 2));
+    const describeCloudTopsLowRes = (w, h) => ({
+      resolvedW: w,
+      resolvedH: h,
+      screenSized: true,
+      type: THREE.HalfFloatType,
+      colorSpace: THREE.NoColorSpace,
+      filter: 'linear',
+      depth: false,
+    });
+    const cloudTopsLowResRT = allocator.create(
+      'cloudTops.lowRes',
+      describeCloudTopsLowRes(cloudTopsLowResW(), cloudTopsLowResH())
+    );
+    /** The upsample-composite quad — built ONCE, never rebuilt by a
+     * diagnostic-toggle flip (unlike `cloudTopsMesh` itself): it only ever
+     * samples `cloudTopsLowResRT.texture`, and `allocator.resize` mutates
+     * that SAME texture object in place on a resolution change (this
+     * file's own `resizeInternalTargets` comment, verified against bloom/
+     * dof's own mip chains) — no rebind needed here either. */
+    const cloudTopsCompositeMaterial = new THREE.NodeMaterial();
+    {
+      // `texture(rt.texture)` — the same idiom bloom/dof's own composite
+      // materials sample their mip chain through (see `resizeInternalTargets`'s
+      // own comment on this file, "texture(bloomMips[0/3].texture) nodes
+      // stay valid"). Bilinear-filtered (`describeCloudTopsLowRes`'s own
+      // `filter: 'linear'`) — free hardware upsample from half to full res.
+      const sampled = THREE.TSL.texture(cloudTopsLowResRT.texture);
+      cloudTopsCompositeMaterial.colorNode = sampled.rgb;
+      cloudTopsCompositeMaterial.opacityNode = sampled.a;
+    }
+    cloudTopsCompositeMaterial.transparent = true;
+    cloudTopsCompositeMaterial.depthTest = false;
+    cloudTopsCompositeMaterial.depthWrite = false;
+    cloudTopsCompositeMaterial.blending = THREE.CustomBlending;
+    cloudTopsCompositeMaterial.blendEquation = THREE.AddEquation;
+    cloudTopsCompositeMaterial.blendSrc = THREE.OneFactor;
+    cloudTopsCompositeMaterial.blendDst = THREE.OneMinusSrcAlphaFactor;
+    cloudTopsCompositeMaterial.blendEquationAlpha = THREE.AddEquation;
+    cloudTopsCompositeMaterial.blendSrcAlpha = THREE.OneFactor;
+    cloudTopsCompositeMaterial.blendDstAlpha = THREE.OneMinusSrcAlphaFactor;
+    const cloudTopsCompositeQuad = new THREE.QuadMesh(cloudTopsCompositeMaterial);
+
     /** Build the tops quad + material on first use, OR rebuild it if a
      * diagnostic override has flipped since the last build — see
      * `cloudTopsDiagOverride`'s own doc. `positionWorld.xy` (not
@@ -8131,18 +8204,41 @@ export async function startVtPanViewer({
       // rounding) rather than genuinely covering it.
       mesh.position.set((topsViewRect.minX + topsViewRect.maxX) / 2, (topsViewRect.minY + topsViewRect.maxY) / 2, 0);
       mesh.scale.set(w * 1.02, h * 1.02, 1);
-      const prevAutoClear = renderer.autoClearColor;
-      renderer.setRenderTarget(sceneLit);
-      renderer.autoClearColor = false;
       // mythica-machina-press#552 — this pass ran measured-but-unattributed
       // from the day it shipped: the pass-level hook already timed it as
       // pass.surface.cloudTops, but that auto-synthesised row carries no
       // ownerEffectId (perf-zones.js's own header — pass rows are derived,
       // never declared). Same bracket shape as surfDust/surfGusts just above.
+      //
+      // mythica-machina-press#555 — the real shading draw now targets
+      // `cloudTopsLowResRT` (half internal resolution, see that target's own
+      // declaration for the full reasoning), NOT `sceneLit` directly. MUST
+      // clear to (0,0,0,0) here — unlike the direct-into-sceneLit draw this
+      // replaces, this is a FRESH scratch target every frame, not a shared
+      // buffer other passes have already painted into, and the composite
+      // step right after depends on a genuinely-transparent background to
+      // produce correct premultiplied colour (see that step's own comment).
+      const prevLowResAutoClear = renderer.autoClearColor;
+      renderer.setRenderTarget(cloudTopsLowResRT);
+      renderer.autoClearColor = true;
       profiler?.begin(Z.cloudTopsDraw);
       renderer.render(cloudTopsScene, camera);
       profiler?.end(Z.cloudTopsDraw);
-      renderer.autoClearColor = prevAutoClear;
+      renderer.autoClearColor = prevLowResAutoClear;
+      renderer.setRenderTarget(null);
+
+      // THE UPSAMPLE COMPOSITE — bilinear-sample the half-res result back
+      // into sceneLit at full resolution, premultiplied-alpha blended (see
+      // `cloudTopsCompositeMaterial`'s own construction comment for why
+      // CustomBlending, not NormalBlending, is required here). Same
+      // autoClearColor guard every other additive-over-sceneLit draw in
+      // this file uses — sceneLit already holds real content this must not
+      // wipe.
+      const prevSceneLitAutoClear = renderer.autoClearColor;
+      renderer.setRenderTarget(sceneLit);
+      renderer.autoClearColor = false;
+      cloudTopsCompositeQuad.render(renderer);
+      renderer.autoClearColor = prevSceneLitAutoClear;
       renderer.setRenderTarget(null);
     }
 
@@ -9558,7 +9654,23 @@ export async function startVtPanViewer({
           deckAltitudePx: env.weather.cloudAltitudePx,
           zoomSensitivity: topsZoomSensitivity,
         });
-        cloudTopsAwake = topsOn && topsGate.awake;
+        // ⚠️ mythica-machina-press#555 — `cloudTopsGate` ITSELF ONLY EVER READS
+        // ZOOM (viewWidthWorldPx/deckAltitudePx/zoomSensitivity above), never
+        // `cloudCover01` — found live 2026-09-16, author: "I zoomed out and
+        // there are no longer clouds but the performance cost is still being
+        // paid." Correct as far as it goes (the zoom gate is a genuinely
+        // separate axis from weather), but it meant the full ~8-field-
+        // evaluation shader ran and was SUBMITTED every awake frame even on a
+        // clear day with nothing to draw — `coverThreshold`'s own calibration
+        // already guarantees the field is EXACTLY zero at cover 0
+        // (`cloud-lab.js#coverCalibration`'s "zeroAtCoverZero" check), so the
+        // draw was real, paid GPU cost, for a result that was already
+        // guaranteed fully transparent. A GENUINELY FREE fix (Effects.md Law
+        // 4, "fails asleep... no mesh submitted, not just alpha 0", the SAME
+        // discipline the zoom gate above already follows) — `> 0`, not some
+        // larger visual threshold, because only EXACT zero is provably
+        // invisible; anything above that may show real, if faint, cloud.
+        cloudTopsAwake = topsOn && topsGate.awake && env.weather.cloudCover01 > 0;
         if (cloudTopsAwake) {
           const topsElevRad = (skyHandle.key.elevationDeg * Math.PI) / 180;
           uTopsSunDir.value.set(skyHandle.key.dirX, skyHandle.key.dirY);
@@ -20818,6 +20930,17 @@ export async function startVtPanViewer({
       for (let k = 0; k < DOF_MIP_COUNT; k++) {
         allocator.resize(dofMips[k], dofMipW(k), dofMipH(k), describeDofMip(dofMipW(k), dofMipH(k)));
       }
+      // cloudTops.lowRes tracks the internal tier too (mythica-machina-press
+      // #555) — same reasoning as bloom/dof's own mip chains just above:
+      // setSize mutates the SAME texture object in place, so
+      // `cloudTopsCompositeMaterial`'s baked `texture(cloudTopsLowResRT.
+      // texture)` node stays valid — no rebind needed.
+      allocator.resize(
+        cloudTopsLowResRT,
+        cloudTopsLowResW(),
+        cloudTopsLowResH(),
+        describeCloudTopsLowRes(cloudTopsLowResW(), cloudTopsLowResH())
+      );
       rebindPresent();
       rebindLighting();
       // buf:occlusion tracks the internal tier too — same reasoning. No

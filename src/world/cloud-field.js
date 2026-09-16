@@ -1457,7 +1457,7 @@ export function buildCloudGroundVisNode(
       cells: false,
       erode: false,
       edgeWidthBoost: blurFieldUnits,
-      varTag: varTag ? `${varTag}-tap${tapIndex}` : `tap${tapIndex}`,
+      varTag: varTag ? `${varTag}_tap${tapIndex}` : `tap${tapIndex}`,
     }).thickness;
     return buildCloudKeyTransmittanceNode(TSL, { thickness, fillShare, depthBias });
   };

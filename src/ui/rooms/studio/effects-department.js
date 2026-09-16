@@ -155,8 +155,8 @@ function buildStudioEffectCard(model) {
     position: 'relative',
     display: 'flex',
     flexDirection: 'column',
-    gap: '6px',
-    padding: '10px 12px 10px 14px',
+    gap: '8px',
+    padding: '12px 14px 12px 16px',
     background: 'var(--bg1, #191c25)',
     border: '1px solid var(--line, rgba(196,208,232,.13))',
     borderRadius: 'var(--r-card, 10px)',
@@ -164,18 +164,51 @@ function buildStudioEffectCard(model) {
     opacity: model.enabled === false ? '0.6' : '1',
   });
 
-  // ---- header: icon + name + enable + badges + tools ----------------------
+  // ---- header: two rows (mythica-machina-press#548) ------------------------
+  // Row 1 is IDENTITY (icon + title + enable) and nothing else; row 2 is
+  // META + TOOLS (health/tier/scope badges, then pin/popout/paint/copy).
+  // The old single-row header packed up to ten flex children (icon, name,
+  // toggle, 3 badges, 4 tool buttons) onto one line — on any card with a
+  // longer title (Candle flame, Lightning, Precipitation) plus its full
+  // badge/tool set, that left the title's own box only a few px wide. The
+  // title `name` span below had no overflow handling, and a flex item's
+  // default `min-width:auto` means it refuses to shrink to fit — so the
+  // overflowing tail of the title rendered OUTSIDE its box and got painted
+  // over by whichever badge/button came right after it in the DOM. Splitting
+  // into two rows means row 1 only ever has three children (icon, title,
+  // toggle) fighting for width, and the title now genuinely truncates
+  // (`overflow:hidden` + ellipsis) instead of spilling into its neighbour.
   const head = document.createElement('div');
-  Object.assign(head.style, { display: 'flex', alignItems: 'center', gap: '7px' });
+  Object.assign(head.style, { display: 'flex', flexDirection: 'column', gap: '5px' });
+
+  // ---- row 1: icon + name/status + enable -----------------------------
+  const headTop = document.createElement('div');
+  Object.assign(headTop.style, { display: 'flex', alignItems: 'center', gap: '8px' });
   const ic = document.createElement('span');
   ic.style.color = `var(${model.accVar ?? '--shine'})`;
+  ic.style.flex = '0 0 auto';
   ic.innerHTML = iconMarkup(model.icon ?? 'gear');
   const nameWrap = document.createElement('span');
-  Object.assign(nameWrap.style, { display: 'flex', flexDirection: 'column', lineHeight: '1.2', minWidth: '0' });
+  Object.assign(nameWrap.style, {
+    display: 'flex',
+    flexDirection: 'column',
+    lineHeight: '1.2',
+    minWidth: '0',
+    flex: '1 1 auto',
+    overflow: 'hidden',
+  });
   const name = document.createElement('span');
-  name.style.fontWeight = '700';
-  name.style.fontSize = '.85rem';
+  Object.assign(name.style, {
+    fontWeight: '700',
+    fontSize: '.85rem',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  });
   name.textContent = model.title;
+  // A real `title` attribute so a truncated name is still readable on hover
+  // — same reasoning as `statusLine.title` just below.
+  name.title = model.title ?? '';
   const statusLine = document.createElement('span');
   statusLine.style.cssText =
     'color:var(--ink2,#7f97ba); font-size:.68rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap';
@@ -184,17 +217,9 @@ function buildStudioEffectCard(model) {
       ? model.status()
       : (model.status ?? collapsedStatusLine({ enabled: model.enabled }));
   statusLine.textContent = statusText;
-  // The row is tight (icon + name + up to 3 badges + 3-4 tool buttons all
-  // share one line), so a long status genuinely does clip behind the CSS
-  // ellipsis above — a real `title` means hovering still reveals the whole
-  // thing rather than just a dead-end "…".
   if (statusText) statusLine.title = statusText;
   nameWrap.append(name, statusLine);
-  head.append(ic, nameWrap);
-
-  const spacer = document.createElement('span');
-  spacer.style.flex = '1';
-  head.append(spacer);
+  headTop.append(ic, nameWrap);
 
   if (typeof model.onToggleEnabled === 'function') {
     // A real track+thumb switch (mythica-machina-press#550) — the old
@@ -244,9 +269,14 @@ function buildStudioEffectCard(model) {
       // still effectively instant to the eye.
       requestAnimationFrame(() => model.onRequestRerender?.());
     });
-    head.append(enableBtn);
+    headTop.append(enableBtn);
   }
-  head.append(
+  head.append(headTop);
+
+  // ---- row 2: health/tier/scope badges, then pin/popout/paint/copy ----
+  const headMeta = document.createElement('div');
+  Object.assign(headMeta.style, { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' });
+  headMeta.append(
     healthBadge({
       declared: model.health?.declared,
       read: model.health?.read,
@@ -255,8 +285,8 @@ function buildStudioEffectCard(model) {
         model.healthPlannedReason ?? 'Control-health (declared − read) waits on the U6 read-tracking proxy.',
     })
   );
-  if (model.tier) head.append(tierChip(model.tier));
-  head.append(
+  if (model.tier) headMeta.append(tierChip(model.tier));
+  headMeta.append(
     scopeGlyph({
       schema: model.schema,
       plannedReason:
@@ -264,6 +294,10 @@ function buildStudioEffectCard(model) {
         'Full scene/world/client scope is not wired yet — only an effect’s own enable state has a real world/client duality today.',
     })
   );
+
+  const toolSpacer = document.createElement('span');
+  toolSpacer.style.flex = '1';
+  headMeta.append(toolSpacer);
 
   const pinBtn = document.createElement('button');
   pinBtn.type = 'button';
@@ -283,7 +317,7 @@ function buildStudioEffectCard(model) {
     else pinned.add(model.id);
     model.onRequestRerender?.();
   });
-  head.append(pinBtn);
+  headMeta.append(pinBtn);
 
   if (typeof model.onPopOut === 'function') {
     const popBtn = document.createElement('button');
@@ -294,7 +328,7 @@ function buildStudioEffectCard(model) {
     popBtn.style.color = 'var(--ink2)';
     popBtn.style.flex = '0 0 auto';
     popBtn.addEventListener('click', () => model.onPopOut());
-    head.append(popBtn);
+    headMeta.append(popBtn);
   }
 
   if (typeof model.onPaint === 'function') {
@@ -311,13 +345,14 @@ function buildStudioEffectCard(model) {
     paintBtn.style.color = 'var(--ink2)';
     paintBtn.style.flex = '0 0 auto';
     paintBtn.addEventListener('click', () => model.onPaint());
-    head.append(paintBtn);
+    headMeta.append(paintBtn);
   }
   // The copy-settings button — see `buildCopySettingsButton`'s own note.
   // Same "skip when there's nothing to copy" guard `buildEffectCard` uses.
   if (model.schema && Object.keys(model.schema).length > 0) {
-    head.append(buildCopySettingsButton(model));
+    headMeta.append(buildCopySettingsButton(model));
   }
+  head.append(headMeta);
   card.append(head);
 
   // ---- mask-found/missing row ----------------------------------------------
@@ -644,9 +679,20 @@ export function renderEffectsDepartment(container, ctx) {
   const grid = document.createElement('div');
   Object.assign(grid.style, {
     display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))',
-    gap: '10px',
+    // Fixed at exactly two columns (mythica-machina-press#548) — the previous
+    // auto-fill(minmax(320px,...)) happily packed in a 3rd column on any wide
+    // Studio window, which is what made the header-overlap bug (see
+    // buildStudioEffectCard's `name` span below) bite in practice: three
+    // columns left too little width per card for the badge/tool cluster.
+    gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+    gap: '12px',
     alignContent: 'start',
+    // Grid items default to `align-items:stretch` — confirmed live in the
+    // Studio preview harness: opening Water's 54-control Advanced section
+    // stretched its ROW-1 neighbour (Bloom, one slider) to match Water's
+    // full ~1700px height, leaving a huge empty pink-bordered box under
+    // Bloom's single control. Each card should size to its OWN content.
+    alignItems: 'start',
   });
 
   function makeChip(label, accVar, filterKey) {
@@ -678,21 +724,41 @@ export function renderEffectsDepartment(container, ctx) {
   // confirmed by reading how this department commits to the DOM,
   // `container.innerHTML = ''` on every render, below). Toggles `.hidden`
   // on the already-built card elements instead.
-  const searchBox = document.createElement('input');
-  searchBox.type = 'search';
-  searchBox.placeholder = 'Filter this list by name or control…';
-  searchBox.value = searchQuery;
-  searchBox.setAttribute('aria-label', 'Filter effects in this category');
-  Object.assign(searchBox.style, {
+  // Wrapped with its own icon (mythica-machina-press#548) so it visually
+  // reads as a lighter-weight, secondary "filter what's on screen" control —
+  // distinct from the room-header's pill-shaped, kbd-hinted global search box
+  // right above it, which is a different action (jump to one control anywhere
+  // in the Studio) even though the two sat close enough to look redundant.
+  const searchWrap = document.createElement('div');
+  Object.assign(searchWrap.style, {
     flexBasis: '100%',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
     background: 'var(--bg2)',
     border: '1px solid var(--line)',
     borderRadius: 'var(--r-ctl,6px)',
-    padding: '4px 8px',
+    padding: '4px 10px',
+  });
+  const searchIcon = document.createElement('span');
+  Object.assign(searchIcon.style, { display: 'flex', flex: '0 0 auto', color: 'var(--ink2)' });
+  searchIcon.innerHTML = iconMarkup('search', 'style="width:12px;height:12px"');
+  const searchBox = document.createElement('input');
+  searchBox.type = 'search';
+  searchBox.placeholder = 'Filter the cards below by name or control…';
+  searchBox.value = searchQuery;
+  searchBox.setAttribute('aria-label', 'Filter effects in this category');
+  Object.assign(searchBox.style, {
+    flex: '1',
+    minWidth: '0',
+    background: 'none',
+    border: 'none',
+    outline: 'none',
     color: 'var(--ink0)',
     fontSize: '.74rem',
   });
-  strip.append(searchBox);
+  searchWrap.append(searchIcon, searchBox);
+  strip.append(searchWrap);
 
   const visible = models
     .filter(({ model }) => !activeFilter || model.filterCategory === activeFilter)

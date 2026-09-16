@@ -13,8 +13,16 @@
         font:
           13px/1.5 system-ui,
           sans-serif;
-        background: #14161d;
-        color: #eceff5;
+        /* Token-driven, not hardcoded to dark — preview.js's own "Cycle
+           theme" button flips html[data-theme], and LANTERN's tokens (once
+           installTokens() injects them) update --bg0/--ink0 live. Before
+           this, the harness page around the glass room stayed hardcoded to
+           dark's exact colours no matter which theme was selected, which
+           made e.g. light-theme card text (dark ink on a light card, but
+           still sitting in this body's old near-black background/native
+           ink) look broken when the room itself was rendering correctly. */
+        background: var(--bg0, #14161d);
+        color: var(--ink0, #eceff5);
       }
       #bar {
         position: fixed;

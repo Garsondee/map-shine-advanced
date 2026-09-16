@@ -150,6 +150,19 @@ ${ACCENT_VARS.map(
    controls.js already documents: a descendant rule would rotate a NESTED
    details' own chevron just because an ANCESTOR details is open. */
 #${ROOM_ID} details[open] > summary .msa-chev{transform:rotate(90deg)}
+/* mythica-machina-press#548 — this class (an effect card's preset/debug-
+   channel <select>, e.g. water's "Off — normal render" picker built by
+   boot.js#buildWaterDebugSelect) carried NO matching rule anywhere this room
+   reaches, the exact "raw browser chrome in a themed panel" gap
+   diag/debug-panel-controls.js's own #msa-debug-panel copy of this rule
+   already documents fixing once for the OLD panel — that fix never made it
+   to this shell. Token-driven rather than that rule's hardcoded rgba(), so
+   it follows the Studio's own live theme instead of being pinned to dark. */
+#${ROOM_ID} .msa-effect-preset-select{background:var(--bg2); color:var(--ink0);
+  border:1px solid var(--line); border-radius:var(--r-ctl,6px); padding:3px 8px;
+  font:inherit; font-size:.72rem; outline:none}
+#${ROOM_ID} .msa-effect-preset-select:hover{border-color:var(--line-strong)}
+#${ROOM_ID} .msa-effect-preset-select:focus-visible{border-color:var(--shine)}
 `.trim();
   document.head.appendChild(el);
 }

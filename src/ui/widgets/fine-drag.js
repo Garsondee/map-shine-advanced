@@ -196,15 +196,25 @@ export function createFineDragHandle(input, { integer = false, axis = 'x' } = {}
   handle.className = 'msa-fine-drag-handle';
   handle.title = 'Drag for fine adjustment (same as holding Shift on the slider)';
   Object.assign(handle.style, {
-    width: axis === 'y' ? '18px' : '10px',
-    height: axis === 'y' ? '10px' : '18px',
+    width: axis === 'y' ? '22px' : '13px',
+    height: axis === 'y' ? '13px' : '18px',
+    flexDirection: axis === 'y' ? 'column' : 'row',
+    gap: '2px',
     cursor: axis === 'y' ? 'ns-resize' : 'ew-resize',
   });
 
-  const line = document.createElement('div');
-  line.className = 'msa-fine-drag-handle-line';
-  Object.assign(line.style, axis === 'y' ? { width: '14px', height: '2px' } : { width: '2px', height: '14px' });
-  handle.appendChild(line);
+  // TWO parallel bars, not one (mythica-machina-press#548) — a single 2px
+  // line sitting between a slider and its readout reads as a stray
+  // typographic pipe rather than a grip you can grab. Two short bars is the
+  // same "drag handle" affordance Tweakpane/most OS resize grips use, still
+  // drawn from the identical `.msa-fine-drag-handle-line` class so the
+  // existing hover/active colour rule in `injectHandleStyle` covers both.
+  for (let i = 0; i < 2; i++) {
+    const line = document.createElement('div');
+    line.className = 'msa-fine-drag-handle-line';
+    Object.assign(line.style, axis === 'y' ? { width: '14px', height: '2px' } : { width: '2px', height: '14px' });
+    handle.appendChild(line);
+  }
 
   runFineDragSession(handle, input, { axis, shouldEngage: () => true });
   return handle;

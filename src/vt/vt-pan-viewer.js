@@ -8075,7 +8075,14 @@ export async function startVtPanViewer({
       const prevAutoClear = renderer.autoClearColor;
       renderer.setRenderTarget(sceneLit);
       renderer.autoClearColor = false;
+      // mythica-machina-press#552 — this pass ran measured-but-unattributed
+      // from the day it shipped: the pass-level hook already timed it as
+      // pass.surface.cloudTops, but that auto-synthesised row carries no
+      // ownerEffectId (perf-zones.js's own header — pass rows are derived,
+      // never declared). Same bracket shape as surfDust/surfGusts just above.
+      profiler?.begin(Z.cloudTopsDraw);
       renderer.render(cloudTopsScene, camera);
+      profiler?.end(Z.cloudTopsDraw);
       renderer.autoClearColor = prevAutoClear;
       renderer.setRenderTarget(null);
     }
@@ -8345,8 +8352,7 @@ export async function startVtPanViewer({
       // re-redirects while inactive) — read the true fresh scene instead of
       // reprocessing our own prior output.
       const lensChainSource = gradePresent.getLitSource?.() ?? sceneLit.texture;
-      lensBuilt.sceneTexNode.value =
-        lensChainSource === lensLastOutputTexture ? sceneLit.texture : lensChainSource;
+      lensBuilt.sceneTexNode.value = lensChainSource === lensLastOutputTexture ? sceneLit.texture : lensChainSource;
       if (lensBuilt.lightBurnTexNode) {
         lensBuilt.lightBurnTexNode.value = lensLightBurnReadRT?.texture ?? lensLightBurnPlaceholder;
       }
@@ -17341,6 +17347,9 @@ export async function startVtPanViewer({
       surfSpecularIslandBake: profiler?.indexOf('surface.specularIslandBake') ?? -1,
       surfDust: profiler?.indexOf('surface.drawDust') ?? -1,
       surfGusts: profiler?.indexOf('surface.drawGusts') ?? -1,
+      // Added 2026-09-16 (mythica-machina-press#552) — see runCloudTopsPass's
+      // own bracket and perf-zones.js's matching declaration.
+      cloudTopsDraw: profiler?.indexOf('surface.cloudTopsDraw') ?? -1,
       bloomUniforms: profiler?.indexOf('bloom.uniformPush') ?? -1,
       bloomBright: profiler?.indexOf('bloom.bright') ?? -1,
       bloomDown: profiler?.indexOf('bloom.downsample') ?? -1,

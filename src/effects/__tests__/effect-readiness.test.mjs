@@ -29,6 +29,8 @@ import { ZONES } from '../../diag/perf-zones.js';
 import { APERTURE_GOBO } from '../aperture-gobo.js';
 import { BLOOM } from '../bloom.js';
 import { CANDLE_FLAME } from '../candle-flame.js';
+import { CLOUD_LOOK } from '../clouds/clouds.js';
+import { CLOUD_TOPS } from '../clouds/cloud-tops.js';
 import { DEPTH_OF_FIELD } from '../depth-of-field.js';
 import { DOOR_GRAPHICS } from '../door-graphics.js';
 import { FIRE } from '../fire/fire.js';
@@ -46,6 +48,14 @@ const MANIFESTS = [
   APERTURE_GOBO,
   BLOOM,
   CANDLE_FLAME,
+  // Missing until mythica-machina-press#552 — CLOUD_TOPS owns a real zone
+  // (surface.cloudTopsDraw, added alongside this fix) and check 2 below would
+  // have caught that the moment it shipped (2026-09-12) had it been listed
+  // here then. CLOUD_LOOK owns none (EFFECT_ZONING's own 'clouds' entry,
+  // coverage:'none') so it isn't REQUIRED by check 2, but is added for the
+  // same reason every other manifest is here: check 1 validates its shape too.
+  CLOUD_LOOK,
+  CLOUD_TOPS,
   DEPTH_OF_FIELD,
   DOOR_GRAPHICS,
   FIRE,

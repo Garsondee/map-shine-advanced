@@ -908,6 +908,36 @@ export const ZONES = Object.freeze(
       false,
       'gustEngine.scene'
     ),
+    // Added 2026-09-16 (perf-instrumentation-audit, mythica-machina-press#552)
+    // — `surface.cloudTops` (graph/passes.js, live since 2026-09-12) had NO
+    // declared zone under it at all: the profiler's own generic per-pass hook
+    // still timed it (as the auto-synthesised `pass.surface.cloudTops`), but
+    // that synthesised row has no ZoneDecl and therefore no `ownerEffectId`
+    // (buildZoneRows, perf-report.js — pass-level rows are DERIVED, never
+    // declared, precisely so they can never carry one on their own). Its
+    // whole cost was measured and simultaneously invisible as "clouds" in
+    // every report — the exact one-directional gap EFFECT_ZONING's own
+    // header already names for fire/specular/window/apertureGobo, now closed
+    // for the newest effect too, before anyone had to notice it live first.
+    // Same shape as `surface.drawDust`/`surface.drawGusts` immediately above:
+    // one 'gpu' zone bracketing the single `renderer.render()` call, nothing
+    // finer — `runCloudTopsPass`'s own CPU work (mesh position/scale, the
+    // zoom-gate check) is a handful of scalar ops, not worth a second zone.
+    z(
+      'surface.cloudTopsDraw',
+      'Cloud tops draw',
+      'surface',
+      'surface.cloudTops',
+      // 'cloudTops' (effects/clouds/cloud-tops.js#CLOUD_TOPS), NOT 'clouds' —
+      // a genuinely separate registered effect manifest from CLOUD_LOOK
+      // (effects/clouds/clouds.js, id:'clouds', the ground-shadow/mood half —
+      // see effects/index.js's own comment on why they're split).
+      'cloudTops',
+      'gpu',
+      'conditional',
+      false,
+      'runCloudTopsPass'
+    ),
 
     // ---- post.bloom: 11 draws, 5 zones. A mip chain is ONE decision, not four.
     z(
@@ -1291,6 +1321,19 @@ export const EFFECT_ZONING = Object.freeze({
   apertureGobo: Object.freeze({
     coverage: 'partial',
     why: "Its own debug-visualization draw is zoned (light.drawApertureShadow, added 2026-08-06 — the bracket already existed in code, only the declaration was missing). The REAL per-fragment gobo pattern cost is baked directly into point-light-pool.js's main light/coloration materials and is only measurable as part of the null-owned light.drawPointLights/light.drawColoration zones.",
+  }),
+  // Added 2026-09-16 (mythica-machina-press#552, author: "does clouds have
+  // full end-to-end benchmarking? it has a high cost we need to track down").
+  // It didn't — "clouds" is actually TWO separate registered effect
+  // manifests (effects/index.js's own comment on why they're split), each
+  // with its own gap, and only one is closed as of this entry.
+  cloudTops: Object.freeze({
+    coverage: 'full',
+    why: "The lit cloud shapes (graph/passes.js's surface.cloudTops pass, live 2026-09-12) draw as one quad, one renderer.render() call, now bracketed as surface.cloudTopsDraw — added alongside this entry. Before it, the cost was real and already IN the raw zone data (the profiler's own generic per-pass hook auto-times every live pass as pass.surface.cloudTops regardless of any declaration here — see perf-zones.js's own module header, 'PASS-LEVEL ZONES ARE DERIVED, NEVER DECLARED') but that auto-synthesised row has no ZoneDecl and therefore no ownerEffectId (buildZoneRows, perf-report.js) — measured, and simultaneously unattributable to 'cloudTops' in any report, from the day it shipped.",
+  }),
+  clouds: Object.freeze({
+    coverage: 'none',
+    why: 'The ground shadow (the shadow/mood half, live 2026-09-10 — the CLOUD_LOOK manifest, effects/clouds/clouds.js) is not a pass and cannot become one: world/cloud-field.js#buildCloudGroundVisNode is a TSL shader-graph NODE FUNCTION, called once per floor at subsystem-construction time from INSIDE two OTHER effects’ own materials — vt-pan-viewer.js#buildWindowCloudFactorNode (feeds window’s glass darkening) and #buildWaterCloudFactorNode (feeds water’s sun-disc glint) — so its real per-fragment cost executes as a few inseparable extra ALU ops inside light.drawWindowLight’s and water’s own already-zoned draws, with no render call of its own to bracket. Same structural shape as `grade` above (folded into a host shader, sweep-only) and `fluid`/`vegetation`/`water`’s own shared-scene draws elsewhere in this file — not a new failure mode, the newest instance of an old one. Resolving this needs a synthetic A/B — force the node’s strength uniform to 0, re-measure the SAME host zones, diff — the exact shape perf-structural-ab.js already built for early-Z/point-light-batching, not a bracket. Not built yet; tracked as the open half of #552.',
   }),
   // NOTE, 2026-08-15: Albedo Clarity (the CAS sharpen, "Sharpening" Make-panel
   // card) deliberately has NO entry here. EFFECT_ZONING is scoped to

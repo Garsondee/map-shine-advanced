@@ -17,6 +17,8 @@ import {
   APERTURE_GOBO,
   BLOOM,
   CANDLE_FLAME,
+  CLOUD_LOOK,
+  CLOUD_TOPS,
   DEPTH_OF_FIELD,
   DOOR_GRAPHICS,
   FLUID,
@@ -64,6 +66,15 @@ const MANIFESTS = [
   UI_WINDOW_SHADOW,
   LIGHTNING,
   FIRE,
+  // Missing entirely until mythica-machina-press#552 — both CLOUD_LOOK
+  // (id:'clouds', live 2026-09-10) and CLOUD_TOPS (id:'cloudTops', live
+  // 2026-09-12) shipped without ever being added here, so this suite's own
+  // "checked against the LIVE effect manifests" promise (this file's own
+  // header) was silently not true for either of them: nothing could have
+  // caught a bad ownerEffectId or a missing EFFECT_ZONING entry for clouds
+  // before this, regardless of what perf-zones.js itself declared.
+  CLOUD_LOOK,
+  CLOUD_TOPS,
 ];
 
 export function run(t) {

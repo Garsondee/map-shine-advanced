@@ -470,6 +470,7 @@ import {
   syncStudioButtonState,
   registerRemoteButton,
   syncRemoteButtonState,
+  syncRemoteButtonStateSoon,
   registerPlayerButton,
   syncPlayerButtonState,
   watchSceneWallStructure,
@@ -1540,8 +1541,14 @@ function install() {
         // so stamping `weatherArchetype:'custom'` on a temperature drag (what
         // LIVE_CHANNELS' own onAxisCommit does) would wrongly un-light the
         // active mood chip over an edit that has nothing to do with it.
+        //
+        // Routes through the real fade engine (Remote UI pass), NOT a direct
+        // editSky() like Sky Light/Atmosphere/Sun latitude just above/below —
+        // see `fadeTemperatureTo`'s own doc for why an instant commit here
+        // was landing as an un-bypassed target for vt-pan-viewer's own
+        // separate multi-minute "brisk" ease, ignoring Fade Time entirely.
         getTemperature: () => skyScope.sky?.temperature01 ?? 0.55,
-        onTemperatureCommit: (v) => void editSky({ temperature01: v }),
+        onTemperatureCommit: (v) => fadeTemperatureTo(v, MapShine.__remote?.getFadeOverMs?.() ?? 0),
         // Wind strength (2026-08-27 fix, author: "wind speed should be one of
         // the vertical sliders") — same ENV_CHANNELS shape as Sky
         // light/Atmosphere/Temperature just above (own getter/commit pair, not
@@ -1568,14 +1575,24 @@ function install() {
         // (renderChips' own highlight check) goes false for every chip
         // including the one just clicked — a GM watching a 10s fade sees the
         // WHOLE row go dark with no sign their click landed. Same
-        // fadeState/pendingArchetypeCompletions buildNowPlayingLabel already
+        // fadeState/pendingSkyFadeCompletions buildNowPlayingLabel already
         // reads, reused rather than a second tracking mechanism.
+        //
+        // ⚠️ SKIPS a non-string completion (Remote UI pass) — since
+        // `fadeTemperatureTo` started also using a `weather.`-prefixed key
+        // (`weather.temperature01`) for its OWN, archetype-less fade, this
+        // loop could otherwise return in-flight temperature's raw editSky()
+        // patch object where every caller (renderChips' own `archetype.id
+        // === fadingId` check) expects a string id or null. `typeof
+        // completion === 'string'` keeps this returning exactly what it
+        // always has — the mood chip a fade is heading toward, or null —
+        // and simply keeps looking past a temperature-only fade instead.
         getFadingArchetypeId: () => {
           const nowMs = wallClockMs();
           for (const [key, entry] of Object.entries(fadeState)) {
-            if (key.startsWith('weather.') && !isEntryExpired(entry, nowMs)) {
-              return pendingArchetypeCompletions.get(entry.id) ?? null;
-            }
+            if (!key.startsWith('weather.') || isEntryExpired(entry, nowMs)) continue;
+            const completion = pendingSkyFadeCompletions.get(entry.id);
+            if (typeof completion === 'string') return completion;
           }
           return null;
         },
@@ -10191,7 +10208,14 @@ function install() {
   // joins an already-populated registry rather than starting a second,
   // shadowed one. id -> {typeOf, readLive, write}.
   fadeSourceRegistry.registerSource('weather', {
-    keys: () => ['cloudCover01', 'precip01'],
+    // `temperature01` joined cloudCover01/precip01 here in the Remote UI
+    // pass (author report: "the vertical sliders... always slowly change...
+    // would be great if it followed Fade Time but it doesn't"). It was
+    // already one of WEATHER_AXES' three genuinely `'live'` axes and already
+    // had a Channels fader (weather-board.js's own ENV_CHANNELS), but its
+    // commit went straight through `editSky()` with no fade at all — see
+    // `fadeTemperatureTo`'s own doc for the mechanism that bug actually hit.
+    keys: () => ['cloudCover01', 'precip01', 'temperature01'],
     typeOf: () => 'float',
     readLive: (field) => skyScope.sky?.[field] ?? 0,
     // LIVE push only — matches the astrolabe's own slider-drag preview
@@ -10207,17 +10231,25 @@ function install() {
       // land on the manager's real `state` directly rather than becoming yet
       // another target for the manager's own separate "brisk" ease to chase.
       else if (field === 'precip01') setVtPanViewerWeatherTargets({ precip01: value }, { immediate: true });
+      // Same shape as precip01 immediately above — temperature rides the
+      // SAME weather-target manager (setWeatherTargets), so the identical
+      // bypass applies unchanged.
+      else if (field === 'temperature01') setVtPanViewerWeatherTargets({ temperature01: value }, { immediate: true });
     },
   });
 
   /** Record<'weather.cloudCover01'|'weather.precip01', FadeEntry> — scene-
    * scoped, reloaded from the scene flag on every canvasReady (below). */
   let fadeState = {};
-  /** gestureId -> the archetype id it's fading TOWARD ('custom' for a
-   * Baseline fade, which has no named row to relight), so the per-tick pump
-   * knows what to persist once every key sharing that gesture has arrived.
-   * Bookkeeping ONLY — fadeState itself holds per-KEY entries, never groups. */
-  const pendingArchetypeCompletions = new Map();
+  /** gestureId -> what to persist once every fadeState key sharing that
+   * gesture has arrived. Bookkeeping ONLY — fadeState itself holds per-KEY
+   * entries, never groups. Two shapes (Remote UI pass — renamed from
+   * `pendingArchetypeCompletions`, which stopped being an honest name once a
+   * second shape joined it): a STRING is an archetype id ('custom' for a
+   * Baseline fade, which has no named row to relight — skipped, not
+   * persisted); an OBJECT is a raw `editSky()` patch, for a fade with no
+   * archetype at all (`fadeTemperatureTo`'s own single-axis gesture). */
+  const pendingSkyFadeCompletions = new Map();
   /** Captured once per scene — "the scene's authored resting look" the
    * Baseline button fades back to. `null` until the first canvasReady for
    * this scene has run. */
@@ -10258,7 +10290,7 @@ function install() {
     }
     if (Object.keys(targets).length === 0) return;
     fadeState = mergeFadeState(fadeState, { id: gestureId, label: archetype.label, targets }, nowMs);
-    pendingArchetypeCompletions.set(gestureId, archetypeId);
+    pendingSkyFadeCompletions.set(gestureId, archetypeId);
     void editSky({ weatherArchetype: 'custom' });
     void writeFadeState(fadeState);
   }
@@ -10286,8 +10318,59 @@ function install() {
       };
     }
     fadeState = mergeFadeState(fadeState, { id: gestureId, label: 'Baseline', targets }, nowMs);
-    pendingArchetypeCompletions.set(gestureId, 'custom'); // no named row to relight
+    pendingSkyFadeCompletions.set(gestureId, 'custom'); // no named row to relight
     void editSky({ weatherArchetype: 'custom' });
+    void writeFadeState(fadeState);
+  }
+
+  /**
+   * The Temperature fader's own commit (Remote UI pass — author report: "the
+   * vertical sliders... always slowly change between their current and
+   * eventual setting... would be great if it followed Fade Time but it
+   * doesn't"). Temperature is deliberately NOT archetype-owned (`ARCHETYPE_
+   * OWNED_AXES`: "a sky is not a climate" — see weatherBoard's own
+   * `onTemperatureCommit` doc, a few hundred lines up), so it never went
+   * through `fadeWeatherToArchetype` above — its commit called `editSky()`
+   * directly, INSTANTLY, same as Sky Light/Atmosphere/Sun latitude/Wind.
+   * But unlike those four (plain closure-variable setters, genuinely
+   * instant, confirmed by reading `setSkyRealism`/`setGradeEnvStrength`/
+   * `setSunLatitude`/`MapShine.setWind` directly), temperature's real value
+   * lands via `setVtPanViewerWeatherTargets` — the SAME weather-target
+   * manager cloudCover01/precip01 use, whose own SEPARATE "brisk" tau ease
+   * (~120-150s) applies to any target that doesn't ask for `{immediate:
+   * true}` (see fadeSourceRegistry's own `write` above). Every temperature
+   * drag was landing as a fresh, un-bypassed target for THAT multi-minute
+   * ease, on its own schedule no matter what Fade Time was selected — this
+   * function instead starts a REAL fade-engine entry (respecting the
+   * selected Fade Time, exactly like a mood chip) and writes through the
+   * SAME `{immediate: true}` bypass every tick, so the two eases never stack.
+   * Deliberately does not stamp `weatherArchetype:'custom'` (matches the
+   * direct-commit path it replaces) and persists via a raw `editSky()` patch
+   * on arrival, not an archetype id — see `pendingSkyFadeCompletions`'s own
+   * doc for that second shape.
+   * @param {number} value @param {number} overMs
+   */
+  function fadeTemperatureTo(value, overMs) {
+    const nowMs = wallClockMs();
+    const gestureId = `temperature:${nowMs}`;
+    fadeState = mergeFadeState(
+      fadeState,
+      {
+        id: gestureId,
+        label: 'Temperature',
+        targets: {
+          'weather.temperature01': {
+            to: value,
+            type: 'float',
+            overMs,
+            curve: 'ease',
+            from: fadeSourceRegistry.readLive('weather.temperature01'),
+          },
+        },
+      },
+      nowMs
+    );
+    pendingSkyFadeCompletions.set(gestureId, { temperature01: value });
     void writeFadeState(fadeState);
   }
 
@@ -10453,10 +10536,10 @@ function install() {
   }
 
   // ── CUE TEST-FIRE + INSTANT REVERT (§5.4) — deliberately isolated from
-  // fadeState/pendingArchetypeCompletions, NEVER via mergeFadeState/
+  // fadeState/pendingSkyFadeCompletions, NEVER via mergeFadeState/
   // writeFadeState. A test that overwrote fadeState[key] directly would
   // hijack whatever REAL, concurrent gesture (a mood-chip fade, another
-  // cue) already owns that key — pendingArchetypeCompletions tracks
+  // cue) already owns that key — pendingSkyFadeCompletions tracks
   // completion by counting that gesture's OWN entries in fadeState, so a
   // hijacked key would either fire that gesture's completion early (wrong
   // archetype lands) or strand it pending forever. A preview must never be
@@ -10581,11 +10664,18 @@ function install() {
       fadeSourceRegistry.write(key, computeEasedValue(entry, nowMs));
     }
     let anyCompleted = false;
-    for (const [gestureId, archetypeId] of pendingArchetypeCompletions) {
+    for (const [gestureId, completion] of pendingSkyFadeCompletions) {
       const ownEntries = Object.values(fadeState).filter((e) => e.id === gestureId);
       if (ownEntries.length > 0 && ownEntries.every((e) => isEntryExpired(e, nowMs))) {
-        pendingArchetypeCompletions.delete(gestureId);
-        if (archetypeId !== 'custom') void editSky({ weatherArchetype: archetypeId });
+        pendingSkyFadeCompletions.delete(gestureId);
+        // Two shapes — see pendingSkyFadeCompletions' own doc: a string is an
+        // archetype id ('custom' skipped, nothing named to persist); an
+        // object is a raw editSky() patch (fadeTemperatureTo's own gesture).
+        if (typeof completion === 'string') {
+          if (completion !== 'custom') void editSky({ weatherArchetype: completion });
+        } else {
+          void editSky(completion);
+        }
         anyCompleted = true;
       }
     }
@@ -10861,6 +10951,12 @@ function install() {
     // never both (see `DEFAULT_SKY.weatherArchetype`'s own note). A named sky
     // applies its whole ROW, so all four cloud axes come back; only a
     // hand-tuned `custom` sky is described by the stored cover.
+    //
+    // `nowMs` lives here, not inside the `else` below (Remote UI pass) —
+    // the temperature restore a few lines down needs the identical "don't
+    // stomp a live fade" guard cloud/precip already have, and it runs
+    // unconditionally, outside this if/else.
+    const nowMs = wallClockMs();
     if (sky.weatherArchetype && sky.weatherArchetype !== 'custom') {
       setVtPanViewerWeatherArchetype(sky.weatherArchetype, 'sky-settings');
     } else {
@@ -10880,7 +10976,6 @@ function install() {
       // set while a live fadeState entry owns the key is the same law
       // day-clock.js#syncTo already applies to todHour, just enforced by
       // staying out of the fade's way instead of re-targeting it.
-      const nowMs = wallClockMs();
       const cloudFading =
         fadeState['weather.cloudCover01'] && !isEntryExpired(fadeState['weather.cloudCover01'], nowMs);
       const precipFading = fadeState['weather.precip01'] && !isEntryExpired(fadeState['weather.precip01'], nowMs);
@@ -10896,7 +10991,17 @@ function install() {
     // a sky is not a climate). No row will ever restore it, so if this line is
     // absent a wintry map silently thaws on every refresh and its snow turns
     // to rain — which is exactly the half-persistence the author reported.
-    setVtPanViewerWeatherTargets({ temperature01: sky.temperature01 });
+    //
+    // SAME "don't stomp a live fade" guard as cloud/precip above (Remote UI
+    // pass, author report: "the vertical sliders... always slowly change...
+    // doesn't follow Fade Time"). Temperature now fades through the real
+    // fade engine too (fadeTemperatureTo) — without this guard, every
+    // editSky() firing DURING that fade (including the fade-start gesture's
+    // own persistence echo) would restore the STALE pre-fade
+    // `sky.temperature01`, fighting pumpWeatherFades exactly the way cloud/
+    // precip used to before they got this same guard.
+    const tempFading = fadeState['weather.temperature01'] && !isEntryExpired(fadeState['weather.temperature01'], nowMs);
+    if (!tempFading) setVtPanViewerWeatherTargets({ temperature01: sky.temperature01 });
     // ⚠️ THE AUTHORED KIND, AND ONLY WHEN IT IS AN EXPLICIT PIN. `applyArchetype`
     // above already set this — to the row's own kind for `snow`, to `auto` for
     // every other row — so restoring the stored value unconditionally would
@@ -14040,7 +14145,7 @@ function install() {
           const { state, reason } = readFadeState();
           fadeState = state;
           if (reason) log.info(`fade state (canvasReady): ${reason}`); // "no active scene" etc. — benign, not an error
-          pendingArchetypeCompletions.clear();
+          pendingSkyFadeCompletions.clear();
           baselineWeatherSnapshot = {
             cloudCover01: skyScope.sky?.cloudCover01 ?? 0,
             precip01: skyScope.sky?.precip01 ?? 0,
@@ -14874,9 +14979,16 @@ async function bootHeartbeat() {
     // default-open call, mirroring the old panel's own landing zone
     // (Bridge -> the Remote), not Studio/Player, which stay an extra click
     // away exactly as authoring/dev tools always were.
+    //
+    // `...Soon`, not the plain sync (Remote UI pass — see that function's
+    // own doc for the exact race this closes: "sometimes it doesn't appear
+    // when I press the button and I have to press twice"). This is the ONE
+    // call site racing Foundry's own first toolbar render; every other
+    // syncRemoteButtonState call (onOpenChange, below) fires long after that
+    // render has already happened, so it stays on the plain, un-retried version.
     if (MapShine.debug?.isGM?.()) {
       MapShine.__remote?.open();
-      syncRemoteButtonState(true);
+      syncRemoteButtonStateSoon(true);
     }
     log.info(`boot heartbeat rendering. Gate "boot renders" ✔`);
   } catch (err) {

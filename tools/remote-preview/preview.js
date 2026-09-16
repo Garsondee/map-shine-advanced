@@ -32,6 +32,7 @@ const fakeSky = {
   windDirectionDeg: 45,
   windSpeed01: 0.3,
   cloudCover01: 0.2,
+  latitudeDeg: 30,
   mode: 'almanac',
   // Realistically empty by default -- nothing in this harness simulates the
   // Almanac's own autonomous weather walk that pins/unpins axes for real.
@@ -339,6 +340,20 @@ const remote = installRemote({
     onTemperatureCommit: (v) => {
       fakeSky.temperature01 = v;
       log(`temperature -> ${v}`);
+    },
+    // Wind + Sun latitude (Remote UI pass) — this harness had 5 of the real
+    // 7 Channels wired, silently missing the two that make the rack wrap to
+    // an orphaned 7th fader on its own line; mirrors boot.js's own
+    // getWindSpeed01/onWindSpeed01Commit/getSunLatitude/onSunLatitudeCommit.
+    getWindSpeed01: () => fakeSky.windSpeed01 ?? 0,
+    onWindSpeed01Commit: (v) => {
+      fakeSky.windSpeed01 = v;
+      log(`wind -> ${v}`);
+    },
+    getSunLatitude: () => fakeSky.latitudeDeg ?? 30,
+    onSunLatitudeCommit: (v) => {
+      fakeSky.latitudeDeg = v;
+      log(`sun latitude -> ${v}`);
     },
     getSceneOverride: () => fakeSky.sceneOverride === true,
     onSceneOverrideCommit: (enabled) => {

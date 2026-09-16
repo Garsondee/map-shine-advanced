@@ -68,7 +68,20 @@ export function buildVerticalFader(id, decl, { value, onChange }) {
     flexDirection: 'column',
     alignItems: 'center',
     gap: '4px',
-    width: '52px',
+    // 44px, not 52 (Remote UI pass) — the Remote's own Channels rack is 7
+    // faders wide today (weather-board.js's LIVE_CHANNELS + ENV_CHANNELS),
+    // and at 52px+8px gaps (shell.js's own .msa-wx-fader-rack) 7 of them
+    // measure 412px, well past the room's real usable width — confirmed
+    // live in tools/remote-preview: the 7th (Sun latitude) wrapped alone
+    // onto its own centred row, a lonely, unbalanced look for one slider.
+    // The naive budget (400px room − .msa-remote-body's 14px×2 padding =
+    // 372px) OVERSTATES it: .msa-remote-body scrolls (overflow-y:auto), and
+    // once its content is tall enough to need that scrollbar — which the
+    // full Astrolabe+Fade Time+Moods+Channels+Cues stack always is — the
+    // scrollbar itself eats ~15px of that, measured live at 357px real
+    // usable width. 44px here plus the matching 4px rack gap brings 7
+    // faders to 332px, comfortably under even a wider platform scrollbar.
+    width: '44px',
     flex: '0 0 auto',
   });
   wrap.dataset.msaParam = id;

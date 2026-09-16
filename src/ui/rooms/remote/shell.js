@@ -330,8 +330,18 @@ function injectStyle() {
    a normal row below the rack (a bool control, not a slider). Wraps as a
    defensive safety net, not because 5 faders at their own width need it at
    any real containment size (measured: well under the Remote's own budget). */
+/* 4px, not 8 (Remote UI pass) — matches vertical-fader.js's own 44px width
+   (down from 52px): together, 7 faders measure 332px against the room's
+   real ~357px usable width (the naive 372px estimate misses the vertical
+   scrollbar .msa-remote-body always ends up showing), so the rack no
+   longer wraps its 7th fader (Sun latitude) onto a lonely, centred row of
+   its own — confirmed live in tools/remote-preview before this pair of
+   changes, and the exact scrollbar-width shortfall of a first attempt at
+   48px/4px (needed 360px, actual usable was 357px — 3px short, still
+   wrapped). flex-wrap stays as a defensive fallback for a genuinely narrow
+   viewport, not the normal case. */
 #${ROOM_ID} .msa-wx-fader-rack{display:flex; flex-direction:row; flex-wrap:wrap;
-  gap:8px; justify-content:center; padding:2px 0}
+  gap:4px; justify-content:center; padding:2px 0}
 /* The track pseudo-elements ui/widgets/vertical-fader.js itself can't reach
    (inline styles don't address pseudo-elements) -- accent-color alone only
    paints the filled portion + thumb, leaving the unfilled groove at the

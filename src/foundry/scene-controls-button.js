@@ -184,6 +184,52 @@ export function syncRemoteButtonState(active) {
 }
 
 /**
+ * The retry-tolerant twin of {@link syncRemoteButtonState} — the fix for
+ * mythica-machina-press's own "sometimes it doesn't appear when I press the
+ * button and I have to press twice" report (Remote UI pass).
+ *
+ * Root cause, confirmed against the real v14 source (`applications/ui/
+ * scene-controls.mjs`): Foundry only ever builds a FRESH `SceneControlTool`
+ * object for this toggle — the one moment `active: isActive()` gets read —
+ * on the toolbar's first-ever render or an explicit `{reset:true}` render
+ * (`#render`'s own doc: "This is only done once when the application is
+ * first rendered. Subsequent renders reuse this data structure."). Every
+ * OTHER render just re-reads whatever `.active` is ALREADY sitting on that
+ * one persistent object — which is exactly what `syncRemoteButtonState`
+ * mutates directly. `bootHeartbeat()`'s own auto-open calls
+ * `MapShine.__remote.open()` then immediately tries to sync the toolbar to
+ * match — but whether Foundry's own first-render snapshot has already been
+ * taken by that exact moment depends on Foundry's OWN boot ordering relative
+ * to MSA's (texture loads, WebGPU pipeline setup) racing against Foundry
+ * building its own core UI, which this codebase neither controls nor can
+ * assume either way. Losing that race silently no-ops
+ * (`syncRemoteButtonState`'s own `if (!tool) return`) — the ROOM opens
+ * correctly regardless (`.open()` doesn't depend on the toolbar at all), but
+ * Foundry's toolbar keeps showing unpressed until some LATER click "wastes"
+ * itself correcting the stale flag (computing the wrong next state off it)
+ * before a SECOND click actually achieves the transition the first one
+ * looked like it should have — the exact "press twice" shape reported live.
+ *
+ * Retries on a short timer instead of guessing the one delay that would
+ * always win the race — correct regardless of how long Foundry's own first
+ * render actually takes on a given machine/scene. Every OTHER caller (a
+ * real click, the Remote's own Close button) finds the tool on the very
+ * first attempt — zero added delay — since the toolbar has existed for the
+ * whole session by the time either can fire.
+ * @param {boolean} active @param {number} [attemptsLeft] - internal, do not pass.
+ */
+export function syncRemoteButtonStateSoon(active, attemptsLeft = 20) {
+  const tool = ui?.controls?.controls?.tokens?.tools?.[REMOTE_TOOL_NAME];
+  if (tool) {
+    tool.active = !!active;
+    ui.controls.render(true);
+    return;
+  }
+  if (attemptsLeft <= 0) return; // ~2s total (20 * 100ms) — generous, still bounded
+  setTimeout(() => syncRemoteButtonStateSoon(active, attemptsLeft - 1), 100);
+}
+
+/**
  * THE PLAYER TOGGLE (U5, docs/holy/UI-Testament.md §5.5) — a tool in the
  * same `tokens.tools` record as every other MSA toggle here (`order: 104`,
  * right after the Remote's `103`).

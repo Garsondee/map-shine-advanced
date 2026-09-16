@@ -1329,12 +1329,27 @@ export function buildWaterSurfaceField({
     // a miss in this direction reads as "too subtle", the safe failure mode,
     // where a miss in the other direction reads as "net destroyed", round
     // 3's own `WAVE_WARP_STRENGTH=4` first guess.
+    // ⚠️ 1 OCTAVE, NOT 2 (2026-09-16, mythica-machina-press#557 perf audit).
+    // Was 2 — three FULL calls to this function every fragment (centre + two
+    // finite-difference taps below) just to read `growthGradient`'s
+    // DIRECTION, never φ's own value. A second octave sharpens VALUE detail;
+    // it does not meaningfully change a low-frequency field's gradient
+    // direction, and `growthFreq` is already sub-cell (§ above: "one peak/
+    // trough pair spans SEVERAL cells"), i.e. already too coarse for a
+    // second octave's extra high-frequency detail to matter to a direction
+    // read off it. Cuts this mechanism's own noise cost by a third (3 taps ×
+    // 1 octave instead of 3 taps × 2) for a mechanism already documented
+    // above as "NOT SHADER-LAB VERIFIED" and "deliberately conservative" —
+    // the lowest-risk cut available in tier 4's own noise budget. Re-check
+    // against a real render (this repo's shader-lab bench, not this audit)
+    // before assuming the look is unchanged; revert to `2` if the author's
+    // eyes disagree.
     const growthFreq = causticGrowthScaleNode;
     const growthEps = float(WATER_CAUSTICS_GROWTH_EPS);
     const potentialAt = (p) =>
       mx_fractal_noise_vec3(
         vec3(p.x.mul(growthFreq), p.y.mul(growthFreq), tSec.mul(causticGrowthSpeedNode)),
-        2,
+        1,
         2.0,
         0.5
       ).x;

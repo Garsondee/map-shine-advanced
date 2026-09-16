@@ -1405,7 +1405,8 @@ export const CLOUD_SHADOW_STREAK_SPREAD = 0.35;
  *   shadow entirely without touching the field or the offset — the "how dark"
  *   dial the author asked for, independent of "how blurred" and "how far".
  * @param {string} [args.varTag] - forwarded to {@link buildCloudFieldNode} as
- *   its own `varTag`, one per TAP (`${varTag}-tap0`, `-tap1`, ...) — this
+ *   its own `varTag`, one per TAP (`${varTag}_tap0`, `_tap1`, ...) — WGSL
+ *   identifiers can't contain `-`, so the join is `_`, never a hyphen — this
  *   function already calls `buildField` up to `streakTaps` times FOR ITSELF,
  *   and every one of the six shadow consumers (`docs/planning/Clouds.md`'s
  *   own count — ambient, window, specular, water, cast shadows, precipitation)

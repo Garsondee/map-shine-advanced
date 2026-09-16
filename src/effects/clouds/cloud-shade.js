@@ -201,7 +201,16 @@ export function buildCloudTopsNode(
 
   // THE MAIN SAMPLE — full detail, because this is the silhouette and the
   // opacity the eye actually reads.
-  const main = buildField(TSL, { worldXY, uniforms: u, octaves });
+  // ⚠️ `varTag` on every `buildField` call in this function — this one plus
+  // the main+shape / two gradient / `shadowTaps` samples below all build a
+  // full `world/cloud-field.js#buildCloudFieldNode` graph, in the SAME tops
+  // material, and that function names its internal vars from a fixed list
+  // (`cloudP0`, `cloudCov`, ...). Untagged, every sample after the first asks
+  // for an already-declared name and `NodeBuilder` renames it with a console
+  // warning (`cloudP1` -> `cloudP1_2`) — harmless to the compiled shader, but
+  // real noise, and the actual bug it is flagging: this function, not the
+  // field, is the one making six-plus samples in one shader.
+  const main = buildField(TSL, { worldXY, uniforms: u, octaves, varTag: 'main' });
   const cov = main.cov;
   const T = clamp(main.thickness, 0, 1).toVar('topsT');
 
@@ -259,21 +268,24 @@ export function buildCloudTopsNode(
   // with the cell pattern legible as a coverage texture rather than
   // relitigated as false relief.
   const cheapOct = Math.max(2, Math.min(octaves, 3));
-  const heightAt = (p, detail) =>
+  // `tag` disambiguates this call's field vars from `main`'s and from every
+  // OTHER `heightAt` call below — see the `varTag` comment on `main` above.
+  const heightAt = (p, detail, tag) =>
     buildField(TSL, {
       worldXY: p,
       uniforms: u,
       octaves: detail ? octaves : cheapOct,
       erode: !!detail,
       cells: false,
+      varTag: tag,
     }).height;
   //
   // ⚠️ AND THE GRADIENT'S ORIGIN COMES FROM THE SAME CHEAP PATH. Differencing
   // a full-detail height against two reduced-detail ones measures the DETAIL
   // that was dropped, not the slope — a difference of two different functions
   // is not a derivative of either.
-  const h0c = heightAt(worldXY, gradientDetail).toVar('topsH0Detail');
-  const h0s = heightAt(worldXY, false).toVar('topsH0Shape');
+  const h0c = heightAt(worldXY, gradientDetail, 'h0c').toVar('topsH0Detail');
+  const h0s = heightAt(worldXY, false, 'h0s').toVar('topsH0Shape');
 
   // ── THE NORMAL ────────────────────────────────────────────────────────────
   // ⚠️ A WORLD-SPACE EPSILON, NEVER `dFdx`/`dFdy`. Screen derivatives are one
@@ -284,8 +296,8 @@ export function buildCloudTopsNode(
   // the relief band-limit itself instead.
   const epsBase = u.scalePx.mul(float(0.015));
   const eps = (footprintPx ? max(epsBase, footprintPx.mul(float(1.5))) : epsBase).toVar('topsEps');
-  const hx = heightAt(worldXY.add(vec2(eps, float(0))), gradientDetail);
-  const hy = heightAt(worldXY.add(vec2(float(0), eps)), gradientDetail);
+  const hx = heightAt(worldXY.add(vec2(eps, float(0))), gradientDetail, 'hx');
+  const hy = heightAt(worldXY.add(vec2(float(0), eps)), gradientDetail, 'hy');
   const dzdx = hx.sub(h0c).mul(reliefPx).div(eps);
   const dzdy = hy.sub(h0c).mul(reliefPx).div(eps);
   const N = normalize(vec3(dzdx.negate(), dzdy.negate(), float(1))).toVar('topsN');
@@ -322,7 +334,7 @@ export function buildCloudTopsNode(
     let acc = float(1);
     for (let i = 1; i <= shadowTaps; i++) {
       const d = stepPx.mul(float(i));
-      const hq = heightAt(worldXY.add(sun.dirXY.mul(d)), false);
+      const hq = heightAt(worldXY.add(sun.dirXY.mul(d)), false, `shadow${i}`);
       // The ray's own height after travelling `d`, in the field's 0..1 units.
       const rayH = h0s.add(sun.tanElev.mul(d).div(reliefPx));
       const occl = clamp(hq.sub(rayH).mul(float(3)), 0, 1);

@@ -674,6 +674,7 @@ export function buildEnvironmentalLightMaterials({
         fillShare: cloudFillShareNode ?? float(1),
         strength: cloudStrengthNode,
         blurFieldUnits: cloudBlurNode,
+        varTag: 'ambient',
       });
       cloudVis = mix(float(1), cloudVisRaw, outdoors).toVar('envCloudVis');
       cloudGateCompiled = true;

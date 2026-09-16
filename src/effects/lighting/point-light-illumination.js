@@ -1464,6 +1464,7 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
       fillShare: cloudFillShareNode ?? float(1),
       strength: cloudStrengthNode,
       blurFieldUnits: cloudBlurNode,
+      varTag: 'specular',
     });
     backgroundFloor = backgroundFloor.mul(cloudVis);
   }

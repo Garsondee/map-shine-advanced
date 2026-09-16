@@ -788,11 +788,24 @@ export function fbmAmplitudeSum(octaves, diminish) {
  *   that function's header for why blurring HERE (before `cov`) rather than
  *   after `thickness` is the cheap option: one scalar add ahead of a
  *   smoothstep that already runs, versus extra taps.
+ * @param {string} [args.varTag] - disambiguates this call's `.toVar(...)`
+ *   declarations from another call's, within the SAME shader. This function
+ *   builds a full, fixed set of named vars (`cloudP0`, `cloudCov`, ...) every
+ *   time it runs, and every real consumer — {@link buildCloudGroundVisNode}'s
+ *   own streak taps, {@link buildCloudTopsNode}'s main+gradient+shadow-march
+ *   samples — calls it several times in ONE material to sample the field at
+ *   several different world positions. Without a tag, the second and later
+ *   calls request an already-declared name and `NodeBuilder` silently
+ *   renames them (`cloudP1` -> `cloudP1_2`), which is harmless to the
+ *   compiled shader but is TSL's own signal that two unrelated samples were
+ *   asked to share one name. Omitted (the shader-lab bench and the unit
+ *   tests, which each build exactly one field per shader) is a no-op — the
+ *   names are exactly what they always were.
  * @returns {{cov: *, thickness: *, height: *, base: *}}
  */
 export function buildCloudFieldNode(
   TSL,
-  { worldXY, uniforms: u, octaves = 4, warp = true, erode = true, cells = true, edgeWidthBoost = null }
+  { worldXY, uniforms: u, octaves = 4, warp = true, erode = true, cells = true, edgeWidthBoost = null, varTag = null }
 ) {
   const {
     float,
@@ -811,8 +824,12 @@ export function buildCloudFieldNode(
     mx_noise_float,
   } = TSL;
 
+  // See `varTag`'s own doc above — every name below goes through this so
+  // two samples in the same shader never contend for one declaration.
+  const vn = (name) => (varTag ? `${name}_${varTag}` : name);
+
   const inv = float(1).div(u.scalePx.max(float(1)));
-  const p0 = worldXY.add(u.drift).mul(inv).toVar('cloudP0');
+  const p0 = worldXY.add(u.drift).mul(inv).toVar(vn('cloudP0'));
 
   // ── 0b. REGIONAL VARIATION — this deck is not one wallpaper tile ─────────
   // Author's report (2026-09-07), after reviewing a dense-cover render: "All
@@ -856,7 +873,7 @@ export function buildCloudFieldNode(
     2,
     0.5,
     1
-  ).toVar('cloudRegionA');
+  ).toVar(vn('cloudRegionA'));
   const regionB = mx_fractal_noise_float(
     vec3(
       p0.x.mul(float(REGION_FREQ_SIZE)).add(float(5.2)),
@@ -867,7 +884,7 @@ export function buildCloudFieldNode(
     2,
     0.5,
     1
-  ).toVar('cloudRegionB');
+  ).toVar(vn('cloudRegionB'));
 
   // ── 1. ANISOTROPY — stretch ALONG the wind ────────────────────────────────
   // Cirrus fibres and cloud streets both run downwind. ONE stretch, applied
@@ -885,17 +902,17 @@ export function buildCloudFieldNode(
   // is what makes this a provable no-op at 0: cellular types with anisotropy
   // already near 1 have barely any elongation to wobble and are left at 0,
   // cirrus (built for exactly this) gets the most.
-  const windDir = u.windDir.toVar('cloudWindDir');
+  const windDir = u.windDir.toVar(vn('cloudWindDir'));
   const wanderRad = regionA.mul(u.streakWander).mul(float(Math.PI / 180));
   const cosW = cos(wanderRad);
   const sinW = sin(wanderRad);
   const a = vec2(windDir.x.mul(cosW).sub(windDir.y.mul(sinW)), windDir.x.mul(sinW).add(windDir.y.mul(cosW))).toVar(
-    'cloudWindDirWandered'
+    vn('cloudWindDirWandered')
   );
-  const b = vec2(a.y.negate(), a.x).toVar('cloudWindPerp');
+  const b = vec2(a.y.negate(), a.x).toVar(vn('cloudWindPerp'));
   const along = dot(p0, a).div(u.anisotropy.max(float(0.05)));
   const across = dot(p0, b);
-  const p1 = a.mul(along).add(b.mul(across)).toVar('cloudP1');
+  const p1 = a.mul(along).add(b.mul(across)).toVar(vn('cloudP1'));
 
   // ── 2. DOMAIN WARP (Quilez) ───────────────────────────────────────────────
   // Two cheap fBm evaluations at CONSTANT offsets make a 2-D warp out of a
@@ -906,7 +923,7 @@ export function buildCloudFieldNode(
   if (warp) {
     const wx = mx_fractal_noise_float(vec3(p1.x.add(float(5.2)), p1.y.add(float(1.3)), u.boil), 2, 2, 0.5, 1);
     const wy = mx_fractal_noise_float(vec3(p1.x.add(float(1.7)), p1.y.add(float(9.2)), u.boil), 2, 2, 0.5, 1);
-    pw = p1.add(vec2(wx, wy).mul(u.warp)).toVar('cloudPw');
+    pw = p1.add(vec2(wx, wy).mul(u.warp)).toVar(vn('cloudPw'));
   }
 
   // ── 3. THE BASE SHAPE — Perlin fBm remapped by a Worley cell term ─────────
@@ -931,7 +948,7 @@ export function buildCloudFieldNode(
     .div(float(1).sub(g))
     .max(float(1e-3));
   const perRaw = mx_fractal_noise_float(vec3(pw.x, pw.y, u.boil), octaves, 2, g, 1);
-  const per01 = clamp(perRaw.div(ampSum).mul(float(0.5)).add(float(0.5)), 0, 1).toVar('cloudPer01');
+  const per01 = clamp(perRaw.div(ampSum).mul(float(0.5)).add(float(0.5)), 0, 1).toVar(vn('cloudPer01'));
 
   let base = per01;
   let dbgCellRaw = float(0);
@@ -976,7 +993,7 @@ export function buildCloudFieldNode(
     // produces driver-dependent garbage below cover 0.5.
     const ringX = u.cover.sub(float(0.5)).div(float(0.14));
     const ring = u.openCellPeak.mul(exp(ringX.mul(ringX).negate()));
-    const cellRaw = mix(w, float(1).sub(w), clamp(ring, 0, 1)).toVar('cloudCellRaw');
+    const cellRaw = mix(w, float(1).sub(w), clamp(ring, 0, 1)).toVar(vn('cloudCellRaw'));
     dbgCellRaw = cellRaw;
     // ⭐ THE WALL-BREACH GATE — let SOME wall CRESTS fuse with a neighbour,
     // chosen by an independent noise, instead of leaving every wall a
@@ -1033,11 +1050,11 @@ export function buildCloudFieldNode(
     );
     dbgGate = gate;
     const breach = crest.mul(gate).mul(u.wallBreach);
-    const cell = cellRaw.sub(breach).toVar('cloudCell');
+    const cell = cellRaw.sub(breach).toVar(vn('cloudCell'));
     // Nubis's remap: Remap(perlin, -(1 - cell), 1, 0, 1).
     const lo = float(1).sub(cell).negate();
     const remapped = per01.sub(lo).div(float(1).sub(lo).max(float(1e-4)));
-    base = mix(per01, clamp(remapped, 0, 1), u.cellWeight).toVar('cloudBase');
+    base = mix(per01, clamp(remapped, 0, 1), u.cellWeight).toVar(vn('cloudBase'));
   }
 
   // ── 4. COVERAGE ───────────────────────────────────────────────────────────
@@ -1071,7 +1088,7 @@ export function buildCloudFieldNode(
   // driving the NORMAL now fades out over the SAME footprint alpha does.
   const thr = cells ? u.threshold : u.macroThreshold;
   const edgeWidthEff = edgeWidthBoost ? u.edgeWidth.add(edgeWidthBoost) : u.edgeWidth;
-  let cov = smoothstep(thr, thr.add(edgeWidthEff.max(float(0.01))), base).toVar('cloudCov');
+  let cov = smoothstep(thr, thr.add(edgeWidthEff.max(float(0.01))), base).toVar(vn('cloudCov'));
   let shadeBump = float(0);
 
   // ── 5. EROSION — high-frequency detail eats the LOW end ───────────────────
@@ -1111,7 +1128,7 @@ export function buildCloudFieldNode(
     // deep into the cloud am I" quantity here.
     const hf = mix(hf01, float(1).sub(hf01), smoothstep(float(0.15), float(0.6), cov));
     const lo = hf.mul(u.erosion).mul(float(0.2));
-    cov = clamp(cov.sub(lo).div(float(1).sub(lo).max(float(1e-4))), 0, 1).toVar('cloudCovEroded');
+    cov = clamp(cov.sub(lo).div(float(1).sub(lo).max(float(1e-4))), 0, 1).toVar(vn('cloudCovEroded'));
 
     // ── 5b. EDGE CHAOS — grainy, NON-ANIMATED noise, in VALUE space only ────
     // Author's ask (2026-09-06): "high frequency grainy noise and a similar
@@ -1148,7 +1165,9 @@ export function buildCloudFieldNode(
     const chaosP = ph.mul(float(5));
     const chaosNoise = mx_noise_float(vec3(chaosP.x, chaosP.y, float(41.7)));
     const edgeProximity = cov.mul(float(1).sub(cov)).mul(float(4));
-    cov = clamp(cov.add(chaosNoise.mul(u.edgeChaos).mul(edgeProximity).mul(float(0.6))), 0, 1).toVar('cloudCovChaos');
+    cov = clamp(cov.add(chaosNoise.mul(u.edgeChaos).mul(edgeProximity).mul(float(0.6))), 0, 1).toVar(
+      vn('cloudCovChaos')
+    );
 
     // ── 5c. SHADING DETAIL — a MEDIUM-frequency bump, HEIGHT only ──────────
     // Author's report (2026-09-07): "The shading on cumulus needs to be
@@ -1216,15 +1235,15 @@ export function buildCloudFieldNode(
   // point sits, normalised by the headroom available above it. A small puff
   // that barely clears is thin; the middle of a big mass is thick.
   const headroom = float(1).sub(u.threshold).max(float(0.15));
-  const excess = clamp(base.sub(u.threshold).div(headroom), 0, 1).toVar('cloudExcess');
+  const excess = clamp(base.sub(u.threshold).div(headroom), 0, 1).toVar(vn('cloudExcess'));
   // The floor keeps a fully-covered sky from going perfectly uniform (real
   // overcast still has structure in it), while the power curve puts most of the
   // variation in the first part of the range, where the eye reads edges.
   const thickness = cov
     .mul(mix(float(0.3), float(1), pow(excess, float(0.75))))
     .mul(u.thicknessCap)
-    .toVar('cloudThickness');
-  const height = thickness.mul(u.reliefGain).add(shadeBump).toVar('cloudHeight');
+    .toVar(vn('cloudThickness'));
+  const height = thickness.mul(u.reliefGain).add(shadeBump).toVar(vn('cloudHeight'));
 
   return {
     cov,
@@ -1385,6 +1404,15 @@ export const CLOUD_SHADOW_STREAK_SPREAD = 0.35;
  *   `1`/omitted is today's natural depth (a provable no-op); `0` removes the
  *   shadow entirely without touching the field or the offset — the "how dark"
  *   dial the author asked for, independent of "how blurred" and "how far".
+ * @param {string} [args.varTag] - forwarded to {@link buildCloudFieldNode} as
+ *   its own `varTag`, one per TAP (`${varTag}-tap0`, `-tap1`, ...) — this
+ *   function already calls `buildField` up to `streakTaps` times FOR ITSELF,
+ *   and every one of the six shadow consumers (`docs/planning/Clouds.md`'s
+ *   own count — ambient, window, specular, water, cast shadows, precipitation)
+ *   calls this function separately, so pass the consumer's own name (e.g.
+ *   `'window'`, `'water'`) to keep every sample's declared names unique were
+ *   two consumers ever to land in the same shader. Omitted is a no-op, same
+ *   as {@link buildCloudFieldNode}'s own default.
  * @returns {*} float node, 0..1, 1 = full sun.
  */
 export function buildCloudGroundVisNode(
@@ -1401,6 +1429,7 @@ export function buildCloudGroundVisNode(
     depthBias = null,
     blurFieldUnits = null,
     strength = null,
+    varTag = null,
   }
 ) {
   const { float, min, mix } = TSL;
@@ -1419,7 +1448,7 @@ export function buildCloudGroundVisNode(
   // and fine erosion grain are dropped from this cheap re-sample, which two
   // consumers (the fullscreen ground pass, and EVERY window quad in view,
   // each paying this `streakTaps` times over) were never meant to carry.
-  const sampleAt = (k) => {
+  const sampleAt = (k, tapIndex) => {
     const p = k === 1 ? worldXY.sub(offset) : worldXY.sub(offset.mul(float(k)));
     const thickness = buildField(TSL, {
       worldXY: p,
@@ -1428,17 +1457,18 @@ export function buildCloudGroundVisNode(
       cells: false,
       erode: false,
       edgeWidthBoost: blurFieldUnits,
+      varTag: varTag ? `${varTag}-tap${tapIndex}` : `tap${tapIndex}`,
     }).thickness;
     return buildCloudKeyTransmittanceNode(TSL, { thickness, fillShare, depthBias });
   };
   const applyStrength = (vis) => (strength ? mix(float(1), vis, strength) : vis);
-  if (taps === 1 || streakSpread <= 0) return applyStrength(sampleAt(1));
-  let vis = sampleAt(1 - streakSpread);
+  if (taps === 1 || streakSpread <= 0) return applyStrength(sampleAt(1, 0));
+  let vis = sampleAt(1 - streakSpread, 0);
   for (let i = 1; i < taps; i++) {
     const k = 1 - streakSpread + (2 * streakSpread * i) / (taps - 1);
     // Skip re-sampling the centre tap twice when `taps` is odd and `i` lands
     // back on `k = 1` — a wasted, identical field evaluation otherwise.
-    vis = Math.abs(k - 1) < 1e-6 ? min(vis, sampleAt(1)) : min(vis, sampleAt(k));
+    vis = Math.abs(k - 1) < 1e-6 ? min(vis, sampleAt(1, i)) : min(vis, sampleAt(k, i));
   }
   return applyStrength(vis);
 }

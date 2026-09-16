@@ -205,7 +205,11 @@ function buildViewMaterial(THREE, u, view, octaves, sunU, groundU) {
     // what `cloud-shade.js#heightAt` samples for the gradient/self-shadow
     // taps. Compare against 'coverage' (the main, fully-cellular pass) at
     // the identical setup to measure the areal-extent mismatch directly.
-    const macro = buildCloudFieldNode(TSL, { worldXY, uniforms: u, octaves, cells: false });
+    // `varTag` — this view builds a SECOND field graph in the same material
+    // as the unconditional `field` above; untagged, both would declare the
+    // same `cloudP0`/`cloudCov`/... names and collide (see `varTag`'s own
+    // doc on `buildCloudFieldNode`).
+    const macro = buildCloudFieldNode(TSL, { worldXY, uniforms: u, octaves, cells: false, varTag: 'macro' });
     rgb = vec3(macro.cov, macro.cov, macro.cov);
   } else if (view === 'dbg-cellraw') {
     rgb = vec3(dbgCellRaw, dbgCellRaw, dbgCellRaw);

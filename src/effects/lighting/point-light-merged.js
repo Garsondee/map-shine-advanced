@@ -251,6 +251,7 @@ export function buildMergedPointLightShadingCore({ THREE, inputs, shared, flags 
       fillShare: cloudFillShareNode ?? float(1),
       strength: cloudStrengthNode,
       blurFieldUnits: cloudBlurNode,
+      varTag: 'specular-merged',
     });
     backgroundFloor = backgroundFloor.mul(cloudVis);
   }

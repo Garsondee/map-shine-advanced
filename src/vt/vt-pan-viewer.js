@@ -3453,6 +3453,7 @@ export async function startVtPanViewer({
         // amounts to each read clearly).
         strength: uWindowCloudContrast,
         blurFieldUnits: uCloudShadowBlur,
+        varTag: 'window',
       });
     }
 
@@ -3474,6 +3475,7 @@ export async function startVtPanViewer({
         fillShare: uCloudFillShare,
         strength: uWaterCloudContrast,
         blurFieldUnits: uCloudShadowBlur,
+        varTag: 'water',
       });
     }
 

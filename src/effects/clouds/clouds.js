@@ -151,7 +151,9 @@ export const CLOUD_LOOK_PARAMS = Object.freeze({
     // cookie needs a stronger push than the ground to read clearly, and
     // coupling the two would make finding a good ground value fight finding
     // a good window one.
-    default: 1.5,
+    // 2026-09-16, round 4 — author, live: "cloud shadows are also very
+    // faint on windows." Raised to the dial's own ceiling.
+    default: 4,
     category: 'Light',
     label: 'Window cloud contrast',
     help: "How much a passing cloud's own shadow darkens window light, separate from Shadow strength above (which governs the ground only). 1 = the natural depth from the sun/sky split; higher pushes the passing shadow shape deeper so it reads clearly against the window's own glow; 0 removes it entirely.",
@@ -161,7 +163,10 @@ export const CLOUD_LOOK_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.22,
+    // 2026-09-16, round 4 — author's own tuned value, same "faint on
+    // windows" dump as windowCloudContrast — less blur so the window's own
+    // cloud/overcast response reads sharper (default was 0.22).
+    default: 0.1,
     category: 'Light',
     label: 'Window blur (overcast)',
     help: "How much extra softening heavy overcast adds to a window's own light cookie edge, independent of any cloud directly overhead — a global sky-mood response, not a moving shadow. 0 = window edges never soften with overcast.",
@@ -171,7 +176,9 @@ export const CLOUD_LOOK_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.6,
+    // 2026-09-16, round 4 — author's own tuned value, same dump as
+    // windowCloudContrast (default was 0.6).
+    default: 0.64,
     category: 'Light',
     label: 'Window flatten (overcast)',
     help: "How much heavy overcast flattens a window cookie's own internal contrast toward neutral — the other half of a diffuse, gloomy interior look. 0 = window contrast never responds to overcast.",
@@ -184,7 +191,9 @@ export const CLOUD_LOOK_PARAMS = Object.freeze({
     // 2026-09-10, round 3 — author's own tuned value (default 0.5, "drop
     // its overall brightness by up to 50%"). A much deeper dim now shipped
     // as the default — overcast can extinguish window light almost entirely.
-    default: 0.05,
+    // 2026-09-16, round 4 — same "faint on windows" dump, pushed to the
+    // dial's own floor: overcast can now extinguish window light entirely.
+    default: 0,
     category: 'Light',
     label: 'Window dim floor (overcast)',
     help: "The darkest heavy overcast can push a window's own light strength to. 1 = overcast never dims window light at all; 0 = a fully overcast sky can extinguish it entirely.",
@@ -194,7 +203,9 @@ export const CLOUD_LOOK_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.3,
+    // 2026-09-16, round 4 — same "faint on windows" dump, raised to the
+    // dial's own ceiling (default was 0.3).
+    default: 1,
     category: 'Light',
     label: 'Window noon boost',
     help: "The mirror of Window dim floor above, for the opposite condition: how much BRIGHTER window light gets at a clear sky with a high sun. Fades to nothing under any cloud cover or away from midday (see the Presence category's Noon brightness/contrast boost for the same fade applied to the outdoor grade).",
@@ -207,7 +218,9 @@ export const CLOUD_LOOK_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.15,
+    // 2026-09-16, round 4 — same "faint on windows" dump, raised to the
+    // dial's own ceiling (default was 0.15).
+    default: 1,
     category: 'Presence',
     label: 'Noon brightness boost',
     help: "Author's ask (2026-09-10): 'at noon with no clouds I'd actually like the CC to brighten... the scene.' Extra exposure added to the outdoor colour grade, strongest at a clear sky with a high sun, fading to nothing under any cloud cover or away from midday — a positive complement to the cloud desaturation/darkening above, not the same dial run backwards.",
@@ -217,7 +230,9 @@ export const CLOUD_LOOK_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.15,
+    // 2026-09-16, round 4 — same dump as Noon brightness boost, raised to
+    // the dial's own ceiling (default was 0.15).
+    default: 1,
     category: 'Presence',
     label: 'Noon contrast boost',
     help: 'Same fade as Noon brightness boost above (clear sky, high sun), added to the grade\'s own contrast instead of its exposure — the author\'s own "increase the contrast" half of the same ask.',

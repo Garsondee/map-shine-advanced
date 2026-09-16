@@ -205,7 +205,7 @@ import { validateImpulseList } from './core/impulse-schema.js';
 import {
   ambientVectorFromWind,
   resolveSky,
-  applySkyEdit,
+  normalizeSky,
   computeSun,
   WIND_DEFAULT_GUSTINESS01,
   CALENDARS,
@@ -11038,12 +11038,53 @@ function install() {
     applyLookToEngines(skyScope.sky);
   };
 
-  /** Apply one astrolabe edit to whichever scope is in force, then persist it. */
+  /**
+   * Apply one astrolabe edit to whichever scope is in force, then persist it.
+   *
+   * ⚠️ MERGES ATOP `skyScope.sky`, NOT A FRESH `readWorldSky()`/`readSceneSky()`
+   * RE-READ — a real, confirmed bug (author report: "changing a setting
+   * unrelated to time of day changes the time of day"). `scene.setFlag()`/
+   * `game.settings.set()` are real round-trips through Foundry's own document
+   * layer — even for the GM's OWN edit, on their OWN client, the write only
+   * lands in `scene.getFlag()`/`game.settings.get()`'s own cache once the
+   * server's update echo comes back, not the instant `writeSceneSky`/
+   * `writeWorldSky` is called. The OLD code re-read those two stores from
+   * scratch on every single `editSky()` call and merged the new patch on top
+   * — so a SECOND edit fired before the FIRST one's write had round-tripped
+   * read stale, pre-first-edit data, and its merge silently REVERTED every
+   * field the first edit had just changed except whatever the second patch
+   * itself touched. `applyLookToEngines()` then reapplied that reverted sky
+   * unconditionally — including `sweepVtPanViewerTimeOfDay(sky.todHour)`
+   * whenever paused in Aesthetic mode — so a time-of-day edit (a ring drag,
+   * an hour-tick click, even pausing itself, which persists the current hour
+   * into the same patch that zeroes the rate) still in flight when ANY other
+   * control was touched would visibly snap the clock back to wherever it
+   * was before that edit. Reproducible any time two edits land within one
+   * write's own round-trip window — which is exactly what "sometimes" means
+   * here, not a rare edge case.
+   *
+   * `skyScope` is the fix: it is ALREADY the correct, race-free source of
+   * truth for "what does this client currently believe the sky is" — this
+   * same function keeps it current synchronously on every local edit (right
+   * below), and `resolveAndApplySky()` keeps it current whenever a REAL
+   * external change is observed (`watchSceneSky`). Nothing else ever writes
+   * it, so unlike the two Foundry stores, it never lags behind this client's
+   * own pending writes. `target` (world vs scene) is `resolveSky`'s own
+   * decision, already captured on `skyScope.sceneOverrides` — no need to
+   * re-derive it either.
+   *
+   * The one thing this deliberately gives up: if a genuinely CONCURRENT
+   * second GM's edit lands in storage in the same narrow window as this
+   * client's own edit, this client's own next edit could briefly overwrite
+   * it — self-correcting the moment that second GM's `watchSceneSky` echo
+   * arrives and `resolveAndApplySky()` re-resolves. Two GMs editing the same
+   * scene's sky within milliseconds of each other is a far narrower window
+   * than "this client fires two edits close together," which is the
+   * ordinary, everyday case this fix actually closes.
+   */
   const editSky = async (patch) => {
-    const { target, sky } = applySkyEdit(
-      { world: readWorldSky().sky, scene: readSceneSky().sky, sceneOverrides: skyScope.sceneOverrides },
-      patch
-    );
+    const target = skyScope.sceneOverrides ? 'scene' : 'world';
+    const sky = normalizeSky({ ...skyScope.sky, ...(patch ?? {}) });
     // Apply LOCALLY first so the dial responds at once — the write is async,
     // GM-gated, and may round-trip a socket. A control that waits on a document
     // update before moving reads as broken even when it is working.

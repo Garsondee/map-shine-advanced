@@ -8004,12 +8004,17 @@ export async function startVtPanViewer({
       const previousAutoClear = renderer.autoClearColor;
       renderer.setRenderTarget(sceneLit);
       renderer.autoClearColor = false;
-      if (floorHasContent) {
-        profiler?.begin(Z.surfSpecular);
-        renderer.render(specularSurface.scene, camera);
-        profiler?.end(Z.surfSpecular);
-      }
+      // mythica-machina-press#553 — the tile draw used to sit OUTSIDE
+      // Z.surfSpecular's bracket entirely (begin/end only wrapped the floor
+      // branch), so a tile-only scene (metal painted on a tile, none on the
+      // floor) drew with ZERO profiler coverage at all — not even riding
+      // inside a wider bracket the way windowTileSurface's own draw does
+      // inside Z.lightDrawWindow. One bracket around BOTH draws now, the
+      // same "share one zone by design" shape window's own comment states.
+      profiler?.begin(Z.surfSpecular);
+      if (floorHasContent) renderer.render(specularSurface.scene, camera);
       if (tilesHaveContent) renderer.render(specularTileSurface.scene, camera);
+      profiler?.end(Z.surfSpecular);
       renderer.autoClearColor = previousAutoClear;
       renderer.setRenderTarget(null);
     }
@@ -8820,6 +8825,15 @@ export async function startVtPanViewer({
         return;
       }
       ensureTaaResolveMaterial();
+      // mythica-machina-press#553 — post.taaResolve is a live pass with a
+      // real draw and real per-frame CPU work (cut detection, reprojection
+      // uniform push) and had ZERO profiler coverage: not an EFFECT_ZONING
+      // candidate at all (TAA resolve is a global rendering-quality knob,
+      // not a registered effectRegistry manifest — same category as Albedo
+      // Clarity, see that NOTE in perf-zones.js), so nothing short of a
+      // sweep of every LIVE pass in passes.js against ZONES would have
+      // caught it. ownerEffectId: null, mirroring present.blit.
+      profiler?.begin(Z.taaResolve);
 
       // THREE independent invalidation triggers, ORed (Stage 5.4):
       //   1. renderScaleHeld — tab-hidden or !settleTracker.settled, already
@@ -8852,6 +8866,7 @@ export async function startVtPanViewer({
       renderer.setRenderTarget(writeTarget);
       taaResolveQuad.render(renderer);
       renderer.setRenderTarget(null);
+      profiler?.end(Z.taaResolve);
 
       taaHistoryWriteIndex = 1 - taaHistoryWriteIndex;
       taaHistoryValid = true;
@@ -11881,6 +11896,17 @@ export async function startVtPanViewer({
           : [{ index: view?.floorIndex ?? 0 }];
       const viewRect = view ? viewToWorldRect(view, canvasW / canvasH) : null;
       if (!viewRect) return;
+      // mythica-machina-press#553 — this whole pass (the per-floor capture
+      // quads below, EACH a real renderer.render() call via renderWaterPass,
+      // AND the tier-5 draw at the bottom of this function) had ZERO
+      // profiler coverage. water's own EFFECT_ZONING entry already documents
+      // tiers 0-4 as unbracketable (they draw inside geometry.world's shared
+      // scene) — but tier 5 is a GENUINELY SEPARATE pass with real render
+      // calls of its own, the same "this half CAN be isolated even though
+      // the rest can't" shape Cloud Tops was split out from ground-shadow
+      // for. ONE zone for the whole function: the per-floor capture loop and
+      // the final draw always run together, never independently gated.
+      profiler?.begin(Z.waterRefraction);
       for (const floor of refractionFloors) {
         const refraction = getWaterRefractionForFloor(floor.index);
         const body = getWaterBodyForFloor(floor.index);
@@ -11960,6 +11986,7 @@ export async function startVtPanViewer({
       renderer.render(waterRefractScene, camera);
       renderer.autoClearColor = previousAutoClearColor;
       renderer.setRenderTarget(null);
+      profiler?.end(Z.waterRefraction);
     }
 
     // ── FLUID, tiers 0-4 (docs/planning/Fluid.md) ──────────────────────────
@@ -17335,6 +17362,9 @@ export async function startVtPanViewer({
       lightWaterSync: profiler?.indexOf('light.waterSurfaceSync') ?? -1,
       lightWaterFlowBake: profiler?.indexOf('light.waterFlowBake') ?? -1,
       lightWaterSimTick: profiler?.indexOf('light.waterSimTick') ?? -1,
+      // Added 2026-09-16 (perf-instrumentation-audit, #553) — see
+      // runWaterRefractionCapturePass's own bracket.
+      waterRefraction: profiler?.indexOf('surface.waterRefraction') ?? -1,
       lightFluidSync: profiler?.indexOf('light.fluidSurfaceSync') ?? -1,
       lightRegions: profiler?.indexOf('light.regionSetup') ?? -1,
       lightPointUpdate: profiler?.indexOf('light.pointLightUpdate') ?? -1,
@@ -17386,6 +17416,9 @@ export async function startVtPanViewer({
       lensUniforms: profiler?.indexOf('lens.uniformPush') ?? -1,
       lensLightBurn: profiler?.indexOf('lens.lightBurn') ?? -1,
       lensComposite: profiler?.indexOf('lens.composite') ?? -1,
+      // Added 2026-09-16 (perf-instrumentation-audit, #553) — see
+      // runPostTaaResolvePass's own bracket.
+      taaResolve: profiler?.indexOf('taa.resolve') ?? -1,
       presentBlit: profiler?.indexOf('present.blit') ?? -1,
       // Added 2026-08-06 (perf-zone-coverage-audit) — see each bracket's own
       // comment at its call site for what was previously invisible.

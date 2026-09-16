@@ -625,6 +625,28 @@ export const ZONES = Object.freeze(
       false,
       'windowSurface.sync'
     ),
+    // Added 2026-09-16 (perf-instrumentation-audit, mythica-machina-press#553)
+    // — window-tile-surface-subsystem.js#sync already calls profiler?.
+    // beginById('light.windowTileSync')/endById(...) (mythica-machina-press
+    // #538/#539) but NO ZoneDecl for that id ever existed here, so every
+    // begin/end resolved to zoneIndexOf's -1 no-op path — the bracket has
+    // been a silent dead letter since the day it shipped. Found by cross-
+    // checking every beginById/endById string call site in effects/**
+    // against ZONES rather than trusting the vt-pan-viewer.js call site's own
+    // comment ("brackets its own cost internally") at face value. Same shape
+    // as light.drawApertureShadow's own 2026-08-06 fix: bracket real, only
+    // the declaration was missing.
+    z(
+      'light.windowTileSync',
+      'Window tile-population sync',
+      'lighting',
+      'light.accumulate',
+      'window',
+      'cpu',
+      'steady',
+      false,
+      'windowTileSurface.sync'
+    ),
     z(
       'light.fireSync',
       'Fire sync (engine step loop)',
@@ -860,6 +882,24 @@ export const ZONES = Object.freeze(
       true,
       'specularSurface.sync'
     ),
+    // Added 2026-09-16 (perf-instrumentation-audit, #553) — specular-tile-
+    // surface-subsystem.js's OWN sync() (the per-TILE population, #538/#539,
+    // same shape as window-tile-surface-subsystem.js's own tile sync) had NO
+    // profiler coverage at all: not self-bracketed, and the caller's
+    // surface.specularSync bracket (above) only ever wrapped the FLOOR
+    // sync's own call, never this one's — found by the same beginById/
+    // endById cross-check that caught light.windowTileSync's identical gap.
+    z(
+      'surface.specularTileSync',
+      'Specular tile-population sync',
+      'surface',
+      'surface.response',
+      'specular',
+      'cpu',
+      'steady',
+      false,
+      'specularTileSurface.sync'
+    ),
     z(
       'surface.specularDraw',
       'Specular response',
@@ -878,6 +918,27 @@ export const ZONES = Object.freeze(
     z(
       'surface.specularIslandBake',
       'Specular island-pack bake',
+      'surface',
+      'surface.response',
+      'specular',
+      'cpu',
+      'bake',
+      false,
+      'bakeIslandPack'
+    ),
+    // Added 2026-09-16 (perf-instrumentation-audit, mythica-machina-press#553)
+    // — specular-tile-surface-subsystem.js's OWN bakeIslandPack (the per-TILE
+    // sibling of the per-floor bake just above — same connected-component
+    // labelling pass, run per tile item instead of per floor) already calls
+    // profiler?.beginById('surface.specularTileIslandBake')/endById(...), but
+    // no ZoneDecl for that id ever existed here — the bracket has been a
+    // silent -1 no-op since the day it shipped. Found the same way
+    // light.windowTileSync's identical gap was found this pass: cross-
+    // checking every beginById/endById string literal in effects/** against
+    // ZONES rather than trusting a call site's own comment.
+    z(
+      'surface.specularTileIslandBake',
+      'Specular per-tile island-pack bake',
       'surface',
       'surface.response',
       'specular',
@@ -959,6 +1020,26 @@ export const ZONES = Object.freeze(
       'conditional',
       false,
       'runSurfacePrecipitationPass'
+    ),
+    // Added 2026-09-16 (perf-instrumentation-audit, #553) — water's own
+    // EFFECT_ZONING entry only ever explained tiers 0-4 (the shared-scene
+    // drawable at renderOrder 0.5, unbracketable by design). Tier 5
+    // (refraction) is a GENUINELY SEPARATE pass — its own per-floor capture
+    // quad (renderWaterPass, inside water-refraction-subsystem.js#tick) plus
+    // its own final draw (waterRefractScene) — with zero profiler coverage
+    // of either half until now. ONE zone for the whole
+    // runWaterRefractionCapturePass: the capture loop and the draw always
+    // run together, never independently gated.
+    z(
+      'surface.waterRefraction',
+      'Water tier-5 refraction (per-floor capture + draw)',
+      'surface',
+      'surface.water',
+      'water',
+      'both',
+      'conditional',
+      false,
+      'runWaterRefractionCapturePass'
     ),
 
     // ---- post.bloom: 11 draws, 5 zones. A mip chain is ONE decision, not four.
@@ -1111,6 +1192,32 @@ export const ZONES = Object.freeze(
       'conditional',
       false,
       'lensQuad.render'
+    ),
+
+    // ---- post.taaResolve: a live pass, no effectRegistry manifest of its
+    // own (a global rendering-quality knob, off by default — same category
+    // as Albedo Clarity, see EFFECT_ZONING's own closing NOTE), and until
+    // this pass had ZERO profiler coverage despite a real draw and real
+    // per-frame CPU work (cut detection, reprojection uniform push). Found
+    // by sweeping every LIVE pass in graph/passes.js for one with no
+    // declared sub-zone underneath it — the same shape surface.
+    // precipitationDraw and lens's three zones closed earlier in this same
+    // pass, just for infrastructure rather than a registered effect.
+    // ownerEffectId: null, mirroring present.blit. ONE 'both' zone, not
+    // split: the CPU cut-detection/uniform-push and the GPU resolve draw are
+    // never independently gated (no tier ladder, no sub-feature toggle the
+    // way lens's light-burn is), so a split would add rows without adding
+    // information. Added 2026-09-16 (perf-instrumentation-audit, #553).
+    z(
+      'taa.resolve',
+      'TAA resolve (cut detection + reprojection + history blend draw)',
+      'post',
+      'post.taaResolve',
+      null,
+      'both',
+      'conditional',
+      false,
+      'runPostTaaResolvePass'
     ),
 
     // ---- present -------------------------------------------------------------
@@ -1366,7 +1473,14 @@ export const EFFECT_ZONING = Object.freeze({
   }),
   water: Object.freeze({
     coverage: 'partial',
-    why: 'The JFA body bake, the surface sync, and the flow-pack solidity bake are zoned, but the tier-0 surface is a drawable at renderOrder 0.5 inside geometry.world (surface.water is still a seam), so its draw cost cannot be separated.',
+    // 2026-09-16 (perf-instrumentation-audit, #553): corrected two things
+    // found stale against current code while auditing this entry — (1)
+    // `surface.water` has been `status:'live'` since the 2026-08-23 tier-5
+    // (refraction) rewrite, not the 'seam' this why-text used to claim; (2)
+    // tier 5 is no longer part of the unbracketable tier-0-4 shared-scene
+    // drawable at all — it is now zoned separately (surface.waterRefraction,
+    // added alongside this fix).
+    why: "The JFA body bake, the surface sync, the flow-pack solidity bake, and tier 5 (refraction — its own per-floor capture + draw, surface.waterRefraction) are all zoned, but tiers 0-4 still draw as a single drawable at renderOrder 0.5 inside geometry.world's shared scene, so THAT portion's draw cost cannot be separated.",
   }),
   uiWindowShadow: Object.freeze({
     coverage: 'full',
@@ -1381,7 +1495,7 @@ export const EFFECT_ZONING = Object.freeze({
   // feedback_instruments_must_not_lie, not a hypothetical.
   window: Object.freeze({
     coverage: 'full',
-    why: 'Unlike water/vegetation/fluid, window light draws into its OWN dedicated per-floor scene (windowSurface.scene, never merged into geometry.world or the point-light pool) — light.windowSync (its per-frame depth-authority query + look-param dirty-check) and light.drawWindowLight (the draw itself) together cover its entire cost with nothing left un-zoned.',
+    why: "Unlike water/vegetation/fluid, window light draws into its OWN dedicated per-floor scene (windowSurface.scene, never merged into geometry.world or the point-light pool) — light.windowSync (its per-frame depth-authority query + look-param dirty-check), light.windowTileSync (the per-TILE population sync, #538/#539, added 2026-09-16 after its bracket was found calling a zone id with no declaration) and light.drawWindowLight (both the per-floor AND per-tile draws, which share one bracket by design — see that call site's own comment) together cover its entire cost with nothing left un-zoned.",
   }),
   fire: Object.freeze({
     coverage: 'partial',
@@ -1460,7 +1574,7 @@ export const EFFECT_ZONING = Object.freeze({
   // never flagged a real effect with real zones simply having no key here).
   specular: Object.freeze({
     coverage: 'full',
-    why: 'Draw (surface.specularDraw), per-frame CPU sync (surface.specularSync) and the island-pack bake (surface.specularIslandBake) are all zoned — the sync and bake zones were added 2026-08-06 alongside this entry; before that, both ran with zero profiler coverage despite running every frame and on every mask load respectively.',
+    why: 'Draw (surface.specularDraw, now covering both the floor AND tile renders in one bracket — 2026-09-16, the tile render used to sit outside it entirely), per-frame CPU sync — floor (surface.specularSync) and tile (surface.specularTileSync, added 2026-09-16, previously unbracketed anywhere) — and both island-pack bakes — per-floor (surface.specularIslandBake) and per-tile (surface.specularTileIslandBake, added 2026-09-16 after its bracket was found calling a zone id with no declaration) — are all zoned; before the 2026-08-06 pass, floor sync and the per-floor bake ran with zero profiler coverage despite running every frame and on every mask load respectively.',
   }),
   fluid: Object.freeze({
     coverage: 'partial',

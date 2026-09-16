@@ -286,7 +286,23 @@ export function createSpecularTileSurfaceSubsystem({
    * @param {number} floorIndex - the VIEWED floor.
    * @param {{minX:number,minY:number,maxX:number,maxY:number}|null} viewRect
    */
+  // mythica-machina-press#553 — this real per-frame CPU cost (per-tile-item
+  // material rebuild/dirty-check, mirroring window-tile-surface-subsystem
+  // .js's own sync()) had NO profiler coverage of any kind: not self-
+  // bracketed here, and the caller's own Z.surfSpecular bracket only ever
+  // wrapped the FLOOR sync (vt-pan-viewer.js, a few lines above this one's
+  // own call site), never this one. Same idiom as window-tile-surface-
+  // subsystem.js#sync — a thin wrapper around the real body.
   function sync(floorIndex, viewRect) {
+    profiler?.beginById('surface.specularTileSync');
+    try {
+      syncUnguarded(floorIndex, viewRect);
+    } finally {
+      profiler?.endById('surface.specularTileSync');
+    }
+  }
+
+  function syncUnguarded(floorIndex, viewRect) {
     syncs++;
     const state = getSpecularRenderState();
     enabled = state.enabled !== false;

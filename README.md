@@ -58,7 +58,7 @@ Supported formats:
 
 ### Currently recognized suffixes
 
-These are the masks currently discovered by the loader (`scripts/assets/loader.js`):
+These are the masks currently discovered by the module's asset-loading system:
 
 - **`_Specular`**: Specular highlights mask
 - **`_Roughness`**: Roughness map (untested)
@@ -88,7 +88,7 @@ These are the masks currently discovered by the loader (`scripts/assets/loader.j
 
 ### Effects & post processing
 
-Registered effects are orchestrated through `EffectComposer` (`scripts/effects/EffectComposer.js`). Current notable effects include:
+Registered effects are orchestrated through the module's effect pipeline. Current notable effects include:
 
 - **LightingEffect**: screen-space lighting composition.
 - **WorldSpaceFogEffect**: Fog of War rendered as a world-space plane with Foundry vision/exploration textures.
@@ -116,7 +116,7 @@ Registered effects are orchestrated through `EffectComposer` (`scripts/effects/E
 
 ## Roadmap (planned)
 
-This is a high-level summary of the current planning documents in `docs/`.
+This list predates a large amount of work that has since shipped (cloud shadows, vision/fog-of-war ownership, and more) — treat it as historical rather than current, and check the GitHub issue tracker for live status.
 
 - **Cloud system expansion**
   - Spatial window dimming based on cloud shadows
@@ -142,13 +142,13 @@ This repo uses an esbuild step to generate a custom Three.js bundle used by Foun
 
 ```text
 npm install
-npm run build:tsl
+npm run build:three-webgpu
 ```
 
 That produces:
 
 ```text
-scripts/vendor/three/three.custom.js
+src/vendor/three/three.webgpu.js
 ```
 
 ## Troubleshooting

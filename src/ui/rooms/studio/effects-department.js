@@ -21,6 +21,7 @@ import { buildDialControl } from '../../widgets/dial-control.js';
 import { rohGroups, collapsedStatusLine, buildSettingsSnapshot } from '../../widgets/param-groups.js';
 import { iconMarkup } from '../../widgets/icon-sprite.js';
 import { tierChip, scopeGlyph, healthBadge } from '../../widgets/badges.js';
+import { DIAL_DRIVE_TYPES } from '../../../core/dials-schema.js';
 
 /** Pinned card ids — one Set for the module's lifetime, seeded once from the
  * persisted client setting (see `pinnedSeeded` below) and written back on
@@ -493,6 +494,28 @@ function buildStudioEffectCard(model) {
       });
       dialRow.classList.add('msa-dial-row');
       foh.append(dialRow);
+    }
+    // A dial can only drive a float/int param (`core/dials-schema.js`'s own
+    // positive gate, `DIAL_DRIVE_TYPES`) — an `angle`/`color`/etc `fohKeys`
+    // entry has no dial FORM at all, so skipping it here would strand it:
+    // `rohGroups` below treats every `fohKeys` entry as promoted regardless
+    // of whether a dial actually covers it, so it would vanish from Advanced
+    // too and end up with no live control anywhere. CAUGHT LIVE 2026-09-17 —
+    // water's own `flowAngleDeg` ("Set direction in Advanced" the Flow
+    // dial's help text promises had nowhere to land; the compass-dial widget
+    // `param-control.js#buildCompassRow` was built for exactly this control
+    // back when it was first requested, 2026-08-16, but never reached the
+    // Studio card once dials replaced the raw `fohKeys` strip). Render those
+    // as raw controls, appended after the dials — a `float`/`int` fohKey
+    // that a dial simply doesn't cover (a deliberate ROH-only demotion, e.g.
+    // water's own `opacity`) is a DIFFERENT case and stays excluded here.
+    for (const key of model.fohKeys ?? []) {
+      const decl = model.schema?.[key];
+      if (!decl || DIAL_DRIVE_TYPES.includes(decl.type)) continue;
+      const row = buildParamControl(key, decl, { value: model.getValue(key), onChange: (v) => model.onChange(key, v) });
+      row.dataset.msaParam = key;
+      row.classList.add('msa-param-row');
+      foh.append(row);
     }
   } else {
     for (const key of model.fohKeys ?? []) {

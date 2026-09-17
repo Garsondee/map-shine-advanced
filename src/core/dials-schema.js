@@ -24,11 +24,16 @@
  * `to: [0,1]` window would validate against nothing, and `resolveDialDrives`
  * would happily write a raw float into a colour picker's storage slot.
  * `bool`/`enum`/`text`/`vec2`/`vec3`/`curve`/`action` all fail the identical
- * way. So the gate is POSITIVE (only `float`/`int` accepted), not a
- * blocklist that has to remember every unsafe type as one is added. Water's
- * own `flowAngleDeg` (one of its six current `fohKeys`) is the concrete case
- * this excludes today — it stays a raw ROH/fohKeys control, never a dial
- * target, until a cyclic `to` shape is designed on purpose.
+ * way. So the gate is POSITIVE (only `float`/`int` accepted, `DIAL_DRIVE_TYPES`
+ * below), not a blocklist that has to remember every unsafe type as one is
+ * added. Water's own `flowAngleDeg` (one of its six current `fohKeys`) is
+ * the concrete case this excludes today — never a dial target, until a
+ * cyclic `to` shape is designed on purpose. It still renders on the FRONT
+ * STRIP though, not tucked into Advanced: `ui/rooms/studio/
+ * effects-department.js`'s card shell reads this same `DIAL_DRIVE_TYPES`
+ * gate to render any `fohKeys` entry a dial structurally can't cover as its
+ * own raw control, right after the dials — being excluded from the dial
+ * mechanism is not the same as being demoted to ROH.
  *
  * ============================================================================
  * WHY THIS FILE TAKES THE PARAMS SCHEMA DIRECTLY, NOT AN INJECTED RESOLVER
@@ -61,6 +66,16 @@
 
 /** The closed curve vocabulary a `drives` entry may declare. */
 export const DIAL_CURVES = Object.freeze(['linear', 'ease-in', 'ease-out', 'smoothstep']);
+
+/**
+ * The positive type gate for a `drives` target (see this file's own header,
+ * "WHY ONLY float/int CAN BE DRIVE TARGETS") — exported so a card shell
+ * deciding which `fohKeys` entries a dial strip actually covers (and which
+ * ones, like an `angle`, structurally never can be and so must still render
+ * as their own raw control) reads the SAME gate `validateDialsSchema` below
+ * enforces, rather than a second copy of the literal that could drift.
+ */
+export const DIAL_DRIVE_TYPES = Object.freeze(['float', 'int']);
 
 /**
  * Hard ceiling (Effects-UI.md §3.2, originally "3-6 dials per effect, hard
@@ -153,7 +168,7 @@ export function validateDialsSchema(dialsSchema, paramsSchema) {
         fail(id, `drives '${paramKey}', which this effect's params schema does not declare`);
         continue;
       }
-      if (paramDecl.type !== 'float' && paramDecl.type !== 'int') {
+      if (!DIAL_DRIVE_TYPES.includes(paramDecl.type)) {
         const why =
           paramDecl.type === 'angle'
             ? 'angle wraps rather than clamps, so it has no fixed [min,max] a to window can target'

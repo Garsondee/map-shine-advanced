@@ -789,14 +789,19 @@ export const WATER_PARAMS = Object.freeze({
  * `core/dials-schema.js#validateDialsSchema` in `water.test.mjs`, the
  * `dials/valid-reference` wall's own real-content half.
  *
- * ⚠️ `flowAngleDeg` AND `tint` ARE DELIBERATELY UNCOVERED. `flowAngleDeg` is
- * an `angle` type — `validateDialsSchema` refuses it as a drive target on
- * principle (no fixed range a `to` window can clamp into; see dials-
- * schema.js's own header). `tint` is `color`-typed for the identical
- * structural reason. Both stay reachable through ROH only — direction and
- * colour-trim are already single, already-plain-language controls in their
- * own right (see their own `help` text above), not knobs a macro dial would
- * meaningfully simplify further.
+ * ⚠️ `flowAngleDeg` AND `tint` ARE DELIBERATELY UNCOVERED BY THE DIALS
+ * THEMSELVES. `flowAngleDeg` is an `angle` type — `validateDialsSchema`
+ * refuses it as a drive target on principle (no fixed range a `to` window
+ * can clamp into; see dials-schema.js's own header). `tint` is `color`-typed
+ * for the identical structural reason. Direction and colour-trim are already
+ * single, already-plain-language controls in their own right (see their own
+ * `help` text above), not knobs a macro dial would meaningfully simplify
+ * further — but "not a dial" isn't "ROH-only": `flowAngleDeg` is one of
+ * water's own `fohKeys` (boot.js), so `effects-department.js`'s card shell
+ * still renders it as a raw compass control on the front strip, right after
+ * the five dials (a type-gated fallback, `DIAL_DRIVE_TYPES`, general to any
+ * effect — not water-specific plumbing). `tint` is NOT in `fohKeys`, so it
+ * stays genuinely ROH-only, under Advanced.
  *
  * ⚠️ `opacity` IS ALSO DELIBERATELY UNCOVERED — a curation choice, not an
  * oversight. It was one of the original six `fohKeys` (a flat "top 6" list
@@ -868,7 +873,7 @@ export const WATER_DIALS = Object.freeze({
   },
   flow: {
     label: 'Flow',
-    help: 'How fast the surface travels downstream — still for a pond, brisk for a lazy river, fast for rapids. Set direction in Advanced.',
+    help: 'How fast the surface travels downstream — still for a pond, brisk for a lazy river, fast for rapids. Set direction with the compass control right after the dials.',
     range: [0, 400],
     default: 90,
     drives: {

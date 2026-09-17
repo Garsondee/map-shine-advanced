@@ -75,6 +75,7 @@ export function schemaFadeSource({ schema, getValue, onChange }) {
  * @returns {{
  *   registerSource: (namespace: string, source: FadeSource) => void,
  *   hasSource: (namespace: string) => boolean,
+ *   canResolve: (key: string) => boolean,
  *   typeOf: (key: string) => string|undefined,
  *   readLive: (key: string) => *,
  *   write: (key: string, value: *) => void,
@@ -103,6 +104,28 @@ export function createFadeSourceRegistry() {
 
   function hasSource(namespace) {
     return sources.has(namespace);
+  }
+
+  /**
+   * Can this key actually be written/read — a real namespace, a real field,
+   * a registered source? The one honest pre-flight check a caller loading
+   * `fadeState` from PERSISTED storage (a scene flag, `fade-persistence.js`)
+   * needs before trusting an entry: unlike `world/sky-settings.js#normalizeSky`,
+   * nothing here has EVER validated a loaded `fadeState` entry's key against
+   * the sources actually registered THIS session — a key that was valid once
+   * (or never valid at all — a stray `'weather'` with no field, from
+   * whatever produced it) is carried forward by every `mergeFadeState` call
+   * forever ("keys outside the patch are carried over untouched," by
+   * design), persisted right alongside real fades by every `writeFadeState`,
+   * and never dropped from STORAGE by `pruneExpired` (which only ever
+   * updates the in-memory copy). A caller loading fadeState from a scene
+   * flag should filter through this FIRST — see boot.js's own
+   * `filterResolvableFadeState`.
+   * @param {string} key @returns {boolean}
+   */
+  function canResolve(key) {
+    const split = splitKey(key);
+    return !!(split && sources.has(split.namespace));
   }
 
   /** @param {string} key @returns {{namespace: string, field: string}|null} */
@@ -144,5 +167,5 @@ export function createFadeSourceRegistry() {
     return out;
   }
 
-  return { registerSource, hasSource, typeOf, readLive, write, allKeys };
+  return { registerSource, hasSource, canResolve, typeOf, readLive, write, allKeys };
 }

@@ -10259,6 +10259,39 @@ function install() {
    * stamp `weatherArchetype:'custom'`, just immediately rather than through
    * this map — see that function's own doc for why the two still differ). */
   const pendingSkyFadeCompletions = new Map();
+
+  /**
+   * Drop any persisted `fadeState` entry `fadeSourceRegistry` can no longer
+   * resolve — a real, live incident, not a defensive-programming exercise:
+   * a stray `'weather'` key (namespace, no field — never a valid target any
+   * function in this file has ever constructed) sat in a scene's own
+   * persisted fade-state flag, silently carried forward by every
+   * `mergeFadeState` call ("keys outside the patch are carried over
+   * untouched," by design) and re-persisted by every `writeFadeState` — but
+   * NEVER cleaned out of storage, since `pruneExpired` only ever updates the
+   * in-memory copy. `pumpWeatherFades`'s own per-key write loop then threw
+   * on it EVERY FRAME, aborting the whole function before it could reach
+   * its own completion loop — which is what actually persists an arrived
+   * axis drag (`fadeWeatherAxisTo`'s own `pendingSkyFadeCompletions` entry)
+   * — so a live Rain fade could start, "arrive," and STILL never actually
+   * commit, forever, because one unrelated poisoned key upstream in the
+   * same object kept blowing up the loop before it got there. Filtering
+   * HERE, at both places raw storage ever becomes this client's own working
+   * `fadeState` (`canvasReady`'s initial load and `watchFadeState`'s own
+   * echo-triggered reload, below), stops a poisoned flag from ever reaching
+   * memory again; `pumpWeatherFades`'s own per-key try/catch (its own doc)
+   * is the second, independent layer, in case something else ever manages
+   * to construct a bad key in-memory without going through storage first.
+   * @param {Record<string, object>} state @returns {Record<string, object>}
+   */
+  function filterResolvableFadeState(state) {
+    const next = {};
+    for (const [key, entry] of Object.entries(state ?? {})) {
+      if (fadeSourceRegistry.canResolve(key)) next[key] = entry;
+      else log.warn(`dropping unresolvable persisted fade key '${key}' — no source registered for its namespace`);
+    }
+    return next;
+  }
   /** Captured once per scene — "the scene's authored resting look" the
    * Baseline button fades back to. `null` until the first canvasReady for
    * this scene has run. */
@@ -10761,10 +10794,36 @@ function install() {
     // regardless) and guarantees the manager's own internal state is forced
     // to the exact target, via the real bypass, before anything else ever
     // touches that key again.
+    // ⚠️ ONE BAD KEY MUST NEVER ABORT EVERY SIBLING FADE IN THIS SAME TICK —
+    // a real, live incident (mythica-machina-press): a stray `'weather'` key
+    // (namespace, no field) sitting in a scene's persisted fade state threw
+    // here, uncaught, EVERY frame — which didn't just spam the console, it
+    // silently starved every OTHER weather fade sharing this one function:
+    // the throw aborted execution before this loop could finish, before the
+    // completion loop below could persist an axis drag's own arrived value
+    // (`fadeWeatherAxisTo`), and before `pruneExpired` at the bottom could
+    // even try to clean the bad key out of memory. A live Rain fade could
+    // start and "arrive" and STILL never actually commit, forever, because
+    // one unrelated poisoned key ahead of it in iteration order kept
+    // blowing up the whole function first. `filterResolvableFadeState`
+    // (this file's own doc) is the fix for HOW a bad key gets into memory in
+    // the first place; this try/catch is the independent second layer, for
+    // whatever future mistake manages to construct one without going
+    // through storage at all — drop it, log it once, keep going.
+    let droppedBadKey = false;
     for (const key of keys) {
       const entry = fadeState[key];
-      fadeSourceRegistry.write(key, computeEasedValue(entry, nowMs));
+      try {
+        fadeSourceRegistry.write(key, computeEasedValue(entry, nowMs));
+      } catch (err) {
+        log.error(`pumpWeatherFades: dropping unwritable fade key '${key}' (${err?.message ?? err})`);
+        const next = { ...fadeState };
+        delete next[key];
+        fadeState = next;
+        droppedBadKey = true;
+      }
     }
+    if (droppedBadKey) void writeFadeState(fadeState);
     let anyCompleted = false;
     for (const [gestureId, completion] of pendingSkyFadeCompletions) {
       const ownEntries = Object.values(fadeState).filter((e) => e.id === gestureId);
@@ -14286,7 +14345,7 @@ function install() {
         // with, not whatever the last scene happened to leave in memory.
         try {
           const { state, reason } = readFadeState();
-          fadeState = state;
+          fadeState = filterResolvableFadeState(state);
           if (reason) log.info(`fade state (canvasReady): ${reason}`); // "no active scene" etc. — benign, not an error
           pendingSkyFadeCompletions.clear();
           baselineWeatherSnapshot = {
@@ -14299,7 +14358,7 @@ function install() {
         fadeUnsub?.();
         fadeUnsub = watchFadeState(() => {
           const { state } = readFadeState();
-          fadeState = state;
+          fadeState = filterResolvableFadeState(state);
           MapShine.__remote?.refreshWeatherBoard();
         });
         // EFFECT SCENE PARAMS (Stage B, #288/#389) — this scene's own load

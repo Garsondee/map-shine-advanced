@@ -8537,7 +8537,12 @@ function install() {
         // the edge, the wet-margin pair, the whole Light group, the wave
         // geometry — still passes the same judgement test the ORIGINAL six did,
         // just no longer includes color.
-        fohKeys: ['depth', 'pollution', 'opacity', 'foam', 'flowAngleDeg', 'flowSpeedPx'],
+        // 'opacity' removed from this list 2026-09-18 (mythica-machina-press#566):
+        // it had no real FOH control (no dial drives it, unlike the other five —
+        // see WATER_DIALS in water.js), so being listed here only excluded it
+        // from Advanced without ever surfacing it anywhere. It now falls through
+        // to Advanced under Water's Look category like a normal ROH param.
+        fohKeys: ['depth', 'pollution', 'foam', 'flowAngleDeg', 'flowSpeedPx'],
         getValue: (id) => readLive().params?.[id] ?? WATER_PARAMS[id]?.default,
         onChange: (id, value) => MapShine.setWater({ [id]: value }),
         enabled: readLive().enabled,
@@ -8593,7 +8598,12 @@ function install() {
         MapShine.setWater(params);
       },
       schema: WATER_PARAMS,
-      fohKeys: ['depth', 'pollution', 'opacity', 'foam', 'flowAngleDeg', 'flowSpeedPx'],
+      // 'opacity' removed from this list 2026-09-18 (mythica-machina-press#566):
+      // it had no real FOH control (no dial drives it, unlike the other five —
+      // see WATER_DIALS in water.js), so being listed here only excluded it
+      // from Advanced without ever surfacing it anywhere. It now falls through
+      // to Advanced under Water's Look category like a normal ROH param.
+      fohKeys: ['depth', 'pollution', 'foam', 'flowAngleDeg', 'flowSpeedPx'],
       // U6 (docs/holy/UI-Testament.md §9): five authored dials replace this
       // fohKeys strip in the FOH — fohKeys itself stays, both as the ROH-
       // exclusion set (rohGroups reads it unconditionally) and as the

@@ -25,19 +25,21 @@
  * file header:
  *
  *   1. Estimate scene luma (sparse 9-tap grid) — feeds the grain/noise
- *      adaptive boost below.
+ *      adaptive boost below (and, tier 3, the overlay catalog's own
+ *      luma-reactivity).
  *   2. Distort the sample UV (radial warp) and sample with chromatic
  *      aberration.
  *   3. Autofocus defocus — mixes in a 9-tap Kawase blur by `uAutoFocusAmount`.
  *   4. Camera motion blur — a 2-tap directional sample either side of centre.
- *   5. Vignette (screen-space, unaffected by the distortion above).
- *   6. Grain + optional digital sensor noise (luma-adaptive cell hash).
- *
- * The OVERLAY/light-leak CATALOG layer (`sampleOverlay`/`sampleOverlayCrossfade`
- * in V2's own shader) is NOT here yet — see `effects/lens.js`'s own header
- * (corrected 2026-09-18, mythica-machina-press#57): the texture library this
- * needs already exists in this repo (`assets/lens assets/`), so this is a
- * real, buildable engineering gap, not a missing-content one.
+ *   5. Overlay catalog (tier 3) — grime/dust/light-leak, additively summed
+ *      in at plain screen uv, matching V2's own real ordering exactly (its
+ *      `lens-shader.js`'s own execution-order header: overlay is computed
+ *      independent of the distortion pipeline and added in after motion,
+ *      before light burn). Basic v1, not V2's full 4-channel catalog — see
+ *      `effects/lens.js`'s own header for the scope split.
+ *   6. Light burn (tier 2) — the persistence buffer's own read side.
+ *   7. Vignette (screen-space, unaffected by the distortion above).
+ *   8. Grain + optional digital sensor noise (luma-adaptive cell hash).
  *
  * @module effects/lens-render
  */
@@ -66,8 +68,20 @@ export const LENS_TIER0_DIGITAL_NOISE_LOW_LIGHT_BOOST = 3.37;
  * uniform — Law 4: nothing here can change without a rebuild anyway. */
 const LENS_DISTORTION_CENTER = [0.5, 0.5];
 
-/** How many performance-cascade rungs this effect declares (0..2, `lens.js#LENS.tiers`). */
-export const LENS_MAX_TIER = 2;
+/** How many performance-cascade rungs this effect declares (0..3, `lens.js#LENS.tiers`). */
+export const LENS_MAX_TIER = 3;
+
+/** Every bundled `LENS_OVERLAY_CATALOG` image ships at this exact size —
+ * used to "cover"-fit the texture to the viewport (`vt/lens-overlay-
+ * image.js`'s own header covers the memory-budget side of this constant;
+ * this is the aspect-ratio side, needed at material-build time regardless
+ * of how large the uploaded texture ends up). */
+const LENS_OVERLAY_SOURCE_ASPECT = 3840 / 2160;
+
+/** Fixed UV-space half-amplitude of the overlay drift wobble — see
+ * `buildLensCompositeMaterial`'s own overlay block for why this is a
+ * bounded oscillation rather than V2's own unbounded linear drift. */
+const LENS_OVERLAY_DRIFT_AMPLITUDE = 0.02;
 
 /** `resolveEffectTier(LENS, {profile: DEFAULT_PERFORMANCE_PROFILE})` resolves to —
  * `standard` reaches tier 0 only (motion needs `performance`... wait, `performance`
@@ -80,7 +94,7 @@ export const LENS_DEFAULT_TIER = 1;
  * The tier ladder, as a plan a builder can branch on — mirrors
  * `fluidTierPlan`/`specularTierPlan`'s own shape exactly.
  * @param {number} tier
- * @returns {{tier: number, motionEnabled: boolean, lightBurnEnabled: boolean}}
+ * @returns {{tier: number, motionEnabled: boolean, lightBurnEnabled: boolean, overlayEnabled: boolean}}
  */
 export function lensTierPlan(tier) {
   const t = Number.isFinite(tier) ? Math.max(0, Math.min(LENS_MAX_TIER, Math.floor(tier))) : LENS_DEFAULT_TIER;
@@ -88,6 +102,7 @@ export function lensTierPlan(tier) {
     tier: t,
     motionEnabled: t >= 1,
     lightBurnEnabled: t >= 2,
+    overlayEnabled: t >= 3,
   };
 }
 
@@ -167,25 +182,41 @@ export function buildLightBurnAccumulateMaterial({ THREE, sceneTexture, prevBurn
  * @param {*} args.lightBurnTexture - tier 2's own accumulator texture. A 1×1
  *   black stub below tier 2 or before light burn's first tick — ALWAYS real,
  *   the gate is `plan.lightBurnEnabled`, never a null check.
+ * @param {*} args.overlayTexture @param {*} args.overlayNextTexture - tier 3's
+ *   own current/next catalog images (`lens.js#LENS_OVERLAY_CATALOG`). Same
+ *   "always a real texture, 1×1 stub before the first real one loads"
+ *   contract as `lightBurnTexture` — the caller (`runPostLensPass`) owns
+ *   fetching the real images (`vt/lens-overlay-image.js`) and re-pointing
+ *   `overlayCurrentTexNode`/`overlayNextTexNode` once each one lands.
  * @param {number} args.resolutionWidth @param {number} args.resolutionHeight -
  *   the render target's own px size, for the texel-size math CA/grain/Kawase
- *   all need. Re-supplied by the caller on every resize (this builder does
- *   not itself watch for one).
+ *   all need, AND (tier 3) the cover-fit aspect correction the overlay
+ *   catalog's own fixed 16:9 images need to avoid stretching on a
+ *   non-16:9 viewport. Re-supplied by the caller on every resize (this
+ *   builder does not itself watch for one).
  * @param {*} [args.tier] - `LENS_DEFAULT_TIER` default.
  * @returns {{material: *, sceneTexNode: *, lightBurnTexNode: (*|null),
- *   uniforms: object}} `sceneTexNode`/`lightBurnTexNode` — re-point every
- *   frame (`runPostLensPass`); see `sceneTexNode`'s own declaration comment,
- *   inside this function, for why there are exactly these two re-pointable
- *   nodes and not one per texture-read call site. `uniforms` — every live-tunable
- *   knob, keyed by `LENS_PARAMS` name (`u` + PascalCase), PLUS the four
- *   per-frame motion uniforms (`uAutoFocusAmount`, `uAutoFocusShiftPx`,
- *   `uCameraMotionBlurPx`, `uZoomMotionBlurPx`) tier 1 pushes fresh every
- *   frame and tier 0 never reads.
+ *   overlayCurrentTexNode: (*|null), overlayNextTexNode: (*|null),
+ *   uniforms: object}} `sceneTexNode`/`lightBurnTexNode`/`overlay*TexNode` —
+ *   re-point every frame (`runPostLensPass`); see `sceneTexNode`'s own
+ *   declaration comment, inside this function, for why the SCENE side of
+ *   this stays to exactly two re-pointable nodes rather than one per
+ *   texture-read call site (the overlay pair are a separate, simpler case —
+ *   each is read exactly once, so each is its own node with no `.sample()`
+ *   fan-out to keep in sync). `uniforms` — every live-tunable knob, keyed by
+ *   `LENS_PARAMS` name (`u` + PascalCase), PLUS the four per-frame motion
+ *   uniforms (`uAutoFocusAmount`, `uAutoFocusShiftPx`, `uCameraMotionBlurPx`,
+ *   `uZoomMotionBlurPx`) tier 1 pushes fresh every frame, and `uOverlayCrossfade`
+ *   (tier 3, pushed fresh every frame from `lens-motion.js#computeOverlayCatalogState`
+ *   — a COMPUTED value, not a direct `LENS_PARAMS` mirror, which is why it has
+ *   no `overlayCrossfade` param counterpart of its own); tier 0 never reads any of them.
  */
 export function buildLensCompositeMaterial({
   THREE,
   sceneTexture,
   lightBurnTexture,
+  overlayTexture,
+  overlayNextTexture,
   resolutionWidth,
   resolutionHeight,
   tier = LENS_DEFAULT_TIER,
@@ -207,6 +238,7 @@ export function buildLensCompositeMaterial({
     dot,
     floor,
     fract,
+    sin,
     Fn,
   } = THREE.TSL;
 
@@ -242,6 +274,19 @@ export function buildLensCompositeMaterial({
   // above owns threshold/softness/response/decay; this is the read side).
   const uLightBurnIntensity = uniform(float(0.1));
   const uLightBurnBlurPx = uniform(float(8));
+
+  // Tier 3 — the overlay catalog's own live knobs, PLUS `uOverlayCrossfade`,
+  // the one uniform here that mirrors no `LENS_PARAMS` entry: it is
+  // `lens-motion.js#computeOverlayCatalogState`'s own computed mix weight
+  // toward `overlayNextTexNode`, pushed fresh every frame the same way
+  // `uAutoFocusAmount` mirrors a computed envelope rather than an authored
+  // number.
+  const uOverlayIntensity = uniform(float(0));
+  const uOverlayLumaReactivity = uniform(float(0.6));
+  const uOverlayClearRadius = uniform(float(0.32));
+  const uOverlayClearSoftness = uniform(float(0.4));
+  const uOverlayDriftSpeed = uniform(float(0.2));
+  const uOverlayCrossfade = uniform(float(0));
 
   const resolution = vec2(Math.max(1, resolutionWidth || 1), Math.max(1, resolutionHeight || 1));
   const texelSize = vec2(1, 1).div(resolution);
@@ -329,6 +374,9 @@ export function buildLensCompositeMaterial({
   /** `null` below tier 2 — nothing was built to re-point (see the return
    * value's own doc for why the caller needs this at all). */
   let lightBurnTexNode = null;
+  /** `null` below tier 3 — same contract as `lightBurnTexNode` above. */
+  let overlayCurrentTexNode = null;
+  let overlayNextTexNode = null;
 
   if (plan.motionEnabled) {
     // ── AUTOFOCUS DEFOCUS — a Kawase-style 9-tap blur, mixed in by
@@ -374,6 +422,74 @@ export function buildLensCompositeMaterial({
     sceneColor = sampleSceneWithCA(distortedUv);
   }
   sceneColor = sceneColor.toVar();
+
+  // ── OVERLAY CATALOG (tier 3) — grime/dust/light-leak, additively
+  // composited "on the lens glass" at PLAIN screen uv, matching V2's own
+  // real ordering exactly: `lens-shader.js`'s own execution-order header
+  // (recovered from git history, `c328c9bd~1`) computes the overlay
+  // independent of the distortion pipeline and sums it into sceneColor
+  // right here — after autofocus/motion, before light burn. Basic v1
+  // (`lens.js`'s own header has the full scope split): ONE cycling library
+  // across all `LENS_OVERLAY_CATALOG` images, no V2 4-channel
+  // classification, no per-channel pulse. ───────────────────────────────
+  if (plan.overlayEnabled) {
+    // COVER FIT — every bundled catalog image is exactly 3840x2160 (16:9);
+    // the viewport rarely is, and a plain 0..1 uv would stretch a subtle
+    // dust pattern into an obviously-wrong smear on any non-16:9 window.
+    // A centred "cover" crop (CSS `background-size:cover`'s own algorithm)
+    // keeps it reading as a photographed overlay at any aspect, at the cost
+    // of a few edge pixels of the source never being seen — never a
+    // problem for a texture with no single feature that must stay visible.
+    // Computed here in plain JS from the same resolutionWidth/Height the
+    // caller already re-supplies on every resize (this builder is rebuilt
+    // on resize regardless — `resolution`/`texelSize` above are baked the
+    // identical way), not as shader ALU: it is a per-BUILD constant, never
+    // a per-frame one.
+    const screenAspect = Math.max(1, resolutionWidth || 1) / Math.max(1, resolutionHeight || 1);
+    const overlayCoverScale =
+      screenAspect > LENS_OVERLAY_SOURCE_ASPECT
+        ? { x: 1, y: LENS_OVERLAY_SOURCE_ASPECT / screenAspect } // screen wider than the source: crop top/bottom
+        : { x: screenAspect / LENS_OVERLAY_SOURCE_ASPECT, y: 1 }; // screen narrower/taller: crop the sides
+
+    // DRIFT — a small, BOUNDED wobble (two slow, out-of-phase sine waves),
+    // deliberately not V2's own unbounded linear drift (`lens.js`'s own
+    // header: a texture sampled ClampToEdge should never have to reason
+    // about how far an unbounded pan travelled over an arbitrarily long
+    // session). Computed here in-shader from `uTimeSec`/`uOverlayDriftSpeed`
+    // — both already-live uniforms — the same "pure function of the clock,
+    // no CPU round-trip" shape grain's own wobble above already uses,
+    // rather than a value pushed from JS every frame.
+    const driftPhaseX = uTimeSec.mul(0.037).mul(uOverlayDriftSpeed);
+    const driftPhaseY = uTimeSec.mul(0.023).mul(uOverlayDriftSpeed).add(1.7);
+    const driftUv = vec2(sin(driftPhaseX), sin(driftPhaseY)).mul(LENS_OVERLAY_DRIFT_AMPLITUDE);
+
+    const overlayUv = clamp(
+      uv().sub(vec2(0.5, 0.5)).mul(vec2(overlayCoverScale.x, overlayCoverScale.y)).add(vec2(0.5, 0.5)).add(driftUv),
+      vec2(0, 0),
+      vec2(1, 1)
+    ).toVar();
+
+    overlayCurrentTexNode = texture(overlayTexture, overlayUv);
+    overlayNextTexNode = texture(overlayNextTexture, overlayUv);
+    const overlaySample = mix(overlayCurrentTexNode.rgb, overlayNextTexNode.rgb, clamp(uOverlayCrossfade, 0, 1));
+
+    // CLEAR-RADIUS MASK + LUMA REACTIVITY — V2's own `sampleOverlay` formula
+    // (`lens-shader.js`, recovered from git history), simplified to ONE
+    // luma term instead of V2's separate `lumaReactivity`/`lumaBoost` pair
+    // (`lens.js`'s own header) and with V2's extra "clearRadius < 0.001"
+    // special case folded away: `smoothstep` already degrades to the same
+    // "a small clear patch sized by softness alone" behaviour at radius 0
+    // without a branch.
+    const overlayDist = length(uv().sub(vec2(0.5, 0.5)));
+    const overlayClearMask = smoothstep(
+      uOverlayClearRadius.sub(uOverlayClearSoftness),
+      uOverlayClearRadius.add(uOverlayClearSoftness),
+      overlayDist
+    );
+    const overlayReactivity = mix(float(1), sceneLuma, clamp(uOverlayLumaReactivity, 0, 1));
+    const overlayAmount = uOverlayIntensity.mul(overlayReactivity).mul(overlayClearMask);
+    sceneColor = sceneColor.add(overlaySample.mul(overlayAmount));
+  }
 
   // ── LIGHT BURN (tier 2) — read at the UNDISTORTED uv (V2's own choice:
   // the burn is a property of the SENSOR, not the glass in front of it, so
@@ -464,16 +580,22 @@ export function buildLensCompositeMaterial({
     material,
     tier: plan.tier,
     // THE RE-POINTABLE INPUT NODES — see `sceneTexNode`'s own declaration
-    // comment for why there are only these two, not dozens. The caller
-    // (`runPostLensPass`) re-points BOTH every frame:
+    // comment for why there are only these two SCENE nodes, not dozens. The
+    // caller (`runPostLensPass`) re-points every frame:
     // `sceneTexNode.value = gradePresent.getLitSource()` (the chain's
-    // current lit texture, which changes IDENTITY whenever TAA is active)
-    // and, when tier 2 built it, `lightBurnTexNode.value = <this tick's
-    // READ half of the ping-pong pair>`. `lightBurnTexNode` is `null` below
-    // tier 2 — nothing to re-point, mirroring `fluid-render.js`'s own
-    // `stateTexNodes` contract exactly.
+    // current lit texture, which changes IDENTITY whenever TAA is active),
+    // when tier 2 built it, `lightBurnTexNode.value = <this tick's READ
+    // half of the ping-pong pair>`, and, when tier 3 built them,
+    // `overlayCurrentTexNode`/`overlayNextTexNode` — but only on the rare
+    // frame the catalog's current/next index actually changes, since these
+    // two hold a genuinely resident image rather than a per-frame swap.
+    // `lightBurnTexNode`/`overlayCurrentTexNode`/`overlayNextTexNode` are
+    // `null` below their own gating tier — nothing to re-point, mirroring
+    // `fluid-render.js`'s own `stateTexNodes` contract exactly.
     sceneTexNode,
     lightBurnTexNode,
+    overlayCurrentTexNode,
+    overlayNextTexNode,
     uniforms: {
       uDistortion,
       uChromaticAmountPx,
@@ -499,6 +621,12 @@ export function buildLensCompositeMaterial({
       uZoomMotionBlurPx,
       uLightBurnIntensity,
       uLightBurnBlurPx,
+      uOverlayIntensity,
+      uOverlayLumaReactivity,
+      uOverlayClearRadius,
+      uOverlayClearSoftness,
+      uOverlayDriftSpeed,
+      uOverlayCrossfade,
     },
   };
 }

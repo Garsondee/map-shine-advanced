@@ -120,6 +120,7 @@ import {
 import { createLogger } from '../core/log.js';
 import { buildViewerDiagnostics } from './vt-pan-viewer-diagnostics.js';
 import { loadMaskImageTexture } from './mask-image.js';
+import { loadLensOverlayTexture } from './lens-overlay-image.js';
 
 /** Log door for the onPageDecoded ingest seam's containment guard — the one
  * place this file reports a CONSUMER's failure rather than its own. */
@@ -428,6 +429,8 @@ import {
   computeZoomMotionBlurPx,
   computeLightBurnDecayFactor,
   computeLightBurnDarknessGate,
+  computeOverlayCatalogState,
+  LENS_OVERLAY_CATALOG,
   buildDofMaterials,
   hexToRgb01,
   resolveEnvGrade,
@@ -8484,6 +8487,42 @@ export async function startVtPanViewer({
      * use. Built lazily (needs `THREE`, not available at closure-top). */
     let lensLightBurnPlaceholder = null;
 
+    // ── OVERLAY CATALOG state (tier 3, mythica-machina-press#57) ───────────
+    /** Same "1×1 stub, never a conditionally-absent slot" contract as
+     * `lensLightBurnPlaceholder` — bound whenever the catalog's real image
+     * for a given slot has not (yet) finished loading. Transparent black:
+     * multiplied into the additive overlay term, it contributes exactly
+     * nothing until the real texture lands. */
+    let lensOverlayPlaceholder = null;
+    /** filename -> Promise<{texture}|null>, so N slots wanting the SAME
+     * catalog image cost exactly one fetch — mirrors `lutTextureCache`'s own
+     * shape/reasoning (`loadNamedLut`, below), except every entry here is
+     * kept forever once resolved: the catalog is a small, fixed, bundled set
+     * (13 images), never large enough to need the eviction a per-map asset
+     * cache would. */
+    const lensOverlayTextureCache = new Map();
+    /** The catalog index each node was LAST re-pointed to, so the per-frame
+     * check below only fetches/re-points on the rare frame the cycle
+     * actually advances — never every frame. `-1` (matches no real index)
+     * forces a re-point on the next tick after any rebuild, since a fresh
+     * `lensBuilt` starts every slot back at the placeholder above. */
+    let lensOverlayAppliedCurrentIndex = -1;
+    let lensOverlayAppliedNextIndex = -1;
+
+    /** Resolve one catalog filename to a texture, fetching+caching on first
+     * ask — same lazy-forever posture `loadNamedLut` already uses for its
+     * own bundled `.cube` set. Never rejects (`loadLensOverlayTexture`'s own
+     * contract): a failed slot just keeps whatever was bound before. */
+    function getLensOverlayTexture(filename) {
+      let entry = lensOverlayTextureCache.get(filename);
+      if (!entry) {
+        const url = `modules/${MODULE_ID}/assets/${encodeURIComponent('lens assets')}/${filename}`;
+        entry = loadLensOverlayTexture({ url, THREE });
+        lensOverlayTextureCache.set(filename, entry);
+      }
+      return entry;
+    }
+
     /** Rebuild (or build for the first time) the composite material at a
      * given tier — mirrors `rebuildDofForTier`'s own shape: a tier is a
      * JS-time branch INSIDE the builder (Law 4), so a tier change compiles
@@ -8491,11 +8530,14 @@ export async function startVtPanViewer({
      * a live uniform toggle on the existing one. */
     function rebuildLensForTier(tier) {
       lensLightBurnPlaceholder ??= createMaskDataTexture(new Uint8Array([0, 0, 0, 0]), 1, 1, 'linear', false);
+      lensOverlayPlaceholder ??= createMaskDataTexture(new Uint8Array([0, 0, 0, 0]), 1, 1, 'linear', false);
       const prev = lensBuilt;
       lensBuilt = buildLensCompositeMaterial({
         THREE,
         sceneTexture: gradePresent.getLitSource?.() ?? sceneLit.texture,
         lightBurnTexture: lensLightBurnReadRT?.texture ?? lensLightBurnPlaceholder,
+        overlayTexture: lensOverlayPlaceholder,
+        overlayNextTexture: lensOverlayPlaceholder,
         resolutionWidth: internalW,
         resolutionHeight: internalH,
         tier,
@@ -8503,6 +8545,14 @@ export async function startVtPanViewer({
       lensQuad = new THREE.QuadMesh(lensBuilt.material);
       prev?.material?.dispose?.();
       lensBuiltForTier = lensBuilt.tier;
+      // A fresh material starts both overlay slots at the placeholder above,
+      // regardless of what was showing before the rebuild — force the next
+      // `runPostLensPass` tick to re-point them from whatever is already
+      // cached (near-instant: the SAME filenames were almost certainly
+      // already fetched under the previous material) rather than reading
+      // "index unchanged" and leaving the placeholder bound indefinitely.
+      lensOverlayAppliedCurrentIndex = -1;
+      lensOverlayAppliedNextIndex = -1;
     }
 
     // ── Autofocus state (V2's own event-scheduler shape, see lens-motion.js) ──
@@ -8722,6 +8772,56 @@ export async function startVtPanViewer({
         const motionOn = p.motionBlurEnabled === true;
         u.uCameraMotionBlurPx.value.set(motionOn ? motionBlurPx.x : 0, motionOn ? motionBlurPx.y : 0);
         u.uZoomMotionBlurPx.value = motionOn ? zoomBlurPx : 0;
+      }
+
+      // ── TIER 3 — OVERLAY CATALOG (mythica-machina-press#57) — which two
+      // catalog images are current/next is a pure function of a running
+      // clock (`computeOverlayCatalogState`), so this is cheap to recompute
+      // every frame; only the (rare) frame an index actually CHANGES kicks
+      // off a fetch — cached forever after by `getLensOverlayTexture`, the
+      // same "lazy, cache forever" posture `loadNamedLut` uses for its own
+      // bundled `.cube` set. ─────────────────────────────────────────────
+      const overlayWanted = plan.overlayEnabled && p.overlayEnabled === true;
+      if (overlayWanted) {
+        const overlayCatalogState = computeOverlayCatalogState({
+          elapsedSec: nowSec,
+          cycleSeconds: lensNum(p.overlayCycleSeconds, 45),
+          crossfadeSeconds: lensNum(p.overlayCrossfadeSeconds, 4),
+          catalogLength: LENS_OVERLAY_CATALOG.length,
+        });
+        if (overlayCatalogState.currentIndex !== lensOverlayAppliedCurrentIndex) {
+          const wantedCurrentIndex = overlayCatalogState.currentIndex;
+          lensOverlayAppliedCurrentIndex = wantedCurrentIndex;
+          getLensOverlayTexture(LENS_OVERLAY_CATALOG[wantedCurrentIndex]).then((result) => {
+            // Stale-response guard — mirrors `loadNamedLut`'s own
+            // `currentLutName` re-check: re-verify this is STILL the wanted
+            // index before applying. Without it, a slow fetch for an index
+            // the cycle has since moved PAST could resolve after a faster,
+            // later fetch already landed and stomp the newer image back to
+            // an older one — a real (if narrow) race, not a hypothetical
+            // one, given fetches race the network, not each other's order.
+            if (result && lensBuilt?.overlayCurrentTexNode && lensOverlayAppliedCurrentIndex === wantedCurrentIndex) {
+              lensBuilt.overlayCurrentTexNode.value = result.texture;
+            }
+          });
+        }
+        if (overlayCatalogState.nextIndex !== lensOverlayAppliedNextIndex) {
+          const wantedNextIndex = overlayCatalogState.nextIndex;
+          lensOverlayAppliedNextIndex = wantedNextIndex;
+          getLensOverlayTexture(LENS_OVERLAY_CATALOG[wantedNextIndex]).then((result) => {
+            if (result && lensBuilt?.overlayNextTexNode && lensOverlayAppliedNextIndex === wantedNextIndex) {
+              lensBuilt.overlayNextTexNode.value = result.texture;
+            }
+          });
+        }
+        u.uOverlayCrossfade.value = overlayCatalogState.crossfadeT;
+        u.uOverlayIntensity.value = lensNum(p.overlayIntensity, 0.35);
+        u.uOverlayLumaReactivity.value = lensNum(p.overlayLumaReactivity, 0.6);
+        u.uOverlayClearRadius.value = lensNum(p.overlayClearRadius, 0.32);
+        u.uOverlayClearSoftness.value = lensNum(p.overlayClearSoftness, 0.4);
+        u.uOverlayDriftSpeed.value = lensNum(p.overlayDriftSpeed, 0.2);
+      } else {
+        u.uOverlayIntensity.value = 0;
       }
       profiler?.end(Z.lensUniforms);
 

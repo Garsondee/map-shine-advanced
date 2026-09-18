@@ -13,6 +13,7 @@ import {
   computeZoomMotionBlurPx,
   computeLightBurnDecayFactor,
   computeLightBurnDarknessGate,
+  computeOverlayCatalogState,
 } from '../lens-motion.js';
 
 export function run(t) {
@@ -187,5 +188,154 @@ export function run(t) {
     Number.isFinite(
       computeLightBurnDarknessGate({ darkness01: 0.5, start: 0.5, end: 0.5, influence: 1, enabled: true })
     )
+  );
+
+  // ── computeOverlayCatalogState — the grime catalog's own clock read ───────
+  ok(
+    'a catalog of 0 or 1 images always reports index 0 with no crossfade',
+    (() => {
+      const zero = computeOverlayCatalogState({
+        elapsedSec: 123,
+        cycleSeconds: 10,
+        crossfadeSeconds: 2,
+        catalogLength: 0,
+      });
+      const one = computeOverlayCatalogState({
+        elapsedSec: 123,
+        cycleSeconds: 10,
+        crossfadeSeconds: 2,
+        catalogLength: 1,
+      });
+      return (
+        zero.currentIndex === 0 &&
+        zero.nextIndex === 0 &&
+        zero.crossfadeT === 0 &&
+        one.currentIndex === 0 &&
+        one.nextIndex === 0 &&
+        one.crossfadeT === 0
+      );
+    })()
+  );
+  ok(
+    'at the very start of the clock, image 0 is current, image 1 is next, no crossfade yet',
+    (() => {
+      const s = computeOverlayCatalogState({ elapsedSec: 0, cycleSeconds: 10, crossfadeSeconds: 2, catalogLength: 5 });
+      return s.currentIndex === 0 && s.nextIndex === 1 && s.crossfadeT === 0;
+    })()
+  );
+  ok(
+    'well before the crossfade window, crossfadeT is exactly 0 (a stable, non-fading image)',
+    computeOverlayCatalogState({ elapsedSec: 4, cycleSeconds: 10, crossfadeSeconds: 2, catalogLength: 5 })
+      .crossfadeT === 0
+  );
+  ok(
+    'inside the crossfade window, crossfadeT rises monotonically toward 1 as the boundary approaches',
+    (() => {
+      const early = computeOverlayCatalogState({
+        elapsedSec: 8.2,
+        cycleSeconds: 10,
+        crossfadeSeconds: 2,
+        catalogLength: 5,
+      }).crossfadeT;
+      const mid = computeOverlayCatalogState({
+        elapsedSec: 9,
+        cycleSeconds: 10,
+        crossfadeSeconds: 2,
+        catalogLength: 5,
+      }).crossfadeT;
+      const late = computeOverlayCatalogState({
+        elapsedSec: 9.9,
+        cycleSeconds: 10,
+        crossfadeSeconds: 2,
+        catalogLength: 5,
+      }).crossfadeT;
+      return early > 0 && early < mid && mid < late && late < 1;
+    })()
+  );
+  ok(
+    'the index rolls over exactly at a cycle boundary and wraps modulo the catalog length',
+    (() => {
+      const justBefore = computeOverlayCatalogState({
+        elapsedSec: 19.999,
+        cycleSeconds: 10,
+        crossfadeSeconds: 2,
+        catalogLength: 2,
+      });
+      const justAfter = computeOverlayCatalogState({
+        elapsedSec: 20.001,
+        cycleSeconds: 10,
+        crossfadeSeconds: 2,
+        catalogLength: 2,
+      });
+      // Cycle 0: current=0,next=1. Cycle 1: current=1,next=0 (wraps). Cycle 2: current=0 again.
+      return (
+        justBefore.currentIndex === 1 &&
+        justBefore.nextIndex === 0 &&
+        justAfter.currentIndex === 0 &&
+        justAfter.nextIndex === 1
+      );
+    })()
+  );
+  ok(
+    'no visible pop at rollover: the instant before shows "next" near full strength, matching the instant after\'s "current"',
+    (() => {
+      const justBefore = computeOverlayCatalogState({
+        elapsedSec: 9.999,
+        cycleSeconds: 10,
+        crossfadeSeconds: 2,
+        catalogLength: 3,
+      });
+      const justAfter = computeOverlayCatalogState({
+        elapsedSec: 10.001,
+        cycleSeconds: 10,
+        crossfadeSeconds: 2,
+        catalogLength: 3,
+      });
+      return justBefore.nextIndex === justAfter.currentIndex && justBefore.crossfadeT > 0.99;
+    })()
+  );
+  ok(
+    'a crossfade longer than the cycle is clamped to the cycle — never outlasts it, never throws',
+    (() => {
+      const s = computeOverlayCatalogState({ elapsedSec: 3, cycleSeconds: 5, crossfadeSeconds: 500, catalogLength: 4 });
+      return Number.isFinite(s.crossfadeT) && s.crossfadeT >= 0 && s.crossfadeT <= 1;
+    })()
+  );
+  ok(
+    'a non-finite or negative elapsed time reads as the very start of the clock, never NaN',
+    (() => {
+      const neg = computeOverlayCatalogState({
+        elapsedSec: -50,
+        cycleSeconds: 10,
+        crossfadeSeconds: 2,
+        catalogLength: 5,
+      });
+      const nan = computeOverlayCatalogState({
+        elapsedSec: NaN,
+        cycleSeconds: 10,
+        crossfadeSeconds: 2,
+        catalogLength: 5,
+      });
+      return neg.currentIndex === 0 && neg.crossfadeT === 0 && nan.currentIndex === 0 && nan.crossfadeT === 0;
+    })()
+  );
+  ok(
+    'a near-zero cycle is floored at 1s rather than spinning the index every frame',
+    (() => {
+      const s1 = computeOverlayCatalogState({
+        elapsedSec: 0.3,
+        cycleSeconds: 0,
+        crossfadeSeconds: 0.1,
+        catalogLength: 5,
+      });
+      const s2 = computeOverlayCatalogState({
+        elapsedSec: 0.6,
+        cycleSeconds: 0,
+        crossfadeSeconds: 0.1,
+        catalogLength: 5,
+      });
+      // Both readings fall inside the SAME floored 1s cycle, so the index must agree.
+      return s1.currentIndex === s2.currentIndex;
+    })()
   );
 }

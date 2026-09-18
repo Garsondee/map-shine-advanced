@@ -223,6 +223,61 @@ export function computeLightBurnDarknessGate({ darkness01, start, end, influence
   return 1.0 + (smooth - 1.0) * inf;
 }
 
+/**
+ * OVERLAY CATALOG — which two catalog images are showing right now, and how
+ * far through the crossfade between them (mythica-machina-press#57's basic
+ * v1: ONE cycling library across all bundled images, sequential order, no
+ * V2 4-channel classification/dual-slot layering — see lens.js's own header).
+ *
+ * A pure CLOCK READ, not an event scheduler like autofocus above: the whole
+ * state is a deterministic function of elapsed time and the two authored
+ * durations, so there is nothing to schedule and nothing that can desync
+ * after a dropped frame or a paused tab the way a countdown state machine
+ * could — the caller can call this every frame off a plain running clock and
+ * always get the answer a fresh page load would also get at that same
+ * elapsed time.
+ *
+ * The crossfade runs over the LAST `crossfadeSeconds` of every cycle window,
+ * so `currentIndex`/`nextIndex` roll over EXACTLY as `crossfadeT` reaches 1:
+ * the instant before rollover shows `nextIndex` at full strength, the
+ * instant after shows the (now-current) same image at full strength again —
+ * the boundary itself is never visible as a pop.
+ *
+ * @param {object} args
+ * @param {number} args.elapsedSec - seconds on any non-negative running
+ *   clock (never needs to reset itself; negative/non-finite reads as 0).
+ * @param {number} args.cycleSeconds - how long one image stays "current"
+ *   before the catalog advances. Floored at 1s — a misconfigured near-zero
+ *   value would otherwise spin the cycle every frame.
+ * @param {number} args.crossfadeSeconds - how long the transition to the
+ *   next image takes. Clamped to (0, cycleSeconds] so a fade can never
+ *   outlast, or exceed, the cycle window it belongs to.
+ * @param {number} args.catalogLength - how many images are in the library.
+ *   `<= 1` means there is nothing to cycle to; this always reports index 0
+ *   with no crossfade rather than dividing by a degenerate range.
+ * @returns {{currentIndex: number, nextIndex: number, crossfadeT: number}}
+ *   `crossfadeT` is 0..1, the mix weight toward `nextIndex`.
+ */
+export function computeOverlayCatalogState({ elapsedSec, cycleSeconds, crossfadeSeconds, catalogLength }) {
+  const count = Number.isInteger(catalogLength) && catalogLength > 0 ? catalogLength : 1;
+  if (count <= 1) return { currentIndex: 0, nextIndex: 0, crossfadeT: 0 };
+
+  const cycle = cycleSeconds > 1 ? cycleSeconds : 1;
+  const fade = clamp(crossfadeSeconds > 0.001 ? crossfadeSeconds : 0.001, 0.001, cycle);
+  const t = Number.isFinite(elapsedSec) && elapsedSec > 0 ? elapsedSec : 0;
+
+  const cyclePosition = t / cycle;
+  const cycleIndex = Math.floor(cyclePosition);
+  const secondsIntoCycle = (cyclePosition - cycleIndex) * cycle;
+  const secondsRemaining = cycle - secondsIntoCycle;
+
+  const currentIndex = cycleIndex % count;
+  const nextIndex = (currentIndex + 1) % count;
+  const crossfadeT = secondsRemaining <= fade ? clamp01(1 - secondsRemaining / fade) : 0;
+
+  return { currentIndex, nextIndex, crossfadeT };
+}
+
 /** @param {number} min @param {number} max @param {() => number} rng */
 function randomInRange(min, max, rng) {
   const lo = Number(min) || 0;

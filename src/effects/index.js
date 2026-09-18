@@ -524,7 +524,7 @@ export { BLOOM, BLOOM_PARAMS, BLOOM_PRESETS, bloomPreset } from './bloom.js';
 // camera's own glass, grain and shutter, ported from V2's own real
 // LensEffectV2.js/lens-shader.js (recovered from git history — see
 // lens.js's own header). Same declaration + TSL-builder split as bloom/DoF.
-export { LENS, LENS_PARAMS, LENS_PRESETS, lensPreset } from './lens.js';
+export { LENS, LENS_PARAMS, LENS_PRESETS, lensPreset, LENS_OVERLAY_CATALOG } from './lens.js';
 export {
   buildLensCompositeMaterial,
   buildLightBurnAccumulateMaterial,
@@ -542,6 +542,7 @@ export {
   computeZoomMotionBlurPx,
   computeLightBurnDecayFactor,
   computeLightBurnDarknessGate,
+  computeOverlayCatalogState,
 } from './lens-motion.js';
 // DEPTH OF FIELD (docs/planning/Depth-of-Field.md) — the SECOND `post` stage
 // effect, and the first post-stage consumer of buf:scene.depth. Same

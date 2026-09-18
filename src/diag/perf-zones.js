@@ -1194,9 +1194,15 @@ export const ZONES = Object.freeze(
     // measured cost belongs to, the exact ambiguity light.pointLightUpdate's
     // own five-way split (this file's header, S2.6) was built to avoid.
     // Added 2026-09-16 (perf-instrumentation-audit, mythica-machina-press#553).
+    // Label widened 2026-09-18 (#57) — the SAME bracket now also covers the
+    // overlay catalog's own per-frame bookkeeping (which two images are
+    // current/next, whether either changed this frame) and its occasional
+    // texture-cache fetch dispatch; the composite draw's own overlay taps
+    // stay inside `lens.composite` below, unchanged, since they run in the
+    // SAME draw call as tier 0/1's taps.
     z(
       'lens.uniformPush',
-      'Lens param/autofocus/motion-blur state + uniform push',
+      'Lens param/autofocus/motion-blur/overlay state + uniform push',
       'post',
       'post.lens',
       'lens',
@@ -1609,7 +1615,7 @@ export const EFFECT_ZONING = Object.freeze({
   // added alongside this entry.
   lens: Object.freeze({
     coverage: 'full',
-    why: "lens.uniformPush (the per-frame param/autofocus/motion-blur bookkeeping and uniform push), lens.lightBurn (the tier-2 persistent ping-ponged accumulator, gated on plan.lightBurnEnabled) and lens.composite (the main distort+chromatic+vignette+grain draw) together cover runPostLensPass's entire cost with nothing left un-zoned.",
+    why: "lens.uniformPush (the per-frame param/autofocus/motion-blur/overlay bookkeeping and uniform push — widened 2026-09-18, #57, when the overlay catalog's own index/crossfade tracking landed in the SAME bracket), lens.lightBurn (the tier-2 persistent ping-ponged accumulator, gated on plan.lightBurnEnabled) and lens.composite (the main distort+chromatic+vignette+grain draw, which the tier-3 overlay taps also run inside — same draw call, no new zone needed) together cover runPostLensPass's entire cost with nothing left un-zoned.",
   }),
   // Added 2026-08-06 (perf-zone-coverage-audit found this effect had NO entry
   // at all, despite owning zones — exactly the drift validateEffectZoning

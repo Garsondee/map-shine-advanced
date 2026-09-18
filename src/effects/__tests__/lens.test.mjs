@@ -5,7 +5,7 @@
  * are well-formed as DATA, and pin the SHAPE so a key cannot be added without
  * someone noticing it needs a consumer (`params/no-dead-controls`).
  */
-import { LENS, LENS_PARAMS, LENS_PRESETS, lensPreset } from '../lens.js';
+import { LENS, LENS_PARAMS, LENS_PRESETS, lensPreset, LENS_OVERLAY_CATALOG } from '../lens.js';
 import { validateEffectManifest } from '../effect-manifest.js';
 import { validateParamsSchema } from '../../core/params-schema.js';
 import { resolveEffectEnabled } from '../effect-cascade.js';
@@ -60,8 +60,11 @@ export function run(t) {
     resolveEffectEnabled(LENS, { profile: 'standard', gmEnable: 'on' }) === true
   );
   ok('tier 0 is declared — a manifest without one is malformed', LENS.tiers[0]?.n === 0);
-  ok('tiers 0-2 are real code', LENS.tiers.length === 3);
-  ok('the ladder is named in build order', LENS.tiers.map((t2) => t2.name).join() === 'optics,motion,light-burn');
+  ok('tiers 0-3 are real code', LENS.tiers.length === 4);
+  ok(
+    'the ladder is named in build order',
+    LENS.tiers.map((t2) => t2.name).join() === 'optics,motion,light-burn,overlay'
+  );
   ok('no tier still claims to be unbuilt', !LENS.tiers.some((t2) => /NOT BUILT/.test(t2.adds)));
   ok(
     'cost class is non-decreasing across rungs 1..N (Law 3 — tier 0 exempt)',
@@ -74,15 +77,32 @@ export function run(t) {
     })()
   );
 
-  // The overlay-catalog gap is recorded as ONE rung, not four — see
-  // lens.js's own header for why the four V2 "channel" layers are a single
-  // coherent content gap.
-  const rungNames = LENS.deferredRungs.map((r) => r.name);
-  ok('exactly one deferred rung — the overlay/grime asset library', rungNames.join() === 'overlay-catalog');
+  // The overlay-catalog gap this used to record is now tier 3 (built,
+  // above) — nothing left to defer (lens.js's own header has the "basic v1
+  // vs V2" scope split for what tier 3 does and does not attempt).
+  ok('nothing left deferred — the overlay catalog shipped as tier 3', LENS.deferredRungs.length === 0);
   ok(
-    'every deferred rung carries a note explaining what it buys',
+    'every deferred rung (there are none today) would still need a note explaining what it buys',
     LENS.deferredRungs.every((r) => typeof r.note === 'string' && r.note.length > 40)
   );
+
+  // ── Tier 3: the overlay catalog (basic v1, mythica-machina-press#57) ─────
+  ok(
+    'overlay is off by default, matching every other opt-in sub-feature',
+    LENS_PARAMS.overlayEnabled.default === false
+  );
+  ok(
+    'the crossfade can never (by declared range) outlast a very short cycle',
+    LENS_PARAMS.overlayCrossfadeSeconds.min <= LENS_PARAMS.overlayCycleSeconds.min
+  );
+  ok(
+    'LENS_OVERLAY_CATALOG lists the real 13-image library, once each',
+    Array.isArray(LENS_OVERLAY_CATALOG) &&
+      LENS_OVERLAY_CATALOG.length === 13 &&
+      new Set(LENS_OVERLAY_CATALOG).size === 13 &&
+      LENS_OVERLAY_CATALOG.every((f) => typeof f === 'string' && /\.jpe?g$/i.test(f))
+  );
+  ok('the overlay catalog is frozen', Object.isFrozen(LENS_OVERLAY_CATALOG));
 
   ok('the declaration is frozen', Object.isFrozen(LENS) && Object.isFrozen(LENS_PARAMS));
 

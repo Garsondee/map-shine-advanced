@@ -6,7 +6,7 @@
  * text — the standing rule for any "V2 parity" claim on this project.
  *
  * ============================================================================
- * THE HONEST SPLIT — WHAT THIS PORTS, AND WHAT IT DELIBERATELY DOES NOT
+ * THE HONEST SPLIT — WHAT THIS PORTS, AND WHAT IT DELIBERATELY SIMPLIFIES
  * ============================================================================
  * V2's `LensEffectV2` is really TWO effects sharing one shader file:
  *
@@ -15,32 +15,50 @@
  *      light-burn persistence buffer. All of it is either pure ALU on the
  *      composited frame or driven by facts this engine already has (elapsed
  *      time, the viewer's own camera delta, the scene's own darkness level).
- *      THIS is what this manifest builds.
+ *      THIS shipped first (tiers 0-2, below).
  *
- *   2. THE OVERLAY CATALOG — four permanently-stacked "channel" layers
- *      (structural / optical / reactive / viewfinder) PLUS two more generic
- *      slots, each with luma-reactive intensity, a clear-radius mask, drift
- *      and pulse animation, auto-rotating through a library of authored
- *      grime/dirt/light-leak IMAGES that V2 discovered at runtime via
- *      Foundry's `FilePicker` scanning an `assets/lens assets/` folder
- *      (`LensEffectV2.js#_discoverCatalog`).
+ *   2. THE OVERLAY CATALOG — grime/dust/light-leak IMAGES drifting subtly
+ *      across the lens, luma-reactive and cycling over time. V2 ran FOUR
+ *      permanently-stacked "channel" layers (structural / optical / reactive
+ *      / viewfinder) PLUS two more generic slots, each with its OWN 13-ish
+ *      authored params, discovered at runtime via Foundry's `FilePicker`
+ *      scanning an `assets/lens assets/` folder (`LensEffectV2.js#
+ *      _discoverCatalog`) and dual-slot cross-faded per channel.
  *      ⚠️ CORRECTED 2026-09-18 (mythica-machina-press#57): a prior version of
  *      this comment claimed "there is no such folder, and no such library, in
- *      this project today" — that was WRONG, and was trusted at face value by
- *      at least one later research pass instead of independently checked
- *      (`assets/lens assets/` exists RIGHT NOW, in this repo, with the full
- *      13-image library: lens_dust_01, lens_grease_01-03, lens_leak_01-02,
- *      lens_overlay_01-02, lens_scratches_01, light_leak_01-02,
- *      rainbow_chroma_01-02 — plus its own `attribution.md`, free for
- *      commercial use via texturelabs.org). The real remaining gap is PURE
- *      ENGINEERING — `_discoverCatalog`'s FilePicker scan, the 2-slot
- *      cycle/crossfade timing, and `sampleOverlay`/`sampleOverlayCrossfade`'s
- *      own shader sampling (see `lens-render.js`'s matching note) — none of
- *      which exist yet, but nothing is blocking building them. Faking the
- *      look with a couple of procedural noise smudges instead of using the
- *      real library would still not be "parity with V2" — it would be a
- *      different, invented effect wearing V2's parameter names.
- *      Recorded honestly below as `deferredRungs`, never silently dropped.
+ *      this project today" — that was WRONG (`assets/lens assets/` exists
+ *      RIGHT NOW, in this repo, with the full 13-image library: lens_dust_01,
+ *      lens_grease_01-03, lens_leak_01-02, lens_overlay_01-02,
+ *      lens_scratches_01, light_leak_01-02, rainbow_chroma_01-02 — plus its
+ *      own `attribution.md`, free for commercial use via texturelabs.org).
+ *
+ *      BUILT NOW (tier 3, below) is a deliberately BASIC v1, not a port of
+ *      V2's full complexity (author's own instruction: "even a basic version
+ *      of every V2 effect is preferable to leaving a gap"):
+ *        - ONE overlay control group, not four channels × ~13 params each —
+ *          intensity, luma-reactivity, a clear-radius + softness, drift
+ *          speed, cycle time and crossfade time. `LENS_OVERLAY_CATALOG`
+ *          (below) cycles through all 13 images UNIFORMLY, in a fixed,
+ *          hardcoded order — no semantic classification into V2's four
+ *          channels, and no runtime `FilePicker` discovery: the images ship
+ *          WITH this module (not author-authored per-map content), so a
+ *          static list of the known filenames is the honest, simpler
+ *          mechanism (`vt/lens-overlay-image.js`'s own header).
+ *        - ONE cycling library, not V2's two independently-timed generic
+ *          slots — a single current/next crossfade (`lens-render.js`'s own
+ *          `overlayCurrentTexNode`/`overlayNextTexNode`), not a dual-slot
+ *          pile-up of up to six simultaneous layers.
+ *        - Drift is a small fixed-amplitude wobble driven by ONE authored
+ *          speed, not V2's own per-channel authored drift VECTOR (a constant
+ *          velocity that runs forever) — bounded on purpose so a texture
+ *          sampled ClampToEdge never needs to reason about how far an
+ *          unbounded pan has travelled over an arbitrarily long play session.
+ *        - No V2 "pulse" (a periodic intensity throb independent of drift) —
+ *          folded out as one more knob this basic v1 does not need.
+ *      None of this is "parity with V2" and it does not claim to be — it is
+ *      the same posture Effects.md §0 asks for everywhere else in this file:
+ *      built, real, and honestly smaller than the reference implementation,
+ *      recorded here rather than silently presented as the full thing.
  *
  * ============================================================================
  * WHERE THIS SITS IN THE FRAME GRAPH — A DELIBERATE, PRECEDENTED DEPARTURE
@@ -484,6 +502,88 @@ export const LENS_PARAMS = Object.freeze({
     label: 'Burn gate strength',
     help: 'How completely the darkness gate suppresses burn outside its range — 0 leaves burn equally visible everywhere (the gate has no effect); 1 removes it entirely in full daylight.',
   },
+
+  // ── Overlay (tier 3 — the grime catalog) ──────────────────────────────────
+  // A basic v1 of V2's overlay catalog — see this module's own header for
+  // exactly what is simplified and why. ONE control group governs the whole
+  // cycling library; there is no per-image or per-channel tuning.
+  overlayEnabled: {
+    type: 'bool',
+    default: false,
+    category: 'Overlay',
+    label: 'Grime overlay',
+    help: "Dust, scratches and light-leak marks drifting slowly across the glass, cycling through this module's own image library over time — the lived-in imperfection of a real camera lens rather than a perfectly clean render. Off by default, matching V2's own shipped state.",
+  },
+  overlayIntensity: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.35,
+    category: 'Overlay',
+    label: 'Overlay strength',
+    help: 'How visible the grime layer reads at its brightest. 0 is invisible regardless of the other settings below; higher reads as a dirtier, more heavily used lens.',
+  },
+  overlayLumaReactivity: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.6,
+    category: 'Overlay',
+    label: 'Brightness reactivity',
+    help: 'How much the overlay above brightens in well-lit scenes and fades in dark ones, the way real dust and smudges only catch the eye once light hits the glass. 0 keeps the overlay at a constant strength regardless of scene brightness.',
+  },
+  overlayClearRadius: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.32,
+    category: 'Overlay',
+    label: 'Clear centre radius',
+    help: "How far from the exact centre of the frame stays free of grime, so the middle of the shot — where the player's eye and the action usually sit — never reads as dirty. 0 lets grime cover the whole frame including dead centre.",
+  },
+  overlayClearSoftness: {
+    type: 'float',
+    min: 0.02,
+    max: 1,
+    step: 0.01,
+    default: 0.4,
+    category: 'Overlay',
+    label: 'Clear edge softness',
+    help: 'How gradually the clear centre above blends into the full grime outside it, rather than cutting off in a visible ring. Larger values spread the transition further across the frame.',
+  },
+  overlayDriftSpeed: {
+    type: 'float',
+    min: 0,
+    max: 2,
+    step: 0.01,
+    default: 0.2,
+    category: 'Overlay',
+    label: 'Drift speed',
+    help: 'How quickly the grime texture itself wobbles across the glass — enough restrained motion that it never reads as a static decal painted on the screen, without ever travelling far. 0 freezes it in place.',
+  },
+  overlayCycleSeconds: {
+    type: 'float',
+    min: 5,
+    max: 300,
+    step: 1,
+    default: 45,
+    category: 'Overlay',
+    label: 'Cycle time',
+    help: "How many seconds one image from this module's grime library stays current before the catalog moves on to the next one, looping back to the start once every image has had a turn.",
+  },
+  overlayCrossfadeSeconds: {
+    type: 'float',
+    min: 0.5,
+    max: 30,
+    step: 0.5,
+    default: 4,
+    category: 'Overlay',
+    label: 'Crossfade time',
+    help: 'How many seconds the transition to the next image in the cycle above takes, so the catalog advancing never reads as a hard cut. Clamped to the cycle time above — it can never outlast the cycle it belongs to.',
+  },
 });
 
 /** The schema defaults as a flat object. */
@@ -491,10 +591,49 @@ const LENS_DEFAULTS = Object.freeze(
   Object.fromEntries(Object.entries(LENS_PARAMS).map(([k, decl]) => [k, decl.default]))
 );
 
-/** No named presets ship yet — V2's own were bundled with the overlay
- * catalog this rung deliberately omits (see this module's own header).
+/** No named presets ship yet — V2's own were bundled with its full 4-channel
+ * overlay catalog, which this basic v1 does not attempt to match (see this
+ * module's own header for the scope split).
  * @type {Record<string, Record<string, number|boolean>>} */
 export const LENS_PRESETS = Object.freeze({ none: {} });
+
+/**
+ * THE OVERLAY CATALOG — every bundled grime/dust/light-leak image, in the
+ * fixed order `overlayCycleSeconds` walks through (mythica-machina-press#57).
+ *
+ * A hardcoded list, deliberately NOT discovered at runtime the way an
+ * author's own painted masks are (`foundry/mask-discovery.js`'s own
+ * `FilePicker` scan): these 13 files ship WITH this module — fixed, known,
+ * version-controlled content, not per-map author content a GM could add to
+ * or rename. `foundry/mask-discovery.js`'s whole reason to exist is that an
+ * author's files are NOT known in advance; that reason does not apply here,
+ * so a static list is the simpler, equally-correct mechanism (`vt/lens-
+ * overlay-image.js`'s own header expands on why the mask-discovery path
+ * would be the wrong tool even though it superficially "scans a folder"
+ * too).
+ *
+ * Order matches how the files were introduced by `attribution.md`'s own
+ * grouping (dust, grease, leak, overlay, scratches, light-leak, rainbow-
+ * chroma) — arbitrary but stable, which is all a uniform, semantics-free
+ * cycle needs.
+ *
+ * @type {readonly string[]}
+ */
+export const LENS_OVERLAY_CATALOG = Object.freeze([
+  'lens_dust_01.jpg',
+  'lens_grease_01.jpg',
+  'lens_grease_02.jpg',
+  'lens_grease_03.jpg',
+  'lens_leak_01.jpg',
+  'lens_leak_02.jpg',
+  'lens_overlay_01.jpg',
+  'lens_overlay_02.jpg',
+  'lens_scratches_01.jpg',
+  'light_leak_01.jpg',
+  'light_leak_02.jpg',
+  'rainbow_chroma_01.jpg',
+  'rainbow_chroma_02.jpg',
+]);
 
 /**
  * Resolve a named preset to a full params object. Kept as a real function
@@ -552,7 +691,7 @@ export const LENS = Object.freeze({
   readiness: Object.freeze({
     firstRunWork: false,
     coverage: 'none',
-    why: "A post pass over buffers the frame graph already owns, same posture as bloom's own readiness doc: no masks to bake, no assets to load below tier 2. Tier 2 (light burn) allocates a small persistent render-target pair on first use, covered by settle.js's pipeline-growth criterion rather than a dedicated probe, matching bloom's reasoning for its own pipeline-compilation cost.",
+    why: "A post pass over buffers the frame graph already owns, same posture as bloom's own readiness doc: no masks to bake, no assets to load below tier 2. Tier 2 (light burn) allocates a small persistent render-target pair on first use, covered by settle.js's pipeline-growth criterion rather than a dedicated probe, matching bloom's reasoning for its own pipeline-compilation cost. Tier 3 (overlay) DOES fetch a real bundled asset on first use (`vt/lens-overlay-image.js`) — deliberately NOT wired into a settle.js probe of its own (unlike `post.grade`'s named `gradeLut` probe for its own bundled `.cube` fetch): Lens is off by default at every profile short of `extreme`, the overlay sub-feature defaults off even once Lens itself is on, and the look it adds is a slow-cycling decorative layer, not a scene-defining look a visible pop would be jarring for the way a LUT swap is. A cold first load shows no overlay for one fetch's worth of latency, then fades in on its own next natural crossfade — a degraded-but-honest first frame, the same posture `vt/baked-textures.js`'s own header states for a missing bake, never a broken one.",
   }),
   params: LENS_PARAMS,
   tiers: Object.freeze([
@@ -600,24 +739,30 @@ export const LENS = Object.freeze({
         '(`fill`) is priced at for the identical reason — a dependent read against STATE, not pure ALU on ' +
         'values already in registers.',
     }),
-  ]),
-  // Recorded, NOT built — the honest rung (Effects.md §0). ONE entry, not
-  // four, because the overlay catalog is a single coherent gap (a missing
-  // asset library + its rotation/crossfade logic), not four separate ones —
-  // see this module's own header for the full reasoning.
-  deferredRungs: Object.freeze([
     Object.freeze({
-      name: 'overlay-catalog',
-      note:
-        "C4. V2's four permanently-stacked channel layers (structural/optical/reactive/viewfinder) plus " +
-        'two generic slots — luma-reactive intensity, a clear-radius mask, drift and pulse animation, ' +
-        'auto-rotating through an artist-authored grime/dirt/light-leak texture LIBRARY discovered at ' +
-        "runtime via Foundry's FilePicker (`LensEffectV2.js#_discoverCatalog`, scanning an `assets/lens " +
-        'assets/` folder that does not exist in this project). A real content pipeline, not a code gap — ' +
-        'needs the asset library authored (or licensed) before there is anything honest to build against; ' +
-        'building the rotation/crossfade/masking MACHINERY against placeholder textures would ship a ' +
-        'mechanism with nothing real to show, the same "control with nothing behind it" failure this ' +
-        "codebase's own `params/no-dead-controls` gate exists to catch at the param level.",
+      n: 3,
+      name: 'overlay',
+      fromProfile: 'extreme',
+      cost: Object.freeze({ class: 'C4', estMsPerMp: 0.04 }),
+      adds:
+        "THE GRIME CATALOG — a basic v1 of V2's overlay layer (this module's own header has the full " +
+        'scope split): two extra texture taps (the current and next catalog image, cross-faded) at plain ' +
+        'screen UV, a luma-reactive intensity term reusing the SAME `sceneLuma` tier 0 already computes, ' +
+        'a clear-radius mask, and a small in-shader UV drift — additively composited straight after ' +
+        "motion and before light burn, matching V2's own real ordering exactly (`lens-shader.js`'s own " +
+        'execution-order header, recovered from git history). Gated to `extreme` — one profile ABOVE ' +
+        "where Lens itself first turns on by default and matching light-burn's own ceiling — because " +
+        "it is the single least load-bearing piece of the effect (an author's own framing: the overlay " +
+        'catalog was the LOWEST-priority remaining gap on all of Lens). C4, matching tier 2: not because ' +
+        "the ALU here is expensive on its own (it genuinely is not — closer to tier 0/1's C2), but Law 3 " +
+        'requires a rung above light-burn to cost AT LEAST as much as light-burn, and two dependent texture ' +
+        'reads keyed off a runtime-selected catalog index is a real instance of the same "dependent read" ' +
+        "shape tier 2's own note describes, not just a conservative label.",
     }),
   ]),
+  // Nothing deferred — the overlay catalog (this module's own header has the
+  // full "basic v1 vs V2" scope split) is the piece that used to be recorded
+  // here; it is now tier 3 above. `Object.freeze([])`, not an omitted field,
+  // mirrors precipitation.js's own "nothing left to defer" declaration.
+  deferredRungs: Object.freeze([]),
 });

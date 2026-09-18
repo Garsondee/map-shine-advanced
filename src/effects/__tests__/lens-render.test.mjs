@@ -30,7 +30,7 @@ export function run(t) {
 
   // ── EVERY RUNG CONSTRUCTS ──────────────────────────────────────────────
   const built = {};
-  for (const tier of [0, 1, 2]) {
+  for (const tier of [0, 1, 2, 3]) {
     let result = null;
     let err = null;
     try {
@@ -38,6 +38,8 @@ export function run(t) {
         THREE,
         sceneTexture: stubTexture(),
         lightBurnTexture: stubTexture(),
+        overlayTexture: stubTexture(),
+        overlayNextTexture: stubTexture(),
         resolutionWidth: 1024,
         resolutionHeight: 768,
         tier,
@@ -48,9 +50,9 @@ export function run(t) {
     ok(`tier ${tier}: the TSL graph CONSTRUCTS without throwing (${err ? err.message : 'clean'})`, err === null);
     built[tier] = result;
   }
-  if (!built[2]) return; // everything below would cascade meaninglessly
+  if (!built[3]) return; // everything below would cascade meaninglessly
 
-  for (const tier of [0, 1, 2]) {
+  for (const tier of [0, 1, 2, 3]) {
     const b = built[tier];
     ok(`tier ${tier}: returns a real NodeMaterial`, b.material?.isNodeMaterial);
     ok(`tier ${tier}: carries a colorNode — an empty material renders nothing, silently`, !!b.material.colorNode);
@@ -91,8 +93,14 @@ export function run(t) {
     'uZoomMotionBlurPx',
     'uLightBurnIntensity',
     'uLightBurnBlurPx',
+    'uOverlayIntensity',
+    'uOverlayLumaReactivity',
+    'uOverlayClearRadius',
+    'uOverlayClearSoftness',
+    'uOverlayDriftSpeed',
+    'uOverlayCrossfade',
   ];
-  for (const tier of [0, 1, 2]) {
+  for (const tier of [0, 1, 2, 3]) {
     const keys = Object.keys(built[tier].uniforms);
     ok(
       `tier ${tier}: every expected uniform is present`,
@@ -108,7 +116,7 @@ export function run(t) {
   // rather than being folded into a one-liner. `sceneTexNode.sample()`
   // (used dozens of times inside the shader) must all derive from ONE base
   // node so a single `.value` re-point reaches every one of them. ────────
-  for (const tier of [0, 1, 2]) {
+  for (const tier of [0, 1, 2, 3]) {
     const b = built[tier];
     ok(`tier ${tier}: returns sceneTexNode — proof there is a real re-pointable input`, !!b.sceneTexNode);
     ok(
@@ -124,13 +132,39 @@ export function run(t) {
     'lightBurnTexNode is null below tier 2 — nothing to re-point, not a built-then-ignored node',
     built[0].lightBurnTexNode === null && built[1].lightBurnTexNode === null
   );
-  ok('lightBurnTexNode is a real node at tier 2', !!built[2].lightBurnTexNode);
+  ok(
+    'lightBurnTexNode is a real node at tier 2 and at tier 3',
+    !!built[2].lightBurnTexNode && !!built[3].lightBurnTexNode
+  );
   ok(
     'lightBurnTexNode.value re-points independently of sceneTexNode',
     (() => {
       const t2 = stubTexture();
       built[2].lightBurnTexNode.value = t2;
       return built[2].lightBurnTexNode.value === t2 && built[2].sceneTexNode.value !== t2;
+    })()
+  );
+
+  // ── OVERLAY TEXTURE NODES (tier 3) — same "null below its own gating
+  // tier" contract as lightBurnTexNode above. ─────────────────────────────
+  ok(
+    'overlayCurrentTexNode/overlayNextTexNode are null below tier 3',
+    [0, 1, 2].every((tier) => built[tier].overlayCurrentTexNode === null && built[tier].overlayNextTexNode === null)
+  );
+  ok('both overlay nodes are real at tier 3', !!built[3].overlayCurrentTexNode && !!built[3].overlayNextTexNode);
+  ok(
+    'the two overlay nodes re-point independently of each other and of sceneTexNode',
+    (() => {
+      const tCurrent = stubTexture();
+      const tNext = stubTexture();
+      built[3].overlayCurrentTexNode.value = tCurrent;
+      built[3].overlayNextTexNode.value = tNext;
+      return (
+        built[3].overlayCurrentTexNode.value === tCurrent &&
+        built[3].overlayNextTexNode.value === tNext &&
+        built[3].overlayCurrentTexNode.value !== built[3].overlayNextTexNode.value &&
+        built[3].sceneTexNode.value !== tCurrent
+      );
     })()
   );
 
@@ -177,11 +211,19 @@ export function run(t) {
   // ── lensTierPlan — the gate a live profile change actually branches on ──
   {
     const p0 = lensTierPlan(0);
-    ok('tier 0: neither motion nor light-burn is enabled', !p0.motionEnabled && !p0.lightBurnEnabled);
+    ok(
+      'tier 0: neither motion, light-burn nor overlay is enabled',
+      !p0.motionEnabled && !p0.lightBurnEnabled && !p0.overlayEnabled
+    );
     const p1 = lensTierPlan(1);
-    ok('tier 1: motion on, light-burn not yet', p1.motionEnabled && !p1.lightBurnEnabled);
-    const p2 = lensTierPlan(LENS_MAX_TIER);
-    ok('tier 2 (max): both on', p2.motionEnabled && p2.lightBurnEnabled);
+    ok('tier 1: motion on, light-burn/overlay not yet', p1.motionEnabled && !p1.lightBurnEnabled && !p1.overlayEnabled);
+    const p2 = lensTierPlan(2);
+    ok(
+      'tier 2: motion + light-burn on, overlay not yet',
+      p2.motionEnabled && p2.lightBurnEnabled && !p2.overlayEnabled
+    );
+    const p3 = lensTierPlan(LENS_MAX_TIER);
+    ok('tier 3 (max): all three on', p3.motionEnabled && p3.lightBurnEnabled && p3.overlayEnabled);
     ok('non-finite input falls back to LENS_DEFAULT_TIER, not NaN', lensTierPlan(undefined).tier === LENS_DEFAULT_TIER);
     ok('clamps above the max', lensTierPlan(99).tier === LENS_MAX_TIER);
     ok('clamps below zero', lensTierPlan(-3).tier === 0);

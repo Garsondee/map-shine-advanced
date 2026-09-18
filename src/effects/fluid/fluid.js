@@ -59,7 +59,10 @@ export const FLUID_PARAMS = Object.freeze({
     min: 0,
     max: 4,
     step: 0.05,
-    default: 1.6,
+    // RAISED 1.6 → 4 = THE SCHEMA'S OWN MAX (2026-09-08) — new live-tuned
+    // default. Recovered from a stash that missed both this file's own
+    // commit and the 0.6.4 release; applied 2026-09-18.
+    default: 4,
     category: 'Look',
     label: 'Glow',
     help: 'How brightly the goo burns. Above about 1 it starts to bloom, which is where the "magic" reading comes from — turn it down for a mundane liquid in a plain glass tube, up for something you would not want to drink.',
@@ -69,7 +72,10 @@ export const FLUID_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.8,
+    // RAISED 0.8 → 1 = THE SCHEMA'S OWN MAX (2026-09-08) — new live-tuned
+    // default. Recovered from a stash that missed both this file's own
+    // commit and the 0.6.4 release; applied 2026-09-18.
+    default: 1,
     category: 'Look',
     label: 'Sheen',
     help: 'An oil-on-water rainbow across the fluid. It is driven by the real thickness of liquid the light passes through, so it bands across the tube and shifts at the front of every slug rather than drifting independently. At 0 the goo is a flat colour.',
@@ -98,7 +104,10 @@ export const FLUID_PARAMS = Object.freeze({
     min: 0,
     max: 3,
     step: 0.05,
-    default: 1,
+    // RAISED 1 → 3 = THE SCHEMA'S OWN MAX (2026-09-08) — new live-tuned
+    // default. Recovered from a stash that missed both this file's own
+    // commit and the 0.6.4 release; applied 2026-09-18.
+    default: 3,
     category: 'Motion',
     label: 'Flow speed',
     help: 'Scales how fast the pump drives goo through every tube. 1 is the pump`s own natural pace; 0 stops it dead, which is useful for a dormant apparatus. Each tube keeps its own rhythm of surges and gaps — this only speeds all of them up or down together, uniformly. Also sets how fast the marbling pattern (Structure) drifts, so slowing the flow slows the pattern with it.',
@@ -109,7 +118,10 @@ export const FLUID_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.5,
+    // LOWERED 0.5 → 0.26 (2026-09-08) — new live-tuned default. Recovered
+    // from a stash that missed both this file's own commit and the 0.6.4
+    // release; applied 2026-09-18.
+    default: 0.26,
     category: 'Detail',
     label: 'Structure',
     help: 'Marbling and grain that ride WITH the flow rather than sitting still on top of it — driven by the material coordinate τ, not the mask`s own fixed position. At 0 the goo is a flat colour with no visible texture; higher values read as a more mottled, organic liquid.',

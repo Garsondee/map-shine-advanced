@@ -54,7 +54,11 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0.25,
     max: 4,
     step: 0.01,
-    default: 1,
+    // LOWERED 1 → 0.69 (2026-09-08) — new live-tuned default; see
+    // `WINDOW_DEFAULT_CONTRAST`'s own header (window-render.js). Recovered
+    // from a stash that missed both this file's own commit and the 0.6.4
+    // release; applied 2026-09-18.
+    default: 0.69,
     category: 'Look',
     label: 'Patch contrast',
     help: 'Gamma on the painted falloff. Above 1 sharpens the cookie toward a hard-edged patch; below 1 softens it toward a broad glow. 1 = exactly what you painted.',

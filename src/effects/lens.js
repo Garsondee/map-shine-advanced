@@ -23,11 +23,23 @@
  *      and pulse animation, auto-rotating through a library of authored
  *      grime/dirt/light-leak IMAGES that V2 discovered at runtime via
  *      Foundry's `FilePicker` scanning an `assets/lens assets/` folder
- *      (`LensEffectV2.js#_discoverCatalog`). That is a real CONTENT pipeline
- *      (an artist's texture library), not a code gap — there is no such
- *      folder, and no such library, in this project today. Faking it with a
- *      couple of procedural noise smudges would not be "parity with V2", it
- *      would be a different, invented effect wearing V2's parameter names.
+ *      (`LensEffectV2.js#_discoverCatalog`).
+ *      ⚠️ CORRECTED 2026-09-18 (mythica-machina-press#57): a prior version of
+ *      this comment claimed "there is no such folder, and no such library, in
+ *      this project today" — that was WRONG, and was trusted at face value by
+ *      at least one later research pass instead of independently checked
+ *      (`assets/lens assets/` exists RIGHT NOW, in this repo, with the full
+ *      13-image library: lens_dust_01, lens_grease_01-03, lens_leak_01-02,
+ *      lens_overlay_01-02, lens_scratches_01, light_leak_01-02,
+ *      rainbow_chroma_01-02 — plus its own `attribution.md`, free for
+ *      commercial use via texturelabs.org). The real remaining gap is PURE
+ *      ENGINEERING — `_discoverCatalog`'s FilePicker scan, the 2-slot
+ *      cycle/crossfade timing, and `sampleOverlay`/`sampleOverlayCrossfade`'s
+ *      own shader sampling (see `lens-render.js`'s matching note) — none of
+ *      which exist yet, but nothing is blocking building them. Faking the
+ *      look with a couple of procedural noise smudges instead of using the
+ *      real library would still not be "parity with V2" — it would be a
+ *      different, invented effect wearing V2's parameter names.
  *      Recorded honestly below as `deferredRungs`, never silently dropped.
  *
  * ============================================================================

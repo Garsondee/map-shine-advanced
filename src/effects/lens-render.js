@@ -34,9 +34,10 @@
  *   6. Grain + optional digital sensor noise (luma-adaptive cell hash).
  *
  * The OVERLAY/light-leak CATALOG layer (`sampleOverlay`/`sampleOverlayCrossfade`
- * in V2's own shader) is NOT here — see `effects/lens.js`'s own header for why
- * that is an honest, recorded omission (a missing artist-authored texture
- * library, not a code gap) rather than a silently dropped feature.
+ * in V2's own shader) is NOT here yet — see `effects/lens.js`'s own header
+ * (corrected 2026-09-18, mythica-machina-press#57): the texture library this
+ * needs already exists in this repo (`assets/lens assets/`), so this is a
+ * real, buildable engineering gap, not a missing-content one.
  *
  * @module effects/lens-render
  */

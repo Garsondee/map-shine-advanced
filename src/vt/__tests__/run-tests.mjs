@@ -28,6 +28,7 @@ import { run as runAlbedoClarity } from './albedo-clarity.test.mjs';
 import { run as runTaaResolve } from './taa-resolve.test.mjs';
 import { run as runBakedFormat } from './baked-format.test.mjs';
 import { run as runBakedTextures } from './baked-textures.test.mjs';
+import { run as runWarmUpChunking } from './warm-up-chunking.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -84,6 +85,7 @@ const suites = [
   ['taa-resolve', runTaaResolve],
   ['baked-format', runBakedFormat],
   ['baked-textures', runBakedTextures],
+  ['warm-up-chunking', runWarmUpChunking],
 ];
 
 for (const [name, fn] of suites) {

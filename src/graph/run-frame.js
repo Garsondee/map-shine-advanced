@@ -121,3 +121,31 @@ export function runPassPlan(ids, impls, ctx, hooks) {
   }
   return ran;
 }
+
+/**
+ * Split `ids` into contiguous batches of at most `size` each — a pure
+ * call-count split, never a reordering: `chunkIds(ids, size).flat()` always
+ * reconstructs `ids` exactly. Nothing is dropped, nothing is padded, nothing
+ * moves.
+ *
+ * mythica-machina-press#534's whole reason to exist: `vt/vt-pan-viewer.js`'s
+ * chunked cold-load warm-up needs to run a `planFrame(...).ids` list through
+ * `runPassPlan` a FEW ids at a time, yielding to a real animation frame
+ * between batches, without ever changing WHAT gets planned or the order it
+ * runs in. Batching is a dispatch-count concern this module already owns
+ * (see this file's own header); it is not a new ordering rule, so it lives
+ * here rather than beside the renderer that consumes it.
+ *
+ * @param {string[]} ids
+ * @param {number} size - batch size; must be a positive integer.
+ * @returns {string[][]} contiguous slices of `ids`, in original order.
+ *   Empty input yields an empty array (zero batches), never one empty batch.
+ */
+export function chunkIds(ids, size) {
+  if (!Number.isInteger(size) || size <= 0) {
+    throw new Error(`chunkIds: size must be a positive integer, got ${size}`);
+  }
+  const batches = [];
+  for (let i = 0; i < ids.length; i += size) batches.push(ids.slice(i, i + size));
+  return batches;
+}

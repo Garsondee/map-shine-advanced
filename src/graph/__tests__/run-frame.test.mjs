@@ -4,7 +4,7 @@
  * future pass added to the geometry..present range without a wired impl fails
  * here instead of silently going dark on screen.
  */
-import { planFrame, runPassPlan } from '../run-frame.js';
+import { planFrame, runPassPlan, chunkIds } from '../run-frame.js';
 import { PASSES, STAGES } from '../passes.js';
 
 const FAKE_PASSES = [
@@ -261,6 +261,78 @@ export function run(t) {
     ok(
       'a non-function hook is ignored rather than throwing mid-frame',
       runPassPlan(['b.two'], { 'b.two': () => {} }, {}, { onPassBegin: 'nope', onPassEnd: 42 }).length === 1
+    );
+  }
+
+  // ---- chunkIds (mythica-machina-press#534) ----------------------------------
+  // The pure core of the chunked cold-load warm-up (vt/vt-pan-viewer.js's
+  // `warmUpDrawStateChunked`): split into contiguous batches, never reorder,
+  // never drop, never pad. Tested here rather than in vt/ because it is a
+  // dispatch-count concern this module already owns (see chunkIds' own doc),
+  // and it needs no renderer at all to prove correct.
+  {
+    ok(
+      'even division: exact-size batches, none empty',
+      JSON.stringify(chunkIds(['a', 'b', 'c', 'd'], 2)) ===
+        JSON.stringify([
+          ['a', 'b'],
+          ['c', 'd'],
+        ])
+    );
+    ok(
+      'uneven division: every batch but the last is full-size, the last carries the remainder',
+      JSON.stringify(chunkIds(['a', 'b', 'c', 'd', 'e'], 2)) === JSON.stringify([['a', 'b'], ['c', 'd'], ['e']])
+    );
+    ok(
+      'a batch size larger than the list yields ONE batch holding everything',
+      (() => {
+        const batches = chunkIds(['a', 'b', 'c'], 10);
+        return batches.length === 1 && batches[0].join(',') === 'a,b,c';
+      })()
+    );
+    ok('a batch size of exactly 1 yields one batch per id', chunkIds(['a', 'b', 'c'], 1).length === 3);
+    ok('empty input yields ZERO batches, never one empty batch', chunkIds([], 4).length === 0);
+    ok(
+      'flattening the batches reconstructs the original order exactly — the core correctness property',
+      chunkIds(['a', 'b', 'c', 'd', 'e', 'f', 'g'], 3).flat().join(',') === 'a,b,c,d,e,f,g'
+    );
+    ok(
+      'the input array is never mutated',
+      (() => {
+        const original = ['a', 'b', 'c', 'd'];
+        chunkIds(original, 3);
+        return original.join(',') === 'a,b,c,d';
+      })()
+    );
+
+    throws(
+      'size 0 throws — a silent infinite loop is worse than a loud refusal',
+      () => chunkIds(['a'], 0),
+      'positive integer'
+    );
+    throws('a negative size throws', () => chunkIds(['a'], -2), 'positive integer');
+    throws('a non-integer size throws', () => chunkIds(['a'], 2.5), 'positive integer');
+
+    // ---- against the REAL graph, at the REAL chunk size (regression guard) --
+    // vt-pan-viewer.js's own WARM_UP_CHUNK_SIZE is 4 (mirrored here as a plain
+    // literal, not imported — that constant is deliberately NOT exported, see
+    // its own doc). If a future pass makes that list longer or shorter, this
+    // proves the ONE property that must never break regardless: batching
+    // never reorders and never loses an id.
+    const { ids: realIds } = planFrame(PASSES, { fromStage: 'masks', toStage: 'present' });
+    const WARM_UP_CHUNK_SIZE = 4;
+    const realBatches = chunkIds(realIds, WARM_UP_CHUNK_SIZE);
+    ok(
+      "chunking today's REAL masks..present id list and flattening it back reconstructs the exact original order",
+      realBatches.flat().join(',') === realIds.join(',')
+    );
+    ok(
+      'no batch (but possibly the last) exceeds the configured chunk size',
+      realBatches.every((b) => b.length <= WARM_UP_CHUNK_SIZE)
+    );
+    ok(
+      'only the LAST batch may be under-size — every other one is exactly full',
+      realBatches.slice(0, -1).every((b) => b.length === WARM_UP_CHUNK_SIZE)
     );
   }
 }

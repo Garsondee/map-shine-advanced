@@ -103,6 +103,14 @@ export function run(t) {
     // passes reading `buf:scene.color`/`buf:scene.depth` — order between the
     // two of them does not matter for correctness, but Prism's own manifest
     // (`prism.js`) exists first, so it is declared first.
+    // `surface.iridescence` joined the SAME night (mythica-machina-press#136),
+    // right after `surface.prism` and still before `surface.water` — after
+    // Specular/Prism for the identical "carefully-tuned material stays
+    // untouched" reason, and its own dependent read (`buf:scene.illum`) is
+    // already finished by `light.accumulate`, so it has no ordering
+    // constraint against `surface.water`'s own capture either; declared
+    // right after its own direct sibling, `surface.prism`, since that is
+    // where a reader looks for it.
     // `post.dof` joined 2026-08-06 (Depth-of-Field.md), between post.bloom and
     // present.composite (post.grade is still a seam, so it never appears in a
     // LIVE plan) — it reads buf:scene.depth, which is unaffected by ordering
@@ -136,7 +144,7 @@ export function run(t) {
     // physically in front" reasoning surface.precipitation's own comment
     // above already states for its relationship to vision.gate).
     const expected =
-      'masks.occlusion,geometry.world,light.accumulate,surface.response,surface.prism,surface.water,surface.particles,surface.cloudTops,surface.precipitation,vision.gate,post.bloom,post.dof,post.taaResolve,post.lens,present.composite';
+      'masks.occlusion,geometry.world,light.accumulate,surface.response,surface.prism,surface.iridescence,surface.water,surface.particles,surface.cloudTops,surface.precipitation,vision.gate,post.bloom,post.dof,post.taaResolve,post.lens,present.composite';
     ok(`today's real masks..present plan is exactly [${expected}] (got: ${ids.join(',')})`, ids.join(',') === expected);
     ok(
       'surface.response is planned AFTER light.accumulate — it reads what that pass writes',

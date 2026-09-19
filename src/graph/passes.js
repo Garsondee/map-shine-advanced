@@ -368,7 +368,12 @@ export const PASSES = [
     // post.bloom pass" is the doctrine; this is its second application, not
     // its first, and `surface.response` can absorb it later if/when the full
     // unification is ever attempted — never a blocker on shipping the effect.
-    absorbs: ['SpecularEffectV2', 'IridescenceEffectV2', 'RoughnessEffectV2', 'NormalEffectV2'],
+    // ⚠️ `IridescenceEffectV2` ALSO REMOVED (2026-09-19, mythica-machina-
+    // press#136) — the identical doctrine a third time: `docs/reference/
+    // v2-effect-params/iridescence-effect.md` slated Iridescence for
+    // absorption here too, and it shipped standalone instead, one effect
+    // after Prism — `surface.iridescence`, below.
+    absorbs: ['SpecularEffectV2', 'RoughnessEffectV2', 'NormalEffectV2'],
     note:
       'TIERS 0-2 ARE LIVE (2026-07-26). The specular mask read as a MATERIAL — hue = F0 (gold ' +
       'reflects gold), saturation = metalness, value = smoothness — where V2 collapsed all three ' +
@@ -430,6 +435,49 @@ export const PASSES = [
       'default until the author`s own eyes confirm the look, this project`s own standing rule for a ' +
       'newly-built effect. Same honesty bar `surface.response`/`geometry.world` set for their own partial ' +
       'claims.',
+  },
+  {
+    id: 'surface.iridescence',
+    stage: 'surface',
+    kind: 'gpu',
+    // LIVE FROM THE START (mythica-machina-press#136) — `vt-pan-viewer.js#
+    // runSurfaceIridescencePass` runs every frame in the `surface` stage,
+    // right after `surface.prism` and before `surface.water`. Real JS-time
+    // gate FIRST (Effects.md Law 4): asks `iridescence-seams.js#
+    // getIridescenceMaskItems` for the viewed floor's own active tiles, and
+    // returns immediately with zero GPU work when that list is empty. When
+    // active, syncs `iridescence-surface-subsystem.js` (the per-tile mesh
+    // population, mirroring `prism-surface-subsystem.js`'s own shape) and
+    // draws whatever came back visible — NO scene-capture subsystem, unlike
+    // Prism: this effect's own dependent read is `buf:scene.illum`, already
+    // a plain, finished target by the time this pass runs.
+    status: 'live',
+    owns: 'effects/iridescence/iridescence.js (the full design account) + mythica-machina-press#136',
+    creates: [],
+    // `buf:scene.illum`, for the SAME real light-reactivity `surface.
+    // response`'s own note describes (indoors reflects the lamps via that
+    // buffer); `buf:scene.depth` for the identical rank-gate occlusion
+    // window Prism/Specular already use. `buf:scene.attr` is NOT read — this
+    // follows the newer depth-authority convention, never the older
+    // attribute-buffer floor-index check.
+    reads: ['buf:scene.illum', 'buf:scene.depth'],
+    modifies: ['buf:scene.color'],
+    absorbs: ['IridescenceEffectV2'],
+    note:
+      "V2's own `IridescenceEffectV2.js` (recovered from git history, `c328c9bd~1`) ran its own " +
+      'MAX_LIGHTS=64 per-light loop (position/colour/radius/falloff uniform arrays) because V2 had no ' +
+      'shared illumination buffer of its own. This pass replaces that whole mechanism with one ' +
+      '`texture(illumTexture)` sample of `buf:scene.illum` — the SAME buffer `surface.response`s own ' +
+      'lamp-direction trick already reads — for a fraction of the code and no new light-feeding ' +
+      'infrastructure (the author`s own 2026-09-19 "make it better" permission, `iridescence.js`s own ' +
+      'header has the full quote). Mask-gated placement + rank-gate occlusion (tier 0), the real ' +
+      'procedural phase field — screen sweep, one of two noise flavours, mask distortion, flow, camera ' +
+      'parallax — fed through V2`s own Inigo-Quilez cosine palette (tier 1), and real light reactivity ' +
+      'off `buf:scene.illum` (tier 2, one extra texture read, C3). `live` means this runs every frame ' +
+      'against real data, NOT that it has been confirmed against a real live scene — `enabledFromProfile: ' +
+      "'extreme'` (`iridescence.js`s own manifest) keeps it off by default until the author`s own eyes " +
+      'confirm the look, the identical posture `surface.prism` shipped with one effect earlier. Same ' +
+      'honesty bar `surface.prism`/`surface.response`/`geometry.world` set for their own partial claims.',
   },
   {
     id: 'surface.water',

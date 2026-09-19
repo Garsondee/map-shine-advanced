@@ -92,14 +92,17 @@ export async function run(t) {
   // which returned no policy at all the moment that stopped being unique.
   // `prism` joined this list 2026-09-19 (mythica-machina-press#137) — same
   // "a GPU consumer is a consumer" case as `specular`/`window` just above:
-  // `effects/prism/prism-seams.js#getPrismMaskItems` needs each item's own
-  // world placement, not this grid's extracted DATA (that kind's own
-  // `meaning` in mask-catalog.js has the full account).
+  // `effects/prism/prism-seams.js#getPrismMaskItems`/`effects/iridescence/
+  // iridescence-seams.js#getIridescenceMaskItems` need each item's own
+  // world placement, not this grid's extracted DATA (those kinds' own
+  // `meaning` in mask-catalog.js have the full account). `iridescence`
+  // joined 2026-09-19 (mythica-machina-press#136), the identical night and
+  // identical reason `prism` joined one line above it.
   t.ok(
-    'outdoors, fire, specular, window, water, fluid and prism are the rasterized kinds',
+    'outdoors, fire, specular, window, water, fluid, prism and iridescence are the rasterized kinds',
     rasterizedKinds()
       .map((k) => k.id)
-      .join(',') === 'outdoors,fire,specular,window,water,fluid,prism'
+      .join(',') === 'outdoors,fire,specular,window,water,fluid,prism,iridescence'
   );
   t.ok(
     'fire is rasterized but does NOT own the packed alpha — the two flags are separate questions',

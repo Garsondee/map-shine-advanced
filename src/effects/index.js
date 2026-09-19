@@ -379,6 +379,31 @@ export {
   PRISM_REFRACTION_MAX_DIM_PX,
 } from './prism/prism-refraction-subsystem.js';
 export { createPrismSurfaceSubsystem } from './prism/prism-surface-subsystem.js';
+// IRIDESCENCE — Prism's own direct sibling, a light-reactive oil-slick/
+// soap-bubble rainbow sheen (mythica-machina-press#136). `graph/passes.js#
+// surface.iridescence` is `live` from the day this module landed —
+// `vt-pan-viewer.js#runSurfaceIridescencePass` is the real producer
+// (`iridescence.js`'s own header has the full account); there is no seam
+// door here to export, the identical posture Prism's own export block above
+// already documents.
+export { IRIDESCENCE, IRIDESCENCE_PARAMS, IRIDESCENCE_PRESETS, iridescencePreset } from './iridescence/iridescence.js';
+export {
+  hash as iridescenceHash,
+  mapNoiseScale as iridescenceMapNoiseScale,
+  computeMaskPresence as iridescenceComputeMaskPresence,
+  computeLiquidNoise,
+  computeGlitterNoise,
+  computeNoiseOffset,
+  computePhase as iridescenceComputePhase,
+  computeRainbowColor,
+  computeLitFactor,
+  IRIDESCENCE_MAX_TIER,
+  IRIDESCENCE_DEFAULT_TIER,
+  iridescenceTierPlan,
+} from './iridescence/iridescence-motion.js';
+export { buildIridescenceSurfaceMaterial } from './iridescence/iridescence-render.js';
+export { createIridescenceSeams } from './iridescence/iridescence-seams.js';
+export { createIridescenceSurfaceSubsystem } from './iridescence/iridescence-surface-subsystem.js';
 // DOOR GRAPHICS as a self-owned subsystem (extracted 2026-07-26). Also the
 // template tier-0 water follows: an opaque, LIT map element drawn into
 // buf:scene.color BEFORE lighting, in its own scene.

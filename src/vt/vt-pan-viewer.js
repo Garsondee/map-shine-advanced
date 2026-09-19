@@ -415,6 +415,13 @@ import {
   createPrismSurfaceSubsystem,
   createPrismRefractionSubsystem,
   prismTierPlan,
+  // IRIDESCENCE (mythica-machina-press#136, Prism's own direct sibling,
+  // built the same night) — `createIridescenceSurfaceSubsystem` is the
+  // per-tile mesh population (mirrors `createPrismSurfaceSubsystem`'s own
+  // shape). No refraction-subsystem sibling: this effect's own dependent
+  // read is `buf:scene.illum`, already a plain, finished target by the time
+  // the surface stage runs, so it needs no scene-capture subsystem at all.
+  createIridescenceSurfaceSubsystem,
   // `surface.response`'s outdoor/indoor split reads the SAME world-space
   // outdoors gate `buf:scene.attr`'s G channel does — injected rather than
   // re-derived, so "world XY → mask UV → sample" still exists exactly once.
@@ -1248,6 +1255,10 @@ export async function startVtPanViewer({
   // for Prism yet — `prism-seams.js`'s own header).
   getPrismMaskItems,
   getPrismRenderState,
+  // IRIDESCENCE (mythica-machina-press#136, Prism's own direct sibling) —
+  // TILE-ONLY, the identical shape one effect later.
+  getIridescenceMaskItems,
+  getIridescenceRenderState,
   getApertureGoboRenderState,
   getFluidMaskItems,
   getFluidRenderState,
@@ -1407,6 +1418,13 @@ export async function startVtPanViewer({
   // actually turns it on" is the honest posture (`prism.js`'s own header).
   getPrismRenderState ??= () => ({ enabled: false, params: null });
   getPrismMaskItems ??= () => [];
+  // IRIDESCENCE's own tile seam (mythica-machina-press#136, `iridescence-
+  // seams.js#getIridescenceMaskItems`) — the identical posture Prism's own
+  // fallback just above documents, one effect later: unwired means no
+  // `_Iridescence`-authored tile at all, inert by construction. Default-OFF,
+  // matching `IRIDESCENCE.enabledFromProfile: 'extreme'`.
+  getIridescenceRenderState ??= () => ({ enabled: false, params: null });
+  getIridescenceMaskItems ??= () => [];
   // APERTURE GOBO's data seam (docs/planning/Aperture-Gobo.md): boot injects
   // `{ enabled, params: <resolved APERTURE_GOBO_PARAMS>, debug }`. Unlike
   // window/specular this effect has no mask seam at all — its only input is
@@ -8323,6 +8341,61 @@ export async function startVtPanViewer({
     }
 
     /**
+     * `surface.iridescence` (mythica-machina-press#136, graph/passes.js) —
+     * Prism's own direct sibling, built the same night: a light-reactive
+     * oil-slick/soap-bubble rainbow sheen. Runs right after `surface.prism`
+     * and before `surface.water`, matching `graph/passes.js`'s own declared
+     * array order. UNLIKE Prism, there is no scene-capture half at all: this
+     * effect's own dependent read (`buf:scene.illum`) is already a plain,
+     * finished target by the time this pass runs (`light.accumulate` ran
+     * earlier in the SAME frame) — so this is a plain sync-then-draw, one
+     * real half, not two.
+     *
+     * ⚠️ THE GATE IS FIRST, BEFORE ANYTHING ELSE RUNS — the identical Law-4
+     * shape `runSurfacePrismPass`'s own gate uses: `getIridescenceMaskItems`
+     * is asked for the CURRENT VIEWED floor's own active tiles before
+     * anything else, so a scene with zero `_Iridescence` masks anywhere pays
+     * for exactly one array-length check: no material build, no draw call
+     * submitted. `iridescenceSurface.sync([])` still runs on the
+     * early-return path (a same cheap no-op Map iteration in the
+     * overwhelming common case) so a tile that just lost its mask, or an
+     * effect just disabled, tears its mesh down THIS frame rather than
+     * lingering.
+     */
+    function runSurfaceIridescencePass() {
+      const floorIndex = view?.floorIndex ?? 0;
+      const items = getIridescenceMaskItems(floorIndex) ?? [];
+      const st = getIridescenceRenderState();
+      if (items.length === 0 || st.enabled !== true) {
+        iridescenceSurface.sync([]);
+        return;
+      }
+
+      iridescenceSurface.sync(items);
+
+      // THE CLOCK + CAMERA CENTRE — pushed AFTER sync() has ensured every
+      // live entry's own material actually exists. `cameraCenter` is the
+      // camera's OWN absolute world-space centre, NOT a delta — see
+      // `iridescence-motion.js#computePhase`'s own doc for why this effect's
+      // own parallax term wants the absolute position V2 itself fed, unlike
+      // Prism's own frame-to-frame delta.
+      const nowSec = (lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value) / 1000;
+      const cameraCenter = view ? { x: view.centerXPx, y: view.centerYPx } : { x: 0, y: 0 };
+      iridescenceSurface.pushTimeAndCamera(nowSec, cameraCenter);
+
+      if (!iridescenceSurface.hasContent()) return;
+
+      const previousAutoClear = renderer.autoClearColor;
+      renderer.setRenderTarget(sceneLit);
+      renderer.autoClearColor = false;
+      profiler?.begin(Z.iridescenceDraw);
+      renderer.render(iridescenceSurface.scene, camera);
+      profiler?.end(Z.iridescenceDraw);
+      renderer.autoClearColor = previousAutoClear;
+      renderer.setRenderTarget(null);
+    }
+
+    /**
      * surface.particles (docs/planning/Particles.md §16) — draw the GPU particles
      * additively over the fully-lit scene. light.accumulate ended with
      * setRenderTarget(null), so re-bind sceneLit and GUARD the clear
@@ -9310,6 +9383,7 @@ export async function startVtPanViewer({
       'light.accumulate': runLightAccumulatePass,
       'surface.response': runSurfaceResponsePass,
       'surface.prism': runSurfacePrismPass,
+      'surface.iridescence': runSurfaceIridescencePass,
       'surface.water': runWaterRefractionCapturePass,
       'surface.particles': runSurfaceParticlesPass,
       'surface.cloudTops': runCloudTopsPass,
@@ -12832,6 +12906,31 @@ export async function startVtPanViewer({
       renderPrismCapturePass: renderSunShadowPass,
     });
 
+    // ── IRIDESCENCE, PER-TILE POPULATION (mythica-machina-press#136, Prism's
+    // own direct sibling, built the same night) ─────────────────────────────
+    // Mirrors `prismSurface`'s own construction exactly — a SINGLE instance
+    // for the whole scene, synced against ONLY the VIEWED floor at the call
+    // site below (`runSurfaceIridescencePass`). NO scene-capture sibling,
+    // unlike Prism: this effect's own dependent read is `buf:scene.illum`
+    // (the SAME shared target `specularSurface`/`specularTileSurface`
+    // already read above), a plain, already-finished texture by the time
+    // this pass runs — no per-frame capture needed at all.
+    const iridescenceSurface = createIridescenceSurfaceSubsystem({
+      THREE,
+      loadMaskImage: (opts) => loadMaskImageTexture({ ...opts, THREE }),
+      illumTexture: sceneIllum.texture,
+      depthTexture: sceneDepth.depthTexture ?? null,
+      uViewRect: envLight.uViewRect,
+      // PER ITEM, not per floor — identical composition to
+      // `prismSurface`'s own `resolveExpectedDepth` just above.
+      resolveExpectedDepth: (itemId) => {
+        const rank = depthAuthority.rankOf({ id: itemId });
+        return rank === null ? 0 : computeTieSafeExpectedDepth(rank, depthAuthority.maxRank);
+      },
+      getIridescenceRenderState,
+      profiler,
+    });
+
     // ── PER-EFFECT READINESS PROBES ─────────────────────────────────────────
     // Registered HERE, at the one point where all four owners exist
     // (`doorGraphics`, `specularSurface`, and the two per-floor maps), and
@@ -12905,6 +13004,14 @@ export async function startVtPanViewer({
       label: 'prism tile masks still loading',
       stage: READINESS_STAGE.STREAM,
       read: () => (prismSurface?.isLoadingMask?.() ? 1 : 0),
+    });
+    // mythica-machina-press#136 — the identical per-tile async fetch shape,
+    // one effect later, declared in `IRIDESCENCE.readiness.probes`.
+    readiness.register({
+      id: 'iridescenceTileMaskLoad',
+      label: 'iridescence tile masks still loading',
+      stage: READINESS_STAGE.STREAM,
+      read: () => (iridescenceSurface?.isLoadingMask?.() ? 1 : 0),
     });
     readiness.register({
       id: 'doorTextures',
@@ -17887,6 +17994,12 @@ export async function startVtPanViewer({
       // identical choice, so it has no `Z.` entry here).
       prismRefraction: profiler?.indexOf('surface.prismRefraction') ?? -1,
       prismDraw: profiler?.indexOf('surface.prismDraw') ?? -1,
+      // mythica-machina-press#136 — `runSurfaceIridescencePass`'s own per-tile
+      // sync ALSO self-brackets INSIDE `iridescence-surface-subsystem.js` via
+      // `beginById`, the identical choice Prism's own sync makes — only the
+      // outer draw call needs a `Z.` entry here, and there is no refraction
+      // bracket at all (this effect needs no scene-capture subsystem).
+      iridescenceDraw: profiler?.indexOf('surface.iridescenceDraw') ?? -1,
       surfDust: profiler?.indexOf('surface.drawDust') ?? -1,
       surfGusts: profiler?.indexOf('surface.drawGusts') ?? -1,
       // Added 2026-09-16 (mythica-machina-press#552) — see runCloudTopsPass's
@@ -23412,6 +23525,17 @@ export async function startVtPanViewer({
        * subsystem's own `getStatus()`, since tier 3's dispersion depends on
        * that capture actually having run. */
       getPrismInfo: () => ({ surface: prismSurface.getStatus(), refraction: prismRefraction.getStatus() }),
+      /** mythica-machina-press#136 — tear down IRIDESCENCE's meshes/
+       * materials/uploaded `_Iridescence` textures. Same leak risk, same
+       * Stop/Restart cadence as `disposePrism` just above — NO capture
+       * subsystem to dispose here (this effect needs none). */
+      disposeIridescence() {
+        iridescenceSurface.dispose();
+      },
+      /** IRIDESCENCE's own state — for the debug report. Mirrors
+       * `getPrismInfo`'s own reporting posture, minus a capture subsystem's
+       * own `getStatus()` (there is none to report). */
+      getIridescenceInfo: () => ({ surface: iridescenceSurface.getStatus() }),
       /** Tear down the candle flame billboard's own mesh/material/geometry (its
        * lights live in the shared pool, freed by disposePointLights). */
       disposeCandleFlame,

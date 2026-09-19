@@ -71,7 +71,16 @@ export function run(t) {
     // one effect later: `vt-pan-viewer.js#runSurfacePrismPass` is a real,
     // reachable per-frame producer, Law-4-gated to a true no-op on any scene
     // with no `_Prism` mask (`effects/prism/prism.js`'s own header).
-    t.ok('a sane number of passes (10-21, the promised ~10-12)', PASSES.length >= 10 && PASSES.length <= 21);
+    // ⚠️ CEILING RAISED 21 → 22 (mythica-machina-press#136, `surface.
+    // iridescence`, `live`, same night as `surface.prism`). The identical
+    // bar a fifth time: `docs/reference/v2-effect-params/iridescence-
+    // effect.md` ALSO slated its effect for absorption into
+    // `surface.response`, and it ALSO shipped standalone instead, one effect
+    // after Prism, for the identical reason. `vt-pan-viewer.js#
+    // runSurfaceIridescencePass` is a real, reachable per-frame producer,
+    // Law-4-gated to a true no-op on any scene with no `_Iridescence` mask
+    // (`effects/iridescence/iridescence.js`'s own header).
+    t.ok('a sane number of passes (10-22, the promised ~10-12)', PASSES.length >= 10 && PASSES.length <= 22);
     t.ok(
       'every stage used is declared',
       PASSES.every((p) => STAGES.includes(p.stage))

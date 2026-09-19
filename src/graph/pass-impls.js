@@ -230,6 +230,22 @@ export const PASS_IMPLS = Object.freeze({
       'surface.response/surface.water: the loop lives inside startVtPanViewer, driven by the same local ' +
       'passImpls/framePlan graph/run-frame.js walks.',
   },
+  'surface.iridescence': {
+    fn: startVtPanViewer,
+    module: 'vt/index.js',
+    export: 'startVtPanViewer',
+    separatelyInvocable: false,
+    note:
+      'REAL as of 2026-09-19 (mythica-machina-press#136): runSurfaceIridescencePass (a closure inside ' +
+      'startVtPanViewer, in the local passImpls map runPassPlan walks) asks iridescence-seams.js`s own ' +
+      'getIridescenceMaskItems for the VIEWED floor`s active tiles first and returns immediately (zero GPU ' +
+      'work) when that list is empty. Otherwise syncs iridescence-surface-subsystem.js (the per-tile mesh ' +
+      'population, mirroring prism-surface-subsystem.js`s own shape — no scene-capture subsystem needed, ' +
+      'unlike Prism: this effect`s own dependent read is buf:scene.illum, already a plain, finished target ' +
+      'by the time this pass runs) and draws whatever came back visible into scene.lit. Same invocability ' +
+      'caveat as surface.prism/surface.response/surface.water: the loop lives inside startVtPanViewer, ' +
+      'driven by the same local passImpls/framePlan graph/run-frame.js walks.',
+  },
   'surface.water': {
     fn: startVtPanViewer,
     module: 'vt/index.js',

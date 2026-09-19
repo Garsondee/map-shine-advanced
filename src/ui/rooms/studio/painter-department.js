@@ -31,21 +31,26 @@
  * `effects/fluid/fluid-registration.js#createFluidSeams`, and the vegetation
  * URL block in `boot.js`).
  *
- * ⚠️ ONLY SEVEN TILES, NOT TEN. `scene/mask-catalog.js#MASK_KINDS` has ten
- * entries (`prism` joined 2026-09-19, mythica-machina-press#137), but only
- * seven effects declare `authoring.paint` (fire, water, window, specular,
- * fluid, prism, vegetation — vegetation covers two masks, tree+bush, as one
- * tile). `shadow`/`outdoors` have no owning effect at all (sun-shadows
- * derives its casters from walls, not a painted mask) — Law 5 applies here
- * exactly as it does to `ui/no-dead-axis` for weather: a mask kind nothing
- * reads doesn't get a tile just because the painter's OWN internal
- * kind-picker still lists it. `PAINT_REACH` below still covers all ten,
- * because that picker DOES list all ten and the two tile-less kinds are
- * exactly where a wrong belief has nothing to correct it. Prism gets a real
- * tile despite `graph/passes.js#surface.prism` being a declared `seam` —
- * `authoring.paint` and "does the render pass exist yet" are different
- * questions (`effects/prism/prism.js`'s own header), and painting/saving the
- * mask works today regardless of the render pass's own status.
+ * ⚠️ ONLY EIGHT TILES, NOT ELEVEN. `scene/mask-catalog.js#MASK_KINDS` has
+ * eleven entries (`prism` joined 2026-09-19, mythica-machina-press#137;
+ * `iridescence` joined the same night, mythica-machina-press#136, Prism's
+ * own direct sibling), but only eight effects declare `authoring.paint`
+ * (fire, water, window, specular, fluid, prism, iridescence, vegetation —
+ * vegetation covers two masks, tree+bush, as one tile). `shadow`/`outdoors`
+ * have no owning effect at all (sun-shadows derives its casters from walls,
+ * not a painted mask) — Law 5 applies here exactly as it does to
+ * `ui/no-dead-axis` for weather: a mask kind nothing reads doesn't get a
+ * tile just because the painter's OWN internal kind-picker still lists it.
+ * `PAINT_REACH` below still covers all eleven, because that picker DOES list
+ * all eleven and the two tile-less kinds are exactly where a wrong belief
+ * has nothing to correct it. Prism gets a real tile despite `graph/
+ * passes.js#surface.prism` being a declared `seam` — `authoring.paint` and
+ * "does the render pass exist yet" are different questions (`effects/
+ * prism/prism.js`'s own header), and painting/saving the mask works today
+ * regardless of the render pass's own status. Iridescence's own tile is the
+ * more ordinary case: its render pass IS live, but `authoring.paint`
+ * resolves a discovered FILE, never the painter's own composited grid,
+ * which is why its `PAINT_REACH` entry below still reads `file-only`.
  *
  * @module ui/rooms/studio/painter-department
  */
@@ -67,9 +72,9 @@ import { iconMarkup } from '../../widgets/icon-sprite.js';
  *   'file-only' — the effect resolves a real file URL and never consults
  *                 painted content. Paint saves, and nothing renders.
  *
- * Exhaustive over `MASK_KINDS` on purpose (nine entries, including the two
+ * Exhaustive over `MASK_KINDS` on purpose (eleven entries, including the two
  * with no tile). `paintReachOf` falls back to the PESSIMISTIC verdict for an
- * id absent here and says "not evaluated" out loud, so a tenth kind added to
+ * id absent here and says "not evaluated" out loud, so a new kind added to
  * the catalog cannot silently inherit a confident wrong answer — the
  * `feedback_seam_default_hides_unwired` shape, refused by making the default
  * visible instead of merely safe.
@@ -112,6 +117,18 @@ export const PAINT_REACH = Object.freeze({
   prism: {
     reach: 'file-only',
     why: "Prism's own render pass does not exist yet (a declared seam) — neither paint nor a mask file draws anything today; save the mask now and it is ready the moment the pass lands.",
+  },
+  // UNLIKE prism's own entry just above, Iridescence's render pass (`graph/
+  // passes.js#surface.iridescence`) is genuinely `live` from day one
+  // (mythica-machina-press#136) — this is the ordinary `file-only` case
+  // `specular`/`window`/`fluid` already are: the pass DRAWS once a real
+  // `_Iridescence` file is discovered, it just never consults the painter's
+  // own composited/coverage grid to get there (`iridescence-seams.js`
+  // resolves `authoredStatusForItem(...).url`, the identical mechanism
+  // those three siblings use).
+  iridescence: {
+    reach: 'file-only',
+    why: 'Iridescence reads the mask file only — it needs the full-resolution RGBA file, not the painter`s own one-byte coverage grid.',
   },
   // Not `rasterize: true` at all, so no painted grid is ever composited for
   // it; and the consumer wants an RGBA canopy image, not a coverage field.

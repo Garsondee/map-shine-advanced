@@ -441,6 +441,15 @@ import {
   PRISM_PARAMS,
   PRISM_PRESETS,
   prismPreset,
+  // IRIDESCENCE (mythica-machina-press#136) — Prism's own direct sibling, a
+  // light-reactive oil-slick/soap-bubble rainbow sheen, built the same
+  // night. `graph/passes.js#surface.iridescence` is `live` from day one —
+  // this card registers the identical way every other live-pass effect
+  // card does.
+  IRIDESCENCE,
+  IRIDESCENCE_PARAMS,
+  IRIDESCENCE_PRESETS,
+  iridescencePreset,
   buildCascadeReadout,
   projectCascadeRenderState,
 } from './effects/index.js';
@@ -610,6 +619,9 @@ import {
   // PRISM's own tile seam (mythica-machina-press#137) — mirrors
   // `createSpecularSeams`'s/`createFluidSeams`'s own shape exactly.
   createPrismSeams,
+  // IRIDESCENCE's own tile seam (mythica-machina-press#136, Prism's own
+  // direct sibling) — the identical shape one effect later.
+  createIridescenceSeams,
   createApertureGoboRegistration,
   APERTURE_GOBO_PARAMS,
   APERTURE_GOBO_DEBUG_CHANNELS,
@@ -2052,6 +2064,11 @@ function install() {
   // revisited — a small, separate, pre-existing inconsistency, not repeated
   // here).
   let prismReadout = { enabled: false, params: null };
+  // IRIDESCENCE (mythica-machina-press#136, Prism's own direct sibling) —
+  // the identical seed posture as `prismReadout` just above, for the
+  // identical reason: `enabledFromProfile: 'extreme'` means "not resolved
+  // yet" is honestly `false`.
+  let iridescenceReadout = { enabled: false, params: null };
   /** Depth-of-field READOUT — same seed posture as bloom's own, above, and
    * for the identical reason: the manifest already says `enabledFromProfile:
    * 'low'`, so a `false` seed would misrepresent the window between
@@ -2439,6 +2456,16 @@ function install() {
     prismReadout = buildCascadeReadout(resolved);
   });
 
+  // IRIDESCENCE (mythica-machina-press#136, Prism's own direct sibling,
+  // built the same night) — registered the identical way, one effect later.
+  // `graph/passes.js#surface.iridescence` is `live` from day one, so
+  // `vt-pan-viewer.js#runSurfaceIridescencePass` actually consumes this
+  // readout every frame (unlike Prism's own first-commit posture, this was
+  // never an unwired seam).
+  effectRegistry.register(IRIDESCENCE, (resolved) => {
+    iridescenceReadout = buildCascadeReadout(resolved);
+  });
+
   /** Transient, in-memory precipitation LOOK-dial tuning
    * (MapShine.setPrecipitation) — mirrors fireLiveOverride/
    * vegetationLiveOverride exactly, now that PRECIPITATION_PARAMS (2026-09-04)
@@ -2525,6 +2552,23 @@ function install() {
     const { params: sceneParams } = readSceneEffectParams('prism');
     layers.paramLayers = [sceneParams, prismLiveOverride].filter(Boolean);
     effectRegistry.resolveAndApply('prism', layers);
+  }
+
+  /** Transient, in-memory Iridescence param tuning (MapShine.setIridescence /
+   * the FOH-ROH card). Mirrors `prismLiveOverride` exactly, one effect later. */
+  const iridescenceLiveOverride = {};
+
+  /** Re-resolve Iridescence's cascade from live settings + the scene's own
+   * authored params (Stage B) + the live override, and apply. Mirrors
+   * `reapplyPrism` exactly; called on settings change, on ready, and by
+   * `MapShine.setIridescence`. ⚠️ MUST ALSO be in the reapply-ALL table below
+   * (the `['bloom', ...]` list) — see that list's own header for the exact
+   * bug an effect left out of it suffers. */
+  function reapplyIridescence() {
+    const layers = deriveEffectLayers('iridescence', (key) => readSetting(MODULE_ID, key));
+    const { params: sceneParams } = readSceneEffectParams('iridescence');
+    layers.paramLayers = [sceneParams, iridescenceLiveOverride].filter(Boolean);
+    effectRegistry.resolveAndApply('iridescence', layers);
   }
 
   /** Transient, in-memory depth-of-field param tuning (MapShine.setDof / the
@@ -2721,6 +2765,7 @@ function install() {
     ['bloom', () => reapplyBloom()],
     ['lens', () => reapplyLens()],
     ['prism', () => reapplyPrism()],
+    ['iridescence', () => reapplyIridescence()],
     ['depth of field', () => reapplyDof()],
     ['clouds', () => reapplyClouds()],
     ['cloud tops', () => reapplyCloudTops()],
@@ -3786,6 +3831,58 @@ function install() {
     return { ...prismLiveOverride };
   };
 
+  // MapShine.setIridescence — the console tuner AND the FOH/ROH card's write
+  // path (mirrors MapShine.setPrism exactly, one effect later). Accepts a
+  // single knob or several:
+  //   MapShine.setIridescence({ intensity: 0.8, colorCycleSpeed: 0.4 })
+  MapShine.setIridescence = (partial = {}) => {
+    const p = partial ?? {};
+    if (typeof p.enabled === 'boolean') {
+      Promise.resolve(writeSetting(MODULE_ID, effectEnableKey('iridescence', 'player'), p.enabled ? 'on' : 'off'))
+        .then(() => reapplyIridescence())
+        .catch((err) => log.error('iridescence enable write/reapply failed:', err));
+    }
+    let changed = false;
+    // Every key IRIDESCENCE_PARAMS declares — explicit, matching setPrism's
+    // own precedent so a rename is a visible typo, not a silent no-op.
+    const scenePatch = {};
+    for (const k of [
+      'maskThreshold',
+      'invertMask',
+      'alpha',
+      'intensity',
+      'distortionStrength',
+      'noiseScale',
+      'noiseType',
+      'flowSpeed',
+      'phaseMult',
+      'colorCycleSpeed',
+      'angleDeg',
+      'parallaxStrength',
+      'ignoreDarkness',
+    ]) {
+      if (k in p) {
+        iridescenceLiveOverride[k] = p[k];
+        if (IRIDESCENCE_PARAMS[k]?.scope !== 'client') scenePatch[k] = p[k];
+        changed = true;
+      }
+    }
+    if (changed) {
+      Promise.resolve(writeSceneEffectParams('iridescence', scenePatch)).then(
+        (result) => {
+          if (!result.ok) log.warn(`iridescence scene param write not persisted: ${result.reason}`);
+        },
+        (err) => log.error('iridescence scene param write failed:', err)
+      );
+      try {
+        reapplyIridescence();
+      } catch (err) {
+        log.error('iridescence reapply (setIridescence) failed:', err);
+      }
+    }
+    return { ...iridescenceLiveOverride };
+  };
+
   // MapShine.setDof — the console tuner AND the FOH/ROH card's + preset
   // picker's write path (mirrors MapShine.setBloom exactly, including the
   // "enabled writes the PLAYER setting, then reapplies once the write lands"
@@ -4060,6 +4157,9 @@ function install() {
   // lens's own, above: no U6 read-tracking wrap (prism is not in
   // READ_TRACKED_EFFECTS).
   const getPrismRenderState = () => projectCascadeRenderState(prismReadout);
+  // IRIDESCENCE's render-state seam (mythica-machina-press#136) — same shape
+  // as prism's own, above, one effect later.
+  const getIridescenceRenderState = () => projectCascadeRenderState(iridescenceReadout);
   // DEPTH OF FIELD's render-state seam — same shape as bloom's own, above.
   // perfTier ADDED 2026-08-30, same fix; DELEGATES the same way.
   // U6 READ TRACKING (mythica-machina-press#194) — wrapped HERE, the real
@@ -4948,6 +5048,17 @@ function install() {
   // `maskItemRenderOrder` handback as Specular's/Window's own tile seams
   // just above — one pair of resolvers, three consumers.
   const { getPrismMaskItems } = createPrismSeams({
+    maskAuthority,
+    getFloors: () => lastKnownFloors,
+    getItems: () => coverItems,
+    getItemCorners: (item) => maskItemCorners(item),
+    getItemRenderOrder: (item) => maskItemRenderOrder(item),
+  });
+  // IRIDESCENCE's tile seam (mythica-machina-press#136, Prism's own direct
+  // sibling) — the identical shape one effect later, sharing the SAME
+  // `maskItemCorners`/`maskItemRenderOrder` handback as Specular's/Window's/
+  // Prism's own tile seams above.
+  const { getIridescenceMaskItems } = createIridescenceSeams({
     maskAuthority,
     getFloors: () => lastKnownFloors,
     getItems: () => coverItems,
@@ -9063,6 +9174,31 @@ function install() {
     status: (readout) => collapsedStatusLine({ enabled: readout.enabled }),
   });
 
+  // IRIDESCENCE (mythica-machina-press#136, docs recovered from V2's own
+  // IridescenceEffectV2.js) — Prism's own direct sibling, a light-reactive
+  // oil-slick/soap-bubble rainbow sheen. Registered the identical way, one
+  // effect later: `graph/passes.js#surface.iridescence` is `live` from day
+  // one, so this card's own params reach a real render pass every frame.
+  registerSimpleEffectCard('iridescence', {
+    // No dedicated icon exists for a rainbow/holographic sheen in
+    // `ui/widgets/icon-sprite.js`'s own ICONS set — `palette` (a set of
+    // coloured dots) is the closest real, shipped icon rather than inventing
+    // an unregistered name that would render blank.
+    icon: 'palette',
+    title: 'Iridescence',
+    accVar: '--c-surface',
+    filterCategory: 'surface',
+    schema: IRIDESCENCE_PARAMS,
+    // FOH mirrors prism's own split: the look-defining strength dials a GM
+    // plausibly reaches for mid-session, never the phase-field fine-tuning
+    // (set-once, ROH — feedback_foh_roh_must_differ).
+    fohKeys: ['alpha', 'intensity', 'flowSpeed', 'colorCycleSpeed'],
+    getReadout: () => iridescenceReadout,
+    setValue: (patch) => MapShine.setIridescence(patch),
+    presets: { table: IRIDESCENCE_PRESETS, pick: iridescencePreset },
+    status: (readout) => collapsedStatusLine({ enabled: readout.enabled }),
+  });
+
   registerSimpleEffectCard('depthOfField', {
     icon: 'eye',
     title: 'Depth of Field',
@@ -12821,6 +12957,12 @@ function install() {
         // door).
         getPrismMaskItems,
         getPrismRenderState,
+        // IRIDESCENCE's own tile seam (mythica-machina-press#136, Prism's
+        // own direct sibling) — see `createIridescenceSeams`'s own
+        // construction comment above for why this is the whole of its
+        // placement discovery (tile-only, no floor-level door).
+        getIridescenceMaskItems,
+        getIridescenceRenderState,
         // APERTURE GOBO's one seam (docs/planning/Aperture-Gobo.md) — no mask
         // URL/rect pair, unlike SHINE/window just above: its only input is
         // wall geometry `effects/lighting/point-light-pool.js` reads itself.

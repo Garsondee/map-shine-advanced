@@ -1030,6 +1030,40 @@ export const ZONES = Object.freeze(
       false,
       'runSurfacePrismPass'
     ),
+    // IRIDESCENCE (mythica-machina-press#136, Prism's own direct sibling,
+    // built the same night) — `graph/passes.js#surface.iridescence` is its
+    // OWN pass too, so both zones below carry `surface.iridescence` as their
+    // owner pass. UNLIKE Prism, there is no third `surface.iridescenceRefraction`
+    // zone: this effect's own dependent read (`buf:scene.illum`) needs no
+    // scene-capture subsystem at all — an ordinary texture sample folds into
+    // the same draw the sync/draw split below already covers, exactly the
+    // way `surface.response`'s own `buf:scene.illum` read needs no capture
+    // zone of its own either. `runSurfaceIridescencePass`'s own early-return
+    // (Law 4: no active `_Iridescence` tile on the viewed floor) means both
+    // read as zero on the overwhelming majority of scenes — real, not a
+    // measurement artefact.
+    z(
+      'surface.iridescenceSync',
+      'Iridescence tile-population sync',
+      'surface',
+      'surface.iridescence',
+      'iridescence',
+      'cpu',
+      'conditional',
+      false,
+      'iridescenceSurface.sync'
+    ),
+    z(
+      'surface.iridescenceDraw',
+      'Iridescence tile draw',
+      'surface',
+      'surface.iridescence',
+      'iridescence',
+      'gpu',
+      'conditional',
+      false,
+      'runSurfaceIridescencePass'
+    ),
     z(
       'surface.drawDust',
       'Dust particle draw',
@@ -1560,6 +1594,18 @@ export const EFFECT_ZONING = Object.freeze({
   prism: Object.freeze({
     coverage: 'full',
     why: 'surface.prism is live (graph/passes.js) — its per-tile sync (surface.prismSync), scene capture (surface.prismRefraction, tier 3 only) and draw (surface.prismDraw) are all zoned, and the Law-4 early-return means all three genuinely cost ~0 on a scene with no Prism mask, not merely unmeasured.',
+  }),
+  // Added 2026-09-19 (mythica-machina-press#136), the same night as `prism`
+  // immediately above — `surface.iridescence` flipped straight to `live`
+  // (never an unwired seam, unlike the FIRST Prism attempt): its per-tile
+  // sync (surface.iridescenceSync) and draw (surface.iridescenceDraw) are
+  // both zoned. No third zone for a scene capture — this effect's own
+  // dependent read (`buf:scene.illum`) needs none (see the zone table's own
+  // comment just above these two). `coverage: 'full'` is honest for the
+  // identical Law-4 reason `prism`'s own entry states.
+  iridescence: Object.freeze({
+    coverage: 'full',
+    why: 'surface.iridescence is live (graph/passes.js) — its per-tile sync (surface.iridescenceSync) and draw (surface.iridescenceDraw) are both zoned, and the Law-4 early-return means both genuinely cost ~0 on a scene with no Iridescence mask, not merely unmeasured. No scene-capture zone exists because this effect needs none (buf:scene.illum is a plain, already-finished read).',
   }),
   // Added 2026-09-16 (perf-instrumentation-audit, #553) — stylize had NO
   // zones AND no EFFECT_ZONING entry: the exact same structural shape as

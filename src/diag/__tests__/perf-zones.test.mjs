@@ -23,6 +23,7 @@ import {
   DOOR_GRAPHICS,
   FLUID,
   GRADE,
+  IRIDESCENCE,
   LENS,
   LIGHTNING,
   PRECIPITATION,
@@ -89,12 +90,16 @@ const MANIFESTS = [
   STYLIZE,
   PRECIPITATION,
   LENS,
-  // PRISM (mythica-machina-press#137) owns no zone at all yet (its own
-  // `surface.prism` pass is a declared seam) — added anyway so
+  // PRISM (mythica-machina-press#137) owns two real zones (surface.prismSync/
+  // surface.prismDraw, plus surface.prismRefraction for tier 3) as of the
+  // same night `surface.prism` flipped to `live` — added here so
   // `EFFECT_ZONING.prism` (perf-zones.js) validates against a real,
-  // registered effect id, the same "check 1 validates its shape too" reason
-  // CLOUD_LOOK/STYLIZE are both here despite CLOUD_LOOK also owning none.
+  // registered effect id.
   PRISM,
+  // IRIDESCENCE (mythica-machina-press#136, Prism's own direct sibling, same
+  // night) owns two real zones (surface.iridescenceSync/Draw) — added for the
+  // identical reason.
+  IRIDESCENCE,
 ];
 
 export function run(t) {

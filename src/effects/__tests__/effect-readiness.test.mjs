@@ -36,6 +36,7 @@ import { DOOR_GRAPHICS } from '../door-graphics.js';
 import { FIRE } from '../fire/fire.js';
 import { FLUID } from '../fluid/fluid.js';
 import { GRADE } from '../grade/grade.js';
+import { IRIDESCENCE } from '../iridescence/iridescence.js';
 import { LENS } from '../lens.js';
 import { LIGHTNING } from '../lightning.js';
 import { PRECIPITATION } from '../precipitation/precipitation.js';
@@ -65,6 +66,10 @@ const MANIFESTS = [
   FIRE,
   FLUID,
   GRADE,
+  // IRIDESCENCE (mythica-machina-press#136, Prism's own direct sibling, same
+  // night) owns two real zones (surface.iridescenceSync/Draw) from day one —
+  // check 2 below REQUIRES it, unlike PRISM did on its own first commit.
+  IRIDESCENCE,
   // Missing until the #552 follow-up audit (perf-instrumentation-audit, #553)
   // — lens and precipitation both owned NO zone and had real, unbracketed
   // draw calls (the exact Cloud-Tops-shaped gap); stylize owns no zone at all
@@ -73,10 +78,8 @@ const MANIFESTS = [
   LENS,
   LIGHTNING,
   PRECIPITATION,
-  // PRISM owns no zone (its own `surface.prism` pass is a declared `seam` —
-  // `prism.js`'s own header) so check 2 below does not REQUIRE it, but it is
-  // added for the same "check 1 validates its shape too" reason CLOUD_LOOK/
-  // STYLIZE are.
+  // PRISM owns real zones (surface.prismSync/Draw/Refraction) as of the same
+  // night `surface.prism` flipped to `live` — check 2 below now REQUIRES it.
   PRISM,
   SPECULAR,
   STYLIZE,

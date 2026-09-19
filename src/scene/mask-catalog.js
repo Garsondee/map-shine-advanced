@@ -38,16 +38,18 @@
  *
  * V2 suffixes deliberately NOT declared yet (Stage 6 rethink rule,
  * keyhole-stage6-effects-approach: audit + rethink per effect, never a
- * mechanical port): _Roughness/_Normal/_Iridescence/_Dust/_Ash.
+ * mechanical port): _Roughness/_Normal/_Dust/_Ash.
  * The wall still reserves their literals — the day an effect needs one, its
  * declaration lands HERE (one line) or the build fails, which is the funnel
- * working as designed. `_Fluid` came off that list on 2026-07-26, and `_Prism`
- * came off it on 2026-09-19 (mythica-machina-press#137): the funnel working
- * exactly as designed both times — Fluid needed its declaration for
- * `docs/planning/Fluid.md` Phase 1, Prism needed its declaration for a
- * standalone, rethought-for-TSL glass/crystal refraction surface (see
- * `effects/prism/prism.js`'s own header for the full design), so each
- * declaration landed here rather than as a literal somewhere in effects/.
+ * working as designed. `_Fluid` came off that list on 2026-07-26, `_Prism`
+ * came off it on 2026-09-19 (mythica-machina-press#137), and `_Iridescence`
+ * came off it the same night (mythica-machina-press#136, Prism's own direct
+ * sibling): the funnel working exactly as designed each time — Fluid needed
+ * its declaration for `docs/planning/Fluid.md` Phase 1, Prism and
+ * Iridescence each needed theirs for a standalone, rethought-for-TSL surface
+ * finish (see `effects/prism/prism.js`'s/`effects/iridescence/iridescence.js`'s
+ * own headers for the full design), so each declaration landed here rather
+ * than as a literal somewhere in effects/.
  *
  * @module scene/mask-catalog
  */
@@ -291,6 +293,32 @@ export const MASK_KINDS = Object.freeze([
       'refraction green) — a genuine option V2`s R-only reading never had, entirely optional: an ordinary ' +
       'black-and-white mask still tints nothing (zero saturation) and behaves exactly like V2`s glass. ' +
       'Absent = no refraction anywhere.',
+  },
+  {
+    id: 'iridescence',
+    suffixes: ['_Iridescence'],
+    channels: 'color',
+    packChannel: null,
+    absentValue: 0,
+    // Same "a GPU consumer is a consumer" case `prism`/`specular`/`window`
+    // already declare `rasterize` for — `effects/iridescence` needs the
+    // per-item mesh's own world placement, never this grid's extracted DATA.
+    // `getIridescenceMaskItems` (`effects/iridescence/iridescence-seams.js`)
+    // resolves placement straight from each tile's own resolved quad
+    // corners, mirroring `getPrismMaskItems`/`getSpecularMaskItems` — this
+    // flag documents that a per-item grid could be derived later (e.g. a
+    // future floor-level surface, mythica-machina-press#136's own noted
+    // follow-up), not that one exists today.
+    rasterize: true,
+    meaning:
+      'Author-painted holographic/thin-film shimmer mask (mythica-machina-press#136, Prism`s own direct ' +
+      'sibling) — the SHIMMER is 100% procedural (a phase field cycled through a spectral palette), this ' +
+      'file only marks WHERE it applies and HOW STRONGLY. Read as V2 itself always read it — deliberately ' +
+      'NOT as a material to tint by hue (unlike `prism`/`specular`): `max(luminance, peak-channel) x alpha` ' +
+      '(V2`s own comment, verbatim, is preserved in `iridescence-motion.js#computeMaskPresence`s own doc: ' +
+      '"Do NOT use a separate alpha-only branch... opaque black padding would read full strength while ' +
+      'painted props went through luminance and looked inverted vs padding"). The rainbow`s own colour comes ' +
+      'entirely from the procedural palette, never the mask`s own hue. Absent = no shimmer anywhere.',
   },
 ]);
 

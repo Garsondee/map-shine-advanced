@@ -513,6 +513,9 @@ import {
   writeSceneSky,
   setSceneSkyOverride,
   watchSceneSky,
+  readSceneWind,
+  writeSceneWind,
+  watchSceneWind,
   readFadeState,
   writeFadeState,
   watchFadeState,
@@ -1588,7 +1591,7 @@ function install() {
         // directly — the SAME source of truth the wind popover's own compass
         // row already reads/writes, not a second copy of wind state.
         getWindSpeed01: () => MapShine.getWind().speed01,
-        onWindSpeed01Commit: (v) => MapShine.setWind({ speed01: v }),
+        onWindSpeed01Commit: (v) => void MapShine.setWind({ speed01: v }),
         getSceneOverride: () => skyScope.sceneOverrides === true,
         // The cloud pin glyph (2026-08-18 fix — gap-audit against the old
         // astrolabe.js's own Cloud row). `weatherPinnedAxes` already rides the
@@ -1714,7 +1717,7 @@ function install() {
       windPopover: {
         getDirectionDeg: () => windDirectionDeg,
         getSpeed01: () => windSpeed01,
-        onCommit: ({ directionDeg, speed01 }) => MapShine.setWind({ directionDeg, speed01 }),
+        onCommit: ({ directionDeg, speed01 }) => void MapShine.setWind({ directionDeg, speed01 }),
       },
       // THE BR CORNER'S TILE MOTION BUTTON (2026-08-27) — the SAME panel
       // controller instance Studio's Scene department and the Lab action
@@ -10492,6 +10495,10 @@ function install() {
   /** Unsubscribe for the scene-sky watcher (a second GM's edit reaching here). */
   let skyUnsub = null;
   void skyUnsub; // held for a future teardown path; the watcher lives for the session
+  /** Unsubscribe for the scene-wind watcher (mythica-machina-press#541 — a
+   * second client's wind edit reaching this one). Re-armed on every
+   * canvasReady, same shape as fadeUnsub/effectParamsUnsub below. */
+  let windUnsub = null;
 
   // ══════════════════════════════════════════════════════════════════════
   // THE FADE ENGINE'S LIVE WIRING (U2 checkpoint 3, docs/holy/UI-Testament.md
@@ -11159,10 +11166,24 @@ function install() {
   // land through the identical `applyAmbientWind` commit path the dial uses
   // on pointer-release — never a second write route.
   MapShine.getWind = () => ({ directionDeg: windDirectionDeg, speed01: windSpeed01 });
-  MapShine.setWind = ({ directionDeg, speed01 } = {}) => {
+  // mythica-machina-press#541 fix: wind used to update ONLY these closure
+  // vars — this client's own particles/fire/precip/vegetation moved, and
+  // nothing else did, forever, on every other connected client. Now mirrors
+  // `editSky`'s own two-step shape exactly: apply LOCALLY first (the dial
+  // must respond at once; the write is async, GM-gated, and may round-trip a
+  // socket — a control that waits on a document update before moving reads
+  // as broken even when it is working), THEN persist the resolved pair
+  // through `foundry/wind-persistence.js`. `windDirectionDeg`/`windSpeed01`
+  // stay the live in-memory values the render loop reads (`applyAmbientWind`)
+  // — the SAME relationship `skyScope` has with its own in-memory sky state;
+  // this is only the write-through the bare vars never had.
+  MapShine.setWind = async ({ directionDeg, speed01 } = {}) => {
     if (Number.isFinite(directionDeg)) windDirectionDeg = directionDeg;
     if (Number.isFinite(speed01)) windSpeed01 = Math.max(0, Math.min(1, speed01));
     applyAmbientWind();
+    const result = await writeSceneWind({ directionDeg: windDirectionDeg, speed01: windSpeed01 });
+    if (!result.ok) log.warn(`wind edit not persisted: ${result.reason}`);
+    return result;
   };
 
   /** Compass point for the collapsed Wind card's status line. Wind direction is
@@ -14667,6 +14688,30 @@ function install() {
           const { state } = readFadeState();
           fadeState = filterResolvableFadeState(state);
           MapShine.__remote?.refreshWeatherBoard();
+        });
+        // WIND'S OWN SCENE LOAD (mythica-machina-press#541) — wind ambient is
+        // scene-scoped exactly like fade state above: a scene SWITCH must
+        // re-derive THIS scene's own wind rather than carrying the previous
+        // scene's direction/speed forward. A `wind: null` read (nothing
+        // stored yet on this scene) deliberately leaves windDirectionDeg/
+        // windSpeed01 exactly where they already are — same "no stored value
+        // yet" posture readSceneSky/readFadeState already use — rather than
+        // snapping a freshly-loaded scene to some other hardcoded default.
+        try {
+          const { wind, reason } = readSceneWind();
+          if (Number.isFinite(wind?.directionDeg)) windDirectionDeg = wind.directionDeg;
+          if (Number.isFinite(wind?.speed01)) windSpeed01 = wind.speed01;
+          applyAmbientWind();
+          if (reason) log.info(`wind state (canvasReady): ${reason}`); // "no active scene" etc. — benign
+        } catch (err) {
+          log.error('wind state (canvasReady) failed:', err);
+        }
+        windUnsub?.();
+        windUnsub = watchSceneWind(() => {
+          const { wind } = readSceneWind();
+          if (Number.isFinite(wind?.directionDeg)) windDirectionDeg = wind.directionDeg;
+          if (Number.isFinite(wind?.speed01)) windSpeed01 = wind.speed01;
+          applyAmbientWind();
         });
         // EFFECT SCENE PARAMS (Stage B, #288/#389) — this scene's own load
         // already picked up UI-shadow's authored params via reapplyAll('scene

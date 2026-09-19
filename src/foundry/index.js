@@ -187,6 +187,15 @@ export {
 // and writes, mirroring sky-persistence.js's own shape.
 export { readFadeState, writeFadeState, watchFadeState } from './fade-persistence.js';
 
+// WIND PERSISTENCE (mythica-machina-press#541, found under the #288/#287
+// GM-player sync audit) — the one scene flag wind ambient's
+// `{directionDeg, speed01}` pair lives under. A deliberately narrow, SCENE-
+// only sibling of sky/fade/effect-param persistence, NOT a third axis on
+// `world/sky-settings.js#DEFAULT_SKY` (see wind-persistence.js's own header
+// for why that option was rejected). Naming/posture mirror
+// sky-persistence.js's readScene/writeScene/watchScene shape exactly.
+export { readSceneWind, writeSceneWind, watchSceneWind } from './wind-persistence.js';
+
 // EFFECT PARAM PERSISTENCE (mythica-machina-press#288, #389, Stage B of
 // effect-settings.js's own "no per-scene PARAM persistence yet" note) — one
 // scene flag, keyed by effect id, mirroring sky/fade persistence's shape.

@@ -60,7 +60,18 @@ export function run(t) {
     // whole 13-class absorption remains unbuilt — see post.grade's own note
     // for why post.bloom already set the "ship standalone, absorb later if
     // ever" precedent this pass follows.
-    t.ok('a sane number of passes (10-20, the promised ~10-12)', PASSES.length >= 10 && PASSES.length <= 20);
+    // ⚠️ CEILING RAISED 20 → 21 (mythica-machina-press#137, `surface.prism`,
+    // `live`). The identical bar a fourth time: `docs/reference/v2-effect-
+    // params/prism-effect.md` slated Prism for absorption into
+    // `surface.response` (Specular's own pass), but that pass has been
+    // through 20+ rounds of live-author-confirmed tuning — touching its
+    // material for an unrelated new effect risks the already-shipped look,
+    // the exact reason `post.lens` shipped standalone instead of folding
+    // into `post.grade`. `surface.prism` follows that identical precedent
+    // one effect later: `vt-pan-viewer.js#runSurfacePrismPass` is a real,
+    // reachable per-frame producer, Law-4-gated to a true no-op on any scene
+    // with no `_Prism` mask (`effects/prism/prism.js`'s own header).
+    t.ok('a sane number of passes (10-21, the promised ~10-12)', PASSES.length >= 10 && PASSES.length <= 21);
     t.ok(
       'every stage used is declared',
       PASSES.every((p) => STAGES.includes(p.stage))

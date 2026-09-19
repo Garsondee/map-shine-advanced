@@ -39,6 +39,7 @@ import { GRADE } from '../grade/grade.js';
 import { LENS } from '../lens.js';
 import { LIGHTNING } from '../lightning.js';
 import { PRECIPITATION } from '../precipitation/precipitation.js';
+import { PRISM } from '../prism/prism.js';
 import { SPECULAR } from '../specular/specular.js';
 import { STYLIZE } from '../stylize.js';
 import { SUN_SHADOWS } from '../sun-shadows.js';
@@ -72,6 +73,11 @@ const MANIFESTS = [
   LENS,
   LIGHTNING,
   PRECIPITATION,
+  // PRISM owns no zone (its own `surface.prism` pass is a declared `seam` —
+  // `prism.js`'s own header) so check 2 below does not REQUIRE it, but it is
+  // added for the same "check 1 validates its shape too" reason CLOUD_LOOK/
+  // STYLIZE are.
+  PRISM,
   SPECULAR,
   STYLIZE,
   SUN_SHADOWS,

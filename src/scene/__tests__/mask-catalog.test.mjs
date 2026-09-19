@@ -90,11 +90,16 @@ export async function run(t) {
   // it is the SECOND trio member to need one. Ownership of the packed page's
   // single alpha slot used to be inferred from "the only rasterized member",
   // which returned no policy at all the moment that stopped being unique.
+  // `prism` joined this list 2026-09-19 (mythica-machina-press#137) — same
+  // "a GPU consumer is a consumer" case as `specular`/`window` just above:
+  // `effects/prism/prism-seams.js#getPrismMaskItems` needs each item's own
+  // world placement, not this grid's extracted DATA (that kind's own
+  // `meaning` in mask-catalog.js has the full account).
   t.ok(
-    'outdoors, fire, specular, window, water and fluid are the rasterized kinds',
+    'outdoors, fire, specular, window, water, fluid and prism are the rasterized kinds',
     rasterizedKinds()
       .map((k) => k.id)
-      .join(',') === 'outdoors,fire,specular,window,water,fluid'
+      .join(',') === 'outdoors,fire,specular,window,water,fluid,prism'
   );
   t.ok(
     'fire is rasterized but does NOT own the packed alpha — the two flags are separate questions',

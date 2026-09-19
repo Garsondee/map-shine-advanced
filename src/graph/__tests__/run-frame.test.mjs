@@ -95,6 +95,14 @@ export function run(t) {
     // buf:scene.color tier 5 depends on, and it must run after geometry.world
     // has actually finished writing that buffer (the same reasoning ANY
     // dependent-read pass in this list already follows).
+    // `surface.prism` joined 2026-09-19 (mythica-machina-press#137), BETWEEN
+    // surface.response and surface.water — after Specular for the identical
+    // "shipped, carefully-tuned material stays untouched" reason `post.lens`
+    // sits after `post.taaResolve` rather than folding into `post.grade`, and
+    // before surface.water because both are dependent-read scene-capture
+    // passes reading `buf:scene.color`/`buf:scene.depth` — order between the
+    // two of them does not matter for correctness, but Prism's own manifest
+    // (`prism.js`) exists first, so it is declared first.
     // `post.dof` joined 2026-08-06 (Depth-of-Field.md), between post.bloom and
     // present.composite (post.grade is still a seam, so it never appears in a
     // LIVE plan) — it reads buf:scene.depth, which is unaffected by ordering
@@ -128,7 +136,7 @@ export function run(t) {
     // physically in front" reasoning surface.precipitation's own comment
     // above already states for its relationship to vision.gate).
     const expected =
-      'masks.occlusion,geometry.world,light.accumulate,surface.response,surface.water,surface.particles,surface.cloudTops,surface.precipitation,vision.gate,post.bloom,post.dof,post.taaResolve,post.lens,present.composite';
+      'masks.occlusion,geometry.world,light.accumulate,surface.response,surface.prism,surface.water,surface.particles,surface.cloudTops,surface.precipitation,vision.gate,post.bloom,post.dof,post.taaResolve,post.lens,present.composite';
     ok(`today's real masks..present plan is exactly [${expected}] (got: ${ids.join(',')})`, ids.join(',') === expected);
     ok(
       'surface.response is planned AFTER light.accumulate — it reads what that pass writes',

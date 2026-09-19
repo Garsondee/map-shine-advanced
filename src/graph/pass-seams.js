@@ -58,6 +58,13 @@ import { buildLightVisibilityPass, buildGradePass, buildFluidSimPass } from '../
  * producer (`runWaterRefractionCapturePass`) runs in vt-pan-viewer.js.
  * Tiers 0-4 stay exactly what they were — a drawable inside geometry.world —
  * this only adds the ONE per-frame capture a drawable cannot do itself.
+ * 'surface.prism' is NOT here either (2026-09-19, mythica-machina-press#137):
+ * it went straight from declared-in-a-doc to `live`, never spending a commit
+ * as a registered seam — `vt-pan-viewer.js#runSurfacePrismPass` is the real
+ * producer (see graph/pass-impls.js). Its own throwing door
+ * (`buildPrismPass`, `effects/prism/prism-pass.js`) is deleted, the same
+ * "a door beside a working implementation is a second, wrong answer" reason
+ * `surface.response`'s own door was deleted above.
  * @type {Record<string, (ctx: object) => never>}
  */
 export const PASS_SEAMS = Object.freeze({

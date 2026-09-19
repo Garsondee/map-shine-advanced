@@ -38,12 +38,16 @@
  *
  * V2 suffixes deliberately NOT declared yet (Stage 6 rethink rule,
  * keyhole-stage6-effects-approach: audit + rethink per effect, never a
- * mechanical port): _Roughness/_Normal/_Iridescence/_Prism/_Dust/_Ash.
+ * mechanical port): _Roughness/_Normal/_Iridescence/_Dust/_Ash.
  * The wall still reserves their literals — the day an effect needs one, its
  * declaration lands HERE (one line) or the build fails, which is the funnel
- * working as designed. `_Fluid` came off that list on 2026-07-26, the funnel
- * working exactly as designed: `docs/planning/Fluid.md` Phase 1 needed it, so
- * its declaration landed here rather than as a literal somewhere in effects/.
+ * working as designed. `_Fluid` came off that list on 2026-07-26, and `_Prism`
+ * came off it on 2026-09-19 (mythica-machina-press#137): the funnel working
+ * exactly as designed both times — Fluid needed its declaration for
+ * `docs/planning/Fluid.md` Phase 1, Prism needed its declaration for a
+ * standalone, rethought-for-TSL glass/crystal refraction surface (see
+ * `effects/prism/prism.js`'s own header for the full design), so each
+ * declaration landed here rather than as a literal somewhere in effects/.
  *
  * @module scene/mask-catalog
  */
@@ -261,6 +265,32 @@ export const MASK_KINDS = Object.freeze([
       'oldest. The residual risk (feedback_one_byte_two_quantities) is that an ANTIALIASED EDGE texel ' +
       'genuinely is coverage×ramp; fluid-net.js therefore reads the hint from INTERIOR texels only. ' +
       'Absent = no tubes anywhere.',
+  },
+  {
+    id: 'prism',
+    suffixes: ['_Prism'],
+    channels: 'color',
+    packChannel: null,
+    absentValue: 0,
+    // Same "a GPU consumer is a consumer" case `specular`/`window` already
+    // declare `rasterize` for — `effects/prism` needs the per-item mesh's own
+    // world placement, never this grid's extracted DATA (see `specular`'s
+    // identical note just above for why R is not read as presence here
+    // either). `getPrismMaskItems` (`effects/prism/prism-seams.js`) resolves
+    // placement straight from each tile's own resolved quad corners, mirroring
+    // `getSpecularMaskItems`/`getFluidMaskItems` — this flag documents that a
+    // per-item grid could be derived later (e.g. a future floor-level surface,
+    // mythica-machina-press#137's own noted follow-up), not that one exists today.
+    rasterize: true,
+    meaning:
+      'Author-painted glass/crystal refraction mask, same convention as `_Specular` (mythica-machina-press#137) ' +
+      '— the ARTWORK is 100% procedural (facets, chromatic dispersion, glint), this file only marks WHERE it ' +
+      'applies and, optionally, WHAT COLOUR it tints. Read as a MATERIAL, not a stencil: presence comes from ' +
+      'the mask`s own LUMA (so a plain grayscale painting — V2`s own convention — reads exactly as before), ' +
+      'while HUE+SATURATION let a coloured crystal tint the light it bends (a green-painted gem tints its own ' +
+      'refraction green) — a genuine option V2`s R-only reading never had, entirely optional: an ordinary ' +
+      'black-and-white mask still tints nothing (zero saturation) and behaves exactly like V2`s glass. ' +
+      'Absent = no refraction anywhere.',
   },
 ]);
 

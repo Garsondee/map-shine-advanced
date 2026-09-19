@@ -431,6 +431,16 @@ import {
   STYLIZE_PARAMS,
   PRECIPITATION,
   PRECIPITATION_PARAMS,
+  // PRISM (mythica-machina-press#137) — a crystal/glass refraction surface
+  // finish. The Studio card below registers the same way `grade`'s own does
+  // for its own not-yet-wired `post.grade` seam: `graph/passes.js#
+  // surface.prism` is a declared `seam` (`effects/prism/prism.js`'s own
+  // header has the full "what's built vs what's wired" account) — this card
+  // lets the look be authored/tuned ahead of the render pass landing.
+  PRISM,
+  PRISM_PARAMS,
+  PRISM_PRESETS,
+  prismPreset,
   buildCascadeReadout,
   projectCascadeRenderState,
 } from './effects/index.js';
@@ -597,6 +607,9 @@ import {
   createWindowRegistration,
   WINDOW_PARAMS,
   WINDOW_DEBUG_CHANNELS,
+  // PRISM's own tile seam (mythica-machina-press#137) — mirrors
+  // `createSpecularSeams`'s/`createFluidSeams`'s own shape exactly.
+  createPrismSeams,
   createApertureGoboRegistration,
   APERTURE_GOBO_PARAMS,
   APERTURE_GOBO_DEBUG_CHANNELS,
@@ -2030,6 +2043,15 @@ function install() {
   // its own, so "not resolved yet" defaulting to ON costs nothing before
   // the first real cascade resolve lands.
   let lensReadout = { enabled: true, params: null };
+  // PRISM (mythica-machina-press#137) — OPPOSITE seed from lens/bloom's own
+  // above: `enabledFromProfile: 'extreme'` (off at every profile short of
+  // the ceiling, `prism.js`'s own manifest) means "not resolved yet" is
+  // honestly `false`, never a flash-of-enabled the way lens's own seed would
+  // now be stale for (lens flipped to the same off-by-default posture on
+  // 2026-09-16, mythica-machina-press#556, without its own seed above being
+  // revisited — a small, separate, pre-existing inconsistency, not repeated
+  // here).
+  let prismReadout = { enabled: false, params: null };
   /** Depth-of-field READOUT — same seed posture as bloom's own, above, and
    * for the identical reason: the manifest already says `enabledFromProfile:
    * 'low'`, so a `false` seed would misrepresent the window between
@@ -2405,6 +2427,18 @@ function install() {
     precipReadout = buildCascadeReadout(resolved);
   });
 
+  // PRISM (mythica-machina-press#137) — registered the same way `GRADE`'s own
+  // seam-backed effect is just above: `apply` only refreshes the shared
+  // readout, since there is no viewer render state to also push into yet
+  // (`graph/passes.js#surface.prism` is a declared seam — `prism.js`'s own
+  // header has the full account). The GM/player enable toggle, the
+  // a11y.photosensitive gate and the System panel's own `effectRows` all come
+  // from this registration existing at all, the identical "no separate wiring
+  // needed" dividend `PRECIPITATION`'s own comment names.
+  effectRegistry.register(PRISM, (resolved) => {
+    prismReadout = buildCascadeReadout(resolved);
+  });
+
   /** Transient, in-memory precipitation LOOK-dial tuning
    * (MapShine.setPrecipitation) — mirrors fireLiveOverride/
    * vegetationLiveOverride exactly, now that PRECIPITATION_PARAMS (2026-09-04)
@@ -2471,6 +2505,26 @@ function install() {
     const { params: sceneParams } = readSceneEffectParams('lens');
     layers.paramLayers = [sceneParams, lensLiveOverride].filter(Boolean);
     effectRegistry.resolveAndApply('lens', layers);
+  }
+
+  /** Transient, in-memory Prism param tuning (MapShine.setPrism / the FOH-ROH
+   * card). Mirrors lensLiveOverride exactly. */
+  const prismLiveOverride = {};
+
+  /** Re-resolve Prism's cascade from live settings + the scene's own authored
+   * params (Stage B) + the live override, and apply. Mirrors reapplyLens
+   * exactly; called on settings change, on ready, and by MapShine.setPrism.
+   * ⚠️ MUST ALSO be in the reapply-ALL table below — see that list's own
+   * header for the exact bug an effect left out of it suffers. Note the
+   * cascade resolve itself has nothing to render yet (`graph/passes.js#
+   * surface.prism` is a declared seam) — this keeps the STORED params/
+   * enabled state correct and ready for the day the pass lands, the same
+   * posture `reapplyGradeLook` already takes for its own seam pass. */
+  function reapplyPrism() {
+    const layers = deriveEffectLayers('prism', (key) => readSetting(MODULE_ID, key));
+    const { params: sceneParams } = readSceneEffectParams('prism');
+    layers.paramLayers = [sceneParams, prismLiveOverride].filter(Boolean);
+    effectRegistry.resolveAndApply('prism', layers);
   }
 
   /** Transient, in-memory depth-of-field param tuning (MapShine.setDof / the
@@ -2636,7 +2690,7 @@ function install() {
    * list is the cheapest one available, and adding a line below is now the job.
    *
    * Thunks, not bare references: `water`/`fluid`/`specular`/`windowLight` are
-   * `const`s declared further down this same scope, so naming them directly here
+   * `const's declared further down this same scope, so naming them directly here
    * would be a temporal-dead-zone throw. An arrow defers the lookup to call time,
    * which is always long after `install()` has returned.
    */
@@ -2666,6 +2720,7 @@ function install() {
     ['aperture gobo', () => apertureGobo.reapply()],
     ['bloom', () => reapplyBloom()],
     ['lens', () => reapplyLens()],
+    ['prism', () => reapplyPrism()],
     ['depth of field', () => reapplyDof()],
     ['clouds', () => reapplyClouds()],
     ['cloud tops', () => reapplyCloudTops()],
@@ -3677,6 +3732,60 @@ function install() {
     return { ...lensLiveOverride };
   };
 
+  // MapShine.setPrism — the console tuner AND the FOH/ROH card's write path
+  // (mirrors MapShine.setLens exactly). Accepts a single knob or several:
+  //   MapShine.setPrism({ intensity: 0.6, spread: 0.8 })
+  // Writing/reading these params works today; there is simply no live render
+  // pass consuming them yet (`graph/passes.js#surface.prism` is a declared
+  // seam — `prism.js`'s own header has the full account).
+  MapShine.setPrism = (partial = {}) => {
+    const p = partial ?? {};
+    if (typeof p.enabled === 'boolean') {
+      Promise.resolve(writeSetting(MODULE_ID, effectEnableKey('prism', 'player'), p.enabled ? 'on' : 'off'))
+        .then(() => reapplyPrism())
+        .catch((err) => log.error('prism enable write/reapply failed:', err));
+    }
+    let changed = false;
+    // Every key PRISM_PARAMS declares — explicit, matching setLens's own
+    // precedent so a rename is a visible typo, not a silent no-op.
+    const scenePatch = {};
+    for (const k of [
+      'maskThreshold',
+      'opacity',
+      'brightness',
+      'maskTintStrength',
+      'facetScale',
+      'facetAnimate',
+      'facetSpeed',
+      'facetSoftness',
+      'parallaxStrength',
+      'glintStrength',
+      'glintThreshold',
+      'intensity',
+      'spread',
+    ]) {
+      if (k in p) {
+        prismLiveOverride[k] = p[k];
+        if (PRISM_PARAMS[k]?.scope !== 'client') scenePatch[k] = p[k];
+        changed = true;
+      }
+    }
+    if (changed) {
+      Promise.resolve(writeSceneEffectParams('prism', scenePatch)).then(
+        (result) => {
+          if (!result.ok) log.warn(`prism scene param write not persisted: ${result.reason}`);
+        },
+        (err) => log.error('prism scene param write failed:', err)
+      );
+      try {
+        reapplyPrism();
+      } catch (err) {
+        log.error('prism reapply (setPrism) failed:', err);
+      }
+    }
+    return { ...prismLiveOverride };
+  };
+
   // MapShine.setDof — the console tuner AND the FOH/ROH card's + preset
   // picker's write path (mirrors MapShine.setBloom exactly, including the
   // "enabled writes the PLAYER setting, then reapplies once the write lands"
@@ -3947,6 +4056,10 @@ function install() {
   // U6 read-tracking wrap (lens is not in READ_TRACKED_EFFECTS; that wrap is
   // opt-in instrumentation, not a correctness requirement).
   const getLensRenderState = () => projectCascadeRenderState(lensReadout);
+  // PRISM's render-state seam (mythica-machina-press#137) — same shape as
+  // lens's own, above: no U6 read-tracking wrap (prism is not in
+  // READ_TRACKED_EFFECTS).
+  const getPrismRenderState = () => projectCascadeRenderState(prismReadout);
   // DEPTH OF FIELD's render-state seam — same shape as bloom's own, above.
   // perfTier ADDED 2026-08-30, same fix; DELEGATES the same way.
   // U6 READ TRACKING (mythica-machina-press#194) — wrapped HERE, the real
@@ -4822,6 +4935,19 @@ function install() {
   // (mythica-machina-press#538/#539) is the newer, THIRD seam — see
   // `getSpecularMaskItems`'s own comment just above for the shared reasoning.
   const { getWindowMaskRect, getWindowMaskUrl, getWindowBackgroundItemId, getWindowMaskItems } = createWindowSeams({
+    maskAuthority,
+    getFloors: () => lastKnownFloors,
+    getItems: () => coverItems,
+    getItemCorners: (item) => maskItemCorners(item),
+    getItemRenderOrder: (item) => maskItemRenderOrder(item),
+  });
+  // PRISM's tile seam (mythica-machina-press#137) — TILE-ONLY, mirroring
+  // `getSpecularMaskItems`'s own per-item door: no floor-level door exists
+  // for Prism yet (`prism-seams.js`'s own header), so this is the whole of
+  // its placement discovery. Shares the SAME `maskItemCorners`/
+  // `maskItemRenderOrder` handback as Specular's/Window's own tile seams
+  // just above — one pair of resolvers, three consumers.
+  const { getPrismMaskItems } = createPrismSeams({
     maskAuthority,
     getFloors: () => lastKnownFloors,
     getItems: () => coverItems,
@@ -8914,6 +9040,29 @@ function install() {
     presets: { table: LENS_PRESETS, pick: lensPreset },
   });
 
+  // PRISM (mythica-machina-press#137, docs recovered from V2's own
+  // PrismEffectV2.js) — a crystal/glass refraction surface finish. Registered
+  // the same way `grade`'s own card is for its own not-yet-wired `post.grade`
+  // seam (this file's own `PRISM` import comment has the full account):
+  // `graph/passes.js#surface.prism` is a declared `seam`, so the look
+  // authored here has no live render yet, but every param/preset/toggle
+  // already works and is stored ready for the day the pass lands.
+  registerSimpleEffectCard('prism', {
+    icon: 'gem',
+    title: 'Prism',
+    accVar: '--c-surface',
+    filterCategory: 'surface',
+    schema: PRISM_PARAMS,
+    // FOH mirrors specular's own split: the look-defining strength dials a
+    // GM plausibly reaches for mid-session, never the facet-geometry/glint
+    // fine-tuning (set-once, ROH — feedback_foh_roh_must_differ).
+    fohKeys: ['opacity', 'brightness', 'intensity', 'spread'],
+    getReadout: () => prismReadout,
+    setValue: (patch) => MapShine.setPrism(patch),
+    presets: { table: PRISM_PRESETS, pick: prismPreset },
+    status: (readout) => collapsedStatusLine({ enabled: readout.enabled }),
+  });
+
   registerSimpleEffectCard('depthOfField', {
     icon: 'eye',
     title: 'Depth of Field',
@@ -12666,6 +12815,12 @@ function install() {
         // header for why this is a THIRD, separate population.
         getWindowMaskItems,
         getWindowRenderState: windowLight.getRenderState,
+        // PRISM's own tile seam (mythica-machina-press#137) — see
+        // `createPrismSeams`'s own construction comment above for why this
+        // is the whole of its placement discovery (tile-only, no floor-level
+        // door).
+        getPrismMaskItems,
+        getPrismRenderState,
         // APERTURE GOBO's one seam (docs/planning/Aperture-Gobo.md) — no mask
         // URL/rect pair, unlike SHINE/window just above: its only input is
         // wall geometry `effects/lighting/point-light-pool.js` reads itself.

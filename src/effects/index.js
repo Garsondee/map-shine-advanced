@@ -348,6 +348,37 @@ export {
   FLUID_MAX_TUBES,
   FLUID_HINT_MIN_CORRELATION,
 } from './fluid/fluid-net.js';
+// PRISM — a crystal/glass refraction surface finish (mythica-machina-press#137).
+// `graph/passes.js#surface.prism` is `live` — `vt-pan-viewer.js#
+// runSurfacePrismPass` is the real producer (`prism.js`'s own header has the
+// full account); there is no seam door here to export, the same posture
+// `surface.response`'s own now-deleted door left behind.
+export { PRISM, PRISM_PARAMS, PRISM_PRESETS, prismPreset } from './prism/prism.js';
+export {
+  hash2 as prismHash2,
+  cellJitter as prismCellJitter,
+  computeVoronoiFacet,
+  computeFacetTimePhase,
+  computeFacetUv,
+  blendFacetSlope,
+  computeGlintAmount,
+  computeChromaticOffsets,
+  PRISM_PARALLAX_SCALE,
+  PRISM_MAX_TIER,
+  PRISM_DEFAULT_TIER,
+  prismTierPlan,
+} from './prism/prism-motion.js';
+export { buildPrismSurfaceMaterial, PRISM_REFRACT_WORLD_PX_PER_INTENSITY } from './prism/prism-render.js';
+export { createPrismSeams } from './prism/prism-seams.js';
+export {
+  createPrismRefractionSubsystem,
+  unionRectOfItemCorners,
+  computePrismCaptureTargetSize,
+  PRISM_REFRACTION_BUCKET_PX,
+  PRISM_REFRACTION_DOWNSAMPLE,
+  PRISM_REFRACTION_MAX_DIM_PX,
+} from './prism/prism-refraction-subsystem.js';
+export { createPrismSurfaceSubsystem } from './prism/prism-surface-subsystem.js';
 // DOOR GRAPHICS as a self-owned subsystem (extracted 2026-07-26). Also the
 // template tier-0 water follows: an opaque, LIT map element drawn into
 // buf:scene.color BEFORE lighting, in its own scene.

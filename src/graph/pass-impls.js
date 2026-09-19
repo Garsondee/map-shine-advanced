@@ -214,6 +214,22 @@ export const PASS_IMPLS = Object.freeze({
       'exist until light.accumulate has run. Skips entirely (JS early-return, no GPU work) when the ' +
       'effect is off or no specular mask has loaded. Same invocability caveat as geometry.world.',
   },
+  'surface.prism': {
+    fn: startVtPanViewer,
+    module: 'vt/index.js',
+    export: 'startVtPanViewer',
+    separatelyInvocable: false,
+    note:
+      'REAL as of 2026-09-19 (mythica-machina-press#137): runSurfacePrismPass (a closure inside ' +
+      'startVtPanViewer, in the local passImpls map runPassPlan walks) asks prism-seams.js`s own ' +
+      'getPrismMaskItems for the VIEWED floor`s active tiles first and returns immediately (zero GPU ' +
+      'work) when that list is empty. Otherwise ticks prism-refraction-subsystem.js (tier 3 only — a ' +
+      'scene capture bounded to the UNION of every active tile`s own rect) then syncs prism-surface-' +
+      'subsystem.js (the per-tile mesh population, mirroring specular-tile-surface-subsystem.js`s own ' +
+      'shape) and draws whatever came back visible into scene.lit. Same invocability caveat as ' +
+      'surface.response/surface.water: the loop lives inside startVtPanViewer, driven by the same local ' +
+      'passImpls/framePlan graph/run-frame.js walks.',
+  },
   'surface.water': {
     fn: startVtPanViewer,
     module: 'vt/index.js',

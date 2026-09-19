@@ -26,6 +26,7 @@ import {
   LENS,
   LIGHTNING,
   PRECIPITATION,
+  PRISM,
   SPECULAR,
   STYLIZE,
   SUN_SHADOWS,
@@ -88,6 +89,12 @@ const MANIFESTS = [
   STYLIZE,
   PRECIPITATION,
   LENS,
+  // PRISM (mythica-machina-press#137) owns no zone at all yet (its own
+  // `surface.prism` pass is a declared seam) — added anyway so
+  // `EFFECT_ZONING.prism` (perf-zones.js) validates against a real,
+  // registered effect id, the same "check 1 validates its shape too" reason
+  // CLOUD_LOOK/STYLIZE are both here despite CLOUD_LOOK also owning none.
+  PRISM,
 ];
 
 export function run(t) {

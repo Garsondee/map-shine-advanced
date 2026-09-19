@@ -359,7 +359,16 @@ export const PASSES = [
     // now declarable, since light.accumulate finally declares that it creates it.
     reads: ['buf:scene.illum', 'buf:scene.attr'],
     modifies: ['buf:scene.color'],
-    absorbs: ['SpecularEffectV2', 'IridescenceEffectV2', 'PrismEffectV2', 'RoughnessEffectV2', 'NormalEffectV2'],
+    // ⚠️ `PrismEffectV2` REMOVED (2026-09-19, mythica-machina-press#137) —
+    // the identical precedent `post.lens`'s own note already set for
+    // `LensEffectV2` one effect earlier: this pass's own docs/reference/
+    // v2-effect-params/prism-effect.md slated Prism for absorption here, and
+    // Prism shipped standalone instead once it was actually built —
+    // `surface.prism`, below. `post.bloom`'s "bloom is now the separate
+    // post.bloom pass" is the doctrine; this is its second application, not
+    // its first, and `surface.response` can absorb it later if/when the full
+    // unification is ever attempted — never a blocker on shipping the effect.
+    absorbs: ['SpecularEffectV2', 'IridescenceEffectV2', 'RoughnessEffectV2', 'NormalEffectV2'],
     note:
       'TIERS 0-2 ARE LIVE (2026-07-26). The specular mask read as a MATERIAL — hue = F0 (gold ' +
       'reflects gold), saturation = metalness, value = smoothness — where V2 collapsed all three ' +
@@ -379,6 +388,48 @@ export const PASSES = [
       'overlay leaves the attributes under it untouched — V2 used a dedicated token mask, which MSA ' +
       'has no equivalent of yet), and the surface normal is flat (+Z) until the relief rung lands. ' +
       'Same honesty bar geometry.world/masks.occlusion set for their own partial claims.',
+  },
+  {
+    id: 'surface.prism',
+    stage: 'surface',
+    kind: 'gpu',
+    // LIVE (mythica-machina-press#137) — `vt-pan-viewer.js#runSurfacePrismPass`
+    // runs every frame, right after `surface.response` (Specular) and before
+    // `surface.water`. Real JS-time gate FIRST (Effects.md Law 4): asks
+    // `prism-seams.js#getPrismMaskItems` for the viewed floor's own active
+    // tiles, and returns immediately with zero GPU work when that list is
+    // empty — a scene with no `_Prism` mask anywhere pays for one
+    // array-length check. When active, ticks `prism-refraction-subsystem.js`
+    // (tier 3 only — the scene capture, bounded to the UNION of every active
+    // tile's own rect) then syncs `prism-surface-subsystem.js` (the per-tile
+    // mesh population, mirroring `specular-tile-surface-subsystem.js`'s own
+    // shape) and draws whatever came back visible.
+    status: 'live',
+    owns: 'effects/prism/prism.js (the full design account) + mythica-machina-press#137',
+    creates: [],
+    // Tiers 0-2 read `buf:scene.depth` for the SAME rank-gate occlusion
+    // window/specular already use (`prism-render.js`'s own occlusion
+    // block); tier 3 additionally reads a captured `buf:scene.color`
+    // exactly like `surface.water`'s own tier 5. `buf:scene.attr` is NOT
+    // read — Prism follows the newer depth-authority convention
+    // (`buf:scene.depth`'s own rank comparison), never the older
+    // attribute-buffer floor-index check.
+    reads: ['buf:scene.depth', 'buf:scene.color'],
+    modifies: ['buf:scene.color'],
+    absorbs: ['PrismEffectV2'],
+    note:
+      "V2's own `PrismEffectV2.js` (recovered from git history, `c328c9bd~1`) sampled its OWN tile's " +
+      'base-colour texture at three same-frame offset UVs — a crude approximation that could only ever ' +
+      'bend the tile`s own art, never the actual scene behind the glass. This pass does it properly ' +
+      "instead (the author's own 2026-09-01 direction: not a straight port, `prism.js`'s own header has " +
+      'the full quote): mask-gated placement + rank-gate occlusion (tier 0), a procedural ' +
+      'Voronoi facet field (tier 1), a moving glint (tier 2), and REAL chromatic dispersion off a genuine ' +
+      'scene capture (tier 3, the same `water`-tier-5-shaped dependent read, priced at the identical C5). ' +
+      '`live` means this runs every frame against real data, NOT that it has been confirmed against a ' +
+      "real live scene — `enabledFromProfile: 'extreme'` (`prism.js`'s own manifest) keeps it off by " +
+      'default until the author`s own eyes confirm the look, this project`s own standing rule for a ' +
+      'newly-built effect. Same honesty bar `surface.response`/`geometry.world` set for their own partial ' +
+      'claims.',
   },
   {
     id: 'surface.water',

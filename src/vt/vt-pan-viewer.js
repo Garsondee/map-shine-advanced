@@ -406,6 +406,15 @@ import {
   createSpecularTileSurfaceSubsystem,
   createWindowSurfaceSubsystem,
   createWindowTileSurfaceSubsystem,
+  // PRISM (mythica-machina-press#137) — `createPrismSurfaceSubsystem` is the
+  // per-tile mesh population (mirrors `createSpecularTileSurfaceSubsystem`'s
+  // own shape); `createPrismRefractionSubsystem` is the scene-capture
+  // subsystem tier 3 (dispersion) needs (mirrors `createWaterRefractionSubsystem`
+  // just above, adapted to a per-frame UNION of active tiles rather than one
+  // global water body — see that module's own header).
+  createPrismSurfaceSubsystem,
+  createPrismRefractionSubsystem,
+  prismTierPlan,
   // `surface.response`'s outdoor/indoor split reads the SAME world-space
   // outdoors gate `buf:scene.attr`'s G channel does — injected rather than
   // re-derived, so "world XY → mask UV → sample" still exists exactly once.
@@ -1234,6 +1243,11 @@ export async function startVtPanViewer({
   getWindowBackgroundItemId,
   getWindowMaskItems,
   getWindowRenderState,
+  // PRISM (mythica-machina-press#137) — TILE-ONLY, mirroring
+  // `getSpecularMaskItems`'s own per-item seam (no floor-level door exists
+  // for Prism yet — `prism-seams.js`'s own header).
+  getPrismMaskItems,
+  getPrismRenderState,
   getApertureGoboRenderState,
   getFluidMaskItems,
   getFluidRenderState,
@@ -1384,6 +1398,15 @@ export async function startVtPanViewer({
   // the same way specular's is: with no `_Window` file the effect renders
   // literally nothing, so a scene that never opted in cannot be surprised.
   getWindowRenderState ??= () => ({ enabled: true, params: {} });
+  // PRISM's own tile seam (mythica-machina-press#137, `prism-seams.js#
+  // getPrismMaskItems`) — unwired means no `_Prism`-authored tile at all,
+  // inert by construction (`runSurfacePrismPass`'s own early-return never
+  // even gets an item to consider). Default-OFF, matching `PRISM.
+  // enabledFromProfile: 'extreme'` — unlike window/specular this is a
+  // brand-new, never-live-tuned effect, so "off unless the manifest/cascade
+  // actually turns it on" is the honest posture (`prism.js`'s own header).
+  getPrismRenderState ??= () => ({ enabled: false, params: null });
+  getPrismMaskItems ??= () => [];
   // APERTURE GOBO's data seam (docs/planning/Aperture-Gobo.md): boot injects
   // `{ enabled, params: <resolved APERTURE_GOBO_PARAMS>, debug }`. Unlike
   // window/specular this effect has no mask seam at all — its only input is
@@ -3099,7 +3122,7 @@ export async function startVtPanViewer({
     const uCloudOvercast01 = THREE.TSL.uniform(THREE.TSL.float(0));
     /** Live-tunable twins of `window-render.js`'s own `WINDOW_OVERCAST_
      * EDGE_WIDEN`/`CONTRAST_SOFTEN`/`MIN_STRENGTH` constants (0.22/0.6/0.5
-     * — mirrored here as the starting `.value`s, not imported, the SAME
+     * — mirrored here as the starting `.value's, not imported, the SAME
      * "shared external uniform" shape `uCloudOvercast01` above already is)
      * — one instance, handed to every window subsystem below, so a single
      * Studio-card slider moves every window on the map at once. */
@@ -8192,6 +8215,113 @@ export async function startVtPanViewer({
       renderer.setRenderTarget(null);
     }
 
+    /** The VIEWED floor's own screen-space camera centre, last frame —
+     * `runSurfacePrismPass`'s own parallax term (`prism-motion.js#
+     * computeFacetUv`'s `cameraOffsetX/Y`). `null` before the first tick, so
+     * the very first frame contributes zero parallax rather than a spurious
+     * jump from an assumed (0,0) origin. */
+    let prismCameraLastCenter = null;
+
+    /**
+     * `surface.prism` (mythica-machina-press#137, graph/passes.js) — the
+     * crystal/glass refraction surface finish. Runs AFTER `surface.response`
+     * (Specular) and BEFORE `surface.water`, matching `graph/passes.js`'s
+     * own declared array order. Two real halves, mirroring the shape
+     * `runWaterRefractionCapturePass` already uses for water's own tier 5:
+     * (1) tick the scene capture (tier 3 only — bounded to the UNION of
+     * every active tile's own rect, `prism-refraction-subsystem.js`'s own
+     * header has the full reasoning); (2) sync the per-tile mesh population
+     * and draw whatever came back visible.
+     *
+     * ⚠️ THE GATE IS FIRST, BEFORE EITHER HALF EVER RUNS. `getPrismMaskItems`
+     * is asked for the CURRENT VIEWED floor's own active tiles before
+     * anything else — a true JS early-return (Effects.md Law 4), so a scene
+     * with zero `_Prism` masks anywhere pays for exactly one array-length
+     * check: no capture tick, no target allocation, no material build, no
+     * draw call submitted. `prismSurface.sync([], …)` still runs on the
+     * early-return path (a same cheap no-op Map iteration in the overwhelming
+     * common case) so a tile that just lost its mask, or an effect just
+     * disabled, tears its mesh down THIS frame rather than lingering.
+     */
+    function runSurfacePrismPass() {
+      const floorIndex = view?.floorIndex ?? 0;
+      const items = getPrismMaskItems(floorIndex) ?? [];
+      const st = getPrismRenderState();
+      if (items.length === 0 || st.enabled !== true) {
+        prismSurface.sync([], { behindTexture: null, capturedRect: null, capturedTexSize: null });
+        return;
+      }
+
+      const viewRect = view ? viewToWorldRect(view, canvasW / canvasH) : null;
+      if (!viewRect) return;
+
+      const plan = prismTierPlan(Number.isFinite(st.perfTier) ? st.perfTier : undefined);
+
+      // TIER 3 ONLY — the capture is a real GPU cost (an extra render call,
+      // possibly an allocation), so it is skipped entirely below the
+      // dispersion rung, a JS-time branch rather than a uniform gate
+      // (Effects.md Law 4 — `tsl/no-uniform-gates`). Tiers 0-2 never read
+      // `behindTexNodes` at all (`prism-render.js`'s own tier-gated graph),
+      // so a stale/absent capture below tier 3 changes nothing on screen.
+      if (plan.dispersionEnabled) {
+        profiler?.begin(Z.prismRefraction);
+        prismRefraction.tick({
+          items,
+          // INTERNAL tier, not canvasW/H — the SAME choice
+          // `runWaterRefractionCapturePass` makes for its own capture, and
+          // for the identical reason (that comment's own doc): `sceneLit`
+          // is itself an internal-tier target, so anything denser just
+          // upscales blur into a wasted buffer.
+          deviceW: internalW,
+          deviceH: internalH,
+          // `sceneLit.texture`, NOT a pre-lighting buffer — mirrors
+          // `runWaterRefractionCapturePass`'s own fixed bug (2026-08-23):
+          // capturing before lighting would refract an unlit scene.
+          sceneColorTexture: sceneLit.texture,
+        });
+        profiler?.end(Z.prismRefraction);
+      }
+
+      prismSurface.sync(items, {
+        behindTexture: prismRefraction.texture,
+        capturedRect: prismRefraction.capturedRect,
+        capturedTexSize: { width: prismRefraction.width ?? 1, height: prismRefraction.height ?? 1 },
+      });
+
+      // THE CLOCK + PARALLAX — pushed AFTER sync() has ensured every live
+      // entry's own material actually exists. `cameraOffsetPx` is a genuine
+      // frame-to-frame screen-space delta of the viewed floor's own camera
+      // centre (world Δ / view span × screen span, the identical conversion
+      // `lens-motion.js#computeCameraMotionBlurPx`'s own header documents),
+      // not a placeholder zero — `parallaxStrength` (`prism.js#PRISM_PARAMS`)
+      // has a genuine live feed to respond to.
+      const nowSec = (lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value) / 1000;
+      let cameraOffsetPx = { x: 0, y: 0 };
+      if (view) {
+        if (prismCameraLastCenter) {
+          const viewSpanX = Math.max(1e-3, viewRect.maxX - viewRect.minX);
+          const viewSpanY = Math.max(1e-3, viewRect.maxY - viewRect.minY);
+          cameraOffsetPx = {
+            x: ((view.centerXPx - prismCameraLastCenter.x) / viewSpanX) * canvasW,
+            y: ((view.centerYPx - prismCameraLastCenter.y) / viewSpanY) * canvasH,
+          };
+        }
+        prismCameraLastCenter = { x: view.centerXPx, y: view.centerYPx };
+      }
+      prismSurface.pushTimeAndParallax(nowSec, cameraOffsetPx);
+
+      if (!prismSurface.hasContent()) return;
+
+      const previousAutoClear = renderer.autoClearColor;
+      renderer.setRenderTarget(sceneLit);
+      renderer.autoClearColor = false;
+      profiler?.begin(Z.prismDraw);
+      renderer.render(prismSurface.scene, camera);
+      profiler?.end(Z.prismDraw);
+      renderer.autoClearColor = previousAutoClear;
+      renderer.setRenderTarget(null);
+    }
+
     /**
      * surface.particles (docs/planning/Particles.md §16) — draw the GPU particles
      * additively over the fully-lit scene. light.accumulate ended with
@@ -9179,6 +9309,7 @@ export async function startVtPanViewer({
       'geometry.world': runGeometryWorldPass,
       'light.accumulate': runLightAccumulatePass,
       'surface.response': runSurfaceResponsePass,
+      'surface.prism': runSurfacePrismPass,
       'surface.water': runWaterRefractionCapturePass,
       'surface.particles': runSurfaceParticlesPass,
       'surface.cloudTops': runCloudTopsPass,
@@ -9599,7 +9730,7 @@ export async function startVtPanViewer({
         // takes (cheap enough — a handful of scalars — that a cache would be
         // pure ceremony). `getCloudsRenderState` is optional so a caller that
         // never wires it (a bench, a test harness) still gets the sensible
-        // JS-default `let`s/uniform-construction-values declared above,
+        // JS-default `let's/uniform-construction-values declared above,
         // unchanged from before this cascade existed.
         const cloudsState = getCloudsRenderState?.() ?? null;
         const cp = cloudsState?.params ?? {};
@@ -12665,6 +12796,42 @@ export async function startVtPanViewer({
       profiler,
     });
 
+    // ── PRISM, PER-TILE POPULATION (mythica-machina-press#137) ──────────────
+    // Mirrors `specularTileSurface`'s own construction exactly — a SINGLE
+    // instance for the whole scene, synced against ONLY the VIEWED floor at
+    // the call site below (`runSurfacePrismPass`), the same single-floor
+    // scope every other per-item population above already uses. See
+    // `prism-surface-subsystem.js`'s own header for the one real
+    // architectural difference: this subsystem also receives a SHARED
+    // "what's behind the glass" capture (below), re-pointed onto every live
+    // entry, rather than each entry owning its whole own texture set.
+    const prismSurface = createPrismSurfaceSubsystem({
+      THREE,
+      loadMaskImage: (opts) => loadMaskImageTexture({ ...opts, THREE }),
+      depthTexture: sceneDepth.depthTexture ?? null,
+      uViewRect: envLight.uViewRect,
+      // PER ITEM, not per floor — identical composition to
+      // `specularTileSurface`'s/`windowTileSurface`'s own `resolveExpectedDepth`.
+      resolveExpectedDepth: (itemId) => {
+        const rank = depthAuthority.rankOf({ id: itemId });
+        return rank === null ? 0 : computeTieSafeExpectedDepth(rank, depthAuthority.maxRank);
+      },
+      getPrismRenderState,
+      profiler,
+    });
+
+    // ── PRISM's OWN SCENE-CAPTURE SUBSYSTEM (tier 3, dispersion) ────────────
+    // Mirrors `createWaterRefractionSubsystem`'s own construction (one
+    // instance, the injected `renderSunShadowPass` save/bind/render/restore
+    // primitive shared by every subsystem that needs it) — see
+    // `prism-refraction-subsystem.js`'s own header for why this captures the
+    // UNION of every active Prism tile's rect rather than one global body.
+    const prismRefraction = createPrismRefractionSubsystem({
+      THREE,
+      allocator,
+      renderPrismCapturePass: renderSunShadowPass,
+    });
+
     // ── PER-EFFECT READINESS PROBES ─────────────────────────────────────────
     // Registered HERE, at the one point where all four owners exist
     // (`doorGraphics`, `specularSurface`, and the two per-floor maps), and
@@ -12727,6 +12894,17 @@ export async function startVtPanViewer({
       label: 'window tile masks still loading',
       stage: READINESS_STAGE.STREAM,
       read: () => (windowTileSurface?.isLoadingMask?.() ? 1 : 0),
+    });
+    // mythica-machina-press#137 — same per-tile async fetch shape as
+    // Specular's own `specularTileMaskLoad` just above, declared in
+    // `PRISM.readiness.probes` this time (see that manifest's own comment on
+    // why the sibling declarations above happen not to list their own tile
+    // probe — this one names the probe it actually registers).
+    readiness.register({
+      id: 'prismTileMaskLoad',
+      label: 'prism tile masks still loading',
+      stage: READINESS_STAGE.STREAM,
+      read: () => (prismSurface?.isLoadingMask?.() ? 1 : 0),
     });
     readiness.register({
       id: 'doorTextures',
@@ -15630,7 +15808,7 @@ export async function startVtPanViewer({
     // tex` (a few thousand lines up) proves swapping a TSL texture node's
     // `.value` live IS a real, working pattern in this codebase — but
     // every proven use of it swaps between textures of the SAME kind (two
-    // `THREE.DataTexture`s, same uncompressed RGBA8 format). It has never
+    // `THREE.DataTexture's, same uncompressed RGBA8 format). It has never
     // been exercised swapping an uncompressed placeholder for a
     // `THREE.CompressedTexture` (a genuinely different GPU texture format
     // — BC1/BC7 block-compressed vs. plain RGBA8, a different upload path
@@ -17223,7 +17401,7 @@ export async function startVtPanViewer({
      * STAMP EVERY DRAWABLE WITH ITS VEGETATION OVERLAYS' SORT POSITIONS.
      *
      * Called once per draw-list rebuild, immediately after `sortByLayer` — the
-     * ONLY moment the sorted list and its stamped `renderOrder`s both exist.
+     * ONLY moment the sorted list and its stamped `renderOrder's both exist.
      * The result lands on `item.vegetationRenderOrder` (`{tree, bush}`, values
      * `number|null`) and is read by both overlay sites below; `null` means
      * "this floor has no usable elevation band", and the reader falls back to
@@ -17703,6 +17881,12 @@ export async function startVtPanViewer({
       surfSpecularSync: profiler?.indexOf('surface.specularSync') ?? -1,
       surfSpecular: profiler?.indexOf('surface.specularDraw') ?? -1,
       surfSpecularIslandBake: profiler?.indexOf('surface.specularIslandBake') ?? -1,
+      // mythica-machina-press#137 — `runSurfacePrismPass`'s own two GPU
+      // brackets (its per-tile sync self-brackets INSIDE `prism-surface-
+      // subsystem.js` via `beginById`, mirroring `specularTileSurface`'s own
+      // identical choice, so it has no `Z.` entry here).
+      prismRefraction: profiler?.indexOf('surface.prismRefraction') ?? -1,
+      prismDraw: profiler?.indexOf('surface.prismDraw') ?? -1,
       surfDust: profiler?.indexOf('surface.drawDust') ?? -1,
       surfGusts: profiler?.indexOf('surface.drawGusts') ?? -1,
       // Added 2026-09-16 (mythica-machina-press#552) — see runCloudTopsPass's
@@ -19782,7 +19966,7 @@ export async function startVtPanViewer({
       // at its host's — the author-ruled exception (see `vegetation.js`'s own
       // "HOW A KIND SORTS"). Must run HERE, with the freshly sorted list: it
       // resolves each overlay's slot through the same comparator, so it needs
-      // the stamped `renderOrder`s that only exist after the line above.
+      // the stamped `renderOrder's that only exist after the line above.
       // `vegState` is read ONCE, synchronously, and reused below for
       // `buildVegetationDepthItems` too — both calls need the SAME live
       // params for the SAME residency pass; two separate reads could
@@ -23214,6 +23398,20 @@ export async function startVtPanViewer({
        * state, ONE ENTRY PER ATTACHED TILE, mirroring `getWindowLightInfo`'s
        * own reporting posture for the per-floor surfaces. */
       getWindowTileInfo: () => windowTileSurface.getStatus(),
+      /** mythica-machina-press#137 — tear down PRISM's meshes/materials/
+       * uploaded `_Prism` textures, and the scene-capture subsystem's own
+       * render target. Same leak risk, same Stop/Restart cadence as
+       * `disposeSpecular`/`disposeWindowLight` just above. */
+      disposePrism() {
+        prismSurface.dispose();
+        prismRefraction.dispose();
+      },
+      /** PRISM's own state — for the debug report. Mirrors
+       * `getSpecularTileInfo`'s own reporting posture (Prism v1 is
+       * tile-only, `prism-seams.js`'s own header) plus the capture
+       * subsystem's own `getStatus()`, since tier 3's dispersion depends on
+       * that capture actually having run. */
+      getPrismInfo: () => ({ surface: prismSurface.getStatus(), refraction: prismRefraction.getStatus() }),
       /** Tear down the candle flame billboard's own mesh/material/geometry (its
        * lights live in the shared pool, freed by disposePointLights). */
       disposeCandleFlame,

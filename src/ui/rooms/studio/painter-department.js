@@ -31,16 +31,21 @@
  * `effects/fluid/fluid-registration.js#createFluidSeams`, and the vegetation
  * URL block in `boot.js`).
  *
- * ⚠️ ONLY SIX TILES, NOT NINE. `scene/mask-catalog.js#MASK_KINDS` has nine
- * entries, but only six effects declare `authoring.paint` (fire, water,
- * window, specular, fluid, vegetation — vegetation covers two masks,
- * tree+bush, as one tile). `shadow`/`outdoors` have no owning effect at all
- * (sun-shadows derives its casters from walls, not a painted mask) — Law 5
- * applies here exactly as it does to `ui/no-dead-axis` for weather: a mask
- * kind nothing reads doesn't get a tile just because the painter's OWN
- * internal kind-picker still lists it. `PAINT_REACH` below still covers all
- * nine, because that picker DOES list all nine and the two tile-less kinds
- * are exactly where a wrong belief has nothing to correct it.
+ * ⚠️ ONLY SEVEN TILES, NOT TEN. `scene/mask-catalog.js#MASK_KINDS` has ten
+ * entries (`prism` joined 2026-09-19, mythica-machina-press#137), but only
+ * seven effects declare `authoring.paint` (fire, water, window, specular,
+ * fluid, prism, vegetation — vegetation covers two masks, tree+bush, as one
+ * tile). `shadow`/`outdoors` have no owning effect at all (sun-shadows
+ * derives its casters from walls, not a painted mask) — Law 5 applies here
+ * exactly as it does to `ui/no-dead-axis` for weather: a mask kind nothing
+ * reads doesn't get a tile just because the painter's OWN internal
+ * kind-picker still lists it. `PAINT_REACH` below still covers all ten,
+ * because that picker DOES list all ten and the two tile-less kinds are
+ * exactly where a wrong belief has nothing to correct it. Prism gets a real
+ * tile despite `graph/passes.js#surface.prism` being a declared `seam` —
+ * `authoring.paint` and "does the render pass exist yet" are different
+ * questions (`effects/prism/prism.js`'s own header), and painting/saving the
+ * mask works today regardless of the render pass's own status.
  *
  * @module ui/rooms/studio/painter-department
  */
@@ -97,6 +102,17 @@ export const PAINT_REACH = Object.freeze({
   // Resolves `authoredStatusForItem(...).url`, per host item. The tube net is
   // extracted from the file's pixels by an explicit earlier correction.
   fluid: { reach: 'file-only', why: 'Tubes read the mask file only — the coarse grid merges tubes together.' },
+  // ⚠️ A GENUINE STEP FURTHER THAN ITS FILE-ONLY SIBLINGS ABOVE (mythica-
+  // machina-press#137). `fluid`/`specular`/`window` still RENDER once a real
+  // file is discovered — "file-only" there means paint doesn't help, a file
+  // does. Prism's own render pass (`graph/passes.js#surface.prism`) is a
+  // declared `seam` (`effects/prism/prism.js`'s own header) — nothing draws
+  // yet even with a perfect file, so the `why` below says so explicitly
+  // rather than reusing a sibling's phrasing that would overclaim.
+  prism: {
+    reach: 'file-only',
+    why: "Prism's own render pass does not exist yet (a declared seam) — neither paint nor a mask file draws anything today; save the mask now and it is ready the moment the pass lands.",
+  },
   // Not `rasterize: true` at all, so no painted grid is ever composited for
   // it; and the consumer wants an RGBA canopy image, not a coverage field.
   tree: { reach: 'file-only', why: 'Canopy reads the mask file only — nothing composites a painted canopy yet.' },

@@ -981,6 +981,55 @@ export const ZONES = Object.freeze(
       false,
       'bakeIslandPack'
     ),
+    // PRISM (mythica-machina-press#137) — `graph/passes.js#surface.prism`
+    // is its OWN pass (never folded into `surface.response`, see that
+    // pass's own note), so all three zones below carry `surface.prism` as
+    // their owner pass, unlike specular's zones just above which all share
+    // `surface.response`. `runSurfacePrismPass`'s own early-return (Law 4:
+    // no active `_Prism` tile on the viewed floor) means these three read
+    // as zero on the overwhelming majority of scenes — real, not a
+    // measurement artefact.
+    z(
+      'surface.prismSync',
+      'Prism tile-population sync',
+      'surface',
+      'surface.prism',
+      'prism',
+      'cpu',
+      'conditional',
+      false,
+      'prismSurface.sync'
+    ),
+    // The scene-capture tick (tier 3, dispersion, only) — a genuine extra
+    // GPU render call plus a possible target reallocation, the same shape
+    // `surface.waterRefraction` is priced at for its own capture+draw pair.
+    // Split into its OWN zone here (rather than combined with the draw
+    // below, water's own choice) because Prism's capture and draw are two
+    // independently JS-gated halves — tiers 0-2 draw with NO capture at
+    // all, so a combined zone would misreport "capture cost" on frames that
+    // never ran one.
+    z(
+      'surface.prismRefraction',
+      'Prism scene-capture (tier 3, dispersion)',
+      'surface',
+      'surface.prism',
+      'prism',
+      'gpu',
+      'conditional',
+      false,
+      'runSurfacePrismPass'
+    ),
+    z(
+      'surface.prismDraw',
+      'Prism tile draw',
+      'surface',
+      'surface.prism',
+      'prism',
+      'gpu',
+      'conditional',
+      false,
+      'runSurfacePrismPass'
+    ),
     z(
       'surface.drawDust',
       'Dust particle draw',
@@ -1495,6 +1544,22 @@ export const EFFECT_ZONING = Object.freeze({
   grade: Object.freeze({
     coverage: 'none',
     why: 'Folded into the present composite shader (gradePresent) rather than adding a pass, so present.blit costs the same whether grade is on or off. Sweep-only.',
+  }),
+  // Added 2026-09-19 (mythica-machina-press#137) — `surface.prism` flipped
+  // from a declared seam to `live`: `runSurfacePrismPass` now has three real
+  // zones (surface.prismSync, surface.prismRefraction, surface.prismDraw),
+  // covering its per-tile sync, its tier-3-only scene capture, and its own
+  // draw call. `coverage: 'full'` is honest, not aspirational, BECAUSE of the
+  // Law-4 gate: on the overwhelming majority of scenes (no `_Prism` mask
+  // anywhere) all three zones correctly measure ~0, which is the true cost,
+  // not a blind spot. The per-tile mask FETCH is deliberately NOT a zone —
+  // it is async I/O, covered instead by `prismTileMaskLoad`
+  // (`PRISM.readiness.probes`), the same split `specular`'s own entry above
+  // draws between its zoned draw/sync and its unzoned island bake would need
+  // if that bake were async (it is not — a different case, see that entry).
+  prism: Object.freeze({
+    coverage: 'full',
+    why: 'surface.prism is live (graph/passes.js) — its per-tile sync (surface.prismSync), scene capture (surface.prismRefraction, tier 3 only) and draw (surface.prismDraw) are all zoned, and the Law-4 early-return means all three genuinely cost ~0 on a scene with no Prism mask, not merely unmeasured.',
   }),
   // Added 2026-09-16 (perf-instrumentation-audit, #553) — stylize had NO
   // zones AND no EFFECT_ZONING entry: the exact same structural shape as

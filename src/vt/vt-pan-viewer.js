@@ -118,7 +118,7 @@ import {
   computePagePlacement,
 } from './decode-pool.js';
 import { createLogger } from '../core/log.js';
-import { buildViewerDiagnostics } from './vt-pan-viewer-diagnostics.js';
+import { buildViewerDiagnostics, describeParallelShaderCompile } from './vt-pan-viewer-diagnostics.js';
 import { loadMaskImageTexture } from './mask-image.js';
 import { loadLensOverlayTexture } from './lens-overlay-image.js';
 
@@ -176,6 +176,7 @@ import {
   PASSES,
   planFrame,
   runPassPlan,
+  chunkIds,
   RenderScaleGovernor,
   computeRenderSize,
   SCALE_LADDER,
@@ -19323,6 +19324,19 @@ export async function startVtPanViewer({
      * Failure is caught and swallowed, same posture as `compileAsync` just
      * above: warming up is an optimisation, never a reason a scene fails to load.
      *
+     * ============================================================================
+     * THE CHUNKED VARIANT (mythica-machina-press#534)
+     * ============================================================================
+     * `warmUpDrawStateChunked`, just below, does the SAME work through the
+     * SAME `runPassPlan` call — split into batches with a real animation-frame
+     * yield between them. Opt-in (`setVtPanViewerChunkedWarmUp(true)`, default
+     * OFF) and wired at the COLD-LOAD call site ONLY: it does not shorten this
+     * stall, it only gives the loading curtain's own rAF-driven pulse a chance
+     * to paint between batches instead of freezing solid for the whole warm-up
+     * in one go. See that function's own header for why it must never reach
+     * the floor-switch call site below — that one keeps calling THIS function,
+     * unchanged.
+     *
      * @param {{includePresent?: boolean}} [opts]
      */
     function warmUpDrawState({ includePresent = true } = {}) {
@@ -19334,6 +19348,93 @@ export async function startVtPanViewer({
         warmUpMs = Math.round(perfNowMs() - t0);
       } catch (err) {
         log.warn('warm-up draw failed — pipelines will compile lazily on first real draw:', err);
+        warmUpMs = null;
+      }
+      const after = readPipelineCount();
+      warmUpPipelinesCreated = Number.isFinite(before) && Number.isFinite(after) ? Math.max(0, after - before) : null;
+    }
+
+    /**
+     * How many pass ids `warmUpDrawStateChunked` runs per batch, before
+     * yielding to a real animation frame. Named and tunable, not a magic
+     * number inline — today's real `masks..present` id list is 16 long
+     * (`graph/__tests__/run-frame.test.mjs` pins the exact list), so 4 gives
+     * 4 batches: enough real repaint opportunities for the curtain's pulse to
+     * read as alive without paying an animation-frame round trip (one tick,
+     * ~16ms+ on a healthy display, more if the browser is busy) per pass. Not
+     * exported/live-tunable — the author edits this constant directly if a
+     * live test finds a different size reads better.
+     */
+    const WARM_UP_CHUNK_SIZE = 4;
+
+    /**
+     * CHUNKED variant of `warmUpDrawState`, just above — read that function's
+     * WHOLE header first; every "what this closes / why it never touches the
+     * visible canvas / why the stall is real and on purpose" reason there
+     * applies here unchanged. This function changes HOW the synchronous work
+     * is split up. It never changes WHAT gets warmed, the ORDER it warms in,
+     * or the TOTAL time it costs — see `warmUpMs`'s own accumulation below,
+     * which sums real per-batch work only, never the yields between batches,
+     * so it stays the same honest "main-thread time this cost" number the
+     * synchronous path already reports (not inflated by however long the
+     * browser took to hand back an animation frame).
+     *
+     * ⚠️ COLD-LOAD CALL SITE ONLY (mythica-machina-press#534) — opt-in via
+     * `setVtPanViewerChunkedWarmUp(true)`, default OFF; the call site a few
+     * hundred lines down branches on that flag and falls back to the plain
+     * synchronous `warmUpDrawState()` when it is off, byte-for-byte identical
+     * to before this function existed. NEVER call this from the floor-prepare
+     * call site (search this file for `warmUpRestore` — a few hundred lines
+     * up): that call site's own comment is explicit that it is safe ONLY
+     * because there is no `await`/yield point between flipping the new
+     * floor's meshes temporarily `visible = true` and flipping them back —
+     * "no real animation frame can ever observe the transient visible=true
+     * state". This function's entire reason to exist is introducing yield
+     * points (`await nextAnimationFrame()` between batches), which is exactly
+     * the thing that guarantee depends on never happening there. Reaching
+     * this function from that call site would let a real `renderFrame` run
+     * mid-warm-up with the NEW floor's meshes wrongly visible over the OLD
+     * floor still on screen — a real, visible, live bug, not a theoretical one.
+     *
+     * Does not shorten the stall. Only (optionally, once the author enables
+     * and live-tests it) keeps the loading curtain's own rAF-driven pulse
+     * (`ui/loading-screen.js`) animating through it, by giving `tick()` a
+     * real animation frame to run on between batches instead of the main
+     * thread staying blocked solid for the whole warm-up in one call.
+     *
+     * @param {{includePresent?: boolean}} [opts]
+     * @returns {Promise<void>}
+     */
+    async function warmUpDrawStateChunked({ includePresent = true } = {}) {
+      const ids = includePresent ? framePlan.ids : framePlan.ids.filter((id) => id !== 'present.composite');
+      const batches = chunkIds(ids, WARM_UP_CHUNK_SIZE);
+      const totalBatches = Math.max(1, batches.length);
+      const before = readPipelineCount();
+      let workMs = 0;
+      onLoadProgress?.({ phase: 'warming', done: 0, total: totalBatches, detail: formatWarmUpChunkDetail(0) });
+      try {
+        for (let i = 0; i < batches.length; i++) {
+          const t0 = perfNowMs();
+          runPassPlan(batches[i], passImpls, {}, undefined);
+          workMs += perfNowMs() - t0;
+          const soFar = readPipelineCount();
+          const createdSoFar = Number.isFinite(before) && Number.isFinite(soFar) ? Math.max(0, soFar - before) : null;
+          onLoadProgress?.({
+            phase: 'warming',
+            done: i + 1,
+            total: totalBatches,
+            detail: formatWarmUpChunkDetail(createdSoFar),
+          });
+          // Yield to a real animation-frame boundary BETWEEN batches (never
+          // after the last one — nothing would consume it) so the curtain's
+          // own rAF-driven pulse gets a chance to actually paint. Reuses the
+          // SAME rAF-as-promise helper the zoom-thrash test already uses,
+          // rather than a second copy of `new Promise((r) => requestAnimationFrame(r))`.
+          if (i + 1 < batches.length) await nextAnimationFrame();
+        }
+        warmUpMs = Math.round(workMs);
+      } catch (err) {
+        log.warn('chunked warm-up draw failed — pipelines will compile lazily on first real draw:', err);
         warmUpMs = null;
       }
       const after = readPipelineCount();
@@ -21602,6 +21703,29 @@ export async function startVtPanViewer({
       shaderCompileMs = null;
     }
 
+    // PARALLEL-COMPILE CAPABILITY (mythica-machina-press#534) — read-only,
+    // no timing risk: this never gates or delays anything above or below it,
+    // it only NAMES what the `compileAsync` wait just above actually was —
+    // real driver-thread work, or an instantly-resolved no-op with the real
+    // cost still to come. See `describeParallelShaderCompile`'s own header
+    // (vt-pan-viewer-diagnostics.js) for how this is verified against the
+    // real vendored renderer source rather than assumed. Logged once here so
+    // it is visible in the console during a live cold-load investigation
+    // without having to open the debug panel; also exposed on the
+    // `vt-pan-viewer-diagnostics` debug report (`shaders.parallelShaderCompile`)
+    // for the same fact after the fact.
+    {
+      const parallelCompileInfo = describeParallelShaderCompile({
+        isWebGPUBackend: renderer.backend?.isWebGPUBackend === true,
+        isWebGLBackend: renderer.backend?.isWebGLBackend === true,
+        khrExtensionPresent: !!renderer.backend?.extensions?.get?.('KHR_parallel_shader_compile'),
+      });
+      log.info(
+        `shader compile capability: backend=${parallelCompileInfo.backend} ` +
+          `parallelShaderCompile=${parallelCompileInfo.supported} — ${parallelCompileInfo.detail}`
+      );
+    }
+
     // THE INITIAL WIND BAKE (Wind.md Tier 1) — must run here, not earlier:
     // bakeWindField's own rebuild-trigger code reaches for candleFlameMat/
     // windOverlayMat (both declared with `let` further up, but AFTER the
@@ -21720,7 +21844,23 @@ export async function startVtPanViewer({
     // loop starts, so it warms exactly what the loop is about to draw.
     // includePresent defaults true: nothing is looking at MSA's canvas yet
     // (see the function's own header for why that is safe here specifically).
-    warmUpDrawState();
+    //
+    // CHUNKED, OPT-IN (mythica-machina-press#534) — `_chunkedWarmUpEnabled`
+    // defaults false, so by default this is the exact same
+    // `warmUpDrawState();` call, unchanged, on the `else` branch below. Only
+    // when the author has explicitly called `setVtPanViewerChunkedWarmUp(true)`
+    // does this take the chunked path instead — see `warmUpDrawStateChunked`'s
+    // own header for what that changes (and, just as importantly, what it does
+    // not). SAFE to `await` here, cold-load ONLY: `renderer.setAnimationLoop`
+    // has not been called yet (a few lines down), so there is no real render
+    // loop for a yield point to race against — see `warmUpDrawStateChunked`'s
+    // header for why the floor-switch call site a few hundred lines up can
+    // never take this same branch.
+    if (_chunkedWarmUpEnabled) {
+      await warmUpDrawStateChunked();
+    } else {
+      warmUpDrawState();
+    }
 
     loopActive = true;
     renderer.setAnimationLoop(renderFrame);
@@ -26104,6 +26244,53 @@ function stopAndDetachTileVideo(t) {
 const ART_TEXTURE_ANISOTROPY = 16;
 
 /**
+ * DIAGNOSTIC/OPT-IN ONLY (mythica-machina-press#534): when true, the
+ * COLD-LOAD warm-up draw (`warmUpDrawStateChunked`, see its own header, a few
+ * thousand lines up) runs instead of the plain synchronous
+ * `warmUpDrawState()`. Defaults OFF — shipping inert is the whole point:
+ * there is no live WebGPU/Foundry session available to verify a
+ * timing-sensitive rendering change in this environment, so this is a new
+ * capability for the author to enable and live-test deliberately, never a
+ * default-behaviour change.
+ *
+ * Module-level, not `_active`-scoped, for the SAME reason `_albedoClarityForce`
+ * below is (see that variable's own comment): the flag is read DURING
+ * `startVtPanViewer`'s own construction, before `_active` exists, so an
+ * instance-scoped flag would have nowhere to live at the moment it's needed.
+ * Plain boolean, not tri-state like `_albedoClarityForce` — there is no
+ * "unset, resolve normally" middle state to preserve here, just on/off.
+ *
+ * NEVER read by the floor-switch/floor-prepare call site — that one calls the
+ * plain synchronous `warmUpDrawState({ includePresent: false })`
+ * unconditionally, with no reference to this flag at all. See
+ * `warmUpDrawStateChunked`'s own header for why that must stay true.
+ * @type {boolean}
+ */
+let _chunkedWarmUpEnabled = false;
+
+/**
+ * Opt into (or back out of) the chunked cold-load warm-up
+ * (mythica-machina-press#534). Takes effect on the NEXT cold load
+ * (`startVtPanViewer` call) — like `setVtPanViewerAlbedoClarityForce` below,
+ * this does not reach into an already-running viewer, because the warm-up it
+ * controls has already happened by the time any viewer is `_active`. Strict
+ * `=== true` check, not a truthy coercion: this flag fails CLOSED — anything
+ * other than an explicit `true` (a stray `1`, a typo'd truthy value) leaves
+ * cold-load behaviour byte-for-byte identical to today, never accidentally on.
+ * @param {boolean} enabled
+ * @returns {{chunkedWarmUpEnabled: boolean}}
+ */
+export function setVtPanViewerChunkedWarmUp(enabled) {
+  _chunkedWarmUpEnabled = enabled === true;
+  return { chunkedWarmUpEnabled: _chunkedWarmUpEnabled };
+}
+
+/** The chunked-warm-up opt-in's own read-back. @returns {{chunkedWarmUpEnabled: boolean}} */
+export function getVtPanViewerChunkedWarmUp() {
+  return { chunkedWarmUpEnabled: _chunkedWarmUpEnabled };
+}
+
+/**
  * ALBEDO CLARITY AS A REAL PERFORMANCE TIER (2026-08-09, PERF audit §18's own
  * "next lever": `geometry.worldDraw` is the dominant zone at 56.5% of frame
  * GPU, and 5 of `buildWholeImageMaterial`'s 6 texture taps are this filter).
@@ -26953,9 +27140,36 @@ export function getVtPanViewerIsolateItemId() {
   return _active.getIsolateItemId();
 }
 
-/** Await one real animation frame — used to drive the thrash test over the ACTUAL render loop, not a synchronous fake. */
+/** Await one real animation frame — used to drive the thrash test over the ACTUAL render loop, not a synchronous
+ * fake, and (mythica-machina-press#534) to yield between batches in `warmUpDrawStateChunked`, a few thousand lines
+ * up, so the loading curtain's own rAF-driven pulse gets a real frame to paint on between them. */
 function nextAnimationFrame() {
   return new Promise((resolve) => requestAnimationFrame(resolve));
+}
+
+/**
+ * Human-readable detail line for one chunked-warm-up progress report
+ * (`warmUpDrawStateChunked`, mythica-machina-press#534) — pure, no renderer
+ * or closure access, so it lives at module scope (like `nextAnimationFrame`
+ * just above) and is cheap to get exactly right and to test directly
+ * (`vt/__tests__/warm-up-chunking.test.mjs`).
+ *
+ * `createdSoFar` is a cumulative `readPipelineCount()` delta since the
+ * chunked run began (see `warmUpDrawStateChunked`'s own body) — `null` means
+ * this renderer did not expose a countable pipeline cache this run
+ * (`readPipelineCount()`'s own documented `null` case), reported honestly as
+ * "compiling" rather than fabricating a "0 pipelines" that would read as a
+ * clean bill of health instead of an unmeasured one
+ * (`feedback_instruments_must_not_lie`) — a genuine zero (the count WAS
+ * read, and nothing new had compiled yet) gets its own distinct wording so
+ * the two are never conflated.
+ * @param {number|null} createdSoFar
+ * @returns {string}
+ */
+export function formatWarmUpChunkDetail(createdSoFar) {
+  if (!Number.isFinite(createdSoFar)) return 'Compiling shaders — the screen may pause briefly, in shorter bursts';
+  if (createdSoFar === 0) return 'Compiling shaders — no new pipelines yet';
+  return `${createdSoFar} new pipeline${createdSoFar === 1 ? '' : 's'} compiled so far`;
 }
 
 /**

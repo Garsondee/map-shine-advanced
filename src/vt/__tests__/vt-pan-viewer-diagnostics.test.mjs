@@ -4,10 +4,16 @@
  * itself is NOT tested here: it reads renderer/cache/subsystem objects real
  * enough to need extensive mocking for little signal, the same reasoning
  * that keeps `sun-shadow-subsystem.js`/`point-light-pool.js` browser-only
- * (CONVENTIONS §4). `percentileMs`, `sampleDiagnostics` and `buildDrawList`
- * take only plain data as input, so they get real coverage for free.
+ * (CONVENTIONS §4). `percentileMs`, `sampleDiagnostics`, `buildDrawList` and
+ * `describeParallelShaderCompile` take only plain data as input, so they get
+ * real coverage for free.
  */
-import { percentileMs, sampleDiagnostics, buildDrawList } from '../vt-pan-viewer-diagnostics.js';
+import {
+  percentileMs,
+  sampleDiagnostics,
+  buildDrawList,
+  describeParallelShaderCompile,
+} from '../vt-pan-viewer-diagnostics.js';
 
 export async function run(t) {
   // --- percentileMs ---------------------------------------------------------
@@ -166,5 +172,74 @@ export async function run(t) {
     const itemStates = new Map([['token:a', { wholeImage: { tiles: [{ appearance: fakeAppearance }] } }]]);
     const [row] = buildDrawList({ lastItems: [baseItem], itemStates });
     t.ok('a tile with no earlyZState yet reports null, not a crash', row.earlyZState === null);
+  }
+
+  // --- describeParallelShaderCompile (mythica-machina-press#534) -------------
+  // The bug this replaces: `renderer.backend?.extensions?.get?.(...)` always
+  // evaluated to `undefined` on the real WebGPU backend (only `WebGLBackend`
+  // has an `.extensions` object at all), so `parallelShaderCompile` silently
+  // read `false` on the common path regardless of the truth. Verified against
+  // the real vendored source (vendor/three/three.webgpu.js): `WebGPUBackend`
+  // never reads `KHR_parallel_shader_compile` anywhere — it is a WebGL2-only
+  // concept in this renderer, not something WebGPU gates at all.
+  {
+    const webgpu = describeParallelShaderCompile({
+      isWebGPUBackend: true,
+      isWebGLBackend: false,
+      khrExtensionPresent: false, // irrelevant on this backend — must be ignored, not misread as "unsupported"
+    });
+    t.ok('WebGPU backend reports supported:true unconditionally', webgpu.supported === true);
+    t.ok('...and names itself correctly', webgpu.backend === 'webgpu');
+    t.ok(
+      '...with a real explanation, not a bare boolean',
+      typeof webgpu.detail === 'string' && webgpu.detail.length > 0
+    );
+
+    // The exact bug being fixed: WebGPU backend, but the extension flag came
+    // back false (as it always did under the old broken read, since WebGPU
+    // has no `.extensions` to query) — must NOT be read as "not supported".
+    const webgpuWithFalseFlag = describeParallelShaderCompile({
+      isWebGPUBackend: true,
+      isWebGLBackend: false,
+      khrExtensionPresent: false,
+    });
+    t.ok(
+      'the WebGPU branch never depends on khrExtensionPresent — that is the exact bug this fixes',
+      webgpuWithFalseFlag.supported === true
+    );
+  }
+  {
+    const withExt = describeParallelShaderCompile({
+      isWebGPUBackend: false,
+      isWebGLBackend: true,
+      khrExtensionPresent: true,
+    });
+    t.ok('WebGL2 backend WITH the extension reports supported:true', withExt.supported === true);
+    t.ok('...and names itself correctly', withExt.backend === 'webgl2');
+
+    const withoutExt = describeParallelShaderCompile({
+      isWebGPUBackend: false,
+      isWebGLBackend: true,
+      khrExtensionPresent: false,
+    });
+    t.ok(
+      'WebGL2 backend WITHOUT the extension reports supported:false — a real, honest negative',
+      withoutExt.supported === false
+    );
+    t.ok(
+      '...and says so in the detail, not just the boolean',
+      /absent/i.test(withoutExt.detail) || /without/i.test(withoutExt.detail)
+    );
+  }
+  {
+    // Neither flag true — e.g. `renderer.backend` itself was missing/null.
+    // Must read as genuinely unknown, never guess a backend it cannot name.
+    const unknown = describeParallelShaderCompile({
+      isWebGPUBackend: false,
+      isWebGLBackend: false,
+      khrExtensionPresent: false,
+    });
+    t.ok('an unrecognised backend reports supported:null, never a guessed boolean', unknown.supported === null);
+    t.ok('...and backend:"unknown", never a fabricated webgpu/webgl2 guess', unknown.backend === 'unknown');
   }
 }

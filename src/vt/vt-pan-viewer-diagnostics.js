@@ -453,6 +453,73 @@ function summarizeWholeImage({ itemStates, textureLimit, alphaGridStats, sunShad
 }
 
 /**
+ * Does `compileAsync`'s wait (vt-pan-viewer.js, a few hundred lines before
+ * `warmUpDrawState`) actually buy anything on THIS renderer backend, or does
+ * it resolve instantly having done no real parallel work — leaving the whole
+ * compile cost to land later, synchronously, wherever the first real draw
+ * call happens (`warmUpDrawState` on a cold load, per that function's own
+ * header)? Pure — takes the three facts already read from the live renderer,
+ * never the renderer itself (this module's header: "pass plain values, never
+ * getters"; the impure `renderer.backend` read stays at each call site, this
+ * is the testable part — vt-pan-viewer-diagnostics.test.mjs).
+ *
+ * BACKEND-AWARE, VERIFIED AGAINST THE REAL VENDORED SOURCE
+ * (mythica-machina-press#534) — `vendor/three/three.webgpu.js` bundles TWO
+ * backend classes behind the same `WebGPURenderer`:
+ *   - `WebGPUBackend` — the primary path this project targets whenever the
+ *     browser/GPU offer WebGPU. Its `createRenderPipeline(renderObject,
+ *     promises)` calls the browser's native `device.createRenderPipelineAsync`
+ *     UNCONDITIONALLY whenever `promises !== null` (i.e. whenever reached via
+ *     `compileAsync`) — core WebGPU API, no extension, nothing to detect.
+ *     `WebGPUBackend` never reads `this.extensions`/`this.parallel` anywhere
+ *     in the vendored file — that pair exists ONLY on `WebGLBackend`, below.
+ *   - `WebGLBackend` — the WebGL2 fallback. `init()` queries
+ *     `this.extensions.get("KHR_parallel_shader_compile")` once and caches it
+ *     as `this.parallel`; `createRenderPipeline` only takes the real async
+ *     `COMPLETION_STATUS_KHR`-polling path `if (promises !== null &&
+ *     this.parallel)` — without the extension it falls straight through to
+ *     `_completeCompile(...)`, synchronously, same beat, extension or not.
+ * This is why `isWebGPUBackend`/`isWebGLBackend` are two SEPARATE booleans
+ * here rather than one `backend: 'webgpu'|'webgl2'` string derived elsewhere:
+ * the caller's own read of `renderer.backend?.extensions?.get?.(...)` is
+ * always safe to compute (optional-chains to `undefined` on a backend with
+ * no `.extensions`), so this function is free to ignore `khrExtensionPresent`
+ * entirely on the WebGPU branch rather than trust the caller to have gated it.
+ *
+ * @param {{isWebGPUBackend: boolean, isWebGLBackend: boolean, khrExtensionPresent: boolean}} facts
+ * @returns {{backend: 'webgpu'|'webgl2'|'unknown', supported: boolean|null, detail: string}}
+ */
+export function describeParallelShaderCompile({ isWebGPUBackend, isWebGLBackend, khrExtensionPresent }) {
+  if (isWebGPUBackend) {
+    return {
+      backend: 'webgpu',
+      supported: true,
+      detail:
+        "WebGPU backend: device.createRenderPipelineAsync() is core API with no extension gate — compileAsync's " +
+        'wait is always real work here (verified: WebGPUBackend never reads KHR_parallel_shader_compile in ' +
+        'vendor/three/three.webgpu.js).',
+    };
+  }
+  if (isWebGLBackend) {
+    return {
+      backend: 'webgl2',
+      supported: !!khrExtensionPresent,
+      detail: khrExtensionPresent
+        ? 'WebGL2 fallback backend: KHR_parallel_shader_compile is present — compileAsync genuinely hands work ' +
+          'to driver threads.'
+        : 'WebGL2 fallback backend: KHR_parallel_shader_compile is ABSENT — compileAsync resolves instantly ' +
+          'without doing real parallel work; the compile cost still lands later, synchronously (first ' +
+          'useProgram, or warmUpDrawState on a cold load).',
+    };
+  }
+  return {
+    backend: 'unknown',
+    supported: null,
+    detail: 'renderer.backend matched neither isWebGPUBackend nor isWebGLBackend — cannot classify.',
+  };
+}
+
+/**
  * The whole-viewer diagnostics report — `_active.getDiagnostics()`'s former
  * body, now orchestrating three extracted helpers above plus the fields small
  * enough to stay inline, reading its 36 dependencies from `args` instead of
@@ -541,6 +608,14 @@ export function buildViewerDiagnostics({
     .filter((e) => e.liveVsRendered && e.liveVsRendered.deltaPx > 1)
     .map((e) => ({ id: e.id, deltaPx: e.liveVsRendered.deltaPx }));
 
+  // See describeParallelShaderCompile's own header (above) for why this is
+  // backend-aware rather than one shared `.extensions?.get?.(...)` read.
+  const parallelCompileInfo = describeParallelShaderCompile({
+    isWebGPUBackend: renderer.backend?.isWebGPUBackend === true,
+    isWebGLBackend: renderer.backend?.isWebGLBackend === true,
+    khrExtensionPresent: !!renderer.backend?.extensions?.get?.('KHR_parallel_shader_compile'),
+  });
+
   return {
     view,
     // buf:scene.color — the first real render target, and the proof that
@@ -623,13 +698,23 @@ export function buildViewerDiagnostics({
     // from the thing it was reporting on, one link short of the pattern
     // `waterBody`/`specular` both already establish immediately above.
     fluid: _active?.getFluidStatus?.() ?? { available: false },
-    // SHADERS (docs/planning/Shaders.md).  is the fork
-    // in the road, not a detail: WITH it, compileAsync hands work to driver
+    // SHADERS (docs/planning/Shaders.md). `KHR_parallel_shader_compile` is the
+    // fork in the road, not a detail: WITH it, compileAsync hands work to driver
     // threads; WITHOUT it, compileAsync resolves instantly having done
     // nothing and the compile stalls the first useProgram instead. This
     // project does not guess about extensions on the design-floor GPU.
+    //
+    // BACKEND-AWARE (mythica-machina-press#534 follow-up) — the OLD read here,
+    // `renderer.backend?.extensions?.get?.(...)`, always evaluated to
+    // `undefined` (optional-chained straight through a property that plain
+    // does not exist) on the real WebGPU backend this project actually
+    // targets — only `WebGLBackend` has an `.extensions` object at all — so
+    // this field silently reported `false` on the common path regardless of
+    // the truth. See `describeParallelShaderCompile`'s own header, above,
+    // for the fix and how it was verified against the real vendored source.
     shaders: {
-      parallelShaderCompile: !!renderer.backend?.extensions?.get?.('KHR_parallel_shader_compile'),
+      parallelShaderCompile: parallelCompileInfo.supported,
+      parallelShaderCompileDetail: parallelCompileInfo.detail,
       precompileMs: shaderCompileMs,
       // THE WARM-UP DRAW (vt-pan-viewer.js#warmUpDrawState) — the follow-up to
       // precompileMs that reaches the seven scenes/post-passes compileAsync(
@@ -649,7 +734,10 @@ export function buildViewerDiagnostics({
       // renderer.info.programs is WebGLRenderer-only; the node renderer
       // reports differently. Left null rather than guessing a number.
       programCount: renderer.info?.programs?.length ?? null,
-      backend: renderer.backend?.isWebGPUBackend ? 'webgpu' : 'webgl2',
+      // Same classification `parallelShaderCompile` above already computed —
+      // one source of truth for "which backend is this", not two independent
+      // reads that could quietly disagree.
+      backend: parallelCompileInfo.backend,
     },
     // GROUND TRUTH: is MSA the thing on screen right now, or is Foundry?
     // This could NOT be answered from a report during the 2026-07-16

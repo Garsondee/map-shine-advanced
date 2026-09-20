@@ -108,7 +108,7 @@ function writeGradeUniforms(u, params) {
  *   use for "this material needs something from outside its own zone."
  *   Omit → the render-scale governor's post-upscale sharpen never compiles
  *   in, same as never calling `setPostUpscaleSharpenActive`.
- * @returns {{ material, presentTexNode, setEnvGrade, setArtGrade, setStylize, setLut, setPostUpscaleSharpenActive, rebindLit, gateCompiled }}
+ * @returns {{ material, presentTexNode, setEnvGrade, setArtGrade, setStylize, setPlayerVisionMode, setLut, setPostUpscaleSharpenActive, rebindLit, gateCompiled }}
  */
 export function buildGradePresentMaterial({
   THREE,

@@ -527,6 +527,9 @@ import {
   registerEffectPresetSettings,
   readEffectPresets,
   writeEffectPresets,
+  registerScenePresetSettings,
+  readScenePresets,
+  writeScenePresets,
   readCueStack,
   writeCueStack,
   watchCueStack,
@@ -2940,6 +2943,106 @@ function install() {
     const next = { ...presets, [effectId]: remaining };
     return Promise.resolve(writeEffectPresets(next)).then((result) => {
       if (!result.ok) log.warn(`delete effect preset not persisted: ${result.reason}`);
+      return result;
+    });
+  };
+
+  // SCENE PRESETS (mythica-machina-press#177) — a named, reusable snapshot
+  // of a WHOLE SCENE's authored look, shared across the whole table
+  // (world-scoped, same library shape as the per-effect presets just
+  // above). #12's own "a scene's whole authored look" definition — every
+  // effect's scene-authored params, as one object — plus #102's "named,
+  // persistent, world library" shape, combined: save/apply below reuse
+  // readSceneAllEffectParams/writeSceneAllEffectParams, the SAME functions
+  // copySceneEffectSettings/pasteSceneEffectSettings (above) already call,
+  // rather than opening a second read/write path onto the same scene flag.
+  // Deliberately narrow per the scope decision on the issue: effect params
+  // only (no sky/weather/wind/anchors/darkness regions), instant apply (no
+  // fade-engine transition), and not a `PARAM_SCOPE`/world-default baseline
+  // — an explicit, named, GM-opt-in snapshot, console/macro API only.
+
+  /**
+   * `MapShine.saveScenePreset('Cozy Tavern')` — snapshot the CURRENT
+   * scene's whole authored look (every effect's scene-authored params, via
+   * the same `readSceneAllEffectParams` #12's copy already uses) under a
+   * name, into the shared world library.
+   * @param {string} presetName
+   * @returns {Promise<{ok: boolean, reason?: string}>}
+   */
+  MapShine.saveScenePreset = (presetName) => {
+    if (typeof presetName !== 'string' || !presetName) {
+      return Promise.resolve({ ok: false, reason: 'presetName is required' });
+    }
+    const { all, reason } = readSceneAllEffectParams();
+    if (!all) {
+      return Promise.resolve({
+        ok: false,
+        reason: reason ?? 'this scene has no authored effect settings to capture yet',
+      });
+    }
+    const { presets } = readScenePresets();
+    const next = {
+      ...presets,
+      [presetName]: { capturedAt: new Date().toISOString(), effects: all },
+    };
+    return Promise.resolve(writeScenePresets(next)).then((result) => {
+      if (!result.ok) log.warn(`save scene preset not persisted: ${result.reason}`);
+      return result;
+    });
+  };
+
+  /**
+   * `MapShine.applyScenePreset('Cozy Tavern')` — REPLACE the current
+   * scene's whole authored effect-params block with a saved preset's, via
+   * the same `writeSceneAllEffectParams` #12's paste already uses, then
+   * re-resolve every effect so the apply is visible at once — exactly
+   * matching `pasteSceneEffectSettings`'s own shape (instant, no fade).
+   * @param {string} presetName
+   * @returns {Promise<{ok: boolean, reason?: string}>}
+   */
+  MapShine.applyScenePreset = (presetName) => {
+    const { presets } = readScenePresets();
+    const preset = presets?.[presetName];
+    if (!preset) {
+      return Promise.resolve({ ok: false, reason: `no scene preset named '${presetName}'` });
+    }
+    return Promise.resolve(writeSceneAllEffectParams(preset.effects)).then((result) => {
+      if (result.ok) reapplyAll(`apply scene preset (${presetName})`);
+      else log.warn(`apply scene preset not persisted: ${result.reason}`);
+      return result;
+    });
+  };
+
+  /**
+   * `MapShine.listScenePresets()` — every saved preset's name + when it was
+   * captured (not the full param blob — just enough to show a picker list).
+   * @returns {{presets: Array<{name: string, capturedAt: string|null, effectCount: number}>}}
+   */
+  MapShine.listScenePresets = () => {
+    const { presets } = readScenePresets();
+    return {
+      presets: Object.entries(presets).map(([name, preset]) => ({
+        name,
+        capturedAt: preset?.capturedAt ?? null,
+        effectCount: preset?.effects && typeof preset.effects === 'object' ? Object.keys(preset.effects).length : 0,
+      })),
+    };
+  };
+
+  /**
+   * `MapShine.deleteScenePreset('Cozy Tavern')`.
+   * @param {string} presetName
+   * @returns {Promise<{ok: boolean, reason?: string}>}
+   */
+  MapShine.deleteScenePreset = (presetName) => {
+    const { presets } = readScenePresets();
+    if (!(presetName in presets)) {
+      return Promise.resolve({ ok: false, reason: `no scene preset named '${presetName}'` });
+    }
+    const next = { ...presets };
+    delete next[presetName];
+    return Promise.resolve(writeScenePresets(next)).then((result) => {
+      if (!result.ok) log.warn(`delete scene preset not persisted: ${result.reason}`);
       return result;
     });
   };
@@ -15118,6 +15221,20 @@ function install() {
         registerEffectPresetSettings();
       } catch (err) {
         log.error('effect presets settings registration failed:', err);
+      }
+
+      // THE SCENE PRESETS SETTING (mythica-machina-press#177) — same "own
+      // init-hook try/catch, same shared `init` hook" placement as the
+      // effect-presets setting just above, for the identical reason: a
+      // second `Hooks.once('init', ...)` here would be a genuine new
+      // `foundry/adapter-only` ratchet violation. No `onChange` needed for
+      // the same reason effect presets has none — a preset LIBRARY changing
+      // has nothing to re-apply until a GM explicitly applies one;
+      // `MapShine.applyScenePreset` re-resolves at that point itself.
+      try {
+        registerScenePresetSettings();
+      } catch (err) {
+        log.error('scene presets settings registration failed:', err);
       }
 
       // THE REGION DARKNESS OVERRIDE SETTING — same "own init-hook try/catch,

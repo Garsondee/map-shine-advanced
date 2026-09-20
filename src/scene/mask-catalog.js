@@ -164,6 +164,37 @@ export const MASK_KINDS = Object.freeze([
       'light radius — so a wide blob is a bonfire and a thin line is a row of small flames.',
   },
   {
+    id: 'drip',
+    suffixes: ['_Drip'],
+    channels: 'gray',
+    // ⚠️ NOT the packed trio's fourth member. `packChannel` is OPTIONAL on a
+    // 'gray' kind — the trio (`shadow`/`outdoors`/`fire` above) is
+    // author-confirmed complete at exactly three, so this rides as its own
+    // ordinary single-file mask instead, the same shape `specular`/`window`
+    // already are one level up from 'gray' (`validateMaskCatalog` only
+    // requires the packed trio be all-or-nothing; it never requires a 'gray'
+    // kind to join it).
+    packChannel: null,
+    absentValue: 0,
+    // A CPU consumer is a consumer — the identical `rasterize` case `fire`
+    // declares just above, for the identical reason: `effects/precipitation/
+    // drip-edges.js#extractDripMaskPoints` (mythica-machina-press#316)
+    // extracts a point cloud straight from the painted region, no
+    // silhouette/edge detection involved (every painted texel is a candidate,
+    // unlike the auto-derived roofline extracted from `coverAbove`'s own
+    // boundary). Feeds a SECOND instance of the same roof-drip particle
+    // engine (`effects/particles/precip-drip-runtime.js`) — one hand-painted
+    // point cloud is exactly as valid an input to it as one derived from an
+    // edge.
+    rasterize: true,
+    meaning:
+      'white = authored drip-spawn region — cave ceilings, leaking pipes, condensation, a leaky roof seam ' +
+      'the author wants to mark by hand rather than rely on the auto-detected roofline. Uses the SAME drip ' +
+      'particle system as roof-edge runoff. Precipitation’s own `dripAuthoredMode` param decides whether ' +
+      'these authored points drip continuously or only while it is raining (the auto-detected roofline ' +
+      'always follows the weather regardless). Absent = no authored drip points anywhere.',
+  },
+  {
     id: 'specular',
     suffixes: ['_Specular'],
     channels: 'color',

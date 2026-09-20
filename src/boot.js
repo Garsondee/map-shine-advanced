@@ -5241,6 +5241,25 @@ function install() {
     }
   };
 
+  /**
+   * ⭐ THE AUTHORED DRIP MASK's INPUT (mythica-machina-press#316) — the exact
+   * same shape as `getFireMaskGrid` above, one kind id later: `_Drip` is
+   * `rasterize: true` for the identical reason `_Fire` is (a CPU consumer,
+   * `effects/precipitation/drip-edges.js#extractDripMaskPoints`, extracts
+   * spawn points from the painted region). Swallowed like `_Fire`/`skyReach`
+   * above: a floor whose art has not streamed yet, or one with simply no
+   * `_Drip` file at all — the ordinary case — yields null, and an absent
+   * authored mask means no authored drip points on this floor, never a
+   * guess.
+   */
+  const getDripMaskGrid = (floorIndex) => {
+    try {
+      return maskAuthority.getDerived('drip', floorIndex)?.grid ?? null;
+    } catch {
+      return null;
+    }
+  };
+
   // WATER's four mask-authority seams — see effects/water/water-seams.js for
   // why they ask different questions at deliberately different resolutions.
   // `getWaterBackgroundItemId` is the depth-authority migration's own seam
@@ -13434,6 +13453,11 @@ function install() {
         getSkyReachGrid,
         getCoverAboveGrid,
         getCasterHeightGrid,
+        // THE AUTHORED DRIP MASK's seam (mythica-machina-press#316) — same
+        // real-scene-only reasoning as getFireMaskGrid above; an unwired/
+        // torture-fixture default of `() => null` simply means no authored
+        // drip points on top of whatever the auto-detected roofline finds.
+        getDripMaskGrid,
         // THE WATER BODY PACK's mask + cross-floor seams (Water.md §5.1) —
         // same real-scene-only reasoning; unwired means no floor has water, so
         // the jump flood never runs (inert by construction, not by a flag).

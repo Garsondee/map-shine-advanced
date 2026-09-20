@@ -241,6 +241,20 @@ export function createPrecipitationSubsystem({
    * LIQUID species is falling. */
   let drips = null;
   let dripReason = 'no roofline supplied yet';
+  /**
+   * ⭐ THE AUTHORED LAYER (mythica-machina-press#316) — a SECOND, independent
+   * instance of the identical roof-drip engine, fed from a hand-painted
+   * `_Drip` mask (`drip-edges.js#extractDripMaskPoints`) instead of the
+   * auto-derived `coverAbove` roofline. Two instances, not one engine shared
+   * between two point sets: the roofline's points come and go with the floor
+   * in view and the author's points do too, but each set is re-derived from a
+   * DIFFERENT input at the SAME chokepoint (`vt-pan-viewer.js#
+   * rebakePerFloorMasks`), and an engine's own `setSpawnPoints` re-seeds every
+   * live body — sharing one engine would make painting a `_Drip` patch
+   * momentarily blank the roofline's own drips and vice versa.
+   */
+  let authoredDrips = null;
+  let authoredDripReason = 'no authored drip mask on this floor';
   let mantleReason =
     createMantleTarget && renderMantleStep
       ? 'not built yet — waiting for scene bounds'
@@ -374,17 +388,65 @@ export function createPrecipitationSubsystem({
     splash.step(renderer, dtRealSec, nowMs, getWindHandle());
   }
 
-  /** Advance the roofline. Cheap when there is no roofline and no tail. */
-  function stepDrips(renderer, dtRealSec, nowMs, precip01, st, weather, viewRect) {
-    if (!drips) return;
+  /**
+   * Advance ONE drip engine — the roofline and the authored layer are both
+   * this same shape, differing only in WHICH engine and WHAT RATE resolves
+   * to. Extracted for the identical reason `stepPopulation` was: two drip
+   * engines now exist (mythica-machina-press#316), and this is the shared
+   * mechanics the copy-paste risk `stepPopulation`'s own comment warns about
+   * would otherwise drift between them — camera push, species/frame resolve,
+   * `setFrame`, the `hasContent` gate, `step`. The two RATE-RESOLUTION RULES
+   * (see `stepDrips`/`stepAuthoredDrips` just below) stay as two thin,
+   * clearly-different callers rather than being folded in here too, because
+   * they are genuinely not the same rule and forcing them into one would
+   * obscure that rather than share anything real.
+   *
+   * @param {object} engine - `drips` or `authoredDrips`.
+   * @param {number} rate - fed to `setFrame`'s own `precip01` argument; THE
+   *   thing that differs between weather-mode and always-mode.
+   * @param {number} framePrecip01 - THE WEATHER's own precip01, for the
+   *   look-frame (brightness/lit-response) only — kept separate from `rate`
+   *   so always-mode can force the rate to 1 without also pretending it is
+   *   raining for lighting purposes.
+   */
+  function stepOneDripEngine(engine, renderer, dtRealSec, nowMs, rate, framePrecip01, st, weather, viewRect) {
+    if (!engine) return;
     // ⚠️ THE CAMERA CENTRE, EVERY FRAME. M(h) magnifies ABOUT it, so a stale
     // centre makes every drip converge on where the camera used to be — the
     // same push the fall engine already gets from `setWorldRect`.
-    if (viewRect) drips.setCamera((viewRect.minX + viewRect.maxX) / 2, (viewRect.minY + viewRect.maxY) / 2);
+    if (viewRect) engine.setCamera((viewRect.minX + viewRect.maxX) / 2, (viewRect.minY + viewRect.maxY) / 2);
     const species = PRECIP_SPECIES.rain;
-    drips.setFrame(dtRealSec, precip01, frameFor(species, weather, st, Math.max(precip01, 0.001)));
-    if (!drips.hasContent) return;
-    drips.step(renderer, dtRealSec, nowMs, getWindHandle());
+    engine.setFrame(dtRealSec, rate, frameFor(species, weather, st, Math.max(framePrecip01, 0.001)));
+    if (!engine.hasContent) return;
+    engine.step(renderer, dtRealSec, nowMs, getWindHandle());
+  }
+
+  /** Advance the roofline. Cheap when there is no roofline and no tail.
+   * Rate === the weather's own liquid-gated precip01, unconditionally —
+   * unchanged from before `stepOneDripEngine` existed (see that function's
+   * own header: this is byte-identical to the inline version it replaced). */
+  function stepDrips(renderer, dtRealSec, nowMs, precip01, st, weather, viewRect) {
+    stepOneDripEngine(drips, renderer, dtRealSec, nowMs, precip01, precip01, st, weather, viewRect);
+  }
+
+  /**
+   * Advance the authored layer. Rate resolution is the one genuine difference
+   * from the roofline (§C of mythica-machina-press#316's design):
+   *   - `'weather'` (default): identical to the roofline — the SAME
+   *     liquid-gated `precip01Liquid` the caller already computed for it, so
+   *     it inherits the SAME 5-minute tail via the engine's own
+   *     `TAIL_DURATION_SEC`/`TAIL_STRENGTH` with no engine change needed.
+   *   - `'always'`: the rate is a constant `1`, ignoring `precip01`/liquid
+   *     entirely — a cave should not stop condensing because it started
+   *     snowing outside. The LOOK frame still resolves from the real weather
+   *     (`precip01Raw`), so lighting stays consistent with the scene; only
+   *     the rate is forced.
+   */
+  function stepAuthoredDrips(renderer, dtRealSec, nowMs, precip01Liquid, precip01Raw, st, weather, viewRect) {
+    if (!authoredDrips) return;
+    const alwaysOn = lastTuning?.dripAuthoredMode === 'always';
+    const rate = alwaysOn ? 1 : precip01Liquid;
+    stepOneDripEngine(authoredDrips, renderer, dtRealSec, nowMs, rate, precip01Raw, st, weather, viewRect);
   }
 
   /** Build one species' engine on first use — a clear map never allocates. */
@@ -560,16 +622,40 @@ export function createPrecipitationSubsystem({
       // snow through a summer.
       stepMantle(dtRealSec, st, weather, precip01);
 
-      // ⭐ THE DRIPS STEP **BEFORE** THE CLEAR-DAY EARLY-OUT, like the mantle and
-      // for the same reason: their whole character is the TAIL that outlives the
-      // rain by minutes. Returning early on `precip01 === 0` would silence the
-      // roofline the instant the sky cleared, which is precisely the signal
-      // §4.3 says is the cheapest "the world is wet" cue there is.
+      // ⭐ BOTH DRIP LAYERS STEP **BEFORE** THE CLEAR-DAY EARLY-OUT, like the
+      // mantle — and now for TWO reasons (mythica-machina-press#316 added the
+      // second).
       //
-      // ⚠️ LIQUID ONLY. Snow settles on a roof, it does not run off it, so the
-      // tail is fed by rain and sleet and never by a blizzard.
+      // The ROOFLINE's reason is unchanged: its whole character is the TAIL
+      // that outlives the rain by minutes. Returning early on `precip01 === 0`
+      // would silence it the instant the sky cleared, which is precisely the
+      // signal §4.3 says is the cheapest "the world is wet" cue there is.
+      //
+      // The AUTHORED layer's reason is new, and in 'always' mode it is
+      // stronger than a tail: a cave's condensation or a leaking pipe must
+      // drip on a cloudless day exactly as it does in a storm, so it cannot be
+      // gated on `precip01 > 0` AT ALL — there may never be a tail to taper,
+      // because there may never have been any rain in the first place. Gating
+      // it here would silently defeat the entire point of 'always' mode the
+      // moment the sky cleared.
+      //
+      // ⚠️ LIQUID ONLY GOVERNS 'weather' MODE. Snow settles on a roof, it does
+      // not run off it, so the roofline's tail (and the authored layer's own
+      // 'weather'-mode rate) is fed by rain and sleet and never by a
+      // blizzard. 'always' mode ignores this split entirely, by design — a
+      // cave does not care whether it is snowing outside.
       const liquid = (weather.precipKind ?? 'rain') !== 'snow';
       stepDrips(renderer, dtRealSec, nowMs, liquid ? precip01 : 0, st, weather, worldRect ?? st.worldRect ?? null);
+      stepAuthoredDrips(
+        renderer,
+        dtRealSec,
+        nowMs,
+        liquid ? precip01 : 0,
+        precip01,
+        st,
+        weather,
+        worldRect ?? st.worldRect ?? null
+      );
 
       // ⚠️ A JS `if`, never a uniform set to zero (Effects.md Law 4). A clear
       // day must not allocate an engine, dispatch a kernel or submit a draw.
@@ -648,9 +734,12 @@ export function createPrecipitationSubsystem({
       // early-returned here on an empty population list, which is TRUE the moment the
       // rain stops — and that is exactly when the tail is the only thing left
       // to draw. The one layer whose whole purpose is outliving the weather
-      // cannot be gated on the weather.
+      // cannot be gated on the weather. The AUTHORED layer joins it here for
+      // the identical reason, and in 'always' mode more strongly still — see
+      // `sync()`'s own comment.
       if (activePopulations.length === 0) {
         if (drips?.hasContent) out.push(drips.scene);
+        if (authoredDrips?.hasContent) out.push(authoredDrips.scene);
         return out;
       }
       /**
@@ -675,8 +764,13 @@ export function createPrecipitationSubsystem({
       }
       // ⭐ THE ROOFLINE LAST — nearest the eye. A drip hangs off an edge that is
       // ABOVE the viewed floor, so it is in front of the rain falling past it,
-      // and it must keep drawing when nothing else does (the tail).
+      // and it must keep drawing when nothing else does (the tail). THE
+      // AUTHORED LAYER joins it at the same "nearest the eye" position
+      // (mythica-machina-press#316) — a hand-painted drip is exactly as much
+      // an overhead feature as an auto-detected one, and the two never
+      // overlap in a way that makes their relative order visible.
       if (drips?.hasContent) out.push(drips.scene);
+      if (authoredDrips?.hasContent) out.push(authoredDrips.scene);
       return out;
     },
 
@@ -757,6 +851,38 @@ export function createPrecipitationSubsystem({
     },
 
     /**
+     * ⭐ THE AUTHORED DRIP MASK, from `drip-edges.js#extractDripMaskPoints`
+     * (mythica-machina-press#316). Structurally the SAME contract as
+     * `setDripEdges` just above — call on floor change or when the mask
+     * authority's products version moves, NEVER per frame; `null`/empty
+     * silences this layer, which is correct for a floor with no `_Drip` mask
+     * painted on it.
+     */
+    setAuthoredDripPoints(points) {
+      if (!points || !(points.count > 0)) {
+        authoredDripReason = 'no authored drip mask on this floor';
+        authoredDrips?.setSpawnPoints({ points: new Float32Array(0), count: 0 });
+        return { count: 0, reason: authoredDripReason };
+      }
+      if (!authoredDrips) {
+        // ⚠️ DELIBERATELY SMALLER THAN THE ROOFLINE's OWN DEFAULTS (6000
+        // capacity / 512 spawn points). An authored `_Drip` mask is
+        // realistically a handful of specific spots — a leaking pipe, a cave
+        // ceiling, a patch of condensation — never a whole building's worth
+        // of eaves, so it has no need of the roofline's own headroom.
+        authoredDrips = createPrecipDripEngine({
+          THREE,
+          renderOrder: renderOrder + 1,
+          capacity: 2000,
+          maxSpawnPoints: 128,
+        });
+        if (lastTuning) authoredDrips.setTuning(lastTuning);
+      }
+      authoredDripReason = null;
+      return authoredDrips.setSpawnPoints(points);
+    },
+
+    /**
      * ⭐ THE VIEWED FLOOR CHANGED — re-derive everything that belongs to a floor.
      *
      * ⚠️ THE MANTLE IS THE ONLY THING HERE THAT HOLDS FLOOR-SPECIFIC STATE.
@@ -796,6 +922,7 @@ export function createPrecipitationSubsystem({
       for (const engine of splashEngines.values()) engine.setTuning(t);
       mantle?.setTuning(t);
       drips?.setTuning(t);
+      authoredDrips?.setTuning(t);
       for (const curtain of curtains.values()) curtain.setTuning(t);
     },
 
@@ -849,6 +976,14 @@ export function createPrecipitationSubsystem({
          * make "still dripping four minutes after the rain" look like "the
          * precipitation axis is stuck". */
         drips: drips ? drips.debugState() : { built: false, reason: dripReason },
+        /** ⭐ THE AUTHORED LAYER (mythica-machina-press#316), reported as its
+         * OWN top-level key rather than merged into `drips` — the two are
+         * independent engines with independent reasons to be silent (no
+         * roofline vs. no `_Drip` mask painted, or 'always' mode drawing when
+         * the roofline's own tail has already finished), and a merged boolean
+         * would name neither (this file's own stated philosophy: every factor
+         * separately). */
+        authoredDrip: authoredDrips ? authoredDrips.debugState() : { built: false, reason: authoredDripReason },
       };
     },
   };

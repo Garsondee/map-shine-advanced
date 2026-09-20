@@ -457,6 +457,10 @@ import {
   profileRank,
   GLOBAL_SETTING_KEYS,
   extractDripEdges,
+  // mythica-machina-press#316 — the authored-mask sibling of extractDripEdges
+  // just above, same module, same coordinate convention, different selection
+  // rule (every painted texel, not just a silhouette's boundary).
+  extractDripMaskPoints,
   // THE CLOUD GROUND SHADOW's OWN OFFSET — the SAME function
   // `effects/shadow-access.js` calls for every vegetation caster (doc 03's
   // D2: "match it by calling it, never reimplementing"), called here once
@@ -1233,6 +1237,9 @@ export async function startVtPanViewer({
   getSkyReachGrid,
   getCoverAboveGrid,
   getCasterHeightGrid,
+  // mythica-machina-press#316 — the authored `_Drip` mask's own seam,
+  // structurally identical to getFireMaskGrid above.
+  getDripMaskGrid,
   getCasterHeightField,
   getShadowFloorPlan,
   getSunShadowRenderState,
@@ -1315,6 +1322,10 @@ export async function startVtPanViewer({
   // answer for a floor with nothing overhead.
   getCoverAboveGrid ??= () => null;
   getCasterHeightGrid ??= () => null;
+  // THE AUTHORED DRIP MASK's own input (mythica-machina-press#316) — absent
+  // means no authored drip points on top of whatever the roofline finds,
+  // same fail-silent posture as the two lines just above.
+  getDripMaskGrid ??= () => null;
   // SUN SHADOWS' two seams. `null`/disabled leaves the shadow field baked white
   // (a provable no-op) rather than leaving it unwritten — the ambient fill
   // always samples it, so "off" has to be a written value. Un-wired callers
@@ -2725,11 +2736,25 @@ export async function startVtPanViewer({
       // (nothing above it) correctly falls silent. It rides the same chokepoint
       // as everything else per-floor precisely so it cannot be the fifth thing
       // somebody forgets.
+      //
+      // ⚠️ TWO INDEPENDENT DRIP LAYERS ARE RE-DERIVED HERE NOW, NOT ONE
+      // (mythica-machina-press#316). The roofline below is auto-detected from
+      // `coverAbove`; the authored layer right after it is extracted from
+      // whatever the artist painted into `_Drip` on THIS floor — a genuinely
+      // different input, but the SAME per-floor lifetime (a floor change
+      // re-sings a different roofline AND reveals a different hand-painted
+      // patch), so it belongs at this exact chokepoint for the same reason
+      // the roofline itself does.
       const roofline = extractDripEdges(getCoverAboveGrid(idx), {
         heightGrid: getCasterHeightGrid(idx),
         heightScalePx: CASTER_HEIGHT_SCALE_PX,
       });
       precipitationSubsystem?.setDripEdges(roofline);
+      const authoredDripPoints = extractDripMaskPoints(getDripMaskGrid(idx), {
+        heightGrid: getCasterHeightGrid(idx),
+        heightScalePx: CASTER_HEIGHT_SCALE_PX,
+      });
+      precipitationSubsystem?.setAuthoredDripPoints(authoredDripPoints);
       lastPerFloorMaskRebake = {
         floorIndex: idx,
         reason,
@@ -2737,6 +2762,11 @@ export async function startVtPanViewer({
         fire,
         skyReach,
         roofline: { count: roofline.count, edgeTexels: roofline.edgeTexels, heightSource: roofline.heightSource },
+        authoredDrip: {
+          count: authoredDripPoints.count,
+          paintedTexels: authoredDripPoints.edgeTexels,
+          heightSource: authoredDripPoints.heightSource,
+        },
       };
       // ⭐ THE MANTLE IS PER-FLOOR TOO. Its buffer holds THIS floor's snow, so a
       // floor change must re-derive it — otherwise the roof wears the

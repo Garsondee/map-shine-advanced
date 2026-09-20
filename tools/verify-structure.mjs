@@ -950,8 +950,12 @@ export const RULES = [
     // The list deliberately RESERVES the not-yet-declared V2 suffixes too
     // (Roughness/Normal/…): the day an effect needs one, its declaration goes
     // in the catalog — one line — or this wall stops the build.
+    // `Drip` joined 2026-09-20 (mythica-machina-press#316) alongside its own
+    // MASK_KINDS declaration, not as a pre-reserved V2 name like the others —
+    // `_Drip` has no V2 precedent at all, it is a wholly new authored-mask
+    // kind, so there was no earlier commit for it to have been reserved in.
     pattern:
-      /_(?:Outdoors|Shadow|Fire|Specular|Window|Windows|Structural|Tree|Bush|Water|Roughness|Normal|Iridescence|Prism|Fluid|Dust|Ash)(?![a-zA-Z])/,
+      /_(?:Outdoors|Shadow|Fire|Drip|Specular|Window|Windows|Structural|Tree|Bush|Water|Roughness|Normal|Iridescence|Prism|Fluid|Dust|Ash)(?![a-zA-Z])/,
     allow: [`${sep}scene${sep}mask-catalog.js`],
     why:
       'V2 held the mask-suffix convention in THREE independent copies — assets/loader.js EFFECT_MASKS ' +

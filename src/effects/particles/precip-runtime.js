@@ -398,6 +398,17 @@ export function createPrecipEngine({
    * measured as hyperspace rather than rain.
    */
   const uParallaxStreak01 = uniform(float(1));
+  /**
+   * ⭐ `fallSpeedScale` (mythica-machina-press#316, the OPTIONAL Fall-parity
+   * dial). An author-facing LOOK multiplier, set once via `setTuning` — NOT
+   * `uSpeedMul` just above, which is the per-FRAME weather-response scalar
+   * `resolveSpeciesFrame` recomputes every call from the squall field. Both
+   * multiply the same `c.z` at each use site, but `uSpeedMul` must stay the
+   * gust engine's alone; stacking an author dial onto IT (rather than beside
+   * it) would double-drive the exact same number from two different callers
+   * and corrupt the gust response. 1.0 = exactly today's speed.
+   */
+  const uFallSpeedScale = uniform(float(1));
 
   // ── ⭐ THE SKY-REACH GATE (Precipitation.md LAW 3) ────────────────────────
   //
@@ -793,7 +804,7 @@ export function createPrecipEngine({
     const s = seed.element(i);
     const c = custom.element(i).toVar();
 
-    const speed = c.z.mul(uSpeedMul).mul(uViewScale);
+    const speed = c.z.mul(uSpeedMul).mul(uFallSpeedScale).mul(uViewScale);
 
     // ── THE FALL: height integrates DOWN. This is the lifecycle. ──
     // The body clock and its per-body phase, hoisted ABOVE the vertical churn
@@ -1370,7 +1381,12 @@ export function createPrecipEngine({
     // fall's own tilt (wind included) displaces that convergence point. It
     // interacts with wind exactly as the author asked, because wind is the
     // dominant contributor to `vel`.
-    const fallSpeed = c.z.mul(uSpeedMul).max(float(1));
+    // ⚠️ `uFallSpeedScale` MULTIPLIES BEFORE THE `.max(float(1))` FLOOR, NOT
+    // AFTER — the floor exists to keep this divisor (see `offset` below) off
+    // zero, and applying the scale afterward would let `fallSpeedScale`'s own
+    // low end (the schema's own min is 0.1) punch the result back under 1 and
+    // reopen the exact division risk the floor is for.
+    const fallSpeed = c.z.mul(uSpeedMul).mul(uFallSpeedScale).max(float(1));
     // ⭐ THE CONVERGENCE SHIFT, FROM THE TILT ANGLE. Lines tilted by θ have
     // their vanishing point `tan(θ)·D` from the nadir — see `uWindAirSpeed` for
     // why an angle rather than the velocity ratio this used to divide.
@@ -1816,6 +1832,11 @@ export function createPrecipEngine({
       if (Number.isFinite(t.illumLit01)) uIllumLit01.value = Math.max(0, Math.min(1, t.illumLit01));
       if (Number.isFinite(t.parallaxStreak01)) uParallaxStreak01.value = Math.max(0, Math.min(1, t.parallaxStreak01));
       if (Number.isFinite(t.cameraHeight)) camHeightBase = Math.max(1, t.cameraHeight);
+      // mythica-machina-press#316 (optional Fall-parity dial) — floored well
+      // above zero: `positionNode`'s own `fallSpeed` divides by this (via
+      // `uSpeedMul`'s sibling term), and the floor there assumes a positive
+      // scale reaching it, not a zero or negative one.
+      if (Number.isFinite(t.fallSpeedScale)) uFallSpeedScale.value = Math.max(0.01, t.fallSpeedScale);
     },
 
     /** What the debug panel and the lab legend print. */
@@ -1851,6 +1872,7 @@ export function createPrecipEngine({
           squallDepth: uSquallDepth.value,
           parallaxStreak01: uParallaxStreak01.value,
           cameraHeight: uCamHeight.value,
+          fallSpeedScale: uFallSpeedScale.value,
         },
         frame: lastFrame,
         wind: { speed01: uWindSpeed01?.value ?? 0, directionDeg: uWindDirDeg?.value ?? 0 },

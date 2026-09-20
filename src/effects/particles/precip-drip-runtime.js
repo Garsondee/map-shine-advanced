@@ -72,11 +72,19 @@ const GRAVITY_MUL = 0.64;
  * species in a table whose every consumer assumes the sky. */
 const RAIN_REFERENCE_SPEED = 3300;
 /** ⭐ How long the tail runs after rain stops, in REAL seconds. V2's
- * `tailDurationSec`. */
+ * `tailDurationSec`. ⚠️ THE DEFAULT ONLY, since mythica-machina-press#316: an
+ * author-tunable dial (`dripTailDurationSec`) now owns the live value via the
+ * closure variable `tailDurationSec` inside {@link createPrecipDripEngine};
+ * this constant is what that variable initializes to and never changes. */
 const TAIL_DURATION_SEC = 300;
-/** …and how strong it starts, relative to raining emission. V2's 260/300. */
+/** …and how strong it starts, relative to raining emission. V2's 260/300.
+ * NOT author-tunable (unlike TAIL_DURATION_SEC) — nothing in Precipitation.md
+ * §4.3 or the live-tuning record asked for this one, so it stays fixed. */
 const TAIL_STRENGTH = 260 / 300;
-/** A whisper of curl (§4.3) — enough that a column of drips is not a ruler. */
+/** A whisper of curl (§4.3) — enough that a column of drips is not a ruler.
+ * ⚠️ THE DEFAULT ONLY, since mythica-machina-press#316: `dripCurlPx` now
+ * drives the live `uCurlPx` uniform below; this constant is only that
+ * uniform's initial value. */
 const CURL_PX = 7;
 /**
  * World px of streak per (px/s) of apparent speed — rain's own `streakPerPxS`
@@ -165,6 +173,15 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
   const uSizeScale = uniform(float(1));
   const uAlphaMul = uniform(float(1));
   const uRgbMul = uniform(float(1));
+  /** mythica-machina-press#316 — `dripFallSpeedScale`. Stacks ON TOP of the
+   * physical `GRAVITY_MUL`/`RAIN_REFERENCE_SPEED` baseline in
+   * {@link bodyConstants}, it does not replace it — 1.0 means "exactly the
+   * physical baseline", same distance-from-reference convention every other
+   * dial in this file uses. */
+  const uFallSpeedScale = uniform(float(1));
+  /** mythica-machina-press#316 — `dripCurlPx`, replacing the module constant
+   * {@link CURL_PX} as the live value `updateKernel`'s wobble term reads. */
+  const uCurlPx = uniform(float(CURL_PX));
 
   const hash11 = (x) => fract(sin(x.mul(12.9898)).mul(43758.5453));
   // Precipitation's compass is no longer this file's own (2026-09-04,
@@ -197,9 +214,13 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
   const bodyConstants = (entropy) => {
     const brightness = hash11(entropy.mul(float(1.7))).pow(float(0.8));
     const sizePx = mix(float(SIZE_PX[0]), float(SIZE_PX[1]), hash11(entropy.mul(float(2.3)).add(float(11))));
+    // ⭐ mythica-machina-press#316 — `uFallSpeedScale` stacks on top of the
+    // physical baseline (GRAVITY_MUL × RAIN_REFERENCE_SPEED × the per-body
+    // jitter), it does not replace any term of it.
     const speed = float(RAIN_REFERENCE_SPEED)
       .mul(float(GRAVITY_MUL))
-      .mul(mix(float(0.8), float(1.25), hash11(entropy.mul(float(3.1)).add(float(29)))));
+      .mul(mix(float(0.8), float(1.25), hash11(entropy.mul(float(3.1)).add(float(29)))))
+      .mul(uFallSpeedScale);
     return { brightness, sizePx, speed };
   };
 
@@ -232,7 +253,7 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
     const tSec = uTimeMs.mul(float(0.001));
     const phase = s.mul(float(12.9));
     const curl = vec2(sin(tSec.mul(float(1.7)).add(phase)), cos(tSec.mul(float(1.3)).add(phase.mul(float(1.9))))).mul(
-      float(CURL_PX)
+      uCurlPx
     );
     const drift = windFlowVectorNode(TSL, uWindDirDeg).mul(uWindSpeed01).mul(uWindAirSpeed).mul(float(0.12)).add(curl);
     const nextPos = pos.add(drift.mul(uDtSec));
@@ -411,6 +432,11 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
   /** ⭐ THE TAIL's state: 0..1, driven to 1 by rain and decaying afterwards. */
   let tail01 = 0;
   let lastRate = 0;
+  /** mythica-machina-press#316 — `dripTailDurationSec`'s live value. PLAIN
+   * JS, not a TSL uniform: `TAIL_DURATION_SEC` is only ever read inside this
+   * closure's own `setFrame`, never inside a `Fn()` kernel, so a mutable
+   * closure variable is the whole fix — no uniform needed. */
+  let tailDurationSec = TAIL_DURATION_SEC;
 
   return {
     scene,
@@ -469,7 +495,7 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
       // and the asymmetry IS the feature — a symmetric ease would make the
       // roofline take five minutes to START, which is the opposite of the
       // physical fact.
-      tail01 = p > tail01 ? p : Math.max(0, tail01 - dt / TAIL_DURATION_SEC);
+      tail01 = p > tail01 ? p : Math.max(0, tail01 - dt / tailDurationSec);
       const rate = Math.max(p, tail01 * TAIL_STRENGTH);
       lastRate = rate;
       liveCount = Math.round(cap * rate);
@@ -501,6 +527,15 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
       if (Number.isFinite(t.dripEdgeJitterPx)) uEdgeJitterPx.value = Math.max(0, t.dripEdgeJitterPx);
       if (Number.isFinite(t.cameraHeight)) uCamHeight.value = Math.max(1, t.cameraHeight);
       if (Number.isFinite(t.windAirSpeedPxS)) uWindAirSpeed.value = t.windAirSpeedPxS;
+      // mythica-machina-press#316 — three more dials, on the identical
+      // finite-then-floor pattern every dial above already uses.
+      if (Number.isFinite(t.dripFallSpeedScale)) uFallSpeedScale.value = Math.max(0.01, t.dripFallSpeedScale);
+      if (Number.isFinite(t.dripCurlPx)) uCurlPx.value = Math.max(0, t.dripCurlPx);
+      // ⚠️ THE ONE PLAIN-JS ASSIGNMENT HERE, not a `.value` write — see
+      // `tailDurationSec`'s own declaration for why. Floored well above zero:
+      // `setFrame` DIVIDES by this every frame, and the schema's own min (0)
+      // is reachable from a dragged slider.
+      if (Number.isFinite(t.dripTailDurationSec)) tailDurationSec = Math.max(0.001, t.dripTailDurationSec);
     },
 
     get hasContent() {
@@ -515,8 +550,12 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
         visible: this.hasContent,
         /** ⭐ THE TAIL, reported — "it is still dripping and it stopped raining
          * four minutes ago" is a FEATURE, and a reader has to be able to tell
-         * it apart from "the rain axis is stuck". */
-        tail: { tail01, rate: lastRate, durationSec: TAIL_DURATION_SEC, strength: TAIL_STRENGTH },
+         * it apart from "the rain axis is stuck". `durationSec` reads the LIVE
+         * `tailDurationSec` (mythica-machina-press#316), not the frozen
+         * `TAIL_DURATION_SEC` default — once the dial is author-tunable, a
+         * readout pinned to the constant would quietly lie the moment someone
+         * moved it. */
+        tail: { tail01, rate: lastRate, durationSec: tailDurationSec, strength: TAIL_STRENGTH },
         storageBuffers: 7,
       };
     },

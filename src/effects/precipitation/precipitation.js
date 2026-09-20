@@ -30,10 +30,13 @@
  * sub-engines coordinated by `precip-subsystem.js` (the ground splash, the
  * falling body, the distant impression veil, the ground's mantle
  * accumulation, and roof/eave drips), each with its own size/rate/strength
- * knobs. Lumping all 23 into 'Look' would be the exact unusable-card problem
- * Fire's own category comment (`ui/widgets/param-groups.js`) already names —
- * so this schema uses five matching categories (`Splash`, `Fall`, `Veil`,
- * `Ground`, `Drips`), added to `CATEGORY_ORDER` alongside Fire's trio.
+ * knobs. Lumping all of these into 'Look' would be the exact unusable-card
+ * problem Fire's own category comment (`ui/widgets/param-groups.js`) already
+ * names — so this schema uses five matching categories (`Splash`, `Fall`,
+ * `Veil`, `Ground`, `Drips`), added to `CATEGORY_ORDER` alongside Fire's trio.
+ * (23 at the schema's 2026-09-04 birth; mythica-machina-press#316 added five
+ * more — the authored-drip mode plus its two engine dials, and a Fall-speed
+ * sibling for both engines — without touching this shape.)
  *
  * ⚠️ EVERY DEFAULT BELOW IS THE ENGINE'S OWN EXISTING HARDCODED DEFAULT,
  * copied rather than re-chosen, with exactly one exception: `splashAlphaScale`
@@ -126,6 +129,23 @@ export const PRECIPITATION_PARAMS = Object.freeze({
     category: 'Fall',
     label: 'Streak length',
     help: 'How long a fast-falling drop`s motion streak draws, on top of its own width.',
+  }),
+  // mythica-machina-press#316's OPTIONAL Fall-parity dial — an author-facing
+  // sibling to the Drips category's own `dripFallSpeedScale`, added because it
+  // was cheap once the drip engine's own version proved the pattern. Stacks
+  // onto `uSpeedMul` (the weather-response scalar `resolveSpeciesFrame`
+  // already drives every frame) rather than replacing it — see
+  // `precip-runtime.js`'s own `uFallSpeedScale` doc for why the two must stay
+  // separate uniforms.
+  fallSpeedScale: Object.freeze({
+    type: 'float',
+    min: 0.1,
+    max: 3,
+    step: 0.05,
+    default: 1,
+    category: 'Fall',
+    label: 'Fall speed',
+    help: 'Scales how fast rain/snow falls, independent of size or streak length.',
   }),
   chaosScale: Object.freeze({
     type: 'float',
@@ -292,6 +312,48 @@ export const PRECIPITATION_PARAMS = Object.freeze({
     category: 'Drips',
     label: 'Drip spawn jitter',
     help: 'How far along a roof edge each drip`s spawn point wanders, in world pixels — the difference between drips falling from one exact point and a believable scatter along the eave.',
+  }),
+  // ── mythica-machina-press#316 — the AUTHORED `_Drip` mask's own controls,
+  // plus two engine-facing dials (`dripCurlPx`/`dripTailDurationSec`) shared
+  // by both the auto-detected roofline and the authored layer, since both are
+  // the same underlying engine (`precip-drip-runtime.js`). ─────────────────
+  dripAuthoredMode: Object.freeze({
+    type: 'enum',
+    values: ['weather', 'always'],
+    default: 'weather',
+    category: 'Drips',
+    label: 'Authored drip mode',
+    help: "Whether the painted Drip mask's spawn points behave like roof-edge runoff (only while it's raining, tapering off after) or drip constantly regardless of weather — for cave condensation, a leaking pipe, anything that shouldn't care if it's sunny out. Only affects Drip-authored points; the auto-detected roofline always follows the weather.",
+  }),
+  dripFallSpeedScale: Object.freeze({
+    type: 'float',
+    min: 0.1,
+    max: 3,
+    step: 0.05,
+    default: 1,
+    category: 'Drips',
+    label: 'Drip fall speed',
+    help: 'Scales how fast drips fall, on top of their own slower-than-rain baseline (both weather and always-mode drips).',
+  }),
+  dripCurlPx: Object.freeze({
+    type: 'float',
+    min: 0,
+    max: 40,
+    step: 1,
+    default: 7,
+    category: 'Drips',
+    label: 'Drip wobble',
+    help: 'How much a falling drip curls/wanders sideways rather than dropping in a dead-straight line.',
+  }),
+  dripTailDurationSec: Object.freeze({
+    type: 'float',
+    min: 0,
+    max: 900,
+    step: 10,
+    default: 300,
+    category: 'Drips',
+    label: 'Weather-drip tail',
+    help: 'How long, in seconds, weather-mode drips keep tapering off after rain stops. Does not apply to always-mode drips, which never taper.',
   }),
 });
 

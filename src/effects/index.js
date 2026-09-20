@@ -761,6 +761,13 @@ export {
   dripEdgeSignature,
   MAX_DRIP_POINTS,
   DEFAULT_DECK_HEIGHT_PX,
+  // ⭐ THE AUTHORED DRIP MASK (mythica-machina-press#316) — the SAME module's
+  // second extractor: a hand-painted `_Drip` mask's every painted texel,
+  // rather than a silhouette's boundary. See drip-edges.js's own header.
+  extractDripMaskPoints,
+  dripMaskPointsSignature,
+  DRIP_MASK_SPAWN_THRESHOLD,
+  MAX_DRIP_MASK_POINTS,
 } from './precipitation/drip-edges.js';
 export {
   PRECIP_SPECIES,

@@ -44,6 +44,38 @@
  * genuinely provable: a pixel can be looked at, but only an assertion can say
  * *"the point at grid row 0 has world y = rect.minY"* and keep saying it.
  *
+ * ============================================================================
+ * ⭐ A SECOND EXTRACTOR: AUTHORED POINTS, NOT AN EDGE (mythica-machina-press#316)
+ * ============================================================================
+ *
+ * {@link extractDripMaskPoints} reads a hand-painted `_Drip` mask
+ * (`scene/mask-catalog.js`'s `drip` kind) rather than the auto-derived
+ * `coverAbove` roofline above — the author's own words: *"the `_Drip` mask
+ * will have white pixels where the drips should spawn from."* Cave ceilings,
+ * a leaking pipe, condensation on a specific wall: places nothing above them
+ * casts a `coverAbove` edge over, so the roofline can never find them, and the
+ * author wants to mark the exact spot by hand instead.
+ *
+ * ⚠️ NO EDGE TEST, AND THAT IS THE WHOLE DIFFERENCE FROM {@link extractDripEdges}
+ * ABOVE. A roofline is a SILHOUETTE — only a boundary texel sheds water — but an
+ * authored mask is the author POINTING at exact spots, so every painted texel
+ * is a legitimate spawn point, not just the ones on a perimeter. This is
+ * `effects/fire/fire-spawn-points.js`'s own distinction, verbatim: *"a
+ * distribution needs the mask's density; only an edge needs its resolution."*
+ * Fittingly, the SUBSAMPLING technique below is fire's own fractional
+ * accumulator, not this file's own integer stride just above — see that
+ * function's header for the density-cliff bug the fractional form avoids, and
+ * see `extractDripMaskPoints`'s own header for why the older integer stride
+ * stays exactly as it is here rather than being "fixed" to match.
+ *
+ * The coordinate convention — texel CENTRES, row 0 = `spec.y` (minY), world px
+ * throughout — is unchanged, because it is a property of `MaskGrid` itself,
+ * not of the roofline's own edge-detection. Both extractors, and both kinds of
+ * point, feed the SAME `precip-drip-runtime.js` particle engine, just two
+ * independent instances of it (`precip-subsystem.js`'s `drips` and
+ * `authoredDrips`) — one hand-painted set of spawn points is exactly as valid
+ * an input to that engine as one derived from a roofline.
+ *
  * @module effects/precipitation/drip-edges
  */
 
@@ -263,6 +295,188 @@ export function dripEdgeSignature(grid) {
     if (v >= COVER_THRESHOLD * 255) covered++;
   }
   return `${w}x${h}:${covered}:${sum}`;
+}
+
+/**
+ * Paint value above which a texel of an AUTHORED `_Drip` mask counts as a
+ * spawn point.
+ *
+ * ⚠️ LOWER THAN `COVER_THRESHOLD`, AND FOR THE SAME REASON
+ * `fire-spawn-points.js`'s own `SPAWN_THRESHOLD` sits below `fire-mask.js`'s:
+ * `COVER_THRESHOLD` above answers "is this texel confidently ROOF" (feeding a
+ * silhouette that must not hang drips a texel outside the building), while
+ * this answers "may a drip be born here" — a faint, partially-painted edge of
+ * a hand-drawn patch legitimately produces a faint scatter of drips rather
+ * than none at all.
+ */
+export const DRIP_MASK_SPAWN_THRESHOLD = 0.15;
+
+/**
+ * Cap on extracted points. Matches {@link MAX_DRIP_POINTS} — the roofline's own
+ * cap — because there is no evidence yet that an authored mask needs a
+ * different ceiling. An authored `_Drip` patch is realistically far sparser
+ * than a whole building's eaves (a handful of specific spots, not a
+ * silhouette), so in practice this cap is rarely the thing doing the work.
+ */
+export const MAX_DRIP_MASK_POINTS = 512;
+
+/**
+ * Extract drip spawn points from a hand-painted `_Drip` mask — every painted
+ * texel is a candidate, not just the ones on a boundary. See this module's own
+ * header (*"A SECOND EXTRACTOR"*) for why that is the entire difference from
+ * {@link extractDripEdges} above, and why the subsampling below is fire's
+ * fractional accumulator rather than this file's own integer stride.
+ *
+ * @param {{spec: object, data: Uint8Array}} grid - a `MaskGrid` for the `drip`
+ *   kind (`maskAuthority.getDerived('drip', floorIndex)`). `spec` carries
+ *   `{w, h, x, y, width, height}` in WORLD units; row 0 is `spec.y` (minY) —
+ *   the one convention, unchanged from {@link extractDripEdges}.
+ * @param {object} [options]
+ * @param {number} [options.maxPoints]
+ * @param {number} [options.threshold] - 0..1 paint value; see
+ *   {@link DRIP_MASK_SPAWN_THRESHOLD}.
+ * @param {{spec: object, data: Uint8Array}} [options.heightGrid] - the floor's
+ *   `casterHeight` grid, sampled exactly as {@link extractDripEdges} samples
+ *   it — an authored drip is just as entitled to its own deck altitude as an
+ *   auto-detected one (a patch on a bridge drips from bridge height).
+ * @param {number} [options.heightScalePx] - `CASTER_HEIGHT_SCALE_PX`.
+ * @param {number} [options.defaultHeightPx] - falls back to
+ *   {@link DEFAULT_DECK_HEIGHT_PX}, the identical fallback the roofline uses.
+ * @returns {{points: Float32Array, count: number, edgeTexels: number, stride: number,
+ *   heightSource: string, meanHeightPx: number}}
+ *   The IDENTICAL shape {@link extractDripEdges} returns — a drop-in for
+ *   whatever consumes it — but two of the names carry a different meaning
+ *   here: `edgeTexels` is the PAINTED texel count (there is no "edge" in this
+ *   extractor), and `stride` is `keepEvery` from the fractional accumulator
+ *   (a float ≥ 1, the natural generalisation of an integer stride — see
+ *   `fire-spawn-points.js#extractFireSpawnPoints`). Empty on any malformed
+ *   input, for the same reason `extractDripEdges` returns empty rather than a
+ *   guess: a drip in the wrong place is worse than no drip.
+ */
+export function extractDripMaskPoints(grid, options = {}) {
+  const spec = grid?.spec ?? null;
+  const data = grid?.data ?? null;
+  const empty = { points: new Float32Array(0), count: 0, edgeTexels: 0, stride: 1 };
+  if (!spec || !data) return empty;
+  const w = spec.w | 0;
+  const h = spec.h | 0;
+  if (w <= 0 || h <= 0 || data.length < w * h) return empty;
+
+  const maxPoints = Math.max(1, Math.floor(options.maxPoints ?? MAX_DRIP_MASK_POINTS));
+  const cut = clamp01(options.threshold ?? DRIP_MASK_SPAWN_THRESHOLD) * 255;
+  const heightGrid = options.heightGrid?.data && options.heightGrid?.spec ? options.heightGrid : null;
+  const heightScale = Number.isFinite(options.heightScalePx) ? options.heightScalePx : 2048;
+  const defaultHeight = Number.isFinite(options.defaultHeightPx) ? options.defaultHeightPx : DEFAULT_DECK_HEIGHT_PX;
+
+  // Pass 1 — count, so the fractional accumulator's step is chosen before
+  // anything is allocated (the same two-pass shape extractDripEdges uses).
+  let painted = 0;
+  for (let i = 0; i < w * h; i++) if (data[i] >= cut) painted++;
+  if (painted === 0) return empty;
+
+  const texelW = Number.isFinite(spec.texelW) && spec.texelW > 0 ? spec.texelW : spec.width / w;
+  const texelH = Number.isFinite(spec.texelH) && spec.texelH > 0 ? spec.texelH : spec.height / h;
+
+  /**
+   * ⚠️ A FRACTIONAL ACCUMULATOR, NOT AN INTEGER STRIDE — copied from
+   * `fire-spawn-points.js#extractFireSpawnPoints` rather than from this
+   * file's own `extractDripEdges` just above (design decision, not an
+   * oversight: see this module's header). An integer `Math.ceil(painted /
+   * maxPoints)` stride jumps by whole numbers, so crossing ONE painted texel
+   * past a multiple of the cap can double the stride and roughly HALVE the
+   * spawned count outright — a real, sudden density drop from a single extra
+   * painted pixel. `keepEvery` is a FLOAT, so `count` rises smoothly with
+   * `painted` right up to the cap instead of sawtoothing.
+   */
+  const count = Math.min(maxPoints, painted);
+  const keepEvery = painted / count;
+  const points = new Float32Array(count * 3);
+
+  let seen = 0;
+  let nextEmitAt = 0;
+  let written = 0;
+  let heightSum = 0;
+  let defaults = 0;
+  for (let y = 0; y < h && written < count; y++) {
+    for (let x = 0; x < w && written < count; x++) {
+      const v = data[y * w + x];
+      if (v < cut) continue;
+      // Emit the FIRST eligible texel at or past each `keepEvery`-wide bucket
+      // boundary — `count` emissions total, spread evenly across every
+      // eligible texel regardless of how close `painted` sits to the cap. See
+      // `extractFireSpawnPoints`'s identical loop for the full reasoning.
+      if (seen < nextEmitAt) {
+        seen++;
+        continue;
+      }
+      nextEmitAt += keepEvery;
+      seen++;
+      // ⚠️ TEXEL CENTRES, row 0 IS minY — identical convention, no exceptions.
+      const wx = spec.x + (x + 0.5) * texelW;
+      const wy = spec.y + (y + 0.5) * texelH;
+      points[written * 3] = wx;
+      points[written * 3 + 1] = wy;
+      // THE DECK's OWN ALTITUDE, sampled exactly as extractDripEdges samples
+      // it — an authored point is just as entitled to its own height as an
+      // edge-derived one (§4.3's promise, kept the same way twice).
+      let heightPx = 0;
+      if (heightGrid) {
+        const hb = sampleGridByte(heightGrid, wx, wy);
+        if (hb !== null) heightPx = (hb / 255) * heightScale;
+      }
+      points[written * 3 + 2] = heightPx > 1 ? heightPx : defaultHeight;
+      if (heightPx > 1) heightSum += heightPx;
+      else defaults++;
+      written++;
+    }
+  }
+
+  const measured = written - defaults;
+  return {
+    points: points.subarray(0, written * 3),
+    count: written,
+    // Not an "edge" — see this function's own header. Named `edgeTexels`
+    // anyway so a consumer of either extractor's return shape reads "how many
+    // texels qualified before subsampling" the same way either time.
+    edgeTexels: painted,
+    stride: keepEvery,
+    heightSource: !heightGrid
+      ? 'default (no height grid)'
+      : measured === 0
+        ? 'default (grid read zero everywhere)'
+        : defaults === 0
+          ? 'measured'
+          : `mixed (${measured}/${written} measured)`,
+    meanHeightPx: measured > 0 ? heightSum / measured : defaultHeight,
+  };
+}
+
+/**
+ * A cheap signature of an authored `_Drip` grid's content, mirroring
+ * {@link dripEdgeSignature}'s job and its exact full-walk algorithm — this
+ * runs on a mask-version bump, not per frame, so a full walk is cheap and a
+ * sampled/strided signature can miss a real change (see that function's own
+ * header for the bug a strided first cut produced). The one difference is the
+ * threshold: `painted` counts against {@link DRIP_MASK_SPAWN_THRESHOLD}, this
+ * extractor's own cut, rather than the roofline's `COVER_THRESHOLD`.
+ *
+ * @param {{spec: object, data: Uint8Array}} grid
+ * @returns {string}
+ */
+export function dripMaskPointsSignature(grid) {
+  const spec = grid?.spec ?? null;
+  const data = grid?.data ?? null;
+  if (!spec || !data) return 'none';
+  const w = spec.w | 0;
+  const h = spec.h | 0;
+  let sum = 0;
+  let painted = 0;
+  for (let i = 0; i < data.length; i++) {
+    const v = data[i];
+    sum = (sum + v * (i + 1)) % 2147483647;
+    if (v >= DRIP_MASK_SPAWN_THRESHOLD * 255) painted++;
+  }
+  return `${w}x${h}:${painted}:${sum}`;
 }
 
 /** @param {*} v @returns {number} */

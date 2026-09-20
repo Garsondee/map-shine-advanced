@@ -31,18 +31,22 @@
  * `effects/fluid/fluid-registration.js#createFluidSeams`, and the vegetation
  * URL block in `boot.js`).
  *
- * ⚠️ ONLY EIGHT TILES, NOT ELEVEN. `scene/mask-catalog.js#MASK_KINDS` has
- * eleven entries (`prism` joined 2026-09-19, mythica-machina-press#137;
+ * ⚠️ ONLY EIGHT TILES, NOT TWELVE. `scene/mask-catalog.js#MASK_KINDS` has
+ * twelve entries (`prism` joined 2026-09-19, mythica-machina-press#137;
  * `iridescence` joined the same night, mythica-machina-press#136, Prism's
- * own direct sibling), but only eight effects declare `authoring.paint`
+ * own direct sibling; `drip` joined 2026-09-20, mythica-machina-press#316),
+ * but only eight effects declare `authoring.paint`
  * (fire, water, window, specular, fluid, prism, iridescence, vegetation —
- * vegetation covers two masks, tree+bush, as one tile). `shadow`/`outdoors`
- * have no owning effect at all (sun-shadows derives its casters from walls,
- * not a painted mask) — Law 5 applies here exactly as it does to
- * `ui/no-dead-axis` for weather: a mask kind nothing reads doesn't get a
- * tile just because the painter's OWN internal kind-picker still lists it.
- * `PAINT_REACH` below still covers all eleven, because that picker DOES list
- * all eleven and the two tile-less kinds are exactly where a wrong belief
+ * vegetation covers two masks, tree+bush, as one tile). `shadow`/`outdoors`/
+ * `drip` have no owning effect at all (precipitation's authored-drip layer
+ * reads `drip` straight off the mask authority, the same seam fire's own
+ * tile is built on, but #316 deliberately did not give it a Studio tile or an
+ * `authoring.paint` declaration this pass — see that feature's own commit for
+ * why) — Law 5 applies here exactly as it does to `ui/no-dead-axis` for
+ * weather: a mask kind with no OWNING TILE doesn't get one just because the
+ * painter's OWN internal kind-picker still lists it.
+ * `PAINT_REACH` below still covers all twelve, because that picker DOES list
+ * all twelve and the tile-less kinds are exactly where a wrong belief
  * has nothing to correct it. Prism gets a real tile despite `graph/
  * passes.js#surface.prism` being a declared `seam` — `authoring.paint` and
  * "does the render pass exist yet" are different questions (`effects/
@@ -72,8 +76,8 @@ import { iconMarkup } from '../../widgets/icon-sprite.js';
  *   'file-only' — the effect resolves a real file URL and never consults
  *                 painted content. Paint saves, and nothing renders.
  *
- * Exhaustive over `MASK_KINDS` on purpose (eleven entries, including the two
- * with no tile). `paintReachOf` falls back to the PESSIMISTIC verdict for an
+ * Exhaustive over `MASK_KINDS` on purpose (twelve entries, including the
+ * three with no tile). `paintReachOf` falls back to the PESSIMISTIC verdict for an
  * id absent here and says "not evaluated" out loud, so a new kind added to
  * the catalog cannot silently inherit a confident wrong answer — the
  * `feedback_seam_default_hides_unwired` shape, refused by making the default
@@ -136,6 +140,21 @@ export const PAINT_REACH = Object.freeze({
   bush: { reach: 'file-only', why: 'Bushes read the mask file only — nothing composites a painted bush layer yet.' },
   // Not rasterized, and no effect reads it. No tile. The painter offers it.
   shadow: { reach: 'file-only', why: 'Nothing reads this mask yet, painted or otherwise.' },
+  // ⭐ `drip` (mythica-machina-press#316) — the SAME worked example as `fire`
+  // just above: `effects/precipitation/precip-subsystem.js#setAuthoredDripPoints`
+  // reads `maskAuthority.getDerived('drip', floor)` through `boot.js#
+  // getDripMaskGrid` (mirroring `getFireMaskGrid` exactly), which composites
+  // painted sources for ANY `rasterize: true` kind regardless of whether an
+  // effect declares `authoring.paint` for it. No tile was added this pass
+  // (out of scope for #316 — the mask is meant to be authored externally,
+  // like every other suffix mask), but the painter's own internal kind-picker
+  // already lists every `MASK_KINDS` id regardless of a tile, the identical
+  // situation `outdoors` is in just above — so this table stays honest about
+  // what painting it anyway would actually do.
+  drip: {
+    reach: 'renders',
+    why: 'Drip spawn points read the painted grid directly, exactly like fire — paint it and it drips.',
+  },
 });
 
 /** Rank used to pick an EFFECT's verdict from its kinds — weakest wins. */

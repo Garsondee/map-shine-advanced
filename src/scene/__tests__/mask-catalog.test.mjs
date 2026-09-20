@@ -98,11 +98,17 @@ export async function run(t) {
   // `meaning` in mask-catalog.js have the full account). `iridescence`
   // joined 2026-09-19 (mythica-machina-press#136), the identical night and
   // identical reason `prism` joined one line above it.
+  // `drip` joined 2026-09-20 (mythica-machina-press#316), positioned right
+  // after `fire` in MASK_KINDS (its closest sibling): its CPU consumer is
+  // `effects/precipitation/drip-edges.js#extractDripMaskPoints`, extracting a
+  // point cloud from the painted region exactly as `fire-spawn-points.js`
+  // does from fire's — the same "a CPU consumer is a consumer" case fire
+  // itself forced the `rasterize`/`ownsPackedAlpha` split over.
   t.ok(
-    'outdoors, fire, specular, window, water, fluid, prism and iridescence are the rasterized kinds',
+    'outdoors, fire, drip, specular, window, water, fluid, prism and iridescence are the rasterized kinds',
     rasterizedKinds()
       .map((k) => k.id)
-      .join(',') === 'outdoors,fire,specular,window,water,fluid,prism,iridescence'
+      .join(',') === 'outdoors,fire,drip,specular,window,water,fluid,prism,iridescence'
   );
   t.ok(
     'fire is rasterized but does NOT own the packed alpha — the two flags are separate questions',

@@ -551,6 +551,12 @@ import {
   writeScenePlayerLightPermissions,
   watchScenePlayerLightPermissions,
   readActivePlayerCarriedLightTokens,
+  // PLAYER VISION-MODE GRADE (mythica-machina-press#77 Stage 2b, #580) — the
+  // per-viewer resolvers `getActivePlayerVisionMode` below reads: which
+  // token is mine, what its mode flag says, am I a GM at all.
+  resolveViewerToken,
+  isViewingUserGM,
+  readTokenPlayerLightMode,
 } from './foundry/index.js';
 import { engageFoundryFallback, getDescribeRenderModeStats } from './diag/render-fallback.js';
 import { registerMarkerSource, getAllMarkerPoints } from './diag/marker-overlay.js';
@@ -652,6 +658,9 @@ import {
   // builder feeding point-light-pool.js's own getPlayerCarriedLightSources
   // injection seam.
   buildPlayerLightSources,
+  // PLAYER VISION-MODE GRADES (mythica-machina-press#77 Stage 2b, #580) — the
+  // pure gate feeding this file's own getActivePlayerVisionMode closure below.
+  resolveActivePlayerVisionModePreset,
 } from './effects/index.js';
 import {
   buildSunShadowsReport,
@@ -4691,6 +4700,30 @@ function install() {
     if (tokenSnapshots.length === 0) return [];
     const { permissions } = readScenePlayerLightPermissions();
     return buildPlayerLightSources(tokenSnapshots, permissions);
+  };
+
+  // PLAYER VISION-MODE GRADE (mythica-machina-press#77 Stage 2b, #580) —
+  // this client's own per-frame answer to "which of the four screen-space
+  // vision grades, if any, should MY present pass apply right now." Mirrors
+  // `getPlayerCarriedLightSources` just above (a live-Foundry-read closure,
+  // recomputed every call, never cached — a scene edit, a token swap or the
+  // GM flipping permissions must show up on the very next frame) but resolves
+  // to a single mode id instead of a light-source array, and — unlike that
+  // one, which has nothing to say about GMs at all — EXCLUDES a GM outright,
+  // the same posture `ui/rooms/player-light-picker.js#paint` already takes at
+  // its own call site (`resolveViewerToken()` itself deliberately does not
+  // make this exclusion — see that resolver's own header).
+  //
+  // vt/ never reaches `game`/`canvas` directly (the `foundry/adapter-only`
+  // wall) — it only ever sees the string (or null) this closure hands it,
+  // via `vt-pan-viewer.js`'s own `pushPlayerVisionMode`.
+  const getActivePlayerVisionMode = () => {
+    if (isViewingUserGM()) return null;
+    const token = resolveViewerToken();
+    if (!token) return null;
+    const mode = readTokenPlayerLightMode(token.document);
+    const { permissions } = readScenePlayerLightPermissions();
+    return resolveActivePlayerVisionModePreset({ isGM: false, mode, permissions });
   };
 
   // THE LIGHTNING data seam (effects/lightning-subsystem.js) — same shape as
@@ -13339,6 +13372,14 @@ function install() {
         // has no token/permission state and stays player-light-free by
         // construction (the pool's own `= null` default).
         getPlayerCarriedLightSources,
+        // PLAYER VISION-MODE GRADE (mythica-machina-press#77 Stage 2b, #580):
+        // each frame, resolves which (if any) of the four screen-space vision
+        // grades THIS client should see, straight into the present-pass
+        // material via `pushPlayerVisionMode`. Same real-scene-only injection
+        // posture as getPlayerCarriedLightSources just above — the torture
+        // fixture has no token/permission state and reads `?.()` as "never
+        // any mode" (grade-present.js's own default).
+        getActivePlayerVisionMode,
         // THE LIGHTNING EFFECT (effects/lightning-subsystem.js): each frame the
         // subsystem schedules/spawns/reaps bolt strands and merges the origin-
         // flash lights into the pool, reading the cascade-resolved enable +

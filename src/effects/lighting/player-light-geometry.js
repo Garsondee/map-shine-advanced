@@ -65,6 +65,40 @@ function playerLightCirclePolygon(cx, cy, radius, segments = 32) {
   return pts;
 }
 
+/**
+ * A carrying token's own live FACING, as a world-space unit vector — the one
+ * new live input the flashlight beam needs beyond position
+ * (mythica-machina-press#579/#77 Stage 2a). Reads Foundry's `TokenDocument.
+ * rotation` (degrees, `common/data/fields.mjs#AngleField`, a real synced
+ * document field every connected client sees identically) — this is
+ * SAMPLING position/rotation data, exactly the same posture Stage 1 already
+ * established for `token.center` feeding a light's `x`/`y`: reading a
+ * document field for "which way is this token facing" is not the same as
+ * writing Foundry's own light-rendering fields, which is what #77's
+ * "Correction" comment rejected.
+ *
+ * CONVENTION, verified against the vendored v14 client source rather than
+ * assumed (`client/canvas/placeables/token.mjs`#`_refreshRotation`:
+ * `this.mesh.angle = this.document.lockRotation ? 0 : this.document.rotation`
+ * — a raw, uncorrected pass-through onto the token sprite's own PIXI
+ * rotation): 0° means the token's own artwork faces "up" — world -Y, since
+ * Foundry's canvas Y grows downward — and the angle increases CLOCKWISE, the
+ * standard compass-bearing convention. `lockRotation` freezes the VISUAL
+ * facing at 0 regardless of the document's stored `rotation` value, so a
+ * locked token's beam always points up/north — matching what a player
+ * actually sees on their own screen, not the (possibly stale) stored number.
+ *
+ * @param {number} rotationDeg - `TokenDocument.rotation`, degrees.
+ * @param {boolean} [lockRotation=false] - `TokenDocument.lockRotation`.
+ * @returns {{x: number, y: number}} a unit vector (or `{x:0,y:-1}`, "up", for
+ *   a non-finite input — never `{x:NaN,y:NaN}`).
+ */
+export function tokenRotationToForwardVector(rotationDeg, lockRotation = false) {
+  const deg = lockRotation ? 0 : Number(rotationDeg);
+  const rad = (Number.isFinite(deg) ? deg : 0) * (Math.PI / 180);
+  return { x: Math.sin(rad), y: -Math.cos(rad) };
+}
+
 /** A stable, position-derived pseudo-seed — same classic GLSL-hash shape as
  * `candle-flame-geometry.js#deriveCandleSeed`/`fire-geometry.js#deriveFireSeed`,
  * so a room of several torches desyncs its flicker the identical way a room
@@ -83,11 +117,18 @@ function deriveTokenSeed(x, y) {
  * `candleFlicker` — see this module's own header for why a second flicker
  * implementation was rejected).
  *
- * `flashlight`: cooler/near-white, longer reach than torch (so the two read
- * as different tools even both being plain pools), NO animation — a genuine
- * omni POOL, not yet a directional beam. `#579`'s own scope (a real SDF
- * cone/beam TSL shader keyed to the token's facing) is explicitly deferred
- * to a follow-up dispatch — see this module's own header.
+ * `flashlight`: cooler/near-white, `radiusPx` is now the beam's own THROW
+ * LENGTH (STAGE 2A, mythica-machina-press#579/#77 — was a plain omni pool's
+ * radius; bumped from 420 to 620 because a beam needs genuine reach to read
+ * as a flashlight rather than a big torch), NO animation, `falloffModel:
+ * 'beam'` — a real SDF cone/beam (`point-light-illumination.js#
+ * buildBeamFalloffNode`), narrow near the bearer and widening with distance,
+ * with a hot core / softer mid / faint rim across its own width. The
+ * `beam*` fields below are that shape's ENTIRE authored surface — one place,
+ * named constants, same discipline this preset block already followed for
+ * torch. Mesh footprint stays a plain wall-clipped circle sized to
+ * `radiusPx` (see `buildBeamFalloffNode`'s own header for why the directional
+ * shape can only live in the shader, never the polygon).
  */
 const PLAYER_LIGHT_MODE_PRESETS = Object.freeze({
   torch: Object.freeze({
@@ -102,14 +143,24 @@ const PLAYER_LIGHT_MODE_PRESETS = Object.freeze({
     animationQuality: 1, // candle-flicker.js tier 1 ("standard") — chaotic guttering, no oval/lean
   }),
   flashlight: Object.freeze({
-    radiusPx: 420,
+    radiusPx: 620,
     ratio: 0.22,
     attenuation01: 0.6,
     luminosity01: 0.4,
     alpha01: 0.55,
     colorHex: '#dcecff',
-    falloffModel: 'inverseSquare',
+    falloffModel: 'beam',
     animated: false,
+    // BEAM SHAPE (Stage 2a) — all fractions of `radiusPx` (the beam's own
+    // local unit-radius space, matching `dist`'s normalization elsewhere in
+    // this pipeline).
+    beamNearHalfWidth01: 0.05, // tight at the bearer's own hand
+    beamFarHalfWidth01: 0.55, // wide open at max reach
+    beamEdgeSoftness01: 0.18, // a soft, not razor, silhouette edge
+    beamLengthFalloffExponent: 1.6, // reach falls off faster than linear
+    beamCoreIntensity: 1.6, // hot core — legitimately brighter than the ambient it mixes toward
+    beamMidIntensity: 1.0,
+    beamRimIntensity: 0.35,
   }),
 });
 
@@ -139,6 +190,7 @@ export function buildOnePlayerLightSource(tokenSnapshot, permissions) {
   if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
   const elevation = Number.isFinite(tokenSnapshot.elevation) ? tokenSnapshot.elevation : 0;
   const seed = deriveTokenSeed(x, y);
+  const isBeam = preset.falloffModel === 'beam';
   return {
     sourceId: `playerLight:${tokenSnapshot.tokenId}`,
     ownerEffectId: 'playerLight',
@@ -154,6 +206,25 @@ export function buildOnePlayerLightSource(tokenSnapshot, permissions) {
     alpha01: preset.alpha01,
     color: hexToRgb01(preset.colorHex),
     falloffModel: preset.falloffModel,
+    // FLASHLIGHT BEAM (Stage 2a) — `null` for every non-beam mode (torch
+    // today). `beamDirection` is the bearer's LIVE facing, re-derived every
+    // call from this frame's own `tokenSnapshot.rotation` (never cached —
+    // the same "recomputed every call" contract this module's own header
+    // already documents for position); `beamShape` is the preset's own
+    // constant shape, read straight through so `point-light-pool.js`'s
+    // material builder can bake it once at entry-creation time.
+    beamDirection: isBeam ? tokenRotationToForwardVector(tokenSnapshot.rotation, tokenSnapshot.lockRotation) : null,
+    beamShape: isBeam
+      ? {
+          nearHalfWidth01: preset.beamNearHalfWidth01,
+          farHalfWidth01: preset.beamFarHalfWidth01,
+          edgeSoftness01: preset.beamEdgeSoftness01,
+          lengthFalloffExponent: preset.beamLengthFalloffExponent,
+          coreIntensity: preset.beamCoreIntensity,
+          midIntensity: preset.beamMidIntensity,
+          rimIntensity: preset.beamRimIntensity,
+        }
+      : null,
     animation: preset.animated
       ? {
           type: 'candleFlicker',

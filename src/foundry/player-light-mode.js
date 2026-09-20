@@ -91,7 +91,15 @@ export async function writeTokenPlayerLightMode(tokenDocument, mode) {
  * Foundry document state (the flag is a synced Token document flag, not a
  * client-local setting).
  *
- * @returns {Array<{tokenId: string, x: number, y: number, elevation: number, mode: string}>}
+ * `rotation`/`lockRotation` (mythica-machina-press#579/#77 Stage 2a) — the
+ * SAME live-read discipline as `x`/`y`: `token.document.rotation` is a real
+ * synced Token-document field (`common/data/fields.mjs#AngleField`, degrees),
+ * read fresh every call, never cached — a flashlight beam must follow the
+ * bearer's live facing exactly as it already follows their live position.
+ * Feeds `effects/lighting/player-light-geometry.js#tokenRotationToForwardVector`;
+ * a non-beam mode (torch) simply ignores both fields.
+ *
+ * @returns {Array<{tokenId: string, x: number, y: number, elevation: number, mode: string, rotation: number, lockRotation: boolean}>}
  */
 export function readActivePlayerCarriedLightTokens() {
   if (typeof canvas === 'undefined' || !canvas?.tokens?.placeables) return [];
@@ -102,12 +110,15 @@ export function readActivePlayerCarriedLightTokens() {
     if (!mode) continue;
     const center = token.center ?? { x: token.document?.x ?? 0, y: token.document?.y ?? 0 };
     const elevation = Number(token.document?.elevation);
+    const rotation = Number(token.document?.rotation);
     out.push({
       tokenId: token.document?.id ?? token.id,
       x: center.x,
       y: center.y,
       elevation: Number.isFinite(elevation) ? elevation : 0,
       mode,
+      rotation: Number.isFinite(rotation) ? rotation : 0,
+      lockRotation: token.document?.lockRotation === true,
     });
   }
   return out;

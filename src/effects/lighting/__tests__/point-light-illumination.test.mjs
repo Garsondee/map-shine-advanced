@@ -19,6 +19,7 @@ import {
   writeLightEdgePoints,
   computeEdgeSoftMarginNormalized,
   computeHeightGate,
+  computeBeamFalloff01,
   buildPointLightIlluminationMaterial,
   MAX_LIGHT_EDGES,
   elevationRank,
@@ -87,6 +88,69 @@ export function run(t) {
   ok("luminosity 0.5 (LightData's default) is the neutral point (exposure 0)", near(computeExposure(0.5), 0));
   ok('luminosity 0 gives exposure -1', near(computeExposure(0), -1));
   ok('luminosity 1 gives exposure 1', near(computeExposure(1), 1));
+
+  // ======================================================================
+  // computeBeamFalloff01 — the flashlight SDF beam (mythica-machina-press#579/
+  // #77 Stage 2a), plain-number half; buildBeamFalloffNode (the TSL mirror)
+  // is exercised further down via a real buildPointLightIlluminationMaterial
+  // construction.
+  // ======================================================================
+  {
+    const BEAM_SHAPE = {
+      nearHalfWidth01: 0.05,
+      farHalfWidth01: 0.55,
+      edgeSoftness01: 0.18,
+      lengthFalloffExponent: 1.6,
+      coreIntensity: 1.6,
+      midIntensity: 1.0,
+      rimIntensity: 0.35,
+    };
+    ok(
+      // axial=0.03 — just past the short "behind the bearer" soft ramp
+      // (0..0.02), so forwardMask has already reached 1 and this reads the
+      // hot core almost undiminished by the separate length falloff.
+      'dead ahead, close to the bearer: bright (the hot core, only barely eased by reach)',
+      near(computeBeamFalloff01({ axial: 0.03, lateral: 0, ...BEAM_SHAPE }), BEAM_SHAPE.coreIntensity, 0.15)
+    );
+    ok(
+      'directly behind the bearer: zero (never lights what it is not pointed at)',
+      computeBeamFalloff01({ axial: -0.5, lateral: 0, ...BEAM_SHAPE }) === 0
+    );
+    ok(
+      'exactly at the bearer, perpendicular to facing: zero (a beam has no sideways throw)',
+      computeBeamFalloff01({ axial: 0, lateral: 0.5, ...BEAM_SHAPE }) === 0
+    );
+    ok(
+      'past the beam edge (lateral far beyond the cone half-width): zero',
+      computeBeamFalloff01({ axial: 0.5, lateral: 10, ...BEAM_SHAPE }) === 0
+    );
+    ok(
+      'at the beam edge the intensity is lower than dead-centre at the SAME reach (soft falloff, not a flat disc)',
+      computeBeamFalloff01({ axial: 0.5, lateral: 0, ...BEAM_SHAPE }) >
+        computeBeamFalloff01({ axial: 0.5, lateral: 0.15, ...BEAM_SHAPE })
+    );
+    ok(
+      'reach falls off with distance along the axis, dead-centre',
+      computeBeamFalloff01({ axial: 0.1, lateral: 0, ...BEAM_SHAPE }) >
+        computeBeamFalloff01({ axial: 0.9, lateral: 0, ...BEAM_SHAPE })
+    );
+    {
+      // The cone WIDENS with reach: a lateral offset that is fully outside
+      // the beam near the bearer is still inside it further out.
+      const nearOffset = computeBeamFalloff01({ axial: 0.05, lateral: 0.3, ...BEAM_SHAPE });
+      const farOffset = computeBeamFalloff01({ axial: 0.9, lateral: 0.3, ...BEAM_SHAPE });
+      ok(
+        'the same lateral offset reads as more inside the beam further from the bearer (a cone, not a cylinder)',
+        (nearOffset === 0 || nearOffset < farOffset) && farOffset > 0
+      );
+    }
+    ok('never returns a negative value', computeBeamFalloff01({ axial: -5, lateral: 5, ...BEAM_SHAPE }) >= 0);
+    ok(
+      'non-finite axial/lateral is total (0), never NaN',
+      computeBeamFalloff01({ axial: NaN, lateral: 0, ...BEAM_SHAPE }) === 0 &&
+        computeBeamFalloff01({ axial: 0.5, lateral: NaN, ...BEAM_SHAPE }) === 0
+    );
+  }
   ok('luminosity above 1 clamps before the remap', near(computeExposure(1.7), computeExposure(1)));
   ok('luminosity below 0 clamps before the remap', near(computeExposure(-0.3), computeExposure(0)));
   ok('non-finite luminosity reads as 0.5 (neutral), never NaN', near(computeExposure(NaN), 0));
@@ -645,6 +709,79 @@ export function run(t) {
       '...and STILL returns the uniform (so a caller can set it without checking which branch built)',
       !!unwired?.uLightExpectedDepth
     );
+  }
+
+  // ======================================================================
+  // buildPointLightIlluminationMaterial — falloffModel: 'beam' (mythica-
+  // machina-press#579/#77 Stage 2a) constructs cleanly with the REAL vendored
+  // TSL (construction-only, same posture as the height-gate block above) and
+  // exposes a real, settable uBeamDirection uniform.
+  // ======================================================================
+  {
+    const { uniform: u3, vec3: v3 } = THREE.TSL;
+    const BEAM_SHAPE = {
+      nearHalfWidth01: 0.05,
+      farHalfWidth01: 0.55,
+      edgeSoftness01: 0.18,
+      lengthFalloffExponent: 1.6,
+      coreIntensity: 1.6,
+      midIntensity: 1.0,
+      rimIntensity: 0.35,
+    };
+    let beamBuilt = null;
+    let beamErr = null;
+    try {
+      beamBuilt = buildPointLightIlluminationMaterial({
+        THREE,
+        uBackgroundColor: u3(v3(0.9, 0.9, 0.9)),
+        uDimColor: u3(v3(0.9, 0.9, 0.9)),
+        uBrightColor: u3(v3(1, 1, 1)),
+        falloffModel: 'beam',
+        beamShape: BEAM_SHAPE,
+      });
+    } catch (e) {
+      beamErr = e;
+    }
+    ok(
+      `a 'beam' falloffModel + beamShape constructs cleanly with the real TSL (${beamErr ? beamErr.message : 'clean'})`,
+      beamErr === null
+    );
+    ok('...and returns uBeamDirection as a real settable uniform', !!beamBuilt?.uBeamDirection);
+
+    // Without beamShape, 'beam' must still construct — the safety-slide
+    // fallback to the plain foundry corona (buildPointLightSharedTerms's own
+    // posture), never a crash from a half-wired caller.
+    let noShapeBuilt = null;
+    let noShapeErr = null;
+    try {
+      noShapeBuilt = buildPointLightIlluminationMaterial({
+        THREE,
+        uBackgroundColor: u3(v3(0.9, 0.9, 0.9)),
+        uDimColor: u3(v3(0.9, 0.9, 0.9)),
+        uBrightColor: u3(v3(1, 1, 1)),
+        falloffModel: 'beam',
+      });
+    } catch (e) {
+      noShapeErr = e;
+    }
+    ok(
+      `'beam' with no beamShape still constructs cleanly (falls back to the foundry corona) (${noShapeErr ? noShapeErr.message : 'clean'})`,
+      noShapeErr === null
+    );
+    ok(
+      '...and uBeamDirection is null (nothing for point-light-pool.js to write)',
+      noShapeBuilt?.uBeamDirection === null
+    );
+
+    // A non-beam light never builds the uniform at all.
+    const plain = buildPointLightIlluminationMaterial({
+      THREE,
+      uBackgroundColor: u3(v3(0.9, 0.9, 0.9)),
+      uDimColor: u3(v3(0.9, 0.9, 0.9)),
+      uBrightColor: u3(v3(1, 1, 1)),
+      falloffModel: 'inverseSquare',
+    });
+    ok('a non-beam light gets uBeamDirection: null', plain.uBeamDirection === null);
   }
 
   // Sanity: this decode module import is exercised (not merely imported and

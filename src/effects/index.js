@@ -77,7 +77,21 @@ export {
   buildPlayerLightSources,
   buildOnePlayerLightSource,
   PLAYER_LIGHT_RENDERED_MODES,
+  tokenRotationToForwardVector,
 } from './lighting/player-light-geometry.js';
+// PLAYER TORCH FLAME + EMBERS (mythica-machina-press#77/#578, Stage 2a) — the
+// pure anchor builder (torch flame body reuses candle's own descriptor
+// shape) and the batched ember-quad vertex math. See player-torch-flame-
+// geometry.js's own header for the full "why".
+export { buildPlayerTorchFlameAnchors, computeTorchEmberArrays } from './player-torch-flame-geometry.js';
+// The torch flame's THREE/TSL glue — the flame body is candle's own builders,
+// re-exported under torch-specific names; the ember batch is genuinely new.
+export {
+  buildTorchFlameGeometry,
+  buildTorchFlameMaterial,
+  buildTorchEmberGeometry,
+  buildTorchEmberMaterial,
+} from './player-torch-flame-render.js';
 export {
   buildEnvironmentalLightMaterials,
   blendSunVisibilityAcrossFloors,

@@ -702,21 +702,25 @@ export { createLightningSubsystem } from './lightning-subsystem.js';
 
 // ROPE & CHAIN (mythica-machina-press#1) — a rope/chain span hanging between
 // two GM-placed tether points, sagging under gravity and swaying in the
-// wind. PHASE 1 (authoring pair + pure geometry/physics) and PHASE 2 (the
-// GPU wind-spring integrator, the ribbon render material and the per-
-// instance CPU subsystem) are both landed — see effects/rope-chain-
+// wind. PHASE 1 (authoring pair + pure geometry/physics), PHASE 2 (the GPU
+// wind-spring integrator, the ribbon render material and the per-instance
+// CPU subsystem) and PHASE 3 (the shadow twin — impliedHeightFraction01,
+// buildRopeChainShadowMaterial, and the shadow lifecycle in
+// rope-chain-subsystem.js) are all landed — see effects/rope-chain-
 // geometry.js's own header for the phase split, and effects/rope-chain-
 // subsystem.js's own header for why this effect is per-instance rather than
 // pooled like lightning/vegetation, and for why it needs no effect-registry
-// manifest/Studio card/graph/passes.js entry to render (Phase 3 territory,
-// not a blocker here). Re-exported here anyway so this file stays the ONE
-// door into effects/, the same rule every other effect's pure half already
-// follows, and so these files are reachable from boot.js
+// manifest/Studio card/graph/passes.js entry to render (still true after
+// Phase 3, which was shadow-casting only — a Studio card and depth-authority
+// occlusion remain future, unscoped work). Re-exported here anyway so this
+// file stays the ONE door into effects/, the same rule every other effect's
+// pure half already follows, and so these files are reachable from boot.js
 // (tools/reachability.mjs's own whole-graph walk).
 export {
   groupRopeChainAnchorsIntoSources,
   ROPE_CHAIN_PRESETS,
   parabolicSag as ropeChainParabolicSag,
+  impliedHeightFraction01 as ropeChainImpliedHeightFraction01,
   modalDisplacement as ropeChainModalDisplacement,
   springChase as ropeChainSpringChase,
   computeModalForcing as ropeChainComputeModalForcing,
@@ -731,7 +735,12 @@ export {
   ROPE_CHAIN_SPRING_MAX_DT_SEC,
   ROPE_CHAIN_SPRING_MAX_AMPLITUDE_PX,
 } from './rope-chain-spring-gpu.js';
-export { buildRopeChainGeometry, refillRopeChainGeometry, buildRopeChainMaterial } from './rope-chain-render.js';
+export {
+  buildRopeChainGeometry,
+  refillRopeChainGeometry,
+  buildRopeChainMaterial,
+  buildRopeChainShadowMaterial,
+} from './rope-chain-render.js';
 export { createRopeChainSubsystem } from './rope-chain-subsystem.js';
 
 // FIRE (docs/planning/Fire.md) — the vertical slab integral. Because the camera

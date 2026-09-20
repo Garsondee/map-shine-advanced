@@ -1,15 +1,47 @@
 /**
- * ROPE & CHAIN — THE CPU SUBSYSTEM (Phase 2, mythica-machina-press#1). Owns
- * every rope/chain SOURCE's own independent lifecycle: its 1x1 ping/pong/
- * publish spring-state render targets, its ribbon geometry/material/mesh,
- * and the per-sync/per-tick uniform + geometry refresh. Mirrors the SHAPE of
- * `lightning-subsystem.js` (explicit injected-dependency factory function,
- * `{sync, tick/dispose}`-style return) and `vegetation-shadow-subsystem.js`
- * (no closure-captured viewer state — every input is named in this factory's
- * own destructured argument, per that file's own "a subsystem is not
- * extracted while it still reads closure state" rule) — but deliberately
- * NOT their POOLING. Read on before changing this file's own Map-of-
- * instances shape.
+ * ROPE & CHAIN — THE CPU SUBSYSTEM (Phase 2 + Phase 3, mythica-machina-
+ * press#1). Owns every rope/chain SOURCE's own independent lifecycle: its
+ * 1x1 ping/pong/publish spring-state render targets, its ribbon geometry/
+ * material/mesh (Phase 2) and its SHADOW twin mesh/material (Phase 3,
+ * `applyShadowUniforms` below), and the per-sync/per-tick uniform + geometry
+ * refresh for both. Mirrors the SHAPE of `lightning-subsystem.js` (explicit
+ * injected-dependency factory function, `{sync, tick/dispose}`-style return)
+ * and `vegetation-shadow-subsystem.js` (no closure-captured viewer state —
+ * every input is named in this factory's own destructured argument, per that
+ * file's own "a subsystem is not extracted while it still reads closure
+ * state" rule) — but deliberately NOT their POOLING. Read on before changing
+ * this file's own Map-of-instances shape.
+ *
+ * PHASE 3 ADDS: a second mesh/material per instance (`rec.shadowMesh`/
+ * `rec.shadowMaterial`/`rec.shadowUniforms`, built in `buildInstance`
+ * alongside the main ones, torn down alongside them in `destroyInstance`),
+ * sharing the SAME `BufferGeometry` object as the main mesh (see "THE SHADOW
+ * SHARES THE MAIN MESH'S OWN GEOMETRY" below), and `applyShadowUniforms` —
+ * the per-sync CPU resolve of this instance's own `shadowHandle.forCaster()`
+ * call. See `rope-chain-render.js#buildRopeChainShadowMaterial`'s own header
+ * for the shader-side design; this file only owns lifecycle + the CPU-side
+ * uniform push.
+ *
+ * ============================================================================
+ * THE SHADOW SHARES THE MAIN MESH'S OWN GEOMETRY — CONFIRMED, NOT ASSUMED
+ * ============================================================================
+ * `rec.shadowMesh` is a SEPARATE `THREE.Mesh` built from the SAME `geometry`
+ * object `rec.mesh` already uses (`new THREE.Mesh(rec.geometry,
+ * shadowBundle.material)`), never a clone. This is safe with NO change to
+ * `refillGeometryFor`/`refillRopeChainGeometry`/`bakedShapeChanged`: every
+ * one of those either mutates an EXISTING `BufferAttribute`'s `.array` in
+ * place (`attr.array.set(array); attr.needsUpdate = true`) or calls
+ * `geometry.setAttribute(...)`/`geometry.setIndex(...)`/
+ * `geometry.setDrawRange(...)` directly on the ONE shared `geometry` object —
+ * and since `rec.mesh.geometry === rec.shadowMesh.geometry` (literally the
+ * same object reference, not two geometries that happen to match), a THREE
+ * `Mesh` reads its geometry's attributes/index/draw-range fresh at DRAW time,
+ * every frame, from whatever the geometry object currently holds. There is
+ * no per-mesh cached copy anywhere in this path. Disposal follows the same
+ * logic in reverse: `destroyInstance` calls `rec.geometry.dispose()` exactly
+ * ONCE (not once per mesh) — disposing the shared geometry tears down the
+ * GPU buffers both meshes were reading, and disposing it twice would be
+ * redundant, not merely wasteful.
  *
  * ============================================================================
  * PER-INSTANCE, NOT POOLED — A DELIBERATE, SCOPED EXCEPTION
@@ -94,18 +126,55 @@
  * injected callback instead).
  *
  * ============================================================================
- * KNOWN, HONEST GAP — NO DEPTH-AUTHORITY OCCLUSION THIS PHASE
+ * KNOWN, HONEST GAP — STILL NO DEPTH-AUTHORITY OCCLUSION (Phase 3 does not
+ * change this)
  * ============================================================================
  * Unlike lightning/candle, this material never wires the depth-authority
  * gate (`lighting/point-light-illumination.js#buildDepthHeightGateNode`) —
- * the Phase 2 brief scoped shadow-casting to Phase 3 and never asked for
- * elevation-based occlusion either, so a rope drawn on one floor will not
- * correctly fade behind a higher floor's opaque content the way lightning's
- * bolt does. `groupRopeChainAnchorsIntoSources` already carries `elevation`
- * (read by `getRopeChainAnchors` in boot.js, mirroring
- * `getLightningRenderState`'s own `resolveAnchorElevationWorldUnits` call)
- * for exactly this purpose, unused by this phase — a straightforward Phase 3
- * follow-up, not a redesign.
+ * the Phase 2 brief scoped elevation-based occlusion out entirely, so a rope
+ * drawn on one floor will not correctly fade behind a higher floor's opaque
+ * content the way lightning's bolt does. `groupRopeChainAnchorsIntoSources`
+ * already carries `elevation` (read by `getRopeChainAnchors` in boot.js,
+ * mirroring `getLightningRenderState`'s own `resolveAnchorElevationWorldUnits`
+ * call), which Phase 3 now DOES consume — but only as `heightPx` for the
+ * SHADOW's own throw (`applyShadowUniforms` below), a completely different
+ * use from the depth-authority occlusion gap named here. That gap is still
+ * open, unchanged by Phase 3, and remains a straightforward future follow-up,
+ * not a redesign.
+ *
+ * ============================================================================
+ * THE SHADOW'S RENDER ORDER — Case 1, mirroring
+ * `vegetation-shadow-subsystem.js#VEG_SHADOW_RENDER_ORDER_MAGNITUDE`'s own
+ * two-case reasoning
+ * ============================================================================
+ * That constant's own doc distinguishes two cases: Case 2 (a shadow drawn
+ * onto a SEPARATE ground item, which must draw AFTER that ground so the
+ * ground doesn't overdraw and erase it) and Case 1 (a shadow drawn under its
+ * OWN canopy/caster, which must draw BEFORE that caster so the caster's own
+ * opaque fill correctly overdraws the shadow where they overlap). A rope's
+ * shadow is Case-1-shaped: it draws on the floor below/behind the rope
+ * itself, and the rope is never "the ground" for anything else the way a
+ * vegetation tile's own art can be. So `rec.shadowMesh.renderOrder =
+ * rec.mesh.renderOrder - ROPE_CHAIN_SHADOW_RENDER_ORDER_MAGNITUDE` (a locally
+ * owned constant, not an import of vegetation's — same "duplicate a small
+ * owned constant rather than cross-import" posture this file's own
+ * `ROPE_CHAIN_SPRING_MAX_DT_SEC` already takes relative to vegetation's
+ * `VEG_SPRING_MAX_DT_SEC`), set once at instance build time in `buildInstance`
+ * (the main mesh's own `renderOrder` is never changed after construction
+ * today, so there is nothing for a later sync to re-derive).
+ *
+ * ⚠️ THIS `renderOrder` ONLY WORKS BECAUSE THE SHADOW MATERIAL IS ALSO
+ * `transparent = false` — see `rope-chain-render.js`'s own module header,
+ * "RENDER ORDER VS. THE TRANSPARENCY QUEUE", for a real bug this caught:
+ * unlike vegetation's canopy (always `transparent = true`), the rope's own
+ * material is `transparent = false`, and THREE's renderer always finishes
+ * its ENTIRE opaque render list before starting the transparent one,
+ * regardless of `renderOrder` — a `transparent = true` shadow would have
+ * ALWAYS drawn after the (opaque) rope no matter what `renderOrder` said,
+ * painting over it instead of under it. `buildRopeChainShadowMaterial` keeps
+ * the shadow in the SAME opaque list via `CustomBlending` (reproducing
+ * ordinary alpha blending's exact GPU factors) instead of relying on
+ * `NormalBlending` + `transparent = true`.
  *
  * @module effects/rope-chain-subsystem
  */
@@ -123,7 +192,12 @@ import {
   buildRopeChainSpringZeroMaterial,
   ROPE_CHAIN_SPRING_MAX_DT_SEC,
 } from './rope-chain-spring-gpu.js';
-import { buildRopeChainGeometry, refillRopeChainGeometry, buildRopeChainMaterial } from './rope-chain-render.js';
+import {
+  buildRopeChainGeometry,
+  refillRopeChainGeometry,
+  buildRopeChainMaterial,
+  buildRopeChainShadowMaterial,
+} from './rope-chain-render.js';
 
 const log = createLogger('RopeChain');
 
@@ -137,6 +211,34 @@ const log = createLogger('RopeChain');
  * verts/instance).
  */
 const ROPE_CHAIN_POINTS_PER_SPAN = 32;
+
+/**
+ * PHASE 3, JUDGMENT CALL — the shadow's own darkness (`shadowHandle.forCaster`'s
+ * `strength01` input), BEFORE atmospheric fading. The `ropeChain` anchor kind
+ * has no authored `shadowStrength` param yet (`scene/anchor-catalog.js`'s own
+ * schema — checked directly, not assumed: `role`/`linkId`/`preset`/`sagPx`/
+ * `thicknessPx`/`elevation`/`windAffected`/`color`/`floorVisibility`, nothing
+ * shadow-related), unlike vegetation's own per-instance `params.shadowStrength`.
+ * 0.6 is a reasonable, unremarkable default — neither a barely-there smudge
+ * nor a full black cutout — picked the same way this file's own
+ * `ROPE_CHAIN_PRESETS.rope`/`.chain` starting values were: a sane starting
+ * point for live tuning, not a derived number. A future phase could expose
+ * this as a real `ropeChain` anchor param (mirroring vegetation's own) if the
+ * author wants per-span control; until then every instance shares this one
+ * constant.
+ */
+const ROPE_CHAIN_SHADOW_STRENGTH_DEFAULT = 0.6;
+
+/**
+ * PHASE 3 — how far the shadow mesh's `renderOrder` sits BELOW its own rope's,
+ * so the rope's own opaque fill correctly overdraws the shadow where they
+ * overlap. See this file's own header, "THE SHADOW'S RENDER ORDER", for the
+ * Case-1-vs-Case-2 reasoning this mirrors from
+ * `vegetation-shadow-subsystem.js#VEG_SHADOW_RENDER_ORDER_MAGNITUDE` (same
+ * magnitude value, a separately owned constant rather than a cross-import —
+ * see that section's own note).
+ */
+const ROPE_CHAIN_SHADOW_RENDER_ORDER_MAGNITUDE = 0.2;
 
 function num(v, fallback) {
   const n = Number(v);
@@ -185,6 +287,16 @@ function num(v, fallback) {
  *   a complete start+end anchor pair IS this effect's own on/off switch.
  *   Default-empty (via the `??=` at the `startVtPanViewer` call site) means
  *   an un-wired caller renders no ropes.
+ * @param {() => object} args.getShadowHandle - PHASE 3. ⚠️ A GETTER, not a
+ *   value — the SAME "getters vs values" pattern `getWindHandle` above takes,
+ *   for the identical reason: `vt-pan-viewer.js`'s own `shadowHandle` local is
+ *   REASSIGNED every time the sky changes (`shadowHandle = createShadowHandle
+ *   ({...})` — a handle is frozen at construction, a rebake mints a new one).
+ *   A captured value would freeze every rope's shadow at whatever sky existed
+ *   when this subsystem was constructed — `vegetation-shadow-subsystem.js`'s
+ *   own module header names this exact trap. Called from `applyShadowUniforms`
+ *   only, itself called from `sync()` (via `buildInstance`/`updateInstance`),
+ *   long after every relevant binding in `vt-pan-viewer.js` is initialized.
  * @returns {{sync:()=>void, tick:(nowMs:number, dtSec:number)=>void, dispose:()=>void}}
  */
 export function createRopeChainSubsystem({
@@ -195,6 +307,7 @@ export function createRopeChainSubsystem({
   uGlobalTimeMs,
   getWindHandle,
   getRopeChainAnchors,
+  getShadowHandle,
 }) {
   /** @type {Map<string, object>} linkId -> InstanceRecord */
   const instances = new Map();
@@ -269,13 +382,53 @@ export function createRopeChainSubsystem({
 
   /** Push thickness/taper/colour onto the ribbon material's own uniforms —
    * pure uniform writes; `thicknessPx`/`color` are never baked into the
-   * geometry (only sagPx and the endpoints are — see `bakedShapeChanged`). */
+   * geometry (only sagPx and the endpoints are — see `bakedShapeChanged`).
+   *
+   * PHASE 3: also mirrors thickness/taper (never colour — the shadow has no
+   * `uColor`, it is flat black) onto the SHADOW material's own uniforms —
+   * see `rope-chain-render.js#buildRopeChainShadowMaterial`'s own doc for why
+   * this is a mirrored VALUE, not a shared uniform node: the shadow must
+   * always be exactly as wide as the rope that casts it. */
   function applyRenderUniforms(rec) {
     const preset = ROPE_CHAIN_PRESETS[rec.source.preset] ?? ROPE_CHAIN_PRESETS.rope;
-    rec.uniforms.uThicknessPx.value = num(rec.source.thicknessPx, 20);
+    const thicknessPx = num(rec.source.thicknessPx, 20);
+    rec.uniforms.uThicknessPx.value = thicknessPx;
     rec.uniforms.uTaper.value = preset.taper;
     const [r, g, b] = hexToRgb01(rec.source.color);
     rec.uniforms.uColor.value.set(r, g, b);
+
+    rec.shadowUniforms.uThicknessPx.value = thicknessPx;
+    rec.shadowUniforms.uTaper.value = preset.taper;
+  }
+
+  /**
+   * PHASE 3 — push this frame's shadow throw into the shadow ribbon's own
+   * uniforms. ONE `forCaster()` call per instance, at the anchor's own
+   * `elevation` — EXACT, not approximate, for every point along the span
+   * (`rope-chain-render.js#buildRopeChainShadowMaterial`'s own header has the
+   * linearity argument), because the shadow's own vertex shader does the rest
+   * with a per-vertex `impliedHeightFraction01` scale. Called from `sync()`
+   * (via `buildInstance`/`updateInstance`) rather than from `tick()` — `sync()`
+   * already runs once per frame in the viewer's own loop (same cadence
+   * `vegetation-shadow-subsystem.js#syncUniforms` uses), and this keeps
+   * `tick()` scoped to just the GPU spring-integrator ping-pong, and `sync()`
+   * scoped to "reconcile instances + push cheap CPU-resolved uniforms" — the
+   * same split this file already draws between `applyPhysicsUniforms`/
+   * `applyRenderUniforms` (also sync-driven) and the spring integration
+   * itself (tick-driven). Cheap enough (one `forCaster()` call, a handful of
+   * uniform writes) to call unconditionally every sync, matching this file's
+   * own "recomputing unconditionally is simpler than tracking what changed"
+   * posture (see `computeRopeChainWindProbes`'s own doc for the identical
+   * argument).
+   */
+  function applyShadowUniforms(rec) {
+    const cast = getShadowHandle().forCaster({
+      heightPx: rec.source.elevation,
+      strength01: ROPE_CHAIN_SHADOW_STRENGTH_DEFAULT,
+    });
+    rec.shadowUniforms.uCastOffsetPx.value.set(cast.offsetX, cast.offsetY);
+    rec.shadowUniforms.uStrength01.value = cast.strength01;
+    rec.shadowUniforms.uPenumbraPx.value = cast.penumbraPx;
   }
 
   /** Re-point the spring integrator's own probe/perpendicular uniforms at a
@@ -323,7 +476,8 @@ export function createRopeChainSubsystem({
   }
 
   /** A `linkId` newly present in `sources` — allocate its trio, bake its
-   * geometry, build its material, add its mesh to `scene`. */
+   * geometry, build its material AND its Phase 3 shadow material, add both
+   * meshes to `scene`. */
   function buildInstance(source) {
     const pingRT = allocator.create(`ropeChain.${source.linkId}.ping`, describeSpringRT());
     const pongRT = allocator.create(`ropeChain.${source.linkId}.pong`, describeSpringRT());
@@ -346,6 +500,22 @@ export function createRopeChainSubsystem({
     mesh.frustumCulled = false;
     scene.add(mesh);
 
+    // PHASE 3 — the shadow twin. SAME `geometry` object as `mesh` (never a
+    // clone — see this file's own header, "THE SHADOW SHARES THE MAIN MESH'S
+    // OWN GEOMETRY", for why that is safe), a DIFFERENT material, a DIFFERENT
+    // Mesh instance. `renderOrder` set once here, at build time: Case 1 (this
+    // file's own header, "THE SHADOW'S RENDER ORDER") — the shadow must draw
+    // BEFORE its own rope, so the rope's opaque fill correctly overdraws it.
+    const shadowBundle = buildRopeChainShadowMaterial({
+      THREE,
+      pointsPerSpan: ROPE_CHAIN_POINTS_PER_SPAN,
+      publishTexture: publishRT.texture,
+    });
+    const shadowMesh = new THREE.Mesh(geometry, shadowBundle.material);
+    shadowMesh.frustumCulled = false;
+    shadowMesh.renderOrder = mesh.renderOrder - ROPE_CHAIN_SHADOW_RENDER_ORDER_MAGNITUDE;
+    scene.add(shadowMesh);
+
     const rec = {
       linkId: source.linkId,
       source,
@@ -359,17 +529,22 @@ export function createRopeChainSubsystem({
       mesh,
       material: renderBundle.material,
       uniforms: renderBundle.uniforms,
+      shadowMesh,
+      shadowMaterial: shadowBundle.material,
+      shadowUniforms: shadowBundle.uniforms,
     };
     buildSpringMaterialsFor(rec);
     applyPhysicsUniforms(rec);
     applyRenderUniforms(rec);
+    applyShadowUniforms(rec);
     return rec;
   }
 
   /** A `linkId` present in both the Map and this sync's `sources` — update
-   * IN PLACE. Never rebuilds the RTs/material/mesh (which would reset the
+   * IN PLACE. Never rebuilds the RTs/materials/meshes (which would reset the
    * live spring state to rest every time a GM nudges an unrelated slider) —
-   * only the geometry (if the baked shape changed) and uniforms refresh. */
+   * only the geometry (if the baked shape changed, shared by both meshes)
+   * and uniforms (main AND shadow) refresh. */
   function updateInstance(rec, source) {
     const shapeChanged = bakedShapeChanged(rec.source, source);
     rec.source = source;
@@ -377,19 +552,29 @@ export function createRopeChainSubsystem({
     updateProbeUniforms(rec);
     applyPhysicsUniforms(rec);
     applyRenderUniforms(rec);
+    applyShadowUniforms(rec);
   }
 
-  /** A `linkId` no longer present in `sources` — tear down its mesh/
-   * geometry/material/spring materials and release its render targets.
-   * `allocator.dispose(rt)` is this codebase's one release convention
-   * (`graph/three-allocator.js` has no separate `release`) — confirmed by
-   * grepping every other `effects/*-subsystem.js` file's own teardown path
-   * before writing this. */
+  /** A `linkId` no longer present in `sources` — tear down both meshes/the
+   * shared geometry/both materials/spring materials and release its render
+   * targets. `allocator.dispose(rt)` is this codebase's one release
+   * convention (`graph/three-allocator.js` has no separate `release`) —
+   * confirmed by grepping every other `effects/*-subsystem.js` file's own
+   * teardown path before writing this.
+   *
+   * PHASE 3: `rec.geometry.dispose()` is called exactly ONCE even though TWO
+   * meshes (`rec.mesh` and `rec.shadowMesh`) read it — it is the SAME shared
+   * object (see this file's own header), so disposing it once tears down
+   * both meshes' GPU buffers; a second call would be redundant, not merely
+   * wasteful. `rec.shadowMaterial`, by contrast, is a genuinely separate
+   * object from `rec.material` and needs its own `.dispose()`. */
   function destroyInstance(rec) {
     try {
       scene.remove(rec.mesh);
+      scene.remove(rec.shadowMesh);
       rec.geometry.dispose();
       rec.material.dispose();
+      rec.shadowMaterial.dispose();
       rec.springMaterials?.dispose();
       allocator.dispose(rec.pingRT);
       allocator.dispose(rec.pongRT);
@@ -488,7 +673,8 @@ export function createRopeChainSubsystem({
    * (no established convention to hook — `vegetation-shadow-subsystem.js`'s
    * own header records the identical gap for its meshes); provided for
    * symmetry with every other subsystem's own `dispose()`, and for a future
-   * Studio "Stop/Restart" control (Phase 3) to call. */
+   * Studio "Stop/Restart" control (still unbuilt after Phase 3 — this phase
+   * was shadow-casting only) to call. */
   function dispose() {
     for (const rec of instances.values()) destroyInstance(rec);
     instances.clear();

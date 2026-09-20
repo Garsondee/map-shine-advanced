@@ -16,8 +16,14 @@
  * and the per-instance CPU subsystem (`rope-chain-subsystem.js`) — see each
  * file's own header. This module gained exactly one new pure export for
  * Phase 2 ({@link computeRopeChainWindProbes}) and is otherwise unchanged.
- * Still nothing GPU-shaped lives here, on purpose. Phase 3 (shadow twin,
- * Studio UI card) is not built yet.
+ * PHASE 3 (shadow twin, same day) added exactly one more pure export,
+ * {@link impliedHeightFraction01} — the normalized 0..1 "how far above the
+ * ground is this point of the curve" shape the shadow's vertex shader scales
+ * its throw by (see `rope-chain-render.js#buildRopeChainShadowMaterial`'s own
+ * header for the full argument for why ONE `forCaster()` call at the anchor's
+ * own `elevation`, scaled per-vertex by this function, is exact rather than
+ * approximate). Still nothing GPU-shaped lives here, on purpose. The Studio
+ * UI card remains unbuilt (out of Phase 3's own scope — shadow-casting only).
  *
  * ============================================================================
  * WHY THIS MIRRORS lightning-geometry.js SO CLOSELY
@@ -255,6 +261,37 @@ export const ROPE_CHAIN_PRESETS = Object.freeze({
  */
 export function parabolicSag(s, sagPx) {
   return 4 * sagPx * s * (1 - s);
+}
+
+/**
+ * PHASE 3 — the normalized 0..1 "implied height above the ground" along the
+ * span's own arclength, for the shadow twin's per-vertex throw scale (see
+ * `rope-chain-render.js#buildRopeChainShadowMaterial`'s own header for the
+ * full design).
+ *
+ * A rope has only ONE authored height (`elevation`, at the anchors — the
+ * candle/lightning "height off floor" convention: `scene/anchor-catalog.js`'s
+ * own `ropeChain.elevation` doc). There is no separate, authored per-point
+ * height curve, and there cannot be one from a real vertical sag either: the
+ * visible droop is a LATERAL bow standing in for a true vertical sag (this
+ * file's own header, and `buildRopeChainRibbonArrays`'s "GRAVITY SAG READS AS
+ * A LATERAL BOW" comment — a top-down view of a real vertical sag would be
+ * invisible from directly overhead, which is why the sag is faked sideways in
+ * the first place). So there is no per-point Z-height to read anywhere in
+ * this effect's data model.
+ *
+ * Instead, this reuses the SAME parabolic shape family that already models
+ * the sag, at UNIT amplitude: `1 - parabolicSag(s, 1)`. That is 1 (full
+ * anchor height) at `s=0` and `s=1`, and 0 (ground level) at `s=0.5` — the
+ * sag's own lowest point — matching a real hanging chain's shadow, which sits
+ * tight to the chain at its lowest point and is most offset near the
+ * elevated mounts.
+ *
+ * @param {number} s - arclength fraction along the span, 0..1.
+ * @returns {number} 1 at the anchors (s=0, s=1), 0 at the sag's lowest point (s=0.5).
+ */
+export function impliedHeightFraction01(s) {
+  return 1 - parabolicSag(s, 1);
 }
 
 // ============================================================================

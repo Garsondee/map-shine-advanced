@@ -36,8 +36,19 @@
 import { buildGradeNode, IDENTITY_GRADE } from './grade-ops.js';
 import { buildOutdoorsGate } from '../lighting/environmental-light.js';
 import { STYLIZE_LOOK_NAMES } from '../stylize.js';
+// PLAYER VISION-MODE GRADE (mythica-machina-press#77 Stage 2b, #580) — an
+// intra-zone sibling import (`effects/vision/`), same "both live under
+// effects/" allowance `environmental-light.js`'s own header already uses for
+// its `../fluid/fluid-render.js` import. See that module's own header for
+// the full "why here, not vision-mask-render.js/environmental-light.js"
+// reasoning — the short version: this is the LAST fullscreen pass before the
+// canvas, so it sees the fog gate and bloom's own work already done, and its
+// `buildStylizeNode`/`currentStyle` pattern just below is the EXACT
+// structural precedent this hook copies.
+import { buildPlayerVisionGradeNode, PLAYER_VISION_GRADE_MODE_KEYS } from '../vision/player-vision-grade-render.js';
 
 const STYLE_NAMES_SAFE = new Set(STYLIZE_LOOK_NAMES);
+const PLAYER_VISION_MODE_NAMES_SAFE = new Set(PLAYER_VISION_GRADE_MODE_KEYS);
 
 /** Make the grade's uniform nodes (the primary ops + the live LUT strength). */
 function makeGradeUniforms(TSL, withTail) {
@@ -140,6 +151,21 @@ export function buildGradePresentMaterial({
   let currentStyle = 'none';
   const uStylizeAmount = uniform(float(0));
 
+  /** The player vision-mode grade currently BAKED into the fragment
+   * (mythica-machina-press#77 Stage 2b) — same "different Fn per choice, so
+   * a compile-time rebuild" reasoning as `currentStyle` right above, and
+   * `'none'` is the identity exactly like `currentStyle`'s own default. This
+   * one is PER-VIEWING-CLIENT, never GM-authored, so nothing here reads a
+   * cascade/registry value — `setPlayerVisionMode` below is called directly
+   * from a live per-frame closure (`grade-present.js`'s own header, and
+   * `player-vision-grade-render.js`'s header, have the full reasoning). */
+  let currentPlayerVisionMode = 'none';
+  /** Milliseconds, pushed every frame — drives grain/scan animation in the
+   * active modes. A plain uniform, not a rebuild trigger: only the MODE
+   * choice rebuilds the fragment, matching `uStylizeAmount`'s own split
+   * between "structural choice" (rebuild) and "live value" (uniform only). */
+  const uPlayerVisionTimeMs = uniform(float(0));
+
   /**
    * The Stylize effect's per-style colour transform, applied to the fully
    * graded/tone-mapped/LUT'd colour (i.e. strictly AFTER Colour Grade's own
@@ -200,7 +226,23 @@ export function buildGradePresentMaterial({
     // mix entirely — byte-identical to before this effect existed, same
     // "omitted input compiles to nothing" contract as `lutTexture` above.
     const styled = buildStylizeNode(gradedArt, currentStyle);
-    const finalRgb = styled ? mix(gradedArt, styled, uStylizeAmount) : gradedArt;
+    const afterStylize = styled ? mix(gradedArt, styled, uStylizeAmount) : gradedArt;
+    // PLAYER VISION-MODE GRADE — strictly LAST, after Colour Grade's own
+    // tail AND Stylize, since this is the viewing client's own personal
+    // device/eye filter over whatever the shot already looks like (see
+    // `player-vision-grade-render.js`'s header). `null` (mode 'none', the
+    // overwhelming common case — no GM, no picked mode, or the scene
+    // disallows it) skips the mix entirely, same no-op contract as `styled`
+    // just above: a frame with no active vision mode pays nothing extra here
+    // beyond the one `currentPlayerVisionMode !== 'none'` JS-time branch.
+    const visionGraded = buildPlayerVisionGradeNode({
+      THREE,
+      rgb: afterStylize,
+      uv: uv(),
+      mode: currentPlayerVisionMode,
+      timeMs: uPlayerVisionTimeMs,
+    });
+    const finalRgb = visionGraded ?? afterStylize;
     material.fragmentNode = vec4(finalRgb, presentTexNode.a);
     material.needsUpdate = true;
   }
@@ -224,6 +266,30 @@ export function buildGradePresentMaterial({
         rebuildFragment();
       }
       uStylizeAmount.value = Number.isFinite(Number(amount)) ? Math.min(1, Math.max(0, Number(amount))) : 0;
+    },
+    /**
+     * Push this frame's active player vision-mode grade (mythica-machina-
+     * press#77 Stage 2b) — `mode` is the CALLER's already-gated answer
+     * (`effects/vision/player-vision-modes.js#resolveActivePlayerVisionModePreset`'s
+     * result, threaded through `boot.js`'s injected per-frame closure and
+     * `vt-pan-viewer.js`'s own `pushPlayerVisionMode`), never resolved here —
+     * this setter only knows "which of the four names, or none" and "what
+     * time is it," the same division of labour `setStylize` already has
+     * between the cascade (elsewhere) and the uniform push (here). Rebuilds
+     * ONLY if the mode actually changed (compile-time, same posture as
+     * `setStylize`'s own `currentStyle` handling); `timeMs` alone never
+     * rebuilds. An unrecognized/omitted mode is treated as `'none'` — fails
+     * closed to "no grade" rather than risking a stale mode string wedging a
+     * viewer into a permanent tint.
+     * @param {string|null} mode @param {number} timeMs
+     */
+    setPlayerVisionMode: (mode, timeMs) => {
+      const next = PLAYER_VISION_MODE_NAMES_SAFE.has(mode) ? mode : 'none';
+      if (next !== currentPlayerVisionMode) {
+        currentPlayerVisionMode = next;
+        rebuildFragment();
+      }
+      uPlayerVisionTimeMs.value = Number.isFinite(Number(timeMs)) ? Number(timeMs) : 0;
     },
     /**
      * Push the artistic grade. `gradeParams` are the primary ops; `tail` is

@@ -16,11 +16,12 @@
  * `scene-intro-zoom.js#runSceneIntroZoom` already established for its own,
  * identical reason.
  *
- * ⚠️ ALL SIX MODES ARE PICKABLE (when the scene allows them), EVEN THOUGH
- * ONLY TORCH/FLASHLIGHT RENDER ANYTHING YET. Picking a vision mode still
- * writes the token's own flag (so Stage 2's real render has something to key
- * off later) — this module labels the other four honestly rather than
- * hiding them or silently pretending they work.
+ * ⚠️ ALL SIX MODES ARE PICKABLE (when the scene allows them) AND ALL SIX NOW
+ * RENDER SOMETHING (Stage 2b, mythica-machina-press#77/#580) — Torch/
+ * Flashlight as real lights everyone sees, the other four as a real
+ * screen-space grade visible only to this token's own viewer. The tooltip
+ * below says which kind each chip is rather than lumping both under one
+ * "rendered" label.
  *
  * @module ui/rooms/player-light-picker
  */
@@ -33,17 +34,23 @@ import {
   readScenePlayerLightPermissions,
 } from '../../foundry/index.js';
 
-/** The six modes, in display order, with which ones Stage 1 actually
- * renders — a local, UI-owned copy (see `remote/player-light-board.js`'s
- * own identical `MODE_ROWS` for why this isn't a shared import: the two
- * lists answer different questions that happen to share six strings today). */
+/** The six modes, in display order, with WHAT each one actually renders —
+ * a local, UI-owned copy (see `remote/player-light-board.js`'s own identical
+ * `MODE_ROWS` for why this isn't a shared import: the two lists answer
+ * different questions that happen to share six strings today). All six
+ * render something as of Stage 2b (mythica-machina-press#77, #580):
+ * `'light'` = a real MSA-rendered light everyone at the table sees
+ * (Torch/Flashlight, Stage 2a); `'grade'` = a real MSA screen-space colour
+ * grade visible ONLY to this token's own viewer (the other four,
+ * `effects/vision/player-vision-grade-render.js`) — different enough in
+ * kind to say so in the tooltip rather than lumping both under "rendered". */
 const MODE_ROWS = Object.freeze([
-  { key: 'torch', label: 'Torch', rendered: true },
-  { key: 'flashlight', label: 'Flashlight', rendered: true },
-  { key: 'nightVision', label: 'Night Vision', rendered: false },
-  { key: 'lowLight', label: 'Low-light Vision', rendered: false },
-  { key: 'infravision', label: 'Infravision', rendered: false },
-  { key: 'activeInfravision', label: 'Active Infravision', rendered: false },
+  { key: 'torch', label: 'Torch', kind: 'light' },
+  { key: 'flashlight', label: 'Flashlight', kind: 'light' },
+  { key: 'nightVision', label: 'Night Vision', kind: 'grade' },
+  { key: 'lowLight', label: 'Low-light Vision', kind: 'grade' },
+  { key: 'infravision', label: 'Infravision', kind: 'grade' },
+  { key: 'activeInfravision', label: 'Active Infravision', kind: 'grade' },
 ]);
 
 function pill(text, title, pressed, onClick) {
@@ -120,11 +127,13 @@ export function renderPlayerLightPicker(container) {
     chipRow.className = 'msa-wx-chips';
     for (const row of allowedRows) {
       const pressed = row.key === currentMode;
-      const text = row.rendered ? row.label : `${row.label} (visual coming soon)`;
-      const chipTitle = row.rendered
-        ? `${row.label} — a real light that follows your token.`
-        : `${row.label} — selectable now, but nothing renders for it yet; the visual treatment is a later build.`;
-      chipRow.appendChild(pill(text, chipTitle, pressed, () => void setMode(token.document, row.key, currentMode)));
+      const chipTitle =
+        row.kind === 'light'
+          ? `${row.label} — a real light that follows your token, visible to everyone at the table.`
+          : `${row.label} — a real screen-space grade only YOUR view gets; nobody else at the table sees it.`;
+      chipRow.appendChild(
+        pill(row.label, chipTitle, pressed, () => void setMode(token.document, row.key, currentMode))
+      );
     }
     body.appendChild(chipRow);
     if (currentMode && !allowedRows.some((r) => r.key === currentMode)) {

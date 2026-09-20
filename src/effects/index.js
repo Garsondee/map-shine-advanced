@@ -189,6 +189,16 @@ export {
   clipPolygonByDoorLeaves,
   applyDoorLeafOcclusion,
 } from './vision/door-leaf-occlusion.js';
+// PLAYER VISION-MODE GRADES (mythica-machina-press#77 Stage 2b, #580) — the
+// pure gate/preset half (`grade-present.js`'s own `setPlayerVisionMode`
+// consumes the TSL half directly, not through this barrel — same "the
+// renderer-facing builder is a direct import, the pure/data half is re-
+// exported here" split `buildPlayerLightSources` above already follows).
+export {
+  VISION_MODE_PRESETS,
+  PLAYER_VISION_GRADE_MODE_KEYS,
+  resolveActivePlayerVisionModePreset,
+} from './vision/player-vision-modes.js';
 export {
   buildRegionRectangleMaterial,
   buildRegionEllipseMaterial,

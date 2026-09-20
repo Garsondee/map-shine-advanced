@@ -1215,6 +1215,17 @@ export async function startVtPanViewer({
   // undefined-safe there (`getFireLightSources`'s own default) so an
   // un-wired caller (tests, the torture fixture) still constructs.
   getPlayerCarriedLightSources,
+  // PLAYER VISION-MODE GRADE (mythica-machina-press#77 Stage 2b, #580) —
+  // boot.js's own per-frame closure: resolves "which of the four screen-
+  // space vision grades (if any) should THIS client's present pass apply
+  // right now" from live Foundry state (the viewer's own token, its
+  // playerLightMode flag, the scene's GM-set permissions, whether this
+  // client is a GM at all) — see `effects/vision/player-vision-modes.js#
+  // resolveActivePlayerVisionModePreset`. Consumed once per frame by
+  // `pushPlayerVisionMode()` below, which reads it via `?.()` so an
+  // un-wired caller (tests, the torture fixture) still constructs without
+  // supplying this param.
+  getActivePlayerVisionMode,
   getDoorRenderState,
   getVegetationRenderState,
   getBloomRenderState,
@@ -10098,6 +10109,13 @@ export async function startVtPanViewer({
       // effect; runs strictly after grade in grade-present.js's own tail
       // either way, so ordering here doesn't matter.
       pushStylize();
+      // PLAYER VISION-MODE GRADE (mythica-machina-press#77 Stage 2b, #580) —
+      // resolved from live per-client Foundry state (NOT the cascade — see
+      // `pushPlayerVisionMode`'s own doc), pushed every frame like everything
+      // else in this function. Runs strictly after Stylize in grade-
+      // present.js's own tail regardless of call order here (same "ordering
+      // here doesn't matter" note as pushStylize above).
+      pushPlayerVisionMode();
 
       const clock = dayClock.read();
       lastEnvSnapshot = {
@@ -10572,6 +10590,30 @@ export async function startVtPanViewer({
       }
       const p = st.params || {};
       gradePresent.setStylize(p.style ?? 'none', p.amount ?? 1);
+    }
+
+    /**
+     * Read this frame's active player vision-mode grade and push it to the
+     * present material (mythica-machina-press#77 Stage 2b, #580). Unlike
+     * `pushGradeLook`/`pushStylize`, this does NOT go through the effect
+     * registry's cascade — `getActivePlayerVisionMode` is a plain per-frame
+     * closure (mirrors `getPlayerCarriedLightSources`'s own non-registry
+     * shape, both boot.js-injected reads of live Foundry/canvas state), since
+     * the cascade resolves ONE value for every client and this is explicitly
+     * per-VIEWING-client. `?.()` — an un-wired caller (a test/fixture that
+     * never passed this param) reads as "never any mode," a provable no-op.
+     */
+    function pushPlayerVisionMode() {
+      const mode = getActivePlayerVisionMode?.() ?? null;
+      // `lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value` — the SAME
+      // "current clock reading" idiom this file already uses at every OTHER
+      // call site outside `updateEnvSnapshot`'s own body (e.g. the wind/fluid
+      // sim ticks) — this function is a sibling of `updateEnvSnapshot`, not
+      // nested inside it, so it has no direct access to that function's own
+      // local `env`. One frame stale at worst (`lastEnvSnapshot` is written
+      // AFTER this runs, each frame) — negligible for grain/scan animation.
+      const timeMs = lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value;
+      gradePresent.setPlayerVisionMode(mode, timeMs);
     }
 
     // THE OCCLUSION MASK — a REAL render target as of 2026-07-18. The MASK

@@ -10,31 +10,35 @@
  * already use) rather than inventing a second control language for this
  * board.
  *
- * ⚠️ ONLY `torch`/`flashlight` ACTUALLY RENDER ANYTHING YET (Stage 1,
- * mythica-machina-press#77's own "Correction" comment). The other four
- * toggles are real and functional (they gate what Stage 2's vision-mode
- * grades will honor once built, and they gate what the player-side picker
- * even offers), but flipping one on today changes nothing on screen — each
- * of those four is labelled honestly, not silently offered as if it already
- * worked.
+ * ⚠️ ALL SIX MODES RENDER SOMETHING AS OF STAGE 2B (mythica-machina-
+ * press#77, mythica-machina-press#580) — Torch/Flashlight as real MSA-
+ * rendered LIGHTS everyone at the table sees (Stage 2a), the other four as
+ * real MSA screen-space GRADES visible only to the wearer's own client
+ * (`effects/vision/player-vision-grade-render.js`). Both kinds are real and
+ * functional; the tooltip below says which is which so a GM isn't left
+ * guessing why flipping on Night Vision changes nothing on the GM's OWN
+ * screen (it isn't meant to — that mode is personal by design).
  *
  * @module ui/rooms/remote/player-light-board
  */
 
 import { buildParamControl } from '../../widgets/param-control.js';
 
-/** The six mode keys, in the order they should appear — matches
- * `foundry/player-light-permissions.js#PLAYER_LIGHT_MODE_KEYS` exactly (a
- * literal copy, not an import: this is a UI-ordering/labelling concern, the
- * persistence module's own list is a validity concern — the two happen to
- * need the same six strings today, not a reason to couple the files). */
+/** The six mode keys, in the order they should appear, and WHAT each one
+ * renders — matches `foundry/player-light-permissions.js#
+ * PLAYER_LIGHT_MODE_KEYS` exactly (a literal copy, not an import: this is a
+ * UI-ordering/labelling concern, the persistence module's own list is a
+ * validity concern — the two happen to need the same six strings today, not
+ * a reason to couple the files). `kind` matches `ui/rooms/player-light-
+ * picker.js`'s own identical field (see that file's own header for why it
+ * isn't a shared import either). */
 const MODE_ROWS = Object.freeze([
-  { key: 'torch', label: 'Torch', rendered: true },
-  { key: 'flashlight', label: 'Flashlight', rendered: true },
-  { key: 'nightVision', label: 'Night Vision', rendered: false },
-  { key: 'lowLight', label: 'Low-light Vision', rendered: false },
-  { key: 'infravision', label: 'Infravision', rendered: false },
-  { key: 'activeInfravision', label: 'Active Infravision', rendered: false },
+  { key: 'torch', label: 'Torch', kind: 'light' },
+  { key: 'flashlight', label: 'Flashlight', kind: 'light' },
+  { key: 'nightVision', label: 'Night Vision', kind: 'grade' },
+  { key: 'lowLight', label: 'Low-light Vision', kind: 'grade' },
+  { key: 'infravision', label: 'Infravision', kind: 'grade' },
+  { key: 'activeInfravision', label: 'Active Infravision', kind: 'grade' },
 ]);
 
 function pill(text, title, pressed, onClick) {
@@ -87,11 +91,11 @@ export function renderPlayerLightBoard(container, ctx) {
     const permissions = ctx.getPermissions();
     for (const row of MODE_ROWS) {
       const allowed = permissions.modes?.[row.key] === true;
-      const title = row.rendered
-        ? `${row.label} — a real, MSA-rendered light. Click to ${allowed ? 'forbid' : 'allow'} it on this scene.`
-        : `${row.label} — visual not yet rendered (coming in a later build). The mode is still selectable and toggleable now, ready for when it lands. Click to ${allowed ? 'forbid' : 'allow'} it on this scene.`;
-      const text = row.rendered ? row.label : `${row.label} ◇`;
-      chipRow.appendChild(pill(text, title, allowed, () => ctx.onModeToggle(row.key, !allowed)));
+      const title =
+        row.kind === 'light'
+          ? `${row.label} — a real, MSA-rendered light everyone at the table sees. Click to ${allowed ? 'forbid' : 'allow'} it on this scene.`
+          : `${row.label} — a real screen-space grade visible only to the wearer's own view, nobody else. Click to ${allowed ? 'forbid' : 'allow'} it on this scene.`;
+      chipRow.appendChild(pill(row.label, title, allowed, () => ctx.onModeToggle(row.key, !allowed)));
     }
   }
 

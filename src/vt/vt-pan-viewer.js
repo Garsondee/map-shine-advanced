@@ -357,6 +357,13 @@ import {
   candleAnimationQualityTier,
   candleTierPlan,
   buildCandleLightSources,
+  // PLAYER TORCH FLAME + EMBERS (mythica-machina-press#77/#578, Stage 2a) —
+  // the flame body re-uses candle's own builders (imported above); these are
+  // its ember-batch-specific siblings plus the torch-named re-exports.
+  buildTorchFlameGeometry,
+  buildTorchFlameMaterial,
+  buildTorchEmberGeometry,
+  buildTorchEmberMaterial,
   createLightningSubsystem,
   createFireSubsystem,
   createPrecipitationSubsystem,
@@ -970,6 +977,14 @@ function disposeActive() {
   } catch (err) {
     log.error('candle flame dispose failed — VRAM may be leaked:', err);
   }
+  // The player torch flame + ember batches' own meshes/geometries/materials
+  // (mythica-machina-press#77/#578) — same per-cycle VRAM-leak reasoning as
+  // the candle flame just above; their lights are in the shared pool too.
+  try {
+    _active.disposePlayerTorchFlame?.();
+  } catch (err) {
+    log.error('player torch flame dispose failed — VRAM may be leaked:', err);
+  }
   // The door leaves' own meshes/geometries/materials + cached textures — same
   // per-cycle VRAM-leak reasoning as the candle flame just above.
   try {
@@ -1215,6 +1230,13 @@ export async function startVtPanViewer({
   // undefined-safe there (`getFireLightSources`'s own default) so an
   // un-wired caller (tests, the torture fixture) still constructs.
   getPlayerCarriedLightSources,
+  // PLAYER TORCH FLAME + EMBERS (mythica-machina-press#77/#578) — boot.js's
+  // own per-frame closure: the SAME two live reads
+  // (getPlayerCarriedLightSources' own header) projected into flame-body
+  // anchors instead of light descriptors. Undefined-safe below, the same
+  // "an un-wired caller (tests, the torture fixture) still constructs"
+  // posture every sibling render-state seam here already has.
+  getPlayerCarriedTorchAnchors,
   getDoorRenderState,
   getVegetationRenderState,
   getBloomRenderState,
@@ -6336,6 +6358,128 @@ export async function startVtPanViewer({
       candleFlameKey = null;
     }
 
+    // ------------------------------------------------------------------
+    // PLAYER TORCH FLAME + EMBERS (mythica-machina-press#77/#578, Stage 2a).
+    // TWO small sibling subsystems of candle's own just above, same "own
+    // dedicated scene, own mesh(es), a cheap checksum decides whether to
+    // rebuild" shape — deliberately SIMPLER than candle's: no per-profile
+    // quality-tier resolution (a fixed, always-on tier — a scene realistically
+    // has a handful of carried torches, never candle-scene counts), and the
+    // geometry checksum naturally doubles as the "did the token move" dirty-
+    // check candle's own signature already provides for "did the anchor set
+    // change" — a torch walking every frame rebuilds every frame (cheap: a
+    // handful of quads), a torch standing still costs nothing extra.
+    //
+    // FLAME BODY — candle's own builders, completely unmodified, fed a LIVE
+    // anchor list instead of a static one. EMBERS — a second, independent
+    // batch (see player-torch-flame-render.js's own header for why this is
+    // NOT the fire particle engine).
+    // ------------------------------------------------------------------
+    // PLAYER TORCH FLAME LOOK — one place, named constants. sizePx mirrors
+    // candle's own default flame size; emberCount is the dispatch's own
+    // "good, distinct, functional... NOT V2's full per-control depth" bar —
+    // five is enough to read as a handful of rising embers, cheap even for
+    // several simultaneous torches (5 quads × N torches, one draw call).
+    const PLAYER_TORCH_FLAME_SIZE_PX = 26;
+    const PLAYER_TORCH_EMBER_COUNT = 5;
+    const torchFlameScene = new THREE.Scene();
+    let torchFlameMesh = null;
+    let torchFlameMat = null;
+    let torchFlameKey = null;
+    const torchEmberScene = new THREE.Scene();
+    let torchEmberMesh = null;
+    let torchEmberMat = null;
+    let torchEmberKey = null;
+
+    /** Same fold-a-position-list-into-an-integer-checksum trick as
+     * candleFlameSignature just above, minus the colour/size/per-anchor-
+     * override machinery candle's own signature carries (torches have no
+     * per-token overrides) — position + count is the whole dirty-check. */
+    function torchAnchorSignature(anchors) {
+      let h = (anchors.length * 1000003) | 0;
+      for (const a of anchors) {
+        h = (h * 31 + Math.round(a.x) + Math.round(a.y) * 7) | 0;
+      }
+      return h;
+    }
+
+    function updatePlayerTorchFlame() {
+      const anchors = getPlayerCarriedTorchAnchors ? (getPlayerCarriedTorchAnchors() ?? []) : [];
+      if (!anchors.length) {
+        if (torchFlameMesh) torchFlameMesh.visible = false;
+        if (torchEmberMesh) torchEmberMesh.visible = false;
+        return;
+      }
+      const sig = torchAnchorSignature(anchors);
+
+      // FLAME BODY — a fixed tier (1, "standard": full chaotic life + wind
+      // tail, no domain-warped silhouette) rather than candle's own profile-
+      // resolved ladder; see this block's own header for why.
+      if (!torchFlameMat) {
+        torchFlameMat = buildTorchFlameMaterial({
+          THREE,
+          uGlobalTimeMs,
+          depthTexNode: envLight.depthTexNode,
+          depthFlagsTexNode: envLight.depthFlagsTexNode,
+          quality: 1,
+          windHandle,
+        });
+        torchFlameMesh = new THREE.Mesh(new THREE.BufferGeometry(), torchFlameMat.material);
+        torchFlameMesh.frustumCulled = false;
+        torchFlameScene.add(torchFlameMesh);
+      }
+      if (sig !== torchFlameKey || !torchFlameMesh.geometry.getAttribute('position')) {
+        const old = torchFlameMesh.geometry;
+        const { geometry } = buildTorchFlameGeometry(THREE, anchors, { sizePx: PLAYER_TORCH_FLAME_SIZE_PX });
+        torchFlameMesh.geometry = geometry;
+        if (old) old.dispose();
+        torchFlameKey = sig;
+      }
+      torchFlameMat.uIntensity.value = 1;
+      torchFlameMesh.visible = true;
+
+      // EMBERS — a second independent batch; see this block's own header.
+      if (!torchEmberMat) {
+        torchEmberMat = buildTorchEmberMaterial({ THREE, uGlobalTimeMs });
+        torchEmberMesh = new THREE.Mesh(new THREE.BufferGeometry(), torchEmberMat.material);
+        torchEmberMesh.frustumCulled = false;
+        torchEmberScene.add(torchEmberMesh);
+      }
+      if (sig !== torchEmberKey || !torchEmberMesh.geometry.getAttribute('position')) {
+        const old = torchEmberMesh.geometry;
+        // sizePx deliberately OMITTED — buildTorchEmberGeometry's own default
+        // is what buildTorchEmberMaterial's shader assumes; see that
+        // function's own warning for why a mismatched override here would
+        // desync the ember's drawn position from its own quad.
+        const { geometry } = buildTorchEmberGeometry(THREE, anchors, { emberCount: PLAYER_TORCH_EMBER_COUNT });
+        torchEmberMesh.geometry = geometry;
+        if (old) old.dispose();
+        torchEmberKey = sig;
+      }
+      torchEmberMat.uIntensity.value = 1;
+      torchEmberMesh.visible = true;
+    }
+
+    /** Free both torch-flame subsystems' GPU resources (their lights, if any
+     * — today's torch mode always carries one, live at candle-flicker
+     * intensity — live in the shared pool, disposed by disposePointLights). */
+    function disposePlayerTorchFlame() {
+      try {
+        torchFlameMesh?.geometry?.dispose();
+        torchFlameMat?.material?.dispose();
+        torchEmberMesh?.geometry?.dispose();
+        torchEmberMat?.material?.dispose();
+      } catch (err) {
+        log.error('player torch flame dispose failed — GPU buffers may leak until renderer.dispose():', err);
+      }
+      torchFlameMesh = null;
+      torchFlameMat = null;
+      torchFlameKey = null;
+      torchEmberMesh = null;
+      torchEmberMat = null;
+      torchEmberKey = null;
+    }
+
     // ── DOOR GRAPHICS (effects/door-graphics-subsystem.js) ────────────────
     // Extracted 2026-07-26 (VT-Pan-Viewer-Extraction.md §11) as prep for Water
     // Phase 3 — read that module's header first: it is also the TEMPLATE
@@ -7556,6 +7700,12 @@ export async function startVtPanViewer({
       profiler?.begin(Z.lightCandleSync);
       updateCandleFlame();
       profiler?.end(Z.lightCandleSync);
+      // PLAYER TORCH FLAME + EMBERS (mythica-machina-press#77/#578) — same
+      // per-frame reconcile shape as updateCandleFlame just above. Not its
+      // own profiler zone yet (a handful of carried torches is inexpensive;
+      // a follow-up can register a dedicated Z entry if it ever needs
+      // measuring on its own).
+      updatePlayerTorchFlame();
       // THE DOOR-REVEAL BRIDGE'S own per-frame tick — throttles itself
       // (MIN_SYNC_INTERVAL_MS), so this call is cheap on every frame it
       // skips. `env.time.realMs`, NEVER `env.time.tMs` — sim time freezes
@@ -8142,6 +8292,22 @@ export async function startVtPanViewer({
         renderer.render(candleFlameScene, camera);
         renderer.autoClearColor = prevFlameAutoClear;
         profiler?.end(Z.lightDrawCandle);
+      }
+      // PLAYER TORCH FLAME + EMBERS (mythica-machina-press#77/#578) — the SAME
+      // guarded-additive draw as candle's just above, two separate scenes
+      // (flame body, then embers on top) so the embers' own additive glow
+      // never has to share a material/blend state with the flame body's.
+      if (torchFlameMesh && torchFlameMesh.visible) {
+        const prevTorchFlameAutoClear = renderer.autoClearColor;
+        renderer.autoClearColor = false;
+        renderer.render(torchFlameScene, camera);
+        renderer.autoClearColor = prevTorchFlameAutoClear;
+      }
+      if (torchEmberMesh && torchEmberMesh.visible) {
+        const prevTorchEmberAutoClear = renderer.autoClearColor;
+        renderer.autoClearColor = false;
+        renderer.render(torchEmberScene, camera);
+        renderer.autoClearColor = prevTorchEmberAutoClear;
       }
       // LIGHTNING — the SAME guarded-additive draw as the candle flame just
       // above (same target, same camera, same "don't wipe what compositeQuad/
@@ -23692,6 +23858,11 @@ export async function startVtPanViewer({
       /** Tear down the candle flame billboard's own mesh/material/geometry (its
        * lights live in the shared pool, freed by disposePointLights). */
       disposeCandleFlame,
+      /** Tear down the player torch flame + ember batches' own meshes/
+       * materials/geometries (mythica-machina-press#77/#578) — same split as
+       * the candle flame just above: their lights live in the shared pool,
+       * freed by disposePointLights. */
+      disposePlayerTorchFlame,
       /** Tear down the lightning strand mesh's own mesh/material/geometry (its
        * origin-flash lights live in the shared pool, freed by
        * disposePointLights — same split as the candle flame just above). */

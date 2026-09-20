@@ -179,6 +179,7 @@ export function buildColorationShadingCore({ THREE, inputs, shared, flags }) {
     apertureCount = 0,
     apGoboCols,
     apGoboRows,
+    beamShape,
   } = flags;
   const {
     localUnitXY,
@@ -189,6 +190,7 @@ export function buildColorationShadingCore({ THREE, inputs, shared, flags }) {
     ratio: uRatio,
     anim,
     wind: windInputs,
+    beamDirection,
   } = inputs;
 
   // dist / FALLOFF / THE HEIGHT-ELEVATION GATE / APERTURE GOBO — S2.13
@@ -222,6 +224,8 @@ export function buildColorationShadingCore({ THREE, inputs, shared, flags }) {
     apGoboCols,
     apGoboRows,
     apertureGoboShared,
+    beamDirection,
+    beamShape,
   });
 
   // Technique 1 ("Adaptive Luminance", the LightData default): the tint is
@@ -362,9 +366,13 @@ export function buildColorationShadingCore({ THREE, inputs, shared, flags }) {
  * @param {number} [args.animationQuality=0] - a graph-BUILD-time quality tier
  *   forwarded to the seed builder as `quality` (see point-light-
  *   illumination.js's own header for the no-uniform-gates rationale).
- * @param {'foundry'|'inverseSquare'|'inverseSquareWide'} [args.falloffModel='foundry'] - the radial
+ * @param {'foundry'|'inverseSquare'|'inverseSquareWide'|'beam'} [args.falloffModel='foundry'] - the radial
  *   falloff curve (see point-light-illumination.js's own param). Must match
  *   the illumination material's so both channels of a light fade together.
+ * @param {object} [args.beamShape] - see point-light-illumination.js's own
+ *   identical param — required together with `falloffModel: 'beam'`, and
+ *   must be the SAME object (or an equal one) the illumination material was
+ *   built with, so both channels agree on the beam's shape.
  * @param {{x:number,y:number}} [args.windCenter] - see point-light-
  *   illumination.js's own param of the same name (Wind.md Tier 0) — a SEPARATE
  *   `sampleWind` call from that module's (two independent shader graphs, the
@@ -391,7 +399,8 @@ export function buildColorationShadingCore({ THREE, inputs, shared, flags }) {
  * @returns {{material: *, uAttenuationEased: *, uColorationAlpha: *,
  *   uLightColor: *, uShadows: *, uLightExpectedDepth: *, uSpeedRaw: (*|null),
  *   uReverseSign: (*|null), uSeed: (*|null), uIntensityRaw: (*|null),
- *   uWindCenter: (*|null), uWindExposure: (*|null), uWindResponse: (*|null)}}
+ *   uWindCenter: (*|null), uWindExposure: (*|null), uWindResponse: (*|null),
+ *   uBeamDirection: (*|null)}}
  */
 export function buildPointLightColorationMaterial({
   THREE,
@@ -403,6 +412,7 @@ export function buildPointLightColorationMaterial({
   uRatio,
   animationQuality = 0,
   falloffModel = 'foundry',
+  beamShape = null,
   windCenter,
   windExposure,
   windResponse,
@@ -419,6 +429,12 @@ export function buildPointLightColorationMaterial({
   const uLightColor = uniform(vec3(1, 1, 1));
   const uShadows = uniform(float(0));
   const uLightExpectedDepth = uniform(float(0));
+  // FLASHLIGHT BEAM DIRECTION — the coloration twin's OWN copy of the SAME
+  // uniform the illumination material creates (see that file's own doc on
+  // this field) — two independently-built materials, same light, same
+  // per-frame value, the SAME small deliberate duplication `uAttenuationEased`
+  // above already is.
+  const uBeamDirection = beamShape ? uniform(vec2(0, -1)) : null;
 
   let uSpeedRaw = null;
   let uReverseSign = null;
@@ -456,9 +472,10 @@ export function buildPointLightColorationMaterial({
         ? { speedRaw: uSpeedRaw, reverseSign: uReverseSign, seed: uSeed, intensityRaw: uIntensityRaw }
         : null,
       wind: uWindCenter ? { center: uWindCenter, exposure: uWindExposure, response: uWindResponse } : null,
+      beamDirection: uBeamDirection,
     },
     shared: { albedoTexture, depthTexNode, depthFlagsTexNode, apertureGoboShared, uGlobalTimeMs, windHandle },
-    flags: { animation, animationQuality, falloffModel, apertureCount, apGoboCols, apGoboRows },
+    flags: { animation, animationQuality, falloffModel, apertureCount, apGoboCols, apGoboRows, beamShape },
   });
 
   const material = new THREE.NodeMaterial();
@@ -511,6 +528,7 @@ export function buildPointLightColorationMaterial({
     uWindCenter,
     uWindExposure,
     uWindResponse,
+    uBeamDirection,
     // APERTURE GOBO (round 10) — `null` when this light has no apertures.
     // A SEPARATE uniform set from illumination's own `uApLampHeight`/
     // `apApertures` (this mesh's own material, own uniforms) — `point-

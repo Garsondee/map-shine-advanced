@@ -368,6 +368,7 @@ function createLightEntry({
     uLightExpectedDepth,
     uApLampHeight,
     apApertures,
+    uBeamDirection: uIllumBeamDirection,
   } = buildPointLightIlluminationMaterial({
     THREE,
     uBackgroundColor,
@@ -377,6 +378,14 @@ function createLightEntry({
     uGlobalTimeMs,
     animationQuality,
     falloffModel,
+    // FLASHLIGHT BEAM (mythica-machina-press#579/#77 Stage 2a) — `light.
+    // beamShape` is `null`/absent for every light except a beam-falloff one
+    // (player-light-geometry.js's own flashlight preset). The seven shape
+    // constants are the same for every flashlight today, so they're read
+    // ONCE here (entry-creation/rebuild time, like `falloffModel` itself) —
+    // only the live `beamDirection` (the bearer's current facing) needs a
+    // per-frame write, done further down in `update()`.
+    beamShape: light.beamShape ?? null,
     // APERTURE GOBO (round 10, 2026-08-04) — baked into THIS light's own
     // MAX-blend draw now, not a separate post-process pass. See point-
     // light-illumination.js's own "THE GOBO IS PART OF THIS LIGHT'S OWN
@@ -452,6 +461,9 @@ function createLightEntry({
     uRatio,
     animationQuality,
     falloffModel,
+    // FLASHLIGHT BEAM — see the illumination material's own identical call,
+    // just above, for why.
+    beamShape: light.beamShape ?? null,
     // SHARED WIND (Wind.md Tier 0/1) — see the illumination material's own
     // identical call, just above.
     windCenter: { x: light.x, y: light.y },
@@ -578,6 +590,12 @@ function createLightEntry({
     uColorWindCenter: colorationBuilt.uWindCenter,
     uColorWindExposure: colorationBuilt.uWindExposure,
     uColorWindResponse: colorationBuilt.uWindResponse,
+    // FLASHLIGHT BEAM (mythica-machina-press#579/#77 Stage 2a) — `null` on
+    // both unless this light was built with a `beamShape` (see the
+    // illumination/coloration material builders' own doc). update()'s
+    // per-frame loop writes the SAME live direction into both.
+    uIllumBeamDirection,
+    uColorBeamDirection: colorationBuilt.uBeamDirection,
     // APERTURE GOBO — round 10 (2026-08-04): baked into `material`/
     // `colorationBuilt.material` above, no separate mesh for the real
     // effect. `uApLampHeight`/`apApertures` (illumination) and
@@ -2224,6 +2242,20 @@ export function createPointLightPool({
       if (entry.uColorWindCenter) entry.uColorWindCenter.value.set(light.x, light.y);
       if (entry.uColorWindExposure) entry.uColorWindExposure.value = light.windExposure ?? 1;
       if (entry.uColorWindResponse) entry.uColorWindResponse.value = light.windResponse ?? 1;
+      // FLASHLIGHT BEAM DIRECTION (mythica-machina-press#579/#77 Stage 2a) —
+      // written every frame like every other per-light uniform in this loop,
+      // from the SAME live per-token read the light's own position already
+      // comes from (`light.beamDirection`, `player-light-geometry.js#
+      // tokenRotationToForwardVector`) — a bearer can turn on the spot
+      // without moving, so this cannot be folded into the shape-change/
+      // rebuild-key dirty-check above. `null` on a non-beam light (both
+      // uniforms are `null` too in that case) — a no-op there.
+      if (entry.uIllumBeamDirection && light.beamDirection) {
+        entry.uIllumBeamDirection.value.set(light.beamDirection.x, light.beamDirection.y);
+      }
+      if (entry.uColorBeamDirection && light.beamDirection) {
+        entry.uColorBeamDirection.value.set(light.beamDirection.x, light.beamDirection.y);
+      }
       // SOFT EDGE: the SAME reuse discipline as scratchArray above, via
       // TRUNCATION rather than growth — writeLightEdgePoints mutates
       // entry.edgePoints' existing Vector2 instances IN PLACE, never

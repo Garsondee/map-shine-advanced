@@ -652,6 +652,10 @@ import {
   // builder feeding point-light-pool.js's own getPlayerCarriedLightSources
   // injection seam.
   buildPlayerLightSources,
+  // PLAYER TORCH FLAME + EMBERS (mythica-machina-press#77/#578, Stage 2a) —
+  // the pure anchor builder feeding the viewer's own torch-flame render
+  // seam, same split as buildPlayerLightSources just above.
+  buildPlayerTorchFlameAnchors,
 } from './effects/index.js';
 import {
   buildSunShadowsReport,
@@ -4691,6 +4695,23 @@ function install() {
     if (tokenSnapshots.length === 0) return [];
     const { permissions } = readScenePlayerLightPermissions();
     return buildPlayerLightSources(tokenSnapshots, permissions);
+  };
+
+  // PLAYER TORCH FLAME + EMBERS (mythica-machina-press#77/#578, Stage 2a) —
+  // the SAME two live reads as getPlayerCarriedLightSources just above, fed
+  // into the flame-body's own anchor builder instead of the light-source
+  // builder. Deliberately a SECOND small read rather than deriving these
+  // anchors from getPlayerCarriedLightSources' own output: that function
+  // already filters to Stage-1-RENDERED modes (torch + flashlight) and
+  // returns LIGHT descriptors (radius/falloffModel/color…), none of which
+  // the flame body needs or should depend on — keeping the two call sites
+  // independent means a future change to the light's own shape can never
+  // silently break the flame's.
+  const getPlayerCarriedTorchAnchors = () => {
+    const tokenSnapshots = readActivePlayerCarriedLightTokens();
+    if (tokenSnapshots.length === 0) return [];
+    const { permissions } = readScenePlayerLightPermissions();
+    return buildPlayerTorchFlameAnchors(tokenSnapshots, permissions);
   };
 
   // THE LIGHTNING data seam (effects/lightning-subsystem.js) — same shape as
@@ -13277,6 +13298,11 @@ function install() {
         // has no token/permission state and stays player-light-free by
         // construction (the pool's own `= null` default).
         getPlayerCarriedLightSources,
+        // PLAYER TORCH FLAME + EMBERS (mythica-machina-press#77/#578): each
+        // frame, the viewer draws a flame body + ember batch for every torch
+        // token whose owner has picked it and the GM currently allows it.
+        // Same real-scene-only injection posture as getCandleRenderState.
+        getPlayerCarriedTorchAnchors,
         // THE LIGHTNING EFFECT (effects/lightning-subsystem.js): each frame the
         // subsystem schedules/spawns/reaps bolt strands and merges the origin-
         // flash lights into the pool, reading the cascade-resolved enable +

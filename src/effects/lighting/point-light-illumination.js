@@ -365,6 +365,155 @@ export const INVERSE_SQUARE_STEEPNESS = 8;
 export const FIRE_INVERSE_SQUARE_STEEPNESS = 0.15;
 
 /**
+ * `smoothstep(edge0, edge1, x)` over plain JS numbers — the private, per-file
+ * copy every falloff-shaped helper in this codebase carries (fire-geometry.js,
+ * aperture-gobo.js, specular-material.js, etc. all have their own; see this
+ * file's own `computeBeamFalloff01` for why THIS one exists: it is the plain-
+ * number half of `buildBeamFalloffNode`'s TSL `smoothstep`, kept in lockstep
+ * by hand).
+ * @param {number} edge0 @param {number} edge1 @param {number} x
+ * @returns {number}
+ */
+function beamSmoothstep01(edge0, edge1, x) {
+  if (edge0 === edge1) return x < edge0 ? 0 : 1;
+  const t = Math.min(1, Math.max(0, (x - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+}
+
+/**
+ * ============================================================================
+ * FLASHLIGHT BEAM SHAPE (mythica-machina-press#579/#77 Stage 2a) — a real SDF
+ * cone/beam INTENSITY profile, not a radial pool with an angular wedge cut out
+ * of it.
+ * ============================================================================
+ *
+ * ⚠️ WHY THIS LIVES IN THE SHADER, NEVER THE MESH SHAPE. A flashlight's own
+ * mesh footprint stays a plain wall-clipped CIRCLE
+ * (`player-light-geometry.js#playerLightCirclePolygon`, sized to the beam's
+ * max reach) — `point-light-pool.js`'s own `playerLightWallClipCache`
+ * unconditionally REPLACES whatever polygon a player light arrives with, with
+ * `computeCandleWallClippedShape`'s own circular sweep (candle/fire's
+ * identical wall-clip call — radius only, no angle/direction param at all); a
+ * cone-shaped input polygon would simply be thrown away every single frame.
+ * The beam's real directional shape can therefore only live in the per-
+ * fragment falloff.
+ *
+ * This is also genuinely NEW shader capability, not an extension of one that
+ * already existed: grepped `angle`/`rotation` across this whole material and
+ * `point-light-pool.js` — the only hits are in `foundry/scene-lights.js`/
+ * `scene-wall-clip.js`, feeding Foundry's OWN `ClockwiseSweepPolygon`
+ * computation UPSTREAM of this file. By the time a light (any light, native
+ * cone included) reaches `buildPointLightSharedTerms`, it is always just a
+ * flat polygon plus a purely RADIAL `dist` — there is no angle/direction
+ * concept anywhere in this material before this addition.
+ *
+ * TWO MIRRORED HALVES, same split `inverseSquareFalloff` established for a
+ * simpler curve: `computeBeamFalloff01` is PLAIN NUMBER math (Node-testable —
+ * `__tests__/point-light-illumination.test.mjs` pins it); `buildBeamFalloffNode`
+ * is the TSL graph actually compiled into the shader. There is no shared
+ * source of truth between the two in this codebase (`inverseSquareFalloff`
+ * itself has no plain-JS twin at all) — keep them in lockstep BY HAND on any
+ * future edit.
+ *
+ * THE SHAPE: `axial` = how far along the bearer's own facing direction a
+ * fragment sits (0 at the bearer, 1 at the beam's max reach — the light's own
+ * `radius`, matching `dist`'s identical unit-radius normalization); `lateral`
+ * = the perpendicular offset from that facing axis, in the SAME normalized
+ * units. The beam's half-width grows from `nearHalfWidth01` to
+ * `farHalfWidth01` as `axial` goes 0→1 (a cone, not a cylinder); a fragment's
+ * `lateralFrac` (lateral ÷ half-width-at-this-axial) drives a soft edge
+ * (`edgeSoftness01`) and a three-stop hot-core/mid/rim brightness band
+ * (fixed stops at 0.3/0.75 — not param-authored, this is the "own considered
+ * take on the shape" the dispatch invited, not a V2 port). `lengthFalloffExponent`
+ * shapes the reach falloff (`(1-axial)^exponent`) independent of the lateral
+ * shape. A fragment BEHIND the bearer (`axial<0`) is excluded via a short
+ * soft ramp (`forwardMask`), not a hard branch — matching this codebase's own
+ * `no hard branch where a smoothstep reads the same and costs nothing extra`
+ * posture elsewhere in this file.
+ */
+export function computeBeamFalloff01({
+  axial,
+  lateral,
+  nearHalfWidth01,
+  farHalfWidth01,
+  edgeSoftness01,
+  lengthFalloffExponent,
+  coreIntensity,
+  midIntensity,
+  rimIntensity,
+}) {
+  if (!Number.isFinite(axial) || !Number.isFinite(lateral)) return 0;
+  const forwardMask = beamSmoothstep01(0, 0.02, axial); // a soft ramp, not a hard cutoff, for "behind the bearer"
+  const t = Math.min(1, Math.max(0, axial));
+  const halfWidth = Math.max(0.001, nearHalfWidth01 + (farHalfWidth01 - nearHalfWidth01) * t);
+  const lateralFrac = Math.abs(lateral) / halfWidth;
+  const softness = Math.max(0.001, edgeSoftness01);
+  const edgeMask = 1 - beamSmoothstep01(1 - softness, 1 + softness, lateralFrac);
+  const exponent = Math.max(0, lengthFalloffExponent);
+  const lengthFalloff = Math.pow(Math.max(0, 1 - t), exponent);
+  // THREE-STOP BANDING — hot core (lateralFrac 0..0.3) → mid ring (0.3..0.75,
+  // itself smoothly interpolated) → faint rim (0.75+, constant until edgeMask
+  // itself zeroes it past the beam's own edge).
+  const nearCore = 1 - beamSmoothstep01(0, 0.3, lateralFrac);
+  const nearMid = 1 - beamSmoothstep01(0.3, 0.75, lateralFrac);
+  const midOrCore = midIntensity + (coreIntensity - midIntensity) * nearCore;
+  const banded = rimIntensity + (midOrCore - rimIntensity) * nearMid;
+  return Math.max(0, edgeMask * lengthFalloff * forwardMask * banded);
+}
+
+/**
+ * The TSL mirror of {@link computeBeamFalloff01} — see that function's own
+ * header for the full shape account; this must stay a byte-for-byte
+ * arithmetic mirror, kept in lockstep BY HAND.
+ * @param {*} TSL - THREE.TSL.
+ * @param {object} args
+ * @param {*} args.localUnitXY - the fragment's local unit-radius position (the
+ *   SAME node `dist = length(localUnitXY)` is already derived from).
+ * @param {*} args.beamDirection - a unit-length vec2 TSL node/uniform, the
+ *   bearer's own live facing direction (world-space, same convention as
+ *   `localUnitXY` — see `player-light-geometry.js#tokenRotationToForwardVector`
+ *   for the one place this vector is derived from a Foundry document).
+ * @param {number} args.nearHalfWidth01 @param {number} args.farHalfWidth01
+ * @param {number} args.edgeSoftness01 @param {number} args.lengthFalloffExponent
+ * @param {number} args.coreIntensity @param {number} args.midIntensity
+ * @param {number} args.rimIntensity
+ * @returns {*} a float TSL node — NOT clamped to [0,1] (a hot core may
+ *   legitimately exceed 1, same "extrapolate past the endpoint" posture
+ *   `mix()`'s own callers elsewhere in this file already rely on).
+ */
+export function buildBeamFalloffNode(
+  TSL,
+  {
+    localUnitXY,
+    beamDirection,
+    nearHalfWidth01,
+    farHalfWidth01,
+    edgeSoftness01,
+    lengthFalloffExponent,
+    coreIntensity,
+    midIntensity,
+    rimIntensity,
+  }
+) {
+  const { float, vec2, dot, abs, clamp, smoothstep, mix, max, pow } = TSL;
+  const perp = vec2(beamDirection.y.negate(), beamDirection.x);
+  const axial = dot(localUnitXY, beamDirection);
+  const lateral = abs(dot(localUnitXY, perp));
+  const t = clamp(axial, float(0), float(1));
+  const forwardMask = smoothstep(float(0), float(0.02), axial);
+  const halfWidth = max(mix(float(nearHalfWidth01), float(farHalfWidth01), t), float(0.001));
+  const lateralFrac = lateral.div(halfWidth);
+  const softness = float(Math.max(0.001, edgeSoftness01));
+  const edgeMask = float(1).sub(smoothstep(float(1).sub(softness), float(1).add(softness), lateralFrac));
+  const lengthFalloff = pow(max(float(0), float(1).sub(t)), float(Math.max(0, lengthFalloffExponent)));
+  const nearCore = float(1).sub(smoothstep(float(0), float(0.3), lateralFrac));
+  const nearMid = float(1).sub(smoothstep(float(0.3), float(0.75), lateralFrac));
+  const midOrCore = mix(float(midIntensity), float(coreIntensity), nearCore);
+  const banded = mix(float(rimIntensity), midOrCore, nearMid);
+  return edgeMask.mul(lengthFalloff).mul(forwardMask).mul(banded);
+}
+
+/**
  * A physically-flavoured inverse-square falloff over the NORMALIZED radial
  * distance `dist` (0 at the light's own centre, 1 at its edge). Foundry's
  * default corona is a plain `smoothstep` — fine for a torch, but wrong for a
@@ -970,7 +1119,7 @@ function makeSdPolygonEdgeDistance(TSL) {
  * @param {*} args.localUnitXY - the per-light/per-vertex local xy node.
  * @param {*} args.attenuationEased
  * @param {*} args.expectedDepth - the height-gate's `uLightExpectedDepth`.
- * @param {'foundry'|'inverseSquare'|'inverseSquareWide'} [args.falloffModel='foundry']
+ * @param {'foundry'|'inverseSquare'|'inverseSquareWide'|'beam'} [args.falloffModel='foundry']
  * @param {*} [args.depthTexNode] @param {*} [args.depthFlagsTexNode] -
  *   `buf:scene.depth`'s two attachments. Omitted → the height gate compiles
  *   out entirely, same posture as before the gate existed.
@@ -978,6 +1127,13 @@ function makeSdPolygonEdgeDistance(TSL) {
  *   @param {number} [args.apGoboRows] @param {object} [args.apertureGoboShared] -
  *   see `buildApertureGoboTerm`'s own params; `apertureCount` is
  *   graph-BUILD-time (`tsl/no-uniform-gates`) — 0 compiles the whole term out.
+ * @param {*} [args.beamDirection] - REQUIRED (with `beamShape`) when
+ *   `falloffModel === 'beam'` — see {@link buildBeamFalloffNode}'s own params.
+ *   Absent → a `'beam'` request falls back to the `foundry` corona rather than
+ *   crashing (the same safety-slide every other un-wired seam in this
+ *   codebase gets).
+ * @param {object} [args.beamShape] - the seven plain-number shape constants
+ *   {@link buildBeamFalloffNode} takes, forwarded verbatim.
  * @returns {{dist: *, falloff: *, falloffGoboed: *, depthHere: *,
  *   depthFlagsHere: *, uApLampHeight: (*|null), apApertures: (Array|null)}}
  *   `falloff` is height-gated but NOT gobo-multiplied (illumination's own
@@ -1002,6 +1158,8 @@ export function buildPointLightSharedTerms({
   apGoboCols,
   apGoboRows,
   apertureGoboShared,
+  beamDirection = null,
+  beamShape = null,
 }) {
   const { float, screenUV, smoothstep, length, positionWorld, mix } = THREE.TSL;
 
@@ -1032,6 +1190,10 @@ export function buildPointLightSharedTerms({
     falloff = inverseSquareFalloff(THREE.TSL, dist);
   } else if (falloffModel === 'inverseSquareWide') {
     falloff = inverseSquareFalloff(THREE.TSL, dist, FIRE_INVERSE_SQUARE_STEEPNESS);
+  } else if (falloffModel === 'beam' && beamDirection && beamShape) {
+    // FLASHLIGHT BEAM (mythica-machina-press#579/#77 Stage 2a) — see
+    // buildBeamFalloffNode's own header for the full shape account.
+    falloff = buildBeamFalloffNode(THREE.TSL, { localUnitXY, beamDirection, ...beamShape });
   } else {
     const attenForFalloff = attenuationEased.max(float(0.0001));
     falloff = smoothstep(float(1), float(1).sub(attenForFalloff), dist);
@@ -1149,6 +1311,7 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
     apertureCount = 0,
     apGoboCols,
     apGoboRows,
+    beamShape,
   } = flags;
   const {
     localUnitXY,
@@ -1164,6 +1327,7 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
     brightColor: uBrightColor,
     anim,
     wind: windInputs,
+    beamDirection,
   } = inputs;
 
   /**
@@ -1236,6 +1400,8 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
     apGoboCols,
     apGoboRows,
     apertureGoboShared,
+    beamDirection,
+    beamShape,
   });
 
   // switchColor(bright, dim, dist) — TRANSITION, audit §5c. Exposed as a
@@ -1634,11 +1800,23 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
  *   tier — the `tsl/no-uniform-gates` wall's own rule. Only MSA-native
  *   animations that declare tiers (currently `candleFlicker`) read it;
  *   every other seed builder ignores the extra arg harmlessly.
- * @param {'foundry'|'inverseSquare'|'inverseSquareWide'} [args.falloffModel='foundry'] - the radial
+ * @param {'foundry'|'inverseSquare'|'inverseSquareWide'|'beam'} [args.falloffModel='foundry'] - the radial
  *   falloff curve, a graph-build-time choice (never a uniform). `foundry` =
  *   the attenuation-slider corona (every real Foundry light); `inverseSquare`
  *   = a physical bright-centre/fast-drop curve (candles). See
- *   `inverseSquareFalloff`.
+ *   `inverseSquareFalloff`. `beam` = the flashlight SDF cone (mythica-
+ *   machina-press#579/#77 Stage 2a) — see `buildBeamFalloffNode`; requires
+ *   `beamShape` below (this material creates the live `beamDirection` uniform
+ *   itself, unlike the shape constants).
+ * @param {object} [args.beamShape] - the seven plain-number beam-shape
+ *   constants `buildBeamFalloffNode` takes (`nearHalfWidth01`,
+ *   `farHalfWidth01`, `edgeSoftness01`, `lengthFalloffExponent`,
+ *   `coreIntensity`, `midIntensity`, `rimIntensity`) — graph-BUILD-time, baked
+ *   as plain `float()` constants, not uniforms (they're the same for every
+ *   flashlight today, exactly like `INVERSE_SQUARE_STEEPNESS` is for every
+ *   candle). Required together with `falloffModel: 'beam'`; absent → falls
+ *   back to the `foundry` corona (see `buildPointLightSharedTerms`'s own
+ *   safety-slide).
  * @param {{x:number,y:number}} [args.windCenter] - this light's WORLD
  *   position, for sampling the shared wind field (world/wind-field.js's
  *   `sampleWind` — Wind.md Tier 0). OPT-IN: paired with `windExposure`, both
@@ -1754,7 +1932,7 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
  *   uEdgeCount: *, uEdgeSoftMargin: *, edgePoints: object[],
  *   uSpeedRaw: (*|null), uReverseSign: (*|null), uSeed: (*|null),
  *   uIntensityRaw: (*|null), uWindCenter: (*|null), uWindExposure: (*|null),
- *   uWindResponse: (*|null), uLightExpectedDepth: *, backgroundFloor: *,
+ *   uWindResponse: (*|null), uBeamDirection: (*|null), uLightExpectedDepth: *, backgroundFloor: *,
  *   combinedFalloff: *, finalColorExposed: *,
  *   uApLampHeight: (*|null), apApertures: (Array|null)}}
  *   the four `u*` animation-config uniforms (and the three wind uniforms)
@@ -1773,6 +1951,7 @@ export function buildPointLightIlluminationMaterial({
   uGlobalTimeMs,
   animationQuality = 0,
   falloffModel = 'foundry',
+  beamShape = null,
   windCenter,
   windExposure,
   windResponse,
@@ -1802,6 +1981,16 @@ export function buildPointLightIlluminationMaterial({
   const uExposure = uniform(float(0));
   const uEdgeCount = uniform(int(0));
   const uEdgeSoftMargin = uniform(float(0));
+
+  // FLASHLIGHT BEAM DIRECTION (mythica-machina-press#579/#77 Stage 2a) — the
+  // ONE live per-frame input the beam needs beyond its (constant) shape:
+  // the bearer's own current facing, written every frame by point-light-
+  // pool.js's update() from the light descriptor's `beamDirection` (a unit
+  // vec2, `player-light-geometry.js#tokenRotationToForwardVector`), the SAME
+  // "uniform out, .value written per frame" contract `uWindCenter` etc.
+  // already follow. `null` when this light isn't a beam — nothing for the
+  // pool to write, matching every other conditional uniform in this function.
+  const uBeamDirection = beamShape ? uniform(vec2(0, -1)) : null;
 
   // Fixed-capacity, allocated ONCE — see this function's own header. Real
   // THREE.Vector2 instances (UniformArrayNode's own update() reads
@@ -1861,6 +2050,7 @@ export function buildPointLightIlluminationMaterial({
           ? { speedRaw: uSpeedRaw, reverseSign: uReverseSign, seed: uSeed, intensityRaw: uIntensityRaw }
           : null,
         wind: uWindCenter ? { center: uWindCenter, exposure: uWindExposure, response: uWindResponse } : null,
+        beamDirection: uBeamDirection,
       },
       shared: {
         attrTexNode,
@@ -1880,7 +2070,7 @@ export function buildPointLightIlluminationMaterial({
         cloudStrengthNode,
         cloudBlurNode,
       },
-      flags: { animation, animationQuality, falloffModel, apertureCount, apGoboCols, apGoboRows },
+      flags: { animation, animationQuality, falloffModel, apertureCount, apGoboCols, apGoboRows, beamShape },
     });
 
   const material = new THREE.NodeMaterial();
@@ -1919,6 +2109,10 @@ export function buildPointLightIlluminationMaterial({
     uWindCenter,
     uWindExposure,
     uWindResponse,
+    // FLASHLIGHT BEAM — `null` unless this light was built with `beamShape`
+    // (see this function's own param doc). `point-light-pool.js`'s per-frame
+    // update writes this every frame from the light's live `beamDirection`.
+    uBeamDirection,
     backgroundFloor,
     combinedFalloff,
     finalColorExposed,

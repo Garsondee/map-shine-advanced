@@ -691,6 +691,27 @@ export {
 export { buildLightningGeometry, refillLightningGeometry, buildLightningMaterial } from './lightning-render.js';
 export { createLightningSubsystem } from './lightning-subsystem.js';
 
+// ROPE & CHAIN (mythica-machina-press#1) — a rope/chain span hanging between
+// two GM-placed tether points, sagging under gravity and (a later phase)
+// swaying in the wind. PHASE 1 ONLY so far: the authoring pair (scene/
+// anchor-catalog.js's `ropeChain` kind + boot.js's CRUD) and this pure
+// geometry/physics half. No `rope-chain.js` declaration, no TSL render, no
+// subsystem yet — see effects/rope-chain-geometry.js's own header for the
+// full phase split. Re-exported here anyway (rather than boot.js reaching
+// into './rope-chain-geometry.js' directly) so this file stays the ONE door
+// into effects/, the same rule every other effect's pure half already
+// follows, and so this new file is reachable from boot.js
+// (tools/reachability.mjs's own whole-graph walk) from the moment it lands.
+export {
+  groupRopeChainAnchorsIntoSources,
+  ROPE_CHAIN_PRESETS,
+  parabolicSag as ropeChainParabolicSag,
+  modalDisplacement as ropeChainModalDisplacement,
+  springChase as ropeChainSpringChase,
+  computeModalForcing as ropeChainComputeModalForcing,
+  buildRopeChainRibbonArrays,
+} from './rope-chain-geometry.js';
+
 // FIRE (docs/planning/Fire.md) — the vertical slab integral. Because the camera
 // is orthographic and looks exactly down −Z, every view ray is parallel to
 // world up, so "marching the fire volume" is a 1-D column integral at a fixed

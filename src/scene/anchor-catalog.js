@@ -47,6 +47,22 @@
  * side) — this catalog only adds the `role`/`linkId` per-anchor params a
  * `lightning` anchor carries.
  *
+ * TIER 2: `ropeChain` (mythica-machina-press#1) — "the endpoints of a rope,"
+ * named in this file's own opening paragraph above before it had a home, that
+ * day has come. A rope/chain SPAN is, exactly like a lightning bolt, two
+ * LINKED anchors (one `role:'start'`, one `role:'end'`, sharing a
+ * `params.linkId`) rather than a single point, and reuses lightning's
+ * `linkedEndpoints` importStrategy and two-anchor pairing convention
+ * verbatim — pairing is done ENTIRELY above this layer, same as lightning's
+ * (boot.js's own two-click placement wrapper; effects/rope-chain-geometry.js
+ * #groupRopeChainAnchorsIntoSources on the read side). This is Phase 1 of
+ * that issue (authoring + pure geometry/physics math only — no TSL/render
+ * yet, see effects/rope-chain-geometry.js's own header). Six per-anchor
+ * params beyond `role`/`linkId` (`preset`/`sagPx`/`thicknessPx`/`elevation`/
+ * `windAffected`/`color`) are all authoritative on the START anchor only —
+ * again mirroring lightning's own `elevation` convention, just extended from
+ * one span-wide knob to every span-wide knob this kind carries.
+ *
  * @module scene/anchor-catalog
  */
 
@@ -469,6 +485,109 @@ export const ANCHOR_KINDS = Object.freeze([
     },
     meaning:
       'One endpoint of a forked-lightning bolt source; two linked endpoints sharing a link id form one bolt, successor to a V2 lightning map-point group.',
+  },
+  {
+    id: 'ropeChain',
+    effectId: 'ropeChain',
+    label: 'Rope & chain',
+    icon: '⛓️',
+    // V2's EFFECT_SOURCE_OPTIONS key (legacy/scene/map-points-manager.js:49).
+    v2EffectTargets: ['rope'],
+    importStrategy: 'linkedEndpoints',
+    params: {
+      // SAME SHAPE AS LIGHTNING'S OWN role/linkId (this file's TIER 2 header
+      // above explains the reuse) — but NOT the same text: lightning's own
+      // `help` strings name "bolt"/"lightning source" explicitly, which would
+      // be an honest-sounding but WRONG description on a rope/chain anchor.
+      // Only the generic parts (type/values/default/maxLength — the load-
+      // bearing shape validateParamsSchema and the write-path check care
+      // about) are copied; the label/help prose is reworded for a rope/chain
+      // "span" (this kind's own vocabulary, used consistently below).
+      role: {
+        type: 'enum',
+        values: ['start', 'end', 'waypoint'],
+        default: 'start',
+        label: 'Endpoint role',
+        help: 'Which end of the span this point is. Two endpoints sharing the same link id form one rope/chain span.',
+      },
+      linkId: {
+        type: 'text',
+        default: '',
+        maxLength: 128,
+        label: 'Span link id',
+        help: 'Ties this point to its partner endpoint. Set automatically when you place a span.',
+      },
+      preset: {
+        type: 'enum',
+        values: ['rope', 'chain'],
+        default: 'rope',
+        label: 'Preset',
+        help: "Rope: thicker, more taper, sways more in wind. Chain: tighter, stiffer, sways less. Ported from V2's two original presets (rope windForce 1.2 vs chain 0.25; rope width 22 vs chain 18; rope damping 0.98 vs chain 0.92 — chain settles faster).",
+      },
+      sagPx: {
+        type: 'float',
+        min: 0,
+        max: 2000,
+        step: 1,
+        default: 40,
+        label: 'Sag amount',
+        help: 'How far the span droops at its midpoint under its own weight, in world px.',
+      },
+      thicknessPx: {
+        type: 'float',
+        min: 1,
+        max: 200,
+        step: 1,
+        default: 20,
+        label: 'Thickness',
+        help: 'The rendered width of the rope/chain ribbon, in world px.',
+      },
+      // HEIGHT OFF THE FLOOR — the SAME depth-authority field candle's and
+      // lightning's own `elevation` already use, on the SAME "world/scene
+      // elevation units, ADDED to floorBinding.bottom" convention. Only the
+      // START endpoint's value is ever read (effects/rope-chain-geometry.js#
+      // groupRopeChainAnchorsIntoSources's own doc), matching lightning's
+      // elevation convention exactly, including the non-zero default
+      // (lightning's own lesson: 0 reads as "never configured" —
+      // lightning-geometry.js#defaultLightningElevation's own doc).
+      elevation: {
+        type: 'float',
+        min: 0,
+        max: 50,
+        step: 1,
+        default: 10,
+        label: 'Height off floor',
+        help: "How far above the floor this span hangs at its anchors. Only the start endpoint's value is used — one shared height for the whole span, editable from either endpoint's menu, same convention as Lightning bolt.",
+      },
+      windAffected: {
+        type: 'float',
+        min: 0,
+        max: 2,
+        step: 0.05,
+        default: 1,
+        label: 'Wind response',
+        help: "Multiplies how strongly this span reacts to wind, on top of its preset's own base response.",
+      },
+      color: {
+        type: 'color',
+        space: 'srgb',
+        default: '#8a8378',
+        label: 'Tint',
+        help: 'Colour tint applied to the rope/chain material.',
+      },
+      // SAME SHAPE AS LIGHTNING'S OWN floorVisibility, same default
+      // 'own-and-above' — but reworded for "span" rather than "bolt"/"storm",
+      // same reasoning as role/linkId above.
+      floorVisibility: {
+        type: 'enum',
+        values: ['own-floor', 'own-and-above', 'all-floors'],
+        default: 'own-and-above',
+        label: 'Visible from',
+        help: 'Which floors this span can be considered on at all. "Own floor" only considers it on the floor it was placed on. "Own and above" (default) also considers it looking down from any higher floor, but never from a floor below — matching a rope or chain hanging somewhere above the whole building, never visible looking up through solid floors underground. "All floors" considers it from literally anywhere, including underground, for an author who wants that specific look on one span. On every floor it IS considered on, it is still genuinely occluded by whatever real artwork actually covers it there; this only controls where it is eligible to be seen at all.',
+      },
+    },
+    meaning:
+      'One endpoint of a rope or chain span; two linked endpoints sharing a link id form one span, successor to a V2 `rope` map-point group.',
   },
 ]);
 

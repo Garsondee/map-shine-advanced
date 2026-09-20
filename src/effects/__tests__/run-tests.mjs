@@ -18,6 +18,7 @@ import { run as runCandleIgnite } from './candle-ignite.test.mjs';
 import { run as runLightning } from './lightning.test.mjs';
 import { run as runLightningGeometry } from './lightning-geometry.test.mjs';
 import { run as runLightningSubsystem } from './lightning-subsystem.test.mjs';
+import { run as runRopeChainGeometry } from './rope-chain-geometry.test.mjs';
 import { run as runVegetation } from './vegetation.test.mjs';
 import { run as runVegetationRender } from './vegetation-render.test.mjs';
 import { run as runVegetationShadow } from './vegetation-shadow-subsystem.test.mjs';
@@ -72,6 +73,7 @@ const suites = [
   ['lightning', runLightning],
   ['lightning-geometry', runLightningGeometry],
   ['lightning-subsystem', runLightningSubsystem],
+  ['rope-chain-geometry', runRopeChainGeometry],
   ['vegetation', runVegetation],
   ['vegetation-render', runVegetationRender],
   ['vegetation-shadow-subsystem', runVegetationShadow],

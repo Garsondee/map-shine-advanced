@@ -423,6 +423,11 @@ import {
   resolveAnchorElevationWorldUnits,
   groupLightningAnchorsIntoSources,
   defaultLightningElevation,
+  // ROPE & CHAIN (mythica-machina-press#1, Phase 1) — only the pairing
+  // function is needed in boot.js so far (the connector-line helper below);
+  // the rest of effects/rope-chain-geometry.js's exports are for a Phase-2
+  // render/subsystem layer that does not exist yet.
+  groupRopeChainAnchorsIntoSources,
   GRADE_PRESETS,
   gradePreset,
   GRADE,
@@ -3394,6 +3399,99 @@ function install() {
    * AnchorsIntoSources needs both to form a source), which is the correct,
    * honest behaviour: a lightning bolt with one end deleted is not a bolt. */
   function removeLightningAnchor(id) {
+    const existed = anchorAuthority.removeAnchor(id);
+    if (existed) {
+      delete authoredAnchorsPayload.overrides[id];
+      if (!authoredAnchorsPayload.removed.includes(id)) authoredAnchorsPayload.removed.push(id);
+      persistAuthoredAnchors();
+      MapShine.debug?.refreshControls?.();
+    }
+    return existed;
+  }
+
+  // ---------------------------------------------------------------------------
+  // ROPE & CHAIN ANCHOR CRUD (mythica-machina-press#1, Phase 1: authoring +
+  // pure geometry only — see effects/rope-chain-geometry.js's own header for
+  // the full picture) — a rope/chain SPAN is TWO linked ordinary anchors
+  // (`role:'start'`/`role:'end'` sharing one `params.linkId`), the exact same
+  // shape a lightning bolt uses (scene/anchor-catalog.js's own TIER 2 header
+  // explains the reuse). Mirrors the LIGHTNING ANCHOR CRUD block just above
+  // line for line: same two-click state machine, same validate-at-write-
+  // through-the-authority path, same snapshot-into-authoredAnchorsPayload-
+  // and-persist shape.
+  //
+  // `defaultLightningElevation` is reused DIRECTLY below, unrenamed — read
+  // its own body (lightning-geometry.js) before assuming that is wrong: it
+  // takes only a `floorBinding` and an `{min,max}` range and contains no
+  // lightning-specific assumption anywhere, so this is genuinely shared
+  // logic (the SAME "never default a fresh instance's height off floor to
+  // 0" reasoning applies verbatim to a rope/chain span), not a lightning-
+  // shaped duplicate wearing a rope label. Its name is a little misleading
+  // now that a second, unrelated kind calls it — left as-is for this phase
+  // rather than a drive-by rename of shared, working, already-tested code.
+  // ---------------------------------------------------------------------------
+
+  /** The in-progress span's link id between its two clicks, or null when no
+   * span is mid-placement. Same module-scope-orphan-on-interruption posture
+   * as `pendingLightningLinkId` above: a stray click elsewhere simply leaves
+   * a single orphaned `role:'start'` anchor, not a crash. */
+  let pendingRopeChainLinkId = null;
+
+  function addRopeChainEndpoint(x, y) {
+    const floorBinding = activeFloorContext
+      ? { mode: 'locked', bottom: activeFloorContext.band[0], top: activeFloorContext.band[1] }
+      : { mode: 'all-levels' };
+    const role = pendingRopeChainLinkId ? 'end' : 'start';
+    const linkId = pendingRopeChainLinkId ?? `ropeChain:${crypto.randomUUID()}`;
+    const id = `authored:${crypto.randomUUID()}`;
+    const params = { role, linkId };
+    // A fresh span's own "height off floor" (2026-09-20, same non-zero-
+    // default reasoning as lightning's own 2026-08-05 fix) — only the start
+    // endpoint's value is ever read (effects/rope-chain-geometry.js#
+    // groupRopeChainAnchorsIntoSources's own doc), so only it needs one
+    // computed; the end endpoint's own `elevation` stays at the schema
+    // default, unused, same as lightning's own end endpoint.
+    if (role === 'start') {
+      params.elevation = defaultLightningElevation(floorBinding, anchorKindById('ropeChain')?.params?.elevation);
+    }
+    const resolved = anchorAuthority.addAnchor({
+      id,
+      kind: 'ropeChain',
+      x,
+      y,
+      floorBinding,
+      enabled: true,
+      params,
+    });
+    if (!resolved) {
+      log.error(
+        `addRopeChainEndpoint: the new span ${role} was rejected at ingest — this should be unreachable for a well-formed raw shape`
+      );
+      return null;
+    }
+    authoredAnchorsPayload.overrides[id] = snapshotAnchorForPersistence(resolved);
+    persistAuthoredAnchors();
+    MapShine.debug?.refreshControls?.();
+    pendingRopeChainLinkId = role === 'start' ? linkId : null;
+    return resolved;
+  }
+
+  /** Patch one span endpoint (position/floor/enabled/params) — identical
+   * shape to `updateLightningAnchor`. */
+  function updateRopeChainAnchor(id, patch) {
+    const resolved = anchorAuthority.updateAnchor(id, patch);
+    if (!resolved) return null;
+    authoredAnchorsPayload.overrides[id] = snapshotAnchorForPersistence(resolved);
+    persistAuthoredAnchors();
+    MapShine.debug?.refreshControls?.();
+    return resolved;
+  }
+
+  /** Remove one span endpoint — regardless of role, regardless of whether it
+   * was V2-imported or freshly authored. Removing EITHER endpoint orphans the
+   * other (same honest behaviour as `removeLightningAnchor`: a rope/chain
+   * span with one end deleted is not a span). */
+  function removeRopeChainAnchor(id) {
     const existed = anchorAuthority.removeAnchor(id);
     if (existed) {
       delete authoredAnchorsPayload.overrides[id];
@@ -8327,6 +8425,188 @@ function install() {
   });
 
   // ---------------------------------------------------------------------------
+  // ROPE & CHAIN AUTHORING HELPERS (mythica-machina-press#1, Phase 1) — the
+  // edit-form/placement-mode/connector-line trio every two-point anchor kind
+  // needs, mirroring lightning's own trio just above. Deliberately NOT
+  // followed by a `buildRopeChainPanel`/`MapShine.debug.registerPanel(...)`
+  // call, and `enterRopeChainPlacement` below is not yet wired to any "➕
+  // Place" button — Phase 2 wires the Studio card once the render/geometry
+  // pieces exist to back it (params/no-dead-controls: shipping a button
+  // against a real function is fine; shipping one against a manifest that
+  // doesn't exist yet is not). Until then, a GM can already place/move/
+  // delete rope/chain anchors through the unified palette
+  // (`enterAnchorViewMode`'s `kinds` array, below).
+  // ---------------------------------------------------------------------------
+
+  /** The ropeChain anchor kind's own per-instance params (scene/anchor-
+   * catalog.js) — the edit popup below reads labels/help/defaults from here,
+   * never hand-duplicated, same convention as CANDLE_ANCHOR_PARAMS/
+   * LIGHTNING_ANCHOR_PARAMS above. */
+  const ROPE_CHAIN_ANCHOR_PARAMS = anchorKindById('ropeChain')?.params ?? {};
+
+  /** `[startId, endId]` pairs for every COMPLETE span currently served —
+   * reuses the SAME pairing a Phase-2 subsystem will use to spawn the real
+   * mesh (`groupRopeChainAnchorsIntoSources`), so the drawn connector line
+   * can never disagree with which anchors actually form a span. Mirrors
+   * `lightningLinePairs` exactly. */
+  function ropeChainLinePairs() {
+    const anchors = anchorAuthority.anchorsForEffect('ropeChain', activeFloorContext);
+    const { sources } = groupRopeChainAnchorsIntoSources(anchors);
+    return sources.map((s) => [s.startId, s.endId]);
+  }
+
+  /** The OTHER endpoint sharing this one's `linkId` and holding `wantRole` —
+   * mirrors `findLightningPartner` exactly, including the NULL floor context
+   * (a structural lookup, not a visibility one). */
+  function findRopeChainPartner(anchor, wantRole) {
+    const linkId = anchor?.params?.linkId;
+    if (!linkId) return null;
+    const anchors = anchorAuthority.anchorsForEffect('ropeChain', null);
+    return (
+      anchors.find((a) => a.id !== anchor.id && a.params?.linkId === linkId && a.params?.role === wantRole) ?? null
+    );
+  }
+
+  /** Build the per-endpoint edit form (ui/anchor-mode.js's popup content).
+   * `role`/`linkId` are structural (set once at placement, shown read-only
+   * via the role line below, never hand-edited — same posture lightning's
+   * form takes). `preset`/`sagPx`/`thicknessPx`/`windAffected`/`color`/
+   * `elevation` are span-wide and START-ANCHOR-ONLY (scene/anchor-catalog.js's
+   * own schema comment on each field; effects/rope-chain-geometry.js#
+   * groupRopeChainAnchorsIntoSources's return shape agrees) — shown and
+   * editable from EITHER endpoint's own popup, mirroring
+   * `buildLightningEditForm`'s identical `elevation` mechanism exactly, just
+   * extended from one shared field to six. `floorVisibility` is, by
+   * contrast, an ORDINARY per-endpoint field (not in that same return shape,
+   * not unified across the span), so it patches `targetIds` like `enabled`
+   * does rather than redirecting to the start anchor. */
+  function buildRopeChainEditForm(anchor, targetIds = [anchor.id]) {
+    const wrap = document.createElement('div');
+    Object.assign(wrap.style, { display: 'flex', flexDirection: 'column', gap: '5px' });
+    const patch = (fields) => {
+      for (const id of targetIds) updateRopeChainAnchor(id, fields);
+    };
+
+    const roleLine = document.createElement('div');
+    Object.assign(roleLine.style, { fontSize: '10px', opacity: '0.75' });
+    const role = anchor.params?.role;
+    roleLine.textContent =
+      role === 'start'
+        ? '⛓️ Span start'
+        : role === 'end'
+          ? '⛓️ Span end (far point)'
+          : '⛓️ Span waypoint (not yet used)';
+    wrap.append(roleLine);
+
+    if (role === 'start' || role === 'end') {
+      const startAnchor = role === 'start' ? anchor : findRopeChainPartner(anchor, 'start');
+      if (startAnchor) {
+        // Deliberately writes straight to `startAnchor.id` rather than going
+        // through `patch()`/`targetIds` above — same reasoning
+        // buildLightningEditForm's own elevation control cites: "which
+        // endpoint's [span-wide value] changes" is never a per-selected-
+        // anchor question, it is always "this span's start".
+        const patchStart = (fields) => updateRopeChainAnchor(startAnchor.id, fields);
+
+        wrap.append(
+          buildParamControl('preset', ROPE_CHAIN_ANCHOR_PARAMS.preset, {
+            value: startAnchor.params?.preset ?? ROPE_CHAIN_ANCHOR_PARAMS.preset?.default,
+            onChange: (v) => patchStart({ params: { preset: v } }),
+          })
+        );
+        wrap.append(
+          buildParamControl('sagPx', ROPE_CHAIN_ANCHOR_PARAMS.sagPx, {
+            value: startAnchor.params?.sagPx ?? ROPE_CHAIN_ANCHOR_PARAMS.sagPx?.default,
+            onChange: (v) => patchStart({ params: { sagPx: v } }),
+          })
+        );
+        wrap.append(
+          buildParamControl('thicknessPx', ROPE_CHAIN_ANCHOR_PARAMS.thicknessPx, {
+            value: startAnchor.params?.thicknessPx ?? ROPE_CHAIN_ANCHOR_PARAMS.thicknessPx?.default,
+            onChange: (v) => patchStart({ params: { thicknessPx: v } }),
+          })
+        );
+        wrap.append(
+          buildParamControl('windAffected', ROPE_CHAIN_ANCHOR_PARAMS.windAffected, {
+            value: startAnchor.params?.windAffected ?? ROPE_CHAIN_ANCHOR_PARAMS.windAffected?.default,
+            onChange: (v) => patchStart({ params: { windAffected: v } }),
+          })
+        );
+        wrap.append(
+          buildParamControl('color', ROPE_CHAIN_ANCHOR_PARAMS.color, {
+            value: startAnchor.params?.color ?? ROPE_CHAIN_ANCHOR_PARAMS.color?.default,
+            onChange: (v) => patchStart({ params: { color: v } }),
+          })
+        );
+        wrap.append(
+          buildParamControl('elevation', ROPE_CHAIN_ANCHOR_PARAMS.elevation, {
+            value: startAnchor.params?.elevation ?? ROPE_CHAIN_ANCHOR_PARAMS.elevation?.default,
+            onChange: (v) => patchStart({ params: { elevation: v } }),
+          })
+        );
+        if (role === 'end') {
+          const sharedNote = document.createElement('div');
+          Object.assign(sharedNote.style, { fontSize: '9.5px', opacity: '0.6' });
+          sharedNote.textContent = 'Shared with this span’s ⛓️ start point.';
+          wrap.append(sharedNote);
+        }
+      } else {
+        const missingNote = document.createElement('div');
+        Object.assign(missingNote.style, { fontSize: '9.5px', opacity: '0.6' });
+        missingNote.textContent = 'This span’s ⛓️ start point hasn’t been placed yet.';
+        wrap.append(missingNote);
+      }
+    }
+
+    // VISIBLE FROM — an ordinary per-endpoint field, shown here the same way
+    // candle's own form shows it (lightning's own form currently omits this
+    // control entirely; that gap is not copied here — a declared field with
+    // nowhere to be edited is the exact "declared, defaulted, consumed,
+    // never wired" shape this project avoids elsewhere, per candle's own
+    // form comment).
+    wrap.append(
+      buildParamControl('floorVisibility', ROPE_CHAIN_ANCHOR_PARAMS.floorVisibility, {
+        value: anchor.params?.floorVisibility ?? ROPE_CHAIN_ANCHOR_PARAMS.floorVisibility?.default,
+        onChange: (v) => patch({ params: { floorVisibility: v } }),
+      })
+    );
+
+    // On — the anchor's own `enabled` flag, same shape as lightning's "Lit".
+    wrap.append(
+      buildParamControl(
+        'enabled',
+        {
+          type: 'bool',
+          label: 'On',
+          help: 'Turn this ONE endpoint off without deleting it. A span needs both ends enabled to render — disabling either one hides the whole span.',
+        },
+        { value: anchor.enabled !== false, onChange: (v) => patch({ enabled: v }) }
+      )
+    );
+
+    return wrap;
+  }
+
+  // Hoisted the same way enterCandlePlacement/enterLightningPlacement are —
+  // not yet called from any button (see this section's own header) but kept
+  // as a real, install()-level closure so Phase 2's own "➕ Place" button has
+  // one ready-made function to point at rather than writing it from scratch.
+  const enterRopeChainPlacement = () => {
+    if (MapShine.__anchorViewMode.isActive()) MapShine.__anchorViewMode.exit(); // see enterCandlePlacement's own note
+    const result = MapShine.__anchorMode.enter({
+      kindLabel: 'rope/chain span',
+      icon: anchorKindById('ropeChain')?.icon,
+      listAnchors: () => anchorAuthority.anchorsForEffect('ropeChain', activeFloorContext),
+      addAnchor: (wx, wy) => addRopeChainEndpoint(wx, wy),
+      updateAnchor: (id, patch) => updateRopeChainAnchor(id, patch),
+      removeAnchor: (id) => removeRopeChainAnchor(id),
+      buildEditForm: buildRopeChainEditForm,
+      linePairs: ropeChainLinePairs,
+    });
+    if (!result?.ok) log.error('could not enter rope/chain placement mode:', result?.reason);
+  };
+
+  // ---------------------------------------------------------------------------
   // THE FIRE WORKSHOP PANEL — same FOH/ROH card template as the two above.
   //
   // ⚠️ FIRE HAS TWO SOURCES AND THE CARD SAYS SO. Every other effect here is
@@ -8462,6 +8742,21 @@ function install() {
           updateAnchor: (id, patch) => updateLightningAnchor(id, patch),
           removeAnchor: (id) => removeLightningAnchor(id),
           buildEditForm: buildLightningEditForm,
+        },
+        // ROPE & CHAIN (mythica-machina-press#1, Phase 1) — this unified
+        // palette entry is the ONLY placement affordance this phase ships;
+        // there is no dedicated "➕ Place" button/panel yet (see the ROPE &
+        // CHAIN AUTHORING HELPERS section's own header, above), but a GM can
+        // already place/move/delete/edit rope & chain anchors from here.
+        {
+          kindId: 'ropeChain',
+          label: 'rope/chain',
+          icon: anchorKindById('ropeChain')?.icon,
+          listAnchors: () => anchorAuthority.anchorsForKindOnFloor('ropeChain', activeFloorContext),
+          addAnchor: (wx, wy) => addRopeChainEndpoint(wx, wy),
+          updateAnchor: (id, patch) => updateRopeChainAnchor(id, patch),
+          removeAnchor: (id) => removeRopeChainAnchor(id),
+          buildEditForm: buildRopeChainEditForm,
         },
       ],
       // The toolbar's own Done button and Escape both call MapShine.__anchor

@@ -54,14 +54,13 @@ import { computeTorchEmberArrays } from './player-torch-flame-geometry.js';
  * @returns {{geometry: *, quadCount: number}}
  */
 export function buildTorchEmberGeometry(THREE, anchors, opts = {}) {
-  const { positions, uvs, centers, seeds, colors, indices, quadCount } = computeTorchEmberArrays(anchors, {
+  const { positions, uvs, seeds, colors, indices, quadCount } = computeTorchEmberArrays(anchors, {
     ...opts,
     sizePx: opts.sizePx ?? EMBER_BOX_SIZE_PX,
   });
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
-  geometry.setAttribute('center', new THREE.BufferAttribute(centers, 2));
   geometry.setAttribute('emberSeed', new THREE.BufferAttribute(seeds, 1));
   geometry.setAttribute('emberColor', new THREE.BufferAttribute(colors, 3));
   geometry.setIndex(new THREE.BufferAttribute(indices, 1));

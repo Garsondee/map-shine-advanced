@@ -112,10 +112,15 @@ function deriveEmberSeed(tokenId, emberIndex) {
  * within it is entirely the shader's job, driven by the baked `seed` +
  * `uGlobalTimeMs`, same "dumb quad, the shader does the motion" principle
  * `computeCandleFlameArrays` already established for the flame body itself.
+ * UNLIKE that sibling, no world-space `center` attribute is baked here — an
+ * ember's own shader math is entirely UV-local (see `buildTorchEmberMaterial`),
+ * with no wind sampling (Stage 2a scope) that would need the wick's world
+ * position; adding wind response later is a `center` attribute plus a
+ * `windHandle` sample away, not a redesign.
  *
  * @param {Array<{x:number, y:number, id?:string}>} anchors
  * @param {{emberCount?:number, sizePx:number, colorHex?:string}} opts
- * @returns {{positions: Float32Array, uvs: Float32Array, centers: Float32Array, seeds: Float32Array, colors: Float32Array, indices: Uint32Array, quadCount: number}}
+ * @returns {{positions: Float32Array, uvs: Float32Array, seeds: Float32Array, colors: Float32Array, indices: Uint32Array, quadCount: number}}
  */
 export function computeTorchEmberArrays(anchors, { emberCount = 5, sizePx, colorHex = '#ffb347' } = {}) {
   const list = Array.isArray(anchors) ? anchors : [];
@@ -125,7 +130,6 @@ export function computeTorchEmberArrays(anchors, { emberCount = 5, sizePx, color
   const maxQuads = list.length * perAnchor;
   const positions = new Float32Array(maxQuads * 4 * 3);
   const uvs = new Float32Array(maxQuads * 4 * 2);
-  const centers = new Float32Array(maxQuads * 4 * 2);
   const seeds = new Float32Array(maxQuads * 4);
   const colors = new Float32Array(maxQuads * 4 * 3);
   const indices = new Uint32Array(maxQuads * 6);
@@ -140,7 +144,6 @@ export function computeTorchEmberArrays(anchors, { emberCount = 5, sizePx, color
       const q = quadCount;
       const p = q * 12;
       const uvo = q * 8;
-      const co = q * 8;
       const clo = q * 12;
       const so = q * 4;
       const io = q * 6;
@@ -166,8 +169,6 @@ export function computeTorchEmberArrays(anchors, { emberCount = 5, sizePx, color
       uvs[uvo + 6] = 0;
       uvs[uvo + 7] = 1;
       for (let v = 0; v < 4; v++) {
-        centers[co + v * 2] = cx;
-        centers[co + v * 2 + 1] = cy;
         seeds[so + v] = seed;
         colors[clo + v * 3 + 0] = cr;
         colors[clo + v * 3 + 1] = cg;
@@ -182,5 +183,5 @@ export function computeTorchEmberArrays(anchors, { emberCount = 5, sizePx, color
       quadCount++;
     }
   }
-  return { positions, uvs, centers, seeds, colors, indices, quadCount };
+  return { positions, uvs, seeds, colors, indices, quadCount };
 }

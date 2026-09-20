@@ -13315,13 +13315,13 @@ export async function startVtPanViewer({
     });
 
     /**
-     * THE ROPE & CHAIN SUBSYSTEM (mythica-machina-press#1, Phase 2) —
-     * effects/rope-chain-subsystem.js's own per-instance mesh/spring-state
-     * lifecycle. Constructed HERE, immediately after `scene`/`vegShadows`,
-     * for the SAME TDZ reason vegShadows' own comment just above states:
-     * `scene` is a `const` declared just above this point in the function
-     * and is in its temporal dead zone before that — this effect's meshes
-     * join that SAME shared `scene` (drawn by the ordinary
+     * THE ROPE & CHAIN SUBSYSTEM (mythica-machina-press#1, Phase 2 + Phase 3)
+     * — effects/rope-chain-subsystem.js's own per-instance mesh/spring-state/
+     * shadow lifecycle. Constructed HERE, immediately after `scene`/
+     * `vegShadows`, for the SAME TDZ reason vegShadows' own comment just
+     * above states: `scene` is a `const` declared just above this point in
+     * the function and is in its temporal dead zone before that — this
+     * effect's meshes join that SAME shared `scene` (drawn by the ordinary
      * `runGeometryWorldPass`, no separate scene/draw call the way lightning
      * needs — see rope-chain-subsystem.js's own header), so it belongs
      * beside vegShadows, not beside lightningSubsystem/pointLights further
@@ -13336,6 +13336,17 @@ export async function startVtPanViewer({
      * not invoked until `ropeChainSubsystem.tick()` first runs from the
      * frame loop, long after every relevant declaration in this function
      * has executed.
+     *
+     * ⚠️ `getShadowHandle` (Phase 3) is a GETTER for the SAME reason, over
+     * the SAME reassigned `shadowHandle` local `vegShadows` above already
+     * takes a getter over (`let shadowHandle = createShadowHandle()`,
+     * reassigned on every sky change — see `vegShadows`' own construction
+     * comment just above, and `vegetation-shadow-subsystem.js`'s own module
+     * header for why a captured value would freeze every rope's shadow at
+     * whatever sky existed when this subsystem was built). `shadowHandle` is
+     * declared well ABOVE this line, so there is not even a TDZ question
+     * here — this is simply the same established getter idiom, applied
+     * consistently.
      *
      * `renderRopeChainPass: renderSunShadowPass` — the subsystem never
      * touches `renderer` directly (`renderer-state/graph-only` allows
@@ -13356,6 +13367,7 @@ export async function startVtPanViewer({
       uGlobalTimeMs,
       getWindHandle: () => windHandle,
       getRopeChainAnchors,
+      getShadowHandle: () => shadowHandle,
     });
 
     // THE WORLD-SPACE CAMERA. Frustum values are set per frame by updateCamera()

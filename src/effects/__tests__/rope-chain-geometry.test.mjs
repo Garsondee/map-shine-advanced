@@ -11,6 +11,7 @@ import {
   groupRopeChainAnchorsIntoSources,
   ROPE_CHAIN_PRESETS,
   parabolicSag,
+  impliedHeightFraction01,
   modalDisplacement,
   springChase,
   computeModalForcing,
@@ -161,6 +162,40 @@ export function run(t) {
     // agreement to within float epsilon is.
     ok('parabolicSag is symmetric around s=0.5', approx(parabolicSag(0.3, 77), parabolicSag(0.7, 77)));
     ok('parabolicSag scales linearly with sagPx', approx(parabolicSag(0.25, 200), parabolicSag(0.25, 100) * 2));
+  }
+
+  // --- impliedHeightFraction01 (Phase 3, the shadow's per-vertex throw scale) ---
+  {
+    ok('impliedHeightFraction01 is 1 (full height) at the start anchor, s=0', impliedHeightFraction01(0) === 1);
+    ok('impliedHeightFraction01 is 1 (full height) at the end anchor, s=1', impliedHeightFraction01(1) === 1);
+    ok('impliedHeightFraction01 is 0 (ground level) at the sag midpoint, s=0.5', impliedHeightFraction01(0.5) === 0);
+    // approx, not === : same left-to-right float-rounding note as
+    // parabolicSag's own symmetry assertion above (this function is
+    // `1 - parabolicSag(s, 1)`, so it inherits that formula's rounding).
+    ok(
+      'impliedHeightFraction01 is symmetric around s=0.5',
+      approx(impliedHeightFraction01(0.3), impliedHeightFraction01(0.7))
+    );
+    // Strictly between 0 and 1 everywhere off the three pinned points above —
+    // a real hanging chain's shadow is never MORE offset than at the anchors
+    // nor LESS offset than at the lowest point.
+    ok(
+      'impliedHeightFraction01 stays within (0, 1) strictly between the anchors and the midpoint',
+      impliedHeightFraction01(0.1) > 0 &&
+        impliedHeightFraction01(0.1) < 1 &&
+        impliedHeightFraction01(0.9) > 0 &&
+        impliedHeightFraction01(0.9) < 1
+    );
+    // Directly ties this function to parabolicSag's OWN formula at unit
+    // amplitude, rather than just re-asserting the same numbers independently
+    // — this is what actually pins "reuses the sag shape family", not just
+    // "happens to produce the same endpoints".
+    for (const s of [0, 0.1, 0.25, 0.5, 0.75, 0.9, 1]) {
+      ok(
+        `impliedHeightFraction01(${s}) === 1 - parabolicSag(${s}, 1)`,
+        impliedHeightFraction01(s) === 1 - parabolicSag(s, 1)
+      );
+    }
   }
 
   // --- modalDisplacement: THE TETHER-POINT SAFETY GUARANTEE -----------------

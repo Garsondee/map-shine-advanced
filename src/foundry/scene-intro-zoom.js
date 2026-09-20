@@ -22,6 +22,7 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { resolveViewerToken } from './viewer-token.js';
 
 const log = createLogger('scene-intro-zoom');
 
@@ -40,31 +41,6 @@ const ZOOM_OUT_MS = 850;
  * not zoom in AGAIN to something absurd). */
 const ZOOM_IN_MULTIPLIER = 2;
 const MAX_ZOOM_SCALE = 3;
-
-/**
- * Find the token this VIEWING USER should be zoomed to, or `null`.
- *
- * Prefers `game.user.character` (the user's explicitly assigned Actor) —
- * the same "this IS my character" signal Foundry's own UI treats as
- * authoritative — and looks for ITS token on the current scene first,
- * since a user can own tokens (by permission) that are not "theirs" in
- * this sense (an NPC a GM granted them edit rights to, for instance).
- * Falls back to "any token this user owns" only if no assigned-character
- * token is present, so a player without a formal character assignment
- * still gets zoomed to whatever they actually control.
- *
- * @returns {*|null} a placed Token, or null (nothing to zoom to).
- */
-function resolveViewerToken() {
-  if (typeof canvas === 'undefined' || !canvas?.tokens?.placeables) return null;
-  const placeables = canvas.tokens.placeables;
-  const characterId = game?.user?.character?.id;
-  if (characterId) {
-    const own = placeables.find((t) => t.actor?.id === characterId && !t.document?.hidden);
-    if (own) return own;
-  }
-  return placeables.find((t) => t.isOwner && !t.document?.hidden) ?? null;
-}
 
 /**
  * Run the intro zoom, if there is a token to run it on. Fails silently

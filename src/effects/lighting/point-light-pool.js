@@ -675,11 +675,11 @@ function createLightEntry({
  *   lightScene: object, colorationScene: object, apertureShadowScene: object,
  *   mergedScene: object,
  *   lightMeshes: Map, candleWallClipCache: Map, lightningWallClipCache: Map,
- *   fireWallClipCache: Map,
+ *   fireWallClipCache: Map, playerLightWallClipCache: Map,
  *   update: (darkness01: number, activeRegions: object[], env: object, darknessRealism01: number, currentFloor: object) => number,
  *   getApertureGoboReadout: () => {totalFound: number, dropped: number, litLights: number, enabled: boolean},
  *   getBatchingReadout: () => object,
- *   getWallClipCacheStats: () => {candle: object, lightning: object, fire: object, regular: object, apertureWalls: object},
+ *   getWallClipCacheStats: () => {candle: object, lightning: object, fire: object, regular: object, playerLight: object, apertureWalls: object},
  *   invalidateBatchedWindMaterials: () => void,
  *   dispose: () => void,
  * }}
@@ -697,6 +697,14 @@ export function createPointLightPool({
   /** Fire's per-frame light descriptors, already clustered by `fire-subsystem.js`.
    * Optional so the pool stays constructible in rigs that have no fire. */
   getFireLightSources = null,
+  /** Player-carried torch/flashlight descriptors (mythica-machina-press#77),
+   * already built for THIS frame by `effects/lighting/player-light-geometry.js
+   * #buildPlayerLightSources` from the live per-token read + the scene's
+   * resolved GM permissions — boot.js's own `getPlayerCarriedLightSources`
+   * closure. Same injection shape as `getFireLightSources` just above (a
+   * sibling, not a variant): optional so the pool stays constructible in
+   * rigs with no player-light UI wired (tests, a future fixture). */
+  getPlayerCarriedLightSources = null,
   getApertureGoboRenderState,
   // STAGE 2 BATCHING'S OWN REVERT FLAG (S2.5, `docs/planning/Point-Light-
   // Batching-Design.md` §8) — a GETTER for the SAME reason every other
@@ -943,6 +951,26 @@ export function createPointLightPool({
    * lightning's visual radius does. */
   const fireWallClipCache = new Map();
 
+  /** sourceId -> {floorId, radius, x, y, points, source, reason} — the FIFTH
+   * sibling of `candleWallClipCache` (mythica-machina-press#77, 2026-09-20),
+   * and the ONE cache in this family keyed on POSITION as well as (floor,
+   * radius). Every other sibling's owner (a real Foundry light, a candle
+   * anchor, a lightning strike, a fire cluster) is either genuinely
+   * stationary or stable-enough-per-frame that (floorId, radius) alone is a
+   * correct cache key — but a player-carried torch/flashlight is explicitly
+   * "a light that follows a moving position" (#77's own architecture
+   * correction) and DOES move every frame a token walks. Keying only on
+   * (floorId, radius) the way candle/fire do would silently freeze a moving
+   * torch's wall-clipped shape at wherever it FIRST appeared — same
+   * sourceId, same floor, same radius, so every subsequent frame would hit
+   * the stale cache entry and never re-sweep against the token's real
+   * position. `(floorId, radius, x, y)` recomputes exactly when the token
+   * actually moves (or crosses a floor, or its radius changes) and hits the
+   * cache every frame it stands still — the same "recompute only when the
+   * thing the shape actually depends on changes" discipline this whole
+   * cache family already follows, just with one more real dependency named. */
+  const playerLightWallClipCache = new Map();
+
   /** Persistent scratch array for the per-frame `lights` merge below (perf
    * pass, 2026-08-13) — `[...a, ...b, ...c, ...d]` allocates a brand-new
    * array every frame regardless of whether any source changed; `.length = 0`
@@ -1043,6 +1071,7 @@ export function createPointLightPool({
     lightning: { hits: 0, misses: 0, evictions: 0 },
     fire: { hits: 0, misses: 0, evictions: 0 },
     regular: { hits: 0, misses: 0, evictions: 0 },
+    playerLight: { hits: 0, misses: 0, evictions: 0 },
     apertureWalls: { hits: 0, misses: 0 },
   };
 
@@ -1183,6 +1212,7 @@ export function createPointLightPool({
       lightningWallClipCache.clear();
       fireWallClipCache.clear();
       regularLightWallClipCache.clear();
+      playerLightWallClipCache.clear();
     }
 
     // darkness01 gates each light's OWN activation window (LightData.darkness
@@ -1430,11 +1460,67 @@ export function createPointLightPool({
       }
     }
 
+    // PLAYER-CARRIED LIGHTS (mythica-machina-press#77) — already built for
+    // THIS frame by `effects/lighting/player-light-geometry.js#
+    // buildPlayerLightSources` (boot.js's own `getPlayerCarriedLightSources`
+    // closure: a live per-token read + the scene's resolved GM permissions,
+    // recomputed every call so a moving token's torch follows it in real
+    // time). They arrive here already shaped like a Foundry light and flow
+    // through this SAME pool for region-aware ambient, the soft edge,
+    // coloration and MAX-blending — the identical "a point light we control"
+    // treatment candle/lightning/fire already get.
+    const playerLights = getPlayerCarriedLightSources ? (getPlayerCarriedLightSources() ?? []) : [];
+
+    // WALL-CLIPPING player lights — same `computeCandleWallClippedShape`
+    // reuse as every sibling above, but keyed on POSITION too (see
+    // `playerLightWallClipCache`'s own declaration for why a moving light
+    // cannot share candle/fire's position-agnostic cache key).
+    for (const pl of playerLights) {
+      let cached = playerLightWallClipCache.get(pl.sourceId);
+      if (
+        !cached ||
+        cached.floorId !== currentFloorId ||
+        cached.radius !== pl.radius ||
+        cached.x !== pl.x ||
+        cached.y !== pl.y
+      ) {
+        wallClipCacheStats.playerLight.misses += 1;
+        const result = computeCandleWallClippedShape({
+          x: pl.x,
+          y: pl.y,
+          radius: pl.radius,
+          levelId: currentFloorId,
+        });
+        cached = { floorId: currentFloorId, radius: pl.radius, x: pl.x, y: pl.y, ...result };
+        playerLightWallClipCache.set(pl.sourceId, cached);
+      } else {
+        wallClipCacheStats.playerLight.hits += 1;
+      }
+      if (cached.points) pl.shapePoints = cached.points;
+      // cached.points === null: the light KEEPS its own naive-circle
+      // shapePoints (buildPlayerLightSources' own fallback) untouched — same
+      // posture as candle/lightning/fire's identical fallback branch above.
+    }
+    // Prune stale entries the same way fire's own cache does: a token that
+    // stopped carrying a light (mode cleared, permission revoked, token
+    // deleted) must not leave a dead entry in this cache for the rest of the
+    // session.
+    if (playerLightWallClipCache.size) {
+      const livePlayerLightIds = new Set(playerLights.map((pl) => pl.sourceId));
+      for (const id of playerLightWallClipCache.keys()) {
+        if (!livePlayerLightIds.has(id)) {
+          playerLightWallClipCache.delete(id);
+          wallClipCacheStats.playerLight.evictions += 1;
+        }
+      }
+    }
+
     lightsScratch.length = 0;
     for (const l of foundryLights) lightsScratch.push(l);
     for (const l of candleLights) lightsScratch.push(l);
     for (const l of lightningLights) lightsScratch.push(l);
     for (const l of fireLights) lightsScratch.push(l);
+    for (const l of playerLights) lightsScratch.push(l);
     const lights = lightsScratch;
     // Read ONCE per frame — a scene's grid size does not change light-to-light,
     // only scene-to-scene.
@@ -2383,6 +2469,7 @@ export function createPointLightPool({
       lightning: { ...wallClipCacheStats.lightning },
       fire: { ...wallClipCacheStats.fire },
       regular: { ...wallClipCacheStats.regular },
+      playerLight: { ...wallClipCacheStats.playerLight },
       apertureWalls: { ...wallClipCacheStats.apertureWalls },
     };
   }
@@ -2440,6 +2527,7 @@ export function createPointLightPool({
     candleWallClipCache,
     lightningWallClipCache,
     fireWallClipCache,
+    playerLightWallClipCache,
     update,
     getApertureGoboReadout,
     getBatchingReadout,

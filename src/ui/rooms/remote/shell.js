@@ -28,6 +28,7 @@ import { installCameraPathPopover } from './camera-path-popover.js';
 import { installWindPopover } from './wind-popover.js';
 import { renderAstrolabePanel } from './astrolabe-panel.js';
 import { renderWeatherBoard } from './weather-board.js';
+import { renderPlayerLightBoard } from './player-light-board.js';
 import { renderCueDeck } from './cue-deck.js';
 import { renderDebugStrip } from './debug-strip.js';
 
@@ -575,6 +576,7 @@ function dangerFooterBtn(text, tooltip, onConfirmed, armMs = 4000) {
  *   isFlowPlaying: () => boolean, onFlowToggle: () => void,
  *   getFlowRate?: () => number, onSetFlowRate?: (rate: number) => void,
  *   weatherBoard?: object, onBaseline?: (overMs: number) => void, cueDeck?: object,
+ *   playerLight?: object,
  *   debugStrip?: object,
  *   getRendererOverride?: () => 'msa'|'foundry', onRendererOverrideChange?: (v: 'msa'|'foundry') => Promise<void>,
  *   onEngageSafety?: () => void,
@@ -582,9 +584,10 @@ function dangerFooterBtn(text, tooltip, onConfirmed, armMs = 4000) {
  *     onCommit?: (v: {directionDeg?: number}) => void},
  *   onOpenTileMotion?: () => void,
  *   impulses?: Array<import('../../../core/impulse-schema.js').ImpulseDecl>}} [opts]
- *   `weatherBoard`/`cueDeck`/`debugStrip`, when supplied, are passed straight
- *   through as `renderWeatherBoard`/`renderCueDeck`/`renderDebugStrip`'s own
- *   `ctx` (weather-board.js, cue-deck.js, debug-strip.js) — this file never
+ *   `weatherBoard`/`playerLight`/`cueDeck`/`debugStrip`, when supplied, are
+ *   passed straight through as `renderWeatherBoard`/`renderPlayerLightBoard`/
+ *   `renderCueDeck`/`renderDebugStrip`'s own `ctx` (weather-board.js,
+ *   player-light-board.js, cue-deck.js, debug-strip.js) — this file never
  *   inspects their shape, only whether they
  *   exist. `impulses` (U7) is handed straight to `astrolabe-panel.js`'s own
  *   TR corner unchanged, same reasoning. `getFlowRate`/`onSetFlowRate`
@@ -721,6 +724,8 @@ export function installRemote(opts = {}) {
   let weatherBoardHandle = null;
   /** @type {{refresh: () => void}|null} */
   let cueDeckHandle = null;
+  /** @type {{refresh: () => void}|null} */
+  let playerLightBoardHandle = null;
   /** @type {{syncFlowState: () => void}|null} */
   let astrolabePanelHandle = null;
   /** @type {{update: () => void}|null} */
@@ -779,6 +784,15 @@ export function installRemote(opts = {}) {
       wxHost.className = 'msa-wx-host';
       body.append(sep2, wxHost);
       weatherBoardHandle = renderWeatherBoard(wxHost, opts.weatherBoard);
+    }
+
+    if (opts.playerLight) {
+      const sepPl = document.createElement('div');
+      sepPl.className = 'msa-remote-sep';
+      const plHost = document.createElement('div');
+      plHost.className = 'msa-wx-host';
+      body.append(sepPl, plHost);
+      playerLightBoardHandle = renderPlayerLightBoard(plHost, opts.playerLight);
     }
 
     if (opts.cueDeck) {
@@ -919,6 +933,15 @@ export function installRemote(opts = {}) {
      * body exists or when no weather board was supplied. */
     refreshWeatherBoard() {
       weatherBoardHandle?.refresh();
+    },
+    /** Re-sync the player-light board's mode chips/master toggle/darkness
+     * slider — boot.js calls this whenever the scene's own permissions flag
+     * changes (this client's own edit echoing back, a second GM's edit, a
+     * scene switch), matching refreshWeatherBoard's own "never polls, it's
+     * told" shape. No-op before the body exists or when no player-light
+     * board was supplied. */
+    refreshPlayerLightBoard() {
+      playerLightBoardHandle?.refresh();
     },
     /** Push a live weather value into the board's own fader mid-fade
      * (2026-09-10 fix) — boot.js's pumpAstrolabe calls this every tick

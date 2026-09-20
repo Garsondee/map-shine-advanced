@@ -1207,6 +1207,14 @@ export async function startVtPanViewer({
   getCandleRenderState,
   getLightningRenderState,
   getFireRenderState,
+  // PLAYER-CARRIED LIGHTS (mythica-machina-press#77) — boot.js's own
+  // per-frame closure: reads the live per-token snapshot + the scene's
+  // resolved GM permissions and builds this frame's torch/flashlight
+  // descriptors (effects/lighting/player-light-geometry.js). Forwarded
+  // straight into `createPointLightPool`'s identical injection seam,
+  // undefined-safe there (`getFireLightSources`'s own default) so an
+  // un-wired caller (tests, the torture fixture) still constructs.
+  getPlayerCarriedLightSources,
   getDoorRenderState,
   getVegetationRenderState,
   getBloomRenderState,
@@ -4500,6 +4508,11 @@ export async function startVtPanViewer({
       // frame loop — so they are THIS frame's, on the same puff clock the
       // flame is drawing with.
       getFireLightSources: () => fireSubsystem.lightSources(),
+      // PLAYER-CARRIED LIGHTS (mythica-machina-press#77) — see this
+      // function's own destructured param doc above. `undefined` (an
+      // un-wired caller) reaches `createPointLightPool`'s own `= null`
+      // default, which it already treats as "no player lights this rig."
+      getPlayerCarriedLightSources,
       getApertureGoboRenderState,
       // STAGE 2 BATCHING (S2.5) — the SAME TDZ-safe closure pattern as
       // `getWindHandle` just above (`pointLightBatching` is declared FURTHER

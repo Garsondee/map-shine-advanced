@@ -69,6 +69,15 @@ export { SUN_SHADOW_DEBUG_VIEWS, sunShadowDebugPaints, sunShadowDebugView } from
 // VT-Pan-Viewer-Extraction.md. The mesh pool, its four dedicated scenes, the
 // candle wall-clip cache, and the per-frame reconcile.
 export { createPointLightPool, resolveAnchorElevationRank } from './lighting/point-light-pool.js';
+// PLAYER-CARRIED LIGHTS (mythica-machina-press#77) — the pure descriptor
+// builder feeding `createPointLightPool`'s own `getPlayerCarriedLightSources`
+// injection seam, same "connection between [X] and a point light we
+// control" shape as `buildCandleLightSources`/`buildFireLightSources` below.
+export {
+  buildPlayerLightSources,
+  buildOnePlayerLightSource,
+  PLAYER_LIGHT_RENDERED_MODES,
+} from './lighting/player-light-geometry.js';
 export {
   buildEnvironmentalLightMaterials,
   blendSunVisibilityAcrossFloors,

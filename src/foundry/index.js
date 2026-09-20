@@ -487,3 +487,36 @@ export { advance, isPenArmed, getAdvanceAuditLog, jumpToHour, advanceDays, advan
 // can be asked live. See almanac-diagnostics.js's own header for why it
 // takes so much as arguments.
 export { buildAlmanacDiagnosticsReport } from './almanac-diagnostics.js';
+
+// VIEWER TOKEN (mythica-machina-press#77) — "which placed Token is THIS
+// client's own character," the one resolver the scene intro zoom AND the
+// player-carried-light picker both need to agree on.
+export { resolveViewerToken, isViewingUserGM } from './viewer-token.js';
+
+// PLAYER-LIGHT PERMISSIONS (mythica-machina-press#77, mythica-machina-press#577)
+// — the GM's scene-scoped "which player-carried light modes are allowed
+// here" allowance plus the darkness-realism lever, one scene flag, GM-write-
+// only. Mirrors sky-persistence.js's own scene-flag shape.
+export {
+  readScenePlayerLightPermissions,
+  writeScenePlayerLightPermissions,
+  watchScenePlayerLightPermissions,
+  defaultPlayerLightPermissions,
+  resolvePlayerLightPermissions,
+  PLAYER_LIGHT_MODE_KEYS,
+  PLAYER_LIGHT_NAMESPACE,
+  PLAYER_LIGHT_PERMISSIONS_FLAG,
+} from './player-light-permissions.js';
+
+// PLAYER-LIGHT MODE (mythica-machina-press#77) — one token's own live
+// choice of carried light/vision mode (owner-write, one Token-document
+// flag), plus the live per-frame reader `point-light-pool.js`'s own
+// `getPlayerCarriedLightSources` injection point (boot.js) reads.
+export {
+  readTokenPlayerLightMode,
+  writeTokenPlayerLightMode,
+  readActivePlayerCarriedLightTokens,
+  PLAYER_LIGHT_MODES,
+  PLAYER_LIGHT_MODE_NAMESPACE,
+  PLAYER_LIGHT_MODE_FLAG,
+} from './player-light-mode.js';

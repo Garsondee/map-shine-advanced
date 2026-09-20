@@ -29,6 +29,7 @@ import { installTokens } from '../tokens.js';
 import { installIconSprite, iconMarkup } from '../widgets/icon-sprite.js';
 import { makeDraggable } from '../widgets/draggable.js';
 import { renderSystemPanel } from './system-panel.js';
+import { renderPlayerLightPicker } from './player-light-picker.js';
 
 const ROOM_ID = 'msa-player';
 const STYLE_ID = 'msa-player-style';
@@ -53,6 +54,23 @@ function injectStyle() {
   color:var(--ink2); background:none; border:none; cursor:pointer; pointer-events:auto}
 #${ROOM_ID} .hbtn:hover{background:var(--bg3); color:var(--ink0)}
 #${ROOM_ID} .msa-player-body{flex:1; overflow-y:auto; padding:14px}
+/* THE CARRIED-LIGHT PICKER (mythica-machina-press#77) — its own sibling
+   section, above the scrollable settings body, same DOM position every
+   other room's own fixed-header-strip lives at. Reuses the Remote's own
+   .msa-wx-* chip/label vocabulary (weather-board.js's own idiom) rather
+   than a third toggle language — scoped under THIS room's id since CSS
+   custom classes are not shared across rooms even when the class names
+   match. */
+#${ROOM_ID} .msa-player-light-host{flex:none; padding:10px 14px 0 14px}
+#${ROOM_ID} .msa-wx-blocklabel{font-size:.64rem; letter-spacing:.22em; text-transform:uppercase;
+  color:var(--ink2); display:flex; align-items:center; gap:6px; margin-bottom:6px}
+#${ROOM_ID} .msa-wx-hint{letter-spacing:.02em; text-transform:none; color:var(--ink2); opacity:.8; font-size:.68rem}
+#${ROOM_ID} .msa-wx-chips{display:flex; flex-wrap:wrap; gap:5px; margin-top:6px}
+#${ROOM_ID} .msa-wx-chip{padding:5px 8px; border-radius:999px; border:1px solid var(--line); background:var(--bg2);
+  color:var(--ink1); font-size:.68rem; cursor:pointer; pointer-events:auto}
+#${ROOM_ID} .msa-wx-chip:hover{background:var(--bg3)}
+#${ROOM_ID} .msa-wx-chip[aria-pressed="true"]{background:color-mix(in oklab, var(--shine) 18%, transparent);
+  border-color:var(--shine); color:var(--shine)}
 `.trim();
   document.head.appendChild(el);
 }
@@ -96,6 +114,16 @@ export function installPlayer(opts = {}) {
   closeBtn.addEventListener('click', () => controller.close());
   head.append(title, headSpacer, closeBtn);
 
+  // THE CARRIED-LIGHT PICKER (mythica-machina-press#77) — a SIBLING section,
+  // not folded into `body`: `renderSystemPanel` does `container.innerHTML =
+  // ''` on every repaint (system-panel.js's own `render()`), which would
+  // silently wipe this section out again on the very next settings change if
+  // it lived inside `body` instead of beside it.
+  const lightHost = document.createElement('div');
+  lightHost.className = 'msa-player-light-host';
+  /** @type {{refresh: () => void}|null} */
+  let lightPickerHandle = null;
+
   const body = document.createElement('div');
   body.className = 'msa-player-body';
   let bodyBuilt = false;
@@ -108,7 +136,7 @@ export function installPlayer(opts = {}) {
     }
   }
 
-  room.append(head, body);
+  room.append(head, lightHost, body);
   document.body.appendChild(room);
   makeDraggable(head, room);
 
@@ -118,6 +146,7 @@ export function installPlayer(opts = {}) {
       if (!bodyBuilt) {
         bodyBuilt = true;
         paint();
+        lightPickerHandle = renderPlayerLightPicker(lightHost);
       }
       state.open = true;
       room.hidden = false;
@@ -142,6 +171,15 @@ export function installPlayer(opts = {}) {
      * shape. No-op before the body exists. */
     refresh() {
       if (bodyBuilt) paint();
+    },
+    /** Re-paint the carried-light picker — boot.js's own
+     * `resolveAndApplyPlayerLightPermissions` calls this whenever the
+     * scene's player-light permissions change (this client's own edit
+     * echoing back, a second GM's edit, a scene switch), matching
+     * `refresh()`'s own "never polls, it's told" shape. No-op before the
+     * room has ever been opened (the picker is built lazily, same as `body`). */
+    refreshPlayerLightPicker() {
+      lightPickerHandle?.refresh();
     },
   };
   room._msaPlayerController = controller;

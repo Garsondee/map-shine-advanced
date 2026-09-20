@@ -547,6 +547,10 @@ import {
   writeRegionDarknessOverrideSettings,
   applyRegionDarknessOverride,
   REGION_DARKNESS_OVERRIDE_PARAMS,
+  readScenePlayerLightPermissions,
+  writeScenePlayerLightPermissions,
+  watchScenePlayerLightPermissions,
+  readActivePlayerCarriedLightTokens,
 } from './foundry/index.js';
 import { engageFoundryFallback, getDescribeRenderModeStats } from './diag/render-fallback.js';
 import { registerMarkerSource, getAllMarkerPoints } from './diag/marker-overlay.js';
@@ -644,6 +648,10 @@ import {
   PRECIP_SPECIES_IDS,
   resolveSpecies,
   resolveSpeciesFrame,
+  // PLAYER-CARRIED LIGHTS (mythica-machina-press#77) — the pure descriptor
+  // builder feeding point-light-pool.js's own getPlayerCarriedLightSources
+  // injection seam.
+  buildPlayerLightSources,
 } from './effects/index.js';
 import {
   buildSunShadowsReport,
@@ -1645,6 +1653,34 @@ function install() {
         },
       },
       onBaseline: (overMs) => fadeWeatherToBaseline(overMs),
+      // THE PLAYER LIGHT BOARD (mythica-machina-press#77, mythica-machina-
+      // press#577) — same closure-reference safety as weatherBoard above.
+      // `getPermissions` re-reads the scene flag fresh every paint (the
+      // "never polls, it's told" shape every board here follows — a repaint
+      // is driven by `MapShine.__remote.refreshPlayerLightBoard()`, called
+      // from `resolveAndApplyPlayerLightPermissions` on scene load and on
+      // the scene-flag watcher, never by this board polling on its own).
+      playerLight: {
+        getPermissions: () => readScenePlayerLightPermissions().permissions,
+        onModeToggle: (modeKey, allowed) => {
+          void writeScenePlayerLightPermissions({ modes: { [modeKey]: allowed } }).then((result) => {
+            if (!result.ok) log.warn(`player-light mode toggle not changed: ${result.reason}`);
+            resolveAndApplyPlayerLightPermissions();
+          });
+        },
+        onPlayersCanChooseModeToggle: (allowed) => {
+          void writeScenePlayerLightPermissions({ playersCanChooseMode: allowed }).then((result) => {
+            if (!result.ok) log.warn(`"players can choose mode" not changed: ${result.reason}`);
+            resolveAndApplyPlayerLightPermissions();
+          });
+        },
+        onDarknessRealismCommit: (v) => {
+          void writeScenePlayerLightPermissions({ darknessRealism01: v }).then((result) => {
+            if (!result.ok) log.warn(`darkness realism not changed: ${result.reason}`);
+            resolveAndApplyPlayerLightPermissions();
+          });
+        },
+      },
       // THE CUE DECK (U3) — same closure-reference safety as weatherBoard
       // just above. fireCue is the ONLY mutation the deck itself calls
       // (GO / a jump-list click); capture/reorder/test-fire are the CUES
@@ -4628,6 +4664,33 @@ function install() {
     // every render-state seam shares; `anchors` is candle's own extra field,
     // spread on top — see effect-readout.js's own header.
     return { ...projectCascadeRenderState(candleReadout), anchors: candleAnchorMemo.anchors };
+  };
+
+  // PLAYER-CARRIED LIGHTS (mythica-machina-press#77) — the boot-owned bridge
+  // between the two live Foundry reads this feature needs (which tokens
+  // currently carry a mode; what the active scene's GM allowance currently
+  // is) and the pure descriptor builder (effects/lighting/player-light-
+  // geometry.js#buildPlayerLightSources), same split as getCandleRenderState
+  // just above: vt/ never reaches canvas.tokens or the scene flag directly,
+  // it only ever sees what this closure hands it. No memoization — unlike
+  // candle/fire's anchor reads (a scene can have dozens of anchors, worth
+  // caching), a scene realistically has a handful of player-controlled
+  // tokens at most, and both live reads underneath
+  // (readActivePlayerCarriedLightTokens/readScenePlayerLightPermissions) are
+  // already cheap single-pass reads with nothing to amortize.
+  //
+  // ⚠️ RECOMPUTED EVERY CALL, ON PURPOSE — "lights which originate at the
+  // token's position" (author, #77) means a moving token's torch must
+  // follow it in real time. `token.center` is read live inside
+  // `readActivePlayerCarriedLightTokens` every single call, never cached —
+  // see that function's own header for why this "just works" identically on
+  // every connected client (each renders from the same synced Token-
+  // document flag, not a client-local value).
+  const getPlayerCarriedLightSources = () => {
+    const tokenSnapshots = readActivePlayerCarriedLightTokens();
+    if (tokenSnapshots.length === 0) return [];
+    const { permissions } = readScenePlayerLightPermissions();
+    return buildPlayerLightSources(tokenSnapshots, permissions);
   };
 
   // THE LIGHTNING data seam (effects/lightning-subsystem.js) — same shape as
@@ -10897,6 +10960,11 @@ function install() {
    * second client's wind edit reaching this one). Re-armed on every
    * canvasReady, same shape as fadeUnsub/effectParamsUnsub below. */
   let windUnsub = null;
+  /** Unsubscribe for the scene player-light-permissions watcher
+   * (mythica-machina-press#77/#577 — a second GM's edit, or this scene's own
+   * flag echoing back, reaching every client). Re-armed on every
+   * canvasReady, same shape as windUnsub just above. */
+  let playerLightPermissionsUnsub = null;
 
   // ══════════════════════════════════════════════════════════════════════
   // THE FADE ENGINE'S LIVE WIRING (U2 checkpoint 3, docs/holy/UI-Testament.md
@@ -11911,6 +11979,28 @@ function install() {
       sceneOverrides: sceneRead.sceneOverrides,
     });
     applyLookToEngines(skyScope.sky);
+  };
+
+  /**
+   * Re-read the active scene's player-light permissions and push its
+   * `darknessRealism01` at the ALREADY-EXISTING lever (`vt-pan-viewer.js#
+   * setDarknessRealism` — this closure is the only thing new; the darkness
+   * math it drives was live before #577, only ever reachable from the debug
+   * panel). Mirrors `resolveAndApplySky`'s own shape one level down: same
+   * "re-read, resolve, apply" sequence, called from the same canvasReady
+   * point AND from the scene-flag watcher below, so a second GM's edit
+   * reaches every connected client's own darkness the moment it lands.
+   *
+   * Also re-paints whichever UI is currently open and cares (the Remote's
+   * own board, the player's mode picker — a mode the GM just disallowed
+   * must stop being offered immediately, not just stop rendering on the
+   * next frame the light-pool getter happens to check permissions).
+   */
+  const resolveAndApplyPlayerLightPermissions = () => {
+    const { permissions } = readScenePlayerLightPermissions();
+    setDarknessRealism(permissions.darknessRealism01);
+    MapShine.__remote?.refreshPlayerLightBoard?.();
+    MapShine.__player?.refreshPlayerLightPicker?.();
   };
 
   /**
@@ -13180,6 +13270,13 @@ function install() {
         // fixture has no candles and never resets the anchor authority, so it
         // stays candle-free by construction (the default inert provider).
         getCandleRenderState,
+        // PLAYER-CARRIED LIGHTS (mythica-machina-press#77): each frame,
+        // merges a torch/flashlight for every scene token whose owner has
+        // picked one and the GM currently allows it. Same real-scene-only
+        // injection posture as getCandleRenderState — the torture fixture
+        // has no token/permission state and stays player-light-free by
+        // construction (the pool's own `= null` default).
+        getPlayerCarriedLightSources,
         // THE LIGHTNING EFFECT (effects/lightning-subsystem.js): each frame the
         // subsystem schedules/spawns/reaps bolt strands and merges the origin-
         // flash lights into the pool, reading the cascade-resolved enable +
@@ -15110,6 +15207,19 @@ function install() {
           if (Number.isFinite(wind?.directionDeg)) windDirectionDeg = wind.directionDeg;
           if (Number.isFinite(wind?.speed01)) windSpeed01 = wind.speed01;
           applyAmbientWind();
+        });
+        // PLAYER-LIGHT PERMISSIONS + DARKNESS REALISM (mythica-machina-
+        // press#77/#577) — scene-scoped exactly like sky/wind above: a scene
+        // SWITCH must re-apply THIS scene's own darkness-realism lever and
+        // mode allowances, never carry the previous scene's forward.
+        try {
+          resolveAndApplyPlayerLightPermissions();
+        } catch (err) {
+          log.error('player-light permissions (canvasReady) failed:', err);
+        }
+        playerLightPermissionsUnsub?.();
+        playerLightPermissionsUnsub = watchScenePlayerLightPermissions(() => {
+          resolveAndApplyPlayerLightPermissions();
         });
         // EFFECT SCENE PARAMS (Stage B, #288/#389) — this scene's own load
         // already picked up UI-shadow's authored params via reapplyAll('scene

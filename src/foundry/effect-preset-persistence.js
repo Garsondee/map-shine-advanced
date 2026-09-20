@@ -5,14 +5,14 @@
  * shareable preset, distinct from #12" — #12 is scene-to-scene copy, this is
  * effect-to-effect reuse).
  *
- * ⚠️ DELIBERATELY NOT #177 ("Scene Preset system — capture and apply whole
- * scene setups"). That issue is explicitly labeled needs-research, Top
- * priority, "needs a real design pass before building": what exactly gets
- * captured, how it relates to #12 and #101, and how it interacts with the
- * three-tier Map-Maker/GM/Player settings model. This module answers none of
- * that — it is the narrower, unblocked #102 only (one effect, one preset),
- * built on the SAME storage shape a scene-wide system could later reuse, but
- * not itself that system.
+ * NOT #177 ("Scene Preset system — capture and apply whole scene setups") —
+ * #177 sat needs-research when this module shipped, then resolved and
+ * shipped separately as `scene-preset-persistence.js`, reusing this
+ * module's own single-JSON-world-setting shape for a WHOLE-SCENE library
+ * instead of a per-effect one (see that module's own header for the full
+ * design-decision trail). This module stays exactly what it always was:
+ * the narrower #102 (one effect, one preset), built on the storage shape
+ * #177 went on to reuse rather than reinvent.
  *
  * WORLD-scoped, unlike `effect-param-persistence.js`'s scene flag — a preset
  * is a reusable TEMPLATE, not a fact about any one scene, so it belongs

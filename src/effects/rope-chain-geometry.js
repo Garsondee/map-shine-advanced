@@ -1,14 +1,23 @@
 /**
- * @fileoverview ROPE & CHAIN — THE PURE HALF, PHASE 1 ONLY (mythica-machina-
- * press#1; read that issue and its 2026-09-20 design comment for the full
- * rationale behind every number and decision below). Anchor pairing, the
- * rope/chain preset table, the static parabolic sag, the modal wind-sway
- * math, a reference spring integrator, and the batched ribbon vertex-array
- * bake. NONE of it touches THREE or TSL — mirrors lightning-geometry.js's own
- * "pure half carries the whole Node test suite" split exactly. Phase 2 (a
- * separate pass, by a separate agent) builds the render target ping-pong
- * spring integrator, the ribbon material, the shadow twin and the CPU
- * subsystem on TOP of this file; nothing GPU-shaped lives here on purpose.
+ * @fileoverview ROPE & CHAIN — THE PURE HALF (mythica-machina-press#1; read
+ * that issue and its 2026-09-20 design comment for the full rationale behind
+ * every number and decision below). Anchor pairing, the rope/chain preset
+ * table, the static parabolic sag, the modal wind-sway math, a reference
+ * spring integrator, the two-probe modal-forcing decomposition, the wind-
+ * probe geometry Phase 2's GPU integrator samples from, and the batched
+ * ribbon vertex-array bake. NONE of it touches THREE or TSL — mirrors
+ * lightning-geometry.js's own "pure half carries the whole Node test suite"
+ * split exactly.
+ *
+ * PHASE 1 (authoring + everything in this file) shipped 2026-09-20, `d7bda013`.
+ * PHASE 2 (a separate pass, by a separate agent, same day) built ON TOP of
+ * this file: the render-target ping-pong spring integrator
+ * (`rope-chain-spring-gpu.js`), the ribbon material (`rope-chain-render.js`)
+ * and the per-instance CPU subsystem (`rope-chain-subsystem.js`) — see each
+ * file's own header. This module gained exactly one new pure export for
+ * Phase 2 ({@link computeRopeChainWindProbes}) and is otherwise unchanged.
+ * Still nothing GPU-shaped lives here, on purpose. Phase 3 (shadow twin,
+ * Studio UI card) is not built yet.
  *
  * ============================================================================
  * WHY THIS MIRRORS lightning-geometry.js SO CLOSELY
@@ -378,6 +387,70 @@ export function computeModalForcing(windPerpAtOneThird, windPerpAtTwoThirds) {
   return {
     mode1Forcing: (a + b) / 2,
     mode2Forcing: (a - b) / 2,
+  };
+}
+
+// ============================================================================
+// PHASE 2 ADDITION — THE LIVE WIND-PROBE GEOMETRY. Pure (a handful of scalar
+// ops from a source's own start/end), so it belongs here rather than inlined
+// in rope-chain-subsystem.js — this codebase's own "anything that CAN be pure
+// gets Node-tested, nothing GPU-shaped forces a fake test" split
+// (CONVENTIONS.md §4).
+// ============================================================================
+
+/**
+ * The wind-sampling geometry for ONE span's live spring integrator: the
+ * chord's own perpendicular unit normal, and the two wind-probe world
+ * positions at arclength fractions 1/3 and 2/3 that {@link computeModalForcing}'s
+ * own doc explains the choice of (sum isolates mode 1, difference isolates
+ * mode 2).
+ *
+ * The perpendicular is computed BYTE-IDENTICALLY to
+ * {@link buildRopeChainRibbonArrays}'s own `-dy/len, dx/len` chord normal —
+ * deliberately duplicated rather than factored into one shared internal
+ * helper the two would both call, because the two call sites want it for
+ * different reasons (one to bow the baked sag/sway shape sideways, this one
+ * to know which direction the GPU integrator's wind sample should project
+ * onto) and this project's own established precedent
+ * (`lightning-geometry.js#lightningCirclePolygon`'s header) is to accept a
+ * few duplicated lines of generic math over a cross-couping import when the
+ * two uses are conceptually independent. What matters is that the FORMULA
+ * stays identical, which this doc comment pins: the static droop and the
+ * dynamic wind sway must agree about which way "sideways" is, or a rope
+ * would sag one way and swing in an unrelated one.
+ *
+ * Cheap enough (a realistic scene has single digits to a few dozen spans,
+ * never more) that Phase 2's CPU subsystem calls this on every sync rather
+ * than caching it — recomputing unconditionally is simpler than tracking
+ * "did start/end actually change" and the cost is negligible at this scale.
+ *
+ * @param {{startX:number, startY:number, endX:number, endY:number}} source -
+ *   as produced by {@link groupRopeChainAnchorsIntoSources} (or any object
+ *   shape carrying those four fields).
+ * @returns {{perpX:number, perpY:number, probeAX:number, probeAY:number, probeBX:number, probeBY:number}}
+ *   `perpX`/`perpY` — the chord's unit sideways direction. `probeA`/`probeB`
+ *   — world positions at s=1/3 and s=2/3 along the chord, for the GPU
+ *   integrator's own two wind samples.
+ */
+export function computeRopeChainWindProbes(source) {
+  const startX = Number.isFinite(source?.startX) ? source.startX : 0;
+  const startY = Number.isFinite(source?.startY) ? source.startY : 0;
+  const endX = Number.isFinite(source?.endX) ? source.endX : 0;
+  const endY = Number.isFinite(source?.endY) ? source.endY : 0;
+
+  const dx = endX - startX;
+  const dy = endY - startY;
+  const chordLen = Math.max(1e-4, Math.hypot(dx, dy));
+  const perpX = -dy / chordLen;
+  const perpY = dx / chordLen;
+
+  return {
+    perpX,
+    perpY,
+    probeAX: startX + dx * (1 / 3),
+    probeAY: startY + dy * (1 / 3),
+    probeBX: startX + dx * (2 / 3),
+    probeBY: startY + dy * (2 / 3),
   };
 }
 

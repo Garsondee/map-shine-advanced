@@ -358,6 +358,13 @@ import {
   candleTierPlan,
   buildCandleLightSources,
   createLightningSubsystem,
+  // ROPE & CHAIN (mythica-machina-press#1, Phase 2) — the per-instance CPU
+  // subsystem (effects/rope-chain-subsystem.js's own header explains why
+  // this effect is per-instance, not pooled, unlike every other name in
+  // this import list). Constructed alongside createLightningSubsystem below;
+  // its own sync()/tick() are called from the sims block, right after
+  // tickVegetationSpring — see that call site's own comment.
+  createRopeChainSubsystem,
   createFireSubsystem,
   createPrecipitationSubsystem,
   precipTierPlan,
@@ -1206,6 +1213,7 @@ export async function startVtPanViewer({
   onDeviceLost,
   getCandleRenderState,
   getLightningRenderState,
+  getRopeChainAnchors,
   getFireRenderState,
   getDoorRenderState,
   getVegetationRenderState,
@@ -1473,6 +1481,14 @@ export async function startVtPanViewer({
   // pool) but knows nothing about the anchor authority or the settings
   // cascade. Default = the effect off, so an un-wired caller draws no bolts.
   getLightningRenderState ??= () => ({ enabled: false, params: {}, anchors: [] });
+  // THE ROPE & CHAIN data seam (effects/rope-chain-subsystem.js, Phase 2):
+  // boot injects the resolved active-floor anchor array directly (id, x, y,
+  // params, elevation) — NOT wrapped in an `{enabled, params, anchors}`
+  // envelope like the seams above, because this effect has no
+  // effectRegistry manifest yet (see rope-chain-subsystem.js's own header
+  // for why rendering needs none of that). Default = an empty anchor list,
+  // so an un-wired caller (the torture fixture) renders no ropes.
+  getRopeChainAnchors ??= () => [];
   // THE DOOR-GRAPHICS data seam (effects/door-graphics-render.js): boot injects
   // `{ enabled, params: {animateMotion, motionDurationScale}, doors: [...] }`
   // — the renderable door snapshots (foundry/scene-doors.js) for the active
@@ -13047,6 +13063,50 @@ export async function startVtPanViewer({
         buildVegetationMaterial(tex, item, kind, params, opts),
     });
 
+    /**
+     * THE ROPE & CHAIN SUBSYSTEM (mythica-machina-press#1, Phase 2) —
+     * effects/rope-chain-subsystem.js's own per-instance mesh/spring-state
+     * lifecycle. Constructed HERE, immediately after `scene`/`vegShadows`,
+     * for the SAME TDZ reason vegShadows' own comment just above states:
+     * `scene` is a `const` declared just above this point in the function
+     * and is in its temporal dead zone before that — this effect's meshes
+     * join that SAME shared `scene` (drawn by the ordinary
+     * `runGeometryWorldPass`, no separate scene/draw call the way lightning
+     * needs — see rope-chain-subsystem.js's own header), so it belongs
+     * beside vegShadows, not beside lightningSubsystem/pointLights further
+     * up (which are constructed BEFORE `scene` even exists).
+     *
+     * ⚠️ `getWindHandle` is a GETTER, not `windHandle` itself — same reason
+     * every other consumer of it in this file takes a getter (`windHandle`
+     * is declared with `let` further UP this function, at line ~5013, but
+     * is REASSIGNED on every wind rebake; see `getWindHandle`'s own doc
+     * comment near the point-light pool/fire subsystem for the full
+     * account). Safe here regardless of declaration order — this getter is
+     * not invoked until `ropeChainSubsystem.tick()` first runs from the
+     * frame loop, long after every relevant declaration in this function
+     * has executed.
+     *
+     * `renderRopeChainPass: renderSunShadowPass` — the subsystem never
+     * touches `renderer` directly (`renderer-state/graph-only` allows
+     * `.setRenderTarget(` only inside `vt/`/`graph/`/`diag/`; a first draft
+     * that called it from `effects/rope-chain-subsystem.js` was correctly
+     * rejected by `npm run verify:structure`). `renderSunShadowPass` (built
+     * above, already reused verbatim as `renderWaterPass`/
+     * `renderPrismCapturePass` elsewhere in this same function) is a plain
+     * save/bind/render/restore triplet with nothing sun-specific in it —
+     * reused here again under this effect's own parameter name rather than
+     * writing a second identical copy.
+     */
+    const ropeChainSubsystem = createRopeChainSubsystem({
+      THREE,
+      scene,
+      allocator,
+      renderRopeChainPass: renderSunShadowPass,
+      uGlobalTimeMs,
+      getWindHandle: () => windHandle,
+      getRopeChainAnchors,
+    });
+
     // THE WORLD-SPACE CAMERA. Frustum values are set per frame by updateCamera()
     // from the live view rect; the placeholder args just construct it.
     //
@@ -17935,6 +17995,7 @@ export async function startVtPanViewer({
       simsWind: profiler?.indexOf('sims.wind') ?? -1,
       simsFluid: profiler?.indexOf('sims.fluid') ?? -1,
       simsVegSpring: profiler?.indexOf('sims.vegSpring') ?? -1,
+      simsRopeChain: profiler?.indexOf('sims.ropeChain') ?? -1,
       simsDust: profiler?.indexOf('sims.particlesDust') ?? -1,
       simsGusts: profiler?.indexOf('sims.particlesGusts') ?? -1,
       masksSync: profiler?.indexOf('masks.occlusionSync') ?? -1,
@@ -18259,6 +18320,22 @@ export async function startVtPanViewer({
         lastEnvSnapshot?.env?.time?.dtSec ?? 0
       );
       profiler?.end(Z.simsVegSpring);
+      // Rope & Chain's own per-instance wind-spring sim (mythica-machina-
+      // press#1, Phase 2) — SAME "inside the gpuProbe bracket, after
+      // tickWindSim so this frame's wind field is fresh" reasoning as
+      // tickVegetationSpring just above (rope-chain-subsystem.js's own
+      // tick() also samples windHandle.node() per instance). sync() first,
+      // so a rope added/removed/dragged this frame is reflected before its
+      // spring state is advanced — mirrors lightningSubsystem's own
+      // sync-before-use ordering. A cheap no-op on any scene with zero
+      // placed rope/chain spans (see rope-chain-subsystem.js's own doc).
+      profiler?.begin(Z.simsRopeChain);
+      ropeChainSubsystem.sync();
+      ropeChainSubsystem.tick(
+        lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value,
+        lastEnvSnapshot?.env?.time?.dtSec ?? 0
+      );
+      profiler?.end(Z.simsRopeChain);
       // sims.particles — advance the GPU particle sim right after the wind field
       // it samples, before the draw (surface.particles, in the plan below) reads
       // its positions. A DIRECT renderer.compute(): the sims stage is out of

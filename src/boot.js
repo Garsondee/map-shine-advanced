@@ -4738,6 +4738,49 @@ function install() {
     return { ...projectCascadeRenderState(lightningReadout), anchors: lightningAnchorMemo.anchors };
   };
 
+  // THE ROPE & CHAIN data seam (effects/rope-chain-subsystem.js, Phase 2,
+  // mythica-machina-press#1) — same memoization posture as
+  // `lightningAnchorMemo`/`getLightningRenderState` just above (an anchor's
+  // resolved fields only actually change when the anchor set, the active
+  // floor, or the served floor list changes), but a DIFFERENT return shape:
+  // this returns the bare anchor ARRAY, not `{enabled, params, anchors}`.
+  // Rope & Chain has no `effectRegistry.register(...)` manifest yet (Phase 3
+  // — see rope-chain-subsystem.js's own header for why rendering needs none
+  // of that today), so there is no cascade-resolved `enabled`/`params`
+  // readout to project (`projectCascadeRenderState` has nothing to read) —
+  // a complete start+end anchor pair IS this effect's own on/off switch,
+  // the same "wind has no manifest either" precedent this file's own
+  // `wind` Studio-card registration already established. `elevation` is
+  // resolved here for the SAME reason the bolt's own seam resolves it
+  // (`resolveAnchorElevationWorldUnits`, this anchor's floorBinding +
+  // `params.elevation` "height off floor") even though Phase 2's render
+  // path does not yet consume it (rope-chain-subsystem.js's own header
+  // names this as a known, honest Phase 3 gap) — cheap to keep correct now
+  // rather than a second thing to remember to wire later.
+  let ropeChainAnchorMemo = { anchorVersion: -1, floorContext: null, floors: null, anchors: [] };
+  const getRopeChainAnchors = () => {
+    const anchorVersion = anchorAuthority.getVersion();
+    if (
+      ropeChainAnchorMemo.anchorVersion !== anchorVersion ||
+      ropeChainAnchorMemo.floorContext !== activeFloorContext ||
+      ropeChainAnchorMemo.floors !== lastKnownFloors
+    ) {
+      ropeChainAnchorMemo = {
+        anchorVersion,
+        floorContext: activeFloorContext,
+        floors: lastKnownFloors,
+        anchors: anchorAuthority.anchorsForEffect('ropeChain', activeFloorContext).map((a) => ({
+          id: a.id,
+          x: a.x,
+          y: a.y,
+          params: a.params,
+          elevation: resolveAnchorElevationWorldUnits(a),
+        })),
+      };
+    }
+    return ropeChainAnchorMemo.anchors;
+  };
+
   /**
    * FIRE'S RENDER-STATE SEAM. Same shape as the candle's and the bolt's: boot
    * composes it, `vt/` never reaches the anchor authority or the settings
@@ -13284,6 +13327,14 @@ function install() {
         // injection posture as getCandleRenderState — the torture fixture has
         // no lightning anchors and stays bolt-free by construction.
         getLightningRenderState,
+        // THE ROPE & CHAIN EFFECT (effects/rope-chain-subsystem.js, Phase 2):
+        // each frame the subsystem reconciles instances from the active-
+        // floor anchors and ping-pongs each one's own wind-spring state.
+        // Same real-scene-only injection posture as getLightningRenderState
+        // just above — the torture fixture has no rope/chain anchors and
+        // stays rope-free by construction (the default inert `() => []`
+        // provider at the top of startVtPanViewer).
+        getRopeChainAnchors,
         // FIRE's render-state seam — same injection posture as the two above.
         // ⚠️ Passed, not merely declared: a render-state seam that is declared,
         // defaulted and never passed is exactly how water shipped every control

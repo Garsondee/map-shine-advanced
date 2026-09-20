@@ -184,6 +184,29 @@ export const ZONES = Object.freeze(
       false,
       'tickVegetationSpring'
     ),
+    // 2026-09-20 (mythica-machina-press#1, Phase 2) — one ping-pong-integrate
+    // -plus-publish pass PER LIVE ROPE/CHAIN INSTANCE (this effect is
+    // deliberately per-instance, not pooled — see rope-chain-subsystem.js's
+    // own header), so this single zone's cost scales with instance count,
+    // the same "one bracket around N tiny per-instance draws" shape
+    // sims.particlesDust/sims.particlesGusts already use below. A no-op on
+    // any scene with zero placed rope/chain spans, hence 'conditional', the
+    // same cadence sims.vegSpring/sims.fluid use for the identical reason.
+    // `ownerEffectId: null`, not `'ropeChain'` — this effect has no
+    // `effectRegistry.register(...)` manifest yet (Phase 3), the same "no
+    // manifest to attribute to" situation `sims.wind`/`sims.windBake` are
+    // already in.
+    z(
+      'sims.ropeChain',
+      'Rope & chain wind-spring sim',
+      'sims',
+      null,
+      null,
+      'both',
+      'conditional',
+      false,
+      'ropeChainSubsystem.tick'
+    ),
     z(
       'sims.particlesDust',
       'Dust particle step',

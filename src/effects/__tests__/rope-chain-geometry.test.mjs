@@ -14,6 +14,7 @@ import {
   modalDisplacement,
   springChase,
   computeModalForcing,
+  computeRopeChainWindProbes,
   buildRopeChainRibbonArrays,
 } from '../rope-chain-geometry.js';
 import { hashStringToSeed } from '../lightning-geometry.js';
@@ -241,6 +242,70 @@ export function run(t) {
       'non-finite inputs are coerced to 0 rather than propagating NaN',
       safe.mode1Forcing === 0 && safe.mode2Forcing === 0
     );
+  }
+
+  // --- computeRopeChainWindProbes (Phase 2) ---------------------------------
+  {
+    // A horizontal chord (0,0)->(100,0): perpendicular must be a pure
+    // vertical unit vector, matching buildRopeChainRibbonArrays's own
+    // -dy/len, dx/len convention (dy=0, dx=100 => perpX=0, perpY=1).
+    const horiz = computeRopeChainWindProbes({ startX: 0, startY: 0, endX: 100, endY: 0 });
+    ok(
+      'perpendicular of a horizontal chord is a unit vector',
+      approx(horiz.perpX * horiz.perpX + horiz.perpY * horiz.perpY, 1)
+    );
+    ok(
+      'perpendicular of a horizontal chord points straight "down" the -dy/len,dx/len convention',
+      approx(horiz.perpX, 0) && approx(horiz.perpY, 1)
+    );
+    ok('probe A sits at arclength 1/3', approx(horiz.probeAX, 100 / 3) && approx(horiz.probeAY, 0));
+    ok('probe B sits at arclength 2/3', approx(horiz.probeBX, 200 / 3) && approx(horiz.probeBY, 0));
+
+    // A vertical chord (0,0)->(0,50): perpendicular must be a pure
+    // horizontal unit vector.
+    const vert = computeRopeChainWindProbes({ startX: 0, startY: 0, endX: 0, endY: 50 });
+    ok(
+      'perpendicular of a vertical chord is a unit vector',
+      approx(vert.perpX * vert.perpX + vert.perpY * vert.perpY, 1)
+    );
+    ok('perpendicular of a vertical chord is horizontal', approx(vert.perpY, 0) && Math.abs(vert.perpX) > 0.99);
+
+    // Matches buildRopeChainRibbonArrays's own chord-normal formula exactly
+    // for an arbitrary diagonal chord, not just the axis-aligned cases above.
+    const diag = computeRopeChainWindProbes({ startX: 10, startY: 20, endX: 130, endY: 100 });
+    const dx = 130 - 10;
+    const dy = 100 - 20;
+    const len = Math.hypot(dx, dy);
+    ok('perpX matches the -dy/len,dx/len convention for an arbitrary chord', approx(diag.perpX, -dy / len));
+    ok('perpY matches the -dy/len,dx/len convention for an arbitrary chord', approx(diag.perpY, dx / len));
+    ok(
+      'probe A is 1/3 of the way from start to end for an arbitrary chord',
+      approx(diag.probeAX, 10 + dx / 3) && approx(diag.probeAY, 20 + dy / 3)
+    );
+    ok(
+      'probe B is 2/3 of the way from start to end for an arbitrary chord',
+      approx(diag.probeBX, 10 + (2 * dx) / 3) && approx(diag.probeBY, 20 + (2 * dy) / 3)
+    );
+
+    // Degenerate (zero-length) chord never throws or produces NaN — mirrors
+    // buildRopeChainRibbonArrays's own `Math.max(1e-4, ...)` chordLen floor.
+    const degenerate = computeRopeChainWindProbes({ startX: 5, startY: 5, endX: 5, endY: 5 });
+    ok(
+      'a zero-length chord never throws and stays finite',
+      Number.isFinite(degenerate.perpX) &&
+        Number.isFinite(degenerate.perpY) &&
+        Number.isFinite(degenerate.probeAX) &&
+        Number.isFinite(degenerate.probeAY)
+    );
+
+    // Malformed/missing fields default to 0 rather than propagating NaN,
+    // matching this file's own established defensive-coercion style.
+    const malformed = computeRopeChainWindProbes({});
+    ok(
+      'a malformed source never throws and stays finite',
+      Number.isFinite(malformed.perpX) && Number.isFinite(malformed.perpY)
+    );
+    ok('a fully-missing source argument never throws', Number.isFinite(computeRopeChainWindProbes(undefined).perpX));
   }
 
   // --- buildRopeChainRibbonArrays ------------------------------------------

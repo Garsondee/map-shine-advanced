@@ -53,6 +53,10 @@ import {
   WATER_TIER5_DISABLED_PENDING_SELF_CAPTURE_FIX,
 } from './water-render.js';
 import { waterKeyLightDirection } from './water-light.js';
+// The shared `flowEnabled` + `flowSpeedPx` resolver (mythica-machina-press
+// #581), beside `waterFlowVector` in the same file for the same reason — the
+// sim subsystem reads the identical function, never a second copy of the rule.
+import { waterFlowSpeedPx } from './water-field.js';
 import { QUAD_UVS, QUAD_INDICES, buildQuadPositions } from '../../scene/index.js';
 
 const log = createLogger('WaterSurface');
@@ -928,6 +932,12 @@ export function createWaterSurfaceSubsystem({
       p.depthScalePx,
       p.inscatter,
       p.foam,
+      // ⚠️ `flowEnabled` MUST be in this key, not just read below. The whole
+      // block under `key !== lastParamsKey` is skipped when the key is
+      // unchanged, so a switch that never appears here would flip in the UI,
+      // persist to the scene flag, and change nothing on screen until some
+      // OTHER param happened to move (mythica-machina-press#581).
+      p.flowEnabled,
       p.flowSpeedPx,
       p.flowAngleDeg,
       p.waveScalePx,
@@ -987,7 +997,13 @@ export function createWaterSurfaceSubsystem({
       if (Number.isFinite(p.inscatter)) surface.setInscatter(p.inscatter);
       if (Number.isFinite(p.foam)) surface.setFoam(p.foam);
       if (Number.isFinite(p.windRipple)) surface.setWindRipple(p.windRipple);
-      if (Number.isFinite(p.flowSpeedPx)) surface.setFlowSpeedPx(p.flowSpeedPx);
+      // `waterFlowSpeedPx` collapses the switch and the speed into one number,
+      // and its `null` (no authored speed yet) is what preserves this line's
+      // original `Number.isFinite` behaviour exactly: make no call at all and
+      // leave the material's own default standing. A real `0` — the author
+      // switching the current off — DOES get pushed.
+      const flowSpeedPx = waterFlowSpeedPx(p);
+      if (flowSpeedPx !== null) surface.setFlowSpeedPx(flowSpeedPx);
       if (Number.isFinite(p.flowAngleDeg)) surface.setFlowAngleDeg(p.flowAngleDeg);
       if (Number.isFinite(p.waveScalePx)) surface.setWaveScalePx(p.waveScalePx);
       if (Number.isFinite(p.chop)) surface.setChop(p.chop);

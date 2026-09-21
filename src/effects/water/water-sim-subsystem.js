@@ -73,6 +73,11 @@ import {
   WATER_SIM_SHEAR_GAIN,
   WATER_SIM_NEAR_SOLID_GAIN,
 } from './water-sim.js';
+// The shared `flowEnabled` + `flowSpeedPx` resolver (mythica-machina-press
+// #581). The surface subsystem reads the identical function: if the author
+// parks the current, the FOAM has to stop being carried downstream too, or the
+// water stands still while its white water keeps drifting away.
+import { waterFlowSpeedPx } from './water-field.js';
 
 /** Fallback foam-band reach, world px, used only until a caller calls
  * `setReachPx` at least once (e.g. before the surface material's own first
@@ -273,7 +278,11 @@ export function createWaterSimSubsystem({
     }
 
     const params = getWaterRenderState()?.params ?? {};
-    uFlowSpeedPx.value = Number.isFinite(params.flowSpeedPx) ? params.flowSpeedPx : 0;
+    // `?? 0` keeps this line's original fallback exactly: the surface leaves
+    // its material default standing when no speed is authored yet, but the sim
+    // has no equivalent default to fall back to, so a missing value is zero
+    // transport — same as it has always been here.
+    uFlowSpeedPx.value = waterFlowSpeedPx(params) ?? 0;
     uFoamAmount.value = Number.isFinite(params.foam) ? params.foam : 1;
     uTauFoamSec.value = Number.isFinite(params.simFoamDecaySec) ? params.simFoamDecaySec : WATER_SIM_TAU_FOAM_SEC;
     uDiffuse.value = Number.isFinite(params.simDiffuse) ? params.simDiffuse : WATER_SIM_DIFFUSE;

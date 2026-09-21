@@ -172,6 +172,63 @@ export function waterFlowVector(bearingDeg) {
   return [clean(x), clean(y)];
 }
 
+/**
+ * ============================================================================
+ * THE ONE PLACE THE FLOW SWITCH BECOMES A SPEED (mythica-machina-press#581)
+ * ============================================================================
+ *
+ * `waterFlowVector` above is "the one place a heading becomes a vector", and
+ * this is its direct sibling one param over: the one place `flowEnabled` and
+ * `flowSpeedPx` collapse into the single number a consumer actually pushes.
+ *
+ * Author's ask, 2026-09-21: *"a proper switch beside the compass that parks
+ * the surface without you having to remember what speed it was at"*. Stilling
+ * a river used to mean dragging Flow speed to 0 — which is a real, supported
+ * setting (`water.js#flowSpeedPx`'s own help names a pond) but a DESTRUCTIVE
+ * one: the authored speed is gone, and putting the river back means
+ * remembering it. The switch parks the surface and leaves both `flowSpeedPx`
+ * and `flowAngleDeg` exactly where the author left them.
+ *
+ * ⚠️ SHARED, not duplicated, because `flowSpeedPx` has TWO consumers that
+ * would otherwise each carry their own copy of `flowEnabled === false ? 0 :
+ * speed` — `water-surface-subsystem.js` (the material's own uniform) and
+ * `water-sim-subsystem.js` (the foam-transport step). Two copies of one rule
+ * is how the surface ends up parked while the foam keeps drifting.
+ *
+ * ⚠️ `null` IS A THIRD ANSWER, distinct from `0`, and the two call sites need
+ * it to stay distinct. `0` means "the author has switched the current OFF —
+ * push a real zero"; `null` means "no authored speed exists at all", which is
+ * the pre-resolve window every effect has before its first cascade resolve
+ * (`water-registration.js`'s own `params: null`). The surface subsystem's
+ * existing `Number.isFinite` guard deliberately makes NO call in that case,
+ * leaving the material's own `WATER_TIER2_FLOW_SPEED_PX` default standing;
+ * collapsing `null` into `0` here would silently freeze every river for those
+ * frames and read as a bug (`feedback_instruments_must_not_lie`).
+ *
+ * ⚠️ THE FLOW-FIELD BAKE IS DELIBERATELY NOT GATED ON THIS. `water-flow-
+ * subsystem.js#maybeBake` reads `flowAngleDeg` and the solve knobs, never the
+ * speed — so a parked river keeps its solved field warm and switching the
+ * current back on resumes on the very next frame, with no multigrid re-solve
+ * and no visible stall. That is the whole behavioural difference between this
+ * switch and disabling the Water effect outright.
+ *
+ * @param {{flowEnabled?: unknown, flowSpeedPx?: unknown}} [params] - a water
+ *   render-state params object. Read KEY BY KEY, never spread: in the surface
+ *   subsystem this is U6's read-tracking proxy and a spread would mark every
+ *   param read on frame one (`water-registration.js#getRenderState`).
+ * @returns {number|null} world px per second, `0` when the current is
+ *   switched off, or `null` when no authored speed exists yet.
+ */
+export function waterFlowSpeedPx(params) {
+  // `=== false`, not `!params?.flowEnabled` — an UNSET key (an older scene's
+  // saved params, written before this switch existed) must read as "flowing",
+  // which is what that scene has always looked like. Only an explicit `false`
+  // parks the surface.
+  if (params?.flowEnabled === false) return 0;
+  const speed = params?.flowSpeedPx;
+  return Number.isFinite(speed) ? speed : null;
+}
+
 /** Tier 2 — how much foam the crests produce, 0..1. */
 export const WATER_TIER2_FOAM = 1;
 

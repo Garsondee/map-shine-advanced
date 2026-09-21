@@ -196,6 +196,27 @@ export const WATER_PARAMS = Object.freeze({
     label: 'Wind ripple',
     help: 'How visibly the map`s own wind roughens open water — gusts read as darker ripple patches, sheltered nooks and lee sides of walls stay glassy-calm, using the same wind field vegetation already leans in. At 0 the surface never responds to wind at all.',
   },
+  // ⚠️ WATER'S FIRST `bool`, and it needs NO new UI machinery — which is the
+  // reason it is shaped as a param rather than a bespoke switch bolted onto
+  // the card. `core/dials-schema.js#DIAL_DRIVE_TYPES` excludes `bool` for the
+  // identical structural reason it excludes `flowAngleDeg`'s `angle` (there is
+  // no `to: [min,max]` window a dial could lerp a boolean across), so
+  // `ui/rooms/studio/effects-department.js`'s existing "render any fohKeys
+  // entry a dial structurally can't cover as its own raw control, right after
+  // the dials" loop picks it up unchanged, and `param-control.js#
+  // buildParamControl` already routes `bool` to `buildCheckboxRow`. Same road
+  // the compass itself travels since mythica-machina-press#565.
+  flowEnabled: {
+    type: 'bool',
+    // ON. A scene saved before this param existed has no stored value at all,
+    // and `waterFlowSpeedPx`'s own `=== false` test means it keeps flowing —
+    // this default and that test have to agree, or an old scene's river stops
+    // the first time someone opens it on a new build.
+    default: true,
+    category: 'Motion',
+    label: 'Current',
+    help: 'The master switch for the two Motion controls below it. Off parks the surface where it stands — the water stops travelling downstream, but the Flow dial and the compass keep the speed and heading you set, so switching it back on resumes exactly as before with no pause to rebuild the current. This is the TRAVEL, not all motion: surface chop and wind ripple carry on regardless, which is what a still pond or a flooded cellar actually looks like. Leave it on for any river.',
+  },
   flowSpeedPx: {
     type: 'float',
     min: 0,
@@ -204,7 +225,7 @@ export const WATER_PARAMS = Object.freeze({
     default: 70,
     category: 'Motion',
     label: 'Flow speed',
-    help: 'How fast the surface travels downstream, in canvas pixels per second. 0 for a still pond or lake; a lazy river is around 40–80, rapids much higher.',
+    help: 'How fast the surface travels downstream, in canvas pixels per second. A lazy river is around 40–80, rapids much higher. 0 is a still pond or lake — but if you only want to park a river you intend to start again, use the Current switch instead: it stills the water without clearing the speed you tuned here.',
   },
   // ⚠️ `angle`, NOT `float` — a compass bearing is CYCLIC, so 359 and 1 are two
   // degrees apart and an out-of-range write must WRAP rather than clamp
@@ -225,7 +246,7 @@ export const WATER_PARAMS = Object.freeze({
     default: 180,
     category: 'Motion',
     label: 'Flow direction',
-    help: 'Which way the current runs, as a compass heading — the direction the water travels TOWARD. North is up the screen. Point it downstream and the whole surface travels that way; the banks still bend it locally, so you are setting the general heading, not steering every meander. A pond does not care: set Flow speed to 0 instead.',
+    help: 'Which way the current runs, as a compass heading — the direction the water travels TOWARD. North is up the screen. Point it downstream and the whole surface travels that way; the banks still bend it locally, so you are setting the general heading, not steering every meander. A pond does not care: turn the Current switch off instead, which keeps this heading safe for whenever the water runs again.',
   },
   waveScalePx: {
     type: 'float',
@@ -789,19 +810,23 @@ export const WATER_PARAMS = Object.freeze({
  * `core/dials-schema.js#validateDialsSchema` in `water.test.mjs`, the
  * `dials/valid-reference` wall's own real-content half.
  *
- * ⚠️ `flowAngleDeg` AND `tint` ARE DELIBERATELY UNCOVERED BY THE DIALS
- * THEMSELVES. `flowAngleDeg` is an `angle` type — `validateDialsSchema`
- * refuses it as a drive target on principle (no fixed range a `to` window
- * can clamp into; see dials-schema.js's own header). `tint` is `color`-typed
- * for the identical structural reason. Direction and colour-trim are already
+ * ⚠️ `flowAngleDeg`, `flowEnabled` AND `tint` ARE DELIBERATELY UNCOVERED BY
+ * THE DIALS THEMSELVES. `flowAngleDeg` is an `angle` type —
+ * `validateDialsSchema` refuses it as a drive target on principle (no fixed
+ * range a `to` window can clamp into; see dials-schema.js's own header).
+ * `flowEnabled` is `bool` and `tint` is `color`, both refused for the
+ * identical structural reason. Direction, the current switch and colour-trim
+ * are already
  * single, already-plain-language controls in their own right (see their own
  * `help` text above), not knobs a macro dial would meaningfully simplify
- * further — but "not a dial" isn't "ROH-only": `flowAngleDeg` is one of
- * water's own `fohKeys` (boot.js), so `effects-department.js`'s card shell
- * still renders it as a raw compass control on the front strip, right after
- * the five dials (a type-gated fallback, `DIAL_DRIVE_TYPES`, general to any
- * effect — not water-specific plumbing). `tint` is NOT in `fohKeys`, so it
- * stays genuinely ROH-only, under Advanced.
+ * further — but "not a dial" isn't "ROH-only": `flowEnabled` and
+ * `flowAngleDeg` are both among water's own `fohKeys` (boot.js), so
+ * `effects-department.js`'s card shell still renders them as a raw switch and
+ * a raw compass on the front strip, right after the dials, in `fohKeys` order
+ * — switch first, then compass, so the master reads above the thing it gates
+ * (a type-gated fallback, `DIAL_DRIVE_TYPES`, general to any effect — not
+ * water-specific plumbing). `tint` is NOT in `fohKeys`, so it stays genuinely
+ * ROH-only, under Advanced.
  *
  * ⚠️ `opacity` IS ALSO DELIBERATELY UNCOVERED — a curation choice, not an
  * oversight. It was one of the original six `fohKeys` (a flat "top 6" list
@@ -873,7 +898,7 @@ export const WATER_DIALS = Object.freeze({
   },
   flow: {
     label: 'Flow',
-    help: 'How fast the surface travels downstream — still for a pond, brisk for a lazy river, fast for rapids. Set direction with the compass control right after the dials.',
+    help: 'How fast the surface travels downstream — still for a pond, brisk for a lazy river, fast for rapids. The Current switch and the compass right after the dials turn this off and point it; both leave this dial where you set it.',
     range: [0, 400],
     default: 90,
     drives: {
@@ -1529,6 +1554,13 @@ export const WATER_PRESETS = Object.freeze({
     // author-tuned value of its own yet, same posture as
     // `foamEdgeSharpness`'s own note below.
     windRipple: 1,
+    // A town river runs. This preset is an ANCHOR, not a diff (this file's own
+    // preset doctrine, walled by water.test.mjs's every-preset-covers-every-
+    // param assertion), so the switch has to be stated even though `true` is
+    // also the schema default — otherwise applying the preset to a scene where
+    // the author had parked the current would leave it parked, which is not
+    // what "a large polluted medieval town river" means.
+    flowEnabled: true,
     flowSpeedPx: 70,
     flowAngleDeg: 180,
     waveScalePx: 88,

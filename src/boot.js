@@ -9359,7 +9359,7 @@ function install() {
         // see WATER_DIALS in water.js), so being listed here only excluded it
         // from Advanced without ever surfacing it anywhere. It now falls through
         // to Advanced under Water's Look category like a normal ROH param.
-        fohKeys: ['depth', 'pollution', 'foam', 'flowAngleDeg', 'flowSpeedPx'],
+        fohKeys: ['depth', 'pollution', 'foam', 'flowEnabled', 'flowAngleDeg', 'flowSpeedPx'],
         getValue: (id) => readLive().params?.[id] ?? WATER_PARAMS[id]?.default,
         onChange: (id, value) => MapShine.setWater({ [id]: value }),
         enabled: readLive().enabled,
@@ -9420,7 +9420,7 @@ function install() {
       // see WATER_DIALS in water.js), so being listed here only excluded it
       // from Advanced without ever surfacing it anywhere. It now falls through
       // to Advanced under Water's Look category like a normal ROH param.
-      fohKeys: ['depth', 'pollution', 'foam', 'flowAngleDeg', 'flowSpeedPx'],
+      fohKeys: ['depth', 'pollution', 'foam', 'flowEnabled', 'flowAngleDeg', 'flowSpeedPx'],
       // U6 (docs/holy/UI-Testament.md §9): five authored dials replace this
       // fohKeys strip in the FOH — fohKeys itself stays, both as the ROH-
       // exclusion set (rohGroups reads it unconditionally) and as the

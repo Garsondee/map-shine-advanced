@@ -9,8 +9,8 @@
  * tier 0's three in phase 3, tier 1's three in phase 4, tier 2's four the same
  * session, and tier 3's four (sunGlint, skySheen, glossiness, viewerHeight).
  */
-import { validateParamsSchema } from '../../../core/params-schema.js';
-import { validateDialsSchema } from '../../../core/dials-schema.js';
+import { validateParamsSchema, validateParamValue } from '../../../core/params-schema.js';
+import { validateDialsSchema, DIAL_DRIVE_TYPES } from '../../../core/dials-schema.js';
 import { validateEffectManifest } from '../../effect-manifest.js';
 import { createEffectRegistry } from '../../registry.js';
 import { resolveEffectEnabled } from '../../effect-cascade.js';
@@ -31,6 +31,7 @@ import {
   WATER_CAUSTICS_JUNCTION_FRACTION,
   WATER_CAUSTICS_LINE_FLOOR,
   WATER_CAUSTICS_SPECULAR_INFLUENCE,
+  waterFlowSpeedPx,
 } from '../water-field.js';
 import { WATER_TIER3_SHADOW_RESPONSE, WATER_TIER3_GLOSSINESS, WATER_MIN_ROUGHNESS } from '../water-light.js';
 import { WATER_TIER4_SWASH_FOAM, WATER_TIER4_BREAK_FOAM, WATER_TIER4_CAUSTICS } from '../water-render.js';
@@ -59,6 +60,30 @@ export function run(t) {
       Object.keys(WATER_DIALS).length >= 3 && Object.keys(WATER_DIALS).length <= 6
     );
   }
+  // --- the Current switch's default and the resolver must AGREE ----------
+  // mythica-machina-press#581. Two files hold one rule between them: the
+  // schema says the switch ships ON, and `waterFlowSpeedPx` tests `=== false`
+  // so that an absent key (every scene authored before this param existed)
+  // also reads as flowing. If a future edit flips this default to `false`, or
+  // loosens that test to plain falsiness, the two stop agreeing and every old
+  // river stops dead the first time it is opened on a new build. Pinned here
+  // rather than in `water-field.test.mjs` because only THIS file can see both.
+  ok('the Current switch ships ON', WATER_PARAMS.flowEnabled.default === true);
+  ok(
+    'the shipped default and the resolver agree — a river with no stored switch still flows',
+    waterFlowSpeedPx({ flowSpeedPx: 70 }) === 70 &&
+      waterFlowSpeedPx({ flowEnabled: WATER_PARAMS.flowEnabled.default, flowSpeedPx: 70 }) === 70
+  );
+  // The switch is FOH (`boot.js#fohKeys`), and it gets there by being a type
+  // no dial can drive — the same door `flowAngleDeg`'s compass uses. If `bool`
+  // were ever admitted to `DIAL_DRIVE_TYPES`, `effects-department.js` would
+  // stop rendering this as its own raw control and the switch would vanish
+  // from the card entirely, exactly as the compass did before #565.
+  ok(
+    'the switch is a type no dial can drive, which is what keeps it on the front strip',
+    WATER_PARAMS.flowEnabled.type === 'bool' && !DIAL_DRIVE_TYPES.includes(WATER_PARAMS.flowEnabled.type)
+  );
+
   ok("the effect's id is water", WATER.id === 'water');
   ok(
     'water does not flash (a11y photosensitive false) — tier 0 has no flicker at all',
@@ -318,11 +343,17 @@ export function run(t) {
         missing.length === 0
       );
 
-      const badType = keys.filter((k) => {
-        const decl = WATER_PARAMS[k];
-        if (decl.type === 'color') return typeof preset[k] !== 'string';
-        return typeof preset[k] !== 'number' || !Number.isFinite(preset[k]);
-      });
+      // ⚠️ THE REAL WRITE-PATH VALIDATOR, not a hand-rolled type switch. This
+      // block used to read "a `color` is a string, everything else is a finite
+      // number" — which was true only for as long as water's params happened
+      // to be floats and one colour, and went wrong the moment `flowEnabled`
+      // arrived as water's first `bool` (mythica-machina-press#581): a
+      // perfectly legal `true` was reported as the wrong type. A second,
+      // partial copy of the type rules in a test is exactly the drift this
+      // codebase walls against everywhere else, so the test now asks
+      // `validateParamValue` — the same function a live write goes through —
+      // and inherits every type it already knows, including the next one.
+      const badType = keys.filter((k) => !validateParamValue(WATER_PARAMS[k], preset[k]).ok);
       ok(
         `preset '${name}': every value has its param's own type${badType.length ? ` (wrong: ${badType})` : ''}`,
         badType.length === 0

@@ -18064,6 +18064,27 @@ export async function startVtPanViewer({
     let warmUpMs = null;
     /** Pipeline-cache growth (`readPipelineCount()` before → after) the most recent warm-up caused — the direct evidence it did real work, not zero. */
     let warmUpPipelinesCreated = null;
+    /**
+     * The same measurement for {@link warmUpSims} specifically
+     * (mythica-machina-press#582), kept SEPARATE from `warmUpPipelinesCreated`
+     * above rather than folded into it.
+     *
+     * This is the receipt for the unpause fix, and it has to be its own number
+     * to be one. `Pipelines#caches` is a single Map shared by render AND compute
+     * pipelines (`getForCompute` hits the same `caches.get`/`caches.set` pair —
+     * verified directly in `src/vendor/three/three.webgpu.js`), so the sim
+     * kernels' compute pipelines land in the very counter the draw warm-up
+     * already reports. Folded together, "the compute kernels were warmed" and
+     * "the pass plan was warmed" would be one indistinguishable total, and the
+     * specific claim this fix makes — that the kernels which used to first
+     * compile when you press space now compile behind the curtain — would be
+     * unfalsifiable.
+     *
+     * A zero here on a cold load means `warmUpSims` reached nothing and the
+     * unpause freeze should be expected to persist. That is exactly the kind of
+     * silent nothing-happened that `warmUpMs` hid for weeks (see #402).
+     */
+    let warmUpSimPipelinesCreated = null;
     const frameTimes = [];
     let lastError = null;
 
@@ -19825,6 +19846,7 @@ export async function startVtPanViewer({
      */
     function warmUpSims() {
       if (!view) return;
+      const before = readPipelineCount();
       const currentViewRect = viewToWorldRect(view, canvasW / canvasH);
       const windSpawnRect = clampRectToBounds(currentViewRect, dimensions.sceneRect);
       const tMs = uGlobalTimeMs.value;
@@ -19838,6 +19860,9 @@ export async function startVtPanViewer({
       if (precipitationSubsystem) {
         precipitationSubsystem.sync(renderer, WARM_UP_SIM_DT_SEC, tMs, windSpawnRect);
       }
+      const after = readPipelineCount();
+      warmUpSimPipelinesCreated =
+        Number.isFinite(before) && Number.isFinite(after) ? Math.max(0, after - before) : null;
     }
 
     function warmUpDrawState({ includePresent = true } = {}) {
@@ -26245,6 +26270,7 @@ export async function startVtPanViewer({
           shaderCompileMs,
           warmUpMs,
           warmUpPipelinesCreated,
+          warmUpSimPipelinesCreated,
           prefetchSkippedPacks,
           lastUpdate,
           passSeq,

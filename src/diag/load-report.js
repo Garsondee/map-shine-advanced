@@ -211,10 +211,26 @@ function buildWarmUpSection(warmUp) {
   if (!warmUp) return null;
   const ran = Number.isFinite(warmUp.warmUpMs);
   const created = Number.isFinite(warmUp.warmUpPipelinesCreated) ? warmUp.warmUpPipelinesCreated : null;
+  // THE UNPAUSE FIX'S OWN RECEIPT (mythica-machina-press#582), reported
+  // separately from the draw warm-up's count on purpose — see
+  // `warmUpSimPipelinesCreated`'s declaration for why one combined total would
+  // make the claim unfalsifiable.
+  const simCreated = Number.isFinite(warmUp.warmUpSimPipelinesCreated) ? warmUp.warmUpSimPipelinesCreated : null;
   return {
     ran,
     ms: ran ? round(warmUp.warmUpMs) : null,
     pipelinesCreated: created,
+    simPipelinesCreated: simCreated,
+    simNote:
+      simCreated === null
+        ? 'Sim-kernel warm-up was not measured on this load.'
+        : simCreated > 0
+          ? `${simCreated} compute pipeline(s) for the particle/gust/fire/rain kernels were compiled BEHIND the ` +
+            'curtain. These are the ones that used to compile the first time the world was unpaused — this is ' +
+            'the unpause freeze being paid for while the curtain is still up.'
+          : 'The sim warm-up created NO compute pipelines. Either they were already compiled (a revisit), or ' +
+            'warmUpSims() reached nothing — in which case the unpause freeze should be expected to persist, and ' +
+            'this zero is the evidence rather than a silent nothing-happened.',
     shaderPrecompileMs: Number.isFinite(warmUp.shaderCompileMs) ? round(warmUp.shaderCompileMs) : null,
     note: ran
       ? created === 0

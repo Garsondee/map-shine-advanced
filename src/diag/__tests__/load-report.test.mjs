@@ -477,5 +477,23 @@ export function run(t) {
     );
 
     ok('no warm-up data at all is absent, never a fabricated success', mkLast(null).warmUp === null);
+
+    // THE UNPAUSE FIX'S RECEIPT. Pipelines#caches is ONE Map shared by render
+    // and compute pipelines, so without a separate counter the sim kernels'
+    // compiles would vanish into the draw warm-up's total and the claim would
+    // be unfalsifiable.
+    const withSims = mkLast({ warmUpMs: 400, warmUpPipelinesCreated: 12, warmUpSimPipelinesCreated: 5 });
+    ok('sim-kernel compiles are counted separately from the draw warm-up', withSims.warmUp.simPipelinesCreated === 5);
+    ok('...and are described as the unpause freeze being paid early', /unpause/i.test(withSims.warmUp.simNote));
+
+    const noSims = mkLast({ warmUpMs: 400, warmUpPipelinesCreated: 12, warmUpSimPipelinesCreated: 0 });
+    ok(
+      'a sim warm-up that reached nothing says so, rather than reading as success',
+      noSims.warmUp.simPipelinesCreated === 0 && /expected to persist/i.test(noSims.warmUp.simNote)
+    );
+    ok(
+      'an unmeasured sim warm-up is worded differently again from a measured zero',
+      mkLast({ warmUpMs: 400 }).warmUp.simNote !== noSims.warmUp.simNote
+    );
   }
 }

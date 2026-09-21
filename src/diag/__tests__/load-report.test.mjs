@@ -477,7 +477,7 @@ export function run(t) {
     );
 
     ok('no warm-up data at all is absent, never a fabricated success', mkLast(null).warmUp === null);
-    // --- TEXTURE COMPRESSION HEALTH (mythica-machina-press#586) --------------
+    // --- TEXTURE COMPRESSION HEALTH (mythica-machina-press#585) --------------
     // A BC worker that is unavailable makes every layer fall back to a RAW
     // texture — ~576MB vs ~144MB for a 12,000-square layer, uploaded on the main
     // thread. That is the leading suspect for the one long unexplained stall in

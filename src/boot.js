@@ -15788,7 +15788,7 @@ function install() {
             warmUpSimError: warmUpDiag?.shaders?.warmUpSimError ?? null,
             shaderCompileMs: warmUpDiag?.shaders?.precompileMs ?? null,
           },
-          // TEXTURE COMPRESSION HEALTH (mythica-machina-press#586) — a
+          // TEXTURE COMPRESSION HEALTH (mythica-machina-press#585) — a
           // POINT-IN-TIME read at load end, deliberately NOT a delta, so the
           // window problem in #583 cannot apply to it. When the BC worker is
           // unavailable, `requestCompressedTexture` resolves null and the

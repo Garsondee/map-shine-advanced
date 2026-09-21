@@ -194,7 +194,7 @@ function buildBackgroundSection(hiddenMs, totalMs) {
 }
 
 /**
- * TEXTURE COMPRESSION HEALTH (mythica-machina-press#586) — "did any layer end
+ * TEXTURE COMPRESSION HEALTH (mythica-machina-press#585) — "did any layer end
  * up as a RAW texture, and what did that cost?"
  *
  * When the BC worker is unavailable or failing, `requestCompressedTexture`

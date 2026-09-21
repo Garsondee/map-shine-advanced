@@ -219,7 +219,7 @@ export function run(t) {
     );
   }
 
-  // --- THE COMPRESSION SECTION'S ADDRESS CONTRACT (#586) -------------------
+  // --- THE COMPRESSION SECTION'S ADDRESS CONTRACT (#585) -------------------
   // Same class of defect as #584, pinned BEFORE it can bite: boot reads the
   // compression health out of the diagnostics tree by path, and a wrong path
   // returns `undefined` silently rather than failing. The published key names

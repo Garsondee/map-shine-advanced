@@ -19819,7 +19819,39 @@ export async function startVtPanViewer({
      * `warmUpDrawState` structurally cannot reach (mythica-machina-press#582).
      *
      * ============================================================================
-     * THE GAP, AND THE AUTHOR REPORT THAT NAMES IT
+     * ⚠️ WHAT THIS DOES *NOT* FIX — CORRECTED 2026-09-21
+     * ============================================================================
+     * This function shipped claiming it fixed the author's unpause freeze:
+     * *"as soon as I hit space to unpause we get another long pause and
+     * freeze, perhaps something is compiling upon the first batch of animated
+     * frames?"* Re-reading the source, that claim is WRONG and is withdrawn.
+     *
+     * `renderFrame`'s `sims` block runs EVERY frame regardless of pause — it
+     * simply passes `dtSec: 0`. `particleEngine.step`/`gustEngine.step` call
+     * `renderer.compute(updateKernel)` unconditionally (no dt guard), and
+     * `fireSubsystem.sync` is called the same way. So those compute pipelines
+     * already compile on the FIRST frame, paused or not. Precipitation is
+     * gated on `uActiveCount` — the weather axis, not time — so pause does not
+     * govern it either.
+     *
+     * Unpausing therefore does not, by itself, trigger a wave of new pipeline
+     * compilation. The far likelier explanation, consistent with every live
+     * report so far, is that the unpause freeze is not a separate mechanism at
+     * all: the load has not actually finished (both live loads ended in a
+     * FORCED reveal with real work still outstanding), so a person pressing
+     * space shortly afterwards is still inside the same expensive first-frames
+     * window — the ~6s-per-frame cost #588 exists to attribute.
+     *
+     * ============================================================================
+     * WHAT IT DOES DO, WHICH IS SMALLER AND REAL
+     * ============================================================================
+     * It moves those compute-kernel compiles off the first REAL frame and into
+     * the warm-up, behind the curtain, where a stall is expected and measured.
+     * That is a genuine improvement to the first frame's cost — just a modest
+     * one, and not the unpause fix it was announced as. `warmUpSimPipelinesCreated`
+     * reports exactly how many pipelines it actually moved, so the size of the
+     * win is a number rather than a claim.
+     *
      * ============================================================================
      * *"Foundry VTT defaults to being paused when you log in. As soon as I hit
      * space to unpause we get another long pause and freeze, perhaps something

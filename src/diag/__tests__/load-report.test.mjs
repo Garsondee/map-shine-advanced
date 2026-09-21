@@ -477,6 +477,76 @@ export function run(t) {
     );
 
     ok('no warm-up data at all is absent, never a fabricated success', mkLast(null).warmUp === null);
+    // --- TEXTURE COMPRESSION HEALTH (mythica-machina-press#586) --------------
+    // A BC worker that is unavailable makes every layer fall back to a RAW
+    // texture — ~576MB vs ~144MB for a 12,000-square layer, uploaded on the main
+    // thread. That is the leading suspect for the one long unexplained stall in
+    // the live reports, and none of it reached this report before.
+    {
+      const mkC = (compression) =>
+        buildLoadReport(
+          {
+            showing: false,
+            current: null,
+            lastLoad: {
+              sceneName: 'S',
+              totalMs: 1000,
+              error: null,
+              forcedReveal: false,
+              unfinished: [],
+              worstStallMs: 0,
+              phases: [{ phase: LOAD_PHASES.ART, startMs: 0, endMs: 1000, durMs: 1000 }],
+              blockerDurationsMs: {},
+            },
+          },
+          { compression }
+        );
+
+      ok('absent compression data is absent, never a fabricated all-clear', mkC(null).compression === null);
+
+      const broken = mkC({ worker: { workerCreated: false, unavailable: true, failed: 3, requests: 9 }, items: [] });
+      ok('an unavailable worker is called out loudly', /NOT HEALTHY/.test(broken.compression.note));
+      ok('...and names the raw-texture fallback as the cost', /RAW texture/.test(broken.compression.note));
+
+      const healthy = mkC({
+        worker: { workerCreated: true, unavailable: false, failed: 0, requests: 9, cached: 9 },
+        applied: true,
+        appliedItems: 4,
+        itemCount: 4,
+        estTextureVramMB: 512,
+        items: [{ id: 'a', compressed: 'bc7', approxVramMB: 144 }],
+      });
+      ok('a healthy worker reads as healthy', /healthy/.test(healthy.compression.note));
+      ok(
+        '...and says its window is point-in-time, not a #583-style delta',
+        /POINT-IN-TIME/.test(healthy.compression.note)
+      );
+      ok('...and carries the VRAM bill', healthy.compression.estTextureVramMB === 512);
+      ok('...with no false fallback accusation', healthy.compression.fellBackItemIds.length === 0);
+
+      const fellBack = mkC({
+        worker: { workerCreated: true, unavailable: false, failed: 0, requests: 2 },
+        items: [
+          { id: 'ground', compressed: 'error:fellback', approxVramMB: 576 },
+          { id: 'first', compressed: 'bc7', approxVramMB: 144 },
+        ],
+      });
+      ok(
+        'a per-item fallback is named even when the worker claims health',
+        fellBack.compression.fellBackItemIds.join() === 'ground'
+      );
+      // A null `compressed` means "not reported". Inferring a fallback from an
+      // absent field is how an instrument starts inventing findings — which is
+      // exactly the mistake #584 was.
+      const unknown = mkC({
+        worker: { workerCreated: true, unavailable: false, failed: 0 },
+        items: [{ id: 'x', compressed: null }],
+      });
+      ok(
+        'an unreported compression state is NOT counted as a fallback',
+        unknown.compression.fellBackItemIds.length === 0
+      );
+    }
 
     // THE UNPAUSE FIX'S RECEIPT. Pipelines#caches is ONE Map shared by render
     // and compute pipelines, so without a separate counter the sim kernels'

@@ -72,20 +72,22 @@ export function run(t) {
     // ever called the setter: the module's own `let _chunkedWarmUpEnabled`
     // seed, observed genuinely untouched.
     //
-    // ⚠️ THIS ASSERTION WAS INVERTED ON PURPOSE (mythica-machina-press#582).
-    // It used to read "defaults OFF — a cold load that never calls the setter
-    // behaves exactly as it did before this flag existed", which was the
-    // correct pin while #534 shipped the capability inert pending a live test.
-    // The author has since made the call this was waiting on — "I want a
-    // loading screen that is responsive and active for the entire loading
-    // speed, even at the cost of a little loading performance" — which is
-    // precisely this flag's trade. Flipping the seed without flipping this
-    // test would have left a green suite asserting the opposite of the
-    // shipped behaviour, so the pin moves WITH the decision and keeps saying
-    // out loud which way it points.
+    // ⚠️ THIS PIN HAS MOVED TWICE — both moves recorded, because a pin that
+    // quietly changes direction is worse than no pin.
+    //
+    // It shipped OFF (#534: the capability was built but never live-tested).
+    // It was flipped ON (#582) on the strength of the author's standing "even
+    // at the cost of a little loading performance". It is now OFF again — and
+    // NOT for the reason first given: the `warmUp.ran:false` that prompted the
+    // revert turned out to be a wrong-address read in the report itself (#584),
+    // so it was never evidence of anything.
+    //
+    // The honest reason it stays off: the first live load with it ON went from
+    // 31,361ms to 80,024ms, and an untested flag was the one new variable. The
+    // control is the path that has actually run in production. Re-enable only
+    // once a load with working instrumentation says it is safe.
     ok(
-      'defaults OFF again — the first live load with it ON reported warmUp.ran:false (see #584); the known-good ' +
-        'synchronous path is the control until the captured error says why',
+      'defaults OFF — the one live load with it ON went 31s -> 80s, and it has never been live-verified',
       getVtPanViewerChunkedWarmUp().chunkedWarmUpEnabled === false
     );
 
@@ -215,5 +217,28 @@ export function run(t) {
       'shaderCompileMs is read by its real published name (precompileMs), not its local one',
       bootSrc.includes('warmUpDiag?.shaders?.precompileMs') && !bootSrc.includes('warmUpDiag?.shaderCompileMs')
     );
+  }
+
+  // --- THE COMPRESSION SECTION'S ADDRESS CONTRACT (#586) -------------------
+  // Same class of defect as #584, pinned BEFORE it can bite: boot reads the
+  // compression health out of the diagnostics tree by path, and a wrong path
+  // returns `undefined` silently rather than failing. The published key names
+  // are asserted against the builder that actually emits them.
+  {
+    const diagSrc = readFileSync(DIAGNOSTICS_PATH, 'utf8');
+    const bootSrc = readFileSync(BOOT_PATH, 'utf8');
+    ok('diagnostics publishes the whole-image item array as `items`', diagSrc.includes('items: perItem,'));
+    ok(
+      'diagnostics publishes the compressed-worker stats under compressed.worker',
+      diagSrc.includes('worker: getCompressedTextureStats()')
+    );
+    for (const path of [
+      'warmUpDiag?.wholeImage?.compressed?.worker',
+      'warmUpDiag?.wholeImage?.compressed?.applied',
+      'warmUpDiag?.wholeImage?.estTextureVramMB',
+      'warmUpDiag?.wholeImage?.items',
+    ]) {
+      ok(`boot reads compression health via ${path}`, bootSrc.includes(path));
+    }
   }
 }

@@ -194,6 +194,58 @@ function buildBackgroundSection(hiddenMs, totalMs) {
 }
 
 /**
+ * TEXTURE COMPRESSION HEALTH (mythica-machina-press#586) — "did any layer end
+ * up as a RAW texture, and what did that cost?"
+ *
+ * When the BC worker is unavailable or failing, `requestCompressedTexture`
+ * resolves `null` and the caller falls back to an uncompressed texture. On a
+ * 12,000-square layer that is ~576MB instead of ~144MB, uploaded on the main
+ * thread — which makes it a prime suspect for a single multi-second stall
+ * inside the first frame, the one thing in the live reports nothing has ever
+ * attributed.
+ *
+ * A POINT-IN-TIME read at load end, NOT a before/after delta — so #583's
+ * window defect cannot apply here. Stated in the note, because a reader who has
+ * just been told to distrust `cacheHealth`'s window is entitled to know why
+ * this one is different rather than having to assume it.
+ */
+function buildCompressionSection(c) {
+  if (!c) return null;
+  const w = c.worker ?? null;
+  const items = Array.isArray(c.items) ? c.items : [];
+  // "fell back" = the per-item field says so explicitly. Anything else is left
+  // out rather than inferred: `null` there means "not reported", and guessing
+  // a fallback from an absent field is how an instrument starts inventing.
+  const fellBack = items.filter((i) => typeof i.compressed === 'string' && /error|fellback/i.test(i.compressed));
+  const workerBroken = !!(w && (w.unavailable === true || (w.failed ?? 0) > 0 || w.workerCreated === false));
+  return {
+    workerCreated: w?.workerCreated ?? null,
+    unavailable: w?.unavailable ?? null,
+    cooldownActive: w?.cooldownActive ?? null,
+    consecutiveWorkerFailures: w?.consecutiveWorkerFailures ?? null,
+    requests: w?.requests ?? null,
+    failed: w?.failed ?? null,
+    cached: w?.cached ?? null,
+    applied: c.applied ?? null,
+    appliedItems: c.appliedItems ?? null,
+    itemCount: c.itemCount ?? null,
+    estTextureVramMB: c.estTextureVramMB ?? null,
+    fellBackItemIds: fellBack.map((i) => i.id).filter(Boolean),
+    note: workerBroken
+      ? 'THE GPU TEXTURE-COMPRESSION WORKER IS NOT HEALTHY. Every layer it could not compress is held as a RAW ' +
+        'texture instead — roughly 4x the bytes of BC7, uploaded on the main thread. On a 12,000-square map that ' +
+        'is the difference between ~144MB and ~576MB for a single layer. If this load showed one long ' +
+        'unexplained freeze, this is the first thing to rule in or out.'
+      : fellBack.length > 0
+        ? `${fellBack.length} layer(s) fell back to a RAW texture even though the worker reports healthy — check ` +
+          'fellBackItemIds. A raw 12,000-square layer is ~576MB against ~144MB compressed.'
+        : 'Compression worker reports healthy and no layer is recorded as having fallen back to a raw texture. ' +
+          'This is a POINT-IN-TIME read at load end, not a before/after delta, so the #583 window caveat that ' +
+          'applies to cacheHealth does NOT apply here.',
+  };
+}
+
+/**
  * THE WARM-UP'S OWN OUTCOME — did the one mechanism built to move compilation
  * behind the curtain actually run? (mythica-machina-press#582)
  *
@@ -428,6 +480,7 @@ export function buildLoadReport(loadingScreenState, diagnostics = null) {
     // previous load's numbers mislabelled as this one's.
     report.compileTime = buildCompileTimeSection(diagnostics, worstStallMs);
     report.warmUp = buildWarmUpSection(diagnostics?.warmUp ?? null);
+    report.compression = buildCompressionSection(diagnostics?.compression ?? null);
     report.background = buildBackgroundSection(state.currentHiddenMs ?? null, totalMs);
     report.cacheHealth = buildCacheHealthSection(diagnostics?.cacheSnapshot ?? null);
     report.zoneBreakdown = null;
@@ -456,6 +509,7 @@ export function buildLoadReport(loadingScreenState, diagnostics = null) {
     );
     report.compileTime = buildCompileTimeSection(diagnostics, report.worstStallMs);
     report.warmUp = buildWarmUpSection(diagnostics?.warmUp ?? null);
+    report.compression = buildCompressionSection(diagnostics?.compression ?? null);
     report.background = buildBackgroundSection(last.hiddenMs ?? null, totalMs);
     report.cacheHealth = buildCacheHealthSection(diagnostics?.cacheSnapshot ?? null);
     // Zone breakdown is COMPLETED-LOAD ONLY — see the in-progress branch's own

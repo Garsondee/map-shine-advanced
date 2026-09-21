@@ -15788,6 +15788,29 @@ function install() {
             warmUpSimError: warmUpDiag?.shaders?.warmUpSimError ?? null,
             shaderCompileMs: warmUpDiag?.shaders?.precompileMs ?? null,
           },
+          // TEXTURE COMPRESSION HEALTH (mythica-machina-press#586) — a
+          // POINT-IN-TIME read at load end, deliberately NOT a delta, so the
+          // window problem in #583 cannot apply to it. When the BC worker is
+          // unavailable, `requestCompressedTexture` resolves null and the
+          // caller falls back to a RAW texture — 4x the bytes of BC7 — and on
+          // a 12,000-square map that is the difference between ~144MB and
+          // ~576MB per layer, uploaded on the main thread. That is a prime
+          // suspect for a single multi-second first-frame stall, and until now
+          // nothing about it reached this report at all.
+          compression: {
+            worker: warmUpDiag?.wholeImage?.compressed?.worker ?? null,
+            applied: warmUpDiag?.wholeImage?.compressed?.applied ?? null,
+            appliedItems: warmUpDiag?.wholeImage?.compressed?.appliedItems ?? null,
+            itemCount: warmUpDiag?.wholeImage?.itemCount ?? null,
+            estTextureVramMB: warmUpDiag?.wholeImage?.estTextureVramMB ?? null,
+            items: Array.isArray(warmUpDiag?.wholeImage?.items)
+              ? warmUpDiag.wholeImage.items.map((i) => ({
+                  id: i?.id ?? null,
+                  compressed: i?.compressed ?? null,
+                  approxVramMB: i?.approxVramMB ?? null,
+                }))
+              : null,
+          },
           cacheSnapshot: { start: loadCacheSnapshotStart, end: loadCacheSnapshotEnd },
         };
 

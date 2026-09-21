@@ -402,6 +402,9 @@ import {
   getVtPanViewerSceneSettle,
   sampleVtPanViewerSceneSettleNow,
   setVtPanViewerLoadRenderScale,
+  setVtPanViewerChunkedWarmUp,
+  getVtPanViewerChunkedWarmUp,
+  getVtPanViewerLoadRenderScale,
   DEFAULT_LOAD_RENDER_SCALE,
   startVtPanViewerLiveMarkers,
   stopVtPanViewerLiveMarkers,
@@ -1004,6 +1007,24 @@ MapShine.armWindProbe = runInteractiveVtPanViewerWindProbe;
 // `MapShine.xxx()` unless it ALSO gets one of these explicit wrappers. See
 // setVtPanViewerDebugFirstRenderProbe's own doc in vt-pan-viewer.js.
 MapShine.setDebugFirstRenderProbe = setVtPanViewerDebugFirstRenderProbe;
+/**
+ * The cold-load internal render-scale clamp (mythica-machina-press#589).
+ * `MapShine.setLoadRenderScale(null)` restores the previous behaviour exactly
+ * — full internal resolution during the load — and any value in (0,1] sets a
+ * different ceiling. Exposed because a rendering change that ships on by
+ * default must be revertible by the person testing it WITHOUT a redeploy; a
+ * flag whose only off switch is a code edit is not really a flag.
+ */
+MapShine.setLoadRenderScale = setVtPanViewerLoadRenderScale;
+/**
+ * The chunked cold-load warm-up (mythica-machina-press#534), currently OFF by
+ * default. `vt-pan-viewer.js` has documented this exact console call since
+ * #534 landed — and it did not exist, so the doc was describing an escape
+ * hatch nobody could reach. Wired here so the claim is true.
+ */
+MapShine.setChunkedWarmUp = setVtPanViewerChunkedWarmUp;
+MapShine.getChunkedWarmUp = getVtPanViewerChunkedWarmUp;
+MapShine.getLoadRenderScale = getVtPanViewerLoadRenderScale;
 MapShine.setDebugForceMaskNodeOff = setVtPanViewerDebugForceMaskNodeOff;
 MapShine.setDebugForceOpaqueBlendOff = setVtPanViewerDebugForceOpaqueBlendOff;
 // THE EXPLORED-FOG WASH (Bug #21) — MSA owns the look of explored-but-unseen

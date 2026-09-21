@@ -143,6 +143,8 @@ export {
   getVtPanViewerSceneSettle,
   sampleVtPanViewerSceneSettleNow,
   setVtPanViewerLoadRenderScale,
+  setVtPanViewerChunkedWarmUp,
+  getVtPanViewerChunkedWarmUp,
   getVtPanViewerLoadRenderScale,
   DEFAULT_LOAD_RENDER_SCALE,
   drawVtPanViewerWorldMarkers,

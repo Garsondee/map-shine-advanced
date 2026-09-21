@@ -42,9 +42,10 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 3,
     step: 0.01,
-    // RAISED 1 → 3 = THE SCHEMA'S OWN MAX (2026-09-09) — new live-tuned
-    // defaults; the author's own dialled-in scene, recorded exactly.
-    default: 3,
+    // LOWERED 3 → 1 (2026-09-21) — new live-tuned default, off the schema's
+    // own max back toward neutral; the author's own dialled-in scene,
+    // recorded exactly. Was RAISED 1 → 3 (2026-09-09) before this round.
+    default: 1,
     category: 'Look',
     label: 'Window light',
     help: 'Master strength of every light cookie this effect draws. Turn it to 0 to see the map with no window light at all.',
@@ -54,11 +55,12 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0.25,
     max: 4,
     step: 0.01,
-    // LOWERED 1 → 0.69 (2026-09-08) — new live-tuned default; see
-    // `WINDOW_DEFAULT_CONTRAST`'s own header (window-render.js). Recovered
+    // RAISED 0.69 → 1 (2026-09-21) — new live-tuned default, back to neutral
+    // (1 = exactly what you painted); see `WINDOW_DEFAULT_CONTRAST`'s own
+    // header (window-render.js). Was LOWERED 1 → 0.69 (2026-09-08, recovered
     // from a stash that missed both this file's own commit and the 0.6.4
-    // release; applied 2026-09-18.
-    default: 0.69,
+    // release; applied 2026-09-18) before this round.
+    default: 1,
     category: 'Look',
     label: 'Patch contrast',
     help: 'Gamma on the painted falloff. Above 1 sharpens the cookie toward a hard-edged patch; below 1 softens it toward a broad glow. 1 = exactly what you painted.',
@@ -90,7 +92,9 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 60,
     step: 0.5,
-    default: 20,
+    // LOWERED 20 → 6.5 (2026-09-21) — new live-tuned default; the author's
+    // own dialled-in scene, recorded exactly.
+    default: 6.5,
     category: 'Glass',
     label: 'Glass thickness',
     help: 'How much the uneven pane bends the light, as a maximum shift in world pixels. 0 = perfectly flat modern glass: no distortion, no prism, no caustics. Raise it for thick, wavy, hand-blown panes.',

@@ -74,14 +74,15 @@ export const WINDOW_MASK_IMAGE_SCALE = 0.5;
 
 /** Defaults, mirroring `WINDOW_PARAMS` — the single source of truth for the
  * values; the schema quotes them. A change lands in both or neither. */
-// RAISED 1 → 3 = WINDOW_PARAMS.strength's own max (2026-09-09) — new
-// live-tuned defaults; a change lands in both or neither.
-export const WINDOW_DEFAULT_STRENGTH = 3;
-// LOWERED 1 → 0.69 (2026-09-08) — new live-tuned default; see
-// `WINDOW_PARAMS.contrast`'s own header (window.js). Recovered from a stash
-// that missed both this file's own commit and the 0.6.4 release; applied
-// 2026-09-18.
-export const WINDOW_DEFAULT_CONTRAST = 0.69;
+// LOWERED 3 → 1 (2026-09-21) — new live-tuned default; a change lands in
+// both or neither. Was RAISED 1 → 3 = WINDOW_PARAMS.strength's own max
+// (2026-09-09) before this round.
+export const WINDOW_DEFAULT_STRENGTH = 1;
+// RAISED 0.69 → 1 (2026-09-21) — new live-tuned default, back to neutral;
+// see `WINDOW_PARAMS.contrast`'s own header (window.js). Was LOWERED 1 →
+// 0.69 (2026-09-08, recovered from a stash that missed both this file's own
+// commit and the 0.6.4 release; applied 2026-09-18) before this round.
+export const WINDOW_DEFAULT_CONTRAST = 1;
 
 /**
  * THE OVERCAST MOOD — author, 2026-09-10: *"overcast days should blur the
@@ -128,7 +129,9 @@ export const WINDOW_DEPTH_FLAG_RESTRICTS_LIGHT_MIRROR = 1;
 export const WINDOW_DEPTH_FLAG_IS_TILE_MIRROR = 16;
 
 /** The glass defaults, mirroring `WINDOW_PARAMS`'s own `Glass` category. */
-export const WINDOW_DEFAULT_GLASS_WARP_PX = 20;
+// LOWERED 20 → 6.5 (2026-09-21) — new live-tuned default; a change lands in
+// both or neither.
+export const WINDOW_DEFAULT_GLASS_WARP_PX = 6.5;
 export const WINDOW_DEFAULT_GLASS_DISPERSION = 1;
 export const WINDOW_DEFAULT_GLASS_SCALE = 400;
 export const WINDOW_DEFAULT_GLASS_DETAIL = 1;

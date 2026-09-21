@@ -121,10 +121,16 @@ function buildCacheHealthSection(snapshot) {
     // must not be left as an exercise.
     lowHitRateCacheIds: lowHitRate.map((r) => r.id),
     note:
-      'hits/misses are for THIS LOAD ONLY (a before/after snapshot around it), not lifetime totals. A cache with ' +
-      'a low hit rate here, on a scene already visited before, is the "recomputing something that should have ' +
-      'been cached" signature the author asked to watch for — see each row\'s own note for what hit/miss means ' +
-      'for that specific cache (they are not all the same granularity, and some have no hits counter at all).',
+      '⚠️ WINDOW CAVEAT FIRST (mythica-machina-press#583): the "before" snapshot is taken AFTER ' +
+      '`startRealSceneViewer()` has already resolved — so this window EXCLUDES the entire fetch → decode → ' +
+      'BC-compress chain, which all runs inside that call. That is the very chain these counters describe. An ' +
+      'all-zero row here therefore means "not measured", NOT "this cache was never used", and must not be read ' +
+      'as evidence that persistence is failing between sessions. ' +
+      'Within that (post-streaming) window, hits/misses are for THIS LOAD ONLY (a before/after snapshot around ' +
+      'it), not lifetime totals. A cache with a genuinely low hit rate here, on a scene already visited before, ' +
+      'is the "recomputing something that should have been cached" signature the author asked to watch for — ' +
+      "see each row's own note for what hit/miss means for that specific cache (they are not all the same " +
+      'granularity, and some have no hits counter at all).',
   };
 }
 
@@ -290,6 +296,12 @@ function buildCompileTimeSection(diagnostics, worstStallMs) {
     combinedMs,
     correlationNote,
     note:
+      '⚠️ WINDOW CAVEAT (mythica-machina-press#583): these probes are armed AFTER `startRealSceneViewer()` ' +
+      'resolves, and BOTH deliberate compile events — `renderer.compileAsync(scene, camera)` and the ' +
+      '`warmUpDrawState()` pass-plan draw — run INSIDE that call. So this total covers compiles that happened ' +
+      'after the warm-up, and a small number here does NOT mean little compilation occurred this load; it means ' +
+      'little occurred in the part of it that was watched. Use `warmUp.pipelinesCreated` / ' +
+      '`warmUp.simPipelinesCreated` for what the warm-up itself compiled. ' +
       'Wall-clock time inside real shader-graph rebuilds and GPU pipeline compiles this load, timed with a clock ' +
       'read immediately before and after each one. If this total is large while `warmingBreakdown` above shows ' +
       'little or no "pipelineCompiles" time, that mismatch is itself informative, not a contradiction: it means ' +

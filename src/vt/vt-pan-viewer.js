@@ -1970,8 +1970,15 @@ export async function startVtPanViewer({
     // own; only an explicit player choice reaches it, via this validation set.
     const RENDER_SCALE_FIXED_CHOICES = [...SUPERSAMPLE_CHOICES, ...SCALE_LADDER];
     /** @returns {number} the scale `resizeInternalTargets` should use RIGHT NOW. */
-    const resolveCurrentInternalScale = () =>
-      resolveInternalScale(renderScaleUserSetting, renderScaleGovernor.scale, RENDER_SCALE_FIXED_CHOICES);
+    const resolveCurrentInternalScale = () => {
+      const base = resolveInternalScale(renderScaleUserSetting, renderScaleGovernor.scale, RENDER_SCALE_FIXED_CHOICES);
+      // MIN, never assignment: a user who has already chosen a scale BELOW the
+      // load clamp keeps theirs. The clamp is a ceiling for one window, not a
+      // second opinion about what the scene should look like.
+      return Number.isFinite(_loadRenderScaleClamp) && _loadRenderScaleClamp > 0
+        ? Math.min(base, _loadRenderScaleClamp)
+        : base;
+    };
     const initialInternalSize = computeRenderSize(drawBufW, drawBufH, resolveCurrentInternalScale());
     /** Device pixels — what every INTERNAL-tier target (scene.color, scene.
      * illum, scene.lit, scene.coloration, scene.colorMapOnly, scene.
@@ -26085,6 +26092,7 @@ export async function startVtPanViewer({
       prepareFloor,
       cancelFloorPrepare,
       prewarmAdjacentFloors, // exposed so a real floor-switch commit can re-scope the ±1 window to wherever the viewer just landed
+      requestInternalRescale, // exposed so releasing the cold-load render-scale clamp can rebuild the real targets at once (mythica-machina-press#589)
       // Re-ask buildItems and reconcile. The draw list is derived from live
       // Foundry documents, but NOTHING here watches them — updateResidency only
       // runs when the VIEW changes, so creating a token while the camera sits
@@ -26962,6 +26970,96 @@ function stopAndDetachTileVideo(t) {
  * the class memory:feedback_seam_default_hides_unwired exists to catch.
  */
 const ART_TEXTURE_ANISOTROPY = 16;
+
+/**
+ * INTERNAL RENDER SCALE WHILE THE COLD-LOAD CURTAIN IS UP
+ * (mythica-machina-press#589), or `null` for "no clamp".
+ *
+ * ## Why the load renders at full resolution today, and why that is backwards
+ *
+ * `renderFrame` HOLDS the render-scale governor for the entire load
+ * (`renderScaleHeld = tabHidden || !settleState?.settled`). The reasoning is
+ * sound — a cost signal taken while the scene is still arriving is not a
+ * measurement of steady-state cost, and feeding it to the governor would poison
+ * the ladder. But the consequence is that the first frames, the most expensive
+ * and most contended of the entire session, render at the SAFE TOP of the
+ * ladder: full internal resolution, with every light doing per-pixel
+ * accumulation, while streaming/decode/compression fight for the same thread.
+ *
+ * And nobody can see any of it. The curtain is up. `syncInterfaceSeam` has not
+ * even handed the art over yet.
+ *
+ * So this clamps the INTERNAL tier (scene.color/illum/lit/depth, the bloom and
+ * DOF chains — everything `computeRenderSize` sizes) for exactly that window.
+ * Fill cost scales with pixels, so halving the scale quarters it, which is
+ * headroom handed straight back to the work that actually needs to finish.
+ *
+ * ## Why this does NOT make readiness lie
+ *
+ * It is released BEFORE the WARMING hold begins, not at reveal. So every
+ * readiness sample — frame-time steadiness above all — is taken at the REAL
+ * resolution the user is about to get. A scene that settles does so on honest
+ * frames. Clamping through WARMING would have been exactly the "0%/98% Ready!"
+ * lie in a new costume: cheap frames certifying a scene that is about to become
+ * expensive.
+ *
+ * ## Why this is lower-risk than it looks
+ *
+ * It introduces no new machinery. `resolveCurrentInternalScale()` already
+ * returns a scale, `computeRenderSize` already consumes one, and the governor
+ * already moves it at runtime through `requestInternalRescale()` — a path
+ * exercised on every automatic scale change. This only makes one `Math.min`
+ * call on a value that system already supports. Engaging costs nothing at all:
+ * set before `initialInternalSize` is computed, the targets are simply BORN at
+ * the smaller size, so there is no resize on the way in — only one on the way
+ * out.
+ *
+ * `null` disables it entirely and restores byte-for-byte the previous
+ * behaviour. See `setVtPanViewerLoadRenderScale`.
+ * @type {number|null}
+ */
+let _loadRenderScaleClamp = null;
+
+/**
+ * The clamp a cold load engages by default. 0.5 quarters the internal fill
+ * cost (area, not width), which is the largest lever available that changes
+ * nothing about WHAT is drawn — same passes, same draw calls, same order.
+ *
+ * Not on the `SCALE_LADDER`'s terms and deliberately not derived from it: this
+ * is not the governor choosing a rung for steady-state play, it is a ceiling
+ * for a window nobody is looking at.
+ */
+export const DEFAULT_LOAD_RENDER_SCALE = 0.5;
+
+/**
+ * Engage or release the cold-load internal render-scale clamp — see
+ * {@link _loadRenderScaleClamp} for the full reasoning.
+ *
+ * `null` (or any non-positive/non-finite value) releases it. Releasing also
+ * requests a rescale, so the real targets are rebuilt immediately rather than
+ * waiting for the next thing that happens to resize.
+ *
+ * Safe to call before the viewer exists: engaging is just setting a module
+ * value that `startVtPanViewer` reads while sizing its initial targets, which
+ * is the ONLY moment engaging needs to happen for it to cost nothing.
+ *
+ * @param {number|null} scale
+ */
+export function setVtPanViewerLoadRenderScale(scale) {
+  const next = Number.isFinite(scale) && scale > 0 ? Math.min(1, scale) : null;
+  const changed = next !== _loadRenderScaleClamp;
+  _loadRenderScaleClamp = next;
+  // Only meaningful once a viewer is running; before that the value is simply
+  // read when the initial targets are sized. `_active`'s own guard inside
+  // `requestInternalRescale` makes the early call a no-op rather than an error.
+  if (changed) _active?.requestInternalRescale?.();
+  return { loadRenderScale: _loadRenderScaleClamp, changed };
+}
+
+/** Current cold-load render-scale clamp, or null when not engaged. */
+export function getVtPanViewerLoadRenderScale() {
+  return { loadRenderScale: _loadRenderScaleClamp };
+}
 
 /**
  * DIAGNOSTIC/OPT-IN ONLY (mythica-machina-press#534): when true, the

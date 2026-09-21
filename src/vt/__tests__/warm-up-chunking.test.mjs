@@ -241,4 +241,28 @@ export function run(t) {
       ok(`boot reads compression health via ${path}`, bootSrc.includes(path));
     }
   }
+
+  // --- THE COLD-LOAD RENDER-SCALE CLAMP (mythica-machina-press#589) --------
+  // Two properties matter and neither is visible from the clamp's own code.
+  //
+  // 1. It is RELEASED BEFORE WARMING BEGINS. Readiness — frame-time steadiness
+  //    above all — must be measured at the resolution the user is actually
+  //    about to get. Releasing at reveal instead would certify a cheap scene
+  //    and then hand over an expensive one: the "Ready!" lie in a new costume.
+  // 2. It is released on EVERY exit, including failure and exception. A load
+  //    that dies must not leave the viewer at reduced internal resolution for
+  //    the rest of the session with nothing on screen to explain it.
+  {
+    const bootSrc = readFileSync(BOOT_PATH, 'utf8').replace(/\r\n/g, '\n');
+    const engage = bootSrc.indexOf('setVtPanViewerLoadRenderScale(DEFAULT_LOAD_RENDER_SCALE)');
+    const release = bootSrc.indexOf(
+      ['setVtPanViewerLoadRenderScale(null);', '        beginSceneLoadPhase(LOAD_PHASES.WARMING);'].join('\n')
+    );
+    ok('the clamp is engaged before the viewer starts', engage > 0);
+    ok('the clamp is released immediately before WARMING begins, not at reveal', release > engage);
+    ok(
+      'every exit path releases it — the happy path, the failure return, and the catch',
+      (bootSrc.match(/setVtPanViewerLoadRenderScale\(null\)/g) || []).length >= 3
+    );
+  }
 }

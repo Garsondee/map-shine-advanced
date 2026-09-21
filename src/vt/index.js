@@ -142,6 +142,9 @@ export {
   // SCENE SETTLE — the real "everything is on screen now" signal (vt/settle.js).
   getVtPanViewerSceneSettle,
   sampleVtPanViewerSceneSettleNow,
+  setVtPanViewerLoadRenderScale,
+  getVtPanViewerLoadRenderScale,
+  DEFAULT_LOAD_RENDER_SCALE,
   drawVtPanViewerWorldMarkers,
   startVtPanViewerLiveMarkers,
   stopVtPanViewerLiveMarkers,

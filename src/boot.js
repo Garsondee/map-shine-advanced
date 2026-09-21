@@ -401,6 +401,8 @@ import {
   getVtPanViewerCloudTopsLowOctaves,
   getVtPanViewerSceneSettle,
   sampleVtPanViewerSceneSettleNow,
+  setVtPanViewerLoadRenderScale,
+  DEFAULT_LOAD_RENDER_SCALE,
   startVtPanViewerLiveMarkers,
   stopVtPanViewerLiveMarkers,
 } from './vt/index.js';
@@ -15671,10 +15673,26 @@ function install() {
           }
         }
 
+        // CHEAP FRAMES WHILE NOBODY IS LOOKING (mythica-machina-press#589).
+        // The first frames of a cold load are the most expensive and most
+        // contended of the session, and `renderFrame` holds the render-scale
+        // governor throughout — so they render at the SAFE TOP of the ladder,
+        // full internal resolution, behind a curtain. Clamping the internal
+        // tier here hands that fill cost back to the streaming/decode work that
+        // actually has to finish. Engaged BEFORE the viewer starts, so its
+        // initial targets are simply born at the smaller size and the clamp
+        // costs no resize at all on the way in.
+        //
+        // Released before WARMING, NOT at reveal — see the release site below.
+        setVtPanViewerLoadRenderScale(DEFAULT_LOAD_RENDER_SCALE);
         const result = await startRealSceneViewer(targetFloorIndex);
         if (result.ok === false) {
           log.warn(`real-scene VT viewer did not start:`, result.error);
           lastLoadDiagnostics = null; // a failed load must not show a stale earlier load's numbers
+          // A load that fails must not leave the clamp engaged — the viewer
+          // would stay at reduced internal resolution for the rest of the
+          // session with nothing on screen to explain why (#589).
+          setVtPanViewerLoadRenderScale(null);
           endSceneLoad({ error: result.error });
           return;
         }
@@ -15774,6 +15792,13 @@ function install() {
         // `shouldStopWaitingForReady` returning true outright when no curtain
         // is up at all (a floor switch must never be made to block here — it
         // has its own hold, with its own UI).
+        // RELEASE THE LOAD CLAMP BEFORE READINESS IS MEASURED, never after.
+        // Every settle sample from here on — frame-time steadiness above all —
+        // is taken at the REAL resolution the user is about to be handed. A
+        // scene that reports settled does so on honest frames. Holding the
+        // clamp through WARMING would certify a cheap scene and then hand over
+        // an expensive one, which is the "Ready!" lie wearing a new costume.
+        setVtPanViewerLoadRenderScale(null);
         beginSceneLoadPhase(LOAD_PHASES.WARMING);
         const readyOutcome = await waitForSceneReady();
         const summary = endSceneLoad({ forced: !readyOutcome.ready });
@@ -15898,6 +15923,9 @@ function install() {
         }
       } catch (err) {
         log.error(`real-scene VT viewer auto-sync failed:`, err);
+        // Same reason as the failure path above: never leave the cold-load
+        // render-scale clamp engaged after an exception (#589).
+        setVtPanViewerLoadRenderScale(null);
         // Belt and braces: an exception partway through the arm/disarm bracket
         // above would otherwise leave a stale earlier load's diagnostics
         // looking like they belong to this (failed) one.

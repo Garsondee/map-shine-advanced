@@ -69,6 +69,7 @@
 
 import { createLogger } from '../core/log.js';
 import { readImageHeaderSize } from './image-header-size.js';
+import { repackMaskPixels } from './mask-repack.js';
 
 const log = createLogger('MaskImage');
 
@@ -125,6 +126,111 @@ export function maskImageTargetSize(nativeW, nativeH, scale = MASK_IMAGE_SCALE, 
  * far below any presence threshold a consumer actually thresholds at.
  */
 export const MASK_CONTENT_EMPTY_BYTE = 1;
+
+/**
+ * Build the mask DataTexture from packed bytes — ONE definition, used by both
+ * the worker path and the main-thread fallback (mythica-machina-press#591).
+ *
+ * Extracted the moment there were two callers, and not a moment later: the
+ * first draft of the worker path hand-rolled these same assignments and left
+ * out `flipY = false`, which would have flipped EVERY mask vertically. This
+ * repo already names that as a recurring bug class
+ * ([[feedback_y_flip_recurring_risk]]), and two copies of a texture setup is
+ * precisely how it recurs. Now it cannot: there is one copy.
+ */
+function buildMaskTexture(THREE, data, width, height, rgbMode) {
+  const texture = rgbMode
+    ? new THREE.DataTexture(data, width, height, THREE.RGBAFormat, THREE.UnsignedByteType)
+    : new THREE.DataTexture(data, width, height, THREE.RedFormat, THREE.UnsignedByteType);
+  // LINEAR — the whole point. The file's own antialiased edge becomes a smooth
+  // ramp the surface shader can threshold into a crisp, resolution-independent
+  // shoreline.
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.wrapS = THREE.ClampToEdgeWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+  // flipY:false — v=0 is the image's TOP row, the world-quad convention every
+  // tile in this renderer already uses (see setTileGeometry's own tex setup).
+  // Getting this wrong flips the water vertically.
+  texture.flipY = false;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+/**
+ * THE MASK DECODE WORKER CLIENT (mythica-machina-press#591).
+ *
+ * One lazily-constructed worker, one in-flight map, and a hard degrade to the
+ * main-thread path on ANY failure — the same contract
+ * `vt/compressed-textures.js` already uses, and for the same reason: a worker
+ * that cannot start must never be why a mask fails to load.
+ *
+ * Construction form is `new Worker(new URL('./x.worker.js', import.meta.url),
+ * { type: 'module' })` because that is the only reference form that both
+ * resolves under Foundry's raw module serving and satisfies this repo's
+ * reachability wall — copied deliberately from the two workers that already
+ * work here rather than invented.
+ */
+let _maskWorker = null;
+let _maskWorkerDead = false;
+let _maskJobSeq = 0;
+const _maskJobs = new Map();
+
+function ensureMaskWorker() {
+  if (_maskWorkerDead) return null;
+  if (_maskWorker) return _maskWorker;
+  try {
+    _maskWorker = new Worker(new URL('./mask-decode.worker.js', import.meta.url), { type: 'module' });
+    _maskWorker.onmessage = (e) => {
+      const d = e.data || {};
+      const job = _maskJobs.get(d.id);
+      if (!job) return;
+      _maskJobs.delete(d.id);
+      job.resolve(d.ok ? d : null);
+    };
+    _maskWorker.onerror = (err) => {
+      // The worker died. Everything waiting on it degrades to the main-thread
+      // path rather than hanging, and it is not rebuilt this session: a worker
+      // that fails here has failed for an environmental reason (CSP, module
+      // resolution) that a retry will not change.
+      log.warn('mask decode worker failed - falling back to main-thread decode:', err?.message || err);
+      _maskWorkerDead = true;
+      _maskWorker = null;
+      for (const [, j] of _maskJobs) j.resolve(null);
+      _maskJobs.clear();
+    };
+  } catch (err) {
+    log.warn('mask decode worker unavailable - using main-thread decode:', err?.message || err);
+    _maskWorkerDead = true;
+    _maskWorker = null;
+    return null;
+  }
+  return _maskWorker;
+}
+
+/**
+ * Ask the worker to decode + read back + repack. Resolves `null` on any
+ * failure, which the caller MUST treat as "do it yourself".
+ * @returns {Promise<{data:Uint8Array, contentBounds:object|null}|null>}
+ */
+function decodeMaskInWorker(bytes, width, height, rgbMode) {
+  const w = ensureMaskWorker();
+  if (!w) return Promise.resolve(null);
+  const id = ++_maskJobSeq;
+  return new Promise((resolve) => {
+    _maskJobs.set(id, { resolve });
+    try {
+      // Zero-copy both ways: the file bytes are TRANSFERRED in (the caller has
+      // already read the header it needs from them) and the packed result is
+      // transferred back, so several hundred MB crosses the boundary with no copy.
+      w.postMessage({ id, bytes, width, height, rgbMode, emptyByte: MASK_CONTENT_EMPTY_BYTE }, [bytes]);
+    } catch (err) {
+      _maskJobs.delete(id);
+      log.warn('mask decode worker postMessage failed - using main-thread decode:', err?.message || err);
+      resolve(null);
+    }
+  });
+}
 
 /**
  * Fetch a mask image and upload it as a texture, plus the AABB of whatever is
@@ -218,6 +324,34 @@ export async function loadMaskImageTexture({ url, THREE, scale = MASK_IMAGE_SCAL
       probe.close();
     }
     const { width, height } = maskImageTargetSize(nativeWidth, nativeHeight, scale);
+    // ── OFF THE MAIN THREAD FIRST (mythica-machina-press#591) ──────────────
+    // Measured on a real 10,000 x 10,000 production layer in a real browser:
+    // getImageData 1,694ms + repack 1,267ms = ~3 SECONDS of hard main-thread
+    // freeze, per mask, and a scene loads several. That is what nails the
+    // thread shut during a cold load — the curtain's pulse dies, nothing else
+    // progresses, and the readiness probes naming these very masks sit
+    // outstanding for the whole hold.
+    //
+    // The worker does the identical work (it imports the SAME
+    // `repackMaskPixels`, so the bytes cannot differ) and returns plain data.
+    // `null` means it could not — unavailable, dead, or it threw — and the
+    // original main-thread path below runs unchanged.
+    const rgbModeEarly = channels === 'rgb';
+    const workerResult = await decodeMaskInWorker(buf, width, height, rgbModeEarly);
+    if (workerResult) {
+      const texture = buildMaskTexture(THREE, workerResult.data, width, height, rgbModeEarly);
+      return {
+        texture,
+        width,
+        height,
+        nativeWidth,
+        nativeHeight,
+        bytes: workerResult.data.length,
+        data: workerResult.data,
+        contentBounds: workerResult.contentBounds,
+      };
+    }
+
     bitmap = await createImageBitmap(blob, {
       resizeWidth: width,
       resizeHeight: height,
@@ -232,80 +366,16 @@ export async function loadMaskImageTexture({ url, THREE, scale = MASK_IMAGE_SCAL
     ctx.drawImage(bitmap, 0, 0);
     const rgba = ctx.getImageData(0, 0, width, height).data;
 
-    // ONE pass over the decoded pixels does both jobs — repack to the
-    // requested layout AND measure the painted AABB. Splitting them would mean
-    // walking 13 M texels twice for no gain; the bounds are free here because
-    // the loop already has each texel in a register.
+    // THE SAME pure pass the worker runs (`vt/mask-repack.js`) — one
+    // definition, two callers, so the fallback and the worker can never
+    // produce different pixels.
     const rgbMode = channels === 'rgb';
-    const texelCount = width * height;
-    const data = rgbMode ? new Uint8Array(texelCount * 4) : new Uint8Array(texelCount);
-    let minX = width;
-    let minY = height;
-    let maxX = -1;
-    let maxY = -1;
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const i = y * width + x;
-        const s = i * 4;
-        const r = rgba[s];
-        let present = r;
-        if (rgbMode) {
-          const g = rgba[s + 1];
-          const b = rgba[s + 2];
-          data[s] = r;
-          data[s + 1] = g;
-          data[s + 2] = b;
-          data[s + 3] = rgba[s + 3];
-          // MAX of the three, not the red channel and not a luminance: the
-          // material decode's own presence axis is HSV *value*, and a mask
-          // painted pure blue has r = 0. Measuring bounds by red would crop a
-          // blue-steel object out of the geometry entirely.
-          present = g > present ? g : present;
-          present = b > present ? b : present;
-        } else {
-          // R only — the water mask carries depth AND presence there (see the
-          // `water` kind's own `meaning` in scene/mask-catalog.js). One byte
-          // per texel instead of four; see this module's header for why that
-          // matters at this size when it does not at 512².
-          data[i] = r;
-        }
-        if (present > MASK_CONTENT_EMPTY_BYTE) {
-          if (x < minX) minX = x;
-          if (x > maxX) maxX = x;
-          if (y < minY) minY = y;
-          if (y > maxY) maxY = y;
-        }
-      }
-    }
-    // Bounds cover the FULL EXTENT of the outermost painted texels — `+1` on
-    // the max side, since texel `maxX` spans u ∈ [maxX/width, (maxX+1)/width]
-    // and cropping to its left edge would shave the last column of metal off.
-    const contentBounds =
-      maxX < 0
-        ? null
-        : {
-            minU: minX / width,
-            minV: minY / height,
-            maxU: (maxX + 1) / width,
-            maxV: (maxY + 1) / height,
-          };
+    const { data, contentBounds } = repackMaskPixels(rgba, width, height, {
+      rgbMode,
+      emptyByte: MASK_CONTENT_EMPTY_BYTE,
+    });
 
-    const texture = rgbMode
-      ? new THREE.DataTexture(data, width, height, THREE.RGBAFormat, THREE.UnsignedByteType)
-      : new THREE.DataTexture(data, width, height, THREE.RedFormat, THREE.UnsignedByteType);
-    // LINEAR — the whole point. The file's own antialiased edge becomes a
-    // smooth ramp the surface shader can threshold into a crisp, resolution-
-    // independent shoreline.
-    texture.minFilter = THREE.LinearFilter;
-    texture.magFilter = THREE.LinearFilter;
-    texture.wrapS = THREE.ClampToEdgeWrapping;
-    texture.wrapT = THREE.ClampToEdgeWrapping;
-    // flipY:false — v=0 is the image's TOP row, the world-quad convention every
-    // tile in this renderer already uses (see setTileGeometry's own tex setup).
-    // Getting this wrong flips the water vertically, which is this repo's named
-    // recurring bug class (feedback_y_flip_recurring_risk).
-    texture.flipY = false;
-    texture.needsUpdate = true;
+    const texture = buildMaskTexture(THREE, data, width, height, rgbMode);
 
     // `data` is returned, not just uploaded. It is the SAME array the texture
     // wraps, so this costs nothing and copies nothing — and a CPU consumer that

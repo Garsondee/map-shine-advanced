@@ -30,6 +30,7 @@ import { run as runBakedFormat } from './baked-format.test.mjs';
 import { run as runBakedTextures } from './baked-textures.test.mjs';
 import { run as runWarmUpChunking } from './warm-up-chunking.test.mjs';
 import { run as runImageHeaderSize } from './image-header-size.test.mjs';
+import { run as runMaskRepack } from './mask-repack.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -88,6 +89,7 @@ const suites = [
   ['baked-textures', runBakedTextures],
   ['warm-up-chunking', runWarmUpChunking],
   ['image-header-size', runImageHeaderSize],
+  ['mask-repack', runMaskRepack],
 ];
 
 for (const [name, fn] of suites) {

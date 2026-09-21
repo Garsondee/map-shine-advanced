@@ -15535,19 +15535,46 @@ function install() {
           // The watchdog reports on the SAME cadence readiness polls on, so the
           // curtain's update rate is one number for the whole load rather than
           // a second one that happens to look similar.
+          // ACTIVE time, not wall time: a hidden tab's seconds do not count
+          // against the budget (see the check below for why).
+          let hiddenMs = 0;
+          let lastCheckAt = startedAt;
           for (;;) {
             const raced = await Promise.race([
               twoFrames.then(() => 'painted'),
               new Promise((r) => setTimeout(() => r('tick'), READY_POLL_MS)),
             ]);
-            if (raced === 'painted' || painted) return { painted: true, waitedMs: wallClockMs() - startedAt };
-            const waitedMs = wallClockMs() - startedAt;
+            const nowAt = wallClockMs();
+            const hiddenNow = typeof document !== 'undefined' && document.hidden === true;
+            // Bill the interval that just elapsed to whichever state the tab is
+            // in NOW. A poll boundary is the finest resolution available here,
+            // and erring toward counting a transitional interval as hidden is
+            // the safe direction: it can only make us wait longer for a real
+            // first paint, never give up on one early.
+            if (hiddenNow) hiddenMs += Math.max(0, nowAt - lastCheckAt);
+            lastCheckAt = nowAt;
+            if (raced === 'painted' || painted) return { painted: true, waitedMs: nowAt - startedAt, hiddenMs };
+            const waitedMs = nowAt - startedAt - hiddenMs;
+            // A HIDDEN TAB IS NOT A SLOW LOAD (mythica-machina-press#582).
+            // Browsers stop `requestAnimationFrame` outright for a background
+            // tab, so the first paint genuinely CANNOT arrive while hidden —
+            // timing out on it would mean giving up on a load that is not
+            // failing, merely unobserved, and then revealing a half-built scene
+            // the instant the user looked back. Waiting here does not hang: the
+            // loop still turns on its own timer, and the moment the tab is
+            // visible again rAF resumes and `painted` resolves.
+            if (hiddenNow) {
+              reportSceneLoadProgress(LOAD_PHASES.FIRST_FRAME, {
+                detail: 'paused while this tab is in the background — it will resume when you come back',
+              });
+              continue;
+            }
             if (waitedMs >= FIRST_PAINT_MAX_MS) {
               log.warn(
                 `first paint has not arrived after ${Math.round(waitedMs)}ms — proceeding to readiness, which ` +
                   `checks for real frames itself and will name the blocker if they are still not coming.`
               );
-              return { painted: false, waitedMs };
+              return { painted: false, waitedMs, hiddenMs };
             }
             // NOT a fraction. There is no denominator here — "two frames" is a
             // gate, not a quantity, and drawing a progress bar against a

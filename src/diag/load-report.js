@@ -156,6 +156,38 @@ function buildProbeSection(stats) {
 }
 
 /**
+ * BACKGROUND TIME — how much of this load the tab spent hidden
+ * (mythica-machina-press#582).
+ *
+ * Reported as its own line rather than quietly subtracted from `totalMs`,
+ * because both numbers are true and they answer different questions: wall time
+ * is what the person experienced, active time is what the engine actually had.
+ * Silently netting them would hide a real fact (the user waited that long);
+ * silently ignoring them — which is what this report did until now — bills
+ * seconds of a stopped browser to whichever phase happened to be open, and is
+ * the single most plausible explanation for a 25.7s `firstFrame` phase whose
+ * entire body is `await rAF(rAF)`.
+ *
+ * @param {number|null} hiddenMs @param {number|null} totalMs
+ */
+function buildBackgroundSection(hiddenMs, totalMs) {
+  if (!Number.isFinite(hiddenMs) || hiddenMs <= 0) return null;
+  const pct = Number.isFinite(totalMs) && totalMs > 0 ? Math.round((hiddenMs / totalMs) * 100) : null;
+  return {
+    hiddenMs: round(hiddenMs),
+    pctOfTotal: pct,
+    activeMs: Number.isFinite(totalMs) ? round(Math.max(0, totalMs - hiddenMs)) : null,
+    note:
+      'This tab was in the BACKGROUND for ' +
+      `${round(hiddenMs)}ms of this load${pct === null ? '' : ` (${pct}% of it)`}. Browsers stop ` +
+      'requestAnimationFrame entirely for a hidden tab, so during that time no frame rendered, no liveness ' +
+      'tick ran, and the engine made no progress — but the load clock kept counting. Subtract it before ' +
+      'concluding anything about which phase is slow: a phase that "took" 25s with the tab hidden for 20 of ' +
+      'them took 5.',
+  };
+}
+
+/**
  * THE WARM-UP'S OWN OUTCOME — did the one mechanism built to move compilation
  * behind the curtain actually run? (mythica-machina-press#582)
  *
@@ -362,6 +394,7 @@ export function buildLoadReport(loadingScreenState, diagnostics = null) {
     // previous load's numbers mislabelled as this one's.
     report.compileTime = buildCompileTimeSection(diagnostics, worstStallMs);
     report.warmUp = buildWarmUpSection(diagnostics?.warmUp ?? null);
+    report.background = buildBackgroundSection(state.currentHiddenMs ?? null, totalMs);
     report.cacheHealth = buildCacheHealthSection(diagnostics?.cacheSnapshot ?? null);
     report.zoneBreakdown = null;
   } else if (state.lastLoad) {
@@ -389,6 +422,7 @@ export function buildLoadReport(loadingScreenState, diagnostics = null) {
     );
     report.compileTime = buildCompileTimeSection(diagnostics, report.worstStallMs);
     report.warmUp = buildWarmUpSection(diagnostics?.warmUp ?? null);
+    report.background = buildBackgroundSection(last.hiddenMs ?? null, totalMs);
     report.cacheHealth = buildCacheHealthSection(diagnostics?.cacheSnapshot ?? null);
     // Zone breakdown is COMPLETED-LOAD ONLY — see the in-progress branch's own
     // comment on why compile time reads live there but this does not (yet).

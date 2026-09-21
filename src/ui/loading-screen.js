@@ -56,6 +56,8 @@ import {
   completeLoad,
   failLoad,
   recordTick,
+  recordVisibility,
+  activeHiddenMs,
   describeLoad,
   hardRevealDue,
   shouldShowForScene,
@@ -344,6 +346,41 @@ function tick(tMs) {
 }
 
 /**
+ * THE TAB-VISIBILITY LISTENER (mythica-machina-press#582).
+ *
+ * A browser stops `requestAnimationFrame` outright for a hidden tab, which
+ * takes down this curtain's entire liveness story with it: the pulse stops, the
+ * elapsed figure stops, `recordTick` stops — and, critically, the load's own
+ * clock does NOT, so every background second was being billed to whatever phase
+ * was open. An event listener is the only way to see this, precisely because
+ * the frame loop is the thing that is not running.
+ *
+ * Registered with the curtain and removed with it, so nothing survives a load.
+ * @type {(() => void)|null}
+ */
+let visibilityUnsub = null;
+
+function watchVisibility() {
+  if (visibilityUnsub || typeof document === 'undefined') return;
+  const onChange = () => {
+    if (!state) return;
+    recordVisibility(state, document.hidden === true, now());
+  };
+  document.addEventListener('visibilitychange', onChange);
+  visibilityUnsub = () => document.removeEventListener('visibilitychange', onChange);
+  // Seed from the CURRENT state rather than waiting for a change: a scene that
+  // begins loading in an already-backgrounded tab (an auto-reconnect, a world
+  // opened in a tab the user immediately switched away from) would otherwise
+  // accrue nothing until they came back, which is the case that needs it most.
+  onChange();
+}
+
+function unwatchVisibility() {
+  visibilityUnsub?.();
+  visibilityUnsub = null;
+}
+
+/**
  * Begin a scene load, showing the curtain — UNLESS this is the same scene, in which
  * case it is a floor switch or a redraw and must show nothing (§4.5).
  *
@@ -371,6 +408,7 @@ export function beginSceneLoad({ sceneId, sceneName }) {
   state = createLoadState({ sceneId, sceneName: sceneName ?? '', nowMs: startNow });
   beginPhase(state, LOAD_PHASES.SCENE, { nowMs: startNow });
   els = buildOverlay();
+  watchVisibility();
   paint(now());
   rafHandle = requestAnimationFrame(tick);
   return { shown: true, reason: verdict.reason };
@@ -446,6 +484,7 @@ export function reportSceneLoadBlockers(blockers, detail = null, structuredBlock
  * @returns {object|null} the summary, or null if nothing was loading.
  */
 export function endSceneLoad({ error = null, silent = false, forced = false } = {}) {
+  unwatchVisibility();
   if (rafHandle !== null) {
     cancelAnimationFrame(rafHandle);
     rafHandle = null;
@@ -463,6 +502,10 @@ export function endSceneLoad({ error = null, silent = false, forced = false } = 
       sceneName: state.sceneName,
       totalMs: Math.round((state.finishedAtMs ?? endedAt) - state.startedAtMs),
       worstStallMs: Math.round(state.worstStallMs),
+      // Carried into the summary so `totalMs` can never be read as "time
+      // this load spent working" when part of it was time the tab spent in
+      // the background not running at all.
+      hiddenMs: Math.round(activeHiddenMs(state, endedAt)),
       // A FORCED REVEAL IS NOT A FINISHED LOAD, and the summary is the thing
       // that ends up in the flight recorder and the perf report — so it says so,
       // and it keeps the list of what was still running. Reading `totalMs`
@@ -530,6 +573,10 @@ export function getLoadingScreenState() {
     // Same reasoning again, for the stall watermark: a load stuck mid-freeze
     // right now is exactly when "how bad has it been so far" matters most.
     currentWorstStallMs: state ? state.worstStallMs : null,
+    // BACKGROUND TIME, live (mythica-machina-press#582) — so a report pulled
+    // mid-load can distinguish "this is taking ages" from "this tab has been
+    // hidden for most of it and nothing has been running".
+    currentHiddenMs: state ? Math.round(activeHiddenMs(state, now())) : null,
     lastLoad: lastSummary,
   };
 }

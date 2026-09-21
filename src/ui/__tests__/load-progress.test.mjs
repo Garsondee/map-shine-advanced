@@ -25,6 +25,8 @@ import {
   recordTick,
   describeLoad,
   hardRevealDue,
+  recordVisibility,
+  activeHiddenMs,
   HARD_REVEAL_MS,
   READINESS_MIN_BUDGET_MS,
   ABSOLUTE_REVEAL_CEILING_MS,
@@ -512,6 +514,75 @@ export function run(t) {
     const cd = describeLoad(clean, 500);
     ok('a genuine completion still says Ready', cd.title === 'Ready' && cd.fraction === 1);
     ok('...and carries no leftover blockers', cd.blockers.length === 0 && cd.forcedReveal === false);
+  }
+
+  // --- A HIDDEN TAB IS NOT A SLOW LOAD (mythica-machina-press#582) ----------
+  // Browsers stop requestAnimationFrame entirely for a background tab: the
+  // pulse stops, recordTick stops, no frame renders — but the load clock keeps
+  // counting, so those seconds were being billed to whichever phase was open.
+  // That is the only explanation consistent with the originating report's three
+  // mutually-contradictory facts (2800ms worst stall, a 25.7s firstFrame phase
+  // containing only `await rAF(rAF)`, and 2 rendered frames).
+  {
+    const s = mk(0);
+    ok('a fresh load has no hidden time', activeHiddenMs(s, 100) === 0);
+
+    recordVisibility(s, true, 1000);
+    ok('an IN-PROGRESS hidden stretch counts immediately, not only once it ends', activeHiddenMs(s, 3000) === 2000);
+    ok('...and nothing is banked until it ends', s.hiddenMs === 0);
+
+    recordVisibility(s, false, 4000);
+    ok('returning banks the stretch', s.hiddenMs === 3000 && s.hiddenSinceMs === null);
+    ok('...and it stops growing once visible', activeHiddenMs(s, 99999) === 3000);
+
+    recordVisibility(s, true, 5000);
+    recordVisibility(s, false, 5500);
+    ok('stretches accumulate across several backgroundings', s.hiddenMs === 3500);
+  }
+  {
+    // visibilitychange is not guaranteed to alternate — a repeated 'hidden'
+    // that reset the start would silently discard the stretch in progress.
+    const s = mk(0);
+    recordVisibility(s, true, 1000);
+    recordVisibility(s, true, 2000);
+    ok('a repeated hidden event does not restart the stretch', activeHiddenMs(s, 3000) === 2000);
+    const before = s.hiddenMs;
+    recordVisibility(s, false, 3000);
+    recordVisibility(s, false, 4000);
+    ok('a repeated visible event does not double-bank', s.hiddenMs === before + 2000);
+  }
+  {
+    // THE DEADLINE SPENDS ACTIVE TIME ONLY. Otherwise looking away during a
+    // load reveals a half-built scene the moment you look back.
+    const s = mk(0);
+    recordVisibility(s, true, 1000);
+    recordVisibility(s, false, 1000 + HARD_REVEAL_MS);
+    ok(
+      'time spent backgrounded does not burn the reveal deadline',
+      hardRevealDue(s, 1000 + HARD_REVEAL_MS, HARD_REVEAL_MS) === false
+    );
+    ok('...but active time still does', hardRevealDue(s, 1000 + HARD_REVEAL_MS * 2, HARD_REVEAL_MS) === true);
+  }
+  {
+    // A STILL-HIDDEN TAB MUST NOT TIME OUT — the in-progress stretch has to
+    // count, or the deadline fires while the user is away, which is the exact
+    // case this exists to prevent.
+    const s = mk(0);
+    recordVisibility(s, true, 100);
+    ok(
+      'a tab hidden continuously past the deadline is never "due"',
+      hardRevealDue(s, 100 + HARD_REVEAL_MS * 3, HARD_REVEAL_MS) === false
+    );
+  }
+  {
+    // Returning from the background must not leave a fictional multi-second
+    // "main-thread stall" receipt on an otherwise healthy load.
+    const s = mk(0);
+    recordTick(s, 100);
+    recordVisibility(s, true, 200);
+    recordVisibility(s, false, 60000);
+    recordTick(s, 60016);
+    ok('a background stretch is not recorded as a main-thread stall', s.worstStallMs === 0);
   }
 
   // --- the blocker list is capped, and SAYS it is --------------------------

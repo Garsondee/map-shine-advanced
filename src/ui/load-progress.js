@@ -306,6 +306,27 @@ export function createLoadState({ sceneId, sceneName, nowMs }) {
     finishedAtMs: null,
     lastTickMs: null,
     worstStallMs: 0,
+    /**
+     * Total ms this load spent with the tab in the BACKGROUND
+     * (mythica-machina-press#582).
+     *
+     * Browsers stop `requestAnimationFrame` entirely for a hidden tab. Nothing
+     * in this stack knew that, so a load whose tab was backgrounded had every
+     * one of those seconds silently billed to whichever phase happened to be
+     * open — and, because the rAF-driven `recordTick` also stops, not even
+     * recorded as a stall. The originating report shows exactly that signature:
+     * a 25,727ms `firstFrame` phase containing nothing but `await rAF(rAF)`, a
+     * worst tick gap of only 2,800ms, and 2 rendered frames. Those three cannot
+     * all be true of a foreground tab; they are all trivially true of one that
+     * was hidden for ~25 seconds.
+     *
+     * Accumulated from `visibilitychange`, NOT from the tick loop — the whole
+     * point is that the tick loop is not running while this is accruing.
+     * @type {number}
+     */
+    hiddenMs: 0,
+    /** When the tab went hidden, or null while it is visible. @type {number|null} */
+    hiddenSinceMs: null,
     lastStallMs: 0,
     lastStallAtMs: null,
     phases: [],
@@ -446,7 +467,13 @@ export function reportProgress(state, phaseId, { done, total, detail, blockers, 
 export function hardRevealDue(state, nowMs, deadlineMs = HARD_REVEAL_MS) {
   if (!state || state.complete || state.error) return false;
   if (!Number.isFinite(nowMs) || !Number.isFinite(state.startedAtMs)) return false;
-  const elapsedMs = nowMs - state.startedAtMs;
+  // ACTIVE time, not wall time (mythica-machina-press#582). A tab in the
+  // background makes no progress — the browser has stopped its animation frames
+  // — so billing that time against the reveal deadline would punish the user
+  // for looking away and then reveal a half-built scene the moment they came
+  // back, which is the precise failure this deadline exists to bound, arrived
+  // at from the opposite direction. See `hiddenMs`.
+  const elapsedMs = nowMs - state.startedAtMs - activeHiddenMs(state, nowMs);
 
   // THE ABSOLUTE WALL FIRST — checked before the floor below can extend
   // anything, so no combination of inputs can push the curtain past it.
@@ -517,6 +544,54 @@ export function failLoad(state, error, nowMs) {
  *
  * @param {LoadState} state @param {number} nowMs @returns {number} gap since the previous tick (0 on the first).
  */
+/**
+ * Total hidden time so far, INCLUDING an in-progress hidden stretch.
+ *
+ * Counting only completed stretches would make the deadline fire while the tab
+ * is still hidden — the single case this whole mechanism exists to prevent —
+ * because the current stretch would contribute nothing until the user came
+ * back, which is exactly too late.
+ *
+ * @param {LoadState} state @param {number} nowMs @returns {number}
+ */
+export function activeHiddenMs(state, nowMs) {
+  const banked = Number.isFinite(state?.hiddenMs) ? state.hiddenMs : 0;
+  const since = state?.hiddenSinceMs;
+  if (!Number.isFinite(since) || !Number.isFinite(nowMs)) return banked;
+  return banked + Math.max(0, nowMs - since);
+}
+
+/**
+ * The tab became hidden or visible. Pure, like everything else here — the
+ * browser event lives in `loading-screen.js`.
+ *
+ * Idempotent in both directions: `visibilitychange` is not guaranteed to
+ * alternate (a tab can fire `hidden` twice across a bfcache round trip), and a
+ * second `hidden` that reset `hiddenSinceMs` would silently discard the
+ * stretch already in progress.
+ *
+ * @param {LoadState} state @param {boolean} hidden @param {number} nowMs
+ * @returns {LoadState}
+ */
+export function recordVisibility(state, hidden, nowMs) {
+  if (!state || !Number.isFinite(nowMs)) return state;
+  if (hidden) {
+    if (state.hiddenSinceMs === null) state.hiddenSinceMs = nowMs;
+    return state;
+  }
+  if (state.hiddenSinceMs !== null) {
+    state.hiddenMs += Math.max(0, nowMs - state.hiddenSinceMs);
+    state.hiddenSinceMs = null;
+    // The tick clock is reset on return, deliberately: the gap spanning a
+    // background stretch is not a main-thread stall and must never be recorded
+    // as one. `recordTick` measures freezes; a hidden tab is not frozen, it is
+    // not running, and conflating the two would put a fictional multi-second
+    // "stall" receipt on an otherwise healthy load.
+    state.lastTickMs = null;
+  }
+  return state;
+}
+
 export function recordTick(state, nowMs) {
   const gap = state.lastTickMs === null ? 0 : nowMs - state.lastTickMs;
   state.lastTickMs = nowMs;

@@ -15732,10 +15732,23 @@ function install() {
           coarseAlphaGridRequests: getVtPanViewerDiagnostics()?.wholeImage?.coarseAlpha ?? null,
           pyramidStore: getPyramidStoreStats(),
         };
+        // THE WARM-UP'S OWN OUTCOME (mythica-machina-press#582) — read at the
+        // same moment as everything else in this bracket. `warmUpMs` is already
+        // on the viewer's diagnostics; it simply never reached the one report
+        // built to explain a slow load, which is how a warm-up that threw on
+        // every single scene load (#402) stayed classified as cosmetic. See
+        // `buildWarmUpSection` for why `null` here means "ran and threw" rather
+        // than "no data".
+        const warmUpDiag = getVtPanViewerDiagnostics();
         lastLoadDiagnostics = {
           zoneRows,
           shaderRebuild: shaderRebuildStats,
           pipelineRebuild: pipelineRebuildStats,
+          warmUp: {
+            warmUpMs: warmUpDiag?.warmUpMs ?? null,
+            warmUpPipelinesCreated: warmUpDiag?.warmUpPipelinesCreated ?? null,
+            shaderCompileMs: warmUpDiag?.shaderCompileMs ?? null,
+          },
           cacheSnapshot: { start: loadCacheSnapshotStart, end: loadCacheSnapshotEnd },
         };
 

@@ -156,6 +156,49 @@ function buildProbeSection(stats) {
 }
 
 /**
+ * THE WARM-UP'S OWN OUTCOME — did the one mechanism built to move compilation
+ * behind the curtain actually run? (mythica-machina-press#582)
+ *
+ * `warmUpDrawState` catches its own exceptions and sets `warmUpMs = null`,
+ * deliberately: warming is an optimisation and must never fail a load. But that
+ * swallow means a warm-up which throws on its FIRST pass — compiling nothing at
+ * all, leaving every pipeline to compile lazily in front of the user — is
+ * indistinguishable, from every report this module produced, from one that
+ * worked perfectly. That is not hypothetical: mythica-machina-press#402 is
+ * exactly that failure, it fired on literally every scene load, and it was
+ * triaged as "purely cosmetic" precisely because nothing measured it.
+ *
+ * So the outcome is reported, and a failure is called a failure. `null` here is
+ * "it ran and threw", NOT "no data" — the two are worded so they can never be
+ * read as each other ([[feedback_absent_zone_row_is_a_measurement]]).
+ *
+ * @param {{warmUpMs?:number|null, warmUpPipelinesCreated?:number|null,
+ *   shaderCompileMs?:number|null}|null} warmUp
+ */
+function buildWarmUpSection(warmUp) {
+  if (!warmUp) return null;
+  const ran = Number.isFinite(warmUp.warmUpMs);
+  const created = Number.isFinite(warmUp.warmUpPipelinesCreated) ? warmUp.warmUpPipelinesCreated : null;
+  return {
+    ran,
+    ms: ran ? round(warmUp.warmUpMs) : null,
+    pipelinesCreated: created,
+    shaderPrecompileMs: Number.isFinite(warmUp.shaderCompileMs) ? round(warmUp.shaderCompileMs) : null,
+    note: ran
+      ? created === 0
+        ? 'The warm-up draw ran but created NO new pipelines. Either everything was already compiled (a warm ' +
+          'cache — normal on a revisit), or the pass plan never reached the passes that would have compiled ' +
+          'something. Compare against a genuinely cold load before concluding.'
+        : 'The warm-up draw ran and compiled pipelines behind the curtain, which is where they are supposed to ' +
+          'compile — this is the mechanism working.'
+      : 'THE WARM-UP DRAW DID NOT COMPLETE. It threw and was swallowed (by design — warming must never fail a ' +
+        'load), which means every pipeline it would have compiled is instead compiling lazily on its first real ' +
+        'draw, in front of the user. Check the console for "warm-up draw failed". This is a bug with a receipt, ' +
+        'not a cosmetic warning.',
+  };
+}
+
+/**
  * Shader-graph rebuild + GPU pipeline compile time — the ONE measurement in
  * this whole report that survives a fully synchronous main-thread freeze
  * intact (mythica-machina-press#400 follow-up). Everything else here
@@ -318,6 +361,7 @@ export function buildLoadReport(loadingScreenState, diagnostics = null) {
     // yet expose while still in flight) — absent here rather than showing a
     // previous load's numbers mislabelled as this one's.
     report.compileTime = buildCompileTimeSection(diagnostics, worstStallMs);
+    report.warmUp = buildWarmUpSection(diagnostics?.warmUp ?? null);
     report.cacheHealth = buildCacheHealthSection(diagnostics?.cacheSnapshot ?? null);
     report.zoneBreakdown = null;
   } else if (state.lastLoad) {
@@ -344,6 +388,7 @@ export function buildLoadReport(loadingScreenState, diagnostics = null) {
       warmingRow?.durMs ?? null
     );
     report.compileTime = buildCompileTimeSection(diagnostics, report.worstStallMs);
+    report.warmUp = buildWarmUpSection(diagnostics?.warmUp ?? null);
     report.cacheHealth = buildCacheHealthSection(diagnostics?.cacheSnapshot ?? null);
     // Zone breakdown is COMPLETED-LOAD ONLY — see the in-progress branch's own
     // comment on why compile time reads live there but this does not (yet).

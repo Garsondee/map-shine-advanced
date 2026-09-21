@@ -436,4 +436,46 @@ export function run(t) {
     const r = buildLoadReport(state, staleDiagnostics);
     ok("in-progress never surfaces a previous load's zone data as if it were live", r.zoneBreakdown === null);
   }
+
+  // --- THE WARM-UP'S OWN OUTCOME (mythica-machina-press#582) ---------------
+  // A warm-up that throws compiles NOTHING and leaves every pipeline to
+  // compile in front of the user — and used to be invisible in this report,
+  // which is how #402 (a warm-up that failed on every single load) stayed
+  // triaged as "purely cosmetic". These pin that it can never hide again.
+  {
+    const mkLast = (warmUp) =>
+      buildLoadReport(
+        {
+          showing: false,
+          current: null,
+          lastLoad: {
+            sceneName: 'S',
+            totalMs: 1000,
+            error: null,
+            forcedReveal: false,
+            unfinished: [],
+            worstStallMs: 0,
+            phases: [{ phase: LOAD_PHASES.ART, startMs: 0, endMs: 1000, durMs: 1000 }],
+            blockerDurationsMs: {},
+          },
+        },
+        { warmUp }
+      );
+
+    const threw = mkLast({ warmUpMs: null, warmUpPipelinesCreated: 3, shaderCompileMs: 10 });
+    ok('a warm-up that threw is reported as NOT having run', threw.warmUp.ran === false);
+    ok('...and says so in words a triager cannot mistake for cosmetic', /did not complete/i.test(threw.warmUp.note));
+
+    const worked = mkLast({ warmUpMs: 420, warmUpPipelinesCreated: 12, shaderCompileMs: 30 });
+    ok('a warm-up that ran reports its real cost', worked.warmUp.ran === true && worked.warmUp.ms === 420);
+    ok('...and how many pipelines it moved behind the curtain', worked.warmUp.pipelinesCreated === 12);
+
+    const nothingCompiled = mkLast({ warmUpMs: 5, warmUpPipelinesCreated: 0, shaderCompileMs: 0 });
+    ok(
+      'a warm-up that ran but compiled nothing is worded distinctly from one that threw',
+      nothingCompiled.warmUp.ran === true && nothingCompiled.warmUp.note !== threw.warmUp.note
+    );
+
+    ok('no warm-up data at all is absent, never a fabricated success', mkLast(null).warmUp === null);
+  }
 }

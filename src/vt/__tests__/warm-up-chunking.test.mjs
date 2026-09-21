@@ -82,7 +82,7 @@ export function run(t) {
     // shipped behaviour, so the pin moves WITH the decision and keeps saying
     // out loud which way it points.
     ok(
-      'defaults OFF again — the first live load with it ON reported warmUp.ran:false (see #585); the known-good ' +
+      'defaults OFF again — the first live load with it ON reported warmUp.ran:false (see #584); the known-good ' +
         'synchronous path is the control until the captured error says why',
       getVtPanViewerChunkedWarmUp().chunkedWarmUpEnabled === false
     );

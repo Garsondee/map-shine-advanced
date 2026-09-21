@@ -18088,7 +18088,7 @@ export async function startVtPanViewer({
     /**
      * The actual error that made a warm-up fail, as `name: message` plus the
      * first few stack frames — or `null` when it did not fail
-     * (mythica-machina-press#585).
+     * (mythica-machina-press#584).
      *
      * `warmUpDrawState` swallows its exception by design (warming must never
      * fail a load) and, until now, kept nothing. So the loading-time report
@@ -26973,7 +26973,7 @@ const ART_TEXTURE_ANISOTROPY = 16;
  * capability for the author to enable and live-test deliberately, never a
  * default-behaviour change.
  *
- * ⚠️ TURNED ON, THEN TURNED BACK OFF (mythica-machina-press#582/#585).
+ * ⚠️ TURNED ON, THEN TURNED BACK OFF (mythica-machina-press#582/#584).
  *
  * It was flipped ON because the author's standing requirement — "responsive and
  * active for the entire loading speed, even at the cost of a little loading

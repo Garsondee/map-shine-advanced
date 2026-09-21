@@ -227,7 +227,7 @@ function buildWarmUpSection(warmUp) {
     ms: ran ? round(warmUp.warmUpMs) : null,
     pipelinesCreated: created,
     simPipelinesCreated: simCreated,
-    // THE CAUSE, not just the fact (mythica-machina-press#585). A warm-up that
+    // THE CAUSE, not just the fact (mythica-machina-press#584). A warm-up that
     // threw is only actionable if it says what threw — otherwise the report
     // reproduces the exact shrug that let #402 sit misfiled for weeks.
     error: warmUp.warmUpError ?? null,

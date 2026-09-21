@@ -68,6 +68,7 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { readImageHeaderSize } from './image-header-size.js';
 
 const log = createLogger('MaskImage');
 
@@ -173,16 +174,50 @@ export async function loadMaskImageTexture({ url, THREE, scale = MASK_IMAGE_SCAL
       log.error(`mask image fetch failed (${response.status}) for ${url}`);
       return null;
     }
-    const blob = await response.blob();
-    // Decode once at NATIVE size only to learn the dimensions, then re-decode
-    // at the target — `createImageBitmap`'s own resize is the browser's
-    // (GPU-accelerated, properly filtered) downscale, which is both faster and
-    // better than drawing a full-size bitmap into a smaller canvas ourselves.
-    const probe = await createImageBitmap(blob);
-    const nativeWidth = probe.width;
-    const nativeHeight = probe.height;
+    // ARRAY BUFFER, NOT BLOB, so the header can be read without a decode. The
+    // `new Blob([buf])` costs nothing meaningful — the bytes are in memory
+    // either way — and leaves the decode below byte-for-byte what it was.
+    const buf = await response.arrayBuffer();
+    const blob = new Blob([buf]);
+
+    // NATIVE SIZE FROM THE HEADER, NOT FROM A THROWAWAY DECODE
+    // (mythica-machina-press#590). This used to read:
+    //
+    //     const probe = await createImageBitmap(blob);    // decode #1
+    //     ... probe.width / probe.height ... probe.close();
+    //     bitmap = await createImageBitmap(blob, {...});  // decode #2
+    //
+    // — so every mask was decoded TWICE, the first time purely to learn two
+    // integers. Measured on a real production layer (`mythica-machina-mansion_
+    // ground_notwrecked.webp`, 10,000 x 10,000, 29.3MB) in a real browser on a
+    // real GPU: the probe decode cost **2,382ms**; reading the same two
+    // integers from the file header cost **2.4ms** and matched exactly. A scene
+    // loading eight such masks spent roughly nineteen seconds decoding images
+    // it threw away.
+    //
+    // The old comment justified the double decode by arguing that
+    // `createImageBitmap`'s own resize beats drawing a full-size bitmap into a
+    // smaller canvas. That argument is still true and still applies — it is why
+    // decode #2 keeps its `resizeWidth`/`resizeHeight`. It never justified
+    // decode #1, which existed only to size that call.
+    //
+    // FAIL-OPEN: `readImageHeaderSize` returns null for anything it does not
+    // positively recognise, and the probe decode remains for exactly that case,
+    // so an unfamiliar format costs precisely what it costs today. An
+    // optimisation with a fallback, never a gate.
+    const header = readImageHeaderSize(buf);
+    let nativeWidth;
+    let nativeHeight;
+    if (header) {
+      nativeWidth = header.width;
+      nativeHeight = header.height;
+    } else {
+      const probe = await createImageBitmap(blob);
+      nativeWidth = probe.width;
+      nativeHeight = probe.height;
+      probe.close();
+    }
     const { width, height } = maskImageTargetSize(nativeWidth, nativeHeight, scale);
-    probe.close();
     bitmap = await createImageBitmap(blob, {
       resizeWidth: width,
       resizeHeight: height,

@@ -503,6 +503,51 @@ export function run(t) {
         );
 
       ok('absent compression data is absent, never a fabricated all-clear', mkC(null).compression === null);
+      // --- FRAME ATTRIBUTION (mythica-machina-press#588) --------------------
+      // The live load's ranked zones summed to ~680ms while frames took 6,683ms.
+      // Reading the top row there would have been chasing 10% of the problem, so
+      // the report must say how much it actually explains before it ranks
+      // anything.
+      const mkA = (zoneAttribution) =>
+        buildLoadReport(
+          {
+            showing: false,
+            current: null,
+            lastLoad: {
+              sceneName: 'S',
+              totalMs: 1000,
+              error: null,
+              forcedReveal: false,
+              unfinished: [],
+              worstStallMs: 0,
+              phases: [{ phase: LOAD_PHASES.ART, startMs: 0, endMs: 1000, durMs: 1000 }],
+              blockerDurationsMs: {},
+            },
+          },
+          { zoneAttribution }
+        );
+
+      ok('absent attribution is absent, never a fabricated all-clear', mkA(null).frameAttribution === null);
+      ok(
+        'a mostly-unmeasured frame is called out, and warns against trusting the ranked table',
+        /do not optimise its top row/i.test(
+          mkA({ unaccountedPct: 90, unaccountedMsPerFrame: 6000 }).frameAttribution.verdict
+        )
+      );
+      ok(
+        'a well-explained frame says the ranked table CAN be trusted',
+        /can be\s+trusted|trusted as a guide/i.test(
+          mkA({ unaccountedPct: 5, unaccountedMsPerFrame: 1 }).frameAttribution.verdict
+        )
+      );
+      ok(
+        'a middling figure is neither dismissed nor alarming',
+        /not the whole story/i.test(mkA({ unaccountedPct: 40, unaccountedMsPerFrame: 100 }).frameAttribution.verdict)
+      );
+      ok(
+        'the underlying numbers are carried through, not replaced by the verdict',
+        mkA({ unaccountedPct: 90, unaccountedMsPerFrame: 6000 }).frameAttribution.unaccountedMsPerFrame === 6000
+      );
 
       const broken = mkC({ worker: { workerCreated: false, unavailable: true, failed: 3, requests: 9 }, items: [] });
       ok('an unavailable worker is called out loudly', /NOT HEALTHY/.test(broken.compression.note));

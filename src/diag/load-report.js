@@ -194,6 +194,42 @@ function buildBackgroundSection(hiddenMs, totalMs) {
 }
 
 /**
+ * HOW MUCH OF EACH FRAME DO THE INSTRUMENTS ACTUALLY EXPLAIN?
+ * (mythica-machina-press#588)
+ *
+ * The single most misleading thing a ranked zone table can do is answer "which
+ * zone is slowest" when the real answer is "none of them — the cost is
+ * somewhere no zone brackets". The live load made that concrete: the ranked
+ * zones summed to roughly 680ms per frame while frames were taking 6,683ms.
+ * Optimising the top row there would have been chasing 10% of the problem.
+ *
+ * `summarizeAttribution` is the SAME computation the steady-state reckoning
+ * report already makes, pointed at one load. Reused rather than re-derived, so
+ * the two cannot disagree about what "unaccounted" means.
+ *
+ * @param {object|null} attribution - from `summarizeAttribution`.
+ */
+function buildAttributionSection(attribution) {
+  if (!attribution) return null;
+  const pct = attribution.unaccountedPct;
+  return {
+    ...attribution,
+    verdict: !Number.isFinite(pct)
+      ? "Not enough data to attribute this load's frames."
+      : pct >= 60
+        ? `🔴 ${pct}% of each frame is OUTSIDE every measured zone. The ranked table below is describing a ` +
+          'minority of the cost — do not optimise its top row. Work this size with no bracket around it is ' +
+          'usually GPU execution the CPU zones cannot see, or main-thread texture upload/decode driven by ' +
+          'streaming. Compare against `compression` (a raw-texture fallback uploads ~4x the bytes).'
+        : pct >= 25
+          ? `🟠 ${pct}% of each frame is outside every measured zone — real, and enough to mislead a reading ` +
+            'of the ranked table, but not the whole story.'
+          : `🟢 ${pct}% unaccounted — the zones below explain most of the frame, so the ranked table can be ` +
+            'trusted as a guide to what to optimise.',
+  };
+}
+
+/**
  * TEXTURE COMPRESSION HEALTH (mythica-machina-press#585) — "did any layer end
  * up as a RAW texture, and what did that cost?"
  *
@@ -481,6 +517,7 @@ export function buildLoadReport(loadingScreenState, diagnostics = null) {
     report.compileTime = buildCompileTimeSection(diagnostics, worstStallMs);
     report.warmUp = buildWarmUpSection(diagnostics?.warmUp ?? null);
     report.compression = buildCompressionSection(diagnostics?.compression ?? null);
+    report.frameAttribution = buildAttributionSection(diagnostics?.zoneAttribution ?? null);
     report.background = buildBackgroundSection(state.currentHiddenMs ?? null, totalMs);
     report.cacheHealth = buildCacheHealthSection(diagnostics?.cacheSnapshot ?? null);
     report.zoneBreakdown = null;
@@ -510,6 +547,7 @@ export function buildLoadReport(loadingScreenState, diagnostics = null) {
     report.compileTime = buildCompileTimeSection(diagnostics, report.worstStallMs);
     report.warmUp = buildWarmUpSection(diagnostics?.warmUp ?? null);
     report.compression = buildCompressionSection(diagnostics?.compression ?? null);
+    report.frameAttribution = buildAttributionSection(diagnostics?.zoneAttribution ?? null);
     report.background = buildBackgroundSection(last.hiddenMs ?? null, totalMs);
     report.cacheHealth = buildCacheHealthSection(diagnostics?.cacheSnapshot ?? null);
     // Zone breakdown is COMPLETED-LOAD ONLY — see the in-progress branch's own

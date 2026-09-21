@@ -75,7 +75,7 @@ import {
 import { buildVramInventory } from './diag/vram-inventory.js';
 import { buildPerfStripModel } from './diag/perf-strip.js';
 import { createFrameProfiler } from './diag/frame-profiler.js';
-import { assembleReckoningReport, summarizeZoneRows } from './diag/reckoning-report.js';
+import { assembleReckoningReport, summarizeZoneRows, summarizeAttribution } from './diag/reckoning-report.js';
 import {
   assertProfilerAvailable,
   createProfiledFrameWaiter,
@@ -15094,6 +15094,7 @@ function install() {
     // refuse (another owner, e.g. the perf HUD, already holds it), so this is
     // never assumed true just because an arm was attempted.
     let zonesArmedForLoad = false;
+    let zonesArmedAtMs = null;
 
     // THE LOADING-TIME REPORT (mythica-machina-press#400, author: "I want to
     // know what is causing things to freeze" — a full accounting of the whole
@@ -15707,6 +15708,7 @@ function install() {
             readTriangles: () => readVtPanViewerTriangleCountOnly(),
           });
           zonesArmedForLoad = true;
+          zonesArmedAtMs = wallClockMs();
         } catch (e) {
           log.warn('loading-time report: zone profiler unavailable for this load (owner conflict?):', e);
         }
@@ -15787,10 +15789,23 @@ function install() {
         const shaderRebuildStats = setVtPanViewerShaderRebuildProbe(false);
         const pipelineRebuildStats = setVtPanViewerPipelineRebuildProbe(false);
         let zoneRows = null;
+        let zoneAttribution = null;
         if (zonesArmedForLoad) {
           try {
             const zoneSnap = perfProfiler.snapshot();
             zoneRows = summarizeZoneRows(zoneSnap.zoneStats, zoneSnap.frames);
+            // THE DECISIVE QUESTION (mythica-machina-press#588): how much of each
+            // frame do the zones actually EXPLAIN? On the live load the ranked
+            // zones summed to ~680ms while frames were taking 6,683ms — so ~6s
+            // per frame was outside every bracket, and "which zone is slow" was
+            // the wrong question entirely. `summarizeAttribution` is the SAME
+            // computation the steady-state reckoning report already makes; this
+            // is it, pointed at one load instead of a settled window.
+            zoneAttribution = summarizeAttribution({
+              frames: zoneSnap.frames,
+              durationMs: Number.isFinite(zonesArmedAtMs) ? wallClockMs() - zonesArmedAtMs : 0,
+              rows: zoneRows,
+            });
           } catch (e) {
             log.warn('loading-time report: zone profiler snapshot failed for this load:', e);
           } finally {
@@ -15819,6 +15834,7 @@ function install() {
         const warmUpDiag = getVtPanViewerDiagnostics();
         lastLoadDiagnostics = {
           zoneRows,
+          zoneAttribution,
           shaderRebuild: shaderRebuildStats,
           pipelineRebuild: pipelineRebuildStats,
           // ⚠️ `.shaders`, NOT the top level (mythica-machina-press#584).

@@ -18034,6 +18034,30 @@ export async function startVtPanViewer({
      */
     const PREWARM_FALLBACK_FRAMES = 1800;
 
+    /**
+     * How many frames of a settled, running scene must pass AFTER readiness
+     * before the deferred prewarm is allowed to start.
+     *
+     * Releasing it the instant `settled` first goes true would hand the user
+     * their map and immediately start a full `prepareFloor` per neighbouring
+     * floor on the same thread — re-creating, one moment later, the exact
+     * "surprise hitch just after the loading screen went away" this whole
+     * change exists to remove. The curtain lifts on the settle sample; these
+     * frames are the breathing room between that and background work resuming.
+     *
+     * ~2s at 60fps, and proportionally longer on a machine that is struggling —
+     * the same reason {@link PREWARM_FALLBACK_FRAMES} is counted in frames
+     * rather than milliseconds.
+     */
+    const PREWARM_SETTLE_DELAY_FRAMES = 120;
+
+    /**
+     * The frame at which readiness first reported settled, or `null` if it has
+     * not yet. Used only to hold the deferred prewarm back a little longer.
+     * @type {number|null}
+     */
+    let settledAtFrame = null;
+
     /** Wall-clock cost of the pre-first-draw shader precompile; null if it failed. */
     let shaderCompileMs = null;
     /** Wall-clock cost of the most recent {@link warmUpDrawState} call; null if it has not run or failed. */
@@ -22434,6 +22458,7 @@ export async function startVtPanViewer({
     /** Hold the cold load's prewarm until the scene settles. */
     function schedulePrewarmAfterSettle(centerFloorIndex) {
       pendingPrewarmFloor = centerFloorIndex;
+      settledAtFrame = null;
     }
 
     /**
@@ -22446,7 +22471,12 @@ export async function startVtPanViewer({
      */
     function runPendingPrewarm(settleResult) {
       if (pendingPrewarmFloor === null) return;
-      const due = settleResult?.settled === true || settleFrameCount >= PREWARM_FALLBACK_FRAMES;
+      if (settleResult?.settled === true && settledAtFrame === null) settledAtFrame = settleFrameCount;
+      // Settled AND given a little room to actually be used first — or the
+      // long frame-counted fallback, for a scene that never settles at all.
+      const settledLongEnough =
+        settledAtFrame !== null && settleFrameCount - settledAtFrame >= PREWARM_SETTLE_DELAY_FRAMES;
+      const due = settledLongEnough || settleFrameCount >= PREWARM_FALLBACK_FRAMES;
       if (!due) return;
       const floorIndex = pendingPrewarmFloor;
       // Cleared BEFORE the call, not after: `prewarmAdjacentFloors` kicks off

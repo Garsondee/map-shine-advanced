@@ -15775,6 +15775,8 @@ function install() {
             warmUpMs: warmUpDiag?.warmUpMs ?? null,
             warmUpPipelinesCreated: warmUpDiag?.warmUpPipelinesCreated ?? null,
             warmUpSimPipelinesCreated: warmUpDiag?.warmUpSimPipelinesCreated ?? null,
+            warmUpError: warmUpDiag?.warmUpError ?? null,
+            warmUpSimError: warmUpDiag?.warmUpSimError ?? null,
             shaderCompileMs: warmUpDiag?.shaderCompileMs ?? null,
           },
           cacheSnapshot: { start: loadCacheSnapshotStart, end: loadCacheSnapshotEnd },

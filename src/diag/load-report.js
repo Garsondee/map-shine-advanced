@@ -227,6 +227,11 @@ function buildWarmUpSection(warmUp) {
     ms: ran ? round(warmUp.warmUpMs) : null,
     pipelinesCreated: created,
     simPipelinesCreated: simCreated,
+    // THE CAUSE, not just the fact (mythica-machina-press#585). A warm-up that
+    // threw is only actionable if it says what threw — otherwise the report
+    // reproduces the exact shrug that let #402 sit misfiled for weeks.
+    error: warmUp.warmUpError ?? null,
+    simError: warmUp.warmUpSimError ?? null,
     simNote:
       simCreated === null
         ? 'Sim-kernel warm-up was not measured on this load.'
@@ -247,8 +252,9 @@ function buildWarmUpSection(warmUp) {
           'compile — this is the mechanism working.'
       : 'THE WARM-UP DRAW DID NOT COMPLETE. It threw and was swallowed (by design — warming must never fail a ' +
         'load), which means every pipeline it would have compiled is instead compiling lazily on its first real ' +
-        'draw, in front of the user. Check the console for "warm-up draw failed". This is a bug with a receipt, ' +
-        'not a cosmetic warning.',
+        'draw, in front of the user — which is precisely the "half the loading happens after the loading screen ' +
+        'goes away" symptom. The `error` field above is what threw. This is a bug with a receipt, not a ' +
+        'cosmetic warning.',
   };
 }
 

@@ -82,8 +82,9 @@ export function run(t) {
     // shipped behaviour, so the pin moves WITH the decision and keeps saying
     // out loud which way it points.
     ok(
-      'defaults ON — the curtain keeps its pulse alive through shader compilation by default',
-      getVtPanViewerChunkedWarmUp().chunkedWarmUpEnabled === true
+      'defaults OFF again — the first live load with it ON reported warmUp.ran:false (see #585); the known-good ' +
+        'synchronous path is the control until the captured error says why',
+      getVtPanViewerChunkedWarmUp().chunkedWarmUpEnabled === false
     );
 
     ok('the setter flips it on', setVtPanViewerChunkedWarmUp(true).chunkedWarmUpEnabled === true);

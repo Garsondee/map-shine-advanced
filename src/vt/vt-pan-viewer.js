@@ -18085,6 +18085,25 @@ export async function startVtPanViewer({
      * silent nothing-happened that `warmUpMs` hid for weeks (see #402).
      */
     let warmUpSimPipelinesCreated = null;
+    /**
+     * The actual error that made a warm-up fail, as `name: message` plus the
+     * first few stack frames — or `null` when it did not fail
+     * (mythica-machina-press#585).
+     *
+     * `warmUpDrawState` swallows its exception by design (warming must never
+     * fail a load) and, until now, kept nothing. So the loading-time report
+     * could say THAT the warm-up did not complete but never WHY, which is the
+     * difference between a diagnosis and a shrug — and it is the exact reason
+     * #402 (a warm-up that threw on every single load) survived weeks of
+     * triage as "purely cosmetic". A caught error that is logged and then
+     * discarded is only available to whoever happened to have the console open
+     * at the time; putting it in the report means the one artefact the author
+     * already pastes carries the cause with it.
+     * @type {string|null}
+     */
+    let warmUpError = null;
+    /** Same, for {@link warmUpSims}. Separate, because they fail independently. @type {string|null} */
+    let warmUpSimError = null;
     const frameTimes = [];
     let lastError = null;
 
@@ -19865,6 +19884,21 @@ export async function startVtPanViewer({
         Number.isFinite(before) && Number.isFinite(after) ? Math.max(0, after - before) : null;
     }
 
+    /**
+     * One caught warm-up error -> one short, pasteable string. Trimmed to a few
+     * frames on purpose: the report is read in a chat window, and the first
+     * frames are where the throwing call always is.
+     */
+    function describeWarmUpError(err) {
+      const head = `${err?.name || 'Error'}: ${err?.message || String(err)}`;
+      const frames = String(err?.stack || '')
+        .split(/\r?\n/)
+        .slice(1, 5)
+        .map((l) => l.trim())
+        .filter(Boolean);
+      return frames.length ? `${head} | ${frames.join(' | ')}` : head;
+    }
+
     function warmUpDrawState({ includePresent = true } = {}) {
       const ids = includePresent ? framePlan.ids : framePlan.ids.filter((id) => id !== 'present.composite');
       const before = readPipelineCount();
@@ -19875,6 +19909,7 @@ export async function startVtPanViewer({
       } catch (err) {
         log.warn('warm-up draw failed — pipelines will compile lazily on first real draw:', err);
         warmUpMs = null;
+        warmUpError = describeWarmUpError(err);
       }
       const after = readPipelineCount();
       warmUpPipelinesCreated = Number.isFinite(before) && Number.isFinite(after) ? Math.max(0, after - before) : null;
@@ -19962,6 +19997,7 @@ export async function startVtPanViewer({
       } catch (err) {
         log.warn('chunked warm-up draw failed — pipelines will compile lazily on first real draw:', err);
         warmUpMs = null;
+        warmUpError = describeWarmUpError(err);
       }
       const after = readPipelineCount();
       warmUpPipelinesCreated = Number.isFinite(before) && Number.isFinite(after) ? Math.max(0, after - before) : null;
@@ -22403,6 +22439,7 @@ export async function startVtPanViewer({
       warmUpSims();
     } catch (err) {
       log.warn('sim warm-up failed — animated kernels will compile on their first real step:', err);
+      warmUpSimError = describeWarmUpError(err);
     }
     if (_chunkedWarmUpEnabled) {
       await warmUpDrawStateChunked();
@@ -26271,6 +26308,8 @@ export async function startVtPanViewer({
           warmUpMs,
           warmUpPipelinesCreated,
           warmUpSimPipelinesCreated,
+          warmUpError,
+          warmUpSimError,
           prefetchSkippedPacks,
           lastUpdate,
           passSeq,
@@ -26934,7 +26973,29 @@ const ART_TEXTURE_ANISOTROPY = 16;
  * capability for the author to enable and live-test deliberately, never a
  * default-behaviour change.
  *
- * ⚠️ NOW DEFAULT ON (mythica-machina-press#582). The paragraph above describes
+ * ⚠️ TURNED ON, THEN TURNED BACK OFF (mythica-machina-press#582/#585).
+ *
+ * It was flipped ON because the author's standing requirement — "responsive and
+ * active for the entire loading speed, even at the cost of a little loading
+ * performance" — is exactly this flag's trade. On the FIRST live load after
+ * that flip, `warmUp.ran` came back **false**: the warm-up draw threw and
+ * compiled nothing, so every pipeline compiled lazily in front of the user
+ * instead, and that load took 80s with a 36.8-SECOND single main-thread stall
+ * (the previous load, with this flag off, was 31s).
+ *
+ * That is not proof this flag is the cause — the warm-up may have been failing
+ * already (#402 is precisely that bug, and `warmUpMs` recorded nothing about it
+ * for weeks). But this flag had NEVER been live-tested, which is the exact
+ * reason #534 shipped it inert, and turning an untested flag on is the one new
+ * variable in that load. Restoring the default that has actually run in
+ * production is the honest control, not a retreat: the next load isolates
+ * whether the warm-up still throws with the known-good synchronous path.
+ *
+ * `warmUpError` now captures WHY it threw, so that next load answers this
+ * instead of costing another round trip.
+ *
+ * PREVIOUS REASONING, kept because it is still the argument FOR turning this
+ * on once it is known to work: The paragraph above describes
  * why it SHIPPED off, and that reasoning was right at the time. What changed is
  * that the author has since set the standing requirement it was waiting for:
  * *"I want a loading screen that is responsive and active for the entire
@@ -26962,7 +27023,7 @@ const ART_TEXTURE_ANISOTROPY = 16;
  * `warmUpDrawStateChunked`'s own header for why that must stay true.
  * @type {boolean}
  */
-let _chunkedWarmUpEnabled = true;
+let _chunkedWarmUpEnabled = false;
 
 /**
  * Opt into (or back out of) the chunked cold-load warm-up

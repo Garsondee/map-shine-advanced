@@ -43,6 +43,8 @@ import { fileURLToPath } from 'node:url';
 import { setVtPanViewerChunkedWarmUp, getVtPanViewerChunkedWarmUp, formatWarmUpChunkDetail } from '../vt-pan-viewer.js';
 
 const VT_PAN_VIEWER_PATH = fileURLToPath(new URL('../vt-pan-viewer.js', import.meta.url));
+const DIAGNOSTICS_PATH = fileURLToPath(new URL('../vt-pan-viewer-diagnostics.js', import.meta.url));
+const BOOT_PATH = fileURLToPath(new URL('../../boot.js', import.meta.url));
 
 export function run(t) {
   const { ok } = t;
@@ -175,6 +177,43 @@ export function run(t) {
     ok(
       'the OFF path passes no options — the same bare `warmUpDrawState()` call as always (default includePresent:true)',
       /else\s*\{\s*\n\s*warmUpDrawState\(\);/.test(coldLoadBlock)
+    );
+  }
+
+  // --- THE WARM-UP REPORT'S ADDRESS CONTRACT (mythica-machina-press#584) ---
+  // A wrong-address read does not fail loudly — it fabricates a confident
+  // wrong answer. `boot.js` read the warm-up fields from the ROOT of
+  // `getVtPanViewerDiagnostics()`, but `buildViewerDiagnostics` nests every
+  // one of them under `shaders:`. Every read returned `undefined`, which
+  // `Number.isFinite` turned into `ran: false` on EVERY load — so the
+  // loading-time report accused the warm-up of throwing on a healthy load,
+  // and that false signal was acted on before it was caught.
+  //
+  // Runtime-testing this would mean mocking a renderer (this suite's sibling
+  // header explains why that is not worth it). The defect is in the SHAPE, so
+  // the source text is the honest place to pin it.
+  {
+    const diagSrc = readFileSync(DIAGNOSTICS_PATH, 'utf8');
+    const bootSrc = readFileSync(BOOT_PATH, 'utf8');
+    const shadersBlock = diagSrc.slice(diagSrc.indexOf('    shaders: {'));
+    const FIELDS = ['warmUpMs', 'warmUpPipelinesCreated', 'warmUpSimPipelinesCreated', 'warmUpError', 'warmUpSimError'];
+    for (const f of FIELDS) {
+      ok(
+        `diagnostics really publishes ${f} (a value passed in but never output reads as never measured)`,
+        shadersBlock.includes(`      ${f},`)
+      );
+      ok(
+        `boot reads ${f} from .shaders, not the root where it is silently undefined`,
+        bootSrc.includes(`warmUpDiag?.shaders?.${f}`)
+      );
+    }
+    ok(
+      'no warm-up field is read from the diagnostics ROOT any more',
+      !FIELDS.some((f) => bootSrc.includes(`warmUpDiag?.${f}`))
+    );
+    ok(
+      'shaderCompileMs is read by its real published name (precompileMs), not its local one',
+      bootSrc.includes('warmUpDiag?.shaders?.precompileMs') && !bootSrc.includes('warmUpDiag?.shaderCompileMs')
     );
   }
 }

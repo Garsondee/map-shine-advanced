@@ -15771,13 +15771,22 @@ function install() {
           zoneRows,
           shaderRebuild: shaderRebuildStats,
           pipelineRebuild: pipelineRebuildStats,
+          // ⚠️ `.shaders`, NOT the top level (mythica-machina-press#584).
+          // `buildViewerDiagnostics` nests every warm-up field under `shaders:`
+          // beside `precompileMs`. Reading them from the ROOT returned
+          // `undefined` for all of them, which `Number.isFinite` turned into
+          // `ran: false` on EVERY load — so the report accused the warm-up of
+          // throwing on a load where it may have been perfectly healthy, and
+          // that false signal was acted on. An instrument that reads the wrong
+          // address does not fail loudly; it fabricates a confident wrong
+          // answer, which is worse than reporting nothing at all.
           warmUp: {
-            warmUpMs: warmUpDiag?.warmUpMs ?? null,
-            warmUpPipelinesCreated: warmUpDiag?.warmUpPipelinesCreated ?? null,
-            warmUpSimPipelinesCreated: warmUpDiag?.warmUpSimPipelinesCreated ?? null,
-            warmUpError: warmUpDiag?.warmUpError ?? null,
-            warmUpSimError: warmUpDiag?.warmUpSimError ?? null,
-            shaderCompileMs: warmUpDiag?.shaderCompileMs ?? null,
+            warmUpMs: warmUpDiag?.shaders?.warmUpMs ?? null,
+            warmUpPipelinesCreated: warmUpDiag?.shaders?.warmUpPipelinesCreated ?? null,
+            warmUpSimPipelinesCreated: warmUpDiag?.shaders?.warmUpSimPipelinesCreated ?? null,
+            warmUpError: warmUpDiag?.shaders?.warmUpError ?? null,
+            warmUpSimError: warmUpDiag?.shaders?.warmUpSimError ?? null,
+            shaderCompileMs: warmUpDiag?.shaders?.precompileMs ?? null,
           },
           cacheSnapshot: { start: loadCacheSnapshotStart, end: loadCacheSnapshotEnd },
         };

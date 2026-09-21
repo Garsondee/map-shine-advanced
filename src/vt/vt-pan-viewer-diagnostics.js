@@ -559,6 +559,9 @@ export function buildViewerDiagnostics({
   shaderCompileMs,
   warmUpMs = null,
   warmUpPipelinesCreated = null,
+  warmUpSimPipelinesCreated = null,
+  warmUpError = null,
+  warmUpSimError = null,
   prefetchSkippedPacks,
   lastUpdate,
   passSeq,
@@ -727,6 +730,15 @@ export function buildViewerDiagnostics({
       // this is reported as a number rather than a boolean "ran").
       warmUpMs,
       warmUpPipelinesCreated,
+      // THE SIM KERNELS' OWN COUNT + BOTH FAILURE CAUSES
+      // (mythica-machina-press#584). Placed here, beside the fields they
+      // belong with: a value passed INTO this builder but never placed in
+      // its OUTPUT is indistinguishable from one that was never measured —
+      // the exact bug these three exist to diagnose, reproduced one level
+      // down.
+      warmUpSimPipelinesCreated,
+      warmUpError,
+      warmUpSimError,
       // Program COUNT is the thing that explodes as effects land (N effects x
       // M variants), so it is watched from the start. Identical ShaderMaterial
       // source shares ONE program (three.module.js:36407 keys the cache on

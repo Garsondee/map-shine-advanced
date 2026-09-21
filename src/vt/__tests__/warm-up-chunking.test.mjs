@@ -67,11 +67,23 @@ export function run(t) {
   {
     // Checked FIRST, before this suite (or anything else in this process —
     // no other suite imports vt-pan-viewer.js today, confirmed by grep) has
-    // ever called the setter: the module's own `let _chunkedWarmUpEnabled =
-    // false;` seed, observed genuinely untouched.
+    // ever called the setter: the module's own `let _chunkedWarmUpEnabled`
+    // seed, observed genuinely untouched.
+    //
+    // ⚠️ THIS ASSERTION WAS INVERTED ON PURPOSE (mythica-machina-press#584).
+    // It used to read "defaults OFF — a cold load that never calls the setter
+    // behaves exactly as it did before this flag existed", which was the
+    // correct pin while #534 shipped the capability inert pending a live test.
+    // The author has since made the call this was waiting on — "I want a
+    // loading screen that is responsive and active for the entire loading
+    // speed, even at the cost of a little loading performance" — which is
+    // precisely this flag's trade. Flipping the seed without flipping this
+    // test would have left a green suite asserting the opposite of the
+    // shipped behaviour, so the pin moves WITH the decision and keeps saying
+    // out loud which way it points.
     ok(
-      'defaults OFF — a cold load that never calls the setter behaves exactly as it did before this flag existed',
-      getVtPanViewerChunkedWarmUp().chunkedWarmUpEnabled === false
+      'defaults ON — the curtain keeps its pulse alive through shader compilation by default',
+      getVtPanViewerChunkedWarmUp().chunkedWarmUpEnabled === true
     );
 
     ok('the setter flips it on', setVtPanViewerChunkedWarmUp(true).chunkedWarmUpEnabled === true);

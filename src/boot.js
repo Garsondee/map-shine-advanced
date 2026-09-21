@@ -180,10 +180,32 @@ const FLOOR_CHANGE_SETTLE_BUFFER_MS = 15000;
  * numbers that both answer "how often do we check if the scene has settled"
  * are two numbers that will eventually disagree
  * ([[feedback_probed_constants_vs_derived]]). Fine-grained next to the
- * multi-second stages being watched, and cheap — each poll is one object read
- * of the LAST settle sample, never a fresh measurement.
+ * multi-second stages being watched, and cheap — each poll collects the
+ * readiness probes' existing counters and takes one settle sample.
+ *
+ * ⚠️ That last clause used to read "each poll is one object read of the LAST
+ * settle sample, never a fresh measurement" — an accurate description of a
+ * broken arrangement (mythica-machina-press#584). Because the sample was only
+ * ever taken inside `renderFrame`, and a cold load is exactly when the render
+ * loop cannot run freely, the poll re-read the same stale verdict for the
+ * entire load and readiness could never be observed. The poll now SAMPLES; see
+ * `waitForSceneReady` below and `sampleVtPanViewerSceneSettleNow`.
  */
 const READY_POLL_MS = 250;
+/**
+ * How long {@link waitForFirstPaint} will wait for two real animation frames
+ * before moving on to readiness anyway.
+ *
+ * Not a guess at how long a first paint "should" take — it is the point past
+ * which continuing to wait HERE stops being useful, because the next phase
+ * checks the same thing more rigorously. WARMING's settle criteria already
+ * require real frames to have advanced, so a first paint that has not arrived
+ * in ten seconds is not lost by proceeding; it is merely caught by the phase
+ * that can name it as a blocker instead of the one that cannot say anything at
+ * all. See `waitForFirstPaint`'s own header for the 25,727ms live measurement
+ * that made this bound necessary.
+ */
+const FIRST_PAINT_MAX_MS = 10000;
 /** Plain fixed-duration wait — no clock read, just a timer (time/one-clock
  * is about READING the current time, which this never does). @param {number} ms */
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -363,6 +385,7 @@ import {
   setVtPanViewerCloudTopsLowOctaves,
   getVtPanViewerCloudTopsLowOctaves,
   getVtPanViewerSceneSettle,
+  sampleVtPanViewerSceneSettleNow,
   startVtPanViewerLiveMarkers,
   stopVtPanViewerLiveMarkers,
 } from './vt/index.js';
@@ -9359,7 +9382,7 @@ function install() {
         // see WATER_DIALS in water.js), so being listed here only excluded it
         // from Advanced without ever surfacing it anywhere. It now falls through
         // to Advanced under Water's Look category like a normal ROH param.
-        fohKeys: ['depth', 'pollution', 'foam', 'flowAngleDeg', 'flowSpeedPx'],
+        fohKeys: ['depth', 'pollution', 'foam', 'flowEnabled', 'flowAngleDeg', 'flowSpeedPx'],
         getValue: (id) => readLive().params?.[id] ?? WATER_PARAMS[id]?.default,
         onChange: (id, value) => MapShine.setWater({ [id]: value }),
         enabled: readLive().enabled,
@@ -9420,7 +9443,7 @@ function install() {
       // see WATER_DIALS in water.js), so being listed here only excluded it
       // from Advanced without ever surfacing it anywhere. It now falls through
       // to Advanced under Water's Look category like a normal ROH param.
-      fohKeys: ['depth', 'pollution', 'foam', 'flowAngleDeg', 'flowSpeedPx'],
+      fohKeys: ['depth', 'pollution', 'foam', 'flowEnabled', 'flowAngleDeg', 'flowSpeedPx'],
       // U6 (docs/holy/UI-Testament.md §9): five authored dials replace this
       // fohKeys strip in the FOH — fohKeys itself stays, both as the ROH-
       // exclusion set (rohGroups reads it unconditionally) and as the
@@ -15459,10 +15482,105 @@ function install() {
          * deadline, on the "Show me anyway" button, and immediately when no
          * curtain is up at all.
          */
+        /**
+         * WAIT FOR THE FIRST FRAME TO PAINT — bounded, and audible while it
+         * waits (mythica-machina-press#584).
+         *
+         * ## What this replaces, and why it had to change
+         *
+         * One line: `await new Promise((r) => rAF(() => rAF(r)))`. Two
+         * animation frames, which on a healthy browser is ~32ms — and which, on
+         * the live load that prompted this work, was the container for
+         * **25,727ms of a 31,361ms load (82%)**, the single largest phase by a
+         * wide margin. For every one of those seconds the curtain showed a
+         * fixed "Drawing the first frame" with no counter, no blocker list and
+         * no elapsed figure moving inside the phase — the exact "customers
+         * think the module has broken" window the author reported. An
+         * unlabelled wait is a wait a user reads as a freeze; this codebase
+         * already gave MASKS and DEVICE their own phases for precisely that
+         * reason, and then left its biggest phase a black box.
+         *
+         * It also consumed the entire reveal deadline before WARMING ever
+         * opened, which is what reduced readiness to a 1ms formality (see
+         * `READINESS_MIN_BUDGET_MS`, the other half of this fix).
+         *
+         * ## What it does now
+         *
+         * Still waits for two real animation frames — that is genuinely the
+         * "something has painted" signal, and nothing cheaper is honest. But it
+         * races them against a watchdog that (a) keeps the phase's own detail
+         * line moving so the curtain is visibly alive and specific, and (b)
+         * refuses to wait past `FIRST_PAINT_MAX_MS`.
+         *
+         * Giving up is SAFE here, and that is worth stating plainly rather than
+         * relying on: the very next thing this phase leads to is WARMING, whose
+         * settle criteria independently require real frames to have advanced
+         * before anything is called ready. So a first paint that never arrives
+         * is caught there, by the system built to catch it, with a named
+         * blocker — instead of silently eating the whole budget here, where
+         * nothing was watching. Proceeding early cannot skip a check; it can
+         * only move the check to the phase that does it properly.
+         */
+        async function waitForFirstPaint() {
+          const startedAt = wallClockMs();
+          let painted = false;
+          const twoFrames = new Promise((resolve) =>
+            requestAnimationFrame(() =>
+              requestAnimationFrame(() => {
+                painted = true;
+                resolve();
+              })
+            )
+          );
+          // The watchdog reports on the SAME cadence readiness polls on, so the
+          // curtain's update rate is one number for the whole load rather than
+          // a second one that happens to look similar.
+          for (;;) {
+            const raced = await Promise.race([
+              twoFrames.then(() => 'painted'),
+              new Promise((r) => setTimeout(() => r('tick'), READY_POLL_MS)),
+            ]);
+            if (raced === 'painted' || painted) return { painted: true, waitedMs: wallClockMs() - startedAt };
+            const waitedMs = wallClockMs() - startedAt;
+            if (waitedMs >= FIRST_PAINT_MAX_MS) {
+              log.warn(
+                `first paint has not arrived after ${Math.round(waitedMs)}ms — proceeding to readiness, which ` +
+                  `checks for real frames itself and will name the blocker if they are still not coming.`
+              );
+              return { painted: false, waitedMs };
+            }
+            // NOT a fraction. There is no denominator here — "two frames" is a
+            // gate, not a quantity, and drawing a progress bar against a
+            // stopwatch is the §7 "0%/98%" lie in miniature. The elapsed
+            // seconds are a fact; the bar stays absent.
+            reportSceneLoadProgress(LOAD_PHASES.FIRST_FRAME, {
+              detail: `waiting for the first painted frame — ${(waitedMs / 1000).toFixed(1)}s`,
+            });
+          }
+        }
+
         async function waitForSceneReady() {
           for (;;) {
-            const settle = getVtPanViewerSceneSettle();
-            if (settle?.settled === true) return { ready: true, reason: 'settled' };
+            // SAMPLES, rather than merely reading (mythica-machina-press#584).
+            // `getVtPanViewerSceneSettle()` returns whatever the render loop
+            // last recorded — and the render loop is exactly what a cold load
+            // starves. A live report caught the consequence with a receipt:
+            // two rendered frames across a 25.7s window, `sampleSceneSettle`
+            // firing only every 10th frame, therefore ZERO settle samples for
+            // the whole stretch this poll was running. Every iteration read the
+            // same stale object, `settled` never became true, and the curtain
+            // could only ever come up on the deadline — which is precisely what
+            // that load's `forcedReveal: true` recorded. Sampling here puts
+            // readiness on a cadence the load cannot starve.
+            const settle = sampleVtPanViewerSceneSettleNow();
+            if (settle?.settled === true) {
+              // `settledVia` is carried out, not swallowed: 'quiet' means
+              // everything genuinely went still, 'slow-scene' means nothing was
+              // outstanding but frame time never reached the hitch bar. Both are
+              // "ready enough to hand over"; only one of them is also "running
+              // well", and the log must not blur that (see vt/settle.js).
+              return { ready: true, reason: 'settled', settledVia: settle.settledVia ?? 'quiet' };
+            }
             // No viewer means nothing to wait FOR — waiting would be a hang with
             // a friendly face. This is unreachable on the path below (we only
             // get here after startRealSceneViewer succeeded) but it is the kind
@@ -15545,7 +15663,7 @@ function install() {
         // frame has PAINTED yet. Waiting one frame is the difference between
         // "Ready" being true and being the §7 "Ready!" lie under a new name.
         beginSceneLoadPhase(LOAD_PHASES.FIRST_FRAME);
-        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        await waitForFirstPaint();
 
         // ONLY NOW hand the art over. MSA has painted a real frame, so
         // suppressing Foundry's `primary`/`effects` swaps one picture for
@@ -15628,6 +15746,10 @@ function install() {
           // one in the log any more than it does in the summary.
           log.info(
             `scene load ${summary.forcedReveal ? 'REVEALED UNFINISHED' : 'complete'} in ${summary.totalMs}ms` +
+              (readyOutcome.settledVia === 'slow-scene'
+                ? ' — settled with nothing outstanding, but frame time never reached the steadiness bar: ' +
+                  'this scene is heavy on this machine, which is a performance question, not a loading one'
+                : '') +
               (summary.worstStallMs > 0 ? ` (worst main-thread stall: ${summary.worstStallMs}ms)` : '') +
               (summary.forcedReveal ? ` — still waiting on: ${summary.unfinished.join(', ') || 'unknown'}` : ''),
             summary

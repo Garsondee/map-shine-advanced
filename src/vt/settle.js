@@ -300,13 +300,39 @@ export function createReadinessRegistry({ builtinKeys = SETTLE_WORK_KEYS } = {})
  * @param {number|null} [opts.hitchMs=null] - what counts as a frame-time hitch.
  *   NO DEFAULT ON PURPOSE — see this module's header. Omitted means the
  *   steadiness criterion reports `unavailable` rather than silently passing.
+ * @param {number|null} [opts.slowSceneGraceMs=null] - how long frame-time
+ *   steadiness may be the ONLY outstanding thing before the scene is declared
+ *   settled anyway, via `settledVia: 'slow-scene'`.
+ *
+ *   **Why this is not a weakening of the rule.** Every other criterion answers
+ *   "has the work finished?". Steadiness answers "is it fast?" — and those
+ *   stop being the same question the moment a scene is genuinely finished but
+ *   genuinely heavy. At the real call site `hitchMs` is 50ms, so ANY scene
+ *   sustaining under 20fps trips it on every sample forever; such a scene could
+ *   never settle, no matter how completely it had loaded, and the curtain over
+ *   it could only ever be lifted by the deadline. That is not a strict
+ *   instrument, it is a broken one, and it is why "lift on readiness" kept
+ *   appearing not to work.
+ *
+ *   OMITTED (`null`) KEEPS THE OLD BEHAVIOUR EXACTLY — the escape is off, and
+ *   steadiness blocks forever as before. Opt-in, so every existing caller and
+ *   test is unchanged by construction rather than by review.
  * @returns {{sample: Function, read: Function, reset: Function}}
  */
-export function createSettleTracker({ quietMs = DEFAULT_SETTLE_QUIET_MS, minFrames = 2, hitchMs = null } = {}) {
+export function createSettleTracker({
+  quietMs = DEFAULT_SETTLE_QUIET_MS,
+  minFrames = 2,
+  hitchMs = null,
+  slowSceneGraceMs = null,
+} = {}) {
   const hitchThresholdMs = Number.isFinite(hitchMs) && hitchMs > 0 ? hitchMs : null;
+  const slowGraceMs = Number.isFinite(slowSceneGraceMs) && slowSceneGraceMs > 0 ? slowSceneGraceMs : null;
   let quietSinceMs = null;
   let framesAtQuietStart = 0;
   let lastPipelineCompiles = null;
+  // THE SLOW-SCENE ESCAPE — see `slowSceneGraceMs` in this factory's doc.
+  let slowSinceMs = null;
+  let framesAtSlowStart = 0;
   let last = null;
 
   /**
@@ -382,12 +408,62 @@ export function createSettleTracker({ quietMs = DEFAULT_SETTLE_QUIET_MS, minFram
     const framesSinceQuiet = Math.max(0, frameCount - framesAtQuietStart);
     const quietElapsed = quietSinceMs !== null && quietForMs >= quietMs;
     const framesAdvanced = framesSinceQuiet >= minFrames;
-    const settled = quietElapsed && framesAdvanced;
+
+    // --- THE SLOW-SCENE ESCAPE ----------------------------------------------
+    // "Loaded but heavy" is not "still loading", and until now this tracker
+    // could not tell them apart. `hitchMs` is 50ms at the only call site — so a
+    // scene that has genuinely finished arriving but renders at, say, 15fps
+    // produces a 66ms gap every single frame, trips the steadiness criterion on
+    // every sample, and can NEVER settle. Not slowly: never. The curtain's only
+    // remaining exit is the deadline, which is exactly the forced reveal the
+    // author has been getting, and which made every earlier attempt at "lift on
+    // readiness" look like it had failed when the real problem was that
+    // readiness was unsatisfiable by construction.
+    //
+    // So: when the ONLY thing outstanding is frame-time steadiness — no work,
+    // no pipelines compiling, frames genuinely advancing — that is a
+    // PERFORMANCE fact about this scene on this machine, not a loading fact,
+    // and holding a curtain over it teaches the user nothing and costs them the
+    // map. Held for `slowSceneGraceMs` first, so a scene that is merely mid-
+    // hitch still gets to recover and settle properly.
+    //
+    // It is reported honestly rather than laundered: `settledVia` says which
+    // door was taken, so a reader (and `diag/load-report.js`) can always tell a
+    // clean settle from this one. Nothing here claims the frame time is fine.
+    const onlySteadinessOutstanding = totalOutstanding === 0 && compiledDelta === 0 && hitched;
+    if (onlySteadinessOutstanding) {
+      if (slowSinceMs === null) {
+        slowSinceMs = nowMs;
+        framesAtSlowStart = frameCount;
+      }
+    } else if (totalOutstanding > 0 || compiledDelta > 0) {
+      // Real work reappeared — this is a load again, not a slow scene.
+      slowSinceMs = null;
+      framesAtSlowStart = frameCount;
+    }
+    const slowForMs = slowSinceMs === null ? 0 : Math.max(0, nowMs - slowSinceMs);
+    const slowFramesAdvanced = Math.max(0, frameCount - framesAtSlowStart) >= minFrames;
+    const slowSceneSettled =
+      slowGraceMs !== null && slowSinceMs !== null && slowForMs >= slowGraceMs && slowFramesAdvanced;
+
+    const settled = (quietElapsed && framesAdvanced) || slowSceneSettled;
+    const settledVia = !settled ? null : quietElapsed && framesAdvanced ? 'quiet' : 'slow-scene';
 
     const allBlockers = [...blockers, ...evidenceBlockers];
 
     last = {
       settled,
+      /**
+       * WHICH DOOR "settled" CAME THROUGH — `'quiet'` (everything genuinely
+       * went still) or `'slow-scene'` (nothing is outstanding, but frame time
+       * never reached the hitch bar and the grace period expired). `null` when
+       * not settled. A reader must never have to infer this: the two mean
+       * materially different things to anyone about to trust the verdict, and
+       * collapsing them would be the instrument lying by omission.
+       */
+      settledVia,
+      /** How long steadiness has been the ONLY thing outstanding. 0 when it is not. */
+      slowForMs,
       quietForMs,
       framesSinceQuiet,
       blockers: allBlockers,
@@ -413,10 +489,16 @@ export function createSettleTracker({ quietMs = DEFAULT_SETTLE_QUIET_MS, minFram
       // hunting a compositing bug that does not exist. The renderer is only
       // named once the time requirement is satisfied and frames STILL have not
       // arrived — which is the genuine "this window is not drawing" case.
-      waitingFor: allBlockers.length
-        ? allBlockers.map((b) => `${b.label} (${b.count})`)
-        : settled
-          ? []
+      // SETTLED MEANS NOT WAITING, even via the slow-scene door — a verdict
+      // that says `settled: true` while still listing what it is "waiting for"
+      // is two contradictory answers to one question. The steadiness blocker is
+      // NOT discarded: it stays in `blockers`, `criteria.steadiness` still
+      // reads 'blocked', and `settledVia` names the door. Nothing is hidden;
+      // only the tense is corrected.
+      waitingFor: settled
+        ? []
+        : allBlockers.length
+          ? allBlockers.map((b) => `${b.label} (${b.count})`)
           : quietForMs < quietMs
             ? [`the ${quietMs}ms quiet period to elapse`]
             : ['frames to render (the renderer may not be compositing)'],
@@ -431,6 +513,13 @@ export function createSettleTracker({ quietMs = DEFAULT_SETTLE_QUIET_MS, minFram
     reset: () => {
       quietSinceMs = null;
       framesAtQuietStart = 0;
+      // CLEARED, unlike the pipeline baseline below. This one IS a property of
+      // the settle epoch: a floor switch is new work, and letting a previous
+      // epoch's accumulated "only steadiness outstanding" time carry into it
+      // would let the new epoch take the slow-scene door on time it never
+      // actually served.
+      slowSinceMs = null;
+      framesAtSlowStart = 0;
       // The pipeline baseline is deliberately KEPT across a reset. It is a
       // property of the GPU device for the whole session, not of this settle
       // epoch — clearing it would make the first sample after every floor

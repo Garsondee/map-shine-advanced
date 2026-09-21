@@ -24,6 +24,7 @@
  */
 import {
   waterFlowVector,
+  waterFlowSpeedPx,
   WATER_TIER2_FLOW_ANGLE_DEG,
   WATER_BANK_REACH_PX,
   WATER_BANK_INFLUENCE,
@@ -122,6 +123,49 @@ export function run(t) {
   ok(
     `the shipped default (${WATER_TIER2_FLOW_ANGLE_DEG}°) is south — water reads as running down the page`,
     isDir(waterFlowVector(WATER_TIER2_FLOW_ANGLE_DEG), SCREEN.down)
+  );
+
+  // ── THE CURRENT SWITCH (mythica-machina-press#581) ─────────────────────
+  // `waterFlowSpeedPx` has THREE answers, not two, and every assertion below
+  // exists because collapsing any pair of them breaks something real: a parked
+  // river that forgets its speed, an old scene that stops flowing on upgrade,
+  // or a freshly-loaded scene frozen for its opening frames.
+  ok(
+    'the switch OFF parks the surface — a real zero the consumers push',
+    waterFlowSpeedPx({ flowEnabled: false, flowSpeedPx: 70 }) === 0
+  );
+  ok(
+    'the switch OFF does NOT clear the authored speed — the caller still holds 70 to switch back on with',
+    waterFlowSpeedPx({ flowEnabled: false, flowSpeedPx: 70 }) === 0 &&
+      waterFlowSpeedPx({ flowEnabled: true, flowSpeedPx: 70 }) === 70
+  );
+  ok('the switch ON is the authored speed, untouched', waterFlowSpeedPx({ flowEnabled: true, flowSpeedPx: 42 }) === 42);
+  // THE UPGRADE CASE, and the reason the resolver tests `=== false` rather
+  // than falsiness: every scene saved before this param existed has no
+  // `flowEnabled` key in its `effectParams` flag at all.
+  ok(
+    'a scene saved BEFORE the switch existed keeps flowing — an absent key is not "off"',
+    waterFlowSpeedPx({ flowSpeedPx: 70 }) === 70
+  );
+  ok(
+    'an explicit `undefined` reads the same as absent, for the same reason',
+    waterFlowSpeedPx({ flowEnabled: undefined, flowSpeedPx: 70 }) === 70
+  );
+  // THE PRE-RESOLVE WINDOW — `null`, never `0`. `water-registration.js` seeds
+  // `params: null` between construction and the first cascade resolve; the
+  // surface subsystem reads this `null` as "make no call, leave the material's
+  // own default standing", so a river is never frozen for those frames.
+  ok('no authored speed at all is `null`, distinct from a switched-off zero', waterFlowSpeedPx({}) === null);
+  ok(
+    'a non-finite speed is `null` too, not NaN pushed into a uniform',
+    waterFlowSpeedPx({ flowSpeedPx: NaN }) === null
+  );
+  ok('a missing params object does not throw', waterFlowSpeedPx(undefined) === null);
+  // OFF BEATS ABSENT. The switch is the author's explicit instruction; it must
+  // not need a finite speed beside it to be obeyed.
+  ok(
+    'the switch OFF wins even with no speed authored — off means off, not "fall through to null"',
+    waterFlowSpeedPx({ flowEnabled: false }) === 0
   );
 
   // ── THE BANK WARP'S OWN BOUNDS ─────────────────────────────────────────

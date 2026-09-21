@@ -18000,7 +18000,7 @@ export async function startVtPanViewer({
     }
 
     let view = null; // set once the first item is loaded
-    // ── COLD-LOAD PREWARM DEFERRAL STATE (mythica-machina-press#584) ──
+    // ── COLD-LOAD PREWARM DEFERRAL STATE (mythica-machina-press#582) ──
     // DECLARED HERE, far above the functions that use them, for the same
     // reason `pauseUnsub` is declared before `installPauseWatch`: a `let`/
     // `const` has a temporal dead zone, `runPendingPrewarm` is reachable from
@@ -18011,7 +18011,7 @@ export async function startVtPanViewer({
     // one, instead of failing as a TDZ ReferenceError inside the render loop.
     /**
      * The floor whose adjacent-floor prewarm is waiting for the scene to
-     * settle, or `null` when nothing is pending (mythica-machina-press#584).
+     * settle, or `null` when nothing is pending (mythica-machina-press#582).
      * @type {number|null}
      */
     let pendingPrewarmFloor = null;
@@ -18172,7 +18172,7 @@ export async function startVtPanViewer({
      */
     /**
      * How long frame-time steadiness may be the ONLY outstanding thing before
-     * the scene counts as settled anyway (mythica-machina-press#584). See
+     * the scene counts as settled anyway (mythica-machina-press#582). See
      * `createSettleTracker`'s own `slowSceneGraceMs` doc for why this exists —
      * in short, `HITCH_THRESHOLD_MS` is an absolute 50ms bar, so without this a
      * fully-loaded scene running below 20fps could never settle at all and the
@@ -19769,7 +19769,7 @@ export async function startVtPanViewer({
 
     /**
      * WARM UP THE SIMULATION KERNELS — the half of the first frame that
-     * `warmUpDrawState` structurally cannot reach (mythica-machina-press#584).
+     * `warmUpDrawState` structurally cannot reach (mythica-machina-press#582).
      *
      * ============================================================================
      * THE GAP, AND THE AUTHOR REPORT THAT NAMES IT
@@ -19962,7 +19962,7 @@ export async function startVtPanViewer({
       // shown yet, and the hitch it was meant to catch would fall between two
       // samples and be judged by neither.
       maxFrameGapSinceSettleSampleMs = 0;
-      // THE COLD LOAD'S DEFERRED PREWARM (mythica-machina-press#584) — released
+      // THE COLD LOAD'S DEFERRED PREWARM (mythica-machina-press#582) — released
       // here because this is the one place that already knows both things it
       // depends on: whether the scene has settled, and how many real frames
       // have rendered. A no-op unless a cold load actually deferred one.
@@ -22362,7 +22362,7 @@ export async function startVtPanViewer({
     // loop for a yield point to race against — see `warmUpDrawStateChunked`'s
     // header for why the floor-switch call site a few hundred lines up can
     // never take this same branch.
-    // THE SIM KERNELS FIRST (mythica-machina-press#584) — see `warmUpSims`'s
+    // THE SIM KERNELS FIRST (mythica-machina-press#582) — see `warmUpSims`'s
     // own header. COLD LOAD ONLY, and deliberately not folded into
     // `warmUpDrawState`: that function is also the floor-switch warm-up, which
     // runs with the real render loop live and whose safety argument rests on
@@ -22513,7 +22513,7 @@ export async function startVtPanViewer({
         }
       })();
     }
-    // DEFERRED, NOT IMMEDIATE (mythica-machina-press#584).
+    // DEFERRED, NOT IMMEDIATE (mythica-machina-press#582).
     //
     // This used to be a bare `prewarmAdjacentFloors(clampedInitialFloor)` on
     // this line — fired one statement after `setAnimationLoop(renderFrame)`,
@@ -23473,7 +23473,7 @@ export async function startVtPanViewer({
         // ⚠️ THIS COMMENT USED TO CLAIM "Samples fresh on every call (so a
         // caller polling slower than the render cadence still gets current
         // truth)" in the API docstring above, which was FALSE and expensively
-        // so (mythica-machina-press#584). The reasoning it gave — "the loop
+        // so (mythica-machina-press#582). The reasoning it gave — "the loop
         // already samples on its own cadence — at 60fps the answer is at most
         // ~160ms old" — silently assumes 60fps. During a cold load the render
         // loop is exactly what is NOT running freely: a live report measured
@@ -23510,7 +23510,7 @@ export async function startVtPanViewer({
       },
       /**
        * TAKE A SETTLE SAMPLE RIGHT NOW, off the render loop's cadence, and
-       * return the fresh verdict (mythica-machina-press#584).
+       * return the fresh verdict (mythica-machina-press#582).
        *
        * ============================================================================
        * WHY A SECOND WAY IN EXISTS AT ALL
@@ -26908,7 +26908,7 @@ const ART_TEXTURE_ANISOTROPY = 16;
  * capability for the author to enable and live-test deliberately, never a
  * default-behaviour change.
  *
- * ⚠️ NOW DEFAULT ON (mythica-machina-press#584). The paragraph above describes
+ * ⚠️ NOW DEFAULT ON (mythica-machina-press#582). The paragraph above describes
  * why it SHIPPED off, and that reasoning was right at the time. What changed is
  * that the author has since set the standing requirement it was waiting for:
  * *"I want a loading screen that is responsive and active for the entire
@@ -27658,7 +27658,7 @@ export function getVtPanViewerSceneSettle() {
 }
 
 /**
- * SCENE SETTLE, SAMPLED FRESH (mythica-machina-press#584) — the poll-side
+ * SCENE SETTLE, SAMPLED FRESH (mythica-machina-press#582) — the poll-side
  * companion to {@link getVtPanViewerSceneSettle}, which only ever returns
  * whatever the render loop last managed to record.
  *

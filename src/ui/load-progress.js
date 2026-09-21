@@ -110,7 +110,7 @@ export const STALL_NOTE_VISIBLE_MS = 3000;
 export const HARD_REVEAL_MS = 30000;
 
 /**
- * THE FLOOR UNDER READINESS (mythica-machina-press#584).
+ * THE FLOOR UNDER READINESS (mythica-machina-press#582).
  *
  * Once {@link LOAD_PHASES.WARMING} begins, readiness gets AT LEAST this long to
  * reach a verdict — even when the phases before it already spent the whole
@@ -454,7 +454,7 @@ export function hardRevealDue(state, nowMs, deadlineMs = HARD_REVEAL_MS) {
   if (elapsedMs < deadlineMs) return false;
 
   // PAST THE ORDINARY DEADLINE — but readiness gets its floor
-  // (mythica-machina-press#584). If WARMING has begun and has not yet had
+  // (mythica-machina-press#582). If WARMING has begun and has not yet had
   // READINESS_MIN_BUDGET_MS to reach a verdict, keep waiting: the phases
   // before it overran, and making READINESS pay for that is what reduced the
   // whole settle apparatus to a 1ms formality on the load that prompted this.

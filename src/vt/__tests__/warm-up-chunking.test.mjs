@@ -70,7 +70,7 @@ export function run(t) {
     // ever called the setter: the module's own `let _chunkedWarmUpEnabled`
     // seed, observed genuinely untouched.
     //
-    // ⚠️ THIS ASSERTION WAS INVERTED ON PURPOSE (mythica-machina-press#584).
+    // ⚠️ THIS ASSERTION WAS INVERTED ON PURPOSE (mythica-machina-press#582).
     // It used to read "defaults OFF — a cold load that never calls the setter
     // behaves exactly as it did before this flag existed", which was the
     // correct pin while #534 shipped the capability inert pending a live test.

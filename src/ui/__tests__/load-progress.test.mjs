@@ -440,7 +440,7 @@ export function run(t) {
     ok('a missing state does not throw', hardRevealDue(null, 1, 1) === false);
   }
 
-  // --- READINESS GETS A FLOOR (mythica-machina-press#584) -------------------
+  // --- READINESS GETS A FLOOR (mythica-machina-press#582) -------------------
   // The live failure this encodes: FIRST_FRAME ran 25,727ms, WARMING did not
   // begin until 31,361ms — already past HARD_REVEAL_MS — so readiness was
   // given 1ms and the curtain lifted on a stopwatch. These tests pin the rule

@@ -252,7 +252,7 @@ export function run(t) {
     );
   }
 
-  // --- THE SLOW-SCENE ESCAPE (mythica-machina-press#584) --------------------
+  // --- THE SLOW-SCENE ESCAPE (mythica-machina-press#582) --------------------
   // `hitchMs` is an ABSOLUTE bar (50ms at the real call site). Without an
   // escape, a fully-loaded scene rendering below 20fps trips steadiness on
   // every sample forever and can never settle — so the curtain over it can only

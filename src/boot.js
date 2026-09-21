@@ -185,7 +185,7 @@ const FLOOR_CHANGE_SETTLE_BUFFER_MS = 15000;
  *
  * ⚠️ That last clause used to read "each poll is one object read of the LAST
  * settle sample, never a fresh measurement" — an accurate description of a
- * broken arrangement (mythica-machina-press#584). Because the sample was only
+ * broken arrangement (mythica-machina-press#582). Because the sample was only
  * ever taken inside `renderFrame`, and a cold load is exactly when the render
  * loop cannot run freely, the poll re-read the same stale verdict for the
  * entire load and readiness could never be observed. The poll now SAMPLES; see
@@ -15484,7 +15484,7 @@ function install() {
          */
         /**
          * WAIT FOR THE FIRST FRAME TO PAINT — bounded, and audible while it
-         * waits (mythica-machina-press#584).
+         * waits (mythica-machina-press#582).
          *
          * ## What this replaces, and why it had to change
          *
@@ -15561,7 +15561,7 @@ function install() {
 
         async function waitForSceneReady() {
           for (;;) {
-            // SAMPLES, rather than merely reading (mythica-machina-press#584).
+            // SAMPLES, rather than merely reading (mythica-machina-press#582).
             // `getVtPanViewerSceneSettle()` returns whatever the render loop
             // last recorded — and the render loop is exactly what a cold load
             // starves. A live report caught the consequence with a receipt:

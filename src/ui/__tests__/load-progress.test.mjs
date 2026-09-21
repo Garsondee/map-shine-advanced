@@ -25,6 +25,9 @@ import {
   recordTick,
   describeLoad,
   hardRevealDue,
+  HARD_REVEAL_MS,
+  READINESS_MIN_BUDGET_MS,
+  ABSOLUTE_REVEAL_CEILING_MS,
   shouldShowForScene,
 } from '../load-progress.js';
 // The ONE pure function in the browser-only overlay — the blocker list's cap.
@@ -435,6 +438,60 @@ export function run(t) {
     failLoad(failed, 'boom', 50);
     ok('nor is one that failed', hardRevealDue(failed, 9999, 1000) === false);
     ok('a missing state does not throw', hardRevealDue(null, 1, 1) === false);
+  }
+
+  // --- READINESS GETS A FLOOR (mythica-machina-press#584) -------------------
+  // The live failure this encodes: FIRST_FRAME ran 25,727ms, WARMING did not
+  // begin until 31,361ms — already past HARD_REVEAL_MS — so readiness was
+  // given 1ms and the curtain lifted on a stopwatch. These tests pin the rule
+  // that the LAST phase cannot be crowded out by the ones before it.
+  {
+    const s = mk(0);
+    // Mirror the real load: WARMING opens well past the ordinary deadline.
+    beginPhase(s, LOAD_PHASES.FIRST_FRAME, { nowMs: 5634 });
+    beginPhase(s, LOAD_PHASES.WARMING, { nowMs: 31361 });
+
+    ok(
+      'past the ordinary deadline, a just-opened WARMING still gets to run',
+      hardRevealDue(s, 31362, HARD_REVEAL_MS) === false
+    );
+    ok(
+      'it keeps running right up to its floor',
+      hardRevealDue(s, 31361 + READINESS_MIN_BUDGET_MS - 1, HARD_REVEAL_MS) === false
+    );
+    ok(
+      'and is due the moment the floor is spent',
+      hardRevealDue(s, 31361 + READINESS_MIN_BUDGET_MS, HARD_REVEAL_MS) === true
+    );
+  }
+  {
+    // THE FLOOR IS NOT AN ESCAPE HATCH. A WARMING phase that opens absurdly
+    // late must still hit the absolute wall — otherwise "readiness gets a
+    // floor" would quietly become "readiness gets forever".
+    const s = mk(0);
+    beginPhase(s, LOAD_PHASES.WARMING, { nowMs: ABSOLUTE_REVEAL_CEILING_MS - 10 });
+    ok(
+      'the absolute ceiling outranks the readiness floor',
+      hardRevealDue(s, ABSOLUTE_REVEAL_CEILING_MS, HARD_REVEAL_MS) === true
+    );
+  }
+  {
+    // THE FLOOR IS SPECIFIC TO WARMING. An earlier phase overrunning must not
+    // extend anything — that is the exact behaviour being fixed, not kept.
+    const s = mk(0);
+    beginPhase(s, LOAD_PHASES.FIRST_FRAME, { nowMs: 100 });
+    ok('a long FIRST_FRAME does not buy itself extra time', hardRevealDue(s, HARD_REVEAL_MS, HARD_REVEAL_MS) === true);
+  }
+  {
+    // A CLOSED WARMING PHASE GRANTS NOTHING. Only the phase actually running
+    // can hold the curtain; a finished one must not keep paying out.
+    const s = mk(0);
+    beginPhase(s, LOAD_PHASES.WARMING, { nowMs: 100 });
+    beginPhase(s, LOAD_PHASES.FIRST_FRAME, { nowMs: 200 }); // closes WARMING
+    ok(
+      'a WARMING phase that already ended cannot extend the deadline',
+      hardRevealDue(s, HARD_REVEAL_MS, HARD_REVEAL_MS) === true
+    );
   }
   {
     // A FORCED REVEAL IS NOT A FINISHED LOAD. This is the §7 "Ready!" lie's

@@ -109,6 +109,61 @@ export const STALL_NOTE_VISIBLE_MS = 3000;
  */
 export const HARD_REVEAL_MS = 30000;
 
+/**
+ * THE FLOOR UNDER READINESS (mythica-machina-press#584).
+ *
+ * Once {@link LOAD_PHASES.WARMING} begins, readiness gets AT LEAST this long to
+ * reach a verdict — even when the phases before it already spent the whole
+ * {@link HARD_REVEAL_MS} budget.
+ *
+ * ## The bug this exists to end, with its receipt
+ *
+ * `HARD_REVEAL_MS` is measured from the START OF THE LOAD, and every phase
+ * draws down the same pool. A live load (2026-09-21, "Docklands Warehouse")
+ * spent 25,727ms inside FIRST_FRAME alone and did not reach WARMING until
+ * 31,361ms — already past the deadline. So `waitForSceneReady` polled exactly
+ * once, `shouldStopWaitingForReady` answered "the reveal deadline elapsed"
+ * immediately, and the whole readiness apparatus — the settle criteria, the
+ * named blockers, the entire reason WARMING was carved out as its own phase —
+ * ran for 1ms and decided nothing. The curtain lifted on a stopwatch, which is
+ * the precise failure `vt/settle.js` was built to replace.
+ *
+ * Worse, it did so SILENTLY: `unfinishedWhenRevealed` came back `[]`, which
+ * reads as "nothing was outstanding" when it actually meant "nobody ever
+ * asked". An empty blocker list from an unrun check is not a clean bill of
+ * health ([[feedback_absent_zone_row_is_a_measurement]]).
+ *
+ * ## Why a floor, rather than simply a bigger total
+ *
+ * Raising `HARD_REVEAL_MS` would give the same pool to whichever phase happens
+ * to overrun first, which is how WARMING got starved in the first place. A
+ * floor is specifically a statement that the LAST phase — the only one that
+ * actually checks whether the scene is playable — cannot be crowded out by the
+ * ones before it. The author's own framing is that they would rather wait a
+ * little longer and be genuinely ready ("even at the cost of a little loading
+ * performance"), which is exactly this trade and not the other one.
+ *
+ * Bounded above by {@link ABSOLUTE_REVEAL_CEILING_MS} so this can never become
+ * the locked door `HARD_REVEAL_MS`'s own doc refuses to allow.
+ */
+export const READINESS_MIN_BUDGET_MS = 15000;
+
+/**
+ * THE LAST WORD — no load holds the curtain past this, whatever else is true.
+ *
+ * {@link READINESS_MIN_BUDGET_MS} deliberately lets the deadline move, and
+ * anything that can move can in principle be pushed. This cannot: it is a plain
+ * wall measured from the load's own start, with nothing derived from it and
+ * nothing able to extend it. It exists so the floor above is a patience
+ * allowance rather than an escape hatch from `HARD_REVEAL_MS`'s central
+ * promise — "we stop BLOCKING without ever saying the work is done".
+ *
+ * Generous on purpose (a genuine 12,000² cold load on a cold cache is minutes
+ * of real work, and revealing at 30s there was never mercy, only impatience),
+ * and still finite.
+ */
+export const ABSOLUTE_REVEAL_CEILING_MS = 90000;
+
 /** @enum {string} The phases of a scene load, in order. */
 export const LOAD_PHASES = Object.freeze({
   /**
@@ -391,7 +446,29 @@ export function reportProgress(state, phaseId, { done, total, detail, blockers, 
 export function hardRevealDue(state, nowMs, deadlineMs = HARD_REVEAL_MS) {
   if (!state || state.complete || state.error) return false;
   if (!Number.isFinite(nowMs) || !Number.isFinite(state.startedAtMs)) return false;
-  return nowMs - state.startedAtMs >= deadlineMs;
+  const elapsedMs = nowMs - state.startedAtMs;
+
+  // THE ABSOLUTE WALL FIRST — checked before the floor below can extend
+  // anything, so no combination of inputs can push the curtain past it.
+  if (elapsedMs >= ABSOLUTE_REVEAL_CEILING_MS) return true;
+  if (elapsedMs < deadlineMs) return false;
+
+  // PAST THE ORDINARY DEADLINE — but readiness gets its floor
+  // (mythica-machina-press#584). If WARMING has begun and has not yet had
+  // READINESS_MIN_BUDGET_MS to reach a verdict, keep waiting: the phases
+  // before it overran, and making READINESS pay for that is what reduced the
+  // whole settle apparatus to a 1ms formality on the load that prompted this.
+  //
+  // Deliberately reads the phase SPAN rather than `state.phase`, so this stays
+  // true for the phase that is actually running and cannot be fooled by a
+  // later phase transition. `startMs` is relative to the load's own start —
+  // the same origin `elapsedMs` is measured in — so the two are directly
+  // comparable without a second clock reading.
+  const warming = state.phases?.find?.((p) => p?.phase === LOAD_PHASES.WARMING && p?.endMs == null);
+  if (warming && Number.isFinite(warming.startMs)) {
+    if (elapsedMs - warming.startMs < READINESS_MIN_BUDGET_MS) return false;
+  }
+  return true;
 }
 
 /**

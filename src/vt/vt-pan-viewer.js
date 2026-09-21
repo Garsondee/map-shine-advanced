@@ -18000,6 +18000,40 @@ export async function startVtPanViewer({
     }
 
     let view = null; // set once the first item is loaded
+    // ── COLD-LOAD PREWARM DEFERRAL STATE (mythica-machina-press#584) ──
+    // DECLARED HERE, far above the functions that use them, for the same
+    // reason `pauseUnsub` is declared before `installPauseWatch`: a `let`/
+    // `const` has a temporal dead zone, `runPendingPrewarm` is reachable from
+    // `renderFrame` the instant `setAnimationLoop` is armed, and the
+    // declarations' natural home (beside `prewarmAdjacentFloors`) sits AFTER
+    // that line. It is safe today only because no `await` separates the two;
+    // hoisting the bindings means it stays safe when someone eventually adds
+    // one, instead of failing as a TDZ ReferenceError inside the render loop.
+    /**
+     * The floor whose adjacent-floor prewarm is waiting for the scene to
+     * settle, or `null` when nothing is pending (mythica-machina-press#584).
+     * @type {number|null}
+     */
+    let pendingPrewarmFloor = null;
+
+    /**
+     * FALLBACK RELEASE, counted in frames rather than milliseconds.
+     *
+     * A scene that never satisfies every settle criterion — one stuck probe, a
+     * 404'd mask, a counter that never returns to zero — must still eventually
+     * prewarm, or a real bug in one subsystem would silently make every floor
+     * switch slow forever. But a plain timeout would be the wrong instrument:
+     * the thing this defers for is CONTENTION, and a load that is still
+     * contended has not stopped being contended just because 30 seconds passed.
+     *
+     * A frame count says the thing that actually matters here — "the renderer
+     * is genuinely running freely now" — and says it in the one unit that
+     * cannot be satisfied by a starved loop. 1800 frames is ~30s at 60fps and
+     * proportionally longer on a machine that is struggling, which is exactly
+     * the right way round. `time/one-clock`: no clock is read here at all.
+     */
+    const PREWARM_FALLBACK_FRAMES = 1800;
+
     /** Wall-clock cost of the pre-first-draw shader precompile; null if it failed. */
     let shaderCompileMs = null;
     /** Wall-clock cost of the most recent {@link warmUpDrawState} call; null if it has not run or failed. */
@@ -18112,7 +18146,25 @@ export async function startVtPanViewer({
      * far finer than the multi-second stages it is watching, and continuous
      * (so a work spike between two external polls is still seen).
      */
-    const settleTracker = createSettleTracker({ hitchMs: HITCH_THRESHOLD_MS });
+    /**
+     * How long frame-time steadiness may be the ONLY outstanding thing before
+     * the scene counts as settled anyway (mythica-machina-press#584). See
+     * `createSettleTracker`'s own `slowSceneGraceMs` doc for why this exists —
+     * in short, `HITCH_THRESHOLD_MS` is an absolute 50ms bar, so without this a
+     * fully-loaded scene running below 20fps could never settle at all and the
+     * curtain over it could only ever be lifted by the deadline.
+     *
+     * Long enough that a scene merely recovering from a compile burst gets to
+     * settle properly through the ordinary quiet door instead (that path needs
+     * only `DEFAULT_SETTLE_QUIET_MS`, 1500ms, of genuine calm — comfortably
+     * inside this window), and short enough that a genuinely heavy map is not
+     * held behind a curtain for something a curtain cannot fix.
+     */
+    const SLOW_SCENE_GRACE_MS = 4000;
+    const settleTracker = createSettleTracker({
+      hitchMs: HITCH_THRESHOLD_MS,
+      slowSceneGraceMs: SLOW_SCENE_GRACE_MS,
+    });
     let settleFrameCount = 0;
     const SETTLE_SAMPLE_EVERY_FRAMES = 10;
     /**
@@ -19679,6 +19731,91 @@ export async function startVtPanViewer({
      *
      * @param {{includePresent?: boolean}} [opts]
      */
+    /**
+     * A SYNTHETIC ANIMATED FRAME'S WORTH OF SIM TIME, used only by the warm-up.
+     *
+     * One frame at 60fps. Any positive value would do — the point is strictly
+     * that it is NOT ZERO, because zero is the one value that leaves every
+     * "has anything moved?" branch untaken. Deliberately below
+     * `particle-runtime.js`'s own 0.05 clamp so nothing here can produce a
+     * lurch even if a kernel did integrate it (none of this is presented —
+     * see {@link warmUpSims}).
+     */
+    const WARM_UP_SIM_DT_SEC = 1 / 60;
+
+    /**
+     * WARM UP THE SIMULATION KERNELS — the half of the first frame that
+     * `warmUpDrawState` structurally cannot reach (mythica-machina-press#584).
+     *
+     * ============================================================================
+     * THE GAP, AND THE AUTHOR REPORT THAT NAMES IT
+     * ============================================================================
+     * *"Foundry VTT defaults to being paused when you log in. As soon as I hit
+     * space to unpause we get another long pause and freeze, perhaps something
+     * is compiling upon the first batch of animated frames?"* — that guess is
+     * correct, and this is the mechanism.
+     *
+     * `warmUpDrawState` warms everything `runPassPlan` draws. But the particle,
+     * gust, fire and precipitation COMPUTE kernels are not in the pass plan:
+     * `renderFrame` dispatches them in its own `sims` block, BEFORE the plan
+     * runs, specifically because a compute dispatch must not run with a render
+     * target bound (see that block's own ⚠️ note). So `warmUpDrawState()`, which
+     * calls `runPassPlan` and nothing else, has never touched them — despite its
+     * own header claiming it reaches `particleEngine.scene`/`gustEngine.scene`,
+     * which is true of their RENDER pipelines and false of their COMPUTE ones.
+     *
+     * That alone would be survivable, because the first real frame dispatches
+     * them anyway. What makes it a freeze the user actually feels is PAUSE:
+     * Foundry logs you in paused, `installPauseWatch` applies scale 0 instantly,
+     * and so every frame of the entire load runs with `dtSec` pinned at 0. Any
+     * kernel branch, spawn path or material variant that only exists once
+     * something has actually MOVED therefore compiles for the first time on the
+     * first unpaused frame — which is the moment the curtain is long gone and a
+     * person is looking straight at it.
+     *
+     * ============================================================================
+     * WHY THIS IS SAFE
+     * ============================================================================
+     * - It is the SAME calls, with the SAME guards, in the SAME order as
+     *   `renderFrame`'s own `sims` block. Not a parallel implementation — if
+     *   that block's preconditions are not met, neither are these, and each
+     *   `if` simply does not fire.
+     * - It runs where `warmUpDrawState` runs: before `setAnimationLoop`, with
+     *   NO render target bound — exactly the condition the real `sims` block
+     *   documents as required for a compute dispatch.
+     * - Nothing it produces is ever presented. It advances sim state by a
+     *   sixtieth of a second into buffers that the first real frame overwrites
+     *   from the live clock regardless.
+     * - It cannot fail a load: its call site wraps it in its own try/catch —
+     *   separate from the draw warm-up's, so a sim kernel that refuses to warm
+     *   cannot stop the pass plan warming. Same posture `warmUpDrawState` and
+     *   `compileAsync` already take: warming is an optimisation, never a
+     *   reason a scene fails to appear.
+     *
+     * ⚠️ NOT a claim that every animated pipeline is now warm. A kernel variant
+     * that only compiles under some condition this synthetic frame does not
+     * reproduce will still compile late — and that is precisely why the
+     * WARMING phase's settle criteria (which restart the quiet clock on any new
+     * pipeline compile) remain the real backstop rather than this being one.
+     * This shortens the tail; `vt/settle.js` is what refuses to lie about it.
+     */
+    function warmUpSims() {
+      if (!view) return;
+      const currentViewRect = viewToWorldRect(view, canvasW / canvasH);
+      const windSpawnRect = clampRectToBounds(currentViewRect, dimensions.sceneRect);
+      const tMs = uGlobalTimeMs.value;
+      if (windParticlesEnabled && particleEngine) {
+        particleEngine.step(renderer, { dtSec: WARM_UP_SIM_DT_SEC, tMs, worldRect: windSpawnRect });
+      }
+      if (windGustsEnabled && gustEngine) {
+        gustEngine.step(renderer, { dtSec: WARM_UP_SIM_DT_SEC, tMs, worldRect: windSpawnRect });
+      }
+      if (fireSubsystem) fireSubsystem.sync(renderer, tMs, WARM_UP_SIM_DT_SEC, windSpawnRect);
+      if (precipitationSubsystem) {
+        precipitationSubsystem.sync(renderer, WARM_UP_SIM_DT_SEC, tMs, windSpawnRect);
+      }
+    }
+
     function warmUpDrawState({ includePresent = true } = {}) {
       const ids = includePresent ? framePlan.ids : framePlan.ids.filter((id) => id !== 'present.composite');
       const before = readPipelineCount();
@@ -19801,6 +19938,11 @@ export async function startVtPanViewer({
       // shown yet, and the hitch it was meant to catch would fall between two
       // samples and be judged by neither.
       maxFrameGapSinceSettleSampleMs = 0;
+      // THE COLD LOAD'S DEFERRED PREWARM (mythica-machina-press#584) — released
+      // here because this is the one place that already knows both things it
+      // depends on: whether the scene has settled, and how many real frames
+      // have rendered. A no-op unless a cold load actually deferred one.
+      runPendingPrewarm(result);
       return result;
     }
 
@@ -22196,6 +22338,23 @@ export async function startVtPanViewer({
     // loop for a yield point to race against — see `warmUpDrawStateChunked`'s
     // header for why the floor-switch call site a few hundred lines up can
     // never take this same branch.
+    // THE SIM KERNELS FIRST (mythica-machina-press#584) — see `warmUpSims`'s
+    // own header. COLD LOAD ONLY, and deliberately not folded into
+    // `warmUpDrawState`: that function is also the floor-switch warm-up, which
+    // runs with the real render loop live and whose safety argument rests on
+    // doing as little as possible between a temporary mesh-visibility flip and
+    // its restore. The sim kernels are long since warm by the time any floor
+    // switch happens, so there is nothing to gain there and a live loop to
+    // avoid perturbing. Same scoping rule as `warmUpDrawStateChunked`, and for
+    // the same reason.
+    //
+    // Its own try/catch, not the draw's: a sim kernel that refuses to warm must
+    // not prevent the PASS PLAN below from warming, which is the larger prize.
+    try {
+      warmUpSims();
+    } catch (err) {
+      log.warn('sim warm-up failed — animated kernels will compile on their first real step:', err);
+    }
     if (_chunkedWarmUpEnabled) {
       await warmUpDrawStateChunked();
     } else {
@@ -22272,6 +22431,32 @@ export async function startVtPanViewer({
      * already kicked off (a texture fetch, a compression job) is wasted
      * even when it does — see `prepareFloor`'s own doc.
      */
+    /** Hold the cold load's prewarm until the scene settles. */
+    function schedulePrewarmAfterSettle(centerFloorIndex) {
+      pendingPrewarmFloor = centerFloorIndex;
+    }
+
+    /**
+     * Release a pending cold-load prewarm once the scene has settled (or once
+     * the renderer has plainly been running freely for a long time anyway).
+     * Called from `sampleSceneSettle`, which is the one place that already
+     * knows both facts. A no-op when nothing is pending, so the floor-switch
+     * prewarm path is entirely unaffected.
+     * @param {{settled?: boolean}|null} settleResult
+     */
+    function runPendingPrewarm(settleResult) {
+      if (pendingPrewarmFloor === null) return;
+      const due = settleResult?.settled === true || settleFrameCount >= PREWARM_FALLBACK_FRAMES;
+      if (!due) return;
+      const floorIndex = pendingPrewarmFloor;
+      // Cleared BEFORE the call, not after: `prewarmAdjacentFloors` kicks off
+      // async chains, and leaving the pending marker set across that would let
+      // the next settle sample start a second, overlapping prewarm of the same
+      // floors.
+      pendingPrewarmFloor = null;
+      prewarmAdjacentFloors(floorIndex);
+    }
+
     function prewarmAdjacentFloors(centerFloorIndex) {
       const adjacentFloors = [];
       for (let f = 0; f < floorCount; f++) {
@@ -22298,7 +22483,30 @@ export async function startVtPanViewer({
         }
       })();
     }
-    prewarmAdjacentFloors(clampedInitialFloor);
+    // DEFERRED, NOT IMMEDIATE (mythica-machina-press#584).
+    //
+    // This used to be a bare `prewarmAdjacentFloors(clampedInitialFloor)` on
+    // this line — fired one statement after `setAnimationLoop(renderFrame)`,
+    // i.e. at the exact instant the viewed floor is trying to produce its first
+    // frames. Read what it actually starts: a full `prepareFloor` per adjacent
+    // floor (its own doc: "textures, masks AND GPU pipeline warm-up"), plus
+    // item metadata for every remaining floor. That is a second, third and
+    // fourth scene's worth of decode/compress/compile work racing the one the
+    // person is waiting to look at, on the same main thread.
+    //
+    // It is also work that, by its own stated purpose, NOBODY IS WAITING FOR:
+    // prewarm exists so a LATER floor switch is instant. It has no bearing on
+    // whether the floor currently on screen is playable, so paying for it
+    // before the curtain lifts is paying at the worst possible moment — and, if
+    // its streaming registers on the readiness counters at all, it actively
+    // holds the curtain up for art the player cannot even see yet.
+    //
+    // So it now waits for the scene to actually settle. `runPendingPrewarm`
+    // (called from `sampleSceneSettle`) releases it. The floor-switch call
+    // sites are UNCHANGED and still immediate — there the previous floor is
+    // already a complete picture on screen, nothing is being held back, and
+    // being fast is the whole point.
+    schedulePrewarmAfterSettle(clampedInitialFloor);
 
     // capture:true — see onKeyDown's comment. Must run before Foundry's own
     // window-level keydown listener (registered at Foundry boot, bubble phase).
@@ -23218,19 +23426,35 @@ export async function startVtPanViewer({
        */
       /**
        * SCENE SETTLE — the one call that answers "has this map finished
-       * appearing?" with a reason attached. Samples fresh on every call (so a
-       * caller polling slower than the render cadence still gets current
-       * truth) and returns `vt/settle.js`'s verdict: `settled`, how long work
-       * has been quiet, and — when it has not settled — exactly what it is
-       * still waiting for.
+       * appearing?" with a reason attached. Returns `vt/settle.js`'s verdict:
+       * `settled`, how long work has been quiet, and — when it has not
+       * settled — exactly what it is still waiting for.
+       *
+       * READ-ONLY: returns the most recent sample, and TAKES NONE. A caller
+       * that needs a current reading (rather than whatever the render loop
+       * last managed to take) must call `sampleSceneSettleNow()` first — see
+       * that method, and the warning inside this one, for why the difference
+       * is load-bearing rather than pedantic.
        */
       getSceneSettle() {
-        // The LAST sample, never a fresh one: sampling here would mean reading
-        // a clock outside the render loop (`time/one-clock`), and the loop
+        // The LAST sample, never a fresh one — see `sampleSceneSettleNow`
+        // below for the on-demand companion and why it had to exist.
+        //
+        // ⚠️ THIS COMMENT USED TO CLAIM "Samples fresh on every call (so a
+        // caller polling slower than the render cadence still gets current
+        // truth)" in the API docstring above, which was FALSE and expensively
+        // so (mythica-machina-press#584). The reasoning it gave — "the loop
         // already samples on its own cadence — at 60fps the answer is at most
-        // ~160ms old, far finer than the multi-second stages being watched.
-        // A renderer that has stopped returns its last sample unchanged, which
-        // correctly reads as "not settled" rather than inventing progress.
+        // ~160ms old" — silently assumes 60fps. During a cold load the render
+        // loop is exactly what is NOT running freely: a live report measured
+        // TWO rendered frames across a 25.7-second window, and
+        // `sampleSceneSettle` only runs every SETTLE_SAMPLE_EVERY_FRAMES (10)
+        // frames, so the tracker was sampled ZERO times for the entire stretch
+        // the curtain was waiting on it. A poller then reads this same stale
+        // object forever and the scene can only ever be revealed by the
+        // deadline. A readiness instrument that cannot be read during the one
+        // window it exists for is a stopwatch with extra steps
+        // ([[feedback_instruments_must_not_lie]]).
         return (
           settleTracker.read() ?? {
             settled: false,
@@ -23253,6 +23477,62 @@ export async function startVtPanViewer({
             sampledAtMs: null,
           }
         );
+      },
+      /**
+       * TAKE A SETTLE SAMPLE RIGHT NOW, off the render loop's cadence, and
+       * return the fresh verdict (mythica-machina-press#584).
+       *
+       * ============================================================================
+       * WHY A SECOND WAY IN EXISTS AT ALL
+       * ============================================================================
+       * `sampleSceneSettle` is called from `renderFrame`, every
+       * SETTLE_SAMPLE_EVERY_FRAMES frames. That is the right cadence for a
+       * scene that is RUNNING — and exactly the wrong one for a scene that is
+       * LOADING, because during a cold load the render loop is the thing under
+       * contention. The readiness verdict was therefore unobservable during
+       * precisely the window it was built to describe: the curtain polled
+       * `getSceneSettle()` every 250ms and got the same stale object back every
+       * time, so it could never lift on readiness — only ever on the deadline.
+       *
+       * This is the poll-side entry point that closes that hole. The curtain
+       * calls it on its own 250ms cadence, so readiness is measured on a
+       * schedule the load cannot starve, and every named blocker reaches the
+       * screen while it is still true rather than after the fact.
+       *
+       * ============================================================================
+       * WHY THIS IS SAFE TO CALL FROM OUTSIDE THE LOOP
+       * ============================================================================
+       * It reads counters and samples the tracker. It renders nothing, touches
+       * no GPU resource, mutates no scene state, and takes no lock — the same
+       * safety class as `getSceneSettle()` one step further, and strictly
+       * weaker than anything `readiness.collect()`'s probes already do every
+       * tenth frame. The one piece of shared mutable state it consumes,
+       * `maxFrameGapSinceSettleSampleMs`, is a per-window maximum that
+       * `sampleSceneSettle` already resets after every sample: sampling more
+       * often splits the same evidence across more windows, it never discards
+       * it (a hitch still lands in exactly one window, and that window still
+       * restarts the quiet clock).
+       *
+       * ⚠️ It does NOT fabricate frames. `settleTracker` still requires real
+       * frames to have advanced during the quiet window, so a starved renderer
+       * polled a hundred times reports "not settled — frames to render" a
+       * hundred times. That is the correct answer, and saying it out loud every
+       * 250ms is the entire improvement: the failure goes from invisible to
+       * named.
+       *
+       * `time/one-clock`: the clock read is `perfNowMs()`, the same import this
+       * file already uses for every other timing (see `renderFrame`) — not a
+       * second clock, just a second CALLER of the one clock.
+       */
+      sampleSceneSettleNow() {
+        // Nothing to sample before the loop has ever been armed — the tracker
+        // has no baseline and `settleFrameCount` is 0, so a sample here would
+        // only manufacture a confident-looking "nothing outstanding" reading
+        // out of a viewer that has not started. Fall through to the read-only
+        // path, whose own fallback says exactly that.
+        if (!loopActive) return this.getSceneSettle();
+        sampleSceneSettle(perfNowMs());
+        return this.getSceneSettle();
       },
       setEarlyZComposition(on) {
         const next = !!on;
@@ -26598,6 +26878,21 @@ const ART_TEXTURE_ANISOTROPY = 16;
  * capability for the author to enable and live-test deliberately, never a
  * default-behaviour change.
  *
+ * ⚠️ NOW DEFAULT ON (mythica-machina-press#584). The paragraph above describes
+ * why it SHIPPED off, and that reasoning was right at the time. What changed is
+ * that the author has since set the standing requirement it was waiting for:
+ * *"I want a loading screen that is responsive and active for the entire
+ * loading speed, even at the cost of a little loading performance."* That is
+ * this flag's exact trade — it costs one animation-frame round trip per batch
+ * of 4 passes and buys a curtain whose pulse keeps moving through shader
+ * compilation instead of freezing solid. A frozen pulse during the single
+ * longest stall of the load is indistinguishable from a crashed tab, which is
+ * the specific impression the author reports customers forming.
+ *
+ * Still a flag, and still reversible in one call
+ * (`MapShine.setChunkedWarmUp(false)`) — the cold-load call site branches on it
+ * exactly as before, and the synchronous path it falls back to is unchanged.
+ *
  * Module-level, not `_active`-scoped, for the SAME reason `_albedoClarityForce`
  * below is (see that variable's own comment): the flag is read DURING
  * `startVtPanViewer`'s own construction, before `_active` exists, so an
@@ -26611,7 +26906,7 @@ const ART_TEXTURE_ANISOTROPY = 16;
  * `warmUpDrawStateChunked`'s own header for why that must stay true.
  * @type {boolean}
  */
-let _chunkedWarmUpEnabled = false;
+let _chunkedWarmUpEnabled = true;
 
 /**
  * Opt into (or back out of) the chunked cold-load warm-up
@@ -27330,6 +27625,23 @@ export function setVtPanViewerEarlyZComposition(on) {
 export function getVtPanViewerSceneSettle() {
   if (!_active) return { skipped: true, reason: 'viewer not started', settled: false };
   return _active.getSceneSettle();
+}
+
+/**
+ * SCENE SETTLE, SAMPLED FRESH (mythica-machina-press#584) — the poll-side
+ * companion to {@link getVtPanViewerSceneSettle}, which only ever returns
+ * whatever the render loop last managed to record.
+ *
+ * Use this from anything that POLLS readiness on its own clock — above all the
+ * cold-load curtain, whose whole job is to describe a window in which the
+ * render loop is too contended to sample on its own. See
+ * `sampleSceneSettleNow` inside the viewer for the full account of why a
+ * read-only poll was silently unable to observe readiness during a load, and
+ * why taking the sample here is safe.
+ */
+export function sampleVtPanViewerSceneSettleNow() {
+  if (!_active) return { skipped: true, reason: 'viewer not started', settled: false };
+  return _active.sampleSceneSettleNow();
 }
 
 /**

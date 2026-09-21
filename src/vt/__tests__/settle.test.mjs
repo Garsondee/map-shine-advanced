@@ -252,6 +252,96 @@ export function run(t) {
     );
   }
 
+  // --- THE SLOW-SCENE ESCAPE (mythica-machina-press#584) --------------------
+  // `hitchMs` is an ABSOLUTE bar (50ms at the real call site). Without an
+  // escape, a fully-loaded scene rendering below 20fps trips steadiness on
+  // every sample forever and can never settle — so the curtain over it can only
+  // ever be lifted by the deadline. These tests pin both halves: that the
+  // escape works, and that it cannot be taken while real work is outstanding.
+  {
+    const tr = createSettleTracker({ quietMs: 1000, minFrames: 2, hitchMs: 50, slowSceneGraceMs: 500 });
+    // A scene with nothing outstanding, but every frame over the hitch bar.
+    let frame = 0;
+    const slowSample = (atMs) => tr.sample({}, atMs, (frame += 10), { maxFrameGapMs: 66, pipelineCompileCount: 5 });
+
+    const first = slowSample(0);
+    ok('a slow-but-empty scene does not settle immediately', first.settled === false);
+    ok(
+      '...and names steadiness as the blocker',
+      first.blockers.some((b) => b.key === 'frameTimeSteadiness')
+    );
+
+    slowSample(200);
+    ok('...still not settled inside the grace period', tr.read().settled === false);
+
+    const escaped = slowSample(600);
+    ok('once the grace period elapses, a loaded-but-slow scene IS settled', escaped.settled === true);
+    ok('...and says which door it came through', escaped.settledVia === 'slow-scene');
+    ok(
+      '...and stops claiming to be waiting for anything',
+      Array.isArray(escaped.waitingFor) && escaped.waitingFor.length === 0
+    );
+    ok(
+      '...while STILL recording the steadiness failure rather than hiding it',
+      escaped.criteria.steadiness === 'blocked' && escaped.blockers.some((b) => b.key === 'frameTimeSteadiness')
+    );
+  }
+  {
+    // THE ESCAPE MUST NOT COVER REAL WORK. Outstanding work is a loading fact,
+    // not a performance one, and no amount of elapsed time may excuse it.
+    const tr = createSettleTracker({ quietMs: 1000, minFrames: 2, hitchMs: 50, slowSceneGraceMs: 500 });
+    let frame = 0;
+    for (const atMs of [0, 200, 600, 5000]) {
+      tr.sample({ itemsLoading: 3 }, atMs, (frame += 10), { maxFrameGapMs: 66, pipelineCompileCount: 5 });
+    }
+    const s = tr.read();
+    ok('outstanding work never takes the slow-scene door, however long it waits', s.settled === false);
+    ok(
+      '...and still names the real blocker',
+      s.waitingFor.some((w) => /map layers still loading/.test(w))
+    );
+  }
+  {
+    // A PIPELINE STILL COMPILING IS ALSO REAL WORK — the other half of the
+    // "only steadiness" condition, tested separately so a future edit cannot
+    // drop it silently.
+    const tr = createSettleTracker({ quietMs: 1000, minFrames: 2, hitchMs: 50, slowSceneGraceMs: 500 });
+    let frame = 0;
+    let compiles = 5;
+    for (const atMs of [0, 200, 600, 5000]) {
+      tr.sample({}, atMs, (frame += 10), { maxFrameGapMs: 66, pipelineCompileCount: (compiles += 2) });
+    }
+    ok('a scene still compiling pipelines never takes the slow-scene door', tr.read().settled === false);
+  }
+  {
+    // OFF BY DEFAULT — every existing caller keeps the old, stricter rule.
+    const tr = createSettleTracker({ quietMs: 1000, minFrames: 2, hitchMs: 50 });
+    let frame = 0;
+    for (const atMs of [0, 200, 600, 5000, 60000]) {
+      tr.sample({}, atMs, (frame += 10), { maxFrameGapMs: 66, pipelineCompileCount: 5 });
+    }
+    ok('without slowSceneGraceMs, steadiness blocks forever exactly as before', tr.read().settled === false);
+  }
+  {
+    // A NORMAL SETTLE STILL REPORTS THE ORDINARY DOOR, so `settledVia` can be
+    // trusted to distinguish the two rather than merely existing.
+    const tr = createSettleTracker({ quietMs: 100, minFrames: 2, hitchMs: 50, slowSceneGraceMs: 500 });
+    tr.sample({}, 0, 0, { maxFrameGapMs: 8, pipelineCompileCount: 5 });
+    const s = tr.sample({}, 200, 10, { maxFrameGapMs: 8, pipelineCompileCount: 5 });
+    ok('a genuinely quiet scene settles the ordinary way', s.settled === true && s.settledVia === 'quiet');
+  }
+  {
+    // RESET CLEARS THE SLOW CLOCK — a floor switch is new work and must not
+    // inherit the previous epoch's accumulated slow time.
+    const tr = createSettleTracker({ quietMs: 1000, minFrames: 2, hitchMs: 50, slowSceneGraceMs: 500 });
+    let frame = 0;
+    tr.sample({}, 0, (frame += 10), { maxFrameGapMs: 66, pipelineCompileCount: 5 });
+    tr.sample({}, 400, (frame += 10), { maxFrameGapMs: 66, pipelineCompileCount: 5 });
+    tr.reset();
+    const afterReset = tr.sample({}, 600, (frame += 10), { maxFrameGapMs: 66, pipelineCompileCount: 5 });
+    ok('reset restarts the slow-scene clock, it does not carry over', afterReset.settled === false);
+  }
+
   // --- housekeeping --------------------------------------------------------
   {
     const tr = createSettleTracker();

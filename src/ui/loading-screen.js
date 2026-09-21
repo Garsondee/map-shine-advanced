@@ -60,6 +60,7 @@ import {
   activeHiddenMs,
   describeLoad,
   hardRevealDue,
+  HARD_REVEAL_MS,
   shouldShowForScene,
 } from './load-progress.js';
 import { perfNowMs } from '../core/frame-clock.js';
@@ -432,6 +433,29 @@ export function reportSceneLoadProgress(phaseId, opts) {
 export function beginSceneLoadPhase(phaseId, opts) {
   if (!state) return;
   beginPhase(state, phaseId, { ...opts, nowMs: now() });
+}
+
+/**
+ * HAS THE ORDINARY REVEAL DEADLINE ALREADY PASSED? (mythica-machina-press#587)
+ *
+ * Distinct from {@link shouldStopWaitingForReady}, which answers "must I stop
+ * NOW" and deliberately honours `READINESS_MIN_BUDGET_MS`'s floor. This answers
+ * the narrower question the no-progress check needs: are we past
+ * `HARD_REVEAL_MS`, i.e. already into borrowed time?
+ *
+ * Kept here rather than in boot for the same reason the rest of this is: the
+ * curtain owns the load's clock, including the hidden-tab accounting that makes
+ * "elapsed" mean ACTIVE elapsed. A caller computing this itself would silently
+ * start billing background time again.
+ *
+ * @returns {boolean} false when no curtain is up — nothing is being hidden, so
+ *   nothing is overdue.
+ */
+export function pastOrdinaryRevealDeadline() {
+  if (!state) return false;
+  const nowMs = now();
+  const activeMs = nowMs - state.startedAtMs - activeHiddenMs(state, nowMs);
+  return activeMs >= HARD_REVEAL_MS;
 }
 
 /**

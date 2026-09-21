@@ -206,6 +206,21 @@ const READY_POLL_MS = 250;
  * that made this bound necessary.
  */
 const FIRST_PAINT_MAX_MS = 10000;
+
+/**
+ * How many consecutive readiness polls may report the EXACT same named
+ * blockers (same keys, same counts) before the curtain stops waiting — once
+ * the ordinary reveal deadline has already passed.
+ *
+ * 20 polls x READY_POLL_MS = ~5s of demonstrably zero progress. Not a guess at
+ * how long work "should" take: it is how long we are willing to keep a curtain
+ * up on evidence that nothing is moving. `READINESS_MIN_BUDGET_MS` still
+ * guarantees readiness its floor whenever progress IS happening — this only
+ * cuts short the case where it provably is not, which on the first live load
+ * cost 29,556ms and changed nothing about the outcome.
+ */
+const READINESS_NO_PROGRESS_POLLS = 20;
+
 /** Plain fixed-duration wait — no clock read, just a timer (time/one-clock
  * is about READING the current time, which this never does). @param {number} ms */
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -589,6 +604,7 @@ import {
   reportSceneLoadProgress,
   reportSceneLoadBlockers,
   shouldStopWaitingForReady,
+  pastOrdinaryRevealDeadline,
   endSceneLoad,
   getLoadingScreenState,
   resetLoadingSceneMemory,
@@ -614,6 +630,7 @@ import {
   installRemote,
   installPlayer,
   LOAD_PHASES,
+  blockerSignature,
   installCompressionStatusBadge,
 } from './ui/index.js';
 import {
@@ -15587,6 +15604,27 @@ function install() {
         }
 
         async function waitForSceneReady() {
+          // NO-PROGRESS DETECTION (mythica-machina-press#587).
+          //
+          // `READINESS_MIN_BUDGET_MS` guarantees readiness a floor it cannot be
+          // crowded out of. On a scene that is CONVERGING that is exactly
+          // right. On one that is not, it is 15 extra seconds of curtain bought
+          // for nothing — which is what the first live load did: it held for
+          // 29,556ms and then force-revealed on the identical three blockers it
+          // started with, while frames were taking 6,683ms each. The user
+          // waited half a minute longer and got precisely the same scene.
+          //
+          // So the floor is now conditional on progress. If the named blockers
+          // have not changed at all for READINESS_NO_PROGRESS_POLLS consecutive
+          // polls AND the ordinary deadline has already passed, readiness is
+          // not going to be reached by waiting longer, and continuing to wait
+          // is just a slower version of the same forced reveal.
+          //
+          // Compared by the blockers' stable KEYS and counts, never their
+          // formatted strings: a count ticking 3 -> 2 is real progress and must
+          // reset the counter, but a label that merely re-renders must not.
+          let lastSignature = null;
+          let unchangedPolls = 0;
           for (;;) {
             // SAMPLES, rather than merely reading (mythica-machina-press#582).
             // `getVtPanViewerSceneSettle()` returns whatever the render loop
@@ -15615,6 +15653,18 @@ function install() {
             if (settle?.skipped) return { ready: false, reason: settle.reason ?? 'viewer not running' };
             const stop = shouldStopWaitingForReady();
             if (stop.stop) return { ready: false, reason: stop.reason, waitingFor: settle?.waitingFor ?? [] };
+            const signature = blockerSignature(settle?.blockers);
+            unchangedPolls = signature === lastSignature ? unchangedPolls + 1 : 0;
+            lastSignature = signature;
+            if (unchangedPolls >= READINESS_NO_PROGRESS_POLLS && pastOrdinaryRevealDeadline()) {
+              return {
+                ready: false,
+                reason: `readiness stopped making progress (unchanged for ${Math.round(
+                  (unchangedPolls * READY_POLL_MS) / 1000
+                )}s past the reveal deadline)`,
+                waitingFor: settle?.waitingFor ?? [],
+              };
+            }
             reportSceneLoadBlockers(settle?.waitingFor ?? [], null, settle?.blockers ?? []);
             await new Promise((r) => setTimeout(r, READY_POLL_MS));
           }

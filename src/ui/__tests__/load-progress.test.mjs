@@ -25,6 +25,7 @@ import {
   recordTick,
   describeLoad,
   hardRevealDue,
+  blockerSignature,
   recordVisibility,
   activeHiddenMs,
   HARD_REVEAL_MS,
@@ -583,6 +584,52 @@ export function run(t) {
     recordVisibility(s, false, 60000);
     recordTick(s, 60016);
     ok('a background stretch is not recorded as a main-thread stall', s.worstStallMs === 0);
+  }
+
+  // --- IS THE WAIT MAKING PROGRESS? (mythica-machina-press#587) ------------
+  // `READINESS_MIN_BUDGET_MS` is right for a load that is converging and pure
+  // waste for one that is not: the first live load held 29,556ms and then
+  // force-revealed on the identical three blockers it started with. This
+  // fingerprint is what tells those two cases apart, so its exact sensitivity
+  // matters in both directions.
+  {
+    ok('no blockers is a stable, comparable value, not a special case', blockerSignature([]) === '');
+    ok('null/undefined are the same stable value', blockerSignature(null) === '' && blockerSignature(undefined) === '');
+
+    const a = [
+      { key: 'itemsLoading', label: 'map layers still loading', count: 3 },
+      { key: 'maskPagesPending', label: 'mask pages still streaming', count: 1 },
+    ];
+    ok('the same blockers twice fingerprint identically', blockerSignature(a) === blockerSignature(a.slice()));
+
+    // PROGRESS must change the fingerprint, or a converging load gets cut off.
+    const progressed = [
+      { key: 'itemsLoading', label: 'map layers still loading', count: 2 },
+      { key: 'maskPagesPending', label: 'mask pages still streaming', count: 1 },
+    ];
+    ok(
+      'a count ticking down IS progress and changes the fingerprint',
+      blockerSignature(a) !== blockerSignature(progressed)
+    );
+
+    // NOISE must NOT change it, or the no-progress check never fires.
+    const reordered = [a[1], a[0]];
+    ok('blocker ORDER is not progress', blockerSignature(a) === blockerSignature(reordered));
+    const relabelled = [
+      { key: 'itemsLoading', label: 'COMPLETELY different prose', count: 3 },
+      { key: 'maskPagesPending', label: 'also different', count: 1 },
+    ];
+    ok(
+      'a changed LABEL is not progress — keys and counts are what count',
+      blockerSignature(a) === blockerSignature(relabelled)
+    );
+
+    // A blocker appearing or disappearing is real movement.
+    ok('losing a blocker changes the fingerprint', blockerSignature(a) !== blockerSignature([a[0]]));
+    ok(
+      'a malformed blocker does not throw and does not collide with a real one',
+      blockerSignature([{}]) === '?:?' && blockerSignature([{}]) !== blockerSignature([{ key: 'x', count: 0 }])
+    );
   }
 
   // --- the blocker list is capped, and SAYS it is --------------------------

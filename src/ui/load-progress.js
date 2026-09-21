@@ -562,6 +562,32 @@ export function activeHiddenMs(state, nowMs) {
 }
 
 /**
+ * A STABLE FINGERPRINT of what readiness is currently blocked on
+ * (mythica-machina-press#587), for deciding whether a wait is making progress.
+ *
+ * Built from each blocker's stable KEY and COUNT, sorted — never from the
+ * formatted display strings. Two reasons, both load-bearing:
+ *
+ *   - a count ticking 3 -> 2 IS progress and must change the fingerprint, so
+ *     the wait is not cut short on a load that is genuinely converging;
+ *   - a label that merely re-renders, or blockers arriving in a different
+ *     order, is NOT progress and must not reset the clock — which comparing
+ *     the human-readable `waitingFor` strings would do, since those interleave
+ *     counts into prose and are built for a reader, not a comparison.
+ *
+ * @param {ReadonlyArray<{key?:string,count?:number}>|null|undefined} blockers
+ * @returns {string} '' when nothing is blocking — which is itself a stable,
+ *   comparable value, not a special case.
+ */
+export function blockerSignature(blockers) {
+  if (!Array.isArray(blockers) || blockers.length === 0) return '';
+  return blockers
+    .map((b) => `${b?.key ?? '?'}:${Number.isFinite(b?.count) ? b.count : '?'}`)
+    .sort()
+    .join('|');
+}
+
+/**
  * The tab became hidden or visible. Pure, like everything else here — the
  * browser event lives in `loading-screen.js`.
  *

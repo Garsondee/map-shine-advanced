@@ -29,7 +29,7 @@ export {
 // report.js` needs the same `LOAD_PHASES` ids and `PHASE_LABELS` names
 // `load-progress.js` already declares, to label phases without hand-keeping a
 // second copy that would drift the moment a phase is renamed.
-export { LOAD_PHASES, PHASE_LABELS } from './load-progress.js';
+export { LOAD_PHASES, PHASE_LABELS, blockerSignature } from './load-progress.js';
 
 // The LANTERN widget canon (U0, docs/holy/UI-Testament.md §9) — the ONE
 // type→widget mapping and its pure category/FOH-ROH/snapshot logic, shared by

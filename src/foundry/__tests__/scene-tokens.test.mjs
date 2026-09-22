@@ -19,6 +19,7 @@ import {
 } from '../scene-tokens.js';
 import { collectTiles, computeItemPlacement } from '../scene-layers.js';
 import { sortByLayer, SORT_LAYERS } from '../../scene/layer-order.js';
+import { GRID_TYPES } from '../scene-geometry.js';
 
 /** A Token shaped like the real v14 document. width/height are GRID UNITS. */
 const mkToken = (id, extra = {}) => ({
@@ -66,6 +67,47 @@ export function run(t) {
       'a token missing every field defaults to one grid square at the origin',
       f.width === 100 && f.height === 100 && f.x === 0
     );
+  }
+
+  // ---- footprint: hex grids (mythica-machina-press#105) ------------------
+  {
+    const HEX_AXIS_SCALE = 1.1547005383792515; // 2*sqrt(1/3), TokenDocument#getSize's own factor
+    // No gridType argument at all -> byte-identical old (square) behaviour.
+    const square = tokenFootprint(mkToken('sq', { width: 1, height: 1 }), 100);
+    t.ok('omitting gridType keeps square-grid behaviour', square.width === 100 && square.height === 100);
+
+    // A plain 1x1 token on a flat-top (column-based) hex grid: the WIDTH axis
+    // gets the sqrt(1/3) correction even though the grid-unit compression
+    // itself is a no-op for an integer count — see this function's own doc
+    // for why this is NOT the same as the square-grid footprint.
+    const flatTop1x1 = tokenFootprint(mkToken('a', { width: 1, height: 1 }), 100, GRID_TYPES.HEXODDQ);
+    t.ok(
+      '1x1 flat-top hex token: width scales by 2*sqrt(1/3), height does not',
+      Math.abs(flatTop1x1.width - 100 * HEX_AXIS_SCALE) < 1e-9 && flatTop1x1.height === 100
+    );
+
+    // A plain 1x1 token on a pointy-top (row-based) hex grid: the HEIGHT axis
+    // gets the correction instead.
+    const pointyTop1x1 = tokenFootprint(mkToken('a', { width: 1, height: 1 }), 100, GRID_TYPES.HEXODDR);
+    t.ok(
+      '1x1 pointy-top hex token: height scales by 2*sqrt(1/3), width does not',
+      pointyTop1x1.width === 100 && Math.abs(pointyTop1x1.height - 100 * HEX_AXIS_SCALE) < 1e-9
+    );
+
+    // A 2-wide token on a flat-top grid: 1.75 hex-widths, not 2 — the
+    // interlocking-hex compression (TokenDocument#getSize's own formula),
+    // THEN the same axis-scale correction on top.
+    const flatTop2x1 = tokenFootprint(mkToken('a', { width: 2, height: 1 }), 100, GRID_TYPES.HEXEVENQ);
+    const expectedWide = 1.75 * 100 * HEX_AXIS_SCALE;
+    t.ok(
+      'a 2-wide flat-top hex token compresses to 1.75 hex-widths, not 2',
+      Math.abs(flatTop2x1.width - expectedWide) < 1e-9 && flatTop2x1.height === 100
+    );
+
+    // Even/odd hex variants (EVENQ vs ODDQ, EVENR vs ODDR) only affect offset
+    // parity, never the size formula — same result either way.
+    const oddQ = tokenFootprint(mkToken('a', { width: 2, height: 1 }), 100, GRID_TYPES.HEXODDQ);
+    t.ok('HEXODDQ and HEXEVENQ compress identically', oddQ.width === flatTop2x1.width);
   }
 
   // ---- computeItemPlacement TRACKS THE LIVE DOCUMENT, never a snapshot ----
@@ -145,6 +187,39 @@ export function run(t) {
     t.ok('kind is token', items[0].kind === 'token');
     t.ok('lands at SORT_LAYERS.TOKENS', items[0].key.sortLayer === SORT_LAYERS.TOKENS);
     t.ok('tokens sort above tiles', SORT_LAYERS.TOKENS > SORT_LAYERS.TILES);
+    t.ok(
+      'no scene.grid.type at all -> gridType defaults to SQUARE, not undefined',
+      items[0]._placement.gridType === GRID_TYPES.SQUARE
+    );
+  }
+  {
+    // mythica-machina-press#105 — collectTokens reads gridType off
+    // scene.grid.type the SAME way it already reads gridSize off
+    // scene.grid.size, and threads it through to both the collected
+    // item's footprint AND its _placement record (which computeItemPlacement
+    // re-derives the footprint from on every later call, per the 2026-07-17
+    // stale-footprint fix above — the hex fix only actually reaches the
+    // renderer if THAT re-derivation also gets the grid type, not just the
+    // one-time collection pass).
+    const hexScene = { grid: { size: 100, type: GRID_TYPES.HEXODDQ }, tokens: [mkToken('h', { width: 1, height: 1 })] };
+    const { items } = collectTokens(hexScene, { visibleLevelIds: ['ground'] });
+    t.ok('gridType is read from scene.grid.type', items[0]._placement.gridType === GRID_TYPES.HEXODDQ);
+    t.ok(
+      'the collected footprint is already hex-shaped, not square',
+      items[0].footprint.width !== items[0].footprint.height
+    );
+    // `'contain'` fit preserves the TEXTURE's own aspect ratio (a square
+    // texture stays square even inside a non-square footprint — correct,
+    // matches Foundry) — so it's the placement's CENTRE, not its fitted
+    // width/height, that proves the hex-shaped footprint actually reached
+    // computeItemPlacement's re-derivation, not just the one-time collection
+    // pass. A square-grid 1x1 token at x=0,y=0 would centre at (50, 50); the
+    // hex footprint's own width (115.47 px, not 100) shifts centreX only.
+    const placement = computeItemPlacement(items[0], { width: 200, height: 200 }, null);
+    t.ok(
+      're-derived placement (computeItemPlacement) used the HEX footprint, not a square fallback',
+      Math.abs(placement.x - 57.73502691896257) < 1e-9 && placement.y === 50
+    );
   }
   {
     // token.level is a NATIVE v14 level id — the floor comes out of core's own

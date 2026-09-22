@@ -33,7 +33,7 @@
 
 import { SORT_LAYERS, makeLayerKey } from '../scene/index.js';
 import { normalizeTint } from './scene-layers.js';
-import { tokenFootprint } from './scene-geometry.js';
+import { tokenFootprint, GRID_TYPES } from './scene-geometry.js';
 
 /** Foundry's own fallback art when a token has no texture (`Token.DEFAULT_ICON`). */
 export const DEFAULT_TOKEN_ICON = 'icons/svg/mystery-man.svg';
@@ -136,10 +136,11 @@ export { tokenFootprint };
  * @param {object} token
  * @param {{x: number, y: number}} point
  * @param {number} gridSize
+ * @param {number} [gridType] - see `tokenFootprint`'s own doc; defaults to SQUARE.
  * @returns {boolean}
  */
-export function tokenContainsPoint(token, point, gridSize) {
-  const f = tokenFootprint(token, gridSize);
+export function tokenContainsPoint(token, point, gridSize, gridType) {
+  const f = tokenFootprint(token, gridSize, gridType);
   return point.x >= f.x && point.x < f.x + f.width && point.y >= f.y && point.y < f.y + f.height;
 }
 
@@ -153,12 +154,13 @@ export function tokenContainsPoint(token, point, gridSize) {
  * @param {Array<object>} tokenItems - token drawables, in paint order.
  * @param {{x: number, y: number}} point
  * @param {number} gridSize
+ * @param {number} [gridType] - see `tokenFootprint`'s own doc; defaults to SQUARE.
  * @returns {object|null}
  */
-export function pickTokenAt(tokenItems, point, gridSize) {
+export function pickTokenAt(tokenItems, point, gridSize, gridType) {
   for (let i = tokenItems.length - 1; i >= 0; i--) {
     const item = tokenItems[i];
-    if (tokenContainsPoint(item._placement?.tokenDoc ?? item, point, gridSize)) return item;
+    if (tokenContainsPoint(item._placement?.tokenDoc ?? item, point, gridSize, gridType)) return item;
   }
   return null;
 }
@@ -185,13 +187,15 @@ export const TOKEN_DOCUMENTS = Object.freeze(['Token']);
  * @param {object} [options]
  * @param {Array<string>} [options.visibleLevelIds] - level ids currently drawn.
  * @param {number} [options.gridSize] - falls back to `sceneDoc.grid.size`.
+ * @param {number} [options.gridType] - falls back to `sceneDoc.grid.type`; see
+ *   `tokenFootprint`'s own doc (`CONST.GRID_TYPES`, defaults to SQUARE).
  * @param {(src: string) => string} [options.getRouteFn]
  * @param {boolean} [options.isGM] - a GM sees hidden tokens, dimmed.
  * @returns {{items: Array<object>, skipped: Array<{name: string, reason: string}>}}
  */
 export function collectTokens(
   sceneDoc,
-  { visibleLevelIds = [], knownLevelIds, viewedLevelId, gridSize, getRouteFn, isGM = true } = {}
+  { visibleLevelIds = [], knownLevelIds, viewedLevelId, gridSize, gridType, getRouteFn, isGM = true } = {}
 ) {
   // No knownLevelIds => strict matching, no fallback. See resolveTokenLevel: with
   // only the VISIBLE ids, a token on a real-but-hidden floor is indistinguishable
@@ -199,6 +203,7 @@ export function collectTokens(
   const known = knownLevelIds ? new Set(knownLevelIds) : null;
   const fallback = viewedLevelId ?? visibleLevelIds[0] ?? '';
   const size = gridSize ?? sceneDoc?.grid?.size ?? 100;
+  const type = gridType ?? sceneDoc?.grid?.type ?? GRID_TYPES.SQUARE;
   const items = [];
   const skipped = [];
 
@@ -230,7 +235,7 @@ export function collectTokens(
     }
 
     const src = token?.texture?.src || DEFAULT_TOKEN_ICON;
-    const f = tokenFootprint(token, size);
+    const f = tokenFootprint(token, size, type);
     if (!(f.width > 0 && f.height > 0)) {
       drop(`degenerate footprint ${f.width}x${f.height}px (width/height are GRID units; grid size ${size})`);
       continue;
@@ -267,7 +272,7 @@ export function collectTokens(
       // moved token's art to stop short of its true document position while
       // reporting no error, since every consumer looked correct in isolation).
       footprint: f,
-      _placement: { kind: 'token', tokenDoc: token, gridSize: size },
+      _placement: { kind: 'token', tokenDoc: token, gridSize: size, gridType: type },
     });
   }
 
@@ -294,14 +299,19 @@ export function collectTokens(
  * @param {object} [options] - the same options collectTokens was called with.
  * @returns {object}
  */
-export function diagnoseTokens(sceneDoc, { visibleLevelIds = [], knownLevelIds, viewedLevelId, gridSize } = {}) {
+export function diagnoseTokens(
+  sceneDoc,
+  { visibleLevelIds = [], knownLevelIds, viewedLevelId, gridSize, gridType } = {}
+) {
   const size = gridSize ?? sceneDoc?.grid?.size ?? 100;
+  const type = gridType ?? sceneDoc?.grid?.type ?? GRID_TYPES.SQUARE;
   const known = knownLevelIds ? new Set(knownLevelIds) : null;
   const fallback = viewedLevelId ?? visibleLevelIds[0] ?? '';
   const docs = tokenDocsOf(sceneDoc);
   return {
     tokenDocsFound: docs.length,
     gridSize: size,
+    gridType: type,
     visibleLevelIds,
     knownLevelIds: knownLevelIds ?? null,
     viewedLevelId: viewedLevelId ?? null,
@@ -310,7 +320,7 @@ export function diagnoseTokens(sceneDoc, { visibleLevelIds = [], knownLevelIds, 
     tokens: docs.map((token) => {
       const rawLevel = token?.level ?? '';
       const resolved = resolveTokenLevel(token, known, fallback);
-      const f = tokenFootprint(token, size);
+      const f = tokenFootprint(token, size, type);
       return {
         id: token?.id,
         name: token?.name,

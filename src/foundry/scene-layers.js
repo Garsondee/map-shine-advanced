@@ -529,7 +529,7 @@ export function computeItemPlacement(item, textureSize, dimensions) {
     // `vt-pan-viewer.js`'s `syncTokenPlacements`), so this now genuinely
     // tracks wherever the live document currently is, with no dependency on
     // which hook fired or when.
-    const footprint = tokenFootprint(item._placement.tokenDoc, item._placement.gridSize);
+    const footprint = tokenFootprint(item._placement.tokenDoc, item._placement.gridSize, item._placement.gridType);
     return computeTokenPlacement(textureSize, item._placement.tokenDoc, footprint);
   }
   return computeLevelTexturePlacement(textureSize, dimensions, item._placement.texturesConfig);

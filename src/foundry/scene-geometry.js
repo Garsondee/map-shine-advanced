@@ -347,16 +347,95 @@ export function computeTilePlacement(textureSize, tileDoc) {
  * so both can reach it without one. `scene-tokens.js` re-exports it so every
  * existing import site (including its own internal callers) is unchanged.
  *
+ * ## Hex-grid width/height compression (mythica-machina-press#105)
+ *
+ * On a hexagonal grid, `TokenDocument#getSize()` (`common/documents/token.mjs:481-494`)
+ * compresses ONE axis — the one that packs along the interlocking-hex direction —
+ * by `0.75·⌊n⌋ + 0.5·(n mod 1) + 0.25` before multiplying by that axis's own pixel
+ * size: a "2-wide" token is 1.75 hex-widths, not 2, because hexes interlock rather
+ * than tile edge-to-edge along that axis. `GRID_TYPES` 2/3 (`HEXODDR`/`HEXEVENR`,
+ * row-based, pointy-top) compress HEIGHT; 4/5 (`HEXODDQ`/`HEXEVENQ`, column-based,
+ * flat-top) compress WIDTH (`common/documents/scene.mjs`'s own
+ * `config.columns = (type === HEXODDQ) || (type === HEXEVENQ)`).
+ *
+ * The grid's own per-axis pixel size also differs from `gridSize` on the
+ * UNCOMPRESSED axis: `HexagonalGrid`'s constructor (`common/grid/hexagonal.mjs:22-33`)
+ * multiplies `sizeY` (row-based) or `sizeX` (column-based) by `2·√⅓ ≈ 1.1547005…`
+ * — reproduced here as a literal (not `Math.SQRT1_3`, which is a Foundry-only
+ * polyfill on the global `Math` object, absent in this module's plain-JS/Node
+ * test environment) for exactly this file's own standing "no simplifying a
+ * reproduced formula" rule.
+ *
+ * ⚠️ NOT invisible for the common 1×1 case, unlike a first read of the
+ * compression formula suggests. For any INTEGER width/height the GRID-UNIT
+ * compression itself IS a no-op (`0.75·⌊n⌋ + 0.5·(n mod 1) + 0.25` evaluates
+ * to exactly `n`) — but `sizeX`/`sizeY` already disagree by the `2·√⅓` factor
+ * BEFORE that multiply ever runs, for every hex token regardless of size,
+ * because a regular hexagon's own bounding box isn't square. A plain 1×1
+ * token on a flat-top hex grid is genuinely `gridSize·1.1547 × gridSize`
+ * pixels, not `gridSize × gridSize` — this was wrong for every single hex
+ * token on every hex-grid scene before this fix, not just multi-hex ones.
+ *
+ * NOT ported here: `TokenDocument#getCenterPoint()`'s shape-specific centroid
+ * for non-rectangular hex shapes (ellipse/trapezoid/hex-rectangle,
+ * `BaseToken._getHexagonalShape`) — a materially larger port (shape caching,
+ * per-shape point tables) left for its own pass. This function still returns a
+ * RECTANGULAR footprint/centre, which is what `TokenDocument#getCenterPoint()`
+ * ALSO falls back to for any shape/size combination `_getHexagonalShape` has no
+ * table for — so this is a narrowing of the gap, not a new inconsistency.
+ *
  * @param {object} token - a Token document (or a plain object shaped like one).
  * @param {number} gridSize - `scene.grid.size`, in pixels.
+ * @param {number} [gridType] - `scene.grid.type` (`CONST.GRID_TYPES`, `common/constants.mjs`).
+ *   Defaults to `1` (`SQUARE`) — every existing caller that passes only two
+ *   arguments keeps exactly its old, square-grid behaviour.
  * @returns {{x: number, y: number, width: number, height: number, centerX: number, centerY: number}}
  */
-export function tokenFootprint(token, gridSize) {
-  const width = (token?.width ?? 1) * gridSize;
-  const height = (token?.height ?? 1) * gridSize;
+export function tokenFootprint(token, gridSize, gridType = GRID_TYPES.SQUARE) {
+  let width = token?.width ?? 1;
+  let height = token?.height ?? 1;
+  let sizeX = gridSize;
+  let sizeY = gridSize;
+  if (isHexagonalGridType(gridType)) {
+    // 2·√⅓ — see this function's own doc for why it's a literal, not Math.SQRT1_3.
+    const HEX_AXIS_SCALE = 1.1547005383792515;
+    if (isColumnsHexGridType(gridType)) {
+      width = 0.75 * Math.floor(width) + 0.5 * (width % 1) + 0.25;
+      sizeX = gridSize * HEX_AXIS_SCALE;
+    } else {
+      height = 0.75 * Math.floor(height) + 0.5 * (height % 1) + 0.25;
+      sizeY = gridSize * HEX_AXIS_SCALE;
+    }
+  }
+  const w = width * sizeX;
+  const h = height * sizeY;
   const x = token?.x ?? 0;
   const y = token?.y ?? 0;
-  return { x, y, width, height, centerX: x + width / 2, centerY: y + height / 2 };
+  return { x, y, width: w, height: h, centerX: x + w / 2, centerY: y + h / 2 };
+}
+
+/**
+ * Foundry's `CONST.GRID_TYPES` (`common/constants.mjs`), the values this module
+ * needs — reproduced as a plain object (not imported) since this module has
+ * zero dependencies by design (see this file's own header).
+ */
+export const GRID_TYPES = Object.freeze({
+  GRIDLESS: 0,
+  SQUARE: 1,
+  HEXODDR: 2,
+  HEXEVENR: 3,
+  HEXODDQ: 4,
+  HEXEVENQ: 5,
+});
+
+/** Row- or column-based hexagonal, `GRID_TYPES.HEXODDR`..`HEXEVENQ`, contiguous. */
+function isHexagonalGridType(gridType) {
+  return gridType >= GRID_TYPES.HEXODDR && gridType <= GRID_TYPES.HEXEVENQ;
+}
+
+/** Column-based (flat-top) hex, as opposed to row-based (pointy-top). */
+function isColumnsHexGridType(gridType) {
+  return gridType === GRID_TYPES.HEXODDQ || gridType === GRID_TYPES.HEXEVENQ;
 }
 
 /**

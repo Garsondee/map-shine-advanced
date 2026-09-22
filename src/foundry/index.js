@@ -57,6 +57,7 @@ export {
   computeTilePlacement,
   computeTokenPlacement,
   TEXTURE_FIT_MODES,
+  GRID_TYPES,
 } from './scene-geometry.js';
 
 // Scene documents -> keyed draw items (the layering law's input).

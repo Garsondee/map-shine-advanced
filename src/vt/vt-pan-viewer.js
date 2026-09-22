@@ -4552,7 +4552,27 @@ export async function startVtPanViewer({
           // actually is on screen — which is what decides whether the specimen
           // tier is worth drawing at all. Absent ⇒ the gate fails AWAKE; an
           // absent measurement must never silently delete the weather.
-          viewportWidthPx: renderer?.domElement?.clientWidth ?? renderer?.domElement?.width ?? null,
+          // ⚠️ `canvasW`, NEVER `domElement.clientWidth` (mythica-machina-press#592).
+          //
+          // This read happens EVERY FRAME, from inside `renderFrame` via
+          // `precip-subsystem.js#sync`. `clientWidth` is a layout property, so
+          // touching it forces the browser to flush pending style and layout
+          // work synchronously — and whoever reads layout first after a DOM
+          // mutation pays for the ENTIRE layout, not just their own element.
+          //
+          // The author's own performance trace, captured during the freeze on
+          // first camera pan, names this exact chain twice in the bottom-up
+          // view:
+          //
+          //   Layout (168ms) <- get clientWidth (153.8ms) <- getPrecipRenderState
+          //     <- sync (precip-subsystem) <- renderFrame
+          //   get clientWidth: 75.1ms self / 269.9ms total (15.1% of the trace)
+          //
+          // `canvasW` is the SAME number — `measureHost(mount.host).width`,
+          // which is the host's clientWidth — already measured once and kept
+          // current by the resize handler. Reading the cached value costs
+          // nothing and cannot force a layout.
+          viewportWidthPx: canvasW || renderer?.domElement?.width || null,
           // The SAME `dayFactor01` the shadow handle and the daylight tint
           // read — never a second "is it dark" derivation.
           dayFactor01: env.sun?.dayFactor01 ?? 1,

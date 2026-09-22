@@ -23,6 +23,7 @@ import {
   clearFoundryFallback,
   getFallbackState,
   getDescribeRenderModeStats,
+  DESCRIBE_RENDER_MODE_CACHE_MS,
 } from '../render-fallback.js';
 
 function sleep(ms) {
@@ -69,7 +70,12 @@ export async function run(t) {
   // allows in diag/), so this is the honest way to prove the window is real
   // rather than assuming the constant is wired to anything.
   const r6 = describeRenderMode({ canvas: null, loopActive: false });
-  await sleep(280); // > DESCRIBE_RENDER_MODE_CACHE_MS (250)
+  // DERIVED from the real constant, never a second copy of the number: the
+  // previous version slept 280ms against a hardcoded "(250)" comment, so
+  // raising the window (mythica-machina-press#592) broke this test rather
+  // than the test following the change. Two independent votes on one
+  // constant is exactly what [[feedback_probed_constants_vs_derived]] names.
+  await sleep(DESCRIBE_RENDER_MODE_CACHE_MS + 40);
   const r7 = describeRenderMode({ canvas: null, loopActive: false });
   t.ok('after the cache window elapses, the SAME args recompute (a fresh object)', r6 !== r7);
   t.ok('the recomputed answer is still correct', r7.renderMode === 'foundry-fallback');

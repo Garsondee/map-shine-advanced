@@ -174,7 +174,38 @@ export function getFallbackState() {
  * file has no visibility into — the cache is what makes that frequency stop
  * mattering, rather than auditing every current and future caller.
  */
-const DESCRIBE_RENDER_MODE_CACHE_MS = 250;
+/**
+ * ⚠️ RAISED FROM 250 (mythica-machina-press#592) — 250 was EXACTLY its
+ * caller's poll interval, so the cache could essentially never hit.
+ *
+ * The reasoning above is right that the cache is what makes caller frequency
+ * stop mattering. It only does that if the window is comfortably LONGER than
+ * the cadence it is defending against. `ui/rooms/remote/debug-strip.js`'s own
+ * header states it updates "every ~250ms", and it is fed from the diagnostics
+ * builder that calls this. Two independent 250s meeting is the
+ * [[feedback_probed_constants_vs_derived]] shape: each defensible alone, and
+ * together a cache that expires precisely as often as it is asked.
+ *
+ * What that cost, from the author's own trace captured during the freeze on
+ * first camera pan:
+ *
+ *   Layout ............. 168.0 ms self, attributed to this file's line 256
+ *                        (`canvas.getBoundingClientRect()`)
+ *   Recalculate style ... 48.3 ms self, attributed to line 253
+ *                        (`getComputedStyle(canvas)`)
+ *
+ * Both are forced synchronous layout/style flushes, and whoever reads layout
+ * first after a DOM mutation pays for the WHOLE layout — so during a pan, when
+ * the page is churning, a diagnostic was repeatedly picking up the bill four
+ * times a second.
+ *
+ * 2s is well clear of any current poller while keeping the answer fresh enough
+ * for a human reading a HUD. The safety slide itself is unaffected: it is
+ * engaged by `engageFoundryFallback`, never by the freshness of this
+ * description — the paragraph above already says so, and it is why raising
+ * this is safe rather than a trade.
+ */
+export const DESCRIBE_RENDER_MODE_CACHE_MS = 2000;
 let lastDescribeRenderMode = null;
 let lastDescribeRenderModeAt = -Infinity;
 /** The canvas/loopActive pair the cached answer was computed for — a change

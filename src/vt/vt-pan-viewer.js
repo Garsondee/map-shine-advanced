@@ -19911,8 +19911,34 @@ export async function startVtPanViewer({
      */
     let effectsWarmedAfterContent = false;
     let effectWarmUpRunning = false;
+    /**
+     * How many post-content warm-up passes have run (mythica-machina-press#613).
+     *
+     * It is a LOOP, not a one-shot, because effects become visible at different
+     * moments and an enumeration of them will always be incomplete. An audit of
+     * every `visible =` gate in `src/effects/` found two the first design would
+     * have missed outright: water's mesh waits on `bakedReady` (the flow BAKE,
+     * which runs after the mask its probe watches), and fluid's waits on
+     * `net.tubeCount > 0` with no readiness probe of any kind. Adding a probe
+     * per effect fixes today's list and silently misses tomorrow's.
+     *
+     * So instead: warm up, and if that pass created any pipelines, something
+     * had become visible that was not compiled before — so go round again. It
+     * converges by construction, because a pass that compiles nothing is proof
+     * there is nothing left newly-visible to compile.
+     */
+    let postContentWarmUpPasses = 0;
     /** Pipelines created by the post-content warm-up — evidence it did real work. */
     let postContentPipelinesCreated = null;
+
+    /**
+     * Ceiling on the convergence loop above. Four is generous — in practice a
+     * second pass compiling anything at all is already unusual — and it exists
+     * only so a pathological effect that somehow compiles something on every
+     * pass cannot hold the curtain shut forever. A bound that is never reached
+     * is still the difference between "converges" and "trust me".
+     */
+    const POST_CONTENT_WARM_UP_MAX_PASSES = 4;
 
     const WARM_UP_SIM_DT_SEC = 1 / 60;
 
@@ -20228,9 +20254,17 @@ export async function startVtPanViewer({
         })
         .finally(() => {
           const after = readPipelineCount();
-          postContentPipelinesCreated =
-            Number.isFinite(before) && Number.isFinite(after) ? Math.max(0, after - before) : null;
-          effectsWarmedAfterContent = true;
+          const created = Number.isFinite(before) && Number.isFinite(after) ? Math.max(0, after - before) : null;
+          // ACCUMULATE across passes — the report wants the total this warm-up
+          // moved behind the curtain, not whatever the last pass happened to do.
+          postContentPipelinesCreated = (postContentPipelinesCreated ?? 0) + (created ?? 0);
+          postContentWarmUpPasses++;
+          // GO ROUND AGAIN if that pass compiled anything: something became
+          // visible that was not compiled before (water finishing its bake,
+          // fluid's tube-net landing, an effect nobody has enumerated yet). A
+          // pass that compiles NOTHING is the proof there is nothing left.
+          const converged = created === 0 || created === null;
+          effectsWarmedAfterContent = converged || postContentWarmUpPasses >= POST_CONTENT_WARM_UP_MAX_PASSES;
           effectWarmUpRunning = false;
         });
     }

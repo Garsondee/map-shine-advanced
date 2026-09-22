@@ -143,6 +143,7 @@ export {
   getVtPanViewerSceneSettle,
   sampleVtPanViewerSceneSettleNow,
   getVtPanViewerPanCompileReport,
+  noteVtPanViewerRevealed,
   resetVtPanViewerPanCompileProbe,
   setVtPanViewerLoadRenderScale,
   setVtPanViewerChunkedWarmUp,

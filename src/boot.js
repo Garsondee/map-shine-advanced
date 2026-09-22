@@ -208,6 +208,15 @@ const READY_POLL_MS = 250;
 const FIRST_PAINT_MAX_MS = 10000;
 
 /**
+ * How long after the curtain lifts to check whether anything compiled in front
+ * of the user (mythica-machina-press#614). Long enough for the first real
+ * frames — which is exactly where the freeze-then-pop-in lands — and short
+ * enough that the warning arrives while the load is still what the person is
+ * thinking about.
+ */
+const POST_REVEAL_COMPILE_CHECK_MS = 5000;
+
+/**
  * How many consecutive readiness polls may report the EXACT same named
  * blockers (same keys, same counts) before the curtain stops waiting — once
  * the ordinary reveal deadline has already passed.
@@ -403,6 +412,7 @@ import {
   sampleVtPanViewerSceneSettleNow,
   setVtPanViewerLoadRenderScale,
   getVtPanViewerPanCompileReport,
+  noteVtPanViewerRevealed,
   resetVtPanViewerPanCompileProbe,
   setMaskImageMaxBytes,
   getMaskImageMaxBytes,
@@ -15844,6 +15854,11 @@ function install() {
         setVtPanViewerLoadRenderScale(null);
         beginSceneLoadPhase(LOAD_PHASES.WARMING);
         const readyOutcome = await waitForSceneReady();
+        // THE CURTAIN IS COMING DOWN — from here on, ANY pipeline compile
+        // happens in front of the user, which is exactly the bug #613 fixed.
+        // Arming the detector here means MSA notices a regression itself, on
+        // every load, rather than waiting for someone to report a stutter.
+        noteVtPanViewerRevealed();
         const summary = endSceneLoad({ forced: !readyOutcome.ready });
 
         // DISARM + READ BACK, THE MOMENT THIS LOAD ENDS. `setXRebuildProbe(false)`
@@ -15949,6 +15964,19 @@ function install() {
           cacheSnapshot: { start: loadCacheSnapshotStart, end: loadCacheSnapshotEnd },
         };
 
+        // SHOUT IF THE FREEZE CAME BACK (mythica-machina-press#614). Checked a
+        // few seconds after reveal, because the compiles being hunted happen on
+        // the first frames a user is actually looking at. Deliberately a WARN
+        // with the issue number in it: a regression nobody is told about is one
+        // that gets rediscovered by a customer.
+        setTimeout(() => {
+          try {
+            const pc = getVtPanViewerPanCompileReport();
+            if (pc?.compiledAfterReveal > 0) log.warn(pc.postRevealVerdict, pc);
+          } catch (e) {
+            /* a detector must never be the thing that breaks a load */
+          }
+        }, POST_REVEAL_COMPILE_CHECK_MS);
         if (summary) {
           // worstStallMs is surfaced, not swallowed: a load that completes but
           // froze the main thread for seconds is a bug with a receipt. Same for

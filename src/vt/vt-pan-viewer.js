@@ -26350,6 +26350,7 @@ export async function startVtPanViewer({
       prewarmAdjacentFloors, // exposed so a real floor-switch commit can re-scope the ±1 window to wherever the viewer just landed
       requestInternalRescale, // exposed so releasing the cold-load render-scale clamp can rebuild the real targets at once (mythica-machina-press#589)
       getPanCompileReport: () => panCompileProbe.read(),
+      notePanCompileRevealed: () => panCompileProbe.noteRevealed(),
       resetPanCompileProbe: () => panCompileProbe.reset(),
       // Re-ask buildItems and reconcile. The draw list is derived from live
       // Foundry documents, but NOTHING here watches them — updateResidency only
@@ -28099,6 +28100,20 @@ export function setVtPanViewerEarlyZComposition(on) {
 export function getVtPanViewerSceneSettle() {
   if (!_active) return { skipped: true, reason: 'viewer not started', settled: false };
   return _active.getSceneSettle();
+}
+
+/**
+ * THE CURTAIN JUST LIFTED — start watching for pipelines compiling in front of
+ * the user (mythica-machina-press#614).
+ *
+ * A compile after reveal IS the freeze-then-pop-in bug, by definition and
+ * whatever effect causes it. Arming here means the module detects its own
+ * regression on every load, instead of the next case being found by someone
+ * noticing a stutter months from now.
+ */
+export function noteVtPanViewerRevealed() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.notePanCompileRevealed();
 }
 
 /**

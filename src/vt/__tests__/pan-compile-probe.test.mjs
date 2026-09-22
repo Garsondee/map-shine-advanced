@@ -134,4 +134,38 @@ export function run(t) {
     p.sample({ viewRect: rect(10), pipelineCount: 930, gapMs: 2000 });
     ok('compiles still win the verdict when both happened', /COMPILED ON PAN/i.test(p.read().verdict));
   }
+
+  // --- THE REGRESSION DETECTOR (mythica-machina-press#614) -----------------
+  // A pipeline compiling after the curtain lifts IS the freeze-then-pop-in
+  // bug, whatever effect causes it. This is what makes the module notice #613
+  // recurring by itself, so the next case is not found by a user months later.
+  {
+    const p = createPanCompileProbe();
+    p.sample({ viewRect: rect(0), pipelineCount: 100 });
+    p.sample({ viewRect: rect(0), pipelineCount: 105 }); // 5 compiled BEFORE reveal
+    ok('before the curtain lifts, post-reveal counting is null (not zero)', p.read().compiledAfterReveal === null);
+    ok('...and the verdict withholds judgement entirely', p.read().postRevealVerdict === null);
+
+    p.noteRevealed();
+    ok('arming starts the count at zero, not null', p.read().compiledAfterReveal === 0);
+    ok('...and a clean load says so', /Clean: no pipeline compiled/.test(p.read().postRevealVerdict));
+
+    p.sample({ viewRect: rect(0), pipelineCount: 108, gapMs: 700 }); // 3 AFTER reveal
+    const r = p.read();
+    ok('compiles after reveal are counted', r.compiledAfterReveal === 3);
+    ok('...and NOT confused with the pre-reveal ones', r.compiledWhileStill === 8);
+    ok('...and the verdict names the regression', /compiled AFTER the curtain lifted/.test(r.postRevealVerdict));
+    ok('...and cites the issue so it is actionable', /613/.test(r.postRevealVerdict));
+    ok('...and carries the frame cost', r.worstGapAfterRevealMs === 700);
+  }
+  {
+    // Arming twice must not restart the count — a load that revealed once has
+    // revealed, and a second call would erase evidence already gathered.
+    const p = createPanCompileProbe();
+    p.sample({ viewRect: rect(0), pipelineCount: 10 });
+    p.noteRevealed();
+    p.sample({ viewRect: rect(0), pipelineCount: 12 });
+    p.noteRevealed();
+    ok('re-arming does not erase what was already seen', p.read().compiledAfterReveal === 2);
+  }
 }

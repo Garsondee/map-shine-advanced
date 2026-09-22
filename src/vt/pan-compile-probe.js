@@ -80,6 +80,20 @@ export function createPanCompileProbe() {
   /** @type {Array<{atFrame:number, created:number, gapMs:number}>} */
   let movingBursts = [];
   let frame = 0;
+  /**
+   * Compiles seen AFTER the curtain lifted (mythica-machina-press#614).
+   *
+   * This is the regression detector for #613. A pipeline compiling once the
+   * user can see the map IS the bug — it is the freeze-then-pop-in, by
+   * definition, whatever effect happened to cause it. Counting it means the
+   * module notices its own regression instead of waiting for someone to report
+   * a stutter months later.
+   *
+   * `null` until the curtain is known to have lifted, so "not watching yet" can
+   * never be mistaken for "watched and saw nothing".
+   */
+  let compiledAfterReveal = null;
+  let worstGapAfterRevealMs = 0;
 
   /**
    * One frame.
@@ -98,6 +112,10 @@ export function createPanCompileProbe() {
     const created = Number.isFinite(pipelineCount) && lastCount !== null ? Math.max(0, pipelineCount - lastCount) : 0;
     if (Number.isFinite(pipelineCount)) lastCount = pipelineCount;
 
+    if (compiledAfterReveal !== null) {
+      compiledAfterReveal += created;
+      if (gapMs > worstGapAfterRevealMs) worstGapAfterRevealMs = gapMs;
+    }
     if (moving) {
       movingFrames++;
       compiledWhileMoving += created;
@@ -115,6 +133,15 @@ export function createPanCompileProbe() {
       if (gapMs > worstGapWhileStillMs) worstGapWhileStillMs = gapMs;
     }
     lastRect = viewRect ? { ...viewRect } : null;
+  }
+
+  /**
+   * The curtain just lifted — start watching for the thing that must not
+   * happen. Idempotent: a second call does not restart the count, because a
+   * load that revealed once has revealed.
+   */
+  function noteRevealed() {
+    if (compiledAfterReveal === null) compiledAfterReveal = 0;
   }
 
   function read() {
@@ -137,6 +164,18 @@ export function createPanCompileProbe() {
        * without the reader having to know which bucket to look in.
        */
       worstGapMs: Math.round(Math.max(worstGapWhileMovingMs, worstGapWhileStillMs)),
+      compiledAfterReveal,
+      worstGapAfterRevealMs: Math.round(worstGapAfterRevealMs),
+      /**
+       * THE REGRESSION VERDICT (mythica-machina-press#614). `null` means the
+       * curtain is not known to have lifted yet — never "clean".
+       */
+      postRevealVerdict:
+        compiledAfterReveal === null
+          ? null
+          : compiledAfterReveal > 0
+            ? `⚠️ ${compiledAfterReveal} pipeline(s) compiled AFTER the curtain lifted (worst frame ${Math.round(worstGapAfterRevealMs)}ms). That is mythica-machina-press#613 recurring: an effect became visible only after the warm-up converged, so its shader compiled in front of the user. Read \`warmUp.postContentPipelinesCreated\` to see whether the warm-up ran at all, and which effect appeared at that moment.`
+            : 'Clean: no pipeline compiled after the curtain lifted. The post-content warm-up caught everything this load.',
       // The verdict this exists to produce, stated rather than left as an
       // exercise — and refusing to give one when nothing was measured.
       verdict: unavailable
@@ -154,6 +193,7 @@ export function createPanCompileProbe() {
   return {
     sample,
     read,
+    noteRevealed,
     reset: () => {
       // `lastRect` is KEPT, for the same reason `lastCount` is (below). Reset
       // clears the COUNTS, not the knowledge of where the camera already was.
@@ -170,6 +210,8 @@ export function createPanCompileProbe() {
       worstGapWhileStillMs = 0;
       movingBursts = [];
       frame = 0;
+      compiledAfterReveal = null;
+      worstGapAfterRevealMs = 0;
       // `lastCount` is deliberately KEPT — it is a property of the GPU device
       // for the whole session, not of this window. Clearing it would make the
       // first sample after a reset re-establish a baseline and therefore be

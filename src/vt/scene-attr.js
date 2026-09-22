@@ -98,15 +98,32 @@
  *       apart from "still my own background, unoccluded" — a distinction the
  *       floor-index channel alone cannot make, since a same-floor Tile
  *       shares its background's floor index.
- *   A = the material's OWN alpha, read via `TSL.output.a` (see
- *       `buildRealFloorAttrMrtNode`'s own doc for why it must be `output`,
- *       never a JS-closure-captured node) — this is what makes the punch-
- *       through work for free: where the base art is opaque (alpha≈1), attr
- *       overwrites with real data (destination almost entirely replaced);
- *       where it has an authored hole (alpha=0), attr's blend leaves
- *       whatever drew before it — typically the floor below — untouched.
- *       The SAME alpha-as-blend-source mechanism the safe zero-default
- *       relies on, just with a real payload instead of zero.
+ *   A = NOT a readable data channel — the GPU's own blend-equation factor for
+ *       THIS write (`attr_new = attr_old·(1−A) + attr_src·A`), fed by the
+ *       material's alpha via `TSL.output.a` (see `buildRealFloorAttrMrtNode`'s
+ *       own doc for why it must be `output`, never a JS-closure-captured
+ *       node) — this is what makes the punch-through work for free: where the
+ *       base art is opaque, attr overwrites with real data (destination
+ *       almost entirely replaced); where it has an authored hole, attr's
+ *       blend leaves whatever drew before it — typically the floor below —
+ *       untouched. The SAME alpha-as-blend-source mechanism the safe
+ *       zero-default relies on, just with a real payload instead of zero.
+ *       ⚠️ `packFloorAttr` (below) does NOT pass the raw, continuous alpha
+ *       through to this slot — it alpha-TESTS it first
+ *       (`ATTR_SOLIDITY_ALPHA_TEST_THRESHOLD`, 2026-08-04 Round 15): a
+ *       CONTINUOUS blend factor here corrupts R/G/B, which are multi-bit
+ *       VALUE fields, not colour — see that constant's own "ALPHA-TEST, NOT A
+ *       CONTINUOUS BLEND" header for the live bug this fixes. So on-screen, A
+ *       is always exactly 0 or 1: a genuine, structural, non-fixable property
+ *       of this channel, not a bug. A consumer may read `attr.a` back as a
+ *       BINARY "was there a confident write here at all" signal (see KNOWN
+ *       GAP 2 below) — it can never carry a continuous partial-transparency
+ *       value, and no amount of tuning the threshold changes that; the
+ *       binarization is what makes R/G/B decode correctly at all. This is
+ *       exactly the constraint the (now-deleted) Windows.md design doc
+ *       recorded as "tier 0 reads R only, no partial-transparency test off
+ *       alpha" (mythica-machina-press#361) — correct, and now written down
+ *       here instead of only in a document that no longer exists.
  *
  * ============================================================================
  * KNOWN GAP, STATED HONESTLY (not silently deferred)

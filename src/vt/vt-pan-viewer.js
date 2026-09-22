@@ -13257,6 +13257,20 @@ export async function startVtPanViewer({
         return n;
       },
     });
+    // ⭐ THE GATE THAT STOPS "COMPILE IN FRONT OF THE USER"
+    // (mythica-machina-press#613). Reads as one outstanding item until every
+    // effect that has content has been DRAWN at least once, so readiness cannot
+    // call the scene settled while a mask-driven material is still uncompiled
+    // and waiting to freeze the first frame that reveals it.
+    //
+    // COMPILE stage, not STREAM: the bytes have arrived by then — what is
+    // outstanding is the GPU work their arrival created.
+    readiness.register({
+      id: 'effectContentWarmUp',
+      label: 'effect shaders still compiling (masks arrived after the first warm-up)',
+      stage: READINESS_STAGE.COMPILE,
+      read: () => (effectsWarmedAfterContent ? 0 : 1),
+    });
     readiness.register({
       id: 'specularMaskLoad',
       label: 'specular masks still loading',
@@ -19844,6 +19858,45 @@ export async function startVtPanViewer({
      * lurch even if a kernel did integrate it (none of this is presented —
      * see {@link warmUpSims}).
      */
+    /**
+     * THE POST-CONTENT WARM-UP (mythica-machina-press#613) — the fix for
+     * *"a HUGE lag spike, then the _Windows effect popped into the scene"*.
+     *
+     * ## Why the existing warm-up cannot catch these
+     *
+     * Every mask-driven effect hides its mesh until its mask arrives.
+     * `window-surface-subsystem.js` is explicit about it:
+     *
+     *     mesh.visible = false;  // until the mask AND its rect land
+     *
+     * Mask loads are async and finish LONG after `warmUpDrawState()` has run —
+     * they are, by name, three of the blockers readiness reports at the end of
+     * a load (`specular masks still loading`, `window cookie masks still
+     * loading`, `vegetation overlays still loading`). So when the warm-up draws
+     * the pass plan, those meshes are invisible, nothing draws them, and their
+     * materials are never compiled.
+     *
+     * Then the mask lands, the mesh turns visible, and the very next frame
+     * draws it for the FIRST time — compiling its shader right there, in front
+     * of the user. The freeze, and then the effect pops in. Exactly as reported.
+     *
+     * ## The fix
+     *
+     * Warm up AGAIN once the content has actually arrived, while the curtain is
+     * still up, and refuse to report ready until that has happened. This flag
+     * is both the latch and a readiness probe: it reads as one outstanding item
+     * until the post-content warm-up has run, so `vt/settle.js` cannot declare
+     * the scene settled before every effect that has content has been drawn at
+     * least once.
+     *
+     * No deadlock: the warm-up is triggered precisely WHEN the streaming probes
+     * reach zero, so the thing this blocks on is always reachable.
+     */
+    let effectsWarmedAfterContent = false;
+    let effectWarmUpRunning = false;
+    /** Pipelines created by the post-content warm-up — evidence it did real work. */
+    let postContentPipelinesCreated = null;
+
     const WARM_UP_SIM_DT_SEC = 1 / 60;
 
     /**
@@ -20037,7 +20090,18 @@ export async function startVtPanViewer({
      * @param {{includePresent?: boolean}} [opts]
      * @returns {Promise<void>}
      */
-    async function warmUpDrawStateChunked({ includePresent = true } = {}) {
+    /**
+     * @param {object} [opts]
+     * @param {boolean} [opts.includePresent]
+     * @param {boolean} [opts.recordStats] - false for the POST-CONTENT warm-up
+     *   (mythica-machina-press#613), which runs a second time later in the load
+     *   and would otherwise silently overwrite the initial warm-up's `warmUpMs`
+     *   / `warmUpPipelinesCreated` in the loading-time report. Two different
+     *   events reported through one pair of fields is how an instrument starts
+     *   answering a question nobody asked; the post-content run keeps its own
+     *   `postContentPipelinesCreated` instead.
+     */
+    async function warmUpDrawStateChunked({ includePresent = true, recordStats = true } = {}) {
       const ids = includePresent ? framePlan.ids : framePlan.ids.filter((id) => id !== 'present.composite');
       const batches = chunkIds(ids, WARM_UP_CHUNK_SIZE);
       const totalBatches = Math.max(1, batches.length);
@@ -20064,14 +20128,17 @@ export async function startVtPanViewer({
           // rather than a second copy of `new Promise((r) => requestAnimationFrame(r))`.
           if (i + 1 < batches.length) await nextAnimationFrame();
         }
-        warmUpMs = Math.round(workMs);
+        if (recordStats) warmUpMs = Math.round(workMs);
       } catch (err) {
         log.warn('chunked warm-up draw failed — pipelines will compile lazily on first real draw:', err);
-        warmUpMs = null;
-        warmUpError = describeWarmUpError(err);
+        if (recordStats) {
+          warmUpMs = null;
+          warmUpError = describeWarmUpError(err);
+        }
       }
       const after = readPipelineCount();
-      warmUpPipelinesCreated = Number.isFinite(before) && Number.isFinite(after) ? Math.max(0, after - before) : null;
+      if (recordStats)
+        warmUpPipelinesCreated = Number.isFinite(before) && Number.isFinite(after) ? Math.max(0, after - before) : null;
     }
 
     /**
@@ -20081,8 +20148,55 @@ export async function startVtPanViewer({
      * about when they happened.
      * @param {number} nowMs - the current frame's own start time.
      */
+    /**
+     * Run the post-content warm-up once, the moment every other readiness probe
+     * has reached zero (mythica-machina-press#613).
+     *
+     * CHUNKED, always — not the synchronous variant. This runs while the
+     * curtain is up and the render loop is live, so a single blocking pass
+     * would be a fresh multi-second freeze in place of the one being removed.
+     * The chunked path yields to a real animation frame between batches AND
+     * reports `{phase:'warming', done, total}` as it goes, which is the
+     * progress the author asked for: a bar that moves because shaders are
+     * actually being compiled, not because a timer said so.
+     *
+     * @param {Record<string, number>} raw - the readiness registry's counters.
+     */
+    function maybeWarmEffectsAfterContent(raw) {
+      if (effectsWarmedAfterContent || effectWarmUpRunning) return;
+      // Everything EXCEPT this probe's own entry must be quiet. Counting our
+      // own outstanding marker would make the condition unsatisfiable — the
+      // classic shape of a gate that waits for itself.
+      let othersOutstanding = 0;
+      for (const [k, v] of Object.entries(raw || {})) {
+        if (k === 'effectContentWarmUp') continue;
+        othersOutstanding += Number(v) || 0;
+      }
+      if (othersOutstanding > 0) return;
+      effectWarmUpRunning = true;
+      const before = readPipelineCount();
+      // Fire-and-forget: this is called from the render loop, which cannot be
+      // made async. Failure is swallowed and the latch is released either way —
+      // warming is an optimisation and must never wedge readiness shut.
+      warmUpDrawStateChunked({ recordStats: false })
+        .catch((err) => {
+          log.warn('post-content effect warm-up failed — effects will compile on first draw:', err);
+        })
+        .finally(() => {
+          const after = readPipelineCount();
+          postContentPipelinesCreated =
+            Number.isFinite(before) && Number.isFinite(after) ? Math.max(0, after - before) : null;
+          effectsWarmedAfterContent = true;
+          effectWarmUpRunning = false;
+        });
+    }
+
     function sampleSceneSettle(nowMs) {
       const { raw, keys, unavailable } = readiness.collect();
+      // THE POST-CONTENT WARM-UP (mythica-machina-press#613) — kicked off here
+      // because this is the one place that already polls every readiness
+      // counter, which is exactly the condition it waits on.
+      maybeWarmEffectsAfterContent(raw);
       const result = settleTracker.sample(raw, nowMs, settleFrameCount, {
         keys,
         unavailable,
@@ -26382,6 +26496,7 @@ export async function startVtPanViewer({
           warmUpMs,
           warmUpPipelinesCreated,
           warmUpSimPipelinesCreated,
+          postContentPipelinesCreated,
           warmUpError,
           warmUpSimError,
           prefetchSkippedPacks,

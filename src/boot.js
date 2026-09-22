@@ -15918,6 +15918,7 @@ function install() {
             warmUpMs: warmUpDiag?.shaders?.warmUpMs ?? null,
             warmUpPipelinesCreated: warmUpDiag?.shaders?.warmUpPipelinesCreated ?? null,
             warmUpSimPipelinesCreated: warmUpDiag?.shaders?.warmUpSimPipelinesCreated ?? null,
+            postContentPipelinesCreated: warmUpDiag?.shaders?.postContentPipelinesCreated ?? null,
             warmUpError: warmUpDiag?.shaders?.warmUpError ?? null,
             warmUpSimError: warmUpDiag?.shaders?.warmUpSimError ?? null,
             shaderCompileMs: warmUpDiag?.shaders?.precompileMs ?? null,

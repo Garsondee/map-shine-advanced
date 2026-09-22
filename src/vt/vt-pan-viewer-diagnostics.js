@@ -560,6 +560,7 @@ export function buildViewerDiagnostics({
   warmUpMs = null,
   warmUpPipelinesCreated = null,
   warmUpSimPipelinesCreated = null,
+  postContentPipelinesCreated = null,
   warmUpError = null,
   warmUpSimError = null,
   prefetchSkippedPacks,
@@ -737,6 +738,10 @@ export function buildViewerDiagnostics({
       // the exact bug these three exist to diagnose, reproduced one level
       // down.
       warmUpSimPipelinesCreated,
+      // The POST-CONTENT warm-up's own count (mythica-machina-press#613) —
+      // kept separate from the initial warm-up's, because they are two
+      // different events and one pair of fields cannot honestly report both.
+      postContentPipelinesCreated,
       warmUpError,
       warmUpSimError,
       // Program COUNT is the thing that explodes as effects land (N effects x

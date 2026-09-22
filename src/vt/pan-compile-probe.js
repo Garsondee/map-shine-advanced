@@ -49,6 +49,16 @@
 
 /** @typedef {{minX:number,minY:number,maxX:number,maxY:number}} Rect */
 
+/**
+ * A frame gap at or above which this probe will call something a stall.
+ *
+ * 250ms, matching `ui/load-progress.js#STALL_THRESHOLD_MS` — the "is it dead"
+ * question, NOT the renderer's 50ms hitch threshold. Those are two different
+ * measurements and this file asks the first one: the user reported a FREEZE,
+ * not a stutter.
+ */
+const STALL_MS = 250;
+
 /** Did the view rect change at all between two frames? */
 function rectChanged(a, b) {
   if (!a || !b) return false;
@@ -119,12 +129,22 @@ export function createPanCompileProbe() {
       worstGapWhileMovingMs: Math.round(worstGapWhileMovingMs),
       worstGapWhileStillMs: Math.round(worstGapWhileStillMs),
       movingBursts: [...movingBursts],
+      /**
+       * The worst frame gap seen at all, whichever state the camera was in.
+       * Carried so this probe can answer the UNPAUSE question too: unpausing
+       * happens with the camera still, so a hitch there lands in
+       * `worstGapWhileStillMs`, and "was there a stall" must be answerable
+       * without the reader having to know which bucket to look in.
+       */
+      worstGapMs: Math.round(Math.max(worstGapWhileMovingMs, worstGapWhileStillMs)),
       // The verdict this exists to produce, stated rather than left as an
       // exercise — and refusing to give one when nothing was measured.
       verdict: unavailable
         ? 'Pipeline count unavailable — `renderer._pipelines.caches` was not a Map. Nothing measured; this is NOT evidence either way.'
         : total === 0
-          ? 'No pipelines were created at all during this window. If a freeze happened in it, compilation is NOT the cause.'
+          ? Math.max(worstGapWhileMovingMs, worstGapWhileStillMs) >= STALL_MS
+            ? `A STALL HAPPENED (worst frame gap ${Math.round(Math.max(worstGapWhileMovingMs, worstGapWhileStillMs))}ms) but ZERO pipelines were created. So it is NOT shader compilation — it is main-thread or GPU work. Capture a performance trace of this window and read it per-thread: if the renderer's main thread is busy it is JS, and if it is idle while CrGpuMain is busy it is the GPU process.`
+            : 'No pipelines were created, and no frame gap crossed the stall threshold. Nothing to explain in this window — no compilation and no stall.'
           : compiledWhileMoving > compiledWhileStill
             ? `PIPELINES ARE BEING COMPILED ON PAN: ${compiledWhileMoving} while the camera moved vs ${compiledWhileStill} while still. This is mythica-machina-press#611's mechanism — new content entering view is compiling shaders, in the GPU process, which is why the freeze shows there with the main thread idle.`
             : `Pipelines were created, but mostly while the camera was STILL (${compiledWhileStill} still vs ${compiledWhileMoving} moving). Panning is not what triggers them — look at what else changed in this window.`,

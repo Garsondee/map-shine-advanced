@@ -50,7 +50,10 @@ export function run(t) {
     p.sample({ viewRect: rect(20), pipelineCount: 500 });
     const r = p.read();
     ok('panning with no new pipelines reports zero', r.compiledWhileMoving === 0);
-    ok('...and says compilation is NOT the cause', /NOT the cause/i.test(r.verdict));
+    // Wording split when the stall branch was added: with no compiles AND no
+    // stall, the honest statement is that there is nothing to explain here at
+    // all — 'compilation is not the cause' would imply something needed a cause.
+    ok('...and says there is nothing to explain in this window', /no compilation and no stall/i.test(r.verdict));
   }
 
   // --- COMPILES WHILE STILL MUST NOT READ AS A PAN FINDING -----------------
@@ -97,5 +100,38 @@ export function run(t) {
     // reset was called to measure.
     p.sample({ viewRect: rect(20), pipelineCount: 510 });
     ok('the first sample after reset still sees a compile (baseline survives)', p.read().compiledWhileMoving === 5);
+  }
+
+  // --- THE UNPAUSE CASE: a stall with NO compilation ----------------------
+  // Unpausing happens with the camera still, so its hitch lands in
+  // `worstGapWhileStillMs`. The probe must distinguish "stalled but compiled
+  // nothing" (main-thread or GPU work) from "nothing happened at all" —
+  // otherwise it answers the pan question and is silent on the unpause one.
+  {
+    const p = createPanCompileProbe();
+    p.sample({ viewRect: rect(0), pipelineCount: 900, gapMs: 16 });
+    p.sample({ viewRect: rect(0), pipelineCount: 900, gapMs: 1800 }); // still; big stall, no compiles
+    const r = p.read();
+    ok('a stall with zero compiles is reported as a stall', /A STALL HAPPENED/.test(r.verdict));
+    ok('...and explicitly exonerates shader compilation', /NOT shader compilation/.test(r.verdict));
+    ok('...and says how to tell main-thread from GPU apart', /per-thread/i.test(r.verdict));
+    ok('worstGapMs surfaces it without knowing which bucket to look in', r.worstGapMs === 1800);
+  }
+  {
+    // A quiet window must NOT be dressed up as a stall.
+    const p = createPanCompileProbe();
+    p.sample({ viewRect: rect(0), pipelineCount: 900, gapMs: 16 });
+    p.sample({ viewRect: rect(0), pipelineCount: 900, gapMs: 17 });
+    const r = p.read();
+    ok('a quiet window says so plainly', /no frame gap crossed the stall threshold/i.test(r.verdict));
+    ok('...and reports a small worst gap', r.worstGapMs === 17);
+  }
+  {
+    // A stall that DID compile keeps the compilation verdict — the stall note
+    // must not swallow the finding it exists alongside.
+    const p = createPanCompileProbe();
+    p.sample({ viewRect: rect(0), pipelineCount: 900, gapMs: 16 });
+    p.sample({ viewRect: rect(10), pipelineCount: 930, gapMs: 2000 });
+    ok('compiles still win the verdict when both happened', /COMPILED ON PAN/i.test(p.read().verdict));
   }
 }

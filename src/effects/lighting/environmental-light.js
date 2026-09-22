@@ -41,7 +41,7 @@
  * `buf:scene.illum` therefore holds the ambient illumination in Foundry's own
  * sRGB space (what its illumination texture is). Stated explicitly because an
  * implied colour space is exactly how the washed-out-map bug is born
- * (CONVENTIONS.md §6; Params.md §3.6 finding #1).
+ * (CONVENTIONS.md §5; Params.md §3.6 finding #1).
  *
  * @module effects/lighting/environmental-light
  */

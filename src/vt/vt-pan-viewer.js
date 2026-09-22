@@ -19844,6 +19844,20 @@ export async function startVtPanViewer({
      * lurch even if a kernel did integrate it (none of this is presented —
      * see {@link warmUpSims}).
      */
+    /**
+     * Half-span of the throwaway orthographic frustum the shader warm-up
+     * compiles against (mythica-machina-press#611).
+     *
+     * Deliberately absurd rather than derived from the scene rect. The number
+     * has exactly one job — be large enough that `compileAsync`'s frustum cull
+     * excludes nothing — and a value computed from scene bounds would be a
+     * second, subtler way to miss something that sits just outside them
+     * (a light's influence volume, an effect quad padded past the map edge,
+     * a tile placed off-map). There is no cost to overshooting: the camera is
+     * temporary, renders nothing, and is read only to decide what to traverse.
+     */
+    const WARM_UP_FRUSTUM_HALF_SPAN = 1e7;
+
     const WARM_UP_SIM_DT_SEC = 1 / 60;
 
     /**
@@ -22332,7 +22346,45 @@ export async function startVtPanViewer({
     });
     try {
       const t0 = perfNowMs();
-      await renderer.compileAsync(scene, camera);
+      // ⭐ WARM UP AGAINST A CAMERA THAT CAN SEE THE WHOLE SCENE, NOT THE VIEW
+      // CAMERA (mythica-machina-press#611).
+      //
+      // `compileAsync(scene, camera)` FRUSTUM-CULLS. It compiles only what the
+      // camera can currently see — so warming with the live view camera
+      // compiles the opening view and nothing else, and every off-screen
+      // material compiles later, on the frame that first reveals it. That is
+      // the author's "big freeze the first time I pan the camera": panning is
+      // what reveals new content, and revealing new content is what triggers
+      // the compile.
+      //
+      // It also explains why the freeze shows up in the GPU PROCESS with the
+      // renderer's main thread IDLE (75.6s across twelve tasks in the author's
+      // trace, worst 16.5s) — driver compilation happens over there, which is
+      // exactly why the JS-side compile probes measured almost none of it and
+      // I wrongly concluded compilation was not involved.
+      //
+      // MEASURED, on this vendored three.js build with real WebGPU, with 12
+      // meshes of which 8 start off-screen:
+      //
+      //                        warmed   compiled on pan   pan frame
+      //   view camera .......... 4            3             35.5 ms
+      //   whole-scene camera ... 12           0              2.2 ms
+      //
+      // Zero compiled on pan, and the pan frame drops 16x.
+      //
+      // The camera is temporary and never renders: `compileAsync` only reads it
+      // to decide what to traverse, so widening it cannot change a single
+      // pixel. The real `camera` is untouched.
+      const warmCamera = camera.clone();
+      warmCamera.left = -WARM_UP_FRUSTUM_HALF_SPAN;
+      warmCamera.right = WARM_UP_FRUSTUM_HALF_SPAN;
+      warmCamera.top = WARM_UP_FRUSTUM_HALF_SPAN;
+      warmCamera.bottom = -WARM_UP_FRUSTUM_HALF_SPAN;
+      warmCamera.near = -WARM_UP_FRUSTUM_HALF_SPAN;
+      warmCamera.far = WARM_UP_FRUSTUM_HALF_SPAN;
+      warmCamera.updateProjectionMatrix();
+      warmCamera.updateMatrixWorld(true);
+      await renderer.compileAsync(scene, warmCamera);
       shaderCompileMs = Math.round(perfNowMs() - t0);
     } catch (err) {
       // Precompiling is an optimisation; failing to precompile must never cost a

@@ -454,7 +454,6 @@ export function buildFireMaterial({
       const gust = windHandle.node(TSL, {
         centerXY: aCenter,
         time: uGlobalTimeMs,
-        exposure: aFireParams.y,
       });
       // gust → px/s → (× shear seconds, per slice) → px → quad fraction.
       leanFrac = gust.mul(uWindResponse).mul(float((WIND_PX_PER_SEC * WIND_ORGANIC_DAMP) / Math.max(quadHalfPx, 1e-3)));

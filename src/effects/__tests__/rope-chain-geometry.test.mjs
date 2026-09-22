@@ -113,6 +113,22 @@ export function run(t) {
       dupRole.orphaned.length === 2 && dupRole.orphaned.every((o) => o.id === 'd1' || o.id === 'd2')
     );
 
+    // mythica-machina-press#576 — the same duplicate-role claim, but this
+    // time a genuine valid pair ALSO exists on the same linkId. Used to
+    // vanish entirely (neither sources nor orphaned) once the pair formed a
+    // source — the bucket's leftover waypoints were only ever checked in the
+    // no-pair branch above.
+    const dupRoleWithPair = groupRopeChainAnchorsIntoSources([
+      { id: 'e1', x: 0, y: 0, params: { role: 'start', linkId: 'dup-2' } },
+      { id: 'e2', x: 10, y: 10, params: { role: 'start', linkId: 'dup-2' } }, // duplicate role, same link
+      { id: 'e3', x: 500, y: 0, params: { role: 'end', linkId: 'dup-2' } },
+    ]);
+    ok('the valid pair still forms exactly one source', dupRoleWithPair.sources.length === 1);
+    ok(
+      'the duplicate-role anchor is no longer silently dropped — it surfaces in orphaned',
+      dupRoleWithPair.orphaned.some((o) => o.id === 'e2' && o.linkId === 'dup-2' && o.role === 'start')
+    );
+
     ok(
       'anchors with no linkId at all are ignored entirely',
       groupRopeChainAnchorsIntoSources([{ id: 'z', x: 0, y: 0, params: {} }]).sources.length === 0

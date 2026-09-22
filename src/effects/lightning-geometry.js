@@ -668,6 +668,18 @@ export function groupLightningAnchorsIntoSources(anchors) {
         intensity,
         elevation: Number.isFinite(elevationRaw) ? elevationRaw : 0,
       });
+      // mythica-machina-press#576 — a valid pair forming a source does NOT
+      // mean every anchor on this linkId was consumed. A second anchor
+      // claiming an already-taken start/end role lands in `waypoints`
+      // (never overwriting the first — see the loop above), and without
+      // this check it vanished from both `sources` and `orphaned`: inert,
+      // but with no diagnostic trail. Only a genuine duplicate-role claim
+      // is reported here — a real `role:'waypoint'` entry is left alone,
+      // matching the else branch below's own distinction.
+      for (const w of bucket.waypoints) {
+        const wRole = w.params?.role;
+        if (wRole === 'start' || wRole === 'end') orphaned.push({ id: w.id, linkId, role: wRole });
+      }
     } else {
       if (bucket.start) orphaned.push({ id: bucket.start.id, linkId, role: 'start' });
       if (bucket.end) orphaned.push({ id: bucket.end.id, linkId, role: 'end' });

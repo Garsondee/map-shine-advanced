@@ -405,6 +405,20 @@ export function run(t) {
       'the resolved source carries the START anchor´s own elevation, not the end´s',
       ranked.sources[0].elevation === 1.5
     );
+
+    // mythica-machina-press#576 — a duplicate-role claim (a second 'start')
+    // on a linkId that ALSO has a valid complete pair used to vanish from
+    // both `sources` and `orphaned` entirely: inert, no diagnostic trail.
+    const dup = groupLightningAnchorsIntoSources([
+      { id: 'c1', x: 0, y: 0, params: { role: 'start', linkId: 'bolt-4' } },
+      { id: 'c2', x: 10, y: 10, params: { role: 'start', linkId: 'bolt-4' } }, // duplicate role, same link
+      { id: 'c3', x: 500, y: 0, params: { role: 'end', linkId: 'bolt-4' } },
+    ]);
+    ok('the valid pair still forms exactly one source', dup.sources.length === 1);
+    ok(
+      'the duplicate-role anchor is no longer silently dropped — it surfaces in orphaned',
+      dup.orphaned.some((o) => o.id === 'c2' && o.linkId === 'bolt-4' && o.role === 'start')
+    );
   }
 
   // --- defaultLightningElevation -------------------------------------------

@@ -2173,19 +2173,18 @@ function install() {
    * is the real fix; this seed is the belt-and-braces half, the same posture
    * `water-registration.js` takes for the same reason. */
   let bloomReadout = { enabled: true, params: null };
-  // LENS (mythica-machina-press#57) — same pre-resolve posture as bloom's
-  // own readout immediately above: a whole-image post pass with no mask of
-  // its own, so "not resolved yet" defaulting to ON costs nothing before
-  // the first real cascade resolve lands.
-  let lensReadout = { enabled: true, params: null };
-  // PRISM (mythica-machina-press#137) — OPPOSITE seed from lens/bloom's own
-  // above: `enabledFromProfile: 'extreme'` (off at every profile short of
-  // the ceiling, `prism.js`'s own manifest) means "not resolved yet" is
-  // honestly `false`, never a flash-of-enabled the way lens's own seed would
-  // now be stale for (lens flipped to the same off-by-default posture on
-  // 2026-09-16, mythica-machina-press#556, without its own seed above being
-  // revisited — a small, separate, pre-existing inconsistency, not repeated
-  // here).
+  // LENS (mythica-machina-press#57, seed corrected mythica-machina-press#573)
+  // — `enabledFromProfile: 'extreme'` (off at every profile short of the
+  // ceiling, `lens.js`'s own manifest since 2026-09-16's #556) means
+  // "not resolved yet" is honestly `false`, the same posture prism and
+  // iridescence take immediately below. Used to seed `true` on the older
+  // "a whole-image post pass costs nothing" reasoning, which predates #556
+  // flipping lens off-by-default and was never revisited.
+  let lensReadout = { enabled: false, params: null };
+  // PRISM (mythica-machina-press#137) — same seed posture as lens's own
+  // above, for the same reason: `enabledFromProfile: 'extreme'` (off at
+  // every profile short of the ceiling, `prism.js`'s own manifest) means
+  // "not resolved yet" is honestly `false`, never a flash-of-enabled.
   let prismReadout = { enabled: false, params: null };
   // IRIDESCENCE (mythica-machina-press#136, Prism's own direct sibling) —
   // the identical seed posture as `prismReadout` just above, for the

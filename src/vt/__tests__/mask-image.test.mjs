@@ -7,7 +7,14 @@
  * so the scale is verifiable live. `maskImageTargetSize` is pure, and it is
  * where the memory bill is actually decided, so it is pinned here.
  */
-import { maskImageTargetSize, MASK_IMAGE_SCALE, MASK_IMAGE_MAX_DIM } from '../mask-image.js';
+import {
+  maskImageTargetSize,
+  MASK_IMAGE_SCALE,
+  MASK_IMAGE_MAX_DIM,
+  MASK_IMAGE_MAX_BYTES_DEFAULT,
+  getMaskImageMaxBytes,
+  setMaskImageMaxBytes,
+} from '../mask-image.js';
 
 export async function run(t) {
   // --- the shipped default: FULL native resolution -------------------------
@@ -67,5 +74,68 @@ export async function run(t) {
   {
     const half = maskImageTargetSize(10650, 4950, 0.5);
     t.ok('an explicit 0.5 still halves', half.width === 5325 && half.height === 2475);
+  }
+
+  // --- THE BYTE CEILING (mythica-machina-press#593) ------------------------
+  // `MASK_IMAGE_MAX_DIM` caps DIMENSIONS, which cannot express VRAM cost,
+  // because bytes are dimensions TIMES CHANNELS. The author's trace showed
+  // twelve GPU-process tasks over a second each (16.5s, 12.5s, 10.2s) while
+  // the renderer's main thread sat idle — VRAM pressure, not JS. Masks for a
+  // 10,000-square map came to 501MB PER FLOOR, against a device this module's
+  // own header says dies near 2.5GB uncompressed.
+  const MB = 1024 * 1024;
+  {
+    // No cap => unchanged behaviour, exactly as before this existed.
+    const a = maskImageTargetSize(10000, 10000, 0.75, MASK_IMAGE_MAX_DIM, Infinity, 4);
+    t.ok('an infinite cap changes nothing', a.width === 7500 && a.height === 7500);
+    const b = maskImageTargetSize(10000, 10000, 0.75, MASK_IMAGE_MAX_DIM, 0, 4);
+    t.ok('a zero/disabled cap changes nothing either', b.width === 7500 && b.height === 7500);
+  }
+  {
+    // An RGBA mask at 7500² is 215MB — 4x the ~53MB this module documents as
+    // acceptable — purely because that note reasoned about a single channel.
+    const r = maskImageTargetSize(10000, 10000, 0.75, MASK_IMAGE_MAX_DIM, 128 * MB, 4);
+    const bytes = r.width * r.height * 4;
+    t.ok('an over-budget RGBA mask is brought under the cap', bytes <= 128 * MB);
+    t.ok('...and not crushed far below it (area scales as the SQUARE of the factor)', bytes > 120 * MB);
+  }
+  {
+    // The masks already inside the accepted range must not move at all —
+    // this is a ceiling on an outlier, not a quality setting.
+    const water = maskImageTargetSize(10000, 10000, 1, MASK_IMAGE_MAX_DIM, 128 * MB, 1);
+    t.ok('a 95MB single-channel mask is untouched', water.width === 10000 && water.height === 10000);
+    const win = maskImageTargetSize(10000, 10000, 0.5, MASK_IMAGE_MAX_DIM, 128 * MB, 4);
+    t.ok('a 95MB RGBA mask is untouched', win.width === 5000 && win.height === 5000);
+  }
+  {
+    // Channels are the whole point: the SAME pixels cost 4x as RGBA, and only
+    // the RGBA one may be capped.
+    const asR = maskImageTargetSize(10000, 10000, 1, MASK_IMAGE_MAX_DIM, 128 * MB, 1);
+    const asRgba = maskImageTargetSize(10000, 10000, 1, MASK_IMAGE_MAX_DIM, 128 * MB, 4);
+    t.ok('the same mask is capped as RGBA but not as single-channel', asR.width > asRgba.width);
+  }
+  {
+    // Aspect ratio must survive the cap — a squashed mask would misregister
+    // against the art it masks.
+    const r = maskImageTargetSize(12000, 6000, 1, MASK_IMAGE_MAX_DIM, 64 * MB, 4);
+    t.ok('a non-square mask keeps its aspect through the cap', Math.abs(r.width / r.height - 2) < 0.02);
+  }
+  {
+    // Never below one texel, whatever the cap.
+    const r = maskImageTargetSize(10000, 10000, 1, MASK_IMAGE_MAX_DIM, 1, 4);
+    t.ok('an absurd cap still yields a usable texture, never 0', r.width >= 1 && r.height >= 1);
+  }
+  {
+    // The live knob.
+    const before = getMaskImageMaxBytes();
+    t.ok('the default ceiling is the documented one', before === MASK_IMAGE_MAX_BYTES_DEFAULT);
+    setMaskImageMaxBytes(64 * MB);
+    t.ok('the setter takes', getMaskImageMaxBytes() === 64 * MB);
+    setMaskImageMaxBytes(0);
+    t.ok('0 disables the ceiling entirely (restores previous behaviour)', getMaskImageMaxBytes() === Infinity);
+    setMaskImageMaxBytes(Number.NaN);
+    t.ok('a non-finite value also disables rather than corrupting it', getMaskImageMaxBytes() === Infinity);
+    setMaskImageMaxBytes(before);
+    t.ok('restored for the rest of the run', getMaskImageMaxBytes() === before);
   }
 }

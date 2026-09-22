@@ -100,6 +100,75 @@ export const MASK_IMAGE_SCALE = 1;
 export const MASK_IMAGE_MAX_DIM = 16384;
 
 /**
+ * Hard ceiling on a single mask's UPLOADED BYTES — the cap `MASK_IMAGE_MAX_DIM`
+ * cannot express, because bytes are dimensions TIMES CHANNELS
+ * (mythica-machina-press#593).
+ *
+ * ## The measurement
+ *
+ * This module's own cost note reasons about "~53 MB" for a 10,650 x 4,950 mask
+ * and calls that acceptable — and it is. But that figure is for a
+ * SINGLE-CHANNEL (R) mask. A `_Specular` mask is RGBA, because its three
+ * channels decode to three separate material properties, so on a 10,000-square
+ * map it is not 53MB:
+ *
+ *   specular  7500² (scale .75)  x4 bytes = 215 MB
+ *   window    5000² (scale .5)   x4 bytes =  95 MB
+ *   water     10000² (scale 1)   x1 byte  =  95 MB
+ *   vegetation 10000² (scale 1)  x1 byte  =  95 MB
+ *   ------------------------------------------------
+ *   per floor                             = 501 MB
+ *   two floors                            = 1,001 MB
+ *
+ * against a device this module's own header says "dies ~2.5GB uncompressed",
+ * before any map art or render target. The author's performance trace shows the
+ * consequence directly: twelve GPU-process tasks over a second each, totalling
+ * 75.6s, with individual tasks of 16.5s, 12.5s and 10.2s — during which the
+ * renderer's main thread is IDLE. That is not JS blocking; that is the GPU
+ * itself, which is what VRAM pressure looks like.
+ *
+ * ## Why a BYTE cap and not a smaller scale
+ *
+ * `MASK_IMAGE_SCALE` was deliberately raised to 1 by the author, for shoreline
+ * crispness they could see. Lowering it again would undo a decision made on
+ * evidence. A byte cap is a different statement: keep native resolution
+ * wherever it is affordable, and only stand down where a single mask would
+ * otherwise cost multiples of the budget this module already documents as
+ * acceptable.
+ *
+ * ## The default, and why it is this number
+ *
+ * 128MB is ~2.4x the ~53MB this module already accepts for one mask, so every
+ * mask in the table above EXCEPT specular is untouched. Specular — the one that
+ * is 4x over the documented figure, purely because the cost note reasoned about
+ * a single-channel mask — comes down from 7500² to ~5800². It is a ceiling on
+ * an outlier, not a quality setting.
+ *
+ * Live-tunable via `MapShine.setMaskImageMaxBytes(n)` so the author can trade
+ * VRAM against crispness against their own eyes rather than against this
+ * comment. `0`/`Infinity` disables the cap entirely and restores the previous
+ * behaviour exactly.
+ */
+export const MASK_IMAGE_MAX_BYTES_DEFAULT = 128 * 1024 * 1024;
+
+let _maskImageMaxBytes = MASK_IMAGE_MAX_BYTES_DEFAULT;
+
+/** @returns {number} the live per-mask byte ceiling (Infinity when disabled). */
+export function getMaskImageMaxBytes() {
+  return _maskImageMaxBytes;
+}
+
+/**
+ * Set the per-mask byte ceiling. `0`, negative or non-finite disables it.
+ * Takes effect on the NEXT mask load — existing textures are not re-uploaded.
+ * @param {number} bytes
+ */
+export function setMaskImageMaxBytes(bytes) {
+  _maskImageMaxBytes = Number.isFinite(bytes) && bytes > 0 ? bytes : Infinity;
+  return { maskImageMaxBytes: _maskImageMaxBytes };
+}
+
+/**
  * The uploaded dimensions for a source of this size: scaled, capped, and never
  * upscaled past native (a 2,000px mask stays 1,000px, it does not become 8,192).
  * Pure, so the sizing rule is Node-testable without a browser.
@@ -108,13 +177,41 @@ export const MASK_IMAGE_MAX_DIM = 16384;
  * @param {number} [scale] @param {number} [maxDim]
  * @returns {{width: number, height: number}}
  */
-export function maskImageTargetSize(nativeW, nativeH, scale = MASK_IMAGE_SCALE, maxDim = MASK_IMAGE_MAX_DIM) {
+export function maskImageTargetSize(
+  nativeW,
+  nativeH,
+  scale = MASK_IMAGE_SCALE,
+  maxDim = MASK_IMAGE_MAX_DIM,
+  maxBytes = Infinity,
+  bytesPerTexel = 1
+) {
   const w0 = Math.max(1, Math.floor(nativeW * scale));
   const h0 = Math.max(1, Math.floor(nativeH * scale));
-  const longest = Math.max(w0, h0);
-  if (longest <= maxDim) return { width: w0, height: h0 };
-  const k = maxDim / longest;
-  return { width: Math.max(1, Math.floor(w0 * k)), height: Math.max(1, Math.floor(h0 * k)) };
+  let w = w0;
+  let h = h0;
+  const longest = Math.max(w, h);
+  if (longest > maxDim) {
+    const k = maxDim / longest;
+    w = Math.max(1, Math.floor(w * k));
+    h = Math.max(1, Math.floor(h * k));
+  }
+  // THE BYTE CEILING (mythica-machina-press#593). Applied AFTER the dimension
+  // cap because they answer different questions — `maxDim` is "what will the
+  // device accept as one texture", this is "what will the scene's VRAM budget
+  // bear". Area scales with the square of the linear factor, so the factor is
+  // the SQUARE ROOT of the byte ratio; scaling linearly would overshoot badly
+  // and throw away resolution nobody asked to lose.
+  const bpt = Number.isFinite(bytesPerTexel) && bytesPerTexel > 0 ? bytesPerTexel : 1;
+  const cap = Number.isFinite(maxBytes) && maxBytes > 0 ? maxBytes : Infinity;
+  if (cap !== Infinity) {
+    const bytes = w * h * bpt;
+    if (bytes > cap) {
+      const k = Math.sqrt(cap / bytes);
+      w = Math.max(1, Math.floor(w * k));
+      h = Math.max(1, Math.floor(h * k));
+    }
+  }
+  return { width: w, height: h };
 }
 
 /**
@@ -323,7 +420,17 @@ export async function loadMaskImageTexture({ url, THREE, scale = MASK_IMAGE_SCAL
       nativeHeight = probe.height;
       probe.close();
     }
-    const { width, height } = maskImageTargetSize(nativeWidth, nativeHeight, scale);
+    // 4 bytes for an RGBA mask, 1 for single-channel — the byte ceiling is
+    // meaningless without the channel count, which is the whole reason
+    // `MASK_IMAGE_MAX_DIM` alone could not express it (#593).
+    const { width, height } = maskImageTargetSize(
+      nativeWidth,
+      nativeHeight,
+      scale,
+      MASK_IMAGE_MAX_DIM,
+      getMaskImageMaxBytes(),
+      channels === 'rgb' ? 4 : 1
+    );
     // ── OFF THE MAIN THREAD FIRST (mythica-machina-press#591) ──────────────
     // Measured on a real 10,000 x 10,000 production layer in a real browser:
     // getImageData 1,694ms + repack 1,267ms = ~3 SECONDS of hard main-thread

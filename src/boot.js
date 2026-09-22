@@ -402,6 +402,8 @@ import {
   getVtPanViewerSceneSettle,
   sampleVtPanViewerSceneSettleNow,
   setVtPanViewerLoadRenderScale,
+  setMaskImageMaxBytes,
+  getMaskImageMaxBytes,
   setVtPanViewerChunkedWarmUp,
   getVtPanViewerChunkedWarmUp,
   getVtPanViewerLoadRenderScale,
@@ -1016,6 +1018,17 @@ MapShine.setDebugFirstRenderProbe = setVtPanViewerDebugFirstRenderProbe;
  * flag whose only off switch is a code edit is not really a flag.
  */
 MapShine.setLoadRenderScale = setVtPanViewerLoadRenderScale;
+/**
+ * The per-mask VRAM ceiling (mythica-machina-press#593). Masks for a
+ * 10,000-square map cost ~501MB PER FLOOR at the shipped scales, and the
+ * author's own trace shows the GPU process blocked for 16.5s at a stretch with
+ * the renderer's main thread idle. `MapShine.setMaskImageMaxBytes(0)` disables
+ * the ceiling and restores the previous behaviour exactly; a smaller number
+ * trades mask crispness for VRAM. Exposed because that trade is the author's to
+ * make with their own eyes, live, not one to settle in a comment.
+ */
+MapShine.setMaskImageMaxBytes = setMaskImageMaxBytes;
+MapShine.getMaskImageMaxBytes = getMaskImageMaxBytes;
 /**
  * The chunked cold-load warm-up (mythica-machina-press#534), currently OFF by
  * default. `vt-pan-viewer.js` has documented this exact console call since

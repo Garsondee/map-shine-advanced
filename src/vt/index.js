@@ -201,3 +201,5 @@ export { getCompressedTextureStats } from './compressed-textures.js';
 // (which reads the heartbeat's device) misreports the limit. Cross-zone, so it
 // goes through this door.
 export { resolveRendererRequiredLimits } from './texture-limits.js';
+
+export { setMaskImageMaxBytes, getMaskImageMaxBytes } from './mask-image.js';

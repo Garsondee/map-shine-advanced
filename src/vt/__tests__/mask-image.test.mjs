@@ -14,6 +14,7 @@ import {
   MASK_IMAGE_MAX_BYTES_DEFAULT,
   getMaskImageMaxBytes,
   setMaskImageMaxBytes,
+  getMaskWorkerPoolStats,
 } from '../mask-image.js';
 
 export async function run(t) {
@@ -137,5 +138,28 @@ export async function run(t) {
     t.ok('a non-finite value also disables rather than corrupting it', getMaskImageMaxBytes() === Infinity);
     setMaskImageMaxBytes(before);
     t.ok('restored for the rest of the run', getMaskImageMaxBytes() === before);
+  }
+
+  // --- THE WORKER POOL SIZE (mythica-machina-press#612) --------------------
+  // The author's trace showed 57.4s of mask work in ONE worker thread, in
+  // three long blocks, while every other core idled. Each mask is entirely
+  // independent — own fetch, own decode, own pixel pass — so the serialisation
+  // was pure waste. These pin the sizing rule, which is the part that can go
+  // wrong quietly.
+  {
+    const st = getMaskWorkerPoolStats();
+    t.ok('the pool reports a wanted size', Number.isFinite(st.wanted) && st.wanted >= 1);
+    t.ok('...never more than the documented cap', st.wanted <= 4);
+    // Two cores are deliberately left alone: the renderer main thread and the
+    // GPU process, which the same trace shows busy for 75.6s. Saturating every
+    // core would steal from the two things the user actually experiences.
+    const cores = Number(globalThis.navigator?.hardwareConcurrency);
+    if (Number.isFinite(cores) && cores >= 2) {
+      t.ok('...and leaves headroom for the main thread and GPU process', st.wanted <= Math.max(1, cores - 2));
+    }
+    // Nothing has asked for a mask in this suite, so the pool must not exist
+    // yet: building workers is lazy, and a test run must not spawn threads it
+    // never uses.
+    t.ok('the pool is built lazily, not on import', st.built === false && st.size === 0);
   }
 }

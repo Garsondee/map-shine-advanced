@@ -255,12 +255,34 @@ function buildMaskTexture(THREE, data, width, height, rgbMode) {
 }
 
 /**
- * THE MASK DECODE WORKER CLIENT (mythica-machina-press#591).
+ * THE MASK DECODE WORKER POOL (mythica-machina-press#591, pooled in #612).
  *
- * One lazily-constructed worker, one in-flight map, and a hard degrade to the
- * main-thread path on ANY failure — the same contract
+ * Lazily-constructed workers, one in-flight map, and a hard degrade to the
+ * main-thread path when the pool is empty — the same contract
  * `vt/compressed-textures.js` already uses, and for the same reason: a worker
  * that cannot start must never be why a mask fails to load.
+ *
+ * ## Why a pool and not one worker
+ *
+ * The author's trace shows **57.4 seconds** of mask work in a SINGLE worker
+ * thread, in three long blocks, for roughly seven masks. That is the load — it
+ * is what "half the loading happens after the loading screen goes away" is made
+ * of, now that the same work no longer blocks the main thread (#591).
+ *
+ * Each mask is completely independent: its own fetch, its own decode, its own
+ * pixel pass, its own result. Nothing is shared and nothing is ordered. That is
+ * the definition of embarrassingly parallel, and it was being run strictly
+ * serially on one thread while every other core sat idle.
+ *
+ * ## Why this size
+ *
+ * `hardwareConcurrency - 2`, capped at 4. Two are left deliberately: the
+ * renderer's main thread, and the GPU process, which the same trace shows busy
+ * for 75.6s — saturating every core would take cycles from the two things the
+ * user actually experiences. The cap at 4 is because the work is
+ * memory-bandwidth bound (a 6,750² mask moves ~180MB through `getImageData`
+ * and the repack), and past a handful of threads more parallelism buys
+ * contention rather than throughput.
  *
  * Construction form is `new Worker(new URL('./x.worker.js', import.meta.url),
  * { type: 'module' })` because that is the only reference form that both
@@ -268,65 +290,102 @@ function buildMaskTexture(THREE, data, width, height, rgbMode) {
  * reachability wall — copied deliberately from the two workers that already
  * work here rather than invented.
  */
-let _maskWorker = null;
-let _maskWorkerDead = false;
+const MASK_WORKER_POOL_MAX = 4;
+
+function resolveMaskPoolSize() {
+  const cores = Number(globalThis.navigator?.hardwareConcurrency);
+  if (!Number.isFinite(cores) || cores < 2) return 1;
+  return Math.max(1, Math.min(MASK_WORKER_POOL_MAX, Math.floor(cores) - 2));
+}
+
+/** @type {Array<{worker: Worker, inFlight: number}>} */
+let _maskPool = [];
+let _maskPoolBuilt = false;
+let _maskPoolDead = false;
 let _maskJobSeq = 0;
 const _maskJobs = new Map();
 
-function ensureMaskWorker() {
-  if (_maskWorkerDead) return null;
-  if (_maskWorker) return _maskWorker;
-  try {
-    _maskWorker = new Worker(new URL('./mask-decode.worker.js', import.meta.url), { type: 'module' });
-    _maskWorker.onmessage = (e) => {
-      const d = e.data || {};
-      const job = _maskJobs.get(d.id);
-      if (!job) return;
-      _maskJobs.delete(d.id);
-      job.resolve(d.ok ? d : null);
-    };
-    _maskWorker.onerror = (err) => {
-      // The worker died. Everything waiting on it degrades to the main-thread
-      // path rather than hanging, and it is not rebuilt this session: a worker
-      // that fails here has failed for an environmental reason (CSP, module
-      // resolution) that a retry will not change.
-      log.warn('mask decode worker failed - falling back to main-thread decode:', err?.message || err);
-      _maskWorkerDead = true;
-      _maskWorker = null;
-      for (const [, j] of _maskJobs) j.resolve(null);
-      _maskJobs.clear();
-    };
-  } catch (err) {
-    log.warn('mask decode worker unavailable - using main-thread decode:', err?.message || err);
-    _maskWorkerDead = true;
-    _maskWorker = null;
-    return null;
+function ensureMaskPool() {
+  if (_maskPoolDead) return _maskPool;
+  if (_maskPoolBuilt) return _maskPool;
+  _maskPoolBuilt = true;
+  const want = resolveMaskPoolSize();
+  for (let i = 0; i < want; i++) {
+    try {
+      const worker = new Worker(new URL('./mask-decode.worker.js', import.meta.url), { type: 'module' });
+      const slot = { worker, inFlight: 0 };
+      worker.onmessage = (e) => {
+        const d = e.data || {};
+        const job = _maskJobs.get(d.id);
+        slot.inFlight = Math.max(0, slot.inFlight - 1);
+        if (!job) return;
+        _maskJobs.delete(d.id);
+        job.resolve(d.ok ? d : null);
+      };
+      worker.onerror = (err) => {
+        // This worker died. Drop it from the pool and resolve ITS jobs null so
+        // they degrade to the main-thread path rather than hanging. Other
+        // workers keep going — one bad thread must not cost the whole pool.
+        log.warn('a mask decode worker failed - that job falls back to main-thread decode:', err?.message || err);
+        _maskPool = _maskPool.filter((x) => x !== slot);
+        if (_maskPool.length === 0) _maskPoolDead = true;
+        for (const [id, j] of _maskJobs) {
+          if (j.slot === slot) {
+            _maskJobs.delete(id);
+            j.resolve(null);
+          }
+        }
+      };
+      _maskPool.push(slot);
+    } catch (err) {
+      log.warn('mask decode worker unavailable - using main-thread decode:', err?.message || err);
+    }
   }
-  return _maskWorker;
+  if (_maskPool.length === 0) _maskPoolDead = true;
+  return _maskPool;
 }
 
 /**
- * Ask the worker to decode + read back + repack. Resolves `null` on any
- * failure, which the caller MUST treat as "do it yourself".
+ * Ask the pool to decode + read back + repack. Resolves `null` on any failure,
+ * which the caller MUST treat as "do it yourself".
  * @returns {Promise<{data:Uint8Array, contentBounds:object|null}|null>}
  */
 function decodeMaskInWorker(bytes, width, height, rgbMode) {
-  const w = ensureMaskWorker();
-  if (!w) return Promise.resolve(null);
+  const pool = ensureMaskPool();
+  if (pool.length === 0) return Promise.resolve(null);
+  // LEAST-LOADED, not round-robin: masks differ enormously in cost (a 6,750²
+  // layer against a small overlay), so a rotation can hand three big ones to
+  // the same thread while another idles. Picking the shortest queue is one
+  // comparison and cannot do that.
+  let slot = pool[0];
+  for (const s of pool) if (s.inFlight < slot.inFlight) slot = s;
   const id = ++_maskJobSeq;
   return new Promise((resolve) => {
-    _maskJobs.set(id, { resolve });
+    _maskJobs.set(id, { resolve, slot });
+    slot.inFlight++;
     try {
       // Zero-copy both ways: the file bytes are TRANSFERRED in (the caller has
       // already read the header it needs from them) and the packed result is
       // transferred back, so several hundred MB crosses the boundary with no copy.
-      w.postMessage({ id, bytes, width, height, rgbMode, emptyByte: MASK_CONTENT_EMPTY_BYTE }, [bytes]);
+      slot.worker.postMessage({ id, bytes, width, height, rgbMode, emptyByte: MASK_CONTENT_EMPTY_BYTE }, [bytes]);
     } catch (err) {
       _maskJobs.delete(id);
+      slot.inFlight = Math.max(0, slot.inFlight - 1);
       log.warn('mask decode worker postMessage failed - using main-thread decode:', err?.message || err);
       resolve(null);
     }
   });
+}
+
+/** Pool state, for diagnostics and tests. */
+export function getMaskWorkerPoolStats() {
+  return {
+    size: _maskPool.length,
+    built: _maskPoolBuilt,
+    dead: _maskPoolDead,
+    inFlight: _maskPool.reduce((n, s) => n + s.inFlight, 0),
+    wanted: resolveMaskPoolSize(),
+  };
 }
 
 /**

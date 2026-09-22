@@ -255,7 +255,7 @@ function buildMaskTexture(THREE, data, width, height, rgbMode) {
 }
 
 /**
- * THE MASK DECODE WORKER POOL (mythica-machina-press#591, pooled in #612).
+ * THE MASK DECODE WORKER POOL (mythica-machina-press#591, pooled in #613).
  *
  * Lazily-constructed workers, one in-flight map, and a hard degrade to the
  * main-thread path when the pool is empty — the same contract

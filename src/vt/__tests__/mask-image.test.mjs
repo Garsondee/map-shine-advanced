@@ -140,7 +140,7 @@ export async function run(t) {
     t.ok('restored for the rest of the run', getMaskImageMaxBytes() === before);
   }
 
-  // --- THE WORKER POOL SIZE (mythica-machina-press#612) --------------------
+  // --- THE WORKER POOL SIZE (mythica-machina-press#613) --------------------
   // The author's trace showed 57.4s of mask work in ONE worker thread, in
   // three long blocks, while every other core idled. Each mask is entirely
   // independent — own fetch, own decode, own pixel pass — so the serialisation

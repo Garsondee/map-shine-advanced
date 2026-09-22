@@ -15855,7 +15855,7 @@ function install() {
         beginSceneLoadPhase(LOAD_PHASES.WARMING);
         const readyOutcome = await waitForSceneReady();
         // THE CURTAIN IS COMING DOWN — from here on, ANY pipeline compile
-        // happens in front of the user, which is exactly the bug #613 fixed.
+        // happens in front of the user, which is exactly the bug #614 fixed.
         // Arming the detector here means MSA notices a regression itself, on
         // every load, rather than waiting for someone to report a stutter.
         noteVtPanViewerRevealed();

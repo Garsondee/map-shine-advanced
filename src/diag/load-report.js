@@ -315,7 +315,7 @@ function buildWarmUpSection(warmUp) {
     ms: ran ? round(warmUp.warmUpMs) : null,
     pipelinesCreated: created,
     simPipelinesCreated: simCreated,
-    // THE POST-CONTENT WARM-UP (mythica-machina-press#613): shaders for
+    // THE POST-CONTENT WARM-UP (mythica-machina-press#614): shaders for
     // mask-driven effects, compiled after their masks landed and BEFORE the
     // curtain lifts. A number here is the 'huge lag spike then the effect
     // pops in' being paid behind the curtain instead of in front of the user.

@@ -137,7 +137,7 @@ export function run(t) {
 
   // --- THE REGRESSION DETECTOR (mythica-machina-press#614) -----------------
   // A pipeline compiling after the curtain lifts IS the freeze-then-pop-in
-  // bug, whatever effect causes it. This is what makes the module notice #613
+  // bug, whatever effect causes it. This is what makes the module notice #614
   // recurring by itself, so the next case is not found by a user months later.
   {
     const p = createPanCompileProbe();
@@ -155,7 +155,7 @@ export function run(t) {
     ok('compiles after reveal are counted', r.compiledAfterReveal === 3);
     ok('...and NOT confused with the pre-reveal ones', r.compiledWhileStill === 8);
     ok('...and the verdict names the regression', /compiled AFTER the curtain lifted/.test(r.postRevealVerdict));
-    ok('...and cites the issue so it is actionable', /613/.test(r.postRevealVerdict));
+    ok('...and cites the issue so it is actionable', /614/.test(r.postRevealVerdict));
     ok('...and carries the frame cost', r.worstGapAfterRevealMs === 700);
   }
   {

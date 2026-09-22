@@ -13258,7 +13258,7 @@ export async function startVtPanViewer({
       },
     });
     // ⭐ THE GATE THAT STOPS "COMPILE IN FRONT OF THE USER"
-    // (mythica-machina-press#613). Reads as one outstanding item until every
+    // (mythica-machina-press#614). Reads as one outstanding item until every
     // effect that has content has been DRAWN at least once, so readiness cannot
     // call the scene settled while a mask-driven material is still uncompiled
     // and waiting to freeze the first frame that reveals it.
@@ -19859,7 +19859,7 @@ export async function startVtPanViewer({
      * see {@link warmUpSims}).
      */
     /**
-     * THE POST-CONTENT WARM-UP (mythica-machina-press#613) — the fix for
+     * THE POST-CONTENT WARM-UP (mythica-machina-press#614) — the fix for
      * *"a HUGE lag spike, then the _Windows effect popped into the scene"*.
      *
      * ## Why the existing warm-up cannot catch these
@@ -19912,7 +19912,7 @@ export async function startVtPanViewer({
     let effectsWarmedAfterContent = false;
     let effectWarmUpRunning = false;
     /**
-     * How many post-content warm-up passes have run (mythica-machina-press#613).
+     * How many post-content warm-up passes have run (mythica-machina-press#614).
      *
      * It is a LOOP, not a one-shot, because effects become visible at different
      * moments and an enumeration of them will always be incomplete. An audit of
@@ -20144,7 +20144,7 @@ export async function startVtPanViewer({
      * @param {object} [opts]
      * @param {boolean} [opts.includePresent]
      * @param {boolean} [opts.recordStats] - false for the POST-CONTENT warm-up
-     *   (mythica-machina-press#613), which runs a second time later in the load
+     *   (mythica-machina-press#614), which runs a second time later in the load
      *   and would otherwise silently overwrite the initial warm-up's `warmUpMs`
      *   / `warmUpPipelinesCreated` in the loading-time report. Two different
      *   events reported through one pair of fields is how an instrument starts
@@ -20200,7 +20200,7 @@ export async function startVtPanViewer({
      */
     /**
      * Run the post-content warm-up once, the moment every other readiness probe
-     * has reached zero (mythica-machina-press#613).
+     * has reached zero (mythica-machina-press#614).
      *
      * CHUNKED, always — not the synchronous variant. This runs while the
      * curtain is up and the render loop is live, so a single blocking pass
@@ -20225,7 +20225,7 @@ export async function startVtPanViewer({
       if (othersOutstanding > 0) return;
       effectWarmUpRunning = true;
       const before = readPipelineCount();
-      // STEP THE SIMS FIRST (mythica-machina-press#613, unpause half).
+      // STEP THE SIMS FIRST (mythica-machina-press#614, unpause half).
       //
       // The same `mesh.visible = false` trap that hid the window surface
       // until its mask landed also hides every ANIMATED effect until it has
@@ -20271,7 +20271,7 @@ export async function startVtPanViewer({
 
     function sampleSceneSettle(nowMs) {
       const { raw, keys, unavailable } = readiness.collect();
-      // THE POST-CONTENT WARM-UP (mythica-machina-press#613) — kicked off here
+      // THE POST-CONTENT WARM-UP (mythica-machina-press#614) — kicked off here
       // because this is the one place that already polls every readiness
       // counter, which is exactly the condition it waits on.
       maybeWarmEffectsAfterContent(raw);

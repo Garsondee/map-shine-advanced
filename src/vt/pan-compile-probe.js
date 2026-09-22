@@ -83,7 +83,7 @@ export function createPanCompileProbe() {
   /**
    * Compiles seen AFTER the curtain lifted (mythica-machina-press#614).
    *
-   * This is the regression detector for #613. A pipeline compiling once the
+   * This is the regression detector for #614. A pipeline compiling once the
    * user can see the map IS the bug — it is the freeze-then-pop-in, by
    * definition, whatever effect happened to cause it. Counting it means the
    * module notices its own regression instead of waiting for someone to report
@@ -174,7 +174,7 @@ export function createPanCompileProbe() {
         compiledAfterReveal === null
           ? null
           : compiledAfterReveal > 0
-            ? `⚠️ ${compiledAfterReveal} pipeline(s) compiled AFTER the curtain lifted (worst frame ${Math.round(worstGapAfterRevealMs)}ms). That is mythica-machina-press#613 recurring: an effect became visible only after the warm-up converged, so its shader compiled in front of the user. Read \`warmUp.postContentPipelinesCreated\` to see whether the warm-up ran at all, and which effect appeared at that moment.`
+            ? `⚠️ ${compiledAfterReveal} pipeline(s) compiled AFTER the curtain lifted (worst frame ${Math.round(worstGapAfterRevealMs)}ms). That is mythica-machina-press#614 recurring: an effect became visible only after the warm-up converged, so its shader compiled in front of the user. Read \`warmUp.postContentPipelinesCreated\` to see whether the warm-up ran at all, and which effect appeared at that moment.`
             : 'Clean: no pipeline compiled after the curtain lifted. The post-content warm-up caught everything this load.',
       // The verdict this exists to produce, stated rather than left as an
       // exercise — and refusing to give one when nothing was measured.

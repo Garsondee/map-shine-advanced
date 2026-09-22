@@ -588,26 +588,22 @@ export function installTileMotionPanel() {
     return wrap;
   }
 
-  // shadowProjectionEnabled/renderAboveTokens (2026-08-27 fix, live V2-vs-V4
-  // gap research this session) — both real, normalized fields in
-  // TileMotionConfig (foundry/tile-motion.js:91-92, 115-116) with NO UI
-  // anywhere before this: not in either of the two now-deleted duplicate
-  // dialogs, and V2 had both (legacy/ui/tile-motion-dialog.js). Applies
-  // regardless of transform/texture mode, so it sits after both, not
-  // nested inside either mode's own section.
+  // renderAboveTokens (2026-08-27 fix, live V2-vs-V4 gap research this
+  // session) — a real, normalized field in TileMotionConfig
+  // (foundry/tile-motion.js:91-92, 115) with NO UI anywhere before this:
+  // not in either of the two now-deleted duplicate dialogs, and V2 had it
+  // (legacy/ui/tile-motion-dialog.js). Applies regardless of
+  // transform/texture mode, so it sits after both, not nested inside
+  // either mode's own section.
+  //
+  // Its former sibling here, `shadowProjectionEnabled`, was removed
+  // entirely (mythica-machina-press#575) — a real, normalized, wired-up
+  // checkbox with zero consumers anywhere in the render path. Re-add it
+  // (field + checkbox) alongside real shadow-casting for moving tiles if
+  // that gets built, rather than resurrecting a control that does nothing.
   function buildRenderingSection(config) {
     const wrap = document.createElement('div');
     wrap.appendChild(sectionHeading('Rendering'));
-    wrap.appendChild(
-      buildParamControl(
-        'tileMotionShadowProjection',
-        { type: 'bool', label: 'shadow projection', help: 'Cast this tile’s own shadow as it moves.' },
-        {
-          value: config.shadowProjectionEnabled,
-          onChange: (v) => patchSelectedTile({ shadowProjectionEnabled: v }),
-        }
-      )
-    );
     wrap.appendChild(
       buildParamControl(
         'tileMotionRenderAboveTokens',

@@ -3049,21 +3049,21 @@ const MOTION_EASINGS = ['linear', 'easeInSine', 'easeOutSine', 'easeInOutSine', 
   'easeInOutBack', 'easeOutBounce', 'easeInOutElastic', 'clockwork', 'clockwork-chaos'];
 const MOTION_TILES = [
   { id: 't1', label: 'Hanging lantern', status: 'active', enabled: true,
-    shadowProjectionEnabled: true, renderAboveTokens: false, mode: 'transform', parent: 'None',
+    renderAboveTokens: false, mode: 'transform', parent: 'None',
     pivot: { x: 0, y: -40, snapToGrid: false },
     motion: { type: 'sine', speed: 0, phase: 0, rotationEasing: 'linear', easeStrength: 1,
       clockworkSteps: 8, clockworkHold: .55, clockworkJank: 0, loopMode: 'loop', radius: 0,
       pointA: { x: 0, y: 0 }, pointB: { x: 0, y: 0 }, amplitudeX: 0, amplitudeY: 0, amplitudeRot: 6 },
     textureMotion: { scrollU: 0, scrollV: 0, rotateSpeed: 0, pivotU: .5, pivotV: .5 } },
   { id: 't2', label: 'Banner', status: 'ready', enabled: true,
-    shadowProjectionEnabled: false, renderAboveTokens: false, mode: 'transform', parent: 'None',
+    renderAboveTokens: false, mode: 'transform', parent: 'None',
     pivot: { x: 0, y: -80, snapToGrid: true },
     motion: { type: 'sine', speed: 0, phase: 30, rotationEasing: 'linear', easeStrength: 1,
       clockworkSteps: 8, clockworkHold: .55, clockworkJank: 0, loopMode: 'loop', radius: 0,
       pointA: { x: 0, y: 0 }, pointB: { x: 0, y: 0 }, amplitudeX: 14, amplitudeY: 0, amplitudeRot: 3 },
     textureMotion: { scrollU: 0, scrollV: 0, rotateSpeed: 0, pivotU: .5, pivotV: .5 } },
   { id: 't3', label: 'Waterwheel', status: 'disabled', enabled: false,
-    shadowProjectionEnabled: false, renderAboveTokens: true, mode: 'transform', parent: 'None',
+    renderAboveTokens: true, mode: 'transform', parent: 'None',
     pivot: { x: 0, y: 0, snapToGrid: false },
     motion: { type: 'rotation', speed: 40, phase: 0, rotationEasing: 'clockwork', easeStrength: .8,
       clockworkSteps: 12, clockworkHold: .6, clockworkJank: .1, loopMode: 'loop', radius: 0,
@@ -3097,8 +3097,6 @@ function renderMotionPop() {
   pop.append(pickRow);
 
   pop.append(checkRow('Enabled', tile.enabled, e => { tile.enabled = e.target.checked; }));
-  pop.append(checkRow('Shadow projection', tile.shadowProjectionEnabled,
-    e => { tile.shadowProjectionEnabled = e.target.checked; }));
   const roatBtn = checkRow('Render above tokens', tile.renderAboveTokens,
     e => { tile.renderAboveTokens = e.target.checked; });
   roatBtn.title = 'Forces roof-style draw order for this tile — independent of Foundry’s own overhead classification';

@@ -88,7 +88,7 @@ function point(raw, fx = 0, fy = 0) {
  *   clockworkJank:number, loopMode:'loop'|'pingPong', radius:number, pointA:{x:number,y:number},
  *   pointB:{x:number,y:number}, amplitudeX:number, amplitudeY:number, amplitudeRot:number}} TileMotionParams */
 /** @typedef {{scrollU:number, scrollV:number, rotateSpeed:number, pivotU:number, pivotV:number}} TileTextureMotion */
-/** @typedef {{version:number, enabled:boolean, shadowProjectionEnabled:boolean, renderAboveTokens:boolean,
+/** @typedef {{version:number, enabled:boolean, renderAboveTokens:boolean,
  *   mode:'transform'|'texture', parentId:string|null, pivot:TileMotionPivot, motion:TileMotionParams,
  *   textureMotion:TileTextureMotion}} TileMotionConfig */
 
@@ -112,7 +112,6 @@ export function normalizeTileMotionConfig(raw, tileId = '') {
   return {
     version: CURRENT_TILE_CONFIG_VERSION,
     enabled: !!cfg.enabled,
-    shadowProjectionEnabled: !!cfg.shadowProjectionEnabled,
     renderAboveTokens: !!cfg.renderAboveTokens,
     mode,
     parentId,

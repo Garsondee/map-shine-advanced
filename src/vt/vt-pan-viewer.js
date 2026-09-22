@@ -19880,6 +19880,23 @@ export async function startVtPanViewer({
      * draws it for the FIRST time — compiling its shader right there, in front
      * of the user. The freeze, and then the effect pops in. Exactly as reported.
      *
+     * ## VERIFIED, on real WebGPU, before shipping
+     *
+     * Two meshes, one visible and one `visible = false` (the effect whose mask
+     * has not landed), each with its own material. `compileAsync` + a full
+     * draw, then the hidden one is revealed:
+     *
+     *                                    compiled at reveal   reveal frame
+     *   without post-content warm-up ........ 1                 66.6 ms
+     *   with post-content warm-up ........... 0                  3.2 ms
+     *
+     * The invisible mesh is genuinely skipped by BOTH `compileAsync` and the
+     * render — it is not among the pipelines the load-time warm-up produces.
+     * Revealing it compiles it, and that is the freeze. Drawing it once while
+     * visible beforehand removes it entirely: 20x faster reveal frame, zero
+     * compiled. That is one mesh; a scene's worth of effects is how it scales
+     * to the multi-second spike the author reported.
+     *
      * ## The fix
      *
      * Warm up AGAIN once the content has actually arrived, while the curtain is

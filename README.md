@@ -75,44 +75,42 @@ These are the masks currently discovered by the module's asset-loading system:
 
 ## Features (current)
 
-### Core rendering & syncing
+This section describes the module's actual roster as of 0.6.5 (superseding an older description that named classes — `EffectComposer`, `TokenManager`, `LightingEffect`, and similar — that no longer exist under those names in `src/`; see mythica-machina-press#567). It's grouped by capability rather than by internal class name, since those names change across refactors and a name-level list is what went stale last time.
 
-- **Three.js scene rendering** with a dedicated render loop.
-- **TokenManager**: token sprites synced from Foundry.
-- **TileManager**: tiles synced from Foundry, including overhead/roof tiles.
-- **WallManager**: walls synced and rendered in Three.js.
-- **DoorMeshManager**: Three.js door meshes.
-- **GridRenderer**: grid rendering based on Foundry grid settings.
-- **DrawingManager**, **NoteManager**, **TemplateManager**, **LightIconManager**: Three.js counterparts for common Foundry overlays.
-- **MapPointsManager**: v1.x map points compatibility and effect wiring.
+### Foundry syncing (`src/foundry/`, `src/scene/`)
 
-### Effects & post processing
+- Tokens, tiles (including overhead/roof), walls, doors, lights, regions, and drawings/notes/templates are synced from the live Foundry scene into the Three.js world and kept live as the GM edits.
+- Vision/fog-of-war ownership, occlusion (walls, floors, roofs), and depth authority are handled natively rather than layered on top of Foundry's own PIXI rendering.
+- Tile motion (scrolling/animated tiles, with per-tile specular/window attachment) and player-light modes (torch/flashlight/night vision/etc.) are first-class, not bolted on.
 
-Registered effects are orchestrated through the module's effect pipeline. Current notable effects include:
+### Effects (`src/effects/`)
 
-- **LightingEffect**: screen-space lighting composition.
-- **WorldSpaceFogEffect**: Fog of War rendered as a world-space plane with Foundry vision/exploration textures.
-- **SpecularEffect**: mask-driven specular surface shading.
-- **IridescenceEffectV2**: additive iridescent per-tile overlay.
-- **PrismEffect**: masked refraction/prism look.
-- **WindowLightEffect**: interior window light pools driven by `_Windows` / `_Structural`.
-- **OverheadShadowsEffect**: roof/overhead shadowing.
-- **BuildingShadowsEffect**: long shadows derived from `_Outdoors`.
-- **CloudEffect**: procedural cloud shadows.
-- **SkyColorEffect**: outdoor grading driven by `WeatherController` time/weather.
-- **ColorCorrectionEffect**, **BloomEffect**, **AsciiEffect**.
-- **DistortionManager**: centralized distortion composition (heat haze, etc.).
+- **Clouds** — ground shadow + high-altitude tops, both zoom-aware.
+- **Water** — refraction, caustics, foam, and a real simulation, not a static ripple texture.
+- **Fire** — wind-responsive flame/spark rendering.
+- **Vegetation** — GPU-driven wind sway and shadowing.
+- **Window** / **Specular** — mask-driven interior light pools and surface shine, both attachable to tiles.
+- **Fluid** — liquid-filled tiles (troughs, cauldrons, etc.) with their own mask channel.
+- **Precipitation** — rain/snow with splash/settle behavior.
+- **Prism** / **Iridescence** — TSL/WebGPU-native refraction and iridescent surface finishes.
+- **Lens** — overlay/grime texture compositing on the camera lens.
+- **Bloom**, **Depth of Field**, **Grade** (color grading), **Sun Shadows**, **TAA** — the post-processing chain.
+- **Region Darkness Override** — a GM-set floor for every scene's darkening regions.
 
-### Particles
+### World / weather state (`src/world/`)
 
-- **ParticleSystem**: shared particle backend.
-- **FireSparksEffect**: mask-driven fire placement (and map-points driven fire/candle sources).
-- **SmellyFliesEffect**: map-points driven “smart particles”.
-- **DustMotesEffect**: dust motes (mask-driven), with planned coupling to window light.
+- **Almanac & calendar** (`almanac.js`, `calendar/`) drive an in-game time-of-day and season system.
+- **Weather** (`weather.js`, `weather-biomes.js`, `weather-events.js`) provides shared global state — precipitation, cloud cover, wind, time-of-day — that the effects above consume as inputs, plus a GPU wind field/simulation (`wind-sim-gpu.js`, `wind-field.js`).
+- **Fades** (`fade-engine.js`, `fade-registry.js`) let the GM transition weather/sky state smoothly rather than snapping.
 
-### Weather state
+### Texture pipeline (`src/vt/`)
 
-- **WeatherController** provides shared global state (precipitation, cloud cover, wind, time-of-day) and drives multiple effects.
+- Pre-baked BC1/BC7 compressed textures with a decode-worker pool, so mask/overlay art doesn't decode twice or block the main thread on load.
+
+### UI
+
+- **Studio** (`src/ui/rooms/studio/`) — the GM's authoring panel, one card per effect.
+- **Remote** (`src/ui/rooms/remote/`) — the in-session control surface (weather channels, sky/time dials, astrolabe).
 
 ## Roadmap (planned)
 
@@ -121,7 +119,7 @@ This list predates a large amount of work that has since shipped (cloud shadows,
 - **Cloud system expansion**
   - Spatial window dimming based on cloud shadows
   - Sky reflections on specular surfaces
-  - Zoom-dependent cloud tops
+  - ~~Zoom-dependent cloud tops~~ — shipped (Cloud Tops)
 
 - **Wall-aware lighting**
   - Mesh-based light polygons derived from Foundry visibility polygons

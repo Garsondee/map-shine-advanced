@@ -402,6 +402,8 @@ import {
   getVtPanViewerSceneSettle,
   sampleVtPanViewerSceneSettleNow,
   setVtPanViewerLoadRenderScale,
+  getVtPanViewerPanCompileReport,
+  resetVtPanViewerPanCompileProbe,
   setMaskImageMaxBytes,
   getMaskImageMaxBytes,
   setVtPanViewerChunkedWarmUp,
@@ -1018,6 +1020,14 @@ MapShine.setDebugFirstRenderProbe = setVtPanViewerDebugFirstRenderProbe;
  * flag whose only off switch is a code edit is not really a flag.
  */
 MapShine.setLoadRenderScale = setVtPanViewerLoadRenderScale;
+/**
+ * THE MEASUREMENT THAT SETTLES #611. Pan the camera, then read it — the
+ * `verdict` field says outright whether pipelines are compiled on pan (the
+ * GPU-process freeze's mechanism) or whether that theory is dead.
+ * `MapShine.resetPanCompileProbe()` first to measure one deliberate pan.
+ */
+MapShine.getPanCompileReport = getVtPanViewerPanCompileReport;
+MapShine.resetPanCompileProbe = resetVtPanViewerPanCompileProbe;
 /**
  * The per-mask VRAM ceiling (mythica-machina-press#593). Masks for a
  * 10,000-square map cost ~501MB PER FLOOR at the shipped scales, and the

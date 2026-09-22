@@ -31,6 +31,7 @@ import { run as runBakedTextures } from './baked-textures.test.mjs';
 import { run as runWarmUpChunking } from './warm-up-chunking.test.mjs';
 import { run as runImageHeaderSize } from './image-header-size.test.mjs';
 import { run as runMaskRepack } from './mask-repack.test.mjs';
+import { run as runPanCompileProbe } from './pan-compile-probe.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -90,6 +91,7 @@ const suites = [
   ['warm-up-chunking', runWarmUpChunking],
   ['image-header-size', runImageHeaderSize],
   ['mask-repack', runMaskRepack],
+  ['pan-compile-probe', runPanCompileProbe],
 ];
 
 for (const [name, fn] of suites) {

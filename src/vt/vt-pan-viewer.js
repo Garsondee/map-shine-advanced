@@ -101,6 +101,7 @@ import {
 // see that function's own doc for why this fix needs a second, main-thread
 // caller for these instead of new logic. Intra-zone.
 import { coarseAlphaGridDims, extractAlphaGrid } from './coarse-alpha.js';
+import { createPanCompileProbe } from './pan-compile-probe.js';
 import { createSettleTracker, createReadinessRegistry, READINESS_STAGE } from './settle.js';
 import {
   buildCoverageCellMask,
@@ -18252,6 +18253,7 @@ export async function startVtPanViewer({
      * held behind a curtain for something a curtain cannot fix.
      */
     const SLOW_SCENE_GRACE_MS = 4000;
+    const panCompileProbe = createPanCompileProbe();
     const settleTracker = createSettleTracker({
       hitchMs: HITCH_THRESHOLD_MS,
       slowSceneGraceMs: SLOW_SCENE_GRACE_MS,
@@ -18917,6 +18919,16 @@ export async function startVtPanViewer({
       // SCENE SETTLE — counted every frame (so "is the renderer actually
       // drawing" is answerable), sampled on a cadence (so reading the counters
       // is not a per-frame cost). See `settleTracker`'s own declaration.
+      // DOES PANNING COMPILE SHADERS? (mythica-machina-press#611) — sampled
+      // every frame, next to the settle sample, because the question is about
+      // frames the camera moved on and a cadence would miss exactly those.
+      // `readPipelineCount()` is a plain Map `.size` read: no allocation, no
+      // GPU call, nothing that could perturb what it measures.
+      panCompileProbe.sample({
+        viewRect: currentViewRect,
+        pipelineCount: readPipelineCount(),
+        gapMs: lastFrameStartMs !== null ? now - lastFrameStartMs : 0,
+      });
       settleFrameCount++;
       if (settleFrameCount % SETTLE_SAMPLE_EVERY_FRAMES === 0) sampleSceneSettle(t0);
       // Closes the profiler's frame AFTER the pass plan, so a frame's zones are
@@ -26145,6 +26157,8 @@ export async function startVtPanViewer({
       cancelFloorPrepare,
       prewarmAdjacentFloors, // exposed so a real floor-switch commit can re-scope the ±1 window to wherever the viewer just landed
       requestInternalRescale, // exposed so releasing the cold-load render-scale clamp can rebuild the real targets at once (mythica-machina-press#589)
+      getPanCompileReport: () => panCompileProbe.read(),
+      resetPanCompileProbe: () => panCompileProbe.reset(),
       // Re-ask buildItems and reconcile. The draw list is derived from live
       // Foundry documents, but NOTHING here watches them — updateResidency only
       // runs when the VIEW changes, so creating a token while the camera sits
@@ -27892,6 +27906,26 @@ export function setVtPanViewerEarlyZComposition(on) {
 export function getVtPanViewerSceneSettle() {
   if (!_active) return { skipped: true, reason: 'viewer not started', settled: false };
   return _active.getSceneSettle();
+}
+
+/**
+ * DOES PANNING COMPILE SHADERS? (mythica-machina-press#611) — the correlation
+ * between camera movement and GPU pipeline creation, for the freeze whose
+ * trace shows the GPU process busy 75.6s while the main thread sits idle.
+ *
+ * `MapShine.getPanCompileReport()`. Pan the camera, then read it: the verdict
+ * field says outright whether pipelines are being compiled on pan, or whether
+ * that theory is dead and the freeze is something else.
+ */
+export function getVtPanViewerPanCompileReport() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.getPanCompileReport();
+}
+
+/** Clear the pan/compile window — call before a deliberate pan to measure just that pan. */
+export function resetVtPanViewerPanCompileProbe() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.resetPanCompileProbe();
 }
 
 /**

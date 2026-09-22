@@ -19904,28 +19904,35 @@ export async function startVtPanViewer({
      * `warmUpDrawState` structurally cannot reach (mythica-machina-press#582).
      *
      * ============================================================================
-     * ⚠️ WHAT THIS DOES *NOT* FIX — CORRECTED 2026-09-21
+     * ⚠️ THE UNPAUSE CLAIM: WITHDRAWN, THEN HALF-REINSTATED
      * ============================================================================
-     * This function shipped claiming it fixed the author's unpause freeze:
-     * *"as soon as I hit space to unpause we get another long pause and
-     * freeze, perhaps something is compiling upon the first batch of animated
-     * frames?"* Re-reading the source, that claim is WRONG and is withdrawn.
+     * This shipped claiming it fixed the author's unpause freeze, then that
+     * claim was withdrawn on 2026-09-21, and the truth is in between. Both
+     * halves are recorded because the correction itself was half wrong.
      *
-     * `renderFrame`'s `sims` block runs EVERY frame regardless of pause — it
-     * simply passes `dtSec: 0`. `particleEngine.step`/`gustEngine.step` call
-     * `renderer.compute(updateKernel)` unconditionally (no dt guard), and
-     * `fireSubsystem.sync` is called the same way. So those compute pipelines
-     * already compile on the FIRST frame, paused or not. Precipitation is
-     * gated on `uActiveCount` — the weather axis, not time — so pause does not
-     * govern it either.
+     * WITHDRAWN AND STILL WITHDRAWN — the COMPUTE half. `renderFrame`'s `sims`
+     * block runs every frame regardless of pause; it simply passes `dtSec: 0`.
+     * `particleEngine.step`/`gustEngine.step` call `renderer.compute(...)` with
+     * no dt guard, and `fireSubsystem.sync` is called the same way. Those
+     * compute pipelines already compile on the FIRST frame, paused or not. So
+     * stepping them early does NOT rescue a compute compile from the unpause.
      *
-     * Unpausing therefore does not, by itself, trigger a wave of new pipeline
-     * compilation. The far likelier explanation, consistent with every live
-     * report so far, is that the unpause freeze is not a separate mechanism at
-     * all: the load has not actually finished (both live loads ended in a
-     * FORCED reveal with real work still outstanding), so a person pressing
-     * space shortly afterwards is still inside the same expensive first-frames
-     * window — the ~6s-per-frame cost #588 exists to attribute.
+     * REINSTATED — the RENDER half, which the 2026-09-22 investigation into the
+     * author's *"HUGE lag spike, then the _Windows effect popped in"* exposed.
+     * An animated effect hides its mesh when it has nothing to draw:
+     * `fire-subsystem.js` sets `engine.scene.visible = false` outright with no
+     * fires. Foundry logs the player in PAUSED, so `dtSec` is pinned at 0 for
+     * the entire load, no embers spawn, those scenes stay invisible, and the
+     * warm-up draw compiles NOTHING for them — their materials then compile on
+     * the first frame after the player presses space. That is the same
+     * `mesh.visible = false` trap as the window mask, reached through time
+     * instead of through streaming.
+     *
+     * So stepping the sims IS load-bearing for the unpause freeze — just for
+     * the draw path, not the compute path. It matters most at the POST-CONTENT
+     * warm-up call site (`maybeWarmEffectsAfterContent`), which runs after
+     * masks land and is the one with a real chance of drawing a populated
+     * scene.
      *
      * ============================================================================
      * WHAT IT DOES DO, WHICH IS SMALLER AND REAL
@@ -20175,6 +20182,26 @@ export async function startVtPanViewer({
       if (othersOutstanding > 0) return;
       effectWarmUpRunning = true;
       const before = readPipelineCount();
+      // STEP THE SIMS FIRST (mythica-machina-press#613, unpause half).
+      //
+      // The same `mesh.visible = false` trap that hid the window surface
+      // until its mask landed also hides every ANIMATED effect until it has
+      // content — `fire-subsystem.js` sets `engine.scene.visible = false`
+      // outright when it has no fires to draw. Foundry logs the player in
+      // PAUSED, so `dtSec` is pinned at 0 for the whole load: no embers
+      // spawn, no drops fall, those scenes stay invisible, and the draw
+      // below would compile nothing for them. Their shaders would then
+      // compile on the first frame after the player presses space — which
+      // is the author's third symptom, and the same mechanism as the first.
+      //
+      // One synthetic step with a non-zero dt gives them real content to be
+      // compiled against. Nothing is presented: the curtain is up, and the
+      // next real frame overwrites this sim state from the live clock.
+      try {
+        warmUpSims();
+      } catch (err) {
+        log.warn('post-content sim warm-up failed — animated effects may compile on unpause:', err);
+      }
       // Fire-and-forget: this is called from the render loop, which cannot be
       // made async. Failure is swallowed and the latch is released either way —
       // warming is an optimisation and must never wedge readiness shut.

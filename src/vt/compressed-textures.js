@@ -144,6 +144,16 @@ const _stats = {
   /** Successful reconstructions after a cooldown (a fresh `Worker` that went
    * on to answer at least one job) — 0 forever on a session with no errors. */
   workerReconstructions: 0,
+  /** The most recent `{ok:false}` reply's own `error` string (mythica-machina-
+   * press#585-followup). Before this, a failed compress job was counted
+   * (`failed++`) but its actual reason was read off the worker message and
+   * immediately discarded — so a report could say THAT something failed, never
+   * WHY, and every investigation had to re-derive the cause from scratch by
+   * reading source. `null` until the first failure; never cleared by a later
+   * success, so a report always shows the last real reason even once the
+   * worker has recovered (feedback_instruments_must_not_lie: a reason that
+   * gets silently erased on recovery is as misleading as one never captured). */
+  lastError: null,
 };
 
 function _queueDepth() {
@@ -155,10 +165,13 @@ function _queueDepth() {
  * queue afterwards — an early `return` that skipped {@link _pump} would strand
  * every remaining job forever. */
 function _resultFor(d, p) {
-  const { ok, mode, format, levels, width, height, cached, alphaStats, alphaMinGrid } = d;
+  const { ok, mode, format, levels, width, height, cached, alphaStats, alphaMinGrid, error } = d;
   if (!ok) {
     if (p.mode === 'alphaGrid') _stats.alphaFailed++;
     else _stats.failed++;
+    // `error` is bc-compress.worker.js's own `String((err && err.message) || err)`
+    // from its one catch-all try/catch — the real reason, not just a tally.
+    _stats.lastError = error ? String(error) : `worker replied ok:false with no error field (mode: ${p.mode})`;
     return null; // resolve (not reject): the caller's contract is "null ⇒ use raw"
   }
   if (mode === 'alphaGrid') {
@@ -195,6 +208,8 @@ function _pump() {
       // contract as every other failure path: resolve null, caller uses raw.
       if (job.mode === 'alphaGrid') _stats.alphaFailed++;
       else _stats.failed++;
+      _stats.lastError =
+        'worker unavailable/cooling down before this job could be dispatched (see workerErrors/cooldownActive)';
       job.resolve(null);
       continue;
     }
@@ -202,10 +217,11 @@ function _pump() {
     try {
       w.postMessage(job.message);
       _inFlight++;
-    } catch (_) {
+    } catch (err) {
       _pending.delete(job.id);
       if (job.mode === 'alphaGrid') _stats.alphaFailed++;
       else _stats.failed++;
+      _stats.lastError = `postMessage threw (not cloneable / worker gone): ${String(err?.message || err)}`;
       job.resolve(null); // not cloneable / worker gone — fall back to raw
     }
   }

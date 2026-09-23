@@ -267,11 +267,17 @@ function buildCompressionSection(c) {
     itemCount: c.itemCount ?? null,
     estTextureVramMB: c.estTextureVramMB ?? null,
     fellBackItemIds: fellBack.map((i) => i.id).filter(Boolean),
+    // The most recent `{ok:false}` reply's own error string (mythica-machina-
+    // press#585-followup) — previously a failed job was only ever counted,
+    // never explained, so every "the worker is unhealthy" report answered
+    // THAT but not WHY and had to be re-investigated from source each time.
+    lastError: w?.lastError ?? null,
     note: workerBroken
       ? 'THE GPU TEXTURE-COMPRESSION WORKER IS NOT HEALTHY. Every layer it could not compress is held as a RAW ' +
         'texture instead — roughly 4x the bytes of BC7, uploaded on the main thread. On a 12,000-square map that ' +
         'is the difference between ~144MB and ~576MB for a single layer. If this load showed one long ' +
-        'unexplained freeze, this is the first thing to rule in or out.'
+        'unexplained freeze, this is the first thing to rule in or out. ' +
+        (w?.lastError ? `Last failure reason: ${w.lastError}` : 'No failure reason was captured for it.')
       : fellBack.length > 0
         ? `${fellBack.length} layer(s) fell back to a RAW texture even though the worker reports healthy — check ` +
           'fellBackItemIds. A raw 12,000-square layer is ~576MB against ~144MB compressed.'

@@ -1147,7 +1147,19 @@ export function createPointLightPool({
     // THE ONE SHARED ANIMATION-CLOCK WRITE — once per FRAME, not once per
     // LIGHT. env.time.tMs is the ONE clock (time/one-clock wall) — no new
     // performance.now() anywhere in this pass.
-    uGlobalTimeMs.value = env.time.tMs;
+    //
+    // GUARDED (mythica-machina-press#585-pan-freeze-followup) the same way
+    // vt-pan-viewer.js's own runLightAccumulatePass call sites already are
+    // (see its "NOT the unguarded env.time.tMs" comment, a few hundred lines
+    // up from where THIS function gets called): the cold-load warm-up draw
+    // runs the pass plan before the first real env snapshot exists, so
+    // `env.time` is undefined on that call. `?? uGlobalTimeMs.value` is a
+    // no-op on that frame (leave the clock uniform exactly where it was)
+    // rather than a second clock source — this was throwing and aborting the
+    // ENTIRE warm-up pass plan (one uncaught throw kills every pass after
+    // it), which is precisely why effects were compiling live on first
+    // reveal/pan instead of behind the curtain.
+    uGlobalTimeMs.value = env.time?.tMs ?? uGlobalTimeMs.value;
     // STAGE 2 BATCHING (S2.5) — read fresh every frame, same as every other
     // live toggle this pool reads (`getApertureGoboRenderState` etc.). The
     // two SHARED resource bundles below are cheap object literals over
@@ -1368,7 +1380,13 @@ export function createPointLightPool({
     // never needs to guess.
     const lightningLights =
       lightningState.enabled && lightningStrands.length && Number(lightningState.perfTier) >= 3
-        ? buildLightningLightSources(lightningStrands, env.time.tMs, lightningState.params ?? {})
+        ? // Same warm-up guard as this function's `uGlobalTimeMs` write above:
+          // `env.time` is undefined on the cold-load warm-up draw.
+          buildLightningLightSources(
+            lightningStrands,
+            env.time?.tMs ?? uGlobalTimeMs.value,
+            lightningState.params ?? {}
+          )
         : [];
     // `originFlashWallClipEnabled` (default true) is a per-scene author
     // choice, not per-strike — read once, same as V2's own `if (params.

@@ -62,12 +62,18 @@ import { buildSquallField } from './squall-field.js';
  * air-light, not albedo. Storing them in one field would be
  * `feedback_one_byte_two_quantities` with pixels. When P6 adds `sand` and
  * `ash`, they add rows HERE as well as there.
+ *
+ * ⭐ EXPORTED (mythica-machina-press#34/#314) — `storm-fog-render.js` reads the
+ * SAME table rather than authoring a second "what colour is rainy air" map
+ * that could drift from this one. Both are the identical physical quantity
+ * (air-light), just two different intensities of it.
  */
-const VEIL_TINT = Object.freeze({
+export const VEIL_TINT = Object.freeze({
   rain: Object.freeze([0.62, 0.68, 0.78]),
   snow: Object.freeze([0.92, 0.94, 0.98]),
 });
-const DEFAULT_TINT = Object.freeze([0.7, 0.72, 0.76]);
+/** ⭐ EXPORTED alongside {@link VEIL_TINT} — same reuse reason. */
+export const DEFAULT_TINT = Object.freeze([0.7, 0.72, 0.76]);
 
 /**
  * How opaque the veil gets at `veil01 = 1` and a full band.

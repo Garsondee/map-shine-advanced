@@ -16,6 +16,7 @@
 import { run as runSpecies } from './precip-species.test.mjs';
 import { run as runMantle } from './mantle-model.test.mjs';
 import { run as runSquall } from './squall-field.test.mjs';
+import { run as runStormFog } from './storm-fog-field.test.mjs';
 import { run as runDrips } from './drip-edges.test.mjs';
 import { run as runPrecipitation } from './precipitation.test.mjs';
 
@@ -50,6 +51,7 @@ const suites = [
   ['precip-species', runSpecies],
   ['mantle-model', runMantle],
   ['squall-field', runSquall],
+  ['storm-fog-field', runStormFog],
   ['drip-edges', runDrips],
   ['precipitation', runPrecipitation],
 ];

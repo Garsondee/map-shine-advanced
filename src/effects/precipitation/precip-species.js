@@ -247,6 +247,13 @@ export const PRECIP_SPECIES = Object.freeze({
       /** The impression tier's weight (P4 consumes this). Zero until ~0.5:
        * a downpour greys the air; drizzle does not. */
       veil: Object.freeze({ kind: 'threshold', at: 0.5, from: 0, to: 1 }),
+      /** ⭐ THE STORM-FOG SCREEN LAYER (mythica-machina-press#34/#314) — a
+       * LATER, MORE EXTREME threshold than `veil` above. The veil already
+       * greys the distant air at 0.5; this is the whole-screen "you cannot
+       * see far in this" reading, reserved for a genuine downpour rather than
+       * ordinary heavy rain. Same `threshold` shape as `veil`, one axis, a
+       * later gate — not a second idea of intensity. */
+      fog: Object.freeze({ kind: 'threshold', at: 0.7, from: 0, to: 1 }),
     }),
 
     /** §3.5 — V2's proven scalar lighting (`:104-113`), harvested exactly.
@@ -984,6 +991,11 @@ export const PRECIP_SPECIES = Object.freeze({
       length: Object.freeze({ kind: 'linear', from: 1, to: 1 }),
       speed: Object.freeze({ kind: 'linear', from: 0.85, to: 1.1 }),
       veil: Object.freeze({ kind: 'threshold', at: 0.45, from: 0, to: 1 }),
+      /** ⭐ WHITE-OUT — the same storm-fog layer as rain's (see that row's own
+       * note), but gated a little EARLIER: a blizzard achieves total white-out
+       * more readily than a rainstorm achieves total grey-out (mythica-
+       * machina-press#34's own title draws this exact distinction). */
+      fog: Object.freeze({ kind: 'threshold', at: 0.6, from: 0, to: 1 }),
     }),
 
     /** ⚠️ SNOW'S FLUTTER FALLS AS THE STORM RISES (§2.3) — blizzard snow
@@ -1240,6 +1252,12 @@ export function resolveSpeciesFrame(species, axes, tierScale = 1) {
      * derived from the same curve set and splitting the derivation across two
      * slices is how the two drift apart). */
     veil01: evalCurve(species.respond.veil, precip01),
+    /** ⭐ THE STORM-FOG SCREEN LAYER's weight (mythica-machina-press#34/#314's
+     * consumer, `effects/precipitation/storm-fog-render.js`). A species with
+     * no `respond.fog` curve (every row but rain/snow) reads `undefined` and
+     * `evalCurve`'s own fail-open floor returns exactly 0 — free, no special
+     * case needed here. */
+    fog01: evalCurve(species.respond.fog, precip01),
     /** Snow only — 1 at calm, →0.15 in a blizzard. `1` for species with no
      * storm response, so the kernel multiplies unconditionally. */
     flutterMul: species.respondStorm?.flutter ? evalCurve(species.respondStorm.flutter, storm01) : 1,

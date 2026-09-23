@@ -492,6 +492,25 @@ export function run(t) {
     const clear = resolveSpeciesFrame(rain, { precip01: 0 });
     t.ok('⭐ LAW 5: precip01=0 yields ZERO live bodies', clear.liveCount === 0);
     t.ok('LAW 5: precip01=0 raises no veil either', clear.veil01 === 0);
+    t.ok('LAW 5: precip01=0 raises no storm-fog either', clear.fog01 === 0);
+
+    // ⭐ mythica-machina-press#34/#314 — the storm-fog screen layer's own
+    // threshold, LATER than the veil's (0.5) and later still than an
+    // ordinary heavy downpour.
+    t.ok(
+      'rain below its fog threshold (0.7) raises no storm-fog',
+      resolveSpeciesFrame(rain, { precip01: 0.65 }).fog01 === 0
+    );
+    t.ok(
+      'rain past its fog threshold raises a nonzero, ramping storm-fog',
+      resolveSpeciesFrame(rain, { precip01: 0.85 }).fog01 > 0 &&
+        resolveSpeciesFrame(rain, { precip01: 0.85 }).fog01 < resolveSpeciesFrame(rain, { precip01: 1 }).fog01
+    );
+    t.ok(
+      '⭐ snow white-out gates EARLIER (0.6) than rain grey-mist (0.7) at the same precip01',
+      resolveSpeciesFrame(PRECIP_SPECIES.snow, { precip01: 0.65 }).fog01 > 0 &&
+        resolveSpeciesFrame(rain, { precip01: 0.65 }).fog01 === 0
+    );
 
     const full = resolveSpeciesFrame(rain, { precip01: 1 });
     t.ok('precip01=1 yields the full capacity', full.liveCount === rain.capacity);

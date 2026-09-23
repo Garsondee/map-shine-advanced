@@ -239,6 +239,22 @@ export const PRECIPITATION_PARAMS = Object.freeze({
     label: 'Squall band size',
     help: 'World-space size of one squall band — larger reads as slower, wider weather fronts.',
   }),
+  // ⭐ mythica-machina-press#34/#314 — the STORM FOG (storm-fog-render.js), a
+  // second and much stronger atmospheric layer that only rises at the top of
+  // a species' own intensity (rain past ~0.7 precip01, snow past ~0.6 — see
+  // precip-species.js's own `respond.fog` curves). Filed under the SAME
+  // category as the veil above: both are "how visible is the air itself"
+  // dials, just two different intensities of that one phenomenon.
+  stormFogStrength: Object.freeze({
+    type: 'float',
+    min: 0,
+    max: 2,
+    step: 0.05,
+    default: 1,
+    category: 'Veil',
+    label: 'Storm-fog strength',
+    help: 'How strongly a genuine downpour or blizzard reduces visibility outdoors — rain greys the air, snow whites it out. Only rises once the weather is already severe; ordinary rain/snow never triggers it.',
+  }),
 
   // ── GROUND — the mantle, i.e. accumulation (mantle-runtime.js) ───────────
   mantleSnowStrength: Object.freeze({

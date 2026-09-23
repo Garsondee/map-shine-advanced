@@ -32,7 +32,8 @@
 import { createPrecipEngine } from '../particles/precip-runtime.js';
 import { createPrecipSplashEngine } from '../particles/precip-splash-runtime.js';
 import { createMantleRuntime } from './mantle-runtime.js';
-import { createPrecipCurtain } from './curtain-render.js';
+import { createPrecipCurtain, VEIL_TINT, DEFAULT_TINT } from './curtain-render.js';
+import { createStormFog } from './storm-fog-render.js';
 import { createPrecipDripEngine } from '../particles/precip-drip-runtime.js';
 import {
   PRECIP_SPECIES,
@@ -255,6 +256,14 @@ export function createPrecipitationSubsystem({
    */
   let authoredDrips = null;
   let authoredDripReason = 'no authored drip mask on this floor';
+  /**
+   * ⭐ THE STORM FOG (mythica-machina-press#34/#314) — ONE combined instance,
+   * unlike the per-species curtain map above; see `storm-fog-render.js`'s own
+   * header for why. Built lazily on the first frame with real scene bounds,
+   * the same "waits for bounds rather than sizing against a placeholder"
+   * posture the mantle and every curtain already use.
+   */
+  let stormFog = null;
   let mantleReason =
     createMantleTarget && renderMantleStep
       ? 'not built yet — waiting for scene bounds'
@@ -283,6 +292,30 @@ export function createPrecipitationSubsystem({
     curtains.set(speciesId, curtain);
     log.info(`built '${speciesId}' curtain over the scene rect`);
     return curtain;
+  }
+
+  /**
+   * ⭐ Build the ONE storm-fog quad on first use, sized from the SCENE bounds
+   * exactly like {@link curtainFor} — see `storm-fog-render.js`'s own header
+   * for why this is a single combined instance rather than one per species.
+   */
+  function stormFogQuadFor(sceneBounds) {
+    if (stormFog) return stormFog;
+    if (!sceneBounds || !(sceneBounds.maxX > sceneBounds.minX)) return null;
+    stormFog = createStormFog({
+      THREE,
+      worldRect: sceneBounds,
+      // Nearest the eye of everything this subsystem draws — see this
+      // module's own `scenes` getter for the actual ordering guarantee
+      // (render-call sequence, not this number); kept consistent with
+      // drips' own "+1 = nearest the eye" convention regardless.
+      renderOrder: renderOrder + 2,
+      openSkyTexture,
+    });
+    if (skyReach.texture) stormFog.setSkyReachTexture(skyReach.texture, skyReach.rect);
+    if (lastTuning) stormFog.setTuning(lastTuning);
+    log.info('built the storm-fog quad over the scene rect');
+    return stormFog;
   }
 
   /**
@@ -681,6 +714,17 @@ export function createPrecipitationSubsystem({
 
       const rect = worldRect ?? st.worldRect ?? null;
 
+      // ⭐ THE STORM FOG's OWN COMBINE (mythica-machina-press#34/#314) — a
+      // QUANTITY (accumulated below, one weighted sum across every active
+      // population) and an APPEARANCE (taken once, from the DOMINANT
+      // population only), the same split `stepMantle`'s own `stays`/`stay`
+      // already makes for the identical reason: lerping two species' tints
+      // produces a colour belonging to neither.
+      let fogIntensity01 = 0;
+      let fogTint = DEFAULT_TINT;
+      let fogRgbMul = 1;
+      let fogAlphaMul = 1;
+
       for (const { speciesId, weight } of activePopulations) {
         const species = PRECIP_SPECIES[speciesId] ?? PRECIP_COMPANIONS[speciesId] ?? null;
         if (!species) continue;
@@ -709,12 +753,33 @@ export function createPrecipitationSubsystem({
           curtain.step(nowMs, getWindHandle());
         }
 
+        // THE STORM FOG's quantity — weighted, added, same reason the veil
+        // above takes the weight. Stepped whether or not the specimens are
+        // awake, exactly like the curtain: fog is atmosphere, not a specimen.
+        fogIntensity01 += base.fog01 * weight;
+        if (speciesId === dominant.speciesId) {
+          fogTint = VEIL_TINT[speciesId] ?? DEFAULT_TINT;
+          fogRgbMul = base.rgbMul;
+          fogAlphaMul = base.alphaMul;
+        }
+
         // ⚠️ THE SPECIMEN TIER SLEEPS AS A JS `continue` — no engine built, no
         // kernel dispatched, no draw submitted (Effects.md Law 7). A uniform
         // set to zero would still pay the dispatch and the fill.
         if (!specimenAwake) continue;
 
         stepPopulation(renderer, speciesId, frame, rect, st, dtRealSec, nowMs);
+      }
+
+      const stormFogQuad = stormFogQuadFor(st.sceneBounds ?? null);
+      if (stormFogQuad) {
+        stormFogQuad.setFrame({
+          intensity01: fogIntensity01,
+          tint: fogTint,
+          rgbMul: fogRgbMul,
+          alphaMul: fogAlphaMul,
+        });
+        stormFogQuad.step(nowMs, getWindHandle());
       }
     },
 
@@ -771,6 +836,11 @@ export function createPrecipitationSubsystem({
       // overlap in a way that makes their relative order visible.
       if (drips?.hasContent) out.push(drips.scene);
       if (authoredDrips?.hasContent) out.push(authoredDrips.scene);
+      // ⭐ THE STORM FOG (mythica-machina-press#34/#314) — LAST of all, nearest
+      // the eye of everything this subsystem draws. See `storm-fog-render.js`'s
+      // own header for why: real heavy fog sits between the eye and literally
+      // everything else, including nearby rain.
+      if (stormFog?.hasContent) out.push(stormFog.scene);
       return out;
     },
 
@@ -812,6 +882,9 @@ export function createPrecipitationSubsystem({
       // The curtain gates on the same mask — a veil over a hall is rain the
       // player can see indoors just as surely as a drop is.
       for (const [id, c] of curtains) results[`${id}:curtain`] = c.setSkyReachTexture(texture, rect);
+      // The storm fog gates on the same mask too — LAW 3, restated a third
+      // time: reduced visibility is outdoor weather, never an indoor pixel.
+      if (stormFog) results.stormFog = stormFog.setSkyReachTexture(texture, rect);
       return results;
     },
 
@@ -924,6 +997,7 @@ export function createPrecipitationSubsystem({
       drips?.setTuning(t);
       authoredDrips?.setTuning(t);
       for (const curtain of curtains.values()) curtain.setTuning(t);
+      stormFog?.setTuning(t);
     },
 
     /**
@@ -984,6 +1058,11 @@ export function createPrecipitationSubsystem({
          * would name neither (this file's own stated philosophy: every factor
          * separately). */
         authoredDrip: authoredDrips ? authoredDrips.debugState() : { built: false, reason: authoredDripReason },
+        /** ⭐ THE STORM FOG (mythica-machina-press#34/#314), reported separately
+         * for the same reason every other tier is: "no fog" and "no rain" are
+         * different states with different causes (below every species' own
+         * `respond.fog` threshold vs. no precipitation at all). */
+        stormFog: stormFog ? stormFog.debugState() : { built: false, reason: 'waiting for scene bounds' },
       };
     },
   };

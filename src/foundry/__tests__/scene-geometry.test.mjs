@@ -9,6 +9,7 @@
  */
 import {
   computeSceneDimensions,
+  sceneRectToMinMax,
   computeTextureFit,
   computeQuadCorners,
   computeQuadBounds,
@@ -77,6 +78,36 @@ export function run(t) {
       d.sceneWidth === 4000 && d.sceneHeight === 3000 && d.width === 6000
     );
     ok('defaults: null doc does not throw', computeSceneDimensions(null).width === 6000);
+  }
+
+  // --- sceneRectToMinMax: the shape every OTHER consumer actually expects ---
+  //
+  // ⭐ mythica-machina-press#34 follow-up (2026-09-23): `getPrecipRenderState`
+  // used to hand `computeSceneDimensions(...).sceneRect` straight through as
+  // `sceneBounds`, and every real consumer's own `rect.maxX > rect.minX` gate
+  // read two `undefined`s off it forever — the impression curtain and the
+  // ground mantle never actually built on a live scene. This suite pins the
+  // conversion so that specific class of shape-mismatch can't silently
+  // reappear.
+  {
+    const d = computeSceneDimensions({ width: 4000, height: 3000, padding: 0.25, grid: { size: 100 } });
+    const mm = sceneRectToMinMax(d.sceneRect);
+    ok('minX/minY are the sceneRect origin', mm.minX === 1000 && mm.minY === 800);
+    ok('maxX/maxY are origin + width/height, not width/height alone', mm.maxX === 5000 && mm.maxY === 3800);
+    ok('⭐ the exact check every real consumer performs actually passes now', mm.maxX > mm.minX && mm.maxY > mm.minY);
+
+    // The bug this whole test exists to catch: feeding the RAW {x,y,width,
+    // height} shape to that same check silently passed as "no bounds" before
+    // this helper existed, because `undefined > undefined` is `false`, not an
+    // error — nothing ever threw, so nothing ever announced the mistake.
+    ok(
+      '⚠️ the raw {x,y,width,height} shape genuinely fails that check (this is the bug, reproduced)',
+      !(d.sceneRect.maxX > d.sceneRect.minX)
+    );
+
+    ok('null input yields null, not a rect of NaNs', sceneRectToMinMax(null) === null);
+    ok('undefined input yields null', sceneRectToMinMax(undefined) === null);
+    ok('a malformed rect (no width/height) yields null', sceneRectToMinMax({ x: 0, y: 0 }) === null);
   }
 
   // --- computeTextureFit: every mode, against Foundry's switch --------------

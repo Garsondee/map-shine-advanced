@@ -51,6 +51,7 @@ export { playTileVideo } from './tile-video.js';
 // The coordinate model — Foundry canvas space, placements, quads.
 export {
   computeSceneDimensions,
+  sceneRectToMinMax,
   computeQuadCorners,
   computeQuadBounds,
   computeLevelTexturePlacement,

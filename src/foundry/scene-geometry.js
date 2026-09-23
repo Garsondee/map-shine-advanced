@@ -110,6 +110,41 @@ export function computeSceneDimensions(sceneDoc) {
 }
 
 /**
+ * Convert a Foundry-shaped rect (`{x,y,width,height}` — what {@link
+ * computeSceneDimensions} returns as `sceneRect`/`rect`) into the
+ * `{minX,minY,maxX,maxY}` shape every world-bounds consumer in `world/` and
+ * `effects/` actually expects (`createPrecipCurtain`'s own JSDoc, the mantle,
+ * the fall/splash engines' `setSceneBounds`, `squall-field.js`'s callers —
+ * this convention is universal outside `foundry/` itself).
+ *
+ * ⚠️ EXISTS BECAUSE THE TWO SHAPES WERE SILENTLY CONFUSED ONCE ALREADY
+ * (mythica-machina-press#34 follow-up, found live 2026-09-23): `vt-pan-
+ * viewer.js#getPrecipRenderState` handed `dimensions.sceneRect` straight
+ * through as `sceneBounds`, and every consumer's own `rect.maxX > rect.minX`
+ * validity check silently read two `undefined`s and failed closed forever —
+ * the impression curtain and the ground mantle had never actually built on a
+ * real scene. `uFireMaskRect`/`fireMaskRect` in `vt-pan-viewer.js` hand-roll
+ * this identical conversion inline (predates this helper; left as-is rather
+ * than churned in the same pass that fixed the actual bug) — any FUTURE
+ * caller needing this conversion should reach for this function instead of
+ * writing a third copy.
+ *
+ * @param {{x:number,y:number,width:number,height:number}|null|undefined} sceneRect
+ * @returns {{minX:number,minY:number,maxX:number,maxY:number}|null} `null` for
+ *   a missing/malformed input — the same fail-open-to-"no bounds" polarity
+ *   every consumer's own `!rect` branch already expects, never a rect of NaNs.
+ */
+export function sceneRectToMinMax(sceneRect) {
+  if (!sceneRect || !Number.isFinite(sceneRect.width) || !Number.isFinite(sceneRect.height)) return null;
+  return {
+    minX: sceneRect.x,
+    minY: sceneRect.y,
+    maxX: sceneRect.x + sceneRect.width,
+    maxY: sceneRect.y + sceneRect.height,
+  };
+}
+
+/**
  * Replicates `PrimarySpriteMesh#resize` (client/canvas/primary/primary-sprite-mesh.mjs
  * :126) — how a texture of arbitrary native resolution is scaled to fill a
  * target box under a fit mode.

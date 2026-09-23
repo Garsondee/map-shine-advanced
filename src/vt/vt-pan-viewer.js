@@ -274,6 +274,7 @@ import {
   // first-gesture gate. See both files' own headers for the full mechanism.
   isVideoUrl,
   playTileVideo,
+  sceneRectToMinMax,
 } from '../foundry/index.js';
 import { engageFoundryFallback, clearFoundryFallback } from '../diag/render-fallback.js';
 import {
@@ -4543,7 +4544,23 @@ export async function startVtPanViewer({
           // ⭐ THE SCENE'S OWN BOUNDS — rain must not fall in the void around
           // the map. `dimensions.sceneRect` is the same rect the view clamp
           // already uses, so there is no second idea of "where the map is".
-          sceneBounds: dimensions?.sceneRect ?? null,
+          //
+          // ⚠️ SHAPE-CONVERTED, NOT PASSED THROUGH RAW (mythica-machina-press#34
+          // follow-up, found live 2026-09-23). `dimensions.sceneRect` is
+          // `{x,y,width,height}` — but `curtainFor`/`stepMantle`/the fall and
+          // splash engines' own `setSceneBounds`/the storm-fog's lazy builder
+          // all gate on `sceneBounds.maxX > sceneBounds.minX`, properties this
+          // shape has never had. `undefined > undefined` is `false`, so that
+          // gate has been permanently closed: the impression curtain and the
+          // ground mantle have never actually built on a real scene, and the
+          // fall/splash engines' own scene-edge clip has silently failed OPEN
+          // (their own fail-open comment: "rains everywhere rather than
+          // nowhere") this whole time — only the shader lab (which constructs
+          // its own WORLD rect directly in min/max form) ever exercised this
+          // path correctly. `sceneRectToMinMax` (`foundry/scene-geometry.js`,
+          // added in this same fix) is the one place this conversion happens
+          // now.
+          sceneBounds: sceneRectToMinMax(dimensions?.sceneRect),
           // ⭐ THE MANTLE's clock (§5.2). WRAPPING 0..24, and the runtime unwraps
           // it — see `mantle-model.js#gameHourDelta`, which owns midnight and the
           // backward-clock case so no caller has to.

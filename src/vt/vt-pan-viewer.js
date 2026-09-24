@@ -314,6 +314,7 @@ import {
 } from '../world/index.js';
 import {
   buildEnvironmentalLightMaterials,
+  pickIllumMaterial,
   blendSunVisibilityAcrossFloors,
   computeAmbientColors,
   computeGlobalLightFloor,
@@ -556,6 +557,7 @@ import {
   buildCloudFieldNode,
   buildCloudGroundVisNode,
   CLOUD_SHADOW_STREAK_SPREAD,
+  CLOUD_THRESHOLD_OFF,
 } from '../world/index.js';
 
 /**
@@ -3879,6 +3881,33 @@ export async function startVtPanViewer({
     // QuadMesh (never a hand-rolled quad — same Y-flip law the present pass
     // documents at length below): the vendor owns v=0-at-top on both backends.
     const illumQuad = new THREE.QuadMesh(envLight.illumMaterial);
+    // THE CLEAR-SKY SWAP (perf goal attempt 3) — see environmental-light.js's
+    // `pickIllumMaterial`. Called at the illum draw every frame; tests the SAME
+    // macroThreshold the shader's cloud term reads, so the swap can only ever
+    // happen where the skipped term is provably ×1.
+    const selectIllumMaterial = () => {
+      const m = pickIllumMaterial({
+        cloudy: envLight.illumMaterial,
+        clear: envLight.illumMaterialClear,
+        macroThreshold: cloudUniforms.macroThreshold.value,
+        offThreshold: CLOUD_THRESHOLD_OFF,
+      });
+      if (illumQuad.material !== m) illumQuad.material = m;
+    };
+    // Draws BOTH illum variants once, behind the curtain, so whichever one the
+    // sky later switches to never compiles its pipeline in front of the player
+    // (#614's whole lesson). A no-op when there is no clear-sky twin.
+    const warmIllumVariants = () => {
+      if (!envLight.illumMaterialClear) return;
+      const prevTarget = renderer.getRenderTarget();
+      renderer.setRenderTarget(sceneIllum);
+      for (const m of [envLight.illumMaterial, envLight.illumMaterialClear]) {
+        illumQuad.material = m;
+        illumQuad.render(renderer);
+      }
+      renderer.setRenderTarget(prevTarget);
+      selectIllumMaterial();
+    };
     const compositeQuad = new THREE.QuadMesh(envLight.compositeMaterial);
 
     // S2.15 (Performance-Audit-2026-08.md §3.1's MRT-merge plan) —
@@ -7914,6 +7943,7 @@ export async function startVtPanViewer({
       renderer.autoClearColor = false;
       profiler?.begin(Z.lightDrawIllum);
       renderer.setRenderTarget(sceneIllum);
+      selectIllumMaterial();
       illumQuad.render(renderer); // buf:scene.illum = ambient background (sRGB), raised by global illumination if active
       profiler?.end(Z.lightDrawIllum);
       // Darkness-region meshes OVERWRITE (discard outside their own shape,
@@ -20110,6 +20140,9 @@ export async function startVtPanViewer({
       try {
         const t0 = perfNowMs();
         runPassPlan(ids, passImpls, {}, undefined);
+        // Both illum variants (perf goal attempt 3) — the plan above only
+        // draws whichever one the sky selects right now.
+        warmIllumVariants();
         warmUpMs = Math.round(perfNowMs() - t0);
       } catch (err) {
         log.warn('warm-up draw failed — pipelines will compile lazily on first real draw:', err);
@@ -20208,6 +20241,12 @@ export async function startVtPanViewer({
           // SAME rAF-as-promise helper the zoom-thrash test already uses,
           // rather than a second copy of `new Promise((r) => requestAnimationFrame(r))`.
           if (i + 1 < batches.length) await nextAnimationFrame();
+        }
+        // Both illum variants (perf goal attempt 3) — see warmUpDrawState.
+        {
+          const t0 = perfNowMs();
+          warmIllumVariants();
+          workMs += perfNowMs() - t0;
         }
         if (recordStats) warmUpMs = Math.round(workMs);
       } catch (err) {

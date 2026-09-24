@@ -470,6 +470,16 @@ export const COVER_LUT_SAMPLES = Object.freeze([0.01, 0.05, 0.12, 0.2, 0.3, 0.4,
  * @param {{coverLut: ReadonlyArray<number>}} recipe
  * @returns {number}
  */
+/**
+ * The threshold `coverThreshold` returns for EXACTLY zero cover: unreachable by
+ * any base shape (base ≤ 1), so `cov = smoothstep(thr, thr + edge, base)` is
+ * exactly 0 whatever the edge width, and every cloud transmittance is exactly
+ * 1. Named (perf goal attempt 3, 2026-09-24) because a consumer that SKIPS the
+ * cloud term entirely at zero cover must test this exact value, never
+ * re-derive "is cover zero" from a different number.
+ */
+export const CLOUD_THRESHOLD_OFF = 8;
+
 export function coverThreshold(cover01, recipe) {
   const c = Number.isFinite(cover01) ? Math.min(1, Math.max(0, cover01)) : 0;
   // EXACTLY zero cover is EXACTLY no cloud — not "very little". The base shape
@@ -477,7 +487,7 @@ export function coverThreshold(cover01, recipe) {
   // clear-sky frame is bit-identical to one with the feature absent. That is
   // what lets clouds default ON without changing a single existing scene, the
   // same discipline `sky-access.js`'s `realism01 = 0` takes.
-  if (c <= 0) return 8;
+  if (c <= 0) return CLOUD_THRESHOLD_OFF;
   if (c >= 1) return -8;
   const lut = recipe.coverLut;
   const xs = COVER_LUT_SAMPLES;

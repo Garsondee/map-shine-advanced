@@ -94,6 +94,7 @@ export {
 } from './player-torch-flame-render.js';
 export {
   buildEnvironmentalLightMaterials,
+  pickIllumMaterial,
   blendSunVisibilityAcrossFloors,
   computeAmbientBackground,
   computeAmbientColors,

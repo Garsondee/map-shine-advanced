@@ -355,6 +355,22 @@ export const FLUID_SHADOW_TINT_STRENGTH = 0.35;
  *   setFluidShadowTintSlot: (slotIndex: number, entry: ({texture: *, rect: {minX:number,minY:number,maxX:number,maxY:number}, tint: number[]}|null)) => void,
  * }}
  */
+/**
+ * Which illum-fill material to draw THIS frame (perf goal attempt 3). The
+ * clear-sky twin is chosen ONLY when the cloud ground-shadow term is provably
+ * a no-op: its coverage reads `smoothstep(macroThreshold, …, base)` with
+ * base ≤ 1, so at `macroThreshold >= CLOUD_THRESHOLD_OFF` coverage is exactly
+ * 0, every transmittance is `mix(1, fill, 0) = 1`, and the ambient is
+ * multiplied by exactly 1 — the twin's output is bit-identical. Tests the
+ * THRESHOLD the shader actually reads (never the cover number, which could
+ * disagree with a stale threshold if the clouds effect stopped pushing).
+ * @param {{cloudy:*, clear:*|null, macroThreshold:number, offThreshold:number}} args
+ */
+export function pickIllumMaterial({ cloudy, clear, macroThreshold, offThreshold }) {
+  if (!clear) return cloudy;
+  return Number.isFinite(macroThreshold) && macroThreshold >= offThreshold ? clear : cloudy;
+}
+
 export function buildEnvironmentalLightMaterials({
   THREE,
   albedoTexture,
@@ -736,6 +752,20 @@ export function buildEnvironmentalLightMaterials({
     illumMaterial.fragmentNode = built.node;
     cloudGateCompiled = built.compiledClouds;
   }
+  // THE CLEAR-SKY TWIN (perf goal attempt 3, 2026-09-24). Measured on Church
+  // of the Light: the cloud ground-shadow term is ~95% of this pass (3.3 ms
+  // → 0.17 ms with it compiled out) and it is evaluated at EVERY pixel even
+  // under a cloudless sky, where it provably multiplies the ambient by exactly
+  // 1 (see `pickIllumMaterial`). This is the same fragment with the cloud term
+  // compiled OUT — JS-time, `tsl/no-uniform-gates`-clean — which the viewer
+  // swaps in, per frame, only while the cloud field is provably empty. `null`
+  // when clouds were never compiled in (nothing to skip).
+  const illumMaterialClear = cloudGateCompiled ? new THREE.NodeMaterial() : null;
+  if (illumMaterialClear) {
+    illumMaterialClear.depthTest = false;
+    illumMaterialClear.depthWrite = false;
+    illumMaterialClear.fragmentNode = buildIllumFragment({ noClouds: true }).node;
+  }
   /** DIAGNOSTIC ONLY — rebuild the illum fill with terms compiled out (see
    * `buildIllumFragment`). `setIllumDiagnostic({})` restores the shipped build. */
   const setIllumDiagnostic = (diag = {}) => {
@@ -918,6 +948,7 @@ export function buildEnvironmentalLightMaterials({
     setSunShadowFloorIndex,
     setFluidShadowTintSlot,
     setIllumDiagnostic,
+    illumMaterialClear,
     /** True when at least one fluid-shadow-tint slot was actually built
      * (`fluidShadowTintTexture` was supplied) — same diagnostic posture as
      * `sunShadowCompiled` below: "no tinted shadow" should be answerable

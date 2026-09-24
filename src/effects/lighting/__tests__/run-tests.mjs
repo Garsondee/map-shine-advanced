@@ -10,6 +10,7 @@
  * `npm test` / `npm run verify` picks it up for free.
  */
 import { run as runEnvironmentalLight } from './environmental-light.test.mjs';
+import { run as runIllumClearSky } from './illum-clear-sky.test.mjs';
 import { run as runPointLightIllumination } from './point-light-illumination.test.mjs';
 import { run as runPointLightColoration } from './point-light-coloration.test.mjs';
 import { run as runPointLightPool } from './point-light-pool.test.mjs';
@@ -60,6 +61,7 @@ const t = {
 
 const suites = [
   ['environmental-light', runEnvironmentalLight],
+  ['illum-clear-sky', runIllumClearSky],
   ['point-light-illumination', runPointLightIllumination],
   ['point-light-coloration', runPointLightColoration],
   ['point-light-pool', runPointLightPool],

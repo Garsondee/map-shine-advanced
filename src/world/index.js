@@ -237,5 +237,6 @@ export {
   buildCloudKeyTransmittanceNode,
   buildCloudGroundVisNode,
   CLOUD_SHADOW_STREAK_SPREAD,
+  CLOUD_THRESHOLD_OFF,
   cloudFlowVectorNode,
 } from './cloud-field.js';

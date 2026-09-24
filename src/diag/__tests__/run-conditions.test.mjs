@@ -216,6 +216,49 @@ export function run(t) {
     ok('checkpoint/notePhase after stop are harmless', (m.checkpoint('x'), m.notePhase('y'), true));
   }
 
+  // ---- a paused game invalidates (author-caught 2026-09-24) -----------------
+  {
+    const e = fakeEnv();
+    let paused = true;
+    let tick = null;
+    const m = createRunConditionsMonitor({
+      ...e,
+      readPaused: () => paused,
+      setInterval: (fn) => ((tick = fn), 1),
+      clearInterval: () => (tick = null),
+    });
+    m.start(); // sample 1: paused
+    e.advance(1000);
+    tick(); // sample 2: paused
+    paused = false;
+    e.advance(1000);
+    tick(); // sample 3: running
+    const r = m.stop(); // sample 4: running
+    ok('paused run is invalid', r.valid === false && /PAUSED/.test(r.invalidReasons.join(' ')));
+    ok('paused samples counted', r.paused.pausedSamples === 2 && r.paused.samples === 4);
+    ok('paused is the first invalid event, at t=0', r.firstInvalid?.kind === 'paused' && r.firstInvalid.atMs === 0);
+    ok('unpause recorded on the timeline', r.events.some((ev) => ev.kind === 'unpaused'));
+  }
+  {
+    const e = fakeEnv();
+    let tick = null;
+    const m = createRunConditionsMonitor({
+      ...e,
+      readPaused: () => false,
+      setInterval: (fn) => ((tick = fn), 1),
+      clearInterval: () => (tick = null),
+    });
+    m.start();
+    tick();
+    const r = m.stop();
+    ok('a never-paused run stays valid, with no pause events', r.valid === true && r.events.length === 0);
+    ok('a throwing pause read is ignored, not fatal', (() => {
+      const m2 = createRunConditionsMonitor({ ...fakeEnv(), readPaused: () => { throw new Error('x'); }, setInterval: () => 1, clearInterval: () => {} });
+      m2.start();
+      return m2.stop().valid === true;
+    })());
+  }
+
   // ---- adapter reader -------------------------------------------------------
   {
     ok('no renderer gives null adapter', readRendererAdapterInfo(null) === null);

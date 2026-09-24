@@ -21,6 +21,10 @@
  * baseline that every later comparison inherits):
  *   - any hidden time at all            → invalid (the loop was not drawing);
  *   - viewport or DPR changed mid-run   → invalid (the workload changed);
+ *   - game PAUSED at any sample         → invalid (2026-09-24, author-caught:
+ *     Foundry logs in paused and MSA runs its simulation at time-scale 0
+ *     while paused, so particles/fire/rain/every animated effect are frozen
+ *     and their real cost is simply absent from the numbers);
  *   - focus lost                        → NOTED ONLY. An unfocused but visible
  *     window keeps rendering at full rate; flagging it would invalidate every
  *     run where the author clicks on another monitor, for no reason.
@@ -55,6 +59,9 @@ export function createRunConditionsMonitor(env = {}) {
   const setIntervalFn = env.setInterval ?? ((fn, ms) => setInterval(fn, ms));
   const clearIntervalFn = env.clearInterval ?? ((id) => clearInterval(id));
   const sampleIntervalMs = env.sampleIntervalMs ?? 1000;
+  // Optional: () => boolean — is the game paused? Sampled on the same slow
+  // timer as render scale (a pause flip is rare and lasts seconds).
+  const readPaused = env.readPaused ?? null;
 
   let startedAt = null;
   let hiddenSince = null;
@@ -77,12 +84,15 @@ export function createRunConditionsMonitor(env = {}) {
   let lastPhaseKey = null;
   let lastCanvasKey = null;
   let firstInvalid = null;
+  let pausedSamples = 0;
+  let totalPauseSamples = 0;
+  let lastPaused = null;
 
   const canvasKey = (vp) => (vp ? `${vp.physicalWidth}x${vp.physicalHeight}@${vp.devicePixelRatio}` : null);
   const pushEvent = (kind, extra = {}) => {
     const ev = { atMs: round(now() - startedAt), kind, phase: currentPhase, ...extra };
     if (events.length < MAX_EVENTS) events.push(ev);
-    if ((kind === 'hidden' || kind === 'canvas') && firstInvalid === null) firstInvalid = ev;
+    if ((kind === 'hidden' || kind === 'canvas' || kind === 'paused') && firstInvalid === null) firstInvalid = ev;
   };
 
   const readScaleSafe = () => {
@@ -99,6 +109,25 @@ export function createRunConditionsMonitor(env = {}) {
     } catch {
       return null;
     }
+  };
+  const samplePaused = () => {
+    if (!readPaused) return;
+    let paused;
+    try {
+      paused = readPaused() === true;
+    } catch {
+      return;
+    }
+    totalPauseSamples++;
+    if (paused) pausedSamples++;
+    if (paused !== lastPaused) {
+      if (lastPaused !== null || paused) pushEvent(paused ? 'paused' : 'unpaused');
+      lastPaused = paused;
+    }
+  };
+  const sampleTick = () => {
+    sampleScale();
+    samplePaused();
   };
   const sampleScale = () => {
     const s = readScaleSafe();
@@ -203,8 +232,11 @@ export function createRunConditionsMonitor(env = {}) {
     scaleSeen = new Set();
     scaleLastKey = null;
     scaleStart = readScaleSafe();
-    sampleScale();
-    if (readRenderScale && scaleTimer === null) scaleTimer = setIntervalFn(sampleScale, sampleIntervalMs);
+    pausedSamples = 0;
+    totalPauseSamples = 0;
+    lastPaused = null;
+    sampleTick();
+    if ((readRenderScale || readPaused) && scaleTimer === null) scaleTimer = setIntervalFn(sampleTick, sampleIntervalMs);
     if (!listening) {
       doc?.addEventListener?.('visibilitychange', onVisibility);
       win?.addEventListener?.('blur', onBlur);
@@ -232,7 +264,7 @@ export function createRunConditionsMonitor(env = {}) {
       clearIntervalFn(scaleTimer);
       scaleTimer = null;
     }
-    sampleScale();
+    sampleTick();
     const scaleEnd = readScaleSafe();
     const endViewport = readViewport();
     let adapter = null;
@@ -253,6 +285,9 @@ export function createRunConditionsMonitor(env = {}) {
       events,
       checkpoints,
       firstInvalid,
+      paused: readPaused
+        ? { samples: totalPauseSamples, pausedSamples, approxPausedMs: pausedSamples * sampleIntervalMs }
+        : null,
       renderScale: readRenderScale
         ? { start: scaleStart, end: scaleEnd, changes: scaleChanges, distinct: [...scaleSeen] }
         : null,
@@ -279,6 +314,7 @@ export function buildRunConditions({
   events = [],
   checkpoints = [],
   firstInvalid = null,
+  paused = null,
   renderScale = null,
   userAgent,
   hardwareConcurrency,
@@ -299,6 +335,14 @@ export function buildRunConditions({
     (startViewport.physicalWidth !== endViewport.physicalWidth ||
       startViewport.physicalHeight !== endViewport.physicalHeight ||
       startViewport.devicePixelRatio !== endViewport.devicePixelRatio);
+  if (paused && paused.pausedSamples > 0) {
+    invalidReasons.push(
+      `The game was PAUSED for ${paused.pausedSamples} of ${paused.samples} one-second samples (~${Math.round(
+        paused.approxPausedMs / 1000
+      )}s). MSA runs its simulation at time-scale 0 while paused, so particles, fire, rain and every other ` +
+        'animated effect were frozen and their real cost is missing from this run. Unpause the game and re-run.'
+    );
+  }
   const canvasEvents = (events ?? []).filter((ev) => ev.kind === 'canvas');
   if (!vpChanged && canvasEvents.length > 0) {
     // A flip-and-back (the Chrome extension's debugging bar appearing and
@@ -349,6 +393,7 @@ export function buildRunConditions({
     firstInvalid,
     checkpoints,
     events,
+    paused,
     renderScale,
     userAgent: userAgent ?? null,
     hardwareConcurrency: hardwareConcurrency ?? null,

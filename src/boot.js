@@ -618,6 +618,7 @@ import {
   resolveViewerToken,
   isViewingUserGM,
   readTokenPlayerLightMode,
+  readGamePaused,
 } from './foundry/index.js';
 import { engageFoundryFallback, getDescribeRenderModeStats } from './diag/render-fallback.js';
 import { registerMarkerSource, getAllMarkerPoints } from './diag/marker-overlay.js';
@@ -6335,6 +6336,7 @@ function install() {
     const monitor = createRunConditionsMonitor({
       readAdapter: () => getVtPanViewerAdapterInfo(),
       readRenderScale: () => getVtPanViewerRenderScaleState(),
+      readPaused: () => readGamePaused().paused,
     });
     monitor.start();
     // Phase labels for the validity timeline = the progress text on screen.

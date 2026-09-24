@@ -86,6 +86,13 @@
  */
 import { encodeStriped, computeMipChainDims, classifyBcFormat } from './block-compress.js';
 import { fetchBakedTexture } from './baked-textures.js';
+import { resolveAgainstPage } from './worker-url.js';
+
+// The page's base URL, sent with every request (worker-url.js's header, #618):
+// a page-relative asset path must resolve against the PAGE, not this worker's
+// own script folder. Only the fetch resolves; `src` stays the cache key as-is.
+let _pageBase = null;
+const pageFetch = (url, opts) => fetch(resolveAgainstPage(url, _pageBase), opts);
 import { coarseAlphaGridDims, extractAlphaGrid, createMinAlphaGrid, accumulateMinAlphaBand } from './coarse-alpha.js';
 // The mip reducer (Lanczos-2, premultiplied, dilated, LINEARIZED). Replaced the
 // OffscreenCanvas `drawImage` resize this file used to rely on — see
@@ -248,7 +255,7 @@ const ALPHA_CACHE_VERSION = 2;
  */
 async function headSource(src) {
   try {
-    const resp = await fetch(src, { method: 'HEAD' });
+    const resp = await pageFetch(src, { method: 'HEAD' });
     if (!resp.ok) return null;
     return {
       etag: resp.headers.get('etag'),
@@ -437,7 +444,7 @@ async function handleAlphaGrid(src) {
     };
   }
 
-  const resp = await fetch(src);
+  const resp = await pageFetch(src);
   if (!resp.ok) throw new Error(`HTTP ${resp.status} for ${src}`);
   const etag = resp.headers.get('etag');
   const lastModified = resp.headers.get('last-modified');
@@ -481,7 +488,7 @@ async function handle(src) {
   // no manifest, a stale entry, a network error, a corrupt file all resolve
   // `null` — so a map with no bake at all falls straight through to the
   // IndexedDB-cache-then-encode path below, completely unchanged.
-  const baked = await fetchBakedTexture(src);
+  const baked = await fetchBakedTexture(src, { fetchFn: pageFetch });
   if (baked) return { ...baked, cached: false };
 
   const key = `bc:v${CACHE_VERSION}:${src}`;
@@ -498,7 +505,7 @@ async function handle(src) {
     };
   }
 
-  const resp = await fetch(src);
+  const resp = await pageFetch(src);
   if (!resp.ok) throw new Error(`HTTP ${resp.status} for ${src}`);
   const etag = resp.headers.get('etag');
   const lastModified = resp.headers.get('last-modified');
@@ -659,7 +666,8 @@ async function handle(src) {
 }
 
 self.onmessage = async (e) => {
-  const { id, src, mode } = e.data || {};
+  const { id, src, mode, base } = e.data || {};
+  if (base) _pageBase = base;
   try {
     if (mode === 'alphaGrid') {
       const a = await handleAlphaGrid(src);

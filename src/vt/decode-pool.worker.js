@@ -37,10 +37,14 @@
 import { pageWorldRect, decodePageToCanvas, DEFAULT_BORDER_PX, compositePackedTexels } from './decode-pool.js';
 import { pageStoreKey, putPageBlob } from './pyramid-store.js';
 import { perfNowMs } from '../core/frame-clock.js';
+import { resolveAgainstPage } from './worker-url.js';
+
+// See bc-compress.worker.js's `_pageBase` — same #618 fix, same reason.
+let _pageBase = null;
 
 /** Fetch + fully decode one source image. This is the expensive op we moved off the main thread. */
 function fetchAndDecode(url) {
-  return fetch(url)
+  return fetch(resolveAgainstPage(url, _pageBase))
     .then((res) => {
       if (!res.ok) throw new Error(`decode-pool.worker: ${url} -> HTTP ${res.status}`);
       return res.blob();
@@ -190,6 +194,7 @@ let _queue = Promise.resolve();
 
 self.onmessage = (e) => {
   const msg = e.data;
+  if (msg?.base) _pageBase = msg.base;
   _queue = _queue
     .then(async () => {
       try {

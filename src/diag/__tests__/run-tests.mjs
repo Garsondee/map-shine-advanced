@@ -32,6 +32,7 @@ import { run as runReckoningReport } from './reckoning-report.test.mjs';
 import { run as runParamReadHealth } from './param-read-health.test.mjs';
 import { run as runUiPerf } from './ui-perf.test.mjs';
 import { run as runLoadReport } from './load-report.test.mjs';
+import { run as runRunConditions } from './run-conditions.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -78,6 +79,7 @@ const suites = [
   ['param-read-health', runParamReadHealth],
   ['ui-perf', runUiPerf],
   ['load-report', runLoadReport],
+  ['run-conditions', runRunConditions],
 ];
 
 for (const [name, fn] of suites) {

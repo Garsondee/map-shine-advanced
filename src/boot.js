@@ -83,6 +83,7 @@ import {
   createVramSampler,
   runProfileSession,
 } from './diag/perf-session.js';
+import { createRunConditionsMonitor } from './diag/run-conditions.js';
 // FLOOR-WIDE STRUCTURAL A/B (2026-08-26) — the only direct import of this
 // module into boot.js; every other consumer reaches it through
 // perf-session.js's own internal call. This is a SECOND, direct call site
@@ -296,6 +297,7 @@ import {
   // setting and its live state (settings-panel row + diagnostics readout).
   setVtPanViewerRenderScaleSetting,
   getVtPanViewerRenderScaleState,
+  getVtPanViewerAdapterInfo,
   // TIER-COUPLED BUDGET (2026-08-27) — re-resolves the governor's Auto
   // target from the player's CURRENT performance-profile tier.
   setVtPanViewerRenderScaleProfile,
@@ -6316,6 +6318,44 @@ function install() {
   // afterward as an independent cross-check (perf-report.js's `effects[]`
   // already reconciles the two automatically). Every settle/sample knob below
   // is turned up for accuracy, not speed, on purpose.
+  // RUN CONDITIONS (2026-09-24) — every perf action stamps whether it was
+  // measured under trustworthy conditions (window visible the whole time, same
+  // canvas size start to end) plus the GPU/browser/render-scale it ran on. See
+  // diag/run-conditions.js's header for the verdict rules. Attached as
+  // `report.runConditions`, and an invalid run says so at the top of findings.
+  // One live monitor at a time: an action that threw mid-run never reached its
+  // attach call, so the next start stops the orphan (listeners + 1s sampler)
+  // instead of leaking it for the rest of the session.
+  let activePerfRunConditions = null;
+  const startPerfRunConditions = () => {
+    activePerfRunConditions?.stop();
+    const monitor = createRunConditionsMonitor({
+      readAdapter: () => getVtPanViewerAdapterInfo(),
+      readRenderScale: () => getVtPanViewerRenderScaleState(),
+    });
+    monitor.start();
+    activePerfRunConditions = monitor;
+    return monitor;
+  };
+  const attachPerfRunConditions = (report, monitor) => {
+    const conditions = monitor.stop();
+    if (activePerfRunConditions === monitor) activePerfRunConditions = null;
+    if (!report || !conditions) return;
+    report.runConditions = conditions;
+    if (!conditions.valid) {
+      report.findings = [
+        {
+          severity: 'high',
+          id: 'run-conditions-invalid',
+          text: `THIS RUN IS NOT A VALID MEASUREMENT. ${conditions.invalidReasons.join(' ')}`,
+          evidence: { hiddenMs: conditions.hiddenMs, viewport: conditions.viewport },
+        },
+        ...(report.findings ?? []),
+      ];
+      log.warn('perf report: run conditions INVALID —', conditions.invalidReasons.join(' '));
+    }
+  };
+
   MapShine.debug.registerAction(
     'perf-run-full',
     // ~2-3 min for a single floor's base route alone. On top of that: a
@@ -6338,6 +6378,7 @@ function install() {
     '🔬 Performance Report (this scene, CPU + GPU + every tier, ~5 min single floor, 20+ min multi-floor)',
     async () => {
       const path = buildBenchmarkPath(); // throws BEFORE anything runs if no scene is loaded
+      const runConditions = startPerfRunConditions();
       // MIN_ACTION_PAUSE_MS's own doc — a fixed floor before this (or any)
       // phase's camera sweep starts moving.
       await pause(MIN_ACTION_PAUSE_MS);
@@ -7261,6 +7302,7 @@ function install() {
       if (lastPerfProfile.summary) {
         log.info(formatOffenderSummaryText(lastPerfProfile.summary));
       }
+      attachPerfRunConditions(lastPerfProfile, runConditions);
       // See perf-run's old comment (now folded into this one): the panel copies
       // the RETURN VALUE, always after entry.fn() resolves — a manual
       // copyToClipboard() here would be silently clobbered.
@@ -7314,6 +7356,7 @@ function install() {
     '⚡ Quick Performance Check (~20s, zone profile + hitches + coverage, no A/B / multi-floor / tier sweep)',
     async () => {
       const path = buildQuickCheckPath(); // throws BEFORE anything runs if no scene is loaded
+      const runConditions = startPerfRunConditions();
       // Same fixed pre-pause the full report uses, and for the same reason
       // (MIN_ACTION_PAUSE_MS's own doc) — a lingering load hitch from
       // whatever the author was just doing would otherwise corrupt the first
@@ -7346,6 +7389,7 @@ function install() {
         hidePerfProgress();
       }
 
+      attachPerfRunConditions(lastPerfProfile, runConditions);
       if (lastPerfProfile.summary) log.info(formatOffenderSummaryText(lastPerfProfile.summary));
       // Same shared "Last result" panel the full report updates — see that
       // panel's own header (`buildPerfLastResultPanel`) for why no separate
@@ -15199,7 +15243,25 @@ function install() {
               zoneRows: null,
             }
           : lastLoadDiagnostics;
-        return buildLoadReport(lss, diagnostics);
+        const report = buildLoadReport(lss, diagnostics);
+        // Comparability stamp (2026-09-24) — the same canvas/GPU/render-scale
+        // facts the perf actions' runConditions carry, read at REPORT time
+        // (not load time): two loads are only comparable on the same canvas.
+        // Hidden-tab time during the load itself is `report.background`.
+        const rs = getVtPanViewerRenderScaleState();
+        report.conditionsAtReportTime = {
+          viewport: {
+            cssWidth: window.innerWidth,
+            cssHeight: window.innerHeight,
+            devicePixelRatio: window.devicePixelRatio ?? 1,
+          },
+          renderScale: rs?.skipped
+            ? null
+            : { userSetting: rs.userSetting ?? null, internalScale: rs.resolvedInternalScale ?? null, internalW: rs.internalW, internalH: rs.internalH },
+          adapter: getVtPanViewerAdapterInfo(),
+          userAgent: navigator.userAgent,
+        };
+        return report;
       },
       { zone: 'lab', primary: true }
     );

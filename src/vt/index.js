@@ -35,6 +35,7 @@ export {
   // setting (Auto = governor-controlled, or a fixed rung) and its live state.
   setVtPanViewerRenderScaleSetting,
   getVtPanViewerRenderScaleState,
+  getVtPanViewerAdapterInfo,
   // TIER-COUPLED BUDGET (2026-08-27) — re-resolve the governor's frame
   // budget from the CURRENT performance-profile tier; see its own doc.
   setVtPanViewerRenderScaleProfile,

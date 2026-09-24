@@ -67,6 +67,7 @@
 // decode/worker latency" class perfNowMs's own header names, not animation
 // state, so it doesn't belong on env.time either.
 import { perfNowMs } from '../core/frame-clock.js';
+import { pageBaseUrl } from './worker-url.js';
 
 /** A texture something is trying to draw right now — always served first. */
 export const PRIORITY_INTERACTIVE = 'interactive';
@@ -215,7 +216,7 @@ function _pump() {
     }
     _pending.set(job.id, { resolve: job.resolve, mode: job.mode });
     try {
-      w.postMessage(job.message);
+      w.postMessage({ ...job.message, base: pageBaseUrl() });
       _inFlight++;
     } catch (err) {
       _pending.delete(job.id);

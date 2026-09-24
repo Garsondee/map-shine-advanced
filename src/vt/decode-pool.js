@@ -49,6 +49,7 @@
 
 import { pageStoreKey, getPageBlob, putPageBlob } from './pyramid-store.js';
 import { perfNowMs } from '../core/frame-clock.js';
+import { pageBaseUrl } from './worker-url.js';
 // The pure half of this module (byte-header parsing, page geometry, URL
 // normalization, a streaming byte reader, a generic semaphore) moved to
 // decode-primitives.js on 2026-07-25 (size-ratchet god-object reversal) —
@@ -610,7 +611,7 @@ async function tryWorkerSlice(msg) {
   const id = _nextWorkerReqId++;
   const promise = new Promise((resolve, reject) => _workerPending.set(id, { resolve, reject }));
   try {
-    w.postMessage({ ...msg, id });
+    w.postMessage({ ...msg, id, base: pageBaseUrl() });
   } catch (err) {
     _workerPending.delete(id);
     recordWorkerRequestFailure(msg.kind, msg.url, `postMessage threw: ${err?.message || err}`); // e.g. not cloneable

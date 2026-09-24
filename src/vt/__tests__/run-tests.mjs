@@ -10,6 +10,7 @@
 import { run as runVtCore } from './vt-core.test.mjs';
 import { run as runDecodePrimitives } from './decode-primitives.test.mjs';
 import { run as runViewState } from './view-state.test.mjs';
+import { run as runWorkerUrl } from './worker-url.test.mjs';
 import { run as runTextureLimits } from './texture-limits.test.mjs';
 import { run as runBlockCompress } from './block-compress.test.mjs';
 import { run as runCoarseAlpha } from './coarse-alpha.test.mjs';
@@ -70,6 +71,7 @@ const suites = [
   ['vt-core', runVtCore],
   ['decode-primitives', runDecodePrimitives],
   ['view-state', runViewState],
+  ['worker-url', runWorkerUrl],
   ['texture-limits', runTextureLimits],
   ['block-compress', runBlockCompress],
   ['coarse-alpha', runCoarseAlpha],

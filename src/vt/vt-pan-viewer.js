@@ -195,6 +195,7 @@ import { decodeHalfFloatRgba, decodeByteRgba, diffProbeBuffers } from '../diag/p
 import { createGpuProbe } from '../diag/gpu-probe.js';
 import { createGpuZoneTimer } from '../diag/gpu-zone-timer.js';
 import { createShaderRebuildProbe } from '../diag/shader-rebuild-probe.js';
+import { readRendererAdapterInfo } from '../diag/run-conditions.js';
 import { createPipelineRebuildProbe } from '../diag/pipeline-rebuild-probe.js';
 // THE ZONE'S ONE DOOR (zones/one-door) — unlike the world-quad/occlusion
 // imports just below (pre-existing, tolerated debt at this ratchet's current
@@ -24252,6 +24253,10 @@ export async function startVtPanViewer({
           pixelRatio,
         };
       },
+      /** The GPU adapter doing the work — perf reports' run-conditions stamp. */
+      readAdapterInfo() {
+        return readRendererAdapterInfo(renderer);
+      },
       /**
        * SHADER-REBUILD PROBE arm/disarm (diag/shader-rebuild-probe.js).
        * Lazily constructed on first arm so an unarmed session never even
@@ -26889,6 +26894,12 @@ export function setVtPanViewerRenderScaleProfile() {
 export function getVtPanViewerRenderScaleState() {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.getRenderScaleState();
+}
+
+/** The live renderer's GPU adapter info (diag/run-conditions.js), or null. */
+export function getVtPanViewerAdapterInfo() {
+  if (!_active) return null;
+  return _active.readAdapterInfo?.() ?? null;
 }
 
 /** `renderer.info` draw-call/triangle counters + drawing-buffer size. */

@@ -69,7 +69,29 @@ function resolveHost() {
  * posture rather than throwing on import in a Node test.
  * @param {string} text
  */
+/**
+ * Progress-text listeners (2026-09-24) — diag/run-conditions.js uses the text
+ * the author already sees as its phase label, so a validity event can name
+ * the sweep phase it landed in without touching the ~40 call sites. A
+ * listener that throws is ignored: this overlay must never break a run.
+ * @type {Set<(text: string) => void>}
+ */
+const progressListeners = new Set();
+
+/** @param {(text: string) => void} fn @returns {() => void} unsubscribe */
+export function onPerfProgressText(fn) {
+  progressListeners.add(fn);
+  return () => progressListeners.delete(fn);
+}
+
 export function showPerfProgress(text) {
+  for (const fn of progressListeners) {
+    try {
+      fn(text);
+    } catch {
+      // see progressListeners' doc
+    }
+  }
   if (typeof document === 'undefined') return;
   if (!el) {
     el = document.createElement('div');

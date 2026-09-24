@@ -15,7 +15,7 @@ export { openCameraPathDialog, closeCameraPathDialog } from './camera-path-dialo
 export { installTileMotionPanel } from './rooms/remote/tile-motion-panel.js';
 export { installAnchorMode } from './anchor-mode.js';
 export { installAnchorViewMode } from './anchor-view-mode.js';
-export { showPerfProgress, hidePerfProgress, formatPerfProgressText } from './perf-progress-overlay.js';
+export { showPerfProgress, hidePerfProgress, formatPerfProgressText, onPerfProgressText } from './perf-progress-overlay.js';
 export { installCompressionStatusBadge } from './compression-status.js';
 export {
   beginFloorTransition,

@@ -173,6 +173,49 @@ export function run(t) {
     ok('skipped scale reader yields null start/end, no changes', r.renderScale.start === null && r.renderScale.changes === 0);
   }
 
+  // ---- timeline: events carry time + phase; checkpoints vouch for early work --
+  {
+    const e = fakeEnv();
+    const m = createRunConditionsMonitor(e);
+    m.start();
+    m.notePhase('Profiling: measuring — 10 frames · 1.0s elapsed');
+    e.advance(1000);
+    m.notePhase('Profiling: measuring — 20 frames · 2.0s elapsed'); // counters only: same phase
+    e.advance(59000);
+    m.checkpoint('main-route-end');
+    m.notePhase('structural-ab — [1/5 low] toggle ON');
+    e.advance(5000);
+    e.win.innerHeight = 1024;
+    e.fire('resize');
+    e.advance(1000);
+    e.win.innerHeight = 1080;
+    e.fire('resize');
+    m.checkpoint('tier-sweep-end');
+    const r = m.stop();
+    ok('flip-and-back canvas change invalidates the whole run', r.valid === false && /2 time\(s\)/.test(r.invalidReasons.join(' ')));
+    ok('first invalid is the canvas change at 65s', r.firstInvalid?.kind === 'canvas' && r.firstInvalid.atMs === 65000);
+    ok('first invalid names its phase', /structural-ab/.test(r.firstInvalid.phase));
+    ok('counter ticks do not create a new phase', r.events.every((ev) => !/20 frames/.test(ev.phase ?? '')));
+    ok('main-route checkpoint still clean', r.checkpoints[0].name === 'main-route-end' && r.checkpoints[0].cleanSoFar === true);
+    ok('later checkpoint dirty', r.checkpoints[1].cleanSoFar === false);
+    ok('both canvas changes recorded', r.events.filter((ev) => ev.kind === 'canvas').length === 2);
+  }
+  {
+    const e = fakeEnv();
+    const m = createRunConditionsMonitor(e);
+    m.start();
+    e.fire('resize'); // same size: no event
+    e.doc.visibilityState = 'hidden';
+    e.fire('visibilitychange');
+    e.advance(10);
+    e.doc.visibilityState = 'visible';
+    e.fire('visibilitychange');
+    const r = m.stop();
+    ok('same-size resize adds no canvas event', !r.events.some((ev) => ev.kind === 'canvas'));
+    ok('hidden + visible events recorded', r.events.map((ev) => ev.kind).join(',') === 'hidden,visible');
+    ok('checkpoint/notePhase after stop are harmless', (m.checkpoint('x'), m.notePhase('y'), true));
+  }
+
   // ---- adapter reader -------------------------------------------------------
   {
     ok('no renderer gives null adapter', readRendererAdapterInfo(null) === null);

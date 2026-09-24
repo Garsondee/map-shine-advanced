@@ -25,6 +25,12 @@
  *     window keeps rendering at full rate; flagging it would invalidate every
  *     run where the author clicks on another monitor, for no reason.
  *
+ * TIMELINE (2026-09-24): every hide/show and canvas-size change is recorded
+ * with its time and the sweep PHASE it landed in (`notePhase` — fed from the
+ * on-screen progress text), plus explicit `checkpoint(name)`s. A 25-minute
+ * sweep whose Chrome extension blipped at minute 20 is then honestly "invalid
+ * as a whole, clean up to checkpoint X" instead of all-or-nothing.
+ *
  * Pure except for the injected `win`/`doc` — tests drive it with fakes.
  */
 
@@ -64,6 +70,20 @@ export function createRunConditionsMonitor(env = {}) {
   let scaleLastKey = null;
   let scaleChanges = 0;
   let scaleSeen = new Set();
+  const MAX_EVENTS = 100;
+  let events = [];
+  let checkpoints = [];
+  let currentPhase = null;
+  let lastPhaseKey = null;
+  let lastCanvasKey = null;
+  let firstInvalid = null;
+
+  const canvasKey = (vp) => (vp ? `${vp.physicalWidth}x${vp.physicalHeight}@${vp.devicePixelRatio}` : null);
+  const pushEvent = (kind, extra = {}) => {
+    const ev = { atMs: round(now() - startedAt), kind, phase: currentPhase, ...extra };
+    if (events.length < MAX_EVENTS) events.push(ev);
+    if ((kind === 'hidden' || kind === 'canvas') && firstInvalid === null) firstInvalid = ev;
+  };
 
   const readScaleSafe = () => {
     if (!readRenderScale) return null;
@@ -113,10 +133,12 @@ export function createRunConditionsMonitor(env = {}) {
       if (hiddenSince === null) {
         hiddenSince = t;
         hiddenEpisodes++;
+        pushEvent('hidden');
       }
     } else if (hiddenSince !== null) {
       hiddenMs += t - hiddenSince;
       hiddenSince = null;
+      pushEvent('visible');
     }
   };
   const onBlur = () => {
@@ -130,7 +152,30 @@ export function createRunConditionsMonitor(env = {}) {
   };
   const onResize = () => {
     resizeEvents++;
+    const vp = readViewport();
+    const key = canvasKey(vp);
+    if (key !== lastCanvasKey) {
+      pushEvent('canvas', { from: lastCanvasKey, to: key });
+      lastCanvasKey = key;
+    }
   };
+
+  /** Phase label from the on-screen progress text; counters are stripped so
+   * "555 frames · 7.0s" ticking does not count as a new phase. */
+  function notePhase(text) {
+    if (startedAt === null || typeof text !== 'string') return;
+    const key = text.replace(/[0-9.]+/g, '#');
+    if (key === lastPhaseKey) return;
+    lastPhaseKey = key;
+    currentPhase = text.length > 160 ? `${text.slice(0, 157)}...` : text;
+  }
+
+  /** A named point in the run ("main-route-end"); records whether the run
+   * was still clean at that moment. */
+  function checkpoint(name) {
+    if (startedAt === null) return;
+    checkpoints.push({ name, atMs: round(now() - startedAt), cleanSoFar: firstInvalid === null });
+  }
 
   function start() {
     startedAt = now();
@@ -143,6 +188,17 @@ export function createRunConditionsMonitor(env = {}) {
     const focused = typeof doc?.hasFocus === 'function' ? doc.hasFocus() : true;
     blurredSince = focused ? null : startedAt;
     startViewport = readViewport();
+    events = [];
+    checkpoints = [];
+    currentPhase = null;
+    lastPhaseKey = null;
+    firstInvalid = null;
+    lastCanvasKey = canvasKey(startViewport);
+    if (hiddenSince !== null) {
+      const ev = { atMs: 0, kind: 'hidden', phase: null };
+      events.push(ev);
+      firstInvalid = ev;
+    }
     scaleChanges = 0;
     scaleSeen = new Set();
     scaleLastKey = null;
@@ -194,6 +250,9 @@ export function createRunConditionsMonitor(env = {}) {
       startViewport,
       endViewport,
       adapter,
+      events,
+      checkpoints,
+      firstInvalid,
       renderScale: readRenderScale
         ? { start: scaleStart, end: scaleEnd, changes: scaleChanges, distinct: [...scaleSeen] }
         : null,
@@ -204,7 +263,7 @@ export function createRunConditionsMonitor(env = {}) {
     return result;
   }
 
-  return { start, stop };
+  return { start, stop, notePhase, checkpoint };
 }
 
 /** Pure verdict builder — exported for tests. */
@@ -217,6 +276,9 @@ export function buildRunConditions({
   startViewport,
   endViewport,
   adapter,
+  events = [],
+  checkpoints = [],
+  firstInvalid = null,
   renderScale = null,
   userAgent,
   hardwareConcurrency,
@@ -237,6 +299,17 @@ export function buildRunConditions({
     (startViewport.physicalWidth !== endViewport.physicalWidth ||
       startViewport.physicalHeight !== endViewport.physicalHeight ||
       startViewport.devicePixelRatio !== endViewport.devicePixelRatio);
+  const canvasEvents = (events ?? []).filter((ev) => ev.kind === 'canvas');
+  if (!vpChanged && canvasEvents.length > 0) {
+    // A flip-and-back (the Chrome extension's debugging bar appearing and
+    // vanishing) ends at the start size, so a start/end compare alone would
+    // call it valid — while part of the run measured a different canvas.
+    invalidReasons.push(
+      `The canvas size changed ${canvasEvents.length} time(s) mid-run (${canvasEvents
+        .map((ev) => `${ev.from} → ${ev.to} at ${Math.round(ev.atMs / 1000)}s`)
+        .join(', ')}) before returning to its starting size. Part of this run measured a different workload.`
+    );
+  }
   if (vpChanged) {
     invalidReasons.push(
       `The canvas size changed mid-run (${startViewport.physicalWidth}×${startViewport.physicalHeight} → ` +
@@ -271,6 +344,11 @@ export function buildRunConditions({
     viewport: endViewport ?? startViewport ?? null,
     viewportAtStart: vpChanged ? startViewport : undefined,
     adapter: adapter ?? null,
+    // Where the run first went bad, and which checkpoints it was still clean
+    // at — so an invalid run can still vouch for its early phases.
+    firstInvalid,
+    checkpoints,
+    events,
     renderScale,
     userAgent: userAgent ?? null,
     hardwareConcurrency: hardwareConcurrency ?? null,

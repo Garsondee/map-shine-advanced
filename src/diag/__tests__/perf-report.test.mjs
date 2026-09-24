@@ -33,6 +33,7 @@ import {
   buildZoneRows,
   classifyAgreement,
   classifyBottleneck,
+  detectRefreshQuantization,
   classifyTemporalShape,
   clockNoiseFloorMs,
   collapseInsignificant,
@@ -2370,6 +2371,36 @@ export function run(t) {
       'the note refuses to call the remainder "CPU time"',
       b.note.includes('NOT proven to be CPU time') && b.note.includes('presentation')
     );
+
+    // --- vsync quantisation (2026-09-24) --------------------------------
+    // REAL distribution: 239 rAF gaps measured live on the author's 120Hz
+    // panel with Docklands loaded (8.3×11, 16.6×164, 25×60, 41.7×2, 66.7, 108.6).
+    const real120 = [
+      ...Array(11).fill(8.3),
+      ...Array(164).fill(16.6),
+      ...Array(60).fill(25.0),
+      41.7,
+      41.7,
+      66.7,
+      108.6,
+    ];
+    const q = detectRefreshQuantization(real120);
+    ok('120Hz panel detected from real gaps (longest qualifying step, not 240)', q?.refreshHz === 120);
+    ok('a pure 60Hz trace detects 60, not 120', detectRefreshQuantization(Array(100).fill(16.67))?.refreshHz === 60);
+    const scattered = Array.from({ length: 200 }, (_, i) => 9 + ((i * 7.3) % 13));
+    ok('scattered (VRR/unlocked) gaps detect nothing', detectRefreshQuantization(scattered) === null);
+    ok('too few samples detect nothing', detectRefreshQuantization([16.6, 16.6]) === null);
+    // Docklands main route, REAL (2026-09-24): gap p50 16.6 / p95 25, gpu p50 8.0 / p95 12.32.
+    const dockGap = { p50: 16.6, p95: 25 };
+    const dockGpu = { p50: 8.0, p95: 12.32 };
+    const plain = classifyBottleneck({ gapMs: dockGap, gpuMs: dockGpu });
+    ok('without refresh info the old verdict stands (not-gpu-bound)', plain.verdict === 'not-gpu-bound');
+    const quant = classifyBottleneck({ gapMs: dockGap, gpuMs: dockGpu, refresh: q });
+    ok('with 120Hz quantisation the median is GPU-bound (8.0ms misses the 8.33ms slot)', quant.verdict === 'gpu-bound');
+    ok('...2 refreshes per frame at the median', quant.median.vsync.refreshesPerFrame === 2);
+    ok('...tail: 12.32ms misses the 16.67ms slot? no → stays its plain verdict', quant.tail.vsync.gpuAloneMissesPreviousSlot === false);
+    ok('...note tells the reader to judge by ms, not fps', /not fps/.test(quant.note) && /vsync wait/.test(quant.note));
+    ok('refresh info echoed on the verdict', quant.refresh.refreshHz === 120);
 
     // A null is an absence: no samples must not read as a balanced frame.
     const none = classifyBottleneck({ gapMs: null, gpuMs: null });

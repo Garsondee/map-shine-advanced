@@ -194,6 +194,48 @@ function buildBackgroundSection(hiddenMs, totalMs) {
 }
 
 /**
+ * WAS THE GPU SIDE BACKED UP? (2026-09-24, diag/gpu-queue-probe.js)
+ *
+ * The one question the rest of this report cannot answer: every other timing
+ * here is main-thread. A load where the renderer draws 2 frames in 23s while
+ * `worstStallMs` reads 2.7s is not explained by anything main-thread — the
+ * wait is on the GPU side (Chrome's GPU process compiling/uploading, #611).
+ * This section names it with a measurement instead of an inference.
+ *
+ * `null` = the probe did not run for this load (no data), never "no backlog".
+ *
+ * @param {object|null} gpuQueue  summarizeGpuQueueSamples() output
+ * @param {number|null} worstStallMs
+ */
+export function buildGpuQueueSection(gpuQueue, worstStallMs) {
+  if (!gpuQueue) return null;
+  const maxMs = gpuQueue.maxMs;
+  let verdict;
+  if (!gpuQueue.sampleCount) {
+    verdict = 'no-samples';
+  } else if (Number.isFinite(maxMs) && maxMs >= 1000 && (!Number.isFinite(worstStallMs) || maxMs > 2 * worstStallMs)) {
+    verdict = 'gpu-side-stall';
+  } else if (Number.isFinite(maxMs) && maxMs >= 250) {
+    verdict = 'gpu-side-backlog';
+  } else {
+    verdict = 'clear';
+  }
+  const notes = {
+    'no-samples':
+      'The GPU queue probe ran but never got a device to ask (the graphics device appeared after the load ended, or the backend is not WebGPU).',
+    'gpu-side-stall':
+      `The GPU side was blocked for up to ${maxMs}ms at a time (${gpuQueue.stalledMs}ms stalled in total) while the main ` +
+      `thread's worst freeze was only ${Number.isFinite(worstStallMs) ? worstStallMs + 'ms' : 'unknown'}. The wait here is ` +
+      "NOT main-thread JavaScript: it is the GPU process (pipeline compiles, texture uploads, or GPU work itself). " +
+      'Main-thread optimisation will not move this; see `worst[]` for when it happened.',
+    'gpu-side-backlog':
+      `The GPU queue backed up to ${maxMs}ms at worst (${gpuQueue.stallCount} sample(s) over 250ms) — real, but not the dominant wait.`,
+    clear: `The GPU queue stayed responsive throughout (worst ${maxMs}ms): whatever made this load slow was not GPU-side.`,
+  };
+  return { ...gpuQueue, verdict, note: notes[verdict] };
+}
+
+/**
  * HOW MUCH OF EACH FRAME DO THE INSTRUMENTS ACTUALLY EXPLAIN?
  * (mythica-machina-press#588)
  *
@@ -562,6 +604,7 @@ export function buildLoadReport(loadingScreenState, diagnostics = null) {
     report.compression = buildCompressionSection(diagnostics?.compression ?? null);
     report.frameAttribution = buildAttributionSection(diagnostics?.zoneAttribution ?? null);
     report.background = buildBackgroundSection(last.hiddenMs ?? null, totalMs);
+    report.gpuQueue = buildGpuQueueSection(diagnostics?.gpuQueue ?? null, report.worstStallMs);
     report.cacheHealth = buildCacheHealthSection(diagnostics?.cacheSnapshot ?? null);
     // Zone breakdown is COMPLETED-LOAD ONLY — see the in-progress branch's own
     // comment on why compile time reads live there but this does not (yet).

@@ -786,6 +786,11 @@ function measureHost(host) {
 }
 
 let _active = null;
+// The newest renderer's GPU device, set the moment `renderer.init()` resolves —
+// i.e. DURING a load, long before `_active` exists (it is assigned only once
+// construction finishes). Read by the load report's GPU queue probe
+// (diag/gpu-queue-probe.js), which must see the device while the load runs.
+let _latestGpuDevice = null;
 
 /**
  * THE BISECT (2026-07-16). Three guesses into a black screen, stop guessing.
@@ -1798,6 +1803,7 @@ export async function startVtPanViewer({
     const renderer = new THREE.WebGPURenderer({ canvas, antialias: false, requiredLimits, trackTimestamp: true });
     onLoadProgress?.({ phase: 'device', done: 0, total: 1, detail: 'creating the graphics device' });
     await renderer.init(); // REQUIRED before any use — the backend is chosen here
+    _latestGpuDevice = renderer.backend?.isWebGPUBackend ? (renderer.backend.device ?? null) : null;
     onLoadProgress?.({
       phase: 'device',
       done: 1,
@@ -26894,6 +26900,11 @@ export function setVtPanViewerRenderScaleProfile() {
 export function getVtPanViewerRenderScaleState() {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.getRenderScaleState();
+}
+
+/** The newest renderer's GPUDevice — available mid-load, unlike `_active` (see `_latestGpuDevice`). */
+export function getVtPanViewerGpuDevice() {
+  return _active?.renderer?.backend?.device ?? _latestGpuDevice;
 }
 
 /** The live renderer's GPU adapter info (diag/run-conditions.js), or null. */

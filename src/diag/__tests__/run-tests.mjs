@@ -33,6 +33,7 @@ import { run as runParamReadHealth } from './param-read-health.test.mjs';
 import { run as runUiPerf } from './ui-perf.test.mjs';
 import { run as runLoadReport } from './load-report.test.mjs';
 import { run as runRunConditions } from './run-conditions.test.mjs';
+import { run as runGpuQueueProbe } from './gpu-queue-probe.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -80,6 +81,7 @@ const suites = [
   ['ui-perf', runUiPerf],
   ['load-report', runLoadReport],
   ['run-conditions', runRunConditions],
+  ['gpu-queue-probe', runGpuQueueProbe],
 ];
 
 for (const [name, fn] of suites) {

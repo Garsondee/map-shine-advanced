@@ -84,6 +84,7 @@ import {
   runProfileSession,
 } from './diag/perf-session.js';
 import { createRunConditionsMonitor } from './diag/run-conditions.js';
+import { createGpuQueueProbe } from './diag/gpu-queue-probe.js';
 // FLOOR-WIDE STRUCTURAL A/B (2026-08-26) — the only direct import of this
 // module into boot.js; every other consumer reaches it through
 // perf-session.js's own internal call. This is a SECOND, direct call site
@@ -298,6 +299,7 @@ import {
   setVtPanViewerRenderScaleSetting,
   getVtPanViewerRenderScaleState,
   getVtPanViewerAdapterInfo,
+  getVtPanViewerGpuDevice,
   // TIER-COUPLED BUDGET (2026-08-27) — re-resolves the governor's Auto
   // target from the player's CURRENT performance-profile tier.
   setVtPanViewerRenderScaleProfile,
@@ -643,6 +645,7 @@ import {
   formatClock,
   showPerfProgress,
   hidePerfProgress,
+  onPerfProgressText,
   formatPerfProgressText,
   beginFloorTransition,
   updateFloorTransitionProgress,
@@ -6334,6 +6337,13 @@ function install() {
       readRenderScale: () => getVtPanViewerRenderScaleState(),
     });
     monitor.start();
+    // Phase labels for the validity timeline = the progress text on screen.
+    const unsubscribe = onPerfProgressText((text) => monitor.notePhase(text));
+    const stop = monitor.stop;
+    monitor.stop = () => {
+      unsubscribe();
+      return stop();
+    };
     activePerfRunConditions = monitor;
     return monitor;
   };
@@ -6347,8 +6357,24 @@ function install() {
         {
           severity: 'high',
           id: 'run-conditions-invalid',
-          text: `THIS RUN IS NOT A VALID MEASUREMENT. ${conditions.invalidReasons.join(' ')}`,
-          evidence: { hiddenMs: conditions.hiddenMs, viewport: conditions.viewport },
+          text:
+            `THIS RUN IS NOT A VALID MEASUREMENT AS A WHOLE. ${conditions.invalidReasons.join(' ')}` +
+            (conditions.firstInvalid
+              ? ` It first went bad at ${Math.round(conditions.firstInvalid.atMs / 1000)}s` +
+                (conditions.firstInvalid.phase ? `, during "${conditions.firstInvalid.phase}"` : '') +
+                '.'
+              : '') +
+            (conditions.checkpoints?.length
+              ? ` Checkpoints still clean at that point: ${
+                  conditions.checkpoints.filter((c) => c.cleanSoFar).map((c) => c.name).join(', ') || 'none'
+                } — numbers measured before a clean checkpoint are usable; everything after it is not.`
+              : ''),
+          evidence: {
+            hiddenMs: conditions.hiddenMs,
+            viewport: conditions.viewport,
+            firstInvalid: conditions.firstInvalid,
+            checkpoints: conditions.checkpoints,
+          },
         },
         ...(report.findings ?? []),
       ];
@@ -6443,6 +6469,7 @@ function install() {
         stopCameraPath();
         await playing;
         hidePerfProgress();
+        runConditions.checkpoint('main-route-end');
       }
 
       // PHASE 2: MULTI-FLOOR (multi-floor-sweep-2026-08-12, author's own
@@ -6624,6 +6651,7 @@ function install() {
         hidePerfProgress();
       }
       lastPerfProfile.multiFloor = multiFloor;
+      runConditions.checkpoint('multi-floor-end');
 
       // PHASE 3: RAPID DIAGONAL STRESS (rapid-diagonal-stress-2026-08-12,
       // author's own design: "move to the bottom left of a scene, then do a
@@ -6751,6 +6779,7 @@ function install() {
         hidePerfProgress();
       }
       lastPerfProfile.rapidStressSweep = rapidStressSweep;
+      runConditions.checkpoint('rapid-stress-end');
 
       // PHASE 3B: FLOOR-WIDE STRUCTURAL A/B SWEEP (2026-08-26, author's own
       // direct request: "You can include Shade Once pro and con tests for
@@ -6980,6 +7009,7 @@ function install() {
         hidePerfProgress();
       }
       lastPerfProfile.floorStructuralAB = floorStructuralAB;
+      runConditions.checkpoint('floor-structural-ab-end');
       // FOLD INTO findings[] (2026-08-26, Round 2) — the report's own
       // `interpretation` field tells a reader to scan findings[] top-down
       // FIRST ("sorted by severity"); without this, the floor-wide sweep's own
@@ -7174,6 +7204,7 @@ function install() {
         };
       }
       lastPerfProfile.tierComparison = tierComparison;
+      runConditions.checkpoint('tier-sweep-end');
 
       // PHASE 6: EDITING-CADENCE STRESS TEST (2026-08-26, author's own direct
       // request: "gather critical information first" — this is the stage that
@@ -7269,6 +7300,7 @@ function install() {
         }
       }
       lastPerfProfile.editCascadeStress = editCascadeStress;
+      runConditions.checkpoint('edit-cascade-end');
       // FOLD INTO findings[] (2026-08-26, Round 2) — same reasoning as
       // floorStructuralAB's own fold above: without this, the single most
       // expensive result the whole report can produce never reaches the list
@@ -15140,8 +15172,19 @@ function install() {
     });
     if (!tearDownWatchdog.registered) log.warn(`blank-canvas watchdog not registered — ${tearDownWatchdog.reason}`);
 
+    // One probe for the whole session, restarted per load (diag/gpu-queue-probe.js).
+    const loadGpuQueueProbe = createGpuQueueProbe({ getDevice: () => getVtPanViewerGpuDevice() });
+
     Hooks.on('canvasInit', (canvasRef) => {
       tearDownWatchdog.markCovered(); // this draw is real — see foundry/canvas-lifecycle.js
+      // GPU QUEUE PROBE (2026-09-24) — armed for the whole load, from the same
+      // moment the curtain starts; see diag/gpu-queue-probe.js. start() also
+      // resets a probe a previous (failed) load left running.
+      try {
+        loadGpuQueueProbe.start();
+      } catch (err) {
+        log.warn('loading-time report: GPU queue probe failed to start:', err);
+      }
       try {
         const sceneDoc = canvasRef?.scene ?? null;
         const verdict = beginSceneLoad({ sceneId: sceneDoc?.id ?? null, sceneName: sceneDoc?.name });
@@ -15922,6 +15965,12 @@ function install() {
         // every load, rather than waiting for someone to report a stutter.
         noteVtPanViewerRevealed();
         const summary = endSceneLoad({ forced: !readyOutcome.ready });
+        let loadGpuQueue = null;
+        try {
+          loadGpuQueue = loadGpuQueueProbe.stop();
+        } catch (err) {
+          log.warn('loading-time report: GPU queue probe failed to stop:', err);
+        }
 
         // DISARM + READ BACK, THE MOMENT THIS LOAD ENDS. `setXRebuildProbe(false)`
         // already returns the probe's final stats() in the same call (see
@@ -16024,6 +16073,7 @@ function install() {
               : null,
           },
           cacheSnapshot: { start: loadCacheSnapshotStart, end: loadCacheSnapshotEnd },
+          gpuQueue: loadGpuQueue,
         };
 
         // SHOUT IF THE FREEZE CAME BACK (mythica-machina-press#614). Checked a

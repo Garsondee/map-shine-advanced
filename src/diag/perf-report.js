@@ -312,19 +312,83 @@ export function findHangs(gapSamples, { keep = HITCHES_KEPT, medianMs = null } =
 export const GPU_BOUND_FRACTION = 0.85;
 export const CPU_BOUND_FRACTION = 0.6;
 
-export function classifyBottleneck({ gapMs = null, gpuMs = null } = {}) {
+/**
+ * IS PRESENTATION QUANTISED TO A DISPLAY REFRESH? (2026-09-24)
+ *
+ * With vsync, a frame can only be shown on a refresh boundary, so frame gaps
+ * land on whole multiples of the refresh interval R. Live 2026-09-24 on the
+ * author's 120Hz panel: gaps clustered at 8.3 / 16.6 / 25ms, the median sat at
+ * EXACTLY 60fps, and a frame needing ~9-12ms of GPU missed the 8.3ms slot and
+ * waited for the 16.6ms one. The unquantised verdict read that as "8.6ms
+ * unexplained → NOT GPU-bound, shrinking a shader will not move this" — the
+ * opposite of the truth, because the unexplained time was vsync WAIT.
+ *
+ * Method: for each common refresh rate, score the fraction of gap samples
+ * within ±QUANT_TOLERANCE_MS of a whole multiple of R; pick the LONGEST R that
+ * scores ≥ QUANT_MIN_SCORE (every multiple of 8.3 is also a multiple of 4.17,
+ * so the longest qualifying interval is the real one). An unlocked/VRR display
+ * scatters gaps and no candidate qualifies → null, and the plain verdict stands.
+ */
+export const QUANT_REFRESH_CANDIDATES_HZ = [30, 48, 50, 60, 72, 75, 90, 100, 120, 144, 165, 170, 180, 240];
+export const QUANT_TOLERANCE_MS = 0.7;
+export const QUANT_MIN_SCORE = 0.9;
+export const QUANT_MIN_SAMPLES = 60;
+
+export function detectRefreshQuantization(gapSamples) {
+  const xs = Array.isArray(gapSamples) ? gapSamples.filter((g) => Number.isFinite(g) && g > 0) : [];
+  if (xs.length < QUANT_MIN_SAMPLES) return null;
+  let best = null;
+  for (const hz of QUANT_REFRESH_CANDIDATES_HZ) {
+    const R = 1000 / hz;
+    let hit = 0;
+    for (const g of xs) {
+      const k = Math.max(1, Math.round(g / R));
+      if (Math.abs(g - k * R) <= QUANT_TOLERANCE_MS) hit++;
+    }
+    const score = hit / xs.length;
+    if (score >= QUANT_MIN_SCORE && (best === null || R > best.refreshMs)) {
+      best = { refreshHz: hz, refreshMs: round(R, 3), score: round(score, 3) };
+    }
+  }
+  return best;
+}
+
+export function classifyBottleneck({ gapMs = null, gpuMs = null, refresh = null } = {}) {
+  const R = Number.isFinite(refresh?.refreshMs) ? refresh.refreshMs : null;
   const at = (p) => {
     const gap = gapMs?.[p];
     const gpu = gpuMs?.[p];
     if (!Number.isFinite(gap) || gap <= 0 || !Number.isFinite(gpu)) return null;
     const explained = gpu / gap;
+    let verdict =
+      explained >= GPU_BOUND_FRACTION ? 'gpu-bound' : explained >= CPU_BOUND_FRACTION ? 'mixed' : 'not-gpu-bound';
+    let vsync = null;
+    if (R !== null) {
+      const k = Math.max(1, Math.round(gap / R));
+      if (k >= 2 && Math.abs(gap - k * R) <= QUANT_TOLERANCE_MS) {
+        // Shown on refresh k, so the frame's real work took more than k-1
+        // refreshes. If GPU time alone exceeds that, the GPU by itself is why
+        // it missed the earlier slot — GPU-bound at the display's granularity.
+        const slotMs = (k - 1) * R;
+        const gpuMissesSlot = gpu > slotMs * 0.95;
+        vsync = {
+          refreshesPerFrame: k,
+          previousSlotMs: ms(slotMs),
+          // Real work is somewhere in ((k-1)R, kR]; this much of the gap may be
+          // pure vsync wait, not work of any kind.
+          maxVsyncWaitMs: ms(Math.min(R, gap - gpu)),
+          gpuAloneMissesPreviousSlot: gpuMissesSlot,
+        };
+        if (gpuMissesSlot) verdict = 'gpu-bound';
+      }
+    }
     return {
       gapMs: ms(gap),
       gpuMs: ms(gpu),
       unexplainedMs: ms(gap - gpu),
       gpuFraction: round(explained, 3),
-      verdict:
-        explained >= GPU_BOUND_FRACTION ? 'gpu-bound' : explained >= CPU_BOUND_FRACTION ? 'mixed' : 'not-gpu-bound',
+      verdict,
+      ...(vsync ? { vsync } : {}),
     };
   };
   const median = at('p50');
@@ -344,11 +408,24 @@ export function classifyBottleneck({ gapMs = null, gpuMs = null } = {}) {
   // rather than being averaged into a single misleading word.
   const verdict = median?.verdict ?? tail?.verdict ?? 'unmeasured';
   const split = median !== null && tail !== null && median.verdict !== tail.verdict;
+  const vsyncNote =
+    R !== null
+      ? ` PRESENTATION IS QUANTISED to a ${refresh.refreshHz}Hz display (${refresh.refreshMs}ms steps, ${Math.round(
+          refresh.score * 100
+        )}% of frames on a step): frame rate moves in jumps (${refresh.refreshHz} → ${round(
+          refresh.refreshHz / 2,
+          1
+        )} → ${round(refresh.refreshHz / 3, 1)}fps), so an optimisation can cut real cost with NO fps change until it crosses a step. Judge improvements by zone/frame ms, not fps.` +
+        (median?.vsync?.gpuAloneMissesPreviousSlot
+          ? ` At the median, GPU time alone (${median.gpuMs}ms) exceeds the ${median.vsync.previousSlotMs}ms slot one refresh earlier, so the GPU by itself is why frames wait an extra refresh — the "unexplained" remainder is vsync wait, not hidden CPU work.`
+          : '')
+      : '';
   return {
     verdict,
     median,
     tail,
     tailDiffers: split,
+    refresh: refresh ?? null,
     note:
       (verdict === 'gpu-bound'
         ? 'GPU-BOUND at the median: the timestamped render passes account for most of the frame, so zones[] is where the frame time actually is — optimise the top row.'
@@ -358,7 +435,8 @@ export function classifyBottleneck({ gapMs = null, gpuMs = null } = {}) {
       (split
         ? ` The TAIL DISAGREES WITH THE MEDIAN (p95 is '${tail.verdict}', p50 is '${median.verdict}') — these have different fixes, and this run needs both. The median says what the steady frame costs; the p95 says what the hitches are made of.`
         : '') +
-      ' The unexplained remainder is NOT proven to be CPU time: mipmap generation, presentation and any GPU work outside a render pass are all real GPU cost that frame.gpuMs does not count (see its own `basis`/`caveat`). Three candidates, not one.',
+      ' The unexplained remainder is NOT proven to be CPU time: mipmap generation, presentation and any GPU work outside a render pass are all real GPU cost that frame.gpuMs does not count (see its own `basis`/`caveat`). Three candidates, not one.' +
+      vsyncNote,
   };
 }
 
@@ -2392,7 +2470,11 @@ export function buildPerfReport({
     sweep?.summary?.noiseFloorMs ?? null
   );
   const sweepRejectedCount = effects.filter((e) => e.sweepUnresolvable !== null).length;
-  const bottleneck = classifyBottleneck({ gapMs: frameBlock.gapMs, gpuMs: frameBlock.gpuMs });
+  const bottleneck = classifyBottleneck({
+    gapMs: frameBlock.gapMs,
+    gpuMs: frameBlock.gpuMs,
+    refresh: detectRefreshQuantization(gapSamples),
+  });
   const caches = buildCacheRows({
     cacheStats,
     depthProxyPoolStats,

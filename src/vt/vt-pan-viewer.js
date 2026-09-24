@@ -3180,6 +3180,11 @@ export async function startVtPanViewer({
      * calm-day floor above — never fed back into `uWindSpeed01` itself, so
      * vegetation/particles keep reading the ambient wind unchanged. */
     let cloudSpeedMul = 0.25;
+    /** The live-tunable `scaleMul` (Studio "Cloud size") — multiplies the
+     * weather axis `cloudScalePx` at BOTH its live read sites (the drift
+     * step and the uniform push) so the field and its own boil clock always
+     * agree on one size. `2` = the author's 2026-09-24 "make them bigger". */
+    let cloudScaleMul = 2;
     /** The live-tunable twin of `CLOUD_COVER_VISUAL_MAX` (`world/cloud-
      * field.js`) — that export is now a DIFFERENT number on purpose (0.45,
      * the bench's own full-range-sweep reference ceiling; see its own
@@ -3188,9 +3193,10 @@ export async function startVtPanViewer({
      * round 2's ship, never a hard requirement that they match. */
     let cloudVisualCoverMax = 0.3;
     /** `buildCloudGroundVisNode`'s own `strength` for the GROUND ambient
-     * consumer ONLY — `mix(1, <shadow>, this)`. `2` is the author's own
-     * round-3 tuned value (round 2 shipped `1`, today's natural depth from
-     * the sky's own key/fill split); `0` removes the ground shadow entirely.
+     * consumer ONLY — `mix(1, <shadow>, this)`. `4` is the author's own
+     * 2026-09-24 "double the contrast" ask on top of round 3's tuned `2`
+     * (round 2 shipped `1`, today's natural depth from the sky's own
+     * key/fill split); `0` removes the ground shadow entirely.
      * The WINDOW'S OWN direct cloud factor reads a SEPARATE uniform,
      * `uWindowCloudContrast` below — round 3 split them apart on the
      * author's own ask ("controls to increase the contrast of the _Windows
@@ -3198,7 +3204,7 @@ export async function startVtPanViewer({
      * dial for two visually different surfaces stopped being enough. A real
      * TSL uniform (not a JS local) because it is read INSIDE the compiled
      * shader graph. */
-    const uCloudShadowStrength = THREE.TSL.uniform(THREE.TSL.float(2));
+    const uCloudShadowStrength = THREE.TSL.uniform(THREE.TSL.float(4));
     /** The window's OWN direct-cloud-factor strength — see `uCloudShadow
      * Strength`'s own doc for why round 3 split this off as its own dial
      * rather than continuing to share the ground's. `1.5` is the author's
@@ -10094,6 +10100,7 @@ export async function startVtPanViewer({
         if (Number.isFinite(cp.maxOffsetPx)) cloudShadowMaxOffsetPx = cp.maxOffsetPx;
         if (Number.isFinite(cp.minWindSpeed01)) cloudMinWindSpeed01 = cp.minWindSpeed01;
         if (Number.isFinite(cp.speedMul)) cloudSpeedMul = cp.speedMul;
+        if (Number.isFinite(cp.scaleMul) && cp.scaleMul > 0) cloudScaleMul = cp.scaleMul;
         if (Number.isFinite(cp.visualCoverMax)) cloudVisualCoverMax = cp.visualCoverMax;
         if (Number.isFinite(cp.shadowBlur)) cloudShadowBlurBase = cp.shadowBlur;
         if (Number.isFinite(cp.shadowBlurCoverGain)) cloudShadowBlurCoverGain = cp.shadowBlurCoverGain;
@@ -10101,7 +10108,7 @@ export async function startVtPanViewer({
         // the schema's own `shadowStrength` value — see CLOUD_LOOK's own
         // header for why this is the one param the toggle overrides rather
         // than the field/grade/sky terms this manifest does not own.
-        uCloudShadowStrength.value = cloudsOn ? (Number.isFinite(cp.shadowStrength) ? cp.shadowStrength : 2) : 0;
+        uCloudShadowStrength.value = cloudsOn ? (Number.isFinite(cp.shadowStrength) ? cp.shadowStrength : 4) : 0;
         // SAME `enabled:false` override as the ground's own strength above —
         // a passing cloud's window darkening is part of what this toggle
         // turns off, the window's separate "overcast mood" trio below is not
@@ -10173,7 +10180,7 @@ export async function startVtPanViewer({
           windDirX: flow.x,
           windDirY: flow.y,
           windSpeedPxPerSec,
-          scalePx: env.weather.cloudScalePx,
+          scalePx: env.weather.cloudScalePx * cloudScaleMul,
           recipe,
         });
         cloudDriftX += step.dx;
@@ -10190,7 +10197,7 @@ export async function startVtPanViewer({
         pushCloudUniforms(cloudUniforms, {
           recipe,
           cover01: Math.min(env.weather.cloudCover01, cloudVisualCoverMax),
-          scalePx: env.weather.cloudScalePx,
+          scalePx: env.weather.cloudScalePx * cloudScaleMul,
           drift: { x: cloudDriftX, y: cloudDriftY },
           boil: cloudBoil,
           windDir: flow,

@@ -39,7 +39,7 @@
  * clouds I'd actually like the CC to brighten and increase the contrast of
  * the scene and the light to have the right colour temperature for a clear
  * noon. This also needs to boost the brightness of the _Window effect."*
- * Fifteen params, five categories — genuinely wide per-param ranges (a
+ * Fifteen params (sixteen since 2026-09-24's Cloud size), five categories — genuinely wide per-param ranges (a
  * caller can push well past the shipped default in either direction)
  * rather than a narrow band around today's tuning.
  *
@@ -54,11 +54,17 @@ export const CLOUD_LOOK_PARAMS = Object.freeze({
   shadowStrength: {
     type: 'float',
     min: 0,
-    max: 2,
+    max: 6,
     step: 0.01,
     // 2026-09-10, round 3 — author's own tuned value, sent as a "new
     // defaults" dump after live-testing round 2's ship (default 1).
-    default: 2,
+    // 2026-09-24 — author: "double the contrast of cloud shadows." Was 2,
+    // already the dial's old ceiling, so the ceiling moved too (2 → 6,
+    // headroom past the new default in the same wide-range spirit). The
+    // shadow now clamps at black (`buildCloudGroundVisNode#applyStrength`)
+    // so a core pushed past black reads as solid shadow, never as NEGATIVE
+    // light subtracting from whatever else lights that pixel.
+    default: 4,
     category: 'Look',
     label: 'Shadow strength',
     help: 'How dark a passing cloud can make the ground light. 0 = no shadow at all; 1 = the natural depth derived from the sun/sky split (shallow at dawn, absent at night); past 1 exaggerates it darker than that natural ceiling allows. Window light has its own separate Window cloud contrast, below.',
@@ -128,6 +134,23 @@ export const CLOUD_LOOK_PARAMS = Object.freeze({
     help: "A floor under the wind speed this deck's own drift reads — never fed back into the ambient wind itself, so grass/particles still see genuine calm. Keeps the deck crawling even at total ground-level dead calm, since upper-level wind exists even on a still surface day. 0 lets the deck freeze solid at calm.",
   },
   // ── Extent ──────────────────────────────────────────────────────────────
+  scaleMul: {
+    type: 'float',
+    min: 0.25,
+    max: 6,
+    step: 0.05,
+    // 2026-09-24 — author: "double the scale of clouds (ie, make them
+    // bigger)." `cloudScalePx` itself is a WEATHER AXIS set per weather
+    // preset (`world/weather-data.js`, not authorable on the weather board —
+    // `weather-board.js`'s own header), so a flat 2x lives HERE, as a look
+    // multiplier on top of whatever the active preset authored, rather than
+    // rewriting every preset's own number: each preset's relative sizing
+    // (fair-weather puffs small, a stratus deck huge) survives untouched.
+    default: 2,
+    category: 'Extent',
+    label: 'Cloud size',
+    help: "Multiplies the size of every cloud formation (shadows AND the lit tops seen when zoomed out) on top of the active weather preset's own cloud scale. 1 = the preset's authored size; 2 = twice as big; below 1 shrinks them. Drift keeps the same ground speed at any size.",
+  },
   maxOffsetPx: {
     type: 'float',
     min: 0,

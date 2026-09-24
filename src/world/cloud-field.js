@@ -1478,7 +1478,12 @@ export function buildCloudGroundVisNode(
     }).thickness;
     return buildCloudKeyTransmittanceNode(TSL, { thickness, fillShare, depthBias });
   };
-  const applyStrength = (vis) => (strength ? mix(float(1), vis, strength) : vis);
+  // `.max(0)` — a strength past 1 extrapolates beyond the natural depth, and
+  // past `1/(1-fillShare)` that extrapolation crosses black into NEGATIVE
+  // visibility, which every consumer then MULTIPLIES into its light (ambient,
+  // specular floor, window) — i.e. a deep shadow core would subtract light
+  // rather than just being dark. Clamping here, once, covers all of them.
+  const applyStrength = (vis) => (strength ? mix(float(1), vis, strength).max(float(0)) : vis);
   if (taps === 1 || streakSpread <= 0) return applyStrength(sampleAt(1, 0));
   let vis = sampleAt(1 - streakSpread, 0);
   for (let i = 1; i < taps; i++) {

@@ -300,6 +300,7 @@ import {
   getVtPanViewerRenderScaleState,
   getVtPanViewerAdapterInfo,
   getVtPanViewerGpuDevice,
+  setVtPanViewerIllumDiagnostic,
   // TIER-COUPLED BUDGET (2026-08-27) — re-resolves the governor's Auto
   // target from the player's CURRENT performance-profile tier.
   setVtPanViewerRenderScaleProfile,
@@ -1230,6 +1231,9 @@ MapShine.getGeometryComposition = getVtPanViewerGeometryComposition;
 // long soft shadows, 12 → short crisp ones, cloud 0.9 → almost none.
 MapShine.setSunHour = setVtPanViewerSunHour;
 MapShine.setCloudCover = setVtPanViewerCloudCover;
+// DIAGNOSTIC ONLY (perf goal attempt 2, 2026-09-24) — price the illum fill's
+// terms: `MapShine.setIllumDiagnostic({noClouds:true})` etc., `({})` restores.
+MapShine.setIllumDiagnostic = setVtPanViewerIllumDiagnostic;
 MapShine.setWeatherArchetype = setVtPanViewerWeatherArchetype;
 
 // THE ALMANAC'S CONSOLE LEVERS (slice 3) — console-first, the same posture the

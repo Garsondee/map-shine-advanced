@@ -596,7 +596,15 @@ export function buildEnvironmentalLightMaterials({
   // again), but the diagnostics returned at the bottom of this function need
   // to say whether the term actually got built at all.
   let cloudGateCompiled = false;
-  {
+  /**
+   * The illum fill's fragment graph. `diag` is DIAGNOSTIC ONLY (perf goal
+   * attempt 2, 2026-09-24): `{noClouds, noFluid, maxSunSlots}` compile those
+   * terms OUT (JS-time, never a uniform gate) so a Quick Check can price each
+   * one directly via `setIllumDiagnostic`. The default `{}` is the shipped
+   * build, unchanged.
+   */
+  const buildIllumFragment = (diag = {}) => {
+    let compiledClouds = false;
     const outdoors = outdoorsAt();
     // `mix(1, skyMultiplier, outdoors)` — indoors keeps the untouched Foundry
     // ambient, outdoors gets the sky's hue. At `realism01 = 0` the multiplier
@@ -617,14 +625,17 @@ export function buildEnvironmentalLightMaterials({
     // uses `screenUV` for the identical sample — see its own call site).
     const depthFloorHere = depthFlagsTexNode ? depthFlagsTexNode.sample(uv()) : null;
     const floorSource = depthFloorHere ?? attrTexNode;
+    // DIAGNOSTIC ONLY (perf goal attempt 2): `maxSunSlots` limits how many
+    // slots are compiled in. Default (Infinity) = every slot, the shipped build.
+    const sunSlotsUsed = sunShadowSlots.slice(0, Math.max(0, diag.maxSunSlots ?? Infinity));
     const sunVis =
-      sunShadowSlots.length === 0
+      sunSlotsUsed.length === 0
         ? null
         : floorSource
           ? blendSunVisibilityAcrossFloors(THREE.TSL, {
               attrFloorIndex01: floorSource.r,
               presence: depthFloorHere ? depthFloorHere.a : null,
-              slots: sunShadowSlots.map((slot) => ({
+              slots: sunSlotsUsed.map((slot) => ({
                 sunVis: buildSunVisibilityNode(THREE.TSL, {
                   uViewRect,
                   uShadowRect: slot.uRect,
@@ -638,8 +649,8 @@ export function buildEnvironmentalLightMaterials({
             // per-floor gate existed at all (pre-2026-07-28).
             buildSunVisibilityNode(THREE.TSL, {
               uViewRect,
-              uShadowRect: sunShadowSlots[0].uRect,
-              shadowTexNode: sunShadowSlots[0].texNode,
+              uShadowRect: sunSlotsUsed[0].uRect,
+              shadowTexNode: sunSlotsUsed[0].texNode,
             });
 
     // THE WORLD POSITION UNDER THIS PIXEL — shared by fluid's own shadow
@@ -647,8 +658,9 @@ export function buildEnvironmentalLightMaterials({
     // than each re-deriving `quadUvToWorld` (this file's own header on
     // `uViewRect`'s orientation). Computed once, whichever of the two
     // actually needs it, so having both active never pays for it twice.
-    const needsWorldXY =
-      (fluidTintSlots.length > 0 && sunVis) || (buildCloudField && buildCloudGroundVis && cloudUniforms);
+    const fluidOn = fluidTintSlots.length > 0 && !diag.noFluid;
+    const cloudsOn = !!(buildCloudField && buildCloudGroundVis && cloudUniforms) && !diag.noClouds;
+    const needsWorldXY = (fluidOn && sunVis) || cloudsOn;
     const worldX = needsWorldXY ? mix(uViewRect.x, uViewRect.z, uv().x) : null;
     const worldY = needsWorldXY ? mix(uViewRect.y, uViewRect.w, uv().y) : null;
 
@@ -658,7 +670,7 @@ export function buildEnvironmentalLightMaterials({
     // sun; the cloud must not darken an interior floor a second time) —
     // `mix(1, cloudVisRaw, outdoors)`, the identical idiom `skyTint` uses.
     let cloudVis = null;
-    if (outdoors && buildCloudField && buildCloudGroundVis && cloudUniforms) {
+    if (outdoors && cloudsOn) {
       const cloudVisRaw = buildCloudGroundVis(THREE.TSL, {
         worldXY: vec2(worldX, worldY),
         uniforms: cloudUniforms,
@@ -677,7 +689,7 @@ export function buildEnvironmentalLightMaterials({
         varTag: 'ambient',
       });
       cloudVis = mix(float(1), cloudVisRaw, outdoors).toVar('envCloudVis');
-      cloudGateCompiled = true;
+      compiledClouds = true;
     }
 
     // FLUID'S OWN SHADOW TINT — see this function's own "FLUID'S OWN SHADOW
@@ -686,7 +698,7 @@ export function buildEnvironmentalLightMaterials({
     // (see the ternary just above), so a scene with sun-shadows disabled
     // pays nothing extra here either.
     let fluidTintAdd = null;
-    if (fluidTintSlots.length > 0 && sunVis) {
+    if (fluidOn && sunVis) {
       let contribution = vec3(0, 0, 0);
       for (const slot of fluidTintSlots) {
         const rectU = worldX.sub(slot.uRect.x).div(slot.uRect.z.sub(slot.uRect.x));
@@ -717,8 +729,26 @@ export function buildEnvironmentalLightMaterials({
     }
     const ambientLitSun = sunVis ? ambient.mul(sunVis) : ambient;
     const ambientLit = cloudVis ? ambientLitSun.mul(cloudVis) : ambientLitSun;
-    illumMaterial.fragmentNode = vec4(fluidTintAdd ? ambientLit.add(fluidTintAdd) : ambientLit, float(1));
+    return { node: vec4(fluidTintAdd ? ambientLit.add(fluidTintAdd) : ambientLit, float(1)), compiledClouds };
+  };
+  {
+    const built = buildIllumFragment();
+    illumMaterial.fragmentNode = built.node;
+    cloudGateCompiled = built.compiledClouds;
   }
+  /** DIAGNOSTIC ONLY — rebuild the illum fill with terms compiled out (see
+   * `buildIllumFragment`). `setIllumDiagnostic({})` restores the shipped build. */
+  const setIllumDiagnostic = (diag = {}) => {
+    const built = buildIllumFragment(diag);
+    illumMaterial.fragmentNode = built.node;
+    illumMaterial.needsUpdate = true;
+    return {
+      diag: { noClouds: !!diag.noClouds, noFluid: !!diag.noFluid, maxSunSlots: diag.maxSunSlots ?? null },
+      compiledClouds: built.compiledClouds,
+      sunSlotsTotal: sunShadowSlots.length,
+      fluidSlotsTotal: fluidTintSlots.length,
+    };
+  };
 
   // UI-SHADOW TINT (mythica-machina-press#171-adjacent rung, ui-window-
   // shadow.js's own 'tinted-shadow' tier) — owned here, not in light-
@@ -887,6 +917,7 @@ export function buildEnvironmentalLightMaterials({
     setSunShadowRect,
     setSunShadowFloorIndex,
     setFluidShadowTintSlot,
+    setIllumDiagnostic,
     /** True when at least one fluid-shadow-tint slot was actually built
      * (`fluidShadowTintTexture` was supplied) — same diagnostic posture as
      * `sunShadowCompiled` below: "no tinted shadow" should be answerable

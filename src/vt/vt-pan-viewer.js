@@ -24259,6 +24259,11 @@ export async function startVtPanViewer({
           pixelRatio,
         };
       },
+      /** DIAGNOSTIC ONLY (perf goal attempt 2): rebuild the illum fill with
+       * terms compiled out — see environmental-light.js#setIllumDiagnostic. */
+      setIllumDiagnostic(diag) {
+        return envLight.setIllumDiagnostic(diag);
+      },
       /** The GPU adapter doing the work — perf reports' run-conditions stamp. */
       readAdapterInfo() {
         return readRendererAdapterInfo(renderer);
@@ -26900,6 +26905,14 @@ export function setVtPanViewerRenderScaleProfile() {
 export function getVtPanViewerRenderScaleState() {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.getRenderScaleState();
+}
+
+/** DIAGNOSTIC ONLY — price the illum fill's terms (perf goal attempt 2).
+ * `setVtPanViewerIllumDiagnostic({noClouds:true})`, `({noFluid:true})`,
+ * `({maxSunSlots:3})`; `({})` restores the shipped build. */
+export function setVtPanViewerIllumDiagnostic(diag) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setIllumDiagnostic(diag);
 }
 
 /** The newest renderer's GPUDevice — available mid-load, unlike `_active` (see `_latestGpuDevice`). */

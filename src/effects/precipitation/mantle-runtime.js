@@ -318,7 +318,14 @@ export function createMantleRuntime({
           .sin()
           .mul(float(0.35))
       );
-    const edge = n.mul(float(0.16));
+    // ⚠️ THE WOBBLE IS SCALED BY DEPTH, NOT ADDED FLAT (mythica-machina-
+    // press#620). Added flat, its positive peaks gave ~0.22 coverage at ZERO
+    // depth — a floor-wide lattice of faint snow/dust blobs (203 × 146 px, the
+    // two sines' wavelengths) on every map, indoors included, whatever the
+    // weather. Invisible until #616 let the mantle build at all. Ramping it
+    // in over the first 0.1 of depth keeps the ragged edge where something
+    // has actually settled and makes empty ground exactly untouched.
+    const edge = n.mul(float(0.16)).mul(depth.mul(float(10)).clamp(float(0), float(1)));
     return depth.mul(float(1.6)).add(edge).clamp(float(0), float(1));
   };
 

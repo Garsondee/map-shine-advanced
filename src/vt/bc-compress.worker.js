@@ -84,7 +84,8 @@
  * same kind of work — fetch, decode, reduce, cache — and a worker that is already
  * warm costs nothing to reuse.
  */
-import { encodeStriped, computeMipChainDims, classifyBcFormat } from './block-compress.js';
+import { encodeStriped, encodeStripedParallel, computeMipChainDims, classifyBcFormat } from './block-compress.js';
+import { createBcEncodePool, bcEncodePoolSize } from './bc-encode-pool.js';
 import { fetchBakedTexture } from './baked-textures.js';
 import { resolveAgainstPage } from './worker-url.js';
 
@@ -107,6 +108,41 @@ import { halveRGBA, rmsContrastFromSums, contrastPreservingCorrect } from './mip
 // STRIP_ROWS at a time (rounded to a multiple of 4 by encodeStriped). 512 rows of
 // a 12000-wide image is ~25 MB per readback, vs 576 MB for the whole image.
 const STRIP_ROWS = 512;
+
+// PARALLEL STRIP ENCODE (2026-09-24, perf goal attempt 1) — see
+// block-compress.js#encodeStripedParallel. `undefined` = not tried yet, `null` =
+// nested workers unavailable here (then every texture keeps the serial path).
+let _encodePool;
+const _encodeStats = { parallelTextures: 0, serialTextures: 0, parallelFallbacks: 0, lastParallelError: null };
+function getEncodePool() {
+  if (_encodePool !== undefined) return _encodePool;
+  try {
+    _encodePool = createBcEncodePool(
+      bcEncodePoolSize(self.navigator?.hardwareConcurrency),
+      () => new Worker(new URL('./bc-encode.worker.js', import.meta.url), { type: 'module' })
+    );
+  } catch {
+    _encodePool = null;
+  }
+  return _encodePool;
+}
+/** Byte-identical either way; parallel when the pool exists, serial otherwise
+ * or if a pool job fails (never a half-encoded texture). */
+async function encodeAll(readStrip, w, h, format) {
+  const pool = getEncodePool();
+  if (pool) {
+    try {
+      const out = await encodeStripedParallel(readStrip, w, h, format, STRIP_ROWS, pool, pool.size + 1);
+      _encodeStats.parallelTextures++;
+      return out;
+    } catch (err) {
+      _encodeStats.parallelFallbacks++;
+      _encodeStats.lastParallelError = String(err?.message || err);
+    }
+  }
+  _encodeStats.serialTextures++;
+  return encodeStriped(readStrip, w, h, format, STRIP_ROWS);
+}
 
 const DB_NAME = 'msa-bc-cache';
 const STORE = 'blocks';
@@ -601,7 +637,7 @@ async function handle(src) {
   // encodeStriped re-reads each band and encodes it into the shared output — the
   // whole image is never resident at once. Result is bit-identical to a
   // whole-image encodeBC1/encodeBC7 (proven in block-compress.test.mjs).
-  const level0Blocks = encodeStriped(readStrip, w, h, format, STRIP_ROWS);
+  const level0Blocks = await encodeAll(readStrip, w, h, format);
 
   // THE MIP CHAIN — see this file's header. Level 0's PADDED size (not the raw
   // w/h) is the base a real GPU allocates every subsequent level from.
@@ -644,7 +680,7 @@ async function handle(src) {
     // snapshot taken when `levelRowReader(prev)` itself is called), so this
     // mutation lands before any read reaches it.
     contrastPreservingCorrect(prev.data, prev.width, prev.height, refRmsContrast);
-    const levelBlocks = encodeStriped(levelRowReader(prev), d.logicalWidth, d.logicalHeight, format, STRIP_ROWS);
+    const levelBlocks = await encodeAll(levelRowReader(prev), d.logicalWidth, d.logicalHeight, format);
     levels.push({ width: d.width, height: d.height, blocks: levelBlocks.buffer });
   }
   bmp.close();
@@ -702,6 +738,9 @@ self.onmessage = async (e) => {
         cached: r.cached,
         alphaStats: r.alphaStats,
         alphaMinGrid: r.alphaMinGrid ?? null,
+        // Parallel-encode health (perf goal attempt 1): cumulative for this
+        // worker, so the load report can say whether the pool actually ran.
+        encodeStats: { ..._encodeStats, poolSize: _encodePool ? _encodePool.size : 0 },
       },
       // Every level's buffer is transferred, never copied — same contract as
       // the old single-buffer message, just one entry per mip level now. The

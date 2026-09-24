@@ -2553,6 +2553,74 @@ export function mipChainByteLength(format, width, height) {
  *   multiple of 4 (the block height) so bands align to the block grid.
  * @returns {Uint8Array} identical bytes to encodeBC1/encodeBC7 of the same image.
  */
+/**
+ * PARALLEL twin of {@link encodeStriped} (2026-09-24, perf goal attempt 1).
+ *
+ * Measured on the real Church of the Light floors (8250²): one 512-row strip
+ * takes ~0.8s to BC1-encode and ~1.2s to BC7-encode on one thread, so a single
+ * floor's level-0 + mips is ~18-27s of serial encode — the bulk of a 166s cold
+ * load's 128s "art" phase, on a machine with 16 hardware threads idle.
+ *
+ * Same strip grid as `encodeStriped` (same `step`, same destination offsets), and
+ * each strip is encoded by the SAME pure `encodeBC1`/`encodeBC7`, just on a
+ * pool worker — so the output is byte-identical by construction (pinned in
+ * block-compress.test.mjs against the serial driver). Strips are READ in order
+ * on the caller's thread (the band canvas is single-threaded) while up to
+ * `maxInFlight` encodes run concurrently, so readback overlaps encode.
+ *
+ * @param {(y:number,h:number)=>Uint8Array|Uint8ClampedArray} readStrip
+ * @param {number} width @param {number} height @param {'bc1'|'bc7'} format
+ * @param {number} stripRows
+ * @param {{encode:(strip:Uint8Array,width:number,h:number,format:string)=>Promise<Uint8Array>}} pool
+ * @param {number} [maxInFlight]
+ * @returns {Promise<Uint8Array>}
+ */
+export async function encodeStripedParallel(readStrip, width, height, format, stripRows, pool, maxInFlight = 4) {
+  if (width <= 0 || height <= 0) throw new Error(`encodeStripedParallel: bad size ${width}x${height}`);
+  if (format !== 'bc1' && format !== 'bc7') throw new Error(`encodeStripedParallel: bad format ${format}`);
+  const bytesPerBlock = format === 'bc7' ? 16 : 8;
+  const rowStride = Math.ceil(width / 4) * bytesPerBlock;
+  const out = new Uint8Array(Math.ceil(height / 4) * rowStride);
+  const step = Math.max(4, stripRows - (stripRows % 4));
+  const inFlight = new Set();
+  try {
+    for (let y = 0; y < height; y += step) {
+      const h = Math.min(step, height - y);
+      const strip = readStrip(y, h);
+      if (!strip || strip.length !== width * h * 4) {
+        throw new Error(
+          `encodeStripedParallel: readStrip(${y},${h}) returned ${strip ? strip.length : 'null'}, expected ${width * h * 4}`
+        );
+      }
+      // A strip that is a VIEW into a larger buffer (a mip level's row reader)
+      // must be copied before it can be transferred to a worker — transferring
+      // the view's buffer would detach the whole level out from under the
+      // caller. A strip that owns its buffer (getImageData's) goes zero-copy.
+      const owned =
+        strip.byteOffset === 0 && strip.byteLength === strip.buffer.byteLength
+          ? new Uint8Array(strip.buffer)
+          : new Uint8Array(strip);
+      const dest = (y / 4) * rowStride;
+      const job = pool.encode(owned, width, h, format).then((blocks) => {
+        if (!blocks || blocks.length !== Math.ceil(h / 4) * rowStride) {
+          throw new Error(`encodeStripedParallel: strip at y=${y} came back ${blocks ? blocks.length : 'null'} bytes`);
+        }
+        out.set(blocks, dest);
+      });
+      const tracked = job.finally(() => inFlight.delete(tracked));
+      inFlight.add(tracked);
+      if (inFlight.size >= maxInFlight) await Promise.race(inFlight);
+    }
+    await Promise.all(inFlight);
+  } catch (err) {
+    // Every job still in flight is awaited before the error leaves, so none of
+    // them surfaces later as an unhandled rejection.
+    await Promise.allSettled(inFlight);
+    throw err;
+  }
+  return out;
+}
+
 export function encodeStriped(readStrip, width, height, format, stripRows = 512) {
   if (width <= 0 || height <= 0) throw new Error(`encodeStriped: bad size ${width}x${height}`);
   if (format !== 'bc1' && format !== 'bc7') throw new Error(`encodeStriped: bad format ${format}`);

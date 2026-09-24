@@ -13,6 +13,7 @@ import { run as runViewState } from './view-state.test.mjs';
 import { run as runWorkerUrl } from './worker-url.test.mjs';
 import { run as runTextureLimits } from './texture-limits.test.mjs';
 import { run as runBlockCompress } from './block-compress.test.mjs';
+import { run as runBcEncodeParallel } from './bc-encode-parallel.test.mjs';
 import { run as runCoarseAlpha } from './coarse-alpha.test.mjs';
 import { run as runMipResample } from './mip-resample.test.mjs';
 import { run as runSceneAttr } from './scene-attr.test.mjs';
@@ -74,6 +75,7 @@ const suites = [
   ['worker-url', runWorkerUrl],
   ['texture-limits', runTextureLimits],
   ['block-compress', runBlockCompress],
+  ['bc-encode-parallel', runBcEncodeParallel],
   ['coarse-alpha', runCoarseAlpha],
   ['mip-resample', runMipResample],
   ['scene-attr', runSceneAttr],

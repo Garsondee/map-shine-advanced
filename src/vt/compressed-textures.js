@@ -260,6 +260,7 @@ function ensureWorker() {
       if (!p) return;
       _pending.delete(d.id);
       _inFlight = Math.max(0, _inFlight - 1);
+      if (d.encodeStats) _stats.encode = d.encodeStats;
       // A real reply proves THIS worker is healthy — an error on some earlier,
       // already-discarded worker must not keep counting against a fresh one
       // that is actually doing its job.

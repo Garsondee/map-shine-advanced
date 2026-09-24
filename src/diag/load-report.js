@@ -314,6 +314,10 @@ function buildCompressionSection(c) {
     // never explained, so every "the worker is unhealthy" report answered
     // THAT but not WHY and had to be re-investigated from source each time.
     lastError: w?.lastError ?? null,
+    // Parallel strip encode (perf goal attempt 1, 2026-09-24): how many
+    // textures used the encoder pool vs the serial path, and why a pool job
+    // fell back if one did. `null` = no fresh encode reported this session.
+    encode: w?.encode ?? null,
     note: workerBroken
       ? 'THE GPU TEXTURE-COMPRESSION WORKER IS NOT HEALTHY. Every layer it could not compress is held as a RAW ' +
         'texture instead — roughly 4x the bytes of BC7, uploaded on the main thread. On a 12,000-square map that ' +

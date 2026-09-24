@@ -128,11 +128,13 @@ function getEncodePool() {
 }
 /** Byte-identical either way; parallel when the pool exists, serial otherwise
  * or if a pool job fails (never a half-encoded texture). */
-async function encodeAll(readStrip, w, h, format) {
+async function encodeAll(readStrip, w, h, format, { disposableStrips = false } = {}) {
   const pool = getEncodePool();
   if (pool) {
     try {
-      const out = await encodeStripedParallel(readStrip, w, h, format, STRIP_ROWS, pool, pool.size + 1);
+      const out = await encodeStripedParallel(readStrip, w, h, format, STRIP_ROWS, pool, pool.size + 1, {
+        disposableStrips,
+      });
       _encodeStats.parallelTextures++;
       return out;
     } catch (err) {
@@ -637,7 +639,10 @@ async function handle(src) {
   // encodeStriped re-reads each band and encodes it into the shared output — the
   // whole image is never resident at once. Result is bit-identical to a
   // whole-image encodeBC1/encodeBC7 (proven in block-compress.test.mjs).
-  const level0Blocks = await encodeAll(readStrip, w, h, format);
+  // Level 0's strips are fresh getImageData buffers, read once each by the
+  // encoder and never again — disposable, so they transfer zero-copy. The mip
+  // levels below are views into a level still needed for the next reduction.
+  const level0Blocks = await encodeAll(readStrip, w, h, format, { disposableStrips: true });
 
   // THE MIP CHAIN — see this file's header. Level 0's PADDED size (not the raw
   // w/h) is the base a real GPU allocates every subsequent level from.

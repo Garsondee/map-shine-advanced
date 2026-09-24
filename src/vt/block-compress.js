@@ -2573,9 +2573,27 @@ export function mipChainByteLength(format, width, height) {
  * @param {number} stripRows
  * @param {{encode:(strip:Uint8Array,width:number,h:number,format:string)=>Promise<Uint8Array>}} pool
  * @param {number} [maxInFlight]
+ * @param {{disposableStrips?: boolean}} [opts] `disposableStrips: true` ONLY when
+ *   every strip `readStrip` returns is a fresh buffer nobody else will read
+ *   again (the worker's getImageData band readback) — then it is handed to the
+ *   pool zero-copy (transferred, i.e. DETACHED here). Otherwise every strip is
+ *   copied first. Ownership cannot be inferred from shape: a mip level small
+ *   enough to be one strip is a view spanning its ENTIRE buffer, and treating
+ *   that as disposable detached the level the next mip step still had to read
+ *   ("Cannot perform Construct on a detached ArrayBuffer", caught live on the
+ *   first smoke run, 2026-09-24).
  * @returns {Promise<Uint8Array>}
  */
-export async function encodeStripedParallel(readStrip, width, height, format, stripRows, pool, maxInFlight = 4) {
+export async function encodeStripedParallel(
+  readStrip,
+  width,
+  height,
+  format,
+  stripRows,
+  pool,
+  maxInFlight = 4,
+  { disposableStrips = false } = {}
+) {
   if (width <= 0 || height <= 0) throw new Error(`encodeStripedParallel: bad size ${width}x${height}`);
   if (format !== 'bc1' && format !== 'bc7') throw new Error(`encodeStripedParallel: bad format ${format}`);
   const bytesPerBlock = format === 'bc7' ? 16 : 8;
@@ -2592,12 +2610,10 @@ export async function encodeStripedParallel(readStrip, width, height, format, st
           `encodeStripedParallel: readStrip(${y},${h}) returned ${strip ? strip.length : 'null'}, expected ${width * h * 4}`
         );
       }
-      // A strip that is a VIEW into a larger buffer (a mip level's row reader)
-      // must be copied before it can be transferred to a worker — transferring
-      // the view's buffer would detach the whole level out from under the
-      // caller. A strip that owns its buffer (getImageData's) goes zero-copy.
+      // See `disposableStrips` in the doc above: copy unless the caller
+      // declared the strips throwaway AND this one really is a whole buffer.
       const owned =
-        strip.byteOffset === 0 && strip.byteLength === strip.buffer.byteLength
+        disposableStrips && strip.byteOffset === 0 && strip.byteLength === strip.buffer.byteLength
           ? new Uint8Array(strip.buffer)
           : new Uint8Array(strip);
       const dest = (y / 4) * rowStride;

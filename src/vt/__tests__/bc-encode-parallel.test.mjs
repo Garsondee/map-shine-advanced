@@ -79,8 +79,30 @@ export async function run(t) {
       owned.push(s);
       return s;
     };
-    await encodeStripedParallel(reader, w, h, 'bc7', 8, pool, 2);
-    ok('owned strips go zero-copy', got.every((s, i) => s.buffer === owned[i].buffer));
+    await encodeStripedParallel(reader, w, h, 'bc7', 8, pool, 2, { disposableStrips: true });
+    ok('declared-disposable strips go zero-copy', got.every((s, i) => s.buffer === owned[i].buffer));
+  }
+
+  // ---- REGRESSION (live smoke run 2026-09-24): a one-strip level is a view
+  // spanning its WHOLE buffer; without an explicit disposable flag it must be
+  // copied, or transferring it detaches a level the caller still needs. -------
+  {
+    const w = 16;
+    const h = 8; // one strip at step 8 -> the strip IS the whole buffer
+    const level = makeImage(w, h, 11);
+    const expected = encodeStriped(stripsOf(level, w), w, h, 'bc7', 8);
+    // A pool that really TRANSFERS (detaches) what it is given, like postMessage.
+    const transferringPool = {
+      size: 1,
+      encode: (strip, ww, hh, f) => {
+        const moved = new Uint8Array(structuredClone(strip.buffer, { transfer: [strip.buffer] }));
+        return Promise.resolve(f === 'bc7' ? encodeBC7(moved, ww, hh) : encodeBC1(moved, ww, hh));
+      },
+    };
+    const got = await encodeStripedParallel(stripsOf(level, w), w, h, 'bc7', 8, transferringPool, 1);
+    ok('default (not disposable): caller buffer NOT detached', level.buffer.byteLength === w * h * 4);
+    ok('...caller can still read it (next mip step)', level[0] === makeImage(w, h, 11)[0]);
+    ok('...and output is still byte-identical', bytesEqual(got, expected));
   }
 
   // ---- a failed strip rejects the whole encode, cleanly --------------------

@@ -86,10 +86,19 @@
 
 /**
  * The authorable knobs (validated by core/params-schema.js), grouped by the
- * fixed ROH categories. Every default below is V2's OWN shipped default
- * (`LensEffectV2.js`'s own `this.params = {...}`), not a guess — the one
- * place a value differs from V2's literal number, the param's own `help`
- * text says why.
+ * fixed ROH categories. Every default below started as V2's OWN shipped
+ * default (`LensEffectV2.js`'s own `this.params = {...}`), not a guess.
+ *
+ * LIVE-TUNED 2026-09-25 — the author's own in-app "New defaults" dump, the
+ * fine-tuning pass mythica-machina-press#556 asked for ("needs to be fine
+ * tuned and off by default"). Seven values now carry the author's tuned
+ * number instead of V2's, each marked `// V2: <old>` beside it: distortion,
+ * chromaticAmountPx, chromaticEdgePower, vignetteSoftness, grainAmount,
+ * grainCellSizeBright, autoFocusEnabled. The dump's own `enabled: true` is
+ * the live panel's switch state, NOT a request to un-gate the effect —
+ * `LENS.enabledFromProfile` stays `'extreme'` (below), still off by default.
+ * `lens-render.js`'s `LENS_TIER0_*` constants and `vt-pan-viewer.js`'s
+ * `runPostLensPass` fallbacks mirror these and change with them.
  *
  * @type {Record<string, object>}
  */
@@ -100,7 +109,7 @@ export const LENS_PARAMS = Object.freeze({
     min: -0.3,
     max: 0.3,
     step: 0.005,
-    default: -0.08,
+    default: -0.03, // V2: -0.08
     category: 'Optics',
     label: 'Lens curvature',
     help: "How much the image bows away from a flat plane, like looking through real camera glass. Negative pulls the edges in (a gentle pincushion, V2's own default); positive pushes them out (barrel). 0 is a perfectly flat, distortion-free image.",
@@ -110,7 +119,7 @@ export const LENS_PARAMS = Object.freeze({
     min: 0,
     max: 12,
     step: 0.1,
-    default: 4.22,
+    default: 1.7, // V2: 4.22
     category: 'Optics',
     label: 'Colour fringing',
     help: 'Red/blue channel separation at the edges of the frame, in screen pixels — the coloured fringing real lenses show on high-contrast edges, strongest where the curvature above is strongest. 0 removes it entirely.',
@@ -120,7 +129,7 @@ export const LENS_PARAMS = Object.freeze({
     min: 0.2,
     max: 6,
     step: 0.01,
-    default: 2.11,
+    default: 1.16, // V2: 2.11
     category: 'Optics',
     label: 'Fringing falloff',
     help: 'How sharply the colour fringing above concentrates at the very edge of frame versus spreading toward the centre. Higher keeps the centre clean and pushes the fringing further out.',
@@ -140,7 +149,7 @@ export const LENS_PARAMS = Object.freeze({
     min: 0.02,
     max: 0.9,
     step: 0.01,
-    default: 0.34,
+    default: 0.02, // V2: 0.34
     category: 'Optics',
     label: 'Vignette softness',
     help: 'How far in from the very corner the darkening above starts to fade in. Small values keep a hard-edged dark ring near the border; large values spread the falloff in toward the centre.',
@@ -152,7 +161,7 @@ export const LENS_PARAMS = Object.freeze({
     min: 0,
     max: 0.15,
     step: 0.001,
-    default: 0.01,
+    default: 0.001, // V2: 0.01
     category: 'Grain',
     label: 'Film grain',
     help: 'Fine per-pixel brightness noise, like real film stock or a camera sensor at speed — the texture that keeps a flat CG-perfect image from reading as sterile. 0 removes it entirely.',
@@ -189,7 +198,7 @@ export const LENS_PARAMS = Object.freeze({
     min: 0.5,
     max: 6,
     step: 0.1,
-    default: 1.4,
+    default: 0.7, // V2: 1.4
     category: 'Grain',
     label: 'Grain size (bright)',
     help: 'How large each grain speck reads, in screen pixels, in well-lit parts of the image. Smaller is finer and less visible; larger reads as coarser, more obviously textured film.',
@@ -255,10 +264,10 @@ export const LENS_PARAMS = Object.freeze({
   // ── Autofocus (tier 1 — the lens hunting for focus) ───────────────────────
   autoFocusEnabled: {
     type: 'bool',
-    default: false,
+    default: true, // V2: false
     category: 'Autofocus',
     label: 'Autofocus pulses',
-    help: "Every so often, the whole image briefly softens and re-sharpens — a camera hunting for focus, the same beat a real autofocus lens has when the shot changes. Off by default, matching V2's own shipped state.",
+    help: 'Every so often, the whole image briefly softens and re-sharpens — a camera hunting for focus, the same beat a real autofocus lens has when the shot changes. On by default (V2 shipped it off) — part of the tuned lens look, so it comes along whenever Lens itself is switched on.',
   },
   autoFocusMinIntervalSeconds: {
     type: 'float',

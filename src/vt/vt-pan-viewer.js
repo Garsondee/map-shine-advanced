@@ -9154,16 +9154,16 @@ export async function startVtPanViewer({
       // ── TIER 0 — always pushed; the shader compiles these in from tier 0
       // regardless of which higher tiers are also active. ─────────────────
       u.uTimeSec.value = nowSec;
-      u.uDistortion.value = lensNum(p.distortion, -0.08);
-      u.uChromaticAmountPx.value = lensNum(p.chromaticAmountPx, 4.22);
-      u.uChromaticEdgePower.value = lensNum(p.chromaticEdgePower, 2.11);
+      u.uDistortion.value = lensNum(p.distortion, -0.03);
+      u.uChromaticAmountPx.value = lensNum(p.chromaticAmountPx, 1.7);
+      u.uChromaticEdgePower.value = lensNum(p.chromaticEdgePower, 1.16);
       u.uVignetteIntensity.value = lensNum(p.vignetteIntensity, 1);
-      u.uVignetteSoftness.value = lensNum(p.vignetteSoftness, 0.34);
-      u.uGrainAmount.value = lensNum(p.grainAmount, 0.01);
+      u.uVignetteSoftness.value = lensNum(p.vignetteSoftness, 0.02);
+      u.uGrainAmount.value = lensNum(p.grainAmount, 0.001);
       u.uGrainSpeed.value = lensNum(p.grainSpeed, 1);
       u.uAdaptiveGrainEnabled.value = p.adaptiveGrainEnabled === false ? 0 : 1;
       u.uGrainLowLightBoost.value = lensNum(p.grainLowLightBoost, 0.25);
-      u.uGrainCellSizeBright.value = lensNum(p.grainCellSizeBright, 1.4);
+      u.uGrainCellSizeBright.value = lensNum(p.grainCellSizeBright, 0.7);
       u.uGrainCellSizeDark.value = lensNum(p.grainCellSizeDark, 3);
       u.uDigitalNoiseEnabled.value = p.digitalNoiseEnabled === true ? 1 : 0;
       u.uDigitalNoiseAmount.value = lensNum(p.digitalNoiseAmount, 0.066);
@@ -9177,7 +9177,9 @@ export async function startVtPanViewer({
       // the expensive GPU work is tier-gated" posture); only the resulting
       // UNIFORM push is gated, further down, by whether tier 1's own extra
       // shader taps are even compiled in. ──────────────────────────────────
-      const autoFocusEnabled = p.autoFocusEnabled === true;
+      // `!== false`, not `=== true` — defaults ON since the 2026-09-25 live
+      // tuning (lens.js), same missing-means-default shape as adaptive grain's.
+      const autoFocusEnabled = p.autoFocusEnabled !== false;
       if (!autoFocusEnabled) {
         lensAutoFocusEventActive = false;
         lensAutoFocusAmount = 0;

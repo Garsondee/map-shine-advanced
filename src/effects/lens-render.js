@@ -44,17 +44,20 @@
  * @module effects/lens-render
  */
 
-/** Tier 0 (`optics`) default constants — every one is V2's OWN shipped
- * default (`LensEffectV2.js`'s own `this.params`), never a guess. */
-export const LENS_TIER0_DISTORTION = -0.08;
-export const LENS_TIER0_CHROMATIC_AMOUNT_PX = 4.22;
-export const LENS_TIER0_CHROMATIC_EDGE_POWER = 2.11;
+/** Tier 0 (`optics`) default constants — mirror `effects/lens.js#LENS_PARAMS`'s
+ * own defaults exactly (a change lands in both or neither). They started as
+ * V2's OWN shipped defaults (`LensEffectV2.js`'s own `this.params`); the six
+ * marked `// V2: <old>` were live-tuned by the author 2026-09-25 (lens.js's
+ * own LENS_PARAMS doc). */
+export const LENS_TIER0_DISTORTION = -0.03; // V2: -0.08
+export const LENS_TIER0_CHROMATIC_AMOUNT_PX = 1.7; // V2: 4.22
+export const LENS_TIER0_CHROMATIC_EDGE_POWER = 1.16; // V2: 2.11
 export const LENS_TIER0_VIGNETTE_INTENSITY = 1;
-export const LENS_TIER0_VIGNETTE_SOFTNESS = 0.34;
-export const LENS_TIER0_GRAIN_AMOUNT = 0.01;
+export const LENS_TIER0_VIGNETTE_SOFTNESS = 0.02; // V2: 0.34
+export const LENS_TIER0_GRAIN_AMOUNT = 0.001; // V2: 0.01
 export const LENS_TIER0_GRAIN_SPEED = 1;
 export const LENS_TIER0_GRAIN_LOW_LIGHT_BOOST = 0.25;
-export const LENS_TIER0_GRAIN_CELL_SIZE_BRIGHT = 1.4;
+export const LENS_TIER0_GRAIN_CELL_SIZE_BRIGHT = 0.7; // V2: 1.4
 export const LENS_TIER0_GRAIN_CELL_SIZE_DARK = 3;
 export const LENS_TIER0_DIGITAL_NOISE_AMOUNT = 0.066;
 export const LENS_TIER0_DIGITAL_NOISE_CHANCE = 0.004;

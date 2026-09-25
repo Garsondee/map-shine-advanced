@@ -6,6 +6,7 @@
  * someone noticing it needs a consumer (`params/no-dead-controls`).
  */
 import { LENS, LENS_PARAMS, LENS_PRESETS, lensPreset, LENS_OVERLAY_CATALOG } from '../lens.js';
+import * as LENS_RENDER from '../lens-render.js';
 import { validateEffectManifest } from '../effect-manifest.js';
 import { validateParamsSchema } from '../../core/params-schema.js';
 import { resolveEffectEnabled } from '../effect-cascade.js';
@@ -116,4 +117,32 @@ export function run(t) {
     "lensPreset('none') is exactly the schema defaults",
     Object.entries(lensPreset('none')).every(([k, v]) => v === LENS_PARAMS[k].default)
   );
+
+  // ── Schema ↔ render-module mirror (added with the 2026-09-25 live-tuning
+  // round). lens-render.js seeds its tier-0 uniforms from its own
+  // LENS_TIER0_* constants, a SECOND copy of these defaults — nothing pinned
+  // the two together, so a tuning round that touched only one would have
+  // shipped a lens that briefly renders the old look until the first push.
+  const TIER0_MIRROR = {
+    distortion: 'LENS_TIER0_DISTORTION',
+    chromaticAmountPx: 'LENS_TIER0_CHROMATIC_AMOUNT_PX',
+    chromaticEdgePower: 'LENS_TIER0_CHROMATIC_EDGE_POWER',
+    vignetteIntensity: 'LENS_TIER0_VIGNETTE_INTENSITY',
+    vignetteSoftness: 'LENS_TIER0_VIGNETTE_SOFTNESS',
+    grainAmount: 'LENS_TIER0_GRAIN_AMOUNT',
+    grainSpeed: 'LENS_TIER0_GRAIN_SPEED',
+    grainLowLightBoost: 'LENS_TIER0_GRAIN_LOW_LIGHT_BOOST',
+    grainCellSizeBright: 'LENS_TIER0_GRAIN_CELL_SIZE_BRIGHT',
+    grainCellSizeDark: 'LENS_TIER0_GRAIN_CELL_SIZE_DARK',
+    digitalNoiseAmount: 'LENS_TIER0_DIGITAL_NOISE_AMOUNT',
+    digitalNoiseChance: 'LENS_TIER0_DIGITAL_NOISE_CHANCE',
+    digitalNoiseGreenBias: 'LENS_TIER0_DIGITAL_NOISE_GREEN_BIAS',
+    digitalNoiseLowLightBoost: 'LENS_TIER0_DIGITAL_NOISE_LOW_LIGHT_BOOST',
+  };
+  for (const [key, constName] of Object.entries(TIER0_MIRROR)) {
+    ok(
+      `${key}: schema default and lens-render.js's ${constName} agree`,
+      LENS_RENDER[constName] === LENS_PARAMS[key].default
+    );
+  }
 }

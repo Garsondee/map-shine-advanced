@@ -1091,6 +1091,8 @@ export function buildWaterSurfaceMaterial({
     length,
     fwidth,
     luminance,
+    Fn,
+    If,
   } = THREE.TSL;
 
   const uMaskRect = uniform(vec4(maskRect.minX, maskRect.minY, maskRect.maxX, maskRect.maxY));
@@ -2486,8 +2488,27 @@ export function buildWaterSurfaceMaterial({
   // which would invert the reflection's own colour — nonsensical, not just
   // "too strong" — so the floor is a hard clamp, not a hope the range never
   // reaches it.
-  const causticNetNorm = clamp(causticExcess.div(float(WATER_CAUSTICS_MAX)), float(0), float(1));
-  const causticSpecularMod = max(float(0), float(1).add(uCausticSpecularInfluence.mul(causticNetNorm.sub(float(0.5)))));
+  //
+  // ⚠️ BRANCHED ON THE INFLUENCE UNIFORM (perf wave 2, 2026-09-25). This is
+  // the ONLY place the in-scatter material reads the caustics, and the
+  // influence ships at 0 (`WATER_CAUSTICS_SPECULAR_INFLUENCE`), where the
+  // modulation is exactly 1 — yet the in-scatter shader still evaluated the
+  // whole caustic net (two 3-D Worley layers + the growth noise) a second
+  // time per pixel, beside the absorb material's own copy. Priced live on
+  // Flooded River Prison (extreme, 2560x1215): caustics 27.4 ms of a 46 ms
+  // frame, i.e. ~13.7 ms per material. Skipping the evaluation while the
+  // influence is 0 is lossless, and a live slider still works without a
+  // recompile. The condition reads only a uniform, so this is UNIFORM control
+  // flow in WGSL — the `fwidth` calls inside the caustic net stay legal
+  // (they would not be under a per-pixel branch).
+  const causticSpecularMod = Fn(() => {
+    const out = float(1).toVar('waterCausticSpecularMod');
+    If(uCausticSpecularInfluence.greaterThan(float(0)), () => {
+      const causticNetNorm = clamp(causticExcess.div(float(WATER_CAUSTICS_MAX)), float(0), float(1));
+      out.assign(max(float(0), float(1).add(uCausticSpecularInfluence.mul(causticNetNorm.sub(float(0.5))))));
+    });
+    return out;
+  })();
   // The reflection is gated by `inside` (no glint on dry land — the same
   // antialiased shoreline every other term already uses) and by `foamHide`
   // (broken, foamy water scatters light, it does not mirror it — reusing the

@@ -1127,6 +1127,9 @@ MapShine.getCloudTopsCheapGradient = getVtPanViewerCloudTopsCheapGradient;
 MapShine.setCloudTopsLowOctaves = setVtPanViewerCloudTopsLowOctaves;
 MapShine.setCloudTopsNoAlphaGate = setVtPanViewerCloudTopsNoAlphaGate;
 MapShine.setCloudTopsInlineShadow = setVtPanViewerCloudTopsInlineShadow;
+// DIAGNOSTIC ONLY (perf wave 2) — `MapShine.setWaterCausticsGateForce(false|true|null)`
+// rebuilds water with caustics forced off/on (null = tier-resolved), for priceAB.
+MapShine.setWaterCausticsGateForce = setWaterCausticsGateForce;
 MapShine.getCloudTopsLowOctaves = getVtPanViewerCloudTopsLowOctaves;
 // Console-exposed directly (2026-08-12, S2.7) so a pixel-diff gate can prove
 // NON-VACUITY without paying for a full perf-run-full capture — illumBuckets/
@@ -7535,8 +7538,24 @@ function install() {
   // the whole-frame GPU the effect costs at THIS view, plus the on/off spreads
   // so a reader can see whether the difference beats the noise. Measured noise
   // floor on a 2560x1215 frame (2026-09-25): about ±0.5 ms.
+  //
+  // `preset: 'screen'` (wave 2) — 2 pairs of 30+120-frame windows instead of
+  // 3 pairs of 60+240: roughly a third of the time, for a first pass over a
+  // new map that only has to find the few effects worth a full-precision
+  // re-price (`priceEffects({ids: [...]})`). A full sweep on a heavy map ran
+  // ~1.5 min per effect, ~35 min for 22.
   // ===========================================================================
-  MapShine.priceEffects = ({ ids = null, ...opts } = {}) =>
+  const PRICE_PRESETS = Object.freeze({ screen: Object.freeze({ pairs: 2, settleFrames: 30, measureFrames: 120 }) });
+  MapShine.priceEffects = ({ ids = null, preset = null, ...rest } = {}) => {
+    const opts = { ...(preset ? PRICE_PRESETS[preset] : null), ...rest };
+    if (preset && !PRICE_PRESETS[preset]) {
+      return Promise.reject(
+        new Error(`priceEffects: unknown preset '${preset}' (known: ${Object.keys(PRICE_PRESETS)})`)
+      );
+    }
+    return priceEffectsRun(ids, opts);
+  };
+  const priceEffectsRun = (ids, opts) =>
     guardedPriceRun('priceEffects', async () => {
       const list = ids ?? buildPerfContext().enabledEffects;
       // Live progress for a caller polling a long run from outside (a console, a

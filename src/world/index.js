@@ -236,6 +236,7 @@ export {
   buildCloudFieldNode,
   buildCloudKeyTransmittanceNode,
   buildCloudGroundVisNode,
+  buildCloudGroundVisFromCacheNode,
   CLOUD_SHADOW_STREAK_SPREAD,
   CLOUD_THRESHOLD_OFF,
   cloudFlowVectorNode,

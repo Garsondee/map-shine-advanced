@@ -7409,9 +7409,9 @@ function install() {
     try {
       // Gate on scene readiness: a run started while late masks were still
       // compiling timed the compile into its first windows.
-      const readyDeadline = performance.now() + 120_000;
-      while (!MapShine.getSceneReady().ready) {
-        if (performance.now() > readyDeadline) {
+      // Counted polls, not a clock (time/one-clock): 240 × 500 ms ≈ 2 min.
+      for (let polls = 0; !MapShine.getSceneReady().ready; polls++) {
+        if (polls >= 240) {
           throw new Error(`${name}: scene never became ready (${MapShine.getSceneReady().waitingFor.join('; ')})`);
         }
         await pause(500);

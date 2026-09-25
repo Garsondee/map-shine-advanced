@@ -1504,3 +1504,42 @@ export function buildCloudGroundVisNode(
   }
   return applyStrength(vis);
 }
+
+/**
+ * THE CACHED GROUND SHADOW (perf wave 2, 2026-09-25) — a drop-in for
+ * {@link buildCloudGroundVisNode} that READS the raw transmittance from a
+ * texture instead of evaluating the field.
+ *
+ * Why: every consumer (ambient fill, window, point-light specular, water)
+ * evaluated the field itself — `streakTaps` × two region fractals plus the
+ * shape octaves, ~30 noise calls per fragment — so under a cloudy sky the
+ * SAME low-frequency shadow was computed up to four times per pixel at full
+ * resolution. Priced live (Docklands Warehouse, 2560x1215, cover 0.6): the
+ * ambient fill's copy alone was 5.1 ms, the whole cloudy frame ~24 ms against
+ * ~9.5 ms clear. The field is rendered ONCE per frame at reduced resolution
+ * over the view rect (`vt-pan-viewer.js`'s cloud-shadow cache pass, with
+ * `strength` omitted so the texel is the raw 0..1 transmittance) and every
+ * consumer samples it here.
+ *
+ * `strength` is applied AFTER the (bilinear) read, exactly as
+ * {@link buildCloudGroundVisNode} applies it after the streak combine: the
+ * mix is affine in `vis`, so filtering commutes with it; only the final
+ * `.max(0)` clamp sees the filtered value, which differs from filtering the
+ * clamped values only inside a strength>1 shadow core's edge texel.
+ *
+ * @param {object} TSL
+ * @param {object} args
+ * @param {*} args.worldXY - vec2 node, the ground point.
+ * @param {*} args.cacheTexture - the cache target's texture (R = transmittance).
+ * @param {*} args.cacheRect - vec4 uniform, the world rect the cache was
+ *   rendered over this frame (minX, minY, maxX, maxY).
+ * @param {*} [args.strength] - as {@link buildCloudGroundVisNode}.
+ * @returns {*} float node, 0..1, 1 = full sun.
+ */
+export function buildCloudGroundVisFromCacheNode(TSL, { worldXY, cacheTexture, cacheRect, strength = null }) {
+  const { float, mix, texture, vec2 } = TSL;
+  const span = vec2(cacheRect.z.sub(cacheRect.x), cacheRect.w.sub(cacheRect.y)).max(vec2(1, 1));
+  const uv = worldXY.sub(vec2(cacheRect.x, cacheRect.y)).div(span).clamp(0, 1);
+  const vis = texture(cacheTexture, uv).r;
+  return strength ? mix(float(1), vis, strength).max(float(0)) : vis;
+}

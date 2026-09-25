@@ -556,6 +556,7 @@ import {
   pushCloudUniforms,
   buildCloudFieldNode,
   buildCloudGroundVisNode,
+  buildCloudGroundVisFromCacheNode,
   CLOUD_SHADOW_STREAK_SPREAD,
   CLOUD_THRESHOLD_OFF,
 } from '../world/index.js';
@@ -3575,6 +3576,128 @@ export async function startVtPanViewer({
       return cloudTopsMesh;
     }
 
+    // ═══════════════════════════════════════════════════════════════════
+    // THE CLOUD SHADOW CACHE (perf wave 2, 2026-09-25) — the ground shadow
+    // rendered ONCE per frame, at half the internal resolution, over the
+    // camera's world rect; every consumer (ambient fill, every point-light
+    // specular variant via `envLight.buildCloudGroundVis`, window, water)
+    // samples it through `cachedCloudGroundVis` instead of evaluating the
+    // field itself (~30 noise calls per fragment, up to four times per
+    // pixel). See `world/cloud-field.js#buildCloudGroundVisFromCacheNode` for
+    // the measurement and for why `strength` stays per-consumer. The field
+    // is low-frequency and already blurred (`uCloudShadowBlur`), so a
+    // bilinear half-res read is not a visible change — the same trade
+    // `cloudTops.lowRes` above already makes for the tops themselves.
+    //
+    // Under a provably clear sky (`macroThreshold >= CLOUD_THRESHOLD_OFF`,
+    // the SAME test `pickIllumMaterial`'s clear-sky swap uses — coverage is
+    // exactly 0 there, so every transmittance is exactly 1) the field pass is
+    // skipped and the target is filled with 1 once, so a clear sky costs one
+    // bilinear tap per consumer and nothing else.
+    // ═══════════════════════════════════════════════════════════════════
+    const cloudShadowCacheW = () => Math.max(1, Math.ceil(internalW / 2));
+    const cloudShadowCacheH = () => Math.max(1, Math.ceil(internalH / 2));
+    const describeCloudShadowCache = (w, h) => ({
+      resolvedW: w,
+      resolvedH: h,
+      screenSized: true,
+      type: THREE.HalfFloatType,
+      colorSpace: THREE.NoColorSpace,
+      filter: 'linear',
+      depth: false,
+    });
+    const cloudShadowCacheRT = allocator.create(
+      'cloudShadow.cache',
+      describeCloudShadowCache(cloudShadowCacheW(), cloudShadowCacheH())
+    );
+    /** The world rect the cache was last rendered over — the consumers' own
+     * world→texel mapping reads this, never a second copy of the view rect,
+     * so write and read can never disagree about where a texel lies. */
+    const uCloudShadowCacheRect = THREE.TSL.uniform(THREE.TSL.vec4(0, 0, 1, 1));
+    const cloudShadowCacheMaterial = new THREE.NodeMaterial();
+    {
+      const { mix, uv, vec2, vec4, float } = THREE.TSL;
+      const r = uCloudShadowCacheRect;
+      // The SAME uv→world mapping the ambient fill uses for its own quad
+      // (environmental-light.js#buildIllumFragment's worldX/worldY).
+      const worldXY = vec2(mix(r.x, r.z, uv().x), mix(r.y, r.w, uv().y));
+      const vis = buildCloudGroundVisNode(THREE.TSL, {
+        worldXY,
+        uniforms: cloudUniforms,
+        buildField: buildCloudFieldNode,
+        offset: uCloudOffset,
+        streakSpread: CLOUD_SHADOW_STREAK_SPREAD,
+        fillShare: uCloudFillShare,
+        // strength omitted: the texel is the RAW transmittance; each
+        // consumer applies its own dial on read.
+        blurFieldUnits: uCloudShadowBlur,
+        varTag: 'cache',
+      });
+      cloudShadowCacheMaterial.fragmentNode = vec4(vis, float(0), float(0), float(1));
+    }
+    cloudShadowCacheMaterial.depthTest = false;
+    cloudShadowCacheMaterial.depthWrite = false;
+    const cloudShadowCacheClearMaterial = new THREE.NodeMaterial();
+    cloudShadowCacheClearMaterial.fragmentNode = THREE.TSL.vec4(1, 1, 1, 1);
+    cloudShadowCacheClearMaterial.depthTest = false;
+    cloudShadowCacheClearMaterial.depthWrite = false;
+    const cloudShadowCacheQuad = new THREE.QuadMesh(cloudShadowCacheMaterial);
+    /** True while the target holds the clear-sky constant 1 — lets a clear
+     * sky skip the pass entirely after the first fill. Reset by a resize
+     * (new texels are undefined) and by any cloudy frame. */
+    let cloudShadowCacheHoldsClear = false;
+    /**
+     * Drop-in for `buildCloudGroundVisNode` with the same call shape, so
+     * every consumer's own call site is untouched. Only `worldXY` and
+     * `strength` are read — everything else is baked into the cache pass,
+     * and all four consumers were already built with identical values for
+     * it (the SAME `uCloudOffset`/`uCloudFillShare`/`uCloudShadowBlur`/
+     * `CLOUD_SHADOW_STREAK_SPREAD`). A `depthBias` would be per-consumer and
+     * cannot be cached, so it throws rather than being silently dropped.
+     */
+    function cachedCloudGroundVis(TSL, { worldXY, strength = null, depthBias = null }) {
+      if (depthBias) {
+        throw new Error('cachedCloudGroundVis: depthBias is per-consumer and is not supported by the shared cache');
+      }
+      return buildCloudGroundVisFromCacheNode(TSL, {
+        worldXY,
+        cacheTexture: cloudShadowCacheRT.texture,
+        cacheRect: uCloudShadowCacheRect,
+        strength,
+      });
+    }
+    /**
+     * Render this frame's cache over `rect` (the camera's world rect, the
+     * same value the ambient fill's own `uViewRect` holds). Called once per
+     * frame just before the illum fill — the first consumer — so every
+     * consumer this frame reads a cache built for this frame's view.
+     * @param {{x:number,y:number,z:number,w:number}} rect
+     */
+    function renderCloudShadowCache(rect) {
+      const clear = cloudUniforms.macroThreshold.value >= CLOUD_THRESHOLD_OFF;
+      if (clear && cloudShadowCacheHoldsClear) return;
+      uCloudShadowCacheRect.value.set(rect.x, rect.y, rect.z, rect.w);
+      const m = clear ? cloudShadowCacheClearMaterial : cloudShadowCacheMaterial;
+      if (cloudShadowCacheQuad.material !== m) cloudShadowCacheQuad.material = m;
+      const prevTarget = renderer.getRenderTarget();
+      renderer.setRenderTarget(cloudShadowCacheRT);
+      cloudShadowCacheQuad.render(renderer);
+      renderer.setRenderTarget(prevTarget);
+      cloudShadowCacheHoldsClear = clear;
+    }
+    /** Both cache variants drawn once behind the load curtain, so a sky
+     * change never compiles a pipeline in front of the player (#614). */
+    function warmCloudShadowCache() {
+      const prevTarget = renderer.getRenderTarget();
+      renderer.setRenderTarget(cloudShadowCacheRT);
+      for (const m of [cloudShadowCacheMaterial, cloudShadowCacheClearMaterial]) {
+        cloudShadowCacheQuad.material = m;
+        cloudShadowCacheQuad.render(renderer);
+      }
+      renderer.setRenderTarget(prevTarget);
+      cloudShadowCacheHoldsClear = true;
+    }
+
     /**
      * A cloud-shadow node for a window subsystem — see `world/cloud-field.js
      * #buildCloudGroundVisNode`'s own header. Reads `THREE.TSL.positionWorld`,
@@ -3592,7 +3715,7 @@ export async function startVtPanViewer({
      * @returns {*} float node, 0..1.
      */
     function buildWindowCloudFactorNode() {
-      return buildCloudGroundVisNode(THREE.TSL, {
+      return cachedCloudGroundVis(THREE.TSL, {
         worldXY: THREE.TSL.positionWorld.xy,
         uniforms: cloudUniforms,
         buildField: buildCloudFieldNode,
@@ -3622,7 +3745,7 @@ export async function startVtPanViewer({
      * @returns {*} float node, 0..1.
      */
     function buildWaterCloudFactorNode() {
-      return buildCloudGroundVisNode(THREE.TSL, {
+      return cachedCloudGroundVis(THREE.TSL, {
         worldXY: THREE.TSL.positionWorld.xy,
         uniforms: cloudUniforms,
         buildField: buildCloudFieldNode,
@@ -3666,7 +3789,10 @@ export async function startVtPanViewer({
       // comment on `cloudUniforms`, just above.
       cloudUniforms,
       buildCloudField: buildCloudFieldNode,
-      buildCloudGroundVis: buildCloudGroundVisNode,
+      // Perf wave 2: the SHARED cache, not a per-consumer field evaluation —
+      // see `cachedCloudGroundVis`. Every point-light variant inherits this
+      // through `envLight.buildCloudGroundVis`.
+      buildCloudGroundVis: cachedCloudGroundVis,
       cloudOffsetNode: uCloudOffset,
       cloudFillShareNode: uCloudFillShare,
       cloudStreakSpread: CLOUD_SHADOW_STREAK_SPREAD,
@@ -3898,6 +4024,9 @@ export async function startVtPanViewer({
     // sky later switches to never compiles its pipeline in front of the player
     // (#614's whole lesson). A no-op when there is no clear-sky twin.
     const warmIllumVariants = () => {
+      // The cloud-shadow cache's two variants ride the same warm-up — the
+      // illum fill (and every other consumer) reads that target.
+      warmCloudShadowCache();
       if (!envLight.illumMaterialClear) return;
       const prevTarget = renderer.getRenderTarget();
       renderer.setRenderTarget(sceneIllum);
@@ -7941,6 +8070,11 @@ export async function startVtPanViewer({
       profiler?.end(Z.lightUiShadow);
       const previousAutoClearColor = renderer.autoClearColor;
       renderer.autoClearColor = false;
+      // The shared cloud-shadow cache — first, because the illum fill below
+      // is its first consumer this frame (see renderCloudShadowCache).
+      profiler?.begin(Z.lightCloudShadowCache);
+      renderCloudShadowCache(envLight.uViewRect.value);
+      profiler?.end(Z.lightCloudShadowCache);
       profiler?.begin(Z.lightDrawIllum);
       renderer.setRenderTarget(sceneIllum);
       selectIllumMaterial();
@@ -18514,6 +18648,7 @@ export async function startVtPanViewer({
       lightVegSync: profiler?.indexOf('light.vegetationSync') ?? -1,
       lightWindOverlaySync: profiler?.indexOf('light.windOverlaySync') ?? -1,
       lightUiShadow: profiler?.indexOf('light.uiShadowStamps') ?? -1,
+      lightCloudShadowCache: profiler?.indexOf('light.cloudShadowCache') ?? -1,
       lightDrawIllum: profiler?.indexOf('light.drawIllum') ?? -1,
       lightDrawRegions: profiler?.indexOf('light.drawRegions') ?? -1,
       lightDrawPoints: profiler?.indexOf('light.drawPointLights') ?? -1,
@@ -22384,6 +22519,16 @@ export async function startVtPanViewer({
         cloudTopsLowResH(),
         describeCloudTopsLowRes(cloudTopsLowResW(), cloudTopsLowResH())
       );
+      // cloudShadow.cache tracks the internal tier too — same in-place
+      // setSize reasoning; the resized texels are undefined, so the clear-sky
+      // skip must refill it once.
+      allocator.resize(
+        cloudShadowCacheRT,
+        cloudShadowCacheW(),
+        cloudShadowCacheH(),
+        describeCloudShadowCache(cloudShadowCacheW(), cloudShadowCacheH())
+      );
+      cloudShadowCacheHoldsClear = false;
       rebindPresent();
       rebindLighting();
       // buf:occlusion tracks the internal tier too — same reasoning. No

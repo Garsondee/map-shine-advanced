@@ -726,6 +726,22 @@ export const ZONES = Object.freeze(
       false,
       'updateUiShadowStamps'
     ),
+    // Perf wave 2 (2026-09-25): the ground cloud shadow rendered ONCE per
+    // frame at reduced resolution, then sampled by the ambient fill, window,
+    // point-light specular and water instead of each evaluating the field
+    // (world/cloud-field.js#buildCloudGroundVisFromCacheNode). Conditional:
+    // under a provably clear sky the pass is skipped and the target holds 1.
+    z(
+      'light.cloudShadowCache',
+      'Cloud shadow cache',
+      'lighting',
+      'light.accumulate',
+      'clouds',
+      'gpu',
+      'conditional',
+      false,
+      'cloudShadowCacheQuad.render'
+    ),
     z(
       'light.drawIllum',
       'Illumination fill',
@@ -1777,8 +1793,8 @@ export const EFFECT_ZONING = Object.freeze({
     why: "The lit cloud shapes (graph/passes.js's surface.cloudTops pass, live 2026-09-12) draw as one quad, one renderer.render() call, now bracketed as surface.cloudTopsDraw — added alongside this entry. Before it, the cost was real and already IN the raw zone data (the profiler's own generic per-pass hook auto-times every live pass as pass.surface.cloudTops regardless of any declaration here — see perf-zones.js's own module header, 'PASS-LEVEL ZONES ARE DERIVED, NEVER DECLARED') but that auto-synthesised row has no ZoneDecl and therefore no ownerEffectId (buildZoneRows, perf-report.js) — measured, and simultaneously unattributable to 'cloudTops' in any report, from the day it shipped.",
   }),
   clouds: Object.freeze({
-    coverage: 'none',
-    why: 'The ground shadow (the shadow/mood half, live 2026-09-10 — the CLOUD_LOOK manifest, effects/clouds/clouds.js) is not a pass and cannot become one: world/cloud-field.js#buildCloudGroundVisNode is a TSL shader-graph NODE FUNCTION, called once per floor at subsystem-construction time from INSIDE two OTHER effects’ own materials — vt-pan-viewer.js#buildWindowCloudFactorNode (feeds window’s glass darkening) and #buildWaterCloudFactorNode (feeds water’s sun-disc glint) — so its real per-fragment cost executes as a few inseparable extra ALU ops inside light.drawWindowLight’s and water’s own already-zoned draws, with no render call of its own to bracket. Same structural shape as `grade` above (folded into a host shader, sweep-only) and `fluid`/`vegetation`/`water`’s own shared-scene draws elsewhere in this file — not a new failure mode, the newest instance of an old one. Resolving this needs a synthetic A/B — force the node’s strength uniform to 0, re-measure the SAME host zones, diff — the exact shape perf-structural-ab.js already built for early-Z/point-light-batching, not a bracket. Not built yet; tracked as the open half of #552.',
+    coverage: 'full',
+    why: 'The ground shadow’s field is evaluated ONCE per frame into cloudShadow.cache (perf wave 2, 2026-09-25) and that pass is zoned: light.cloudShadowCache. The ambient fill, every point-light specular variant, window and water now each take one bilinear tap of that texture (world/cloud-field.js#buildCloudGroundVisFromCacheNode) instead of evaluating the field inside their own materials, so the per-consumer remainder is a single sample inside their own zones — this closes the open half of #552. The tops are cloudTops, a separate effect with its own zones.',
   }),
   // NOTE, 2026-08-15: Albedo Clarity (the CAS sharpen, "Sharpening" Make-panel
   // card) deliberately has NO entry here. EFFECT_ZONING is scoped to

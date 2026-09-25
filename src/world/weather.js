@@ -389,8 +389,19 @@ export const PRECIP_KINDS = Object.freeze(['auto', 'rain', 'snow', 'sleet', 'hai
  * a half-open band would make `temperature01 === 0.30` yield pure rain with a
  * mix weight of 1, i.e. the one input that should be MOST sleet-like reading as
  * not sleet at all.
+ *
+ * ⚠️ COLD EDGE 0.2 → 0.25, 2026-09-25 (mythica-machina-press#626), author's
+ * call. The Remote's Temperature fader draws a snowflake tick AT this edge
+ * (`ui/rooms/remote/weather-board.js#SNOW_LINE_MARKER` reads it from here);
+ * shown that tick at 25%, the author asked for the snow to line up with it.
+ * Snow is back at the original §2.2 line (0.25), and the band keeps its ramp,
+ * now 0.25 → 0.30, all of it on the warm side of the tick. The warm edge is
+ * deliberately untouched: rain above 0.30 and the snow mantle's melt onset
+ * (`effects/precipitation/mantle-model.js#meltPerHour` starts there) are
+ * exactly as before. Net change: 0.20-0.25, formerly snow-heavy sleet, is now
+ * snow.
  */
-export const PRECIP_SLEET_BAND = Object.freeze({ coldEdge: 0.2, warmEdge: 0.3 });
+export const PRECIP_SLEET_BAND = Object.freeze({ coldEdge: 0.25, warmEdge: 0.3 });
 
 /**
  * Derive what is actually falling, and (inside the sleet band) how the two

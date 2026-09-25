@@ -77,8 +77,8 @@ export function computeFineDragValue({ startValue, deltaPx, min, max, step }) {
  */
 function runFineDragSession(captureEl, input, { axis, shouldEngage }) {
   // Screen Y grows downward; negating it makes "up" a positive delta, which
-  // is what "more" means on the rotated vertical fader (see `axis` on the
-  // public functions below).
+  // is what "more" means on a vertical fader (see `axis` on the public
+  // functions below).
   const pos = axis === 'y' ? (e) => -e.clientY : (e) => e.clientX;
 
   let dragging = false;
@@ -144,14 +144,35 @@ function runFineDragSession(captureEl, input, { axis, shouldEngage }) {
  *   integer's declared step is already 1, and there is no finer value an int
  *   can hold, so there is nothing for a fine drag to add.
  *   `axis` — which pointer coordinate reads as "more". Defaults to `'x'`
- *   (every normal horizontal slider). `vertical-fader.js` passes `'y'`: its
- *   `<input>` is a real horizontal range rotated with `writing-mode` +
- *   `direction: rtl` so the TOP of the track is the max — a fine drag must
- *   read "up" as the same direction that means "more" there too.
+ *   (every normal horizontal slider). `'y'` reads "up" as more, for a
+ *   vertical control whose TOP is its max (`vertical-fader.js`, which drives
+ *   its hidden range through {@link attachFineDragSurface} below).
  */
 export function attachFineDrag(input, { integer = false, axis = 'x' } = {}) {
   if (integer) return;
   runFineDragSession(input, input, { axis, shouldEngage: (e) => e.shiftKey });
+}
+
+/**
+ * Make an EXISTING element a fine-drag surface for `input` — for a control
+ * that draws its own look and keeps its real range input out of sight
+ * (`vertical-fader.js`, mythica-machina-press#626), so neither
+ * {@link attachFineDrag} nor {@link createFineDragHandle} has anything to
+ * listen on or sit beside.
+ * @param {HTMLElement} surfaceEl - receives the presses: the fader's value
+ *   readout (a "scrubby number" in After Effects' sense), or its whole well.
+ * @param {HTMLInputElement} input - the range input this drives.
+ * @param {{ integer?: boolean, axis?: 'x' | 'y', shiftOnly?: boolean }} [opts]
+ *   `integer`/`axis` — same meaning as {@link attachFineDrag}. `shiftOnly` —
+ *   engage only while Shift is held (the well, where a plain press is a
+ *   normal drag) rather than on every press (the readout, which IS the handle).
+ * @returns {boolean} false for an int-typed param (nothing finer than its own
+ *   step of 1 to offer), so the caller can drop its "drag me" affordance.
+ */
+export function attachFineDragSurface(surfaceEl, input, { integer = false, axis = 'x', shiftOnly = false } = {}) {
+  if (integer) return false;
+  runFineDragSession(surfaceEl, input, { axis, shouldEngage: shiftOnly ? (e) => e.shiftKey : () => true });
+  return true;
 }
 
 const HANDLE_STYLE_ID = 'msa-fine-drag-handle-style';

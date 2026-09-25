@@ -228,7 +228,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
     /**
      * ⭐ THE ONLY ROW THAT NAMES A **BLEND**, and the reason it exists is
      * testability: `sleet` is normally reached by walking `temperature01` into
-     * the narrow band between `coldEdge 0.2` and `warmEdge 0.3`, which is not
+     * the narrow band between `coldEdge 0.25` and `warmEdge 0.3`, which is not
      * something anyone can do from a shelf. Without a button the dual-population
      * interleave is unverifiable by the only person whose eyes decide whether it
      * looks right — and an effect nobody can look at is an effect nobody can

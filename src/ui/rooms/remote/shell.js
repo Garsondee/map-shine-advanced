@@ -317,8 +317,8 @@ function injectStyle() {
    distracting" note applied here too, not just at the GO button. */
 #${ROOM_ID} .msa-wx-chip[data-pending="true"]{background:color-mix(in oklab, var(--shine) 8%, transparent);
   border-color:var(--shine); border-style:dashed; color:var(--ink0)}
-/* The Almanac forecast text (2026-08-18 fix) -- a read-only caption, same
-   typography weight as .msa-wx-bracket just below it. Its own "surprise me"
+/* The Almanac forecast text (2026-08-18 fix) -- a read-only caption, in the
+   same muted ink as the rack's own small labels. Its own "surprise me"
    toggle sits right under it as a normal buildParamControl bool row (see
    weather-board.js), not styled here -- that widget owns its own look. */
 #${ROOM_ID} .msa-wx-forecast-text{font-size:.66rem; color:var(--ink2); padding:2px 0;
@@ -328,49 +328,25 @@ function injectStyle() {
    sliders would appear soon"). A horizontal row of ui/widgets/vertical-
    fader.js's own faders, replacing buildParamControl's stacked horizontal
    rows for LIVE_CHANNELS/ENV_CHANNELS specifically -- Scene-override stays
-   a normal row below the rack (a bool control, not a slider). Wraps as a
-   defensive safety net, not because 5 faders at their own width need it at
-   any real containment size (measured: well under the Remote's own budget). */
-/* 4px, not 8 (Remote UI pass) — matches vertical-fader.js's own 44px width
-   (down from 52px): together, 7 faders measure 332px against the room's
-   real ~357px usable width (the naive 372px estimate misses the vertical
-   scrollbar .msa-remote-body always ends up showing), so the rack no
-   longer wraps its 7th fader (Sun latitude) onto a lonely, centred row of
-   its own — confirmed live in tools/remote-preview before this pair of
-   changes, and the exact scrollbar-width shortfall of a first attempt at
-   48px/4px (needed 360px, actual usable was 357px — 3px short, still
-   wrapped). flex-wrap stays as a defensive fallback for a genuinely narrow
-   viewport, not the normal case. */
-#${ROOM_ID} .msa-wx-fader-rack{display:flex; flex-direction:row; flex-wrap:wrap;
-  gap:4px; justify-content:center; padding:2px 0}
-/* The track pseudo-elements ui/widgets/vertical-fader.js itself can't reach
-   (inline styles don't address pseudo-elements) -- accent-color alone only
-   paints the filled portion + thumb, leaving the unfilled groove at the
-   browser default, which reads as a near-invisible hairline on a dark theme
-   (author screenshot, 2026-08-19: thumbs read fine, the channel they sit in
-   didn't). --line-strong rather than a new rgba: it's already themed
-   across all 4 LANTERN modes -- including the high-contrast one, where it
-   jumps to .6 alpha -- and already covered by the U0 contrast-gate test, so
-   this groove inherits that guarantee instead of inventing an unchecked value. */
-#${ROOM_ID} .msa-vfader-input::-webkit-slider-runnable-track{background:var(--line-strong); border-radius:3px}
-#${ROOM_ID} .msa-vfader-input::-moz-range-track{background:var(--line-strong); border-radius:3px}
-/* THE THUMB (2026-08-27 fix, author report: "the handles on the vertical
-   sliders are ugly and offset to the right of where they should be"). No
-   thumb rule existed at all -- WebKit/Gecko fall back to each browser's own
-   UA-default thumb geometry (sized for a normal ~horizontal slider), which
-   does not match this input's own 8px track once rotated into
-   writing-mode:vertical-lr, and visibly overhangs to one side rather than
-   centring on the thin groove. Sized explicitly + shifted to centre on the
-   track (half the size difference, 4px) -- accent-color still supplies the
-   fill colour, only the geometry is being constrained here. */
-#${ROOM_ID} .msa-vfader-input::-webkit-slider-thumb{width:16px; height:16px; margin-left:-4px}
-#${ROOM_ID} .msa-vfader-input::-moz-range-thumb{width:16px; height:16px}
-/* Both were an INLINE addition beside a horizontal row's label+value before
-   this fix; now they stack as ordinary block children below a vertical
-   fader's own label, where the old margin-left just nudges them slightly
-   off the column's own centred axis -- dropped, not replaced with
-   anything, since the parent's own align-items:center already centres them. */
-#${ROOM_ID} .msa-wx-bracket{font-size:.6rem; color:var(--ink2); white-space:nowrap}
+   a normal row below the rack (a bool control, not a slider).
+   REDRAWN 2026-09-25 (mythica-machina-press#626). Two captioned groups
+   ("Moods"/"Climate" | "By hand", weather-board.js#faderGroup) split by a
+   hairline. The faders flex instead of sitting at a fixed 44px, so all seven
+   share whatever width the room has: ~46px each at the room's real ~357px
+   usable width (400px, minus .msa-remote-body's padding, minus the scrollbar
+   it always ends up showing). No wrapping: a narrower room shrinks every
+   column evenly (labels ellipsize) rather than orphaning Sun latitude onto
+   a row of its own, the failure the old fixed-width rack had to be tuned
+   around. The fader's own look (slot/fill/cap/ticks) lives with the widget
+   itself (vertical-fader.js#injectFaderStyle) -- the old ::-webkit-slider-*
+   rules here only ever half-won against Foundry's own global slider style. */
+#${ROOM_ID} .msa-wx-fader-rack{display:flex; flex-direction:row; align-items:stretch; padding:2px 0}
+#${ROOM_ID} .msa-wx-fader-group{display:flex; flex-direction:column; min-width:0}
+#${ROOM_ID} .msa-wx-fader-caption{font-size:.56rem; letter-spacing:.18em; text-transform:uppercase;
+  color:var(--ink2); text-align:center; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  padding-bottom:3px; margin:0 2px 6px; border-bottom:1px solid var(--line)}
+#${ROOM_ID} .msa-wx-fader-row{display:flex; flex-direction:row; gap:4px; justify-content:center}
+#${ROOM_ID} .msa-wx-fader-divider{flex:0 0 1px; align-self:stretch; background:var(--line); margin:0 3px}
 #${ROOM_ID} .msa-wx-pin{flex:0 0 auto; padding:0 4px; font-size:.68rem; line-height:1;
   cursor:pointer; border:none; background:transparent; color:var(--shine)}
 #${ROOM_ID} .msa-cue-deck{display:flex; flex-direction:column; gap:6px}

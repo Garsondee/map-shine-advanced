@@ -491,6 +491,7 @@ import {
   // are the zoom-gate + "rising through the decks" parallax this session adds
   // (effects/clouds/cloud-shade.js's own header has the full model).
   buildCloudTopsNode,
+  buildCloudTopsShadowNode,
   cloudTopsGate,
   buildCloudTopsParallaxWorldXY,
 } from '../effects/index.js';
@@ -3380,7 +3381,15 @@ export async function startVtPanViewer({
     // `false`: byte-identical to the shipped behaviour until a toggle flips.
     // `noAlphaGate` (perf wave 2) turns OFF the shipped `gateOnAlpha` skip, so
     // its saving can be A/B'd live against the ungated shader it replaced.
-    const cloudTopsDiagOverride = { noShadowMarch: false, cheapGradient: false, lowOctaves: false, noAlphaGate: false };
+    // `inlineShadow` (perf wave 2) turns OFF the shipped quarter-res shadow
+    // pre-pass (`cloudTopsShadowRT`) and marches inline again, for a live A/B.
+    const cloudTopsDiagOverride = {
+      noShadowMarch: false,
+      cheapGradient: false,
+      lowOctaves: false,
+      noAlphaGate: false,
+      inlineShadow: false,
+    };
     /** The octave count `cloudTopsLowOctaves` forces the WHOLE field down to
      * (main sample AND, via `cheapOct = max(2, min(octaves,3))`, every
      * reduced-detail tap too) — 2 is this codebase's own established floor
@@ -3394,7 +3403,7 @@ export async function startVtPanViewer({
      * through the function. */
     function cloudTopsWantedBuildKey() {
       const o = cloudTopsDiagOverride;
-      return `${o.noShadowMarch ? 1 : 0}:${o.cheapGradient ? 1 : 0}:${o.lowOctaves ? 1 : 0}:${o.noAlphaGate ? 1 : 0}`;
+      return `${o.noShadowMarch ? 1 : 0}:${o.cheapGradient ? 1 : 0}:${o.lowOctaves ? 1 : 0}:${o.noAlphaGate ? 1 : 0}:${o.inlineShadow ? 1 : 0}`;
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -3470,6 +3479,28 @@ export async function startVtPanViewer({
     cloudTopsCompositeMaterial.blendDstAlpha = THREE.OneMinusSrcAlphaFactor;
     const cloudTopsCompositeQuad = new THREE.QuadMesh(cloudTopsCompositeMaterial);
 
+    // ═══════════════════════════════════════════════════════════════════
+    // THE TOPS' SELF-SHADOW, PRE-RENDERED (perf wave 2, 2026-09-25) — the
+    // march (`cloud-shade.js#buildCloudTopsShadowNode`: an origin height plus
+    // three field taps up-sun) priced at 2.56 ms of the tops' cost under
+    // cover 0.6. It answers a large-scale question on the reduced field, so
+    // its result is smooth over a few screen pixels: it is drawn with the
+    // SAME tops mesh + camera into a target at HALF the tops' own resolution
+    // (a quarter of the internal size), then the tops material samples it at
+    // `screenUV` — both targets cover the same viewport, so the mapping is
+    // exact. A quarter of the fragments for the march; the tops lose nothing
+    // but a bilinear softening of an already-soft term.
+    // ═══════════════════════════════════════════════════════════════════
+    const cloudTopsShadowW = () => Math.max(1, Math.ceil(internalW / 4));
+    const cloudTopsShadowH = () => Math.max(1, Math.ceil(internalH / 4));
+    const cloudTopsShadowRT = allocator.create(
+      'cloudTops.shadow',
+      describeCloudTopsLowRes(cloudTopsShadowW(), cloudTopsShadowH())
+    );
+    /** The march-only material for the pre-pass — rebuilt alongside the tops
+     * mesh (same diagnostic key), `null` while the inline path is in use. */
+    let cloudTopsShadowMaterial = null;
+
     /** Build the tops quad + material on first use, OR rebuild it if a
      * diagnostic override has flipped since the last build — see
      * `cloudTopsDiagOverride`'s own doc. `positionWorld.xy` (not
@@ -3497,19 +3528,29 @@ export async function startVtPanViewer({
         uTopsViewCentre,
         uTopsMagnification
       );
-      const tops = buildCloudTopsNode(THREE.TSL, {
-        worldXY,
-        uniforms: cloudUniforms,
-        buildField: buildCloudFieldNode,
-        sun: { dirXY: uTopsSunDir, sinElev: uTopsSinElev, cosElev: uTopsCosElev, tanElev: uTopsTanElev },
-        colors: { keyRgb: uTopsKeyRgb, fillRgb: uTopsFillRgb },
-        octaves: cloudTopsDiagOverride.lowOctaves ? CLOUD_TOPS_DIAG_LOW_OCTAVES : undefined,
-        shadowTaps: cloudTopsDiagOverride.noShadowMarch ? 0 : undefined,
-        gradientDetail: !cloudTopsDiagOverride.cheapGradient,
-        // Perf wave 2: skip the seven lighting samples where there is no
-        // cloud (alpha 0) — lossless; only rgb/alpha are read below.
-        gateOnAlpha: !cloudTopsDiagOverride.noAlphaGate,
-      });
+      const topsSun = { dirXY: uTopsSunDir, sinElev: uTopsSinElev, cosElev: uTopsCosElev, tanElev: uTopsTanElev };
+      const topsOctaves = cloudTopsDiagOverride.lowOctaves ? CLOUD_TOPS_DIAG_LOW_OCTAVES : undefined;
+      const topsShadowTaps = cloudTopsDiagOverride.noShadowMarch ? 0 : undefined;
+      // The pre-rendered march (see `cloudTopsShadowRT`) — skipped when the
+      // march is diagnostically off (nothing to pre-render) or forced inline.
+      const preRenderShadow = !cloudTopsDiagOverride.noShadowMarch && !cloudTopsDiagOverride.inlineShadow;
+      cloudTopsShadowMaterial?.dispose?.();
+      cloudTopsShadowMaterial = null;
+      if (preRenderShadow) {
+        const shadow = buildCloudTopsShadowNode(THREE.TSL, {
+          worldXY,
+          uniforms: cloudUniforms,
+          buildField: buildCloudFieldNode,
+          sun: topsSun,
+          octaves: topsOctaves,
+          shadowTaps: topsShadowTaps,
+        });
+        cloudTopsShadowMaterial = new THREE.NodeMaterial();
+        cloudTopsShadowMaterial.colorNode = THREE.TSL.vec3(shadow, shadow, shadow);
+        cloudTopsShadowMaterial.depthTest = false;
+        cloudTopsShadowMaterial.depthWrite = false;
+        cloudTopsShadowMaterial.side = THREE.DoubleSide;
+      }
       // ⚠️ MAP-BOUNDS SOFT MASK (author, 2026-09-16: "we're creating clouds
       // that extend a long way outside the region of the map... large enough
       // to cover the whole map + 20% more", "ideally with a very soft edge,
@@ -3551,6 +3592,23 @@ export async function startVtPanViewer({
       const outsideTop = groundXY.y.sub(float(sceneMaxY)).div(float(scenePadY));
       const outsideMost = tslMax(tslMax(outsideLeft, outsideRight), tslMax(outsideBottom, outsideTop));
       const mapBoundsMask = float(1).sub(smoothstep(0, 1, tslClamp(outsideMost, 0, 1)));
+      const tops = buildCloudTopsNode(THREE.TSL, {
+        worldXY,
+        uniforms: cloudUniforms,
+        buildField: buildCloudFieldNode,
+        sun: topsSun,
+        colors: { keyRgb: uTopsKeyRgb, fillRgb: uTopsFillRgb },
+        octaves: topsOctaves,
+        shadowTaps: topsShadowTaps,
+        shadowNode: preRenderShadow ? THREE.TSL.texture(cloudTopsShadowRT.texture, THREE.TSL.screenUV).r : null,
+        gradientDetail: !cloudTopsDiagOverride.cheapGradient,
+        // Perf wave 2: skip the seven lighting samples where there is no
+        // cloud (alpha 0) — lossless; only rgb/alpha are read below.
+        gateOnAlpha: !cloudTopsDiagOverride.noAlphaGate,
+        // ...and where the map-bounds fade zeroes opacity (zoomed out past
+        // the map edge), same lossless reasoning.
+        gateVisibility: mapBoundsMask,
+      });
       const material = new THREE.NodeMaterial();
       material.colorNode = tops.rgb;
       material.opacityNode = tops.alpha.mul(uTopsOpacity).mul(mapBoundsMask);
@@ -8916,9 +8974,20 @@ export async function startVtPanViewer({
       // step right after depends on a genuinely-transparent background to
       // produce correct premultiplied colour (see that step's own comment).
       const prevLowResAutoClear = renderer.autoClearColor;
+      profiler?.begin(Z.cloudTopsDraw);
+      // The self-shadow pre-pass (see `cloudTopsShadowRT`) — the SAME mesh,
+      // transform and camera, march-only material, quarter-res target — so
+      // the tops draw right after samples this frame's shadow at screenUV.
+      if (cloudTopsShadowMaterial) {
+        const topsMaterial = mesh.material;
+        mesh.material = cloudTopsShadowMaterial;
+        renderer.setRenderTarget(cloudTopsShadowRT);
+        renderer.autoClearColor = true;
+        renderer.render(cloudTopsScene, camera);
+        mesh.material = topsMaterial;
+      }
       renderer.setRenderTarget(cloudTopsLowResRT);
       renderer.autoClearColor = true;
-      profiler?.begin(Z.cloudTopsDraw);
       renderer.render(cloudTopsScene, camera);
       profiler?.end(Z.cloudTopsDraw);
       renderer.autoClearColor = prevLowResAutoClear;
@@ -22510,6 +22579,12 @@ export async function startVtPanViewer({
         cloudTopsLowResH(),
         describeCloudTopsLowRes(cloudTopsLowResW(), cloudTopsLowResH())
       );
+      allocator.resize(
+        cloudTopsShadowRT,
+        cloudTopsShadowW(),
+        cloudTopsShadowH(),
+        describeCloudTopsLowRes(cloudTopsShadowW(), cloudTopsShadowH())
+      );
       // cloudShadow.cache tracks the internal tier too — same in-place
       // setSize reasoning; the resized texels are undefined, so the clear-sky
       // skip must refill it once.
@@ -24177,6 +24252,14 @@ export async function startVtPanViewer({
       },
       getCloudTopsLowOctaves() {
         return { lowOctaves: cloudTopsDiagOverride.lowOctaves };
+      },
+      setCloudTopsInlineShadow(on) {
+        const next = !!on;
+        if (next === cloudTopsDiagOverride.inlineShadow) {
+          return { inlineShadow: cloudTopsDiagOverride.inlineShadow, changed: false };
+        }
+        cloudTopsDiagOverride.inlineShadow = next;
+        return { inlineShadow: next, changed: true };
       },
       setCloudTopsNoAlphaGate(on) {
         const next = !!on;
@@ -28498,6 +28581,13 @@ export function setVtPanViewerCloudTopsLowOctaves(on) {
 export function getVtPanViewerCloudTopsLowOctaves() {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.getCloudTopsLowOctaves();
+}
+/** DIAGNOSTIC ONLY (perf wave 2) — `MapShine.setCloudTopsInlineShadow(true)`
+ * rebuilds the tops marching their self-shadow INLINE (the pre-wave-2 shader)
+ * instead of sampling the quarter-res pre-pass, for a live A/B. */
+export function setVtPanViewerCloudTopsInlineShadow(on) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setCloudTopsInlineShadow(on);
 }
 /** DIAGNOSTIC ONLY (perf wave 2) — `MapShine.setCloudTopsNoAlphaGate(true)`
  * rebuilds the tops WITHOUT the `gateOnAlpha` skip, for a live A/B. */

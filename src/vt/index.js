@@ -142,6 +142,7 @@ export {
   getVtPanViewerCloudTopsCheapGradient,
   setVtPanViewerCloudTopsLowOctaves,
   setVtPanViewerCloudTopsNoAlphaGate,
+  setVtPanViewerCloudTopsInlineShadow,
   getVtPanViewerCloudTopsLowOctaves,
   // SCENE SETTLE — the real "everything is on screen now" signal (vt/settle.js).
   getVtPanViewerSceneSettle,

@@ -880,6 +880,7 @@ export {
 // exists precisely so that gap is visible rather than silent.
 export {
   buildCloudTopsNode,
+  buildCloudTopsShadowNode,
   CLOUD_SIGMA,
   CLOUD_WRAP_CRISP,
   CLOUD_WRAP_FLAT,

@@ -169,6 +169,11 @@ export const CLOUD_RELIEF_SCALE = 0.55;
  * @param {*} [args.footprintPx] - float node, world px per screen px. The
  *   gradient epsilon is floored at this, so the relief band-limits itself as
  *   the camera pulls back instead of turning to noise.
+ * @param {*} [args.shadowNode] - a pre-rendered {@link buildCloudTopsShadowNode}
+ *   value to use instead of marching inline (perf wave 2).
+ * @param {*} [args.gateVisibility] - with `gateOnAlpha`, a float node the
+ *   caller multiplies into opacity (e.g. a map-bounds fade): the lighting is
+ *   skipped where `alpha * gateVisibility` is 0, not just where `alpha` is.
  * @param {boolean} [args.gateOnAlpha] - run the lighting (seven more field
  *   samples) only where the main sample's `alpha > 0`. Lossless for a caller
  *   that composites by `alpha`; gated, the debug outputs (`normalZ`,
@@ -200,6 +205,8 @@ export function buildCloudTopsNode(
     footprintPx = null,
     gradientDetail = true,
     gateOnAlpha = false,
+    gateVisibility = null,
+    shadowNode = null,
   }
 ) {
   const { float, vec2, vec3, mix, clamp, exp, max, min, dot, normalize, smoothstep, mx_noise_float, Fn, If } = TSL;
@@ -304,7 +311,6 @@ export function buildCloudTopsNode(
     // that was dropped, not the slope — a difference of two different functions
     // is not a derivative of either.
     const h0c = heightAt(worldXY, gradientDetail, 'h0c').toVar('topsH0Detail');
-    const h0s = heightAt(worldXY, false, 'h0s').toVar('topsH0Shape');
 
     // ── THE NORMAL ────────────────────────────────────────────────────────────
     // ⚠️ A WORLD-SPACE EPSILON, NEVER `dFdx`/`dFdy`. Screen derivatives are one
@@ -345,26 +351,11 @@ export function buildCloudTopsNode(
     // Step along the ground toward the sun and ask whether the field up-sun rises
     // above the ray leaving this point. A JS-time loop, so `shadowTaps = 0`
     // constructs none of it.
-    let shadow = float(1);
-    if (shadowTaps > 0) {
-      // Longer steps at a low sun, because a low sun's rays travel further
-      // horizontally per unit of height. Clamped so a sun near the horizon does
-      // not send the taps halfway across the map.
-      const stepPx = u.scalePx
-        .mul(float(0.18))
-        .div(max(sun.tanElev, float(0.25)))
-        .toVar('topsStep');
-      let acc = float(1);
-      for (let i = 1; i <= shadowTaps; i++) {
-        const d = stepPx.mul(float(i));
-        const hq = heightAt(worldXY.add(sun.dirXY.mul(d)), false, `shadow${i}`);
-        // The ray's own height after travelling `d`, in the field's 0..1 units.
-        const rayH = h0s.add(sun.tanElev.mul(d).div(reliefPx));
-        const occl = clamp(hq.sub(rayH).mul(float(3)), 0, 1);
-        acc = acc.mul(float(1).sub(occl.mul(float(1 - CLOUD_SELF_SHADOW_FLOOR))));
-      }
-      shadow = acc.toVar('topsShadow');
-    }
+    // `shadowNode` (perf wave 2): the SAME march, pre-rendered by the caller
+    // at reduced resolution (see buildCloudTopsShadowNode) and sampled here.
+    const shadow = shadowNode
+      ? shadowNode.toVar('topsShadow')
+      : buildCloudTopsShadowNode(TSL, { worldXY, uniforms: u, buildField, sun, octaves, shadowTaps });
 
     // ── BEER, POWDER, RIM ─────────────────────────────────────────────────────
     const sigmaT = T.mul(float(CLOUD_SIGMA));
@@ -499,7 +490,8 @@ export function buildCloudTopsNode(
   if (gateOnAlpha) {
     const rgb = Fn(() => {
       const out = vec3(0, 0, 0).toVar('topsRgbGated');
-      If(alpha.greaterThan(float(0)), () => {
+      const visible = gateVisibility ? alpha.mul(gateVisibility) : alpha;
+      If(visible.greaterThan(float(0)), () => {
         out.assign(shadeLit().rgb);
       });
       return out;
@@ -508,6 +500,53 @@ export function buildCloudTopsNode(
   }
   const lit = shadeLit();
   return { rgb: lit.rgb, alpha, normalZ: lit.N.z, thickness: T, diffuse: lit.diff, shadow: lit.shadow, rim: lit.rim };
+}
+
+/**
+ * THE SELF-SHADOW MARCH, on its own (perf wave 2, 2026-09-25) — step along
+ * the ground toward the sun and ask whether the field up-sun rises above the
+ * ray leaving this point. {@link buildCloudTopsNode} calls this inline by
+ * default; a caller can instead render it into a reduced-resolution target
+ * once and hand the sampled value back as `shadowNode`.
+ *
+ * Why that is worth doing: it is one cheap origin height plus `shadowTaps`
+ * field samples per fragment, priced live at 2.56 ms of the tops' cost (cover
+ * 0.6, Docklands Warehouse, 2560x1215) — and it answers a LARGE-SCALE question
+ * ("is a big billow up-sun of me", taps `scalePx·0.18` apart, on the reduced
+ * cheap field with no erosion or cells), so its result is smooth at the scale
+ * of a few screen pixels and survives a bilinear upsample. A JS-time loop, so
+ * `shadowTaps = 0` constructs none of it and returns a literal 1.
+ *
+ * @param {object} TSL
+ * @param {object} args - the same `worldXY`/`uniforms`/`buildField`/`sun`/
+ *   `octaves`/`shadowTaps` {@link buildCloudTopsNode} takes.
+ * @returns {*} float node, 0..1 (1 = unshadowed).
+ */
+export function buildCloudTopsShadowNode(TSL, { worldXY, uniforms: u, buildField, sun, octaves = 5, shadowTaps = 3 }) {
+  const { float, clamp, max } = TSL;
+  if (!(shadowTaps > 0)) return float(1);
+  const cheapOct = Math.max(2, Math.min(octaves, 3));
+  const heightAt = (p, tag) =>
+    buildField(TSL, { worldXY: p, uniforms: u, octaves: cheapOct, erode: false, cells: false, varTag: tag }).height;
+  const reliefPx = u.scalePx.mul(float(CLOUD_RELIEF_SCALE));
+  const h0s = heightAt(worldXY, 'h0s').toVar('topsH0Shape');
+  // Longer steps at a low sun, because a low sun's rays travel further
+  // horizontally per unit of height. Clamped so a sun near the horizon does
+  // not send the taps halfway across the map.
+  const stepPx = u.scalePx
+    .mul(float(0.18))
+    .div(max(sun.tanElev, float(0.25)))
+    .toVar('topsStep');
+  let acc = float(1);
+  for (let i = 1; i <= shadowTaps; i++) {
+    const d = stepPx.mul(float(i));
+    const hq = heightAt(worldXY.add(sun.dirXY.mul(d)), `shadow${i}`);
+    // The ray's own height after travelling `d`, in the field's 0..1 units.
+    const rayH = h0s.add(sun.tanElev.mul(d).div(reliefPx));
+    const occl = clamp(hq.sub(rayH).mul(float(3)), 0, 1);
+    acc = acc.mul(float(1).sub(occl.mul(float(1 - CLOUD_SELF_SHADOW_FLOOR))));
+  }
+  return acc.toVar('topsShadow');
 }
 
 // ---------------------------------------------------------------------------

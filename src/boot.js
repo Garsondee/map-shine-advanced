@@ -413,6 +413,7 @@ import {
   getVtPanViewerCloudTopsCheapGradient,
   setVtPanViewerCloudTopsLowOctaves,
   setVtPanViewerCloudTopsNoAlphaGate,
+  setVtPanViewerCloudTopsInlineShadow,
   getVtPanViewerCloudTopsLowOctaves,
   getVtPanViewerSceneSettle,
   sampleVtPanViewerSceneSettleNow,
@@ -1125,6 +1126,7 @@ MapShine.setCloudTopsCheapGradient = setVtPanViewerCloudTopsCheapGradient;
 MapShine.getCloudTopsCheapGradient = getVtPanViewerCloudTopsCheapGradient;
 MapShine.setCloudTopsLowOctaves = setVtPanViewerCloudTopsLowOctaves;
 MapShine.setCloudTopsNoAlphaGate = setVtPanViewerCloudTopsNoAlphaGate;
+MapShine.setCloudTopsInlineShadow = setVtPanViewerCloudTopsInlineShadow;
 MapShine.getCloudTopsLowOctaves = getVtPanViewerCloudTopsLowOctaves;
 // Console-exposed directly (2026-08-12, S2.7) so a pixel-diff gate can prove
 // NON-VACUITY without paying for a full perf-run-full capture — illumBuckets/

@@ -492,6 +492,8 @@ import {
   // (effects/clouds/cloud-shade.js's own header has the full model).
   buildCloudTopsNode,
   buildCloudTopsShadowNode,
+  WATER_PRESENCE_EDGE0,
+  WATER_PRESENCE_EDGE1,
   cloudTopsGate,
   buildCloudTopsParallaxWorldXY,
 } from '../effects/index.js';
@@ -3230,6 +3232,11 @@ export async function startVtPanViewer({
      * not a tuned constant; worth the author's own look before treating it
      * as settled. */
     const uWaterCloudContrast = THREE.TSL.uniform(THREE.TSL.float(1.5));
+    /** Water's OWN ground-shadow strength in the ambient fill (2026-09-25,
+     * author: "cloud shadows are too dark across water") — Studio "Water
+     * shadow strength", `CLOUD_LOOK_PARAMS.waterShadowStrength`. See
+     * environmental-light.js's `waterShadowStrengthNode`. */
+    const uWaterShadowStrength = THREE.TSL.uniform(THREE.TSL.float(1));
     /** `buildCloudGroundVisNode`'s own `blurFieldUnits` — widens the
      * silhouette's coverage transition before either shadow consumer reads
      * it. Recomputed every frame as `cloudShadowBlurBase +
@@ -3864,6 +3871,12 @@ export async function startVtPanViewer({
       // rather than each carrying an independent copy.
       cloudStrengthNode: uCloudShadowStrength,
       cloudBlurNode: uCloudShadowBlur,
+      waterShadowStrengthNode: uWaterShadowStrength,
+      waterPresenceEdges: [WATER_PRESENCE_EDGE0, WATER_PRESENCE_EDGE1],
+      waterMaskPlaceholder: Object.assign(
+        new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType),
+        { needsUpdate: true }
+      ),
     });
     envLight.setOutdoorsRect(outdoorsRect);
 
@@ -7827,6 +7840,16 @@ export async function startVtPanViewer({
       {
         const waterViewRect = view ? viewToWorldRect(view, canvasW / canvasH) : null;
         for (const floor of waterFloors) getWaterSurfaceForFloor(floor.index).sync(floor.index, waterViewRect);
+        // The ambient fill's water-shadow term reads the VIEWED floor's water
+        // mask (the floor the fill and its outdoors mask are for) — `null`
+        // until that floor's real mask has loaded, which the fill treats as
+        // "no water here" (ground strength).
+        const viewedWaterFloor = view?.floorIndex ?? 0;
+        const viewedWaterMask = waterSurfacesByFloor.get(viewedWaterFloor)?.getFullResMaskTexture?.() ?? null;
+        envLight.setWaterMask(
+          viewedWaterMask,
+          viewedWaterMask ? getWaterBodyForFloor(viewedWaterFloor).getRect() : null
+        );
       }
       profiler?.end(Z.lightWaterSync);
       // THE FLOW PACK — runs AFTER the surface sync above, not beside the body
@@ -10340,6 +10363,12 @@ export async function startVtPanViewer({
         // header for why this is the one param the toggle overrides rather
         // than the field/grade/sky terms this manifest does not own.
         uCloudShadowStrength.value = cloudsOn ? (Number.isFinite(cp.shadowStrength) ? cp.shadowStrength : 4) : 0;
+        // Water's own strength — same `enabled:false` override as the ground's.
+        uWaterShadowStrength.value = cloudsOn
+          ? Number.isFinite(cp.waterShadowStrength)
+            ? cp.waterShadowStrength
+            : 1
+          : 0;
         // SAME `enabled:false` override as the ground's own strength above —
         // a passing cloud's window darkening is part of what this toggle
         // turns off, the window's separate "overcast mood" trio below is not

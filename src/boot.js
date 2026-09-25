@@ -7547,6 +7547,13 @@ function install() {
   // re-price (`priceEffects({ids: [...]})`). A full sweep on a heavy map ran
   // ~1.5 min per effect, ~35 min for 22.
   // ===========================================================================
+  /**
+   * `MapShine.forceEffect('sunShadows', false)` — transiently force one effect
+   * on/off for a live "which effect draws this?" bisect; `null` restores its
+   * resolved state. Never written to a setting (same `forceEffectEnabled` the
+   * pricing tools use).
+   */
+  MapShine.forceEffect = (id, on) => forceEffectEnabled(id, on === true || on === false ? on : null);
   const PRICE_PRESETS = Object.freeze({ screen: Object.freeze({ pairs: 2, settleFrames: 30, measureFrames: 120 }) });
   MapShine.priceEffects = ({ ids = null, preset = null, ...rest } = {}) => {
     const opts = { ...(preset ? PRICE_PRESETS[preset] : null), ...rest };

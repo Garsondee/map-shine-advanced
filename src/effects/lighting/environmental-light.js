@@ -409,6 +409,21 @@ export function buildEnvironmentalLightMaterials({
   // is a provable no-op in both (see that function's own header).
   cloudStrengthNode = null,
   cloudBlurNode = null,
+  // WATER'S OWN CLOUD-SHADOW STRENGTH (2026-09-25, author: "cloud shadows
+  // are too dark across water ... give water its own gentler cloud shadow
+  // strength"). Water is drawn into scene colour BEFORE lighting and lit by
+  // THIS fill, so its shadow depth can only be set here: with a ground
+  // strength past 1 the fill clamps cloud cores to black, and nothing the
+  // water shader does afterwards can scale a zero back up. Where the viewed
+  // floor's water mask (`setWaterMask`) reads as water, the fill blends its
+  // cloud strength from `cloudStrengthNode` to this one. `waterPresenceEdges`
+  // are water-render.js's own WATER_PRESENCE_EDGE0/1, handed in by the caller
+  // so "is this water" means the same thing to both. `null` = no water term.
+  waterShadowStrengthNode = null,
+  waterPresenceEdges = null,
+  // A 1x1 all-zero texture from the caller (textures are made in vt/ only —
+  // `gpu/textures-in-vt-only`): "no water anywhere" until `setWaterMask`.
+  waterMaskPlaceholder = null,
 }) {
   const { uniform, texture, uv, vec2, vec3, vec4, float, mix, smoothstep, step, sRGBTransferEOTF, sRGBTransferOETF } =
     THREE.TSL;
@@ -446,6 +461,14 @@ export function buildEnvironmentalLightMaterials({
   const uOutdoorsRect = uniform(vec4(0, 0, 1, 1));
 
   const outdoorsTexNode = outdoorsTexture ? texture(outdoorsTexture) : null;
+
+  // The water mask slot (see `waterShadowStrengthNode`). A 1x1 all-zero
+  // placeholder until the viewed floor's real mask is handed over — "no water
+  // anywhere", i.e. exactly the ground strength — then re-pointed per frame by
+  // `setWaterMask` (rebind, never rebuild: same posture as `outdoorsTexNode`).
+  const waterMaskTexNode = waterShadowStrengthNode && waterMaskPlaceholder ? texture(waterMaskPlaceholder) : null;
+  /** The world rect the water mask covers: (minX, minY, maxX, maxY). */
+  const uWaterMaskRect = uniform(vec4(0, 0, 1, 1));
 
   /**
    * `1` outdoors, `0` indoors, smoothly between — evaluated at the world
@@ -687,6 +710,26 @@ export function buildEnvironmentalLightMaterials({
     // `mix(1, cloudVisRaw, outdoors)`, the identical idiom `skyTint` uses.
     let cloudVis = null;
     if (outdoors && cloudsOn) {
+      // Water's own gentler strength where the viewed floor has water — see
+      // `waterShadowStrengthNode`. Hard-gated to the mask's own rect (a clamped
+      // sample would smear its edge texel across the rest of the map, the same
+      // reasoning the fluid slots below give).
+      let cloudStrengthHere = cloudStrengthNode;
+      if (waterMaskTexNode && cloudStrengthNode) {
+        const r = uWaterMaskRect;
+        const wu = worldX.sub(r.x).div(r.z.sub(r.x).max(float(1)));
+        const wv = worldY.sub(r.y).div(r.w.sub(r.y).max(float(1)));
+        const inWaterRect = step(float(0), wu)
+          .mul(step(wu, float(1)))
+          .mul(step(float(0), wv))
+          .mul(step(wv, float(1)));
+        const waterPresence = smoothstep(
+          float(waterPresenceEdges?.[0] ?? 2 / 255),
+          float(waterPresenceEdges?.[1] ?? 0.5),
+          waterMaskTexNode.sample(vec2(wu.clamp(0, 1), wv.clamp(0, 1))).r
+        ).mul(inWaterRect);
+        cloudStrengthHere = mix(cloudStrengthNode, waterShadowStrengthNode, waterPresence);
+      }
       const cloudVisRaw = buildCloudGroundVis(THREE.TSL, {
         worldXY: vec2(worldX, worldY),
         uniforms: cloudUniforms,
@@ -700,7 +743,7 @@ export function buildEnvironmentalLightMaterials({
         // already obeys.
         streakSpread: cloudStreakSpread,
         fillShare: cloudFillShareNode ?? float(1),
-        strength: cloudStrengthNode,
+        strength: cloudStrengthHere,
         blurFieldUnits: cloudBlurNode,
         varTag: 'ambient',
       });
@@ -859,6 +902,19 @@ export function buildEnvironmentalLightMaterials({
     uViewRect.value.set(rect.minX, rect.minY, rect.maxX, rect.maxY);
   }
 
+  /**
+   * Point the water-shadow term at the viewed floor's water mask (or `null`
+   * for "no water" → the placeholder). Called per frame by the viewer after
+   * the water sync; a no-op when this fill was built without a water term.
+   * @param {*} tex @param {{minX:number,minY:number,maxX:number,maxY:number}|null} rect
+   */
+  function setWaterMask(tex, rect) {
+    if (!waterMaskTexNode) return;
+    const next = tex ?? waterMaskPlaceholder;
+    if (waterMaskTexNode.value !== next) waterMaskTexNode.value = next;
+    if (rect) uWaterMaskRect.value.set(rect.minX, rect.minY, rect.maxX, rect.maxY);
+  }
+
   /** The world rect the outdoors texture covers — the world→mask half. */
   function setOutdoorsRect(rect) {
     uOutdoorsRect.value.set(rect.minX, rect.minY, rect.maxX, rect.maxY);
@@ -943,6 +999,7 @@ export function buildEnvironmentalLightMaterials({
     setSky,
     setUiShadowTint,
     setViewRect,
+    setWaterMask,
     setOutdoorsRect,
     setSunShadowRect,
     setSunShadowFloorIndex,

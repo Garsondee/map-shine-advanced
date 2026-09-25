@@ -70,6 +70,22 @@ export const CLOUD_LOOK_PARAMS = Object.freeze({
     label: 'Shadow strength',
     help: 'How dark a passing cloud can make the ground light. 0 = no shadow at all; 1 = the natural depth derived from the sun/sky split (shallow at dawn, absent at night); past 1 exaggerates it darker than that natural ceiling allows. Window light has its own separate Window cloud contrast, below.',
   },
+  waterShadowStrength: {
+    type: 'float',
+    min: 0,
+    max: 6,
+    step: 0.01,
+    // 2026-09-25 — author: "The cloud shadows are too dark across water ...
+    // give water its own gentler cloud shadow strength." Water is lit by the
+    // SAME ambient fill as the ground, so a ground strength past 1 (which
+    // clamps cloud cores to black) turned open water into black holes. The
+    // fill now blends to this dial wherever the viewed floor's water mask
+    // says there is water. 1 = the natural sun/sky-split depth.
+    default: 1,
+    category: 'Look',
+    label: 'Water shadow strength',
+    help: 'How dark a passing cloud makes open water — its own dial, separate from Shadow strength, because a water surface darkened as hard as the ground reads as a black hole. Same scale: 0 = no shadow on water, 1 = the natural depth, past 1 exaggerates it.',
+  },
   shadowBlur: {
     type: 'float',
     min: 0,

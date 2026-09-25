@@ -45,7 +45,8 @@ export const WINDOW_PARAMS = Object.freeze({
     // LOWERED 3 → 1 (2026-09-21) — new live-tuned default, off the schema's
     // own max back toward neutral; the author's own dialled-in scene,
     // recorded exactly. Was RAISED 1 → 3 (2026-09-09) before this round.
-    default: 1,
+    // 2026-09-25 — author's live-tuned "new defaults" dump (was 1).
+    default: 3,
     category: 'Look',
     label: 'Window light',
     help: 'Master strength of every light cookie this effect draws. Turn it to 0 to see the map with no window light at all.',

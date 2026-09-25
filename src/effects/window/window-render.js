@@ -74,10 +74,11 @@ export const WINDOW_MASK_IMAGE_SCALE = 0.5;
 
 /** Defaults, mirroring `WINDOW_PARAMS` — the single source of truth for the
  * values; the schema quotes them. A change lands in both or neither. */
-// LOWERED 3 → 1 (2026-09-21) — new live-tuned default; a change lands in
+// RAISED 1 → 3 (2026-09-25) — new live-tuned default, back to the dial's max.
+// Was LOWERED 3 → 1 (2026-09-21) — new live-tuned default; a change lands in
 // both or neither. Was RAISED 1 → 3 = WINDOW_PARAMS.strength's own max
 // (2026-09-09) before this round.
-export const WINDOW_DEFAULT_STRENGTH = 1;
+export const WINDOW_DEFAULT_STRENGTH = 3;
 // RAISED 0.69 → 1 (2026-09-21) — new live-tuned default, back to neutral;
 // see `WINDOW_PARAMS.contrast`'s own header (window.js). Was LOWERED 1 →
 // 0.69 (2026-09-08, recovered from a stash that missed both this file's own

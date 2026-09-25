@@ -161,7 +161,8 @@ export const LENS_PARAMS = Object.freeze({
     min: 0,
     max: 0.15,
     step: 0.001,
-    default: 0.001, // V2: 0.01
+    // 2026-09-25 — author's live-tuned "new defaults" dump (was 0.001). V2: 0.01.
+    default: 0,
     category: 'Grain',
     label: 'Film grain',
     help: 'Fine per-pixel brightness noise, like real film stock or a camera sensor at speed — the texture that keeps a flat CG-perfect image from reading as sterile. 0 removes it entirely.',

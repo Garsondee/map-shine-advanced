@@ -51,7 +51,8 @@ export const BLOOM_PARAMS = Object.freeze({
     // `strength` and `coreStrength` below. Recovered from a stash that
     // missed both this file's own commit and the 0.6.4 release; applied
     // 2026-09-18.
-    default: 1.79,
+    // 2026-09-25 — author's live-tuned "new defaults" dump (was 1.79).
+    default: 1.52,
     category: 'Look',
     label: 'Threshold',
     help: 'How bright a pixel must be before it starts to glow. The scene is HDR (light and coloration push values above 1), so ~1.0 means "only real highlights bloom"; lower it to make more of the image glow.',
@@ -74,7 +75,8 @@ export const BLOOM_PARAMS = Object.freeze({
     // RAISED 0.05 → 0.14 (2026-09-08) — new live-tuned defaults. Recovered
     // from a stash that missed both this file's own commit and the 0.6.4
     // release; applied 2026-09-18.
-    default: 0.14,
+    // 2026-09-25 — author's live-tuned "new defaults" dump (was 0.14).
+    default: 0.29,
     category: 'Look',
     label: 'Strength',
     help: 'Overall glow intensity — scales both the tight core and the wide atmosphere together. The master dial.',
@@ -87,7 +89,8 @@ export const BLOOM_PARAMS = Object.freeze({
     // RAISED 1.0 → 2.25 (2026-09-08) — new live-tuned defaults. Recovered
     // from a stash that missed both this file's own commit and the 0.6.4
     // release; applied 2026-09-18.
-    default: 2.25,
+    // 2026-09-25 — author's live-tuned "new defaults" dump (was 2.25).
+    default: 1.01,
     category: 'Look',
     label: 'Core strength',
     help: 'Intensity of the TIGHT glow that hugs bright sources (lamps, fire, specular glints). This is the crisp halo right on the source.',
@@ -105,7 +108,8 @@ export const BLOOM_PARAMS = Object.freeze({
     min: 0,
     max: 3,
     step: 0.01,
-    default: 2.45,
+    // 2026-09-25 — author's live-tuned "new defaults" dump (was 2.45).
+    default: 0.75,
     category: 'Look',
     label: 'Atmosphere strength',
     help: 'Intensity of the WIDE, soft glow — the sense of air catching the light, haze around a scene. This is the "atmospherics" layer, separate from the tight core.',

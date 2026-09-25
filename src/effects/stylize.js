@@ -35,7 +35,8 @@ export const STYLIZE_PARAMS = Object.freeze({
   style: {
     type: 'enum',
     values: [...STYLIZE_LOOK_NAMES],
-    default: 'none',
+    // 2026-09-25 — author's live-tuned "new defaults" dump (was 'none').
+    default: 'sepia',
     category: 'Look',
     label: 'Style',
     help: 'A selectable whole-frame photographic look, applied after Colour Grade (so it layers on top of exposure/tone-map/LUT, not instead of them). None (default) is a deliberate choice, same as Film response and Cinematic preset — nothing is applied until you pick one.',
@@ -45,7 +46,8 @@ export const STYLIZE_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 1,
+    // 2026-09-25 — author's live-tuned "new defaults" dump (was 1).
+    default: 0.2,
     category: 'Look',
     label: 'Amount',
     help: 'How much of the style to blend in — 1 is the full look, lower eases it back toward the graded (but unstylized) image. Has no effect while Style is None.',
@@ -53,11 +55,12 @@ export const STYLIZE_PARAMS = Object.freeze({
 });
 
 /**
- * The manifest — the effect as data (Effects.md §2 shape). Ships with
- * `style: 'none'` (a no-op, like `grade.js`'s `toneMapping`/`lutName`), so
- * `enabledFromProfile: 'low'` costs nothing on a fresh scene — the compile-
- * time branch this rides (`grade-present.js`'s `currentStyle`) simply never
- * fires until an author picks a look. `a11y.photosensitive: false` — every
+ * The manifest — the effect as data (Effects.md §2 shape). Originally shipped
+ * with `style: 'none'` (a no-op, so `enabledFromProfile: 'low'` cost nothing
+ * on a fresh scene); since 2026-09-25 the author's live-tuned defaults ship a
+ * light sepia (amount 0.2) on every scene, so the compile-time branch this
+ * rides (`grade-present.js`'s `currentStyle`) is now live by default.
+ * `a11y.photosensitive: false` — every
  * shipped style here is a static per-pixel colour transform, no flashing/
  * motion (unlike, say, Detective Vision's pulse).
  * @type {import('./effect-manifest.js').EffectManifest}

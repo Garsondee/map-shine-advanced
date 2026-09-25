@@ -54,8 +54,14 @@ export function run(t) {
   ok('GRADE_LOOK_PARAMS is a valid params schema', validateParamsSchema(GRADE_LOOK_PARAMS).ok);
   ok('GRADE is a valid manifest', validateEffectManifest(GRADE).ok);
   ok("the grade's id is grade", GRADE.id === 'grade');
-  ok('the grade ships enabled (Look sliders live at their no-op defaults)', GRADE.enabledFromProfile === 'low');
-  ok('toneMapping defaults to none/off', GRADE_LOOK_PARAMS.toneMapping.default === 'none');
+  ok(
+    "the grade ships enabled (its Look carries the author's 2026-09-25 live-tuned grade)",
+    GRADE.enabledFromProfile === 'low'
+  );
+  ok(
+    'toneMapping defaults to reinhard (2026-09-25 live-tuned; was none/off)',
+    GRADE_LOOK_PARAMS.toneMapping.default === 'reinhard'
+  );
   ok("'enabled' is NOT a grade param (the cascade owns it)", !('enabled' in GRADE_LOOK_PARAMS));
 
   // BLOOM — pinned because the declaration and the runtime disagreed for months.

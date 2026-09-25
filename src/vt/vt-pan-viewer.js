@@ -9159,7 +9159,7 @@ export async function startVtPanViewer({
       u.uChromaticEdgePower.value = lensNum(p.chromaticEdgePower, 1.16);
       u.uVignetteIntensity.value = lensNum(p.vignetteIntensity, 1);
       u.uVignetteSoftness.value = lensNum(p.vignetteSoftness, 0.02);
-      u.uGrainAmount.value = lensNum(p.grainAmount, 0.001);
+      u.uGrainAmount.value = lensNum(p.grainAmount, 0);
       u.uGrainSpeed.value = lensNum(p.grainSpeed, 1);
       u.uAdaptiveGrainEnabled.value = p.adaptiveGrainEnabled === false ? 0 : 1;
       u.uGrainLowLightBoost.value = lensNum(p.grainLowLightBoost, 0.25);

@@ -50,7 +50,8 @@ export const GRADE_LOOK_PARAMS = Object.freeze({
     min: 0.5,
     max: 2,
     step: 0.01,
-    default: 1,
+    // 2026-09-25 — author's live-tuned "new defaults" dump (was 1).
+    default: 1.02,
     category: 'Look',
     label: 'Contrast',
     help: 'Push tones away from mid-grey (>1) or pull them toward it (<1). Higher reads punchier; lower reads flatter/softer.',
@@ -60,7 +61,8 @@ export const GRADE_LOOK_PARAMS = Object.freeze({
     min: 0,
     max: 2,
     step: 0.01,
-    default: 1,
+    // 2026-09-25 — author's live-tuned "new defaults" dump (was 1).
+    default: 0.9,
     category: 'Look',
     label: 'Saturation',
     help: 'Overall colour intensity. 0 is greyscale, 1 unchanged, 2 vivid. Brightness is never touched — this only drains or lifts chroma.',
@@ -70,7 +72,8 @@ export const GRADE_LOOK_PARAMS = Object.freeze({
     min: -1,
     max: 1,
     step: 0.01,
-    default: 0,
+    // 2026-09-25 — author's live-tuned "new defaults" dump (was 0).
+    default: 0.1,
     category: 'Look',
     label: 'Temperature',
     help: 'Warm (+, toward orange) or cool (−, toward blue) white balance. The master mood knob.',
@@ -80,7 +83,8 @@ export const GRADE_LOOK_PARAMS = Object.freeze({
     min: -1,
     max: 1,
     step: 0.01,
-    default: 0,
+    // 2026-09-25 — author's live-tuned "new defaults" dump (was 0).
+    default: 0.2,
     category: 'Look',
     label: 'Vibrance',
     help: 'A gentler saturation that boosts muted colours more than already-vivid ones — lifts a drab scene without making skies and skin go radioactive.',
@@ -88,7 +92,8 @@ export const GRADE_LOOK_PARAMS = Object.freeze({
   toneMapping: {
     type: 'enum',
     values: [...TONE_MAP_NAMES],
-    default: 'none',
+    // 2026-09-25 — author's live-tuned "new defaults" dump (was 'none').
+    default: 'reinhard',
     category: 'Look',
     label: 'Film response',
     help: 'The HDR→display curve. None (default, "off") keeps the raw rolloff — the most basic option, so picking a look here is a deliberate choice, not something the author has to opt out of. Neutral keeps colour and contrast close to the source; AgX compresses highlights hardest but reads flatter/desaturated without extra contrast; ACES is punchier/contrastier.',
@@ -151,12 +156,12 @@ export const GRADE_LOOK_PARAMS = Object.freeze({
 /**
  * The manifest — the effect as data (Effects.md §2 shape). Ships ENABLED (like
  * bloom) so the OTHER Look sliders (exposure/contrast/saturation/etc, all at
- * their own no-op defaults) are live without an extra toggle — but as of
- * 2026-08-31 `toneMapping` itself defaults to `'none'` ("off"), not a filmic
- * curve: the author wants the default to be the most basic option, so a film
- * response is something a user actively picks rather than something already
- * applied for them. `a11y.photosensitive: false` — a static colour transform,
- * no motion.
+ * their own defaults) are live without an extra toggle. From 2026-08-31
+ * `toneMapping` defaulted to `'none'` ("off") and every Look slider sat at a
+ * no-op; since 2026-09-25 the author's live-tuned dump ships a real look
+ * instead (Reinhard, contrast 1.02, saturation 0.9, temperature 0.1, vibrance
+ * 0.2) — the default is no longer a neutral pass-through.
+ * `a11y.photosensitive: false` — a static colour transform, no motion.
  * @type {import('../effect-manifest.js').EffectManifest}
  */
 export const GRADE = Object.freeze({

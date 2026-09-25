@@ -64,7 +64,8 @@ export const CLOUD_LOOK_PARAMS = Object.freeze({
     // shadow now clamps at black (`buildCloudGroundVisNode#applyStrength`)
     // so a core pushed past black reads as solid shadow, never as NEGATIVE
     // light subtracting from whatever else lights that pixel.
-    default: 4,
+    // 2026-09-25 — author's live-tuned "new defaults" dump (was 4).
+    default: 2,
     category: 'Look',
     label: 'Shadow strength',
     help: 'How dark a passing cloud can make the ground light. 0 = no shadow at all; 1 = the natural depth derived from the sun/sky split (shallow at dawn, absent at night); past 1 exaggerates it darker than that natural ceiling allows. Window light has its own separate Window cloud contrast, below.',
@@ -74,7 +75,8 @@ export const CLOUD_LOOK_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.08,
+    // 2026-09-25 — author's live-tuned "new defaults" dump (was 0.08).
+    default: 0.12,
     category: 'Look',
     label: 'Shadow blur',
     help: "How soft the shadow's own edge is, even under a clear sky with light cloud. 0 = the shadow traces the cloud's own silhouette exactly; higher values widen the transition into a soft penumbra.",
@@ -84,7 +86,8 @@ export const CLOUD_LOOK_PARAMS = Object.freeze({
     min: 0,
     max: 3,
     step: 0.01,
-    default: 0.4,
+    // 2026-09-25 — author's live-tuned "new defaults" dump (was 0.4).
+    default: 0,
     category: 'Look',
     label: 'Shadow blur (overcast gain)',
     help: 'How much EXTRA blur gets added on top of Shadow blur as cover rises toward fully overcast — real heavy overcast diffuses light into a much bigger source, so its shadows read far softer than a single fair-weather puff. Total blur = Shadow blur + this × current cover.',
@@ -117,7 +120,8 @@ export const CLOUD_LOOK_PARAMS = Object.freeze({
     // scale Beaufort curve was always going to need a much bigger cut than
     // a linear wind consumer, since real cloud decks move far slower than surface
     // gusts regardless of how the ground-level dial is calibrated.
-    default: 0.25,
+    // 2026-09-25 — author's live-tuned "new defaults" dump (was 0.25).
+    default: 0.78,
     category: 'Motion',
     label: 'Cloud speed',
     help: "Multiplies how fast the deck drifts with wind. 1 = the ambient wind's own speed, unscaled (which reaches ~35 m/s equivalent at full wind — genuinely hurricane force, tuned for ground-level effects, not a slow-moving cloud deck). 0 holds the deck still regardless of wind.",
@@ -228,7 +232,8 @@ export const CLOUD_LOOK_PARAMS = Object.freeze({
     step: 0.01,
     // 2026-09-16, round 4 — same "faint on windows" dump, raised to the
     // dial's own ceiling (default was 0.3).
-    default: 1,
+    // 2026-09-25 — author's live-tuned "new defaults" dump (was 1).
+    default: 0,
     category: 'Light',
     label: 'Window noon boost',
     help: "The mirror of Window dim floor above, for the opposite condition: how much BRIGHTER window light gets at a clear sky with a high sun. Fades to nothing under any cloud cover or away from midday (see the Presence category's Noon brightness/contrast boost for the same fade applied to the outdoor grade).",
@@ -265,7 +270,8 @@ export const CLOUD_LOOK_PARAMS = Object.freeze({
     min: -1,
     max: 1,
     step: 0.01,
-    default: 0.1,
+    // 2026-09-25 — author's live-tuned "new defaults" dump (was 0.1).
+    default: 0,
     category: 'Presence',
     label: 'Noon colour temperature',
     help: 'Same fade as the two boosts above. A gentle warm nudge to the grade\'s own colour temperature at a clear, high-sun noon (the author\'s own ask: "the light to have the right colour temperature for a clear noon"). Negative cools it instead; 0 leaves noon perfectly neutral.',

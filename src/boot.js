@@ -6372,7 +6372,10 @@ function install() {
               : '') +
             (conditions.checkpoints?.length
               ? ` Checkpoints still clean at that point: ${
-                  conditions.checkpoints.filter((c) => c.cleanSoFar).map((c) => c.name).join(', ') || 'none'
+                  conditions.checkpoints
+                    .filter((c) => c.cleanSoFar)
+                    .map((c) => c.name)
+                    .join(', ') || 'none'
                 } — numbers measured before a clean checkpoint are usable; everything after it is not.`
               : ''),
           evidence: {
@@ -7389,6 +7392,129 @@ function install() {
   // for itself", "does the floor above regress", …) that "is anything slow,
   // and is anything mis-reporting" does not need answered every time.
   // ===========================================================================
+  // ---------------------------------------------------------------------------
+  // THE A/B CORE (wave 2) — one parked-camera, drift-cancelling comparison of
+  // two states, shared by priceEffects (on vs off), priceTiers (rung vs rung)
+  // and priceAB (any two callbacks: a param, a debug flag, a code path). Before
+  // this existed every "is variant B cheaper" question needed its own copy of
+  // the alternation loop or, worse, an eyeballed FPS counter.
+  // ---------------------------------------------------------------------------
+  let priceRunActive = false;
+  const guardedPriceRun = async (name, fn) => {
+    // Re-entrancy guard: two overlapping runs toggle each other's state
+    // mid-window and every row of both is garbage — and a driver whose call
+    // timed out can easily start a second one without knowing.
+    if (priceRunActive) throw new Error(`${name}: a pricing run is already in progress`);
+    priceRunActive = true;
+    try {
+      // Gate on scene readiness: a run started while late masks were still
+      // compiling timed the compile into its first windows.
+      const readyDeadline = performance.now() + 120_000;
+      while (!MapShine.getSceneReady().ready) {
+        if (performance.now() > readyDeadline) {
+          throw new Error(`${name}: scene never became ready (${MapShine.getSceneReady().waitingFor.join('; ')})`);
+        }
+        await pause(500);
+      }
+      if (document.visibilityState !== 'visible') {
+        // A hidden tab throttles rAF; the run would crawl and then be stamped
+        // invalid window by window. Say so up front instead.
+        log.warn(`${name}: the tab is hidden — rAF is throttled; bring it to the front`);
+      }
+      return await fn();
+    } finally {
+      priceRunActive = false;
+    }
+  };
+  const medianOf = (xs) => {
+    const s = xs.filter(Number.isFinite).sort((a, b) => a - b);
+    if (!s.length) return null;
+    const m = Math.floor(s.length / 2);
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  };
+  // Plain rAF frames: the profiler's own counter only advances while it is
+  // armed (inside runProfileSession), so it cannot pace a warm-up flip.
+  const rafFrames = (n) =>
+    new Promise((resolve) => {
+      let k = 0;
+      const tick = () => (++k >= n ? resolve() : requestAnimationFrame(tick));
+      requestAnimationFrame(tick);
+    });
+  const measureGpuWindow = async ({ settleFrames = 60, measureFrames = 240 } = {}) => {
+    const monitor = createRunConditionsMonitor({
+      readAdapter: () => getVtPanViewerAdapterInfo(),
+      readRenderScale: () => getVtPanViewerRenderScaleState(),
+      readPaused: () => readGamePaused().paused,
+    });
+    monitor.start();
+    let report = null;
+    let conditions = null;
+    try {
+      report = await runProfileSession(profileHarness, {
+        settleFrames,
+        measureFrames,
+        includeSweep: false,
+        includeStructuralAB: false,
+      });
+    } finally {
+      conditions = monitor.stop();
+    }
+    return {
+      gpuP50: report?.frame?.gpuMs?.p50 ?? null,
+      gpuP95: report?.frame?.gpuMs?.p95 ?? null,
+      frameMsP50: report?.frame?.fps?.frameMs?.median ?? null,
+      frames: report?.window?.frames ?? null,
+      valid: conditions?.valid === true && (report?.window?.frames ?? 0) >= Math.min(60, measureFrames),
+      invalidReasons: conditions?.invalidReasons ?? [],
+    };
+  };
+  /**
+   * A vs B, alternated with the order flipped every pair so slow drift (GPU
+   * clocks, heat) cancels, after a discarded warm-up flip so neither side's
+   * first-use pipeline compile lands in a timed window. `deltaGpuMsP50` =
+   * median(A) − median(B), so a positive delta means A costs more.
+   */
+  const compareStates = async (applyA, applyB, { pairs = 3, settleFrames = 60, measureFrames = 240 } = {}) => {
+    const row = { a: [], b: [], valid: true };
+    await applyB();
+    await rafFrames(settleFrames);
+    await applyA();
+    await rafFrames(settleFrames);
+    for (let p = 0; p < pairs; p++) {
+      const order = p % 2 === 0 ? ['a', 'b'] : ['b', 'a'];
+      for (const side of order) {
+        await (side === 'a' ? applyA : applyB)();
+        const w = await measureGpuWindow({ settleFrames, measureFrames });
+        row[side].push(w);
+        if (!w.valid) row.valid = false;
+      }
+    }
+    const aP50 = row.a.map((w) => w.gpuP50);
+    const bP50 = row.b.map((w) => w.gpuP50);
+    const mA = medianOf(aP50);
+    const mB = medianOf(bP50);
+    row.medianAGpuMsP50 = mA;
+    row.medianBGpuMsP50 = mB;
+    row.deltaGpuMsP50 = Number.isFinite(mA) && Number.isFinite(mB) ? +(mA - mB).toFixed(3) : null;
+    row.aSpreadMs = aP50.length ? +(Math.max(...aP50) - Math.min(...aP50)).toFixed(3) : null;
+    row.bSpreadMs = bP50.length ? +(Math.max(...bP50) - Math.min(...bP50)).toFixed(3) : null;
+    // Resolved = the two ranges do not overlap.
+    row.resolved =
+      aP50.length && bP50.length
+        ? Math.min(...aP50) > Math.max(...bP50) || Math.max(...aP50) < Math.min(...bP50)
+        : false;
+    return row;
+  };
+  /** Transient layer override for one effect — the scene's own authored params
+   * kept (a pricing run must cost the scene's look, not the schema defaults),
+   * nothing written. `patch` is merged over the derived layers. */
+  const forceEffectLayers = (id, patch) => {
+    const layers = deriveEffectLayers(id, (k) => readSetting(MODULE_ID, k));
+    const { params: sceneParams } = readSceneEffectParams(id);
+    layers.paramLayers = [sceneParams].filter(Boolean);
+    effectRegistry.resolveAndApply(id, { ...layers, ...patch });
+  };
+
   // ===========================================================================
   // EFFECT PRICING (2026-09-25, effects perf goal) — `MapShine.priceEffects()`.
   //
@@ -7397,105 +7523,111 @@ function install() {
   // draw inside shared passes and read "unpriceable". The old whole-frame
   // effect SWEEP was retired because its drift (7-13 ms across a 60 s camera
   // route) swamped ~0.5 ms effects. This is the same on/off idea done
-  // tightly enough to resolve: camera PARKED (identical view in every window),
-  // short windows, on/off ALTERNATED with the order flipped each pair so slow
-  // drift (heat) cancels, a discarded warm-up flip first so first-use pipeline
-  // compiles never land in a timed window, and every window stamped by the
-  // run-conditions monitor (paused / hidden / canvas change = invalid).
-  // Toggles are TRANSIENT (`forceEffectEnabled` — never a written setting) and
-  // every effect is restored in `finally`.
+  // tightly enough to resolve (compareStates above). Toggles are TRANSIENT
+  // (`forceEffectEnabled` — never a written setting) and every effect is
+  // restored in `finally`.
   //
   // Result per effect: `marginalGpuMsP50` = median(on p50) − median(off p50),
   // the whole-frame GPU the effect costs at THIS view, plus the on/off spreads
-  // so a reader can see whether the difference beats the noise.
+  // so a reader can see whether the difference beats the noise. Measured noise
+  // floor on a 2560x1215 frame (2026-09-25): about ±0.5 ms.
   // ===========================================================================
-  MapShine.priceEffects = async ({ ids = null, pairs = 3, settleFrames = 60, measureFrames = 240 } = {}) => {
-    const median = (xs) => {
-      const s = xs.filter(Number.isFinite).sort((a, b) => a - b);
-      if (!s.length) return null;
-      const m = Math.floor(s.length / 2);
-      return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
-    };
-    const list = ids ?? buildPerfContext().enabledEffects;
-    const window1 = async () => {
-      const monitor = createRunConditionsMonitor({
-        readAdapter: () => getVtPanViewerAdapterInfo(),
-        readRenderScale: () => getVtPanViewerRenderScaleState(),
-        readPaused: () => readGamePaused().paused,
-      });
-      monitor.start();
-      let report = null;
-      let conditions = null;
-      try {
-        report = await runProfileSession(profileHarness, {
-          settleFrames,
-          measureFrames,
-          includeSweep: false,
-          includeStructuralAB: false,
-        });
-      } finally {
-        conditions = monitor.stop();
-      }
-      return {
-        gpuP50: report?.frame?.gpuMs?.p50 ?? null,
-        gpuP95: report?.frame?.gpuMs?.p95 ?? null,
-        frameMsP50: report?.frame?.fps?.frameMs?.median ?? null,
-        frames: report?.window?.frames ?? null,
-        valid: conditions?.valid === true && (report?.window?.frames ?? 0) >= Math.min(60, measureFrames),
-        invalidReasons: conditions?.invalidReasons ?? [],
-      };
-    };
-    // Plain rAF frames: the profiler's own counter only advances while it is
-    // armed (inside runProfileSession), so it cannot pace the warm-up flip.
-    const rafFrames = (n) =>
-      new Promise((resolve) => {
-        let k = 0;
-        const tick = () => (++k >= n ? resolve() : requestAnimationFrame(tick));
-        requestAnimationFrame(tick);
-      });
-    const results = [];
-    for (const id of list) {
-      const row = { id, on: [], off: [], valid: true, error: null };
-      try {
-        // Warm-up flip (discarded): both variants compile before any timed window.
-        forceEffectEnabled(id, false);
-        await rafFrames(settleFrames);
-        forceEffectEnabled(id, true);
-        await rafFrames(settleFrames);
-        for (let p = 0; p < pairs; p++) {
-          const order = p % 2 === 0 ? [true, false] : [false, true];
-          for (const state of order) {
-            forceEffectEnabled(id, state);
-            const w = await window1();
-            (state ? row.on : row.off).push(w);
-            if (!w.valid) row.valid = false;
-          }
+  MapShine.priceEffects = ({ ids = null, ...opts } = {}) =>
+    guardedPriceRun('priceEffects', async () => {
+      const list = ids ?? buildPerfContext().enabledEffects;
+      // Live progress for a caller polling a long run from outside (a console, a
+      // browser-automation driver) — the promise only answers at the very end.
+      MapShine.__priceEffectsProgress = { total: list.length, done: 0, current: null, rows: [] };
+      const results = [];
+      for (const id of list) {
+        MapShine.__priceEffectsProgress.current = id;
+        let row;
+        try {
+          const cmp = await compareStates(
+            () => forceEffectEnabled(id, true),
+            () => forceEffectEnabled(id, false),
+            opts
+          );
+          row = {
+            id,
+            on: cmp.a,
+            off: cmp.b,
+            valid: cmp.valid,
+            error: null,
+            medianOnGpuMsP50: cmp.medianAGpuMsP50,
+            medianOffGpuMsP50: cmp.medianBGpuMsP50,
+            marginalGpuMsP50: cmp.deltaGpuMsP50,
+            onSpreadMs: cmp.aSpreadMs,
+            offSpreadMs: cmp.bSpreadMs,
+            resolved: cmp.resolved,
+          };
+        } catch (err) {
+          row = { id, valid: false, error: String(err?.message || err), marginalGpuMsP50: null, resolved: false };
+        } finally {
+          forceEffectEnabled(id, null);
         }
-      } catch (err) {
-        row.error = String(err?.message || err);
-        row.valid = false;
+        results.push(row);
+        MapShine.__priceEffectsProgress.done++;
+        MapShine.__priceEffectsProgress.rows.push({
+          id,
+          marginalGpuMsP50: row.marginalGpuMsP50,
+          resolved: row.resolved,
+          valid: row.valid,
+        });
+        log.info(
+          `priceEffects: ${id} marginal ${row.marginalGpuMsP50} ms (resolved ${row.resolved}, valid ${row.valid})`
+        );
+      }
+      results.sort((a, b) => (b.marginalGpuMsP50 ?? -1) - (a.marginalGpuMsP50 ?? -1));
+      MapShine.__lastPriceEffects = results;
+      return results;
+    });
+
+  /**
+   * `MapShine.priceTiers('window')` — what each rung of an effect's perf
+   * ladder costs over rung 0, at this view. Pins `tierOverride` transiently
+   * (never written) and restores the effect in `finally`.
+   */
+  MapShine.priceTiers = (id, { tiers = null, ...opts } = {}) =>
+    guardedPriceRun('priceTiers', async () => {
+      const manifest = effectRegistry.list().find((m) => m.id === id);
+      if (!manifest) throw new Error(`priceTiers: no effect '${id}'`);
+      const max = Math.max(0, (manifest.tiers?.length ?? 1) - 1);
+      const list = tiers ?? Array.from({ length: max }, (_, i) => i + 1);
+      const rows = [];
+      try {
+        for (const t of list) {
+          const cmp = await compareStates(
+            () => forceEffectLayers(id, { tierOverride: t }),
+            () => forceEffectLayers(id, { tierOverride: 0 }),
+            opts
+          );
+          const { a: _a, b: _b, ...summary } = cmp;
+          rows.push({ id, tier: t, vsTier: 0, ...summary });
+          log.info(`priceTiers: ${id} tier ${t} costs ${cmp.deltaGpuMsP50} ms over tier 0 (resolved ${cmp.resolved})`);
+        }
       } finally {
         forceEffectEnabled(id, null);
       }
-      const onP50 = row.on.map((w) => w.gpuP50);
-      const offP50 = row.off.map((w) => w.gpuP50);
-      const mOn = median(onP50);
-      const mOff = median(offP50);
-      row.medianOnGpuMsP50 = mOn;
-      row.medianOffGpuMsP50 = mOff;
-      row.marginalGpuMsP50 = Number.isFinite(mOn) && Number.isFinite(mOff) ? +(mOn - mOff).toFixed(3) : null;
-      row.onSpreadMs = onP50.length ? +(Math.max(...onP50) - Math.min(...onP50)).toFixed(3) : null;
-      row.offSpreadMs = offP50.length ? +(Math.max(...offP50) - Math.min(...offP50)).toFixed(3) : null;
-      // Resolved = the on/off ranges do not overlap.
-      row.resolved =
-        onP50.length && offP50.length ? Math.min(...onP50) > Math.max(...offP50) || Math.max(...onP50) < Math.min(...offP50) : false;
-      results.push(row);
-      log.info(`priceEffects: ${id} marginal ${row.marginalGpuMsP50} ms (resolved ${row.resolved}, valid ${row.valid})`);
-    }
-    results.sort((a, b) => (b.marginalGpuMsP50 ?? -1) - (a.marginalGpuMsP50 ?? -1));
-    MapShine.__lastPriceEffects = results;
-    return results;
-  };
+      return rows;
+    });
+
+  /**
+   * `MapShine.priceAB({ a: () => MapShine.setX(1), b: () => MapShine.setX(0), restore })`
+   * — the general form: any two states you can reach from the console. Positive
+   * `deltaGpuMsP50` means A costs more. `restore` always runs.
+   */
+  MapShine.priceAB = ({ a, b, restore = null, label = 'priceAB', ...opts } = {}) =>
+    guardedPriceRun(label, async () => {
+      if (typeof a !== 'function' || typeof b !== 'function') throw new Error('priceAB: pass a and b callbacks');
+      try {
+        const cmp = await compareStates(a, b, opts);
+        log.info(`${label}: A − B = ${cmp.deltaGpuMsP50} ms (resolved ${cmp.resolved}, valid ${cmp.valid})`);
+        return { label, ...cmp };
+      } finally {
+        if (typeof restore === 'function') await restore();
+      }
+    });
 
   MapShine.debug.registerAction(
     'perf-quick-check',
@@ -15414,7 +15546,12 @@ function install() {
           },
           renderScale: rs?.skipped
             ? null
-            : { userSetting: rs.userSetting ?? null, internalScale: rs.resolvedInternalScale ?? null, internalW: rs.internalW, internalH: rs.internalH },
+            : {
+                userSetting: rs.userSetting ?? null,
+                internalScale: rs.resolvedInternalScale ?? null,
+                internalW: rs.internalW,
+                internalH: rs.internalH,
+              },
           adapter: getVtPanViewerAdapterInfo(),
           userAgent: navigator.userAgent,
         };

@@ -868,7 +868,26 @@ export function buildWindowSurfaceMaterial({
       : debugGlass.cookie.mul(debugGlass.causticGain).toVar('winCookieTinted');
 
   // ── THE CLOUD SEAM — see this module's header ────────────────────────────
-  const cloudFactor = (cloudFactorNode ?? float(1)).toVar('winCloudFactor');
+  //
+  // ⚠️ EVALUATED ONLY WHERE THERE IS LIGHT TO SHADE (perf wave 2, 2026-09-25).
+  // The cloud node is three streak taps of a procedural two-octave field —
+  // priced live on Docklands Warehouse (2560x1215) at ~5 ms of window's 9 ms,
+  // paid at EVERY fragment of the mask's AABB quad even though most of that
+  // quad is unpainted (cookie = 0), where the product below is 0 whatever the
+  // cloud says. Branching on the pre-cloud light is lossless by construction:
+  // skipped fragments were multiplying the cloud by exactly zero. Same idiom
+  // as `gateGlass` above. Mask regions are spatially coherent, so the branch
+  // diverges only along cookie edges.
+  const cloudFactor = cloudFactorNode
+    ? Fn(() => {
+        const out = float(1).toVar('winCloudFactorGated');
+        const preCloud = cookieTinted.mul(coverage);
+        If(max(max(preCloud.r, preCloud.g), preCloud.b).greaterThan(float(0)), () => {
+          out.assign(cloudFactorNode);
+        });
+        return out;
+      })().toVar('winCloudFactor')
+    : float(1);
   // THE OVERCAST DIM — the other half of the author's ask, "drop its overall
   // brightness by up to 50%". `overcast01` at 0 is exactly `float(1)` here
   // too, so a caller that never passes `cloudOvercastNode` still compiles

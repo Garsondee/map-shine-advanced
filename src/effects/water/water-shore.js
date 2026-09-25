@@ -578,7 +578,7 @@ export function buildFoamCellularStructure({
   uGrainOctave = null,
   uGrainTimeScale = null,
 }) {
-  const { vec2, vec3, float, max, length, smoothstep, fwidth, mx_worley_noise_vec2, mx_fractal_noise_vec3 } = TSL;
+  const { vec2, vec3, float, max, length, smoothstep, fwidth, mx_worley_noise_vec2, mx_fractal_noise_float } = TSL;
   const reach = max(uReachPx, float(1));
   const tSec = timeMsNode ? timeMsNode.mul(float(1 / 1000)) : float(0);
   const flowNudgeNode = uFlowNudge ?? float(WATER_FOAM_FLOW_NUDGE);
@@ -659,12 +659,17 @@ export function buildFoamCellularStructure({
   // Sampled in `streakCell` (post-stretch), at a higher frequency and its
   // own clock rate, so it reads as texture jittering WITHIN the net rather
   // than a second, competing net of its own.
-  const bubbleNoise = mx_fractal_noise_vec3(
+  // ⚠️ SCALAR, NOT `mx_fractal_noise_vec3(...).x` (perf wave 2, 2026-09-25) —
+  // bit-identical: three's `mx_hash_vec3` is ONE `mx_hash_int` per lattice corner
+  // split into bytes, and `mx_gradient_vec3` is `mx_gradient_float` per byte, which
+  // masks to `& 15` — so byte x (`h & 255`) and the scalar's own `h & 15` pick the
+  // same gradient. The vec3 form paid for two gradient channels nobody read.
+  const bubbleNoise = mx_fractal_noise_float(
     vec3(streakCell.x.mul(bubbleOctaveNode), streakCell.y.mul(bubbleOctaveNode), tSec.mul(bubbleTimeScaleNode)),
     2,
     2.0,
     0.5
-  ).x;
+  );
   const edgeDist = edgeDistSharp.add(bubbleNoise.mul(bubbleAmountNode));
 
   // ── THE EDGE, ANTI-ALIASED (2026-08-19) — see `WATER_FOAM_EDGE_AA_PX`'s
@@ -705,12 +710,17 @@ export function buildFoamCellularStructure({
   // for). `.add(0.5)` twice: `mx_fractal_noise` is roughly zero-centred
   // (this file's own header, elsewhere, measures it), remapped to `[0,1]`
   // before it scales the brightness cut.
-  const grainNoise = mx_fractal_noise_vec3(
+  // ⚠️ SCALAR, NOT `mx_fractal_noise_vec3(...).x` (perf wave 2, 2026-09-25) —
+  // bit-identical: three's `mx_hash_vec3` is ONE `mx_hash_int` per lattice corner
+  // split into bytes, and `mx_gradient_vec3` is `mx_gradient_float` per byte, which
+  // masks to `& 15` — so byte x (`h & 255`) and the scalar's own `h & 15` pick the
+  // same gradient. The vec3 form paid for two gradient channels nobody read.
+  const grainNoise = mx_fractal_noise_float(
     vec3(streakCell.x.mul(grainOctaveNode), streakCell.y.mul(grainOctaveNode), tSec.mul(grainTimeScaleNode)),
     2,
     2.0,
     0.5
-  ).x;
+  );
   const grain = float(1)
     .sub(grainAmountNode)
     .add(grainNoise.mul(float(0.5)).add(float(0.5)).mul(grainAmountNode));

@@ -924,6 +924,7 @@ export function buildWaterSurfaceField({
     mix,
     fwidth,
     mx_fractal_noise_vec3,
+    mx_fractal_noise_float,
     mx_worley_noise_vec3,
     Fn,
     If,
@@ -1418,12 +1419,17 @@ export function buildWaterSurfaceField({
       const growthFreq = causticGrowthScaleNode;
       const growthEps = float(WATER_CAUSTICS_GROWTH_EPS);
       const potentialAt = (p) =>
-        mx_fractal_noise_vec3(
+        // ⚠️ SCALAR, NOT `mx_fractal_noise_vec3(...).x` (perf wave 2, 2026-09-25) —
+        // bit-identical: three's `mx_hash_vec3` is ONE `mx_hash_int` per lattice corner
+        // split into bytes, and `mx_gradient_vec3` is `mx_gradient_float` per byte, which
+        // masks to `& 15` — so byte x (`h & 255`) and the scalar's own `h & 15` pick the
+        // same gradient. The vec3 form paid for two gradient channels nobody read.
+        mx_fractal_noise_float(
           vec3(p.x.mul(growthFreq), p.y.mul(growthFreq), tSec.mul(causticGrowthSpeedNode)),
           1,
           2.0,
           0.5
-        ).x;
+        );
       const potentialCentre = potentialAt(netCellPreOrganic);
       const potentialX = potentialAt(netCellPreOrganic.add(vec2(growthEps, 0)));
       const potentialY = potentialAt(netCellPreOrganic.add(vec2(0, growthEps)));

@@ -864,6 +864,7 @@ export function buildWaterSurfaceField({
   shoaling = false,
   caustics = false,
   causticsInsideGate = false,
+  noiseNode = null,
   // THE REAL SOLVED LOCAL DIRECTION (S3's pressure solve, already
   // dead-zone-guarded by the caller — `water-render.js`'s own
   // `localFlowDirSafe`, the SAME node shore foam's `localFlowDir` reads).
@@ -1082,7 +1083,11 @@ export function buildWaterSurfaceField({
   // vendored, backend-neutral, and identical on WebGPU and WebGL2, which is why
   // it is used instead of a hand-rolled hash (Law 8: no hand-written twin).
   const cell = worldXY.add(domainOffset).div(max(uWaveScalePx, float(1)));
-  const n = mx_fractal_noise_vec3(vec3(cell.x, cell.y, tSec.mul(float(0.15))), 3, 2.0, 0.5);
+  // `noiseNode` (perf wave 2, 2026-09-25): the SAME vec3, pre-rendered once
+  // per frame by the caller and sampled at the fragment's own texel — water
+  // draws up to three materials over the same pixels (absorb, in-scatter,
+  // refraction) and each used to evaluate this 3-octave fractal itself.
+  const n = noiseNode ?? mx_fractal_noise_vec3(vec3(cell.x, cell.y, tSec.mul(float(0.15))), 3, 2.0, 0.5);
 
   // TURBIDITY — the field as a modulation of optical depth. Centred on zero so
   // it neither brightens nor darkens the water on average; it only gives the
@@ -1561,7 +1566,7 @@ export function buildWaterSurfaceField({
   // zero) whenever `windHandle` is omitted — `.add()` on it is a genuine
   // no-op, so an unwired caller gets byte-identical `turbidity` to before
   // this rung existed.
-  return { foam, turbidity: turbidity.add(windRipple), slope, domainOffset, causticBrightness, flowWarp };
+  return { foam, turbidity: turbidity.add(windRipple), slope, domainOffset, causticBrightness, flowWarp, noise: n };
 }
 
 // waterCausticsCpu (the Jacobian-focus CPU twin) was REMOVED 2026-08-27 along

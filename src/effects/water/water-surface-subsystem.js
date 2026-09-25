@@ -123,6 +123,16 @@ export function setWaterCausticsInsideGateOff(off) {
   return { off: _causticsInsideGateOff };
 }
 
+/** DIAGNOSTIC ONLY (perf wave 2) — `true` rebuilds water evaluating the
+ * surface noise inline in every material again (no pre-pass), for a live A/B.
+ * @type {boolean} */
+let _noisePrepassOff = false;
+/** @param {boolean} off */
+export function setWaterNoisePrepassOff(off) {
+  _noisePrepassOff = off === true;
+  return { off: _noisePrepassOff };
+}
+
 /**
  * @param {object} args
  * @param {*} args.THREE - injected, never imported.
@@ -251,6 +261,9 @@ export function createWaterSurfaceSubsystem({
   // exactly as it did before this fix existed, same convention every other
   // optional dependency here follows.
   refractScene = null,
+  // Perf wave 2 — see water-render.js#buildWaterSurfaceMaterial's own
+  // `noiseTexture`. The viewer owns the target and draws `noiseScene`.
+  noiseTexture = null,
   // WIND-DRIVEN RIPPLE (mythica-machina-press#18) — a GETTER, same shape as
   // `getSkyHandle`/`getWaterCausticsGateForce` immediately below and the
   // SAME reason several other viewer-side consumers already take one
@@ -348,6 +361,7 @@ export function createWaterSurfaceSubsystem({
    * path WITHOUT the resolved tier itself having moved at all. */
   let builtForCausticsGateForce = getWaterCausticsGateForce().forced;
   let builtForCausticsInsideGateOff = _causticsInsideGateOff;
+  let builtForNoisePrepassOff = _noisePrepassOff;
   /** The `windHandle.version` the CURRENT materials were built against
    * (mythica-machina-press#18) — same reasoning as `builtForCausticsGate
    * Force` immediately above: `world/wind-access.js`'s own handle is
@@ -403,6 +417,7 @@ export function createWaterSurfaceSubsystem({
     meshes[1].material = showDebug ? surface.debugMaterial : surface.inscatterMaterial;
     meshes[1].visible = bakedReady;
     meshes[2].visible = bakedReady && !showDebug && !!surface.refractMaterial;
+    noiseMesh.visible = bakedReady && !!surface.noiseMaterial;
   }
 
   /** Build (or, called again from `sync`, REBUILD) the two tier-gated
@@ -445,6 +460,7 @@ export function createWaterSurfaceSubsystem({
       // `waterBody`/`maskTexture` right above already follow.
       causticsGateForce: getWaterCausticsGateForce().forced,
       causticsInsideGate: !_causticsInsideGateOff,
+      noiseTexture: _noisePrepassOff ? null : noiseTexture,
       // WIND-DRIVEN RIPPLE (mythica-machina-press#18) — read FRESH on every
       // build, same discipline as `causticsGateForce` immediately above:
       // `getWindHandle()` may return a NEWER handle than whatever `sync()`
@@ -712,6 +728,17 @@ export function createWaterSurfaceSubsystem({
     m.visible = false; // until BOTH a bake and the hi-res mask land
     (i === 2 ? refractMeshScene : scene).add(m);
   }
+  // THE NOISE PRE-PASS (perf wave 2, 2026-09-25) — the SAME geometry (identity
+  // transform, world-space positions), so it rasterises exactly the pixels the
+  // absorb/in-scatter/refraction meshes will, with `surface.noiseMaterial`,
+  // in a scene of its own the viewer draws into its noise target BEFORE the
+  // world draw. Never visible without a noise material (no target wired, or
+  // below tier 2).
+  const noiseScene = new THREE.Scene();
+  const noiseMesh = new THREE.Mesh(geometry, surface.noiseMaterial ?? refractPlaceholderMaterial);
+  noiseMesh.frustumCulled = false;
+  noiseMesh.visible = false;
+  noiseScene.add(noiseMesh);
 
   /**
    * THE SHORELINE'S ACTUAL SOURCE. Loads the resolved floor's `_Water` file at
@@ -814,6 +841,7 @@ export function createWaterSurfaceSubsystem({
       resolvedTier !== builtForTier ||
       resolvedCausticsGateForce !== builtForCausticsGateForce ||
       _causticsInsideGateOff !== builtForCausticsInsideGateOff ||
+      _noisePrepassOff !== builtForNoisePrepassOff ||
       resolvedWindVersion !== builtForWindVersion
     ) {
       const prev = surface;
@@ -821,6 +849,8 @@ export function createWaterSurfaceSubsystem({
       meshes[0].material = surface.absorbMaterial;
       meshes[1].material = surface.inscatterMaterial;
       meshes[2].material = surface.refractMaterial ?? refractPlaceholderMaterial;
+      noiseMesh.material = surface.noiseMaterial ?? refractPlaceholderMaterial;
+      prev.noiseMaterial?.dispose?.();
       prev.absorbMaterial?.dispose?.(); // free the superseded materials on a tier change
       prev.inscatterMaterial?.dispose?.();
       prev.debugMaterial?.dispose?.(); // the THIRD material built every rebuild, same as the other two
@@ -847,6 +877,7 @@ export function createWaterSurfaceSubsystem({
       builtForTier = surface.tier;
       builtForCausticsGateForce = resolvedCausticsGateForce;
       builtForCausticsInsideGateOff = _causticsInsideGateOff;
+      builtForNoisePrepassOff = _noisePrepassOff;
       builtForWindVersion = resolvedWindVersion;
       // Force every cached value below to re-push onto the FRESH material — it
       // starts back at its constructor defaults, and the key-based caches
@@ -1106,6 +1137,9 @@ export function createWaterSurfaceSubsystem({
 
   return {
     sync,
+    /** The noise pre-pass scene (see `noiseMesh`) — the viewer renders it
+     * into the `noiseTexture` it passed in, before the world draw. */
+    noiseScene,
     /** Re-push `capturedTexNodes`/`capturedRect`/`capturedTexSize` from THIS
      * floor's `waterRefraction` handle — the SAME function `sync()` already
      * calls, exposed separately (2026-08-23, the self-capture fix) so
@@ -1284,6 +1318,8 @@ export function createWaterSurfaceSubsystem({
       surface.inscatterMaterial?.dispose?.();
       surface.debugMaterial?.dispose?.();
       surface.refractMaterial?.dispose?.();
+      noiseScene.remove(noiseMesh);
+      surface.noiseMaterial?.dispose?.();
       refractPlaceholderMaterial.dispose(); // the ONE object never touched by a tier rebuild — freed here instead
       maskTexture?.dispose?.();
       flowPackPlaceholder?.dispose?.();

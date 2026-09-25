@@ -253,7 +253,6 @@ export {
   setWaterCausticsGateForce,
   getWaterCausticsGateForce,
   setWaterCausticsInsideGateOff,
-  setWaterNoisePrepassOff,
 } from './water/water-surface-subsystem.js';
 // THE FLOW PACK (docs/planning/Water-Simulation-Turn.md §3 Layer B / §4 S2) —
 // area-averaged solidity over the SAME full-resolution mask the surface pack

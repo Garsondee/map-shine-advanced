@@ -991,11 +991,6 @@ export function buildWaterSurfaceMaterial({
   // Perf wave 2 — see water-field.js#buildWaterSurfaceField's own
   // `causticsInsideGate`. `false` only for the live A/B diagnostic.
   causticsInsideGate = true,
-  // Perf wave 2 — a screen-sized target the caller fills each frame with the
-  // surface field's 3-octave noise (`noiseMaterial`, returned below), which
-  // every material here then samples instead of evaluating it. `null` (every
-  // caller before this, and every construction-only test) = evaluate inline.
-  noiseTexture = null,
   foamTrail = WATER_TIER4_FOAM_TRAIL,
   // ⚠️ LIVE PARAM (2026-08-24) — live-reported: foam appears on every shore
   // regardless of how the author painted the bank, and a softly-feathered
@@ -1631,17 +1626,8 @@ export function buildWaterSurfaceMaterial({
     flowWarp: vec2(0, 0),
     causticBrightness: float(0),
   };
-  // The noise pre-pass (see `noiseTexture`): the SAME field built twice —
-  // once sampling the pre-rendered noise (the one every material below reads),
-  // once computing it (only `noise` is read, so only it and its inputs are
-  // emitted) for the caller's pre-pass draw. Sampled through the SAME
-  // `uViewRect` world→screen remap the floor gate uses, never the `screenUV`
-  // builtin (`feedback_shared_texture_node_carries_the_wrong_uv`). The noise
-  // varies over many pixels, so bilinear sampling it is exact to half-float
-  // precision at the texel it was written to.
-  let noiseMaterial = null;
   if (activeTier >= 2) {
-    const fieldArgs = {
+    field = buildWaterSurfaceField({
       TSL: THREE.TSL,
       worldXY: vec2(positionWorld.x, positionWorld.y),
       timeMsNode: timeMsNode ?? float(0),
@@ -1696,23 +1682,7 @@ export function buildWaterSurfaceMaterial({
       // duplicate that, never change it.
       windHandle,
       uWindRipple,
-    };
-    let noiseNode = null;
-    if (noiseTexture && uViewRect) {
-      const noiseSpanX = max(uViewRect.z.sub(uViewRect.x), float(1));
-      const noiseSpanY = max(uViewRect.w.sub(uViewRect.y), float(1));
-      const noiseUv = vec2(
-        clamp(positionWorld.x.sub(uViewRect.x).div(noiseSpanX), 0, 1),
-        clamp(positionWorld.y.sub(uViewRect.y).div(noiseSpanY), 0, 1)
-      );
-      noiseNode = texture(noiseTexture, noiseUv).xyz;
-      noiseMaterial = new THREE.NodeMaterial();
-      noiseMaterial.colorNode = vec4(buildWaterSurfaceField(fieldArgs).noise, 1);
-      noiseMaterial.depthTest = false;
-      noiseMaterial.depthWrite = false;
-      noiseMaterial.side = THREE.DoubleSide;
-    }
-    field = buildWaterSurfaceField({ ...fieldArgs, noiseNode });
+    });
   }
 
   // Turbidity rides the OPTICAL DEPTH, which is what makes it visible with no
@@ -2707,9 +2677,6 @@ export function buildWaterSurfaceMaterial({
     absorbMaterial,
     inscatterMaterial,
     debugMaterial,
-    /** The noise pre-pass material (see `noiseTexture`) — `null` unless a
-     * noise texture was supplied AND tier 2+ built a field. */
-    noiseMaterial,
     /** Tier 5's own third mesh — `null` below tier 5 (the same convention
      * `bodyTexNode` uses), a real `THREE.NodeMaterial` at tier >= 5. Callers
      * add/remove this from the draw list on a tier rebuild exactly like the

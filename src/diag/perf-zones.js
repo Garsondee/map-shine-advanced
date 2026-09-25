@@ -715,20 +715,6 @@ export const ZONES = Object.freeze(
       false,
       'updateUiShadowStamps'
     ),
-    // Perf wave 2 (2026-09-25): water's surface-field noise rendered ONCE per
-    // frame into water.noise, then sampled by the absorb/in-scatter/refraction
-    // materials instead of each evaluating it (water-render.js#noiseTexture).
-    z(
-      'geometry.waterNoise',
-      'Water noise pre-pass',
-      'geometry',
-      'geometry.world',
-      'water',
-      'gpu',
-      'conditional',
-      false,
-      'renderWaterNoisePrepass'
-    ),
     // Perf wave 2 (2026-09-25): the ground cloud shadow rendered ONCE per
     // frame at reduced resolution, then sampled by the ambient fill, window,
     // point-light specular and water instead of each evaluating the field

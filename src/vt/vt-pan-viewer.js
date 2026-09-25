@@ -7329,9 +7329,6 @@ export async function startVtPanViewer({
       profiler?.begin(Z.geomDepth);
       runSceneDepthPass();
       profiler?.end(Z.geomDepth);
-      profiler?.begin(Z.geomWaterNoise);
-      renderWaterNoisePrepass();
-      profiler?.end(Z.geomWaterNoise);
       // MRT scoped, never left set (scene-attr.js's own header): a stale MRT
       // node would silently empty light.accumulate's single-attachment
       // targets right after this pass — save/set/restore.
@@ -7365,28 +7362,6 @@ export async function startVtPanViewer({
       // separate render() here was a whole extra MRT render pass, ~0.9 ms).
       renderer.setRenderTarget(null);
       renderer.setMRT(previousMRT);
-    }
-    /** Every floor's water noise pre-pass into `waterNoiseRT` — cleared once,
-     * then each visible floor draws over it in turn (the same camera XY the
-     * world draw uses). A no-op with no visible pre-pass mesh. */
-    function renderWaterNoisePrepass() {
-      let cleared = false;
-      const prevAutoClear = renderer.autoClearColor;
-      for (const surface of waterSurfacesByFloor.values()) {
-        if (!surface.noiseScene?.children?.[0]?.visible) continue;
-        if (!cleared) {
-          renderer.setRenderTarget(waterNoiseRT);
-          renderer.autoClearColor = true;
-          cleared = true;
-        } else {
-          renderer.autoClearColor = false;
-        }
-        renderer.render(surface.noiseScene, camera);
-      }
-      if (cleared) {
-        renderer.autoClearColor = prevAutoClear;
-        renderer.setRenderTarget(null);
-      }
     }
     function runSceneDepthPass() {
       // STAGE-0 CPU-MYSTERY EXPERIMENT (2026-08-10, debug-only, OFF by
@@ -12740,18 +12715,10 @@ export async function startVtPanViewer({
     // (paired to THIS floor's own body-pack slot) — only `sync(floorIndex,
     // viewRect)`'s own arguments (at the frame-loop call site) vary per floor.
     const waterSurfacesByFloor = new Map();
-    // THE WATER NOISE PRE-PASS TARGET (perf wave 2, 2026-09-25) — water's
-    // absorb, in-scatter and refraction materials each evaluated the surface
-    // field's 3-octave fractal noise over the same pixels. Each floor's
-    // `noiseScene` writes it here once per frame (`renderWaterNoisePrepass`,
-    // just before the world draw) and every material samples it. Full
-    // internal resolution — the noise feeds per-pixel foam/slope/caustics.
-    const waterNoiseRT = allocator.create('water.noise', describeCloudShadowCache(internalW, internalH));
     function createWaterSurfaceForFloor(floorIndex) {
       return createWaterSurfaceSubsystem({
         THREE,
         scene,
-        noiseTexture: waterNoiseRT.texture,
         refractScene: waterRefractScene,
         waterBody: getWaterBodyForFloor(floorIndex),
         getWaterMaskUrl,
@@ -18742,7 +18709,6 @@ export async function startVtPanViewer({
       lightWindOverlaySync: profiler?.indexOf('light.windOverlaySync') ?? -1,
       lightUiShadow: profiler?.indexOf('light.uiShadowStamps') ?? -1,
       lightCloudShadowCache: profiler?.indexOf('light.cloudShadowCache') ?? -1,
-      geomWaterNoise: profiler?.indexOf('geometry.waterNoise') ?? -1,
       lightDrawIllum: profiler?.indexOf('light.drawIllum') ?? -1,
       lightDrawRegions: profiler?.indexOf('light.drawRegions') ?? -1,
       lightDrawPoints: profiler?.indexOf('light.drawPointLights') ?? -1,
@@ -22629,7 +22595,6 @@ export async function startVtPanViewer({
         describeCloudShadowCache(cloudShadowCacheW(), cloudShadowCacheH())
       );
       cloudShadowCacheHoldsClear = false;
-      allocator.resize(waterNoiseRT, internalW, internalH, describeCloudShadowCache(internalW, internalH));
       rebindPresent();
       rebindLighting();
       // buf:occlusion tracks the internal tier too — same reasoning. No

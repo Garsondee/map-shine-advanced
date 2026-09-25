@@ -412,6 +412,7 @@ import {
   setVtPanViewerCloudTopsCheapGradient,
   getVtPanViewerCloudTopsCheapGradient,
   setVtPanViewerCloudTopsLowOctaves,
+  setVtPanViewerCloudTopsNoAlphaGate,
   getVtPanViewerCloudTopsLowOctaves,
   getVtPanViewerSceneSettle,
   sampleVtPanViewerSceneSettleNow,
@@ -1123,6 +1124,7 @@ MapShine.getCloudTopsNoShadowMarch = getVtPanViewerCloudTopsNoShadowMarch;
 MapShine.setCloudTopsCheapGradient = setVtPanViewerCloudTopsCheapGradient;
 MapShine.getCloudTopsCheapGradient = getVtPanViewerCloudTopsCheapGradient;
 MapShine.setCloudTopsLowOctaves = setVtPanViewerCloudTopsLowOctaves;
+MapShine.setCloudTopsNoAlphaGate = setVtPanViewerCloudTopsNoAlphaGate;
 MapShine.getCloudTopsLowOctaves = getVtPanViewerCloudTopsLowOctaves;
 // Console-exposed directly (2026-08-12, S2.7) so a pixel-diff gate can prove
 // NON-VACUITY without paying for a full perf-run-full capture — illumBuckets/
@@ -7573,6 +7575,11 @@ function install() {
           marginalGpuMsP50: row.marginalGpuMsP50,
           resolved: row.resolved,
           valid: row.valid,
+          // WHY a row is invalid, deduplicated across its windows — a bare
+          // `valid: false` sent the reader off to re-derive it every time.
+          invalidReasons: [
+            ...new Set([...(row.on ?? []), ...(row.off ?? [])].flatMap((w) => w.invalidReasons ?? []).map(String)),
+          ],
         });
         log.info(
           `priceEffects: ${id} marginal ${row.marginalGpuMsP50} ms (resolved ${row.resolved}, valid ${row.valid})`

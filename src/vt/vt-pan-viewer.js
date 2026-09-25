@@ -3378,7 +3378,9 @@ export async function startVtPanViewer({
     // measured live 2026-09-16 (mythica-machina-press#552) actually lives in
     // — before any of them changes what a real scene ships. All three default
     // `false`: byte-identical to the shipped behaviour until a toggle flips.
-    const cloudTopsDiagOverride = { noShadowMarch: false, cheapGradient: false, lowOctaves: false };
+    // `noAlphaGate` (perf wave 2) turns OFF the shipped `gateOnAlpha` skip, so
+    // its saving can be A/B'd live against the ungated shader it replaced.
+    const cloudTopsDiagOverride = { noShadowMarch: false, cheapGradient: false, lowOctaves: false, noAlphaGate: false };
     /** The octave count `cloudTopsLowOctaves` forces the WHOLE field down to
      * (main sample AND, via `cheapOct = max(2, min(octaves,3))`, every
      * reduced-detail tap too) — 2 is this codebase's own established floor
@@ -3392,7 +3394,7 @@ export async function startVtPanViewer({
      * through the function. */
     function cloudTopsWantedBuildKey() {
       const o = cloudTopsDiagOverride;
-      return `${o.noShadowMarch ? 1 : 0}:${o.cheapGradient ? 1 : 0}:${o.lowOctaves ? 1 : 0}`;
+      return `${o.noShadowMarch ? 1 : 0}:${o.cheapGradient ? 1 : 0}:${o.lowOctaves ? 1 : 0}:${o.noAlphaGate ? 1 : 0}`;
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -3504,6 +3506,9 @@ export async function startVtPanViewer({
         octaves: cloudTopsDiagOverride.lowOctaves ? CLOUD_TOPS_DIAG_LOW_OCTAVES : undefined,
         shadowTaps: cloudTopsDiagOverride.noShadowMarch ? 0 : undefined,
         gradientDetail: !cloudTopsDiagOverride.cheapGradient,
+        // Perf wave 2: skip the seven lighting samples where there is no
+        // cloud (alpha 0) — lossless; only rgb/alpha are read below.
+        gateOnAlpha: !cloudTopsDiagOverride.noAlphaGate,
       });
       // ⚠️ MAP-BOUNDS SOFT MASK (author, 2026-09-16: "we're creating clouds
       // that extend a long way outside the region of the map... large enough
@@ -6763,20 +6768,6 @@ export async function startVtPanViewer({
     const syncDoorGraphics = doorGraphics.sync;
     const disposeDoorGraphics = doorGraphics.dispose;
 
-    /** Draw the door leaves INTO the currently-bound target (buf:scene.color,
-     * bound by runGeometryWorldPass) WITHOUT clearing it, so they composite over
-     * the map and get lit downstream. No-op when nothing is built.
-     *
-     * Stays HERE rather than in the subsystem: `renderer-state/graph-only`
-     * allows `.autoClear* =` only inside vt/graph/diag (trap #5). */
-    function renderDoorGraphicsInto() {
-      if (!doorGraphics.leafCount) return;
-      const prev = renderer.autoClearColor;
-      renderer.autoClearColor = false;
-      renderer.render(doorGraphics.scene, camera);
-      renderer.autoClearColor = prev;
-    }
-
     /** Constructed lazily, after the startup bake (see the construction site
      * near bakeWindField('startup') for why) — see runSurfaceParticlesPass and
      * renderFrame's particle step for the two readers; both tolerate `null`
@@ -7308,12 +7299,9 @@ export async function startVtPanViewer({
         renderer.render(scene, camera);
         profiler?.end(Z.geomWorld);
       }
-      // Door leaves composite over the map INTO the same target (not cleared),
-      // so the light.accumulate pass lights them like the tiles beneath them.
-      // Class-B overlay, same safe zero-default, no mrtNode override needed.
-      profiler?.begin(Z.geomDoors);
-      renderDoorGraphicsInto();
-      profiler?.end(Z.geomDoors);
+      // Door leaves are drawn BY the world draw above — `doorGraphics.root` is
+      // parented into `scene` with a top renderOrder (perf wave 2: their old
+      // separate render() here was a whole extra MRT render pass, ~0.9 ms).
       renderer.setRenderTarget(null);
       renderer.setMRT(previousMRT);
     }
@@ -7403,8 +7391,8 @@ export async function startVtPanViewer({
      * buffer this reads from structurally cannot contain a token.
      *
      * ⚠️ DOORS ARE ALSO EXCLUDED, deliberately conservative rather than
-     * proven necessary: `renderDoorGraphicsInto()` is simply never called
-     * here. A door's open/closed state is dynamic in the same sense a token's
+     * proven necessary: `doorGraphics.root` (parented into `scene` since perf
+     * wave 2) is hidden for the capture, the same way tokens are. A door's open/closed state is dynamic in the same sense a token's
      * position is, and this capture has no cheap way to tell "this door leaf
      * is effectively permanent scenery" from "this door just changed state" —
      * so it stays out, same as tokens, until a reason to special-case it
@@ -7416,7 +7404,8 @@ export async function startVtPanViewer({
      * invisible after this returns, exactly as it was before this ran.
      */
     function captureMapOnlySnapshot() {
-      const restore = [];
+      const restore = [[doorGraphics.root, doorGraphics.root.visible]];
+      doorGraphics.root.visible = false;
       for (const item of lastItems) {
         if (item.kind === 'token') {
           const tiles = itemStates.get(item.id)?.wholeImage?.tiles;
@@ -12542,6 +12531,9 @@ export async function startVtPanViewer({
     }
 
     const scene = new THREE.Scene();
+    // Door leaves draw inside the world draw itself — see
+    // door-graphics-subsystem.js#DOOR_LEAF_RENDER_ORDER.
+    scene.add(doorGraphics.root);
 
     // TIER 5's OWN SCENE (2026-08-23, the self-capture fix — see
     // `water-render.js#WATER_TIER5_DISABLED_PENDING_SELF_CAPTURE_FIX`'s own
@@ -18620,7 +18612,6 @@ export async function startVtPanViewer({
       masksSync: profiler?.indexOf('masks.occlusionSync') ?? -1,
       masksDraw: profiler?.indexOf('masks.occlusionDraw') ?? -1,
       geomWorld: profiler?.indexOf('geometry.worldDraw') ?? -1,
-      geomDoors: profiler?.indexOf('geometry.doorDraw') ?? -1,
       geomDepth: profiler?.indexOf('geometry.depthDraw') ?? -1,
       // ADDED 2026-08-09 — see perf-zones.js's own declaration comment: the
       // 13ms/frame CPU mystery three isolated shader-lab benches could not
@@ -24187,6 +24178,14 @@ export async function startVtPanViewer({
       getCloudTopsLowOctaves() {
         return { lowOctaves: cloudTopsDiagOverride.lowOctaves };
       },
+      setCloudTopsNoAlphaGate(on) {
+        const next = !!on;
+        if (next === cloudTopsDiagOverride.noAlphaGate) {
+          return { noAlphaGate: cloudTopsDiagOverride.noAlphaGate, changed: false };
+        }
+        cloudTopsDiagOverride.noAlphaGate = next;
+        return { noAlphaGate: next, changed: true };
+      },
       /**
        * The flag AND the evidence that it is actually doing something.
        *
@@ -28499,6 +28498,12 @@ export function setVtPanViewerCloudTopsLowOctaves(on) {
 export function getVtPanViewerCloudTopsLowOctaves() {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.getCloudTopsLowOctaves();
+}
+/** DIAGNOSTIC ONLY (perf wave 2) — `MapShine.setCloudTopsNoAlphaGate(true)`
+ * rebuilds the tops WITHOUT the `gateOnAlpha` skip, for a live A/B. */
+export function setVtPanViewerCloudTopsNoAlphaGate(on) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setCloudTopsNoAlphaGate(on);
 }
 
 /**

@@ -298,17 +298,6 @@ export const ZONES = Object.freeze(
       false,
       'runGeometryWorldPass'
     ),
-    z(
-      'geometry.doorDraw',
-      'Door graphics draw',
-      'geometry',
-      'geometry.world',
-      'doorGraphics',
-      'gpu',
-      'conditional',
-      false,
-      'renderDoorGraphicsInto'
-    ),
     // buf:scene.depth (docs/planning/Depth-Buffer.md) — its own real scene,
     // its own camera, one extra renderer.render() call every frame. §11's
     // OWN named risk ("the all-floors draw list costs draws the colour pass
@@ -1744,8 +1733,8 @@ export const EFFECT_ZONING = Object.freeze({
     why: "post.dof is entirely this effect's own pass — dof.uniformPush (cpu), dof.downsample and dof.composite (gpu) cover the whole downsample-pyramid + composite chain with nothing shared with another effect and nothing left un-zoned.",
   }),
   doorGraphics: Object.freeze({
-    coverage: 'full',
-    why: 'tick.doorSync (the per-frame animation-state sync) and geometry.doorDraw (renderDoorGraphicsInto, its own render call inside geometry.world) cover its entire cost — door leaves emit no light and have no bake, unlike candleFlame/lightning/fire.',
+    coverage: 'partial',
+    why: 'tick.doorSync (the per-frame animation-state sync) is zoned; the leaves themselves draw INSIDE geometry.world since perf wave 2 (2026-09-25) — their old separate render call (geometry.doorDraw) was a whole extra MRT render pass costing ~0.9 ms for a handful of quads, so they now ride the world draw and their few fragments are part of that zone. Door leaves emit no light and have no bake, unlike candleFlame/lightning/fire.',
   }),
   // Added 2026-09-16 (perf-instrumentation-audit, #553) — precipitation had
   // NO zone at all: `runSurfacePrecipitationPass` (surface.precipitation,

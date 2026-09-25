@@ -11,8 +11,9 @@
  *
  * ⚠️ **This is also the template tier-0 water follows.** A door is an OPAQUE,
  * LIT part of the map — a wooden leaf in a doorway, not an additive glow — so
- * its meshes live in their own `THREE.Scene` and are drawn INTO
- * `buf:scene.color` right after the main scene, *before* lighting, which is
+ * its meshes are drawn INTO `buf:scene.color` as the LAST items of the main
+ * world draw (a Group parented into it, see DOOR_LEAF_RENDER_ORDER), *before*
+ * lighting, which is
  * why the lighting pass darkens a door at night and a torch pools on it for
  * free, exactly like the tile beside it. Water's surface wants the identical
  * treatment and should read this file before inventing its own.
@@ -38,14 +39,12 @@
  * this, no new door math.
  *
  * ============================================================================
- * WHY THE DRAW CALL IS NOT IN HERE (trap #5)
+ * WHY THERE IS NO DRAW CALL AT ALL
  * ============================================================================
- * `renderer-state/graph-only` allows `.autoClear* =` only inside `vt/`,
- * `graph/`, `diag/`, and the draw needs to suppress the clear so the leaves
- * composite over the map rather than erasing it. So the seven-line
- * bind-and-draw stays in `vt-pan-viewer.js` and reads `scene` + `leafCount`
- * from here — the same split `sun-shadow-subsystem.js` §3 documents, and the
- * frame-graph pattern those walls' own `instead:` text prescribes.
+ * Until perf wave 2 (2026-09-25) the viewer drew the leaves in a separate
+ * `renderer.render()` after the world draw; now it parents `root` into the
+ * world scene itself, so the leaves ride the world draw's own render pass and
+ * cost no pass of their own. `leafCount` is still exposed for diagnostics.
  *
  * @module effects/door-graphics-subsystem
  */
@@ -71,15 +70,31 @@ import { computeQuadCorners } from '../foundry/index.js';
 const log = createLogger('DoorGraphics');
 
 /**
+ * The leaves' `renderOrder` inside the viewer's MAIN world scene (perf wave 2,
+ * 2026-09-25). They used to be a scene of their own, drawn by a SECOND
+ * `renderer.render()` into `buf:scene.color` right after the world draw — on
+ * WebGPU a whole extra render pass that loads and stores every attachment of
+ * that MRT target (colour, attr, depth32) at full internal resolution, just to
+ * add a handful of small quads: priced live at ~0.9 ms on Docklands Warehouse
+ * (2560x1215). As children of the world scene they draw in the SAME pass.
+ * Every world material is `transparent`, so three sorts the whole draw list by
+ * `renderOrder`; this is far above any world item's own order (tile/token
+ * orders are small dense integers), so a leaf still draws last — above tiles
+ * AND tokens, exactly where the separate pass put it.
+ */
+export const DOOR_LEAF_RENDER_ORDER = 1e9;
+
+/**
  * @param {object} args
  * @param {*} args.THREE - injected, never imported (the bloom split's rule).
  * @param {{size?: number}} args.dimensions - the scene's px/square.
  * @param {() => {enabled: boolean, params: object, doors: Array<object>}} args.getDoorRenderState -
  *   boot's data seam. Default-off means an un-wired caller draws no doors.
- * @returns {{scene: *, readonly leafCount: number, sync: (nowMs: number) => void, dispose: () => void}}
+ * @returns {{root: *, readonly leafCount: number, sync: (nowMs: number) => void, dispose: () => void}}
  */
 export function createDoorGraphicsSubsystem({ THREE, dimensions, getDoorRenderState }) {
-  const doorScene = new THREE.Scene();
+  // A Group, not a Scene: it is parented into the viewer's world scene.
+  const doorScene = new THREE.Group();
   /** url -> { texture, width, height } once loaded; 'pending'/'failed' while not. */
   const doorTextureCache = new Map();
   /** wallId -> Array<leaf state> (1 for a single door, 2 for a double). */
@@ -175,6 +190,7 @@ export function createDoorGraphicsSubsystem({ THREE, dimensions, getDoorRenderSt
       geometry.setIndex(Array.from(QUAD_INDICES));
       const mesh = new THREE.Mesh(geometry, mat.material);
       mesh.frustumCulled = false; // world-space, camera bounds vary per frame
+      mesh.renderOrder = DOOR_LEAF_RENDER_ORDER;
       doorScene.add(mesh);
       leaves.push({
         style,
@@ -346,10 +362,10 @@ export function createDoorGraphicsSubsystem({ THREE, dimensions, getDoorRenderSt
   }
 
   return {
-    /** The leaves' own scene — the viewer's `renderDoorGraphicsInto` draws THIS
-     * into the currently-bound target without clearing it (see the header for
-     * why that seven-line call cannot live in here). */
-    scene: doorScene,
+    /** The leaves' root Group — the viewer parents it into its world scene
+     * (see DOOR_LEAF_RENDER_ORDER), and hides it for any capture that must
+     * exclude doors. */
+    root: doorScene,
     /** How many doors currently have built leaves — the viewer skips its draw
      * entirely at zero, so a scene with no doors costs nothing. A getter, not a
      * value: the count changes on every reconcile. */

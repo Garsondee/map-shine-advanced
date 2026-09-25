@@ -243,6 +243,7 @@ export function buildLensCompositeMaterial({
     fract,
     sin,
     Fn,
+    If,
   } = THREE.TSL;
 
   // ── UNIFORMS — every LENS_PARAMS knob this material actually reads ───────
@@ -389,6 +390,16 @@ export function buildLensCompositeMaterial({
     // per-tier one). ──────────────────────────────────────────────────────
     const focusShiftUv = uAutoFocusShiftPx.mul(texelSize).mul(clamp(uAutoFocusAmount, 0, 1));
     focusUv = clamp(distortedUv.add(focusShiftUv), vec2(0, 0), vec2(1, 1)).toVar();
+    // ⚠️ BRANCHED ON THE PER-FRAME AMOUNT (perf wave 2, 2026-09-25). The nine
+    // taps used to run on EVERY frame tier 1 is active and be mixed in at
+    // `focusAmount = 0` — i.e. discarded — on all but the rare pulse frames.
+    // `mix(sharp, blur, 0)` is exactly `sharp`, so skipping them there is
+    // lossless. This is not a feature gate (`tsl/no-uniform-gates` is about
+    // those — a tier that should shrink the compiled shader): the amount is an
+    // animated per-frame envelope, the shader must hold the taps for the frames
+    // that pulse, and a branch every fragment takes the same way is coherent,
+    // so the skipped taps genuinely cost nothing.
+    const focusAmount = clamp(uAutoFocusAmount, 0, 1);
     const kawaseBlur = Fn(() => {
       const r1 = maxNode(uAutoFocusBlurPx, float(0.001));
       const r2 = r1.mul(2);
@@ -406,8 +417,14 @@ export function buildLensCompositeMaterial({
       return accum;
     })();
     const sharp = sampleSceneWithCA(focusUv);
-    const focusAmount = clamp(uAutoFocusAmount, 0, 1);
-    sceneColor = mix(sharp, kawaseBlur, focusAmount).toVar();
+    // `If` needs an `Fn` scope (TSL's flow stack), hence the wrapper.
+    const focused = Fn(() => {
+      const out = sharp.toVar('lensFocused');
+      If(focusAmount.greaterThan(float(0)), () => {
+        out.assign(mix(sharp, kawaseBlur, focusAmount));
+      });
+      return out;
+    })();
 
     // ── CAMERA MOTION BLUR — 2-tap directional sample either side of the
     // pan/zoom-driven offset (V2's own cheap approximation, not a real
@@ -417,10 +434,18 @@ export function buildLensCompositeMaterial({
     const radialDirSafe = radialDir.add(vec2(1e-5, 1e-5)).normalize();
     const motionUv = uCameraMotionBlurPx.add(radialDirSafe.mul(uZoomMotionBlurPx)).mul(texelSize);
     const mLen = length(motionUv);
-    const mA = sampleSceneCheap(focusUv.add(motionUv));
-    const mB = sampleSceneCheap(focusUv.sub(motionUv));
+    // Same per-frame branch as the autofocus taps above: `motionBlend` is
+    // exactly 0 whenever the camera is still, and mixing by 0 is the identity.
     const motionBlend = clamp(mLen.mul(2.2), 0, 0.65);
-    sceneColor = mix(sceneColor, mA.add(mB).mul(0.5), motionBlend);
+    sceneColor = Fn(() => {
+      const out = focused.toVar('lensMotion');
+      If(motionBlend.greaterThan(float(0)), () => {
+        const mA = sampleSceneCheap(focusUv.add(motionUv));
+        const mB = sampleSceneCheap(focusUv.sub(motionUv));
+        out.assign(mix(focused, mA.add(mB).mul(0.5), motionBlend));
+      });
+      return out;
+    })();
   } else {
     sceneColor = sampleSceneWithCA(distortedUv);
   }

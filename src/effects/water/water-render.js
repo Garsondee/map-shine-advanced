@@ -1707,19 +1707,7 @@ export function buildWaterSurfaceMaterial({
       );
       noiseNode = texture(noiseTexture, noiseUv).xyz;
       noiseMaterial = new THREE.NodeMaterial();
-      // Only where there is water: every consumer of the noise (turbidity via
-      // depth01, foam, slope via the specular/refraction/caustic terms) is
-      // multiplied by `inside` downstream, so dry-land texels are never read
-      // into anything visible — writing 0 there skips the fractal for the
-      // whole land part of the mesh's AABB.
-      const preNoise = buildWaterSurfaceField(fieldArgs).noise;
-      noiseMaterial.colorNode = Fn(() => {
-        const out = vec3(0, 0, 0).toVar('waterNoisePre');
-        If(inside.greaterThan(float(0)), () => {
-          out.assign(preNoise);
-        });
-        return vec4(out, 1);
-      })();
+      noiseMaterial.colorNode = vec4(buildWaterSurfaceField(fieldArgs).noise, 1);
       noiseMaterial.depthTest = false;
       noiseMaterial.depthWrite = false;
       noiseMaterial.side = THREE.DoubleSide;

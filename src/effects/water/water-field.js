@@ -1553,12 +1553,7 @@ export function buildWaterSurfaceField({
     // pixels (zoomed out); at closer zooms `edgeFarBase` wins either way.
     let combinedNet;
     if (causticsInsideGate) {
-      // From the cell coordinate WITHOUT `waveWarp`: that term comes from the
-      // surface noise's slope, which the noise pre-pass zeroes on dry land, so
-      // its derivative would spike along the shoreline; `domainOffset` does not
-      // depend on the noise at all. `waveWarp` is a bounded perturbation (capped
-      // at a fraction of a cell), so the estimate's scale is unchanged.
-      const cellFw = fwidth(worldXY.add(domainOffset).div(cellPx));
+      const cellFw = fwidth(netCellPreOrganic);
       const aaFw = cellFw.x.add(cellFw.y).mul(float(1.25)).toVar('waterCausticAaFw');
       combinedNet = Fn(() => {
         const out = float(0).toVar('waterCausticNetGated');

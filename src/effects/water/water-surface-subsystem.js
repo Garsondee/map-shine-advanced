@@ -112,6 +112,17 @@ export function getWaterCausticsGateForce() {
   return { forced: _causticsGateForce };
 }
 
+/** DIAGNOSTIC ONLY (perf wave 2) — `true` rebuilds water with the caustic
+ * net evaluated over the whole mesh again (the pre-wave-2 shader), for a live
+ * A/B of `causticsInsideGate`. Same module-level shape and rebuild-on-change
+ * path as `_causticsGateForce` above. @type {boolean} */
+let _causticsInsideGateOff = false;
+/** @param {boolean} off */
+export function setWaterCausticsInsideGateOff(off) {
+  _causticsInsideGateOff = off === true;
+  return { off: _causticsInsideGateOff };
+}
+
 /**
  * @param {object} args
  * @param {*} args.THREE - injected, never imported.
@@ -336,6 +347,7 @@ export function createWaterSurfaceSubsystem({
    * because a diagnostic force change must trigger the identical rebuild
    * path WITHOUT the resolved tier itself having moved at all. */
   let builtForCausticsGateForce = getWaterCausticsGateForce().forced;
+  let builtForCausticsInsideGateOff = _causticsInsideGateOff;
   /** The `windHandle.version` the CURRENT materials were built against
    * (mythica-machina-press#18) — same reasoning as `builtForCausticsGate
    * Force` immediately above: `world/wind-access.js`'s own handle is
@@ -432,6 +444,7 @@ export function createWaterSurfaceSubsystem({
       // Read FRESH on every build (never captured earlier), same discipline
       // `waterBody`/`maskTexture` right above already follow.
       causticsGateForce: getWaterCausticsGateForce().forced,
+      causticsInsideGate: !_causticsInsideGateOff,
       // WIND-DRIVEN RIPPLE (mythica-machina-press#18) — read FRESH on every
       // build, same discipline as `causticsGateForce` immediately above:
       // `getWindHandle()` may return a NEWER handle than whatever `sync()`
@@ -800,6 +813,7 @@ export function createWaterSurfaceSubsystem({
     if (
       resolvedTier !== builtForTier ||
       resolvedCausticsGateForce !== builtForCausticsGateForce ||
+      _causticsInsideGateOff !== builtForCausticsInsideGateOff ||
       resolvedWindVersion !== builtForWindVersion
     ) {
       const prev = surface;
@@ -832,6 +846,7 @@ export function createWaterSurfaceSubsystem({
       // rather than depending on winning that race.
       builtForTier = surface.tier;
       builtForCausticsGateForce = resolvedCausticsGateForce;
+      builtForCausticsInsideGateOff = _causticsInsideGateOff;
       builtForWindVersion = resolvedWindVersion;
       // Force every cached value below to re-push onto the FRESH material — it
       // starts back at its constructor defaults, and the key-based caches

@@ -988,6 +988,9 @@ export function buildWaterSurfaceMaterial({
   // what it costs `geometry.worldDraw` on a real GPU with everything else
   // (shoaling, shore foam) held fixed.
   causticsGateForce = null,
+  // Perf wave 2 — see water-field.js#buildWaterSurfaceField's own
+  // `causticsInsideGate`. `false` only for the live A/B diagnostic.
+  causticsInsideGate = true,
   foamTrail = WATER_TIER4_FOAM_TRAIL,
   // ⚠️ LIVE PARAM (2026-08-24) — live-reported: foam appears on every shore
   // regardless of how the author painted the bank, and a softly-feathered
@@ -1670,6 +1673,7 @@ export function buildWaterSurfaceMaterial({
       // Effects.md Law 4 — below tier 4 neither branch is even entered.
       shoaling: activeTier >= 4,
       caustics: causticsGateForce ?? activeTier >= 4,
+      causticsInsideGate,
       // WIND-DRIVEN RIPPLE (mythica-machina-press#18) — UNCONDITIONAL, not
       // gated behind an `if (activeTier >= N)` the way shoaling/caustics
       // are: it rides tier 2's own fetch (the SAME "no new fetch" reasoning

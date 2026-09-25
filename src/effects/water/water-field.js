@@ -863,6 +863,7 @@ export function buildWaterSurfaceField({
   uChop = null,
   shoaling = false,
   caustics = false,
+  causticsInsideGate = false,
   // THE REAL SOLVED LOCAL DIRECTION (S3's pressure solve, already
   // dead-zone-guarded by the caller — `water-render.js`'s own
   // `localFlowDirSafe`, the SAME node shore foam's `localFlowDir` reads).
@@ -923,6 +924,8 @@ export function buildWaterSurfaceField({
     fwidth,
     mx_fractal_noise_vec3,
     mx_worley_noise_vec3,
+    Fn,
+    If,
   } = TSL;
   const bankInfluenceNode = uBankInfluence ?? float(WATER_BANK_INFLUENCE);
   const flowWarpInfluenceNode = uFlowWarpInfluence ?? float(WATER_FLOW_WARP_INFLUENCE);
@@ -1401,99 +1404,108 @@ export function buildWaterSurfaceField({
     // against a real render (this repo's shader-lab bench, not this audit)
     // before assuming the look is unchanged; revert to `2` if the author's
     // eyes disagree.
-    const growthFreq = causticGrowthScaleNode;
-    const growthEps = float(WATER_CAUSTICS_GROWTH_EPS);
-    const potentialAt = (p) =>
-      mx_fractal_noise_vec3(
-        vec3(p.x.mul(growthFreq), p.y.mul(growthFreq), tSec.mul(causticGrowthSpeedNode)),
-        1,
-        2.0,
-        0.5
-      ).x;
-    const potentialCentre = potentialAt(netCellPreOrganic);
-    const potentialX = potentialAt(netCellPreOrganic.add(vec2(growthEps, 0)));
-    const potentialY = potentialAt(netCellPreOrganic.add(vec2(0, growthEps)));
-    const growthGradient = vec2(potentialX.sub(potentialCentre), potentialY.sub(potentialCentre)).div(growthEps);
-    const growthWarpRaw = growthGradient.mul(causticGrowthNode);
-    const growthWarpLen = length(growthWarpRaw);
-    const growthWarpCapScale = min(float(1), causticGrowthCapNode.div(max(growthWarpLen, float(1e-4))));
-    const netCell = netCellPreOrganic.add(growthWarpRaw.mul(growthWarpCapScale));
+    // Everything from here to `combinedNet` is the expensive part — the
+    // growth potential (three fractal-noise taps) and two 3-D Worley layers.
+    // Wrapped in a builder so `causticsInsideGate` (below) can run it inside
+    // a per-pixel branch. `aaFw` = null keeps the original `fwidth` AA;
+    // otherwise it is the pre-branch AA estimate (see that gate).
+    const buildCombinedNet = (aaFw) => {
+      const growthFreq = causticGrowthScaleNode;
+      const growthEps = float(WATER_CAUSTICS_GROWTH_EPS);
+      const potentialAt = (p) =>
+        mx_fractal_noise_vec3(
+          vec3(p.x.mul(growthFreq), p.y.mul(growthFreq), tSec.mul(causticGrowthSpeedNode)),
+          1,
+          2.0,
+          0.5
+        ).x;
+      const potentialCentre = potentialAt(netCellPreOrganic);
+      const potentialX = potentialAt(netCellPreOrganic.add(vec2(growthEps, 0)));
+      const potentialY = potentialAt(netCellPreOrganic.add(vec2(0, growthEps)));
+      const growthGradient = vec2(potentialX.sub(potentialCentre), potentialY.sub(potentialCentre)).div(growthEps);
+      const growthWarpRaw = growthGradient.mul(causticGrowthNode);
+      const growthWarpLen = length(growthWarpRaw);
+      const growthWarpCapScale = min(float(1), causticGrowthCapNode.div(max(growthWarpLen, float(1e-4))));
+      const netCell = netCellPreOrganic.add(growthWarpRaw.mul(growthWarpCapScale));
 
-    // EVOLUTION's own clock — Z is a real lattice axis, not "2-D result at
-    // time T"; see the header above.
-    const zTimePrimary = tSec.mul(causticEvolveSpeedNode);
+      // EVOLUTION's own clock — Z is a real lattice axis, not "2-D result at
+      // time T"; see the header above.
+      const zTimePrimary = tSec.mul(causticEvolveSpeedNode);
 
-    /** F1/F2/F3 for one Worley layer at `(cellCoord, zTime)` — a genuine
-     * 3-D lattice sample, sorted nearest-to-farthest. `mx_worley_noise_vec3`'s
-     * second arg is jitter (1 = fully randomised feature points), the same
-     * value `buildFoamCellularStructure` already uses for its own 2-D call. */
-    const worleyAt = (cellCoord, zTime) => mx_worley_noise_vec3(vec3(cellCoord.x, cellCoord.y, zTime), float(1));
+      /** F1/F2/F3 for one Worley layer at `(cellCoord, zTime)` — a genuine
+       * 3-D lattice sample, sorted nearest-to-farthest. `mx_worley_noise_vec3`'s
+       * second arg is jitter (1 = fully randomised feature points), the same
+       * value `buildFoamCellularStructure` already uses for its own 2-D call. */
+      const worleyAt = (cellCoord, zTime) => mx_worley_noise_vec3(vec3(cellCoord.x, cellCoord.y, zTime), float(1));
 
-    // SHARPNESS — how WIDE the bright band around each edge is allowed to
-    // read, NOT a post-hoc contrast curve (that was the FIRST version's
-    // mistake — reshaping a blob's OUTPUT can't change its SHAPE). 0 = a
-    // thick, lacy net (`WATER_CAUSTICS_EDGE_FAR_MAX`); 1 = a hairline net
-    // (`WATER_CAUSTICS_EDGE_FAR_MIN`), close to the author's own reference
-    // image. `fwidth`-widened exactly like `buildFoamCellularStructure`'s own
-    // proven mechanism, so the same world-space band can never alias into a
-    // hard single-pixel edge at closer zoom, whatever `causticSharpness` is
-    // set to.
-    const edgeFarBase = mix(
-      float(WATER_CAUSTICS_EDGE_FAR_MAX),
-      float(WATER_CAUSTICS_EDGE_FAR_MIN),
-      causticSharpnessNode
-    );
+      // SHARPNESS — how WIDE the bright band around each edge is allowed to
+      // read, NOT a post-hoc contrast curve (that was the FIRST version's
+      // mistake — reshaping a blob's OUTPUT can't change its SHAPE). 0 = a
+      // thick, lacy net (`WATER_CAUSTICS_EDGE_FAR_MAX`); 1 = a hairline net
+      // (`WATER_CAUSTICS_EDGE_FAR_MIN`), close to the author's own reference
+      // image. `fwidth`-widened exactly like `buildFoamCellularStructure`'s own
+      // proven mechanism, so the same world-space band can never alias into a
+      // hard single-pixel edge at closer zoom, whatever `causticSharpness` is
+      // set to.
+      const edgeFarBase = mix(
+        float(WATER_CAUSTICS_EDGE_FAR_MAX),
+        float(WATER_CAUSTICS_EDGE_FAR_MIN),
+        causticSharpnessNode
+      );
 
-    /** One layer's brightness — an EDGE test (`F2−F1`, as before) times a
-     * NEW JUNCTION test (`F3−F2`) that concentrates full brightness only
-     * where a THIRD feature point is ALSO nearly equidistant (a genuine
-     * multi-cell junction) and lets a plain two-cell edge fall to a dim
-     * floor. Author, live: *"the effect produces a brightening effect but
-     * it's uniform, it should be concentrated into the intersections and
-     * grow weak in the middle parts of the lines."* Physically apt, not
-     * just aesthetic — real caustic brightness concentrates at
-     * higher-order fold intersections (catastrophe theory's cusps), not
-     * uniformly along a single fold's own length. Reuses `edgeFarBase` (a
-     * FRACTION of it) rather than a new independent threshold, so
-     * `causticSharpness` sharpens the junction test in step with the edge
-     * test instead of the two drifting apart at extreme settings. */
-    const netAt = (cellCoord, zTime) => {
-      const ranks = worleyAt(cellCoord, zTime);
-      const edgeDist = ranks.y.sub(ranks.x);
-      const junctionGap = ranks.z.sub(ranks.y);
+      /** One layer's brightness — an EDGE test (`F2−F1`, as before) times a
+       * NEW JUNCTION test (`F3−F2`) that concentrates full brightness only
+       * where a THIRD feature point is ALSO nearly equidistant (a genuine
+       * multi-cell junction) and lets a plain two-cell edge fall to a dim
+       * floor. Author, live: *"the effect produces a brightening effect but
+       * it's uniform, it should be concentrated into the intersections and
+       * grow weak in the middle parts of the lines."* Physically apt, not
+       * just aesthetic — real caustic brightness concentrates at
+       * higher-order fold intersections (catastrophe theory's cusps), not
+       * uniformly along a single fold's own length. Reuses `edgeFarBase` (a
+       * FRACTION of it) rather than a new independent threshold, so
+       * `causticSharpness` sharpens the junction test in step with the edge
+       * test instead of the two drifting apart at extreme settings. */
+      const netAt = (cellCoord, zTime, layerScale) => {
+        const ranks = worleyAt(cellCoord, zTime);
+        const edgeDist = ranks.y.sub(ranks.x);
+        const junctionGap = ranks.z.sub(ranks.y);
 
-      const edgeFarAA = max(edgeFarBase, fwidth(edgeDist).mul(float(WATER_CAUSTICS_EDGE_AA_PX)));
-      // Bright NEAR an edge (edgeDist≈0), dark toward a cell's interior —
-      // `1 −` the ramp, not a reversed-argument smoothstep (undefined for
-      // edge0 > edge1), same construction `buildFoamCellularStructure` uses.
-      const edgeMask = float(1).sub(smoothstep(float(0), edgeFarAA, edgeDist));
+        const edgeFw = aaFw ? aaFw.mul(float(layerScale)) : fwidth(edgeDist);
+        const edgeFarAA = max(edgeFarBase, edgeFw.mul(float(WATER_CAUSTICS_EDGE_AA_PX)));
+        // Bright NEAR an edge (edgeDist≈0), dark toward a cell's interior —
+        // `1 −` the ramp, not a reversed-argument smoothstep (undefined for
+        // edge0 > edge1), same construction `buildFoamCellularStructure` uses.
+        const edgeMask = float(1).sub(smoothstep(float(0), edgeFarAA, edgeDist));
 
-      const junctionFar = edgeFarBase.mul(causticJunctionWidthNode);
-      const junctionFarAA = max(junctionFar, fwidth(junctionGap).mul(float(WATER_CAUSTICS_EDGE_AA_PX)));
-      const junctionMask = float(1).sub(smoothstep(float(0), junctionFarAA, junctionGap));
+        const junctionFar = edgeFarBase.mul(causticJunctionWidthNode);
+        const junctionFw = aaFw ? aaFw.mul(float(layerScale)) : fwidth(junctionGap);
+        const junctionFarAA = max(junctionFar, junctionFw.mul(float(WATER_CAUSTICS_EDGE_AA_PX)));
+        const junctionMask = float(1).sub(smoothstep(float(0), junctionFarAA, junctionGap));
 
-      const lineBrightness = mix(causticLineFloorNode, float(1), junctionMask);
-      return edgeMask.mul(lineBrightness);
+        const lineBrightness = mix(causticLineFloorNode, float(1), junctionMask);
+        return edgeMask.mul(lineBrightness);
+      };
+
+      const primaryNet = netAt(netCell, zTimePrimary, 1);
+
+      // NETTING — a SECOND layer at `WATER_CAUSTICS_NET_SCALE_RATIO`× FINER
+      // in SPACE (unchanged from round 2) and now ALSO `NET_SCALE_RATIO`×
+      // FASTER in its own evolution — a finer scale evolving proportionally
+      // faster is the same cascade real turbulence shows (small structures
+      // change faster than large ones), not an arbitrary second choice — plus
+      // a fixed TIME PHASE offset so it never evolves in lockstep with the
+      // primary layer. Blended via `max()` so two independent, already-
+      // connected nets overlay into a visibly richer net — never `average`,
+      // which would only dim wherever the two layers' edges do not coincide
+      // and undo the point of a second layer entirely.
+      const fineCell = netCell.mul(float(WATER_CAUSTICS_NET_SCALE_RATIO));
+      const zTimeFine = tSec
+        .mul(causticEvolveSpeedNode.mul(float(WATER_CAUSTICS_NET_SCALE_RATIO)))
+        .add(float(WATER_CAUSTICS_NET_TIME_PHASE));
+      const fineNet = netAt(fineCell, zTimeFine, WATER_CAUSTICS_NET_SCALE_RATIO);
+      return mix(primaryNet, max(primaryNet, fineNet), causticNettingNode);
     };
-
-    const primaryNet = netAt(netCell, zTimePrimary);
-
-    // NETTING — a SECOND layer at `WATER_CAUSTICS_NET_SCALE_RATIO`× FINER
-    // in SPACE (unchanged from round 2) and now ALSO `NET_SCALE_RATIO`×
-    // FASTER in its own evolution — a finer scale evolving proportionally
-    // faster is the same cascade real turbulence shows (small structures
-    // change faster than large ones), not an arbitrary second choice — plus
-    // a fixed TIME PHASE offset so it never evolves in lockstep with the
-    // primary layer. Blended via `max()` so two independent, already-
-    // connected nets overlay into a visibly richer net — never `average`,
-    // which would only dim wherever the two layers' edges do not coincide
-    // and undo the point of a second layer entirely.
-    const fineCell = netCell.mul(float(WATER_CAUSTICS_NET_SCALE_RATIO));
-    const zTimeFine = tSec
-      .mul(causticEvolveSpeedNode.mul(float(WATER_CAUSTICS_NET_SCALE_RATIO)))
-      .add(float(WATER_CAUSTICS_NET_TIME_PHASE));
-    const fineNet = netAt(fineCell, zTimeFine);
-    const combinedNet = mix(primaryNet, max(primaryNet, fineNet), causticNettingNode);
 
     // PHYSICAL PLAUSIBILITY, CHEAPLY — dead-calm water (`chop=0`) shows no
     // caustics (the same "no wave field, no caustics" contract the Jacobian
@@ -1516,6 +1528,32 @@ export function buildWaterSurfaceField({
     // it, over the water's whole AABB. Every other term in this file already
     // carries this gate; caustics cannot be the one exception. See
     // `feedback_blend_neutral_element_is_per_blend` and correction #9.
+    // ⚠️ `causticsInsideGate` (perf wave 2, 2026-09-25) — the net only ever
+    // reaches the screen multiplied by `insideWater` and `chopGate`, yet it
+    // was evaluated over the water mesh's whole footprint, dry land included.
+    // Gated, it runs only where both are non-zero; elsewhere the product was
+    // exactly 0 anyway. The catch is the net's `fwidth` AA: derivatives are
+    // illegal under a per-pixel (non-uniform) branch in WGSL, so the AA width
+    // comes from `fwidth(netCellPreOrganic)`, taken BEFORE the branch. In cell
+    // units `F2 − F1` (and `F3 − F2`) change at up to ~2x the coordinate's own
+    // rate right at an edge, the only place the AA widening matters;
+    // `(fw.x + fw.y) · 1.25` matches the isotropic average of the exact
+    // `fwidth` there. It only engages once a cell is a few tens of screen
+    // pixels (zoomed out); at closer zooms `edgeFarBase` wins either way.
+    let combinedNet;
+    if (causticsInsideGate) {
+      const cellFw = fwidth(netCellPreOrganic);
+      const aaFw = cellFw.x.add(cellFw.y).mul(float(1.25)).toVar('waterCausticAaFw');
+      combinedNet = Fn(() => {
+        const out = float(0).toVar('waterCausticNetGated');
+        If(insideWater.mul(chopGate).greaterThan(float(0)), () => {
+          out.assign(buildCombinedNet(aaFw));
+        });
+        return out;
+      })();
+    } else {
+      combinedNet = buildCombinedNet(null);
+    }
     causticBrightness = combinedNet.mul(float(WATER_CAUSTICS_MAX)).mul(chopGate).mul(shoalBoost).mul(insideWater);
   }
 

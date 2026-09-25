@@ -692,6 +692,7 @@ import {
   waterPreset,
   setWaterCausticsGateForce,
   getWaterCausticsGateForce,
+  setWaterCausticsInsideGateOff,
   createFluidSeams,
   createFluidRegistration,
   FLUID_PARAMS,
@@ -1130,6 +1131,7 @@ MapShine.setCloudTopsInlineShadow = setVtPanViewerCloudTopsInlineShadow;
 // DIAGNOSTIC ONLY (perf wave 2) — `MapShine.setWaterCausticsGateForce(false|true|null)`
 // rebuilds water with caustics forced off/on (null = tier-resolved), for priceAB.
 MapShine.setWaterCausticsGateForce = setWaterCausticsGateForce;
+MapShine.setWaterCausticsInsideGateOff = setWaterCausticsInsideGateOff;
 MapShine.getCloudTopsLowOctaves = getVtPanViewerCloudTopsLowOctaves;
 // Console-exposed directly (2026-08-12, S2.7) so a pixel-diff gate can prove
 // NON-VACUITY without paying for a full perf-run-full capture — illumBuckets/

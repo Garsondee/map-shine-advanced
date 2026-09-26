@@ -8,6 +8,7 @@ import { run as runIconSprite } from './icon-sprite.test.mjs';
 import { run as runParamControl } from './param-control.test.mjs';
 import { run as runParamGroups } from './param-groups.test.mjs';
 import { run as runFineDrag } from './fine-drag.test.mjs';
+import { run as runVerticalFader } from './vertical-fader.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -28,6 +29,7 @@ const suites = [
   ['param-control', runParamControl],
   ['param-groups', runParamGroups],
   ['fine-drag', runFineDrag],
+  ['vertical-fader', runVerticalFader],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

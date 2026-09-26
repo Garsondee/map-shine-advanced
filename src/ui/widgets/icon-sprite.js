@@ -79,6 +79,10 @@ export const ICONS = Object.freeze({
     '<rect x="3.5" y="5.5" width="17" height="15" rx="2.2"/><path d="M3.5 10h17M8 3.5v4M16 3.5v4"/><circle cx="8.3" cy="14.3" r="1"/><circle cx="12" cy="14.3" r="1"/><circle cx="15.7" cy="14.3" r="1"/>',
   bug: '<ellipse cx="12" cy="13.5" rx="5" ry="6.2"/><path d="M12 7.3v12.4M7.3 10.2l-3-2M16.7 10.2l3-2M6.5 14h-3M17.5 14h3M7.3 17.8l-3 2M16.7 17.8l3 2M9.3 6 8 4M14.7 6 16 4"/>',
   heart: '<path d="M12 20.3S3.6 14.9 3.6 9.1a5 5 0 0 1 8.4-3.6 5 5 0 0 1 8.4 3.6c0 5.8-8.4 11.2-8.4 11.2Z"/>',
+  // Not from the mock — drawn 2026-09-25 for the Remote's Channels rack
+  // (mythica-machina-press#626), in the set's own 24px/stroke-only style.
+  thermometer: '<path d="M10 14.2V5a2 2 0 0 1 4 0v9.2a4 4 0 1 1-4 0Z"/><path d="M12 9v8.5"/>',
+  globe: '<circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M4.8 7.5h14.4M4.8 16.5h14.4"/>',
 });
 
 /**

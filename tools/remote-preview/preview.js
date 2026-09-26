@@ -26,6 +26,33 @@ import { validateCue, orderedCues, cueToFadePatch } from '../../src/core/cues-sc
 installTokens();
 document.documentElement.dataset.theme = 'dark';
 
+// FOUNDRY'S OWN GLOBAL SLIDER STYLE (mythica-machina-press#626). Live, every
+// `<input type="range">` on the page gets Foundry v14's rules from
+// `foundry2.css` (`@layer elements.forms`, ~L3989; values from ~L208/316/
+// 388/448, dark theme). This harness never loaded them, which is exactly how
+// the Remote's faders shipped wearing a half-Foundry thumb no preview here
+// ever showed. A faithful copy, cascade layer and all, so any native range
+// input MSA draws looks here the way it looks in the game.
+const foundrySliderStyle = document.createElement('style');
+foundrySliderStyle.textContent = `
+@layer elements.forms {
+  input[type=range]{--range-track-color:#302831; --range-track-border-color:transparent;
+    --range-thumb-background-color:rgba(11,10,19,.9); --range-thumb-border-color:#ee9b3a;
+    appearance:none; -webkit-appearance:none; background:transparent; height:2rem; margin:0; width:100%;
+    border-radius:4px}
+  input[type=range]::-webkit-slider-runnable-track{width:100%; height:4px; background:var(--range-track-color);
+    border:1px solid var(--range-track-border-color); border-radius:2px}
+  input[type=range]::-moz-range-track{width:100%; height:4px; background:var(--range-track-color);
+    border:1px solid var(--range-track-border-color); border-radius:2px}
+  input[type=range]::-webkit-slider-thumb{appearance:none; -webkit-appearance:none; height:12px; width:12px;
+    margin-top:-5px; background:var(--range-thumb-background-color);
+    border:1px solid var(--range-thumb-border-color); border-radius:4px}
+  input[type=range]::-moz-range-thumb{appearance:none; height:12px; width:12px; margin-top:-5px;
+    background:var(--range-thumb-background-color); border:1px solid var(--range-thumb-border-color);
+    border-radius:4px}
+}`;
+document.head.appendChild(foundrySliderStyle);
+
 const fakeSky = {
   todHour: 14,
   rateHoursPerMinute: 0,

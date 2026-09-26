@@ -57,6 +57,14 @@ export function run(t) {
   {
     const { coldEdge, warmEdge } = PRECIP_SLEET_BAND;
     t.ok('the band is ordered and non-empty', warmEdge > coldEdge);
+    // ⭐ mythica-machina-press#626, the author's own call (2026-09-25): snow
+    // starts AT the Remote Temperature fader's snowflake tick, which is drawn
+    // from this very constant. The warm edge was deliberately left alone, so
+    // rain and the snow mantle's melt onset did not move with that decision.
+    // Update both pins only alongside another deliberate author decision.
+    t.ok("⭐ snow starts at the author's 25% snowflake tick (#626)", coldEdge === 0.25);
+    t.ok('the warm edge stayed put: rain and melt onset still at 30%', warmEdge === 0.3);
+    t.ok('just below the tick is pure snow', derivePrecipKind('auto', 0.24).kind === 'snow');
 
     t.ok('well below the band is pure snow', derivePrecipKind('auto', 0.05).kind === 'snow');
     t.ok('well above the band is pure rain', derivePrecipKind('auto', 0.9).kind === 'rain');

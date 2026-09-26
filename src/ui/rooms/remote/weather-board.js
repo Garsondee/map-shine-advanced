@@ -49,7 +49,7 @@
 // world/weather-biomes.js directly — the same door ui/astrolabe.js's own
 // horizon shelf and biome picker already use for these identical two tables
 // (zones/one-door, tools/verify-structure.mjs).
-import { WEATHER_ARCHETYPES, WEATHER_BIOMES } from '../../../world/index.js';
+import { WEATHER_ARCHETYPES, WEATHER_BIOMES, PRECIP_SLEET_BAND } from '../../../world/index.js';
 import { buildParamControl } from '../../widgets/param-control.js';
 import { buildVerticalFader } from '../../widgets/vertical-fader.js';
 import { createFadeTimeControl } from './fade-time.js';
@@ -125,9 +125,29 @@ function blockLabel(icon, titleEl, trailingEl) {
  * schema change in world/weather.js (flip consumerStatus, wire a real
  * consumer) BEFORE it is a UI change here — never the other way round. */
 const LIVE_CHANNELS = Object.freeze([
-  { axis: 'cloudCover01', label: 'Clouds', help: 'How much sky is covered.' },
-  { axis: 'precip01', label: 'Rain', help: 'How hard it is coming down.' },
+  { axis: 'cloudCover01', label: 'Clouds', shortLabel: 'Clouds', icon: 'cloud', help: 'How much sky is covered.' },
+  { axis: 'precip01', label: 'Rain', shortLabel: 'Rain', icon: 'rain', help: 'How hard it is coming down.' },
 ]);
+
+/** A 0..1 value as a whole percent, for tooltip text. */
+const pct = (v) => `${Math.round(v * 100)}%`;
+
+/**
+ * Temperature's SNOW LINE (mythica-machina-press#626) — the author, shown a
+ * mockup with one snowflake tick at 25%: "we should make the snow align with
+ * that tick you created". The tick is drawn FROM the engine's own band edge,
+ * never a copy of its number, so the fader and the falling snow cannot drift
+ * apart: at or below `PRECIP_SLEET_BAND.coldEdge`, `world/weather.js#
+ * derivePrecipKind` gives snow (the edge itself is the band's all-snow end).
+ */
+const SNOW_LINE_MARKER = Object.freeze({
+  at: PRECIP_SLEET_BAND.coldEdge,
+  icon: 'snow',
+  tone: 'cold',
+  title:
+    `Snow line — snow at or below ${pct(PRECIP_SLEET_BAND.coldEdge)}, ` +
+    `sleet up to ${pct(PRECIP_SLEET_BAND.warmEdge)}, rain above that.`,
+});
 
 /** Sky Light + Atmosphere + Temperature — each gets its own `ctx` getter/
  * commit pair rather than folding into `LIVE_CHANNELS`/`onAxisCommit`
@@ -148,6 +168,8 @@ const ENV_CHANNELS = Object.freeze([
   {
     key: 'skyRealism',
     label: 'Sky light',
+    shortLabel: 'Sky',
+    icon: 'sun',
     help: 'How much the sky itself lights the scene.',
     getValue: 'getSkyRealism',
     onCommit: 'onSkyRealismCommit',
@@ -155,6 +177,8 @@ const ENV_CHANNELS = Object.freeze([
   {
     key: 'atmosphere',
     label: 'Atmosphere',
+    shortLabel: 'Atmos',
+    icon: 'fog',
     help: 'Environmental colour-grade strength.',
     getValue: 'getGradeEnvStrength',
     onCommit: 'onGradeEnvStrengthCommit',
@@ -162,6 +186,9 @@ const ENV_CHANNELS = Object.freeze([
   {
     key: 'temperature',
     label: 'Temperature',
+    shortLabel: 'Temp',
+    icon: 'thermometer',
+    markers: [SNOW_LINE_MARKER],
     help: 'Cold to hot — also decides whether precipitation falls as rain or snow.',
     getValue: 'getTemperature',
     onCommit: 'onTemperatureCommit',
@@ -169,6 +196,8 @@ const ENV_CHANNELS = Object.freeze([
   {
     key: 'windSpeed',
     label: 'Wind',
+    shortLabel: 'Wind',
+    icon: 'wind',
     help: 'How hard the wind blows. Direction is set from the astrolabe’s own wind pill.',
     getValue: 'getWindSpeed01',
     onCommit: 'onWindSpeed01Commit',
@@ -176,6 +205,8 @@ const ENV_CHANNELS = Object.freeze([
   {
     key: 'sunLatitude',
     label: 'Sun latitude',
+    shortLabel: 'Latitude',
+    icon: 'globe',
     help: 'How high the sun peaks at noon — 0° (equator) passes near overhead, ±90° (poles) barely clears the horizon even at noon.',
     getValue: 'getSunLatitude',
     onCommit: 'onSunLatitudeCommit',
@@ -186,6 +217,10 @@ const ENV_CHANNELS = Object.freeze([
     max: 90,
     step: 1,
     default: 30,
+    // #626: read in degrees, and filled out from the equator (the centre of
+    // the travel) rather than up from -90, which is not a "nothing" end.
+    unit: 'degrees',
+    bipolar: true,
   },
 ]);
 
@@ -197,6 +232,28 @@ function chip(text, title, onClick) {
   if (title) btn.title = title;
   btn.addEventListener('click', onClick);
   return btn;
+}
+
+/**
+ * One captioned group of faders in the Channels rack (#626). `count` sets
+ * the group's share of the rack's width, so every column across BOTH groups
+ * comes out the same width — the rack budget is tight (the Remote is 400px
+ * wide, ~357px usable once its scrollbar shows), and that is spent evenly.
+ * @param {string} caption @param {string} title @param {number} count
+ * @returns {{root: HTMLElement, row: HTMLElement}}
+ */
+function faderGroup(caption, title, count) {
+  const root = document.createElement('div');
+  root.className = 'msa-wx-fader-group';
+  root.style.flex = `${count} ${count} 0`;
+  const cap = document.createElement('div');
+  cap.className = 'msa-wx-fader-caption';
+  cap.textContent = caption;
+  cap.title = title;
+  const row = document.createElement('div');
+  row.className = 'msa-wx-fader-row';
+  root.append(cap, row);
+  return { root, row };
 }
 
 /**
@@ -466,35 +523,63 @@ export function renderWeatherBoard(container, ctx) {
     // own widget-canon discipline warns against).
     const rack = document.createElement('div');
     rack.className = 'msa-wx-fader-rack';
+    // TWO CAPTIONED GROUPS (mythica-machina-press#626) — the channels a mood
+    // chip (Direct) or the climate walk (Drift) moves on its own, split from
+    // the ones nothing moves but the GM. Without it, why only Clouds and Rain
+    // animate on a mood click was invisible. The first group IS
+    // ARCHETYPE_OWNED_AXES' two faders (LIVE_CHANNELS' own doc, above).
+    const autoGroup = faderGroup(
+      mode === 'almanac' ? 'Climate' : 'Moods',
+      mode === 'almanac'
+        ? 'The climate moves these on its own in Drift mode.'
+        : 'Mood chips fade these to their own values.',
+      LIVE_CHANNELS.length
+    );
+    // Only the channels this host actually wires get a column (the loop below
+    // skips any without a getter), so only they claim a share of the width.
+    const envChannels = ENV_CHANNELS.filter((channel) => typeof ctx[channel.getValue] === 'function');
+    const handGroup = faderGroup('By hand', 'Nothing moves these but you.', envChannels.length);
+    const divider = document.createElement('div');
+    divider.className = 'msa-wx-fader-divider';
+    rack.append(autoGroup.root, divider, handGroup.root);
     // Rebuilt fresh every call (this function's own `faderHost.innerHTML =
     // ''` above already discards the old DOM) — updateLiveAxisValues() below
     // reads whatever this holds NOW, so a stale handle from a torn-down
     // fader can never be written into by accident.
     liveFaderHandles = {};
     for (const channel of LIVE_CHANNELS) {
-      const decl = { type: 'float', min: 0, max: 1, step: 0.01, default: 0, label: channel.label, help: channel.help };
+      // Drift's wander range is drawn ON the fader now, as a band beside its
+      // slot (mythica-machina-press#190) — it used to be a "0.20–0.80" text
+      // caption under it, wider than the column it sat in.
+      const bracket = biome ? driftBracket(biome, channel.axis) : null;
+      const decl = {
+        type: 'float',
+        min: 0,
+        max: 1,
+        step: 0.01,
+        default: 0,
+        label: channel.label,
+        shortLabel: channel.shortLabel,
+        icon: channel.icon,
+        unit: 'percent',
+        help: channel.help,
+        band: bracket,
+        bandTitle: bracket
+          ? `${biome.label} wanders between ${pct(bracket[0])} and ${pct(bracket[1])} ${channel.label.toLowerCase()} on its own in Drift mode.`
+          : undefined,
+      };
       const fader = buildVerticalFader(channel.axis, decl, {
         value: ctx.getAxisValue(channel.axis),
         onChange: (v) => ctx.onAxisCommit(channel.axis, v),
       });
       liveFaderHandles[channel.axis] = fader;
-      if (biome) {
-        const bracket = driftBracket(biome, channel.axis);
-        if (bracket) {
-          const note = document.createElement('span');
-          note.className = 'msa-wx-bracket';
-          note.textContent = `${bracket[0].toFixed(2)}–${bracket[1].toFixed(2)}`;
-          note.title = `${biome.label} can wander this ${channel.label.toLowerCase()} range on its own in Drift mode.`;
-          fader.root.appendChild(note);
-        }
-      }
       // THE CLOUD PIN GLYPH (2026-08-18 fix — gap-audit against the old
       // astrolabe.js's own Cloud row, astrolabe.js:358-373). The only axis
       // the Almanac can pin today (weather.js's own `pinnedAxes`) — visible
       // only in Drift mode while genuinely pinned, same two facts astrolabe.js
       // keys off, so it can't say "pinned" when Direct mode makes the concept
-      // meaningless. Same `fader.root.appendChild` shape as the drift-bracket
-      // note just above, not a new attachment mechanism.
+      // meaningless. Appended under the fader's own label (`fader.root` is a
+      // plain flex column), not a new attachment mechanism.
       if (mode === 'almanac' && channel.axis === 'cloudCover01' && ctx.getCloudPinned?.()) {
         const pin = document.createElement('button');
         pin.type = 'button';
@@ -504,7 +589,7 @@ export function renderWeatherBoard(container, ctx) {
         pin.addEventListener('click', () => ctx.onUnpinCloudCover?.());
         fader.root.appendChild(pin);
       }
-      rack.appendChild(fader.root);
+      autoGroup.row.appendChild(fader.root);
     }
     // Sky Light + Atmosphere (2026-08-18 fix) — own commit path per channel
     // (ctx[channel.getValue]/ctx[channel.onCommit]), never ctx.onAxisCommit,
@@ -513,7 +598,7 @@ export function renderWeatherBoard(container, ctx) {
     // live-updated from outside (unlike LIVE_CHANNELS, above) — nothing fades
     // these today; a mood/climate chip only ever touches the two axes in
     // ARCHETYPE_OWNED_AXES.
-    for (const channel of ENV_CHANNELS) {
+    for (const channel of envChannels) {
       // Per-channel range override (mythica-machina-press#170) — every
       // channel before Sun latitude was happily 0..1, so this defaults to
       // exactly that rather than needing every existing entry touched.
@@ -524,12 +609,16 @@ export function renderWeatherBoard(container, ctx) {
         step: channel.step ?? 0.01,
         default: channel.default ?? 0,
         label: channel.label,
+        shortLabel: channel.shortLabel,
+        icon: channel.icon,
+        unit: channel.unit ?? 'percent',
+        bipolar: channel.bipolar === true,
+        markers: channel.markers,
         help: channel.help,
       };
       const getValue = ctx[channel.getValue];
       const onCommit = ctx[channel.onCommit];
-      if (typeof getValue !== 'function') continue;
-      rack.appendChild(
+      handGroup.row.appendChild(
         buildVerticalFader(channel.key, decl, { value: getValue(), onChange: (v) => onCommit?.(v) }).root
       );
     }

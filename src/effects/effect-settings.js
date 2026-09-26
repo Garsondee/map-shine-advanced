@@ -259,7 +259,7 @@ export function describeEffectSettings(manifests = []) {
       default: false,
       config: true,
       name: 'Map Shine — Reduced motion',
-      hint: "Turn off panel/UI transitions and sweeps (not the map's own effects — this is about the interface around it, not the scene).",
+      hint: "Turn off panel/UI transitions and sweeps, and the camera zoom-in when a scene opens. The map's own effects (water, weather, fire) keep moving.",
     },
     {
       key: GLOBAL_SETTING_KEYS.rendererOverride,

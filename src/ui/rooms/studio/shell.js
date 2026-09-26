@@ -34,6 +34,7 @@ import { renderCuesDepartment } from './cues-department.js';
 import { renderSystemDepartment } from './system-department.js';
 import { renderLabDepartment } from './lab-department.js';
 import { installSearchPalette, buildSearchIndex } from './search-palette.js';
+import { raiseRoom, raiseRoomOnPress } from '../room-stack.js';
 
 const ROOM_ID = 'msa-studio';
 const STYLE_ID = 'msa-studio-style';
@@ -264,6 +265,7 @@ export function installStudio({ debugPanel, ...roomCtx } = {}) {
 
   room.append(head, frame);
   document.body.appendChild(room);
+  raiseRoomOnPress(room);
   // 2026-08-18 fix: .room-head already carried the mock's own cursor:grab
   // CSS (line ~105) with no listener behind it — looked draggable, silently
   // did nothing. Wired for real now, shared with the Remote/Player rooms.
@@ -352,6 +354,7 @@ export function installStudio({ debugPanel, ...roomCtx } = {}) {
     open() {
       state.open = true;
       room.hidden = false;
+      raiseRoom(room);
       render();
       for (const fn of openChangeListeners) fn(true);
     },

@@ -112,6 +112,9 @@ function buildClockModeRow(ctx) {
     btn.title = m.title;
     btn.addEventListener('click', () => {
       ctx.onSetMode?.(m.value);
+      // A lock/arming explanation names the posture it was written under
+      // ("posture is currently 'aesthetic'") — stale the moment it changes.
+      ctx.onStatus?.('');
       sync();
     });
     el.appendChild(btn);
@@ -203,6 +206,12 @@ function buildCornerTL(ctx) {
   speedBtn.className = 'msa-corner-txt';
   speedBtn.title = 'Time speed — how fast the world clock runs';
   speedBtn.style.position = 'relative';
+  // The "×N" text lives in its own span: syncSpeedBtn runs on every astrolabe
+  // pump (~10 Hz), and writing speedBtn.textContent there deleted the open
+  // speed menu (a child of this button) within ~100 ms of it appearing — the
+  // GM could never actually pick a speed (UI test pass, 2026-09-26).
+  const speedLabel = document.createElement('span');
+  speedBtn.appendChild(speedLabel);
   // The badge shows the real-time "×N" (TIME_RATE_MULTIPLIERS), never the
   // raw day-clock rate directly — that mismatch (a stored 1, meaning "1 hour
   // of game time per real minute," displayed verbatim as "×1") is the exact
@@ -212,11 +221,17 @@ function buildCornerTL(ctx) {
   function syncSpeedBtn() {
     const rate = ctx.getFlowRate?.() ?? 0;
     const idx = nearestRateIndex(rate > 0 ? rate : FLOW_SPEED_STEPS[0]);
-    speedBtn.textContent = `×${TIME_RATE_MULTIPLIERS[idx]}`;
+    speedLabel.textContent = `×${TIME_RATE_MULTIPLIERS[idx]}`;
     speedBtn.title = `Time speed — how fast the world clock runs (${formatRate(TIME_RATE_STEPS[idx])})`;
   }
   speedBtn.addEventListener('click', () => {
     if (!aestheticActive()) return explainNotAesthetic();
+    // A second press closes the open menu rather than stacking another.
+    const openMenu = speedBtn.querySelector('.msa-jump-menu');
+    if (openMenu) {
+      openMenu.remove();
+      return;
+    }
     const current = ctx.getFlowRate?.() ?? 0;
     const menu = document.createElement('div');
     menu.className = 'msa-jump-menu';
@@ -242,7 +257,7 @@ function buildCornerTL(ctx) {
     });
     speedBtn.appendChild(menu);
     const closeOnOutside = (e) => {
-      if (!menu.contains(e.target) && e.target !== speedBtn) {
+      if (!menu.contains(e.target) && !speedBtn.contains(e.target)) {
         menu.remove();
         document.removeEventListener('pointerdown', closeOnOutside, true);
       }
@@ -253,6 +268,13 @@ function buildCornerTL(ctx) {
 
   const jumpBtn = iconBtn('calendar', 'Jump to…', async () => {
     if (!armed()) return explainUnarmed();
+    // Second press (on this button OR the dial's date pill, which opens this
+    // same menu) closes an already-open menu instead of stacking a second one.
+    const openMenu = jumpBtn.querySelector('.msa-jump-menu');
+    if (openMenu) {
+      openMenu.remove();
+      return;
+    }
     // A minimal inline picker — the mock's #jumpPop is a small flyout; here a
     // native-feeling menu of buttons keeps this file free of a second popover
     // implementation for four choices plus two multi-day jumps.
@@ -292,7 +314,10 @@ function buildCornerTL(ctx) {
     }
     jumpBtn.appendChild(menu);
     const closeOnOutside = (e) => {
-      if (!menu.contains(e.target) && e.target !== jumpBtn) {
+      // contains(), not ===: the press usually lands on the icon INSIDE the
+      // button, which used to close the menu here only for the click to
+      // reopen it — the button could never close its own menu.
+      if (!menu.contains(e.target) && !jumpBtn.contains(e.target)) {
         menu.remove();
         document.removeEventListener('pointerdown', closeOnOutside, true);
       }
@@ -304,6 +329,10 @@ function buildCornerTL(ctx) {
   el.append(flowBtn, speedBtn, jumpBtn);
   return {
     el,
+    /** The dial's date pill ("Change the date") opens this same menu — its
+     * +1 Day / +1 Week rows ARE the date change, and one menu keeps the
+     * posture gate (explainUnarmed) in one place. */
+    openJumpMenu: () => jumpBtn.click(),
     sync: () => {
       syncFlowBtn();
       syncSpeedBtn();
@@ -357,7 +386,7 @@ function buildCornerBR(onStatus, onOpenTileMotion) {
 
 /**
  * @param {HTMLElement} container
- * @param {{mountAstrolabeDial: (el: HTMLElement, dialCtx: {onLockedAttempt: () => void, onWindClick?: () => void}) => void,
+ * @param {{mountAstrolabeDial: (el: HTMLElement, dialCtx: {onLockedAttempt: () => void, onWindClick?: () => void, onDateClick?: () => void}) => void,
  *   getPosture: () => string,
  *   onSetMode?: (mode: string) => void, isFlowPlaying: () => boolean,
  *   onFlowToggle: () => void, getFlowRate?: () => number,
@@ -394,7 +423,7 @@ export function renderAstrolabePanel(container, ctx) {
       `The dial is locked to Foundry's own clock — set the Clock above to Aesthetic to drag it directly (currently '${ctx.getPosture()}').`
     );
 
-  const clockMode = buildClockModeRow(ctx);
+  const clockMode = buildClockModeRow({ ...ctx, onStatus });
 
   const dialHost = document.createElement('div');
   dialHost.className = 'msa-astro-dial-host';
@@ -418,6 +447,7 @@ export function renderAstrolabePanel(container, ctx) {
   ctx.mountAstrolabeDial(dialSlot, {
     onLockedAttempt: explainRingLocked,
     onWindClick: ctx.onWindClick,
+    onDateClick: () => cornerTL.openJumpMenu(),
   });
   dialHost.appendChild(dialSlot);
 

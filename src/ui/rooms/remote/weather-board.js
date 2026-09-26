@@ -155,14 +155,18 @@ const ENV_CHANNELS = Object.freeze([
   {
     key: 'atmosphere',
     label: 'Atmosphere',
-    help: 'Environmental colour-grade strength.',
+    // `faderLabel`: the 44px fader column can't fit the full word (see
+    // vertical-fader.js's label note); the full name stays in the tooltip.
+    faderLabel: 'Atmos.',
+    help: 'Atmosphere — environmental colour-grade strength.',
     getValue: 'getGradeEnvStrength',
     onCommit: 'onGradeEnvStrengthCommit',
   },
   {
     key: 'temperature',
     label: 'Temperature',
-    help: 'Cold to hot — also decides whether precipitation falls as rain or snow.',
+    faderLabel: 'Temp.',
+    help: 'Temperature — cold to hot. Also decides whether precipitation falls as rain or snow.',
     getValue: 'getTemperature',
     onCommit: 'onTemperatureCommit',
   },
@@ -523,7 +527,7 @@ export function renderWeatherBoard(container, ctx) {
         max: channel.max ?? 1,
         step: channel.step ?? 0.01,
         default: channel.default ?? 0,
-        label: channel.label,
+        label: channel.faderLabel ?? channel.label,
         help: channel.help,
       };
       const getValue = ctx[channel.getValue];

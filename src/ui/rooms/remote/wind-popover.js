@@ -43,7 +43,9 @@ const DIRECTION_DECL = Object.freeze({
 /**
  * Install the Remote's wind popover, once.
  * @param {{getDirectionDeg?: () => number,
- *   onCommit?: (v: {directionDeg?: number}) => void}} [ctx]
+ *   onCommit?: (v: {directionDeg?: number}) => void,
+ *   getAnchorRect?: () => DOMRect|null}} [ctx] - `getAnchorRect`: the opening
+ *   room's rect; the popover sits beside it (else the fixed top-right spot).
  * @returns {{open: () => void, close: () => void, toggle: () => void, isOpen: () => boolean}}
  */
 export function installWindPopover(ctx = {}) {
@@ -101,10 +103,23 @@ export function installWindPopover(ctx = {}) {
     );
   }
 
+  // Beside the room that opened it, when the caller says where that is
+  // (UI test pass, 2026-09-26): the fixed top-right fallback sat over
+  // Foundry's own sidebar, a whole screen away from the wind pill.
+  function place() {
+    const r = ctx.getAnchorRect?.();
+    if (!r || !(r.width > 0)) return;
+    const w = win.offsetWidth || 220;
+    const fitsRight = r.right + 8 + w <= window.innerWidth - 8;
+    const left = fitsRight ? r.right + 8 : Math.max(8, r.left - 8 - w);
+    Object.assign(win.style, { left: `${left}px`, right: 'auto', top: `${Math.max(8, r.top + 48)}px` });
+  }
+
   const controller = {
     open() {
       render();
       win.hidden = false;
+      place();
     },
     close() {
       win.hidden = true;

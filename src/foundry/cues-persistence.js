@@ -16,6 +16,8 @@
  * @module foundry/cues-persistence
  */
 
+import { flattenDottedLeaves, hasOwnTo } from './flag-keys.js';
+
 const CUES_NAMESPACE = 'map-shine-advanced';
 const SCENE_CUES_FLAG = 'cueStack';
 
@@ -28,7 +30,17 @@ export function readCueStack() {
     const scene = typeof canvas !== 'undefined' ? (canvas?.scene ?? null) : null;
     if (!scene) return { cues: [], reason: 'no active scene' };
     const raw = scene.getFlag(CUES_NAMESPACE, SCENE_CUES_FLAG);
-    return { cues: Array.isArray(raw) ? raw : [], reason: null };
+    if (!Array.isArray(raw)) return { cues: [], reason: null };
+    // Each cue's `targets` is keyed by dotted fade-source ids, which Foundry's
+    // flag write nests (flag-keys.js) — without this every stored cue failed
+    // validation and GO refused it. The array itself is replaced whole on
+    // every write, so repairing on read is the complete fix.
+    const cues = raw.map((cue) =>
+      cue && typeof cue === 'object' && cue.targets && typeof cue.targets === 'object'
+        ? { ...cue, targets: flattenDottedLeaves(cue.targets, hasOwnTo) }
+        : cue
+    );
+    return { cues, reason: null };
   } catch (err) {
     return { cues: [], reason: `reading the cue stack failed: ${err?.message ?? err}` };
   }

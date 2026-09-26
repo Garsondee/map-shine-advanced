@@ -61,7 +61,9 @@ function injectStyle() {
    reflow the results column out from under the GM's eye mid-search. */
 .msa-search-overlay .rail.searching{opacity:.35; pointer-events:none}
 .msa-search-overlay .results{max-height:380px; overflow-y:auto; padding:6px; scrollbar-width:thin; flex:1; min-width:0}
-.msa-search-overlay .hit{display:flex; align-items:center; gap:9px; padding:7px 11px; border-radius:8px;
+/* justify-content: Foundry's own button rule centres flex content, so a hit with a
+   short description drifted right of its neighbours (UI test pass 2026-09-26). */
+.msa-search-overlay .hit{display:flex; align-items:center; justify-content:flex-start; gap:9px; padding:7px 11px; border-radius:8px;
   width:100%; text-align:left; color:var(--ink1); font-size:.78rem; pointer-events:auto}
 .msa-search-overlay .hit:hover, .msa-search-overlay .hit.sel{background:var(--bg2); color:var(--ink0)}
 .msa-search-overlay .hit .crumb{margin-left:auto; color:var(--ink2); font-size:.64rem}

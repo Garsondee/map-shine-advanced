@@ -108,7 +108,9 @@ export function renderPlayerLightPicker(container) {
     }
     const token = resolveViewerToken();
     if (!token) {
-      paintMessage('No controlled token found on this scene.');
+      // resolveViewerToken reads your assigned character's token, else any
+      // token you own — never the "controlled" (selected) one, so don't say so.
+      paintMessage("You don't have a token on this scene yet — your carried light follows your character's token.");
       return;
     }
     const { permissions } = readScenePlayerLightPermissions();

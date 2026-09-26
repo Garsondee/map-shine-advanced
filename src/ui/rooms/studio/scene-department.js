@@ -78,6 +78,11 @@ function realCard(icon, title, bodyHtml) {
  * @param {() => {ok: boolean, reason?: string, effectIds?: string[]}} [ctx.copySceneEffectSettings] -
  *   MapShine.copySceneEffectSettings (mythica-machina-press#12); omitted hides the card.
  * @param {() => Promise<{ok: boolean, reason?: string, effectIds?: string[]}>} [ctx.pasteSceneEffectSettings]
+ * @param {() => {presets: Array<{name: string, capturedAt: string|null, effectCount: number}>}} [ctx.listScenePresets] -
+ *   MapShine.listScenePresets (mythica-machina-press#177); omitted (with saveScenePreset) hides the card.
+ * @param {(name: string) => Promise<{ok: boolean, reason?: string}>} [ctx.saveScenePreset]
+ * @param {(name: string) => Promise<{ok: boolean, reason?: string}>} [ctx.applyScenePreset]
+ * @param {(name: string) => Promise<{ok: boolean, reason?: string}>} [ctx.deleteScenePreset]
  * @returns {string} department subtitle.
  */
 export function renderSceneDepartment(container, ctx) {
@@ -88,17 +93,12 @@ export function renderSceneDepartment(container, ctx) {
     gap: '10px',
   });
 
+  // "Baseline" and "Scene presets" used to be planned cards here, both
+  // saying they waited on the Fade Engine — which shipped: the Remote's own
+  // ⟲ Baseline fades back to the authored look, and the scene-preset library
+  // (mythica-machina-press#177) is real. Presets get a real card below;
+  // Baseline needs none (it IS "the look this department authors").
   grid.append(
-    plannedCard(
-      'home',
-      'Baseline',
-      'What "Baseline" on the Remote fades back to — needs the Fade Engine (U2), not built yet.'
-    ),
-    plannedCard(
-      'map',
-      'Scene presets',
-      'A validated snapshot of the whole authored look — also waits on the Fade Engine (U2).'
-    ),
     plannedCard(
       'layers',
       'Levels',
@@ -186,7 +186,7 @@ export function renderSceneDepartment(container, ctx) {
     const darknessCard = realCard(
       'moon',
       'Darkness at max',
-      '<p style="margin:0 0 8px; font-size:.72rem; color:var(--ink2)">How dark an unlit scene gets.</p>'
+      '<p style="margin:0 0 8px; font-size:.72rem; color:var(--ink2)">How dark an unlit scene gets at full night. Same setting as the Remote’s Night darkness slider — saved on this scene, so every player sees it.</p>'
     );
     const snapToPreset = (v) => (v <= 0.25 ? '0' : v >= 0.75 ? '1' : '0.5');
     darknessCard.appendChild(
@@ -196,6 +196,121 @@ export function renderSceneDepartment(container, ctx) {
       })
     );
     grid.append(darknessCard);
+  }
+
+  // SCENE PRESETS (UI test pass, 2026-09-26) — the Studio face for the
+  // MapShine.save/apply/list/deleteScenePreset library, which until now was
+  // console-only. Same semantics as the API: effect params only, instant
+  // apply, a world-scoped library the whole table shares.
+  if (typeof ctx.listScenePresets === 'function' && typeof ctx.saveScenePreset === 'function') {
+    const presetCard = realCard(
+      'map',
+      'Scene presets',
+      '<p style="margin:0 0 8px; font-size:.72rem; color:var(--ink2)">Save this scene’s whole effect look under a name, then apply it here or on any other scene. Applying replaces every effect setting on this scene at once.</p>'
+    );
+    const status = document.createElement('p');
+    Object.assign(status.style, { margin: '0 0 8px', fontSize: '.7rem', color: 'var(--ink2)' });
+    const list = document.createElement('div');
+    Object.assign(list.style, { display: 'flex', flexDirection: 'column', gap: '4px', marginBottom: '8px' });
+    const setStatus = (text, ok) => {
+      status.textContent = text;
+      status.style.color = ok === true ? 'var(--ok, #6c6)' : ok === false ? 'var(--fail)' : 'var(--ink2)';
+    };
+    const smallBtn = (label, title) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = label;
+      if (title) b.title = title;
+      Object.assign(b.style, {
+        background: 'var(--bg2, #23262d)',
+        color: 'var(--ink0)',
+        border: '1px solid var(--line)',
+        borderRadius: '6px',
+        padding: '3px 10px',
+        cursor: 'pointer',
+        fontSize: '.72rem',
+      });
+      return b;
+    };
+    const renderList = () => {
+      list.innerHTML = '';
+      let presets = [];
+      try {
+        presets = ctx.listScenePresets()?.presets ?? [];
+      } catch (_) {
+        presets = [];
+      }
+      if (presets.length === 0) {
+        const empty = document.createElement('span');
+        Object.assign(empty.style, { fontSize: '.7rem', color: 'var(--ink2)' });
+        empty.textContent = 'No scene presets saved yet.';
+        list.appendChild(empty);
+        return;
+      }
+      for (const p of presets) {
+        const row = document.createElement('div');
+        Object.assign(row.style, { display: 'flex', alignItems: 'center', gap: '6px', fontSize: '.72rem' });
+        const name = document.createElement('span');
+        Object.assign(name.style, {
+          flex: '1',
+          minWidth: '0',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        });
+        name.textContent = p.name;
+        name.title = `${p.effectCount} effect(s)${p.capturedAt ? ` · saved ${new Date(p.capturedAt).toLocaleString()}` : ''}`;
+        const applyBtn = smallBtn('Apply', `Replace this scene's effect settings with '${p.name}'`);
+        applyBtn.addEventListener('click', () => {
+          Promise.resolve(ctx.applyScenePreset(p.name)).then((res) =>
+            res?.ok
+              ? setStatus(`Applied '${p.name}' to this scene.`, true)
+              : setStatus(`Apply failed: ${res?.reason}`, false)
+          );
+        });
+        const delBtn = smallBtn('✕', `Delete '${p.name}' from the shared library`);
+        delBtn.addEventListener('click', () => {
+          if (!window.confirm(`Delete scene preset '${p.name}'? It is shared with the whole table.`)) return;
+          Promise.resolve(ctx.deleteScenePreset(p.name)).then((res) => {
+            if (res?.ok) setStatus(`Deleted '${p.name}'.`, null);
+            else setStatus(`Delete failed: ${res?.reason}`, false);
+            renderList();
+          });
+        });
+        row.append(name, applyBtn, delBtn);
+        list.appendChild(row);
+      }
+    };
+    const saveRow = document.createElement('div');
+    Object.assign(saveRow.style, { display: 'flex', gap: '6px' });
+    const nameInput = document.createElement('input');
+    nameInput.type = 'text';
+    nameInput.placeholder = 'Preset name';
+    nameInput.setAttribute('aria-label', 'Scene preset name');
+    Object.assign(nameInput.style, { flex: '1', minWidth: '0', fontSize: '.72rem' });
+    const saveBtn = smallBtn('Save', 'Save this scene’s current effect look under this name');
+    const doSave = () => {
+      const presetName = nameInput.value.trim();
+      if (!presetName) {
+        setStatus('Type a name first.', false);
+        return;
+      }
+      Promise.resolve(ctx.saveScenePreset(presetName)).then((res) => {
+        if (res?.ok) {
+          setStatus(`Saved '${presetName}'.`, true);
+          nameInput.value = '';
+        } else setStatus(`Save failed: ${res?.reason}`, false);
+        renderList();
+      });
+    };
+    saveBtn.addEventListener('click', doSave);
+    nameInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') doSave();
+    });
+    saveRow.append(nameInput, saveBtn);
+    renderList();
+    presetCard.append(list, status, saveRow);
+    grid.append(presetCard);
   }
 
   let tileMotionSummary = null;

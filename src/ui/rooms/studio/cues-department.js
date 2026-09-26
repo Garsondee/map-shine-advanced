@@ -85,6 +85,7 @@ function styledButton(html, { gold = false } = {}) {
  *   captureCue: (name: string) => Promise<{ok: boolean, reason: string|null, cue: object|null}>,
  *   updateCueFadeMs: (id: string, overMs: number) => {ok: boolean, reason: string|null},
  *   moveCueOrder: (id: string, direction: -1|1) => {ok: boolean, reason: string|null},
+ *   deleteCue?: (id: string) => {ok: boolean, reason: string|null},
  *   testFireCue: (id: string) => {ok: boolean, reason: string|null},
  *   revertCueTest: () => {ok: boolean, reason: string|null},
  *   isCueTestActive: () => boolean,
@@ -277,6 +278,21 @@ export function renderCuesDepartment(container, ctx) {
       });
 
       item.append(order, cnum, info, fadeSelect, curveBadge, testBtn);
+      if (typeof ctx.deleteCue === 'function') {
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.className = 'hbtn';
+        delBtn.title = 'Delete this cue from the stack';
+        delBtn.textContent = '✕';
+        Object.assign(delBtn.style, { flex: 'none', fontSize: '.7rem' });
+        delBtn.addEventListener('click', () => {
+          if (!window.confirm(`Delete cue "${cue.name}"?`)) return;
+          const res = ctx.deleteCue(cue.id);
+          if (!res?.ok) window.alert(`Could not delete the cue: ${res?.reason}`);
+          render();
+        });
+        item.append(delBtn);
+      }
       wrap.append(item);
     });
 

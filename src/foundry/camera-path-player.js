@@ -47,7 +47,11 @@ const LETTERBOX_CLASS = 'msa-camera-path-letterbox';
 // visible during playback) is boot.js's OWN corner overlay, not Foundry's —
 // display:none on it is safe, the heartbeat canvas inside keeps rendering
 // real frames regardless of CSS visibility (that's the whole point of it
-// being a real canvas, per boot.js's own comment). Mirrors V2's own "hide
+// being a real canvas, per boot.js's own comment). The MSA rooms (#msa-remote,
+// #msa-studio, #msa-player, #msa-tile-motion, the wind popover) are MSA's
+// own chrome too: #msa-debug-panel was their predecessor, and when it was
+// deleted nothing took its place here, so the Remote sat over every
+// "hide UI" cinematic (UI test pass, 2026-09-26). Mirrors V2's own "hide
 // grid/drawings/notes/sounds/templates/controls (+ door controls)" layer
 // set — see camera-path.js's header for why the REST of the data model was
 // redesigned but this proven, author-tuned list was not.
@@ -66,7 +70,12 @@ function injectHideUiStyle() {
     body.${HIDE_UI_CLASS} #hud,
     body.${HIDE_UI_CLASS} #msa-debug-panel,
     body.${HIDE_UI_CLASS} #msa-camera-path-dialog,
-    body.${HIDE_UI_CLASS} #msa-keyhole-boot {
+    body.${HIDE_UI_CLASS} #msa-keyhole-boot,
+    body.${HIDE_UI_CLASS} #msa-remote,
+    body.${HIDE_UI_CLASS} #msa-remote-wind,
+    body.${HIDE_UI_CLASS} #msa-studio,
+    body.${HIDE_UI_CLASS} #msa-player,
+    body.${HIDE_UI_CLASS} #msa-tile-motion {
       display: none !important;
     }
     .msa-camera-path-fade {
@@ -80,6 +89,13 @@ function injectHideUiStyle() {
       position: absolute; left: 0; right: 0; background: #000;
       height: ${LETTERBOX_BAR_HEIGHT_PCT * 100}%;
     }
+    .msa-camera-path-hint {
+      position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%);
+      z-index: 100001; pointer-events: none; padding: 6px 12px; border-radius: 8px;
+      background: rgba(0, 0, 0, 0.6); color: #eee; font: 12px/1.3 sans-serif;
+      animation: msaCameraPathHint 3.5s ease forwards;
+    }
+    @keyframes msaCameraPathHint { 0%, 70% { opacity: 1; } 100% { opacity: 0; } }
     .${LETTERBOX_CLASS}__bar--top { top: 0; }
     .${LETTERBOX_CLASS}__bar--bottom { bottom: 0; }
   `;
@@ -337,8 +353,16 @@ export async function playCameraPath(pathData, opts = {}) {
   let layerPriorStates = null; // Map|null
   let letterboxEl = null;
   let originalDarkness01 = null;
+  // "Esc stops" — the only way out once playing: the Remote's popover (and
+  // its ■ Stop) hides itself to stay out of the shot, and hideUi hides every
+  // other room too. Shown briefly at the start, then fades (CSS animation).
+  let hintEl = null;
 
   const restore = () => {
+    if (hintEl) {
+      hintEl.remove();
+      hintEl = null;
+    }
     if (fadeEl) {
       fadeEl.remove();
       fadeEl = null;
@@ -371,6 +395,10 @@ export async function playCameraPath(pathData, opts = {}) {
       document.body.classList.add(HIDE_UI_CLASS);
       uiHidden = true;
     }
+    hintEl = document.createElement('div');
+    hintEl.className = 'msa-camera-path-hint';
+    hintEl.textContent = 'Press Esc to stop the camera path';
+    document.body.appendChild(hintEl);
     if (settings.hideLayers) {
       layerPriorStates = hideLayers();
     }

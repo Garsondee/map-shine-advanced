@@ -156,11 +156,19 @@ export function buildVerticalFader(id, decl, { value, onChange }) {
   handle.addEventListener('pointerup', markReleased);
   handle.addEventListener('pointercancel', markReleased);
 
+  // maxWidth + overflowWrap: a single word wider than the 44px column above
+  // used to spill into its neighbour's label ("AtmosphereTemperature" — UI
+  // test pass, 2026-09-26). It now wraps inside its own column; callers with
+  // a long name pass a short `label` and keep the full name in `help` (the
+  // Remote's "Atmos."/"Temp."), since Chrome on Windows breaks mid-word
+  // without a hyphen.
   const label = styled('span', {
     fontSize: '.64rem',
     color: TEXT,
     textAlign: 'center',
     lineHeight: '1.15',
+    maxWidth: '100%',
+    overflowWrap: 'anywhere',
   });
   label.textContent = decl.label ?? id;
 

@@ -30,6 +30,7 @@ import { installIconSprite, iconMarkup } from '../widgets/icon-sprite.js';
 import { makeDraggable } from '../widgets/draggable.js';
 import { renderSystemPanel } from './system-panel.js';
 import { renderPlayerLightPicker } from './player-light-picker.js';
+import { raiseRoom, raiseRoomOnPress } from './room-stack.js';
 
 const ROOM_ID = 'msa-player';
 const STYLE_ID = 'msa-player-style';
@@ -138,6 +139,7 @@ export function installPlayer(opts = {}) {
 
   room.append(head, lightHost, body);
   document.body.appendChild(room);
+  raiseRoomOnPress(room);
   makeDraggable(head, room);
 
   const openChangeListeners = new Set();
@@ -150,6 +152,7 @@ export function installPlayer(opts = {}) {
       }
       state.open = true;
       room.hidden = false;
+      raiseRoom(room);
       for (const fn of openChangeListeners) fn(true);
     },
     close() {

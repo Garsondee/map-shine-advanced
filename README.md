@@ -20,23 +20,13 @@ https://github.com/Garsondee/map-shine-advanced/releases/latest/download/module.
 
 ## Quick start
 
-1. Install and enable the module.
-2. Open a Scene.
-3. Open the Map Shine panel:
-   - In the Scene Controls (Tokens), click **Map Shine Config** (cog) or **Map Shine Control** (sliders).
-4. In the panel, enable Map Shine for the current scene.
-
-### Gameplay mode vs Map Maker mode
-
-Map Shine supports a hybrid workflow:
-
-- **Gameplay Mode**
-  - Three.js is responsible for most rendering and gameplay interactions.
-  - The Foundry canvas remains available for UI and tooling, but is configured as a transparent overlay.
-
-- **Map Maker Mode**
-  - Toggle **Map Maker Mode** in the Map Shine panel.
-  - Intended for using native Foundry tools (walls, lights, drawings, regions, etc.) without fighting the Three.js interaction model.
+1. Install and enable the module, then open a Scene. Map Shine renders it straight away; there is no per-scene switch to turn on.
+2. The Map Shine tools live in the **Token controls** toolbar:
+   - **MSA Remote** (GM, satellite dish) is the in-session control surface. It covers time of day, weather moods and faders, fade time, wind, Player Lights allowances, the cue deck and the camera path. It opens by itself for the GM.
+   - **MSA Studio** (GM) is the authoring panel: an Effects department with one card per effect, plus Painter, Scene, Cues, System and Lab.
+   - **MSA Anchor View** (GM) shows and toggles candle and lightning anchors.
+   - **Performance & Graphics** (everyone) holds each player's own settings: the on/off switch, graphics quality, render resolution, accessibility, per-effect toggles, and their carried light.
+3. If Map Shine misbehaves mid-session, the Remote's **Renderer** dropdown switches the whole table to Foundry's own renderer. A player can also turn it off for themselves in Performance & Graphics.
 
 ## Map authoring: suffix-based masks
 
@@ -44,11 +34,10 @@ Map Shine discovers masks by searching for sibling files next to your scene back
 
 Example (if your background is `MyMap.webp`):
 
-- `MyMap_Specular.webp`
-- `MyMap_Roughness.webp`
-- `MyMap_Normal.webp`
 - `MyMap_Outdoors.webp`
-- `MyMap_Windows.webp`
+- `MyMap_Specular.webp`
+- `MyMap_Window.webp`
+- `MyMap_Water.webp`
 
 Supported formats:
 
@@ -58,20 +47,18 @@ Supported formats:
 
 ### Currently recognized suffixes
 
-These are the masks currently discovered by the module's asset-loading system:
+These are the masks the module discovers (the source of truth is `src/scene/mask-catalog.js`; the Studio's Scene department shows which ones the current scene has under "Masks aboard"):
 
-- **`_Specular`**: Specular highlights mask
-- **`_Roughness`**: Roughness map (untested)
-- **`_Normal`**: Normal map
-- **`_Iridescence`**: Iridescence mask
-- **`_Prism`**: Prism/refraction mask
-- **`_Outdoors`**: Indoor/outdoor mask (used for roof/indoor logic)
-- **`_Windows`**: Window lighting mask
-- **`_Structural`**: Legacy structural/window mask fallback
-- **`_Fire`**: Fire placement mask
-- **`_Dust`**: Dust motes placement mask
-- **`_Bush`**: Animated bush texture (RGBA)
-- **`_Tree`**: Animated tree canopy texture
+- **`_Outdoors`** (grayscale): white is outdoors, black is indoors. Required on every level.
+- **`_Shadow`** (grayscale): hand-painted shadow; black is shadowed.
+- **`_Fire`** (grayscale): where fire spawns.
+- **`_Drip`** (grayscale): where drips spawn (cave ceilings, leaking pipes).
+- **`_Specular`** (colour): metal and shine; the hue is the reflection colour.
+- **`_Window`** (colour): interior window-light cookie. `_Windows` and `_Structural` are still accepted as older names.
+- **`_Water`** (RGBA): water depth and presence.
+- **`_Fluid`** (RGBA): liquid-filled tiles (tubes, troughs, cauldrons).
+- **`_Tree`** / **`_Bush`** (RGBA): animated canopy and bush colour plus coverage.
+- **`_Prism`** / **`_Iridescence`** (colour): glass/crystal refraction and thin-film shimmer.
 
 ## Features (current)
 

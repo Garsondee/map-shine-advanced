@@ -44,6 +44,8 @@ import { run as runWindPersistence } from './wind-persistence.test.mjs';
 import { run as runScenePresetPersistence } from './scene-preset-persistence.test.mjs';
 import { run as runPlayerLightPermissions } from './player-light-permissions.test.mjs';
 import { run as runPlayerLightMode } from './player-light-mode.test.mjs';
+import { run as runFlagKeys } from './flag-keys.test.mjs';
+import { run as runImpulseBroadcast } from './impulse-broadcast.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -116,6 +118,8 @@ const suites = [
   ['scene-preset-persistence', runScenePresetPersistence],
   ['player-light-permissions', runPlayerLightPermissions],
   ['player-light-mode', runPlayerLightMode],
+  ['flag-keys', runFlagKeys],
+  ['impulse-broadcast', runImpulseBroadcast],
 ];
 
 for (const [name, fn] of suites) {

@@ -21,6 +21,8 @@
  * @module foundry/fade-persistence
  */
 
+import { flattenDottedLeaves, hasOwnTo } from './flag-keys.js';
+
 const FADE_NAMESPACE = 'map-shine-advanced';
 const SCENE_FADE_FLAG = 'fadeState';
 
@@ -36,7 +38,9 @@ export function readFadeState() {
     const scene = typeof canvas !== 'undefined' ? (canvas?.scene ?? null) : null;
     if (!scene) return { state: {}, reason: 'no active scene' };
     const raw = scene.getFlag(FADE_NAMESPACE, SCENE_FADE_FLAG);
-    return { state: raw && typeof raw === 'object' ? raw : {}, reason: null };
+    // Keys are dotted fade-source ids, which Foundry's flag write nests —
+    // flag-keys.js explains; this restores the flat map the engine expects.
+    return { state: flattenDottedLeaves(raw, hasOwnTo), reason: null };
   } catch (err) {
     return { state: {}, reason: `reading fade state failed: ${err?.message ?? err}` };
   }

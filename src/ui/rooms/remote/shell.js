@@ -31,6 +31,7 @@ import { renderWeatherBoard } from './weather-board.js';
 import { renderPlayerLightBoard } from './player-light-board.js';
 import { renderCueDeck } from './cue-deck.js';
 import { renderDebugStrip } from './debug-strip.js';
+import { raiseRoom, raiseRoomOnPress } from '../room-stack.js';
 
 const ROOM_ID = 'msa-remote';
 const STYLE_ID = 'msa-remote-style';
@@ -613,6 +614,7 @@ export function installRemote(opts = {}) {
   const windPopover = installWindPopover({
     getDirectionDeg: opts.windPopover?.getDirectionDeg,
     onCommit: (v) => opts.windPopover?.onCommit?.(v),
+    getAnchorRect: () => (room.hidden ? null : room.getBoundingClientRect()),
   });
   const dirBtn = plannedHeaderBtn('clap', 'Director', 'Cutscene mode lands in a later stage (U9) — not built yet.');
   const healthBtn = plannedHeaderBtn(
@@ -655,6 +657,13 @@ export function installRemote(opts = {}) {
       await opts.onRendererOverrideChange?.(rendererSelect.value);
     } catch (err) {
       rendererSelect.title = `Renderer switch failed — ${err?.message ?? err}`;
+      // Snap back to what is actually stored — the dropdown must not keep
+      // showing a renderer nobody is running (UI test pass, 2026-09-26).
+      try {
+        paintRendererSelect(opts.getRendererOverride?.() === 'foundry');
+      } catch (_) {
+        // the setting itself is unreadable; the title above already says why
+      }
     } finally {
       rendererSelect.disabled = false;
     }
@@ -840,6 +849,7 @@ export function installRemote(opts = {}) {
   card.append(head, rendererRow, body, foot);
   room.appendChild(card);
   document.body.appendChild(room);
+  raiseRoomOnPress(room);
   const positioning = makeDraggable(head, room, {
     storageKey: POSITION_STORAGE_KEY,
     getDefaultPosition: computeDefaultPosition,
@@ -868,6 +878,7 @@ export function installRemote(opts = {}) {
       buildBody();
       state.open = true;
       room.hidden = false;
+      raiseRoom(room);
       // Rect is only real once un-hidden — see makeDraggable's own doc for
       // why this has to be called here rather than right after it's built.
       positioning.ensurePositioned();

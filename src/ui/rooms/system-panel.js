@@ -20,15 +20,11 @@
  * `diag/` anywhere in this codebase (checked, not assumed), and the two
  * functions are a dozen lines combined.
  *
- * ⚠️ PLAYER-LIGHT ALLOWANCES ARE NOT HERE. §5.5's own line assumes a
- * rendering effect that does not exist anywhere in this engine yet —
- * confirmed by grepping every plausible name (`PlayerLightEffect`,
- * `playerLightMode`, `playerLightAllowance`) across `src/` and finding
- * nothing outside `legacy/` (5,029 lines of V2 GLSL, never rebuilt) and one
- * forward-looking `absorbs:` list entry on an unrelated ambient-lighting
- * pass. Building it is a genuine, separate rendering feature, not a UI port
- * — named for the author's own call, matching U4's own precedent for its
- * missing render path (see Petition P17).
+ * PLAYER-LIGHT ALLOWANCES ARE NOT HERE — they live on the Remote's own
+ * Player Lights board (GM) and ui/rooms/player-light-picker.js (a player's
+ * own pick, shown above this panel in the Performance & Graphics room). The
+ * carried-light rendering this header once said did not exist has since
+ * shipped (mythica-machina-press#77).
  *
  * ⚠️ THE PER-EFFECT TOGGLE IS NOT "BOUNDED BY THE GM."
  * `effect-cascade.js#resolveEffectEnabled`'s own comment says outright:
@@ -61,6 +57,18 @@ function describeEffectRows(effectRows, reducePhotosensitive) {
     locked: isEffectLocked(r, reducePhotosensitive),
   }));
 }
+
+/**
+ * The master switch's value when this page loaded — what is actually RUNNING.
+ * Captured on first render (module scope, so the Studio's System department
+ * and the player room share it). The switch only takes effect on reload, so
+ * a mismatch means "you changed it; reload to apply" (UI test pass,
+ * 2026-09-26: the help text promised a reload nothing ever offered — the
+ * write goes through writeSetting, not Foundry's own form, so Foundry's
+ * requiresReload prompt never fires).
+ * @type {boolean|null}
+ */
+let msaEnabledAtLoad = null;
 
 function sectionHead(text) {
   const h = document.createElement('div');
@@ -153,6 +161,30 @@ export function renderSystemPanel(container, ctx) {
       read(keys.msaEnabled) !== false,
       (v) => write(keys.msaEnabled, v)
     );
+    const msaEnabledNow = read(keys.msaEnabled) !== false;
+    if (msaEnabledAtLoad === null) msaEnabledAtLoad = msaEnabledNow;
+    if (msaEnabledNow !== msaEnabledAtLoad) {
+      const pending = document.createElement('div');
+      Object.assign(pending.style, {
+        display: 'flex',
+        alignItems: 'center',
+        gap: '8px',
+        fontSize: '.72rem',
+        color: 'var(--ink1)',
+      });
+      const note = document.createElement('span');
+      note.style.flex = '1';
+      note.textContent = msaEnabledNow
+        ? 'Map Shine Advanced turns on after a reload.'
+        : "Foundry's own renderer takes over after a reload.";
+      const reloadBtn = document.createElement('button');
+      reloadBtn.type = 'button';
+      reloadBtn.textContent = 'Reload now';
+      Object.assign(reloadBtn.style, { flex: 'none', padding: '3px 10px', fontSize: '.72rem', cursor: 'pointer' });
+      reloadBtn.addEventListener('click', () => window.location.reload());
+      pending.append(note, reloadBtn);
+      wrap.append(pending);
+    }
 
     // 2. GRAPHICS QUALITY.
     put(
@@ -203,7 +235,7 @@ export function renderSystemPanel(container, ctx) {
       {
         type: 'bool',
         label: 'Reduced motion',
-        help: "Turns off panel/UI transitions and sweeps (not the map's own effects — this is about the interface, not the scene).",
+        help: "Turns off panel/UI transitions and sweeps, and the camera zoom-in when a scene opens. The map's own effects (water, weather, fire) keep moving.",
       },
       read(keys.reducedMotion) === true,
       (v) => write(keys.reducedMotion, v)

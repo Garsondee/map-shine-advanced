@@ -59,3 +59,42 @@ export function resolveViewerToken() {
 export function isViewingUserGM() {
   return typeof game !== 'undefined' && game?.user?.isGM === true;
 }
+
+/**
+ * Call `onChange` whenever the answer to {@link resolveViewerToken} might
+ * have changed: a token created or deleted, or one updated in a way that
+ * matters to it (actor, hidden) or to its carried light (this module's own
+ * flags) — e.g. the GM places a player's token while that player has the
+ * Performance & Graphics room open, or changes their light from the GM's
+ * seat. A plain move is ignored. Never throws; returns an unsubscribe.
+ * @param {() => void} onChange
+ * @returns {() => void}
+ */
+export function watchViewerToken(onChange) {
+  if (typeof onChange !== 'function' || typeof Hooks === 'undefined') return () => {};
+  const fire = () => {
+    try {
+      onChange();
+    } catch (err) {
+      void err;
+    }
+  };
+  const onUpdate = (_doc, change) => {
+    if (!change) return;
+    if ('actorId' in change || 'hidden' in change || change.flags?.['map-shine-advanced']) fire();
+  };
+  const ids = [
+    ['createToken', Hooks.on('createToken', fire)],
+    ['deleteToken', Hooks.on('deleteToken', fire)],
+    ['updateToken', Hooks.on('updateToken', onUpdate)],
+  ];
+  return () => {
+    for (const [hook, id] of ids) {
+      try {
+        Hooks.off(hook, id);
+      } catch (err) {
+        void err;
+      }
+    }
+  };
+}

@@ -38,7 +38,7 @@
 
 import { PARAM_STATUS } from './params-schema.js';
 
-/** @typedef {{id: string, label: string, icon: string, fire?: () => void, status?: 'live'|'planned', plannedReason?: string}} ImpulseDecl */
+/** @typedef {{id: string, label: string, icon: string, fire?: () => void, fireLocal?: () => unknown, status?: 'live'|'planned', plannedReason?: string}} ImpulseDecl — `fireLocal`: this client only (boot.js broadcasts `fire` to the table and runs `fireLocal` on receipt). */
 
 /**
  * Validate one impulse declaration. Pure; Node-testable exactly like

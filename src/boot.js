@@ -613,6 +613,9 @@ import {
   REGION_DARKNESS_OVERRIDE_PARAMS,
   readScenePlayerLightPermissions,
   writeScenePlayerLightPermissions,
+  broadcastImpulse,
+  listenForImpulses,
+  watchViewerToken,
   watchScenePlayerLightPermissions,
   readActivePlayerCarriedLightTokens,
   // PLAYER VISION-MODE GRADE (mythica-machina-press#77 Stage 2b, #580) — the
@@ -672,6 +675,7 @@ import {
   anchorKindByV2EffectTarget,
   anchorKindById,
   maskKindById,
+  MASK_KINDS,
   assembleLayerDescriptors,
 } from './scene/index.js';
 import {
@@ -1363,7 +1367,8 @@ function install() {
       // lightning.js's own manifest declares a11y.photosensitive:true —
       // this is what the (still-planned) suppression badge would watch.
       flashClass: true,
-      fire: () => MapShine.strikeLightning(),
+      fireLocal: () => MapShine.strikeLightning(),
+      fire: () => fireImpulseForTable('strike'),
     },
     {
       id: 'thunder',
@@ -1377,9 +1382,27 @@ function install() {
       id: 'gust',
       label: 'Gust',
       icon: 'wind',
-      fire: () => MapShine.gustWind(),
+      fireLocal: () => MapShine.gustWind(),
+      fire: () => fireImpulseForTable('gust'),
     },
   ];
+  // IMPULSES REACH THE WHOLE TABLE (UI test pass, 2026-09-26). A Remote/Studio
+  // impulse used to run only on the GM's own client — the GM saw the strike,
+  // the players saw nothing. `fire` now runs `fireLocal` here AND broadcasts
+  // the impulse id over the module socket (module.json already declares
+  // "socket": true); every other client runs its own `fireLocal`, so each
+  // player's own settings (a photosensitive lock turning lightning off, no
+  // lightning anchors on their floor) still decide what they see. Which
+  // anchor a strike lands on is picked per client — the flash is shared, not
+  // the exact bolt. Transport: foundry/impulse-broadcast.js (GM-sent only).
+  // The MapShine.strikeLightning()/gustWind() console calls stay local. The
+  // receiving half is installed with the rooms, in the `ready` hook below.
+  function fireImpulseForTable(id) {
+    const result = IMPULSES.find((d) => d.id === id)?.fireLocal?.();
+    const sent = broadcastImpulse(id);
+    if (!sent.ok) log.info(`impulse '${id}' not broadcast: ${sent.reason}`);
+    return result;
+  }
   // Fail loud at boot, not silently at first click — the same discipline
   // `setWater`'s own unknown-key check already applies to a runtime write,
   // applied here to a declaration instead. A typo'd status value or a
@@ -1452,6 +1475,7 @@ function install() {
       captureCue: (name) => captureCueFromLive(name),
       updateCueFadeMs: (id, overMs) => updateCueFadeMs(id, overMs),
       moveCueOrder: (id, direction) => moveCueOrder(id, direction),
+      deleteCue: (id) => deleteCue(id),
       testFireCue: (id) => testFireCue(id),
       revertCueTest: () => revertCueTest(),
       isCueTestActive: () => isCueTestActive(),
@@ -1492,6 +1516,24 @@ function install() {
       // registration) — the identical closure-reference safety every other
       // ctx function on this call already relies on.
       getSystemPanelCtx: () => getSystemPanelCtx(),
+      // THE SCENE DEPARTMENT's "Masks aboard" card (UI test pass, 2026-09-26)
+      // — the card has always asked for this and nothing supplied it, so it
+      // read "Mask board data not available" on every scene. A kind counts as
+      // found when ANY floor discovered a file for it (the authority report's
+      // own per-floor `authored` map: a url tail, or `default(..)`/`MISSING…`
+      // when absent). Suffix text comes from the catalog, never a literal
+      // (the masks/authority-only tripwire). Closure reference: maskAuthority
+      // is declared further down install().
+      getMaskBoard: () => {
+        const floors = maskAuthority.getReport()?.floors ?? [];
+        return MASK_KINDS.map((k) => ({
+          suffix: k.suffixes[0],
+          found: floors.some((f) => {
+            const v = f.authored?.[k.id];
+            return typeof v === 'string' && !v.startsWith('default(') && !v.startsWith('MISSING');
+          }),
+        }));
+      },
       // THE SCENE DEPARTMENT's Motion tiles card (2026-08-27) — a summary
       // readout + an "Open" button onto the full ui/rooms/remote/tile-motion-
       // panel.js panel, same closure-reference safety as every other ctx fn
@@ -1521,13 +1563,31 @@ function install() {
       // select already calls (see that registration's own comment, below,
       // for the full lever's rationale); this is a second door onto it, not
       // a second implementation.
+      //
+      // The setter writes the SAME scene flag the Remote's "Night darkness"
+      // slider writes (playerLightPermissions.darknessRealism01), then
+      // re-resolves (UI test pass, 2026-09-26). It used to call the raw local
+      // lever: the GM's own screen changed, players never saw it, nothing
+      // persisted, and the next permissions resolve (a reload, any Player
+      // Lights edit) silently snapped it back to the Remote's value.
       getDarknessRealism: () => getDarknessRealism(),
-      setDarknessRealism: (v) => setDarknessRealism(v),
+      setDarknessRealism: (v) => {
+        setDarknessRealism(v); // instant local feedback; the flag echo re-applies the same value
+        void writeScenePlayerLightPermissions({ darknessRealism01: v }).then((result) => {
+          if (!result.ok) log.warn(`darkness realism not changed: ${result.reason}`);
+          resolveAndApplyPlayerLightPermissions();
+        });
+      },
       // COPY/PASTE SCENE SETTINGS (mythica-machina-press#12) — thin
       // pass-throughs onto the console/macro API of the same name, which
       // already existed; this Scene-department card was the missing UI.
       copySceneEffectSettings: () => MapShine.copySceneEffectSettings(),
       pasteSceneEffectSettings: () => MapShine.pasteSceneEffectSettings(),
+      // Scene presets card (Scene department) — the #177 library's Studio face.
+      listScenePresets: () => MapShine.listScenePresets(),
+      saveScenePreset: (name) => MapShine.saveScenePreset(name),
+      applyScenePreset: (name) => MapShine.applyScenePreset(name),
+      deleteScenePreset: (name) => MapShine.deleteScenePreset(name),
       // MY PRESETS (mythica-machina-press#102) — same thin pass-through
       // shape as the copy/paste pair just above, onto the console/macro API
       // of the same name that already existed. Generic over effectId, so
@@ -1603,6 +1663,9 @@ function install() {
           // shell.js's own wind-popover.js instance — this dial only fires the
           // click, shell.js owns what opens (UI parity plan, phase 6a).
           onWindClick: dialCtx?.onWindClick,
+          // The date pill opens the TL corner's own Jump menu (+1 Day /
+          // +1 Week) — astrolabe-panel.js owns that menu and its gate.
+          onDateClick: dialCtx?.onDateClick,
           // UI parity plan, phase 6b — a tick click sweeps immediately, same
           // shape as ui/astrolabe.js's own old onTimeStop.
           onTimeStop: sweepToHourWithFade,
@@ -1896,6 +1959,21 @@ function install() {
       // both already open, never a second one.
       onOpenTileMotion: () => tileMotionPanel.open(),
     });
+    // Toolbar highlight re-sync for both rooms. This MUST live here, not in
+    // the `init` hook next to registerStudioButton/registerRemoteButton:
+    // `init` fires before this `ready` hook builds the controllers, so an
+    // `init`-time `MapShine.__studio?.onOpenChange(...)` optional-chains to a
+    // no-op and closing a room with its own ✕ left the toolbar button stuck
+    // "on" — the next click then closed an already-closed room (UI test pass,
+    // 2026-09-26: the "have to press twice" symptom).
+    MapShine.__studio?.onOpenChange((open) => syncStudioButtonState(open));
+    MapShine.__remote?.onOpenChange((open) => syncRemoteButtonState(open));
+    // Every client (GM or player) runs a GM's broadcast impulse locally — see
+    // fireImpulseForTable, above.
+    listenForImpulses((id) => IMPULSES.find((d) => d.id === id)?.fireLocal?.());
+    // The player's Carried Light picker repaints when their token appears,
+    // disappears or has its light changed elsewhere — not only on reopen.
+    watchViewerToken(() => MapShine.__player?.refreshPlayerLightPicker?.());
   }); // end Hooks.once('ready', ...) — see the deferral comment above installStudio
   // THE PLAYER ROOM (U5, docs/holy/UI-Testament.md §5.5) — safe to construct
   // unconditionally for every client, GM or not (its own header explains
@@ -11979,6 +12057,26 @@ function install() {
     return { ok: true, reason: null };
   }
 
+  /**
+   * Remove one cue from this scene's stack (UI test pass, 2026-09-26 — until
+   * now a captured cue could be reordered and re-timed but never removed, by
+   * UI or console). Re-validates the remaining stack before persisting, same
+   * as every other stack edit here. A fade the cue already started keeps
+   * running: it lives in fadeState, not in the stack.
+   * @param {string} id @returns {{ok: boolean, reason: string|null}}
+   */
+  function deleteCue(id) {
+    if (!cueStack.some((c) => c.id === id))
+      return { ok: false, reason: `no cue with id '${id}' in this scene's stack` };
+    const nextStack = cueStack.filter((c) => c.id !== id);
+    const check = validateCueStack(nextStack, fadeSourceRegistry.typeOf);
+    if (!check.ok) return { ok: false, reason: check.errors.join('; ') };
+    cueStack = nextStack;
+    void writeCueStack(cueStack);
+    MapShine.__remote?.refreshCueDeck();
+    return { ok: true, reason: null };
+  }
+
   // ── CUE TEST-FIRE + INSTANT REVERT (§5.4) — deliberately isolated from
   // fadeState/pendingSkyFadeCompletions, NEVER via mergeFadeState/
   // writeFadeState. A test that overwrote fadeState[key] directly would
@@ -12085,6 +12183,7 @@ function install() {
   MapShine.listCues = () => orderedCues(cueStack);
   MapShine.updateCueFadeMs = (id, overMs) => updateCueFadeMs(id, overMs);
   MapShine.moveCueOrder = (id, direction) => moveCueOrder(id, direction);
+  MapShine.deleteCue = (id) => deleteCue(id);
   MapShine.testFireCue = (id) => testFireCue(id);
   MapShine.revertCueTest = () => revertCueTest();
   MapShine.isCueTestActive = () => isCueTestActive();
@@ -12713,13 +12812,23 @@ function install() {
       refreshCandleIgnition();
       // ALSO UNGATED — an in-flight weather fade must keep landing on the
       // rendered sky whether or not the Remote happens to be open right now
-      // (pumpWeatherFades's own doc explains why). Piggybacks this rAF loop's
-      // real timestamp rather than a second requestAnimationFrame registration.
-      pumpWeatherFades(nowMs);
-      // A cue TEST preview (§5.4) rides this exact same timestamp too — see
+      // (pumpWeatherFades's own doc explains why). Piggybacks this rAF loop
+      // rather than a second requestAnimationFrame registration.
+      //
+      // ⚠️ WALL CLOCK, NOT `nowMs` (UI test pass, 2026-09-26). Every fade
+      // entry and cue-test preview is stamped `startedAtMs: wallClockMs()`
+      // (epoch ms — it is persisted and shared, so every client must read the
+      // same clock), but these used to be pumped with rAF's page-relative
+      // timestamp. Progress = (≈1.7e5 − ≈1.8e12) / overMs clamped to 0: every
+      // timed fade sat at its `from` value forever and never arrived (only
+      // Fade Time = Now worked, since overMs 0 counts as arrived at once), and
+      // Now Playing read "Fading to Rain — 1790392589s left".
+      const fadeNowMs = wallClockMs();
+      pumpWeatherFades(fadeNowMs);
+      // A cue TEST preview (§5.4) rides this same loop too — see
       // pumpCueTestPreview's own doc for why it must never become a second
       // requestAnimationFrame loop.
-      pumpCueTestPreview(nowMs);
+      pumpCueTestPreview(fadeNowMs);
       // THREE conditions, all must hold: (1) `isConnected` — the panel builds
       // the dial once and the shell detaches it when another zone is showing;
       // (2) NOT explicitly hidden — `isPanelVisible() === false` after
@@ -12792,9 +12901,8 @@ function install() {
           // the Remote.
           // `cloudCoverEased01`, not `cloudCover01`: the scene must show the
           // sky the map is ACTUALLY rendering, matching `dial`'s own doc above
-          // on why the two are deliberately kept separate. `dateText` has no
-          // real source yet (see astrolabe-dial.js's own header) — omitted,
-          // the dial's own `?? '—'` fallback shows honestly, not faked.
+          // on why the two are deliberately kept separate. `dateText`: see
+          // readDialDateText (undefined under Aesthetic → the dial's '—').
           // Skipped mid-drag (2026-09-09 fix) — the dial is already painting
           // its own local, live cosmetic preview of the dragged-to hour (see
           // mountAstrolabeDial's own onTimeChange doc); the real engine's
@@ -12809,6 +12917,13 @@ function install() {
               windDirectionDeg: payload.windDirectionDeg,
               windSpeed01: payload.windSpeed01,
               cloudCover01: payload.cloudCoverEased01,
+              // The date pill (UI test pass, 2026-09-26) — it used to have "no
+              // real source", but the installed calendar IS one now: under
+              // Follow/Almanac the dial reads Foundry's own world clock, so the
+              // pill shows that clock's date in the calendar's own names (the
+              // same names Foundry's World Clock shows). Aesthetic keeps '—':
+              // that dial is detached from world time, so no date is true.
+              dateText: readDialDateText(skyScope.sky?.mode ?? 'aesthetic'),
               // Ring-lock (2026-08-18 fix) — already on `payload` via the
               // `...dial` spread above (vt-pan-viewer.js's own
               // `canSetHour: clock?.canSetHour !== false`), not a new source
@@ -12825,7 +12940,7 @@ function install() {
             // since U2 with zero callers; see buildNowPlayingLabel's own doc
             // for the full story. Riding the same ~10Hz throttle as the dial
             // itself, not a second timer.
-            MapShine.__remote?.updateNowPlaying?.({ label: buildNowPlayingLabel(payload, nowMs) });
+            MapShine.__remote?.updateNowPlaying?.({ label: buildNowPlayingLabel(payload, wallClockMs()) });
             // The weather board's own Clouds/Rain faders (2026-09-10 fix,
             // author: "the sliders and weather buttons feel like two
             // completely detached systems") — `cloudCoverEased01`/
@@ -12874,6 +12989,27 @@ function install() {
     },
     { effect: 'wind' }
   );
+
+  /**
+   * The Remote dial's date pill text: "19 Jan 2026" from Foundry's live
+   * `game.time.components` + installed calendar, or undefined (the dial's own
+   * '—') under Aesthetic or when no calendar is readable. Never throws.
+   * @param {string} posture - the sky's clock mode.
+   * @returns {string|undefined}
+   */
+  function readDialDateText(posture) {
+    if (posture === 'aesthetic') return undefined;
+    try {
+      const c = game.time?.components;
+      const cal = game.time?.calendar;
+      const monthDef = cal?.months?.values?.[c?.month];
+      if (!c || !monthDef) return undefined;
+      const month = monthDef.abbreviation || String(monthDef.name ?? '').slice(0, 3);
+      return `${c.dayOfMonth + 1} ${month} ${c.year}`;
+    } catch (_) {
+      return undefined;
+    }
+  }
 
   // THE ALMANAC DIAGNOSTIC REPORT (docs/holy/Almanac-Testament.md, stage
   // A2) — the author's own ask, 2026-08-17: *"build a button which will
@@ -16622,7 +16758,8 @@ function install() {
           else MapShine.__studio?.close();
         },
       });
-      MapShine.__studio?.onOpenChange((open) => syncStudioButtonState(open));
+      // Highlight re-sync is wired where __studio is built (the `ready` hook
+      // in install()) — it does not exist yet at `init`.
 
       // THE REMOTE TOGGLE (U2) — the fourth tool, side-by-side rollout: opens
       // the new Remote next to the panel/Studio, changes nothing about any
@@ -16634,7 +16771,7 @@ function install() {
           else MapShine.__remote?.close();
         },
       });
-      MapShine.__remote?.onOpenChange((open) => syncRemoteButtonState(open));
+      // Highlight re-sync: see the Studio's note above.
 
       // THE PLAYER TOGGLE (U5) — the fifth tool, visible:true unlike the
       // three GM-only ones above (foundry/scene-controls-button.js#

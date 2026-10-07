@@ -144,6 +144,47 @@ export function run(t) {
         (nearOffset === 0 || nearOffset < farOffset) && farOffset > 0
       );
     }
+    // A shorter beam is drawn by LENGTHENING `beamDirection` (length 1/f -> beam at
+    // fraction f of its throw) — the shader never normalizes it. Replicate exactly
+    // what `buildBeamFalloffNode` does with it and pin that this is the full beam
+    // scaled about the bearer, in every direction the bearer can face.
+    {
+      const shaderBeam = (p, dir) => {
+        const perp = { x: -dir.y, y: dir.x }; // buildBeamFalloffNode: vec2(-dir.y, dir.x)
+        return computeBeamFalloff01({
+          axial: p.x * dir.x + p.y * dir.y,
+          lateral: Math.abs(p.x * perp.x + p.y * perp.y),
+          ...BEAM_SHAPE,
+        });
+      };
+      let identical = true;
+      let dark = true;
+      let sampled = 0;
+      for (const deg of [0, 37, 90, 145, 225, 300]) {
+        const rad = (deg * Math.PI) / 180;
+        const unit = { x: Math.sin(rad), y: -Math.cos(rad) };
+        for (const f of [0.2, 0.5, 0.8]) {
+          const shortened = { x: unit.x / f, y: unit.y / f };
+          for (const a of [0.05, 0.2, 0.5, 0.9]) {
+            for (const l of [-0.2, 0, 0.1, 0.3]) {
+              // the point at (a, l) in the full beam's frame, and where it sits once the beam is f as long
+              const full = { x: unit.x * a - unit.y * l, y: unit.y * a + unit.x * l };
+              const scaled = { x: full.x * f, y: full.y * f };
+              identical = identical && near(shaderBeam(scaled, shortened), shaderBeam(full, unit), 1e-9);
+              sampled += 1;
+            }
+          }
+          // nothing is lit beyond f of the way out
+          const beyond = { x: unit.x * f * 1.05, y: unit.y * f * 1.05 };
+          dark = dark && shaderBeam(beyond, shortened) === 0;
+        }
+      }
+      ok(
+        'a beamDirection of length 1/f draws the full beam scaled by f about the bearer (' + sampled + ' samples)',
+        identical
+      );
+      ok('…and lights nothing beyond fraction f of the throw', dark);
+    }
     ok('never returns a negative value', computeBeamFalloff01({ axial: -5, lateral: 5, ...BEAM_SHAPE }) >= 0);
     ok(
       'non-finite axial/lateral is total (0), never NaN',

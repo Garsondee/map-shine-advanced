@@ -117,6 +117,34 @@ export function resolveBeamDirection({ aimAngleDeg, rotation, lockRotation } = {
   return tokenRotationToForwardVector(rotation, lockRotation);
 }
 
+function scaleVec2(v, k) {
+  return { x: v.x * k, y: v.y * k };
+}
+
+/**
+ * How much of its full throw a flashlight's beam is drawn at, from how far away
+ * its bearer's cursor is (`reachPx`): the beam reaches the cursor, never past the
+ * preset's full length and never less than `minReach01` of it.
+ * No reach known (an older client, no cursor yet) is the full beam.
+ *
+ * HOW THE SHADER IS TOLD: not with a new uniform. The falloff reads
+ * `axial = dot(fragment, beamDirection)` and `lateral = |dot(fragment, perp)|`
+ * with NO normalization (`point-light-illumination.js#buildBeamFalloffNode`), so
+ * a `beamDirection` of length `1/reach01` makes a fragment at (a, l) behave as
+ * the full beam's (a/reach01, l/reach01) — the whole beam, cone angle and all,
+ * scaled down about the bearer. The pool, both materials and the shader are
+ * untouched; `point-light-illumination.test.mjs` pins the scaling identity.
+ *
+ * @param {number|undefined} reachPx
+ * @param {number} radiusPx - the preset's full throw.
+ * @param {number} minReach01
+ * @returns {number} in [minReach01, 1]
+ */
+export function resolveBeamReach01(reachPx, radiusPx, minReach01) {
+  if (!Number.isFinite(reachPx) || !(radiusPx > 0)) return 1;
+  return Math.min(1, Math.max(minReach01, reachPx / radiusPx));
+}
+
 /**
  * Where a carried light — and, for a torch, its flame and embers — sits THIS
  * frame: the token's centre, plus the displacement of a light the bearer holds
@@ -191,6 +219,10 @@ const PLAYER_LIGHT_MODE_PRESETS = Object.freeze({
     animated: false,
     // POINTED at the bearer's cursor (`resolveBeamDirection`).
     aimed: true,
+    // The beam is never drawn shorter than this fraction of `radiusPx`, however
+    // close the cursor is — a flashlight pointed at your own feet still lights a
+    // patch of floor (V2's floor was ~1.5 grid units).
+    beamMinReach01: 0.2,
     // BEAM SHAPE (Stage 2a) — all fractions of `radiusPx` (the beam's own
     // local unit-radius space, matching `dist`'s normalization elsewhere in
     // this pipeline).
@@ -221,8 +253,9 @@ export const PLAYER_LIGHT_AIMED_MODES = Object.freeze(
  * batch `buildPlayerLightSources` below) so the light-pool merge point and a
  * unit test can both reason about one token without a whole-array dance.
  *
- * @param {{tokenId: string, x: number, y: number, elevation: number, mode: string, rotation?: number, lockRotation?: boolean, aimAngleDeg?: number, offsetX?: number, offsetY?: number}} tokenSnapshot
+ * @param {{tokenId: string, x: number, y: number, elevation: number, mode: string, rotation?: number, lockRotation?: boolean, aimAngleDeg?: number, reachPx?: number, offsetX?: number, offsetY?: number}} tokenSnapshot
  *   `aimAngleDeg` (optional) is the bearer's live aim — see {@link resolveBeamDirection};
+ *   `reachPx` (optional) is how far away their cursor is — see {@link resolveBeamReach01};
  *   `offsetX`/`offsetY` (optional) is a held light's displacement — see {@link resolveLightPosition}.
  * @param {{modes: Record<string, boolean>}} permissions - `resolvePlayerLightPermissions`'s own shape.
  * @returns {object|null}
@@ -240,6 +273,7 @@ export function buildOnePlayerLightSource(tokenSnapshot, permissions) {
   // every frame would read as a stutter rather than a flame.
   const seed = deriveTokenSeed(Number(tokenSnapshot.x), Number(tokenSnapshot.y));
   const isBeam = preset.falloffModel === 'beam';
+  const beamReach01 = isBeam ? resolveBeamReach01(tokenSnapshot.reachPx, preset.radiusPx, preset.beamMinReach01) : null;
   return {
     sourceId: `playerLight:${tokenSnapshot.tokenId}`,
     ownerEffectId: 'playerLight',
@@ -263,7 +297,10 @@ export function buildOnePlayerLightSource(tokenSnapshot, permissions) {
     // documents for position); `beamShape` is the preset's own
     // constant shape, read straight through so `point-light-pool.js`'s
     // material builder can bake it once at entry-creation time.
-    beamDirection: isBeam ? resolveBeamDirection(tokenSnapshot) : null,
+    // Its LENGTH is 1/beamReach01 (1 = a unit vector, the full beam) — see
+    // `resolveBeamReach01` for why that, rather than a uniform, sets the throw.
+    beamDirection: isBeam ? scaleVec2(resolveBeamDirection(tokenSnapshot), 1 / beamReach01) : null,
+    beamReach01,
     beamShape: isBeam
       ? {
           nearHalfWidth01: preset.beamNearHalfWidth01,

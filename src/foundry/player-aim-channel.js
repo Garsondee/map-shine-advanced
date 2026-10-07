@@ -77,6 +77,8 @@ import { readScenePlayerLightPermissions } from './player-light-permissions.js';
 import {
   PLAYER_AIM_MODES,
   PLAYER_AIM_REACH_MODES,
+  PLAYER_AIM_HELD_MODES,
+  AIM_FLASHLIGHT_REACH_CAP_PX,
   AIM_MESSAGE_TYPE,
   AIM_TORCH_LEASH_SQUARES,
   AIM_TORCH_EASE_TAU_MS,
@@ -199,6 +201,11 @@ export function createPlayerAimChannel({
     if (angleDeg === null) return null;
     if (!PLAYER_AIM_REACH_MODES.includes(snap.mode)) return { angleDeg, reachPx: null };
     const cursorDistancePx = cursor ? Math.hypot(cursor.x - snap.x, cursor.y - snap.y) : 0;
+    // A flashlight is not displaced, so walls do not clamp it (its light sweep
+    // already stops at them); its reach just says how far away the cursor is.
+    if (!PLAYER_AIM_HELD_MODES.includes(snap.mode)) {
+      return { angleDeg, reachPx: Math.min(cursorDistancePx, AIM_FLASHLIGHT_REACH_CAP_PX) };
+    }
     const leashPx = readGridSizePixels().gridSizePixels * AIM_TORCH_LEASH_SQUARES;
     const wanted = Math.min(cursorDistancePx, leashPx);
     const end = offsetFromAim(angleDeg, wanted);
@@ -216,6 +223,8 @@ export function createPlayerAimChannel({
    * the snapshots are this frame's own fresh objects
    * (`readActivePlayerCarriedLightTokens` builds them per call):
    *   - `aimAngleDeg`, the bearing (a flashlight's beam direction);
+   *   - `reachPx`: how far the cursor is — a flashlight's beam is that long
+   *     (`player-light-geometry.js#resolveBeamReach01`);
    *   - for a held torch also `offsetX`/`offsetY`, where its bearer holds it
    *     relative to their token (`player-light-geometry.js#resolveLightPosition`).
    * Called by BOTH the light getter and the torch-flame getter each frame. That
@@ -236,7 +245,7 @@ export function createPlayerAimChannel({
         let aim = null;
         if (localToken && snap.tokenId === tokenIdOf(localToken)) {
           const target = localAimTarget(localToken, snap);
-          if (target && target.reachPx === null) {
+          if (target && !PLAYER_AIM_HELD_MODES.includes(snap.mode)) {
             aim = target; // a beam follows the cursor exactly - no lag
           } else if (target) {
             torchEase.receive(snap.tokenId, target.angleDeg, nowMs, target.reachPx);
@@ -248,9 +257,12 @@ export function createPlayerAimChannel({
         if (!aim) continue;
         snap.aimAngleDeg = aim.angleDeg;
         if (aim.reachPx !== null && PLAYER_AIM_REACH_MODES.includes(snap.mode)) {
-          const offset = offsetFromAim(aim.angleDeg, aim.reachPx);
-          snap.offsetX = offset.x;
-          snap.offsetY = offset.y;
+          snap.reachPx = aim.reachPx;
+          if (PLAYER_AIM_HELD_MODES.includes(snap.mode)) {
+            const offset = offsetFromAim(aim.angleDeg, aim.reachPx);
+            snap.offsetX = offset.x;
+            snap.offsetY = offset.y;
+          }
         }
       }
     } catch (err) {

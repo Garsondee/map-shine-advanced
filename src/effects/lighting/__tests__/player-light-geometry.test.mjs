@@ -10,6 +10,7 @@ import {
   PLAYER_LIGHT_RENDERED_MODES,
   resolveBeamDirection,
   resolveLightPosition,
+  resolveBeamReach01,
   PLAYER_LIGHT_AIMED_MODES,
   tokenRotationToForwardVector,
 } from '../player-light-geometry.js';
@@ -236,6 +237,54 @@ export function run(t) {
     ok(
       'a non-finite position produces no descriptor',
       buildOnePlayerLightSource({ tokenId: 't', x: NaN, y: 0, mode: 'torch' }, ALLOW_ALL) === null
+    );
+  }
+
+  // ======================================================================
+  // how long the beam is drawn: as far as the cursor, between a floor and its full throw
+  // ======================================================================
+  {
+    ok('reach: half the throw away is half the beam', near(resolveBeamReach01(310, 620, 0.2), 0.5));
+    ok('reach: past the throw is the full beam', resolveBeamReach01(5000, 620, 0.2) === 1);
+    ok('reach: right at the feet is the floor, not nothing', resolveBeamReach01(0, 620, 0.2) === 0.2);
+    ok(
+      'reach: unknown is the full beam',
+      [undefined, null, NaN, 'far'].every((r) => resolveBeamReach01(r, 620, 0.2) === 1) &&
+        resolveBeamReach01(100, 0, 0.2) === 1
+    );
+
+    const full = buildOnePlayerLightSource(
+      { tokenId: 'b1', x: 0, y: 0, mode: 'flashlight', aimAngleDeg: 90 },
+      ALLOW_ALL
+    );
+    ok(
+      'beam: with no reach it is the full beam and a unit vector',
+      full.beamReach01 === 1 && near(Math.hypot(full.beamDirection.x, full.beamDirection.y), 1)
+    );
+    const half = buildOnePlayerLightSource(
+      { tokenId: 'b2', x: 0, y: 0, mode: 'flashlight', aimAngleDeg: 90, reachPx: 310 },
+      ALLOW_ALL
+    );
+    ok(
+      'beam: a half-length beam has a direction twice as long…',
+      near(half.beamDirection.x, 2) && near(half.beamDirection.y, 0, 1e-9)
+    );
+    ok('beam: …still pointing the same way', Math.sign(half.beamDirection.x) === Math.sign(full.beamDirection.x));
+    ok('beam: …and reports the fraction it was drawn at', near(half.beamReach01, 0.5));
+    ok('beam: its mesh radius (the wall-clip cost) is untouched by the beam length', half.radius === full.radius);
+    const diag = buildOnePlayerLightSource(
+      { tokenId: 'b3', x: 0, y: 0, mode: 'flashlight', aimAngleDeg: 225, reachPx: 124 },
+      ALLOW_ALL
+    );
+    const diagDeg = ((Math.atan2(diag.beamDirection.x, -diag.beamDirection.y) * 180) / Math.PI + 360) % 360;
+    ok(
+      'beam: a shortened diagonal beam keeps its bearing (the direction is the aim, the length the reach)',
+      near(diagDeg, 225, 1e-6)
+    );
+    ok(
+      'beam: a torch has no beam reach',
+      buildOnePlayerLightSource({ tokenId: 't', x: 0, y: 0, mode: 'torch', reachPx: 50 }, ALLOW_ALL).beamReach01 ===
+        null
     );
   }
 

@@ -59,12 +59,27 @@
 export const PLAYER_AIM_MODES = Object.freeze(['flashlight', 'torch']);
 
 /**
- * The subset whose light is HELD OUT at the cursor rather than just pointed at
- * it: a torch sits at the end of an arm, so besides a bearing it needs a REACH
- * (how far from the bearer). A flashlight's beam has a fixed length today, so
- * its reach is neither sent nor drawn.
+ * The subset that carries a REACH besides its bearing (the `d` on the wire).
+ * For a torch it is how far from the bearer the light is held; for a flashlight
+ * it is how far away the cursor is, which sets how long the beam is.
  */
-export const PLAYER_AIM_REACH_MODES = Object.freeze(['torch']);
+export const PLAYER_AIM_REACH_MODES = Object.freeze(['torch', 'flashlight']);
+
+/**
+ * The subset whose light is HELD OUT at the cursor — displaced from its
+ * bearer by the reach — rather than just pointed at it: a torch sits at the end
+ * of an arm. (A flashlight stays in its bearer's hand; its reach only sets how
+ * far the beam throws.)
+ */
+export const PLAYER_AIM_HELD_MODES = Object.freeze(['torch']);
+
+/**
+ * A flashlight's reach is the cursor's distance, capped here so a cursor
+ * wandering further out stops generating traffic once the beam has reached its
+ * full length. Must stay above the flashlight preset's `radiusPx` (a cross-zone
+ * test holds it there) — a cap below that would shorten the beam's full throw.
+ */
+export const AIM_FLASHLIGHT_REACH_CAP_PX = 1000;
 
 /** How far from its bearer a torch may be held, in grid squares (V2: 10 units x 3 = 30 ft at 5 ft/square). */
 export const AIM_TORCH_LEASH_SQUARES = 6;

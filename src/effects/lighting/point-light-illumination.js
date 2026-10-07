@@ -469,10 +469,13 @@ export function computeBeamFalloff01({
  * @param {object} args
  * @param {*} args.localUnitXY - the fragment's local unit-radius position (the
  *   SAME node `dist = length(localUnitXY)` is already derived from).
- * @param {*} args.beamDirection - a unit-length vec2 TSL node/uniform, the
- *   bearer's own live facing direction (world-space, same convention as
- *   `localUnitXY` — see `player-light-geometry.js#tokenRotationToForwardVector`
- *   for the one place this vector is derived from a Foundry document).
+ * @param {*} args.beamDirection - a vec2 TSL node/uniform: the bearer's own live
+ *   facing direction (world-space, same convention as `localUnitXY` — see
+ *   `player-light-geometry.js#tokenRotationToForwardVector` for the one place
+ *   the direction is derived from a Foundry document). Unit length means the
+ *   beam's full throw; a LONGER vector shortens the beam (length 1/f draws it at
+ *   fraction f of its throw, cone angle preserved) because `axial`/`lateral`
+ *   below are plain dot products with NO normalization — do not add one.
  * @param {number} args.nearHalfWidth01 @param {number} args.farHalfWidth01
  * @param {number} args.edgeSoftness01 @param {number} args.lengthFalloffExponent
  * @param {number} args.coreIntensity @param {number} args.midIntensity

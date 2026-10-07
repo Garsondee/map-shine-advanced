@@ -11,6 +11,8 @@
 import {
   PLAYER_AIM_MODES,
   PLAYER_AIM_REACH_MODES,
+  PLAYER_AIM_HELD_MODES,
+  AIM_FLASHLIGHT_REACH_CAP_PX,
   AIM_MAX_REACH_PX,
   AIM_TORCH_WALL_MARGIN_PX,
   clampTorchReachPx,
@@ -32,6 +34,7 @@ import {
 import {
   tokenRotationToForwardVector,
   PLAYER_LIGHT_AIMED_MODES,
+  buildOnePlayerLightSource,
 } from '../../effects/lighting/player-light-geometry.js';
 
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) < eps;
@@ -392,11 +395,23 @@ export function run(t) {
     PLAYER_AIM_MODES.includes('flashlight') && PLAYER_AIM_MODES.includes('torch')
   );
   ok(
-    'only the torch is held out (has a reach) — a flashlight’s beam is fixed length',
-    PLAYER_AIM_REACH_MODES.length === 1 &&
-      PLAYER_AIM_REACH_MODES[0] === 'torch' &&
-      PLAYER_AIM_REACH_MODES.every((m) => PLAYER_AIM_MODES.includes(m))
+    'both lights carry a reach; only the torch is HELD out (a flashlight stays in the hand)',
+    PLAYER_AIM_REACH_MODES.includes('torch') &&
+      PLAYER_AIM_REACH_MODES.includes('flashlight') &&
+      PLAYER_AIM_HELD_MODES.length === 1 &&
+      PLAYER_AIM_HELD_MODES[0] === 'torch' &&
+      PLAYER_AIM_HELD_MODES.every((m) => PLAYER_AIM_REACH_MODES.includes(m))
   );
+  {
+    const flash = buildOnePlayerLightSource(
+      { tokenId: 'x', x: 0, y: 0, mode: 'flashlight' },
+      { modes: { flashlight: true } }
+    );
+    ok(
+      'the flashlight reach cap is above the beam’s full throw, so the cap never shortens it',
+      AIM_FLASHLIGHT_REACH_CAP_PX >= flash.radius
+    );
+  }
 
   // ======================================================================
   // a held torch's reach

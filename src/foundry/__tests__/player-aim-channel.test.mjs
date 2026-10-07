@@ -182,9 +182,14 @@ export function run(t) {
       snaps = channel.annotate(readActivePlayerCarriedLightTokens());
       ok('annotate: the viewer’s own token aims at the cursor (due east is 90°)', near(snaps[0].aimAngleDeg, 90));
       const [src] = buildPlayerLightSources(snaps, ALLOW_FLASHLIGHT);
+      const len = Math.hypot(src.beamDirection.x, src.beamDirection.y);
       ok(
         'annotate: …and that reaches the beam descriptor, pointing +X',
-        near(src.beamDirection.x, 1) && near(src.beamDirection.y, 0)
+        near(src.beamDirection.x / len, 1) && near(src.beamDirection.y / len, 0)
+      );
+      ok(
+        'annotate: …and the cursor, 100 px away, shortens the beam (to its floor: 0.2 of a 620 px throw)',
+        near(snaps[0].reachPx, 100) && near(src.beamReach01, 0.2) && near(len, 5)
       );
 
       w.setMouse(100, 0);
@@ -620,6 +625,94 @@ export function run(t) {
       w.setMouse(400, 100);
       const [snap] = channel.annotate(readActivePlayerCarriedLightTokens());
       ok('flashlight: aimed but never displaced', near(snap.aimAngleDeg, 90) && snap.offsetX === undefined);
+    });
+  }
+  {
+    // A flashlight's beam is as long as the cursor is far, up to its full throw.
+    const checks = [];
+    const w = makeWorld({
+      tokens: [
+        {
+          id: 't1',
+          actorId: 'actor-p1',
+          x: 100,
+          y: 100,
+          mode: 'flashlight',
+          owners: ['p1'],
+          checkCollision: () => {
+            checks.push('wall test');
+            return { x: 120, y: 100 };
+          },
+        },
+      ],
+    });
+    const { channel, clock } = makeChannel();
+    withWorld(w, () => {
+      w.setMouse(400, 100);
+      let snaps = channel.annotate(readActivePlayerCarriedLightTokens());
+      let [src] = buildPlayerLightSources(snaps, ALLOW_FLASHLIGHT);
+      ok('flashlight beam: the cursor 300 px away is its reach', near(snaps[0].reachPx, 300));
+      ok('flashlight beam: …drawn at 300/620 of its full throw', near(src.beamReach01, 300 / 620));
+      ok(
+        'flashlight beam: …by lengthening the direction vector to 1/that fraction',
+        near(Math.hypot(src.beamDirection.x, src.beamDirection.y), 620 / 300)
+      );
+      w.setMouse(3100, 100);
+      snaps = channel.annotate(readActivePlayerCarriedLightTokens());
+      [src] = buildPlayerLightSources(snaps, ALLOW_FLASHLIGHT);
+      ok(
+        'flashlight beam: a far cursor saturates at the cap (no traffic once the beam is full length)',
+        snaps[0].reachPx === 1000
+      );
+      ok(
+        'flashlight beam: …and the full beam is a unit vector',
+        near(src.beamReach01, 1) && near(Math.hypot(src.beamDirection.x, src.beamDirection.y), 1)
+      );
+      ok('flashlight beam: walls never clamp a flashlight (its light sweep stops at them itself)', checks.length === 0);
+
+      w.setMouse(400, 100);
+      ok(
+        'flashlight beam (send): the first aim carries its reach',
+        channel.tick(clock.t) === true && w.emitted[0].msg.d === 300
+      );
+      clock.advance(120);
+      w.setMouse(250, 100);
+      ok(
+        'flashlight beam (send): shortening the beam without turning it is news',
+        channel.tick(clock.t) === true && w.emitted[1].msg.d === 150
+      );
+      clock.advance(120);
+      w.setMouse(1500, 100);
+      channel.tick(clock.t);
+      w.setMouse(2500, 100);
+      clock.advance(120);
+      ok('flashlight beam (send): beyond the cap, a farther cursor is NOT news', channel.tick(clock.t) === false);
+    });
+  }
+  {
+    // A flashlight on another screen.
+    const w = makeWorld({
+      tokens: [
+        { id: 't1', actorId: 'actor-p1', x: 100, y: 100, mode: 'torch', owners: ['p1'] },
+        { id: 't2', actorId: 'actor-p2', x: 600, y: 600, mode: 'flashlight', owners: ['p2'] },
+      ],
+    });
+    const { channel } = makeChannel();
+    withWorld(w, () => {
+      channel.handleMessage({ type: 'playerAim', tokenId: 't2', userId: 'p2', a: 90, d: 124 });
+      let [, remote] = channel.annotate(readActivePlayerCarriedLightTokens());
+      let [src] = buildPlayerLightSources([remote], ALLOW_FLASHLIGHT);
+      ok(
+        'flashlight beam (remote): drawn at the relayed reach',
+        near(src.beamReach01, 0.2) && remote.offsetX === undefined
+      );
+      channel.handleMessage({ type: 'playerAim', tokenId: 't2', userId: 'p2', a: 90 });
+      [, remote] = channel.annotate(readActivePlayerCarriedLightTokens());
+      [src] = buildPlayerLightSources([remote], ALLOW_FLASHLIGHT);
+      ok(
+        'flashlight beam (remote): a message with no reach — an older client — is the full beam',
+        near(src.beamReach01, 1) && near(Math.hypot(src.beamDirection.x, src.beamDirection.y), 1)
+      );
     });
   }
   {

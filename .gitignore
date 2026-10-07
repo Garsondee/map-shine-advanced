@@ -54,3 +54,10 @@ chrome-performance-traces/
 example_map/
 mansion_example_map/
 knip-report.txt
+
+# Oracle-server sync: connection details stay local (this repo is public).
+# The .ppk key itself is covered by the parent folder's *.ppk rule.
+tools/oracle-sync/oracle-sync.config.json
+*.ppk
+tools/oracle-sync/*.log
+tools/oracle-sync/*.lock

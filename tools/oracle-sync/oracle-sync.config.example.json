@@ -1,0 +1,9 @@
+{
+  "host": "<server IP or hostname>",
+  "port": 22,
+  "user": "<ssh user>",
+  "hostKey": "SHA256:<server ssh-ed25519 fingerprint, as plink prints it on first contact>",
+  "keyPath": "../SSH.ppk",
+  "remoteModuleDir": "/home/<user>/foundrydata/Data/modules/map-shine-advanced",
+  "remoteStagingDir": "/home/<user>/foundrydata/.msa-upload-staging"
+}

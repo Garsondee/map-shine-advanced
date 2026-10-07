@@ -406,8 +406,13 @@ async function watchMode(cfg, flags) {
         // Only files that still exist; a local delete is reported, never mirrored.
         const present = [];
         for (const r of rels) {
-          if (await existsLocal(r)) present.push(r);
-          else log(`  (deleted locally, left on the server: ${r})`);
+          const s = await stat(path.join(repoRoot, r)).catch(() => null);
+          if (!s) log(`  (deleted locally, left on the server: ${r})`);
+          // A DIRECTORY is not a file: on Windows, a recursive watch also reports the PARENT directory when a file
+          // inside it is replaced by a temp-write + rename (which is how editors and Claude Code save). Hashing it
+          // threw EISDIR, the batch was re-queued with the directory still in it, and the watcher sat in an endless
+          // retry loop that never uploaded anything (2026-10-07).
+          else if (s.isFile()) present.push(r);
         }
         if (!present.length) continue;
         // Hash-compare first so a save that did not change content (formatters, touch) sends nothing.

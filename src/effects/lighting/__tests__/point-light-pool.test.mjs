@@ -11,6 +11,8 @@
  * module's own general shape — a viewer-adjacent orchestrator, verified live
  * rather than in Node, same posture `vt-pan-viewer.js` has always had).
  */
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { resolveLightElevationRank, resolveAnchorElevationRank } from '../point-light-pool.js';
 import { LIGHT_ELEVATION_UNCONFIGURED_SENTINEL, elevationRank } from '../point-light-illumination.js';
 
@@ -173,5 +175,22 @@ export function run(t) {
     resolveAnchorElevationRank({ mode: 'locked', bottom: -10, top: 0 }, FLOORS) === elevationRank(0, 0) &&
       resolveAnchorElevationRank({ mode: 'locked', bottom: -10, top: 0 }, FLOORS) <
         resolveAnchorElevationRank({ mode: 'locked', bottom: 0, top: 10 }, FLOORS)
+  );
+
+  // A light descriptor with `animation: null` (the flashlight once shipped
+  // that) used to throw `Cannot read properties of null (reading 'type')`
+  // from `createLightEntry`/`update()` every frame. `update()` is not
+  // unit-testable here (real THREE), so guard the invariant on the source:
+  // no live code may read a field off `light.animation` directly — it must
+  // go through `light.animation ?? NO_LIGHT_ANIMATION`.
+  const poolSource = readFileSync(fileURLToPath(new URL('../point-light-pool.js', import.meta.url)), 'utf8');
+  const poolCode = poolSource.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  ok(
+    'point-light-pool.js never reads a field straight off `light.animation` (a null animation would crash the loop)',
+    !/\blight\.animation\.\w/.test(poolCode)
+  );
+  ok(
+    'point-light-pool.js falls back to NO_LIGHT_ANIMATION in both createLightEntry and update()',
+    (poolCode.match(/light\.animation \?\? NO_LIGHT_ANIMATION/g) ?? []).length >= 2
   );
 }

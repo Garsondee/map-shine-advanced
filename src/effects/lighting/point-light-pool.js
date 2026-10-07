@@ -127,6 +127,24 @@ import {
  * rare frame a light's own polygon exceeds its previous high-water mark. */
 const INITIAL_LIGHT_FAN_VERTICES = 192;
 
+/** The "not animated" snapshot, shared and frozen. Every light descriptor is
+ * SUPPOSED to carry an `animation` object (`type: null` for none — scene
+ * lights' `deriveAnimationSnapshot`, player lights, candle/fire/lightning),
+ * but a builder that omits it (the flashlight shipped `animation: null` once)
+ * would otherwise throw `Cannot read properties of null (reading 'type')`
+ * from inside the per-frame loop and take the whole render loop down with it.
+ * Reading `light.animation ?? NO_LIGHT_ANIMATION` keeps one malformed
+ * descriptor a harmless "plain steady pool" instead. Same field defaults the
+ * animated builders use for speed/intensity. */
+const NO_LIGHT_ANIMATION = Object.freeze({
+  type: null,
+  speedRaw: 5,
+  intensityRaw: 5,
+  reverse: false,
+  seed: 0,
+  quality: 0,
+});
+
 const log = createLogger('PointLightPool');
 
 /**
@@ -349,7 +367,8 @@ function createLightEntry({
   // the matched registry entry (or null for no/unbuilt animation) is baked
   // into the node graph via the seed-injection seam — mirrors Foundry's own
   // "swap the shader class at source init" approach exactly.
-  const animationEntry = resolveLightAnimation(light.animation.type);
+  const animationType = (light.animation ?? NO_LIGHT_ANIMATION).type;
+  const animationEntry = resolveLightAnimation(animationType);
   const {
     material,
     uRatio,
@@ -572,7 +591,7 @@ function createLightEntry({
     // writer in update() can skip it entirely. Separate sets for
     // illumination vs coloration (two independent shader graphs) but always
     // written the SAME values.
-    animationType: light.animation.type,
+    animationType,
     animationQuality,
     falloffModel,
     animationEntry,
@@ -1815,7 +1834,8 @@ export function createPointLightPool({
       // path. Dispose what THREE actually HAS a real dispose() for (geometry,
       // both materials) — unlike the BufferAttribute leak this pool's own
       // header documents.
-      const animationQuality = light.animation?.quality ?? 0;
+      const lightAnimation = light.animation ?? NO_LIGHT_ANIMATION;
+      const animationQuality = lightAnimation.quality ?? 0;
       // FALLOFF MODEL — a graph-build-time choice baked into the node graph
       // (point-light-illumination.js), so a change needs the same rebuild as
       // type/quality. In practice constant per source (Foundry → 'foundry',
@@ -1895,10 +1915,10 @@ export function createPointLightPool({
           if (staleEntry.apertureShadowDebugMesh) staleEntry.apertureShadowDebugMesh.visible = false;
         }
 
-        const animationEntry = resolveLightAnimation(light.animation.type);
+        const animationEntry = resolveLightAnimation(lightAnimation.type);
         const windPresent = Number.isFinite(light.windExposure);
         const bucketKey = computeBucketKey({
-          animationType: light.animation.type,
+          animationType: lightAnimation.type,
           animationResolved: animationEntry !== null,
           animationQuality,
           falloffModel,
@@ -1918,7 +1938,7 @@ export function createPointLightPool({
         const expectedDepth = resolveExpectedDepth
           ? resolveExpectedDepth(light.elevation, light.renderAboveOverhead === true)
           : 0;
-        const reverseSign = light.animation.reverse ? -1 : 1;
+        const reverseSign = lightAnimation.reverse ? -1 : 1;
         // Same `?? 1` fallback the per-light path's own uniform write uses
         // (`entry.uIllumWindExposure.value = light.windExposure ?? 1`) —
         // writing a raw `undefined` into a Float32Array silently becomes
@@ -1961,10 +1981,10 @@ export function createPointLightPool({
         illumSlot.bg = localAmbient.background;
         illumSlot.dim = localAmbient.dim;
         illumSlot.bright = localAmbient.bright;
-        illumSlot.speedRaw = light.animation.speedRaw;
+        illumSlot.speedRaw = lightAnimation.speedRaw;
         illumSlot.reverseSign = reverseSign;
-        illumSlot.seed = light.animation.seed;
-        illumSlot.intensityRaw = light.animation.intensityRaw;
+        illumSlot.seed = lightAnimation.seed;
+        illumSlot.intensityRaw = lightAnimation.intensityRaw;
         illumSlot.windExposure = windExposureSafe;
         illumSlot.windResponse = windResponseSafe;
 
@@ -2002,10 +2022,10 @@ export function createPointLightPool({
           colorSlot.expectedDepth = expectedDepth;
           colorSlot.ratio = light.ratio;
           colorSlot.lightColor = light.color;
-          colorSlot.speedRaw = light.animation.speedRaw;
+          colorSlot.speedRaw = lightAnimation.speedRaw;
           colorSlot.reverseSign = reverseSign;
-          colorSlot.seed = light.animation.seed;
-          colorSlot.intensityRaw = light.animation.intensityRaw;
+          colorSlot.seed = lightAnimation.seed;
+          colorSlot.intensityRaw = lightAnimation.intensityRaw;
           colorSlot.windExposure = windExposureSafe;
           colorSlot.windResponse = windResponseSafe;
         }
@@ -2014,7 +2034,7 @@ export function createPointLightPool({
 
       if (
         entry &&
-        (entry.animationType !== light.animation.type ||
+        (entry.animationType !== lightAnimation.type ||
           entry.animationQuality !== animationQuality ||
           entry.falloffModel !== falloffModel ||
           entry.apertureCount !== apertureCount ||
@@ -2195,15 +2215,15 @@ export function createPointLightPool({
       // light is writing its four RAW config scalars — cheap plain float
       // writes, no function calls, no noise generation, no per-light JS math.
       if (entry.animationEntry) {
-        const reverseSign = light.animation.reverse ? -1 : 1;
-        if (entry.uIllumSpeedRaw) entry.uIllumSpeedRaw.value = light.animation.speedRaw;
+        const reverseSign = lightAnimation.reverse ? -1 : 1;
+        if (entry.uIllumSpeedRaw) entry.uIllumSpeedRaw.value = lightAnimation.speedRaw;
         if (entry.uIllumReverseSign) entry.uIllumReverseSign.value = reverseSign;
-        if (entry.uIllumSeed) entry.uIllumSeed.value = light.animation.seed;
-        if (entry.uIllumIntensityRaw) entry.uIllumIntensityRaw.value = light.animation.intensityRaw;
-        if (entry.uColorSpeedRaw) entry.uColorSpeedRaw.value = light.animation.speedRaw;
+        if (entry.uIllumSeed) entry.uIllumSeed.value = lightAnimation.seed;
+        if (entry.uIllumIntensityRaw) entry.uIllumIntensityRaw.value = lightAnimation.intensityRaw;
+        if (entry.uColorSpeedRaw) entry.uColorSpeedRaw.value = lightAnimation.speedRaw;
         if (entry.uColorReverseSign) entry.uColorReverseSign.value = reverseSign;
-        if (entry.uColorSeed) entry.uColorSeed.value = light.animation.seed;
-        if (entry.uColorIntensityRaw) entry.uColorIntensityRaw.value = light.animation.intensityRaw;
+        if (entry.uColorSeed) entry.uColorSeed.value = lightAnimation.seed;
+        if (entry.uColorIntensityRaw) entry.uColorIntensityRaw.value = lightAnimation.intensityRaw;
       }
       entry.uRatio.value = light.ratio;
       // HEIGHT/ELEVATION GATE — STAGE 2 (2026-08-04); candle CAST-light

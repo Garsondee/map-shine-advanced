@@ -90,7 +90,7 @@ export function run(t) {
     const src = buildOnePlayerLightSource(snap, ALLOW_ALL);
     ok('flashlight, allowed: produces a descriptor', !!src);
     ok('flashlight: carries elevation through', src.elevation === 10);
-    ok('flashlight: has NO animation (a plain, steady pool)', src.animation === null);
+    ok('flashlight: has NO animation (a plain, steady pool)', src.animation?.type === null);
     ok('flashlight: reaches further than torch', src.radius > 220);
     ok(
       "flashlight: falloffModel is 'beam' (Stage 2a — a real SDF cone, not an omni pool)",

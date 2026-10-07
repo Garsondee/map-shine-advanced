@@ -225,16 +225,18 @@ export function buildOnePlayerLightSource(tokenSnapshot, permissions) {
           rimIntensity: preset.beamRimIntensity,
         }
       : null,
-    animation: preset.animated
-      ? {
-          type: 'candleFlicker',
-          speedRaw: 5,
-          intensityRaw: 5,
-          reverse: false,
-          seed,
-          quality: preset.animationQuality,
-        }
-      : null,
+    // Always an object, never null — the same shape scene lights' own
+    // `deriveAnimationSnapshot` produces (`type: null` for "not animated").
+    // (A `null` here once crashed the render loop; the pool now also falls
+    // back to `NO_LIGHT_ANIMATION`, but descriptors should still be well-formed.)
+    animation: {
+      type: preset.animated ? 'candleFlicker' : null,
+      speedRaw: 5,
+      intensityRaw: 5,
+      reverse: false,
+      seed,
+      quality: preset.animated ? preset.animationQuality : 0,
+    },
   };
 }
 

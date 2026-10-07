@@ -172,6 +172,22 @@ export {
   DOOR_IMPULSE_MIN_RADIUS_PX,
 } from './wind-sim.js';
 export { buildWindSimMaterials } from './wind-sim-gpu.js';
+// THE BAKE, SPLIT BY WHAT EACH PIECE DEPENDS ON (2026-10-07) — structure (walls)
+// vs openness (speed) vs shadow (direction), plus the in-place texture writers.
+// See wind-structure.js's own header for why a dial change must not redo (1).
+export {
+  createWindGridState,
+  bakeWindStructure,
+  computeFineConnectivity,
+  deriveWindOpenness,
+  deriveWindShadow,
+  sameWindGrid,
+  writeHalfFloatChannel,
+  writeSolidMaskData,
+  OPENNESS_TEXTURE_CHANNELS,
+  WALL_AVOID_TEXTURE_CHANNELS,
+  WIND_OPENNESS_REFINE,
+} from './wind-structure.js';
 
 // THE ALMANAC (docs/holy/Almanac-Testament.md) — worldTime <-> calendar
 // components, themed date formatting, moon phase. Pure; the CalendarData

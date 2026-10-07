@@ -42,6 +42,8 @@ import {
   hexToRgb01,
   fireRampStops,
   fireRuntimeFromParams,
+  fireWindSuppressionFloors,
+  fireOpennessGain01,
   fireTintMul,
   FIRE_DEFAULT_TIER,
   FIRE_FUELS,
@@ -750,14 +752,29 @@ export function run(t) {
       noWind.perKind.smoke.activeCount === 24 && noWind.perKind.flame.activeCount === 12
     );
 
-    const fullWind = fireRuntimeFromParams({}, chain66, { speed01: 1, exposure01: 1 });
+    const fullWind = fireRuntimeFromParams({}, chain66, { speed01: 1 });
+    // ⚠️ THE CURVE MOVED INTO THE SHADER, 2026-10-07. The flame/smoke population
+    // and brightness used to be pre-thinned HERE from a map-wide exposure (the
+    // MAX across every fire on the floor), so an indoor hearth sharing a floor
+    // with an outdoor campfire inherited the campfire's suppression. The CPU now
+    // hands over the author's own counts untouched plus the flame's two floors,
+    // and the draw shader runs fireWindParticleResponse's curve at each sprite's
+    // own position (fire-sprite.js#buildFireWindSuppressionNode, pinned to it by
+    // the parity test in fire-sprite.test.mjs).
     t.ok(
-      'a full gale drives smoke activeCount to exactly 0 through the real call path',
-      fullWind.perKind.smoke.activeCount === 0
+      "a full gale leaves smoke activeCount at the author's own dial — the wind curve is per particle now, not pre-applied",
+      fullWind.perKind.smoke.activeCount === noWind.perKind.smoke.activeCount && noWind.perKind.smoke.activeCount === 24
     );
     t.ok(
-      'a full gale still thins flame activeCount below the windless case — that stays CPU-side, map-wide',
-      fullWind.perKind.flame.activeCount < noWind.perKind.flame.activeCount
+      "a full gale leaves flame activeCount and opacity at the author's own dials too",
+      fullWind.perKind.flame.activeCount === noWind.perKind.flame.activeCount &&
+        fullWind.perKind.flame.opacityScale === noWind.perKind.flame.opacityScale
+    );
+    t.ok(
+      "the flame's suppression floors travel with the runtime: gutterable fires empty out harder than immune ones",
+      near(fullWind.windSuppression.countFloor, 0.3, 1e-9) &&
+        near(fullWind.windSuppression.opacityFloor, 0.65, 1e-9) &&
+        fireRuntimeFromParams({ canBeSnuffed: false }, chain66, { speed01: 1 }).windSuppression.countFloor > 0.3
     );
     t.ok(
       'a full gale does NOT move lifeAtWind0/lifeAtWind1 — wind speed no longer touches the CPU-side value at all',
@@ -769,29 +786,47 @@ export function run(t) {
       fullWind.windMotion01 > 0.9
     );
 
-    // ⚠️ THE SPLIT (2026-09-04) — author, live: "test the actual location...
-    // indoor/sheltered fires low movement, exposed/outdoors fires moved", not
-    // one map-wide number every fire shares. `windMotion01` (returned here,
-    // forwarded to every particle engine's `uWindMotion01`) is now
-    // EXPOSURE-EXCLUDED on purpose — the kernel supplies REAL per-particle
-    // exposure itself, sampled live from the wind bake's own geometry
-    // (`fire-particle-runtime.js`'s own header). Baking the CPU-side
-    // aggregate exposure in HERE TOO would double-count it for any fire
-    // whose own exposure is the map's only (or lowest) one. `activeCount`
-    // suppression has no per-particle home to move into (a necessarily
-    // shared, map-wide arena — see that same header) and so correctly KEEPS
-    // reading exposure; `lifeAtWind0`/`lifeAtWind1` are untouched by exposure
-    // for the same reason they are untouched by speed above — pure
-    // passthrough, full stop.
-    const fullWindSealed = fireRuntimeFromParams({}, chain66, { speed01: 1, exposure01: 0 });
+    // ⚠️ THE SPLIT, COMPLETED (2026-10-07). 2026-09-04 moved PUSH, lifespan and
+    // chaos/rise to per-particle exposure and left the flame/smoke population on
+    // the CPU "because a shared arena has no per-particle home for it". It does:
+    // the draw shader reads the same wind-cell buffer in the vertex stage. So
+    // there is no CPU-side exposure input at all any more — `exposure01` is
+    // ignored if a stale caller still passes it, and nothing here can differ with
+    // it. Exposure enters exactly once, in the shader.
+    const legacyCallerSealed = fireRuntimeFromParams({}, chain66, { speed01: 1, exposure01: 0 });
     t.ok(
-      'windMotion01 is IDENTICAL whether the representative fire is fully exposed or fully sealed — exposure moved to the kernel',
-      fullWindSealed.windMotion01 === fullWind.windMotion01
+      'a stale caller still passing exposure01 changes NOTHING — exposure is applied per particle in the shader, never here',
+      legacyCallerSealed.windMotion01 === fullWind.windMotion01 &&
+        legacyCallerSealed.perKind.flame.activeCount === fullWind.perKind.flame.activeCount &&
+        legacyCallerSealed.perKind.smoke.activeCount === fullWind.perKind.smoke.activeCount
+    );
+  }
+
+  // ── THE OPENNESS GAIN HAS NO FLOOR (2026-10-07) ────────────────────────────
+  // Author: "I don't want fires and candles and anything else which is indoors
+  // reacting to wind as if they were outdoors." The kernel's gain used to be
+  // max(sqrt(openness), 0.3): measured on a real GPU, a sealed room's embers
+  // drifted 16% as far downwind as a field's. These pin the CPU twin of the
+  // shader's replacement (fire-sprite.js#buildFireOpennessGainNode, parity-tested
+  // in fire-sprite.test.mjs).
+  {
+    t.ok('a sealed spot (openness 0) feels NONE of the gale — there is no 0.3 floor', fireOpennessGain01(0) === 0);
+    t.ok('an open spot feels all of it', fireOpennessGain01(1) === 1);
+    t.ok(
+      'the gain is LINEAR: no square root inflating a small leaked reading (0.1 stays 0.1, not 0.32)',
+      fireOpennessGain01(0.1) === 0.1 && fireOpennessGain01(0.25) === 0.25
     );
     t.ok(
-      'flame activeCount, by contrast, still differs with exposure — suppression stays exposure-aware',
-      fullWindSealed.perKind.flame.activeCount !== fullWind.perKind.flame.activeCount &&
-        fullWindSealed.perKind.flame.activeCount > fullWind.perKind.flame.activeCount
+      'out-of-range readings clamp, and a non-finite one means "no geometry data => open outdoors", never "sealed"',
+      fireOpennessGain01(-3) === 0 && fireOpennessGain01(7) === 1 && fireOpennessGain01(NaN) === 1
+    );
+    t.ok(
+      'the suppression floors a flame eases toward: 0.3/0.65 gutterable, 0.65/0.85 immune',
+      near(fireWindSuppressionFloors(true).countFloor, 0.3, 1e-9) &&
+        near(fireWindSuppressionFloors(true).opacityFloor, 0.65, 1e-9) &&
+        near(fireWindSuppressionFloors(false).countFloor, 0.65, 1e-9) &&
+        near(fireWindSuppressionFloors(false).opacityFloor, 0.85, 1e-9) &&
+        fireWindSuppressionFloors().countFloor === fireWindSuppressionFloors(true).countFloor
     );
   }
 

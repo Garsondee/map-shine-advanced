@@ -239,6 +239,39 @@ export function createFireSubsystem({
   const lastCohesionByEngine = new Map();
   let lastStatus = { engines: 0, fires: 0, lights: 0, spawnPoints: 0 };
 
+  /**
+   * EACH FIRE'S WIND EXPOSURE, FROM THE WIND BAKE'S GEOMETRY (2026-10-07).
+   *
+   * `fires[].windExposure` arrives from `boot.js` as a sample of the painted
+   * `_Outdoors` mask — a different answer to a different question ("is there a
+   * roof"), and one the wind has not consulted since the 2026-07-22 rethink:
+   * "geometry decides where wind is, not paint". Left as it was, the fire's
+   * light gutter followed the paint while its embers followed the walls, so a
+   * hearth in a room painted as outdoors (or on a floor whose mask had not
+   * streamed, which `safeSampleOutdoors` answers with "fully outdoors") read as
+   * exposed to a gale it could not feel. Author: "I don't want fires... which is
+   * indoors reacting to wind as if they were outdoors."
+   *
+   * Replaced with the bake's own openness at the fire's position
+   * (`windHandle.cpuAt`) — the SAME nearest-cell lookup the particle kernels and
+   * the wind probe use. `outdoors01` is left alone: it answers the roof
+   * question (`fireIndoorParticleResponse`), which genuinely is the mask's.
+   *
+   * Memoised on the input array and the handle's version: `state.fires` is a
+   * stable reference between anchor/mask changes, and the handle's version bumps
+   * on every wall/door/dial change, so this allocates only when something moved.
+   * With no bake yet the list is returned untouched — the painted-mask value
+   * stays as the fallback, never a silent "fully sealed".
+   */
+  let exposureMemo = { source: null, version: -1, result: null };
+  function firesWithGeometricWindExposure(list, windHandle) {
+    if (!windHandle?.hasBake || list.length === 0) return list;
+    if (exposureMemo.source === list && exposureMemo.version === windHandle.version) return exposureMemo.result;
+    const result = list.map((f) => ({ ...f, windExposure: windHandle.cpuAt(f.x, f.y).openness }));
+    exposureMemo = { source: list, version: windHandle.version, result };
+    return result;
+  }
+
   /** Built lazily on the first sync that has something to burn — the same
    * deferred-construction posture the wind engines use, and for the same
    * reason: a build-time input (the wind handle) only becomes real later. */
@@ -308,7 +341,8 @@ export function createFireSubsystem({
    * would otherwise have skipped that. */
   function syncUnguarded(renderer, nowMs, dtSec, worldRect) {
     const state = getFireRenderState() ?? {};
-    const fires = Array.isArray(state.fires) ? state.fires : [];
+    const windHandle = getWindHandle?.() ?? null;
+    const fires = firesWithGeometricWindExposure(Array.isArray(state.fires) ? state.fires : [], windHandle);
     const cloud = state.spawnCloud ?? null;
     const hasPaint = (cloud?.count ?? 0) > 0;
     // `applyCohesion`'s label-scoped grouping (2026-08-16) — see that
@@ -350,42 +384,30 @@ export function createFireSubsystem({
     // same reason. `getEnvironment` is gone (2026-09-04) — its one live
     // consumer, `buildFireLightSources`' old `fireWeatherResponse(chain,
     // env, ...)` call, is gone too; see that function's own orphan note.
-    const windHandle = getWindHandle?.() ?? null;
     const windSpeed01 = windHandle?.ambient?.speed01?.value;
-    // ⚠️ NOT `fires[0]?.windExposure` (2026-09-04, a real live bug) —
-    // `fires[0]` is `extractFiresFromMask`'s WIDEST painted blob on the whole
-    // floor (`fire-mask.js`'s own sort, widest-ridge-first), which has no
-    // relationship to WHERE that fire sits. Author, live, on a map with more
-    // than one fire: an outdoor fire "isn't reacting to wind" while
-    // vegetation on the same scene reacts fine. Root cause: a wider INDOOR
-    // fire elsewhere on the floor was landing at `fires[0]`, and its own
-    // correctly-low `windExposure` (sampled per-fire from the real
-    // `_Outdoors` mask, `boot.js#sampleWindExposureAt` — the data itself was
-    // never wrong) was being broadcast to the WHOLE map's shared particle
-    // engines, silencing the outdoor fire's wind response too. Unlike
-    // vegetation (`vt-pan-viewer.js`'s own wind sample, LIVE per clump
-    // position off geometry-derived openness — never funnelled through one
-    // representative anything), every flame/ember/smoke engine here is
-    // genuinely map-wide, so there is no way to give an indoor and an
-    // outdoor fire independently correct wind without per-particle exposure
-    // data the arena has no spare storage for (`fire-particle-runtime.js`'s
-    // own header). The best available fix short of that restructure: take
-    // the MAXIMUM windExposure across every fire on the floor, not an
-    // arbitrary one's. A floor with any genuinely outdoor fire on it now
-    // engages wind for its shared particles; a purely indoor floor stays
-    // calm exactly as before — this can only ever make the particles MORE
-    // wind-aware than the old single-fire read, never less.
-    const windExposure01 = fires.length
-      ? fires.reduce((max, f) => Math.max(max, Number.isFinite(f?.windExposure) ? f.windExposure : 1), 0)
-      : 1;
-    // ⚠️ SAME MAX-ACROSS-FIRES SHAPE AS windExposure01 ABOVE, DELIBERATELY
-    // (2026-09-07) — and for the same underlying reason: ember/smoke's indoor
-    // suppression (`fireIndoorParticleResponse`, fire-geometry.js) is ANOTHER
-    // per-kind value shared by every fire on the floor's map-wide particle
-    // engines, so one indoor fire and one outdoor fire sharing a floor cannot
-    // each get their own independently-correct answer without the same
-    // per-particle storage this file's own `windExposure01` note already says
-    // does not exist. Taking the MAXIMUM `outdoors01` biases the shared
+    // ⚠️ THERE IS NO MAP-WIDE `windExposure01` ANY MORE (2026-10-07). It was the
+    // MAX of every fire's exposure, standing in for "how exposed is the fire the
+    // shared engines are drawing" because one number had to (2026-09-04: an
+    // arbitrary `fires[0]` had silenced an outdoor fire's wind for being beside
+    // a wider indoor one). Every wind response that number fed — push,
+    // lifespan, chaos/rise, and now the flame/smoke population and brightness
+    // curve — is evaluated PER PARTICLE in the engines, from the bake's own
+    // openness at the particle's position. A floor holding an indoor hearth
+    // and an outdoor campfire therefore gives each its own answer.
+    //
+    // (`windExposure` on each fire survives for the cast LIGHT's gutter, which is
+    // genuinely per fire — see `firesWithGeometricWindExposure`.)
+    //
+    // ⚠️ MAX ACROSS FIRES, DELIBERATELY, STILL HOLDS FOR `outdoor01` (2026-09-07):
+    // ember/smoke's indoor suppression (`fireIndoorParticleResponse`,
+    // fire-geometry.js) answers "is there a ROOF over this fire" — a question the
+    // painted mask owns, not the wind geometry — and is a per-kind value shared
+    // by every fire on the floor's map-wide particle engines, so one indoor fire
+    // and one outdoor fire sharing a floor cannot each get their own
+    // independently-correct answer without per-particle storage the arena does
+    // not have (the wind-cell buffer already spends its last free
+    // storage-buffer slot; see `fire-particle-runtime.js`'s header). Wind is no
+    // longer subject to this limit — only the roof question is. Taking the MAXIMUM `outdoors01` biases the shared
     // answer toward "outdoors" on a mixed floor — i.e. toward LESS
     // suppression — which is the lesser-evil direction here just as it was
     // for wind: an outdoor bonfire whose embers/smoke visibly vanish for no
@@ -406,7 +428,7 @@ export function createFireSubsystem({
     const runtime = fireRuntimeFromParams(
       params,
       fireScaleChain(fires[0]?.diameterPx ?? 100, mPerPx, { fuel: params?.fuel }),
-      { speed01: windSpeed01, exposure01: windExposure01, outdoor01 }
+      { speed01: windSpeed01, outdoor01 }
     );
 
     // THE DEPTH-AUTHORITY OCCLUSION GATE'S INPUT (mythica-machina-press#469) —
@@ -514,6 +536,11 @@ export function createFireSubsystem({
         // does, and the particle kernel can fade flame's own calm-air
         // upward drift as wind rises. See fire-geometry.js#fireWindMotion01.
         windMotion01: runtime.windMotion01,
+        // The flame's floors for the PER-PARTICLE suppression curve — the engines
+        // evaluate it at each sprite's own position (see `fire-sprite.js#
+        // buildFireWindSuppressionNode`); the CPU no longer pre-multiplies a count.
+        windCountFloor: runtime.windSuppression.countFloor,
+        windOpacityFloor: runtime.windSuppression.opacityFloor,
         expectedDepth,
         // ⚠️ FIXED ALONGSIDE THE ABOVE (2026-08-30) — `hueShiftRad`/
         // `posterizeAmount`/`bandCount`/`tintMul` were the other three

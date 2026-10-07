@@ -5426,7 +5426,7 @@ function install() {
   };
 
   // THE MASK-DRIVEN WIND REBAKE TRIGGER's own version seam (2026-07-21) — see
-  // vt-pan-viewer.js#pollMaskAuthorityForWindRebake for the full story (the
+  // vt-pan-viewer.js#pollMaskAuthorityForPerFloorMasks for the full story (the
   // root-cause fix for a stale wind-exposure snapshot baked before real mask
   // content had streamed in). A cheap O(1) read (`getProductsVersion` forces
   // a recompute-if-dirty, same cost class as any other mask-authority read);
@@ -5703,7 +5703,7 @@ function install() {
   // LIVE MASK-AUTHORITY CROSS-CHECK (2026-07-22, the wind+particle probe's
   // own next question): the probe's `wind.exposure` field reads wind's own
   // CACHED snapshot (`windExposureGrid`, refreshed by bakeWindField — see
-  // pollMaskAuthorityForWindRebake). A live author report showed `enclosed:
+  // pollMaskAuthorityForPerFloorMasks). A live author report showed `enclosed:
   // true` (walls say sealed room) but `exposure: 1` (fully outdoors) at the
   // SAME point, even after the mask-driven rebake trigger landed — meaning
   // either that trigger isn't actually firing, or the underlying mask-

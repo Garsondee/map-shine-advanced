@@ -641,7 +641,7 @@ export async function run(t) {
   t.ok('tile alpha now covers the top-right quadrant', after.grid.data[1 * gridW + Math.floor(gridW * 0.75)] === 255);
 
   // --- getProductsVersion — the wind-rebake poll's own cheap seam ----------
-  // (2026-07-21: vt-pan-viewer.js#pollMaskAuthorityForWindRebake polls this
+  // (2026-07-21: vt-pan-viewer.js#pollMaskAuthorityForPerFloorMasks polls this
   // every ~500ms to detect "mask data changed" and re-bake — see that
   // function's own header for the staleness bug this closes.)
   {

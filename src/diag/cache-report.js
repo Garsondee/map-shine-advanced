@@ -319,15 +319,17 @@ const RAW_CACHE_ADAPTERS = {
     if (!end || isSkipped(end)) return null;
     return row({
       id: 'windFieldBakeGate',
-      label: 'Wind field bake (5 trigger reasons, no single upstream skip gate)',
+      label: 'Wind field STRUCTURE bake (load / wall / door / floor / manual — no upstream skip gate)',
       misses: delta(start?.total, end.total),
       note:
-        'MISSES-ONLY, deliberately: every call to bakeWindField() is a real, uncached rebake by definition — 4 ' +
-        'of its 5 trigger reasons (startup/floor-change/ambient-change/manual) have no poll/skip step at all, ' +
-        "and the 5th (mask-change) already skips upstream in pollMaskAuthorityForWindRebake's own throttle+" +
-        'version-compare, before ever reaching this function — a skip counter added HERE could only ever read ' +
-        '0. A high count during passive panning (no walls/doors/floor changes) points at one of those triggers ' +
-        'firing more than it should. Per-reason breakdown is in instrument.cacheStats.windFieldBakeGate.byReason.',
+        'MISSES-ONLY, deliberately: every call to bakeWindField() is a real, uncached structure bake by ' +
+        'definition — its reasons (startup / wall:* / floor-change / manual) are imperative triggers with no ' +
+        'poll/skip step, so a skip counter added HERE could only ever read 0. Since 2026-10-07 a change of the ' +
+        'wind DIAL is NOT one of them: it re-derives openness/shadow in place from the cached structure ' +
+        "(counted under reason 'ambient-change' but costing a few ms, not a bake), and the mask-version poll no " +
+        'longer rebakes the wind at all (the bake has not read a mask since the 2026-07-22 rethink). A high ' +
+        'count during passive panning (no walls/doors/floor changes) points at a trigger firing more than it ' +
+        'should. Per-reason breakdown is in instrument.cacheStats.windFieldBakeGate.byReason.',
     });
   },
   islandPackBakeGate(start, end) {

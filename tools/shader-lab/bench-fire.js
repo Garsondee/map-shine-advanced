@@ -87,6 +87,7 @@ import { medianOf, percentileOf } from '../../src/diag/gpu-probe.js';
 // THE REAL PRODUCTION CODE, imported and never transcribed (AGENTS.md §6).
 import { computeCameraFrustum } from '../../src/scene/world-quad.js';
 import { createWindHandle } from '../../src/world/index.js';
+import { createWindGridTextureFactory } from '../../src/vt/wind-grid-textures.js';
 import {
   fireScaleChain,
   fireSlabPlan,
@@ -1898,6 +1899,562 @@ export function createFireBench({ THREE, log }) {
           msPerMpxPerLatticeHash: slope === null ? null : Number((slope / 8).toFixed(6)),
           fixedCostMsPerMpx: intercept === null ? null : Number(intercept.toFixed(5)),
         },
+      };
+    },
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // THE INDOOR FIRE, AND THE INDOOR CANDLE (2026-10-07).
+  //
+  // Author: "I don't want fires and candles and anything else which is indoors
+  // reacting to wind as if they were outdoors." Two scenarios, each through the
+  // REAL production path on the REAL GPU, because the Node suite cannot run a
+  // compute kernel or sample a texture and the bug lived in both:
+  //
+  //   indoor-fire-ignores-wind — the fire engine's compute path (a storage
+  //     buffer of per-cell openness) in a gale: embers born in a sealed room vs
+  //     embers born in a field.
+  //   sealed-room-candle-field — the TEXTURE path every light, candle flame and
+  //     plant reads (`sampleWind`), scanned across a wall.
+  //
+  // Both consume a REAL `bakeWindStructure` of REAL walls — never a hand-typed
+  // array — so a regression in the bake shows up here, not just in a unit test
+  // of the bake's own arithmetic.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  const WIND_FIXTURE_SPAN = 4096;
+
+  /** Closed rectangle of four solid walls. */
+  function ringWalls(x0, y0, x1, y1) {
+    const w = (ax, ay, bx, by) => ({ x1: ax, y1: ay, x2: bx, y2: by, solid: true, blocksExterior: true });
+    return [w(x0, y0, x1, y0), w(x1, y0, x1, y1), w(x1, y1, x0, y1), w(x0, y1, x0, y0)];
+  }
+
+  /** The cell grid the bake would produce for the stage world at a 100 px Foundry grid. */
+  async function windFixtureGrid() {
+    const W = await import('../../src/world/index.js');
+    return W.computeWindBakeGridSpec({
+      sceneX: 0,
+      sceneY: 0,
+      sceneWidth: WIND_FIXTURE_SPAN,
+      sceneHeight: WIND_FIXTURE_SPAN,
+      gridSizePixels: 25,
+      maxAxisCells: 512,
+    });
+  }
+
+  /** A 5x5-texel painted blob centred at (cx, cy) — the same hearth-sized spawn cloud `particles-draw` uses. */
+  async function hearthCloudAt(cx, cy) {
+    const { extractFireSpawnPoints } = await import('../../src/effects/fire/fire-spawn-points.js');
+    const N = 5;
+    const texel = 20;
+    const data = new Uint8Array(N * N);
+    for (let y = 0; y < N; y++) {
+      for (let x = 0; x < N; x++) {
+        const dx = (x - N / 2) / (N * 0.22);
+        const dy = (y - N / 2) / (N * 0.22);
+        data[y * N + x] = dx * dx + dy * dy <= 1 ? 255 : 0;
+      }
+    }
+    return extractFireSpawnPoints({
+      spec: {
+        x: cx - (N * texel) / 2,
+        y: cy - (N * texel) / 2,
+        width: N * texel,
+        height: N * texel,
+        w: N,
+        h: N,
+        texelW: texel,
+        texelH: texel,
+      },
+      data,
+    });
+  }
+
+  scenarios.set('indoor-fire-ignores-wind', {
+    name: 'indoor-fire-ignores-wind',
+    summary:
+      'A fire in a SEALED room and a fire in an open field, side by side, under the same gale, through the real ' +
+      'fire engine and a real bake of real walls. Embers born in the sealed room must not drift downwind; embers ' +
+      'in the field must. Reproduces the author report that an indoor hearth\'s embers blew in the wind direction ' +
+      '(FIRE_OPENNESS_FLOOR_GAIN = 0.3 gave a sealed room 30% of the gale\'s motion gain).',
+    async run({ runId }) {
+      const st = await ensureStage();
+      const W = await import('../../src/world/index.js');
+      const { createFireParticleEngine } = await import('../../src/effects/particles/particle-engine.js');
+      const { uniform, float } = THREE.TSL;
+
+      const SPEED = 1;
+      const DIRECTION = 90; // blows TOWARD +x (east)
+      const gridSpec = await windFixtureGrid();
+      const ROOM = { cx: 1024, cy: 2048, half: 350 };
+      const FIELD = { x: 3000, y: 2048 };
+      const structure = W.bakeWindStructure({
+        walls: ringWalls(ROOM.cx - ROOM.half, ROOM.cy - ROOM.half, ROOM.cx + ROOM.half, ROOM.cy + ROOM.half),
+        gridSpec,
+      });
+      const openness = W.deriveWindOpenness(structure, SPEED);
+      const windHandle = W.createWindHandle({
+        version: 1,
+        ambientWind: { directionDeg: uniform(float(DIRECTION)), speed01: uniform(float(SPEED)) },
+        grid: {
+          originX: gridSpec.minX,
+          originY: gridSpec.minY,
+          cellSize: gridSpec.cellSize,
+          cols: gridSpec.cols,
+          rows: gridSpec.rows,
+        },
+        cells: {
+          solid: structure.solidMask,
+          openness,
+          wallAvoidDirX: structure.wallAvoidDirX,
+          wallAvoidDirY: structure.wallAvoidDirY,
+          wallProximity: structure.wallProximity,
+          windShadow: W.deriveWindShadow(structure, DIRECTION),
+        },
+      });
+      const cellOf = (x, y) =>
+        Math.floor((y - gridSpec.minY) / gridSpec.cellSize) * gridSpec.cols +
+        Math.floor((x - gridSpec.minX) / gridSpec.cellSize);
+      const opennessIndoor = openness[cellOf(ROOM.cx, ROOM.cy)];
+      const opennessField = openness[cellOf(FIELD.x, FIELD.y)];
+
+      // One run: an ember engine whose spawn cloud sits at (x, y), stepped for a few
+      // seconds under `windMotion01`, framed on its own spawn point so the centroid
+      // is directly its drift. The perspective centre follows the framed rect, so
+      // the radial parallax of a raised particle cannot masquerade as wind.
+      async function drift(x, y, windMotion01, kind = 'ember') {
+        const span = 1600;
+        const rect = { minX: x - span / 2, minY: y - span / 2, maxX: x + span / 2, maxY: y + span / 2 };
+        const e = createFireParticleEngine({
+          THREE,
+          kind,
+          archetype: kind === 'flame' ? 'plasmaCore' : null,
+          system: { id: `fire.${kind}`, params: { capacity: 48 } },
+          worldRect: rect,
+          pxPerMeter: 100,
+          windHandle,
+        });
+        e.setSpawnPoints(await hearthCloudAt(x, y));
+        // The flame's gutter floors travel with every engine, exactly as
+        // `fire-subsystem.js` sends them (`fireWindSuppressionFloors`).
+        e.setParams({
+          intensity: 1,
+          sizeScale: 4,
+          activeCount: 40,
+          windMotion01,
+          windCountFloor: 0.3,
+          windOpacityFloor: 0.65,
+        });
+        for (let i = 0; i < 90; i++) e.step(renderer, { dtSec: 0.05, tMs: 1000 + i * 50, worldRect: rect });
+        frameWorld(rect);
+        st.scene.clear();
+        st.scene.add(e.scene);
+        renderer.setRenderTarget(st.target);
+        renderer.setClearColor(new THREE.Color(0, 0, 0), 1);
+        renderer.clear();
+        renderer.render(st.scene, st.camera);
+        renderer.setRenderTarget(null);
+        const raw = await renderer.readRenderTargetPixelsAsync(st.target, 0, 0, STAGE_DIM, STAGE_DIM);
+        const pixels = decodeHdrReadback(raw instanceof Promise ? await raw : raw);
+        const s = frameStats(pixels);
+        return {
+          dx: s.centroidWorldX - x,
+          lit: s.litFraction,
+          luma: s.meanLuma,
+          hasGrid: e.debugState().hasOpennessGrid,
+          pixels,
+        };
+      }
+
+      const indoorCalm = await drift(ROOM.cx, ROOM.cy, 0);
+      const indoorGale = await drift(ROOM.cx, ROOM.cy, 1);
+      const fieldGale = await drift(FIELD.x, FIELD.y, 1);
+      paintPixels(indoorGale.pixels, `embers in a SEALED room, gale ${SPEED} → east: drift ${indoorGale.dx.toFixed(0)} px`);
+      const artifacts = [];
+      const pngIn = await savePixels(runId, 'embers-sealed-room-gale.png', indoorGale.pixels);
+      const pngOut = await savePixels(runId, 'embers-open-field-gale.png', fieldGale.pixels);
+      if (pngIn) artifacts.push(pngIn);
+      if (pngOut) artifacts.push(pngOut);
+
+      // THE POPULATION AND BRIGHTNESS — the per-particle suppression the draw
+      // shader applies (`buildFireWindSuppressionNode`), which reads the wind-cell
+      // buffer in the VERTEX stage. Smoke dies to exactly 0 at a full gale and a
+      // flame gutters toward its floors — but only where the wind actually reaches:
+      // a sealed room's smoke and flame must not feel the gale an open field does.
+      const smokeIndoorCalm = await drift(ROOM.cx, ROOM.cy, 0, 'smoke');
+      const smokeIndoorGale = await drift(ROOM.cx, ROOM.cy, 1, 'smoke');
+      const smokeFieldCalm = await drift(FIELD.x, FIELD.y, 0, 'smoke');
+      const smokeFieldGale = await drift(FIELD.x, FIELD.y, 1, 'smoke');
+      const flameIndoorCalm = await drift(ROOM.cx, ROOM.cy, 0, 'flame');
+      const flameIndoorGale = await drift(ROOM.cx, ROOM.cy, 1, 'flame');
+      const flameFieldCalm = await drift(FIELD.x, FIELD.y, 0, 'flame');
+      const flameFieldGale = await drift(FIELD.x, FIELD.y, 1, 'flame');
+      const ratio = (a, b) => (b > 1e-9 ? a / b : null);
+      const smokeIndoorKept = ratio(smokeIndoorGale.luma, smokeIndoorCalm.luma);
+      const smokeFieldKept = ratio(smokeFieldGale.luma, smokeFieldCalm.luma);
+      const flameIndoorKept = ratio(flameIndoorGale.luma, flameIndoorCalm.luma);
+      const flameFieldKept = ratio(flameFieldGale.luma, flameFieldCalm.luma);
+
+      const windEffectIndoor = indoorGale.dx - indoorCalm.dx;
+      const checks = [
+        evaluate('the-fixture-is-what-it-claims', () => ({
+          ok: opennessIndoor === 0 && opennessField === 1 && indoorGale.hasGrid && fieldGale.hasGrid,
+          measured: { opennessIndoor, opennessField, hasGrid: [indoorGale.hasGrid, fieldGale.hasGrid] },
+          expected: 'sealed room openness exactly 0, open field exactly 1, both engines reading the grid',
+        })),
+        evaluate('the-gale-blows-field-embers-downwind', () => ({
+          ok: fieldGale.dx > 120,
+          measured: { fieldDriftPx: Math.round(fieldGale.dx) },
+          expected: '> 120 px east — if this fails the rig, not the room, is broken (a vacuity guard)',
+        })),
+        evaluate('sealed-room-embers-do-not-drift-downwind', () => ({
+          ok: Math.abs(windEffectIndoor) < Math.max(8, 0.03 * fieldGale.dx),
+          measured: {
+            indoorCalmPx: Math.round(indoorCalm.dx),
+            indoorGalePx: Math.round(indoorGale.dx),
+            windEffectPx: Number(windEffectIndoor.toFixed(1)),
+            fieldDriftPx: Math.round(fieldGale.dx),
+            fractionOfField: Number((windEffectIndoor / Math.max(1, fieldGale.dx)).toFixed(4)),
+          },
+          expected: 'the gale changes a sealed room\'s embers by < max(8 px, 3% of the field drift)',
+          note: 'Before the floor was removed this was ~12% of the field drift (30% gain → 11.6% push).',
+        })),
+        evaluate('smoke-is-gone-in-the-field-gale-but-untouched-in-the-sealed-room', () => ({
+          ok:
+            smokeFieldKept !== null &&
+            smokeIndoorKept !== null &&
+            smokeFieldKept < 0.08 &&
+            smokeIndoorKept > 0.85,
+          measured: {
+            smokeFieldKept: smokeFieldKept === null ? null : Number(smokeFieldKept.toFixed(3)),
+            smokeIndoorKept: smokeIndoorKept === null ? null : Number(smokeIndoorKept.toFixed(3)),
+            calmLuma: { indoor: smokeIndoorCalm.luma, field: smokeFieldCalm.luma },
+          },
+          expected: 'field smoke < 8% of its calm brightness; sealed-room smoke > 85% of its calm brightness',
+          note:
+            'Before the curve moved into the shader, a floor with both an indoor hearth and an outdoor fire gave ' +
+            'BOTH the outdoor fire\'s suppression — the hearth\'s smoke vanished in a gale it could not feel.',
+        })),
+        evaluate('flame-guttering-follows-the-local-wind', () => ({
+          ok:
+            flameFieldKept !== null &&
+            flameIndoorKept !== null &&
+            flameIndoorKept > 0.85 &&
+            flameFieldKept < flameIndoorKept - 0.1,
+          measured: {
+            flameIndoorKept: flameIndoorKept === null ? null : Number(flameIndoorKept.toFixed(3)),
+            flameFieldKept: flameFieldKept === null ? null : Number(flameFieldKept.toFixed(3)),
+            calmLuma: { indoor: flameIndoorCalm.luma, field: flameFieldCalm.luma },
+          },
+          expected: 'sealed-room flame > 85% of calm; open-field flame at least 10 points dimmer than the indoor one',
+        })),
+      ];
+      return {
+        checks,
+        artifacts,
+        inputs: { speed01: SPEED, directionDeg: DIRECTION, room: ROOM, field: FIELD, grid: `${gridSpec.cols}x${gridSpec.rows}` },
+        stats: { indoorCalm: indoorCalm.dx, indoorGale: indoorGale.dx, fieldGale: fieldGale.dx },
+      };
+    },
+  });
+
+  scenarios.set('sealed-room-candle-field', {
+    name: 'sealed-room-candle-field',
+    summary:
+      'Scans the shared wind field (`windHandle.node` — what every candle flame, light and plant samples) in a straight ' +
+      'line across a sealed room\'s wall, on the real GPU, with the real baked textures. Inside the wall it must read ~0; ' +
+      'outside it must read the gale. Then repeats the scan on the PREVIOUS data (any-reached-cell openness + a bilinear ' +
+      'texture) to prove the rig can see the leak it exists to prevent.',
+    async run() {
+      await ensureRenderer();
+      const W = await import('../../src/world/index.js');
+      const { texture, uv, vec2, vec4, float, uniform, length } = THREE.TSL;
+      const SPEED = 1;
+      const DIRECTION = 90;
+      const gridSpec = await windFixtureGrid();
+      // The wall phase that read worst before the fix (10 px into a 25 px cell).
+      const WALL_X = 1010;
+      const walls = ringWalls(WALL_X, 1010, WALL_X + 800, 1810);
+      const structure = W.bakeWindStructure({ walls, gridSpec });
+      const { cols, rows } = gridSpec;
+      const n = cols * rows;
+      const toHalf = (v) => THREE.DataUtils.toHalfFloat(v);
+
+      /** Build the openness + wall-avoid textures for an openness field and a filter. */
+      function buildTextures(opennessValues, exteriorValues, linear) {
+        const open = new Uint16Array(n * 4);
+        const wa = new Uint16Array(n * 4);
+        W.writeHalfFloatChannel(open, W.OPENNESS_TEXTURE_CHANNELS.openness, opennessValues, toHalf, 1);
+        W.writeHalfFloatChannel(open, W.OPENNESS_TEXTURE_CHANNELS.exterior, exteriorValues, toHalf, 1);
+        W.writeHalfFloatChannel(wa, W.WALL_AVOID_TEXTURE_CHANNELS.dirX, structure.wallAvoidDirX, toHalf, 0);
+        W.writeHalfFloatChannel(wa, W.WALL_AVOID_TEXTURE_CHANNELS.dirY, structure.wallAvoidDirY, toHalf, 0);
+        W.writeHalfFloatChannel(wa, W.WALL_AVOID_TEXTURE_CHANNELS.proximity, structure.wallProximity, toHalf, 0);
+        W.writeHalfFloatChannel(
+          wa,
+          W.WALL_AVOID_TEXTURE_CHANNELS.shadow,
+          W.deriveWindShadow(structure, DIRECTION),
+          toHalf,
+          0
+        );
+        const opennessTex = createWindGridTextureFactory(THREE).createOpennessTexture(open, cols, rows);
+        if (linear) {
+          opennessTex.minFilter = THREE.LinearFilter;
+          opennessTex.magFilter = THREE.LinearFilter;
+        }
+        return { opennessTex, wallAvoidTex: createWindGridTextureFactory(THREE).createWallAvoidTexture(wa, cols, rows) };
+      }
+
+      // The PREVIOUS reduction, rebuilt from the same fine connectivity.
+      const fine = W.computeFineConnectivity(walls, gridSpec);
+      const oldExterior = W.downsampleMax(fine.fineOpenExterior, cols, rows, W.WIND_OPENNESS_REFINE);
+      const oldDist = W.downsampleDistanceMin(fine.fineDoorDistance, cols, rows, W.WIND_OPENNESS_REFINE);
+      const oldOpenness = W.opennessFalloffFromDistance(oldDist, oldExterior, {
+        reachCells: 120 * W.WIND_OPENNESS_REFINE * W.doorReachScaleForWindSpeed(SPEED),
+      });
+
+      const variants = {
+        now: buildTextures(W.deriveWindOpenness(structure, SPEED), structure.exterior, false),
+        before: buildTextures(oldOpenness, oldExterior, true),
+      };
+
+      // Sample positions: a horizontal line through the room's west wall at its mid-height,
+      // 1 px steps from 400 px outside to 160 px inside. One texel per sample; N x 1 target.
+      // (400 px out, because the wind here blows INTO this wall head-on and the wall
+      // deflection — deliberately — cancels most of it for a few cells before the wall.)
+      const MID_Y = 1410;
+      const xs = [];
+      for (let x = WALL_X - 400; x <= WALL_X + 160; x++) xs.push(x);
+      const N = xs.length;
+      const posData = new Float32Array(N * 4);
+      xs.forEach((x, i) => {
+        posData[i * 4] = x;
+        posData[i * 4 + 1] = MID_Y;
+        posData[i * 4 + 3] = 1;
+      });
+      const posTex = new THREE.DataTexture(posData, N, 1, THREE.RGBAFormat, THREE.FloatType);
+      posTex.minFilter = THREE.NearestFilter;
+      posTex.magFilter = THREE.NearestFilter;
+      posTex.needsUpdate = true;
+
+      async function scan(tex) {
+        const handle = W.createWindHandle({
+          version: 1,
+          ambientWind: { directionDeg: uniform(float(DIRECTION)), speed01: uniform(float(SPEED)) },
+          grid: {
+            originX: gridSpec.minX,
+            originY: gridSpec.minY,
+            cellSize: gridSpec.cellSize,
+            cols,
+            rows,
+          },
+          opennessTexture: tex.opennessTex,
+          wallAvoidTexture: tex.wallAvoidTex,
+        });
+        const material = new THREE.NodeMaterial();
+        const p = texture(posTex, vec2(uv().x, float(0.5))).xy;
+        const wind = handle.node(THREE.TSL, { centerXY: p, time: float(0) });
+        material.fragmentNode = vec4(length(wind), wind.x, wind.y, float(1));
+        material.depthTest = false;
+        material.depthWrite = false;
+        material.side = THREE.DoubleSide;
+        const target = new THREE.RenderTarget(N, 1, {
+          type: THREE.FloatType,
+          format: THREE.RGBAFormat,
+          colorSpace: THREE.NoColorSpace,
+        });
+        target.texture.minFilter = THREE.NearestFilter;
+        target.texture.magFilter = THREE.NearestFilter;
+        const quadScene = new THREE.Scene();
+        const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material);
+        quad.frustumCulled = false;
+        quadScene.add(quad);
+        const cam = new THREE.OrthographicCamera(-1, 1, 1, -1, -1, 1);
+        renderer.setRenderTarget(target);
+        renderer.render(quadScene, cam);
+        renderer.setRenderTarget(null);
+        const raw = await renderer.readRenderTargetPixelsAsync(target, 0, 0, N, 1);
+        const px = raw instanceof Promise ? await raw : raw;
+        const magnitude = new Float32Array(N);
+        for (let i = 0; i < N; i++) magnitude[i] = px[i * 4];
+        material.dispose();
+        target.dispose();
+        return magnitude;
+      }
+
+      const nowScan = await scan(variants.now);
+      const beforeScan = await scan(variants.before);
+      const insideFrom = xs.findIndex((x) => x > WALL_X + 1);
+      const outsideTo = xs.findIndex((x) => x > WALL_X - 300) - 1;
+      const maxOver = (arr, a, b) => {
+        let m = 0;
+        for (let i = a; i <= b; i++) m = Math.max(m, arr[i]);
+        return m;
+      };
+      const minOver = (arr, a, b) => {
+        let m = Infinity;
+        for (let i = a; i <= b; i++) m = Math.min(m, arr[i]);
+        return m;
+      };
+      const nowInside = maxOver(nowScan, insideFrom, N - 1);
+      const beforeInside = maxOver(beforeScan, insideFrom, N - 1);
+      const nowOutside = minOver(nowScan, 0, outsideTo);
+
+      return {
+        checks: [
+          evaluate('the-gale-is-felt-outside-the-wall', () => ({
+            ok: nowOutside > 0.5,
+            measured: { weakestOutsideReading: Number(nowOutside.toFixed(3)) },
+            expected: '> 0.5 everywhere 300+ px outside the wall at wind 1 (a vacuity guard for the rig)',
+          })),
+          evaluate('sealed-room-reads-calm-right-up-to-the-wall', () => ({
+            ok: nowInside < 0.05,
+            measured: { strongestInsideReading: Number(nowInside.toFixed(4)), samplesInside: N - insideFrom },
+            expected: '< 0.05 at every point from 1 px inside the wall onward (turbulence floor is 2% of the dial)',
+            note: 'Measured through the real node graph, the real textures and a real sampler.',
+          })),
+          evaluate('the-rig-can-see-the-old-leak', () => ({
+            ok: beforeInside > 0.3,
+            measured: { strongestInsideReadingOnPreviousData: Number(beforeInside.toFixed(3)) },
+            expected: '> 0.3 on the previous data (any-reached-cell rule + bilinear filter)',
+            note: 'If this fails the scenario can no longer detect the bug — the check above would be vacuous.',
+          })),
+        ],
+        inputs: { wallX: WALL_X, speed01: SPEED, scan: `${N} samples, 1 px apart, ${WALL_X - 400}..${WALL_X + 160}` },
+        stats: { nowInside, beforeInside, nowOutside },
+      };
+    },
+  });
+
+  scenarios.set('wind-texture-rewrites-in-place', {
+    name: 'wind-texture-rewrites-in-place',
+    summary:
+      'The assumption the whole wind-bake redesign stands on, proven on the real GPU: rewrite a half-float ' +
+      'DataTexture\'s data in place, set needsUpdate, and an ALREADY-COMPILED material samples the new values on ' +
+      'the next draw — with no material rebuild and no new pipeline. If this ever fails, a wind-dial change ' +
+      'would silently stop moving anything (or would need the shader rebuild it was designed to avoid).',
+    async run() {
+      await ensureRenderer();
+      const W = await import('../../src/world/index.js');
+      const { texture, uv, vec2, vec4, float, uniform, length } = THREE.TSL;
+      const gridSpec = await windFixtureGrid();
+      const { cols, rows } = gridSpec;
+      const n = cols * rows;
+      const toHalf = (v) => THREE.DataUtils.toHalfFloat(v);
+      const structure = W.bakeWindStructure({ walls: [], gridSpec }); // open everywhere
+      const open = new Uint16Array(n * 4);
+      const wa = new Uint16Array(n * 4);
+      const ones = new Float32Array(n).fill(1);
+      const zeros = new Float32Array(n);
+      W.writeHalfFloatChannel(open, W.OPENNESS_TEXTURE_CHANNELS.openness, ones, toHalf, 1);
+      W.writeHalfFloatChannel(open, W.OPENNESS_TEXTURE_CHANNELS.exterior, structure.exterior, toHalf, 1);
+      const windTextures = createWindGridTextureFactory(THREE);
+      const opennessTex = windTextures.createOpennessTexture(open, cols, rows);
+      const wallAvoidTex = windTextures.createWallAvoidTexture(wa, cols, rows);
+      const handle = W.createWindHandle({
+        version: 1,
+        ambientWind: { directionDeg: uniform(float(90)), speed01: uniform(float(1)) },
+        grid: { originX: gridSpec.minX, originY: gridSpec.minY, cellSize: gridSpec.cellSize, cols, rows },
+        opennessTexture: opennessTex,
+        wallAvoidTexture: wallAvoidTex,
+      });
+
+      // 32 sample points spread over open ground, one texel each in an N x 1 target.
+      const N = 32;
+      const posData = new Float32Array(N * 4);
+      for (let i = 0; i < N; i++) {
+        posData[i * 4] = 400 + i * 100;
+        posData[i * 4 + 1] = 2000 + (i % 5) * 70;
+        posData[i * 4 + 3] = 1;
+      }
+      const posTex = new THREE.DataTexture(posData, N, 1, THREE.RGBAFormat, THREE.FloatType);
+      posTex.minFilter = THREE.NearestFilter;
+      posTex.magFilter = THREE.NearestFilter;
+      posTex.needsUpdate = true;
+
+      // ONE material, built ONCE — every scan below reuses it.
+      const material = new THREE.NodeMaterial();
+      const p = texture(posTex, vec2(uv().x, float(0.5))).xy;
+      const wind = handle.node(THREE.TSL, { centerXY: p, time: float(0) });
+      material.fragmentNode = vec4(length(wind), wind.x, wind.y, float(1));
+      material.depthTest = false;
+      material.depthWrite = false;
+      material.side = THREE.DoubleSide;
+      const target = new THREE.RenderTarget(N, 1, {
+        type: THREE.FloatType,
+        format: THREE.RGBAFormat,
+        colorSpace: THREE.NoColorSpace,
+      });
+      target.texture.minFilter = THREE.NearestFilter;
+      target.texture.magFilter = THREE.NearestFilter;
+      const quadScene = new THREE.Scene();
+      const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material);
+      quad.frustumCulled = false;
+      quadScene.add(quad);
+      const cam = new THREE.OrthographicCamera(-1, 1, 1, -1, -1, 1);
+      const pipelineCount = () => {
+        const caches = renderer?._pipelines?.caches;
+        return caches instanceof Map ? caches.size : null;
+      };
+      const mean = async () => {
+        renderer.setRenderTarget(target);
+        renderer.render(quadScene, cam);
+        renderer.setRenderTarget(null);
+        const raw = await renderer.readRenderTargetPixelsAsync(target, 0, 0, N, 1);
+        const px = raw instanceof Promise ? await raw : raw;
+        let sum = 0;
+        for (let i = 0; i < N; i++) sum += px[i * 4];
+        return sum / N;
+      };
+
+      const open1 = await mean();
+      const pipelinesAfterFirstDraw = pipelineCount();
+      const materialUuid = material.uuid;
+
+      // THE REWRITE: same array, same DataTexture, same material. Both channels,
+      // as a real sealed cell has both at 0 (openness AND the exterior flag —
+      // leaving the flag at 1 keeps outdoor-grade turbulence, ~0.07, which is the
+      // field working correctly rather than a rewrite that did not land).
+      for (const channel of [W.OPENNESS_TEXTURE_CHANNELS.openness, W.OPENNESS_TEXTURE_CHANNELS.exterior]) {
+        W.writeHalfFloatChannel(open, channel, zeros, toHalf, 1);
+      }
+      opennessTex.needsUpdate = true;
+      const sealed = await mean();
+      for (const channel of [W.OPENNESS_TEXTURE_CHANNELS.openness, W.OPENNESS_TEXTURE_CHANNELS.exterior]) {
+        W.writeHalfFloatChannel(open, channel, ones, toHalf, 1);
+      }
+      opennessTex.needsUpdate = true;
+      const open2 = await mean();
+      const pipelinesAfterRewrites = pipelineCount();
+
+      material.dispose();
+      target.dispose();
+      return {
+        checks: [
+          evaluate('the-first-draw-reads-the-open-texture', () => ({
+            ok: open1 > 0.5,
+            measured: { meanMagnitude: Number(open1.toFixed(3)) },
+            expected: '> 0.5 with openness 1 everywhere at wind 1 (a vacuity guard for the rig)',
+          })),
+          evaluate('an-in-place-rewrite-reaches-an-already-compiled-material', () => ({
+            ok: sealed < 0.05,
+            measured: { meanMagnitudeAfterRewriteToZero: Number(sealed.toFixed(4)) },
+            expected: '< 0.05 after the SAME material samples the rewritten texture',
+            note: 'If this stays high, needsUpdate on a rewritten half-float DataTexture is not reaching the GPU.',
+          })),
+          evaluate('rewriting-back-restores-it', () => ({
+            ok: Math.abs(open2 - open1) < 0.02,
+            measured: { first: Number(open1.toFixed(4)), afterRoundTrip: Number(open2.toFixed(4)) },
+            expected: 'the round trip returns to the original reading',
+          })),
+          evaluate('no-pipeline-was-compiled-by-the-rewrites', () => ({
+            ok: pipelinesAfterFirstDraw !== null && pipelinesAfterRewrites === pipelinesAfterFirstDraw,
+            measured: { afterFirstDraw: pipelinesAfterFirstDraw, afterRewrites: pipelinesAfterRewrites, materialUuid },
+            expected: 'identical pipeline counts — a data rewrite is not a shader change',
+          })),
+        ],
+        inputs: { grid: `${cols}x${rows}`, samples: N },
+        stats: { open1, sealed, open2, pipelinesAfterFirstDraw, pipelinesAfterRewrites },
       };
     },
   });

@@ -1183,16 +1183,16 @@ export function buildFireLightSources(
  * the author has marked immune (`canBeSnuffed: false` — a magical brazier, a
  * plot beacon, 0.65) — but neither goes anywhere near as low as before.
  */
-const FLAME_GUTTER_COUNT_FLOOR = 0.3;
-const FLAME_GUTTER_COUNT_FLOOR_IMMUNE = 0.65;
+export const FLAME_GUTTER_COUNT_FLOOR = 0.3;
+export const FLAME_GUTTER_COUNT_FLOOR_IMMUNE = 0.65;
 /**
  * Opacity floors deliberately GENTLER than the count floors — fewer sprites
  * that are still clearly flame-coloured reads as "struggling"; fewer AND
  * faint at once reads as "already out", which is a stronger claim than
  * "mostly suppressed" asked for.
  */
-const FLAME_GUTTER_OPACITY_FLOOR = 0.65;
-const FLAME_GUTTER_OPACITY_FLOOR_IMMUNE = 0.85;
+export const FLAME_GUTTER_OPACITY_FLOOR = 0.65;
+export const FLAME_GUTTER_OPACITY_FLOOR_IMMUNE = 0.85;
 
 /**
  * ⚠️ ADDED 2026-09-04, THE OTHER HALF OF THE "TOO STRONG" FIX. Raising the
@@ -1205,7 +1205,7 @@ const FLAME_GUTTER_OPACITY_FLOOR_IMMUNE = 0.85;
  * `windMotion01=1`) while pushing the bulk of the transition later —
  * `smoothstep01(0,1,0.5) ** 2.2 ≈ 0.22`, not 0.5.
  */
-const SUPPRESSION_EASE_POWER = 2.2;
+export const SUPPRESSION_EASE_POWER = 2.2;
 
 /**
  * Smoke is the most fragile layer — real smoke shears apart in far less wind
@@ -1215,7 +1215,7 @@ const SUPPRESSION_EASE_POWER = 2.2;
  * starts EARLIER than flame's own suppression curve (a bowed ramp, not a
  * straight one) while still landing on an EXACT 0 at `windMotion01 = 1`.
  */
-const SMOKE_WIND_FADE_EXPONENT = 0.65;
+export const SMOKE_WIND_FADE_EXPONENT = 0.65;
 
 /**
  * The GM's wind dial, folded into ONE 0..1 "how hard is this fire being hit"
@@ -1340,6 +1340,53 @@ export function fireWindParticleResponse(windMotion01, canBeSnuffed = true) {
 }
 
 /**
+ * The two floors {@link fireWindParticleResponse} eases a flame toward, as the
+ * kernel needs them (2026-10-07). The suppression curve now runs PER PARTICLE
+ * in the draw shader (`fire-sprite.js#buildFireWindSuppressionNode`), so the
+ * CPU hands over the floors instead of pre-multiplying a map-wide count.
+ *
+ * @param {boolean} [canBeSnuffed=true]
+ * @returns {{countFloor: number, opacityFloor: number}}
+ */
+export function fireWindSuppressionFloors(canBeSnuffed = true) {
+  return {
+    countFloor: canBeSnuffed ? FLAME_GUTTER_COUNT_FLOOR : FLAME_GUTTER_COUNT_FLOOR_IMMUNE,
+    opacityFloor: canBeSnuffed ? FLAME_GUTTER_OPACITY_FLOOR : FLAME_GUTTER_OPACITY_FLOOR_IMMUNE,
+  };
+}
+
+/**
+ * How much of the gale a particle at THIS spot feels, given the wind bake's
+ * geometry-derived openness there. Exactly the openness, clamped — the CPU twin
+ * of the `clamp` in `fire-particle-runtime.js`'s update kernel and its
+ * `effectiveWindMotionAt`.
+ *
+ * ⚠️ THERE IS NO FLOOR, AND NO SQUARE ROOT, AND THAT IS THE FIX (2026-10-07,
+ * author: "I don't want fires and candles and anything else which is indoors
+ * reacting to wind as if they were outdoors"). This used to be
+ * `max(sqrt(openness), 0.3)`. Measured on a real GPU through the real engine,
+ * a SEALED room's embers drifted 79 px downwind in a gale against 485 px in an
+ * open field — 16% — because the floor handed every sealed spot 30% of the
+ * gain, which the superlinear gust curve turned into ~12% of the full push, and
+ * `sqrt` inflated every small leaked reading (0.1 → 0.32) on top. The floor was
+ * added in "ROUND 4" for a fire that did not move at all, on the theory that
+ * painted fires sit against walls and read 0; "ROUND 6" of the same file then
+ * found the real cause (the push MAGNITUDE was too small, independent of the
+ * grid) and fixed it — and the workaround stayed.
+ *
+ * Linear matches every other consumer of the field (`sampleWind` multiplies the
+ * coherent wind by `openness` directly), and a fire against a wall no longer
+ * needs propping up: the bake now reads a sealed side as exactly 0 and an open
+ * side as exactly 1 (`downsampleOpennessClasses`), instead of a blend.
+ *
+ * @param {number} openness - 0..1 from the bake.
+ * @returns {number} 0..1
+ */
+export function fireOpennessGain01(openness) {
+  return clampNum(Number.isFinite(openness) ? openness : 1, 0, 1);
+}
+
+/**
  * How much a fire's own indoor-ness holds back its embers and smoke — count
  * AND lifetime, both driven off the SAME `indoor01` signal so "sparser" and
  * "shorter-lived" read as one thing happening to an indoor fire, not two
@@ -1425,14 +1472,14 @@ export function fireIndoorParticleResponse(indoor01, opts = {}) {
  *
  * @param {object} params - a resolved param bag (`effect-cascade.js#resolveEffectParams`).
  * @param {object} chain - from {@link fireScaleChain}.
- * @param {object} [wind] - `{speed01, exposure01, outdoor01}`. Omitted (the
- *   default for every pre-existing call site and test) resolves the wind
- *   signals below to exactly 0 and `outdoor01` to 1 (fully outdoors, so
- *   indoor suppression is a no-op) — byte-identical to before either
- *   parameter existed. `outdoor01` is `fires[].outdoors01` (the `_Outdoors`
- *   mask sample, NOT `exposure01`) aggregated by `fire-subsystem.js` — see
- *   {@link fireIndoorParticleResponse}'s own header for why this is a
- *   different question from wind exposure even though both read one mask.
+ * @param {object} [wind] - `{speed01, outdoor01}`. Omitted (the default for
+ *   every pre-existing call site and test) resolves the wind signal below to
+ *   exactly 0 and `outdoor01` to 1 (fully outdoors, so indoor suppression is a
+ *   no-op). `outdoor01` is `fires[].outdoors01` (the `_Outdoors` mask sample)
+ *   aggregated by `fire-subsystem.js` — see {@link fireIndoorParticleResponse}'s
+ *   own header for why "is there a roof" is a different question from "can
+ *   moving air reach it". There is no `exposure01` any more: wind exposure is
+ *   applied per PARTICLE in the shader, never aggregated here.
  * @returns {object} plain numbers, ready to assign to uniforms.
  */
 export function fireRuntimeFromParams(params = {}, chain = {}, wind = {}) {
@@ -1443,37 +1490,30 @@ export function fireRuntimeFromParams(params = {}, chain = {}, wind = {}) {
   const weatherResponse = clampNum(num(p.weatherResponse, 1), 0, 1);
   const windResponseGain = clampNum(num(p.windResponse, 1), 0, 2);
   const canBeSnuffed = bool(p.canBeSnuffed, true);
-  // ⚠️ TWO WIND SIGNALS, DELIBERATELY, SINCE 2026-09-04 — NOT ONE READ TWICE.
-  // Author, live: "test the actual location of the fire... indoor/sheltered
-  // fires be low movement, exposed/outdoors fires be moved" — a single
-  // map-wide exposure number (however it's aggregated) makes every fire on
-  // the floor share one wind reading, which is exactly what was wrong.
+  // ⚠️ ONE WIND SIGNAL, EXPOSURE-EXCLUDED — AND EXPOSURE IS APPLIED PER PARTICLE
+  // (2026-10-07; this used to be two signals). Author, live, 2026-09-04: "test
+  // the actual location of the fire... indoor/sheltered fires be low movement,
+  // exposed/outdoors fires be moved" — a single map-wide exposure number
+  // (however it is aggregated) makes every fire on the floor share one wind
+  // reading, which is exactly what was wrong.
   //
-  //   `windMotionForSuppression01` — EXPOSURE INCLUDED (the map-wide
-  //   representative-fire aggregate `wind.exposure01` already carries, from
-  //   `fire-subsystem.js`). Feeds ONLY `fireWindParticleResponse` below —
-  //   lifespan/population/opacity are CPU-computed once per kind and shared
-  //   across the whole map-wide particle arena, so there is genuinely no
-  //   per-particle home for them without a much larger rearchitecture (see
-  //   fire-particle-runtime.js's own header on the arena's buffer budget).
+  // PUSH, LIFESPAN and CHAOS/RISE already took their exposure per particle from
+  // the wind bake's own geometry-derived openness grid
+  // (`fire-particle-runtime.js`, `windHandle.kernel()`). What did NOT was the
+  // flame's population/opacity and smoke's population: they were computed HERE
+  // from a map-wide `exposure01` (the MAX across every fire on the floor, because
+  // one number has to stand for all of them) and handed to the engine pre-
+  // multiplied. On a floor holding an indoor hearth AND an outdoor campfire that
+  // gave BOTH the outdoor fire's suppression: the hearth's smoke vanished and its
+  // flames dimmed in a gale it could not feel. Author: "I don't want fires...
+  // which is indoors reacting to wind as if they were outdoors."
   //
-  //   `windMotion01` — EXPOSURE EXCLUDED (fixed to 1). This is the value
-  //   forwarded to every engine's `uWindMotion01` uniform, which now supplies
-  //   only speed/gain/gate/size-normalisation; the kernel multiplies it by
-  //   REAL per-particle exposure sampled live from the wind bake's own
-  //   geometry-derived openness grid (`windHandle.kernel()`, the SAME
-  //   mechanism vegetation/gust-runtime.js/dust motes already use) — see that
-  //   file's own construction-site comment. Including exposure here TOO would
-  //   double-count it: a genuinely sheltered lone fire would read its own low
-  //   exposure from BOTH this term and the per-particle sample and square the
-  //   dampening, suppressing it far harder than either signal alone intends.
-  const windMotionForSuppression01 = fireWindMotion01({
-    windSpeed01: wind?.speed01,
-    windExposure01: wind?.exposure01,
-    windResponseGain,
-    weatherResponse01: weatherResponse,
-    snuffWind: chain?.snuffWind,
-  });
+  // So this function no longer pre-applies the curve. It passes `windMotion01`
+  // (speed × gain ÷ size, exposure fixed to 1) and the two floors, and the draw
+  // shader runs the SAME curve (`fire-sprite.js#buildFireWindSuppressionNode`,
+  // pinned to `fireWindParticleResponse` by a parity test) at each particle's
+  // own position with that position's own openness. Exposure still enters
+  // exactly once.
   const windMotion01 = fireWindMotion01({
     windSpeed01: wind?.speed01,
     windExposure01: 1,
@@ -1481,12 +1521,10 @@ export function fireRuntimeFromParams(params = {}, chain = {}, wind = {}) {
     weatherResponse01: weatherResponse,
     snuffWind: chain?.snuffWind,
   });
-  const windFx = fireWindParticleResponse(windMotionForSuppression01, canBeSnuffed);
-  // ⚠️ `outdoor01` DEFAULTS TO 1 (fully outdoors), NOT 0 — the same
-  // byte-identical-until-touched contract `exposure01` already keeps (this
-  // function's own header). A caller that never passes it (every pre-2026-
-  // 09-07 call site and test) must see indoor suppression as a hard no-op,
-  // not an accidental full cut.
+  const windSuppression = fireWindSuppressionFloors(canBeSnuffed);
+  // ⚠️ `outdoor01` DEFAULTS TO 1 (fully outdoors), NOT 0 — a caller that never
+  // passes it (every pre-2026-09-07 call site and test) must see indoor
+  // suppression as a hard no-op, not an accidental full cut.
   const indoor01 = 1 - clampNum(Number.isFinite(wind?.outdoor01) ? wind.outdoor01 : 1, 0, 1);
   const indoorFx = fireIndoorParticleResponse(indoor01, {
     emberSuppression: num(p.emberIndoorSuppression, 0.9),
@@ -1557,11 +1595,11 @@ export function fireRuntimeFromParams(params = {}, chain = {}, wind = {}) {
     // stored value from an older schema cannot reach past what the slider says.
     perKind: {
       flame: {
-        // ⚠️ WIND-MODULATED (2026-09-03) — see fireWindParticleResponse. Each
-        // multiplier STACKS onto the author's own dial rather than replacing
-        // it, and is ~1 at windMotion01=0 (activeCount/opacity) so a windless
-        // fire is unaffected.
-        activeCount: Math.round(clampNum(num(p.flameCount, 12), 0, 200) * windFx.flameActiveCountMul),
+        // ⚠️ WIND-MODULATED (2026-09-03) — but no longer HERE (2026-10-07): the
+        // author's own dial only. The wind curve (`fireWindParticleResponse`)
+        // is applied per particle, at that particle's own position, by the
+        // draw shader — see the note above `windMotion01`.
+        activeCount: Math.round(clampNum(num(p.flameCount, 12), 0, 200)),
         // ⚠️ LIFE IS A WIND0/WIND1 PAIR, NOT A SINGLE SCALE, 2026-09-04
         // ROUND 7 — see `fireWindParticleResponse`'s own note on why this
         // moved off the CPU-side, map-wide suppression path entirely. Both
@@ -1570,7 +1608,7 @@ export function fireRuntimeFromParams(params = {}, chain = {}, wind = {}) {
         lifeAtWind0: clampNum(num(p.flameLifeAtWind0, 2.8), 0.05, 30),
         lifeAtWind1: clampNum(num(p.flameLifeAtWind1, 1.5), 0.05, 30),
         sizeScale: clampNum(num(p.flameSizeScale, 1), 0.02, 20),
-        opacityScale: clampNum(num(p.flameOpacity, 1), 0, 20) * windFx.flameOpacityMul,
+        opacityScale: clampNum(num(p.flameOpacity, 1), 0, 20),
         emissionScale: clampNum(num(p.flameEmission, 1), 0, 50),
         colorAge: clampNum(num(p.flameColorAge, 2.5), 0.1, 12),
         // Warps WHICH spawn point gets picked, not how it looks once picked —
@@ -1618,12 +1656,12 @@ export function fireRuntimeFromParams(params = {}, chain = {}, wind = {}) {
         // ⚠️ WIND- AND INDOOR-MODULATED — fades to a literal ZERO active
         // count at windMotion01=1 ("producing zero smoke", the author's own
         // wind-1 endpoint; SMOKE_WIND_FADE_EXPONENT), ahead of flame's own
-        // suppression curve, AND separately cut by indoorFx (2026-09-07) —
-        // see fireIndoorParticleResponse's own header. The two stack: a
-        // sealed, windless room reaches both floors at once.
-        activeCount: Math.round(
-          clampNum(num(p.smokeCount, 24), 0, 400) * windFx.smokeActiveCountMul * indoorFx.smokeActiveCountMul
-        ),
+        // suppression curve — applied PER PARTICLE by the draw shader since
+        // 2026-10-07 (see the note above `windMotion01`) — AND separately cut
+        // here by indoorFx (2026-09-07; see fireIndoorParticleResponse's own
+        // header). The two stack: a sealed, windless room reaches both floors
+        // at once.
+        activeCount: Math.round(clampNum(num(p.smokeCount, 24), 0, 400) * indoorFx.smokeActiveCountMul),
         // ⚠️ WIND0/WIND1 PAIR, NOT A `lifeScale` FIELD, 2026-09-07
         // (mythica-machina-press#512) — `lifeScale` reached this object but
         // nothing downstream ever read it: `fire-particle-runtime.js#setParams`
@@ -1669,6 +1707,13 @@ export function fireRuntimeFromParams(params = {}, chain = {}, wind = {}) {
     // (fire-particle-runtime.js's `uWindMotion01`, multiplied by a live
     // `windHandle.kernel()` sample at each particle's own position).
     windMotion01,
+    /**
+     * The flame's floors for the per-particle suppression curve
+     * (`fire-sprite.js#buildFireWindSuppressionNode`) — what the CPU used to
+     * pre-multiply into `activeCount`/`opacityScale` map-wide. Attached to every
+     * engine like `windMotion01`; ember and smoke ignore it.
+     */
+    windSuppression,
   };
 }
 

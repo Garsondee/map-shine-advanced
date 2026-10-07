@@ -102,6 +102,7 @@ import {
 // caller for these instead of new logic. Intra-zone.
 import { coarseAlphaGridDims, extractAlphaGrid } from './coarse-alpha.js';
 import { createPanCompileProbe } from './pan-compile-probe.js';
+import { createWindGridTextureFactory } from './wind-grid-textures.js';
 import { createSettleTracker, createReadinessRegistry, READINESS_STAGE } from './settle.js';
 import {
   buildCoverageCellMask,
@@ -509,27 +510,18 @@ import { decomposeWindAt } from '../diag/wind-probe.js';
 import { derivePixelsPerMetre } from '../core/scene-scale.js';
 import {
   computeWindBakeGridSpec,
-  rasterizeWallsToGrid,
   ambientVectorFromWind,
   windFlowVector,
   buildWindSimMaterials,
   doorwayImpulseFromWallSegment,
   gatherActiveImpulseSlots,
   computeThawWindowMs,
-  floodFillOpenFromBoundary,
   summarizeEnclosure,
-  downsampleMax,
-  cropGridMargin,
-  distanceFromDoorThreshold,
-  opennessFalloffFromDistance,
-  downsampleDistanceMin,
-  DOOR_FALLOFF_REACH_CELLS,
-  doorReachScaleForWindSpeed,
-  distanceFromNearestSolid,
-  wallAvoidanceDirectionFromDistance,
-  wallProximityFromDistance,
-  WALL_DEFLECT_REACH_CELLS,
-  upwindShelter,
+  // THE BAKE, SPLIT BY WHAT EACH PIECE DEPENDS ON (2026-10-07) — see
+  // world/wind-structure.js's header. The viewer owns the GPU objects and the
+  // triggers; the maths and the texture-channel writers live in world/.
+  bakeWindStructure,
+  createWindGridState,
   WIND_SIM_DEFAULT_DECAY_PER_SECOND,
   WIND_SIM_DEFAULT_RELAX_ITERATIONS,
   WIND_SIM_RELAX_BLEND,
@@ -5387,13 +5379,25 @@ export async function startVtPanViewer({
      * forever (see this file's own `updateWindFieldOverlay` for the hand-found
      * instance that motivated it). */
     let windHandleVersion = 0;
-    /** The two baked wind DataTextures, kept only so the NEXT bake can dispose
-     * them (the handle hands them out but does not own their lifetime — a
-     * frozen value object has no dispose step, and inventing one would give the
-     * handle a second responsibility it does not need). Null until the first
-     * bake. */
-    let bakedOpennessTexture = null;
-    let bakedWallAvoidTexture = null;
+    /**
+     * THE WIND GRID STATE (world/wind-structure.js#createWindGridState) — the
+     * baked textures, their backing arrays, the raw per-cell arrays and the
+     * cached STRUCTURE (walls/doors/floor) a dial change re-derives openness and
+     * shadow from. It owns the textures' lifetime (the handle hands them out but
+     * does not own them) and guarantees that a rebake on the SAME grid rewrites
+     * them in place — the property that stops every consumer's shader being
+     * rebuilt — which is why it lives in world/ and is Node-tested rather than
+     * being eleven loose `let`s in this closure.
+     */
+    const windGrid = createWindGridState({
+      textures: createWindGridTextureFactory(THREE),
+      toHalf: (v) => THREE.DataUtils.toHalfFloat(v),
+    });
+    /** Bumped ONLY when a consumer's shader graph must be rebuilt (a regrid).
+     * `windHandle.version` bumps on every data change, which is far more often
+     * and needs nothing rebuilt — a consumer keying a REBUILD on the handle's
+     * version would recompile its shader on every dial change. */
+    let windMaterialEpoch = 0;
     // NOTE — the raw per-cell arrays (`solid`/`openness`/wall-avoidance) used to
     // live here as their own closure local, pushed to each consumer separately.
     // They are now `windHandle.cells` (2026-07-23, Wind.md §5.1): ONE
@@ -5410,61 +5414,54 @@ export async function startVtPanViewer({
     // texture sample inside a compute shader, a path never verified in this
     // renderer (the retired compute spike proved storage buffers, not textures).
 
-    // THE MASK-DRIVEN WIND REBAKE TRIGGER (2026-07-21). Root cause of a real,
-    // author-reported bug: `bakeWindField('startup')` runs synchronously very
-    // early — before the outdoors mask has any realistic chance to have
-    // streamed in through the async VT page-decode pipeline (mask-authority's
-    // own header: "STALENESS IS LAZY, NOT SCHEDULED... products recompute on
-    // the NEXT READ" — a PULL model, no push notification exists to wire
-    // into). The four PRE-EXISTING rebake reasons ('startup'/'manual'/
-    // 'wall:*'/'ambient-change') never included "the mask data changed" —
-    // that dependency was simply never wired, so a wind-exposure snapshot
-    // baked before real mask content arrived stayed WRONG for the entire
-    // session, in a room that was correctly, unambiguously painted (memory:
-    // keyhole-wind-wake-turbulence's own addendum — this is the fix for the
-    // root cause it diagnosed). THROTTLED, not per-frame: mask-authority's
-    // own `version` bumps on every ingested page (there can be dozens during
-    // a scene's initial decode burst), and re-running the ~64-iteration
-    // relaxation on every single one would visibly cost real time during
-    // exactly the moment the app is already busiest. Polling a plain integer
-    // (`getMaskAuthorityVersion()`) is essentially free; the THROTTLE bounds
-    // how often a detected change actually triggers the (cheap-but-not-free)
-    // rebake, not how often it's checked.
+    // THE MASK-VERSION POLL (2026-07-21; WIND REMOVED FROM IT 2026-10-07).
+    //
+    // It began as THE MASK-DRIVEN WIND REBAKE TRIGGER: `bakeWindField('startup')`
+    // ran before the outdoors mask had streamed in, and the wind-exposure
+    // snapshot it baked from that mask stayed wrong all session. The 2026-07-22
+    // rethink then deleted the painted mask from the wind bake entirely
+    // ("geometry decides where wind is, not paint") — but this poll kept
+    // rebaking the wind on every mask-authority version bump, i.e. once per
+    // ingested page, dozens of times during a scene's decode burst, to
+    // recompute walls and flood-fills that do not read a mask at all. That was
+    // wind cost paid DURING LOADING for no reason, at exactly the moment the
+    // app is busiest. Removed: the wind bake now runs at load, on a wall/door/
+    // floor edit, and on a manual rebake — never on mask data.
+    //
+    // What remains is the per-floor SKY/precip mask bake, which genuinely does
+    // follow the masks and still needs this poll (mask-authority is a PULL
+    // model — "products recompute on the NEXT READ" — with no push to wire to).
+    // THROTTLED, not per-frame; a plain integer compare is essentially free.
     const MASK_VERSION_POLL_INTERVAL_MS = 500;
     let lastMaskVersionPollMs = -Infinity;
     let lastSeenMaskVersion = null;
 
     /**
      * Called once per frame (see renderFrame): if enough wall-clock time has
-     * passed AND mask-authority's own version counter has moved since the
-     * last bake, rebake the wind field — the mask-driven analogue of the
-     * existing wall/door-change auto-rebake, closing the ONE gap that watcher
-     * never covered.
+     * passed AND mask-authority's own version counter has moved since the last
+     * look, rebake the per-floor masks (sky gate, precipitation sky reach).
      * @param {number} nowMs - the shared clock's own tMs (never a fresh
      *   `performance.now()` — core/frame-clock.js is the one clock).
      */
-    function pollMaskAuthorityForWindRebake(nowMs) {
+    function pollMaskAuthorityForPerFloorMasks(nowMs) {
       if (nowMs - lastMaskVersionPollMs < MASK_VERSION_POLL_INTERVAL_MS) return;
       lastMaskVersionPollMs = nowMs;
       const v = getMaskAuthorityVersion();
       if (v == null) return; // unwired (torture fixture) — inert, never bakes
       if (lastSeenMaskVersion === null) {
         lastSeenMaskVersion = v;
-        // FIRST OBSERVATION — nothing to compare for the WIND (which wants a
-        // change), but the SKY wants the mask itself, and this is the earliest
-        // moment one is known to exist. Baking here is what stops the sky gate
-        // sitting on its 1×1 placeholder until something unrelated happens to
-        // edit a mask. The wind's own "not a change, don't rebake" reasoning is
-        // unaffected and unchanged.
+        // FIRST OBSERVATION — the SKY wants the mask itself, and this is the
+        // earliest moment one is known to exist. Baking here is what stops the
+        // sky gate sitting on its 1×1 placeholder until something unrelated
+        // happens to edit a mask.
         rebakePerFloorMasks(view?.floorIndex ?? 0, 'first-mask-observation');
         return;
       }
       if (v === lastSeenMaskVersion) return;
       lastSeenMaskVersion = v;
-      bakeWindField('mask-change');
-      // The sky's gate is derived from the same masks, so it goes stale at
-      // exactly the same moments. One trigger, two bakes — never two polls that
-      // could drift into disagreeing about which mask version is current.
+      // The sky's gate is derived from the masks, so it goes stale exactly when
+      // they change. One poll, never two that could drift into disagreeing
+      // about which mask version is current.
       rebakePerFloorMasks(view?.floorIndex ?? 0, 'mask-change');
     }
 
@@ -5479,7 +5476,6 @@ export async function startVtPanViewer({
     // scene/grid-size, the SAME rare event that already forces a Tier 1
     // rebake, never per frame.
     // ------------------------------------------------------------------
-    let windSolidMaskTexture = null; // R8-ish DataTexture, NEAREST filtered, 1=solid
     let windSimGridKey = null; // `${cols}x${rows}` — when this changes, the RTs below get reallocated
     let windPingRT = null;
     let windPongRT = null;
@@ -5513,7 +5509,7 @@ export async function startVtPanViewer({
     let vegSpringPingRT = null;
     let vegSpringPongRT = null;
     let vegSpringPublishRT = null;
-    let vegSpringMaterials = null; // { integrate, publish, dispose() } | null (rebuilt lazily, on windHandle.version change)
+    let vegSpringMaterials = null; // { integrate, publish, dispose() } | null (rebuilt lazily, on a wind REGRID — windMaterialEpoch)
     let vegSpringMaterialsWindVersion = -1;
     let vegSpringPingIsCurrent = true;
 
@@ -5574,12 +5570,12 @@ export async function startVtPanViewer({
      */
     function tickVegetationSpring(nowMs, dtSec) {
       if (!vegSpringPingRT || !vegSpringPongRT || !vegSpringPublishRT || !vegSpringGrid) return;
-      // Rebuild on first use AND whenever the wind handle has been reassigned
-      // (a rebake) — a cheap, worthwhile fix beyond what the existing
-      // per-mesh sway materials do (they do not track windHandle.version at
-      // all today), affordable here specifically because there is only ONE
-      // shared material to rebuild, not one per mesh.
-      if (!vegSpringMaterials || vegSpringMaterialsWindVersion !== windHandle.version) {
+      // Rebuild on first use AND whenever the wind GRID changed under it (a
+      // regrid) — keyed on `windMaterialEpoch`, NOT `windHandle.version`: the
+      // handle's version bumps on every dial change, and this material bakes
+      // only the grid constants and (stable, rewritten-in-place) textures, so
+      // rebuilding on the version recompiled this shader on every wind commit.
+      if (!vegSpringMaterials || vegSpringMaterialsWindVersion !== windMaterialEpoch) {
         vegSpringMaterials?.dispose();
         vegSpringMaterials = buildVegetationSpringMaterials({
           THREE,
@@ -5593,7 +5589,7 @@ export async function startVtPanViewer({
           originX: vegSpringGrid.originX,
           originY: vegSpringGrid.originY,
         });
-        vegSpringMaterialsWindVersion = windHandle.version;
+        vegSpringMaterialsWindVersion = windMaterialEpoch;
       }
 
       const p = getVegetationRenderState()?.params ?? {};
@@ -5648,99 +5644,107 @@ export async function startVtPanViewer({
     let windBakeTotal = 0;
     const windBakeCountsByReason = Object.create(null);
 
+    // ------------------------------------------------------------------
+    // THE WIND BAKE, SPLIT BY WHAT EACH PIECE DEPENDS ON (2026-10-07).
+    //
+    // This used to be ONE function that did everything on EVERY change of the
+    // wind dial: re-read the walls, re-rasterize and flood-fill a multi-million-
+    // cell fine grid, allocate fresh textures, and then dispose and rebuild
+    // every wind-reading shader in the scene (every point light's material pair,
+    // the candle flames, the overlays). Author, live: "going from 0% wind to any
+    // other percent causes a huge slow down ... over 10 seconds".
+    //
+    // MEASURED, not guessed: the CPU half of that bake is 40-280 ms even at 3.2M
+    // fine cells (Node, the unmodified pure modules). The freeze was the shader
+    // rebuild it triggered — in front of the player, after the load-time warm-up
+    // that exists to hide exactly that. It also ran TWICE per commit on the GM:
+    // `MapShine.setWind` applied locally, then `setFlag` echoed back through
+    // `watchSceneWind` and applied again.
+    //
+    // THE FIX IS STRUCTURAL, not a faster rebuild:
+    //   * `bakeWindField` is the STRUCTURE bake (walls/doors/floor) — world/
+    //     wind-structure.js's `bakeWindStructure`. It runs at load and on a
+    //     wall/door/floor edit, never on a dial change.
+    //   * `applyWindAmbient` is the dial: it re-derives only what the dial
+    //     changes (openness for speed, shadow for direction) from the CACHED
+    //     structure and rewrites those texture channels IN PLACE.
+    //   * The textures are created ONCE per grid and rewritten, never replaced:
+    //     a new texture object is a new shader binding, and a new binding is
+    //     what forced every consumer to rebuild. Consumers hold the texture by
+    //     reference, so they simply see fresh data next frame.
+    //   * Only a REGRID (a different scene/grid — the one event that changes
+    //     constants baked into shader graphs) still tears consumers down.
+    // ------------------------------------------------------------------
+
     /**
-     * Read walls, rasterize, relax, upload — see this block's own header.
-     * NOT per-floor scoped yet (`readSceneWallSegments(null)` reads every
-     * wall regardless of level) — a deliberate, honest simplification for
-     * this first cut (see `scene-wall-clip.js`'s own per-floor precedent
-     * for the natural follow-up), not a silent gap: most scenes have no
-     * per-floor wall scoping at all, and a wrongly-included wall from
-     * another floor just over-blocks the bake slightly, never crashes it.
-     * Never throws — a bake failure logs and leaves the PREVIOUS bake (or
-     * none) in place, exactly like every other "read live Foundry state"
-     * step in this file.
+     * Mint the handle every consumer receives. Cheap (a frozen object of
+     * references) — and, since the textures it names are stable, a newer handle
+     * is NOT a reason for any consumer to rebuild anything: they compare
+     * `version` only to know their own copied-out DATA (the particle engines'
+     * storage buffers) is stale.
+     */
+    function publishWindHandle() {
+      windHandleVersion += 1;
+      const g = windGrid.structure.gridSpec;
+      windHandle = createWindHandle({
+        version: windHandleVersion,
+        ambientWind: { directionDeg: uWindDirectionDeg, speed01: uWindSpeed01, gustiness01: uWindGustiness01 },
+        grid: { originX: g.minX, originY: g.minY, cellSize: g.cellSize, cols: g.cols, rows: g.rows },
+        opennessTexture: windGrid.opennessTexture,
+        wallAvoidTexture: windGrid.wallAvoidTexture,
+        liveTexture: windPublishRT?.texture ?? null,
+        cells: windGrid.cells,
+        cpuExposureAt: sampleWindExposureAt,
+      });
+    }
+
+    /** The dial's CURRENT value — what the dial-owned texture channels derive from. */
+    const currentWindAmbient = () => ({ speed01: uWindSpeed01.value, directionDeg: uWindDirectionDeg.value });
+
+    /** Hand the new data to every consumer that copied it out (storage buffers). */
+    function pushWindToEngines() {
+      // The diagnostic dust/gust engines are only built when their debug toggles
+      // are on; the fire engines are the live ones. Each is an in-place buffer
+      // overwrite — cols/rows are stable across a same-grid rebake — never a
+      // kernel rebuild.
+      particleEngine?.updateWind(windHandle);
+      gustEngine?.updateWind(windHandle);
+      fireSubsystem?.updateWind(windHandle);
+    }
+
+    /**
+     * Read walls, flood-fill, upload — the STRUCTURE bake. See the block header
+     * above. Per-floor wall scoping: resolves the CURRENTLY VIEWED floor's Level
+     * id and reads only the walls that apply to it (an empty `wall.levels` set
+     * means "every floor", Foundry's own convention).
      *
-     * @param {string} [reason] - WHY this bake ran ('manual' | 'ambient-change'
-     *   | 'wall:createWall' | 'wall:updateWall' | 'wall:deleteWall' |
-     *   'mask-change' — a mask-authority version bump, throttled via
-     *   `pollMaskAuthorityForWindRebake`; see that function's own header for
-     *   the bug this closes | 'floor-change' — `setFloorIndex` re-baking so
-     *   the per-floor wall scoping below never goes stale across a floor
-     *   switch, see that function's own header for the bug this closes)
-     *   — stamped into the log line only, so opening a
-     *   door in a live Foundry session shows up as its OWN log entry distinct
-     *   from a manual Rebake click or
-     *   an ambient-dial change. An instrument that only ever says "baked",
-     *   never "baked BECAUSE", can't prove the auto-invalidation hook (boot.js)
-     *   actually fired versus the author coincidentally having clicked Rebake
-     *   moments earlier (feedback_instruments_must_not_lie).
+     * Never throws — a bake failure logs and leaves the PREVIOUS bake (or none)
+     * in place, like every other "read live Foundry state" step in this file.
+     *
+     * @param {string} [reason] - WHY this bake ran ('startup' | 'manual' |
+     *   'wall:createWall'/'wall:updateWall'/'wall:deleteWall' | 'floor-change'
+     *   | 'ambient-change' for the first-ever bake a dial change had to run).
+     *   Stamped into the log line only: an instrument that only ever says
+     *   "baked", never "baked BECAUSE", can't prove the auto-invalidation hook
+     *   (boot.js) fired versus the author coincidentally clicking Rebake
+     *   (feedback_instruments_must_not_lie). `mask-change` is GONE: this bake
+     *   has not consulted the painted `_Outdoors` mask since the 2026-07-22
+     *   rethink, so rebaking on every mask-authority version bump (dozens per
+     *   scene load) redid the whole bake for nothing.
      */
     function bakeWindField(reason = 'manual') {
-      // BAKE-COUNT HEALTH (cache-completeness pass, 2026-08-12) — unlike
-      // mask-authority.js/water-body-subsystem.js, this bake has no single
-      // upstream dirty-check to pair a bakeRuns/bakeSkips gate against: 4 of
-      // its 5 call sites (startup/floor-change/ambient-change/manual) are
-      // plain imperative triggers with no poll step at all, and the 5th
-      // (mask-change, via pollMaskAuthorityForWindRebake's own throttle+
-      // version-compare) already has its OWN skip path that never reaches
-      // this function — a skip counter added HERE could only ever read 0.
-      // So this is a MISSES-only counter (every call is a real, uncached
-      // rebake by definition), broken down by `reason` — answering "is
-      // something thrashing this expensive rebake" without fabricating a
-      // hit rate this call site cannot honestly report.
+      // BAKE-COUNT HEALTH — a MISSES-only lifetime tally by reason: every call
+      // here is a real, uncached structure bake by definition.
       windBakeTotal += 1;
       windBakeCountsByReason[reason] = (windBakeCountsByReason[reason] ?? 0) + 1;
-      // Wraps the WHOLE function via try/finally rather than each of its 5
-      // call sites (4 internal + rebakeVtPanViewerWindField's external
-      // `_active.bakeWindField(...)` path) — finally runs before every return
-      // in the try below, at any depth, so this is the one safe place to
-      // bracket a function with this many exit paths without hand-tracing
-      // every one of them.
       profiler?.begin(Z.simsWindBake);
       try {
         const gridSizePixels = readGridSizePixels().gridSizePixels;
-        // CONSUMPTION-RESOLUTION grid — what the particle/gust storage
-        // buffers and the sampleWind texture actually sample.
-        //
-        // BOUNDED TO THE REAL SCENE RECT, NOT THE PADDED CANVAS (2026-07-23,
-        // author: "Don't render the wind particles or the overlay outside of
-        // the scene... We need the grid to align with the grid of the actual
-        // scene too"). This was previously `sceneX:0, sceneY:0, sceneWidth:
-        // dimensions.width, sceneHeight: dimensions.height` — `dimensions.
-        // width`/`.height` are `foundry/scene-geometry.js#computeSceneDimensions`'s
-        // PADDED canvas size (`sceneWidth + 2×gridSnappedPadding`, that
-        // module's own header: "the canvas is ~1.5× the art, and the art is
-        // *inset* at `sceneRect`, not at the origin"), and `0,0` is the
-        // padded rect's OWN corner, not the real map's. So the wind grid was
-        // computing openness across the padding margin surrounding the map
-        // too — walls/doors never exist out there, so it read as wide-open
-        // exterior, and particles/the overlay happily filled it. FIX: origin
-        // + extent now come from `dimensions.sceneX/sceneY/sceneWidth/
-        // sceneHeight` — the REAL playable rect (`Scene#getDimensions()`'s
-        // own `sceneRect`, replicated verbatim in `computeSceneDimensions`).
-        // Bonus: `sceneX`/`sceneY` are `Math.ceil(padding×sceneWidth/
-        // gridSize)×gridSize` minus `shiftX`/`shiftY` (that function's own
-        // doc) — an exact multiple of Foundry's OWN grid square size on any
-        // scene that hasn't been manually grid-shifted (`shiftX`/`shiftY`
-        // default 0), so this origin lands ON a real Foundry grid line, same
-        // phase as `cellSize` being an exact fraction of `gridSizePixels`
-        // below — the wind grid's cell boundaries now coincide with the
-        // map's own grid squares, not just its extent.
-        //
-        // RESOLUTION (2026-07-23, author: "make the wind resolution
-        // higher") — QUARTERED (was HALVED): `gridSizePixels/4` so each
-        // Foundry grid square gets a 4×4 sub-grid instead of 2×2, same
-        // "narrow corridor still gets a real open centreline cell" reasoning
-        // as the original halving, just finer. HONEST COST: this ~4×s the
-        // consumption grid's own cell count (both axes double, same 512-cell
-        // safety cap as before — a map whose long axis already exceeds ~128
-        // true grid squares was ALREADY hitting that cap at the old /2 and
-        // gets no finer here; the cap itself is intentionally untouched, a
-        // deliberate ceiling on worst-case bake cost, not a bug), and the
-        // FINE flood-fill grid below (OPENNESS_REFINE×) scales by the exact
-        // same ~4× on top of that — a real, one-time-per-bake CPU cost
-        // increase (wall/door/floor changes, never per-frame), traded
-        // deliberately for the finer wind detail that was asked for.
+        // CONSUMPTION-RESOLUTION grid, bounded to the REAL scene rect (not the
+        // padded canvas: walls/doors never exist in the padding, so it read as
+        // wide-open exterior and particles filled it — 2026-07-23), at a
+        // QUARTER of a Foundry grid square per cell (a narrow corridor still
+        // gets a real open centreline cell), capped at 512 cells per axis.
         const gridSpec = computeWindBakeGridSpec({
           sceneX: dimensions.sceneX,
           sceneY: dimensions.sceneY,
@@ -5749,49 +5753,20 @@ export async function startVtPanViewer({
           gridSizePixels: gridSizePixels / 4,
           maxAxisCells: 512,
         });
-        // PER-FLOOR WALL SCOPING (2026-07-22, live author report: "reading
-        // the wall from the floor above"). `readSceneWallSegments(null)`
-        // used to read EVERY wall on the scene regardless of level — a
-        // known, previously-documented simplification. On a multi-floor
-        // scene, that means an UPPER floor's interior walls silently sealed
-        // the GROUND floor's own openness computation, even on a ground
-        // floor genuinely wall-free — exactly the "no walls at all, wind
-        // still dies" report, except this time the dead-end was real wall
-        // data from the wrong floor, not the painted mask. FIX: resolve the
-        // CURRENTLY VIEWED floor's own Level id the SAME way candle
-        // wall-clipping already does (`updatePointLightMeshes`'s own
-        // `currentFloor.id`, sourced from `getActiveSceneFloors` matched
-        // against `view.floorIndex` — `readElevationFilteredDarknessRegions`'s
-        // own header has the full precedent), and scope the wall read to
-        // it. `readSceneWallSegments`'s own `levelId` param already treats
-        // an EMPTY `wall.levels` set as "applies to every floor" (Foundry's
-        // own convention for an unscoped exterior/structural wall — those
-        // still count everywhere); only a wall an author explicitly scoped
-        // to ANOTHER floor is excluded now. Falls back to unscoped
-        // (byte-identical to the prior behaviour) if the floor can't be
-        // identified — never a harder failure than before this fix.
+
+        // PER-FLOOR WALL SCOPING (2026-07-22, live author report: "reading the
+        // wall from the floor above"): an UPPER floor's interior walls silently
+        // sealed the GROUND floor's openness. Falls back to unscoped (every
+        // wall) if the floor can't be identified — never a harder failure.
         let currentLevelIdForWind = null;
-        // WHY the lookup landed where it did, not just what it returned —
-        // (2026-07-23, live: LIVE TEST #3 showed `currentLevelIdForWind`
-        // resolving to null on a FRESH LOAD, no floor switch involved, which
-        // the floor-switch fix above cannot explain — see that memory entry
-        // for the full trail). Every branch that can leave the id null now
-        // names itself, so the NEXT log line says which of "getActiveScene
-        // Floors failed", "view isn't set yet", or "no floor in the array
-        // matched view.floorIndex" (and if the last one, lists what indices
-        // WERE available) actually happened, instead of the caller having to
-        // re-derive it by reading code again.
+        // Every branch that can leave the id null names itself, so the next log
+        // line says which of "getActiveSceneFloors failed", "view isn't set
+        // yet", or "no floor matched view.floorIndex" happened.
         let windLevelLookupDiag = 'resolved';
         try {
-          // `globalThis.canvas`, NOT the bare `canvas` identifier — SAME
-          // root-cause shadow as `readElevationFilteredDarknessRegions`
-          // above (see that function's own comment for the full
-          // explanation): this file's local `let canvas` (the WebGPU render
-          // surface's DOM element) shadowed Foundry's global here too, which
-          // is EXACTLY why `windLevelLookupDiag` kept reporting
-          // "getActiveSceneFloors failed: no active scene" on a fresh load
-          // with a real, open scene — `canvas?.scene` was reading the DOM
-          // element's (nonexistent) `.scene`, never Foundry's actual scene.
+          // `globalThis.canvas`, NOT the bare `canvas` identifier — this file's
+          // local `let canvas` (the WebGPU render surface's DOM element)
+          // shadows Foundry's global (see readElevationFilteredDarknessRegions).
           const sceneDocForWind = globalThis.canvas?.scene ?? null;
           const floorsResultForWind = getActiveSceneFloors(sceneDocForWind);
           if (!floorsResultForWind.ok) {
@@ -5811,25 +5786,12 @@ export async function startVtPanViewer({
           windLevelLookupDiag = `threw: ${err?.message ?? err}`;
         }
         const walls = readSceneWallSegments(currentLevelIdForWind);
-        // TOTAL (unscoped) wall count, purely for the diagnostics line below
-        // (2026-07-23 — this bake's own scoping was hard to trust from the
-        // log alone: "N wall segments" never said whether N was ALREADY the
-        // filtered count or the whole scene, so a scoping failure that
-        // silently fell back to unscoped was indistinguishable from correct
-        // scoping that simply found few walls on this floor. Reading
-        // `walls.length` next to the RAW `canvas.scene.walls.size` makes
-        // that distinction a one-line fact instead of a guess.
+        // TOTAL (unscoped) wall count, so "N wall segments" can be told apart
+        // from "scoping silently fell back to the whole scene".
         const totalWallCountForWind = globalThis.canvas?.scene?.walls?.size ?? null;
-        // A SECOND, independent question: even when `currentLevelIdForWind`
-        // resolves, is `wall.levels` actually the queryable `Set` `readScene
-        // WallSegments`'s own filter assumes (`typeof levels.has ===
-        // 'function'`)? A live document should always give a real Set
-        // (SceneLevelsSetField, verified in Foundry's own source), but this
-        // makes that assumption checkable instead of assumed — a Proxy or
-        // serialized wall shape that isn't a real Set would silently make
-        // EVERY wall read as "unscoped" (the filter's own guard clause
-        // quietly no-ops), independent of whether the level id above
-        // resolved correctly, and nothing about that would ever throw.
+        // Is `wall.levels` actually the queryable Set `readSceneWallSegments`'s
+        // filter assumes? A shape that is not would silently make EVERY wall
+        // read as unscoped, and nothing would ever throw.
         let wallLevelsShapeDiag = 'n/a';
         try {
           const rawWalls = globalThis.canvas?.scene?.walls;
@@ -5849,264 +5811,20 @@ export async function startVtPanViewer({
         } catch (err) {
           wallLevelsShapeDiag = `threw: ${err?.message ?? err}`;
         }
-        const cols = gridSpec.cols;
-        const rows = gridSpec.rows;
-        // The COARSE solid mask — kept ONLY for Tier 2's windSolidMaskTexture
-        // (world/wind-sim-gpu.js's transient sim, untouched by this rethink)
-        // and the probe's diagnostic display. `superCover:true` (the
-        // conservative default) is fine for both; neither depends on fine
-        // openings surviving the way `openness` below does.
-        const solidMask = rasterizeWallsToGrid(walls, gridSpec);
 
-        // WALL-AVOIDANCE DEFLECTION (2026-07-23, author: "walls perpendicular
-        // to the wind aren't preventing the wind from penetrating... how can
-        // we prevent wind from crossing walls with confidence? How can we
-        // divert and diminish its strength so that it breaks around objects
-        // instead of just losing all its energy") — see `world/wind-
-        // enclosure.js`'s own "WALL-AVOIDANCE DEFLECTION" section header for
-        // the full reasoning; this is that module's three functions run
-        // straight off the COARSE `solidMask` above (no fine-grid pass
-        // needed here, unlike openness — see that header for why). One extra
-        // BFS per bake, same rare-event trigger as everything else in this
-        // block.
-        const wallDistance = distanceFromNearestSolid(solidMask, cols, rows);
-        const wallAvoidDir = wallAvoidanceDirectionFromDistance(wallDistance, cols, rows);
-        const wallProximity = wallProximityFromDistance(wallDistance, { reachCells: WALL_DEFLECT_REACH_CELLS });
-
-        // OPENNESS (2026-07-22, THE RETHINK — docs/planning/Wind-Rethink.md
-        // §4) — THE single geometry-derived answer to "how much outside wind
-        // reaches this cell," replacing what used to be five separate
-        // mechanisms. Computed on a grid OPENNESS_REFINE× finer than
-        // `gridSpec`, rasterized WITHOUT the diagonal over-seal guard
-        // (`superCover:false`) — at coarse, over-sealed resolution a curved
-        // or narrow real opening can fuse into one solid band
-        // (author-confirmed live: removing physical door walls did nothing,
-        // because the entrance GEOMETRY around them — not the doors
-        // themselves — had already sealed at that resolution). A leak in a
-        // fine, non-over-sealed CONNECTIVITY mask is harmless: there is no
-        // solve left for it to corrupt, it can only help wind find a real
-        // opening. `floodFillOpenFromBoundary` then answers "is this cell
-        // connected to the map's open EXTERIOR through open space" purely
-        // from walls/doors — the painted `_Outdoors` mask is NOT consulted
-        // anywhere in this block, by design: the author's decisive
-        // experiment deleted every wall in the scene and found wind still
-        // died at the painted mask's boundary, proving the mask — not
-        // geometry — had been deciding wind presence. This binary result
-        // (`fineOpen`) feeds the graded door-distance falloff just below,
-        // which produces the FINAL `opennessArray` — see that block's own
-        // header. `downsampleMax`/`downsampleDistanceMin` (any fine cell in
-        // a coarse cell's footprint reached/closest ⇒ the coarse cell
-        // reflects it — a door that only opens part of a coarse cell still
-        // admits wind) bring everything back to `gridSpec`'s own resolution
-        // for everything downstream.
-        const OPENNESS_REFINE = 4;
-        // MAP-EDGE OPENNESS MARGIN (2026-07-23, author: "a building, fully
-        // enclosed with walls, sits right on the edge of the map... wind
-        // just starts inside the building") — see `cropGridMargin`'s own
-        // header (world/wind-enclosure.js) for the full mechanism: the fine
-        // grid used for the flood-fill below is rasterized on a rect padded
-        // a few cells beyond the real scene rect on every side, so even an
-        // edge-flush wall gets a genuinely open neighbour to separate it
-        // from the grid's own outer border (which `floodFillOpenFromBoundary`
-        // otherwise treats as automatically "outside"). `fineCols`/`fineRows`
-        // below are the TRUE (unpadded) fine size — the margin is cropped
-        // back off immediately after each flood-fill and never reaches
-        // anything downstream, so the published grid's own extent is
-        // byte-identical to before this fix (still exactly the real scene
-        // rect — the earlier "don't leak into the padding margin" fix stays
-        // fully intact).
-        const OPENNESS_MARGIN_CELLS = OPENNESS_REFINE * 2;
-        const fineCellSize = gridSpec.cellSize / OPENNESS_REFINE;
-        const fineCols = cols * OPENNESS_REFINE;
-        const fineRows = rows * OPENNESS_REFINE;
-        const paddedFineSpec = {
-          minX: gridSpec.minX - OPENNESS_MARGIN_CELLS * fineCellSize,
-          minY: gridSpec.minY - OPENNESS_MARGIN_CELLS * fineCellSize,
-          cols: fineCols + OPENNESS_MARGIN_CELLS * 2,
-          rows: fineRows + OPENNESS_MARGIN_CELLS * 2,
-          cellSize: fineCellSize,
-        };
-        const paddedFineSolid = rasterizeWallsToGrid(walls, paddedFineSpec, { superCover: false });
-        const paddedFineOpen = floodFillOpenFromBoundary(paddedFineSolid, paddedFineSpec.cols, paddedFineSpec.rows);
-        const fineOpen = cropGridMargin(
-          paddedFineOpen,
-          paddedFineSpec.cols,
-          paddedFineSpec.rows,
-          OPENNESS_MARGIN_CELLS
-        );
-
-        // DOOR-DISTANCE PENETRATION FALLOFF (2026-07-22, same day as binary
-        // openness — author, immediately after confirming binary worked
-        // live: "opening a door now floods the interior with wind... the
-        // effect of the wind drops off as it travels further away from the
-        // nearest door that is open... we'd have something very subtle"). A
-        // SECOND fine flood-fill, on a mask where a door — open OR closed —
-        // ALWAYS counts as a barrier (`deriveWallBlocksExterior`,
-        // `foundry/scene-walls.js`), answers "is this cell reachable WITHOUT
-        // ever crossing a door at all" — the genuinely outdoor, in-the-open
-        // space the "looks amazing outside" look depends on; it never falls
-        // off. `distanceFromDoorThreshold` then measures how far a cell
-        // that's ONLY reachable via an open door has travelled from that
-        // door's own threshold, and `opennessFalloffFromDistance` turns both
-        // into the FINAL per-cell openness — 1 outdoors/at the door, fading
-        // over `DOOR_FALLOFF_REACH_CELLS`, 0 wherever binary openness was
-        // already 0. Same fine geometry, reused; only whether a door counts
-        // as passable differs between the two rasterizations.
-        const wallsExteriorView = walls.map((w) => ({ ...w, solid: w.blocksExterior }));
-        const paddedFineSolidExterior = rasterizeWallsToGrid(wallsExteriorView, paddedFineSpec, { superCover: false });
-        const paddedFineOpenExterior = floodFillOpenFromBoundary(
-          paddedFineSolidExterior,
-          paddedFineSpec.cols,
-          paddedFineSpec.rows
-        );
-        const fineOpenExterior = cropGridMargin(
-          paddedFineOpenExterior,
-          paddedFineSpec.cols,
-          paddedFineSpec.rows,
-          OPENNESS_MARGIN_CELLS
-        );
-        const fineDoorDistance = distanceFromDoorThreshold(fineOpen, fineOpenExterior, fineCols, fineRows);
-        const doorDistance = downsampleDistanceMin(fineDoorDistance, cols, rows, OPENNESS_REFINE);
-        const exteriorOpenness = downsampleMax(fineOpenExterior, cols, rows, OPENNESS_REFINE);
-        // WIND SPEED SETS HOW FAR IT PUSHES IN (2026-08-15) — see
-        // `world/wind-enclosure.js#doorReachScaleForWindSpeed` for the author's
-        // report and why this rides the bake rather than the shader. Reading
-        // `uWindSpeed01.value` (the uniform's number, not the node) for the same
-        // reason the wind SHADOW a few dozen lines below reads
-        // `uWindDirectionDeg.value`: this is plain CPU arithmetic, and both are
-        // baked against the ambient that `setWindAmbient` re-bakes on.
-        const opennessArray = opennessFalloffFromDistance(doorDistance, exteriorOpenness, {
-          reachCells: DOOR_FALLOFF_REACH_CELLS * OPENNESS_REFINE * doorReachScaleForWindSpeed(uWindSpeed01.value),
-        });
-
-        // RGBA — B carries openness (the SAME channel `windReach` used
-        // before the rethink, so nothing about the texture's shape moved).
-        // R/G are always written 0 — the now-deleted wall-relaxation used to
-        // carry dvx/dvy there; kept well-defined rather than repurposed
-        // because Tier 2's advect pass independently reads this SAME
-        // texture's `.xy` as a transport velocity (world/wind-sim-gpu.js) —
-        // see world/wind-field.js#sampleWind's own header for the full
-        // channel contract. A NOW CARRIES `exteriorOpenness` (2026-07-23,
-        // author: "turbulence indoors needs to be happening only when that
-        // section becomes exposed to an open door... rooms that have their
-        // doors shut are still nearly still") — was "unused, always 1" until
-        // now; `sampleWind` needs a way to tell "genuinely outdoors" apart
-        // from "indoor, reached only via an open door" (both can read
-        // `openness` near 1), and `exteriorOpenness` — already computed just
-        // above for the door-distance falloff, previously discarded after
-        // use — is exactly that distinction, already sitting right here.
-        // HalfFloatType matches this project's OWN established choice for
-        // float-ish render targets (sceneColor/sceneIllum/etc), not
-        // FloatType, which has patchier linear-filtering support across
-        // backends.
-        const n = cols * rows;
-        const data = new Uint16Array(n * 4);
-        const zeroHalf = THREE.DataUtils.toHalfFloat(0);
-        for (let i = 0; i < n; i++) {
-          data[i * 4 + 0] = zeroHalf;
-          data[i * 4 + 1] = zeroHalf;
-          data[i * 4 + 2] = THREE.DataUtils.toHalfFloat(opennessArray[i] ?? 1);
-          data[i * 4 + 3] = THREE.DataUtils.toHalfFloat(exteriorOpenness[i] ?? 1);
-        }
-        bakedOpennessTexture?.dispose();
-        const tex = new THREE.DataTexture(data, cols, rows, THREE.RGBAFormat, THREE.HalfFloatType);
-        tex.minFilter = THREE.LinearFilter;
-        tex.magFilter = THREE.LinearFilter;
-        tex.wrapS = THREE.ClampToEdgeWrapping;
-        tex.wrapT = THREE.ClampToEdgeWrapping;
-        tex.needsUpdate = true;
-        bakedOpennessTexture = tex;
-
-        // THE WIND SHADOW (2026-08-01, author: "Can we get wind shadows to
-        // appear on the opposite side of buildings?") — see
-        // `world/wind-enclosure.js#upwindShelter` for the full reasoning,
-        // including why this is NOT the deleted potential-flow relaxation.
-        //
-        // DIRECTION-DEPENDENT, which is why it lives in the BAKE rather than in
-        // the shader: `setWindAmbient` already re-bakes on every direction
-        // change (its own comment: "the bake depends on the SAME direction/speed
-        // it was last computed from"), so the one input that makes this term
-        // move is already a rebake trigger.
-        //
-        // UPWIND IS THE NEGATED FLOW (2026-09-04, mythica-machina-press#497
-        // Stage 0). `directionDeg` now names the direction the wind blows
-        // TOWARD (`world/wind-bake.js#windFlowVector`), so the direction it
-        // comes FROM — which is what a shelter search walks toward — is that
-        // vector negated. This used to read `(cos, sin)` with no negation,
-        // correct under the OLD meteorological reading and wrong under this
-        // one; getting it backwards puts every wind shadow on the windward
-        // face instead of the lee, which is the most visible way this bake can
-        // fail. Reading `.value` (not the uniform node) because this is plain
-        // CPU arithmetic.
-        const shelterFlow = windFlowVector(uWindDirectionDeg.value);
-        const windShadow = upwindShelter(solidMask, cols, rows, {
-          upwindX: -shelterFlow.x,
-          upwindY: -shelterFlow.y,
-        });
-
-        // THE WALL-AVOIDANCE TEXTURE — a SEPARATE texture from the openness one
-        // (no channel left to repurpose there: B carries openness, A carries
-        // exteriorOpenness, and R/G must stay well-defined zeros for Tier 2's
-        // independent `.xy` read). R=dirX, G=dirY, B=proximity. A CARRIES THE
-        // WIND SHADOW (2026-08-01) — it was "always 1, unused" until now, which
-        // is exactly the free channel this term needed: same grid, same origin,
-        // same cellSize, so it costs no new texture, no new binding and no
-        // storage-buffer slot (keyhole-storage-buffer-limit-fix's hard cap of 8
-        // per stage is why a new buffer would not have been free).
-        const wallAvoidData = new Uint16Array(n * 4);
-        for (let i = 0; i < n; i++) {
-          wallAvoidData[i * 4 + 0] = THREE.DataUtils.toHalfFloat(wallAvoidDir.dirX[i] ?? 0);
-          wallAvoidData[i * 4 + 1] = THREE.DataUtils.toHalfFloat(wallAvoidDir.dirY[i] ?? 0);
-          wallAvoidData[i * 4 + 2] = THREE.DataUtils.toHalfFloat(wallProximity[i] ?? 0);
-          wallAvoidData[i * 4 + 3] = THREE.DataUtils.toHalfFloat(windShadow[i] ?? 0);
-        }
-        bakedWallAvoidTexture?.dispose();
-        const wallAvoidTex = new THREE.DataTexture(wallAvoidData, cols, rows, THREE.RGBAFormat, THREE.HalfFloatType);
-        wallAvoidTex.minFilter = THREE.LinearFilter;
-        wallAvoidTex.magFilter = THREE.LinearFilter;
-        wallAvoidTex.wrapS = THREE.ClampToEdgeWrapping;
-        wallAvoidTex.wrapT = THREE.ClampToEdgeWrapping;
-        wallAvoidTex.needsUpdate = true;
-        bakedWallAvoidTexture = wallAvoidTex;
-
-        // (The raw per-cell arrays every non-texture consumer reads — the two
-        // particle kernels' storage buffers and the wind probe — now ride into
-        // the handle below as its `cells`, rather than living in a second
-        // closure local that had to be pushed around separately.)
-
-        // TIER 2's OWN SOLID MASK — a plain 0/1 upload (NOT the dvx/dvy
-        // deviation above) so the sim's relax pass can tell which GPU texel
-        // neighbours are walls. RGBA8 (not R8 — same "universally supported"
-        // reasoning as the RGBA-not-RG choice just above) with NEAREST
-        // filtering — LINEAR would blur a wall/open boundary into a
-        // fractional "half solid" reading right where relax's into-wall
-        // cancellation needs a crisp 0 or 1 (world/wind-sim-gpu.js#
-        // buildWindRelaxMaterial reads this texture at exactly the cell
-        // boundary every neighbour sample).
-        windSolidMaskTexture?.dispose();
-        const solidData = new Uint8Array(n * 4);
-        for (let i = 0; i < n; i++) {
-          const v = solidMask[i] ? 255 : 0;
-          solidData[i * 4 + 0] = v;
-          solidData[i * 4 + 1] = v;
-          solidData[i * 4 + 2] = v;
-          solidData[i * 4 + 3] = 255;
-        }
-        const solidTex = new THREE.DataTexture(solidData, cols, rows, THREE.RGBAFormat, THREE.UnsignedByteType);
-        solidTex.minFilter = THREE.NearestFilter;
-        solidTex.magFilter = THREE.NearestFilter;
-        solidTex.wrapS = THREE.ClampToEdgeWrapping;
-        solidTex.wrapT = THREE.ClampToEdgeWrapping;
-        solidTex.needsUpdate = true;
-        windSolidMaskTexture = solidTex;
+        // ── THE EXPENSIVE PART, once ─────────────────────────────────────────
+        const structure = bakeWindStructure({ walls, gridSpec });
+        const { cols, rows } = structure;
+        // A REGRID is the only event that changes what consumers bake into their
+        // shader graphs (origin/cellSize/cols/rows are build-time constants). On
+        // the SAME grid the textures and arrays are rewritten in place — same
+        // objects, new contents — and `regrid` is false.
+        const { regrid } = windGrid.applyStructure(structure, currentWindAmbient());
 
         // TIER 2's PING/PONG/PUBLISH RENDER TARGETS — only reallocated on a
         // genuine REGRID (cols/rows changed, or first bake ever). Neither
-        // `screenSized` nor `allowWorldScale`: cols/rows are ALWAYS <=256
-        // (Tier 1's own [64,256] clamp, computeWindBakeGridSpec), so this
-        // sails under the Keyhole law's plain 2048px cap with no exception
-        // needed — a genuinely tiny, fixed-size allocation regardless of map
-        // size (Wind.md §2's own "half a megabyte at the worst case" claim).
+        // `screenSized` nor `allowWorldScale`: cols/rows are <=512, so this
+        // sails under the Keyhole law's plain 2048px cap with no exception.
         const gridKey = `${cols}x${rows}`;
         if (gridKey !== windSimGridKey) {
           allocator.dispose(windPingRT);
@@ -6124,16 +5842,10 @@ export async function startVtPanViewer({
           windPingRT = allocator.create('wind.sim.ping', describeWindSimRT());
           windPongRT = allocator.create('wind.sim.pong', describeWindSimRT());
           windPublishRT = allocator.create('wind.sim.publish', describeWindSimRT());
-          // A fresh regrid means fresh GPU memory of UNDEFINED content —
-          // clear all three explicitly so a NaN bit-pattern can never enter
-          // the sim (it would propagate through every multiply forever). A
-          // FRESH local Color, deliberately not the file's shared
-          // `_clearColorScratch` (declared further down, line ~3237) — this
-          // function has ALREADY bitten a temporal-dead-zone bug once (see
-          // this file's own "THE INITIAL WIND BAKE... must run here, not
-          // earlier" comment) from reaching for a `let`/`const` declared
-          // below it; a throwaway allocation here (rare — regrid only, never
-          // per frame) is cheaper than re-earning that lesson.
+          // Fresh GPU memory is UNDEFINED content — clear all three explicitly
+          // so a NaN bit-pattern can never enter the sim. A FRESH local Color,
+          // deliberately not the file's shared `_clearColorScratch` (declared
+          // further down — reaching for it here is a temporal-dead-zone bug).
           const prevRT = renderer.getRenderTarget();
           const prevClearColor = renderer.getClearColor(new THREE.Color());
           const prevClearAlpha = renderer.getClearAlpha();
@@ -6147,144 +5859,48 @@ export async function startVtPanViewer({
           windSimGridKey = gridKey;
           windPingIsCurrent = true;
         }
-        // Tier 2's D_live rides into the handle below as `windPublishRT.texture`
-        // — a STABLE texture reference across ordinary (non-regrid) bakes even
-        // though its CONTENT changes every tick, which is exactly why consumers
-        // need no per-tick rebuild for it (see wind-sim-gpu.js#
-        // buildWindPublishMaterial's own header).
-        //
-        // D_rest (and the solid mask) changed — Tier 2's own materials read
-        // BOTH baked in at build time (unlike the ping-pong textures, which
-        // are re-pointed live), so they need the SAME "dispose, rebuild
-        // lazily on next tick" treatment as candleFlameMat below.
-        windSimMaterials?.dispose();
-        windSimMaterials = null;
 
-        // ── THE WIND HANDLE (world/wind-access.js, Wind.md §5.1) ────────────
-        // Assembled HERE and nowhere else: this is the only code that has all
-        // of it at once (the freshly-baked openness/wall-avoidance textures,
-        // the raw per-cell arrays, Tier 2's published target, the live ambient
-        // uniforms, and the CPU exposure query). Every consumer below receives
-        // this ONE object instead of hand-assembling four arguments — the
-        // `wind/handle-only` tripwire (tools/verify-structure.mjs) fails the
-        // build if any of them tries. `version` increments on every bake, so a
-        // consumer holding derived state (a built material, an uploaded storage
-        // buffer) can tell that it must refresh — see wind-access.js's own
-        // header for the two live bugs that arrangement replaces.
-        windHandleVersion += 1;
-        windHandle = createWindHandle({
-          version: windHandleVersion,
-          ambientWind: { directionDeg: uWindDirectionDeg, speed01: uWindSpeed01, gustiness01: uWindGustiness01 },
-          grid: {
-            originX: gridSpec.minX,
-            originY: gridSpec.minY,
-            cellSize: gridSpec.cellSize,
-            cols,
-            rows,
-          },
-          opennessTexture: tex,
-          wallAvoidTexture: wallAvoidTex,
-          liveTexture: windPublishRT?.texture ?? null,
-          cells: {
-            solid: solidMask,
-            openness: opennessArray,
-            wallAvoidDirX: wallAvoidDir.dirX,
-            wallAvoidDirY: wallAvoidDir.dirY,
-            wallProximity,
-            // The raw 0..1 occlusion, pre-WIND_SHADOW_DEPTH — so the wind probe
-            // reports the GEOMETRY's own answer, not the look-tuned one. A probe
-            // that silently folded the depth constant in could not tell "the
-            // shadow is too weak" from "the geometry found nothing".
-            windShadow,
-          },
-          cpuExposureAt: sampleWindExposureAt,
-        });
+        publishWindHandle();
 
-        // `bakedField` is a graph-BUILD-time shape (a NEW texture object is a
-        // NEW uniform binding, and whether it's present/absent at all is a
-        // JS-time branch inside sampleWind — no-uniform-gates), so every
-        // consumer's material must be rebuilt to pick it up — the SAME
-        // "tear down, let the exists-check below recreate it" discipline an
-        // animation-type/quality change already uses, just applied to every
-        // sampleWind consumer at once instead of one. `liveField` does NOT
-        // need this (its texture reference is stable — see above); only
-        // `bakedField`'s own change forces this.
-        if (candleFlameMat) {
-          candleFlameMat.material?.dispose();
-          candleFlameMat = null;
+        if (regrid) {
+          // WHAT A REGRID STILL HAS TO REBUILD — and the ONLY time. `bakedField`
+          // is a graph-BUILD-time shape (origin/cellSize/cols/rows are constants
+          // in each consumer's graph, and the texture is a fresh binding), so
+          // every consumer's material is torn down and lazily rebuilt against
+          // the new handle. On a same-grid rebake none of this runs: the
+          // textures are the same objects with new contents.
+          windMaterialEpoch += 1;
+          windSimMaterials?.dispose();
+          windSimMaterials = null;
+          if (candleFlameMat) {
+            candleFlameMat.material?.dispose();
+            candleFlameMat = null;
+          }
+          for (const entry of pointLights.lightMeshes.values()) entry.animationType = '__wind_rebake_pending__';
+          // STAGE 2 BATCHING's sibling of the sentinel above — a bucket's key has
+          // no wind-handle identity, so it needs outright disposal.
+          pointLights.invalidateBatchedWindMaterials();
+          if (windOverlayMat) {
+            windOverlayMat.material?.dispose();
+            windOverlayMat = null;
+          }
+          if (windHeatMat) {
+            windHeatMat.material?.dispose();
+            windHeatMat = null;
+          }
+          // The overlay samples POSITIONS straight from this grid, so its
+          // geometry must follow a regrid too.
+          windOverlayLastView = null;
         }
-        for (const entry of pointLights.lightMeshes.values()) entry.animationType = '__wind_rebake_pending__';
-        // STAGE 2 BATCHING (S2.5) — the bucket sibling of the per-light
-        // sentinel just above; see `invalidateBatchedWindMaterials`'s own
-        // header (point-light-pool.js) for why a bucket needs a DIFFERENT
-        // invalidation mechanism than "wait for next frame's key mismatch".
-        // Safe to call unconditionally: a no-op when `pointLightBatching` is
-        // off (both registries are simply empty).
-        pointLights.invalidateBatchedWindMaterials();
-        if (windOverlayMat) {
-          windOverlayMat.material?.dispose();
-          windOverlayMat = null;
-        }
-        if (windHeatMat) {
-          windHeatMat.material?.dispose();
-          windHeatMat = null;
-        }
-        // FORCE A GEOMETRY REBUILD TOO, NOT JUST THE MATERIAL (2026-07-23) —
-        // `updateWindFieldOverlay` now samples POSITIONS straight from THIS
-        // bake's own grid spec (`windHandle.grid`, see that function's own header), and
-        // its own per-point `windExposure` attribute is a CPU snapshot taken
-        // only when the geometry rebuilds. Without this, a rebake with the
-        // camera sitting still (e.g. a door opening while the author isn't
-        // panning/zooming) would rebuild the material but leave the OLD
-        // geometry — built from the PREVIOUS bake's grid — bound, so the
-        // overlay could show stale cell positions/exposure until the next
-        // view-triggered rebuild happened to also fire. Nulling this forces
-        // `windOverlayNeedsRebuild`'s own `!windOverlayLastView` branch next
-        // call, unconditionally.
-        windOverlayLastView = null;
-        // THE PARTICLE ENGINE'S OWN OPENNESS GRID (fix-13, author-reported:
-        // "still not fixed" after fix-12's texture→storage-buffer pivot — TWO
-        // different sampling mechanisms both read back EXACTLY the same
-        // stale data, not two independent bugs). ROOT CAUSE: the engine is
-        // constructed ONCE, right after `bakeWindField('startup')`, and its
-        // storage buffer was uploaded once and never touched again — it
-        // stayed frozen at that first bake's content forever, no matter how
-        // many times a LATER wall/door change produced a genuinely different
-        // grid (a rebake DOES fire via the wall-
-        // change watcher; the overlay/candle correctly showed it, the
-        // particle engine never got told). Every consumer above (candle/
-        // overlay/heat) is explicitly invalidated right here and rebuilds
-        // lazily on its next per-frame call, so it always shows the CURRENT
-        // bake. Unlike their "dispose + lazy rebuild" (their materials bake
-        // origin/cellSize/cols/rows in as graph-build-time constants), the
-        // particle engine's storage buffer can be refreshed IN PLACE —
-        // cols/rows are stable across an ordinary rebake (only a scene/grid-
-        // size change touches them, which the method below detects and
-        // refuses to hot-patch), so this is a data overwrite, not a rebuild.
-        // (openness itself is PURELY geometric — unlike the now-deleted
-        // wall-relaxation, it never depends on wind speed/direction at all,
-        // so even the very first 'startup' bake already carries real,
-        // position-varying data; this explicit push still matters because a
-        // LATER wall/door edit is the thing that changes it.)
-        particleEngine?.updateWind(windHandle);
-        // The gust engine reads the SAME handle; refresh it identically
-        // (a no-op until it has been constructed, same as the particle engine).
-        gustEngine?.updateWind(windHandle);
-        // Fire's own flame/ember/smoke engines now hold the SAME kind of
-        // wind-cell buffer (mythica-machina-press#485 follow-up, 2026-09-04
-        // — real per-particle openness, not a map-wide aggregate). This call
-        // was missing entirely before; fire's own per-engine `updateWind`
-        // existed but nothing ever invoked it.
-        fireSubsystem?.updateWind(windHandle);
 
-        // DIAGNOSTICS — a direct INSTRUMENT, not a guess
-        // (feedback_instruments_must_not_lie): how much of the mapped area
-        // wind can actually reach, straight from the SAME grids every
-        // consumer reads (`world/wind-enclosure.js#summarizeEnclosure`), not
-        // a second computation that could itself drift from the real one.
-        const enclosure = summarizeEnclosure(solidMask, opennessArray);
+        pushWindToEngines();
+
+        // DIAGNOSTICS — a direct INSTRUMENT (feedback_instruments_must_not_lie):
+        // how much of the mapped area wind can actually reach, from the SAME
+        // arrays every consumer reads, not a second computation.
+        const enclosure = summarizeEnclosure(structure.solidMask, windGrid.cells.openness);
         log.info(
-          `wind field baked (${reason}): floor level "${currentLevelIdForWind ?? '(unscoped)'}" [${windLevelLookupDiag}], ` +
+          `wind field baked (${reason}${regrid ? ', new grid' : ', in place'}): floor level "${currentLevelIdForWind ?? '(unscoped)'}" [${windLevelLookupDiag}], ` +
             `${cols}x${rows} cells, ${walls.length}/${totalWallCountForWind ?? '?'} wall segments (scoped/total), ` +
             `${wallLevelsShapeDiag}, ` +
             `${enclosure.solidCells} solid, ${enclosure.openCells} open-to-exterior, ` +
@@ -6293,6 +5909,7 @@ export async function startVtPanViewer({
         return {
           ok: true,
           reason,
+          regrid,
           cols,
           rows,
           levelId: currentLevelIdForWind,
@@ -6310,17 +5927,41 @@ export async function startVtPanViewer({
       }
     }
 
-    /** @param {number} directionDeg @param {number} speed01 */
     /**
-     * GUSTINESS — the one ambient input that does NOT rebake (2026-08-15).
+     * THE DIAL — re-derive only what a change of direction/speed changes, from
+     * the cached structure, and rewrite those texture channels in place. A few
+     * milliseconds of CPU, no allocation of textures, NO shader rebuild.
      *
-     * Deliberately its own entry point rather than a third argument on
-     * `setWindAmbient`: that function's entire body past the two writes is
-     * `bakeWindField('ambient-change')`, and gustiness is invisible to the
-     * bake (the wind SHADOW is the only direction-dependent baked term, and it
-     * does not care how gusty the wind is). Folding this in would have made
-     * every gustiness change pay a wall-raster and a flood-fill for nothing —
-     * and worse, made that cost invisible at the call site.
+     * @param {{directionChanged: boolean, speedChanged: boolean}} changed
+     */
+    function applyWindAmbient({ directionChanged, speedChanged }) {
+      windBakeTotal += 1;
+      windBakeCountsByReason['ambient-change'] = (windBakeCountsByReason['ambient-change'] ?? 0) + 1;
+      profiler?.begin(Z.simsWindBake);
+      try {
+        windGrid.applyAmbient(currentWindAmbient(), { speedChanged, directionChanged });
+        publishWindHandle();
+        pushWindToEngines();
+        log.info(
+          `wind ambient applied in place (${[
+            speedChanged && 'speed → openness',
+            directionChanged && 'direction → shadow',
+          ]
+            .filter(Boolean)
+            .join(', ')}) — no texture or material rebuilt`
+        );
+      } catch (err) {
+        log.error('wind ambient update failed — the previous wind data stays in place:', err);
+      } finally {
+        profiler?.end(Z.simsWindBake);
+      }
+    }
+
+    /**
+     * GUSTINESS — the one ambient input that touches NO baked data at all
+     * (2026-08-15). The wind SHADOW is the only direction-dependent baked term
+     * and openness the only speed-dependent one; gustiness is invisible to
+     * both, so this simply writes the uniform.
      *
      * @param {number} gustiness01 - 0..1; non-finite values are ignored,
      *   matching `setWindAmbient`'s own guard.
@@ -6329,15 +5970,33 @@ export async function startVtPanViewer({
       if (Number.isFinite(gustiness01)) uWindGustiness01.value = Math.min(1, Math.max(0, gustiness01));
     }
 
+    /**
+     * Set the live ambient wind. The uniforms move at once (every consumer reads
+     * them by reference); the baked structure correction follows IN PLACE.
+     *
+     * A call that changes nothing does nothing — that is the whole point of the
+     * early return: on a GM client every commit is delivered TWICE (once
+     * locally, once as the echo of its own scene-flag write), and the scene
+     * load re-applies the stored value, so an unguarded setter re-did the work
+     * for values it already held.
+     *
+     * @param {number} directionDeg @param {number} speed01
+     */
     function setWindAmbient(directionDeg, speed01) {
-      if (Number.isFinite(directionDeg)) uWindDirectionDeg.value = directionDeg;
-      if (Number.isFinite(speed01)) uWindSpeed01.value = Math.max(0, speed01);
-      // The bake depends on the SAME direction/speed it was last computed
-      // from — changing either without re-baking would leave the moving
-      // ambient and the static structure disagreeing about which way the
-      // "prevailing" wind blows, so re-run it immediately (cheap — see
-      // bakeWindField's own header).
-      bakeWindField('ambient-change');
+      const nextDirection = Number.isFinite(directionDeg) ? directionDeg : uWindDirectionDeg.value;
+      const nextSpeed = Number.isFinite(speed01) ? Math.max(0, speed01) : uWindSpeed01.value;
+      const directionChanged = nextDirection !== uWindDirectionDeg.value;
+      const speedChanged = nextSpeed !== uWindSpeed01.value;
+      uWindDirectionDeg.value = nextDirection;
+      uWindSpeed01.value = nextSpeed;
+      // Nothing baked yet (a dial change racing the startup bake): the bake
+      // itself reads the uniforms just written.
+      if (!windGrid.structure) {
+        bakeWindField('ambient-change');
+        return;
+      }
+      if (!directionChanged && !speedChanged) return;
+      applyWindAmbient({ directionChanged, speedChanged });
     }
 
     // The initial bake fires further down (after candleFlameMat/windOverlayMat
@@ -6409,6 +6068,94 @@ export async function startVtPanViewer({
     }
 
     /**
+     * Build Tier 2's four quad materials if they do not exist yet. Returns
+     * whether the sim CAN run (a bake, the solid mask and its three render
+     * targets all exist). Shared by the live tick and the load-time warm-up so
+     * both build the identical materials — a warm-up that built its own would
+     * warm nothing.
+     *
+     * Built ONCE per grid: the materials bind the openness and solid-mask
+     * textures by reference and those are rewritten in place now, so neither a
+     * dial change nor a wall/door rebake invalidates them (only a regrid does).
+     */
+    function ensureWindSimMaterials() {
+      if (!windHandle.hasBake || !windGrid.solidMaskTexture || !windPingRT || !windPongRT || !windPublishRT)
+        return false;
+      if (windSimMaterials) return true;
+      windSimMaterials = buildWindSimMaterials({
+        THREE,
+        pingTexture: windPingRT.texture,
+        pongTexture: windPongRT.texture,
+        publishTexture: windPingRT.texture,
+        // Tier 2 is part of the wind SYSTEM, not a consumer of it: its advect
+        // pass transports ON the resting field, so it legitimately needs
+        // D_rest's texture rather than a sample of it. The handle exposes that
+        // under its own name (`restFieldTexture`) precisely so it stays
+        // distinct from the consumer-facing shapes.
+        restFieldTexture: windHandle.restFieldTexture,
+        solidMaskTexture: windGrid.solidMaskTexture,
+        ambientWind: { directionDeg: uWindDirectionDeg, speed01: uWindSpeed01, gustiness01: uWindGustiness01 },
+        cols: windHandle.grid.cols,
+        rows: windHandle.grid.rows,
+        cellSize: windHandle.grid.cellSize,
+        originX: windHandle.grid.originX,
+        originY: windHandle.grid.originY,
+        decayPerSecond: WIND_SIM_DEFAULT_DECAY_PER_SECOND,
+        relaxBlend: WIND_SIM_RELAX_BLEND,
+        maxImpulseSlots: WIND_SIM_MAX_ACTIVE_IMPULSES,
+      });
+      return true;
+    }
+
+    /**
+     * COMPILE TIER 2 DURING LOADING (2026-10-07). The sim is frozen until a door
+     * opens, and its four quad shaders (advect, splat, relax, publish) were built
+     * and compiled lazily on that first thaw — i.e. the first time a player
+     * opened a door, a compile landed on the frame the door was swinging.
+     * Author: "ideally any cost of the wind would be done during loading, not
+     * during the actual running of the session."
+     *
+     * Renders each pass once into the real targets with every impulse slot inert
+     * (gain 0), then clears all three targets back to zero, so nothing it drew
+     * is ever visible. Does NOT touch the thaw state: the sim stays frozen.
+     * Called from `warmUpSims`, which is wrapped in its own try/catch — warming
+     * is an optimisation, never a reason a scene fails to appear.
+     */
+    function warmUpWindSim() {
+      if (!ensureWindSimMaterials()) return;
+      for (const slot of windSimMaterials.splat.slots) slot.uGain.value = 0;
+      const prevRT = renderer.getRenderTarget();
+      const prevClearColor = renderer.getClearColor(new THREE.Color());
+      const prevClearAlpha = renderer.getClearAlpha();
+      // ping → pong → ping..., exactly the order the live tick uses, with a
+      // tiny nonzero dt so no pass is compiled out as a no-op.
+      const dt = 1 / 60;
+      windSimMaterials.advectDissipate.uDtSec.value = dt;
+      windSimMaterials.splat.uDtSec.value = dt;
+      for (const n of windSimMaterials.advectDissipate.prevTexNodes) n.value = windPingRT.texture;
+      renderer.setRenderTarget(windPongRT);
+      windSimMaterials.advectDissipate.quad.render(renderer);
+      for (const n of windSimMaterials.splat.prevTexNodes) n.value = windPongRT.texture;
+      renderer.setRenderTarget(windPingRT);
+      windSimMaterials.splat.quad.render(renderer);
+      for (const n of windSimMaterials.relax.prevTexNodes) n.value = windPingRT.texture;
+      renderer.setRenderTarget(windPongRT);
+      windSimMaterials.relax.quad.render(renderer);
+      windSimMaterials.publish.sourceTexNode.value = windPongRT.texture;
+      renderer.setRenderTarget(windPublishRT);
+      windSimMaterials.publish.quad.render(renderer);
+      // Back to a clean, frozen state: all three targets zero, ping current.
+      renderer.setClearColor(0x000000, 0);
+      for (const rt of [windPingRT, windPongRT, windPublishRT]) {
+        renderer.setRenderTarget(rt);
+        renderer.clear(true, false, false);
+      }
+      renderer.setRenderTarget(prevRT);
+      renderer.setClearColor(prevClearColor, prevClearAlpha);
+      windPingIsCurrent = true;
+    }
+
+    /**
      * THE TIER 2 TICK — advect+dissipate, splat, relax x N, publish. Called
      * once per rendered frame (see renderFrame's own call site: inside the
      * gpuProbe timing bracket, so the perf lab can actually see this cost),
@@ -6444,31 +6191,7 @@ export async function startVtPanViewer({
         }
         return;
       }
-      if (!windHandle.hasBake || !windSolidMaskTexture || !windPingRT || !windPongRT || !windPublishRT) return;
-      if (!windSimMaterials) {
-        windSimMaterials = buildWindSimMaterials({
-          THREE,
-          pingTexture: windPingRT.texture,
-          pongTexture: windPongRT.texture,
-          publishTexture: windPingRT.texture,
-          // Tier 2 is part of the wind SYSTEM, not a consumer of it: its advect
-          // pass transports ON the resting field, so it legitimately needs
-          // D_rest's texture rather than a sample of it. The handle exposes that
-          // under its own name (`restFieldTexture`) precisely so it stays
-          // distinct from the consumer-facing shapes.
-          restFieldTexture: windHandle.restFieldTexture,
-          solidMaskTexture: windSolidMaskTexture,
-          ambientWind: { directionDeg: uWindDirectionDeg, speed01: uWindSpeed01, gustiness01: uWindGustiness01 },
-          cols: windHandle.grid.cols,
-          rows: windHandle.grid.rows,
-          cellSize: windHandle.grid.cellSize,
-          originX: windHandle.grid.originX,
-          originY: windHandle.grid.originY,
-          decayPerSecond: WIND_SIM_DEFAULT_DECAY_PER_SECOND,
-          relaxBlend: WIND_SIM_RELAX_BLEND,
-          maxImpulseSlots: WIND_SIM_MAX_ACTIVE_IMPULSES,
-        });
-      }
+      if (!ensureWindSimMaterials()) return;
 
       const { slots } = gatherActiveImpulseSlots(windActiveImpulses, nowMs, WIND_SIM_MAX_ACTIVE_IMPULSES);
       for (let i = 0; i < windSimMaterials.splat.slots.length; i++) {
@@ -7051,16 +6774,17 @@ export async function startVtPanViewer({
     /** Tear down Wind.md Tier 2's own GPU resources (ping/pong/publish
      * render targets + the solid mask texture + the sim materials) — same
      * per-cycle VRAM-leak reasoning as disposeWindFieldOverlay just above.
-     * Tier 1's own baked textures are NOT touched here (disposed by the next
-     * bakeWindField call or the renderer's own final dispose — unchanged,
-     * pre-existing behaviour). */
+     * Tier 1's two baked textures are disposed here too since 2026-10-07: they
+     * are created ONCE per grid now and rewritten in place, so nothing else
+     * ever disposes the last pair — previously the next bake did, which is
+     * exactly the replace-on-every-bake behaviour this change removed. */
     function disposeWindSim() {
       try {
         windSimMaterials?.dispose();
         allocator.dispose(windPingRT);
         allocator.dispose(windPongRT);
         allocator.dispose(windPublishRT);
-        windSolidMaskTexture?.dispose();
+        windGrid.dispose();
       } catch (err) {
         log.error('wind sim dispose failed — GPU buffers may leak until renderer.dispose():', err);
       }
@@ -7068,7 +6792,6 @@ export async function startVtPanViewer({
       windPingRT = null;
       windPongRT = null;
       windPublishRT = null;
-      windSolidMaskTexture = null;
       windSimGridKey = null;
       windActiveImpulses = [];
       windThawUntilMs = 0;
@@ -7754,7 +7477,7 @@ export async function startVtPanViewer({
         const floorsResultForSunShadows = floorsResultForFrame;
         // `env.time?.realMs` — the SAME wall clock (never a fresh
         // `performance.now()`) the water bake below and
-        // `pollMaskAuthorityForWindRebake` already use, `?? 0` for the
+        // `pollMaskAuthorityForPerFloorMasks` already use, `?? 0` for the
         // identical reason: an early frame before the env snapshot exists
         // must not throttle, only a legitimately-ticking clock should. Throttles
         // the ACTUAL bake only, never the cheap version check — see
@@ -7821,7 +7544,7 @@ export async function startVtPanViewer({
         }
       }
       // `env.time?.realMs` — the SAME wall clock (never a fresh
-      // `performance.now()`) `pollMaskAuthorityForWindRebake` already uses
+      // `performance.now()`) `pollMaskAuthorityForPerFloorMasks` already uses
       // for its own poll throttle, `?? 0` for the identical reason: an early
       // frame before the env snapshot exists must not throttle, only a
       // legitimately-ticking clock should (see `maybeBake`'s own
@@ -11729,7 +11452,7 @@ export async function startVtPanViewer({
       // hovered", never as (0,0), which would be a false hit at the scene's
       // own origin. `nowMs` mirrors this codebase's OWN established
       // per-frame wall-clock convention — `lastEnvSnapshot.env.time.realMs`,
-      // the SAME `?? 0` fallback `pollMaskAuthorityForWindRebake` already
+      // the SAME `?? 0` fallback `pollMaskAuthorityForPerFloorMasks` already
       // uses in `renderFrame` — rather than a fresh `canvas.app.ticker
       // .lastTime` read: real Foundry's own clock for this exact purpose IS
       // an unscaled, monotonic wall-clock ms value
@@ -19002,9 +18725,9 @@ export async function startVtPanViewer({
       // two subtly different ones. Fed the rAF timestamp already in hand — no new
       // clock read (`time/one-clock` forbids one in this file anyway).
       profiler?.beginFrame(now);
-      // The mask-driven rebake check (see pollMaskAuthorityForWindRebake's own
-      // header) — BEFORE tickWindSim, so a mask-triggered rebake this frame is
-      // reflected in this SAME frame's wind sim/sampling, not one frame late.
+      // The mask-driven per-floor rebake check (see pollMaskAuthorityForPerFloorMasks's
+      // own header) — before the pass plan, so a mask-triggered rebake this frame
+      // is reflected in this SAME frame, not one frame late.
       // WALL time, deliberately (2026-07-23). This is a THROTTLE on a
       // housekeeping poll ("check the mask version at most every N ms"), not a
       // simulation step — and `tMs` now stops dead while Foundry is paused. Fed
@@ -19013,7 +18736,7 @@ export async function startVtPanViewer({
       // un-paused. The rest of this frame block genuinely wants sim time and
       // keeps it; this one line is the deliberate opt-out.
       profiler?.begin(Z.tickWindPoll);
-      pollMaskAuthorityForWindRebake(lastEnvSnapshot?.env?.time?.realMs ?? 0);
+      pollMaskAuthorityForPerFloorMasks(lastEnvSnapshot?.env?.time?.realMs ?? 0);
       profiler?.end(Z.tickWindPoll);
       // Wind.md Tier 2 — INSIDE the gpuProbe bracket (not before it) so its
       // own render passes are actually visible to the perf lab's sweep, per
@@ -20341,6 +20064,9 @@ export async function startVtPanViewer({
     function warmUpSims() {
       if (!view) return;
       const before = readPipelineCount();
+      // Tier 2's four wind-sim quad shaders — frozen until a door opens, so
+      // nothing else would ever draw them during loading (see warmUpWindSim).
+      warmUpWindSim();
       const currentViewRect = viewToWorldRect(view, canvasW / canvasH);
       const windSpawnRect = clampRectToBounds(currentViewRect, dimensions.sceneRect);
       const tMs = uGlobalTimeMs.value;
@@ -22723,7 +22449,7 @@ export async function startVtPanViewer({
     targetHalfSpanPx = view.halfSpanPx; // eased-zoom target starts equal to the actual value — no zoom-on-load
 
     // THE SKY'S GATE, baked NOW rather than waiting for the mask-version poll's
-    // "first observation" tick (pollMaskAuthorityForWindRebake, throttled to
+    // "first observation" tick (pollMaskAuthorityForPerFloorMasks, throttled to
     // MASK_VERSION_POLL_INTERVAL_MS). That poll exists to catch a LIVE EDIT, not
     // to discover a scene's masks in the first place — waiting on it here would
     // leave the sky reading the fully-outdoors placeholder for up to that
@@ -23872,7 +23598,7 @@ export async function startVtPanViewer({
      *
      * `maskLive` (2026-07-22, pre-rethink) — added after a live report showed
      * a sealed room reading full painted exposure at the SAME point, even
-     * after the mask-driven rebake trigger (`pollMaskAuthorityForWindRebake`)
+     * after the mask-driven rebake trigger (`pollMaskAuthorityForPerFloorMasks`)
      * landed. STALE POST-RETHINK: this cross-check no longer matters for WIND
      * (the painted mask has zero influence on it now — that was the whole
      * point), but it still answers a genuinely useful, separate question —

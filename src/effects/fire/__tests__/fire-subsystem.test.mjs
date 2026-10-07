@@ -554,15 +554,26 @@ export function run(t) {
         (e) => Number.isFinite(e.paramCalls.at(-1)?.windMotion01) && e.paramCalls.at(-1).windMotion01 > 0
       )
     );
+    const closeTo = (a, b) => Number.isFinite(a) && Math.abs(a - b) < 1e-9;
     t.ok(
-      // ⚠️ `activeCount`, NOT `lifeScale`, 2026-09-04 ROUND 7 — life moved off
-      // this CPU-side path entirely (`fireWindParticleResponse`'s own
-      // header); `activeCount` is what still proves suppression genuinely
-      // reaches setParams rather than sitting inert.
-      'flame activeCount actually moved from the calm sync — the wiring reaches the tuning, not just a passthrough field',
+      // ⚠️ REWRITTEN 2026-10-07 — the flame's population/brightness curve moved
+      // from a CPU pre-multiply (which this used to prove by watching
+      // `activeCount` move with the dial) into the draw shader, evaluated per
+      // particle. What the CPU still owes the engines — and what is observable
+      // here — is the curve's two FLOORS, and an untouched author dial.
+      "the flame's suppression floors reach every FLAME engine, and the population is the author's own dial with or without wind",
       windEngines
         .filter((e) => e.kind === 'flame')
-        .every((e) => e.paramCalls.at(-1)?.activeCount !== e.paramCalls.at(-2)?.activeCount)
+        .every((e) => {
+          const calm = e.paramCalls.at(-2);
+          const windy = e.paramCalls.at(-1);
+          return (
+            closeTo(windy?.windCountFloor, 0.3) &&
+            closeTo(windy?.windOpacityFloor, 0.65) &&
+            windy.activeCount === calm.activeCount &&
+            windy.opacityScale === calm.opacityScale
+          );
+        })
     );
 
     // ⚠️ REWRITTEN 2026-09-04 — MOTION (uWindMotion01, what reaches setParams
@@ -592,53 +603,52 @@ export function run(t) {
       Number.isFinite(windMotionExposed) && windMotionExposed === windMotionSealed
     );
 
-    // SUPPRESSION (activeCount — the OTHER thing wind drives, still a
-    // necessarily map-wide CPU aggregate, see fire-particle-runtime.js's own
-    // header on why activeCount genuinely cannot be made per-particle) must
-    // STILL respond to exposure — this is `windMotionForSuppression01`,
-    // a SEPARATE internal computation from `windMotion01` above, and this is
-    // its own proof that splitting the two didn't quietly drop the exposure
-    // awareness the previous commit's fix relied on.
+    // SUPPRESSION (the flame/smoke population and brightness — the OTHER thing
+    // wind drives). It used to be a map-wide CPU aggregate that had to stay
+    // exposure-aware here ("genuinely cannot be made per-particle"). It can:
+    // 2026-10-07 moved it into the draw shader, which reads the wind-cell buffer
+    // per sprite. So the CPU-side population must now be IDENTICAL whatever the
+    // fire's own exposure is — exposure enters once, in the shader — which is
+    // exactly what lets an indoor hearth keep its smoke on a floor where an
+    // outdoor fire has lost its.
     const flameSealed = windEngines.find((e) => e.kind === 'flame');
     const activeCountSealed = flameSealed?.paramCalls.at(-1)?.activeCount;
     windState.fires = [exposedFire];
     windSubsystem.sync(renderer, 48, 0.016, rect);
     const activeCountExposed = flameSealed?.paramCalls.at(-1)?.activeCount;
     t.ok(
-      `flame activeCount still responds to windExposure (suppression stays exposure-aware even though motion no longer is) — sealed=${activeCountSealed}, exposed=${activeCountExposed}`,
-      Number.isFinite(activeCountSealed) &&
-        Number.isFinite(activeCountExposed) &&
-        activeCountSealed !== activeCountExposed
+      `flame activeCount is IDENTICAL whatever the fire's windExposure — exposure is applied per particle in the shader, never aggregated here (sealed=${activeCountSealed}, exposed=${activeCountExposed})`,
+      Number.isFinite(activeCountSealed) && activeCountSealed === activeCountExposed
     );
 
-    // ⚠️ THE ORIGINAL REPORTED BUG (2026-09-04) — author, live, on a map with
-    // more than one fire: an outdoor fire "isn't reacting to wind" while
-    // vegetation on the SAME scene reacted fine. `extractFiresFromMask`
-    // (fire-mask.js) sorts fires WIDEST-FIRST, with no relationship to
-    // indoor/outdoor — so a wider INDOOR fire elsewhere on the floor can land
-    // at `fires[0]` ahead of the outdoor one the author is actually looking
-    // at. The FIX for the symptom as originally reported (motion) is the
-    // live per-particle kernel sample above, not observable here; what
-    // remains true and IS observable at this layer is that the map-wide
-    // aggregate this fix's predecessor built (MAX exposure across fires, not
-    // an arbitrary single one's) still reaches `setParams` for the
-    // suppression side. `f1` is the wide indoor fire (windExposure: 0, and —
-    // as the widest — the one a naive `fires[0]` read would have picked);
-    // `f2` is the narrower outdoor one (windExposure: 1).
-    windState.fires = [{ id: 'f1', x: 10, y: 10, diameterPx: 200, intensity: 1, windExposure: 0 }];
+    // ⚠️ THE ORIGINAL REPORTED BUG (2026-09-04) — an outdoor fire "isn't
+    // reacting to wind" because a wider INDOOR fire landed at `fires[0]`
+    // (`extractFiresFromMask` sorts widest-first) and its exposure was
+    // broadcast to every shared engine; the interim fix took the MAX across
+    // fires. 2026-10-07 removes the aggregate altogether: swapping one of two
+    // fires from indoor to outdoor must change NOTHING the CPU sends (same fire
+    // count, same budget), because who is exposed is decided per particle, at the
+    // particle's own position, on the GPU. The old assertion here — that adding
+    // an outdoor fire moved the population — held only because fireCount
+    // scaling moves it too, and its "MAX exposure" reason no longer exists.
+    windState.fires = [
+      { id: 'f1', x: 10, y: 10, diameterPx: 200, intensity: 1, windExposure: 0 },
+      { id: 'f2', x: 500, y: 500, diameterPx: 40, intensity: 1, windExposure: 0 },
+    ];
     windSubsystem.sync(renderer, 56, 0.016, rect);
-    const activeCountIndoorOnly = flameSealed?.paramCalls.at(-1)?.activeCount;
+    const activeCountBothIndoor = flameSealed?.paramCalls.at(-1)?.activeCount;
+    const smokeEngineWind = windEngines.find((e) => e.kind === 'smoke');
+    const smokeCountBothIndoor = smokeEngineWind?.paramCalls.at(-1)?.activeCount;
     windState.fires = [
       { id: 'f1', x: 10, y: 10, diameterPx: 200, intensity: 1, windExposure: 0 },
       { id: 'f2', x: 500, y: 500, diameterPx: 40, intensity: 1, windExposure: 1 },
     ];
     windSubsystem.sync(renderer, 64, 0.016, rect);
-    const activeCountWithOutdoor = flameSealed?.paramCalls.at(-1)?.activeCount;
     t.ok(
-      `adding a narrower OUTDOOR fire alongside a wider INDOOR one still moves suppression — MAX exposure, not fires[0]'s own (indoor-only=${activeCountIndoorOnly}, with-outdoor=${activeCountWithOutdoor})`,
-      Number.isFinite(activeCountIndoorOnly) &&
-        Number.isFinite(activeCountWithOutdoor) &&
-        activeCountWithOutdoor !== activeCountIndoorOnly
+      `an indoor/outdoor mix and an all-indoor pair (same fire count) send IDENTICAL flame and smoke populations — no map-wide exposure aggregate remains (flame ${activeCountBothIndoor} vs ${flameSealed?.paramCalls.at(-1)?.activeCount}, smoke ${smokeCountBothIndoor} vs ${smokeEngineWind?.paramCalls.at(-1)?.activeCount})`,
+      Number.isFinite(activeCountBothIndoor) &&
+        activeCountBothIndoor === flameSealed?.paramCalls.at(-1)?.activeCount &&
+        smokeCountBothIndoor === smokeEngineWind?.paramCalls.at(-1)?.activeCount
     );
 
     // ── INDOOR SUPPRESSION (2026-09-07) — outdoors01 reaching setParams ────
@@ -712,6 +722,88 @@ export function run(t) {
     t.ok(
       `swapping one of two indoor fires for a genuinely outdoor one (same fire count both times) lifts the shared suppression toward "outdoors" rather than staying at the fully-indoor reading — an outdoor bonfire sharing a floor with a sheltered hearth must not have its own embers/smoke silently vanish (both-indoor=${emberCountBothIndoor}, mixed=${emberCountMixedFloor})`,
       emberCountMixedFloor > emberCountBothIndoor
+    );
+  }
+
+  // ── EACH FIRE'S WIND EXPOSURE COMES FROM THE BAKE'S GEOMETRY (2026-10-07) ──
+  // `fires[].windExposure` arrives from boot.js as a sample of the painted
+  // `_Outdoors` mask — the question "is there a roof", which the wind has not
+  // consulted since the 2026-07-22 rethink ("geometry decides where wind is, not
+  // paint"). The subsystem now replaces it with the bake's own openness at the
+  // fire's position (`windHandle.cpuAt`), so a hearth in a room painted as
+  // outdoors — or on a floor whose mask never streamed, which boot answers with
+  // "fully outdoors" — no longer reads as exposed to a gale it cannot feel.
+  {
+    const rect2 = { minX: 0, minY: 0, maxX: 4000, maxY: 4000 };
+    const opennessAt = (x) => (x < 1000 ? 0 : 1); // a sealed room west of x=1000, open ground east of it
+    const geoHandle = {
+      hasBake: true,
+      version: 1,
+      ambient: { speed01: { value: 0.4 }, directionDeg: { value: 90 } },
+      cpuAt: (x) => ({ exposure: 1, openness: opennessAt(x), solid: false, inGrid: true }),
+    };
+    const geoState = {
+      enabled: true,
+      params: {},
+      perfTier: 2,
+      mPerPx: 0.02,
+      fires: [
+        // PAINTED as outdoors (1) but standing in the sealed room:
+        { id: 'hearth', x: 200, y: 200, diameterPx: 66, intensity: 1, windExposure: 1, outdoors01: 1 },
+        // PAINTED as sheltered (0) but standing on open ground:
+        { id: 'camp', x: 3000, y: 200, diameterPx: 66, intensity: 1, windExposure: 0, outdoors01: 1 },
+      ],
+      spawnCloud: makeCloud([[0, 0]], 1),
+    };
+    const stubEngine = ({ kind, archetype, renderOrder }) => ({
+      kind,
+      archetype,
+      renderOrder,
+      scene: { visible: true, renderOrder: 0 },
+      setSpawnPoints() {},
+      setParams() {},
+      step() {},
+      updateWind() {},
+      debugState: () => ({ kind, archetype }),
+    });
+    const geoSubsystem = createFireSubsystem({
+      THREE: { Scene: FakeScene },
+      getFireRenderState: () => geoState,
+      getWindHandle: () => geoHandle,
+      createEngine: stubEngine,
+    });
+    geoSubsystem.sync(renderer, 0, 0.016, rect2);
+    const lightOf = (id) => geoSubsystem.lightSources().find((l) => l.sourceId === `fire:${id}`);
+    t.ok(
+      'a fire in a SEALED room reads openness 0 even though the painted mask said 1 — the geometry decides, not the paint',
+      lightOf('hearth')?.windExposure === 0
+    );
+    t.ok(
+      'a fire on OPEN ground reads openness 1 even though the painted mask said 0',
+      lightOf('camp')?.windExposure === 1
+    );
+    t.ok(
+      'the roof question is untouched: outdoors01 still comes from the mask (the input list is never mutated either)',
+      geoState.fires.every((f) => f.outdoors01 === 1) &&
+        geoState.fires[0].windExposure === 1 &&
+        geoState.fires[1].windExposure === 0
+    );
+
+    // Without a bake the painted value stays the fallback — never a silent "sealed".
+    const noBakeSubsystem = createFireSubsystem({
+      THREE: { Scene: FakeScene },
+      getFireRenderState: () => geoState,
+      getWindHandle: () => ({
+        hasBake: false,
+        version: 0,
+        ambient: { speed01: { value: 0.4 }, directionDeg: { value: 90 } },
+      }),
+      createEngine: stubEngine,
+    });
+    noBakeSubsystem.sync(renderer, 0, 0.016, rect2);
+    t.ok(
+      'with no bake yet, the painted-mask exposure stays as the fallback (fail toward the old behaviour, not toward "sealed")',
+      noBakeSubsystem.lightSources().find((l) => l.sourceId === 'fire:hearth')?.windExposure === 1
     );
   }
 }

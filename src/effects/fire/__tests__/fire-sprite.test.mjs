@@ -32,7 +32,14 @@ import {
   FLAME_PEAK_OPACITY,
   EMBER_PEAK_OPACITY,
   flameGradientStops,
+  buildFireWindSuppressionNode,
+  buildFireOpennessGainNode,
 } from '../fire-sprite.js';
+import { fireWindParticleResponse, fireWindSuppressionFloors, fireOpennessGain01 } from '../fire-geometry.js';
+// The numeric TSL stub the wind tests use to EVALUATE node graphs in Node. Only
+// AGREEMENT between two paths through it is meaningful (see that file's header) —
+// which is exactly the question here: does the shader's curve equal the CPU's?
+import { TSL_STUB, values } from '../../../world/__tests__/tsl-numeric-stub.mjs';
 
 const near = (a, b, tol = 1e-6) => Math.abs(a - b) <= tol;
 /** Every stop list must be ascending in `t` or the piecewise builders mis-ramp. */
@@ -197,5 +204,99 @@ export function run(t) {
       FLAME_ARCHETYPES.join(',') === 'plasmaCore,convectionCrescent,vortexSwirl,thermalRing'
     );
     t.ok('the list is frozen', Object.isFrozen(FLAME_ARCHETYPES));
+  }
+
+  // ── THE PER-PARTICLE WIND SUPPRESSION: SHADER == CPU REFERENCE (2026-10-07) ──
+  // The flame's population/brightness and the smoke's population moved from a
+  // CPU pre-multiply (fireWindParticleResponse, from a map-wide exposure) into
+  // the draw shader, so an indoor hearth no longer inherits an outdoor fire's
+  // suppression. fireWindParticleResponse stays as the CPU reference; this pins
+  // the shader to it across the whole dial, for gutterable and immune flames.
+  {
+    // smoothstep is the one function the shared stub does not carry.
+    const TSL = {
+      ...TSL_STUB,
+      smoothstep: (e0, e1, x) => {
+        const u = TSL_STUB.clamp(x.sub(e0).div(e1.sub(e0)), TSL_STUB.float(0), TSL_STUB.float(1));
+        return u.mul(u).mul(TSL_STUB.float(3).sub(u.mul(TSL_STUB.float(2))));
+      },
+    };
+    const f = TSL.float;
+    const sweep = Array.from({ length: 41 }, (_, i) => i / 40);
+
+    let worstFlame = 0;
+    let worstSmoke = 0;
+    for (const canBeSnuffed of [true, false]) {
+      const floors = fireWindSuppressionFloors(canBeSnuffed);
+      for (const m of sweep) {
+        const cpu = fireWindParticleResponse(m, canBeSnuffed);
+        const flame = buildFireWindSuppressionNode(TSL, {
+          motion01: f(m),
+          kind: 'flame',
+          countFloor: f(floors.countFloor),
+          opacityFloor: f(floors.opacityFloor),
+        });
+        const smoke = buildFireWindSuppressionNode(TSL, { motion01: f(m), kind: 'smoke' });
+        worstFlame = Math.max(
+          worstFlame,
+          Math.abs(values(flame.countMul)[0] - cpu.flameActiveCountMul),
+          Math.abs(values(flame.opacityMul)[0] - cpu.flameOpacityMul)
+        );
+        worstSmoke = Math.max(worstSmoke, Math.abs(values(smoke.countMul)[0] - cpu.smokeActiveCountMul));
+      }
+    }
+    t.ok(
+      `the flame's count and opacity curve in the shader equals fireWindParticleResponse at 41 points, snuffable and immune (worst error ${worstFlame})`,
+      worstFlame < 1e-12
+    );
+    t.ok(
+      `the smoke's count curve in the shader equals fireWindParticleResponse, reaching an exact 0 at a full gale (worst error ${worstSmoke})`,
+      worstSmoke < 1e-12 &&
+        values(buildFireWindSuppressionNode(TSL, { motion01: f(1), kind: 'smoke' }).countMul)[0] === 0
+    );
+    const calmFlame = buildFireWindSuppressionNode(TSL, {
+      motion01: f(0),
+      kind: 'flame',
+      countFloor: f(0.3),
+      opacityFloor: f(0.65),
+    });
+    t.ok(
+      'a dead calm suppresses nothing (multipliers exactly 1) — an indoor spot with motion 0 is untouched',
+      values(calmFlame.countMul)[0] === 1 && values(calmFlame.opacityMul)[0] === 1
+    );
+    const ember = buildFireWindSuppressionNode(TSL, { motion01: f(1), kind: 'ember' });
+    t.ok(
+      'embers have no wind suppression curve at all (1 and 1, whatever the gale)',
+      values(ember.countMul)[0] === 1 && values(ember.opacityMul)[0] === 1
+    );
+    t.ok(
+      'out-of-range motion is clamped, never extrapolated (a >1 reading cannot push a multiplier below its floor)',
+      near(
+        values(
+          buildFireWindSuppressionNode(TSL, {
+            motion01: f(7),
+            kind: 'flame',
+            countFloor: f(0.3),
+            opacityFloor: f(0.65),
+          }).countMul
+        )[0],
+        0.3,
+        1e-12
+      )
+    );
+
+    // The openness gain: no floor, no square root.
+    let worstGain = 0;
+    for (const o of [-1, 0, 0.05, 0.1, 0.25, 0.5, 0.9, 1, 3]) {
+      worstGain = Math.max(
+        worstGain,
+        Math.abs(values(buildFireOpennessGainNode(TSL, f(o)))[0] - fireOpennessGain01(o))
+      );
+    }
+    t.ok(`the shader's openness gain equals fireOpennessGain01 (worst error ${worstGain})`, worstGain === 0);
+    t.ok(
+      'a sealed spot has gain exactly 0 in the shader too — the old max(sqrt(o), 0.3) gave it 0.3',
+      values(buildFireOpennessGainNode(TSL, f(0)))[0] === 0
+    );
   }
 }

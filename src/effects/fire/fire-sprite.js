@@ -48,7 +48,7 @@
  *
  * @module effects/fire/fire-sprite
  */
-import { FIRE_RAMP_WOOD, hexToRgb01 } from './fire-geometry.js';
+import { FIRE_RAMP_WOOD, hexToRgb01, SUPPRESSION_EASE_POWER, SMOKE_WIND_FADE_EXPONENT } from './fire-geometry.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // THE COLOUR SPEC — ported verbatim from V2's fire-behaviors.js
@@ -627,4 +627,62 @@ export function buildLifeFade(TSL, t01, fadeIn = 0.14, fadeOut = 0.16) {
   const rise = smoothstep(float(0), float(Math.max(1e-4, fadeIn)), t01);
   const fall = smoothstep(float(0), float(Math.max(1e-4, fadeOut)), float(1).sub(t01));
   return min(rise, fall);
+}
+
+/**
+ * HOW MUCH OF THE GALE A PARTICLE FEELS, from the openness at its own position —
+ * the shader twin of `fire-geometry.js#fireOpennessGain01`. Openness itself,
+ * clamped: no floor, no square root. See that function's header for the
+ * measured leak (a sealed room's embers drifting 16% as far as a field's) this
+ * replaced.
+ *
+ * @param {*} TSL @param {*} openness - float node, the bake's 0..1.
+ * @returns {*} a float node in 0..1.
+ */
+export function buildFireOpennessGainNode(TSL, openness) {
+  const { float, clamp } = TSL;
+  return clamp(openness, float(0), float(1));
+}
+
+/**
+ * THE PARTICLE-SIDE WIND SUPPRESSION, EVALUATED PER PARTICLE — the shader twin of
+ * `fire-geometry.js#fireWindParticleResponse`, which stays as the CPU reference
+ * and is pinned to this by a parity test (`fire.test.mjs`).
+ *
+ * WHY IT MOVED INTO THE SHADER (2026-10-07). The flame's population/opacity and
+ * the smoke's population used to be computed on the CPU from ONE map-wide
+ * exposure (the MAX across every fire on the floor) and handed to the engine as
+ * a pre-multiplied `activeCount`. On a floor with an indoor hearth and an
+ * outdoor campfire the hearth inherited the campfire's suppression — its smoke
+ * vanished and its flames dimmed in a gale it could not feel. Evaluating the
+ * curve here, at each sprite's own position, with that position's own openness,
+ * gives every fire its own answer from the one grid — the same grid the push,
+ * the lifespan and the chaos/rise blends already read per particle.
+ *
+ * @param {*} TSL
+ * @param {object} args
+ * @param {*} args.motion01 - float node, 0..1: this particle's LOCAL wind motion
+ *   (`uWindMotion01 × openness gain`). Exposure is already in it exactly once.
+ * @param {'flame'|'ember'|'smoke'} args.kind - a BUILD-TIME choice: ember has no
+ *   wind suppression at all, and a kind that needs none builds no nodes.
+ * @param {*} [args.countFloor] - float node/uniform (flame): the gutter count floor.
+ * @param {*} [args.opacityFloor] - float node/uniform (flame): the gutter opacity floor.
+ * @returns {{countMul: *, opacityMul: *}} float nodes in 0..1.
+ */
+export function buildFireWindSuppressionNode(TSL, { motion01, kind, countFloor, opacityFloor }) {
+  const { float, clamp, smoothstep, pow } = TSL;
+  const t = clamp(motion01, float(0), float(1));
+  if (kind === 'smoke') {
+    // Bowed toward an earlier fade, and an EXACT 0 at t=1 — "producing zero smoke".
+    return { countMul: float(1).sub(pow(t, float(SMOKE_WIND_FADE_EXPONENT))), opacityMul: float(1) };
+  }
+  if (kind === 'flame') {
+    // POWERED smoothstep — same endpoints as a bare one, only the middle moves.
+    const eased = pow(smoothstep(float(0), float(1), t), float(SUPPRESSION_EASE_POWER));
+    return {
+      countMul: float(1).sub(eased.mul(float(1).sub(countFloor))),
+      opacityMul: float(1).sub(eased.mul(float(1).sub(opacityFloor))),
+    };
+  }
+  return { countMul: float(1), opacityMul: float(1) };
 }

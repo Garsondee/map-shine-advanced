@@ -259,7 +259,31 @@ Three things this bench learned that are worth copying:
   mismatchesFlipped: 0`; its centre is now deliberately off-centre in Y so the orientation check
   can actually resolve something.
 
-## 12. Known-good smoke test
+## 12. The wind scenarios on the `fire` bench — indoors must not feel the gale
+
+Four scenarios added 2026-10-07, each through the REAL production path on the REAL GPU, because the
+Node suite can neither run a compute kernel nor sample a texture and the bug lived in both:
+
+- `indoor-fire-ignores-wind` — real `bakeWindStructure` of a sealed room + an open field, real fire
+  engines (ember, smoke, flame) in a gale. Sealed-room embers must not drift downwind (they drifted
+  79 px against the field's 485 px before `FIRE_OPENNESS_FLOOR_GAIN` was deleted); sealed-room smoke
+  and flame must be untouched while the field's are suppressed (the per-particle suppression reads the
+  wind-cell buffer in the **vertex** stage — only a real GPU proves that binding works).
+- `sealed-room-candle-field` — scans `windHandle.node` (what every candle flame, light and plant samples)
+  across a wall, 1 px apart. Also scans the PREVIOUS data (any-reached-cell openness + a bilinear
+  texture) to prove the rig can still see the leak: `the-rig-can-see-the-old-leak` fails if it can't.
+- `wind-texture-rewrites-in-place` — the assumption the whole "a wind change rebuilds no shader" design
+  stands on: rewrite a half-float `DataTexture` in place + `needsUpdate`, and an already-compiled
+  material samples the new values, with the pipeline count unchanged.
+
+Run them with `window.lab.run('fire', '<name>')`. Start the lab with `preview_start` name
+`msa-studio-preview` (port 8934) and `navigate` with `force: true`.
+
+⚠️ Two traps found while writing them: a wall's own wind **deflection** cancels most of a head-on wind for a
+few cells before the wall, so "is there a gale outside" must be measured ≥300 px out; and a sealed cell has
+BOTH openness and the exterior flag at 0 — leaving the flag at 1 keeps ordinary outdoor turbulence (~0.07).
+
+## 13. Known-good smoke test
 
 ```js
 window.lab.describe().benches.map(b => b.name)   // ['fixture', 'derive', …, 'floor-lighting']

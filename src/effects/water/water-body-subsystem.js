@@ -299,7 +299,7 @@ export function createWaterBodySubsystem({
    * on every one of those bumps is `uploadMask` + the jump flood itself
    * (~90ms measured live, chrome://tracing, 2026-08-25: `uploadMask` alone
    * was 47.9% self-time of a captured frame). Mirrors
-   * `vt-pan-viewer.js#pollMaskAuthorityForWindRebake`'s own throttle, except
+   * `vt-pan-viewer.js#pollMaskAuthorityForPerFloorMasks`'s own throttle, except
    * THAT one gates the (cheap) version CHECK — this one has to gate the
    * (expensive) BAKE, because the check here is already cheap and already
    * correct; throttling the check would just delay noticing a real change

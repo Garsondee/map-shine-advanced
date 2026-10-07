@@ -88,6 +88,8 @@ import {
   buildFlameShapeAlpha,
   buildFlameShading,
   buildLifeFade,
+  buildFireOpennessGainNode,
+  buildFireWindSuppressionNode,
   hueRotateNode,
   piecewiseLinear,
   piecewiseLinearRgb,
@@ -294,26 +296,27 @@ const SPAWN_CAPACITY = 1024;
  */
 const WIND_GUST_MAX_MULT = 8;
 
-/**
- * ⚠️ ADDED 2026-09-04, ROUND 4 — see `opennessGain`'s own note in the update
- * kernel for the full diagnostic story (a ×10 blunt multiplier on top of the
- * CPU-side gain's own ×2 maximum still produced no visible flame movement at
- * all, which rules out "under-tuned strength" and points at the real,
- * per-position wind-bake sample itself reading at or near 0 for typical
- * painted fire locations — routinely right against a wall, unlike where
- * `_Bush`/`_Tree` paint usually sits). The FLOOR this constant sets on
- * `opennessGain` — applied AFTER the sqrt curve, so it is a direct, easy-to-
- * reason-about minimum on the FINAL gain rather than the raw sample — is what
- * turns "a strict single-cell reading can crush wind response to literal
- * zero" into "the worst case is still a real, visible LOW response", which is
- * what the author actually asked for from the very first message in this
- * whole thread ("indoor/sheltered fires be low movement... exposed/outdoors
- * fires be moved" — never "no movement at all"). 0.3 means even a fully
- * "sealed" reading still reaches 30% of a fully-open location's gain; a
- * genuinely open reading (sqrt already close to 1) is barely touched by this
- * floor at all.
- */
-const FIRE_OPENNESS_FLOOR_GAIN = 0.3;
+// ⚠️ `FIRE_OPENNESS_FLOOR_GAIN = 0.3` WAS DELETED HERE, 2026-10-07 — read this
+// before putting a floor back. It was added in "ROUND 4" (2026-09-04) because a
+// ×10 diagnostic multiplier still produced no flame movement, which was read as
+// "the per-position openness sample reads ~0 at painted fire locations,
+// routinely against a wall", and `max(sqrt(openness), 0.3)` made sure no reading
+// could crush the response to zero. "ROUND 6" of the SAME session then found
+// the real cause — the push MAGNITUDE was marginal-to-insufficient regardless of
+// the grid (see `windAccelPerUnitSize`) — and fixed it. The floor stayed.
+//
+// What it cost, MEASURED on a real GPU through this real engine
+// (`tools/shader-lab` scenario `indoor-fire-ignores-wind`): embers born in a
+// SEALED room drifted 79 px downwind in a gale against 485 px in an open field
+// — 16% — because a 0.3 gain, through the superlinear gust curve, is ~12% of
+// the full push, and `sqrt` inflated every small leaked reading on top.
+// Author: "I don't want fires and candles and anything else which is indoors
+// reacting to wind as if they were outdoors." A sealed room's gain is now
+// exactly 0: `buildFireOpennessGainNode` is the openness, clamped.
+//
+// A fire painted against a wall no longer needs the prop either: the bake now
+// reads a sealed side as exactly 0 and an open side as exactly 1
+// (`downsampleOpennessClasses`) instead of blending the two across a coarse cell.
 
 /**
  * V2's camera-to-ground distance, and therefore the strength of the perspective
@@ -613,6 +616,14 @@ export function createFireParticleEngine({
    * `setParams` call, which matches "no wind" — a safe default.
    */
   const uWindMotion01 = uniform(float(0));
+  /**
+   * The flame's floors for the per-particle wind suppression curve
+   * (`buildFireWindSuppressionNode`) — how far its population and brightness
+   * can be pushed down by wind. 1 = no suppression (the safe start, until the
+   * first `setParams`); ember and smoke never read them.
+   */
+  const uWindCountFloor = uniform(float(1));
+  const uWindOpacityFloor = uniform(float(1));
 
   /**
    * `effectiveWindMotion` AT AN ARBITRARY POSITION — the same openness-gated
@@ -630,9 +641,25 @@ export function createFireParticleEngine({
     const openness = windOpennessBuffer
       ? windHandle.kernel(TSL, { centerXY: posVec, time: uTimeMs, cellBuffer: windOpennessBuffer }).openness
       : float(1);
-    const gain = openness.pow(float(0.5)).max(float(FIRE_OPENNESS_FLOOR_GAIN));
-    return uWindMotion01.mul(gain);
+    return uWindMotion01.mul(buildFireOpennessGainNode(TSL, openness));
   };
+
+  /**
+   * THE WIND SUPPRESSION AT AN ARBITRARY POSITION — flame's population/opacity and
+   * smoke's population, evaluated from the LOCAL wind motion
+   * (`effectiveWindMotionAt`) rather than from a map-wide aggregate. See
+   * `fire-sprite.js#buildFireWindSuppressionNode` for why this lives in the
+   * shader. With no wind grid (a bake-less handle) the local motion is the bare
+   * dial — "no geometry data ⇒ behave like the open outdoors", the same
+   * convention every other consumer of the field uses.
+   */
+  const windSuppressionAt = (posVec) =>
+    buildFireWindSuppressionNode(TSL, {
+      motion01: windOpennessBuffer ? effectiveWindMotionAt(posVec) : uWindMotion01,
+      kind,
+      countFloor: uWindCountFloor,
+      opacityFloor: uWindOpacityFloor,
+    });
 
   const hash11 = (x) => fract(sin(x.mul(12.9898)).mul(43758.5453));
 
@@ -781,37 +808,14 @@ export function createFireParticleEngine({
       wallAwayDirY = cell.wallAwayDirY;
       wallProximity = cell.wallProximity;
     }
-    // ⚠️ SQUARE-ROOTED, THEN FLOORED — NOT RAW (2026-09-04, ROUND 2, revised
-    // ROUND 4 after the ×10 diagnostic). The diagnostic settled the question:
-    // author, live, with the CPU-side "Wind response" dial already at its own
-    // maximum (2×) AND a further ×10 blunt multiplier on top of that — STILL
-    // "nothing in the way of sideways movement". Anything multiplied by
-    // something genuinely at 0 stays 0 no matter how large the OTHER factor
-    // is, which rules out "under-tuned strength" outright — a weak-but-real
-    // signal would have visibly grown at either boost. It also rules out
-    // `windOpennessBuffer` never being allocated at all: this file's own
-    // fallback for that case is `particleOpenness = float(1)` (fully open),
-    // which would have made the ×10 diagnostic read as DRAMATICALLY stronger
-    // motion, not none. So the buffer IS wired and IS returning real sampled
-    // data — data that reads at or near 0 at these particular painted spots.
-    //
-    // Leading theory, not fully provable without live access: fires are
-    // routinely painted RIGHT AGAINST walls (a hearth built into a wall, a
-    // brazier under an eave) in a way `_Bush`/`_Tree` paint typically is not —
-    // and the wind bake's `openness` is a strict flood-fill from genuinely
-    // outdoor cells, so a spot a human calls "outdoors" can still sit in a
-    // cell the geometry calls enclosed. That is not necessarily a bug in the
-    // shared mechanism itself (which the author confirms already looks right
-    // for vegetation/gusts) — it is a mismatch between "looks outdoors" and
-    // "flood-fill says open" for the SPECIFIC locations fire happens to be
-    // painted at. `FIRE_OPENNESS_FLOOR_GAIN` makes the fix robust regardless
-    // of which of these is the exact truth: it guarantees a real, visible
-    // floor on wind response that NO reading — however strict — can crush to
-    // literal zero, matching what the author actually asked for from the
-    // start ("indoor/sheltered fires be LOW movement" — not none) without
-    // touching `world/wind-field.js`/`wind-access.js` and risking the
-    // vegetation/gust look the author confirmed already works.
-    const opennessGain = particleOpenness.pow(float(0.5)).max(float(FIRE_OPENNESS_FLOOR_GAIN));
+    // THE OPENNESS, CLAMPED — NOT SQUARE-ROOTED, NOT FLOORED (2026-10-07). This
+    // was `max(sqrt(openness), 0.3)` ("ROUND 2", revised "ROUND 4"): a workaround
+    // for a fire that would not move at all, which "ROUND 6" then traced to the
+    // push MAGNITUDE rather than to the grid (see `windAccelPerUnitSize`,
+    // construction site). It stayed, and a SEALED room's embers drifted 16% as
+    // far downwind as a field's in a gale — measured on this real engine. See
+    // the note above `windSuppressionAt` and `fire-geometry.js#fireOpennessGain01`.
+    const opennessGain = buildFireOpennessGainNode(TSL, particleOpenness);
     // `uWindMotion01` is EXPOSURE-EXCLUDED now (fire-geometry.js#fireRuntimeFromParams's
     // own note) — multiplying it by this particle's own real openness is what
     // makes an indoor fire's flame stay calm while an outdoor one on the same
@@ -1037,6 +1041,17 @@ export function createFireParticleEngine({
     return vec4(t01, c.x, c.y, seed.element(i));
   })().toVarying('vFireLife');
 
+  /**
+   * The flame's per-particle wind DIMMING, crossed to the fragment stage as a
+   * varying (storage reads are vertex-stage only on this renderer, and this one
+   * needs the wind-cell buffer). Flame only — ember and smoke have no wind
+   * opacity curve, so they build nothing.
+   */
+  const vFireWind =
+    kind === 'flame'
+      ? Fn(() => windSuppressionAt(position.element(instanceIndex)).opacityMul)().toVarying('vFireWind')
+      : null;
+
   const material = new THREE.NodeMaterial();
   material.positionNode = Fn(() => {
     const i = instanceIndex;
@@ -1063,8 +1078,15 @@ export function createFireParticleEngine({
         .mul(t01)
     );
     // Slots past the active count collapse to zero size — invisible, and
-    // costing no fill rate, without needing a separate draw range.
-    const alive = float(i).lessThan(uActiveCount).select(float(1), float(0));
+    // costing no fill rate, without needing a separate draw range. The count is
+    // thinned PER PARTICLE by the wind at the sprite's own position
+    // (`windSuppressionAt`): slot i survives iff i < activeCount × (the local
+    // population multiplier). Slots map to spawn points at random, so thinning by
+    // index thins every fire in proportion to ITS OWN wind — an indoor hearth
+    // keeps its smoke on a floor where an outdoor campfire has lost its.
+    const alive = float(i)
+      .lessThan(uActiveCount.mul(windSuppressionAt(centre).countMul))
+      .select(float(1), float(0));
 
     // ── PERSPECTIVE — V2's `M(h) = D / (D − h)`, applied per particle ──
     // A particle `h` above the ground is nearer the camera, so it appears
@@ -1142,7 +1164,7 @@ export function createFireParticleEngine({
         .add(sd.mul(float(97)));
       const shape = buildFlameShapeAlpha(TSL, { nx: uv().x, ny: uv().y, phase, seed: sd, archetype });
       const shade = buildFlameShading(TSL, { t01, heat: float(1), brightness: bright, ageToTemperature: uColorAge });
-      return shape.mul(shade.alpha).mul(fade).mul(uOpacityScale).mul(occlusionGate);
+      return shape.mul(shade.alpha).mul(fade).mul(uOpacityScale).mul(vFireWind).mul(occlusionGate);
     }
     // Ember and smoke are soft radial dots — V2's ember sprite is a 15×15
     // authored blur, which is what this is, minus the texture fetch.
@@ -1238,6 +1260,8 @@ export function createFireParticleEngine({
       set(uBandCount, p2.bandCount);
       set(uExpectedDepth, p2.expectedDepth);
       set(uWindMotion01, p2.windMotion01);
+      set(uWindCountFloor, p2.windCountFloor);
+      set(uWindOpacityFloor, p2.windOpacityFloor);
       if (Array.isArray(p2.tintMul) && p2.tintMul.length === 3) {
         uTintMul.value.set(p2.tintMul[0], p2.tintMul[1], p2.tintMul[2]);
       }

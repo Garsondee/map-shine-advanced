@@ -28,6 +28,7 @@ import { run as runWindSpectrum } from './wind-spectrum.test.mjs';
 import { run as runWindSim } from './wind-sim.test.mjs';
 import { run as runWindEnclosure } from './wind-enclosure.test.mjs';
 import { run as runWindAccess } from './wind-access.test.mjs';
+import { run as runWindStructure } from './wind-structure.test.mjs';
 import { run as runAlmanac } from './almanac.test.mjs';
 import { run as runFadeEngine } from './fade-engine.test.mjs';
 import { run as runFadeRegistry } from './fade-registry.test.mjs';
@@ -80,6 +81,7 @@ const suites = [
   ['wind-sim', runWindSim],
   ['wind-enclosure', runWindEnclosure],
   ['wind-access', runWindAccess],
+  ['wind-structure', runWindStructure],
   ['almanac', runAlmanac],
   ['fade-engine', runFadeEngine],
   ['fade-registry', runFadeRegistry],

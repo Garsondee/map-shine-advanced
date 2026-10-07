@@ -145,16 +145,20 @@ export const ZONES = Object.freeze(
     z('tick.tokenSync', 'Token placement sync', 'frame', null, null, 'cpu', 'steady', false, 'syncTokenPlacements'),
     z('tick.doorSync', 'Door graphics sync', 'frame', null, 'doorGraphics', 'cpu', 'steady', false, 'syncDoorGraphics'),
     z('tick.envSnapshot', 'Environment snapshot', 'frame', null, null, 'cpu', 'steady', true, 'updateEnvSnapshot'),
+    // ⚠️ The zone id stays `tick.windRebakePoll` (the perf ledger and the A/B
+    // toggles key on it); what it times is the per-frame MASK-VERSION poll, which
+    // stopped rebaking the wind on 2026-10-07 and now only drives the per-floor
+    // sky/precipitation mask bake.
     z(
       'tick.windRebakePoll',
-      'Wind rebake poll',
+      'Mask-version poll',
       'frame',
       null,
       null,
       'cpu',
       'bake',
       true,
-      'pollMaskAuthorityForWindRebake'
+      'pollMaskAuthorityForPerFloorMasks'
     ),
     z('tick.camera', 'Camera derive', 'frame', null, null, 'cpu', 'steady', true, 'updateCamera'),
 
@@ -164,8 +168,10 @@ export const ZONES = Object.freeze(
     // DataTexture builds/uploads, and on regrid three render-target
     // allocations/clears — has no zone despite the identical 'bake' cadence
     // shape sun-shadow/water-body bakes already have. Triggered live at
-    // mask-change, wall-change, ambient-change and floor-change, not just
-    // startup, so a live rebake's cost was completely invisible.
+    // wall-change and floor-change, not just startup, so a live rebake's cost
+    // was completely invisible. (2026-10-07: a wind-dial change no longer runs
+    // the structure bake — it re-derives two texture channels in place inside
+    // this same zone, a few ms — and mask-change no longer triggers it at all.)
     z('sims.windBake', 'Wind field bake', 'sims', null, null, 'cpu', 'bake', false, 'bakeWindField'),
     z('sims.wind', 'Wind sim', 'sims', null, null, 'both', 'conditional', false, 'tickWindSim'),
     z('sims.fluid', 'Fluid sim', 'sims', null, 'fluid', 'both', 'conditional', false, 'tickFluidSim'),

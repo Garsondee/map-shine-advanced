@@ -506,6 +506,130 @@ export function downsampleDistanceMin(fineDistance, coarseCols, coarseRows, fact
 
 /**
  * ============================================================================
+ * SEALED SIDE WINS — the wall-straddling leak (2026-10-07, author: "I don't
+ * want fires and candles and anything else which is indoors reacting to wind
+ * as if they were outdoors.")
+ * ============================================================================
+ * ROOT CAUSE, MEASURED (not argued): {@link downsampleMax} answers "is ANY fine
+ * cell of this coarse cell reached?" — generous on purpose, so a doorway
+ * narrower than a coarse cell still admits wind. But a coarse cell that a wall
+ * runs through holds BOTH sides of that wall: the exterior fine cells read 1,
+ * the sealed room's fine cells read 0, and "any" picks 1. That cell is the wall
+ * cell the GPU then bilinear-filters against its sealed neighbour, so an
+ * interior point within ~one coarse cell (≈ a quarter of a grid square) of any
+ * EXTERIOR wall read openness 0.5–1.0 inside a perfectly sealed room: measured
+ * 1.00 at the wall, 0.62 at 12 px, 0.10 at 25 px, with every door shut. A
+ * candle, a hearth, a mantel — anything stood against an outside wall — got
+ * outdoor wind.
+ *
+ * THE RULE: if a coarse cell contains even one fine cell that is open air but
+ * NOT reached from outside (a sealed pocket), the whole coarse cell reads
+ * sealed. The pocket wins, because the question this field answers is "can
+ * moving air reach here?" and the answer for the sealed half is a hard no —
+ * whereas the cost of the opposite error (a ~half-cell band of slightly
+ * calmer air OUTSIDE a building's wall) is physically plausible: it is a
+ * boundary layer, and `deflectAroundWalls`/`wallProximity` already shape the
+ * wind there. A doorway is untouched: an open door's gap cells are reached
+ * from BOTH sides, so no pocket exists in the doorway's coarse cells, and "any
+ * reached cell admits wind" still holds for them.
+ *
+ * Replaces the {@link downsampleMax} + {@link downsampleDistanceMin} pair in
+ * the bake with ONE pass over the fine grids, producing exactly the two
+ * arrays the pair produced (same types, same units), so
+ * {@link opennessFalloffFromDistance} consumes the result unchanged.
+ *
+ * @param {object} fine
+ * @param {Uint8Array} fine.fineSolid - 1 = a wall occupies the fine cell (the REAL
+ *   mask: an open door is NOT solid in it).
+ * @param {Uint8Array} fine.fineOpen - {@link floodFillOpenFromBoundary} of that mask.
+ * @param {Uint8Array} fine.fineOpenExterior - the same fill with doors always
+ *   solid (reached without crossing any door).
+ * @param {Int32Array} fine.fineDoorDistance - {@link distanceFromDoorThreshold}'s output.
+ * @param {number} coarseCols @param {number} coarseRows @param {number} factor
+ * @returns {{exterior: Float32Array, doorDistance: Int32Array}} `exterior[i]`
+ *   is 1 only for a coarse cell that is genuinely outdoors and has no sealed
+ *   pocket; `doorDistance[i]` is the nearest threshold distance (FINE-cell
+ *   units) for a cell reached only through a door, else -1.
+ */
+export function downsampleOpennessClasses(fine, coarseCols, coarseRows, factor) {
+  const cc = Math.max(0, Math.floor(coarseCols) || 0);
+  const cr = Math.max(0, Math.floor(coarseRows) || 0);
+  const f = Math.max(1, Math.floor(factor) || 1);
+  const fc = cc * f;
+  const exterior = new Float32Array(cc * cr);
+  const doorDistance = new Int32Array(cc * cr).fill(-1);
+  if (cc * cr === 0) return { exterior, doorDistance };
+  const total = fc * cr * f;
+  const fr = cr * f;
+  const { fineSolid, fineOpen, fineOpenExterior, fineDoorDistance } = fine ?? {};
+  const valid = (a) => a != null && a.length === total;
+  if (!valid(fineSolid) || !valid(fineOpen) || !valid(fineOpenExterior) || !valid(fineDoorDistance)) {
+    return { exterior, doorDistance }; // shape mismatch — fail to all-sealed, never garbage
+  }
+  // Is the fine cell at (x, y) open air that outside air cannot reach?
+  const isPocket = (x, y) => {
+    if (x < 0 || y < 0 || x >= fc || y >= fr) return false;
+    const j = y * fc + x;
+    return !fineSolid[j] && !fineOpen[j];
+  };
+  for (let cy = 0; cy < cr; cy++) {
+    for (let cx = 0; cx < cc; cx++) {
+      let sealedPocket = false;
+      let anyExterior = false;
+      let best = -1;
+      for (let dy = 0; dy < f && !sealedPocket; dy++) {
+        const row = (cy * f + dy) * fc + cx * f;
+        for (let dx = 0; dx < f; dx++) {
+          const i = row + dx;
+          if (fineSolid[i]) {
+            // A wall cell says nothing about which side it is on — EXCEPT that a
+            // wall cell touching a sealed pocket is the wall OF that sealed
+            // space, even when the pocket itself lies in the NEIGHBOURING
+            // coarse cell (the wall's fine cell is the first row/column of its
+            // block, so the whole interior falls in the block beside it).
+            // Without this, interior points inside the wall's own ~6 px
+            // thickness read the outdoor neighbour's value (found by the
+            // eight-phase test: phases 3 and 21 px leaked at the corners).
+            const fx = cx * f + dx;
+            const fy = cy * f + dy;
+            if (
+              isPocket(fx - 1, fy) ||
+              isPocket(fx + 1, fy) ||
+              isPocket(fx, fy - 1) ||
+              isPocket(fx, fy + 1) ||
+              isPocket(fx - 1, fy - 1) ||
+              isPocket(fx + 1, fy - 1) ||
+              isPocket(fx - 1, fy + 1) ||
+              isPocket(fx + 1, fy + 1)
+            ) {
+              sealedPocket = true;
+              break;
+            }
+            continue;
+          }
+          if (!fineOpen[i]) {
+            sealedPocket = true; // open air that outside air cannot reach
+            break;
+          }
+          if (fineOpenExterior[i]) {
+            anyExterior = true;
+          } else {
+            const d = fineDoorDistance[i];
+            if (d >= 0 && (best < 0 || d < best)) best = d;
+          }
+        }
+      }
+      if (sealedPocket) continue; // stays exterior 0 / distance -1: nothing reaches here
+      const o = cy * cc + cx;
+      if (anyExterior) exterior[o] = 1;
+      else if (best >= 0) doorDistance[o] = best;
+    }
+  }
+  return { exterior, doorDistance };
+}
+
+/**
+ * ============================================================================
  * WALL-AVOIDANCE DEFLECTION (2026-07-23, author: "Walls perpendicular to the
  * wind aren't preventing the wind from penetrating... the wind is pushing
  * straight through the side of a building once an interior room becomes open

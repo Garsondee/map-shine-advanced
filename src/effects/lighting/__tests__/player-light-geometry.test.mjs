@@ -11,6 +11,9 @@ import {
   resolveBeamDirection,
   resolveLightPosition,
   resolveBeamReach01,
+  resolveTorchBurn01,
+  PLAYER_TORCH_OUT_BELOW_BURN01,
+  PLAYER_LIGHT_HELD_MODES,
   PLAYER_LIGHT_AIMED_MODES,
   tokenRotationToForwardVector,
 } from '../player-light-geometry.js';
@@ -238,6 +241,58 @@ export function run(t) {
       'a non-finite position produces no descriptor',
       buildOnePlayerLightSource({ tokenId: 't', x: NaN, y: 0, mode: 'torch' }, ALLOW_ALL) === null
     );
+  }
+
+  // ======================================================================
+  // a torch that gutters: dimmer and smaller, then out
+  // ======================================================================
+  {
+    ok('burn: no burn known is burning', resolveTorchBurn01({}) === 1 && resolveTorchBurn01(undefined) === 1);
+    ok(
+      'burn: a real burn is read, clamped to 0..1',
+      resolveTorchBurn01({ burn01: 0.4 }) === 0.4 &&
+        resolveTorchBurn01({ burn01: 7 }) === 1 &&
+        resolveTorchBurn01({ burn01: -2 }) === 0
+    );
+    ok(
+      'burn: junk is burning, never NaN',
+      resolveTorchBurn01({ burn01: NaN }) === 1 && resolveTorchBurn01({ burn01: 'low' }) === 1
+    );
+    ok(
+      'only the torch is held (can gutter)',
+      PLAYER_LIGHT_HELD_MODES.length === 1 && PLAYER_LIGHT_HELD_MODES[0] === 'torch'
+    );
+
+    const full = buildOnePlayerLightSource({ tokenId: 'g', x: 0, y: 0, mode: 'torch' }, ALLOW_ALL);
+    const same = buildOnePlayerLightSource({ tokenId: 'g', x: 0, y: 0, mode: 'torch', burn01: 1 }, ALLOW_ALL);
+    ok(
+      'burn: a full-burn torch is exactly the torch it always was',
+      same.radius === full.radius && same.alpha01 === full.alpha01
+    );
+    const half = buildOnePlayerLightSource({ tokenId: 'g', x: 0, y: 0, mode: 'torch', burn01: 0.5 }, ALLOW_ALL);
+    ok('burn: a guttering torch is dimmer', near(half.alpha01, full.alpha01 * 0.5));
+    ok('burn: …and lights less ground, but not none', half.radius < full.radius && half.radius > full.radius * 0.1);
+    ok('burn: …its fallback polygon shrinks with it', Math.abs(half.shapePoints[0] - 0) < full.shapePoints[0] - 0);
+    ok(
+      'burn: a torch about to go out is faint on every axis (nothing pops when it goes)',
+      (() => {
+        const dying = buildOnePlayerLightSource(
+          { tokenId: 'g', x: 0, y: 0, mode: 'torch', burn01: PLAYER_TORCH_OUT_BELOW_BURN01 + 0.001 },
+          ALLOW_ALL
+        );
+        return dying.alpha01 < full.alpha01 * 0.04 && dying.radius < full.radius * 0.2;
+      })()
+    );
+    ok(
+      'burn: out is no light at all',
+      buildOnePlayerLightSource({ tokenId: 'g', x: 0, y: 0, mode: 'torch', burn01: 0 }, ALLOW_ALL) === null &&
+        buildOnePlayerLightSource(
+          { tokenId: 'g', x: 0, y: 0, mode: 'torch', burn01: PLAYER_TORCH_OUT_BELOW_BURN01 - 0.001 },
+          ALLOW_ALL
+        ) === null
+    );
+    const beam = buildOnePlayerLightSource({ tokenId: 'g', x: 0, y: 0, mode: 'flashlight', burn01: 0 }, ALLOW_ALL);
+    ok('burn: a flashlight has no burn — it ignores one', beam !== null && beam.alpha01 > 0);
   }
 
   // ======================================================================

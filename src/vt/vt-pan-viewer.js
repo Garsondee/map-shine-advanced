@@ -368,6 +368,7 @@ import {
   buildTorchFlameMaterial,
   buildTorchEmberGeometry,
   buildTorchEmberMaterial,
+  PLAYER_TORCH_FLAME_SIZE_PX,
   createLightningSubsystem,
   // ROPE & CHAIN (mythica-machina-press#1, Phase 2) — the per-instance CPU
   // subsystem (effects/rope-chain-subsystem.js's own header explains why
@@ -6729,7 +6730,8 @@ export async function startVtPanViewer({
     // "good, distinct, functional... NOT V2's full per-control depth" bar —
     // five is enough to read as a handful of rising embers, cheap even for
     // several simultaneous torches (5 quads × N torches, one draw call).
-    const PLAYER_TORCH_FLAME_SIZE_PX = 26;
+    // PLAYER_TORCH_FLAME_SIZE_PX (26 px, imported above) is the flame at full burn;
+    // a guttering torch's anchor overrides it per anchor.
     const PLAYER_TORCH_EMBER_COUNT = 5;
     const torchFlameScene = new THREE.Scene();
     let torchFlameMesh = null;
@@ -6747,7 +6749,8 @@ export async function startVtPanViewer({
     function torchAnchorSignature(anchors) {
       let h = (anchors.length * 1000003) | 0;
       for (const a of anchors) {
-        h = (h * 31 + Math.round(a.x) + Math.round(a.y) * 7) | 0;
+        // + the flame's own size: a guttering torch shrinks in place, and must still redraw.
+        h = (h * 31 + Math.round(a.x) + Math.round(a.y) * 7 + Math.round((a.params?.customSizePx ?? 0) * 4) * 13) | 0;
       }
       return h;
     }

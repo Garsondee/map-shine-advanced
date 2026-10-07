@@ -2,7 +2,11 @@
  * Node verification for effects/player-torch-flame-geometry.js. All pure —
  * no THREE, no Foundry.
  */
-import { buildPlayerTorchFlameAnchors, computeTorchEmberArrays } from '../player-torch-flame-geometry.js';
+import {
+  buildPlayerTorchFlameAnchors,
+  computeTorchEmberArrays,
+  PLAYER_TORCH_FLAME_SIZE_PX,
+} from '../player-torch-flame-geometry.js';
 
 const ALLOW_TORCH = { modes: { torch: true, flashlight: true } };
 const DISALLOW_TORCH = { modes: { torch: false, flashlight: true } };
@@ -36,6 +40,25 @@ export function run(t) {
       'an unusable displacement leaves the flame on the token',
       buildPlayerTorchFlameAnchors([{ tokenId: 'a', x: 7, y: 8, mode: 'torch', offsetX: NaN }], ALLOW_TORCH)[0].x === 7
     );
+  }
+  {
+    // A torch that gutters: a smaller flame, then none.
+    const at = (burn01) =>
+      buildPlayerTorchFlameAnchors([{ tokenId: 'a', x: 1, y: 2, mode: 'torch', burn01 }], ALLOW_TORCH);
+    ok(
+      'a full-burn torch has the default flame (no size override)',
+      at(1)[0].params === undefined && at(undefined)[0].params === undefined
+    );
+    const half = at(0.5)[0];
+    ok(
+      'a guttering torch has a smaller flame, by the same per-anchor size a candle uses',
+      half.params.useCustomSize === true &&
+        half.params.customSizePx < PLAYER_TORCH_FLAME_SIZE_PX &&
+        half.params.customSizePx > PLAYER_TORCH_FLAME_SIZE_PX * 0.3
+    );
+    ok('a nearly-out flame is small but still there', at(0.05)[0].params.customSizePx > 0);
+    ok('an out torch has no flame at all', at(0).length === 0 && at(0.01).length === 0);
+    ok('the flame goes out at exactly the burn the light does', at(0.031).length === 1 && at(0.029).length === 0);
   }
   ok(
     'the GM disallowing torch on this scene produces zero anchors, even for a real torch token',

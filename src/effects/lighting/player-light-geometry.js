@@ -146,6 +146,29 @@ export function resolveBeamReach01(reachPx, radiusPx, minReach01) {
 }
 
 /**
+ * A torch is OUT below this burn: no light, no flame. A burn that low is
+ * already invisible (alpha scales with it), so nothing pops.
+ */
+export const PLAYER_TORCH_OUT_BELOW_BURN01 = 0.03;
+
+/**
+ * How brightly a held torch burns this frame, 0..1 — what its bearer's client
+ * relayed (`foundry/player-aim-channel.js`: 1 until the cursor is dragged past
+ * the leash, then falling to 0). No burn known is a torch burning normally. The
+ * ONE definition, read by both the light and its flame, so they can never
+ * disagree about whether the torch is out.
+ * @param {{burn01?: number}} snapshot
+ * @returns {number}
+ */
+export function resolveTorchBurn01(snapshot) {
+  const b = snapshot?.burn01;
+  return Number.isFinite(b) ? Math.min(1, Math.max(0, b)) : 1;
+}
+
+/** A guttering torch lights a smaller area: its radius falls to this fraction of full as it dies. */
+const TORCH_MIN_RADIUS_FRACTION = 0.1;
+
+/**
  * Where a carried light — and, for a torch, its flame and embers — sits THIS
  * frame: the token's centre, plus the displacement of a light the bearer holds
  * out toward their cursor (`offsetX`/`offsetY`, world px, stamped by
@@ -207,6 +230,7 @@ const PLAYER_LIGHT_MODE_PRESETS = Object.freeze({
     // HELD OUT at the bearer's cursor (`resolveLightPosition`): the light and its
     // flame sit at the end of an arm, not on the token.
     aimed: true,
+    held: true,
   }),
   flashlight: Object.freeze({
     radiusPx: 620,
@@ -241,6 +265,11 @@ const PLAYER_LIGHT_MODE_PRESETS = Object.freeze({
  * produces no descriptor here (see this module's own Stage-1-scope header). */
 export const PLAYER_LIGHT_RENDERED_MODES = Object.freeze(Object.keys(PLAYER_LIGHT_MODE_PRESETS));
 
+/** The rendered modes whose light is HELD OUT (displaced from its bearer, and able to gutter) — what `foundry/player-aim.js#PLAYER_AIM_HELD_MODES` mirrors. */
+export const PLAYER_LIGHT_HELD_MODES = Object.freeze(
+  PLAYER_LIGHT_RENDERED_MODES.filter((mode) => PLAYER_LIGHT_MODE_PRESETS[mode].held === true)
+);
+
 /** The rendered modes the bearer's cursor steers — what `foundry/player-aim.js#PLAYER_AIM_MODES` mirrors (a test holds them together). */
 export const PLAYER_LIGHT_AIMED_MODES = Object.freeze(
   PLAYER_LIGHT_RENDERED_MODES.filter((mode) => PLAYER_LIGHT_MODE_PRESETS[mode].aimed === true)
@@ -253,7 +282,7 @@ export const PLAYER_LIGHT_AIMED_MODES = Object.freeze(
  * batch `buildPlayerLightSources` below) so the light-pool merge point and a
  * unit test can both reason about one token without a whole-array dance.
  *
- * @param {{tokenId: string, x: number, y: number, elevation: number, mode: string, rotation?: number, lockRotation?: boolean, aimAngleDeg?: number, reachPx?: number, offsetX?: number, offsetY?: number}} tokenSnapshot
+ * @param {{tokenId: string, x: number, y: number, elevation: number, mode: string, rotation?: number, lockRotation?: boolean, aimAngleDeg?: number, reachPx?: number, offsetX?: number, offsetY?: number, burn01?: number}} tokenSnapshot
  *   `aimAngleDeg` (optional) is the bearer's live aim — see {@link resolveBeamDirection};
  *   `reachPx` (optional) is how far away their cursor is — see {@link resolveBeamReach01};
  *   `offsetX`/`offsetY` (optional) is a held light's displacement — see {@link resolveLightPosition}.
@@ -267,6 +296,11 @@ export function buildOnePlayerLightSource(tokenSnapshot, permissions) {
   if (permissions?.modes?.[mode] !== true) return null; // the GM has not (or no longer) allowed this mode on this scene
   const { x, y } = resolveLightPosition(tokenSnapshot);
   if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  // A held torch that has gone out is no light at all; one that is guttering is
+  // dimmer (alpha) and lights less ground (radius) in proportion.
+  const burn01 = preset.held === true ? resolveTorchBurn01(tokenSnapshot) : 1;
+  if (burn01 < PLAYER_TORCH_OUT_BELOW_BURN01) return null;
+  const radiusPx = preset.radiusPx * (TORCH_MIN_RADIUS_FRACTION + (1 - TORCH_MIN_RADIUS_FRACTION) * burn01);
   const elevation = Number.isFinite(tokenSnapshot.elevation) ? tokenSnapshot.elevation : 0;
   // Seeded from the TOKEN's own position, not the light's: a torch held out under
   // a moving cursor changes position every frame, and re-seeding its flicker
@@ -280,13 +314,13 @@ export function buildOnePlayerLightSource(tokenSnapshot, permissions) {
     x,
     y,
     elevation,
-    radius: preset.radiusPx,
-    shapePoints: playerLightCirclePolygon(x, y, preset.radiusPx),
+    radius: radiusPx,
+    shapePoints: playerLightCirclePolygon(x, y, radiusPx),
     ratio: preset.ratio,
     attenuation01: preset.attenuation01,
     luminosity01: preset.luminosity01,
     hasColor: true,
-    alpha01: preset.alpha01,
+    alpha01: preset.alpha01 * burn01,
     color: hexToRgb01(preset.colorHex),
     falloffModel: preset.falloffModel,
     // FLASHLIGHT BEAM (Stage 2a) — `null` for every non-beam mode (torch

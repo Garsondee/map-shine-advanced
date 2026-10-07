@@ -83,7 +83,11 @@ export {
 // pure anchor builder (torch flame body reuses candle's own descriptor
 // shape) and the batched ember-quad vertex math. See player-torch-flame-
 // geometry.js's own header for the full "why".
-export { buildPlayerTorchFlameAnchors, computeTorchEmberArrays } from './player-torch-flame-geometry.js';
+export {
+  buildPlayerTorchFlameAnchors,
+  computeTorchEmberArrays,
+  PLAYER_TORCH_FLAME_SIZE_PX,
+} from './player-torch-flame-geometry.js';
 // The torch flame's THREE/TSL glue — the flame body is candle's own builders,
 // re-exported under torch-specific names; the ember batch is genuinely new.
 export {

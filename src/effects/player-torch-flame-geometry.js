@@ -48,7 +48,21 @@
  */
 
 import { hexToRgb01 } from './candle-flame-geometry.js';
-import { resolveLightPosition } from './lighting/player-light-geometry.js';
+import {
+  resolveLightPosition,
+  resolveTorchBurn01,
+  PLAYER_TORCH_OUT_BELOW_BURN01,
+} from './lighting/player-light-geometry.js';
+
+/**
+ * A torch's flame billboard, in px, when it burns at full. The viewer draws
+ * every player torch at this size (`vt/vt-pan-viewer.js`); a guttering torch
+ * overrides it per anchor, through the same `params.customSizePx` a candle uses.
+ */
+export const PLAYER_TORCH_FLAME_SIZE_PX = 26;
+
+/** A guttering flame shrinks to this fraction of full as it dies. */
+const FLAME_MIN_SIZE_FRACTION = 0.3;
 
 /**
  * Every currently-active, currently-allowed TORCH (not flashlight, not a
@@ -73,7 +87,15 @@ export function buildPlayerTorchFlameAnchors(tokenSnapshots, permissions) {
     // (`resolveLightPosition`), not the token's centre.
     const { x, y } = resolveLightPosition(snap);
     if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-    out.push({ x, y, id: String(snap?.tokenId ?? '') });
+    // A torch that has gone out has no flame; one that is guttering has a smaller one.
+    const burn01 = resolveTorchBurn01(snap);
+    if (burn01 < PLAYER_TORCH_OUT_BELOW_BURN01) continue;
+    const anchor = { x, y, id: String(snap?.tokenId ?? '') };
+    if (burn01 < 1) {
+      const scale = FLAME_MIN_SIZE_FRACTION + (1 - FLAME_MIN_SIZE_FRACTION) * burn01;
+      anchor.params = { useCustomSize: true, customSizePx: PLAYER_TORCH_FLAME_SIZE_PX * scale };
+    }
+    out.push(anchor);
   }
   return out;
 }

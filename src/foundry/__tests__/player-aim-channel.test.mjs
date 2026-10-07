@@ -823,6 +823,150 @@ export function run(t) {
   }
 
   // ======================================================================
+  // a torch dragged too far gutters, goes out, and relights only when touched
+  // ======================================================================
+  {
+    const w = torchWorld();
+    const { channel, clock } = makeChannel();
+    const settle = () => {
+      clock.advance(3000);
+      channel.annotate(readActivePlayerCarriedLightTokens());
+      clock.advance(3000);
+      return channel.annotate(readActivePlayerCarriedLightTokens())[0];
+    };
+    withWorld(w, () => {
+      w.setMouse(400, 100); // 300 px: well inside the 600 px leash
+      let snap = settle();
+      ok('burn: inside the leash the torch burns fully', near(snap.burn01, 1));
+      let [light] = buildPlayerLightSources([snap], ALLOW_TORCH);
+      const fullRadius = light.radius;
+      const fullAlpha = light.alpha01;
+
+      w.setMouse(850, 100); // 750 px: half way through the 300 px fade band
+      snap = settle();
+      ok('burn: dragged past the leash it gutters (half way through the band is half)', near(snap.burn01, 0.5, 1e-3));
+      ok('burn: …but is still held at the leash, no further', near(snap.offsetX, 600));
+      [light] = buildPlayerLightSources([snap], ALLOW_TORCH);
+      ok('burn: …a dimmer, smaller light', light.alpha01 < fullAlpha && light.radius < fullRadius);
+      const [flame] = buildPlayerTorchFlameAnchors([snap], ALLOW_TORCH);
+      ok('burn: …and a smaller flame', flame.params.customSizePx < 26);
+
+      w.setMouse(1100, 100); // 1000 px: past the band
+      snap = settle();
+      ok('burn: far enough out and the torch is out', snap.burn01 < 0.03);
+      ok('burn: …no light', buildPlayerLightSources([snap], ALLOW_TORCH).length === 0);
+      ok('burn: …and no flame', buildPlayerTorchFlameAnchors([snap], ALLOW_TORCH).length === 0);
+
+      w.setMouse(300, 100); // back inside the leash — but not touching
+      snap = settle();
+      ok(
+        'burn: pulling the cursor back does NOT relight it',
+        snap.burn01 < 0.03 && buildPlayerLightSources([snap], ALLOW_TORCH).length === 0
+      );
+
+      w.setMouse(150, 100); // 50 px from the token centre: inside its radius (50) + margin (12)
+      snap = settle();
+      ok(
+        'burn: touching its bearer relights it',
+        near(snap.burn01, 1) && buildPlayerLightSources([snap], ALLOW_TORCH).length === 1
+      );
+      ok('burn: …flame and all', buildPlayerTorchFlameAnchors([snap], ALLOW_TORCH).length === 1);
+      w.setMouse(400, 100);
+      snap = settle();
+      ok('burn: …and it keeps burning when the cursor moves away again', near(snap.burn01, 1));
+    });
+  }
+  {
+    // A bigger token is touched from further away: its radius counts.
+    const big = torchWorld();
+    big.tokenObjects[0].document.width = 3; // 3 squares wide -> radius 150 px
+    big.tokenObjects[0].document.height = 3;
+    const { channel, clock } = makeChannel();
+    withWorld(big, () => {
+      const settle = () => {
+        clock.advance(3000);
+        channel.annotate(readActivePlayerCarriedLightTokens());
+        clock.advance(3000);
+        return channel.annotate(readActivePlayerCarriedLightTokens())[0];
+      };
+      big.setMouse(1100, 100);
+      settle();
+      big.setMouse(240, 100); // 140 px out: inside a 3x3 token's 150 px radius, outside a 1x1's 62 px
+      ok('burn: a 3x3 token relights when touched anywhere on its body', near(settle().burn01, 1));
+    });
+  }
+  {
+    // What everyone else is told.
+    const w = torchWorld();
+    const { channel, clock } = makeChannel();
+    withWorld(w, () => {
+      w.setMouse(400, 100);
+      channel.tick(clock.t);
+      ok('burn (send): a burning torch sends no burn field', !('b' in w.emitted[0].msg));
+      clock.advance(150);
+      w.setMouse(850, 100);
+      channel.tick(clock.t);
+      ok('burn (send): a guttering one sends its burn', w.emitted[1].msg.b === 50 && w.emitted[1].msg.d === 600);
+      clock.advance(150);
+      w.setMouse(1100, 100);
+      channel.tick(clock.t);
+      ok('burn (send): going out is sent as 0', w.emitted[2].msg.b === 0);
+      clock.advance(150);
+      w.setMouse(300, 100);
+      ok(
+        'burn (send): pulling the cursor back in changes the reach but the torch stays out',
+        channel.tick(clock.t) === true && w.emitted[3].msg.b === 0
+      );
+      clock.advance(150);
+      w.setMouse(150, 100);
+      channel.tick(clock.t);
+      ok('burn (send): touching it relights, and the burn field disappears again', !('b' in w.emitted[4].msg));
+    });
+  }
+  {
+    // What other bearers' guttering torches look like on THIS screen.
+    const w = makeWorld({
+      tokens: [
+        { id: 't1', actorId: 'actor-p1', x: 100, y: 100, mode: 'flashlight', owners: ['p1'] },
+        { id: 't2', actorId: 'actor-p2', x: 600, y: 600, mode: 'torch', owners: ['p2'] },
+      ],
+    });
+    const { channel, clock } = makeChannel();
+    withWorld(w, () => {
+      channel.handleMessage({ type: 'playerAim', tokenId: 't2', userId: 'p2', a: 90, d: 600, b: 40 });
+      let [, remote] = channel.annotate(readActivePlayerCarriedLightTokens());
+      ok('burn (remote): drawn at the relayed burn', near(remote.burn01, 0.4));
+      channel.handleMessage({ type: 'playerAim', tokenId: 't2', userId: 'p2', a: 90, d: 600, b: 0 });
+      clock.advance(3000);
+      channel.annotate(readActivePlayerCarriedLightTokens());
+      clock.advance(3000);
+      [, remote] = channel.annotate(readActivePlayerCarriedLightTokens());
+      ok(
+        'burn (remote): relayed out means no light on this screen either',
+        buildPlayerLightSources([remote], ALLOW_TORCH).length === 0
+      );
+      channel.handleMessage({ type: 'playerAim', tokenId: 't2', userId: 'p2', a: 90, d: 100 });
+      [, remote] = channel.annotate(readActivePlayerCarriedLightTokens());
+      ok(
+        'burn (remote): a message with no burn is a torch burning again',
+        remote.burn01 === undefined && buildPlayerLightSources([remote], ALLOW_TORCH).length === 1
+      );
+    });
+  }
+  {
+    // A flashlight has no burn, whatever the cursor does.
+    const w = makeWorld({
+      tokens: [{ id: 't1', actorId: 'actor-p1', x: 100, y: 100, mode: 'flashlight', owners: ['p1'] }],
+    });
+    const { channel } = makeChannel();
+    withWorld(w, () => {
+      w.setMouse(3000, 100);
+      const [snap] = channel.annotate(readActivePlayerCarriedLightTokens());
+      ok('burn: dragging a flashlight far away does not put it out', snap.burn01 === undefined);
+    });
+  }
+
+  // ======================================================================
   // lifecycle
   // ======================================================================
   {

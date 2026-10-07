@@ -13,6 +13,8 @@ import {
   PLAYER_AIM_REACH_MODES,
   PLAYER_AIM_HELD_MODES,
   AIM_FLASHLIGHT_REACH_CAP_PX,
+  torchBurnTarget01,
+  createTorchBurn,
   AIM_MAX_REACH_PX,
   AIM_TORCH_WALL_MARGIN_PX,
   clampTorchReachPx,
@@ -34,6 +36,7 @@ import {
 import {
   tokenRotationToForwardVector,
   PLAYER_LIGHT_AIMED_MODES,
+  PLAYER_LIGHT_HELD_MODES,
   buildOnePlayerLightSource,
 } from '../../effects/lighting/player-light-geometry.js';
 
@@ -411,6 +414,103 @@ export function run(t) {
       'the flashlight reach cap is above the beam’s full throw, so the cap never shortens it',
       AIM_FLASHLIGHT_REACH_CAP_PX >= flash.radius
     );
+  }
+
+  ok(
+    'PLAYER_AIM_HELD_MODES is exactly the rendered modes the presets mark held',
+    PLAYER_LIGHT_HELD_MODES.length === PLAYER_AIM_HELD_MODES.length &&
+      PLAYER_LIGHT_HELD_MODES.every((m) => PLAYER_AIM_HELD_MODES.includes(m))
+  );
+
+  // ======================================================================
+  // a torch guttering past its leash
+  // ======================================================================
+  {
+    const G = { leashPx: 600, fadeBandPx: 300 };
+    ok('burn: full inside the leash', torchBurnTarget01({ cursorDistancePx: 599, ...G }) === 1);
+    ok('burn: full right at the leash', torchBurnTarget01({ cursorDistancePx: 600, ...G }) === 1);
+    ok('burn: halfway through the fade band is half', near(torchBurnTarget01({ cursorDistancePx: 750, ...G }), 0.5));
+    ok('burn: out at the far edge of the band', torchBurnTarget01({ cursorDistancePx: 900, ...G }) === 0);
+    ok('burn: and stays out beyond it, never negative', torchBurnTarget01({ cursorDistancePx: 5000, ...G }) === 0);
+    ok(
+      'burn: an unknown distance, or no band, is just burning',
+      torchBurnTarget01({ cursorDistancePx: NaN, ...G }) === 1 &&
+        torchBurnTarget01({ cursorDistancePx: 5000, leashPx: 600, fadeBandPx: 0 }) === 1
+    );
+
+    const args = (d) => ({ cursorDistancePx: d, ...G, touchPx: 62 });
+    const b = createTorchBurn();
+    ok('torch: burns while the cursor is near', b.update('a', args(200)) === 1 && !b.isOut);
+    ok('torch: gutters as the cursor is dragged out', near(b.update('a', args(750)), 0.5) && !b.isOut);
+    ok('torch: goes out at the far edge of the band', b.update('a', args(950)) === 0 && b.isOut);
+    ok('torch: STAYS out when the cursor comes back inside the leash', b.update('a', args(300)) === 0 && b.isOut);
+    ok('torch: …and when it comes right up to the bearer but not touching', b.update('a', args(80)) === 0 && b.isOut);
+    ok('torch: touching its bearer relights it', b.update('a', args(40)) === 1 && !b.isOut);
+    ok('torch: …and it keeps burning once relit', b.update('a', args(300)) === 1);
+    b.update('a', args(950));
+    ok('torch: a different token does not inherit a snuffed torch', b.update('b', args(300)) === 1 && !b.isOut);
+    b.update('b', args(950));
+    b.reset();
+    ok('torch: reset relights', b.update('b', args(300)) === 1);
+  }
+
+  // ======================================================================
+  // burn on the wire, in the policy, in the store
+  // ======================================================================
+  {
+    const base = { tokenId: 't', angleDeg: 10, userId: 'u' };
+    ok('wire: a torch at full burn sends no burn field', !('b' in encodeAimMessage({ ...base, burn01: 1 })));
+    ok(
+      'wire: a guttering torch sends its burn as a whole percent',
+      encodeAimMessage({ ...base, burn01: 0.4 }).b === 40
+    );
+    ok('wire: an out torch sends 0, not nothing', encodeAimMessage({ ...base, burn01: 0 }).b === 0);
+    ok(
+      'wire: no burn is no field',
+      !('b' in encodeAimMessage(base)) && !('b' in encodeAimMessage({ ...base, burn01: null }))
+    );
+    const msg = { type: AIM_MESSAGE_TYPE, tokenId: 't', userId: 'u', a: 10 };
+    ok('wire: burn decodes to a 0..1 fraction', near(decodeAimMessage({ ...msg, b: 40 }).burn01, 0.4));
+    ok('wire: …0 is out, not missing', decodeAimMessage({ ...msg, b: 0 }).burn01 === 0);
+    ok('wire: no burn decodes to null (burning)', decodeAimMessage(msg).burn01 === null);
+    ok(
+      'wire: an out-of-range burn is clamped',
+      decodeAimMessage({ ...msg, b: 900 }).burn01 === 1 && decodeAimMessage({ ...msg, b: -5 }).burn01 === 0
+    );
+    ok(
+      'wire: a junk burn is ignored and costs nothing else',
+      (() => {
+        const d = decodeAimMessage({ ...msg, b: 'dim' });
+        return d !== null && d.burn01 === null && near(d.angleDeg, 10);
+      })()
+    );
+  }
+  {
+    const p = createAimSendPolicy();
+    p.decide('a', 90, 0, 100, 1);
+    ok('policy: a burn change past the dead band is sent', near(p.decide('a', 90, 150, 100, 0.8), 90));
+    ok('policy: a burn flutter inside the dead band is not', p.decide('a', 90, 300, 100, 0.79) === null);
+    ok('policy: …but it settles, so the torch ends exactly', near(p.decide('a', 90, 450, 100, 0.79), 90));
+    ok('policy: going out is news', near(p.decide('a', 90, 700, 100, 0), 90));
+    ok('policy: relighting is news', near(p.decide('a', 90, 900, 100, 1), 90));
+    ok('policy: a burn that keeps changing inside the rate cap waits', p.decide('a', 90, 950, 100, 0.2) === null);
+  }
+  {
+    const s = createRemoteAimStore({ tauMs: 70 });
+    s.receive('a', 90, 0, 100, 1);
+    s.receive('a', 90, 100, 100, 0.2);
+    ok('store: a new burn has not moved yet the instant it lands', near(s.sampleAim('a', 100).burn01, 1));
+    ok(
+      'store: …and eases toward it, one time constant later ~63% of the way',
+      near(s.sampleAim('a', 170).burn01, 1 + (0.2 - 1) * (1 - Math.exp(-1)), 1e-9)
+    );
+    s.receive('a', 90, 200, 100, null);
+    ok('store: a torch that stops reporting burn is simply burning (null)', s.sampleAim('a', 200).burn01 === null);
+    const f = createRemoteAimStore();
+    f.receive('f', 10, 0, 50);
+    ok('store: a message that never had a burn has none', f.sampleAim('f', 0).burn01 === null);
+    f.receive('f', 10, 100, 50, 0.5);
+    ok('store: a burn that appears snaps (nothing to ease from)', near(f.sampleAim('f', 100).burn01, 0.5));
   }
 
   // ======================================================================

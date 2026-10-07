@@ -2398,7 +2398,10 @@ export function run(t) {
     const quant = classifyBottleneck({ gapMs: dockGap, gpuMs: dockGpu, refresh: q });
     ok('with 120Hz quantisation the median is GPU-bound (8.0ms misses the 8.33ms slot)', quant.verdict === 'gpu-bound');
     ok('...2 refreshes per frame at the median', quant.median.vsync.refreshesPerFrame === 2);
-    ok('...tail: 12.32ms misses the 16.67ms slot? no → stays its plain verdict', quant.tail.vsync.gpuAloneMissesPreviousSlot === false);
+    ok(
+      '...tail: 12.32ms misses the 16.67ms slot? no → stays its plain verdict',
+      quant.tail.vsync.gpuAloneMissesPreviousSlot === false
+    );
     ok('...note tells the reader to judge by ms, not fps', /not fps/.test(quant.note) && /vsync wait/.test(quant.note));
     ok('refresh info echoed on the verdict', quant.refresh.refreshHz === 120);
 

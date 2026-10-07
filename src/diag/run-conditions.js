@@ -236,7 +236,8 @@ export function createRunConditionsMonitor(env = {}) {
     totalPauseSamples = 0;
     lastPaused = null;
     sampleTick();
-    if ((readRenderScale || readPaused) && scaleTimer === null) scaleTimer = setIntervalFn(sampleTick, sampleIntervalMs);
+    if ((readRenderScale || readPaused) && scaleTimer === null)
+      scaleTimer = setIntervalFn(sampleTick, sampleIntervalMs);
     if (!listening) {
       doc?.addEventListener?.('visibilitychange', onVisibility);
       win?.addEventListener?.('blur', onBlur);

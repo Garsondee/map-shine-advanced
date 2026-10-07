@@ -139,7 +139,8 @@ export function summarizeGpuQueueSamples({
   errors = 0,
 }) {
   const all = [...samples];
-  if (Number.isFinite(stillOutstandingMs)) all.push({ atMs: stillOutstandingAtMs, ms: stillOutstandingMs, unfinished: true });
+  if (Number.isFinite(stillOutstandingMs))
+    all.push({ atMs: stillOutstandingAtMs, ms: stillOutstandingMs, unfinished: true });
   const lat = all.map((s) => s.ms).sort((a, b) => a - b);
   const pct = (q) => (lat.length ? lat[Math.min(lat.length - 1, Math.floor(q * lat.length))] : null);
   const stalls = all.filter((s) => s.ms >= GPU_QUEUE_STALL_MS);

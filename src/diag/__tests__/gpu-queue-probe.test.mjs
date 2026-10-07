@@ -37,7 +37,12 @@ export async function run(t) {
   {
     const g = fakeGpu();
     let dev = null;
-    const p = createGpuQueueProbe({ getDevice: () => dev, now: g.now, setInterval: g.setInterval, clearInterval: g.clearInterval });
+    const p = createGpuQueueProbe({
+      getDevice: () => dev,
+      now: g.now,
+      setInterval: g.setInterval,
+      clearInterval: g.clearInterval,
+    });
     p.start();
     g.tick();
     const r = p.stop();
@@ -49,10 +54,18 @@ export async function run(t) {
   // ---- one outstanding at a time; a long stall is ONE sample ----------------
   {
     const g = fakeGpu();
-    const p = createGpuQueueProbe({ getDevice: () => g.device, now: g.now, setInterval: g.setInterval, clearInterval: g.clearInterval });
+    const p = createGpuQueueProbe({
+      getDevice: () => g.device,
+      now: g.now,
+      setInterval: g.setInterval,
+      clearInterval: g.clearInterval,
+    });
     p.start(); // immediate first tick
     ok('first probe posted on start', g.pendingCount() === 1);
-    g.advance(250); g.tick(); g.advance(250); g.tick();
+    g.advance(250);
+    g.tick();
+    g.advance(250);
+    g.tick();
     ok('no pile-up while outstanding', g.pendingCount() === 1);
     g.advance(9500);
     g.resolveAll();
@@ -73,7 +86,12 @@ export async function run(t) {
   // ---- outstanding at stop is reported, and late resolution is ignored ------
   {
     const g = fakeGpu();
-    const p = createGpuQueueProbe({ getDevice: () => g.device, now: g.now, setInterval: g.setInterval, clearInterval: g.clearInterval });
+    const p = createGpuQueueProbe({
+      getDevice: () => g.device,
+      now: g.now,
+      setInterval: g.setInterval,
+      clearInterval: g.clearInterval,
+    });
     p.start();
     g.advance(4000);
     const r = p.stop();
@@ -85,12 +103,21 @@ export async function run(t) {
 
   // ---- verdict boundaries ----------------------------------------------------
   {
-    const clear = summarizeGpuQueueSamples({ samples: [{ atMs: 0, ms: 3 }, { atMs: 250, ms: 12 }], windowMs: 500 });
+    const clear = summarizeGpuQueueSamples({
+      samples: [
+        { atMs: 0, ms: 3 },
+        { atMs: 250, ms: 12 },
+      ],
+      windowMs: 500,
+    });
     ok('clear verdict', buildGpuQueueSection(clear, 50).verdict === 'clear');
     const backlog = summarizeGpuQueueSamples({ samples: [{ atMs: 0, ms: GPU_QUEUE_STALL_MS + 100 }], windowMs: 500 });
     ok('backlog verdict', buildGpuQueueSection(backlog, 50).verdict === 'gpu-side-backlog');
     const mainBound = summarizeGpuQueueSamples({ samples: [{ atMs: 0, ms: 3000 }], windowMs: 5000 });
-    ok('GPU wait no bigger than main-thread stall is not blamed on GPU', buildGpuQueueSection(mainBound, 2900).verdict === 'gpu-side-backlog');
+    ok(
+      'GPU wait no bigger than main-thread stall is not blamed on GPU',
+      buildGpuQueueSection(mainBound, 2900).verdict === 'gpu-side-backlog'
+    );
     ok('null in, null out', buildGpuQueueSection(null, 1) === null);
   }
 
@@ -98,8 +125,16 @@ export async function run(t) {
   {
     const g = fakeGpu();
     const p = createGpuQueueProbe({
-      getDevice: () => ({ queue: { onSubmittedWorkDone: () => { throw new Error('lost'); } } }),
-      now: g.now, setInterval: g.setInterval, clearInterval: g.clearInterval,
+      getDevice: () => ({
+        queue: {
+          onSubmittedWorkDone: () => {
+            throw new Error('lost');
+          },
+        },
+      }),
+      now: g.now,
+      setInterval: g.setInterval,
+      clearInterval: g.clearInterval,
     });
     p.start();
     g.tick();

@@ -9,7 +9,7 @@ import { createRunConditionsMonitor, buildRunConditions, readRendererAdapterInfo
 function fakeEnv({ hidden = false, focused = true, w = 1920, h = 1080, dpr = 1 } = {}) {
   let t = 0;
   const listeners = {};
-  const add = (type, fn) => ((listeners[type] ??= []).push(fn));
+  const add = (type, fn) => (listeners[type] ??= []).push(fn);
   const remove = (type, fn) => (listeners[type] = (listeners[type] ?? []).filter((f) => f !== fn));
   const doc = {
     visibilityState: hidden ? 'hidden' : 'visible',
@@ -167,10 +167,18 @@ export function run(t) {
   }
   {
     const e = fakeEnv();
-    const m = createRunConditionsMonitor({ ...e, readRenderScale: () => ({ skipped: true }), setInterval: () => 1, clearInterval: () => {} });
+    const m = createRunConditionsMonitor({
+      ...e,
+      readRenderScale: () => ({ skipped: true }),
+      setInterval: () => 1,
+      clearInterval: () => {},
+    });
     m.start();
     const r = m.stop();
-    ok('skipped scale reader yields null start/end, no changes', r.renderScale.start === null && r.renderScale.changes === 0);
+    ok(
+      'skipped scale reader yields null start/end, no changes',
+      r.renderScale.start === null && r.renderScale.changes === 0
+    );
   }
 
   // ---- timeline: events carry time + phase; checkpoints vouch for early work --
@@ -192,11 +200,20 @@ export function run(t) {
     e.fire('resize');
     m.checkpoint('tier-sweep-end');
     const r = m.stop();
-    ok('flip-and-back canvas change invalidates the whole run', r.valid === false && /2 time\(s\)/.test(r.invalidReasons.join(' ')));
+    ok(
+      'flip-and-back canvas change invalidates the whole run',
+      r.valid === false && /2 time\(s\)/.test(r.invalidReasons.join(' '))
+    );
     ok('first invalid is the canvas change at 65s', r.firstInvalid?.kind === 'canvas' && r.firstInvalid.atMs === 65000);
     ok('first invalid names its phase', /structural-ab/.test(r.firstInvalid.phase));
-    ok('counter ticks do not create a new phase', r.events.every((ev) => !/20 frames/.test(ev.phase ?? '')));
-    ok('main-route checkpoint still clean', r.checkpoints[0].name === 'main-route-end' && r.checkpoints[0].cleanSoFar === true);
+    ok(
+      'counter ticks do not create a new phase',
+      r.events.every((ev) => !/20 frames/.test(ev.phase ?? ''))
+    );
+    ok(
+      'main-route checkpoint still clean',
+      r.checkpoints[0].name === 'main-route-end' && r.checkpoints[0].cleanSoFar === true
+    );
     ok('later checkpoint dirty', r.checkpoints[1].cleanSoFar === false);
     ok('both canvas changes recorded', r.events.filter((ev) => ev.kind === 'canvas').length === 2);
   }
@@ -237,7 +254,10 @@ export function run(t) {
     ok('paused run is invalid', r.valid === false && /PAUSED/.test(r.invalidReasons.join(' ')));
     ok('paused samples counted', r.paused.pausedSamples === 2 && r.paused.samples === 4);
     ok('paused is the first invalid event, at t=0', r.firstInvalid?.kind === 'paused' && r.firstInvalid.atMs === 0);
-    ok('unpause recorded on the timeline', r.events.some((ev) => ev.kind === 'unpaused'));
+    ok(
+      'unpause recorded on the timeline',
+      r.events.some((ev) => ev.kind === 'unpaused')
+    );
   }
   {
     const e = fakeEnv();
@@ -252,11 +272,21 @@ export function run(t) {
     tick();
     const r = m.stop();
     ok('a never-paused run stays valid, with no pause events', r.valid === true && r.events.length === 0);
-    ok('a throwing pause read is ignored, not fatal', (() => {
-      const m2 = createRunConditionsMonitor({ ...fakeEnv(), readPaused: () => { throw new Error('x'); }, setInterval: () => 1, clearInterval: () => {} });
-      m2.start();
-      return m2.stop().valid === true;
-    })());
+    ok(
+      'a throwing pause read is ignored, not fatal',
+      (() => {
+        const m2 = createRunConditionsMonitor({
+          ...fakeEnv(),
+          readPaused: () => {
+            throw new Error('x');
+          },
+          setInterval: () => 1,
+          clearInterval: () => {},
+        });
+        m2.start();
+        return m2.stop().valid === true;
+      })()
+    );
   }
 
   // ---- adapter reader -------------------------------------------------------

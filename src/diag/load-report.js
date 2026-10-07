@@ -226,10 +226,9 @@ export function buildGpuQueueSection(gpuQueue, worstStallMs) {
     'gpu-side-stall':
       `The GPU side was blocked for up to ${maxMs}ms at a time (${gpuQueue.stalledMs}ms stalled in total) while the main ` +
       `thread's worst freeze was only ${Number.isFinite(worstStallMs) ? worstStallMs + 'ms' : 'unknown'}. The wait here is ` +
-      "NOT main-thread JavaScript: it is the GPU process (pipeline compiles, texture uploads, or GPU work itself). " +
+      'NOT main-thread JavaScript: it is the GPU process (pipeline compiles, texture uploads, or GPU work itself). ' +
       'Main-thread optimisation will not move this; see `worst[]` for when it happened.',
-    'gpu-side-backlog':
-      `The GPU queue backed up to ${maxMs}ms at worst (${gpuQueue.stallCount} sample(s) over 250ms) — real, but not the dominant wait.`,
+    'gpu-side-backlog': `The GPU queue backed up to ${maxMs}ms at worst (${gpuQueue.stallCount} sample(s) over 250ms) — real, but not the dominant wait.`,
     clear: `The GPU queue stayed responsive throughout (worst ${maxMs}ms): whatever made this load slow was not GPU-side.`,
   };
   return { ...gpuQueue, verdict, note: notes[verdict] };

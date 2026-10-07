@@ -80,7 +80,10 @@ export async function run(t) {
       return s;
     };
     await encodeStripedParallel(reader, w, h, 'bc7', 8, pool, 2, { disposableStrips: true });
-    ok('declared-disposable strips go zero-copy', got.every((s, i) => s.buffer === owned[i].buffer));
+    ok(
+      'declared-disposable strips go zero-copy',
+      got.every((s, i) => s.buffer === owned[i].buffer)
+    );
   }
 
   // ---- REGRESSION (live smoke run 2026-09-24): a one-strip level is a view
@@ -171,7 +174,10 @@ export async function run(t) {
       return w;
     });
     ok('construction failure -> null', pool === null);
-    ok('...and the workers already made are terminated', built.every((w) => w.terminated));
+    ok(
+      '...and the workers already made are terminated',
+      built.every((w) => w.terminated)
+    );
   }
   {
     const ws = [];

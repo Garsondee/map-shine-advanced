@@ -35,7 +35,10 @@ export function run(t) {
   ok('OFF is unreachable by a base shape <= 1', CLOUD_THRESHOLD_OFF > 1);
   {
     const u = createCloudUniforms(THREE.TSL);
-    ok('fresh cloud uniforms start OFF (nothing pushed yet = no cloud)', u.macroThreshold.value === CLOUD_THRESHOLD_OFF);
+    ok(
+      'fresh cloud uniforms start OFF (nothing pushed yet = no cloud)',
+      u.macroThreshold.value === CLOUD_THRESHOLD_OFF
+    );
     let recipe = null;
     try {
       recipe = cloudRecipeFor(0.3);
@@ -44,9 +47,23 @@ export function run(t) {
     }
     ok('a real cloud recipe is available to push', !!recipe);
     if (recipe) {
-      pushCloudUniforms(u, { recipe, cover01: 0, scalePx: 1000, drift: { x: 0, y: 0 }, boil: 0, windDir: { x: 1, y: 0 } });
+      pushCloudUniforms(u, {
+        recipe,
+        cover01: 0,
+        scalePx: 1000,
+        drift: { x: 0, y: 0 },
+        boil: 0,
+        windDir: { x: 1, y: 0 },
+      });
       ok('pushing cover 0 sets macroThreshold OFF', u.macroThreshold.value === CLOUD_THRESHOLD_OFF);
-      pushCloudUniforms(u, { recipe, cover01: 0.4, scalePx: 1000, drift: { x: 0, y: 0 }, boil: 0, windDir: { x: 1, y: 0 } });
+      pushCloudUniforms(u, {
+        recipe,
+        cover01: 0.4,
+        scalePx: 1000,
+        drift: { x: 0, y: 0 },
+        boil: 0,
+        windDir: { x: 1, y: 0 },
+      });
       ok('pushing real cover moves macroThreshold below OFF', u.macroThreshold.value < CLOUD_THRESHOLD_OFF);
     }
   }
@@ -93,7 +110,15 @@ export function run(t) {
     }
     ok(`builds with a cloud term (${err ? err.message : 'clean'})`, err === null && built?.cloudGateCompiled === true);
     ok('...and HAS a clear-sky twin', !!built?.illumMaterialClear);
-    ok('...a distinct material with its own fragment graph', built?.illumMaterialClear !== built?.illumMaterial && !!built?.illumMaterialClear?.fragmentNode && built.illumMaterialClear.fragmentNode !== built.illumMaterial.fragmentNode);
-    ok('...drawn like the original (no depth test/write)', built?.illumMaterialClear?.depthTest === false && built?.illumMaterialClear?.depthWrite === false);
+    ok(
+      '...a distinct material with its own fragment graph',
+      built?.illumMaterialClear !== built?.illumMaterial &&
+        !!built?.illumMaterialClear?.fragmentNode &&
+        built.illumMaterialClear.fragmentNode !== built.illumMaterial.fragmentNode
+    );
+    ok(
+      '...drawn like the original (no depth test/write)',
+      built?.illumMaterialClear?.depthTest === false && built?.illumMaterialClear?.depthWrite === false
+    );
   }
 }

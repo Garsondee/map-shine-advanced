@@ -117,6 +117,23 @@ export function resolveBeamDirection({ aimAngleDeg, rotation, lockRotation } = {
   return tokenRotationToForwardVector(rotation, lockRotation);
 }
 
+/**
+ * Where a carried light — and, for a torch, its flame and embers — sits THIS
+ * frame: the token's centre, plus the displacement of a light the bearer holds
+ * out toward their cursor (`offsetX`/`offsetY`, world px, stamped by
+ * `foundry/player-aim-channel.js#annotate`). No offset means the token's centre,
+ * exactly as before holding existed. One definition so the light and the flame
+ * can never disagree about where the torch is.
+ *
+ * @param {{x: number, y: number, offsetX?: number, offsetY?: number}} snapshot
+ * @returns {{x: number, y: number}}
+ */
+export function resolveLightPosition(snapshot) {
+  const dx = Number.isFinite(snapshot?.offsetX) ? snapshot.offsetX : 0;
+  const dy = Number.isFinite(snapshot?.offsetY) ? snapshot.offsetY : 0;
+  return { x: Number(snapshot?.x) + dx, y: Number(snapshot?.y) + dy };
+}
+
 /** A stable, position-derived pseudo-seed — same classic GLSL-hash shape as
  * `candle-flame-geometry.js#deriveCandleSeed`/`fire-geometry.js#deriveFireSeed`,
  * so a room of several torches desyncs its flicker the identical way a room
@@ -159,6 +176,9 @@ const PLAYER_LIGHT_MODE_PRESETS = Object.freeze({
     falloffModel: 'inverseSquare',
     animated: true,
     animationQuality: 1, // candle-flicker.js tier 1 ("standard") — chaotic guttering, no oval/lean
+    // HELD OUT at the bearer's cursor (`resolveLightPosition`): the light and its
+    // flame sit at the end of an arm, not on the token.
+    aimed: true,
   }),
   flashlight: Object.freeze({
     radiusPx: 620,
@@ -169,6 +189,8 @@ const PLAYER_LIGHT_MODE_PRESETS = Object.freeze({
     colorHex: '#dcecff',
     falloffModel: 'beam',
     animated: false,
+    // POINTED at the bearer's cursor (`resolveBeamDirection`).
+    aimed: true,
     // BEAM SHAPE (Stage 2a) — all fractions of `radiusPx` (the beam's own
     // local unit-radius space, matching `dist`'s normalization elsewhere in
     // this pipeline).
@@ -187,6 +209,11 @@ const PLAYER_LIGHT_MODE_PRESETS = Object.freeze({
  * produces no descriptor here (see this module's own Stage-1-scope header). */
 export const PLAYER_LIGHT_RENDERED_MODES = Object.freeze(Object.keys(PLAYER_LIGHT_MODE_PRESETS));
 
+/** The rendered modes the bearer's cursor steers — what `foundry/player-aim.js#PLAYER_AIM_MODES` mirrors (a test holds them together). */
+export const PLAYER_LIGHT_AIMED_MODES = Object.freeze(
+  PLAYER_LIGHT_RENDERED_MODES.filter((mode) => PLAYER_LIGHT_MODE_PRESETS[mode].aimed === true)
+);
+
 /**
  * Build ONE light-source descriptor for a single carried light, or `null` if
  * this token's mode has no Stage-1 render (a vision mode) or the scene's own
@@ -194,8 +221,9 @@ export const PLAYER_LIGHT_RENDERED_MODES = Object.freeze(Object.keys(PLAYER_LIGH
  * batch `buildPlayerLightSources` below) so the light-pool merge point and a
  * unit test can both reason about one token without a whole-array dance.
  *
- * @param {{tokenId: string, x: number, y: number, elevation: number, mode: string, rotation?: number, lockRotation?: boolean, aimAngleDeg?: number}} tokenSnapshot
- *   `aimAngleDeg` (optional) is the bearer's live aim — see {@link resolveBeamDirection}.
+ * @param {{tokenId: string, x: number, y: number, elevation: number, mode: string, rotation?: number, lockRotation?: boolean, aimAngleDeg?: number, offsetX?: number, offsetY?: number}} tokenSnapshot
+ *   `aimAngleDeg` (optional) is the bearer's live aim — see {@link resolveBeamDirection};
+ *   `offsetX`/`offsetY` (optional) is a held light's displacement — see {@link resolveLightPosition}.
  * @param {{modes: Record<string, boolean>}} permissions - `resolvePlayerLightPermissions`'s own shape.
  * @returns {object|null}
  */
@@ -204,11 +232,13 @@ export function buildOnePlayerLightSource(tokenSnapshot, permissions) {
   const preset = PLAYER_LIGHT_MODE_PRESETS[mode];
   if (!preset) return null; // a vision-mode pick, or an unrecognized/absent mode — nothing to render yet
   if (permissions?.modes?.[mode] !== true) return null; // the GM has not (or no longer) allowed this mode on this scene
-  const x = Number(tokenSnapshot.x);
-  const y = Number(tokenSnapshot.y);
+  const { x, y } = resolveLightPosition(tokenSnapshot);
   if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
   const elevation = Number.isFinite(tokenSnapshot.elevation) ? tokenSnapshot.elevation : 0;
-  const seed = deriveTokenSeed(x, y);
+  // Seeded from the TOKEN's own position, not the light's: a torch held out under
+  // a moving cursor changes position every frame, and re-seeding its flicker
+  // every frame would read as a stutter rather than a flame.
+  const seed = deriveTokenSeed(Number(tokenSnapshot.x), Number(tokenSnapshot.y));
   const isBeam = preset.falloffModel === 'beam';
   return {
     sourceId: `playerLight:${tokenSnapshot.tokenId}`,

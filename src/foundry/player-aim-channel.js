@@ -1,17 +1,20 @@
 /**
- * PLAYER AIM CHANNEL — THE LIVE HALF of "a carried flashlight points where its
- * bearer's cursor points" (mythica-machina-press#77). Every decision it makes is
+ * PLAYER AIM CHANNEL — THE LIVE HALF of "a carried light follows its bearer's
+ * cursor" (mythica-machina-press#77): a flashlight's beam POINTS at it, a torch
+ * is HELD OUT at it. Every decision it makes is
  * delegated to `player-aim.js` (pure, Node-tested); this file only touches the
  * world: Foundry's pointer, the module socket, a timer, the viewing user.
  *
  * ONE INSTANCE PER CLIENT (`createPlayerAimChannel`, owned by boot.js), doing
  * three jobs:
  *
- *   1. ANNOTATE (`annotate`, every frame, from the light-source getter): stamp
- *      each aimable carried light's snapshot with `aimAngleDeg` — from THIS
- *      client's own cursor if the token is the one this user aims, else from
- *      the angle its own client relayed. No aim known → the field stays unset
- *      and `player-light-geometry.js` falls back to the token's stored rotation.
+ *   1. ANNOTATE (`annotate`, every frame, from the light-source getter AND the
+ *      torch-flame getter): stamp each aimable carried light's snapshot with
+ *      `aimAngleDeg` (and, for a torch, `offsetX/Y`, where its bearer holds it)
+ *      — from THIS client's own cursor if the token is the one this user aims,
+ *      else from the aim its own client relayed. No aim known → the fields stay
+ *      unset and `player-light-geometry.js` falls back to the token's stored
+ *      rotation (flashlight) or the token's centre (torch).
  *   2. SEND (`tick`, every `AIM_SENDER_TICK_MS`, from a timer — NOT from the
  *      frame loop, so a stalled renderer or a hidden tab cannot starve it): if
  *      this user is aiming, put the angle on the module socket under
@@ -34,6 +37,12 @@
  * The fog gates `canvas.mousePositionVisible/Explored` are deliberately NOT
  * applied: aiming a flashlight into unexplored dark is the whole point, and a
  * direction reveals nothing the beam does not.
+ *
+ * A HELD TORCH'S REACH is as far as the cursor, no further than 6 grid squares,
+ * and stopping 12 px short of the first wall that blocks movement
+ * (`Token#checkCollision`). The OWNER's client works that out once and relays
+ * the result, so every screen agrees where the torch is; the owner's own torch
+ * is eased toward it (an arm, not a laser pointer).
  *
  * WHO AIMS: a non-GM client aims exactly `resolveViewerToken()` — the token the
  * carried-light picker writes to, so "the token I picked a flashlight for" and
@@ -61,15 +70,20 @@
 
 import { createLogger } from '../core/log.js';
 import { perfNowMs } from '../core/frame-clock.js';
-import { readMouseHoverPoint } from './scene-occlusion-sources.js';
+import { readMouseHoverPoint, readGridSizePixels } from './scene-occlusion-sources.js';
 import { resolveViewerToken, isViewingUserGM } from './viewer-token.js';
 import { readActivePlayerCarriedLightTokens } from './player-light-mode.js';
 import { readScenePlayerLightPermissions } from './player-light-permissions.js';
 import {
   PLAYER_AIM_MODES,
+  PLAYER_AIM_REACH_MODES,
   AIM_MESSAGE_TYPE,
+  AIM_TORCH_LEASH_SQUARES,
+  AIM_TORCH_EASE_TAU_MS,
   encodeAimMessage,
   decodeAimMessage,
+  clampTorchReachPx,
+  offsetFromAim,
   createLocalAimTracker,
   createAimSendPolicy,
   createRemoteAimStore,
@@ -104,7 +118,13 @@ export function createPlayerAimChannel({
 } = {}) {
   const tracker = createLocalAimTracker();
   const store = createRemoteAimStore();
+  // The bearer's OWN held torch is eased through the same machinery other
+  // bearers' aims are: each frame's target is `receive`d and `sampleAim`ed, so
+  // the torch lags the cursor like an arm instead of snapping to it.
+  const torchEase = createRemoteAimStore({ tauMs: AIM_TORCH_EASE_TAU_MS, maxEntries: 8 });
   const policy = createAimSendPolicy();
+  /** The wall test for the same (origin, destination) is asked every frame the cursor is still. */
+  let wallMemo = { key: null, hitPx: null };
 
   const stats = { sent: 0, received: 0, rejected: {}, errors: 0 };
   let timer = null;
@@ -122,7 +142,7 @@ export function createPlayerAimChannel({
     if (message === lastErrorMessage) return;
     lastErrorMessage = message;
     stats.errors += 1;
-    log.error(`${where} failed (the stored token rotation is used instead):`, err);
+    log.error(`${where} failed:`, err);
   }
 
   /** @returns {{x: number, y: number}|null} the cursor in world space, or `null` if Foundry has not seen one. */
@@ -133,11 +153,58 @@ export function createPlayerAimChannel({
     return { x: point.x, y: point.y };
   }
 
-  /** @returns {string|null} the token this client's cursor steers, or `null` (a GM, or no token). */
-  function resolveLocalAimTokenId() {
+  /** @returns {object|null} the Token this client's cursor steers, or `null` (a GM, or no token). */
+  function resolveLocalAimToken() {
     if (isViewingUserGM()) return null;
-    const token = resolveViewerToken();
-    return token?.document?.id ?? token?.id ?? null;
+    return resolveViewerToken();
+  }
+
+  const tokenIdOf = (token) => token?.document?.id ?? token?.id ?? null;
+
+  /**
+   * How far along `from -> to` the first wall that blocks MOVEMENT is, or `null`
+   * if the way is clear. Foundry's own `Token#checkCollision` (v14: level- and
+   * elevation-aware, and independent of the token's animation). A fault is
+   * logged once and reads as "no wall" - a torch that can briefly reach through
+   * a wall is a smaller harm than no torch.
+   */
+  function readWallHitDistancePx(token, from, to) {
+    const key = `${Math.round(from.x)},${Math.round(from.y)}>${Math.round(to.x)},${Math.round(to.y)}`;
+    if (wallMemo.key === key) return wallMemo.hitPx;
+    let hitPx = null;
+    try {
+      const hit = token?.checkCollision?.(
+        { x: to.x, y: to.y },
+        { origin: { x: from.x, y: from.y }, type: 'move', mode: 'closest' }
+      );
+      if (hit && Number.isFinite(hit.x) && Number.isFinite(hit.y)) hitPx = Math.hypot(hit.x - from.x, hit.y - from.y);
+    } catch (err) {
+      noteError('testing a held torch against walls', err);
+    }
+    wallMemo = { key, hitPx };
+    return hitPx;
+  }
+
+  /**
+   * What the bearer's cursor asks of their own light right now: a bearing, and
+   * for a held torch the reach - as far as the cursor, no further than the
+   * leash, stopping short of the first wall. `null` until a cursor has been seen.
+   * Shared by the renderer (`annotate`) and the sender (`tick`), so what this
+   * client draws and what everyone else is told come from one calculation.
+   * @returns {{angleDeg: number, reachPx: number|null}|null}
+   */
+  function localAimTarget(token, snap) {
+    const cursor = readCursorWorld();
+    const angleDeg = tracker.update(snap.tokenId, snap, cursor);
+    if (angleDeg === null) return null;
+    if (!PLAYER_AIM_REACH_MODES.includes(snap.mode)) return { angleDeg, reachPx: null };
+    const cursorDistancePx = cursor ? Math.hypot(cursor.x - snap.x, cursor.y - snap.y) : 0;
+    const leashPx = readGridSizePixels().gridSizePixels * AIM_TORCH_LEASH_SQUARES;
+    const wanted = Math.min(cursorDistancePx, leashPx);
+    const end = offsetFromAim(angleDeg, wanted);
+    const wallHitDistancePx =
+      wanted > 0 ? readWallHitDistancePx(token, snap, { x: snap.x + end.x, y: snap.y + end.y }) : null;
+    return { angleDeg, reachPx: clampTorchReachPx({ cursorDistancePx, leashPx, wallHitDistancePx }) };
   }
 
   function hasPeers() {
@@ -145,29 +212,46 @@ export function createPlayerAimChannel({
   }
 
   /**
-   * Stamp `aimAngleDeg` onto every aimable carried light's snapshot, IN PLACE —
+   * Stamp every aimable carried light's snapshot with the aim to draw, IN PLACE -
    * the snapshots are this frame's own fresh objects
-   * (`readActivePlayerCarriedLightTokens` builds them per call).
-   * @param {Array<{tokenId: string, x: number, y: number, mode: string, aimAngleDeg?: number}>} snapshots
+   * (`readActivePlayerCarriedLightTokens` builds them per call):
+   *   - `aimAngleDeg`, the bearing (a flashlight's beam direction);
+   *   - for a held torch also `offsetX`/`offsetY`, where its bearer holds it
+   *     relative to their token (`player-light-geometry.js#resolveLightPosition`).
+   * Called by BOTH the light getter and the torch-flame getter each frame. That
+   * is safe by construction: the ease is time-composable, so two calls a few
+   * milliseconds apart each return the eased aim for their own instant - the
+   * light and its flame differ by a sub-frame of travel, never accumulate error.
+   * @param {Array<{tokenId: string, x: number, y: number, mode: string}>} snapshots
    * @returns {Array} the same array.
    */
   function annotate(snapshots) {
     if (!Array.isArray(snapshots) || snapshots.length === 0) return snapshots;
     try {
       const nowMs = now();
-      let localId = UNRESOLVED;
-      let cursor;
+      let localToken = UNRESOLVED;
       for (const snap of snapshots) {
         if (!PLAYER_AIM_MODES.includes(snap?.mode)) continue;
-        if (localId === UNRESOLVED) localId = resolveLocalAimTokenId();
-        let angle;
-        if (snap.tokenId === localId) {
-          if (cursor === undefined) cursor = readCursorWorld();
-          angle = tracker.update(snap.tokenId, snap, cursor);
+        if (localToken === UNRESOLVED) localToken = resolveLocalAimToken();
+        let aim = null;
+        if (localToken && snap.tokenId === tokenIdOf(localToken)) {
+          const target = localAimTarget(localToken, snap);
+          if (target && target.reachPx === null) {
+            aim = target; // a beam follows the cursor exactly - no lag
+          } else if (target) {
+            torchEase.receive(snap.tokenId, target.angleDeg, nowMs, target.reachPx);
+            aim = torchEase.sampleAim(snap.tokenId, nowMs);
+          }
         } else {
-          angle = store.sample(snap.tokenId, nowMs);
+          aim = store.sampleAim(snap.tokenId, nowMs);
         }
-        if (angle !== null) snap.aimAngleDeg = angle;
+        if (!aim) continue;
+        snap.aimAngleDeg = aim.angleDeg;
+        if (aim.reachPx !== null && PLAYER_AIM_REACH_MODES.includes(snap.mode)) {
+          const offset = offsetFromAim(aim.angleDeg, aim.reachPx);
+          snap.offsetX = offset.x;
+          snap.offsetY = offset.y;
+        }
       }
     } catch (err) {
       noteError('annotating player aim', err);
@@ -179,8 +263,8 @@ export function createPlayerAimChannel({
    * Only reached with a live `game.socket` (see `tick`).
    * @returns {boolean} whether a message went out.
    */
-  function emit(tokenId, angleDeg) {
-    const msg = encodeAimMessage({ tokenId, angleDeg, userId: game.user?.id });
+  function emit(tokenId, angleDeg, reachPx) {
+    const msg = encodeAimMessage({ tokenId, angleDeg, userId: game.user?.id, reachPx });
     if (!msg) return reject('unencodable');
     const socket = game.socket;
     // `volatile`: a stale aim must be dropped, not queued behind a reconnect —
@@ -197,8 +281,10 @@ export function createPlayerAimChannel({
    */
   function tick(nowMs = now()) {
     store.prune(nowMs);
+    torchEase.prune(nowMs);
     if (typeof game === 'undefined' || !game?.socket) return false;
-    const localId = resolveLocalAimTokenId();
+    const token = resolveLocalAimToken();
+    const localId = tokenIdOf(token);
     if (!localId) return false;
     const snap = readActivePlayerCarriedLightTokens().find((s) => s.tokenId === localId);
     if (!snap || !PLAYER_AIM_MODES.includes(snap.mode)) return false;
@@ -208,11 +294,11 @@ export function createPlayerAimChannel({
       policy.reset(); // alone at the table: say nothing, and say it all the moment someone joins
       return false;
     }
-    const angle = tracker.update(localId, snap, readCursorWorld());
-    if (angle === null) return false; // no cursor yet — everyone keeps the stored rotation
-    const toSend = policy.decide(localId, angle, nowMs);
+    const target = localAimTarget(token, snap);
+    if (!target) return false; // no cursor yet — everyone keeps the stored rotation
+    const toSend = policy.decide(localId, target.angleDeg, nowMs, target.reachPx);
     if (toSend === null) return false;
-    return emit(localId, toSend);
+    return emit(localId, toSend, target.reachPx);
   }
 
   /**
@@ -232,7 +318,7 @@ export function createPlayerAimChannel({
     if (!token?.document) return reject('unknown-token'); // not on the scene this client is viewing
     // Fail closed: a missing method reads as "not the owner".
     if (!token.document.testUserPermission?.(sender, 'OWNER')) return reject('not-owner');
-    if (!store.receive(msg.tokenId, msg.angleDeg, now())) return reject('unstorable');
+    if (!store.receive(msg.tokenId, msg.angleDeg, now(), msg.reachPx)) return reject('unstorable');
     stats.received += 1;
     return true;
   }
@@ -272,6 +358,8 @@ export function createPlayerAimChannel({
     if (socketHandler && typeof game !== 'undefined') game.socket?.off?.(SOCKET_NAME, socketHandler);
     socketHandler = null;
     store.clear();
+    torchEase.clear();
+    wallMemo = { key: null, hitPx: null };
     policy.reset();
     tracker.reset();
   }

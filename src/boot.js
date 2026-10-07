@@ -4964,6 +4964,10 @@ function install() {
     const tokenSnapshots = readActivePlayerCarriedLightTokens();
     if (tokenSnapshots.length === 0) return [];
     const { permissions } = readScenePlayerLightPermissions();
+    // The flame rides the light: a torch held out toward its bearer's cursor
+    // has its flame there too (see getPlayerCarriedLightSources above — both
+    // getters annotate, and the ease is time-composable, so they agree).
+    playerAimChannel.annotate(tokenSnapshots);
     return buildPlayerTorchFlameAnchors(tokenSnapshots, permissions);
   };
 

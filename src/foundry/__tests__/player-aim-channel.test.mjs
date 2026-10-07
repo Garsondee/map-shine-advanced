@@ -17,6 +17,7 @@
 import { createPlayerAimChannel, AIM_SENDER_TICK_MS } from '../player-aim-channel.js';
 import { readActivePlayerCarriedLightTokens } from '../player-light-mode.js';
 import { buildPlayerLightSources } from '../../effects/lighting/player-light-geometry.js';
+import { buildPlayerTorchFlameAnchors } from '../../effects/player-torch-flame-geometry.js';
 import { LogLevel, getLogLevel, setLogLevel, setLogSink } from '../../core/log.js';
 
 const near = (a, b, eps = 1e-6) => Math.abs(a - b) < eps;
@@ -49,6 +50,8 @@ function makeWorld({
     actor: { id: spec.actorId ?? `actor-${spec.id}` },
     isOwner: spec.isOwner ?? true,
     center: { x: spec.x, y: spec.y },
+    // v14's Token#checkCollision: the first wall the ray meets, or null.
+    checkCollision: spec.checkCollision ?? (() => null),
     document: {
       id: spec.id,
       hidden: false,
@@ -87,6 +90,7 @@ function makeWorld({
     },
     canvas: {
       scene: { id: 's1', getFlag: () => sceneFlag },
+      grid: { size: 100 }, // a torch's leash is 6 grid squares = 600 px
       tokens: { placeables: tokenObjects, get: (id) => tokenObjects.find((t) => t.document.id === id) },
       // Foundry's own un-moved default; `setMouse` stands in for a real pointermove.
       mousePosition: { x: 0, y: 0 },
@@ -200,19 +204,19 @@ export function run(t) {
     });
   }
   {
-    // A torch, a vision mode, and a flashlight on the same table: only the flashlight is aimable.
+    // A vision mode is not a light the cursor steers.
     const w = makeWorld({
       tokens: [
-        { id: 't1', actorId: 'actor-p1', x: 100, y: 100, mode: 'torch', owners: ['p1'] },
-        { id: 't2', actorId: 'actor-x', x: 500, y: 500, mode: 'nightVision', owners: ['p2'] },
+        { id: 't1', actorId: 'actor-p1', x: 100, y: 100, mode: 'nightVision', owners: ['p1'] },
+        { id: 't2', actorId: 'actor-x', x: 500, y: 500, mode: 'infravision', owners: ['p2'] },
       ],
     });
     const { channel } = makeChannel();
     withWorld(w, () => {
       w.setMouse(300, 100);
       const snaps = channel.annotate(readActivePlayerCarriedLightTokens());
-      ok('annotate: a torch is not aimed', snaps[0].aimAngleDeg === undefined);
-      ok('annotate: a vision mode is not aimed', snaps[1].aimAngleDeg === undefined);
+      ok('annotate: my vision mode is not aimed', snaps[0].aimAngleDeg === undefined && snaps[0].offsetX === undefined);
+      ok('annotate: someone else’s vision mode is not aimed', snaps[1].aimAngleDeg === undefined);
     });
   }
   {
@@ -446,8 +450,8 @@ export function run(t) {
       });
     };
     hold(
-      'tick: a torch is not aimable, so nothing is sent',
-      { tokens: [{ id: 't1', actorId: 'actor-p1', x: 100, y: 100, mode: 'torch', owners: ['p1'] }] },
+      'tick: a vision mode is not aimable, so nothing is sent',
+      { tokens: [{ id: 't1', actorId: 'actor-p1', x: 100, y: 100, mode: 'nightVision', owners: ['p1'] }] },
       false
     );
     hold(
@@ -477,6 +481,252 @@ export function run(t) {
       { tokens: [{ id: 't1', actorId: 'actor-p1', x: 100, y: 100, mode: 'flashlight', owners: ['p1'] }] },
       true
     );
+  }
+
+  // ======================================================================
+  // a held torch — the light, and its flame, sit at the cursor
+  // ======================================================================
+  const ALLOW_TORCH = { modes: { torch: true } };
+  const torchWorld = (extra = {}) =>
+    makeWorld({ tokens: [{ id: 't1', actorId: 'actor-p1', x: 100, y: 100, mode: 'torch', owners: ['p1'], ...extra }] });
+  {
+    const w = torchWorld();
+    const { channel, clock } = makeChannel();
+    withWorld(w, () => {
+      let snaps = channel.annotate(readActivePlayerCarriedLightTokens());
+      ok('torch: before any cursor has been seen it stays on its bearer', snaps[0].offsetX === undefined);
+
+      w.setMouse(400, 100);
+      snaps = channel.annotate(readActivePlayerCarriedLightTokens());
+      ok(
+        'torch: held out to the cursor — 300 px due east',
+        near(snaps[0].offsetX, 300) && near(snaps[0].offsetY, 0, 1e-6)
+      );
+      ok('torch: …and carries the bearing too', near(snaps[0].aimAngleDeg, 90));
+      const [light] = buildPlayerLightSources(snaps, ALLOW_TORCH);
+      ok('torch: the LIGHT is at the cursor, not the token', near(light.x, 400) && near(light.y, 100, 1e-6));
+      const [flame] = buildPlayerTorchFlameAnchors(snaps, ALLOW_TORCH);
+      ok('torch: the FLAME is at the same place as the light', near(flame.x, light.x) && near(flame.y, light.y));
+
+      w.setMouse(100, 100);
+      clock.advance(3000);
+      channel.annotate(readActivePlayerCarriedLightTokens());
+      clock.advance(3000);
+      snaps = channel.annotate(readActivePlayerCarriedLightTokens());
+      ok(
+        'torch: a cursor parked on the token draws the torch back in, holding the bearing',
+        Math.hypot(snaps[0].offsetX, snaps[0].offsetY) < 0.5 && near(snaps[0].aimAngleDeg, 90)
+      );
+    });
+  }
+  {
+    const w = torchWorld();
+    const { channel } = makeChannel();
+    withWorld(w, () => {
+      w.setMouse(1500, 100);
+      const [snap] = channel.annotate(readActivePlayerCarriedLightTokens());
+      ok('torch: held no further than the leash (6 grid squares = 600 px)', near(snap.offsetX, 600));
+    });
+  }
+  {
+    // A wall 150 px along the ray: the torch stops a margin short of it.
+    const calls = [];
+    const w = torchWorld({
+      checkCollision: (dest, opts) => {
+        calls.push({ dest, opts });
+        return { x: 250, y: 100 };
+      },
+    });
+    const { channel, clock } = makeChannel();
+    withWorld(w, () => {
+      w.setMouse(400, 100);
+      const [snap] = channel.annotate(readActivePlayerCarriedLightTokens());
+      ok('torch: stops 12 px short of a wall in the way', near(snap.offsetX, 150 - 12));
+      ok(
+        'torch: asks Foundry whether MOVEMENT is blocked, for the closest hit, from the bearer toward the cursor',
+        calls.length === 1 &&
+          calls[0].opts.type === 'move' &&
+          calls[0].opts.mode === 'closest' &&
+          near(calls[0].opts.origin.x, 100) &&
+          near(calls[0].dest.x, 400)
+      );
+      channel.annotate(readActivePlayerCarriedLightTokens());
+      channel.tick(clock.t);
+      ok(
+        'torch: an unchanged question is not asked of the walls again (frame, frame, sender tick)',
+        calls.length === 1
+      );
+
+      const w2 = torchWorld({ checkCollision: () => ({ x: 102, y: 100 }) });
+      const { channel: c2 } = makeChannel();
+      withWorld(w2, () => {
+        w2.setMouse(400, 100);
+        const [pressed] = c2.annotate(readActivePlayerCarriedLightTokens());
+        ok(
+          'torch: a wall hard against its bearer gives no reach, never a negative one',
+          near(pressed.offsetX, 0) && pressed.offsetX >= 0
+        );
+      });
+    });
+  }
+  {
+    // The wall answer follows the cursor: a wall in the way of one aim is not in the way of the next.
+    const w = torchWorld({ checkCollision: (dest) => (dest.x > 300 ? { x: 250, y: 100 } : null) });
+    const { channel, clock } = makeChannel();
+    withWorld(w, () => {
+      w.setMouse(400, 100);
+      let [snap] = channel.annotate(readActivePlayerCarriedLightTokens());
+      ok('torch: aimed through the wall, it stops short of it', near(snap.offsetX, 138));
+      // 280 is on the near side of the stub wall, but beyond where a STALE wall (hit at 150) would stop it.
+      w.setMouse(280, 100);
+      clock.advance(3000);
+      channel.annotate(readActivePlayerCarriedLightTokens());
+      clock.advance(3000);
+      [snap] = channel.annotate(readActivePlayerCarriedLightTokens());
+      ok(
+        'torch: aimed somewhere the wall does not block, the old wall answer is not reused',
+        near(snap.offsetX, 180, 0.5)
+      );
+    });
+  }
+  {
+    // The torch lags the cursor like an arm: it eases, it does not snap.
+    const w = torchWorld();
+    const { channel, clock } = makeChannel();
+    withWorld(w, () => {
+      w.setMouse(400, 100);
+      channel.annotate(readActivePlayerCarriedLightTokens());
+      w.setMouse(200, 100);
+      let [snap] = channel.annotate(readActivePlayerCarriedLightTokens());
+      ok('torch: the instant the cursor moves, the torch has not', near(snap.offsetX, 300));
+      clock.advance(90);
+      [snap] = channel.annotate(readActivePlayerCarriedLightTokens());
+      ok(
+        'torch: one time constant later it is ~63% of the way to the cursor',
+        near(snap.offsetX, 300 + (100 - 300) * (1 - Math.exp(-1)), 1e-6)
+      );
+      clock.advance(2000);
+      [snap] = channel.annotate(readActivePlayerCarriedLightTokens());
+      ok('torch: …and it arrives', near(snap.offsetX, 100, 1e-3));
+    });
+  }
+  {
+    // A flashlight is pointed, never held out: no offset, whatever the cursor does.
+    const w = makeWorld({
+      tokens: [{ id: 't1', actorId: 'actor-p1', x: 100, y: 100, mode: 'flashlight', owners: ['p1'] }],
+    });
+    const { channel } = makeChannel();
+    withWorld(w, () => {
+      w.setMouse(400, 100);
+      const [snap] = channel.annotate(readActivePlayerCarriedLightTokens());
+      ok('flashlight: aimed but never displaced', near(snap.aimAngleDeg, 90) && snap.offsetX === undefined);
+    });
+  }
+  {
+    // What other bearers' torches do on THIS screen.
+    const w = makeWorld({
+      tokens: [
+        { id: 't1', actorId: 'actor-p1', x: 100, y: 100, mode: 'flashlight', owners: ['p1'] },
+        { id: 't2', actorId: 'actor-p2', x: 600, y: 600, mode: 'torch', owners: ['p2'] },
+      ],
+    });
+    const { channel } = makeChannel();
+    withWorld(w, () => {
+      ok(
+        'torch (remote): a held torch’s message is accepted',
+        channel.handleMessage({ type: 'playerAim', tokenId: 't2', userId: 'p2', a: 90, d: 200 }) === true
+      );
+      const [, remote] = channel.annotate(readActivePlayerCarriedLightTokens());
+      ok(
+        'torch (remote): drawn 200 px from its bearer, along the relayed bearing',
+        near(remote.offsetX, 200) && near(remote.offsetY, 0, 1e-6)
+      );
+      const lights = buildPlayerLightSources([remote], ALLOW_TORCH);
+      ok('torch (remote): the light follows', near(lights[0].x, 800));
+    });
+    const { channel: bare } = makeChannel();
+    withWorld(w, () => {
+      bare.handleMessage({ type: 'playerAim', tokenId: 't2', userId: 'p2', a: 90 });
+      const [, remote] = bare.annotate(readActivePlayerCarriedLightTokens());
+      ok(
+        'torch (remote): a message with no reach leaves the torch on its bearer',
+        remote.offsetX === undefined && near(remote.aimAngleDeg, 90)
+      );
+    });
+  }
+  {
+    // What this client TELLS everyone about its own torch.
+    const w = torchWorld();
+    const { channel, clock } = makeChannel();
+    withWorld(w, () => {
+      w.setMouse(400, 100);
+      ok('torch (send): the first aim is sent', channel.tick(clock.t) === true);
+      ok('torch (send): …with its reach', w.emitted[0].msg.d === 300 && near(w.emitted[0].msg.a, 90));
+      clock.advance(120);
+      w.setMouse(250, 100);
+      ok(
+        'torch (send): pulling the torch in without turning it is still news',
+        channel.tick(clock.t) === true && w.emitted[1].msg.d === 150
+      );
+      clock.advance(120);
+      w.setMouse(1500, 100);
+      channel.tick(clock.t);
+      ok(
+        'torch (send): what is sent is the leash-clamped reach, not the raw cursor distance',
+        w.emitted[2].msg.d === 600
+      );
+    });
+    const wall = torchWorld({ checkCollision: () => ({ x: 250, y: 100 }) });
+    const { channel: c2, clock: k2 } = makeChannel();
+    withWorld(wall, () => {
+      wall.setMouse(400, 100);
+      c2.tick(k2.t);
+      ok(
+        'torch (send): …and the wall-clamped one, so every screen agrees where the torch is',
+        wall.emitted[0].msg.d === 138
+      );
+    });
+  }
+  {
+    // A wall test that fails must not take the torch (or the frame) down.
+    const records = [];
+    const priorLevel = getLogLevel();
+    setLogLevel(LogLevel.ERROR + 1);
+    setLogSink((entry) => records.push(entry));
+    try {
+      const w = torchWorld({
+        checkCollision: () => {
+          throw new Error('collision backend not ready');
+        },
+      });
+      const { channel } = makeChannel();
+      withWorld(w, () => {
+        w.setMouse(400, 100);
+        const [snap] = channel.annotate(readActivePlayerCarriedLightTokens());
+        ok('torch (fault): a failing wall test leaves the torch at the cursor', near(snap.offsetX, 300));
+        channel.annotate(readActivePlayerCarriedLightTokens());
+        ok(
+          'torch (fault): …logged once, with the reason',
+          records.filter((r) => r.level === 'error').length === 1 && /wall/i.test(records[0].message)
+        );
+      });
+    } finally {
+      setLogSink(null);
+      setLogLevel(priorLevel);
+    }
+  }
+  {
+    const gm = makeWorld({
+      userId: 'gm',
+      isGM: true,
+      tokens: [{ id: 't1', actorId: 'actor-p1', x: 100, y: 100, mode: 'torch', owners: ['p1'] }],
+    });
+    const { channel } = makeChannel();
+    withWorld(gm, () => {
+      gm.setMouse(400, 100);
+      const [snap] = channel.annotate(readActivePlayerCarriedLightTokens());
+      ok('torch: a GM’s cursor never carries a player’s torch around', snap.offsetX === undefined);
+    });
   }
 
   // ======================================================================

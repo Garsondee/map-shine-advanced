@@ -10,6 +10,12 @@
  */
 import {
   PLAYER_AIM_MODES,
+  PLAYER_AIM_REACH_MODES,
+  AIM_MAX_REACH_PX,
+  AIM_TORCH_WALL_MARGIN_PX,
+  clampTorchReachPx,
+  offsetFromAim,
+  smoothScalar,
   AIM_MESSAGE_TYPE,
   AIM_MIN_DISTANCE_PX,
   normalizeAngleDeg,
@@ -25,8 +31,7 @@ import {
 } from '../player-aim.js';
 import {
   tokenRotationToForwardVector,
-  buildOnePlayerLightSource,
-  PLAYER_LIGHT_RENDERED_MODES,
+  PLAYER_LIGHT_AIMED_MODES,
 } from '../../effects/lighting/player-light-geometry.js';
 
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) < eps;
@@ -375,21 +380,152 @@ export function run(t) {
   }
 
   // ======================================================================
-  // the mode list agrees with the beam presets it mirrors
+  // the mode lists agree with the presets they mirror
+  // ======================================================================
+  ok(
+    'PLAYER_AIM_MODES is exactly the rendered modes the presets mark aimed',
+    PLAYER_LIGHT_AIMED_MODES.length === PLAYER_AIM_MODES.length &&
+      PLAYER_LIGHT_AIMED_MODES.every((m) => PLAYER_AIM_MODES.includes(m))
+  );
+  ok(
+    'flashlight and torch are both aimable',
+    PLAYER_AIM_MODES.includes('flashlight') && PLAYER_AIM_MODES.includes('torch')
+  );
+  ok(
+    'only the torch is held out (has a reach) — a flashlight’s beam is fixed length',
+    PLAYER_AIM_REACH_MODES.length === 1 &&
+      PLAYER_AIM_REACH_MODES[0] === 'torch' &&
+      PLAYER_AIM_REACH_MODES.every((m) => PLAYER_AIM_MODES.includes(m))
+  );
+
+  // ======================================================================
+  // a held torch's reach
   // ======================================================================
   {
-    const beamModes = PLAYER_LIGHT_RENDERED_MODES.filter((mode) => {
-      const src = buildOnePlayerLightSource(
-        { tokenId: 'x', x: 0, y: 0, elevation: 0, mode },
-        { modes: { [mode]: true } }
-      );
-      return src?.falloffModel === 'beam';
-    });
+    const M = AIM_TORCH_WALL_MARGIN_PX;
     ok(
-      'PLAYER_AIM_MODES is exactly the rendered modes whose light is a beam',
-      beamModes.length === PLAYER_AIM_MODES.length && beamModes.every((m) => PLAYER_AIM_MODES.includes(m))
+      'reach: as far as the cursor when nothing limits it',
+      clampTorchReachPx({ cursorDistancePx: 150, leashPx: 600 }) === 150
     );
-    ok('flashlight is aimable', PLAYER_AIM_MODES.includes('flashlight'));
-    ok('torch is not (yet)', !PLAYER_AIM_MODES.includes('torch'));
+    ok('reach: never past the leash', clampTorchReachPx({ cursorDistancePx: 900, leashPx: 600 }) === 600);
+    ok(
+      'reach: stops a margin short of a wall in the way',
+      clampTorchReachPx({ cursorDistancePx: 500, leashPx: 600, wallHitDistancePx: 300 }) === 300 - M
+    );
+    ok(
+      'reach: a wall beyond the cursor does not pull it back',
+      clampTorchReachPx({ cursorDistancePx: 200, leashPx: 600, wallHitDistancePx: 300 }) === 200
+    );
+    ok(
+      'reach: a wall right against the bearer gives 0, never negative',
+      clampTorchReachPx({ cursorDistancePx: 500, leashPx: 600, wallHitDistancePx: 3 }) === 0
+    );
+    ok(
+      'reach: no wall (null) is no limit',
+      clampTorchReachPx({ cursorDistancePx: 80, leashPx: 600, wallHitDistancePx: null }) === 80
+    );
+    ok('reach: garbage in is 0, not NaN', clampTorchReachPx({ cursorDistancePx: NaN, leashPx: 600 }) === 0);
+
+    const east = offsetFromAim(90, 100);
+    const north = offsetFromAim(0, 100);
+    const sw = offsetFromAim(225, 100);
+    ok('offset: east is +X', near(east.x, 100) && near(east.y, 0, 1e-9));
+    ok('offset: north is −Y (canvas Y grows downward)', near(north.x, 0, 1e-9) && near(north.y, -100));
+    ok('offset: south-west is −X, +Y', near(sw.x, -Math.SQRT1_2 * 100, 1e-9) && near(sw.y, Math.SQRT1_2 * 100, 1e-9));
+    ok('offset: a zero reach is no displacement', offsetFromAim(123, 0).x === 0);
+
+    ok('scalar ease: one time constant closes ~63%', near(smoothScalar(0, 100, 70, 70), 100 * (1 - Math.exp(-1))));
+    ok('scalar ease: no time passed changes nothing', smoothScalar(5, 100, 0, 70) === 5);
+    ok('scalar ease: a zero time constant jumps', smoothScalar(5, 100, 16, 0) === 100);
+  }
+
+  // ======================================================================
+  // reach on the wire
+  // ======================================================================
+  {
+    const held = encodeAimMessage({ tokenId: 't', angleDeg: 10, userId: 'u', reachPx: 187.6 });
+    ok('wire: a torch’s message carries its reach, rounded to a pixel', held.d === 188);
+    ok('wire: …which survives JSON', decodeAimMessage(JSON.parse(JSON.stringify(held))).reachPx === 188);
+    const beam = encodeAimMessage({ tokenId: 't', angleDeg: 10, userId: 'u' });
+    ok('wire: a flashlight’s message carries no reach field at all', !('d' in beam));
+    ok('wire: …and decodes to a null reach', decodeAimMessage(beam).reachPx === null);
+    ok(
+      'wire: a null reach is not sent',
+      !('d' in encodeAimMessage({ tokenId: 't', angleDeg: 10, userId: 'u', reachPx: null }))
+    );
+    ok(
+      'wire: a negative reach is not sent',
+      !('d' in encodeAimMessage({ tokenId: 't', angleDeg: 10, userId: 'u', reachPx: -5 }))
+    );
+    ok(
+      'wire: an absurd reach is capped on the way out',
+      encodeAimMessage({ tokenId: 't', angleDeg: 10, userId: 'u', reachPx: 1e9 }).d === AIM_MAX_REACH_PX
+    );
+    const base = { type: AIM_MESSAGE_TYPE, tokenId: 't', userId: 'u', a: 10 };
+    ok(
+      'wire: a bad reach never costs the good angle beside it',
+      (() => {
+        const d = decodeAimMessage({ ...base, d: 'far' });
+        return d !== null && near(d.angleDeg, 10) && d.reachPx === null;
+      })()
+    );
+    ok('wire: a negative reach decodes to none', decodeAimMessage({ ...base, d: -3 }).reachPx === null);
+    ok('wire: an infinite reach decodes to none', decodeAimMessage({ ...base, d: Infinity }).reachPx === null);
+    ok(
+      'wire: an absurd reach is capped on the way in',
+      decodeAimMessage({ ...base, d: 1e9 }).reachPx === AIM_MAX_REACH_PX
+    );
+  }
+
+  // ======================================================================
+  // reach in the send policy
+  // ======================================================================
+  {
+    const p = createAimSendPolicy();
+    p.decide('a', 90, 0, 100);
+    ok('policy: a big reach change alone is sent (once past the rate cap)', near(p.decide('a', 90, 150, 140), 90));
+    ok('policy: a reach wobble under the dead band is not', p.decide('a', 90, 300, 142) === null);
+    ok('policy: …but it settles, so the torch ends exactly', near(p.decide('a', 90, 450, 142), 90));
+    ok(
+      'policy: an unchanged aim and reach stay quiet until the keepalive',
+      p.decide('a', 90, 1000, 142) === null && near(p.decide('a', 90, 3000, 142), 90)
+    );
+  }
+  {
+    const p = createAimSendPolicy();
+    p.decide('a', 90, 0, null);
+    ok('policy: a reach appearing counts as a real change', near(p.decide('a', 90, 120, 50), 90));
+    ok('policy: …and so does it vanishing', near(p.decide('a', 90, 250, null), 90));
+  }
+  {
+    const p = createAimSendPolicy();
+    p.decide('a', 90, 0, 100);
+    ok('policy: a reach that keeps changing inside the rate cap still waits', p.decide('a', 90, 50, 400) === null);
+  }
+
+  // ======================================================================
+  // reach in the remote store
+  // ======================================================================
+  {
+    const s = createRemoteAimStore({ tauMs: 70 });
+    s.receive('a', 90, 0, 100);
+    const first = s.sampleAim('a', 0);
+    ok('store: a new entry snaps to its angle AND reach', near(first.angleDeg, 90) && near(first.reachPx, 100));
+    s.receive('a', 90, 100, 300);
+    ok('store: a new reach has not moved yet the instant it lands', near(s.sampleAim('a', 100).reachPx, 100));
+    ok(
+      'store: …and eases toward it, one time constant later ~63% of the way',
+      near(s.sampleAim('a', 170).reachPx, 100 + 200 * (1 - Math.exp(-1)), 1e-9)
+    );
+    ok('store: sample() still answers with just the angle', near(s.sample('a', 170), 90));
+  }
+  {
+    const s = createRemoteAimStore();
+    s.receive('a', 10, 0);
+    ok('store: a message with no reach has none', s.sampleAim('a', 0).reachPx === null);
+    s.receive('a', 10, 100, 250);
+    ok('store: a reach that appears snaps (nothing to ease from)', s.sampleAim('a', 100).reachPx === 250);
+    s.receive('a', 10, 200, null);
+    ok('store: a reach that disappears is gone', s.sampleAim('a', 200).reachPx === null);
   }
 }

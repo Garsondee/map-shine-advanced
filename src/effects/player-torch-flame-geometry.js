@@ -48,6 +48,7 @@
  */
 
 import { hexToRgb01 } from './candle-flame-geometry.js';
+import { resolveLightPosition } from './lighting/player-light-geometry.js';
 
 /**
  * Every currently-active, currently-allowed TORCH (not flashlight, not a
@@ -68,8 +69,9 @@ export function buildPlayerTorchFlameAnchors(tokenSnapshots, permissions) {
   for (const snap of list) {
     if (snap?.mode !== 'torch') continue; // a flashlight or a vision-mode pick — no flame body
     if (permissions?.modes?.torch !== true) continue; // the GM has not (or no longer) allowed torch on this scene
-    const x = Number(snap?.x);
-    const y = Number(snap?.y);
+    // The flame rides the light: wherever the bearer holds the torch out to
+    // (`resolveLightPosition`), not the token's centre.
+    const { x, y } = resolveLightPosition(snap);
     if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
     out.push({ x, y, id: String(snap?.tokenId ?? '') });
   }

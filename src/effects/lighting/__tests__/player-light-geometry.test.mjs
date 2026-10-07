@@ -9,6 +9,8 @@ import {
   buildPlayerLightSources,
   PLAYER_LIGHT_RENDERED_MODES,
   resolveBeamDirection,
+  resolveLightPosition,
+  PLAYER_LIGHT_AIMED_MODES,
   tokenRotationToForwardVector,
 } from '../player-light-geometry.js';
 
@@ -234,6 +236,57 @@ export function run(t) {
     ok(
       'a non-finite position produces no descriptor',
       buildOnePlayerLightSource({ tokenId: 't', x: NaN, y: 0, mode: 'torch' }, ALLOW_ALL) === null
+    );
+  }
+
+  // ======================================================================
+  // a held light sits where its bearer holds it, not on the token
+  // ======================================================================
+  {
+    const p = resolveLightPosition({ x: 100, y: 200, offsetX: 30, offsetY: -40 });
+    ok('position: the token centre plus the held displacement', p.x === 130 && p.y === 160);
+    const bare = resolveLightPosition({ x: 100, y: 200 });
+    ok('position: no displacement is the token centre, exactly as before', bare.x === 100 && bare.y === 200);
+    ok(
+      'position: an unusable displacement is ignored, not propagated as NaN',
+      (() => {
+        const q = resolveLightPosition({ x: 5, y: 6, offsetX: NaN, offsetY: 'far' });
+        return q.x === 5 && q.y === 6;
+      })()
+    );
+    ok(
+      'position: a missing token position stays non-finite, so the builder refuses it',
+      Number.isNaN(resolveLightPosition({}).x)
+    );
+
+    const held = buildOnePlayerLightSource(
+      { tokenId: 'h1', x: 100, y: 100, mode: 'torch', offsetX: 300, offsetY: 0 },
+      ALLOW_ALL
+    );
+    ok('a torch held 300 px east is a light at x=400', held.x === 400 && held.y === 100);
+    ok(
+      'the wall-clip fallback polygon is centred on the HELD position, not the token',
+      near((held.shapePoints[0] + held.shapePoints[32]) / 2, 400, 1e-6)
+    );
+    const still = buildOnePlayerLightSource({ tokenId: 'h1', x: 100, y: 100, mode: 'torch' }, ALLOW_ALL);
+    const moving = buildOnePlayerLightSource(
+      { tokenId: 'h1', x: 100, y: 100, mode: 'torch', offsetX: 217, offsetY: -63 },
+      ALLOW_ALL
+    );
+    ok(
+      'a torch swinging under the cursor keeps its flicker seed (it is the TOKEN’s, not the light’s)',
+      still.animation.seed === moving.animation.seed
+    );
+    const flash = buildOnePlayerLightSource(
+      { tokenId: 'h2', x: 100, y: 100, mode: 'flashlight', offsetX: 50, offsetY: 50 },
+      ALLOW_ALL
+    );
+    ok('an offset on a non-torch light is still just a position (the channel never sets one)', flash.x === 150);
+    ok(
+      'the aimed modes are the torch and the flashlight',
+      PLAYER_LIGHT_AIMED_MODES.length === 2 &&
+        PLAYER_LIGHT_AIMED_MODES.includes('torch') &&
+        PLAYER_LIGHT_AIMED_MODES.includes('flashlight')
     );
   }
 

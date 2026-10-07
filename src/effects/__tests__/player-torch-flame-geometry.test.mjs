@@ -25,6 +25,18 @@ export function run(t) {
     ok('the anchor carries the token position', out[0].x === 10 && out[0].y === 20);
     ok('the anchor carries the token id', out[0].id === 'a');
   }
+  {
+    // The flame rides the light: wherever the bearer holds the torch out to.
+    const out = buildPlayerTorchFlameAnchors(
+      [{ tokenId: 'a', x: 100, y: 200, mode: 'torch', offsetX: 30, offsetY: -40 }],
+      ALLOW_TORCH
+    );
+    ok('a held torch’s flame is at the held position, not the token', out[0].x === 130 && out[0].y === 160);
+    ok(
+      'an unusable displacement leaves the flame on the token',
+      buildPlayerTorchFlameAnchors([{ tokenId: 'a', x: 7, y: 8, mode: 'torch', offsetX: NaN }], ALLOW_TORCH)[0].x === 7
+    );
+  }
   ok(
     'the GM disallowing torch on this scene produces zero anchors, even for a real torch token',
     buildPlayerTorchFlameAnchors([{ tokenId: 'x', x: 0, y: 0, mode: 'torch' }], DISALLOW_TORCH).length === 0

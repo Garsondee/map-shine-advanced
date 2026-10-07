@@ -1,6 +1,6 @@
 /**
- * PLAYER AIM — THE PURE HALF of "a carried flashlight points where its bearer's
- * cursor points" (mythica-machina-press#77). The live half — Foundry's pointer,
+ * PLAYER AIM — THE PURE HALF of "a carried light follows its bearer's cursor"
+ * (mythica-machina-press#77): a flashlight is pointed at it, a torch held out to it. The live half — Foundry's pointer,
  * the module socket, a timer — is `player-aim-channel.js`; everything here is a
  * total function or a small state machine over plain numbers, so the rules that
  * decide what a client SENDS and what a client SHOWS are Node-tested instead of
@@ -26,9 +26,10 @@
  * rotation it overrides; nothing converts between two conventions on the way to
  * the shader. (`player-aim.test.mjs` locks the two together.)
  *
- * WHAT TRAVELS is one angle per aiming token, not a cursor position: a remote
- * client has no use for the cursor beyond its direction from the token, and the
- * beam already shows exactly that much.
+ * WHAT TRAVELS is one angle per aiming token — plus, for a held torch, one
+ * reach (px from the token, already clamped to the leash and the walls by the
+ * owner's client) — not a cursor position: a remote client has no use for the
+ * cursor beyond where the light ends up, and that is all it is sent.
  *
  * WHY IT IS SHAPED THIS WAY:
  *   - SEND POLICY (`createAimSendPolicy`) is rate-capped at Foundry's own cursor
@@ -49,14 +50,28 @@
  */
 
 /**
- * The carried-light modes whose light has a direction the bearer can aim. Kept
- * as this zone's own copy rather than imported from `effects/lighting/player-
- * light-geometry.js` (a leaf adapter imports nothing above itself, and
- * `player-light-mode.js` already sets the precedent of a per-zone mode list);
- * `player-aim.test.mjs` fails if it ever disagrees with the presets that carry a
- * `beam` falloff.
+ * The carried-light modes the bearer's cursor steers. Kept as this zone's own
+ * copy rather than imported from `effects/lighting/player-light-geometry.js` (a
+ * leaf adapter imports nothing above itself, and `player-light-mode.js` already
+ * sets the precedent of a per-zone mode list); `player-aim.test.mjs` fails if it
+ * ever disagrees with the presets marked `aimed` there.
  */
-export const PLAYER_AIM_MODES = Object.freeze(['flashlight']);
+export const PLAYER_AIM_MODES = Object.freeze(['flashlight', 'torch']);
+
+/**
+ * The subset whose light is HELD OUT at the cursor rather than just pointed at
+ * it: a torch sits at the end of an arm, so besides a bearing it needs a REACH
+ * (how far from the bearer). A flashlight's beam has a fixed length today, so
+ * its reach is neither sent nor drawn.
+ */
+export const PLAYER_AIM_REACH_MODES = Object.freeze(['torch']);
+
+/** How far from its bearer a torch may be held, in grid squares (V2: 10 units x 3 = 30 ft at 5 ft/square). */
+export const AIM_TORCH_LEASH_SQUARES = 6;
+/** A torch held against a wall stops this far short of it, so its flame never sits inside the wall (V2: 12 px). */
+export const AIM_TORCH_WALL_MARGIN_PX = 12;
+/** The torch lags the cursor slightly — an arm, not a laser pointer (V2 sprang it). */
+export const AIM_TORCH_EASE_TAU_MS = 90;
 
 /** The `type` this feature's messages carry on the shared module socket. */
 export const AIM_MESSAGE_TYPE = 'playerAim';
@@ -77,6 +92,10 @@ const MAX_ID_LENGTH = 64;
 
 export const AIM_SEND_MIN_INTERVAL_MS = 100;
 export const AIM_SEND_MIN_DELTA_DEG = 0.75;
+/** A reach change smaller than this is not worth a message (a torch's light radius is hundreds of px). */
+export const AIM_SEND_MIN_REACH_DELTA_PX = 4;
+/** Refuse an absurd reach off the wire; a leash is a handful of grid squares. */
+export const AIM_MAX_REACH_PX = 20000;
 export const AIM_SEND_SETTLE_MS = 250;
 export const AIM_SEND_KEEPALIVE_MS = 2500;
 /** Longer than the keepalive by a wide margin, so one lost message never expires an aim. */
@@ -155,6 +174,45 @@ export function smoothAngleDeg(currentDeg, targetDeg, dtMs, tauMs) {
   return normalizeAngleDeg(currentDeg + shortestAngleDeltaDeg(currentDeg, targetDeg) * k);
 }
 
+/**
+ * One step of the same exponential ease for a plain number (a torch's reach).
+ * @returns {number}
+ */
+export function smoothScalar(current, target, dtMs, tauMs) {
+  if (!(dtMs > 0)) return current;
+  if (!(tauMs > 0)) return target;
+  return current + (target - current) * (1 - Math.exp(-dtMs / tauMs));
+}
+
+/**
+ * How far from its bearer a held torch sits: as far as the cursor, but never
+ * past the leash, and never closer to a wall than `marginPx`.
+ *
+ * @param {{cursorDistancePx: number, leashPx: number, wallHitDistancePx?: number|null, marginPx?: number}} args
+ *   `wallHitDistancePx` is how far along the bearer→cursor ray the first
+ *   blocking wall is, or `null` if the way is clear.
+ * @returns {number} px, ≥ 0.
+ */
+export function clampTorchReachPx({
+  cursorDistancePx,
+  leashPx,
+  wallHitDistancePx = null,
+  marginPx = AIM_TORCH_WALL_MARGIN_PX,
+}) {
+  let reach = Math.min(cursorDistancePx, leashPx);
+  if (Number.isFinite(wallHitDistancePx)) reach = Math.min(reach, wallHitDistancePx - marginPx);
+  return Number.isFinite(reach) ? Math.max(0, reach) : 0;
+}
+
+/**
+ * The displacement `reachPx` along a bearing, in canvas pixels (Y down).
+ * @returns {{x: number, y: number}}
+ */
+export function offsetFromAim(angleDeg, reachPx) {
+  const rad = (angleDeg * Math.PI) / 180;
+  return { x: Math.sin(rad) * reachPx, y: -Math.cos(rad) * reachPx };
+}
+
 // ---------------------------------------------------------------------------
 // Wire format
 // ---------------------------------------------------------------------------
@@ -164,9 +222,13 @@ export function smoothAngleDeg(currentDeg, targetDeg, dtMs, tauMs) {
  * @returns {{type: string, tokenId: string, userId: string, a: number}|null} the
  *   socket payload, or `null` if any field is unusable (nothing half-valid is sent).
  */
-export function encodeAimMessage({ tokenId, angleDeg, userId } = {}) {
+export function encodeAimMessage({ tokenId, angleDeg, userId, reachPx } = {}) {
   if (!isId(tokenId) || !isId(userId) || !Number.isFinite(angleDeg)) return null;
-  return { type: AIM_MESSAGE_TYPE, tokenId, userId, a: quantizeAimAngleDeg(angleDeg) };
+  const msg = { type: AIM_MESSAGE_TYPE, tokenId, userId, a: quantizeAimAngleDeg(angleDeg) };
+  // `d` only when there is a reach to carry (a held torch): a flashlight's message stays as small as before,
+  // and a receiver that predates it simply ignores the extra field.
+  if (Number.isFinite(reachPx) && reachPx >= 0) msg.d = Math.min(AIM_MAX_REACH_PX, Math.round(reachPx));
+  return msg;
 }
 
 /**
@@ -174,13 +236,17 @@ export function encodeAimMessage({ tokenId, angleDeg, userId } = {}) {
  * with other features (`impulse-broadcast.js`), so anything that is not this
  * feature's own message — or is malformed — decodes to `null`.
  * @param {*} msg
- * @returns {{tokenId: string, userId: string, angleDeg: number}|null}
+ * @returns {{tokenId: string, userId: string, angleDeg: number, reachPx: number|null}|null}
+ *   `reachPx` is `null` when the message carries none (or an unusable one — a
+ *   bad reach never costs the good angle next to it).
  */
 export function decodeAimMessage(msg) {
   if (!msg || typeof msg !== 'object' || msg.type !== AIM_MESSAGE_TYPE) return null;
   if (!isId(msg.tokenId) || !isId(msg.userId)) return null;
   if (typeof msg.a !== 'number' || !Number.isFinite(msg.a)) return null;
-  return { tokenId: msg.tokenId, userId: msg.userId, angleDeg: normalizeAngleDeg(msg.a) };
+  const reachPx =
+    typeof msg.d === 'number' && Number.isFinite(msg.d) && msg.d >= 0 ? Math.min(AIM_MAX_REACH_PX, msg.d) : null;
+  return { tokenId: msg.tokenId, userId: msg.userId, angleDeg: normalizeAngleDeg(msg.a), reachPx };
 }
 
 function isId(value) {
@@ -235,45 +301,61 @@ export function createLocalAimTracker({ minDistancePx = AIM_MIN_DISTANCE_PX } = 
  * wire. Sends when, in order of precedence:
  *   1. nothing has been sent for this token yet;
  *   2. — never sooner than `minIntervalMs` after the previous send, whatever else is true —
- *   3. the angle moved at least `minDeltaDeg`;
- *   4. it moved by any amount and `settleMs` has passed (the FINAL angle of a
- *      sweep always lands exactly, not up to `minDeltaDeg` short);
+ *   3. the angle moved at least `minDeltaDeg`, or the reach (a held torch's
+ *      distance from its bearer; `null` for a flashlight) moved at least
+ *      `minReachDeltaPx`;
+ *   4. either moved by any amount and `settleMs` has passed (the FINAL aim of a
+ *      sweep always lands exactly, not up to the dead band short);
  *   5. `keepaliveMs` has passed (late joiners and dropped volatile messages).
+ * A reach appearing or disappearing counts as a big move.
  *
- * @param {{minIntervalMs?: number, minDeltaDeg?: number, settleMs?: number, keepaliveMs?: number}} [options]
+ * @param {{minIntervalMs?: number, minDeltaDeg?: number, minReachDeltaPx?: number, settleMs?: number, keepaliveMs?: number}} [options]
  */
 export function createAimSendPolicy({
   minIntervalMs = AIM_SEND_MIN_INTERVAL_MS,
   minDeltaDeg = AIM_SEND_MIN_DELTA_DEG,
+  minReachDeltaPx = AIM_SEND_MIN_REACH_DELTA_PX,
   settleMs = AIM_SEND_SETTLE_MS,
   keepaliveMs = AIM_SEND_KEEPALIVE_MS,
 } = {}) {
   let tokenId = null;
   let lastSentDeg = null;
+  let lastSentReach = null;
   let lastSentMs = 0;
   return {
     /**
      * @param {string} id - the aiming token.
      * @param {number} angleDeg - its current aim.
      * @param {number} nowMs
+     * @param {number|null} [reachPx] - its current reach, if it has one.
      * @returns {number|null} the (wire-quantized) angle to send now, or `null` to stay quiet.
+     *   The caller sends its own current reach alongside; this only decides WHEN.
      */
-    decide(id, angleDeg, nowMs) {
+    decide(id, angleDeg, nowMs, reachPx = null) {
       if (id !== tokenId) {
         tokenId = id;
         lastSentDeg = null;
+        lastSentReach = null;
       }
       if (!Number.isFinite(angleDeg) || !Number.isFinite(nowMs)) return null;
       const angle = quantizeAimAngleDeg(angleDeg);
+      const reach = Number.isFinite(reachPx) ? Math.round(reachPx) : null;
       let send = lastSentDeg === null;
       if (!send) {
         const sinceMs = nowMs - lastSentMs;
         if (sinceMs < minIntervalMs) return null;
         const deltaDeg = Math.abs(shortestAngleDeltaDeg(lastSentDeg, angle));
-        send = deltaDeg >= minDeltaDeg || (deltaDeg > 0 && sinceMs >= settleMs) || sinceMs >= keepaliveMs;
+        let deltaReach = 0;
+        if (reach !== lastSentReach) {
+          deltaReach = reach === null || lastSentReach === null ? Infinity : Math.abs(reach - lastSentReach);
+        }
+        const moved = deltaDeg >= minDeltaDeg || deltaReach >= minReachDeltaPx;
+        const changed = deltaDeg > 0 || deltaReach > 0;
+        send = moved || (changed && sinceMs >= settleMs) || sinceMs >= keepaliveMs;
       }
       if (!send) return null;
       lastSentDeg = angle;
+      lastSentReach = reach;
       lastSentMs = nowMs;
       return angle;
     },
@@ -281,6 +363,7 @@ export function createAimSendPolicy({
     reset() {
       tokenId = null;
       lastSentDeg = null;
+      lastSentReach = null;
     },
   };
 }
@@ -310,8 +393,19 @@ export function createRemoteAimStore({
   tauMs = AIM_SMOOTHING_TAU_MS,
   maxEntries = AIM_MAX_REMOTE_ENTRIES,
 } = {}) {
-  /** @type {Map<string, {targetDeg: number, currentDeg: number, receivedMs: number, sampledMs: number}>} */
+  /** @type {Map<string, {targetDeg: number, currentDeg: number, targetReach: number|null, currentReach: number|null, receivedMs: number, sampledMs: number}>} */
   const entries = new Map();
+
+  /** Advance one entry's displayed angle and reach to `nowMs`, toward the targets in force. */
+  function advance(e, nowMs) {
+    const dtMs = nowMs - e.sampledMs;
+    e.currentDeg = smoothAngleDeg(e.currentDeg, e.targetDeg, dtMs, tauMs);
+    e.currentReach =
+      e.targetReach === null || e.currentReach === null
+        ? e.targetReach
+        : smoothScalar(e.currentReach, e.targetReach, dtMs, tauMs);
+    e.sampledMs = nowMs;
+  }
 
   function evictOldest() {
     let oldestId = null;
@@ -330,27 +424,49 @@ export function createRemoteAimStore({
      * @param {string} tokenId
      * @param {number} angleDeg
      * @param {number} nowMs
+     * @param {number|null} [reachPx] - a held torch's distance from its bearer; `null` for none.
      * @returns {boolean} whether it was stored (false for an unusable id/angle/time).
      */
-    receive(tokenId, angleDeg, nowMs) {
+    receive(tokenId, angleDeg, nowMs, reachPx = null) {
       if (!isId(tokenId) || !Number.isFinite(angleDeg) || !Number.isFinite(nowMs)) return false;
       const targetDeg = normalizeAngleDeg(angleDeg);
+      const targetReach = Number.isFinite(reachPx) && reachPx >= 0 ? reachPx : null;
       const existing = entries.get(tokenId);
       if (existing && nowMs - existing.receivedMs <= staleMs) {
-        existing.currentDeg = smoothAngleDeg(
-          existing.currentDeg,
-          existing.targetDeg,
-          nowMs - existing.sampledMs,
-          tauMs
-        );
-        existing.sampledMs = nowMs;
+        advance(existing, nowMs); // up to NOW, toward the OLD targets — see this factory's header
         existing.targetDeg = targetDeg;
+        existing.targetReach = targetReach;
+        // A reach that has only just appeared has nothing to ease from: snap to it.
+        if (existing.currentReach === null) existing.currentReach = targetReach;
         existing.receivedMs = nowMs;
         return true;
       }
       if (!existing && entries.size >= maxEntries) evictOldest();
-      entries.set(tokenId, { targetDeg, currentDeg: targetDeg, receivedMs: nowMs, sampledMs: nowMs });
+      entries.set(tokenId, {
+        targetDeg,
+        currentDeg: targetDeg,
+        targetReach,
+        currentReach: targetReach,
+        receivedMs: nowMs,
+        sampledMs: nowMs,
+      });
       return true;
+    },
+    /**
+     * @param {string} tokenId
+     * @param {number} nowMs
+     * @returns {{angleDeg: number, reachPx: number|null}|null} the smoothed aim to
+     *   draw, or `null` if there is no fresh one.
+     */
+    sampleAim(tokenId, nowMs) {
+      const e = entries.get(tokenId);
+      if (!e) return null;
+      if (nowMs - e.receivedMs > staleMs) {
+        entries.delete(tokenId);
+        return null;
+      }
+      advance(e, nowMs);
+      return { angleDeg: e.currentDeg, reachPx: e.currentReach };
     },
     /**
      * @param {string} tokenId
@@ -358,15 +474,7 @@ export function createRemoteAimStore({
      * @returns {number|null} the smoothed angle to draw, or `null` if there is no fresh aim.
      */
     sample(tokenId, nowMs) {
-      const e = entries.get(tokenId);
-      if (!e) return null;
-      if (nowMs - e.receivedMs > staleMs) {
-        entries.delete(tokenId);
-        return null;
-      }
-      e.currentDeg = smoothAngleDeg(e.currentDeg, e.targetDeg, nowMs - e.sampledMs, tauMs);
-      e.sampledMs = nowMs;
-      return e.currentDeg;
+      return this.sampleAim(tokenId, nowMs)?.angleDeg ?? null;
     },
     /** Drop every expired entry (bounds memory when tokens vanish without a last message). */
     prune(nowMs) {

@@ -165,6 +165,34 @@ export function resolveTorchBurn01(snapshot) {
   return Number.isFinite(b) ? Math.min(1, Math.max(0, b)) : 1;
 }
 
+/** Below this burn a torch starts to redden — the amber shifts toward ember red as it dies. */
+const TORCH_EMBER_START_BURN01 = 0.7;
+/** The colour a dying torch fades to (a coal, not a flame). */
+const TORCH_EMBER_HEX = '#c7301a';
+
+/**
+ * How far a guttering torch has shifted from its normal colour toward ember red:
+ * 0 at and above burn 0.7, 1 at the point it goes out. (V2 swapped the whole
+ * flame to red the instant it guttered; a blend reads as dying, not as a switch.)
+ * @param {number} burn01
+ * @returns {number} 0..1
+ */
+export function resolveTorchEmberMix01(burn01) {
+  const span = TORCH_EMBER_START_BURN01 - PLAYER_TORCH_OUT_BELOW_BURN01;
+  return Math.min(1, Math.max(0, (TORCH_EMBER_START_BURN01 - burn01) / span));
+}
+
+/** `#rrggbb` blended toward the ember red by `mix01`, as `#rrggbb`. */
+export function mixTowardEmberHex(baseHex, mix01) {
+  const a = hexToRgb01(baseHex);
+  const b = hexToRgb01(TORCH_EMBER_HEX);
+  const to = (i) =>
+    Math.round((a[i] + (b[i] - a[i]) * mix01) * 255)
+      .toString(16)
+      .padStart(2, '0');
+  return `#${to(0)}${to(1)}${to(2)}`;
+}
+
 /** A guttering torch lights a smaller area: its radius falls to this fraction of full as it dies. */
 const TORCH_MIN_RADIUS_FRACTION = 0.1;
 
@@ -321,7 +349,9 @@ export function buildOnePlayerLightSource(tokenSnapshot, permissions) {
     luminosity01: preset.luminosity01,
     hasColor: true,
     alpha01: preset.alpha01 * burn01,
-    color: hexToRgb01(preset.colorHex),
+    // A dying torch reddens toward ember (the flame and embers follow, see
+    // player-torch-flame-geometry.js); a full-burn one is exactly its preset colour.
+    color: hexToRgb01(mixTowardEmberHex(preset.colorHex, burn01 < 1 ? resolveTorchEmberMix01(burn01) : 0)),
     falloffModel: preset.falloffModel,
     // FLASHLIGHT BEAM (Stage 2a) — `null` for every non-beam mode (torch
     // today). `beamDirection` is the bearer's LIVE aim — their cursor, local or

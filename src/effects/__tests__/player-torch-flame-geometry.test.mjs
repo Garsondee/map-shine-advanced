@@ -42,6 +42,42 @@ export function run(t) {
     );
   }
   {
+    // A dying torch's flame (and, below, its embers) reddens.
+    const at = (burn01) =>
+      buildPlayerTorchFlameAnchors([{ tokenId: 'a', x: 1, y: 2, mode: 'torch', burn01 }], ALLOW_TORCH);
+    ok('a full-burn flame keeps the default colour', at(1)[0].params === undefined);
+    ok('a merely dim flame keeps its colour too', at(0.8)[0].params.useCustomColor === undefined);
+    const dying = at(0.1)[0];
+    ok(
+      'a dying flame takes a custom colour…',
+      dying.params.useCustomColor === true && /^#[0-9a-f]{6}$/.test(dying.params.customColor)
+    );
+    ok('…redder than amber (less green than #ffaa00)', parseInt(dying.params.customColor.slice(3, 5), 16) < 0xaa);
+    ok(
+      'the anchor carries its burn so the viewer can tell it changed',
+      dying.burn01 === 0.1 && at(1)[0].burn01 === undefined
+    );
+
+    const arrays = computeTorchEmberArrays(
+      [
+        { x: 0, y: 0, id: 'amber' },
+        { x: 0, y: 0, id: 'coal', params: { useCustomColor: true, customColor: '#c7301a' } },
+      ],
+      { emberCount: 2, sizePx: 10, colorHex: '#ffb347' }
+    );
+    const colorOf = (quad) => [arrays.colors[quad * 12], arrays.colors[quad * 12 + 1], arrays.colors[quad * 12 + 2]];
+    ok(
+      'embers default to the batch colour',
+      Math.abs(colorOf(0)[0] - 1) < 1e-6 && Math.abs(colorOf(0)[1] - 0xb3 / 255) < 1e-6
+    );
+    ok(
+      '…an anchor’s custom colour reddens only its own embers',
+      Math.abs(colorOf(2)[1] - 0x30 / 255) < 1e-6 &&
+        Math.abs(colorOf(3)[1] - 0x30 / 255) < 1e-6 &&
+        Math.abs(colorOf(1)[1] - 0xb3 / 255) < 1e-6
+    );
+  }
+  {
     // A torch that gutters: a smaller flame, then none.
     const at = (burn01) =>
       buildPlayerTorchFlameAnchors([{ tokenId: 'a', x: 1, y: 2, mode: 'torch', burn01 }], ALLOW_TORCH);

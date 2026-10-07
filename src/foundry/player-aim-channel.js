@@ -74,7 +74,7 @@
  */
 
 import { createLogger } from '../core/log.js';
-import { perfNowMs } from '../core/frame-clock.js';
+import { perfNowMs, wallClockMs } from '../core/frame-clock.js';
 import { readMouseHoverPoint, readGridSizePixels } from './scene-occlusion-sources.js';
 import { resolveViewerToken, isViewingUserGM } from './viewer-token.js';
 import { readActivePlayerCarriedLightTokens } from './player-light-mode.js';
@@ -89,6 +89,8 @@ import {
   AIM_TORCH_EASE_TAU_MS,
   AIM_TORCH_FADE_SQUARES,
   AIM_TORCH_TOUCH_MARGIN_PX,
+  AIM_TORCH_WANDER_PX,
+  torchWanderOffset,
   encodeAimMessage,
   decodeAimMessage,
   clampTorchReachPx,
@@ -118,11 +120,15 @@ const UNRESOLVED = Symbol('unresolved');
 /**
  * @param {object} [options] - every option is a test seam; production passes none.
  * @param {() => number} [options.now] - monotonic milliseconds (`core/frame-clock.js#perfNowMs`).
+ * @param {() => number} [options.wallNow] - wall-clock milliseconds, for effects every client must agree on.
+ * @param {number} [options.wanderPx] - a held torch's hand tremor, px (0 = none).
  * @param {(fn: () => void, ms: number) => *} [options.setIntervalFn]
  * @param {(handle: *) => void} [options.clearIntervalFn]
  */
 export function createPlayerAimChannel({
   now = perfNowMs,
+  wallNow = wallClockMs,
+  wanderPx = AIM_TORCH_WANDER_PX,
   setIntervalFn = (fn, ms) => setInterval(fn, ms),
   clearIntervalFn = (handle) => clearInterval(handle),
 } = {}) {
@@ -260,6 +266,7 @@ export function createPlayerAimChannel({
     if (!Array.isArray(snapshots) || snapshots.length === 0) return snapshots;
     try {
       const nowMs = now();
+      const wallMs = wallNow();
       let localToken = UNRESOLVED;
       for (const snap of snapshots) {
         if (!PLAYER_AIM_MODES.includes(snap?.mode)) continue;
@@ -283,8 +290,11 @@ export function createPlayerAimChannel({
           if (PLAYER_AIM_HELD_MODES.includes(snap.mode)) {
             if (aim.burn01 !== null) snap.burn01 = aim.burn01;
             const offset = offsetFromAim(aim.angleDeg, aim.reachPx);
-            snap.offsetX = offset.x;
-            snap.offsetY = offset.y;
+            // The hand's tremor is added at DRAW time on every client, from the wall
+            // clock and the token id, so it is never sent — see torchWanderOffset.
+            const wander = torchWanderOffset(snap.tokenId, wallMs, wanderPx);
+            snap.offsetX = offset.x + wander.x;
+            snap.offsetY = offset.y + wander.y;
           }
         }
       }

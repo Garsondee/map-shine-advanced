@@ -12,6 +12,8 @@ import {
   resolveLightPosition,
   resolveBeamReach01,
   resolveTorchBurn01,
+  resolveTorchEmberMix01,
+  mixTowardEmberHex,
   PLAYER_TORCH_OUT_BELOW_BURN01,
   PLAYER_LIGHT_HELD_MODES,
   PLAYER_LIGHT_AIMED_MODES,
@@ -293,6 +295,48 @@ export function run(t) {
     );
     const beam = buildOnePlayerLightSource({ tokenId: 'g', x: 0, y: 0, mode: 'flashlight', burn01: 0 }, ALLOW_ALL);
     ok('burn: a flashlight has no burn — it ignores one', beam !== null && beam.alpha01 > 0);
+  }
+
+  // ======================================================================
+  // a dying torch reddens
+  // ======================================================================
+  {
+    ok(
+      'ember: no shift at full burn or while merely dimmed',
+      resolveTorchEmberMix01(1) === 0 && resolveTorchEmberMix01(0.7) === 0
+    );
+    ok('ember: fully red at the point it goes out', near(resolveTorchEmberMix01(PLAYER_TORCH_OUT_BELOW_BURN01), 1));
+    ok(
+      'ember: shifts steadily between',
+      resolveTorchEmberMix01(0.5) > resolveTorchEmberMix01(0.6) &&
+        resolveTorchEmberMix01(0.2) > resolveTorchEmberMix01(0.5)
+    );
+    ok('ember: never out of range', resolveTorchEmberMix01(-3) === 1 && resolveTorchEmberMix01(9) === 0);
+    ok('ember: a zero blend is the colour it started as', mixTowardEmberHex('#ff9a42', 0) === '#ff9a42');
+    ok('ember: a full blend is the coal red', mixTowardEmberHex('#ff9a42', 1) === '#c7301a');
+    const mid = mixTowardEmberHex('#ffaa00', 0.5);
+    ok(
+      'ember: a half blend is between, redder than amber',
+      mid > '#c7301a' && mid < '#ffaa00' && parseInt(mid.slice(3, 5), 16) < 0xaa
+    );
+
+    const full = buildOnePlayerLightSource({ tokenId: 'e', x: 0, y: 0, mode: 'torch' }, ALLOW_ALL);
+    const same = buildOnePlayerLightSource({ tokenId: 'e', x: 0, y: 0, mode: 'torch', burn01: 0.9 }, ALLOW_ALL);
+    ok(
+      'ember: a torch that is only a little dim keeps its exact colour',
+      same.color.every((c, i) => c === full.color[i])
+    );
+    const dying = buildOnePlayerLightSource({ tokenId: 'e', x: 0, y: 0, mode: 'torch', burn01: 0.1 }, ALLOW_ALL);
+    ok(
+      'ember: a dying torch’s light is redder — less green and blue, red kept',
+      dying.color[1] < full.color[1] && dying.color[2] < full.color[2] && dying.color[0] > 0.7
+    );
+    const flash = buildOnePlayerLightSource({ tokenId: 'e', x: 0, y: 0, mode: 'flashlight', burn01: 0.1 }, ALLOW_ALL);
+    const flashNormal = buildOnePlayerLightSource({ tokenId: 'e', x: 0, y: 0, mode: 'flashlight' }, ALLOW_ALL);
+    ok(
+      'ember: a flashlight never reddens',
+      flash.color.every((c, i) => c === flashNormal.color[i])
+    );
   }
 
   // ======================================================================

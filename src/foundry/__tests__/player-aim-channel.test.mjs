@@ -152,9 +152,10 @@ function makeTimers() {
   };
 }
 
-function makeChannel(clock = makeClock()) {
+function makeChannel(clock = makeClock(), options = {}) {
   const timers = makeTimers();
-  const channel = createPlayerAimChannel({ now: clock.now, ...timers });
+  // wanderPx 0: every position assertion below is exact; the tremor has its own tests.
+  const channel = createPlayerAimChannel({ now: clock.now, wallNow: clock.now, wanderPx: 0, ...timers, ...options });
   return { channel, clock, timers };
 }
 
@@ -963,6 +964,73 @@ export function run(t) {
       w.setMouse(3000, 100);
       const [snap] = channel.annotate(readActivePlayerCarriedLightTokens());
       ok('burn: dragging a flashlight far away does not put it out', snap.burn01 === undefined);
+    });
+  }
+
+  // ======================================================================
+  // a held torch's hand tremor
+  // ======================================================================
+  {
+    const w = torchWorld();
+    const clock = makeClock(1000);
+    const still = makeChannel(clock, { wanderPx: 0 }).channel;
+    const trembling = makeChannel(clock, { wanderPx: 5 }).channel;
+    withWorld(w, () => {
+      w.setMouse(400, 100);
+      const [a] = still.annotate(readActivePlayerCarriedLightTokens());
+      const [b] = trembling.annotate(readActivePlayerCarriedLightTokens());
+      ok('tremor: moves the torch off the exact held point', b.offsetX !== a.offsetX || b.offsetY !== a.offsetY);
+      ok(
+        'tremor: …by no more than its amplitude',
+        Math.abs(b.offsetX - a.offsetX) <= 6 && Math.abs(b.offsetY - a.offsetY) <= 6
+      );
+      const [c] = trembling.annotate(readActivePlayerCarriedLightTokens());
+      ok(
+        'tremor: two reads in the same instant agree (light and flame never disagree)',
+        c.offsetX === b.offsetX && c.offsetY === b.offsetY
+      );
+      const seen = new Set();
+      for (let i = 0; i < 400; i++) {
+        clock.advance(25);
+        const [s] = trembling.annotate(readActivePlayerCarriedLightTokens());
+        seen.add(`${s.offsetX},${s.offsetY}`);
+      }
+      ok('tremor: it keeps moving over time', seen.size > 6);
+      ok('tremor: …but on a coarse grid, so the wall sweep is not redone every frame', seen.size < 60);
+      ok(
+        'tremor: the sender is not told about it (a flicker is not news)',
+        (() => {
+          w.emitted.length = 0;
+          clock.advance(500);
+          trembling.tick(clock.t);
+          const first = w.emitted.length;
+          clock.advance(500);
+          trembling.tick(clock.t);
+          return first === 1 && w.emitted.length === 1;
+        })()
+      );
+    });
+  }
+  {
+    // On another screen the same tremor appears, from the same wall clock.
+    const w = makeWorld({
+      tokens: [
+        { id: 't1', actorId: 'actor-p1', x: 100, y: 100, mode: 'flashlight', owners: ['p1'] },
+        { id: 't2', actorId: 'actor-p2', x: 600, y: 600, mode: 'torch', owners: ['p2'] },
+      ],
+    });
+    const clock = makeClock(7000);
+    const one = makeChannel(clock, { wanderPx: 5 }).channel;
+    const two = makeChannel(clock, { wanderPx: 5 }).channel;
+    withWorld(w, () => {
+      for (const ch of [one, two]) ch.handleMessage({ type: 'playerAim', tokenId: 't2', userId: 'p2', a: 90, d: 200 });
+      const [, r1] = one.annotate(readActivePlayerCarriedLightTokens());
+      const [, r2] = two.annotate(readActivePlayerCarriedLightTokens());
+      ok(
+        'tremor (remote): two clients at the same moment draw the same torch',
+        r1.offsetX === r2.offsetX && r1.offsetY === r2.offsetY
+      );
+      ok('tremor (remote): …and it is not exactly the relayed point', r1.offsetX !== 200 || r1.offsetY !== 0);
     });
   }
 

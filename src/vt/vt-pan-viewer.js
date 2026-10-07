@@ -6472,8 +6472,9 @@ export async function startVtPanViewer({
     function torchAnchorSignature(anchors) {
       let h = (anchors.length * 1000003) | 0;
       for (const a of anchors) {
-        // + the flame's own size: a guttering torch shrinks in place, and must still redraw.
-        h = (h * 31 + Math.round(a.x) + Math.round(a.y) * 7 + Math.round((a.params?.customSizePx ?? 0) * 4) * 13) | 0;
+        // + the torch's burn: a guttering torch shrinks and reddens in place (its
+        // anchor carries a size and a colour derived from it), and must still redraw.
+        h = (h * 31 + Math.round(a.x) + Math.round(a.y) * 7 + Math.round((a.burn01 ?? 1) * 50) * 13) | 0;
       }
       return h;
     }

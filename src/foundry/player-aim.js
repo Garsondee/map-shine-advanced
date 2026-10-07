@@ -99,6 +99,16 @@ export const AIM_TORCH_TOUCH_MARGIN_PX = 12;
 /** A change in burn smaller than this many percent is not worth a message. */
 export const AIM_SEND_MIN_BURN_DELTA_PCT = 3;
 
+/**
+ * A held torch is not held perfectly still: a hand tremor of this many px (V2's
+ * `wanderPixels` was 28, which on a 100 px grid read as a drunk; this is a
+ * tremor). Quantized to `AIM_TORCH_WANDER_STEP_PX` because the light's wall-clip
+ * cache is keyed on its EXACT position — unquantized wander would miss it, and
+ * re-sweep the walls, every single frame for every torch, even a still one.
+ */
+export const AIM_TORCH_WANDER_PX = 5;
+export const AIM_TORCH_WANDER_STEP_PX = 2;
+
 /** The torch lags the cursor slightly — an arm, not a laser pointer (V2 sprang it). */
 export const AIM_TORCH_EASE_TAU_MS = 90;
 
@@ -240,6 +250,49 @@ export function clampTorchReachPx({
 export function offsetFromAim(angleDeg, reachPx) {
   const rad = (angleDeg * Math.PI) / 180;
   return { x: Math.sin(rad) * reachPx, y: -Math.cos(rad) * reachPx };
+}
+
+/** A small, stable hash of a string to [0, 1) — one per (token, salt), for phases. */
+function hash01(text, salt) {
+  let h = 2166136261 ^ salt;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  h ^= h >>> 15;
+  h = Math.imul(h, 2246822519);
+  h ^= h >>> 13;
+  return (h >>> 0) / 4294967296;
+}
+
+/**
+ * The tremor of a hand holding a torch: a smooth, bounded, deterministic wander
+ * around where the torch is held, a pure function of the wall clock and the
+ * token id — so every client computes the SAME wander for the same moment and
+ * nothing about it crosses the network. Two sines per axis at unrelated rates
+ * (~1-3 Hz) read as organic rather than as an orbit; the phases come from the
+ * token id, so two bearers' torches never wander in step.
+ *
+ * @param {string} tokenId
+ * @param {number} wallMs - wall-clock milliseconds (`core/frame-clock.js#wallClockMs`).
+ * @param {number} [amplitudePx]
+ * @param {number} [stepPx] - the grid the result is snapped to (see AIM_TORCH_WANDER_PX).
+ * @returns {{x: number, y: number}} never beyond ±amplitude (plus half a step).
+ */
+export function torchWanderOffset(
+  tokenId,
+  wallMs,
+  amplitudePx = AIM_TORCH_WANDER_PX,
+  stepPx = AIM_TORCH_WANDER_STEP_PX
+) {
+  if (!(amplitudePx > 0) || !Number.isFinite(wallMs)) return { x: 0, y: 0 };
+  const t = wallMs / 1000;
+  const id = String(tokenId ?? '');
+  const tau = Math.PI * 2;
+  const wave = (rateA, rateB, salt) =>
+    0.65 * Math.sin(tau * (rateA * t + hash01(id, salt))) + 0.35 * Math.sin(tau * (rateB * t + hash01(id, salt + 1)));
+  const snap = (v) => (stepPx > 0 ? Math.round(v / stepPx) * stepPx : v);
+  return { x: snap(amplitudePx * wave(1.1, 2.7, 11)), y: snap(amplitudePx * wave(0.9, 3.1, 31)) };
 }
 
 /**

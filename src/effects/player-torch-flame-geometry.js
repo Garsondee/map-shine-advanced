@@ -47,10 +47,12 @@
  * @module effects/player-torch-flame-geometry
  */
 
-import { hexToRgb01 } from './candle-flame-geometry.js';
+import { hexToRgb01, resolveAnchorColorHex } from './candle-flame-geometry.js';
 import {
   resolveLightPosition,
   resolveTorchBurn01,
+  resolveTorchEmberMix01,
+  mixTowardEmberHex,
   PLAYER_TORCH_OUT_BELOW_BURN01,
 } from './lighting/player-light-geometry.js';
 
@@ -60,6 +62,9 @@ import {
  * overrides it per anchor, through the same `params.customSizePx` a candle uses.
  */
 export const PLAYER_TORCH_FLAME_SIZE_PX = 26;
+
+/** A torch's flame colour at full burn (the candle flame's own default amber). */
+const FLAME_BASE_HEX = '#ffaa00';
 
 /** A guttering flame shrinks to this fraction of full as it dies. */
 const FLAME_MIN_SIZE_FRACTION = 0.3;
@@ -93,7 +98,17 @@ export function buildPlayerTorchFlameAnchors(tokenSnapshots, permissions) {
     const anchor = { x, y, id: String(snap?.tokenId ?? '') };
     if (burn01 < 1) {
       const scale = FLAME_MIN_SIZE_FRACTION + (1 - FLAME_MIN_SIZE_FRACTION) * burn01;
-      anchor.params = { useCustomSize: true, customSizePx: PLAYER_TORCH_FLAME_SIZE_PX * scale };
+      const mix = resolveTorchEmberMix01(burn01);
+      // The size and colour overrides a candle already understands, built in one
+      // literal (never poked into `params` afterwards — `params/one-owner`).
+      anchor.params = {
+        useCustomSize: true,
+        customSizePx: PLAYER_TORCH_FLAME_SIZE_PX * scale,
+        ...(mix > 0 ? { useCustomColor: true, customColor: mixTowardEmberHex(FLAME_BASE_HEX, mix) } : {}),
+      };
+      // The viewer redraws the flame when this changes (its anchor signature hashes
+      // it), so a guttering torch's size AND colour both track the burn.
+      anchor.burn01 = burn01;
     }
     out.push(anchor);
   }
@@ -150,7 +165,6 @@ export function computeTorchEmberArrays(anchors, { emberCount = 5, sizePx, color
   const list = Array.isArray(anchors) ? anchors : [];
   const perAnchor = Math.max(0, Math.floor(Number(emberCount) || 0));
   const half = (Number(sizePx) > 0 ? Number(sizePx) : 1) / 2;
-  const [cr, cg, cb] = hexToRgb01(colorHex);
   const maxQuads = list.length * perAnchor;
   const positions = new Float32Array(maxQuads * 4 * 3);
   const uvs = new Float32Array(maxQuads * 4 * 2);
@@ -163,6 +177,9 @@ export function computeTorchEmberArrays(anchors, { emberCount = 5, sizePx, color
     const cx = Number(anchor?.x);
     const cy = Number(anchor?.y);
     if (!Number.isFinite(cx) || !Number.isFinite(cy)) continue; // belt-and-braces, mirrors computeCandleFlameArrays
+    // A guttering torch's embers redden with its flame (per-anchor colour, the
+    // same override a candle uses); every other ember is the batch colour.
+    const [cr, cg, cb] = hexToRgb01(resolveAnchorColorHex(anchor, colorHex));
     for (let e = 0; e < perAnchor; e++) {
       const seed = deriveEmberSeed(anchor?.id, e);
       const q = quadCount;

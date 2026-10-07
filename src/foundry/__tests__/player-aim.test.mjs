@@ -15,6 +15,9 @@ import {
   AIM_FLASHLIGHT_REACH_CAP_PX,
   torchBurnTarget01,
   createTorchBurn,
+  torchWanderOffset,
+  AIM_TORCH_WANDER_PX,
+  AIM_TORCH_WANDER_STEP_PX,
   AIM_MAX_REACH_PX,
   AIM_TORCH_WALL_MARGIN_PX,
   clampTorchReachPx,
@@ -421,6 +424,70 @@ export function run(t) {
     PLAYER_LIGHT_HELD_MODES.length === PLAYER_AIM_HELD_MODES.length &&
       PLAYER_LIGHT_HELD_MODES.every((m) => PLAYER_AIM_HELD_MODES.includes(m))
   );
+
+  // ======================================================================
+  // a hand's tremor
+  // ======================================================================
+  {
+    const A = AIM_TORCH_WANDER_PX;
+    const S = AIM_TORCH_WANDER_STEP_PX;
+    let bounded = true;
+    let onGrid = true;
+    let moved = false;
+    let maxStep = 0;
+    let prev = torchWanderOffset('tok', 0);
+    let sumX = 0;
+    let n = 0;
+    for (let ms = 0; ms <= 60000; ms += 16) {
+      const w = torchWanderOffset('tok', ms);
+      bounded = bounded && Math.abs(w.x) <= A + S / 2 && Math.abs(w.y) <= A + S / 2;
+      onGrid = onGrid && w.x % S === 0 && w.y % S === 0;
+      moved = moved || w.x !== prev.x || w.y !== prev.y;
+      maxStep = Math.max(maxStep, Math.abs(w.x - prev.x), Math.abs(w.y - prev.y));
+      sumX += w.x;
+      n += 1;
+      prev = w;
+    }
+    ok('wander: stays within its amplitude', bounded);
+    ok('wander: lands on the step grid (so the wall-clip cache is not defeated)', onGrid);
+    ok('wander: actually moves', moved);
+    ok('wander: is smooth — no frame jumps more than a step or two', maxStep <= S * 2);
+    ok('wander: is centred on where the torch is held, not drifting off it', Math.abs(sumX / n) < A * 0.25);
+    ok(
+      'wander: is a pure function of its inputs (every client computes the same tremor)',
+      torchWanderOffset('tok', 12345).x === torchWanderOffset('tok', 12345).x &&
+        torchWanderOffset('tok', 12345).y === torchWanderOffset('tok', 12345).y
+    );
+    let differs = 0;
+    for (let ms = 0; ms < 5000; ms += 50) {
+      const a = torchWanderOffset('alpha', ms);
+      const b = torchWanderOffset('bravo', ms);
+      if (a.x !== b.x || a.y !== b.y) differs += 1;
+    }
+    ok('wander: two bearers’ torches do not tremble in step', differs > 60);
+    ok(
+      'wander: zero amplitude is perfectly still',
+      (() => {
+        const w = torchWanderOffset('tok', 999, 0);
+        return w.x === 0 && w.y === 0;
+      })()
+    );
+    ok(
+      'wander: a bad clock is still, not NaN',
+      (() => {
+        const w = torchWanderOffset('tok', NaN);
+        return w.x === 0 && w.y === 0;
+      })()
+    );
+    ok(
+      'wander: a custom amplitude scales it',
+      (() => {
+        let m = 0;
+        for (let ms = 0; ms < 20000; ms += 20) m = Math.max(m, Math.abs(torchWanderOffset('tok', ms, 20, 0).x));
+        return m > 12 && m <= 20;
+      })()
+    );
+  }
 
   // ======================================================================
   // a torch guttering past its leash

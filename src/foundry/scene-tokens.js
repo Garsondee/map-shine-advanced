@@ -181,6 +181,28 @@ export function pickTokenAt(tokenItems, point, gridSize, gridType) {
 export const TOKEN_DOCUMENTS = Object.freeze(['Token']);
 
 /**
+ * How Foundry fades a token while it is being dragged — `PlaceableObject#
+ * _getTargetAlpha` (placeables/placeable-object.mjs:640):
+ * `isDragging ? (isPreview ? 0.8 : (hasPreview ? 0.4 : 1)) : 1`. The preview
+ * clone is drawn at 0.8 and the token it stands in for drops to 0.4, so the two
+ * read as "here" and "going there". Copied, not invented: a different pair
+ * would make the drag look wrong next to every other Foundry placeable.
+ */
+export const DRAG_PREVIEW_ALPHA = 0.8;
+export const DRAG_ORIGINAL_ALPHA = 0.4;
+
+/**
+ * The draw-list id of the drag ghost for token `originalId`. STABLE per token
+ * (not per drag): the viewer hides, never disposes, an item that leaves the
+ * draw list, so the second drag of a token finds its ghost already loaded.
+ * @param {string} originalId
+ * @returns {string}
+ */
+export function dragPreviewItemId(originalId) {
+  return `token:${originalId}:drag-preview`;
+}
+
+/**
  * Collect every visible token on the visible levels as a drawable.
  *
  * @param {object} sceneDoc
@@ -191,11 +213,26 @@ export const TOKEN_DOCUMENTS = Object.freeze(['Token']);
  *   `tokenFootprint`'s own doc (`CONST.GRID_TYPES`, defaults to SQUARE).
  * @param {(src: string) => string} [options.getRouteFn]
  * @param {boolean} [options.isGM] - a GM sees hidden tokens, dimmed.
+ * @param {Array<{originalId: string, document: object}>} [options.dragPreviews] -
+ *   the live drag previews (`readTokenDragPreviews`, foundry/token-drag-previews.js):
+ *   `document` is the preview clone's own TokenDocument, which Foundry mutates on
+ *   every pointer move; `originalId` is the id of the token being dragged. Each
+ *   becomes a GHOST item beside the real tokens, and the token it was cloned from
+ *   is dimmed (see DRAG_*_ALPHA).
  * @returns {{items: Array<object>, skipped: Array<{name: string, reason: string}>}}
  */
 export function collectTokens(
   sceneDoc,
-  { visibleLevelIds = [], knownLevelIds, viewedLevelId, gridSize, gridType, getRouteFn, isGM = true } = {}
+  {
+    visibleLevelIds = [],
+    knownLevelIds,
+    viewedLevelId,
+    gridSize,
+    gridType,
+    getRouteFn,
+    isGM = true,
+    dragPreviews = [],
+  } = {}
 ) {
   // No knownLevelIds => strict matching, no fallback. See resolveTokenLevel: with
   // only the VISIBLE ids, a token on a real-but-hidden floor is indistinguishable
@@ -207,14 +244,28 @@ export function collectTokens(
   const items = [];
   const skipped = [];
 
-  for (const token of tokenDocsOf(sceneDoc)) {
+  // A drag ghost is a token like any other as far as collection goes — same level
+  // resolution, same footprint, same drop reasons — so it runs through the SAME
+  // loop rather than a second collector that would have to be kept in step. The
+  // only differences are the handful of fields set under `preview` below.
+  const draggedIds = new Set(dragPreviews.map((p) => p.originalId));
+  const entries = [
+    ...tokenDocsOf(sceneDoc).map((token) => ({ token, preview: null })),
+    ...dragPreviews.map((preview) => ({ token: preview.document, preview })),
+  ];
+
+  for (const { token, preview } of entries) {
     // EVERY drop is reported with its reason. A bare `continue` here is what made
     // three tokens vanish while the report said skippedItems: [] -- confidently
     // claiming nothing was skipped while quietly binning them (author-reported
     // 2026-07-16, "only one token renders"). A silent skip is worse than a crash:
     // it manufactures the impression that collection ran cleanly.
     const drop = (reason) =>
-      skipped.push({ name: token?.name || token?.id || '(unnamed token)', id: token?.id, reason });
+      skipped.push({
+        name: `${token?.name || token?.id || '(unnamed token)'}${preview ? ' (drag preview)' : ''}`,
+        id: token?.id,
+        reason,
+      });
 
     if (token?.hidden && !isGM) {
       drop('hidden, and this client is not a GM');
@@ -241,12 +292,21 @@ export function collectTokens(
       continue;
     }
 
+    // Foundry fades a token while it is dragged — see DRAG_*_ALPHA.
+    const dragFade = preview ? DRAG_PREVIEW_ALPHA : draggedIds.has(token.id) ? DRAG_ORIGINAL_ALPHA : 1;
+
     items.push({
-      id: `token:${token.id}`,
+      id: preview ? dragPreviewItemId(preview.originalId) : `token:${token.id}`,
       kind: 'token',
+      // A GHOST, not a token: it paints above every real token at its elevation
+      // (Foundry draws previews in a container above all placeables), it must
+      // never take part in occlusion, and it must not flash the black
+      // disclosure-safety stand-in a first-ever load gets — the renderer keys off
+      // `dragPreview` for all three.
+      ...(preview ? { dragPreview: true } : {}),
       key: makeLayerKey({
         elevation: token.elevation ?? 0,
-        sortLayer: SORT_LAYERS.TOKENS,
+        sortLayer: preview ? SORT_LAYERS.TOKEN_EFFECTS : SORT_LAYERS.TOKENS,
         sort: token.sort ?? 0,
         zIndex: 0,
       }),
@@ -254,15 +314,17 @@ export function collectTokens(
       levelId: level,
       visibleOnLevelIds: on,
       // Foundry dims a hidden token to 0.5 for the GM, exactly as it does a tile.
-      alpha: (token.alpha ?? 1) * (token.hidden ? 0.5 : 1),
+      alpha: (token.alpha ?? 1) * (token.hidden ? 0.5 : 1) * dragFade,
       tint: normalizeTint(token.texture?.tint),
       rotation: token.lockRotation ? 0 : (token.rotation ?? 0),
       hidden: !!token.hidden,
       disposition: token.disposition ?? 0,
       // The RADIAL disc radius for the occlusion mask's G channel — real document
       // data (`occludable.radius`), carried now so the producer is purely additive.
-      // 0 means this token contributes no disc.
-      occludableRadius: token.occludable?.radius ?? 0,
+      // 0 means this token contributes no disc. A ghost never contributes one: the
+      // real token is still standing where it was, and a second disc following the
+      // cursor would fade roofs the token is not under.
+      occludableRadius: preview ? 0 : (token.occludable?.radius ?? 0),
       // `footprint` (top-level) is a SNAPSHOT for hit-testing utilities
       // (`pickTokenAt`/`tokenContainsPoint`) that don't need live-tracking. It
       // is NOT what the renderer places art from — `_placement` intentionally

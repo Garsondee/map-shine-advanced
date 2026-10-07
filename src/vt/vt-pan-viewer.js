@@ -11623,6 +11623,9 @@ export async function startVtPanViewer({
       let testTokenCount = 0;
       for (const it of lastItems) {
         if (it.kind !== 'token') continue;
+        // A drag GHOST is a picture of where the token MIGHT go, not a token: the
+        // real one is still standing at its origin and is what fades roofs.
+        if (it.dragPreview) continue;
         if (it.hidden) continue; // dimmed-for-GM tokens still occlude in real Foundry; hidden ones do not
 
         // FADE/VISION-fallback test point — EVERY non-hidden token, gathered
@@ -15977,7 +15980,15 @@ export async function startVtPanViewer({
         // SYNCHRONOUSLY, before `wi.loadPromise` below has even started its
         // first `await` — see `buildDisclosurePlaceholderTile`'s own header
         // (a few dozen lines below) for the full mechanism this closes.
-        buildDisclosurePlaceholderTile(wi, state, item, imageW, imageH);
+        //
+        // NOT FOR A DRAG GHOST: the placeholder is an opaque black quad that
+        // stands in so a not-yet-loaded floor/tile cannot DISCLOSE what is
+        // beneath it. A ghost discloses nothing (it is the art of a token the
+        // viewer can already see, at 0.8 alpha), and on its first-ever load the
+        // black quad would flash over the very token being dragged. `wi.tiles`
+        // simply stays empty until the real art commits, which every reader of
+        // it already tolerates (a ghost is invisible, not black, while loading).
+        if (!item.dragPreview) buildDisclosurePlaceholderTile(wi, state, item, imageW, imageH);
       }
 
       // wi.loadPromise: the async body below ALWAYS resolves (every error path

@@ -406,6 +406,94 @@ export function run(t) {
     );
   }
 
+  // ---- THE DRAG GHOST -----------------------------------------------------
+  {
+    // Foundry does not move a dragged token; it moves a CLONE. Before ghosts
+    // existed the clone's art went into a suppressed PIXI group and the drag
+    // showed an outline with no picture. A ghost is a second draw item built
+    // from the clone's own document — NOT a snapshot of it — so it follows the
+    // cursor without any further events.
+    const hero = mkToken('hero', { x: 100, y: 100, level: 'ground', sort: 5, occludable: { radius: 3 } });
+    const other = mkToken('other', { x: 500, y: 100, level: 'ground' });
+    const scene = mkScene([hero, other]);
+    // The clone shares the original's id (`clone({}, {keepId: true})`) and is a
+    // distinct, mutable document.
+    const cloneDoc = { ...hero };
+    const opts = { visibleLevelIds: ['ground'], dragPreviews: [{ originalId: 'hero', document: cloneDoc }] };
+    const { items, skipped } = collectTokens(scene, opts);
+    const byId = Object.fromEntries(items.map((i) => [i.id, i]));
+
+    t.ok('a ghost is collected alongside both real tokens', items.length === 3 && skipped.length === 0);
+    const ghost = byId['token:hero:drag-preview'];
+    t.ok('the ghost has its own stable id and is flagged', !!ghost && ghost.dragPreview === true);
+    t.ok('the ghost is still kind "token", so every token consumer treats it as one', ghost.kind === 'token');
+    t.ok('real tokens are NOT flagged as ghosts', !byId['token:hero'].dragPreview && !byId['token:other'].dragPreview);
+    t.ok("the ghost draws the clone's art", ghost.src === 'hero.webp');
+
+    // Foundry's _getTargetAlpha: preview 0.8, the token it stands in for 0.4.
+    t.ok('the ghost is drawn at 0.8, like Foundry', ghost.alpha === 0.8);
+    t.ok('the token being dragged dims to 0.4, like Foundry', byId['token:hero'].alpha === 0.4);
+    t.ok('a token NOT being dragged is untouched', byId['token:other'].alpha === 1);
+    t.ok(
+      'without previews nothing is dimmed and no ghost exists',
+      collectTokens(scene, { visibleLevelIds: ['ground'] }).items.every((i) => i.alpha === 1 && !i.dragPreview)
+    );
+
+    // A ghost must not fade roofs: the real token is still standing at its origin.
+    t.ok('the ghost contributes no occlusion disc even if the token has one', ghost.occludableRadius === 0);
+    t.ok('the real token still does', byId['token:hero'].occludableRadius === 3);
+
+    // It paints above every real token at its elevation, whatever their `sort`.
+    const order = sortByLayer(items).map((i) => i.id);
+    t.ok(
+      'the ghost paints above every real token at its elevation, even one with a higher sort',
+      order.indexOf('token:hero:drag-preview') > order.indexOf('token:other') &&
+        order.indexOf('token:hero:drag-preview') > order.indexOf('token:hero')
+    );
+
+    // THE POINT: placement is re-read from the clone's document, so mutating it
+    // (which is all Foundry does on a pointer move) moves the ghost.
+    const dims = { width: 1000, height: 1000 };
+    const before = computeItemPlacement(ghost, { width: 100, height: 100 }, dims);
+    cloneDoc.x = 700;
+    cloneDoc.y = 300;
+    const after = computeItemPlacement(ghost, { width: 100, height: 100 }, dims);
+    t.ok(
+      'the ghost follows the clone document with no re-collection',
+      before.x === 150 && before.y === 150 && after.x === 750 && after.y === 350
+    );
+    t.ok(
+      'while the real token stays exactly where the document left it',
+      computeItemPlacement(byId['token:hero'], { width: 100, height: 100 }, dims).x === 150
+    );
+
+    // A ghost is subject to the same level and visibility rules as a token, and
+    // is reported (not silently dropped) when it is not shown.
+    const away = collectTokens(scene, {
+      visibleLevelIds: ['upper'],
+      knownLevelIds: ['ground', 'upper'],
+      viewedLevelId: 'upper',
+      dragPreviews: [{ originalId: 'hero', document: cloneDoc }],
+    });
+    t.ok(
+      'a ghost on a level that is not shown is dropped WITH a reason that says it was a drag preview',
+      away.items.length === 0 && away.skipped.some((s) => /drag preview/.test(s.name))
+    );
+
+    // A hidden token's ghost: dimmed for the GM (0.5 x 0.8), absent for a player.
+    const ghostly = mkToken('ghostly', { hidden: true, level: 'ground' });
+    const hiddenOpts = {
+      visibleLevelIds: ['ground'],
+      dragPreviews: [{ originalId: 'ghostly', document: { ...ghostly } }],
+    };
+    const gmGhost = collectTokens(mkScene([ghostly]), hiddenOpts).items.find((i) => i.dragPreview);
+    t.ok("the GM sees a hidden token's ghost at 0.5 x 0.8", Math.abs(gmGhost.alpha - 0.4) < 1e-9);
+    t.ok(
+      'a player does not see it',
+      collectTokens(mkScene([ghostly]), { ...hiddenOpts, isGM: false }).items.length === 0
+    );
+  }
+
   // ---- THE BRIDGE: a token under a roof, through the real sort law --------
   {
     // The whole reason tokens come first. A roof tile at elevation 9 and a token

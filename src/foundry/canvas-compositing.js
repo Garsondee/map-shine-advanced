@@ -223,12 +223,13 @@
  *   dependency above at once. Until then, §3's two-lever suppression is the
  *   scoped fix. Keep suppression per-group and reversible so that day is an
  *   addition, not a rewrite.
- * - The DRAG PREVIEW's art. A preview Token is a real Token, so its `_draw`
- *   also pushes a mesh into `primary` — suppressed with everything else. MSA
- *   draws from DOCUMENTS and a preview is not a document; it lives at
- *   `canvas.tokens.preview.children` (layers/base/placeables-layer.mjs:47).
- *   Expect to drag an outline with no picture until that is wired. Real,
- *   bounded, and NOT silently pretended away.
+ * - (WIRED 2026-10-07 — see foundry/token-drag-previews.js.) The DRAG PREVIEW's
+ *   art. A preview Token is a real Token, so its `_draw` also pushes a mesh into
+ *   `primary` — suppressed with everything else. MSA draws from DOCUMENTS and a
+ *   preview is not a document; it lives at `canvas.tokens.preview.children`
+ *   (layers/base/placeables-layer.mjs:47). Until it was wired a drag showed an
+ *   outline with no picture; now each dragged token's clone becomes a ghost draw
+ *   item (`collectTokens({dragPreviews})`) and the real token dims, as in Foundry.
  */
 
 import { createLogger } from '../core/log.js';

@@ -529,6 +529,8 @@ import {
   collectSceneLayers,
   collectTokens,
   diagnoseTokens,
+  readTokenDragPreviews,
+  watchTokenDragPreviews,
   SCENE_LAYER_DOCUMENTS,
   TOKEN_DOCUMENTS,
   computeSceneDimensions,
@@ -13607,7 +13609,16 @@ function install() {
         // collectTokens tell "unassigned" (defaultLevel0000 — what a freshly
         // dragged token carries) from "on a floor you cannot currently see". Pass
         // only the visible ids and an upstairs token gets dragged down here.
-        ...collectTokens(sceneDoc, { visibleLevelIds, knownLevelIds: allLevelIds, viewedLevelId, isGM }).items,
+        // `dragPreviews`: Foundry drags a CLONE of a token, not the token — see
+        // foundry/token-drag-previews.js. Read fresh on every rebuild, like the
+        // scene documents beside it, so the ghost exists exactly while a clone does.
+        ...collectTokens(sceneDoc, {
+          visibleLevelIds,
+          knownLevelIds: allLevelIds,
+          viewedLevelId,
+          isGM,
+          dragPreviews: readTokenDragPreviews(),
+        }).items,
       ];
     };
 
@@ -15877,6 +15888,16 @@ function install() {
     // costs one string build and no GPU work. Cheap enough that covering the
     // whole family beats guessing which single one is authoritative.
     for (const hook of ['moveToken', 'stopToken', 'pauseToken']) redrawOn(hook);
+
+    // THE DRAG GHOST. A dragged token is not moved — Foundry moves a clone of it
+    // (canvas.tokens.preview), and the clone is not a scene document, so none of
+    // the CRUD hooks above ever hear about it: you dragged an outline with no
+    // picture. The clone appearing/disappearing is the only thing that changes the
+    // draw list; its MOVEMENT is picked up per-frame like any token's. See
+    // foundry/token-drag-previews.js.
+    watchTokenDragPreviews((hook) => {
+      refreshVtPanViewerItems(hook).catch((err) => log.error(`${hook} redraw failed:`, err));
+    });
 
     // `switchToPreparedFloor` — the shared prepare-then-commit floor-switch
     // orchestrator this same-scene branch calls below — is defined up at

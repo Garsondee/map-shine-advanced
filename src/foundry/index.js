@@ -83,6 +83,10 @@ export { discoverAuthoredMasks } from './mask-discovery.js';
 // Token documents -> drawables.
 export { collectTokens, diagnoseTokens, TOKEN_DOCUMENTS, tokenFootprint } from './scene-tokens.js';
 
+// The drag GHOST — Foundry moves a clone of a dragged token, not the token; these
+// hand that clone to collectTokens and say when one appears or goes away.
+export { readTokenDragPreviews, watchTokenDragPreviews } from './token-drag-previews.js';
+
 // Tile document access for the editing-cadence perf stress test ONLY — see
 // scene-tiles.js's own header. Nothing here draws anything.
 export { pickStressTestTile, pingStressTestTile, unpingStressTestTile } from './scene-tiles.js';

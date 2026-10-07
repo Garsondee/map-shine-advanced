@@ -304,6 +304,10 @@ import {
   WATER_FOAM_GRAIN_AMOUNT,
   WATER_FOAM_GRAIN_OCTAVE,
   WATER_FOAM_GRAIN_TIME_SCALE,
+  buildFoamPatchNode,
+  createFoamPatchUniforms,
+  WATER_FOAM_PATCHINESS,
+  WATER_FOAM_PATCH_SIZE_PX,
 } from './water-shore.js';
 import { WATER_SIM_CLUMP_LO, WATER_SIM_CLUMP_HI, WATER_SIM_CLUMP_AA_PX } from './water-sim.js';
 import { buildDebugChannelColor } from '../debug-channel-select.js';
@@ -991,6 +995,8 @@ export function buildWaterSurfaceMaterial({
   // Perf wave 2 — see water-field.js#buildWaterSurfaceField's own
   // `causticsInsideGate`. `false` only for the live A/B diagnostic.
   causticsInsideGate = true,
+  // `false` only for the live A/B diagnostic — see the sim foam lace's gate.
+  foamStructureGate = true,
   foamTrail = WATER_TIER4_FOAM_TRAIL,
   // ⚠️ LIVE PARAM (2026-08-24) — live-reported: foam appears on every shore
   // regardless of how the author painted the bank, and a softly-feathered
@@ -1000,6 +1006,9 @@ export function buildWaterSurfaceMaterial({
   // BYTE-IDENTICAL to every previously-shipped map (the gate never engages
   // at all); only turning it up starts requiring a sharper local mask edge.
   foamEdgeSharpness = 0,
+  // FOAM PATCHINESS (2026-09-25) — water-shore.js#buildFoamPatchNode.
+  foamPatchiness = WATER_FOAM_PATCHINESS,
+  foamPatchSizePx = WATER_FOAM_PATCH_SIZE_PX,
   // ── TIER 5 — REFRACTION (2026-08-23, Water-Testament.md §2.5) ───────────
   // `capturedTexture` follows the SAME "caller always supplies a real, if
   // 1×1 placeholder, texture object" contract `waterSimTexture` above already
@@ -1222,6 +1231,10 @@ export function buildWaterSurfaceMaterial({
   const uCausticSpecularInfluence = uniform(float(WATER_CAUSTICS_SPECULAR_INFLUENCE));
   const uFoamTrail = uniform(float(foamTrail));
   const uFoamEdgeSharpness = uniform(float(foamEdgeSharpness));
+  const { uPatchiness: uFoamPatchiness, uPatchSizePx: uFoamPatchSizePx } = createFoamPatchUniforms(THREE.TSL, {
+    patchiness: foamPatchiness,
+    patchSizePx: foamPatchSizePx,
+  });
   // THE FOAM BAND's REACH, derived from the author's own `depthScalePx` on the
   // CPU — see `water-shore.js#WATER_FOAM_SHORE_FRACTION` for why a fraction of a
   // body-scale length rather than a bare pixel constant is the entire answer to
@@ -2057,7 +2070,14 @@ export function buildWaterSurfaceMaterial({
   // foam's already-shipped `worleyLace` shared this exact bug (confirmed
   // showing the identical artifact) and is fixed by the same change, in the
   // one shared function, not twice.
-  const simFoamStructureBuild = buildFoamCellularStructure({
+  //
+  // ⚠️ GATED ON THE SIM'S OWN FOAM (perf wave 2, 2026-09-25) — this lattice
+  // is only ever multiplied by `waterSimFoam`, which is exactly 0 over most of
+  // the water, so it now runs only where that is non-zero (`gate`, see
+  // `buildFoamCellularStructure`'s own doc — lossless for this product). The
+  // debug channel keeps an UNGATED twin below (`simFoamStructureFull`) so
+  // "is the lattice healthy" still reads over the whole surface.
+  const simFoamStructureArgs = {
     TSL: THREE.TSL,
     worldXY: vec2(positionWorld.x, positionWorld.y),
     domainOffset: field.domainOffset,
@@ -2066,7 +2086,12 @@ export function buildWaterSurfaceMaterial({
     uReachPx: uFoamReachPx,
     timeMsNode,
     ...foamStructureUniforms,
+  };
+  const simFoamStructureBuild = buildFoamCellularStructure({
+    ...simFoamStructureArgs,
+    gate: foamStructureGate ? waterSimFoam : null,
   });
+  const simFoamStructureFull = buildFoamCellularStructure(simFoamStructureArgs).structure;
   const simFoamStructure = simFoamStructureBuild.structure;
   const waterSimFoamStructured = waterSimFoam.mul(simFoamStructure);
 
@@ -2123,7 +2148,18 @@ export function buildWaterSurfaceMaterial({
     foamSharpnessFactor = mix(float(1), foamSharpnessGate, uFoamEdgeSharpness);
   }
 
-  const totalFoam = min(max(field.foam, waterSimFoamStructured), float(1)).mul(foamSharpnessFactor);
+  // THE PATCH FIELD on tier 2's crest foam (2026-09-25) — the SAME
+  // world-anchored field the sim gates its emission with
+  // (water-shore.js#buildFoamPatchNode), so crest blotches and sim wakes agree
+  // about which stretches of water are foamy right now. Crest foam has no
+  // memory, so display time is its source.
+  const crestPatch = buildFoamPatchNode(THREE.TSL, {
+    worldXY: vec2(positionWorld.x, positionWorld.y),
+    timeSec: (timeMsNode ?? float(0)).mul(float(1 / 1000)),
+    uPatchiness: uFoamPatchiness,
+    uPatchSizePx: uFoamPatchSizePx,
+  });
+  const totalFoam = min(max(field.foam.mul(crestPatch), waterSimFoamStructured), float(1)).mul(foamSharpnessFactor);
 
   // ── TIER 4: CAUSTICS' OWN AUTHOR-FACING GAIN ─────────────────────────────
   // `field.causticBrightness` already carries the calibrated
@@ -2612,7 +2648,7 @@ export function buildWaterSurfaceMaterial({
     // stretch, hole density) independent of where the sim buffer happens to
     // be bright this frame. `simFoamStructured` (below) is what actually
     // reaches the water: this × `simFoam` above.
-    simFoamStructure: vec3(simFoamStructure, simFoamStructure, simFoamStructure),
+    simFoamStructure: vec3(simFoamStructureFull, simFoamStructureFull, simFoamStructureFull),
     simFoamStructured: vec3(waterSimFoamStructured, waterSimFoamStructured, waterSimFoamStructured),
     // `flowWarp` ALONE (`field.flowWarp`, `water-field.js`) — NOT `domainOffset`,
     // which this channel could not use even if it wanted to: `drift` (unbounded,
@@ -2637,6 +2673,7 @@ export function buildWaterSurfaceMaterial({
     // revisiting for that map's own resolution, not that the mechanism is
     // broken.
     foamEdgeSharpness: vec3(foamSharpnessGate, foamSharpnessGate, foamSharpnessGate),
+    foamPatch: vec3(crestPatch, crestPatch, crestPatch),
   };
   // ⚠️ ARITHMETIC, NOT `select()` — see `effects/debug-channel-select.js`'s
   // header for the twelve specular rounds this trap cost before anyone dumped
@@ -2857,6 +2894,16 @@ export function buildWaterSurfaceMaterial({
      * own doc for the full mechanism. 0 = every shore shows foam exactly as
      * before this control existed; 1 = only edges the mask itself paints
      * sharply. */
+    /** WATER_PARAMS `foamPatchiness` — how much of the water is foam-free at
+     * a time; see water-shore.js#buildFoamPatchNode. (The sim's own copy of
+     * this value is pulled separately, water-sim-subsystem.js.) */
+    setFoamPatchiness(v) {
+      uFoamPatchiness.value = v;
+    },
+    /** WATER_PARAMS `foamPatchSizePx` — one foam patch's size, world px. */
+    setFoamPatchSizePx(v) {
+      uFoamPatchSizePx.value = v;
+    },
     setFoamEdgeSharpness(v) {
       uFoamEdgeSharpness.value = v;
     },

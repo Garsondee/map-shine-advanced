@@ -322,6 +322,30 @@ export const WATER_PARAMS = Object.freeze({
     label: 'Foam edge sharpness',
     help: 'Restricts shore/wake foam to places the mask paints a genuinely SHARP black/white edge, fading it out wherever the bank is a soft, gradual transition instead. At 0 (default) foam behaves exactly as before — it appears on every shore regardless of how the edge was painted. Raise it to keep foam on hard-edged banks (piers, stonework, cliffs) while suppressing it on softly-feathered ones (grassy slopes, sandy shallows) — a mask that only ever paints hard edges will look identical at any value.',
   },
+  // ── FOAM PATCHINESS (2026-09-25) — author, live on Flooded River Prison:
+  // "foam is everywhere ... could you make it so that foam spawns in a more
+  // patchy and less predictable way?" See water-shore.js#buildFoamPatchNode;
+  // a Node test pins both defaults to that module's own constants.
+  foamPatchiness: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.65,
+    category: 'Motion',
+    label: 'Foam patchiness',
+    help: 'How much of the water is foam-free at any moment. Foam only forms inside slowly drifting patches — some docks, posts and banks foam while others stay calm, and which ones changes over tens of seconds. 0 = the old look (every shore foams all the time); 1 = only rare patches.',
+  },
+  foamPatchSizePx: {
+    type: 'float',
+    min: 100,
+    max: 4000,
+    step: 10,
+    default: 800,
+    category: 'Motion',
+    label: 'Foam patch size',
+    help: 'How large one foam patch is, in canvas pixels. Smaller = many small busy and calm spots; larger = whole stretches of shoreline switching together.',
+  },
   // ── TIER 4 (2026-08-16) ────────────────────────────────────────────────────
   swashFoam: {
     type: 'float',
@@ -1479,6 +1503,17 @@ export const WATER_DEBUG_CHANNELS = Object.freeze([
       "EDGE_SHARPNESS_TAP_PX`) is miscalibrated for this map's own resolution, not that the gate itself " +
       'is dead — check against a known hard edge and a known soft one before concluding either.',
   }),
+  Object.freeze({
+    n: 30,
+    id: 'foamPatch',
+    label: '29 · Foam patch field (2026-09-25)',
+    reads:
+      'The foam PATCH field (water-shore.js#buildFoamPatchNode) — white = foam may form here right now, black ' +
+      '= calm water. The SAME world-anchored field gates the sim foam emission and the tier-2 crest foam, so ' +
+      'this is where both are allowed. Flat white = `foamPatchiness` is 0 (the old every-shore-foams look); ' +
+      'mostly black = patchiness near 1. Patches should drift/reshape over tens of seconds — a frozen field ' +
+      'with the clock running means the time term is not reaching it.',
+  }),
 ]);
 
 // ===========================================================================
@@ -1572,6 +1607,8 @@ export const WATER_PRESETS = Object.freeze({
     // NEW (2026-08-24) — matches the schema default; no author-tuned value
     // of its own yet (see WATER_PARAMS.foamEdgeSharpness's own doc).
     foamEdgeSharpness: 0,
+    foamPatchiness: 0.65,
+    foamPatchSizePx: 800,
     swashFoam: 1,
     breakFoam: 1,
     foamTrail: 0.85,

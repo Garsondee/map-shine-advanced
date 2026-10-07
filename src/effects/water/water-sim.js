@@ -122,7 +122,7 @@
  * @module effects/water/water-sim
  */
 
-import { WATER_SWASH_BANDS, WATER_SWASH_SPEED, WATER_SWASH_WIDTH } from './water-shore.js';
+import { WATER_SWASH_BANDS, WATER_SWASH_SPEED, WATER_SWASH_WIDTH, buildFoamPatchNode } from './water-shore.js';
 
 /** Foam's own exponential decay time constant, seconds — how long a texel's
  * foam value takes to fall to `1/e` of itself with no further emission. Sized
@@ -322,6 +322,14 @@ export function buildWaterSimStepMaterial({
   uDiffuse = null,
   uShearGain = null,
   uNearSolidGain = null,
+  // FOAM PATCHINESS (2026-09-25) — see water-shore.js#buildFoamPatchNode.
+  // `uRectOrigin` (vec2, the body rect's world min) turns this pass's
+  // rect-relative position into the ABSOLUTE world position the patch field
+  // is anchored to, so the render's own crest foam agrees about where the
+  // patches are. All three omitted = no patch term (the old emission).
+  uPatchiness = null,
+  uPatchSizePx = null,
+  uRectOrigin = null,
 }) {
   const TSL = THREE.TSL;
   const {
@@ -339,7 +347,7 @@ export function buildWaterSimStepMaterial({
     clamp,
     smoothstep,
     sin,
-    mx_fractal_noise_vec3,
+    mx_fractal_noise_float,
   } = TSL;
 
   const uv0 = uv();
@@ -449,16 +457,33 @@ export function buildWaterSimStepMaterial({
   // to VARY and stay mostly positive, not hit any particular distribution.
   const worldXY = vec2(uv0.x.mul(float(rectWidthPx)), uv0.y.mul(float(rectHeightPx)));
   const noiseUv = worldXY.div(float(WATER_SIM_NOISE_CELL_PX));
-  const noiseRaw = mx_fractal_noise_vec3(
+  // Scalar, not `mx_fractal_noise_vec3(...).x` — bit-identical (three's
+  // `mx_gradient_vec3` is `mx_gradient_float` per hash byte, and byte x masks
+  // to the scalar's own `& 15`), two gradient channels cheaper per texel.
+  const noiseRaw = mx_fractal_noise_float(
     vec3(noiseUv.x, noiseUv.y, tSec.mul(float(WATER_SIM_NOISE_TIME_SCALE))),
     2,
     2.0,
     0.5
   );
-  const noiseGate = clamp(noiseRaw.x.mul(float(0.5)).add(float(0.5)), float(WATER_SIM_NOISE_FLOOR), float(1));
+  const noiseGate = clamp(noiseRaw.mul(float(0.5)).add(float(0.5)), float(WATER_SIM_NOISE_FLOOR), float(1));
+  // THE PATCH FIELD — gates ALL THREE emission terms at their source, so a
+  // stretch of shore inside a calm patch emits nothing at all (no halo, no
+  // swash rings) while a foamy patch sheds trails the advection above carries
+  // downstream. Unlike `noiseGate` it CAN reach 0 — at its own scale (hundreds
+  // of px, tens of seconds) that reads as calm water, not flicker.
+  const patchGate =
+    uPatchiness && uPatchSizePx && uRectOrigin
+      ? buildFoamPatchNode(TSL, {
+          worldXY: worldXY.add(uRectOrigin),
+          timeSec: tSec,
+          uPatchiness,
+          uPatchSizePx,
+        })
+      : float(1);
 
   const totalEmit = emitFront.add(emitShear).add(emitSwash).mul(uFoamAmount);
-  const newR = decayedR.add(totalEmit.mul(uDtSec).mul(noiseGate));
+  const newR = decayedR.add(totalEmit.mul(uDtSec).mul(noiseGate).mul(patchGate));
 
   // ── 4. GATHER is already done (the diffuse-toward-blur blend above, §2).
   // BREAK — the clump threshold — is deliberately NOT applied here: see this

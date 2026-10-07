@@ -214,6 +214,29 @@ export function createWaterRegistration({
   }
 
   /**
+   * `MapShine.setWaterLive({ foamPatchiness: 0 })` — the SAME live override
+   * `setWater` applies, WITHOUT the scene write: a transient A/B for tuning or
+   * a perf/visual comparison that must not leave an authored value behind.
+   * `null` for a key drops it from the override (back to the scene's own
+   * value). Session-only; a reload forgets it.
+   * @param {object} [partial]
+   */
+  function setWaterLive(partial = {}) {
+    let changed = false;
+    for (const [key, value] of Object.entries(partial ?? {})) {
+      if (!Object.prototype.hasOwnProperty.call(WATER_PARAMS, key)) {
+        log.error(`setWaterLive: unknown param '${key}' — see WATER_PARAMS in effects/water/water.js`);
+        continue;
+      }
+      if (value === null) delete liveOverride[key];
+      else liveOverride[key] = value;
+      changed = true;
+    }
+    if (changed) reapply();
+    return { ...liveOverride };
+  }
+
+  /**
    * `MapShine.setWaterDebug(9)` — show one shader intermediate instead of the
    * effect. 0 restores the normal render. See `water.js#WATER_DEBUG_CHANNELS`
    * for what each one answers.
@@ -244,6 +267,7 @@ export function createWaterRegistration({
     reapply,
     getRenderState,
     setWater,
+    setWaterLive,
     setDebugChannel,
     getDebugChannel: () => debugChannel,
     getReadout: () => readout,

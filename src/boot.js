@@ -697,6 +697,7 @@ import {
   setWaterCausticsGateForce,
   getWaterCausticsGateForce,
   setWaterCausticsInsideGateOff,
+  setWaterFoamStructureGateOff,
   createFluidSeams,
   createFluidRegistration,
   FLUID_PARAMS,
@@ -1136,6 +1137,7 @@ MapShine.setCloudTopsInlineShadow = setVtPanViewerCloudTopsInlineShadow;
 // rebuilds water with caustics forced off/on (null = tier-resolved), for priceAB.
 MapShine.setWaterCausticsGateForce = setWaterCausticsGateForce;
 MapShine.setWaterCausticsInsideGateOff = setWaterCausticsInsideGateOff;
+MapShine.setWaterFoamStructureGateOff = setWaterFoamStructureGateOff;
 MapShine.getCloudTopsLowOctaves = getVtPanViewerCloudTopsLowOctaves;
 // Console-exposed directly (2026-08-12, S2.7) so a pixel-diff gate can prove
 // NON-VACUITY without paying for a full perf-run-full capture — illumBuckets/
@@ -9686,6 +9688,7 @@ function install() {
   // see its header for why this one is a module while the other four effects
   // still inline the identical block.
   MapShine.setWater = water.setWater;
+  MapShine.setWaterLive = water.setWaterLive;
   /** `MapShine.setWaterDebug(9)` — the console twin of the picker below
    * (Water-Testament W0). */
   MapShine.setWaterDebug = water.setDebugChannel;

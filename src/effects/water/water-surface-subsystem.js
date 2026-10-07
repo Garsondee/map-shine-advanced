@@ -123,6 +123,17 @@ export function setWaterCausticsInsideGateOff(off) {
   return { off: _causticsInsideGateOff };
 }
 
+/** DIAGNOSTIC ONLY (2026-09-25) — `true` rebuilds water with the sim foam's
+ * cellular lace evaluated over the WHOLE surface again (no `gate`), for a
+ * live A/B of that gate's saving. Same shape as `_causticsInsideGateOff`.
+ * @type {boolean} */
+let _foamStructureGateOff = false;
+/** @param {boolean} off */
+export function setWaterFoamStructureGateOff(off) {
+  _foamStructureGateOff = off === true;
+  return { off: _foamStructureGateOff };
+}
+
 /**
  * @param {object} args
  * @param {*} args.THREE - injected, never imported.
@@ -348,6 +359,7 @@ export function createWaterSurfaceSubsystem({
    * path WITHOUT the resolved tier itself having moved at all. */
   let builtForCausticsGateForce = getWaterCausticsGateForce().forced;
   let builtForCausticsInsideGateOff = _causticsInsideGateOff;
+  let builtForFoamStructureGateOff = _foamStructureGateOff;
   /** The `windHandle.version` the CURRENT materials were built against
    * (mythica-machina-press#18) — same reasoning as `builtForCausticsGate
    * Force` immediately above: `world/wind-access.js`'s own handle is
@@ -445,6 +457,7 @@ export function createWaterSurfaceSubsystem({
       // `waterBody`/`maskTexture` right above already follow.
       causticsGateForce: getWaterCausticsGateForce().forced,
       causticsInsideGate: !_causticsInsideGateOff,
+      foamStructureGate: !_foamStructureGateOff,
       // WIND-DRIVEN RIPPLE (mythica-machina-press#18) — read FRESH on every
       // build, same discipline as `causticsGateForce` immediately above:
       // `getWindHandle()` may return a NEWER handle than whatever `sync()`
@@ -814,6 +827,7 @@ export function createWaterSurfaceSubsystem({
       resolvedTier !== builtForTier ||
       resolvedCausticsGateForce !== builtForCausticsGateForce ||
       _causticsInsideGateOff !== builtForCausticsInsideGateOff ||
+      _foamStructureGateOff !== builtForFoamStructureGateOff ||
       resolvedWindVersion !== builtForWindVersion
     ) {
       const prev = surface;
@@ -847,6 +861,7 @@ export function createWaterSurfaceSubsystem({
       builtForTier = surface.tier;
       builtForCausticsGateForce = resolvedCausticsGateForce;
       builtForCausticsInsideGateOff = _causticsInsideGateOff;
+      builtForFoamStructureGateOff = _foamStructureGateOff;
       builtForWindVersion = resolvedWindVersion;
       // Force every cached value below to re-push onto the FRESH material — it
       // starts back at its constructor defaults, and the key-based caches
@@ -983,6 +998,8 @@ export function createWaterSurfaceSubsystem({
       p.causticSpecularInfluence,
       p.refractStrengthPx,
       p.foamEdgeSharpness,
+      p.foamPatchiness,
+      p.foamPatchSizePx,
       // ROH TUNING (2026-08-19) — bankWarp/flowWarp + buildFoamCellularStructure's own knobs.
       p.bankInfluence,
       p.flowWarpInfluence,
@@ -1048,6 +1065,8 @@ export function createWaterSurfaceSubsystem({
       if (Number.isFinite(p.causticSpecularInfluence)) surface.setCausticSpecularInfluence(p.causticSpecularInfluence);
       if (Number.isFinite(p.refractStrengthPx)) surface.setRefractStrengthPx(p.refractStrengthPx);
       if (Number.isFinite(p.foamEdgeSharpness)) surface.setFoamEdgeSharpness(p.foamEdgeSharpness);
+      if (Number.isFinite(p.foamPatchiness)) surface.setFoamPatchiness(p.foamPatchiness);
+      if (Number.isFinite(p.foamPatchSizePx)) surface.setFoamPatchSizePx(p.foamPatchSizePx);
       if (Number.isFinite(p.bankInfluence)) surface.setBankInfluence(p.bankInfluence);
       if (Number.isFinite(p.flowWarpInfluence)) surface.setFlowWarpInfluence(p.flowWarpInfluence);
       if (Number.isFinite(p.foamFlowNudge)) surface.setFoamFlowNudge(p.foamFlowNudge);

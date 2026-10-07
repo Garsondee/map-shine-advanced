@@ -577,8 +577,10 @@ export function buildFoamCellularStructure({
   uGrainAmount = null,
   uGrainOctave = null,
   uGrainTimeScale = null,
+  gate = null,
 }) {
-  const { vec2, vec3, float, max, length, smoothstep, fwidth, mx_worley_noise_vec2, mx_fractal_noise_float } = TSL;
+  const { vec2, vec3, float, max, length, smoothstep, fwidth, mx_worley_noise_vec2, mx_fractal_noise_float, Fn, If } =
+    TSL;
   const reach = max(uReachPx, float(1));
   const tSec = timeMsNode ? timeMsNode.mul(float(1 / 1000)) : float(0);
   const flowNudgeNode = uFlowNudge ?? float(WATER_FOAM_FLOW_NUDGE);
@@ -651,80 +653,120 @@ export function buildFoamCellularStructure({
   const alongFlow = nudgedCell.x.mul(flowDir.x).add(nudgedCell.y.mul(flowDir.y));
   const acrossFlow = nudgedCell.x.mul(flowDir.y.negate()).add(nudgedCell.y.mul(flowDir.x));
   const streakCell = vec2(alongFlow.div(float(WATER_FOAM_STREAK)), acrossFlow);
-  const worleyRanks = mx_worley_noise_vec2(vec2(streakCell.x, streakCell.y), float(1));
-  const edgeDistSharp = worleyRanks.y.sub(worleyRanks.x); // F2 − F1, ZERO on a cell edge
+  // Everything from here to `structure` is the expensive half — two Worley
+  // lattices and two fractal noises — built through `buildStructure` so a
+  // caller-supplied `gate` can run it inside a per-pixel branch (see the
+  // gate itself, below). `aaFw` = null keeps the original `fwidth` AA.
+  const buildStructure = (aaFw) => {
+    const worleyRanks = mx_worley_noise_vec2(vec2(streakCell.x, streakCell.y), float(1));
+    const edgeDistSharp = worleyRanks.y.sub(worleyRanks.x); // F2 − F1, ZERO on a cell edge
 
-  // ── THE BUBBLE — a faster, independent time-varying nudge to WHERE the
-  // net's own walls sit (`WATER_FOAM_BUBBLE_*` own doc has the full case).
-  // Sampled in `streakCell` (post-stretch), at a higher frequency and its
-  // own clock rate, so it reads as texture jittering WITHIN the net rather
-  // than a second, competing net of its own.
-  // ⚠️ SCALAR, NOT `mx_fractal_noise_vec3(...).x` (perf wave 2, 2026-09-25) —
-  // bit-identical: three's `mx_hash_vec3` is ONE `mx_hash_int` per lattice corner
-  // split into bytes, and `mx_gradient_vec3` is `mx_gradient_float` per byte, which
-  // masks to `& 15` — so byte x (`h & 255`) and the scalar's own `h & 15` pick the
-  // same gradient. The vec3 form paid for two gradient channels nobody read.
-  const bubbleNoise = mx_fractal_noise_float(
-    vec3(streakCell.x.mul(bubbleOctaveNode), streakCell.y.mul(bubbleOctaveNode), tSec.mul(bubbleTimeScaleNode)),
-    2,
-    2.0,
-    0.5
-  );
-  const edgeDist = edgeDistSharp.add(bubbleNoise.mul(bubbleAmountNode));
+    // ── THE BUBBLE — a faster, independent time-varying nudge to WHERE the
+    // net's own walls sit (`WATER_FOAM_BUBBLE_*` own doc has the full case).
+    // Sampled in `streakCell` (post-stretch), at a higher frequency and its
+    // own clock rate, so it reads as texture jittering WITHIN the net rather
+    // than a second, competing net of its own.
+    // ⚠️ SCALAR, NOT `mx_fractal_noise_vec3(...).x` (perf wave 2, 2026-09-25) —
+    // bit-identical: three's `mx_hash_vec3` is ONE `mx_hash_int` per lattice corner
+    // split into bytes, and `mx_gradient_vec3` is `mx_gradient_float` per byte, which
+    // masks to `& 15` — so byte x (`h & 255`) and the scalar's own `h & 15` pick the
+    // same gradient. The vec3 form paid for two gradient channels nobody read.
+    const bubbleNoise = mx_fractal_noise_float(
+      vec3(streakCell.x.mul(bubbleOctaveNode), streakCell.y.mul(bubbleOctaveNode), tSec.mul(bubbleTimeScaleNode)),
+      2,
+      2.0,
+      0.5
+    );
+    const edgeDist = edgeDistSharp.add(bubbleNoise.mul(bubbleAmountNode));
 
-  // ── THE EDGE, ANTI-ALIASED (2026-08-19) — see `WATER_FOAM_EDGE_AA_PX`'s
-  // own doc. `far` is the WIDER of the stylistic minimum
-  // (`WATER_FOAM_EDGE_FAR`) and whatever `fwidth` says THIS frame, at
-  // whatever zoom is actually active, is needed to keep the transition a
-  // few real screen pixels wide — never narrower, whichever term wins.
-  // INVERTED vs. the old F1 cut: bright NEAR zero (an edge), dark as the
-  // pixel moves toward a cell's own interior — `smoothstep` alone ramps the
-  // other way, so this is `1 −` that ramp, not a reversed-argument trick
-  // (reversing smoothstep's own edge args is undefined for edge0 > edge1).
-  const edgeFarAA = max(edgeFarNode, fwidth(edgeDist).mul(edgeAaPxNode));
-  const cellWalls = float(1).sub(smoothstep(float(WATER_FOAM_EDGE_NEAR), edgeFarAA, edgeDist));
-  // ── A SECOND, FINER OCTAVE — bubbles ON the clumps ──────────────────────
-  // See `WATER_FOAM_FINE_OCTAVE`: one octave gives cells of a single size,
-  // and the eye reads that as a repeating texture rather than as a
-  // substance. The fine octave MULTIPLIES the coarse walls rather than
-  // averaging with them, so detail appears only where there is foam to be
-  // detailed and the holes stay genuinely open. Same AA and bubble
-  // treatment as the coarse octave immediately above, independently
-  // measured against ITS OWN `fwidth` (a finer, higher-frequency field
-  // aliases at a different rate than the coarse one, so sharing one AA
-  // width between them would under- or over-correct one of the two).
-  const fineCell = streakCell.mul(float(WATER_FOAM_FINE_OCTAVE));
-  const worleyFineRanks = mx_worley_noise_vec2(vec2(fineCell.x, fineCell.y), float(1));
-  const fineEdgeDistSharp = worleyFineRanks.y.sub(worleyFineRanks.x);
-  const fineEdgeDist = fineEdgeDistSharp.add(bubbleNoise.mul(bubbleAmountNode));
-  const fineFarAA = max(edgeFarNode, fwidth(fineEdgeDist).mul(edgeAaPxNode));
-  const fineWalls = float(1).sub(smoothstep(float(WATER_FOAM_EDGE_NEAR), fineFarAA, fineEdgeDist));
-  const structureNet = cellWalls.mul(float(1 - WATER_FOAM_FINE_SHARE).add(fineWalls.mul(float(WATER_FOAM_FINE_SHARE))));
-  // ── THE GRAIN — see `WATER_FOAM_GRAIN_AMOUNT`'s own doc for the full case
-  // (a SEPARATE mechanism from the bubble nudge above: this multiplies the
-  // net's own brightness, visible everywhere it is non-zero, not just at
-  // its edges). Independent noise fetch from the bubble's own (different
-  // frequency AND different clock rate — sharing one would make grain and
-  // bubble move in lockstep, reading as one coarser effect instead of two
-  // textures at two scales, the actual "gritty AND evolving" look asked
-  // for). `.add(0.5)` twice: `mx_fractal_noise` is roughly zero-centred
-  // (this file's own header, elsewhere, measures it), remapped to `[0,1]`
-  // before it scales the brightness cut.
-  // ⚠️ SCALAR, NOT `mx_fractal_noise_vec3(...).x` (perf wave 2, 2026-09-25) —
-  // bit-identical: three's `mx_hash_vec3` is ONE `mx_hash_int` per lattice corner
-  // split into bytes, and `mx_gradient_vec3` is `mx_gradient_float` per byte, which
-  // masks to `& 15` — so byte x (`h & 255`) and the scalar's own `h & 15` pick the
-  // same gradient. The vec3 form paid for two gradient channels nobody read.
-  const grainNoise = mx_fractal_noise_float(
-    vec3(streakCell.x.mul(grainOctaveNode), streakCell.y.mul(grainOctaveNode), tSec.mul(grainTimeScaleNode)),
-    2,
-    2.0,
-    0.5
-  );
-  const grain = float(1)
-    .sub(grainAmountNode)
-    .add(grainNoise.mul(float(0.5)).add(float(0.5)).mul(grainAmountNode));
-  const structure = structureNet.mul(grain);
+    // ── THE EDGE, ANTI-ALIASED (2026-08-19) — see `WATER_FOAM_EDGE_AA_PX`'s
+    // own doc. `far` is the WIDER of the stylistic minimum
+    // (`WATER_FOAM_EDGE_FAR`) and whatever `fwidth` says THIS frame, at
+    // whatever zoom is actually active, is needed to keep the transition a
+    // few real screen pixels wide — never narrower, whichever term wins.
+    // INVERTED vs. the old F1 cut: bright NEAR zero (an edge), dark as the
+    // pixel moves toward a cell's own interior — `smoothstep` alone ramps the
+    // other way, so this is `1 −` that ramp, not a reversed-argument trick
+    // (reversing smoothstep's own edge args is undefined for edge0 > edge1).
+    const edgeFarAA = max(edgeFarNode, (aaFw ?? fwidth(edgeDist)).mul(edgeAaPxNode));
+    const cellWalls = float(1).sub(smoothstep(float(WATER_FOAM_EDGE_NEAR), edgeFarAA, edgeDist));
+    // ── A SECOND, FINER OCTAVE — bubbles ON the clumps ──────────────────────
+    // See `WATER_FOAM_FINE_OCTAVE`: one octave gives cells of a single size,
+    // and the eye reads that as a repeating texture rather than as a
+    // substance. The fine octave MULTIPLIES the coarse walls rather than
+    // averaging with them, so detail appears only where there is foam to be
+    // detailed and the holes stay genuinely open. Same AA and bubble
+    // treatment as the coarse octave immediately above, independently
+    // measured against ITS OWN `fwidth` (a finer, higher-frequency field
+    // aliases at a different rate than the coarse one, so sharing one AA
+    // width between them would under- or over-correct one of the two).
+    const fineCell = streakCell.mul(float(WATER_FOAM_FINE_OCTAVE));
+    const worleyFineRanks = mx_worley_noise_vec2(vec2(fineCell.x, fineCell.y), float(1));
+    const fineEdgeDistSharp = worleyFineRanks.y.sub(worleyFineRanks.x);
+    const fineEdgeDist = fineEdgeDistSharp.add(bubbleNoise.mul(bubbleAmountNode));
+    const fineFarAA = max(
+      edgeFarNode,
+      (aaFw ? aaFw.mul(float(WATER_FOAM_FINE_OCTAVE)) : fwidth(fineEdgeDist)).mul(edgeAaPxNode)
+    );
+    const fineWalls = float(1).sub(smoothstep(float(WATER_FOAM_EDGE_NEAR), fineFarAA, fineEdgeDist));
+    const structureNet = cellWalls.mul(
+      float(1 - WATER_FOAM_FINE_SHARE).add(fineWalls.mul(float(WATER_FOAM_FINE_SHARE)))
+    );
+    // ── THE GRAIN — see `WATER_FOAM_GRAIN_AMOUNT`'s own doc for the full case
+    // (a SEPARATE mechanism from the bubble nudge above: this multiplies the
+    // net's own brightness, visible everywhere it is non-zero, not just at
+    // its edges). Independent noise fetch from the bubble's own (different
+    // frequency AND different clock rate — sharing one would make grain and
+    // bubble move in lockstep, reading as one coarser effect instead of two
+    // textures at two scales, the actual "gritty AND evolving" look asked
+    // for). `.add(0.5)` twice: `mx_fractal_noise` is roughly zero-centred
+    // (this file's own header, elsewhere, measures it), remapped to `[0,1]`
+    // before it scales the brightness cut.
+    // ⚠️ SCALAR, NOT `mx_fractal_noise_vec3(...).x` (perf wave 2, 2026-09-25) —
+    // bit-identical: three's `mx_hash_vec3` is ONE `mx_hash_int` per lattice corner
+    // split into bytes, and `mx_gradient_vec3` is `mx_gradient_float` per byte, which
+    // masks to `& 15` — so byte x (`h & 255`) and the scalar's own `h & 15` pick the
+    // same gradient. The vec3 form paid for two gradient channels nobody read.
+    const grainNoise = mx_fractal_noise_float(
+      vec3(streakCell.x.mul(grainOctaveNode), streakCell.y.mul(grainOctaveNode), tSec.mul(grainTimeScaleNode)),
+      2,
+      2.0,
+      0.5
+    );
+    const grain = float(1)
+      .sub(grainAmountNode)
+      .add(grainNoise.mul(float(0.5)).add(float(0.5)).mul(grainAmountNode));
+    return { structure: structureNet.mul(grain), edgeDist };
+  };
+
+  // ⚠️ `gate` (perf wave 2, 2026-09-25) — the sim-foam caller multiplies this
+  // structure by its own foam amount, which is exactly 0 across most of the
+  // water (and more of it now that foam is patchy — `buildFoamPatchNode`), so
+  // the lattice + noise work there was spent on a product of zero. With a
+  // gate, it runs only inside `If(gate > 0)` and reads 0 elsewhere —
+  // lossless for that caller. WGSL forbids derivatives under a per-pixel
+  // branch, so the AA width comes from `fwidth(streakCell)` taken BEFORE the
+  // branch: F2−F1 (plus the bubble nudge) changes at up to ~2x the cell
+  // coordinate's own rate at an edge, the only place the AA widening
+  // engages, and it only engages once cells are a few screen px (zoomed far
+  // out) — at closer zooms `edgeFarNode` wins either way.
+  let structure;
+  let edgeDist = null;
+  if (gate) {
+    const cellFw = fwidth(streakCell);
+    const aaFw = cellFw.x.add(cellFw.y).mul(float(2)).toVar('foamCellAaFw');
+    structure = Fn(() => {
+      const out = float(0).toVar('foamStructureGated');
+      If(gate.greaterThan(float(0)), () => {
+        out.assign(buildStructure(aaFw).structure);
+      });
+      return out;
+    })();
+  } else {
+    const built = buildStructure(null);
+    structure = built.structure;
+    edgeDist = built.edgeDist;
+  }
   // `1 − bite·(1 − walls)`: full brightness on a wall, thinned (never
   // erased) in a cell's middle. A clean multiply by `structure` would
   // stencil holes right through a CONTINUOUS sheet, which reads as a pattern
@@ -828,7 +870,7 @@ export function buildWaterShoreFoam({
   // gets the exact pre-param defaults.
   foamStructureUniforms = null,
 }) {
-  const { vec2, vec3, float, max, min, dot, sin, step, clamp, smoothstep, mx_fractal_noise_vec3 } = TSL;
+  const { vec2, vec3, float, max, min, dot, sin, step, clamp, smoothstep, mx_fractal_noise_float } = TSL;
 
   const effectiveLocalDir = localFlowDir ?? flowDir;
   const effectiveLocalSpeed01 = localSpeed01 ?? float(WATER_LOCAL_SPEED01_BASELINE);
@@ -874,7 +916,10 @@ export function buildWaterShoreFoam({
   // by a low-frequency noise so the bands wander along the shore instead of
   // running perfectly parallel to it (Cyanilux's step; without it a straight
   // bank gets suspiciously straight foam).
-  const wobble = mx_fractal_noise_vec3(
+  // Scalar, not `mx_fractal_noise_vec3(...).x` — bit-identical (see the
+  // grain noise's own note in `buildFoamCellularStructure`), two gradient
+  // channels cheaper.
+  const wobble = mx_fractal_noise_float(
     vec3(cell.x.mul(float(0.35)), cell.y.mul(float(0.35)), tSec.mul(float(0.05))),
     2,
     2.0,
@@ -900,7 +945,7 @@ export function buildWaterShoreFoam({
   // `speedAmp` still reaches swash — see the FINAL multiply below, a pure
   // brightness/height scale with no phase/rate involved, which cannot
   // produce this artifact because it carries no time dependence of its own.
-  const phase = d01.add(wobble.x.mul(float(0.09))).sub(tSec.mul(float(WATER_SWASH_SPEED)));
+  const phase = d01.add(wobble.mul(float(0.09))).sub(tSec.mul(float(WATER_SWASH_SPEED)));
   const wave = sin(phase.mul(float(WATER_SWASH_BANDS * 2 * Math.PI)));
   // Threshold the wave into a band. `1 − 2·width` puts the cut near the top of
   // the sine's range, so only the crest of each cycle lights — a travelling
@@ -1019,6 +1064,93 @@ export function buildWaterShoreFoam({
     swashBand: band,
     breakFacing: facing,
   };
+}
+
+/**
+ * FOAM PATCHINESS — the default share of shoreline that is foam-free at any
+ * moment (2026-09-25, author, live on Flooded River Prison: *"foam is
+ * everywhere ... could you make it so that foam spawns in a more patchy and
+ * less predictable way?"*). 0 = the old behaviour exactly (every shore foams),
+ * 1 = only rare patches. 0.65 leaves foam on roughly 45% of the water at a
+ * time (the patch noise's own spread, ~0.28 RMS — this file's header —
+ * sets where each threshold lands).
+ */
+export const WATER_FOAM_PATCHINESS = 0.65;
+
+/** How big one foam patch is, world px — the patch noise's own cell size. Big
+ * enough that whole stretches of shoreline switch together (a dock face, a
+ * run of posts), small enough that one map shows several of each. */
+export const WATER_FOAM_PATCH_SIZE_PX = 800;
+
+/** How fast the patch field evolves through its third (time) axis, noise
+ * units per second — a patch forms or fades over tens of seconds, slow
+ * enough to read as weather on the water, never as flicker. */
+export const WATER_FOAM_PATCH_TIME_SCALE = 0.025;
+
+/** The patch edge's ramp, in the patch noise's own units (its spread is
+ * ~0.28 RMS): a short fall-off OUTSIDE the threshold and a long rise INSIDE
+ * it, so a patch is light at its rim and heaviest at its heart — foam that
+ * thickens toward the busiest water, rather than uniform stamps switched on
+ * and off. */
+const WATER_FOAM_PATCH_RAMP_OUT = 0.05;
+const WATER_FOAM_PATCH_RAMP_IN = 0.2;
+
+/**
+ * THE FOAM PATCH FIELD — 0..1, "may foam form here right now". A slowly
+ * evolving, world-anchored, low-frequency noise thresholded into islands with
+ * soft edges. Why this shape:
+ *
+ *   - The sim's own emission terms (a rock's upstream face, shear beside it,
+ *     the shore's swash rhythm) fire on EVERY obstacle alike, and its existing
+ *     40 px noise gate is floored at 0.15 on purpose — a hard per-texel zero
+ *     there would flicker. So nothing could ever leave a stretch of shore
+ *     clean, and every post wore the same halo. A LARGE-scale field is the
+ *     missing piece: at hundreds of px and tens of seconds a true zero reads
+ *     as "calm water here, for now", not as flicker.
+ *   - Applied at EMISSION (`water-sim.js`), not at display, so a post inside
+ *     a foamy patch still sheds a trail that the sim carries downstream rather
+ *     than one cut off at the patch edge; tier 2's crest foam, which has no
+ *     memory, takes the same field at display (`water-render.js`) — the SAME
+ *     world-anchored function in both, so the two sources agree about where
+ *     the patches are.
+ *   - `uPatchiness` moves the THRESHOLD, not the gain: fewer patches, each at
+ *     full strength, rather than every patch dimmed. At `uPatchiness <= 0` the
+ *     threshold drops below the noise's whole range and the field is exactly
+ *     1 — the old look, unchanged.
+ *
+ * @param {object} TSL
+ * @param {object} args
+ * @param {*} args.worldXY - vec2 node, ABSOLUTE world px.
+ * @param {*} args.timeSec - float node, seconds on the shared clock.
+ * @param {*} args.uPatchiness - float node 0..1.
+ * @param {*} args.uPatchSizePx - float node, world px.
+ * @returns {*} float node 0..1.
+ */
+export function buildFoamPatchNode(TSL, { worldXY, timeSec, uPatchiness, uPatchSizePx }) {
+  const { float, vec3, max, mix, step, smoothstep, mx_fractal_noise_float } = TSL;
+  const p = worldXY.div(max(uPatchSizePx, float(16)));
+  const n = mx_fractal_noise_float(vec3(p.x, p.y, timeSec.mul(float(WATER_FOAM_PATCH_TIME_SCALE))), 2, 2.0, 0.5);
+  // `step(uPatchiness, 0)` is 1 exactly when patchiness <= 0 — the −2 then
+  // puts the threshold below anything a 2-octave noise can reach.
+  const threshold = mix(float(-0.45), float(0.3), uPatchiness).sub(step(uPatchiness, float(0)).mul(float(2)));
+  return smoothstep(threshold.sub(float(WATER_FOAM_PATCH_RAMP_OUT)), threshold.add(float(WATER_FOAM_PATCH_RAMP_IN)), n);
+}
+
+/**
+ * The patch field's own two uniforms (patchiness, patch size), created HERE
+ * with the field rather than in each caller — the patch field is its own
+ * concern, and a render module's frozen uniform budget
+ * (`effects/uniform-budget`) should not grow for it.
+ * @param {object} TSL
+ * @param {{patchiness?: number, patchSizePx?: number}} [initial]
+ * @returns {{uPatchiness: *, uPatchSizePx: *}}
+ */
+export function createFoamPatchUniforms(
+  TSL,
+  { patchiness = WATER_FOAM_PATCHINESS, patchSizePx = WATER_FOAM_PATCH_SIZE_PX } = {}
+) {
+  const { uniform, float } = TSL;
+  return { uPatchiness: uniform(float(patchiness)), uPatchSizePx: uniform(float(patchSizePx)) };
 }
 
 /**

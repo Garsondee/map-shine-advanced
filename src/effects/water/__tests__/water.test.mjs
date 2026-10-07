@@ -35,9 +35,22 @@ import {
 } from '../water-field.js';
 import { WATER_TIER3_SHADOW_RESPONSE, WATER_TIER3_GLOSSINESS, WATER_MIN_ROUGHNESS } from '../water-light.js';
 import { WATER_TIER4_SWASH_FOAM, WATER_TIER4_BREAK_FOAM, WATER_TIER4_CAUSTICS } from '../water-render.js';
+import { WATER_FOAM_PATCHINESS, WATER_FOAM_PATCH_SIZE_PX } from '../water-shore.js';
 
 export function run(t) {
   const { ok, throws } = t;
+  ok(
+    'foamPatchiness schema default matches WATER_FOAM_PATCHINESS (water-shore.js)',
+    WATER_PARAMS.foamPatchiness.default === WATER_FOAM_PATCHINESS
+  );
+  ok(
+    'foamPatchSizePx schema default matches WATER_FOAM_PATCH_SIZE_PX (water-shore.js)',
+    WATER_PARAMS.foamPatchSizePx.default === WATER_FOAM_PATCH_SIZE_PX
+  );
+  ok(
+    'foamPatchiness reaches 0 — the old every-shore-foams look stays reachable',
+    WATER_PARAMS.foamPatchiness.min === 0
+  );
 
   // --- the declaration validates ------------------------------------------
   ok('WATER_PARAMS is a valid params schema', validateParamsSchema(WATER_PARAMS).ok);

@@ -78,6 +78,7 @@ import {
 // parks the current, the FOAM has to stop being carried downstream too, or the
 // water stands still while its white water keeps drifting away.
 import { waterFlowSpeedPx } from './water-field.js';
+import { WATER_FOAM_PATCHINESS, WATER_FOAM_PATCH_SIZE_PX } from './water-shore.js';
 
 /** Fallback foam-band reach, world px, used only until a caller calls
  * `setReachPx` at least once (e.g. before the surface material's own first
@@ -126,7 +127,7 @@ export function createWaterSimSubsystem({
 }) {
   getWaterRenderState ??= () => ({ params: {} });
 
-  const { uniform, vec4, float } = THREE.TSL;
+  const { uniform, vec2, vec4, float } = THREE.TSL;
   /** Written every `tick()` — the only per-frame-varying uniform. */
   const uDtSec = uniform(float(0));
   /** Written from schema params every `tick()` — see this module's header
@@ -141,6 +142,12 @@ export function createWaterSimSubsystem({
   const uDiffuse = uniform(float(WATER_SIM_DIFFUSE));
   const uShearGain = uniform(float(WATER_SIM_SHEAR_GAIN));
   const uNearSolidGain = uniform(float(WATER_SIM_NEAR_SOLID_GAIN));
+  /** Foam patchiness (2026-09-25) — same pull pattern; see
+   * water-shore.js#buildFoamPatchNode. `uRectOrigin` is the body rect's world
+   * min, pushed every tick so the patch field stays world-anchored. */
+  const uPatchiness = uniform(float(WATER_FOAM_PATCHINESS));
+  const uPatchSizePx = uniform(float(WATER_FOAM_PATCH_SIZE_PX));
+  const uRectOrigin = uniform(vec2(0, 0));
 
   const zeroMaterial = new THREE.NodeMaterial();
   zeroMaterial.fragmentNode = vec4(0, 0, 0, 0);
@@ -242,6 +249,9 @@ export function createWaterSimSubsystem({
       uDiffuse,
       uShearGain,
       uNearSolidGain,
+      uPatchiness,
+      uPatchSizePx,
+      uRectOrigin,
     };
     stepPingToPong = buildWaterSimStepMaterial({ ...common, simPrevTexture: simPingRt.texture });
     stepPongToPing = buildWaterSimStepMaterial({ ...common, simPrevTexture: simPongRt.texture });
@@ -290,6 +300,9 @@ export function createWaterSimSubsystem({
     uNearSolidGain.value = Number.isFinite(params.simNearSolidGain)
       ? params.simNearSolidGain
       : WATER_SIM_NEAR_SOLID_GAIN;
+    uPatchiness.value = Number.isFinite(params.foamPatchiness) ? params.foamPatchiness : WATER_FOAM_PATCHINESS;
+    uPatchSizePx.value = Number.isFinite(params.foamPatchSizePx) ? params.foamPatchSizePx : WATER_FOAM_PATCH_SIZE_PX;
+    uRectOrigin.value.set(rect.minX, rect.minY);
 
     ensureTargets(flowW, flowH);
     if (!stepPingToPong || flowTexture !== boundFlowTexture || bodyTexture !== boundBodyTexture) {

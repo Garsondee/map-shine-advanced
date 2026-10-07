@@ -99,6 +99,24 @@ export function tokenRotationToForwardVector(rotationDeg, lockRotation = false) 
   return { x: Math.sin(rad), y: -Math.cos(rad) };
 }
 
+/**
+ * Which way a carried beam points THIS frame. A live aim — `aimAngleDeg`, the
+ * bearer's own cursor or the angle their client relayed
+ * (`foundry/player-aim-channel.js#annotate`), in `TokenDocument.rotation`'s own
+ * convention — outranks the token's stored facing, and ignores `lockRotation`:
+ * that setting pins how the token's ARTWORK is drawn, not where its bearer is
+ * pointing a flashlight. With no aim (nobody has moved a cursor yet, a relayed
+ * aim went stale, a flashlight set on an NPC by hand) the beam follows the
+ * token's rotation exactly as it did before aiming existed.
+ *
+ * @param {{aimAngleDeg?: number|null, rotation?: number, lockRotation?: boolean}} [snapshot]
+ * @returns {{x: number, y: number}} a unit vector, as {@link tokenRotationToForwardVector}.
+ */
+export function resolveBeamDirection({ aimAngleDeg, rotation, lockRotation } = {}) {
+  if (Number.isFinite(aimAngleDeg)) return tokenRotationToForwardVector(aimAngleDeg, false);
+  return tokenRotationToForwardVector(rotation, lockRotation);
+}
+
 /** A stable, position-derived pseudo-seed — same classic GLSL-hash shape as
  * `candle-flame-geometry.js#deriveCandleSeed`/`fire-geometry.js#deriveFireSeed`,
  * so a room of several torches desyncs its flicker the identical way a room
@@ -176,7 +194,8 @@ export const PLAYER_LIGHT_RENDERED_MODES = Object.freeze(Object.keys(PLAYER_LIGH
  * batch `buildPlayerLightSources` below) so the light-pool merge point and a
  * unit test can both reason about one token without a whole-array dance.
  *
- * @param {{tokenId: string, x: number, y: number, elevation: number, mode: string}} tokenSnapshot
+ * @param {{tokenId: string, x: number, y: number, elevation: number, mode: string, rotation?: number, lockRotation?: boolean, aimAngleDeg?: number}} tokenSnapshot
+ *   `aimAngleDeg` (optional) is the bearer's live aim — see {@link resolveBeamDirection}.
  * @param {{modes: Record<string, boolean>}} permissions - `resolvePlayerLightPermissions`'s own shape.
  * @returns {object|null}
  */
@@ -207,13 +226,14 @@ export function buildOnePlayerLightSource(tokenSnapshot, permissions) {
     color: hexToRgb01(preset.colorHex),
     falloffModel: preset.falloffModel,
     // FLASHLIGHT BEAM (Stage 2a) — `null` for every non-beam mode (torch
-    // today). `beamDirection` is the bearer's LIVE facing, re-derived every
-    // call from this frame's own `tokenSnapshot.rotation` (never cached —
-    // the same "recomputed every call" contract this module's own header
-    // already documents for position); `beamShape` is the preset's own
+    // today). `beamDirection` is the bearer's LIVE aim — their cursor, local or
+    // relayed — else their token's rotation (`resolveBeamDirection`), re-derived
+    // every call from this frame's own snapshot (never cached — the same
+    // "recomputed every call" contract this module's own header already
+    // documents for position); `beamShape` is the preset's own
     // constant shape, read straight through so `point-light-pool.js`'s
     // material builder can bake it once at entry-creation time.
-    beamDirection: isBeam ? tokenRotationToForwardVector(tokenSnapshot.rotation, tokenSnapshot.lockRotation) : null,
+    beamDirection: isBeam ? resolveBeamDirection(tokenSnapshot) : null,
     beamShape: isBeam
       ? {
           nearHalfWidth01: preset.beamNearHalfWidth01,

@@ -527,3 +527,10 @@ export {
   PLAYER_LIGHT_MODE_FLAG,
 } from './player-light-mode.js';
 export { broadcastImpulse, listenForImpulses } from './impulse-broadcast.js';
+
+// PLAYER AIM (mythica-machina-press#77) — the live half of "a carried flashlight
+// points where its bearer's cursor points": reads Foundry's own cursor, relays
+// the bearer's aim angle over the module socket and stamps every aimable
+// carried-light snapshot with the aim to draw. One instance per client, owned
+// by boot.js (`playerAimChannel`). Pure rules live in ./player-aim.js.
+export { createPlayerAimChannel } from './player-aim-channel.js';

@@ -8,6 +8,7 @@ import {
   buildOnePlayerLightSource,
   buildPlayerLightSources,
   PLAYER_LIGHT_RENDERED_MODES,
+  resolveBeamDirection,
   tokenRotationToForwardVector,
 } from '../player-light-geometry.js';
 
@@ -149,6 +150,64 @@ export function run(t) {
       'lockRotation forces the VISUAL facing to 0° regardless of the stored rotation value',
       near(locked.beamDirection.x, 0, 1e-6) && near(locked.beamDirection.y, -1, 1e-6)
     );
+  }
+
+  // ======================================================================
+  // a live aim (the bearer's cursor, local or relayed) outranks the stored rotation
+  // ======================================================================
+  {
+    const aimedEast = buildOnePlayerLightSource(
+      { tokenId: 'a1', x: 0, y: 0, mode: 'flashlight', rotation: 0, aimAngleDeg: 90 },
+      ALLOW_ALL
+    );
+    ok(
+      'an aim of 90° points the beam +X even though the token itself faces north',
+      near(aimedEast.beamDirection.x, 1, 1e-6) && near(aimedEast.beamDirection.y, 0, 1e-6)
+    );
+    const aimedLocked = buildOnePlayerLightSource(
+      { tokenId: 'a2', x: 0, y: 0, mode: 'flashlight', rotation: 0, lockRotation: true, aimAngleDeg: 180 },
+      ALLOW_ALL
+    );
+    ok(
+      'lockRotation pins the token artwork, not the bearer’s aim: an aim of 180° still points the beam south',
+      near(aimedLocked.beamDirection.x, 0, 1e-6) && near(aimedLocked.beamDirection.y, 1, 1e-6)
+    );
+    const aimedDiagonal = buildOnePlayerLightSource(
+      { tokenId: 'a3', x: 0, y: 0, mode: 'flashlight', aimAngleDeg: 225 },
+      ALLOW_ALL
+    );
+    ok(
+      'an aim of 225° points the beam south-west',
+      near(aimedDiagonal.beamDirection.x, -Math.SQRT1_2, 1e-6) &&
+        near(aimedDiagonal.beamDirection.y, Math.SQRT1_2, 1e-6)
+    );
+    const aimedZero = buildOnePlayerLightSource(
+      { tokenId: 'a4', x: 0, y: 0, mode: 'flashlight', rotation: 90, aimAngleDeg: 0 },
+      ALLOW_ALL
+    );
+    ok(
+      'an aim of exactly 0° (north) is a real aim, not “no aim”',
+      near(aimedZero.beamDirection.x, 0, 1e-6) && near(aimedZero.beamDirection.y, -1, 1e-6)
+    );
+    ok(
+      'every unusable aim falls back to the stored rotation',
+      [null, undefined, NaN, '90', Infinity].every((aimAngleDeg) => {
+        const d = resolveBeamDirection({ aimAngleDeg, rotation: 90 });
+        return near(d.x, 1, 1e-6) && near(d.y, 0, 1e-6);
+      })
+    );
+    ok(
+      'resolveBeamDirection with nothing at all is total and points north',
+      (() => {
+        const d = resolveBeamDirection();
+        return near(d.x, 0, 1e-6) && near(d.y, -1, 1e-6);
+      })()
+    );
+    const torchAimed = buildOnePlayerLightSource(
+      { tokenId: 'a5', x: 0, y: 0, mode: 'torch', aimAngleDeg: 90 },
+      ALLOW_ALL
+    );
+    ok('a torch ignores an aim — it has no beam to point', torchAimed.beamDirection === null);
   }
   {
     // A vision-mode pick — real, selectable, but Stage 1 renders nothing for it.

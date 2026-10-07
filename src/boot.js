@@ -627,6 +627,10 @@ import {
   isViewingUserGM,
   readTokenPlayerLightMode,
   readGamePaused,
+  // PLAYER AIM (mythica-machina-press#77) — the one per-client channel that
+  // reads the bearer's cursor, relays it over the module socket and stamps
+  // each aimable carried light with the aim to draw (`playerAimChannel`).
+  createPlayerAimChannel,
 } from './foundry/index.js';
 import { engageFoundryFallback, getDescribeRenderModeStats } from './diag/render-fallback.js';
 import { registerMarkerSource, getAllMarkerPoints } from './diag/marker-overlay.js';
@@ -1978,6 +1982,10 @@ function install() {
     // The player's Carried Light picker repaints when their token appears,
     // disappears or has its light changed elsewhere — not only on reopen.
     watchViewerToken(() => MapShine.__player?.refreshPlayerLightPicker?.());
+    // A flashlight points where its bearer's cursor points, and every client
+    // sees it: start the aim sender and the socket listener that carries it
+    // (`playerAimChannel`, declared beside the carried-light getter further down).
+    playerAimChannel.start();
   }); // end Hooks.once('ready', ...) — see the deferral comment above installStudio
   // THE PLAYER ROOM (U5, docs/holy/UI-Testament.md §5.5) — safe to construct
   // unconditionally for every client, GM or not (its own header explains
@@ -4895,10 +4903,26 @@ function install() {
   // see that function's own header for why this "just works" identically on
   // every connected client (each renders from the same synced Token-
   // document flag, not a client-local value).
+  //
+  // AIM — a flashlight's beam points where its bearer's cursor points.
+  // `playerAimChannel.annotate` stamps each aimable snapshot with the aim to
+  // draw (this client's own cursor for its own token; the angle each other
+  // bearer's client relayed over the module socket for theirs), and
+  // `buildPlayerLightSources` uses it in place of the token's stored rotation.
+  // With no aim known (no cursor moved yet, a relayed aim went stale, an NPC
+  // flashlight set by hand) the snapshot is left alone and the beam stays on
+  // that rotation. The channel's sender and socket listener start in the
+  // `ready` hook beside `listenForImpulses`. `annotate` never throws — a throw
+  // in this per-frame getter kills the render loop (a0402af8 was exactly that,
+  // on this same flashlight).
+  const playerAimChannel = createPlayerAimChannel();
+  // A console readout: what this client has sent, heard and refused, and why.
+  MapShine.playerAimStats = () => playerAimChannel.getStats();
   const getPlayerCarriedLightSources = () => {
     const tokenSnapshots = readActivePlayerCarriedLightTokens();
     if (tokenSnapshots.length === 0) return [];
     const { permissions } = readScenePlayerLightPermissions();
+    playerAimChannel.annotate(tokenSnapshots);
     return buildPlayerLightSources(tokenSnapshots, permissions);
   };
 

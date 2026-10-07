@@ -50,20 +50,26 @@ uploaded and verified. A failed preflight keeps the files queued and says why; a
 retries after 15 s. Only one watcher runs at a time (heartbeat lock file); its log is
 `oracle-sync.log`.
 
-Start it hidden (PowerShell):
+### Start at login (Windows scheduled task)
 
 ```powershell
-Start-Process node -ArgumentList 'tools/oracle-sync/oracle-sync.mjs','watch' -WorkingDirectory . `
-  -WindowStyle Hidden -RedirectStandardOutput tools/oracle-sync/oracle-sync.log `
-  -RedirectStandardError tools/oracle-sync/oracle-sync.err.log
+powershell -File tools/oracle-sync/install-login-task.ps1              # create/replace + start
+powershell -File tools/oracle-sync/install-login-task.ps1 -Uninstall   # remove
 ```
 
-Stop it: end the `node.exe` whose command line contains `oracle-sync.mjs watch`.
+Registers the task `MapShineAdvanced-OracleSync` for the current user (no admin, hidden window,
+starts 30 s after login, restarts the watcher up to 3 times if it dies). The task owns the
+watcher's lifetime: `Stop-ScheduledTask -TaskName MapShineAdvanced-OracleSync` stops it,
+`Start-ScheduledTask …` starts it again.
+
+To start it by hand without the task: `powershell -File tools/oracle-sync/start-watcher.ps1 -Detach`
+(hidden, returns immediately; safe to run twice — a second copy exits at once).
 
 ## Files
 
 - `oracle-sync-core.mjs` — pure rules (what syncs, path safety, diffing, import/manifest checks). Unit-tested in `oracle-sync-core.test.mjs`, wired into `npm test`.
 - `oracle-sync.mjs` — the CLI; the only file that touches PuTTY, the network or the disk.
+- `start-watcher.ps1` / `install-login-task.ps1` — launch the watcher / register it as a login task.
 
 Design lineage: the rules are the lessons of the sibling *Blank Inheritance* project's
 `tools/module-sync` (verified pushes, file-by-file upload, never push a subset).

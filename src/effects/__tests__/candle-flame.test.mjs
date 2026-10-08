@@ -55,7 +55,11 @@ export function run(t) {
       'the resolved params carry the look defaults',
       resolved.params.sizePx === 24 &&
         resolved.params.color === CANDLE_FLAME_PARAMS.color.default &&
-        resolved.params.lightRadiusPx === 400
+        resolved.params.lightRadiusPx === CANDLE_FLAME_PARAMS.lightRadiusPx.default
+    );
+    ok(
+      'the default candle light radius is 600px (author: 50% bigger than the old 400)',
+      CANDLE_FLAME_PARAMS.lightRadiusPx.default === 600
     );
     ok('the flame colour default is a valid #rrggbb', /^#[0-9a-f]{6}$/i.test(CANDLE_FLAME_PARAMS.color.default));
     throws('a duplicate candle registration throws', () => reg.register(CANDLE_FLAME, () => {}), 'already registered');

@@ -395,8 +395,11 @@ export function run(t) {
     const four = candleClusterLightParams(4, 400);
     const eight = candleClusterLightParams(8, 400);
     ok('one candle sits below the neutral reference (dimmer exposure)', one.luminosity01 < 0.5);
-    ok('≈4 candles land at the neutral reference (exposure ~0)', approx(four.luminosity01, 0.5, 1e-9));
-    ok('8 candles are brighter than the reference', eight.luminosity01 > 0.5);
+    // The reference used to sit at exposure 0 (factor 1). Candle lights are now
+    // +33% (author, 2026-10-08): factor 1.33 ⇒ exposure 0.66 ⇒ luminosity 0.83.
+    ok('≈4 candles land 33% above the old neutral reference', approx(four.luminosity01, 0.83, 1e-9));
+    ok('the coloration alpha at the reference is also +33%', approx(four.alpha01, 0.85 * 1.33, 1e-9));
+    ok('8 candles are brighter than the reference', eight.luminosity01 > four.luminosity01);
     ok(
       'coloration strength scales monotonically with candle count',
       one.alpha01 < four.alpha01 && four.alpha01 < eight.alpha01

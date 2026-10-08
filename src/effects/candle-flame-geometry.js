@@ -187,7 +187,7 @@ export function candleAnimationQualityTier(name) {
  * frame, from 91 draw calls**; the effect sweep independently measured candles'
  * marginal cost at 13.15 ms, agreeing to 0.3%. **A candle costs what its LIGHT
  * costs — its flame is free**, because a `sizePx` 24 billboard covers ~576
- * world px² against a `lightRadiusPx` 400 (×1.25 boost ⇒ r=500) light's
+ * world px² against a `lightRadiusPx` 400 (the pre-2026-10-08 default; ×1.25 boost ⇒ r=500) light's
  * ~785,000, drawn twice. Roughly 1,363× the area.
  *
  * So the lever that matters is the light COUNT, and the existing clustering
@@ -283,9 +283,11 @@ export function candleClusterLightParams(strength, baseRadius) {
   // STRENGTH_REF, positive (brighter) for a candelabra. luminosity01 =
   // (exposure+1)/2 (point-light-illumination.js#computeExposure's inverse).
   const exposure = clampNum(CANDLE_EXPO_PER_STRENGTH * (s - CANDLE_STRENGTH_REF), CANDLE_EXPO_MIN, CANDLE_EXPO_MAX);
-  const luminosity01 = clampNum(0.5 + exposure / 2, 0.05, 1);
+  const luminosity01 = clampNum(0.5 + boostExposure(exposure) / 2, 0.05, 1);
   // Coloration (warm-glow) strength scales linearly off the reference.
-  const alpha01 = clampNum(CANDLE_ALPHA_BASE * (s / CANDLE_STRENGTH_REF), CANDLE_ALPHA_MIN, CANDLE_ALPHA_MAX);
+  const alpha01 =
+    clampNum(CANDLE_ALPHA_BASE * (s / CANDLE_STRENGTH_REF), CANDLE_ALPHA_MIN, CANDLE_ALPHA_MAX) *
+    CANDLE_BRIGHTNESS_BOOST;
   // Reach: the flat +25% (RADIUS_BOOST) plus a gentle sqrt growth with cluster
   // size, so a candelabra lights a bigger area without ballooning.
   const radiusFactor = clampNum(
@@ -294,6 +296,21 @@ export function candleClusterLightParams(strength, baseRadius) {
     CANDLE_RADIUS_MAX_FACTOR
   );
   return { radius: r * CANDLE_RADIUS_BOOST * radiusFactor, luminosity01, alpha01 };
+}
+
+/**
+ * Lift an exposure so the light it produces is `CANDLE_BRIGHTNESS_BOOST`× as
+ * bright. The illumination shader (point-light-illumination.js, EXPOSURE) turns
+ * exposure `e` into a multiplier at the light's centre of `1 + e` for e ≤ 0 and
+ * `1 + e/2` for e > 0 — so the boost multiplies THAT factor and is inverted
+ * back to an exposure, rather than naively scaling `e` (which would do nothing
+ * at the neutral reference, e = 0). Clamped to the shader's own [-1, 1] range.
+ * @param {number} e - exposure, -1..1.
+ * @returns {number}
+ */
+function boostExposure(e) {
+  const factor = (e <= 0 ? 1 + e : 1 + e / 2) * CANDLE_BRIGHTNESS_BOOST;
+  return clampNum(factor <= 1 ? factor - 1 : 2 * (factor - 1), -1, 1);
 }
 
 /** Clamp helper (pure) — kept local so candleClusterLightParams stays total. */
@@ -312,6 +329,9 @@ const CANDLE_LIGHT_SEGMENTS = 32; // circle polygon smoothness (no walls in v1)
 // ── Per-cluster STRENGTH → brightness/reach (candleClusterLightParams) ──────
 const CANDLE_STRENGTH_REF = 4; // "≈ today's look" strength (author: about 4 candles)
 const CANDLE_RADIUS_BOOST = 1.25; // flat +25% reach for the inverse-square falloff
+/** Candle lights read as very dim (author, 2026-10-08) → +33% on both halves of
+ * the light: the coloration (warm-glow) alpha and the illumination exposure. */
+const CANDLE_BRIGHTNESS_BOOST = 1.33;
 const CANDLE_EXPO_PER_STRENGTH = 0.14; // exposure gained per unit strength past the ref
 const CANDLE_EXPO_MIN = -0.55; // a lone candle's floor (dim, not out)
 const CANDLE_EXPO_MAX = 0.7; // a big candelabra's ceiling (bright, not blown out)

@@ -66,7 +66,10 @@ export const CANDLE_FLAME_PARAMS = Object.freeze({
     min: 0,
     max: 2000,
     step: 1,
-    default: 400,
+    // RAISED 400 → 600 (+50%, 2026-10-08, author: "the light radius for default
+    // candles needs to be 50% bigger"). Only the DEFAULT moves: a scene or
+    // candle that stored its own radius keeps it.
+    default: 600,
     category: 'Light',
     label: 'Light radius',
     help: 'How far the candle casts light, in canvas pixels. 0 = a flame with no light. This is the point light we control.',

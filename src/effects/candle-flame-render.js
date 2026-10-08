@@ -163,10 +163,25 @@ const FLAME_TIP_COOL = 0.75;
  * existed to serve an "extremely bright core" ask by blowing the centre to
  * white, and the reference art has no blown-out white anywhere in it. Brightness
  * now comes from the pale cream ramp stop, not from clipping the channel. */
-const FLAME_EMIT_BODY = 0.6;
+const FLAME_EMIT_BODY = 0.85; // was 0.6 — flames read dim (author, 2026-10-08)
 const FLAME_EMIT_HEAT_GAIN = 1.0;
 const FLAME_CORE_RADIUS = 0.12; // the core kick's radius (fraction of the quad)
 const FLAME_CORE_BOOST = 0.5;
+/**
+ * THE HOT CORE (2026-10-08, author: flames should be "bright enough that they
+ * trigger bloom easily"). Bloom thresholds the scene's HDR luma (bloom.js,
+ * default 1.52), and the cream core stop only reaches ~1.3-1.6 of it, so a
+ * flame sat right at the edge and a guttering one never crossed it. The
+ * innermost heat band is multiplied by (1 + FLAME_HOT_CORE_GAIN) so the core
+ * lands well above the threshold even at a mid-life emission level — HDR
+ * emission, not a whiter colour (the ramp stays on the reference palette).
+ */
+const FLAME_HOT_CORE_GAIN = 1.6;
+const FLAME_HOT_CORE_HEAT = [0.5, 0.85]; // heat band the gain fades in across
+/** THE OPAQUE MIDDLE (same ask: "opaque in the middle"). Where heat passes this
+ * band the flame stops ADDING to the floor and REPLACES it, so the body does not
+ * go see-through over a bright map. The rim stays additive (a soft glow). */
+const FLAME_OPAQUE_HEAT = [0.3, 0.6];
 
 /**
  * ============================================================================
@@ -686,6 +701,11 @@ export function buildCandleFlameMaterial({
         .add(heat.mul(float(FLAME_EMIT_HEAT_GAIN)))
         .add(coreT.mul(float(FLAME_CORE_BOOST)))
     )
+    .mul(
+      float(1).add(
+        smoothstep(float(FLAME_HOT_CORE_HEAT[0]), float(FLAME_HOT_CORE_HEAT[1]), heat).mul(float(FLAME_HOT_CORE_GAIN))
+      )
+    )
     .mul(emitLevel)
     .mul(uIntensity)
     .mul(flameIntensity); // per-candle brightness (the anchor's own `intensity` param, finally read by the flame itself)
@@ -742,15 +762,29 @@ export function buildCandleFlameMaterial({
     );
   }
 
+  // OPACITY of the flame's middle. Taken from the FINAL emission (snuff and the
+  // depth gate already folded in), so a guttered, snuffed or floor-occluded
+  // flame fades its opaque body out with its light instead of leaving a dark
+  // hole in the map.
+  const opacity = inside
+    .mul(smoothstep(float(FLAME_OPAQUE_HEAT[0]), float(FLAME_OPAQUE_HEAT[1]), heat))
+    .mul(clamp(emission, float(0), float(1)));
+
   const material = new THREE.NodeMaterial();
   material.transparent = true;
   material.depthTest = false;
   material.depthWrite = false;
   material.side = THREE.DoubleSide;
-  material.blending = THREE.AdditiveBlending;
-  // AdditiveBlending = SrcAlpha·rgb + dst → the contribution is colorOut ×
-  // emission, added onto scene.lit — a glow that fades at the silhouette.
-  material.fragmentNode = vec4(colorOut, emission);
+  // PREMULTIPLIED OVER: out = rgb + dst·(1 − opacity). Where opacity is 0 (the
+  // rim) that is exactly the old additive glow (colorOut × emission added onto
+  // scene.lit); where it is 1 (the middle) the flame replaces what is under it.
+  material.blending = THREE.CustomBlending;
+  material.blendEquation = THREE.AddEquation;
+  material.blendSrc = THREE.OneFactor;
+  material.blendDst = THREE.OneMinusSrcAlphaFactor;
+  material.blendSrcAlpha = THREE.OneFactor;
+  material.blendDstAlpha = THREE.OneFactor;
+  material.fragmentNode = vec4(colorOut.mul(emission), opacity);
 
   return { material, uIntensity, uLean, uWindResponse };
 }

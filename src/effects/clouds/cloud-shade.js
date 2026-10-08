@@ -593,8 +593,13 @@ export function buildCloudTopsShadowNode(TSL, { worldXY, uniforms: u, buildField
  * every stage of the gate by exactly that factor at any given zoom, without
  * changing the shape of the fade/loom curve doc 02 §9 derived — the same
  * "one physical model, one number to correct" property the eye-height
- * redesign was built for. */
-export const CLOUD_TOPS_CAMERA_HEIGHT_PER_VIEW_WIDTH = 0.23 / 1.5;
+ * redesign was built for.
+ *
+ * 2026-10-08 — author: clouds should appear only after zooming out TWICE as
+ * far as now (clouds read as bigger and further away). Same lever again:
+ * halved (0.23 / 1.5 -> 0.23 / 3), so the tops wake, fade in and finish
+ * fading at exactly 2x the view width they did before. */
+export const CLOUD_TOPS_CAMERA_HEIGHT_PER_VIEW_WIDTH = 0.23 / 3;
 
 /** The hard ceiling on parallax magnification, `M = 1/(1 - parallax)`. As the
  * eye height approaches the deck's own altitude, `deckAltitudePx/eyeHeightPx`

@@ -137,7 +137,10 @@ export const CLOUD_LOOK_PARAMS = Object.freeze({
     // a linear wind consumer, since real cloud decks move far slower than surface
     // gusts regardless of how the ground-level dial is calibrated.
     // 2026-09-25 — author's live-tuned "new defaults" dump (was 0.25).
-    default: 0.78,
+    // 2026-10-08 — author: halve wind's effect on cloud movement so the clouds
+    // feel bigger and further away (was 0.78). Scales the calm floor too, as
+    // the multiplier sits after it.
+    default: 0.39,
     category: 'Motion',
     label: 'Cloud speed',
     help: "Multiplies how fast the deck drifts with wind. 1 = the ambient wind's own speed, unscaled (which reaches ~35 m/s equivalent at full wind — genuinely hurricane force, tuned for ground-level effects, not a slow-moving cloud deck). 0 holds the deck still regardless of wind.",

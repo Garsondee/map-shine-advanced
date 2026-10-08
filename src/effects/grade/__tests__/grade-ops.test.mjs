@@ -9,6 +9,9 @@ import {
   applyGrade,
   buildGradeNode,
   resolveEnvGrade,
+  resolveHazeGrade,
+  applyHazeToGrade,
+  DEFAULT_HAZE_CONFIG,
   scaleGradeToIdentity,
   gradePreset,
   luminance,
@@ -140,6 +143,92 @@ export function run(t) {
     const sat0 = (x) => (Math.max(...x) - Math.min(...x)) / Math.max(...x);
     const graded = applyGrade(red, scaleGradeToIdentity(overcast, 1));
     t.ok('an overcast-graded red is greyer', sat0(graded) < sat0(red));
+  }
+
+  // ---- atmospheric haze (aerial perspective as lift/gain data) --------------
+  {
+    const env = (day, cloud) => ({ sun: { dayFactor01: day }, weather: { cloudCover01: cloud } });
+    const veilMean = (h) => (h.veil[0] + h.veil[1] + h.veil[2]) / 3;
+    const isIdentity = (h) => h.lift.every((x) => x === 0) && h.gain.every((x) => x === 1);
+
+    // Zero at play zoom, and fails clear on a missing measurement.
+    t.ok('no haze at play zoom', isIdentity(resolveHazeGrade(env(1, 0), 1900)));
+    t.ok(
+      'no haze exactly at the start width',
+      isIdentity(resolveHazeGrade(env(1, 0), DEFAULT_HAZE_CONFIG.startWidthPx))
+    );
+    t.ok(
+      'missing/garbage view width = no haze',
+      isIdentity(resolveHazeGrade(env(1, 1), NaN)) && isIdentity(resolveHazeGrade(env(1, 1), -5))
+    );
+
+    // Present at cloud cover 0 once zoomed out, but subtle.
+    const clearFar = resolveHazeGrade(env(1, 0), 20000);
+    t.ok('haze exists in perfectly clear air when zoomed out', veilMean(clearFar) > 0.05);
+    t.ok('...but is subtle in clear air (< 25% veil)', veilMean(clearFar) < 0.25);
+
+    // Stronger with cloud cover; stronger with zoom; capped.
+    const overcastFar = resolveHazeGrade(env(1, 1), 20000);
+    t.ok('cloud cover thickens the haze', veilMean(overcastFar) > veilMean(clearFar) * 1.8);
+    t.ok(
+      'zooming out thickens the haze',
+      veilMean(resolveHazeGrade(env(1, 0.5), 30000)) > veilMean(resolveHazeGrade(env(1, 0.5), 12000))
+    );
+    t.ok(
+      'the veil never exceeds maxVeil',
+      Math.max(...resolveHazeGrade(env(1, 1), 1e7).veil) <= DEFAULT_HAZE_CONFIG.maxVeil + 1e-12
+    );
+
+    // Colour: clear air is blue-airlight and blue-extinguished-most (Rayleigh);
+    // overcast is neutral (Mie).
+    t.ok('clear-air haze is bluest (airlight lifts blue most)', clearFar.lift[2] > clearFar.lift[0]);
+    t.ok('clear-air extinction is wavelength-dependent (blue veiled most)', clearFar.veil[2] > clearFar.veil[0]);
+    t.ok(
+      'overcast haze is neutral (equal veil per channel)',
+      Math.abs(overcastFar.veil[0] - overcastFar.veil[2]) < 1e-9
+    );
+
+    // The map really is `x*T + A*(1-T)`: through the grade primitive, a pixel
+    // equal to the airlight is unmoved; darker pixels lift, brighter ones drop.
+    const A = clearFar.lift.map((l, i) => l / clearFar.veil[i]);
+    t.ok('a pixel equal to the airlight is a fixed point of the haze', rgbClose(applyGrade(A, clearFar), A, 1e-9));
+    const dark = applyGrade([0.02, 0.02, 0.02], clearFar);
+    const bright = applyGrade([2, 2, 2], clearFar);
+    t.ok('haze lifts darks and lowers brights (contrast loss)', dark[1] > 0.02 && bright[1] < 2);
+    // Saturation: a vivid red gets greyer through the haze.
+    const sat0 = (x) => (Math.max(...x) - Math.min(...x)) / Math.max(...x);
+    t.ok('haze desaturates', sat0(applyGrade([0.8, 0.2, 0.2], overcastFar)) < sat0([0.8, 0.2, 0.2]));
+
+    // Night: far less veil and a dark airlight (never a bright foggy night).
+    const nightFar = resolveHazeGrade(env(0, 1), 20000);
+    t.ok('night veil is a fraction of the day veil', veilMean(nightFar) < veilMean(overcastFar) * 0.4);
+    t.ok('night airlight is dark', Math.max(...nightFar.lift.map((l, i) => l / nightFar.veil[i])) < 0.1);
+    const nightPixel = applyGrade([0.03, 0.03, 0.03], nightFar);
+    t.ok('haze can never brighten a night pixel into grey fog', nightPixel[1] < 0.06);
+
+    // Composition: identity haze leaves a grade alone; a real haze composes
+    // as "grade first, then haze" (affine composition).
+    const g0 = { ...IDENTITY_GRADE, lift: [0.02, 0.01, 0], gain: [1.1, 1, 0.9], saturation: 0.8 };
+    t.ok(
+      'identity haze composes to the same lift/gain',
+      (() => {
+        const o = applyHazeToGrade(g0, { lift: [0, 0, 0], gain: [1, 1, 1] });
+        return rgbClose(o.lift, g0.lift) && rgbClose(o.gain, g0.gain) && o.saturation === 0.8;
+      })()
+    );
+    const px = [0.3, 0.5, 0.7];
+    const sequential = (() => {
+      const first = applyGrade(px, { lift: g0.lift, gain: g0.gain });
+      return applyGrade(first, { lift: clearFar.lift, gain: clearFar.gain });
+    })();
+    const composed = applyGrade(px, {
+      lift: applyHazeToGrade(g0, clearFar).lift,
+      gain: applyHazeToGrade(g0, clearFar).gain,
+    });
+    t.ok('haze composes after the grade lift/gain (affine composition)', rgbClose(sequential, composed, 1e-9));
+    // Strength lever: scaling to identity scales the veil linearly.
+    const half = scaleGradeToIdentity(applyHazeToGrade({ ...IDENTITY_GRADE }, clearFar), 0.5);
+    t.ok('the strength lever halves the haze', close(half.lift[2], clearFar.lift[2] * 0.5, 1e-9));
   }
 
   // ---- vibrance: luminance-preserving, unsaturated-first --------------------

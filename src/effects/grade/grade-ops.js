@@ -297,6 +297,136 @@ export function resolveEnvGrade(env, config = DEFAULT_ENV_GRADE_CONFIG) {
 }
 
 // ===========================================================================
+// ATMOSPHERIC HAZE — aerial perspective, expressed in the ONE grade primitive.
+// ===========================================================================
+
+/**
+ * Haze tuning. Authorable defaults, same posture as `DEFAULT_ENV_GRADE_CONFIG`.
+ *
+ * THE MODEL (Hoffman & Preetham 2002, the standard real-time aerial
+ * perspective; Koschmieder's visibility law is the same idea): light from the
+ * ground reaches the eye through a column of air that both REMOVES some of it
+ * (extinction, Beer–Lambert `T = exp(-β·d)`) and ADDS some scattered sun/sky
+ * light of its own (airlight): `C = C₀·T + L_air·(1 − T)`. Three visible
+ * consequences, all of which fall out of that one line:
+ *   - contrast drops (every pixel is pulled toward the same airlight colour);
+ *   - saturation drops (the airlight is nearly neutral);
+ *   - the shift is COLOURED: dry, clear air scatters by Rayleigh/small-particle
+ *     physics (blue airlight, and blue is also the channel extinguished most,
+ *     so the ground behind it warms very slightly), while humid/cloudy air
+ *     scatters by Mie (large droplets, all wavelengths alike → white-grey
+ *     airlight, no channel preference).
+ *
+ * THE DISTANCE is the camera's height: the same "zooming out is rising"
+ * model `cloud-shade.js#cloudTopsGate` uses, so the optical path length is
+ * proportional to the view WIDTH (world px). Below `startWidthPx` — normal
+ * play zoom — the column is too short to matter and the haze is exactly zero.
+ */
+export const DEFAULT_HAZE_CONFIG = Object.freeze({
+  /** View width (world px) below which there is no haze at all — play zoom. */
+  startWidthPx: 2500,
+  /** Width of one "optical unit" (world px): `d = (width - start) / this`. */
+  refWidthPx: 10000,
+  /** Extinction per optical unit in perfectly clear air. Non-zero by design:
+   * the author wants haze "present even at cloud cover 0". */
+  betaClear: 0.09,
+  /** Extra extinction per optical unit at full cloud cover (humid, Mie-heavy
+   * air; haze is far thicker under cloud than under a clear sky). */
+  betaCloud: 0.24,
+  /** Hard ceiling on the veil (1 − T), whatever the zoom — never a flat wash. */
+  maxVeil: 0.55,
+  /** Per-channel extinction weights in clear (Rayleigh-ish) air; cloud cover
+   * blends these toward [1,1,1] (Mie is wavelength-neutral). */
+  clearChannelWeights: Object.freeze([0.82, 1, 1.22]),
+  /** Airlight colour, clear air: bluish, ~unit luminance. */
+  clearAirlight: Object.freeze([0.82, 0.98, 1.28]),
+  /** Airlight colour, overcast: neutral. */
+  cloudAirlight: Object.freeze([1, 1, 1]),
+  /** Airlight LEVEL (linear, scene-referred) at midday: roughly the brightness
+   * of a lit daytime ground pixel, so the veil lifts darks and lowers brights
+   * toward a believable sky-ish grey rather than toward white or black. */
+  airlightLevel: 0.36,
+  /** Under full overcast the sky (and its airlight) is dimmer by this much. */
+  cloudAirlightDim: 0.15,
+  /** Night keeps this fraction of the daytime airlight LEVEL (moonlit haze is
+   * dark, and a bright night haze is the "foggy grey night" bug the env grade
+   * already fixed once — see `DEFAULT_ENV_GRADE_CONFIG.cloudNightDarken`). */
+  nightAirlight: 0.1,
+  /** Night keeps this fraction of the daytime veil, so a lamp isn't dimmed
+   * by a daylight-strength column of air. */
+  nightVeil: 0.25,
+});
+
+/**
+ * Resolve the haze for one frame as a per-channel affine map `x → x·T + A·(1−T)`
+ * written in the grade primitive's own `lift`/`gain` terms (`x·gain +
+ * lift·(1 − x)` ≡ `x·(gain − lift) + lift`, so `gain − lift = T` and
+ * `lift = A·(1 − T)`). NO new uniform, NO new shader term — haze is the grade
+ * primitive's existing lift/gain with different DATA, which is the entire
+ * point of `grade/one-stack`. Pure.
+ *
+ * @param {object} env - the env snapshot (`env.sun`, `env.weather`).
+ * @param {number} viewWidthWorldPx - the current view's width in world px.
+ *   Non-finite / <= 0 (no measurement) means NO haze (fails clear, like the
+ *   cloud tops fail asleep: a missing measurement must not veil the map).
+ * @param {object} [config]
+ * @returns {{lift: number[], gain: number[], veil: number[]}} `veil` = `1 − T`
+ *   per channel (0 = no haze), for diagnostics/tests.
+ */
+export function resolveHazeGrade(env, viewWidthWorldPx, config = DEFAULT_HAZE_CONFIG) {
+  const cfg = { ...DEFAULT_HAZE_CONFIG, ...(config || {}) };
+  const day = clamp01(env?.sun?.dayFactor01 ?? 1);
+  const cloud = clamp01(env?.weather?.cloudCover01 ?? 0);
+  const width = Number(viewWidthWorldPx);
+  const d = Number.isFinite(width) && width > 0 ? Math.max(0, width - cfg.startWidthPx) / cfg.refWidthPx : 0;
+  if (d <= 0) return { lift: [0, 0, 0], gain: [1, 1, 1], veil: [0, 0, 0] };
+
+  const beta = cfg.betaClear + cfg.betaCloud * cloud;
+  const dayVeil = lerp(cfg.nightVeil, 1, day);
+  const level = cfg.airlightLevel * lerp(cfg.nightAirlight, 1, day) * (1 - cfg.cloudAirlightDim * cloud);
+
+  const lift = [0, 0, 0];
+  const gain = [1, 1, 1];
+  const veil = [0, 0, 0];
+  for (let i = 0; i < 3; i++) {
+    const w = lerp(cfg.clearChannelWeights[i], 1, cloud); // Rayleigh → Mie
+    const transmittance = Math.exp(-beta * w * d); // Beer–Lambert
+    const v = Math.min(cfg.maxVeil, (1 - transmittance) * dayVeil);
+    const airlight = level * lerp(cfg.clearAirlight[i], cfg.cloudAirlight[i], cloud);
+    veil[i] = v;
+    lift[i] = airlight * v;
+    gain[i] = 1 - v + lift[i];
+  }
+  return { lift, gain, veil };
+}
+
+/**
+ * Lay a haze map (from {@link resolveHazeGrade}) over a resolved grade's own
+ * lift/gain, so the haze composes with — never replaces — whatever lift/gain
+ * the grade already carries. Both are per-channel affine maps
+ * (`x → a·x + b`, `a = gain − lift`, `b = lift`); the haze is applied AFTER
+ * the grade's own, so `a = aH·a0` and `b = aH·b0 + bH`. Returns a new grade.
+ * @param {object} grade @param {{lift:number[], gain:number[]}} haze @returns {object}
+ */
+export function applyHazeToGrade(grade, haze) {
+  const lift0 = grade?.lift || IDENTITY_GRADE.lift;
+  const gain0 = grade?.gain || IDENTITY_GRADE.gain;
+  const lift = [0, 0, 0];
+  const gain = [1, 1, 1];
+  for (let i = 0; i < 3; i++) {
+    const a0 = gain0[i] - lift0[i];
+    const b0 = lift0[i];
+    const aH = haze.gain[i] - haze.lift[i];
+    const bH = haze.lift[i];
+    const a = aH * a0;
+    const b = aH * b0 + bH;
+    lift[i] = b;
+    gain[i] = a + b;
+  }
+  return { ...grade, lift, gain };
+}
+
+// ===========================================================================
 // THE TSL PATH — mirrors applyGrade op-for-op, in the same order.
 // ===========================================================================
 

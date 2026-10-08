@@ -595,6 +595,9 @@ export { createSkyHandle, luminance, saturation } from './sky-access.js';
 export {
   applyGrade,
   resolveEnvGrade,
+  resolveHazeGrade,
+  applyHazeToGrade,
+  DEFAULT_HAZE_CONFIG,
   scaleGradeToIdentity,
   gradePreset,
   GRADE_PRESETS,

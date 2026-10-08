@@ -471,6 +471,8 @@ import {
   buildDofMaterials,
   hexToRgb01,
   resolveEnvGrade,
+  resolveHazeGrade,
+  applyHazeToGrade,
   scaleGradeToIdentity,
   identityCubeLut,
   parseCubeLut,
@@ -10345,7 +10347,15 @@ export async function startVtPanViewer({
       envGradeResolved.exposure += noonExposureBoost * clearNoon01;
       envGradeResolved.contrast *= 1 + noonContrastBoost * clearNoon01;
       envGradeResolved.temperature += noonWarmth * clearNoon01;
-      gradePresent.setEnvGrade(scaleGradeToIdentity(envGradeResolved, gradeEnvStrength));
+      // ATMOSPHERIC HAZE (2026-10-08) — aerial perspective as lift/gain DATA on
+      // the same env grade (grade-ops.js#resolveHazeGrade has the model and the
+      // research). Distance = the camera's height = the view width, so it is
+      // exactly zero at play zoom and builds as the view pulls back; thicker
+      // and whiter under cloud, never zero in clear air. Rides the env grade's
+      // existing outdoor gate and strength lever — no new uniform, no new pass.
+      const hazeViewRect = view ? viewToWorldRect(view, canvasW / canvasH) : null;
+      const hazeMap = resolveHazeGrade(env, hazeViewRect ? hazeViewRect.maxX - hazeViewRect.minX : 0);
+      gradePresent.setEnvGrade(scaleGradeToIdentity(applyHazeToGrade(envGradeResolved, hazeMap), gradeEnvStrength));
       // THE WINDOW'S OWN MIRROR — see `uWindowNoonBoostMul`'s own doc.
       uWindowNoonBoostMul.value = 1 + windowNoonBoost * clearNoon01;
 

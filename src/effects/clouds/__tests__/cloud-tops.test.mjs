@@ -68,7 +68,9 @@ export function run(t) {
 
     // Deep zoom-out: eyeHeightPx >> altitude -> fully awake, fully faded in,
     // parallax relaxed toward 0 (doc 02 §9: "flatten as you keep rising").
-    const zoomedOut = cloudTopsGate({ viewWidthWorldPx: 200000, deckAltitudePx: 1400 });
+    // 400000 (was 200000 before the 2026-10-08 recalibration that made the tops
+    // need 2x the zoom-out: the same relative point of the same curve).
+    const zoomedOut = cloudTopsGate({ viewWidthWorldPx: 400000, deckAltitudePx: 1400 });
     ok('zoomed way out -> awake', zoomedOut.awake === true);
     ok('zoomed way out -> fully faded in', zoomedOut.fade === 1);
     ok('zoomed way out -> parallax relaxes well below the ceiling', zoomedOut.parallax < 0.05);

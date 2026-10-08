@@ -56,10 +56,13 @@ export const CANDLE_FLAME_PARAMS = Object.freeze({
     // blue in the darks. This value is now the MID stop of the ramp
     // candle-flame-render.js builds around it (rim/inner/core are derived), so
     // it sets the whole flame's character rather than just its tip.
+    // 2026-10-08: the shader now DECODES this sRGB hex to linear light before
+    // using it (it used to emit the raw bytes, which displayed far paler —
+    // #f8901c came out as #fcc65d), so this stop DISPLAYS as the colour picked.
     default: '#f8901c',
     category: 'Look',
     label: 'Flame colour',
-    help: 'The warm colour of the candle flame (tints both the flame and the light it casts). The flame ramps from a deeper version of this at its edge, through this colour, up to a pale creamy version at its hottest core.',
+    help: 'The colour of the candle flame (tints both the flame and the light it casts). The flame is built around it, like a real candle: a thin deep rim, then this colour, then gold and pale yellow, up to a white-hot core — with a blue base round the wick. It displays as the colour you pick.',
   },
   lightRadiusPx: {
     type: 'float',
@@ -263,7 +266,7 @@ export const CANDLE_FLAME = Object.freeze({
       name: 'boil',
       fromProfile: 'standard',
       cost: Object.freeze({ class: 'C2', estMsPerMp: 0.03 }),
-      adds: 'the silhouette boils and curls, and each light gains a breathing core and a wavering, non-circular edge',
+      adds: 'the flame sways and licks — a smooth S-wave travelling up it — and each light gains a breathing core and a wavering, non-circular edge',
     }),
     Object.freeze({
       n: 4,

@@ -9,6 +9,13 @@
  */
 import {
   hexToRgb01,
+  FLAME_SHAPE,
+  FLAME_PROFILE_PEAK_S,
+  FLAME_PROFILE_NORM,
+  flameHalfWidth01,
+  limitFlameLength,
+  srgbToLinear,
+  srgbHexToLinear,
   candleCirclePolygon,
   buildCandleLightSources,
   candleAnimationQualityTier,
@@ -680,6 +687,124 @@ export function run(t) {
     ok(
       'an out-of-range intensity clamps into [0,1] rather than blowing out the flame',
       wildIntensity.intensities[0] === 1
+    );
+  }
+
+  // --- THE FLAME'S SILHOUETTE (the analytic profile the shader shares) -------
+  // The outline is an analytic curve, not noise-displaced (author, 2026-10-08:
+  // the old edge read as "rough and fuzzy"; real candle flames are a smooth
+  // teardrop). What is worth pinning is the SHAPE'S PROPERTIES, not its numbers.
+  {
+    ok('the profile is 0 at the lowest point of the bulb', flameHalfWidth01(0) === 0);
+    ok('the profile is 0 at the tip', flameHalfWidth01(1) === 0);
+    ok(
+      'the profile is 0 outside the flame (below / beyond), never negative or NaN',
+      flameHalfWidth01(-0.3) === 0 && flameHalfWidth01(1.7) === 0 && flameHalfWidth01(NaN) === 0
+    );
+    ok(
+      'the profile peaks at exactly 1 (so baseRadius IS the max half-width)',
+      approx(flameHalfWidth01(FLAME_PROFILE_PEAK_S), 1, 1e-9)
+    );
+    ok(
+      '…and nowhere is wider than that',
+      Array.from({ length: 999 }, (_, i) => flameHalfWidth01((i + 1) / 1000)).every((w) => w <= 1 + 1e-9)
+    );
+    ok(
+      'the widest point is in the LOWER half (a teardrop, not a diamond)',
+      FLAME_PROFILE_PEAK_S > 0.2 && FLAME_PROFILE_PEAK_S < 0.5
+    );
+    ok(
+      '…matching the photographs (widest 0.37-0.46 up the flame, within a margin)',
+      FLAME_PROFILE_PEAK_S > 0.3 && FLAME_PROFILE_PEAK_S < 0.48
+    );
+
+    // Smooth, convex bulb: strictly rising to the peak, strictly falling after it.
+    let rising = true;
+    let falling = true;
+    let prev = 0;
+    for (let i = 1; i <= 999; i++) {
+      const s = i / 1000;
+      const w = flameHalfWidth01(s);
+      if (s <= FLAME_PROFILE_PEAK_S) rising = rising && w > prev;
+      else falling = falling && w < prev;
+      prev = w;
+    }
+    ok('the half-width rises monotonically to the widest point', rising);
+    ok('…and falls monotonically from it to the tip (no waist, no second bulge)', falling);
+
+    // A ROUND bottom: w² is linear in s near 0 (a parabola — a vertex with no corner),
+    // i.e. w(s)/sqrt(s) is a constant as s → 0. A cone would make w/s constant instead.
+    const c1 = flameHalfWidth01(1e-4) / Math.sqrt(1e-4);
+    const c2 = flameHalfWidth01(1e-3) / Math.sqrt(1e-3);
+    ok('the bottom is a parabolic cap (w ∝ √s near 0), not a corner', Math.abs(c1 - c2) / c2 < 0.02);
+    ok(
+      'the tip closes to a point (the width at 99.9% height is a hair of the maximum)',
+      flameHalfWidth01(0.999) < 0.01
+    );
+    ok(
+      'the profile is blunt enough to survive the photographs: ~half width at 60% height',
+      flameHalfWidth01(0.6) > 0.5 && flameHalfWidth01(0.6) < 0.95
+    );
+    ok(
+      'the normaliser is finite and > 1 (the raw profile never reaches 1 by itself)',
+      Number.isFinite(FLAME_PROFILE_NORM) && FLAME_PROFILE_NORM > 1
+    );
+    ok('FLAME_SHAPE is frozen — the shader and the tests can never disagree by mutation', Object.isFrozen(FLAME_SHAPE));
+  }
+
+  // --- limitFlameLength — the smooth length limit (no clip at the quad edge) --
+  {
+    const max = FLAME_SHAPE.lenMax;
+    ok('a short tip is left alone (≈ identity below the knee)', approx(limitFlameLength(0.1), 0.1, 1e-4));
+    ok(
+      'the typical resting length passes through within a few percent',
+      Math.abs(limitFlameLength(0.4) - 0.4) / 0.4 < 0.1
+    );
+    ok(
+      'it NEVER exceeds the limit, however hard the wind asks',
+      [0.5, 1, 5, 100, 1e6].every((l) => limitFlameLength(l) < max + 1e-9)
+    );
+    ok('…and the limit is inside the quad (a half-extent of 0.5), so the tip is never sliced', max < 0.5);
+    let monotone = true;
+    let last = -1;
+    for (let l = 0; l <= 3; l += 0.01) {
+      const v = limitFlameLength(l);
+      monotone = monotone && v >= last - 1e-12;
+      last = v;
+    }
+    ok('a longer ask never gives a SHORTER flame (monotone)', monotone);
+    // Smooth: the slope varies continuously — no step in the finite difference.
+    const slope = (l) => (limitFlameLength(l + 1e-4) - limitFlameLength(l)) / 1e-4;
+    let maxStep = 0;
+    for (let l = 0.05; l < 2; l += 0.01) maxStep = Math.max(maxStep, Math.abs(slope(l + 0.01) - slope(l)));
+    ok('the knee is smooth (no kink in the slope)', maxStep < 0.35);
+    ok(
+      'zero, negative and NaN lengths give 0',
+      limitFlameLength(0) === 0 && limitFlameLength(-1) === 0 && limitFlameLength(NaN) === 0
+    );
+  }
+
+  // --- srgbToLinear / srgbHexToLinear — the flame's colour decode ------------
+  {
+    ok('sRGB 0 → linear 0', srgbToLinear(0) === 0);
+    ok('sRGB 1 → linear 1', approx(srgbToLinear(1), 1, 1e-9));
+    ok('sRGB mid-grey (0.5) → ~0.214 linear (the decode really is non-linear)', approx(srgbToLinear(0.5), 0.214, 1e-3));
+    ok('the linear segment near black is used below 0.04045', approx(srgbToLinear(0.04), 0.04 / 12.92, 1e-12));
+    let monotone = true;
+    for (let i = 1; i <= 100; i++) monotone = monotone && srgbToLinear(i / 100) > srgbToLinear((i - 1) / 100);
+    ok('the decode is monotonic', monotone);
+    const [r, g, b] = srgbHexToLinear('#f8901c');
+    ok(
+      '#f8901c decodes to a saturated linear orange (R high, G ~0.28, B ~0)',
+      r > 0.9 && approx(g, 0.279, 0.01) && b < 0.02
+    );
+    ok(
+      'a hex displays as itself: encoding the decode round-trips',
+      approx(r, srgbToLinear(0xf8 / 255), 1e-12) && approx(b, srgbToLinear(0x1c / 255), 1e-12)
+    );
+    ok(
+      'a malformed hex takes the warm-orange fallback (never throws)',
+      srgbHexToLinear('nope')[0] === 1 && srgbHexToLinear('nope')[2] === 0
     );
   }
 }

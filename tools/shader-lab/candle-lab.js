@@ -31,6 +31,7 @@
  */
 import * as THREE from '../../src/vendor/three/three.webgpu.js';
 import { buildCandleFlameGeometry, buildCandleFlameMaterial } from '../../src/effects/candle-flame-render.js';
+import { CANDLE_FLAME_PARAMS } from '../../src/effects/candle-flame.js';
 
 const statusEl = document.getElementById('candleStatus');
 const log = (msg) => {
@@ -74,7 +75,9 @@ class CandleLab {
 
     this.state = {
       quality: 2,
-      colorHex: '#ffaa00',
+      // The effect's REAL default — this said '#ffaa00' (the pre-2026-08-06 colour) for weeks, so the
+      // lab never showed the look that actually ships.
+      colorHex: CANDLE_FLAME_PARAMS.color.default,
       sizePx: 30, // the effect-wide fallback; every anchor below overrides it
       wind: true,
       paused: false,
@@ -219,7 +222,7 @@ class CandleLab {
   _updateLegend() {
     const el = document.getElementById('candleLegend');
     if (!el) return;
-    const names = ['0 low (calm)', '1 standard (life+wind+gutter)', '2 lavish (+domain warp)'];
+    const names = ['0 low (calm)', '1 standard (life+wind+gutter)', '2 lavish (+travelling lick)'];
     el.textContent =
       `CANDLE bench — quality=${names[this.state.quality]}  candles=${this._quadCount}  ` +
       `colour=${this.state.colorHex}  wind=${this.state.wind ? 'on' : 'off'}  ` +
@@ -322,6 +325,129 @@ class CandleLab {
     rt.dispose();
     const res = await fetch(`/__lab/artifact?run=${run}&file=${file}`, { method: 'POST', body: blob });
     return res.json();
+  }
+
+  /**
+   * How SMOOTH is the flame's outline? — the numeric half of "the edges are not
+   * fuzzy" (author, 2026-10-08: the shipped silhouette read as "rough and fuzzy").
+   *
+   * Renders one large flame offscreen (wind off, so it measures SHAPE, not sway) at
+   * several moments, finds the outline's sub-pixel position on every row where the
+   * luminance crosses a threshold, and reports the RMS deviation of that outline from
+   * its own 9-row moving average: the edge's high-frequency content, in pixels. A
+   * perfectly smooth curve scores at the antialiasing floor (~0.05 px here); the
+   * noise-displaced silhouette this replaced scored ~0.5 px (1.3 px on a bad frame)
+   * on identical frames. The tip and the very bottom are skipped (their curvature is
+   * legitimately high). Uses a PRIVATE scene and render target — the on-screen lab
+   * state, the anchors and the clock are all restored.
+   *
+   * @param {{sizePx?: number, timesMs?: number[], thresholds?: number[]}} [opts]
+   * @returns {Promise<{rmsPx: Record<string, number>, perFrame: Array<object>}>}
+   */
+  async edgeRoughness({ sizePx = 780, timesMs = [3000, 7300, 12000, 21000], thresholds = [0.15, 0.35] } = {}) {
+    const width = 2048;
+    const height = 1536;
+    const rt = new THREE.RenderTarget(width, height, { type: THREE.UnsignedByteType, format: THREE.RGBAFormat });
+    const { geometry } = buildCandleFlameGeometry(
+      THREE,
+      [
+        {
+          id: 'edge-probe',
+          x: WORLD_W / 2,
+          y: WORLD_H * 0.55,
+          windExposure: 0,
+          params: { intensity: 1, useCustomSize: true, customSizePx: sizePx },
+        },
+      ],
+      { sizePx, colorHex: this.state.colorHex }
+    );
+    const scene = new THREE.Scene();
+    const mesh = new THREE.Mesh(geometry, this.material);
+    mesh.frustumCulled = false;
+    scene.add(mesh);
+
+    const prevTime = this.uGlobalTimeMs.value;
+    const prevWind = this.uniforms.uWindResponse.value;
+    const prevTarget = this.renderer.getRenderTarget();
+    this.uniforms.uWindResponse.value = 0;
+
+    /** Sub-pixel left/right outline per row at luminance `thr`; null where there is none. */
+    const outline = (lum, thr) => {
+      const rows = [];
+      for (let y = 0; y < height; y++) {
+        const o = y * width;
+        let i0 = -1;
+        let i1 = -1;
+        for (let x = 0; x < width; x++) {
+          if (lum[o + x] >= thr) {
+            if (i0 < 0) i0 = x;
+            i1 = x;
+          }
+        }
+        if (i0 <= 0 || i1 >= width - 1 || i1 - i0 < 2) {
+          rows.push(null);
+          continue;
+        }
+        const xl = i0 - 1 + (thr - lum[o + i0 - 1]) / (lum[o + i0] - lum[o + i0 - 1] + 1e-9);
+        const xr = i1 + (lum[o + i1] - thr) / (lum[o + i1] - lum[o + i1 + 1] + 1e-9);
+        rows.push([xl, xr]);
+      }
+      return rows;
+    };
+    /** RMS of a series about its own moving average, away from the series' ends. */
+    const highFrequency = (series, win = 9) => {
+      if (series.length < 4 * win) return NaN;
+      let sum = 0;
+      let n = 0;
+      for (let i = win; i < series.length - win; i++) {
+        let avg = 0;
+        for (let k = -4; k <= 4; k++) avg += series[i + k];
+        const d = series[i] - avg / win;
+        sum += d * d;
+        n++;
+      }
+      return Math.sqrt(sum / n);
+    };
+
+    const perFrame = [];
+    try {
+      for (const t of timesMs) {
+        this.uGlobalTimeMs.value = t;
+        this.renderer.setRenderTarget(rt);
+        this.renderer.render(scene, this.camera);
+        const raw = await this.renderer.readRenderTargetPixelsAsync(rt, 0, 0, width, height);
+        const px = ArrayBuffer.isView(raw) ? raw : new Uint8Array(raw);
+        const lum = new Float32Array(width * height);
+        for (let i = 0, j = 0; i < px.length; i += 4, j++) {
+          lum[j] = (0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2]) / 255;
+        }
+        const frame = { timeMs: t };
+        for (const thr of thresholds) {
+          const rows = outline(lum, thr);
+          const live = rows.map((r, i) => (r ? i : -1)).filter((i) => i >= 0);
+          if (live.length < 100) {
+            frame[thr] = NaN;
+            continue;
+          }
+          const span = live[live.length - 1] - live[0];
+          const keep = live.filter((i) => i >= live[0] + 0.12 * span && i <= live[live.length - 1] - 0.12 * span);
+          frame[thr] = 0.5 * (highFrequency(keep.map((i) => rows[i][0])) + highFrequency(keep.map((i) => rows[i][1])));
+        }
+        perFrame.push(frame);
+      }
+    } finally {
+      this.renderer.setRenderTarget(prevTarget);
+      this.uGlobalTimeMs.value = prevTime;
+      this.uniforms.uWindResponse.value = prevWind;
+      geometry.dispose();
+      rt.dispose();
+    }
+    const rmsPx = {};
+    for (const thr of thresholds) {
+      const v = perFrame.map((f) => f[thr]).filter((x) => Number.isFinite(x));
+      rmsPx[thr] = v.length ? v.reduce((a, b) => a + b, 0) / v.length : NaN;
+    }
+    return { rmsPx, perFrame };
   }
 
   /** Mean/peak colour of each size band's middle candle — the one call a

@@ -31,6 +31,99 @@ export function hexToRgb01(hex) {
 
 /**
  * ============================================================================
+ * THE FLAME'S SILHOUETTE — the pure math the shader shares (2026-10-08)
+ * ============================================================================
+ *
+ * The flame is drawn by `candle-flame-render.js`'s fragment shader, which this
+ * file cannot import — but the numbers that DEFINE its outline live here, so the
+ * shader and the Node tests read ONE copy of them, and the properties that
+ * matter are asserted rather than hoped for: a round bottom, one widest point in
+ * the lower half, a clean point at the top, and a length that can never leave
+ * the quad (see `candle-flame-render.js#THE SHAPE` for why the outline is an
+ * analytic curve and not noise-displaced).
+ *
+ * Along the flame, with `s` running 0 (the lowest point of the bulb) to 1 (the
+ * tip), the half-width is
+ *
+ *     w(s) = baseRadius · norm · s^profileBottom · (1 − s)^profileTip
+ *
+ * `norm` makes the maximum exactly `baseRadius`. The fit was taken from the
+ * author's reference photographs of real candles: a flame ~4× taller than wide,
+ * widest 37-46% of the way up, with convex sides that close to a point — which
+ * `s^0.5 · (1 − s)^0.9` reproduces within a few percent across the whole height.
+ */
+export const FLAME_SHAPE = Object.freeze({
+  /** Half-width at the widest point, as a fraction of the quad side. */
+  baseRadius: 0.185,
+  /** How far the bulb hangs BELOW the wick, as a fraction of `baseRadius`. */
+  bulbDrop: 0.7,
+  /** Exponent of `s`. 0.5 is a parabolic cap — round, with no corner. */
+  profileBottom: 0.5,
+  /** Exponent of `1 − s`. A point at the tip; >1 gives concave sides, <1 convex. */
+  profileTip: 0.9,
+  /** The longest the wick → tip length may ever be, in quad fractions. */
+  lenMax: 0.48,
+  /** How sharp the length limiter's knee is — higher stays linear for longer. */
+  lenOrder: 6,
+});
+
+/** The `s` at which the profile is widest. */
+export const FLAME_PROFILE_PEAK_S = FLAME_SHAPE.profileBottom / (FLAME_SHAPE.profileBottom + FLAME_SHAPE.profileTip);
+
+/** Scales the profile so its maximum is exactly 1. */
+export const FLAME_PROFILE_NORM =
+  1 / (FLAME_PROFILE_PEAK_S ** FLAME_SHAPE.profileBottom * (1 - FLAME_PROFILE_PEAK_S) ** FLAME_SHAPE.profileTip);
+
+/**
+ * The flame's half-width at height `s` (0 = bottom of the bulb, 1 = tip), as a
+ * fraction of `baseRadius`: 0 at both ends, exactly 1 at its widest.
+ * @param {number} s @returns {number}
+ */
+export function flameHalfWidth01(s) {
+  const x = Number(s);
+  if (!(x > 0 && x < 1)) return 0;
+  return FLAME_PROFILE_NORM * x ** FLAME_SHAPE.profileBottom * (1 - x) ** FLAME_SHAPE.profileTip;
+}
+
+/**
+ * The wick → tip length after the SMOOTH limit. The wind can ask for a tip far
+ * outside the quad, where the square would slice the flame off in a straight
+ * line; this eases toward `lenMax` instead of clamping into it — a rational
+ * saturation (C∞, no kink) that stays almost linear until close to the limit and
+ * never reaches it. The shader builds the same expression.
+ * @param {number} len - the raw tip length (≥ 0). @returns {number}
+ */
+export function limitFlameLength(len) {
+  const l = Number(len);
+  if (!(l > 0)) return 0;
+  const n = FLAME_SHAPE.lenOrder;
+  return l / (1 + (l / FLAME_SHAPE.lenMax) ** n) ** (1 / n);
+}
+
+/**
+ * sRGB channel (0..1) → linear light. The flame material writes LINEAR light
+ * into `scene.lit` (which is sRGB-encoded for display later), so a colour picked
+ * as an sRGB hex must be decoded before it is emitted or it displays far paler
+ * than it was picked. (`hexToRgb01` deliberately does NOT do this — it feeds
+ * Foundry's gamma-space LIGHT shaders.)
+ * @param {number} c @returns {number}
+ */
+export function srgbToLinear(c) {
+  return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+}
+
+/**
+ * A `#rrggbb` sRGB hex as the linear [r,g,b] the shader must emit to DISPLAY as
+ * that colour. A malformed value takes `hexToRgb01`'s own warm-orange fallback.
+ * @param {string} hex @returns {[number, number, number]}
+ */
+export function srgbHexToLinear(hex) {
+  const [r, g, b] = hexToRgb01(hex);
+  return [srgbToLinear(r), srgbToLinear(g), srgbToLinear(b)];
+}
+
+/**
+ * ============================================================================
  * PER-CANDLE OVERRIDE RESOLUTION (2026-07-22, debug-panel FOH/ROH build)
  * ============================================================================
  * "Can we individually recolour candles?" — yes, plus size and light reach on

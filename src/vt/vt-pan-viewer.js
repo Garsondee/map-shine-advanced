@@ -9099,7 +9099,7 @@ export async function startVtPanViewer({
       // regardless of which higher tiers are also active. ─────────────────
       u.uTimeSec.value = nowSec;
       u.uDistortion.value = lensNum(p.distortion, -0.03);
-      u.uChromaticAmountPx.value = lensNum(p.chromaticAmountPx, 1.7);
+      u.uChromaticAmountPx.value = lensNum(p.chromaticAmountPx, 0.8);
       u.uChromaticEdgePower.value = lensNum(p.chromaticEdgePower, 1.16);
       u.uVignetteIntensity.value = lensNum(p.vignetteIntensity, 1);
       u.uVignetteSoftness.value = lensNum(p.vignetteSoftness, 0.02);

@@ -119,7 +119,7 @@ export const LENS_PARAMS = Object.freeze({
     min: 0,
     max: 12,
     step: 0.1,
-    default: 1.7, // V2: 4.22
+    default: 0.8, // V2: 4.22 (live-tuned 1.7, toned down again 2026-10-08)
     category: 'Optics',
     label: 'Colour fringing',
     help: 'Red/blue channel separation at the edges of the frame, in screen pixels — the coloured fringing real lenses show on high-contrast edges, strongest where the curvature above is strongest. 0 removes it entirely.',

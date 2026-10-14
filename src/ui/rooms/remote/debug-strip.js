@@ -310,26 +310,72 @@ export function renderDebugStrip(container, ctx) {
   wrap.append(primaryRow, statsRow, body);
   container.appendChild(wrap);
 
+  // update() runs from boot.js's requestAnimationFrame heartbeat (~4x/sec), so
+  // it must never force a synchronous style recalc there. The old version
+  // wrote innerHTML (dirtying style) and THEN read getComputedStyle(...)
+  // .getPropertyValue('--ok'), which made the browser flush a full "Recalculate
+  // style" inside the rAF callback every tick (DevTools: debug-strip.js:324).
+  // Fixes: (1) the label <b> nodes are built once and only their text is
+  // swapped, and only when it changed (no HTML parse, no churn); (2) the theme
+  // tokens are cached and re-read at most every THEME_REFRESH_MS, and that read
+  // happens BEFORE any write in this function so style is still clean; (3) bar
+  // height/colour are only written when they differ from the last paint.
+  const THEME_REFRESH_MS = 2000;
+  const mkLabel = (el, pre, post) => {
+    const b = document.createElement('b');
+    b.textContent = '—';
+    el.replaceChildren(...(pre ? [pre] : []), b, ...(post ? [post] : []));
+    return b;
+  };
+  const fpsVal = mkLabel(fpsStat, 'fps ', null);
+  const msVal = mkLabel(msStat, null, 'ms');
+  const vramVal = mkLabel(vramStat, 'vram ', null);
+  const setText = (node, text) => {
+    if (node.textContent !== text) node.textContent = text;
+  };
+  let theme = null;
+  let themeReadAt = -Infinity;
+  const lastHeight = new Array(SPARK_N).fill('');
+  const lastColor = new Array(SPARK_N).fill('');
+
+  function readTheme(now) {
+    // Theme tokens only change on a theme switch, so a short TTL cache is
+    // plenty (2026-08-18 fix — see fpsBlendColor's own doc for why this needs
+    // to be its own absolute-fps model rather than perf-strip.js's shared
+    // refresh-rate-relative one).
+    if (theme && now - themeReadAt < THEME_REFRESH_MS) return theme;
+    const rootStyle = getComputedStyle(document.documentElement);
+    theme = {
+      ok: hexToRgb(rootStyle.getPropertyValue('--ok')),
+      warn: hexToRgb(rootStyle.getPropertyValue('--warn')),
+      fail: hexToRgb(rootStyle.getPropertyValue('--fail')),
+    };
+    themeReadAt = now;
+    return theme;
+  }
+
   function update(snapshot) {
     if (!snapshot) return;
-    fpsStat.innerHTML = `fps <b>${snapshot.fpsText ?? '—'}</b>`;
-    msStat.innerHTML = `<b>${snapshot.msText ?? '—'}</b>ms`;
-    vramStat.innerHTML = `vram <b>${snapshot.vramText ?? '—'}</b>`;
+    // READ phase first — nothing in this function has dirtied style yet.
+    const { ok, warn, fail } = readTheme(performance.now());
+    // WRITE phase.
+    setText(fpsVal, `${snapshot.fpsText ?? '—'}`);
+    setText(msVal, `${snapshot.msText ?? '—'}`);
+    setText(vramVal, `${snapshot.vramText ?? '—'}`);
     const hist = snapshot.sparkHistory ?? [];
-    // Read the LIVE theme tokens once per update, not once per bar (24x)
-    // (2026-08-18 fix — see fpsBlendColor's own doc for why this needs to
-    // be its own absolute-fps model rather than perf-strip.js's shared
-    // refresh-rate-relative one).
-    const rootStyle = getComputedStyle(document.documentElement);
-    const ok = hexToRgb(rootStyle.getPropertyValue('--ok'));
-    const warn = hexToRgb(rootStyle.getPropertyValue('--warn'));
-    const fail = hexToRgb(rootStyle.getPropertyValue('--fail'));
     for (let i = 0; i < SPARK_N; i++) {
       const sample = hist[i];
-      const bar = bars[i];
       const pct = Number.isFinite(sample?.ratio) ? Math.max(6, Math.min(100, sample.ratio * 100)) : 6;
-      bar.style.height = `${pct.toFixed(0)}%`;
-      bar.style.background = fpsBlendColor(ok, warn, fail, sample?.fps);
+      const height = `${pct.toFixed(0)}%`;
+      const color = fpsBlendColor(ok, warn, fail, sample?.fps);
+      if (height !== lastHeight[i]) {
+        bars[i].style.height = height;
+        lastHeight[i] = height;
+      }
+      if (color !== lastColor[i]) {
+        bars[i].style.background = color;
+        lastColor[i] = color;
+      }
     }
   }
 

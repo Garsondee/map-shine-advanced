@@ -622,9 +622,9 @@ import {
   readActivePlayerCarriedLightTokens,
   // PLAYER VISION-MODE GRADE (mythica-machina-press#77 Stage 2b, #580) — the
   // per-viewer resolvers `getActivePlayerVisionMode` below reads: which
-  // token is mine, what its mode flag says, am I a GM at all.
-  resolveViewerToken,
-  isViewingUserGM,
+  // token carries my light (a player's own, a GM's selected one), what its
+  // mode flag says.
+  resolveCarriedLightToken,
   readTokenPlayerLightMode,
   readGamePaused,
   // PLAYER AIM (mythica-machina-press#77) — the one per-client channel that
@@ -1981,7 +1981,11 @@ function install() {
     listenForImpulses((id) => IMPULSES.find((d) => d.id === id)?.fireLocal?.());
     // The player's Carried Light picker repaints when their token appears,
     // disappears or has its light changed elsewhere — not only on reopen.
-    watchViewerToken(() => MapShine.__player?.refreshPlayerLightPicker?.());
+    // A GM's picker lives in the Remote's Player Lights board and follows their selection.
+    watchViewerToken(() => {
+      MapShine.__player?.refreshPlayerLightPicker?.();
+      MapShine.__remote?.refreshCarriedLightPicker?.();
+    });
     // A flashlight points where its bearer's cursor points, and every client
     // sees it: start the aim sender and the socket listener that carries it
     // (`playerAimChannel`, declared beside the carried-light getter further down).
@@ -4932,18 +4936,18 @@ function install() {
   // `getPlayerCarriedLightSources` just above (a live-Foundry-read closure,
   // recomputed every call, never cached — a scene edit, a token swap or the
   // GM flipping permissions must show up on the very next frame) but resolves
-  // to a single mode id instead of a light-source array, and — unlike that
-  // one, which has nothing to say about GMs at all — EXCLUDES a GM outright,
-  // the same posture `ui/rooms/player-light-picker.js#paint` already takes at
-  // its own call site (`resolveViewerToken()` itself deliberately does not
-  // make this exclusion — see that resolver's own header).
+  // to a single mode id instead of a light-source array.
+  //
+  // A GM gets the grade too, from the token they have SELECTED
+  // (`resolveCarriedLightToken`: a GM's own pick, never a token an active
+  // player steers) — without that a GM had no way to see Night Vision at all.
+  // The grade tints the GM's own view only while such a token is selected.
   //
   // vt/ never reaches `game`/`canvas` directly (the `foundry/adapter-only`
   // wall) — it only ever sees the string (or null) this closure hands it,
   // via `vt-pan-viewer.js`'s own `pushPlayerVisionMode`.
   const getActivePlayerVisionMode = () => {
-    if (isViewingUserGM()) return null;
-    const token = resolveViewerToken();
+    const token = resolveCarriedLightToken();
     if (!token) return null;
     const mode = readTokenPlayerLightMode(token.document);
     const { permissions } = readScenePlayerLightPermissions();

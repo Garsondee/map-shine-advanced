@@ -126,15 +126,14 @@ export const VISION_MODE_PRESETS = Object.freeze({
  * `player-light-mode.js#readActivePlayerCarriedLightTokens`'s own "live read
  * vs. pure resolver" split), never here.
  *
- * ⚠️ A GM NEVER GETS A GRADE, EVEN IF `mode` IS SET. Mirrors `ui/rooms/
- * player-light-picker.js`'s own posture exactly: a GM has no personal
- * carried light/vision the way a player does (`resolveViewerToken()`'s own
- * header — it deliberately does NOT exclude a GM itself; every caller that
- * needs the exclusion makes it at its own call site, and this is that call
- * site for the render gate).
+ * ⚠️ `isGM: true` GETS NO GRADE, EVEN IF `mode` IS SET — the gate for a caller
+ * that wants a GM excluded outright. `boot.js`'s `getActivePlayerVisionMode`
+ * does NOT: a GM's carried-light token is the one they have selected
+ * (`foundry/viewer-token.js#resolveCarriedLightToken`), and that token's mode
+ * grades the GM's own view, so a GM can try the modes. It passes `false`.
  *
  * @param {object} args
- * @param {boolean} args.isGM - `foundry/viewer-token.js#isViewingUserGM()`'s result.
+ * @param {boolean} args.isGM - true to exclude the viewer outright.
  * @param {string|null} args.mode - `readTokenPlayerLightMode()`'s result for
  *   the viewer's own token (or `null` — no token, no mode, torch/flashlight).
  * @param {{modes: Record<string, boolean>}} args.permissions -

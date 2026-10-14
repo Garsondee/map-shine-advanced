@@ -497,7 +497,13 @@ export { buildAlmanacDiagnosticsReport } from './almanac-diagnostics.js';
 // VIEWER TOKEN (mythica-machina-press#77) — "which placed Token is THIS
 // client's own character," the one resolver the scene intro zoom AND the
 // player-carried-light picker both need to agree on.
-export { resolveViewerToken, isViewingUserGM, watchViewerToken } from './viewer-token.js';
+export {
+  resolveViewerToken,
+  resolveCarriedLightTarget,
+  resolveCarriedLightToken,
+  isViewingUserGM,
+  watchViewerToken,
+} from './viewer-token.js';
 
 // PLAYER-LIGHT PERMISSIONS (mythica-machina-press#77, mythica-machina-press#577)
 // — the GM's scene-scoped "which player-carried light modes are allowed

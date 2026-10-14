@@ -10,6 +10,7 @@ import {
   PLAYER_LIGHT_RENDERED_MODES,
   resolveBeamDirection,
   resolveLightPosition,
+  resolveFlashlightRimPx,
   resolveBeamReach01,
   resolveTorchBurn01,
   resolveTorchEmberMix01,
@@ -471,4 +472,58 @@ export function run(t) {
     const b = buildOnePlayerLightSource(snap, ALLOW_ALL);
     ok('the seed is deterministic for the same position', a.animation.seed === b.animation.seed);
   }
+  // A flashlight starts on the rim of the circle its token occupies, along its beam.
+  {
+    const flash = (extra) =>
+      buildOnePlayerLightSource(
+        { tokenId: 'f', x: 1000, y: 1000, elevation: 0, mode: 'flashlight', ...extra },
+        ALLOW_ALL
+      );
+    const east = flash({ aimAngleDeg: 90, radiusPx: 50 });
+    ok('rim: aimed east the light is 50 px east of the token centre', near(east.x, 1050) && near(east.y, 1000));
+    const north = flash({ aimAngleDeg: 0, radiusPx: 50 });
+    ok('rim: aimed north it is 50 px north', near(north.x, 1000) && near(north.y, 950));
+    ok(
+      'rim: the shape polygon is built around the rim point, not the token centre',
+      near(east.shapePoints[0], 1050 + east.radius) && near(east.shapePoints[1], 1000)
+    );
+    ok(
+      'rim: a wall-safe rimPx wins over the plain radius',
+      near(flash({ aimAngleDeg: 90, radiusPx: 50, rimPx: 20 }).x, 1020)
+    );
+    ok(
+      'rim: a negative rimPx is floored at the centre',
+      near(flash({ aimAngleDeg: 90, radiusPx: 50, rimPx: -9 }).x, 1000)
+    );
+    const noRadius = flash({ aimAngleDeg: 90 });
+    ok(
+      'rim: a token with no known size keeps the light at its centre (as before)',
+      near(noRadius.x, 1000) && near(noRadius.y, 1000)
+    );
+    ok(
+      'rim: with no aim the light follows the stored rotation (180 degrees is south)',
+      near(flash({ rotation: 180, radiusPx: 50 }).y, 1050)
+    );
+
+    // The cursor is 400 px east of the centre; the beam starts 50 px out, so it needs only 350 px.
+    const aimed = flash({ aimAngleDeg: 90, radiusPx: 50, reachPx: 400 });
+    ok(
+      'rim: the beam is measured from the rim, so it ends at the cursor',
+      near(aimed.x + aimed.beamReach01 * 620, 1400)
+    );
+    const close = flash({ aimAngleDeg: 90, radiusPx: 50, reachPx: 30 });
+    ok('rim: a cursor inside the rim still lights a patch of ground (the 0.2 floor)', near(close.beamReach01, 0.2));
+    const torch = buildOnePlayerLightSource(
+      { tokenId: 't', x: 1000, y: 1000, elevation: 0, mode: 'torch', aimAngleDeg: 90, radiusPx: 50 },
+      ALLOW_ALL
+    );
+    ok(
+      'rim: a torch is not placed on the rim (it is held out toward the cursor)',
+      near(torch.x, 1000) && near(torch.y, 1000)
+    );
+  }
+  ok(
+    'resolveFlashlightRimPx: nothing known is the centre',
+    resolveFlashlightRimPx({}) === 0 && resolveFlashlightRimPx() === 0
+  );
 }

@@ -99,7 +99,7 @@ export async function writeTokenPlayerLightMode(tokenDocument, mode) {
  * Feeds `effects/lighting/player-light-geometry.js#tokenRotationToForwardVector`;
  * a non-beam mode (torch) simply ignores both fields.
  *
- * @returns {Array<{tokenId: string, x: number, y: number, elevation: number, mode: string, rotation: number, lockRotation: boolean}>}
+ * @returns {Array<{tokenId: string, x: number, y: number, elevation: number, mode: string, rotation: number, lockRotation: boolean, radiusPx: number}>}
  */
 export function readActivePlayerCarriedLightTokens() {
   if (typeof canvas === 'undefined' || !canvas?.tokens?.placeables) return [];
@@ -111,6 +111,9 @@ export function readActivePlayerCarriedLightTokens() {
     const center = token.center ?? { x: token.document?.x ?? 0, y: token.document?.y ?? 0 };
     const elevation = Number(token.document?.elevation);
     const rotation = Number(token.document?.rotation);
+    // The circle the token occupies: half its smaller side, in pixels (`Token#w`/`#h`).
+    // A flashlight sits on this circle's rim, not on the token's centre.
+    const bodyPx = Math.min(Number(token.w), Number(token.h));
     out.push({
       tokenId: token.document?.id ?? token.id,
       x: center.x,
@@ -119,6 +122,7 @@ export function readActivePlayerCarriedLightTokens() {
       mode,
       rotation: Number.isFinite(rotation) ? rotation : 0,
       lockRotation: token.document?.lockRotation === true,
+      radiusPx: Number.isFinite(bodyPx) && bodyPx > 0 ? bodyPx / 2 : 0,
     });
   }
   return out;

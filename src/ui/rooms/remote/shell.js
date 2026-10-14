@@ -930,6 +930,12 @@ export function installRemote(opts = {}) {
     refreshPlayerLightBoard() {
       playerLightBoardHandle?.refresh();
     },
+    /** Repaint just the GM's "Carried Light" picker (their token selection
+     * changed, or a token's light flag did) without rebuilding the board's
+     * sliders. No-op before the body exists or with no player-light board. */
+    refreshCarriedLightPicker() {
+      playerLightBoardHandle?.refreshCarried?.();
+    },
     /** Push a live weather value into the board's own fader mid-fade
      * (2026-09-10 fix) — boot.js's pumpAstrolabe calls this every tick
      * alongside syncAstrolabePanel/updateNowPlaying below, matching their

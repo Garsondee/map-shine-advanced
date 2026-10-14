@@ -213,6 +213,27 @@ export function resolveLightPosition(snapshot) {
   return { x: Number(snapshot?.x) + dx, y: Number(snapshot?.y) + dy };
 }
 
+/**
+ * How far from its token's centre a flashlight sits, along its beam: on the rim
+ * of the circle the token occupies, so the light starts outside the token and
+ * does not wash over the artwork that carries it. It rolls around that rim as the
+ * aim turns. `rimPx` is what `foundry/player-aim-channel.js#annotate` worked out,
+ * already pulled in from any wall the rim would cross; without it the plain
+ * radius is the best this pure module can say. No radius known is the centre.
+ *
+ * The beam is aimed down the line from the token's centre to the cursor, and the
+ * rim point lies on that line, so a beam that starts there and points the same
+ * way still ends exactly at the cursor.
+ *
+ * @param {{rimPx?: number, radiusPx?: number}} [snapshot]
+ * @returns {number} px, >= 0
+ */
+export function resolveFlashlightRimPx(snapshot) {
+  if (Number.isFinite(snapshot?.rimPx)) return Math.max(0, snapshot.rimPx);
+  const radius = Number(snapshot?.radiusPx);
+  return Number.isFinite(radius) && radius > 0 ? radius : 0;
+}
+
 /** A stable, position-derived pseudo-seed — same classic GLSL-hash shape as
  * `candle-flame-geometry.js#deriveCandleSeed`/`fire-geometry.js#deriveFireSeed`,
  * so a room of several torches desyncs its flicker the identical way a room
@@ -310,7 +331,7 @@ export const PLAYER_LIGHT_AIMED_MODES = Object.freeze(
  * batch `buildPlayerLightSources` below) so the light-pool merge point and a
  * unit test can both reason about one token without a whole-array dance.
  *
- * @param {{tokenId: string, x: number, y: number, elevation: number, mode: string, rotation?: number, lockRotation?: boolean, aimAngleDeg?: number, reachPx?: number, offsetX?: number, offsetY?: number, burn01?: number}} tokenSnapshot
+ * @param {{tokenId: string, x: number, y: number, elevation: number, mode: string, rotation?: number, lockRotation?: boolean, aimAngleDeg?: number, reachPx?: number, offsetX?: number, offsetY?: number, burn01?: number, radiusPx?: number, rimPx?: number}} tokenSnapshot
  *   `aimAngleDeg` (optional) is the bearer's live aim — see {@link resolveBeamDirection};
  *   `reachPx` (optional) is how far away their cursor is — see {@link resolveBeamReach01};
  *   `offsetX`/`offsetY` (optional) is a held light's displacement — see {@link resolveLightPosition}.
@@ -322,7 +343,13 @@ export function buildOnePlayerLightSource(tokenSnapshot, permissions) {
   const preset = PLAYER_LIGHT_MODE_PRESETS[mode];
   if (!preset) return null; // a vision-mode pick, or an unrecognized/absent mode — nothing to render yet
   if (permissions?.modes?.[mode] !== true) return null; // the GM has not (or no longer) allowed this mode on this scene
-  const { x, y } = resolveLightPosition(tokenSnapshot);
+  const isBeam = preset.falloffModel === 'beam';
+  const beamUnit = isBeam ? resolveBeamDirection(tokenSnapshot) : null;
+  // A beam starts on the rim of its token's circle, in the direction it points.
+  const rimPx = isBeam ? resolveFlashlightRimPx(tokenSnapshot) : 0;
+  const held = resolveLightPosition(tokenSnapshot);
+  const x = isBeam ? held.x + beamUnit.x * rimPx : held.x;
+  const y = isBeam ? held.y + beamUnit.y * rimPx : held.y;
   if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
   // A held torch that has gone out is no light at all; one that is guttering is
   // dimmer (alpha) and lights less ground (radius) in proportion.
@@ -334,8 +361,10 @@ export function buildOnePlayerLightSource(tokenSnapshot, permissions) {
   // a moving cursor changes position every frame, and re-seeding its flicker
   // every frame would read as a stutter rather than a flame.
   const seed = deriveTokenSeed(Number(tokenSnapshot.x), Number(tokenSnapshot.y));
-  const isBeam = preset.falloffModel === 'beam';
-  const beamReach01 = isBeam ? resolveBeamReach01(tokenSnapshot.reachPx, preset.radiusPx, preset.beamMinReach01) : null;
+  // `reachPx` is how far the cursor is from the token's CENTRE; the beam starts
+  // `rimPx` out along that line, so it needs that much less to reach the cursor.
+  const beamReachPx = Number.isFinite(tokenSnapshot.reachPx) ? Math.max(0, tokenSnapshot.reachPx - rimPx) : undefined;
+  const beamReach01 = isBeam ? resolveBeamReach01(beamReachPx, preset.radiusPx, preset.beamMinReach01) : null;
   return {
     sourceId: `playerLight:${tokenSnapshot.tokenId}`,
     ownerEffectId: 'playerLight',
@@ -363,7 +392,7 @@ export function buildOnePlayerLightSource(tokenSnapshot, permissions) {
     // material builder can bake it once at entry-creation time.
     // Its LENGTH is 1/beamReach01 (1 = a unit vector, the full beam) — see
     // `resolveBeamReach01` for why that, rather than a uniform, sets the throw.
-    beamDirection: isBeam ? scaleVec2(resolveBeamDirection(tokenSnapshot), 1 / beamReach01) : null,
+    beamDirection: isBeam ? scaleVec2(beamUnit, 1 / beamReach01) : null,
     beamReach01,
     beamShape: isBeam
       ? {

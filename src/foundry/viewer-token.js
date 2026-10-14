@@ -46,6 +46,71 @@ export function resolveViewerToken() {
 }
 
 /**
+ * Does an ACTIVE (logged-in) non-GM user own this token? Such a token is steered
+ * by its player's own client, so a GM must not also steer it.
+ * @param {*} token - a placed Token.
+ * @returns {boolean}
+ */
+function isOwnedByActivePlayer(token) {
+  try {
+    return (
+      game.users?.some?.(
+        (user) => user?.active && !user.isGM && token.document?.testUserPermission?.(user, 'OWNER')
+      ) === true
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * THE TOKEN THIS CLIENT'S CARRIED LIGHT BELONGS TO — the one answer the picker,
+ * the cursor-aim channel and the vision-mode grade all need to agree on.
+ *
+ * - A PLAYER: their own character's token ({@link resolveViewerToken}).
+ * - A GM: the token they have SELECTED, so a GM can give an NPC a torch or a
+ *   flashlight, steer it with their own cursor, and try the vision modes on it
+ *   (the grade tints the GM's own view while that token is selected). A selected
+ *   token an active player owns is skipped: that player's client steers it, and
+ *   two cursors must not fight over one beam (this is also why a GM who selects
+ *   a PC just to read its sheet cannot drag the player's flashlight around).
+ *
+ * `reason` says why there is no token: `'no-canvas'`, `'no-token'` (a player with
+ * no token on this scene), `'none-selected'` (a GM with nothing selected), or
+ * `'player-active'` (a GM whose selection is all player-steered; `blockedName`
+ * names the first).
+ *
+ * @returns {{token: *|null, reason: string|null, blockedName?: string}}
+ */
+export function resolveCarriedLightTarget() {
+  if (typeof canvas === 'undefined' || !canvas?.tokens) return { token: null, reason: 'no-canvas' };
+  if (typeof game === 'undefined' || game?.user?.isGM !== true) {
+    const token = resolveViewerToken();
+    return token ? { token, reason: null } : { token: null, reason: 'no-token' };
+  }
+  const controlled = Array.isArray(canvas.tokens.controlled) ? canvas.tokens.controlled : [];
+  let blocked = null;
+  for (const token of controlled) {
+    if (!token?.document) continue;
+    if (isOwnedByActivePlayer(token)) {
+      blocked ??= token;
+      continue;
+    }
+    return { token, reason: null };
+  }
+  if (blocked)
+    return { token: null, reason: 'player-active', blockedName: String(blocked.name ?? blocked.document?.name ?? '') };
+  return { token: null, reason: 'none-selected' };
+}
+
+/**
+ * @returns {*|null} {@link resolveCarriedLightTarget}'s token, or null.
+ */
+export function resolveCarriedLightToken() {
+  return resolveCarriedLightTarget().token;
+}
+
+/**
  * Is the CURRENT client's user a GM? A one-line door onto `game.user.isGM`
  * for callers OUTSIDE `foundry/`/`diag/` (the `foundry/adapter-only` wall —
  * `tools/verify-structure.mjs` — forbids touching `game.user` directly from
@@ -87,6 +152,8 @@ export function watchViewerToken(onChange) {
     ['createToken', Hooks.on('createToken', fire)],
     ['deleteToken', Hooks.on('deleteToken', fire)],
     ['updateToken', Hooks.on('updateToken', onUpdate)],
+    // A GM's carried-light token is whichever one they have selected.
+    ['controlToken', Hooks.on('controlToken', fire)],
   ];
   return () => {
     for (const [hook, id] of ids) {

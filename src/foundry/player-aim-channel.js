@@ -49,13 +49,20 @@
  * the result, so every screen agrees where the torch is; the owner's own torch
  * is eased toward it (an arm, not a laser pointer).
  *
- * WHO AIMS: a non-GM client aims exactly `resolveViewerToken()` — the token the
- * carried-light picker writes to, so "the token I picked a flashlight for" and
- * "the token my cursor steers" cannot drift. A GM aims nothing: the picker
- * already says a GM has no personal carried light, and a GM who selected a
- * player's token to read its sheet must not be able to drag that player's beam
- * around with a mouse. A flashlight on some other token (set by hand or macro)
- * keeps following its stored rotation.
+ * WHO AIMS: every client aims exactly `resolveCarriedLightTarget().token` — the
+ * token the carried-light picker writes to, so "the token I picked a flashlight
+ * for" and "the token my cursor steers" cannot drift. For a player that is their
+ * own character's token; for a GM it is the token they have SELECTED, unless an
+ * active player owns it: that player's client steers it, and a GM who selected
+ * a PC just to read its sheet must not be able to drag the player's beam around
+ * with a mouse. A flashlight on some other token (set by hand or macro) keeps
+ * following its stored rotation.
+ *
+ * A FLASHLIGHT SITS ON ITS TOKEN'S RIM (`stampFlashlightRim`): the origin is the
+ * point of the circle the token occupies that lies toward the aim, so the light
+ * starts outside the token instead of washing over its artwork, and rolls around
+ * the circle as the aim turns. The rim point is pulled back from any wall that
+ * blocks light, so a token against a wall never puts its light on the far side.
  *
  * WHO IS BELIEVED: a message is accepted only from a user that owns the token it
  * names (`testUserPermission(sender, 'OWNER')`), checked against the sender id
@@ -76,7 +83,7 @@
 import { createLogger } from '../core/log.js';
 import { perfNowMs, wallClockMs } from '../core/frame-clock.js';
 import { readMouseHoverPoint, readGridSizePixels } from './scene-occlusion-sources.js';
-import { resolveViewerToken, isViewingUserGM } from './viewer-token.js';
+import { resolveCarriedLightTarget } from './viewer-token.js';
 import { readActivePlayerCarriedLightTokens } from './player-light-mode.js';
 import { readScenePlayerLightPermissions } from './player-light-permissions.js';
 import {
@@ -114,6 +121,9 @@ const SOCKET_NAME = 'module.map-shine-advanced';
  */
 export const AIM_SENDER_TICK_MS = 50;
 
+/** A flashlight's origin stops this far short of a light-blocking wall on its token's rim. */
+const AIM_FLASHLIGHT_WALL_MARGIN_PX = 4;
+
 /** `annotate` has not yet looked up this frame's aiming token. */
 const UNRESOLVED = Symbol('unresolved');
 
@@ -140,8 +150,8 @@ export function createPlayerAimChannel({
   const torchEase = createRemoteAimStore({ tauMs: AIM_TORCH_EASE_TAU_MS, maxEntries: 8 });
   const policy = createAimSendPolicy();
   const torchBurn = createTorchBurn();
-  /** The wall test for the same (origin, destination) is asked every frame the cursor is still. */
-  let wallMemo = { key: null, hitPx: null };
+  /** The wall test for the same (origin, destination) is asked every frame the cursor is still: one memo per token. */
+  const wallMemo = new Map();
 
   const stats = { sent: 0, received: 0, rejected: {}, errors: 0 };
   let timer = null;
@@ -170,36 +180,62 @@ export function createPlayerAimChannel({
     return { x: point.x, y: point.y };
   }
 
-  /** @returns {object|null} the Token this client's cursor steers, or `null` (a GM, or no token). */
+  /** @returns {object|null} the Token this client's cursor steers, or `null` (see `viewer-token.js#resolveCarriedLightTarget`). */
   function resolveLocalAimToken() {
-    if (isViewingUserGM()) return null;
-    return resolveViewerToken();
+    return resolveCarriedLightTarget().token;
   }
 
   const tokenIdOf = (token) => token?.document?.id ?? token?.id ?? null;
 
   /**
-   * How far along `from -> to` the first wall that blocks MOVEMENT is, or `null`
-   * if the way is clear. Foundry's own `Token#checkCollision` (v14: level- and
-   * elevation-aware, and independent of the token's animation). A fault is
-   * logged once and reads as "no wall" - a torch that can briefly reach through
-   * a wall is a smaller harm than no torch.
+   * How far along `from -> to` the first wall of `type` is, or `null` if the way
+   * is clear: `'move'` for a held torch (it must not be held through a wall),
+   * `'light'` for a flashlight's origin (it must not sit on the far side of a
+   * wall that would block its light). Foundry's own `Token#checkCollision` (v14:
+   * level- and elevation-aware, and independent of the token's animation). A
+   * fault is logged once and reads as "no wall" - a light that can briefly reach
+   * through a wall is a smaller harm than no light.
    */
-  function readWallHitDistancePx(token, from, to) {
-    const key = `${Math.round(from.x)},${Math.round(from.y)}>${Math.round(to.x)},${Math.round(to.y)}`;
-    if (wallMemo.key === key) return wallMemo.hitPx;
+  function readWallHitDistancePx(token, from, to, type = 'move') {
+    const id = tokenIdOf(token) ?? '';
+    const key = `${type}:${Math.round(from.x)},${Math.round(from.y)}>${Math.round(to.x)},${Math.round(to.y)}`;
+    const memo = wallMemo.get(id);
+    if (memo && memo.key === key) return memo.hitPx;
     let hitPx = null;
     try {
       const hit = token?.checkCollision?.(
         { x: to.x, y: to.y },
-        { origin: { x: from.x, y: from.y }, type: 'move', mode: 'closest' }
+        { origin: { x: from.x, y: from.y }, type, mode: 'closest' }
       );
       if (hit && Number.isFinite(hit.x) && Number.isFinite(hit.y)) hitPx = Math.hypot(hit.x - from.x, hit.y - from.y);
     } catch (err) {
-      noteError('testing a held torch against walls', err);
+      noteError('testing a carried light against walls', err);
     }
-    wallMemo = { key, hitPx };
+    if (wallMemo.size >= 16 && !wallMemo.has(id)) wallMemo.clear(); // bounded: a table has a handful of lights
+    wallMemo.set(id, { key, hitPx });
     return hitPx;
+  }
+
+  /**
+   * Where along its beam a flashlight's origin sits: on the rim of the circle its
+   * token occupies, pulled back from any light-blocking wall that rim would cross
+   * (a token standing against a wall must not put its light on the other side).
+   * Stamped as `rimPx`; `player-light-geometry.js#resolveFlashlightRimPx` places
+   * the light. Runs for every client's flashlights, local or relayed, because the
+   * rim is derived from the token and the aim every client already has.
+   */
+  function stampFlashlightRim(snap) {
+    const radiusPx = Number(snap.radiusPx);
+    if (!(radiusPx > 0)) return;
+    const angleDeg = Number.isFinite(snap.aimAngleDeg)
+      ? snap.aimAngleDeg
+      : snap.lockRotation
+        ? 0
+        : Number(snap.rotation);
+    const end = offsetFromAim(Number.isFinite(angleDeg) ? angleDeg : 0, radiusPx);
+    const token = typeof canvas === 'undefined' ? null : canvas.tokens?.get?.(snap.tokenId);
+    const hitPx = readWallHitDistancePx(token, snap, { x: snap.x + end.x, y: snap.y + end.y }, 'light');
+    snap.rimPx = hitPx === null ? radiusPx : Math.max(0, Math.min(radiusPx, hitPx - AIM_FLASHLIGHT_WALL_MARGIN_PX));
   }
 
   /**
@@ -283,19 +319,25 @@ export function createPlayerAimChannel({
         } else {
           aim = store.sampleAim(snap.tokenId, nowMs);
         }
-        if (!aim) continue;
-        snap.aimAngleDeg = aim.angleDeg;
-        if (aim.reachPx !== null && PLAYER_AIM_REACH_MODES.includes(snap.mode)) {
-          snap.reachPx = aim.reachPx;
-          if (PLAYER_AIM_HELD_MODES.includes(snap.mode)) {
-            if (aim.burn01 !== null) snap.burn01 = aim.burn01;
-            const offset = offsetFromAim(aim.angleDeg, aim.reachPx);
-            // The hand's tremor is added at DRAW time on every client, from the wall
-            // clock and the token id, so it is never sent — see torchWanderOffset.
-            const wander = torchWanderOffset(snap.tokenId, wallMs, wanderPx);
-            snap.offsetX = offset.x + wander.x;
-            snap.offsetY = offset.y + wander.y;
+        if (aim) {
+          snap.aimAngleDeg = aim.angleDeg;
+          if (aim.reachPx !== null && PLAYER_AIM_REACH_MODES.includes(snap.mode)) {
+            snap.reachPx = aim.reachPx;
+            if (PLAYER_AIM_HELD_MODES.includes(snap.mode)) {
+              if (aim.burn01 !== null) snap.burn01 = aim.burn01;
+              const offset = offsetFromAim(aim.angleDeg, aim.reachPx);
+              // The hand's tremor is added at DRAW time on every client, from the wall
+              // clock and the token id, so it is never sent — see torchWanderOffset.
+              const wander = torchWanderOffset(snap.tokenId, wallMs, wanderPx);
+              snap.offsetX = offset.x + wander.x;
+              snap.offsetY = offset.y + wander.y;
+            }
           }
+        }
+        // A flashlight sits on the rim of its token's circle even before any aim is
+        // known (it then follows the token's stored rotation).
+        if (PLAYER_AIM_REACH_MODES.includes(snap.mode) && !PLAYER_AIM_HELD_MODES.includes(snap.mode)) {
+          stampFlashlightRim(snap);
         }
       }
     } catch (err) {
@@ -404,7 +446,7 @@ export function createPlayerAimChannel({
     socketHandler = null;
     store.clear();
     torchEase.clear();
-    wallMemo = { key: null, hitPx: null };
+    wallMemo.clear();
     policy.reset();
     tracker.reset();
     torchBurn.reset();
@@ -412,7 +454,22 @@ export function createPlayerAimChannel({
 
   /** A readout for the console (`MapShine.playerAimStats()`) — what has this client sent, heard and refused, and why. */
   function getStats() {
+    // Why a light is not following this client's cursor: is the channel running, has Foundry
+    // reported a cursor, and which token (if any) does that cursor steer.
+    let steers = null;
+    let cursor = null;
+    try {
+      const target = resolveCarriedLightTarget();
+      steers = target.token
+        ? { tokenId: tokenIdOf(target.token), name: target.token.name ?? null }
+        : { reason: target.reason };
+      cursor = readCursorWorld();
+    } catch (err) {
+      steers = { reason: `unreadable: ${err?.message ?? err}` };
+    }
     return {
+      steers,
+      cursor,
       running: timer !== null,
       sent: stats.sent,
       received: stats.received,

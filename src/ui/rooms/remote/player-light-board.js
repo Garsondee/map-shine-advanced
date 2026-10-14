@@ -16,13 +16,16 @@
  * real MSA screen-space GRADES visible only to the wearer's own client
  * (`effects/vision/player-vision-grade-render.js`). Both kinds are real and
  * functional; the tooltip below says which is which so a GM isn't left
- * guessing why flipping on Night Vision changes nothing on the GM's OWN
- * screen (it isn't meant to — that mode is personal by design).
+ * guessing why ALLOWING Night Vision here changes nothing on the GM's own
+ * screen: the allowance is for players. To see a mode yourself, or to carry a
+ * light as a GM, use the "Carried Light" picker at the bottom of this board,
+ * which acts on the token you have selected.
  *
  * @module ui/rooms/remote/player-light-board
  */
 
 import { buildParamControl } from '../../widgets/param-control.js';
+import { renderPlayerLightPicker } from '../player-light-picker.js';
 
 /** The six mode keys, in the order they should appear, and WHAT each one
  * renders — matches `foundry/player-light-permissions.js#
@@ -60,7 +63,7 @@ function pill(text, title, pressed, onClick) {
  *   onPlayersCanChooseModeToggle: (allowed: boolean) => void,
  *   onDarknessRealismCommit: (v: number) => void,
  * }} ctx
- * @returns {{refresh: () => void}}
+ * @returns {{refresh: () => void, refreshCarried: () => void}}
  */
 export function renderPlayerLightBoard(container, ctx) {
   const wrap = document.createElement('div');
@@ -83,8 +86,14 @@ export function renderPlayerLightBoard(container, ctx) {
   const masterHost = document.createElement('div');
   const realismHost = document.createElement('div');
 
-  wrap.append(label, hint, chipRow, masterHost, realismHost);
+  // The GM's own picker: gives the SELECTED token a Torch/Flashlight/vision mode.
+  // Without it a GM had no way to carry a light at all.
+  const carriedHost = document.createElement('div');
+  carriedHost.style.marginTop = '0.6rem';
+
+  wrap.append(label, hint, chipRow, masterHost, realismHost, carriedHost);
   container.appendChild(wrap);
+  const carriedPicker = renderPlayerLightPicker(carriedHost);
 
   function renderChips() {
     chipRow.innerHTML = '';
@@ -144,6 +153,11 @@ export function renderPlayerLightBoard(container, ctx) {
       renderChips();
       renderMaster();
       renderRealism();
+      carriedPicker.refresh();
+    },
+    /** Repaint only the GM's carried-light picker (their selection changed). */
+    refreshCarried() {
+      carriedPicker.refresh();
     },
   };
 }

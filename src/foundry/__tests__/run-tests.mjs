@@ -44,6 +44,7 @@ import { run as runWindPersistence } from './wind-persistence.test.mjs';
 import { run as runScenePresetPersistence } from './scene-preset-persistence.test.mjs';
 import { run as runPlayerLightPermissions } from './player-light-permissions.test.mjs';
 import { run as runPlayerLightMode } from './player-light-mode.test.mjs';
+import { run as runViewerToken } from './viewer-token.test.mjs';
 import { run as runPlayerAim } from './player-aim.test.mjs';
 import { run as runPlayerAimChannel } from './player-aim-channel.test.mjs';
 import { run as runFlagKeys } from './flag-keys.test.mjs';
@@ -120,6 +121,7 @@ const suites = [
   ['scene-preset-persistence', runScenePresetPersistence],
   ['player-light-permissions', runPlayerLightPermissions],
   ['player-light-mode', runPlayerLightMode],
+  ['viewer-token', runViewerToken],
   ['player-aim', runPlayerAim],
   ['player-aim-channel', runPlayerAimChannel],
   ['flag-keys', runFlagKeys],

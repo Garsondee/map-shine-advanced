@@ -49,7 +49,12 @@ function makeWorld({
     id: spec.id,
     actor: { id: spec.actorId ?? `actor-${spec.id}` },
     isOwner: spec.isOwner ?? true,
+    name: spec.name ?? spec.id,
     center: { x: spec.x, y: spec.y },
+    // Token#w / #h: the token's size in pixels (the circle it occupies is half the smaller).
+    w: spec.w,
+    h: spec.h,
+    selected: spec.selected === true,
     // v14's Token#checkCollision: the first wall the ray meets, or null.
     checkCollision: spec.checkCollision ?? (() => null),
     document: {
@@ -67,7 +72,7 @@ function makeWorld({
     { id: 'p1', active: true, isSelf: userId === 'p1' },
     { id: 'p2', active: true, isSelf: userId === 'p2' },
     { id: 'p3', active: true, isSelf: userId === 'p3' },
-    { id: 'gm', active: true, isSelf: userId === 'gm' },
+    { id: 'gm', active: true, isGM: true, isSelf: userId === 'gm' },
   ];
   const socket = {
     on: (name, fn) => listeners.push({ name, fn }),
@@ -91,7 +96,14 @@ function makeWorld({
     canvas: {
       scene: { id: 's1', getFlag: () => sceneFlag },
       grid: { size: 100 }, // a torch's leash is 6 grid squares = 600 px
-      tokens: { placeables: tokenObjects, get: (id) => tokenObjects.find((t) => t.document.id === id) },
+      tokens: {
+        placeables: tokenObjects,
+        // What the viewing user has selected on the board (a GM's carried-light token).
+        get controlled() {
+          return tokenObjects.filter((token) => token.selected);
+        },
+        get: (id) => tokenObjects.find((t) => t.document.id === id),
+      },
       // Foundry's own un-moved default; `setMouse` stands in for a real pointermove.
       mousePosition: { x: 0, y: 0 },
       mousePositionVisible: true,
@@ -1179,5 +1191,153 @@ export function run(t) {
       setLogSink(null);
       setLogLevel(priorLevel);
     }
+  }
+  // ======================================================================
+  // A GM's carried light: the SELECTED token, steered by the GM's own cursor
+  // ======================================================================
+  {
+    const w = makeWorld({
+      userId: 'gm',
+      isGM: true,
+      tokens: [
+        { id: 'npc', x: 100, y: 100, mode: 'flashlight', owners: ['gm'], selected: true },
+        { id: 'other', x: 500, y: 500, mode: 'flashlight', owners: ['gm'] },
+      ],
+    });
+    const { channel, clock } = makeChannel();
+    withWorld(w, () => {
+      w.setMouse(200, 100);
+      const snaps = channel.annotate(readActivePlayerCarriedLightTokens());
+      ok('GM: the selected NPC flashlight follows the GM’s cursor (due east is 90°)', near(snaps[0].aimAngleDeg, 90));
+      ok('GM: a token the GM has not selected is left alone', snaps[1].aimAngleDeg === undefined);
+      ok(
+        'GM: the aim goes out on the socket for the other clients',
+        channel.tick(clock.t) === true && w.emitted.length === 1
+      );
+    });
+  }
+  {
+    // A selected token an ACTIVE player owns is that player's to steer.
+    const w = makeWorld({
+      userId: 'gm',
+      isGM: true,
+      tokens: [
+        { id: 't1', actorId: 'actor-p1', x: 100, y: 100, mode: 'flashlight', owners: ['p1', 'gm'], selected: true },
+      ],
+    });
+    const { channel, clock } = makeChannel();
+    withWorld(w, () => {
+      w.setMouse(200, 100);
+      const snaps = channel.annotate(readActivePlayerCarriedLightTokens());
+      ok('GM: selecting a token an active player owns does not steer it', snaps[0].aimAngleDeg === undefined);
+      ok('GM: …and sends nothing', channel.tick(clock.t) === false && w.emitted.length === 0);
+    });
+  }
+  {
+    // …but once that player is offline nothing else will steer it.
+    const w = makeWorld({
+      userId: 'gm',
+      isGM: true,
+      users: [
+        { id: 'p1', active: false, isSelf: false },
+        { id: 'gm', active: true, isGM: true, isSelf: true },
+      ],
+      tokens: [
+        { id: 't1', actorId: 'actor-p1', x: 100, y: 100, mode: 'flashlight', owners: ['p1', 'gm'], selected: true },
+      ],
+    });
+    const { channel } = makeChannel();
+    withWorld(w, () => {
+      w.setMouse(200, 100);
+      const snaps = channel.annotate(readActivePlayerCarriedLightTokens());
+      ok('GM: a selected token whose player is offline can be steered', near(snaps[0].aimAngleDeg, 90));
+    });
+  }
+
+  // ======================================================================
+  // A flashlight sits on the rim of its token's circle and rolls around it
+  // ======================================================================
+  {
+    const w = makeWorld({
+      tokens: [{ id: 't1', actorId: 'actor-p1', x: 1000, y: 1000, w: 100, h: 100, mode: 'flashlight', owners: ['p1'] }],
+    });
+    const { channel } = makeChannel();
+    withWorld(w, () => {
+      let snaps = channel.annotate(readActivePlayerCarriedLightTokens());
+      ok('rim: the snapshot carries the token’s radius (half of 100 px)', snaps[0].radiusPx === 50);
+      let [src] = buildPlayerLightSources(snaps, ALLOW_FLASHLIGHT);
+      ok(
+        'rim: before any aim the light is on the rim along the stored rotation (due north)',
+        near(src.x, 1000) && near(src.y, 950)
+      );
+
+      w.setMouse(1400, 1000);
+      snaps = channel.annotate(readActivePlayerCarriedLightTokens());
+      [src] = buildPlayerLightSources(snaps, ALLOW_FLASHLIGHT);
+      ok('rim: aimed east, the light sits on the east edge of the token', near(src.x, 1050) && near(src.y, 1000));
+      ok(
+        'rim: …and the beam, which now starts 50 px out, still ends exactly at the cursor',
+        near(src.x + src.beamReach01 * 620, 1400)
+      );
+
+      w.setMouse(1000, 600);
+      snaps = channel.annotate(readActivePlayerCarriedLightTokens());
+      [src] = buildPlayerLightSources(snaps, ALLOW_FLASHLIGHT);
+      ok(
+        'rim: swinging the cursor north rolls the light round to the north edge',
+        near(src.x, 1000) && near(src.y, 950)
+      );
+
+      w.setMouse(1000, 1000);
+      snaps = channel.annotate(readActivePlayerCarriedLightTokens());
+      [src] = buildPlayerLightSources(snaps, ALLOW_FLASHLIGHT);
+      ok('rim: a cursor on the token itself keeps the last edge (no jump to the centre)', near(src.y, 950));
+    });
+  }
+  {
+    // A wall closer than the rim pulls the origin back, tested against LIGHT-blocking walls.
+    const calls = [];
+    const w = makeWorld({
+      tokens: [
+        {
+          id: 't1',
+          actorId: 'actor-p1',
+          x: 1000,
+          y: 1000,
+          w: 100,
+          h: 100,
+          mode: 'flashlight',
+          owners: ['p1'],
+          checkCollision: (dest, opts) => {
+            calls.push(opts.type);
+            return { x: opts.origin.x + 30, y: opts.origin.y };
+          },
+        },
+      ],
+    });
+    const { channel } = makeChannel();
+    withWorld(w, () => {
+      w.setMouse(1400, 1000);
+      const snaps = channel.annotate(readActivePlayerCarriedLightTokens());
+      ok(
+        'rim: a light-blocking wall 30 px away pulls the origin back to 26 px (4 px margin)',
+        near(snaps[0].rimPx, 26)
+      );
+      ok(
+        'rim: …found with a LIGHT collision test, not a movement one',
+        calls.length > 0 && calls.every((type) => type === 'light')
+      );
+    });
+  }
+  {
+    const w = makeWorld({
+      tokens: [{ id: 't1', actorId: 'actor-p1', x: 1000, y: 1000, w: 100, h: 100, mode: 'torch', owners: ['p1'] }],
+    });
+    const { channel } = makeChannel();
+    withWorld(w, () => {
+      w.setMouse(1300, 1000);
+      const snaps = channel.annotate(readActivePlayerCarriedLightTokens());
+      ok('rim: a torch is held out at the cursor, not placed on the rim', snaps[0].rimPx === undefined);
+    });
   }
 }

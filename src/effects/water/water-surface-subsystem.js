@@ -78,6 +78,32 @@ export function resolveGatedWaterTier(rawTier) {
 }
 
 /**
+ * THE REBUILD-STORM TRIPWIRE'S POLICY (2026-10-14). `sync()` runs every frame,
+ * but a floor should rebuild its water materials only a handful of times a
+ * session: once when its body pack first lands, on a profile change, on a wind
+ * rebake. A rebuild count that TRACKS the sync count is a storm — exactly the
+ * bug this file had until today (every material rebuilt per floor per frame on
+ * any scene with no water), which hid for weeks because nothing counted
+ * rebuilds. `water-body-subsystem.js` already reports `bakes` against `polls`
+ * for the same reason; this is the surface's twin.
+ *
+ * Pure, so it is testable with plain numbers. It rides on `getStatus()` as
+ * `rebuildHealth` and so appears per floor in the `water-health` report.
+ *
+ * @param {{syncs: number, rebuilds: number}} counts - `sync()` calls and
+ *   material rebuilds this subsystem has made since construction.
+ * @returns {{ok: boolean|null, note: string}} `ok: null` means "not evaluated"
+ *   — never a silent pass.
+ */
+export function describeRebuildHealth({ syncs, rebuilds }) {
+  // TODO(human): decide when a rebuild rate is a storm. Return `ok: false` with
+  // a `note` that reads well pasted into a bug report when it is, `ok: true`
+  // when it is not, and keep `ok: null` for "too early to say" (a rebuild on
+  // frame 1 is normal, so some warm-up allowance is needed).
+  return { ok: null, note: `${rebuilds} rebuilds over ${syncs} syncs — no health policy set yet` };
+}
+
+/**
  * DIAGNOSTIC-ONLY (2026-08-27) — a build-time force for JUST the caustics
  * half of tier 4, for `diag/perf-shader-variant-ab.js`'s own restart-based
  * A/B measurement of what the Worley-net block costs `geometry.worldDraw`.
@@ -367,6 +393,11 @@ export function createWaterSurfaceSubsystem({
    * slide) — what the author asked for, reported beside `builtForTier` (what
    * compiled) so a clamped floor reads as clamped rather than as a lie. */
   let lastResolvedTier = WATER_DEFAULT_TIER;
+  /** `sync()` calls, and material rebuilds among them, since construction —
+   * the pair `describeRebuildHealth` judges. The construction-time build is
+   * not counted: a healthy floor reads `rebuilds: 0` until water arrives. */
+  let syncCount = 0;
+  let rebuildCount = 0;
   /** The `_causticsGateForce` value the CURRENT materials were built with —
    * same reasoning as `builtForTier` immediately above, tracked separately
    * because a diagnostic force change must trigger the identical rebuild
@@ -806,6 +837,7 @@ export function createWaterSurfaceSubsystem({
    *   correct (if static) tier-3 render rather than a crash.
    */
   function sync(floorIndex, viewRect) {
+    syncCount++;
     ensureMaskImage(floorIndex);
 
     // THE LOOK/TIER STATE — fetched ONCE, at the top, because the tier-rebuild
@@ -868,6 +900,7 @@ export function createWaterSurfaceSubsystem({
       resolvedWindVersion !== builtForWindVersion
     ) {
       const prev = surface;
+      rebuildCount++;
       surface = buildSurfaceForTier(resolvedTier);
       meshes[0].material = surface.absorbMaterial;
       meshes[1].material = surface.inscatterMaterial;
@@ -1285,6 +1318,13 @@ export function createWaterSurfaceSubsystem({
           builtForTier < lastResolvedTier
             ? 'no baked water body on this floor (nothing to draw yet), or tier 5 awaiting its first capture'
             : null,
+        // THE REBUILD-STORM TRIPWIRE — `rebuilds` should be single digits
+        // against thousands of `syncs`; if the two track each other, every
+        // frame is paying to rebuild this floor's materials (see
+        // `describeRebuildHealth`).
+        syncs: syncCount,
+        rebuilds: rebuildCount,
+        rebuildHealth: describeRebuildHealth({ syncs: syncCount, rebuilds: rebuildCount }),
         // ⚠️ WHAT THE TIER COSTS THE AUTHOR, IN THEIR OWN VOCABULARY (2026-08-17).
         // `perfTier: 3` is a true statement that answered nobody's question: the
         // author had five live sliders doing nothing and no way to connect that

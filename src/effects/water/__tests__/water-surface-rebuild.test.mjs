@@ -35,7 +35,7 @@
  */
 import * as THREE from '../../../vendor/three/three.webgpu.js';
 import { buildWorldSpaceOutdoorsGate } from '../../lighting/environmental-light.js';
-import { createWaterSurfaceSubsystem } from '../water-surface-subsystem.js';
+import { createWaterSurfaceSubsystem, describeRebuildHealth } from '../water-surface-subsystem.js';
 import { buildWaterSurfaceMaterial, resolveWaterBuildTier, WATER_DEFAULT_TIER } from '../water-render.js';
 
 const RECT = { minX: 0, minY: 0, maxX: 1000, maxY: 1000 };
@@ -212,6 +212,38 @@ export function run(t) {
       typeof st.inertControls === 'string' && st.inertControls.includes('no baked water body')
     );
   }
+
+  // ── THE REBUILD COUNTERS — THE STORM TRIPWIRE'S INPUTS ──────────────────
+  {
+    const floor = makeFloor(4);
+    floor.syncFrames(40);
+    let st = floor.sub.getStatus();
+    ok('a no-water floor counts every sync() and zero rebuilds', st.syncs === 40 && st.rebuilds === 0);
+    floor.giveWater();
+    floor.syncFrames(20);
+    st = floor.sub.getStatus();
+    ok('…then exactly one rebuild once water arrives (60 syncs, 1 rebuild)', st.syncs === 60 && st.rebuilds === 1);
+    ok(
+      'rebuildHealth is always a {ok, note} pair: null/true/false plus a non-empty string',
+      (st.rebuildHealth.ok === null || typeof st.rebuildHealth.ok === 'boolean') &&
+        typeof st.rebuildHealth.note === 'string' &&
+        st.rebuildHealth.note.length > 0
+    );
+  }
+
+  // ── THE POLICY'S INVARIANTS — true of ANY sane threshold ────────────────
+  // These pin the intent without dictating the numbers: whatever cut-off
+  // `describeRebuildHealth` uses, a healthy session must never read as a storm
+  // and a storm must never read as healthy ("not evaluated" is allowed for
+  // both — only a confident wrong answer fails).
+  ok(
+    'a healthy session (3 rebuilds in 5000 syncs) is never flagged as a storm',
+    describeRebuildHealth({ syncs: 5000, rebuilds: 3 }).ok !== false
+  );
+  ok(
+    'a storm (a rebuild on every one of 5000 syncs) is never reported healthy',
+    describeRebuildHealth({ syncs: 5000, rebuilds: 5000 }).ok !== true
+  );
 
   // ── A FLOOR THAT GAINS WATER REBUILDS EXACTLY ONCE, AT THE REAL TIER ────
   // Tier 3 is the case the seeded `builtForTier` used to hide: the resolved

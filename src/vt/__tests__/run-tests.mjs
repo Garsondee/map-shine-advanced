@@ -35,6 +35,7 @@ import { run as runImageHeaderSize } from './image-header-size.test.mjs';
 import { run as runMaskRepack } from './mask-repack.test.mjs';
 import { run as runPanCompileProbe } from './pan-compile-probe.test.mjs';
 import { run as runWindGridTextures } from './wind-grid-textures.test.mjs';
+import { run as runUiShadowScan } from './ui-shadow-scan.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -98,6 +99,7 @@ const suites = [
   ['mask-repack', runMaskRepack],
   ['pan-compile-probe', runPanCompileProbe],
   ['wind-grid-textures', runWindGridTextures],
+  ['ui-shadow-scan', runUiShadowScan],
 ];
 
 for (const [name, fn] of suites) {

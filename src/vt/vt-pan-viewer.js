@@ -122,6 +122,7 @@ import {
 import { createLogger } from '../core/log.js';
 import { buildViewerDiagnostics, describeParallelShaderCompile } from './vt-pan-viewer-diagnostics.js';
 import { loadMaskImageTexture } from './mask-image.js';
+import { createPostFrameScanner, readUiWindowRects } from './ui-shadow-scan.js';
 import { loadLensOverlayTexture } from './lens-overlay-image.js';
 
 /** Log door for the onPageDecoded ingest seam's containment guard — the one
@@ -4340,38 +4341,41 @@ export async function startVtPanViewer({
     // THROTTLE (2026-07-20 v5; kept as a SECONDARY optimization after v6
     // removed the dominant cost — the extra render() call, see uiShadow's own
     // construction comment above and buildUiShadowVisibility's header). The
-    // DOM read itself is still real, non-zero main-thread work: it is
-    // `canvas.getBoundingClientRect()` +
-    // `document.querySelectorAll` + one `getBoundingClientRect()` per open
-    // window, all on the MAIN thread, every single frame. `getBoundingClient
-    // Rect()` forces the browser to flush any pending layout (a synchronous
-    // reflow) — in a live Foundry session (chat, combat tracker, animations
-    // constantly touching the DOM) that flush is real, repeated work, and
-    // Foundry v14's ApplicationV2 core chrome (sidebar/hotbar/players list)
-    // ALSO carries the `.application` class the query matches, widening the
-    // scan. A frame-count throttle (not a time-based one — `time/one-clock`
-    // in tools/verify-structure.mjs reserves `performance.now()`/`Date.now()`
-    // to core/frame-clock.js + diag/, and this file is already at its
-    // grandfathered ratchet limit) skips the DOM read on most frames and
-    // reuses the PREVIOUS scan's uniforms/count in between — window drag
-    // motion still reads as smooth (the shadow catches up within a handful
-    // of frames, imperceptible), while the reflow only happens 1/Nth as
-    // often. Tunable via MapShine.setUiShadow({ scanEveryNFrames }).
+    // DOM read is `canvas.getBoundingClientRect()` + `document.querySelectorAll`
+    // + one `getBoundingClientRect()` per open window, and a layout read flushes
+    // any pending style/layout synchronously. A frame-count throttle (not a
+    // time-based one — `time/one-clock` in tools/verify-structure.mjs reserves
+    // `performance.now()`/`Date.now()` to core/frame-clock.js + diag/) asks for
+    // a scan on 1 frame in N and reuses the PREVIOUS scan's uniforms/count in
+    // between — window drag motion still reads as smooth (the shadow catches
+    // up within a handful of frames, imperceptible). Tunable via
+    // MapShine.setUiShadow({ scanEveryNFrames }).
+    //
+    // WHERE THE READ HAPPENS (2026-10-14, DevTools "Forced reflow" — a Recalculate
+    // Style + Layout pair under this function's first `getBoundingClientRect`):
+    // the throttle made the flush rarer, not cheaper — a scan frame still paid a
+    // full style+layout flush mid-callback whenever anything else had dirtied the
+    // DOM earlier in the frame, which in a live Foundry session is nearly always.
+    // So the frame loop no longer reads the DOM at all: it queues the scan on a
+    // post-frame macrotask (ui-shadow-scan.js — layout is already clean by then)
+    // and applies the newest FINISHED scan, one frame later.
     let _uiShadowFrameCounter = 0;
+    const uiShadowScanner = createPostFrameScanner({ read: () => readUiWindowRects(document, canvas) });
 
     /**
-     * Read this frame's open, framed Foundry windows (ApplicationV2 `.application`
-     * and legacy `.app.window-app`, both identified by a direct-child
-     * `.window-header` — which excludes docked UI like the sidebar), map each to
-     * a shadow stamp, and push them into `uiShadow`'s uniforms (consumed every
-     * frame by the composite shader's `visNode` multiply — v6: there is no
-     * longer a separate draw to skip, so correctness now depends on this
-     * function actively clearing the uniforms when disabled, not merely on the
-     * caller declining to render). Records detected/active counts on
-     * `_uiShadowState` so the debug report can prove it is finding windows
-     * (never a silent no-op). On a throttled (skipped) frame, the uniforms are
-     * left untouched — the composite keeps using the most recent known window
-     * positions rather than flickering off.
+     * Map the newest finished scan of this scene's open, framed Foundry windows
+     * (ui-shadow-scan.js — ApplicationV2 `.application` and legacy
+     * `.app.window-app`, both identified by a direct-child `.window-header`,
+     * which excludes docked UI like the sidebar) to shadow stamps, and push
+     * them into `uiShadow`'s uniforms (consumed every frame by the composite
+     * shader's `visNode` multiply — v6: there is no longer a separate draw to
+     * skip, so correctness now depends on this function actively clearing the
+     * uniforms when disabled, not merely on the caller declining to render).
+     * Records detected/active counts on `_uiShadowState` so the debug report
+     * can prove it is finding windows (never a silent no-op). On a frame with
+     * no finished scan, the uniforms are left untouched — the composite keeps
+     * using the most recent known window positions rather than flickering off.
+     * Reads NO DOM itself: it only queues the next scan (see the note above).
      * @returns {number}
      */
     function updateUiShadowStamps() {
@@ -4379,6 +4383,7 @@ export async function startVtPanViewer({
         _uiShadowState.lastWindowCount = 0;
         _uiShadowState.lastStampCount = 0;
         _uiShadowFrameCounter = 0;
+        uiShadowScanner.discard();
         // MUST clear explicitly now (v6): visNode is always evaluated by the
         // composite shader, so stale non-zero uniforms from before a disable
         // would keep casting a shadow forever — there's no draw-skip to hide it.
@@ -4387,12 +4392,14 @@ export async function startVtPanViewer({
       }
       _uiShadowFrameCounter++;
       const interval = Math.max(1, Math.round(_uiShadowState.scanEveryNFrames));
-      // -1 so the FIRST call (counter becomes 1) always scans immediately —
+      // Take what the PREVIOUS request read BEFORE queueing the next, so a
+      // result is never consumed on the very frame it was asked for.
+      const scan = uiShadowScanner.take();
+      // -1 so the FIRST call (counter becomes 1) always requests immediately —
       // no delay when the feature is freshly enabled or a window just opened.
-      if ((_uiShadowFrameCounter - 1) % interval !== 0) {
-        return _uiShadowState.lastStampCount;
-      }
-      const canvasRect = canvas.getBoundingClientRect();
+      if ((_uiShadowFrameCounter - 1) % interval === 0) uiShadowScanner.request();
+      if (!scan) return _uiShadowState.lastStampCount;
+      const { canvasRect } = scan;
       uiShadow.setResolution(canvasRect.width, canvasRect.height);
       uiShadow.setFlipY(_uiShadowState.flipY);
       // Same throttle as every other "Look" field read in this function
@@ -4410,28 +4417,13 @@ export async function startVtPanViewer({
         maxOffsetPx: _uiShadowState.maxOffsetPx,
         offsetScale: _uiShadowState.offsetScale,
       };
-      const stamps = [];
-      let detected = 0;
-      const els = document.querySelectorAll('.application, .app.window-app');
-      for (const el of els) {
-        // Only floating, framed windows (a title bar to grab) — not docked apps.
-        if (!el.querySelector(':scope > .window-header')) continue;
-        if (el.classList.contains('minimized')) continue;
-        const r = el.getBoundingClientRect();
-        if (r.width < 1 || r.height < 1) continue;
-        detected++;
-        if (stamps.length >= MAX_UI_SHADOW_STAMPS) continue; // count all, cast the first N
-        stamps.push(
-          mapWindowRectToStamp(
-            { left: r.left, top: r.top, width: r.width, height: r.height },
-            { left: canvasRect.left, top: canvasRect.top, width: canvasRect.width, height: canvasRect.height },
-            light,
-            opts
-          )
-        );
-      }
+      // Count all, cast the first N. The scan already dropped docked,
+      // minimized and degenerate windows (ui-shadow-scan.js#readUiWindowRects).
+      const stamps = scan.windows
+        .slice(0, MAX_UI_SHADOW_STAMPS)
+        .map((rect) => mapWindowRectToStamp(rect, canvasRect, light, opts));
       uiShadow.setStamps(stamps);
-      _uiShadowState.lastWindowCount = detected;
+      _uiShadowState.lastWindowCount = scan.windows.length;
       _uiShadowState.lastStampCount = stamps.length;
       return stamps.length;
     }

@@ -87,7 +87,12 @@ function fakeCasterHeightField() {
   };
 }
 
-function buildHarness({ getMaskAuthorityVersion = () => 1, getSunShadowRenderState, atmosphere } = {}) {
+function buildHarness({
+  getMaskAuthorityVersion = () => 1,
+  getSunShadowRenderState,
+  atmosphere,
+  getCasterHeightField,
+} = {}) {
   const allocator = fakeAllocator();
   const pass = fakeRenderPass();
   const sun = { azimuthDeg: 200, elevationDeg: 40, strengthMul: 1, softnessMul: 1, ...atmosphere };
@@ -96,7 +101,7 @@ function buildHarness({ getMaskAuthorityVersion = () => 1, getSunShadowRenderSta
     THREE,
     allocator,
     dimensions: { sceneRect: { x: 0, y: 0, width: 1000, height: 1000 } },
-    getCasterHeightField: () => fakeCasterHeightField(),
+    getCasterHeightField: getCasterHeightField ?? (() => fakeCasterHeightField()),
     getSunShadowRenderState: getSunShadowRenderState ?? (() => defaultState),
     getMaskAuthorityVersion,
     getShadowHandle: () => ({ atmosphere: sun }),
@@ -191,6 +196,61 @@ export function run(t) {
       'no nowMs: a real change bakes immediately, exactly like before the throttle existed',
       pass.calls > rendersAfterFirst
     );
+  }
+
+  // ══ A VERSION BUMP THAT DID NOT TOUCH THIS FLOOR'S OWN GRIDS REPACKS NOTHING
+  // (2026-10-14). `mask-authority`'s version is ONE number for the whole scene,
+  // so a tile mask arriving on floor 2 read as "changed" to every floor slot —
+  // and each repacked its RGBA texture, re-uploaded it and re-ran its GPU march.
+  // The derive cache hands back the SAME grid objects for a floor whose inputs
+  // did not change; a slot compares the four grids it packs from by identity. ══
+  {
+    let version = 1;
+    const stable = fakeCasterHeightField();
+    let field = stable;
+    const { subsystem, pass } = buildHarness({
+      getMaskAuthorityVersion: () => version,
+      getCasterHeightField: () => field,
+    });
+    subsystem.maybeBake(0, 1000);
+    const marches = pass.calls;
+    ok('identity reuse: the first bake packs and marches for real', marches > 0);
+    const packedResult = subsystem.getStatus().floors[0].caster;
+
+    version = 2; // some OTHER floor's art or mask arrived
+    subsystem.maybeBake(0, 2000);
+    ok(
+      'identity reuse: a version bump that left the floor own four grids untouched does NOT re-march the GPU',
+      pass.calls === marches
+    );
+    const reused = subsystem.getStatus().floors[0];
+    ok(
+      'identity reuse: …and is counted, so the report can say how often it saved a repack',
+      reused.bakeGate.casterPackReuses === 1
+    );
+    ok(
+      'identity reuse: …while the field the slot serves is still the packed one (the report keeps its channel stats)',
+      reused.caster.ok === true &&
+        reused.caster.reused === true &&
+        reused.caster.channelStats === packedResult.channelStats
+    );
+
+    // A genuinely new grid (the derive cache returned a NEW object — the floor changed) must repack and re-march.
+    field = { ...stable, channels: { coverOverhead: grid(4, 4) } };
+    version = 3;
+    subsystem.maybeBake(0, 3000);
+    ok('identity reuse: a changed grid object repacks and re-marches', pass.calls > marches);
+    ok(
+      'identity reuse: …and the repack is a real one, not flagged as a reuse',
+      subsystem.getStatus().floors[0].caster.reused !== true
+    );
+
+    // Each of the four packed inputs counts: the floor-above band is one of them.
+    const marchesAfterRepack = pass.calls;
+    field = { ...field, coverAbove: grid(4, 4, 1000, 1000, 90) };
+    version = 4;
+    subsystem.maybeBake(0, 4000);
+    ok('identity reuse: a changed coverAbove grid repacks too', pass.calls > marchesAfterRepack);
   }
 
   // ══ THE OFF PATH IS NEVER THROTTLED — already the cheap collapsed path

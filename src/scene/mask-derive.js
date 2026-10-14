@@ -22,9 +22,12 @@
  * Here the inputs are the packs' COARSEST pages (each pack's `maxMip` page is
  * the whole item in ≤248² texels, already decoded by the pager on its way to
  * the coarse pin — see mask-authority.js for the ingest seam), and the output
- * is a ≤MASK_GRID_MAX_DIM-per-side Uint8 grid per floor per product. CPU, a
- * few milliseconds, recomputed lazily when inputs change, never blocking a
- * frame. When a GPU pass eventually consumes these (light.visibility's
+ * is a ≤MASK_GRID_MAX_DIM-per-side Uint8 grid per floor per product (the caster
+ * channels and water rasterize finer — up to 2048² — and that is where the cost
+ * is). CPU, recomputed lazily when inputs change and INCREMENTALLY: see
+ * `createDeriveCache`, which exists because "a few milliseconds, never blocking
+ * a frame" stopped being true and froze a live scene load for seconds at a time.
+ * When a GPU pass eventually consumes these (light.visibility's
  * sky-reach term), the grid uploads as one tiny DataTexture through vt/ —
  * deliberately NOT built until that consumer exists.
  *
@@ -303,6 +306,249 @@ export function sampleContentBoxPremultiplied(content, alpha, u, v, hx, hy) {
   return { alphaMean: sumA / n / 255, premultMean: sumCA / n / 255 };
 }
 
+// ============================================================================
+// THE COMPOSITE PRIMITIVES' SHARED MACHINERY (2026-10-14)
+// ============================================================================
+//
+// WHY THIS SECTION EXISTS. A live scene load froze the main thread for ~4.5 s
+// at a time, six times in one minute, and the Chrome profile put 56% of ALL
+// main-thread time in `deriveFloorProducts` — called from inside `renderFrame`
+// (fire sync → `getMaskDrivenFires` → `getDerived` → `recomputeIfDirty`), once
+// per batch of mask/art that finished streaming in. Self time over the trace:
+// `worldToItemUv` 23% (it ran `Math.cos` + `Math.sin` and allocated `{u, v}` for
+// EVERY TEXEL), `sampleContentBilinear` 16%, `sampleMaskGridWorld` 6%.
+//
+// Two fixes, and they compose. THIS section is the per-texel cost: placement
+// constants hoisted out of the texel loop, and an axis-aligned item (every
+// background, almost every tile) sampled SEPARABLY — its u depends only on the
+// column and its v only on the row, so the bilinear taps are worked out once
+// per column/row instead of once per texel. Every expression is the SAME
+// expression in the SAME order as `worldToItemUv`/`sampleContentBilinear`, so
+// the bytes are identical; `mask-derive.test.mjs` fuzzes this against a
+// verbatim copy of the old per-texel code and requires exact equality.
+// The other fix is the redundant work — see `createDeriveCache`.
+
+/**
+ * `worldToItemUv`'s per-placement constants, computed ONCE per composite
+ * instead of once per texel. Same operations, same order, so u/v are
+ * bit-identical to calling `worldToItemUv` per texel.
+ * @param {Parameters<typeof worldToItemUv>[0]} placement
+ */
+function uvPlan(placement) {
+  const { x, y, width, height, anchorX = 0.5, anchorY = 0.5, rotation = 0 } = placement;
+  const a = (rotation * Math.PI) / 180;
+  const sin = Math.sin(a);
+  return { x, y, width, height, anchorX, anchorY, cos: Math.cos(a), sin, nsin: -sin };
+}
+
+/**
+ * The grid cells under an item's rotated-corner AABB, clamped to the grid —
+ * exactly the range every composite used to compute inline.
+ * @param {Parameters<typeof worldToItemUv>[0]} placement
+ * @param {MaskGridSpec} spec
+ */
+function footprintCellRange(placement, spec) {
+  const [c0, c1, c2, c3] = itemWorldCorners(placement);
+  const minX = Math.min(c0.x, c1.x, c2.x, c3.x);
+  const maxX = Math.max(c0.x, c1.x, c2.x, c3.x);
+  const minY = Math.min(c0.y, c1.y, c2.y, c3.y);
+  const maxY = Math.max(c0.y, c1.y, c2.y, c3.y);
+  return {
+    gx0: Math.max(0, Math.floor((minX - spec.x) / spec.texelW)),
+    gx1: Math.min(spec.w - 1, Math.ceil((maxX - spec.x) / spec.texelW)),
+    gy0: Math.max(0, Math.floor((minY - spec.y) / spec.texelH)),
+    gy1: Math.min(spec.h - 1, Math.ceil((maxY - spec.y) / spec.texelH)),
+  };
+}
+
+/** A string for a placement's VALUES — never its object identity, because a
+ * placement object could be edited in place and an identity key would then
+ * serve a stale footprint. @param {object|null|undefined} p */
+export function placementKey(p) {
+  if (!p) return 'none';
+  return `${p.x},${p.y},${p.width},${p.height},${p.anchorX},${p.anchorY},${p.rotation}`;
+}
+
+/** A string for a grid spec's VALUES. @param {MaskGridSpec} s */
+export function specKey(s) {
+  return `${s.x},${s.y},${s.width},${s.height},${s.w},${s.h},${s.texelW},${s.texelH}`;
+}
+
+/** True when `u` depends on the column alone and `v` on the row alone: no
+ * rotation (exact `sin === 0`, `cos === 1`) and a finite, non-degenerate
+ * placement. Anything else takes the general per-texel path, which mirrors
+ * the original arithmetic including its NaN behaviour. */
+function isSeparablePlan(plan) {
+  return (
+    plan.sin === 0 &&
+    plan.cos === 1 &&
+    plan.width !== 0 &&
+    plan.height !== 0 &&
+    Number.isFinite(plan.x + plan.y + plan.width + plan.height + plan.anchorX + plan.anchorY)
+  );
+}
+
+/**
+ * One AXIS of a separable composite: for each of `count` grid cells starting at
+ * `first`, whether the cell centre lands inside the item (`ok`) and, if so, the
+ * two source taps and weights `sampleContentBilinear` would use. This is
+ * `sampleContentBilinear`'s own arithmetic with the per-texel work lifted out:
+ * the x taps depend only on the column and the y taps only on the row.
+ * @returns {{ok: Uint8Array, i0: Int32Array, i1: Int32Array, t: Float64Array, omt: Float64Array}}
+ */
+function axisTable(first, count, specOrigin, specTexel, pOrigin, pSize, pAnchor, srcN) {
+  const ok = new Uint8Array(count);
+  const i0 = new Int32Array(count);
+  const i1 = new Int32Array(count);
+  const t = new Float64Array(count);
+  const omt = new Float64Array(count);
+  for (let k = 0; k < count; k++) {
+    const pos = specOrigin + (first + k + 0.5) * specTexel;
+    const uv = (pos - pOrigin) / pSize + pAnchor;
+    if (uv < 0 || uv >= 1) continue;
+    ok[k] = 1;
+    const f = uv * srcN - 0.5;
+    const f0 = Math.floor(f);
+    const frac = f - f0;
+    i0[k] = f0 < 0 ? 0 : f0 > srcN - 1 ? srcN - 1 : f0;
+    i1[k] = f0 + 1 < 0 ? 0 : f0 + 1 > srcN - 1 ? srcN - 1 : f0 + 1;
+    t[k] = frac;
+    omt[k] = 1 - frac;
+  }
+  return { ok, i0, i1, t, omt };
+}
+
+/**
+ * @typedef {object} MaskStamp - ONE ITEM'S SAMPLED FOOTPRINT at one grid
+ *   resolution: the bytes every composite would offer the grid, without the grid.
+ * @property {number} gx0 - first grid column the stamp covers.
+ * @property {number} gy0 - first grid row.
+ * @property {number} w - columns. @property {number} h - rows.
+ * @property {Uint8Array|null} value - w*h; what `compositeItemMax` would offer
+ *   each texel (0 where the item does not reach).
+ * @property {Uint8Array|null} pass - w*h; 1 where `compositeItemHeightMax` would
+ *   WRITE its height (the item reaches AND its raw alpha is at or above
+ *   `HEIGHT_COVERAGE_THRESHOLD`). Kept as the raw comparison, not derived from
+ *   `value`, because `value` is rounded: a raw 7.6 rounds to 8 yet fails.
+ */
+
+/**
+ * Sample one item's content through its placement onto a grid resolution.
+ *
+ * The per-item half of {@link compositeItemMax} and {@link compositeItemHeightMax}
+ * (which are now `rasterizeStamp` + a merge). Split out because the stamp does
+ * not depend on WHICH FLOOR's grid it lands in: an upper-floor background that
+ * is "above" three lower floors used to be re-sampled three times, bilinear tap
+ * by bilinear tap, to produce three identical sets of bytes.
+ *
+ * @param {MaskGridSpec} spec
+ * @param {ContentGrid} content
+ * @param {Parameters<typeof worldToItemUv>[0]} placement
+ * @param {{scale?: number, wantValue?: boolean, wantPass?: boolean}} [options]
+ * @returns {MaskStamp|null} null when the item's footprint misses the grid.
+ */
+export function rasterizeStamp(spec, content, placement, { scale = 1, wantValue = true, wantPass = false } = {}) {
+  const { gx0, gx1, gy0, gy1 } = footprintCellRange(placement, spec);
+  const w = gx1 - gx0 + 1;
+  const h = gy1 - gy0 + 1;
+  if (!(w > 0 && h > 0)) return null;
+  const value = wantValue ? new Uint8Array(w * h) : null;
+  const pass = wantPass ? new Uint8Array(w * h) : null;
+  const plan = uvPlan(placement);
+
+  if (isSeparablePlan(plan)) {
+    const cw = content.w;
+    const cd = content.data;
+    const xt = axisTable(gx0, w, spec.x, spec.texelW, plan.x, plan.width, plan.anchorX, cw);
+    const yt = axisTable(gy0, h, spec.y, spec.texelH, plan.y, plan.height, plan.anchorY, content.h);
+    for (let r = 0; r < h; r++) {
+      if (yt.ok[r] === 0) continue;
+      const row0 = yt.i0[r] * cw;
+      const row1 = yt.i1[r] * cw;
+      const ty = yt.t[r];
+      const omty = yt.omt[r];
+      let o = r * w;
+      for (let k = 0; k < w; k++, o++) {
+        if (xt.ok[k] === 0) continue;
+        const c0 = xt.i0[k];
+        const c1 = xt.i1[k];
+        const tx = xt.t[k];
+        const omtx = xt.omt[k];
+        const top = cd[row0 + c0] * omtx + cd[row0 + c1] * tx;
+        const bot = cd[row1 + c0] * omtx + cd[row1 + c1] * tx;
+        const raw = top * omty + bot * ty;
+        if (value) value[o] = Math.min(255, Math.round(scale === 1 ? raw : raw * scale));
+        if (pass) pass[o] = raw < HEIGHT_COVERAGE_THRESHOLD ? 0 : 1;
+      }
+    }
+    return { gx0, gy0, w, h, value, pass };
+  }
+
+  // GENERAL (rotated) PATH — `worldToItemUv`'s own arithmetic, per texel, with
+  // the trig and the per-column/per-row products lifted out of the loop.
+  const cdx = new Float64Array(w);
+  const nsdx = new Float64Array(w);
+  for (let k = 0; k < w; k++) {
+    const dx = spec.x + (gx0 + k + 0.5) * spec.texelW - plan.x;
+    cdx[k] = plan.cos * dx;
+    nsdx[k] = plan.nsin * dx;
+  }
+  for (let r = 0; r < h; r++) {
+    const dy = spec.y + (gy0 + r + 0.5) * spec.texelH - plan.y;
+    const sdy = plan.sin * dy;
+    const cdy = plan.cos * dy;
+    let o = r * w;
+    for (let k = 0; k < w; k++, o++) {
+      const u = (cdx[k] + sdy) / plan.width + plan.anchorX;
+      const v = (nsdx[k] + cdy) / plan.height + plan.anchorY;
+      if (u < 0 || u >= 1 || v < 0 || v >= 1) continue;
+      const raw = sampleContentBilinear(content, u, v);
+      if (value) value[o] = Math.min(255, Math.round(scale === 1 ? raw : raw * scale));
+      if (pass) pass[o] = raw < HEIGHT_COVERAGE_THRESHOLD ? 0 : 1;
+    }
+  }
+  return { gx0, gy0, w, h, value, pass };
+}
+
+/** MAX a stamp's coverage bytes into a grid — `compositeItemMax`'s write half.
+ * @param {MaskGrid} grid @param {MaskStamp|null} stamp */
+export function mergeMaxStamp(grid, stamp) {
+  if (!stamp?.value) return;
+  const { value, w, h, gx0, gy0 } = stamp;
+  const data = grid.data;
+  const gw = grid.spec.w;
+  for (let r = 0; r < h; r++) {
+    let d = (gy0 + r) * gw + gx0;
+    let s = r * w;
+    for (let k = 0; k < w; k++, s++, d++) {
+      const v = value[s];
+      if (v > data[d]) data[d] = v;
+    }
+  }
+}
+
+/** MAX a constant height byte into a grid wherever the stamp's `pass` is set —
+ * `compositeItemHeightMax`'s write half. @param {MaskGrid} grid
+ * @param {MaskStamp|null} stamp @param {number} height - already clamped. */
+export function mergeHeightStamp(grid, stamp, height) {
+  if (!stamp?.pass) return;
+  const { pass, w, h, gx0, gy0 } = stamp;
+  const data = grid.data;
+  const gw = grid.spec.w;
+  for (let r = 0; r < h; r++) {
+    let d = (gy0 + r) * gw + gx0;
+    let s = r * w;
+    for (let k = 0; k < w; k++, s++, d++) {
+      if (pass[s] === 1 && height > data[d]) data[d] = height;
+    }
+  }
+}
+
+/** `compositeItemHeightMax`'s own clamp of a height byte. @param {number} heightByte */
+function heightMergeValue(heightByte) {
+  return Math.max(0, Math.min(255, Math.round(heightByte)));
+}
+
 /**
  * MAX-composite one item's content grid into a scene grid through its
  * placement. Iterates only the grid texels under the item's rotated-corner
@@ -322,32 +568,9 @@ export function sampleContentBoxPremultiplied(content, alpha, u, v, hx, hy) {
  *   height through {@link compositeItemHeightMax}, which keeps them separate.
  */
 export function compositeItemMax(grid, content, placement, valueScale = 1) {
-  const { spec, data } = grid;
   const scale = Number.isFinite(valueScale) ? Math.max(0, valueScale) : 1;
   if (scale === 0) return;
-  const corners = itemWorldCorners(placement);
-  const minX = Math.min(...corners.map((c) => c.x));
-  const maxX = Math.max(...corners.map((c) => c.x));
-  const minY = Math.min(...corners.map((c) => c.y));
-  const maxY = Math.max(...corners.map((c) => c.y));
-
-  const gx0 = Math.max(0, Math.floor((minX - spec.x) / spec.texelW));
-  const gx1 = Math.min(spec.w - 1, Math.ceil((maxX - spec.x) / spec.texelW));
-  const gy0 = Math.max(0, Math.floor((minY - spec.y) / spec.texelH));
-  const gy1 = Math.min(spec.h - 1, Math.ceil((maxY - spec.y) / spec.texelH));
-
-  for (let gy = gy0; gy <= gy1; gy++) {
-    const wy = spec.y + (gy + 0.5) * spec.texelH;
-    for (let gx = gx0; gx <= gx1; gx++) {
-      const wx = spec.x + (gx + 0.5) * spec.texelW;
-      const { u, v } = worldToItemUv(placement, wx, wy);
-      if (u < 0 || u >= 1 || v < 0 || v >= 1) continue;
-      const raw = sampleContentBilinear(content, u, v);
-      const value = Math.min(255, Math.round(scale === 1 ? raw : raw * scale));
-      const i = gy * spec.w + gx;
-      if (value > data[i]) data[i] = value;
-    }
-  }
+  mergeMaxStamp(grid, rasterizeStamp(grid.spec, content, placement, { scale }));
 }
 
 /**
@@ -482,29 +705,93 @@ export function compositeItemOverwrite(grid, content, placement, alpha = null, {
     // pass for a file, one derived LUT array for paint); a hypothetical
     // mismatch falls back to the bilinear path rather than reading garbage.
     (!alpha || (alpha.w === content.w && alpha.h === content.h));
-  const corners = itemWorldCorners(placement);
-  const minX = Math.min(...corners.map((c) => c.x));
-  const maxX = Math.max(...corners.map((c) => c.x));
-  const minY = Math.min(...corners.map((c) => c.y));
-  const maxY = Math.max(...corners.map((c) => c.y));
+  const { gx0, gx1, gy0, gy1 } = footprintCellRange(placement, spec);
+  const w = gx1 - gx0 + 1;
+  const h = gy1 - gy0 + 1;
+  if (!(w > 0 && h > 0)) return;
+  const plan = uvPlan(placement);
 
-  const gx0 = Math.max(0, Math.floor((minX - spec.x) / spec.texelW));
-  const gx1 = Math.min(spec.w - 1, Math.ceil((maxX - spec.x) / spec.texelW));
-  const gy0 = Math.max(0, Math.floor((minY - spec.y) / spec.texelH));
-  const gy1 = Math.min(spec.h - 1, Math.ceil((maxY - spec.y) / spec.texelH));
+  // ── SEPARABLE FAST PATH (2026-10-14) ───────────────────────────────────────
+  // An axis-aligned source — every background and nearly every tile — has u
+  // depending on the column alone and v on the row alone, so the bilinear taps
+  // are worked out once per column/row rather than once per texel. Every
+  // expression below is `sampleContentBilinear`'s own, in its own order: the
+  // bytes written are identical to the per-texel path (fuzzed in
+  // `mask-derive.test.mjs`). The minifying box filter keeps the general path.
+  if (!useBox && isSeparablePlan(plan)) {
+    const cw = content.w;
+    const cd = content.data;
+    const xt = axisTable(gx0, w, spec.x, spec.texelW, plan.x, plan.width, plan.anchorX, cw);
+    const yt = axisTable(gy0, h, spec.y, spec.texelH, plan.y, plan.height, plan.anchorY, content.h);
+    // The mask's own alpha normally shares `content`'s geometry (one
+    // `extractContentWindow` pass), so the same tables serve both; a mismatched
+    // alpha gets tables of its own.
+    const ad = alpha ? alpha.data : null;
+    const aw = alpha ? alpha.w : 0;
+    const alphaShares = !alpha || (alpha.w === content.w && alpha.h === content.h);
+    const xta =
+      alpha && !alphaShares ? axisTable(gx0, w, spec.x, spec.texelW, plan.x, plan.width, plan.anchorX, aw) : xt;
+    const yta =
+      alpha && !alphaShares ? axisTable(gy0, h, spec.y, spec.texelH, plan.y, plan.height, plan.anchorY, alpha.h) : yt;
+    for (let r = 0; r < h; r++) {
+      if (yt.ok[r] === 0) continue;
+      const row0 = yt.i0[r] * cw;
+      const row1 = yt.i1[r] * cw;
+      const ty = yt.t[r];
+      const omty = yt.omt[r];
+      const arow0 = ad ? yta.i0[r] * aw : 0;
+      const arow1 = ad ? yta.i1[r] * aw : 0;
+      const aty = ad ? yta.t[r] : 0;
+      const aomty = ad ? yta.omt[r] : 0;
+      let i = (gy0 + r) * spec.w + gx0;
+      for (let k = 0; k < w; k++, i++) {
+        if (xt.ok[k] === 0) continue;
+        const tx = xt.t[k];
+        const omtx = xt.omt[k];
+        const c0 = xt.i0[k];
+        const c1 = xt.i1[k];
+        const top = cd[row0 + c0] * omtx + cd[row0 + c1] * tx;
+        const bot = cd[row1 + c0] * omtx + cd[row1 + c1] * tx;
+        const raw = top * omty + bot * ty;
+        if (!ad) {
+          data[i] = Math.min(255, Math.round(raw));
+          continue;
+        }
+        const atx = xta.t[k];
+        const aomtx = xta.omt[k];
+        const ac0 = xta.i0[k];
+        const ac1 = xta.i1[k];
+        const atop = ad[arow0 + ac0] * aomtx + ad[arow0 + ac1] * atx;
+        const abot = ad[arow1 + ac0] * aomtx + ad[arow1 + ac1] * atx;
+        // SOURCE-OVER by the mask's own alpha — see the general path below.
+        const a = Math.max(0, Math.min(1, (atop * aomty + abot * aty) / 255));
+        data[i] = Math.min(255, Math.round(data[i] * (1 - a) + raw * a));
+      }
+    }
+    return;
+  }
 
-  for (let gy = gy0; gy <= gy1; gy++) {
-    const wy = spec.y + (gy + 0.5) * spec.texelH;
-    for (let gx = gx0; gx <= gx1; gx++) {
-      const wx = spec.x + (gx + 0.5) * spec.texelW;
-      const { u, v } = worldToItemUv(placement, wx, wy);
+  const cdx = new Float64Array(w);
+  const nsdx = new Float64Array(w);
+  for (let k = 0; k < w; k++) {
+    const dx = spec.x + (gx0 + k + 0.5) * spec.texelW - plan.x;
+    cdx[k] = plan.cos * dx;
+    nsdx[k] = plan.nsin * dx;
+  }
+  for (let r = 0; r < h; r++) {
+    const dy = spec.y + (gy0 + r + 0.5) * spec.texelH - plan.y;
+    const sdy = plan.sin * dy;
+    const cdy = plan.cos * dy;
+    for (let k = 0; k < w; k++) {
+      const u = (cdx[k] + sdy) / plan.width + plan.anchorX;
+      const v = (nsdx[k] + cdy) / plan.height + plan.anchorY;
       // REACH IS DECIDED BY THE TEXEL CENTRE ON BOTH PATHS, deliberately: it
       // is the same "which texels does this source own" question
       // `rasterizeAuthored` builds its absent-vs-painted distinction on, and
       // widening it under the box filter would silently change every
       // source's footprint by half a texel.
       if (u < 0 || u >= 1 || v < 0 || v >= 1) continue;
-      const i = gy * spec.w + gx;
+      const i = (gy0 + r) * spec.w + gx0 + k;
       if (useBox) {
         const { alphaMean, premultMean } = sampleContentBoxPremultiplied(content, alpha, u, v, hx, hy);
         data[i] = Math.min(255, Math.round(data[i] * (1 - alphaMean) + premultMean));
@@ -592,31 +879,9 @@ export const OVERHEAD_EXTERIOR_THRESHOLD = 128;
  * @param {number} heightByte - the item's own height, 0..255 over the field scale.
  */
 export function compositeItemHeightMax(grid, content, placement, heightByte) {
-  const { spec, data } = grid;
-  const value = Math.max(0, Math.min(255, Math.round(heightByte)));
+  const value = heightMergeValue(heightByte);
   if (value === 0) return;
-  const corners = itemWorldCorners(placement);
-  const minX = Math.min(...corners.map((c) => c.x));
-  const maxX = Math.max(...corners.map((c) => c.x));
-  const minY = Math.min(...corners.map((c) => c.y));
-  const maxY = Math.max(...corners.map((c) => c.y));
-
-  const gx0 = Math.max(0, Math.floor((minX - spec.x) / spec.texelW));
-  const gx1 = Math.min(spec.w - 1, Math.ceil((maxX - spec.x) / spec.texelW));
-  const gy0 = Math.max(0, Math.floor((minY - spec.y) / spec.texelH));
-  const gy1 = Math.min(spec.h - 1, Math.ceil((maxY - spec.y) / spec.texelH));
-
-  for (let gy = gy0; gy <= gy1; gy++) {
-    const wy = spec.y + (gy + 0.5) * spec.texelH;
-    for (let gx = gx0; gx <= gx1; gx++) {
-      const wx = spec.x + (gx + 0.5) * spec.texelW;
-      const { u, v } = worldToItemUv(placement, wx, wy);
-      if (u < 0 || u >= 1 || v < 0 || v >= 1) continue;
-      if (sampleContentBilinear(content, u, v) < HEIGHT_COVERAGE_THRESHOLD) continue;
-      const i = gy * spec.w + gx;
-      if (value > data[i]) data[i] = value;
-    }
-  }
+  mergeHeightStamp(grid, rasterizeStamp(grid.spec, content, placement, { wantValue: false, wantPass: true }), value);
 }
 
 /**
@@ -930,6 +1195,274 @@ export function rasterizeAuthored(gridSpec, sources, absentValue) {
   return grid;
 }
 
+// ============================================================================
+// THE DERIVE CACHE — redo only the work an ingest actually changed (2026-10-14)
+// ============================================================================
+//
+// `deriveFloorProducts` used to be a pure function of EVERYTHING, so any change
+// to anything — one tile's mask finishing its decode, a Tile document being
+// touched, a slider — re-rasterized every kind on every floor from scratch:
+// ~2.8 s for 3 floors / 68 items at a 1024 caster grid on a dev box, ~4.5 s on
+// the live scene, run inside `renderFrame` once per batch of streaming content.
+//
+// An ingest is IMMUTABLE once stored (`mask-authority.js` replaces one, it never
+// edits one), so a stage's inputs can be NAMED — by object identity for content,
+// by value for placements and specs — and compared in a handful of string
+// comparisons. Each floor memoises its stages independently:
+//
+//   composites  the six alpha/height grids built from items above or raised over
+//               the floor (cover, coverSkyReach, casterSkyReach, overhead, …)
+//   outdoors    the floor's `_Outdoors` at the shared grid and at caster resolution
+//   authored    each other rasterized kind (fire, water, …), one entry per kind
+//   gate        everything derived from outdoors + composites (sky, building,
+//               gated overhead, merged height)
+//
+// and below them the STAMP cache: an item's sampled footprint at one grid
+// resolution is the same bytes whichever floor it lands in, so it is sampled
+// once (keyed by the ingest's content object) and MAX-merged into each floor's
+// grid. A floor whose item set merely GAINED members — the load-time case, art
+// and masks arriving one by one — updates by merging only the new stamps into a
+// copy (`append`) instead of re-merging every stamp.
+//
+// WHAT THIS DOES NOT DO: change what is computed. `mask-derive.test.mjs` fuzzes
+// the cached derive against a verbatim copy of the pre-cache one and requires
+// byte-identical products and completeness, across random ingest sequences.
+//
+// A product whose every stage came from cache is returned as the SAME OBJECT as
+// last time, which is how `mask-authority.js` tells "nothing changed" from "a
+// real change" and avoids bumping its version (and every downstream re-bake)
+// for a touch that changed nothing.
+
+/**
+ * @typedef {object} DeriveCache
+ * @property {(obj: object|null|undefined) => number} idOf - a stable small integer per object (0 for null).
+ * @property {() => number} uid - a fresh stage id.
+ * @property {object} stats - counters; see `createDeriveCache`.
+ */
+
+/**
+ * @returns {DeriveCache} an empty cache. One per scene (`mask-authority.js#reset`
+ *   makes a new one) — the content objects it keys on belong to that scene.
+ */
+export function createDeriveCache() {
+  const ids = new WeakMap();
+  let nextId = 1;
+  const cache = {
+    epoch: '',
+    floors: new Map(),
+    stamps: new WeakMap(),
+    /**
+     * Counters for the report — texel counts and hit/miss tallies, no clocks
+     * (`time/one-clock`). `stampTexels` is the honest unit of derive work: it is
+     * what the cost scales with, on any machine.
+     */
+    stats: {
+      derives: 0,
+      stampsComputed: 0,
+      stampHits: 0,
+      stampTexels: 0,
+      composites: { hit: 0, append: 0, rebuild: 0 },
+      outdoors: { hit: 0, miss: 0 },
+      authored: { hit: 0, miss: 0 },
+      gate: { hit: 0, miss: 0 },
+      productsBuilt: 0,
+      productsReused: 0,
+    },
+    idOf(obj) {
+      if (!obj) return 0;
+      let id = ids.get(obj);
+      if (id === undefined) {
+        id = nextId++;
+        ids.set(obj, id);
+      }
+      return id;
+    },
+    uid() {
+      return nextId++;
+    },
+    /** A new grid resolution (tier switch) or scene: every stamp and floor memo is for the old one. */
+    beginDerive(epoch) {
+      cache.stats.derives++;
+      if (cache.epoch !== epoch) {
+        cache.epoch = epoch;
+        cache.stamps = new WeakMap();
+        cache.floors.clear();
+      }
+    },
+    endDerive(seenFloorIndices) {
+      for (const index of cache.floors.keys()) if (!seenFloorIndices.has(index)) cache.floors.delete(index);
+    },
+    floorMemo(index) {
+      let memo = cache.floors.get(index);
+      if (!memo) {
+        memo = { composites: null, outdoors: null, authored: new Map(), gate: null, product: null };
+        cache.floors.set(index, memo);
+      }
+      return memo;
+    },
+    /** One item's stamp at one resolution, sampled once per (content, placement, spec). */
+    stamp(spec, key, content, placement, wantPass) {
+      let perContent = cache.stamps.get(content);
+      if (!perContent) {
+        perContent = new Map();
+        cache.stamps.set(content, perContent);
+      }
+      const k = `${key}|${placementKey(placement)}`;
+      let entry = perContent.get(k);
+      if (entry === undefined || (wantPass && entry.stamp && !entry.stamp.pass)) {
+        const stamp = rasterizeStamp(spec, content, placement, { wantPass });
+        entry = { stamp };
+        perContent.set(k, entry);
+        cache.stats.stampsComputed++;
+        if (stamp) cache.stats.stampTexels += stamp.w * stamp.h;
+      } else {
+        cache.stats.stampHits++;
+      }
+      return entry.stamp;
+    },
+  };
+  return cache;
+}
+
+/** An `{spec, data}` grid with its own copy of the bytes. @param {MaskGrid} grid @returns {MaskGrid} */
+function copyGrid(grid) {
+  return { spec: grid.spec, data: grid.data.slice() };
+}
+
+/**
+ * The names of the inputs of a rasterized source list: content/alpha by object
+ * identity, placement by value. One string per source, in draw order.
+ * @param {Array<object>|undefined} sources @param {DeriveCache} memo @returns {string[]}
+ */
+function sourceTokens(sources, memo) {
+  return (sources ?? []).map(
+    (s) =>
+      `${memo.idOf(s?.content)}|${memo.idOf(s?.alpha)}|${placementKey(s?.placement)}|${s?.areaAverage === true ? 1 : 0}|${s?.ownerId ?? ''}`
+  );
+}
+
+/** @param {string[]|null|undefined} a @param {string[]} b */
+function tokensEqual(a, b) {
+  if (!a || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+/**
+ * The stage of a floor's derivation that depends on its `_Outdoors` grid and its
+ * composites: `skyReach`, the building channel, the exterior-gated overhead
+ * channel and the merged height field. Pure of its inputs, so the caller
+ * memoises it on the identity of those inputs.
+ *
+ * ⚠️ WORLD-SAMPLED, NOT INDEX-ALIGNED (2026-07-30, casterGridDim). `outdoors`
+ * always rasterizes at the SHARED `gridSpec` — it serves water/wind/etc. too,
+ * and its resolution is not this effect's to raise. Once the caster grid differs
+ * from it (a tier with its own `casterGridDim`), `coverBuilding.data[i]` and
+ * `outdoors.data[i]` are DIFFERENT-SIZED grids: the same index means a different
+ * world texel in each. `worldIndexMap` looks `outdoors` up by WORLD POSITION
+ * (it is `sampleMaskGridWorld` hoisted out of the texel loop), which is correct
+ * at any relative resolution and costs a table lookup when the two match.
+ */
+function deriveGateProducts({ gridSpec, casterSpecActive, outdoors, comp, buildingByte }) {
+  const sky = createMaskGrid(gridSpec);
+  for (let i = 0; i < sky.data.length; i++) {
+    sky.data[i] = Math.round((outdoors.data[i] * (255 - comp.cover.data[i])) / 255);
+  }
+
+  const w = casterSpecActive.w;
+  const h = casterSpecActive.h;
+  const map = worldIndexMap(casterSpecActive, outdoors.spec);
+  const od = outdoors.data;
+
+  // THE BUILDING CHANNEL — the dark of `_Outdoors` IS the building footprint.
+  // No item, no alpha, no elevation: the author already painted where the
+  // walls are, and that painting is a REQUIRED mask, so this producer can
+  // never be starved the way the art-opacity ones can.
+  //
+  // COVERAGE and HEIGHT, separately (the rethink's whole point): indoor-ness
+  // is the COVERAGE — a doorway painted mid-grey is half-covered, and a
+  // half-covered texel casts a half-strength shadow, which is what a soft
+  // threshold at a door should be. It used to scale the HEIGHT instead, which
+  // made that same doorway a half-height wall casting a half-LENGTH shadow.
+  const coverBuilding = createMaskGrid(casterSpecActive);
+  const casterBuilding = createMaskGrid(casterSpecActive);
+  if (buildingByte >= 0) {
+    for (let gy = 0; gy < h; gy++) {
+      const rowBase = map.row[gy];
+      for (let gx = 0; gx < w; gx++) {
+        const i = gy * w + gx;
+        const c = map.col[gx];
+        const outdoorsByte = rowBase < 0 || c < 0 ? 255 : od[rowBase + c];
+        const indoorness = 255 - outdoorsByte;
+        coverBuilding.data[i] = indoorness;
+        casterBuilding.data[i] = indoorness >= HEIGHT_COVERAGE_THRESHOLD ? buildingByte : 0;
+      }
+    }
+  }
+
+  // OVERHEAD gated to EXTERIOR protrusions (author, 2026-07-24: *"Overhead
+  // shadows from inside of a building are ending up projected outside the
+  // building."*). An overhead tile sitting over INDOOR ground is interior
+  // architecture under a roof — the sun never reaches it, so it must not
+  // cast a sun-shadow at all (and certainly not one that leaks out past the
+  // wall onto the courtyard, which is what a receiver-gated-only shadow did).
+  //
+  // ⚠️ BINARY, NOT A CONTINUOUS MULTIPLY (2026-07-30 — see
+  // `OVERHEAD_EXTERIOR_THRESHOLD`'s own header for the asymmetric-fade bug
+  // this replaces). A wall-mounted protrusion's own attachment point sits
+  // exactly on the `_Outdoors` mask's blurriest boundary, and multiplying
+  // by that raw, partial value baked a fake, asymmetric taper into the
+  // caster field itself — permanently, before the shadow's own (correct)
+  // softening ever ran. Classifying exterior/interior at the mask's own
+  // midpoint, once, avoids manufacturing a gradient the source art never
+  // had.
+  //
+  // Applied to the COVERAGE, with the height zeroed wherever the gate
+  // fails — never to the height directly, which would re-create the
+  // alpha×height coupling this rethink exists to remove.
+  //
+  // The composites are NOT mutated: gating works on COPIES, because the raw
+  // (pre-gate) grids are the cached composite stage's own and the next derive
+  // may need to re-gate them against a different `outdoors`.
+  let coverOverhead = comp.coverOverhead;
+  let casterOverhead = comp.casterOverhead;
+  if (comp.hasOverhead) {
+    coverOverhead = copyGrid(comp.coverOverhead);
+    casterOverhead = copyGrid(comp.casterOverhead);
+    const cov = coverOverhead.data;
+    const cas = casterOverhead.data;
+    for (let gy = 0; gy < h; gy++) {
+      const rowBase = map.row[gy];
+      for (let gx = 0; gx < w; gx++) {
+        const i = gy * w + gx;
+        const c = map.col[gx];
+        const outdoorsByte = rowBase < 0 || c < 0 ? 255 : od[rowBase + c];
+        const isExterior = outdoorsByte >= OVERHEAD_EXTERIOR_THRESHOLD;
+        const gated = isExterior ? cov[i] : 0;
+        cov[i] = gated;
+        if (gated < HEIGHT_COVERAGE_THRESHOLD) cas[i] = 0;
+      }
+    }
+  }
+
+  // MAX, not sum: three producers describing ONE physical quantity (how tall
+  // the occluder is). A chimney on a roof over a building is not three
+  // shadows stacked, it is the tallest of the three. This is the same
+  // reasoning `combineVisibility` uses for min-combining visibility, one
+  // level down.
+  const casterHeight = createMaskGrid(casterSpecActive);
+  const bData = casterBuilding.data;
+  const oData = casterOverhead.data;
+  const sData = comp.casterSkyReach.data;
+  for (let i = 0; i < casterHeight.data.length; i++) {
+    const b = bData[i];
+    const o = oData[i];
+    const s = sData[i];
+    casterHeight.data[i] = b > o ? (b > s ? b : s) : o > s ? o : s;
+  }
+  return { sky, coverBuilding, casterBuilding, coverOverhead, casterOverhead, casterHeight };
+}
+
 /**
  * Derive every floor's products in one pass over the item set.
  *
@@ -978,6 +1511,13 @@ export function rasterizeAuthored(gridSpec, sources, absentValue) {
  *   one level down — generalised because the caster channels are not the only
  *   authored kind a POINT-sampled 512px grid can silently lose a small
  *   painted feature from (`WATER_GRID_MAX_DIM`'s own doc has the incident).
+ * @param {DeriveCache} [args.cache] - {@link createDeriveCache}'s memo. Pass the
+ *   SAME one on every call for one scene and a call redoes only the stages whose
+ *   inputs changed (and returns the same product object for a floor that did not);
+ *   omit it and this is the pure function it always was, still sharing item
+ *   footprints across floors within the one call. Inputs must be IMMUTABLE once
+ *   handed in — an ingest is replaced, never edited — because content is named by
+ *   object identity.
  * @returns {DerivedFloorProducts[]}
  */
 export function deriveFloorProducts({
@@ -988,8 +1528,15 @@ export function deriveFloorProducts({
   casterHeights = null,
   casterGridSpec = null,
   authoredGridSpecs = {},
+  cache = null,
 }) {
+  // A caller that passes no cache still shares stamps across floors within this one call.
+  const memo = cache ?? createDeriveCache();
   const casterSpecActive = casterGridSpec ?? gridSpec;
+  const gridKey = specKey(gridSpec);
+  const casterKey = casterGridSpec ? specKey(casterGridSpec) : gridKey;
+  memo.beginDerive(`${gridKey}|${casterGridSpec ? casterKey : ''}`);
+  const stats = memo.stats;
   const products = [];
   const heightScalePx = casterHeights?.scalePx > 0 ? casterHeights.scalePx : 0;
   const distancePixels = Number.isFinite(casterHeights?.distancePixels) ? casterHeights.distancePixels : 0;
@@ -997,22 +1544,16 @@ export function deriveFloorProducts({
   const wantBuilding = heightScalePx > 0 && include.building !== false;
   const wantOverhead = heightScalePx > 0 && distancePixels > 0 && include.overhead !== false;
   const wantSkyReach = heightScalePx > 0 && distancePixels > 0 && include.skyReach !== false;
+  // `-1` = no building channel; otherwise the byte every building texel carries.
+  const buildingByte =
+    wantBuilding && casterHeights.buildingHeightPx > 0
+      ? Math.min(255, Math.round((casterHeights.buildingHeightPx / heightScalePx) * 255))
+      : -1;
+  const seenFloors = new Set();
 
   for (const floor of floors) {
-    const cover = createMaskGrid(gridSpec);
-    // ⚠️ A CASTER-RESOLUTION TWIN OF `cover`, aliased (not duplicated) when no
-    // caster-specific resolution was requested — same "off costs nothing"
-    // discipline `wantBuilding`/`wantOverhead` already follow. See
-    // `DerivedFloorProducts.casterChannels`'s own doc for why this exists:
-    // `cover` (and `outdoors`, below) stayed pinned to the SHARED `gridSpec`
-    // resolution while `coverOverhead`/`coverSkyReach` already scaled with
-    // `casterGridSpec` — found 2026-08-02, author live: a real scene's walls
-    // and sky-reach layer were visibly pixelated at every performance tier,
-    // because the two most visually dominant channels were silently capped at
-    // the shared, low-res budget every OTHER effect (water/wind) also shares,
-    // while the tier ladder's own `layerGridDim` (2048 at Extreme) only ever
-    // reached the overhead channel.
-    const coverCaster = casterGridSpec ? createMaskGrid(casterSpecActive) : cover;
+    seenFloors.add(floor.index);
+    const fm = memo.floorMemo(floor.index);
     const expected = [];
     const missing = [];
     const hiddenExcluded = [];
@@ -1021,17 +1562,6 @@ export function deriveFloorProducts({
     /** One row per item: the classification, made inspectable. See
      * `completeness.itemBands`. */
     const itemBands = [];
-
-    const bottomElevation = Number.isFinite(floor.bottomElevation) ? floor.bottomElevation : null;
-    // HEIGHTS (world px as a byte over `heightScalePx`) and COVERAGE (art
-    // alpha) are separate grids per producer — the whole point of the
-    // 2026-07-26 rethink. One byte cannot mean both without the art's soft edge
-    // silently becoming a short caster (Sun-Shadows-Rethink.md §2c).
-    const casterBuilding = createMaskGrid(casterSpecActive);
-    const casterOverhead = createMaskGrid(casterSpecActive);
-    const casterSkyReach = createMaskGrid(casterSpecActive);
-    const coverOverhead = createMaskGrid(casterSpecActive);
-    const coverSkyReach = createMaskGrid(casterSpecActive);
     /** Tallest caster written to this floor, in BYTES — reported so "there are
      * casters but they are all zero-height" is a readable state rather than an
      * invisible one. That exact condition (a floor with no declared
@@ -1039,16 +1569,29 @@ export function deriveFloorProducts({
      * healthy) is what made sky-reach undebuggable — feedback_instruments_must_not_lie. */
     let maxCasterByte = 0;
 
+    const bottomElevation = Number.isFinite(floor.bottomElevation) ? floor.bottomElevation : null;
+
     /** An item's height above THIS floor's ground, in world px (0 if unknown). */
     const heightPxOf = (item) =>
       bottomElevation === null ? 0 : Math.max(0, (item.elevation - bottomElevation) * distancePixels);
-    /** The same, as the field's own byte. */
+    /** The same, as the field's own byte. HEIGHTS (world px as a byte over
+     * `heightScalePx`) and COVERAGE (art alpha) are separate grids per producer —
+     * the whole point of the 2026-07-26 rethink. One byte cannot mean both
+     * without the art's soft edge silently becoming a short caster
+     * (Sun-Shadows-Rethink.md §2c). */
     const heightByteOf = (item) => {
       const byte = Math.min(255, Math.round((heightPxOf(item) / heightScalePx) * 255));
       if (byte > maxCasterByte) maxCasterByte = byte;
       return byte;
     };
 
+    // ── PASS 1: CLASSIFY (cheap, runs every time) ─────────────────────────────
+    // Decides, for every item, which band it is in and whether it contributes,
+    // and records the composite each contributor needs as an OP. The report
+    // arrays and `maxCasterByte` are built here, fresh each derive, so they can
+    // never be stale; only the expensive rasterization below is cached.
+    /** @type {Array<{above: boolean, alpha: ContentGrid, placement: object, hb: number, token: string}>} */
+    const ops = [];
     for (const item of items) {
       // FLOOR MEMBERSHIP FIRST for a level's own art, elevation for everything
       // else — see `DeriveItemInput.ownerFloorIndex` for why the elevation test
@@ -1109,46 +1652,181 @@ export function deriveFloorProducts({
         continue;
       }
       if (isAbove) {
-        compositeItemMax(cover, item.alpha, item.placement);
-        if (coverCaster !== cover) compositeItemMax(coverCaster, item.alpha, item.placement);
+        // Evaluated only when sky-reach is wanted — `heightByteOf` also feeds `maxCasterByte`.
+        let hb = 0;
         if (wantSkyReach) {
           skyReachIds.push(item.id);
-          compositeItemMax(coverSkyReach, item.alpha, item.placement);
-          compositeItemHeightMax(casterSkyReach, item.alpha, item.placement, heightByteOf(item));
+          hb = heightByteOf(item);
         }
+        ops.push({ above: true, alpha: item.alpha, placement: item.placement, hb, token: '' });
       } else if (wantOverhead) {
         overheadIds.push(item.id);
-        compositeItemMax(coverOverhead, item.alpha, item.placement);
-        compositeItemHeightMax(casterOverhead, item.alpha, item.placement, heightByteOf(item));
+        ops.push({ above: false, alpha: item.alpha, placement: item.placement, hb: heightByteOf(item), token: '' });
       }
     }
-
-    const sky = createMaskGrid(gridSpec);
-    const outdoors = rasterizeAuthored(gridSpec, floor.outdoors, outdoorsAbsentValue);
-    // The same caster-resolution-twin discipline as `coverCaster`, above —
-    // `sky` (skyReach) does not need one: it is derived FROM `outdoors`+`cover`
-    // right below at whichever resolution THEY were built at, and nothing
-    // downstream reads it at caster resolution the way the layer-smear pack
-    // reads `outdoors` and `coverAbove` directly.
-    const outdoorsCaster = casterGridSpec
-      ? rasterizeAuthored(casterSpecActive, floor.outdoors, outdoorsAbsentValue)
-      : outdoors;
-    for (let i = 0; i < sky.data.length; i++) {
-      sky.data[i] = Math.round((outdoors.data[i] * (255 - cover.data[i])) / 255);
+    for (const op of ops) {
+      op.token = `${op.above ? 'a' : 'o'}${op.hb}:${memo.idOf(op.alpha)}:${placementKey(op.placement)}`;
     }
 
-    // Every OTHER `rasterize: true` kind (mask-catalog.js) — `water` today.
-    // Same rasterizer, no derivation on top: the consumer is a GPU bake, and
-    // the authority's job ends at "here is the authored value on the grid".
+    // ── STAGE: COMPOSITES ─────────────────────────────────────────────────────
+    // `cover` (the shared grid) and its caster-resolution twin `coverCaster`,
+    // plus — per producer — a COVERAGE grid and a HEIGHT grid. ⚠️ A CASTER-
+    // RESOLUTION TWIN OF `cover`, aliased (not duplicated) when no caster-specific
+    // resolution was requested — same "off costs nothing" discipline
+    // `wantBuilding`/`wantOverhead` already follow. See
+    // `DerivedFloorProducts.casterChannels`'s own doc for why this exists:
+    // `cover` (and `outdoors`, below) stayed pinned to the SHARED `gridSpec`
+    // resolution while `coverOverhead`/`coverSkyReach` already scaled with
+    // `casterGridSpec` — found 2026-08-02, author live: a real scene's walls
+    // and sky-reach layer were visibly pixelated at every performance tier,
+    // because the two most visually dominant channels were silently capped at
+    // the shared, low-res budget every OTHER effect (water/wind) also shares,
+    // while the tier ladder's own `layerGridDim` (2048 at Extreme) only ever
+    // reached the overhead channel.
+    //
+    // HIT: this floor's op set is exactly last derive's. APPEND: it only GAINED
+    // ops (art arriving) — copy last derive's grids and merge just the new
+    // stamps. REBUILD: an op was removed or changed (an item's art re-ingested,
+    // a ceiling moved) — max-composites cannot be un-merged, so start clean.
+    // A stamp is sampled once per (content, placement, resolution) whichever
+    // path runs, so even a REBUILD is merges, not resampling.
+    const wantHeights = wantSkyReach || wantOverhead;
+    const compKey = `${gridKey}|${casterKey}|${casterGridSpec ? 1 : 0}${wantSkyReach ? 1 : 0}${wantOverhead ? 1 : 0}`;
+    let comp = fm.composites;
+    let compMode = 'rebuild';
+    let deltaOps = ops;
+    if (comp && comp.key === compKey) {
+      const next = new Set(ops.map((op) => op.token));
+      let superset = true;
+      for (const token of comp.tokens) {
+        if (!next.has(token)) {
+          superset = false;
+          break;
+        }
+      }
+      if (superset) {
+        if (next.size === comp.tokens.size) {
+          compMode = 'hit';
+        } else {
+          compMode = 'append';
+          deltaOps = ops.filter((op) => !comp.tokens.has(op.token));
+        }
+      }
+    }
+    stats.composites[compMode]++;
+    if (compMode !== 'hit') {
+      const base = compMode === 'append' ? comp : null;
+      const cover = base ? copyGrid(base.cover) : createMaskGrid(gridSpec);
+      const coverCaster = casterGridSpec
+        ? base
+          ? copyGrid(base.coverCaster)
+          : createMaskGrid(casterSpecActive)
+        : cover;
+      const coverSkyReach = base ? copyGrid(base.coverSkyReach) : createMaskGrid(casterSpecActive);
+      const casterSkyReach = base ? copyGrid(base.casterSkyReach) : createMaskGrid(casterSpecActive);
+      const coverOverhead = base ? copyGrid(base.coverOverhead) : createMaskGrid(casterSpecActive);
+      const casterOverhead = base ? copyGrid(base.casterOverhead) : createMaskGrid(casterSpecActive);
+      let hasOverhead = base ? base.hasOverhead : false;
+      for (const op of deltaOps) {
+        const stampShared = memo.stamp(gridSpec, gridKey, op.alpha, op.placement, wantHeights);
+        const stampCaster = casterGridSpec
+          ? memo.stamp(casterSpecActive, casterKey, op.alpha, op.placement, wantHeights)
+          : stampShared;
+        if (op.above) {
+          mergeMaxStamp(cover, stampShared);
+          if (coverCaster !== cover) mergeMaxStamp(coverCaster, stampCaster);
+          if (wantSkyReach) {
+            mergeMaxStamp(coverSkyReach, stampCaster);
+            mergeHeightStamp(casterSkyReach, stampCaster, heightMergeValue(op.hb));
+          }
+        } else {
+          hasOverhead = true;
+          mergeMaxStamp(coverOverhead, stampCaster);
+          mergeHeightStamp(casterOverhead, stampCaster, heightMergeValue(op.hb));
+        }
+      }
+      comp = fm.composites = {
+        uid: memo.uid(),
+        key: compKey,
+        tokens: new Set(ops.map((op) => op.token)),
+        cover,
+        coverCaster,
+        coverSkyReach,
+        casterSkyReach,
+        coverOverhead,
+        casterOverhead,
+        hasOverhead,
+      };
+    }
+    const { cover, coverCaster, coverSkyReach, casterSkyReach } = comp;
+
+    // ── STAGE: OUTDOORS ───────────────────────────────────────────────────────
+    // The same caster-resolution-twin discipline as `coverCaster`, above —
+    // `sky` (skyReach) does not need one: it is derived FROM `outdoors`+`cover`
+    // at whichever resolution THEY were built at, and nothing downstream reads
+    // it at caster resolution the way the layer-smear pack reads `outdoors` and
+    // `coverAbove` directly.
+    const outdoorsTokens = sourceTokens(floor.outdoors, memo);
+    const outdoorsKey = `${gridKey}|${casterGridSpec ? casterKey : ''}|${outdoorsAbsentValue}`;
+    let om = fm.outdoors;
+    if (om && om.key === outdoorsKey && tokensEqual(om.tokens, outdoorsTokens)) {
+      stats.outdoors.hit++;
+    } else {
+      stats.outdoors.miss++;
+      const outdoors = rasterizeAuthored(gridSpec, floor.outdoors, outdoorsAbsentValue);
+      om = fm.outdoors = {
+        uid: memo.uid(),
+        key: outdoorsKey,
+        tokens: outdoorsTokens,
+        outdoors,
+        outdoorsCaster: casterGridSpec
+          ? rasterizeAuthored(casterSpecActive, floor.outdoors, outdoorsAbsentValue)
+          : outdoors,
+        // ⚠️ WHAT ACTUALLY FED `outdoors`, per source. `outdoorsSource` below says
+        // only "authored vs default"; when a floor's grid comes out wrong this
+        // says WHICH of its sources did it. See `describeAuthoredSources`.
+        ledger: describeAuthoredSources(floor.outdoors),
+      };
+    }
+    const { outdoors, outdoorsCaster } = om;
+
+    // ── STAGE: EVERY OTHER `rasterize: true` KIND (mask-catalog.js) ───────────
+    // `water` today, plus fire/drip/specular/window/…. Same rasterizer, no
+    // derivation on top: the consumer is a GPU bake or a CPU extractor, and the
+    // authority's job ends at "here is the authored value on the grid".
     // `authoredGridSpecs[kindId]` (present for `water` — see
     // `WATER_GRID_MAX_DIM`'s own doc) rasterizes THAT kind at its own,
     // independent resolution; every kind absent from the map keeps today's
     // byte-for-byte behaviour on the shared `gridSpec`.
+    //
+    // Each kind is its own cache entry: a fire mask arriving must not
+    // re-rasterize the 2048-wide water grid beside it.
     const authored = {};
-    for (const [kindId, input] of Object.entries(floor.authored ?? {})) {
+    const authoredUids = [];
+    const authoredKinds = Object.keys(floor.authored ?? {});
+    for (const kindId of authoredKinds) {
+      const input = floor.authored[kindId];
       const kindGridSpec = authoredGridSpecs[kindId] ?? gridSpec;
-      authored[kindId] = rasterizeAuthored(kindGridSpec, input?.sources, input?.absentValue ?? 0);
+      const tokens = sourceTokens(input?.sources, memo);
+      const key = `${specKey(kindGridSpec)}|${input?.absentValue ?? 0}`;
+      let km = fm.authored.get(kindId);
+      if (km && km.key === key && tokensEqual(km.tokens, tokens)) {
+        stats.authored.hit++;
+      } else {
+        stats.authored.miss++;
+        km = {
+          uid: memo.uid(),
+          key,
+          tokens,
+          grid: rasterizeAuthored(kindGridSpec, input?.sources, input?.absentValue ?? 0),
+        };
+        fm.authored.set(kindId, km);
+      }
+      authored[kindId] = km.grid;
+      authoredUids.push(km.uid);
     }
+    // A kind that left the catalog/input must not keep its grid alive.
+    for (const kindId of fm.authored.keys()) if (!authoredKinds.includes(kindId)) fm.authored.delete(kindId);
     const authoredSources = Object.fromEntries(
       Object.entries(floor.authored ?? {}).map(([id, input]) => [
         id,
@@ -1172,160 +1850,100 @@ export function deriveFloorProducts({
       Object.entries(floor.authored ?? {}).map(([id, input]) => [id, input?.sources?.length ?? 0])
     );
 
-    // THE BUILDING CHANNEL — the dark of `_Outdoors` IS the building footprint.
-    // No item, no alpha, no elevation: the author already painted where the
-    // walls are, and that painting is a REQUIRED mask, so this producer can
-    // never be starved the way the art-opacity ones can.
-    //
-    // COVERAGE and HEIGHT, separately (the rethink's whole point): indoor-ness
-    // is the COVERAGE — a doorway painted mid-grey is half-covered, and a
-    // half-covered texel casts a half-strength shadow, which is what a soft
-    // threshold at a door should be. It used to scale the HEIGHT instead, which
-    // made that same doorway a half-height wall casting a half-LENGTH shadow.
-    const coverBuilding = createMaskGrid(casterSpecActive);
-    if (wantBuilding && casterHeights.buildingHeightPx > 0) {
-      const buildingByte = Math.min(255, Math.round((casterHeights.buildingHeightPx / heightScalePx) * 255));
-      if (buildingByte > maxCasterByte) maxCasterByte = buildingByte;
-      // ⚠️ WORLD-SAMPLED, NOT INDEX-ALIGNED (2026-07-30, casterGridDim). `outdoors`
-      // always rasterizes at the SHARED `gridSpec` — it serves water/wind/etc.
-      // too, and its own resolution is not this effect's to raise. Once
-      // `casterSpecActive` differs from `gridSpec` (a tier with its own,
-      // higher-res `casterGridDim`), `coverBuilding.data[i]` and `outdoors.data[i]`
-      // are DIFFERENT-SIZED grids — the same array index means a different world
-      // texel in each. `sampleMaskGridWorld` looks `outdoors` up by WORLD
-      // POSITION instead, which is correct at any relative resolution and a
-      // no-op in cost terms when the two happen to match (today's tiers 0-1).
-      for (let gy = 0; gy < casterSpecActive.h; gy++) {
-        const wy = casterSpecActive.y + (gy + 0.5) * casterSpecActive.texelH;
-        for (let gx = 0; gx < casterSpecActive.w; gx++) {
-          const wx = casterSpecActive.x + (gx + 0.5) * casterSpecActive.texelW;
-          const i = gy * casterSpecActive.w + gx;
-          const outdoorsByte = sampleMaskGridWorld(outdoors, wx, wy) ?? 255;
-          const indoorness = 255 - outdoorsByte;
-          coverBuilding.data[i] = indoorness;
-          casterBuilding.data[i] = indoorness >= HEIGHT_COVERAGE_THRESHOLD ? buildingByte : 0;
-        }
-      }
+    // ── STAGE: GATE (sky, building, gated overhead, merged height) ────────────
+    if (buildingByte >= 0 && buildingByte > maxCasterByte) maxCasterByte = buildingByte;
+    const gateKey = [casterKey, buildingByte, memo.idOf(outdoors), comp.uid].join('|');
+    let gm = fm.gate;
+    if (gm && gm.key === gateKey) {
+      stats.gate.hit++;
+    } else {
+      stats.gate.miss++;
+      gm = fm.gate = {
+        uid: memo.uid(),
+        key: gateKey,
+        ...deriveGateProducts({ gridSpec, casterSpecActive, outdoors, comp, buildingByte }),
+      };
     }
 
-    // OVERHEAD gated to EXTERIOR protrusions (author, 2026-07-24: *"Overhead
-    // shadows from inside of a building are ending up projected outside the
-    // building."*). An overhead tile sitting over INDOOR ground is interior
-    // architecture under a roof — the sun never reaches it, so it must not
-    // cast a sun-shadow at all (and certainly not one that leaks out past the
-    // wall onto the courtyard, which is what a receiver-gated-only shadow did).
-    //
-    // ⚠️ BINARY, NOT A CONTINUOUS MULTIPLY (2026-07-30 — see
-    // `OVERHEAD_EXTERIOR_THRESHOLD`'s own header for the asymmetric-fade bug
-    // this replaces). A wall-mounted protrusion's own attachment point sits
-    // exactly on the `_Outdoors` mask's blurriest boundary, and multiplying
-    // by that raw, partial value baked a fake, asymmetric taper into the
-    // caster field itself — permanently, before the shadow's own (correct)
-    // softening ever ran. Classifying exterior/interior at the mask's own
-    // midpoint, once, avoids manufacturing a gradient the source art never
-    // had.
-    //
-    // Applied to the COVERAGE, with the height zeroed wherever the gate
-    // fails — never to the height directly, which would re-create the
-    // alpha×height coupling this rethink exists to remove.
-    //
-    // ⚠️ WORLD-SAMPLED against `outdoors`, same reason as THE BUILDING CHANNEL
-    // just above: `coverOverhead` may now be a different resolution than the
-    // shared `outdoors` grid it is gated against (casterGridDim).
-    for (let gy = 0; gy < casterSpecActive.h; gy++) {
-      const wy = casterSpecActive.y + (gy + 0.5) * casterSpecActive.texelH;
-      for (let gx = 0; gx < casterSpecActive.w; gx++) {
-        const wx = casterSpecActive.x + (gx + 0.5) * casterSpecActive.texelW;
-        const i = gy * casterSpecActive.w + gx;
-        const outdoorsByte = sampleMaskGridWorld(outdoors, wx, wy) ?? 255;
-        const isExterior = outdoorsByte >= OVERHEAD_EXTERIOR_THRESHOLD;
-        const gated = isExterior ? coverOverhead.data[i] : 0;
-        coverOverhead.data[i] = gated;
-        if (gated < HEIGHT_COVERAGE_THRESHOLD) casterOverhead.data[i] = 0;
-      }
-    }
+    const completeness = {
+      expectedItemIds: expected,
+      missingItemIds: missing,
+      hiddenExcludedIds: hiddenExcluded,
+      outdoorsSource: floor.outdoors?.length > 0 ? 'authored' : 'default',
+      // Per rasterized kind: did real authored content reach this floor, or
+      // is the grid an absent-fill? `water` reads this to decide whether the
+      // floor genuinely HAS water — an all-zero grid from a real all-land
+      // mask and an all-zero grid from no mask at all are different facts,
+      // and only one of them means "do not bake" (feedback_required_masks_fail_loud
+      // applied to a kind that is not required: report the difference rather
+      // than throw on it).
+      authoredSources,
+      authoredSourceCounts,
+      ceilingElevation: floor.ceilingElevation,
+      // null (not 0) when the floor declares no ground: "we do not know" and
+      // "it is at zero" produce very different shadows, and only one of them
+      // is a fact (feedback_required_masks_fail_loud's reasoning, applied to a
+      // number rather than a file).
+      bottomElevation,
+      overheadItemIds: overheadIds,
+      skyReachItemIds: skyReachIds,
+      // ⚠️ THE FIELD'S TALLEST CASTER, in world px. Zero WITH a non-empty
+      // item list is the exact silent failure that hid sky-reach for months:
+      // a floor with no declared `bottomElevation` gives every caster a
+      // height of 0, so the counts stay healthy while the field is blank and
+      // nothing casts. Reported so the two states can never look alike.
+      maxCasterHeightPx: Math.round((maxCasterByte / 255) * heightScalePx),
+      // EVERY item's verdict, in one table: what it is, where it sits, which
+      // band took it, and whether its art had arrived. Added 2026-07-26
+      // because "sky-reach only shows the overhead parts" took a screenshot,
+      // a directory listing and a code read to diagnose — and all three were
+      // answering a question this row could have answered on its own
+      // (feedback_instruments_must_not_lie). A classification bug is invisible
+      // in aggregate counts and obvious in a per-item list.
+      itemBands: itemBands.sort((a, b) => (a.band < b.band ? -1 : a.band > b.band ? 1 : 0)),
+    };
 
-    // MAX, not sum: three producers describing ONE physical quantity (how tall
-    // the occluder is). A chimney on a roof over a building is not three
-    // shadows stacked, it is the tallest of the three. This is the same
-    // reasoning `combineVisibility` uses for min-combining visibility, one
-    // level down.
-    const casterHeight = createMaskGrid(casterSpecActive);
-    for (let i = 0; i < casterHeight.data.length; i++) {
-      const b = casterBuilding.data[i];
-      const o = casterOverhead.data[i];
-      const s = casterSkyReach.data[i];
-      casterHeight.data[i] = b > o ? (b > s ? b : s) : o > s ? o : s;
+    // ── THE PRODUCT, reused when nothing it is made of changed ────────────────
+    // Same stage objects + same report = the SAME product object as last derive.
+    const productKey = [comp.uid, om.uid, gm.uid, ...authoredUids, JSON.stringify(completeness)].join('|');
+    if (fm.product && fm.product.key === productKey) {
+      stats.productsReused++;
+      products.push(fm.product.value);
+      continue;
     }
-
-    products.push({
+    stats.productsBuilt++;
+    const value = {
       index: floor.index,
       coverAbove: cover,
-      skyReach: sky,
+      skyReach: gm.sky,
       outdoors,
       authored,
-      casterHeight,
+      casterHeight: gm.casterHeight,
       casterChannels: {
-        building: casterBuilding,
-        overhead: casterOverhead,
+        building: gm.casterBuilding,
+        overhead: gm.casterOverhead,
         skyReach: casterSkyReach,
         // THE FOUR THE GPU ACTUALLY PACKS (R,G,B + the gate arrives separately).
         // ⚠️ NO `coverFloating`. R packs `coverSkyReach` alone — see this
         // typedef's own doc for why folding `coverOverhead` in was the bug.
-        height: casterHeight,
-        coverBuilding,
-        coverOverhead,
+        height: gm.casterHeight,
+        coverBuilding: gm.coverBuilding,
+        coverOverhead: gm.coverOverhead,
         coverSkyReach,
         // CASTER-RESOLUTION TWINS of the shared-resolution `outdoors`/`coverAbove`
-        // above (2026-08-02) — see `coverCaster`'s own comment, up in the item
-        // loop, for the full story. `layer-smear`'s R (walls) and B (floor-
-        // above) channels read THESE, not the shared-resolution products.
+        // above (2026-08-02) — see the composites stage's own comment for the
+        // full story. `layer-smear`'s R (walls) and B (floor-above) channels
+        // read THESE, not the shared-resolution products.
         outdoors: outdoorsCaster,
         coverAbove: coverCaster,
       },
-      // ⚠️ WHAT ACTUALLY FED `outdoors`, per source. `outdoorsSource` below says
-      // only "authored vs default"; when a floor's grid comes out wrong this
-      // says WHICH of its sources did it. See `describeAuthoredSources`.
-      outdoorsLedger: describeAuthoredSources(floor.outdoors),
-      completeness: {
-        expectedItemIds: expected,
-        missingItemIds: missing,
-        hiddenExcludedIds: hiddenExcluded,
-        outdoorsSource: floor.outdoors?.length > 0 ? 'authored' : 'default',
-        // Per rasterized kind: did real authored content reach this floor, or
-        // is the grid an absent-fill? `water` reads this to decide whether the
-        // floor genuinely HAS water — an all-zero grid from a real all-land
-        // mask and an all-zero grid from no mask at all are different facts,
-        // and only one of them means "do not bake" (feedback_required_masks_fail_loud
-        // applied to a kind that is not required: report the difference rather
-        // than throw on it).
-        authoredSources,
-        authoredSourceCounts,
-        ceilingElevation: floor.ceilingElevation,
-        // null (not 0) when the floor declares no ground: "we do not know" and
-        // "it is at zero" produce very different shadows, and only one of them
-        // is a fact (feedback_required_masks_fail_loud's reasoning, applied to a
-        // number rather than a file).
-        bottomElevation,
-        overheadItemIds: overheadIds,
-        skyReachItemIds: skyReachIds,
-        // ⚠️ THE FIELD'S TALLEST CASTER, in world px. Zero WITH a non-empty
-        // item list is the exact silent failure that hid sky-reach for months:
-        // a floor with no declared `bottomElevation` gives every caster a
-        // height of 0, so the counts stay healthy while the field is blank and
-        // nothing casts. Reported so the two states can never look alike.
-        maxCasterHeightPx: Math.round((maxCasterByte / 255) * heightScalePx),
-        // EVERY item's verdict, in one table: what it is, where it sits, which
-        // band took it, and whether its art had arrived. Added 2026-07-26
-        // because "sky-reach only shows the overhead parts" took a screenshot,
-        // a directory listing and a code read to diagnose — and all three were
-        // answering a question this row could have answered on its own
-        // (feedback_instruments_must_not_lie). A classification bug is invisible
-        // in aggregate counts and obvious in a per-item list.
-        itemBands: itemBands.sort((a, b) => (a.band < b.band ? -1 : a.band > b.band ? 1 : 0)),
-      },
-    });
+      outdoorsLedger: om.ledger,
+      completeness,
+    };
+    fm.product = { key: productKey, value };
+    products.push(value);
   }
+  memo.endDerive(seenFloors);
   return products;
 }
 
@@ -1350,6 +1968,48 @@ export function sampleMaskGridWorld(grid, wx, wy) {
   if (gx < 0 || gx >= spec.w || gy < 0 || gy >= spec.h) return null;
   return data[gy * spec.w + gx];
 }
+
+/**
+ * `sampleMaskGridWorld(src, wx, wy)` for EVERY texel of a destination grid, as
+ * two small tables instead of a function call, two divisions and two floors
+ * per texel (2026-10-14). The world→source mapping separates by axis — the
+ * source column depends only on the destination column, the source row only on
+ * the destination row — so a 2048×1024 destination needs 3,072 lookups, not 2
+ * million. Each entry is `sampleMaskGridWorld`'s own expression; `-1` is its
+ * `null` (outside the source's rect), which every caller turns into the same
+ * absent value it already used.
+ *
+ * `row[gy]` is PRE-MULTIPLIED by the source width, so a texel is
+ * `src.data[row[gy] + col[gx]]` — the same flat index `sampleMaskGridWorld`
+ * builds. Cached per (destination, source) spec pair: a derive and a bake ask
+ * for the same pair every time.
+ *
+ * @param {MaskGridSpec} dst @param {MaskGridSpec} src
+ * @returns {{col: Int32Array, row: Int32Array}}
+ */
+export function worldIndexMap(dst, src) {
+  const key = `${specKey(dst)}>${specKey(src)}`;
+  const hit = WORLD_INDEX_MAPS.get(key);
+  if (hit) return hit;
+  const col = new Int32Array(dst.w);
+  for (let gx = 0; gx < dst.w; gx++) {
+    const wx = dst.x + (gx + 0.5) * dst.texelW;
+    const sx = Math.floor((wx - src.x) / src.texelW);
+    col[gx] = sx >= 0 && sx < src.w ? sx : -1;
+  }
+  const row = new Int32Array(dst.h);
+  for (let gy = 0; gy < dst.h; gy++) {
+    const wy = dst.y + (gy + 0.5) * dst.texelH;
+    const sy = Math.floor((wy - src.y) / src.texelH);
+    row[gy] = sy >= 0 && sy < src.h ? sy * src.w : -1;
+  }
+  const map = { col, row };
+  // Specs only change on a tier switch or a scene change; a handful of pairs is every pair that is ever live.
+  if (WORLD_INDEX_MAPS.size >= 16) WORLD_INDEX_MAPS.delete(WORLD_INDEX_MAPS.keys().next().value);
+  WORLD_INDEX_MAPS.set(key, map);
+  return map;
+}
+const WORLD_INDEX_MAPS = new Map();
 
 /** Mean value 0..1 of a grid — the report's one-glance "how open is this floor" number. @param {MaskGrid} grid @returns {number} */
 export function maskGridMean(grid) {

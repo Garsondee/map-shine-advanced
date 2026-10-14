@@ -1176,4 +1176,95 @@ export async function run(t) {
       empty.data.every((v) => v === 0)
     );
   }
+
+  // ------------------------------------------------------------------
+  // THE DERIVE CACHE, AS THE AUTHORITY USES IT (2026-10-14). A live scene load
+  // froze the main thread ~4.5 s per recompute because every touch re-derived
+  // every floor. Two consequences are pinned here, at the seam consumers see:
+  // a touch that changes nothing must not mint a new products version (every
+  // downstream baker — sun-shadow, water, wind — re-bakes on a bump), and a
+  // REAL ingest must still produce exactly one.
+  // ------------------------------------------------------------------
+  {
+    const cachePlacements = {
+      'level:C0:background': { x: 50, y: 50, width: 100, height: 100 },
+      'level:C1:background': { x: 25, y: 50, width: 50, height: 100 },
+      'tile:CT': { x: 75, y: 25, width: 50, height: 50 },
+    };
+    const cacheItems = [
+      { id: 'level:C0:background', kind: 'levelBackground', levelId: 'C0', hidden: false, key: { elevation: 0 } },
+      { id: 'level:C1:background', kind: 'levelBackground', levelId: 'C1', hidden: false, key: { elevation: 10 } },
+      { id: 'tile:CT', kind: 'tile', levelId: '', hidden: false, key: { elevation: 10 } },
+    ];
+    const cacheAuthority = createMaskAuthority({ readPageImageData: (bitmap) => bitmap, log });
+    cacheAuthority.reset({
+      sceneKey: 'cache-scene',
+      dimensions: { width: 200, height: 200, sceneRect: { x: 0, y: 0, width: 100, height: 100 } },
+      floors: [
+        { index: 0, id: 'C0', name: 'Ground', ceilingElevation: 10, bottomElevation: 0 },
+        { index: 1, id: 'C1', name: 'Upstairs', ceilingElevation: 20, bottomElevation: 10 },
+      ],
+      items: cacheItems,
+      resolvePlacement: (item) => cachePlacements[item.id],
+    });
+    const solidAlpha = (value) => ({ w: 4, h: 4, data: new Uint8Array(16).fill(value) });
+    cacheAuthority.ingestItemAlpha({
+      ownerId: 'level:C1:background',
+      grid: solidAlpha(255),
+      imageWidth: 100,
+      imageHeight: 100,
+    });
+    const cacheV1 = cacheAuthority.getProductsVersion();
+    const cacheCover = cacheAuthority.getDerived('coverAbove', 0).grid;
+
+    // The Tile/Level/Wall document hooks all end in `setItems(<the same list, freshly collected>)`.
+    cacheAuthority.setItems(cacheItems.map((item) => ({ ...item, key: { ...item.key } })));
+    t.ok(
+      'a touch that changed nothing keeps the products version — no downstream re-bake',
+      cacheAuthority.getProductsVersion() === cacheV1
+    );
+    t.ok(
+      '…and keeps serving the very same grid object (consumers that cache by identity stay valid)',
+      cacheAuthority.getDerived('coverAbove', 0).grid === cacheCover
+    );
+    t.ok(
+      'getBakeStats reports it as a recompute that rebuilt nothing',
+      cacheAuthority.getBakeStats().bakeNoops >= 1 && cacheAuthority.getBakeStats().derive.productsReused >= 2
+    );
+
+    // A real change still bumps, exactly once, and serves the new content.
+    cacheAuthority.ingestItemAlpha({ ownerId: 'tile:CT', grid: solidAlpha(255), imageWidth: 100, imageHeight: 100 });
+    const cacheV2 = cacheAuthority.getProductsVersion();
+    t.ok('a REAL ingest still bumps the products version', cacheV2 > cacheV1);
+    t.ok(
+      '…and is served immediately (reads stay always-fresh)',
+      cacheAuthority.getDerived('coverAbove', 0).grid !== cacheCover
+    );
+    t.ok('…exactly once', cacheAuthority.getProductsVersion() === cacheV2);
+
+    // A different ingest of the SAME content (a re-decode) is a new object, so it is a real change too.
+    const stats = cacheAuthority.getBakeStats().derive;
+    cacheAuthority.ingestItemAlpha({ ownerId: 'tile:CT', grid: solidAlpha(255), imageWidth: 100, imageHeight: 100 });
+    cacheAuthority.getProductsVersion();
+    t.ok(
+      'a re-ingest of an item replaces its art and rebuilds the floors that art reaches (max-composites cannot be un-merged)',
+      cacheAuthority.getBakeStats().derive.composites.rebuild > stats.composites.rebuild
+    );
+
+    // reset() drops the cache: the previous scene's ingests must never serve the next scene.
+    cacheAuthority.reset({
+      sceneKey: 'cache-scene-2',
+      dimensions: { width: 200, height: 200, sceneRect: { x: 0, y: 0, width: 100, height: 100 } },
+      floors: [
+        { index: 0, id: 'C0', name: 'Ground', ceilingElevation: 10, bottomElevation: 0 },
+        { index: 1, id: 'C1', name: 'Upstairs', ceilingElevation: 20, bottomElevation: 10 },
+      ],
+      items: cacheItems,
+      resolvePlacement: (item) => cachePlacements[item.id],
+    });
+    t.ok(
+      'reset() starts a clean scene: nothing ingested yet means nothing covers the ground floor',
+      cacheAuthority.getDerived('coverAbove', 0).grid.data.every((v) => v === 0)
+    );
+  }
 }

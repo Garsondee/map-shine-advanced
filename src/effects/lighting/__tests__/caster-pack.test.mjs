@@ -21,7 +21,8 @@
  * cover) rather than an obvious blank.
  */
 
-import { packLayerTexelData } from '../sun-shadow-subsystem.js';
+import { packLayerTexelData, describeLayerChannels } from '../sun-shadow-subsystem.js';
+import { sampleMaskGridWorld } from '../../../scene/index.js';
 
 /** A MaskGrid over a world rect: `{spec, data}` (NOT `{w,h,data}` — that is a
  * ContentGrid, a different type in the same neighbourhood). */
@@ -31,6 +32,70 @@ function grid(w, h, worldW = 1000, worldH = 1000, fill = 0) {
   return {
     spec: { x: 0, y: 0, width: worldW, height: worldH, w, h, texelW: worldW / w, texelH: worldH / h },
     data,
+  };
+}
+
+// ── THE PRE-2026-10-14 PACK, VERBATIM, AS AN ORACLE ─────────────────────────────────────────────────────────
+// `packLayerTexelData` called `sampleMaskGridWorld` three times per texel and `describeLayerChannels`
+// made four strided passes; both were rewritten (index tables, one pass). Extracted from the revision before
+// the rewrite, comments stripped; the fuzz below requires byte-identical output and identical stats.
+const EMPTY_BYTE = 8;
+const SOLID_BYTE = 247;
+function oraclePackLayerTexelData({ channels, outdoorsGrid, coverAboveGrid, bandAboveGrid = null, spec }) {
+  const { w, h } = spec;
+  const data = new Uint8Array(w * h * 4);
+  let coveredTexels = 0;
+  for (let gy = 0; gy < h; gy++) {
+    const wy = spec.y + (gy + 0.5) * spec.texelH;
+    for (let gx = 0; gx < w; gx++) {
+      const wx = spec.x + (gx + 0.5) * spec.texelW;
+      const i = gy * w + gx;
+      const outdoorsByte = sampleMaskGridWorld(outdoorsGrid, wx, wy) ?? 255;
+      const overheadCoverage = channels.coverOverhead?.data[i] ?? 0;
+      const aboveByte = coverAboveGrid ? (sampleMaskGridWorld(coverAboveGrid, wx, wy) ?? 0) : 0;
+      const bandAboveByte = bandAboveGrid ? (sampleMaskGridWorld(bandAboveGrid, wx, wy) ?? 0) : 0;
+      const wallByte = 255 - outdoorsByte;
+      data[i * 4 + 0] = wallByte;
+      data[i * 4 + 1] = overheadCoverage;
+      data[i * 4 + 2] = aboveByte;
+      data[i * 4 + 3] = bandAboveByte;
+      if (wallByte > 0 || overheadCoverage > 0 || aboveByte > 0 || bandAboveByte > 0) coveredTexels++;
+    }
+  }
+  return { data, coveredTexels, channelStats: oracleDescribeLayerChannels(data, w, h) };
+}
+
+function oracleDescribeLayerChannels(data, w, h) {
+  const n = w * h;
+  const channel = (offset) => {
+    let covered = 0;
+    let soft = 0;
+    let sum = 0;
+    let max = 0;
+    for (let i = 0; i < n; i++) {
+      const v = data[i * 4 + offset];
+      sum += v;
+      if (v > max) max = v;
+      if (v > EMPTY_BYTE) covered++;
+      if (v > EMPTY_BYTE && v < SOLID_BYTE) soft++;
+    }
+    return {
+      coveredPct: n > 0 ? +((covered / n) * 100).toFixed(1) : 0,
+      softEdgePct: n > 0 ? +((soft / n) * 100).toFixed(1) : 0,
+      meanByte: n > 0 ? +(sum / n).toFixed(1) : 0,
+      maxByte: max,
+    };
+  };
+  return {
+    walls: channel(0),
+    overhead: channel(1),
+    band0: channel(2),
+    band1: channel(3),
+    thresholds: {
+      emptyAtOrBelow: EMPTY_BYTE,
+      solidAtOrAbove: SOLID_BYTE,
+      note: 'coveredPct here counts bytes > 8, unlike casterField.coveredPct which counts > 0',
+    },
   };
 }
 
@@ -306,6 +371,86 @@ export function run(t) {
     t.ok(
       'coverAbove falls to NOTHING outside its grid (0 everywhere), never phantom coverage',
       [0, 1, 2, 3].every((i) => data[i * 4 + 2] === 0)
+    );
+  }
+
+  // ── THE REWRITE IS BYTE-IDENTICAL TO WHAT IT REPLACED (2026-10-14) ──────────
+  // `packLayerTexelData` swapped three per-texel `sampleMaskGridWorld` calls for
+  // index tables (`worldIndexMap`), and `describeLayerChannels` went from four
+  // strided passes to one. This pins both against the verbatim originals above on
+  // random grids at MISMATCHED resolutions and offsets — the exact shape of the
+  // 2026-07-30 corruption bug this file exists to guard — including grids that
+  // only partly overlap the output (out-of-rect texels must read the same default).
+  {
+    let seed = 7;
+    const rnd = () => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return seed / 4294967296;
+    };
+    const randomGrid = (w, h, worldW, worldH, x0 = 0, y0 = 0) => {
+      const g = grid(w, h, worldW, worldH);
+      g.spec.x = x0;
+      g.spec.y = y0;
+      for (let i = 0; i < g.data.length; i++) g.data[i] = rnd() < 0.3 ? 0 : Math.floor(rnd() * 256);
+      return g;
+    };
+    let bad = null;
+    let trials = 0;
+    for (let k = 0; k < 120 && !bad; k++) {
+      const w = 2 + Math.floor(rnd() * 40);
+      const h = 2 + Math.floor(rnd() * 40);
+      const channels = { coverOverhead: randomGrid(w, h, 1000, 800) };
+      const spec = channels.coverOverhead.spec;
+      const shifted = (n) => (rnd() < 0.7 ? 0 : (rnd() - 0.5) * 600 * n);
+      const outdoorsGrid = randomGrid(
+        2 + Math.floor(rnd() * 50),
+        2 + Math.floor(rnd() * 50),
+        1000,
+        800,
+        shifted(1),
+        shifted(1)
+      );
+      const coverAboveGrid =
+        rnd() < 0.2
+          ? null
+          : randomGrid(2 + Math.floor(rnd() * 50), 2 + Math.floor(rnd() * 50), 1000, 800, shifted(1), shifted(1));
+      const bandAboveGrid =
+        rnd() < 0.3
+          ? null
+          : randomGrid(2 + Math.floor(rnd() * 50), 2 + Math.floor(rnd() * 50), 1000, 800, shifted(1), shifted(1));
+      const args = { channels, outdoorsGrid, coverAboveGrid, bandAboveGrid, spec };
+      const want = oraclePackLayerTexelData(args);
+      const got = packLayerTexelData(args);
+      trials++;
+      if (want.coveredTexels !== got.coveredTexels)
+        bad = `trial ${k}: coveredTexels ${want.coveredTexels} vs ${got.coveredTexels}`;
+      else if (JSON.stringify(want.channelStats) !== JSON.stringify(got.channelStats))
+        bad = `trial ${k}: channelStats differ`;
+      else {
+        for (let i = 0; i < want.data.length; i++) {
+          if (want.data[i] !== got.data[i]) {
+            bad = `trial ${k}: byte ${i} (texel ${i >> 2}, channel ${i & 3}) ${want.data[i]} vs ${got.data[i]}`;
+            break;
+          }
+        }
+      }
+      const rgba = new Uint8Array(w * h * 4);
+      for (let i = 0; i < rgba.length; i++) rgba[i] = rnd() < 0.15 ? 8 : rnd() < 0.15 ? 247 : Math.floor(rnd() * 256);
+      if (
+        !bad &&
+        JSON.stringify(oracleDescribeLayerChannels(rgba, w, h)) !== JSON.stringify(describeLayerChannels(rgba, w, h))
+      ) {
+        bad = `trial ${k}: describeLayerChannels differs on threshold-heavy bytes`;
+      }
+    }
+    t.ok(
+      `packLayerTexelData + describeLayerChannels: ${trials} random mismatched-resolution trials are byte- and stat-identical to the per-texel originals${bad ? ` — FIRST FAIL: ${bad}` : ''}`,
+      !bad
+    );
+    // `sampleMaskGridWorld` is still exported and unchanged — the oracle above depends on it.
+    t.ok(
+      'sampleMaskGridWorld is the same per-texel lookup the oracle uses',
+      sampleMaskGridWorld(grid(2, 2, 1000, 1000, 9), 10, 10) === 9
     );
   }
 }

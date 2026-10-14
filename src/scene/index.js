@@ -77,7 +77,13 @@ export {
   anchorKindByV2EffectTarget,
 } from './anchor-catalog.js';
 export { createAnchorAuthority, mergeAnchorSources, nearestAnchor } from './anchor-authority.js';
-export { MASK_GRID_MAX_DIM, computeMaskGridSpec, sampleMaskGridWorld, maskGridMean } from './mask-derive.js';
+export {
+  MASK_GRID_MAX_DIM,
+  computeMaskGridSpec,
+  sampleMaskGridWorld,
+  worldIndexMap,
+  maskGridMean,
+} from './mask-derive.js';
 export {
   createPaintLayer,
   stampBrushWorld,

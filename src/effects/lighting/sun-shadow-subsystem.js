@@ -222,7 +222,7 @@ import {
 } from './layer-smear.js';
 import { resolveShadowBandPlan, SHADOW_BAND_LAYER_INDICES } from './shadow-bands.js';
 import { buildSunShadowDebugMaterial, sunShadowDebugPaints, sunShadowDebugLayers } from './sun-shadow-debug.js';
-import { sampleMaskGridWorld } from '../../scene/index.js';
+import { worldIndexMap } from '../../scene/index.js';
 import { createLogger } from '../../core/log.js';
 
 const log = createLogger('SunShadowSubsystem');
@@ -447,34 +447,71 @@ const SOLID_BYTE = 247;
  */
 export function describeLayerChannels(data, w, h) {
   const n = w * h;
-  const channel = (offset) => {
-    let covered = 0;
-    let soft = 0;
-    let sum = 0;
-    let max = 0;
-    for (let i = 0; i < n; i++) {
-      const v = data[i * 4 + offset];
-      sum += v;
-      if (v > max) max = v;
-      if (v > EMPTY_BYTE) covered++;
-      if (v > EMPTY_BYTE && v < SOLID_BYTE) soft++;
+  // ONE PASS OVER ALL FOUR CHANNELS (2026-10-14). This used to be four strided
+  // passes, one per channel, over the whole RGBA buffer — ~16 MB of reads at the
+  // Extreme rung, run on EVERY layer-texture bake for the sake of a report nobody
+  // opens until something looks wrong. Same arithmetic per byte, same results.
+  let covered0 = 0;
+  let covered1 = 0;
+  let covered2 = 0;
+  let covered3 = 0;
+  let soft0 = 0;
+  let soft1 = 0;
+  let soft2 = 0;
+  let soft3 = 0;
+  let sum0 = 0;
+  let sum1 = 0;
+  let sum2 = 0;
+  let sum3 = 0;
+  let max0 = 0;
+  let max1 = 0;
+  let max2 = 0;
+  let max3 = 0;
+  for (let i = 0, p = 0; i < n; i++, p += 4) {
+    const v0 = data[p];
+    const v1 = data[p + 1];
+    const v2 = data[p + 2];
+    const v3 = data[p + 3];
+    sum0 += v0;
+    sum1 += v1;
+    sum2 += v2;
+    sum3 += v3;
+    if (v0 > max0) max0 = v0;
+    if (v1 > max1) max1 = v1;
+    if (v2 > max2) max2 = v2;
+    if (v3 > max3) max3 = v3;
+    if (v0 > EMPTY_BYTE) {
+      covered0++;
+      if (v0 < SOLID_BYTE) soft0++;
     }
-    return {
-      coveredPct: n > 0 ? +((covered / n) * 100).toFixed(1) : 0,
-      softEdgePct: n > 0 ? +((soft / n) * 100).toFixed(1) : 0,
-      meanByte: n > 0 ? +(sum / n).toFixed(1) : 0,
-      maxByte: max,
-    };
-  };
+    if (v1 > EMPTY_BYTE) {
+      covered1++;
+      if (v1 < SOLID_BYTE) soft1++;
+    }
+    if (v2 > EMPTY_BYTE) {
+      covered2++;
+      if (v2 < SOLID_BYTE) soft2++;
+    }
+    if (v3 > EMPTY_BYTE) {
+      covered3++;
+      if (v3 < SOLID_BYTE) soft3++;
+    }
+  }
+  const channel = (covered, soft, sum, max) => ({
+    coveredPct: n > 0 ? +((covered / n) * 100).toFixed(1) : 0,
+    softEdgePct: n > 0 ? +((soft / n) * 100).toFixed(1) : 0,
+    meanByte: n > 0 ? +(sum / n).toFixed(1) : 0,
+    maxByte: max,
+  });
   return {
-    walls: channel(0),
-    overhead: channel(1),
+    walls: channel(covered0, soft0, sum0, max0),
+    overhead: channel(covered1, soft1, sum1, max1),
     // Named for what the channels actually hold since 2026-08-05 — two
     // cumulative bands, not "the floor above" and an empty slot. A report that
     // still said `floorAbove`/`higher` would be describing the packing this
     // one replaced (`feedback_instruments_must_not_lie`).
-    band0: channel(2),
-    band1: channel(3),
+    band0: channel(covered2, soft2, sum2, max2),
+    band1: channel(covered3, soft3, sum3, max3),
     thresholds: {
       emptyAtOrBelow: EMPTY_BYTE,
       solidAtOrAbove: SOLID_BYTE,
@@ -592,21 +629,47 @@ export function packLayerTexelData({ channels, outdoorsGrid, coverAboveGrid, ban
   // resolutions diverge. `channels.coverOverhead` is natively at `spec`'s own
   // resolution (it is WHERE `spec` came from), so it alone is safe to
   // flat-index.
+  //
+  // ⚠️ THE WORLD→GRID LOOKUP IS TWO TABLES, NOT THREE FUNCTION CALLS PER TEXEL
+  // (2026-10-14). `sampleMaskGridWorld` per texel — a call, two divisions and two
+  // floors, times three grids, times 4.2 M texels at the Extreme rung, times one
+  // slot per floor, on every version bump — was 5.8% of main-thread time in an
+  // 80 s load profile. The mapping separates by axis (`worldIndexMap`), so each
+  // grid costs a few thousand lookups up front and an indexed read per texel.
+  // Same expressions, same results: the tests below pin it against the
+  // per-texel call.
+  const overheadData = channels.coverOverhead?.data ?? null;
+  const outdoorsMap = worldIndexMap(spec, outdoorsGrid.spec);
+  const outdoorsData = outdoorsGrid.data;
+  const aboveMap = coverAboveGrid ? worldIndexMap(spec, coverAboveGrid.spec) : null;
+  const aboveData = coverAboveGrid ? coverAboveGrid.data : null;
+  const bandMap = bandAboveGrid ? worldIndexMap(spec, bandAboveGrid.spec) : null;
+  const bandData = bandAboveGrid ? bandAboveGrid.data : null;
   for (let gy = 0; gy < h; gy++) {
-    const wy = spec.y + (gy + 0.5) * spec.texelH;
+    const outdoorsRow = outdoorsMap.row[gy];
+    const aboveRow = aboveMap ? aboveMap.row[gy] : -1;
+    const bandRow = bandMap ? bandMap.row[gy] : -1;
     for (let gx = 0; gx < w; gx++) {
-      const wx = spec.x + (gx + 0.5) * spec.texelW;
       const i = gy * w + gx;
-      const outdoorsByte = sampleMaskGridWorld(outdoorsGrid, wx, wy) ?? 255;
-      const overheadCoverage = channels.coverOverhead?.data[i] ?? 0;
-      const aboveByte = coverAboveGrid ? (sampleMaskGridWorld(coverAboveGrid, wx, wy) ?? 0) : 0;
+      const outdoorsCol = outdoorsMap.col[gx];
+      const outdoorsByte = (outdoorsRow < 0 || outdoorsCol < 0 ? null : outdoorsData[outdoorsRow + outdoorsCol]) ?? 255;
+      const overheadCoverage = (overheadData ? overheadData[i] : null) ?? 0;
+      let aboveByte = 0;
+      if (aboveMap && aboveRow >= 0) {
+        const aboveCol = aboveMap.col[gx];
+        if (aboveCol >= 0) aboveByte = aboveData[aboveRow + aboveCol] ?? 0;
+      }
       // Absent (no floor two storeys up, or its products are not derived yet)
       // = 0, i.e. NOTHING THERE — the opposite polarity from the blockage this
       // channel used to carry, and deliberately so: an absent SILHOUETTE must
       // cast nothing, where an absent BLOCKAGE had to read fully-blocking. Same
       // channel, opposite safe default, because they are opposite questions
       // (`feedback_gate_polarity_must_fail_open`).
-      const bandAboveByte = bandAboveGrid ? (sampleMaskGridWorld(bandAboveGrid, wx, wy) ?? 0) : 0;
+      let bandAboveByte = 0;
+      if (bandMap && bandRow >= 0) {
+        const bandCol = bandMap.col[gx];
+        if (bandCol >= 0) bandAboveByte = bandData[bandRow + bandCol] ?? 0;
+      }
       const wallByte = 255 - outdoorsByte;
       data[i * 4 + 0] = wallByte;
       data[i * 4 + 1] = overheadCoverage;
@@ -742,6 +805,20 @@ function createFloorSlot({
    * provably never match any real fragment's floor index. */
   let casterFieldFloor = -1;
   let lastCasterBakeResult = null;
+  /**
+   * THE GRIDS THE LIVE LAYER TEXTURE WAS PACKED FROM, by identity (2026-10-14),
+   * plus the result it reported. `mask-authority`'s version counter is ONE
+   * number for the whole scene, so a tile mask arriving on floor 2 reads as
+   * "changed" to every floor slot — and each used to repack and re-upload its own
+   * RGBA texture and re-run its GPU march for it. The derive cache returns the
+   * SAME grid objects for a floor whose inputs did not change, so "are these the
+   * four grids I packed last time" is an exact, O(1) answer to "did MY field
+   * change". `null` = nothing packed (or the field was dropped).
+   * @type {{coverOverhead: object, outdoors: object, coverAbove: object|null, bandAbove: object|null, result: object}|null}
+   */
+  let lastPack = null;
+  /** Version bumps that did NOT touch this floor's own four grids — a repack + upload + march skipped. */
+  let casterPackReuses = 0;
   let lastSunShadowParamsKey = '';
   /** False while `casterTexture` is still the 1×1 placeholder (never uploaded,
    * or dropped because the effect went off). A plain "has the mask version
@@ -1014,10 +1091,31 @@ function createFloorSlot({
     } catch {
       bandAboveGrid = null;
     }
+    // ⚠️ NOTHING THIS FLOOR PACKS FROM HAS CHANGED — see `lastPack`. Keep the live
+    // texture, DO NOT null `bakedSun` (that is what forces the GPU march), and say
+    // so in the report. The report's `completeness`/`outdoorsSources` ride on the
+    // PRODUCT, not the grids, and can change on their own, so they are refreshed.
+    const coverAboveGrid = field?.coverAbove ?? null;
+    if (
+      lastPack &&
+      lastPack.coverOverhead === channels.coverOverhead &&
+      lastPack.outdoors === outdoorsGrid &&
+      lastPack.coverAbove === coverAboveGrid &&
+      lastPack.bandAbove === bandAboveGrid
+    ) {
+      casterPackReuses += 1;
+      lastPack.result = {
+        ...lastPack.result,
+        completeness: field.completeness ?? null,
+        outdoorsSources: field?.outdoorsLedger ?? null,
+        reused: true,
+      };
+      return lastPack.result;
+    }
     const { data, coveredTexels, channelStats } = packLayerTexelData({
       channels,
       outdoorsGrid,
-      coverAboveGrid: field?.coverAbove ?? null,
+      coverAboveGrid,
       bandAboveGrid,
       spec,
     });
@@ -1045,7 +1143,7 @@ function createFloorSlot({
     pushRect(rect);
     // A new field invalidates whatever was baked from the old one.
     bakedSun = null;
-    return {
+    const result = {
       ok: true,
       floorIndex,
       cols: w,
@@ -1085,6 +1183,14 @@ function createFloorSlot({
       completeness: field.completeness ?? null,
       rect,
     };
+    lastPack = {
+      coverOverhead: channels.coverOverhead,
+      outdoors: outdoorsGrid,
+      coverAbove: coverAboveGrid,
+      bandAbove: bandAboveGrid,
+      result,
+    };
+    return result;
   }
 
   /**
@@ -1108,6 +1214,7 @@ function createFloorSlot({
     casterHasCoverage = false;
     layerGridDimPx = 0;
     casterFieldLoaded = false;
+    lastPack = null;
     lastCasterBakeResult = { ok: false, reason: 'effect off — layer field released' };
     bakedSun = null;
   }
@@ -1469,6 +1576,7 @@ function createFloorSlot({
         bakeGate: {
           casterFieldBakeRuns,
           casterFieldBakeSkips,
+          casterPackReuses,
           sunShadowBakeRuns,
           sunShadowBakeSkips,
         },

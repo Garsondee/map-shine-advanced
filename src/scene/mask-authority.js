@@ -63,8 +63,21 @@
  * readback, no cache pressure — the keyhole's own traffic, distilled.
  *
  * STALENESS IS LAZY, NOT SCHEDULED: any state change marks dirty; products
- * recompute on the next read (a few ms over ≤512² grids). No timer, no clock
- * read, no frame hook — and a read always reflects every ingest before it.
+ * recompute on the next read. No timer, no clock read, no frame hook — and a
+ * read always reflects every ingest before it.
+ *
+ * ⚠️ "A FEW MS OVER ≤512² GRIDS" STOPPED BEING TRUE and this header went on
+ * saying it (2026-10-14). The caster channels rasterize at up to 2048² per tier
+ * and water at 2048², per floor, and a recompute that redid ALL of it for every
+ * touch froze a live scene load for ~4.5 s at a time — inside `renderFrame`,
+ * because the first read of the frame pays. The recompute is now INCREMENTAL
+ * (`mask-derive.js#createDeriveCache`): a per-floor, per-stage memo plus a cache
+ * of each item's sampled footprint, so a touch that changed nothing costs a few
+ * comparisons and returns the SAME product objects (and does not bump
+ * `productsVersion`), and a tile's mask arriving rebuilds that kind on that
+ * floor and the stages downstream of it — not the scene. Freshness is unchanged:
+ * the recompute is still synchronous, on the read, and exact (the old derive is
+ * kept as a test oracle and fuzzed against).
  *
  * KNOWN LIMITS, recorded not hidden:
  *   - Every mask-hosting item now streams its own extra pack layers
@@ -98,6 +111,7 @@ import {
 import { buildMaskAuthorityReport } from './mask-authority-report.js';
 import {
   computeMaskGridSpec,
+  createDeriveCache,
   deriveFloorProducts,
   sampleMaskGridWorld,
   extractContentWindow,
@@ -263,6 +277,15 @@ export function createMaskAuthority({ readPageImageData, log }) {
   // as neither — no cache decision was possible, not a hit.
   let bakeRuns = 0;
   let bakeSkips = 0;
+  // A recompute that found nothing to redo (every stage came out of the derive
+  // cache) — the touch was real, the change was not. See `recomputeIfDirty`.
+  let bakeNoops = 0;
+  // `blockedIdsForLevel`'s answer per level, valid for one `version` (see there).
+  let blockedMemo = { version: -1, byLevel: new Map() };
+  // `mask-derive.js#createDeriveCache`'s per-scene memo of every stage's inputs
+  // and outputs; replaced wholesale by `reset()` since its keys are the previous
+  // scene's ingests.
+  let deriveCache = createDeriveCache();
 
   const counters = {
     pagesOffered: 0,
@@ -355,6 +378,7 @@ export function createMaskAuthority({ readPageImageData, log }) {
    */
   function reset({ sceneKey, dimensions, floors, items, resolvePlacement }) {
     scene = emptyScene();
+    deriveCache = createDeriveCache();
     scene.sceneKey = sceneKey;
     const rect = dimensions.sceneRect ?? { x: 0, y: 0, width: dimensions.width, height: dimensions.height };
     scene.gridSpec = computeMaskGridSpec(rect);
@@ -844,7 +868,8 @@ export function createMaskAuthority({ readPageImageData, log }) {
       };
     });
 
-    products = deriveFloorProducts({
+    const next = deriveFloorProducts({
+      cache: deriveCache,
       gridSpec: scene.gridSpec,
       // `casterSpec.gridMaxDim > 0` (a sun-shadow tier's own `casterGridDim`)
       // rasterizes the caster channels at a SECOND, independent resolution —
@@ -870,7 +895,21 @@ export function createMaskAuthority({ readPageImageData, log }) {
         include: casterSpec.include,
       },
     });
-    productsVersion = version;
+    // ⚠️ `productsVersion` BUMPS ON A REAL CHANGE, NOT ON EVERY TOUCH (2026-10-14).
+    // `touch()` fires for every Tile/Level/Wall document hook (`setItems` is
+    // unconditional — see `perf-structural-ab.js`'s own note) and for ingests that
+    // replace content with itself, and each used to mint a new version that every
+    // downstream baker (sun-shadow pack + GPU march per floor slot, water, wind)
+    // reads as "re-bake now". The derive cache hands back the SAME product object
+    // for a floor none of whose inputs changed, so identity is the whole test.
+    const unchanged =
+      productsVersion >= 0 && next.length === products.length && next.every((p, i) => p === products[i]);
+    if (unchanged) {
+      bakeNoops += 1;
+    } else {
+      products = next;
+      productsVersion = version;
+    }
     dirty = false;
   }
 
@@ -1176,10 +1215,22 @@ export function createMaskAuthority({ readPageImageData, log }) {
    * @returns {Set<string>}
    */
   function blockedIdsForLevel(levelId) {
-    const blocked = requiredMissingAuthoredIds(levelId);
-    if (blocked.size === 0) return blocked;
-    for (const d of DERIVED_KINDS) {
-      if (d.inputs.some((input) => blocked.has(input))) blocked.add(d.id);
+    // ⚠️ MEMOISED PER TOUCH (2026-10-14). `getDerived` runs this on EVERY call —
+    // and the fire sync, three bakers and the sun-shadow slots each call it every
+    // frame — and the answer walks every item in the scene (`hostsOfFloor`
+    // rebuilds the floor bands and a per-item membership Map). It reads only
+    // items, discovery and floors, all of which change through `touch()` and
+    // nothing else, so `version` is the whole cache key.
+    if (blockedMemo.version !== version) blockedMemo = { version, byLevel: new Map() };
+    let blocked = blockedMemo.byLevel.get(levelId);
+    if (!blocked) {
+      blocked = requiredMissingAuthoredIds(levelId);
+      if (blocked.size > 0) {
+        for (const d of DERIVED_KINDS) {
+          if (d.inputs.some((input) => blocked.has(input))) blocked.add(d.id);
+        }
+      }
+      blockedMemo.byLevel.set(levelId, blocked);
     }
     return blocked;
   }
@@ -1387,7 +1438,29 @@ export function createMaskAuthority({ readPageImageData, log }) {
      * reports the counters' CURRENT state, and forcing a recompute just to
      * read them would corrupt the very count being read. */
     getBakeStats() {
-      return { bakeRuns, bakeSkips };
+      const d = deriveCache.stats;
+      return {
+        bakeRuns,
+        bakeSkips,
+        // Recomputes that rebuilt NOTHING (every stage came from the derive cache):
+        // a touch with no real change. `bakeRuns - bakeNoops` is the count of
+        // recomputes that actually changed a product — and bumped the version.
+        bakeNoops,
+        // WHERE THE WORK WENT, in counts (no clocks): how many stages the cache
+        // served vs rebuilt, and how many texels were actually sampled
+        // (`stampTexels` is the unit derive cost scales with, on any machine).
+        derive: {
+          composites: { ...d.composites },
+          outdoors: { ...d.outdoors },
+          authored: { ...d.authored },
+          gate: { ...d.gate },
+          stampsComputed: d.stampsComputed,
+          stampHits: d.stampHits,
+          stampTexels: d.stampTexels,
+          productsBuilt: d.productsBuilt,
+          productsReused: d.productsReused,
+        },
+      };
     },
     /**
      * Which floors have AUTHORED content for a `rasterize: true` kind — the

@@ -12,6 +12,7 @@ import { run as runOcclusion } from './occlusion.test.mjs';
 import { run as runWorldQuad } from './world-quad.test.mjs';
 import { run as runMaskCatalog } from './mask-catalog.test.mjs';
 import { run as runMaskDerive } from './mask-derive.test.mjs';
+import { run as runMaskDeriveEquivalence } from './mask-derive-equivalence.test.mjs';
 import { run as runMaskAuthority } from './mask-authority.test.mjs';
 import { run as runSkyReachAccess } from './sky-reach-access.test.mjs';
 import { run as runPaintMask } from './paint-mask.test.mjs';
@@ -58,6 +59,7 @@ const suites = [
   ['world-quad', runWorldQuad],
   ['mask-catalog', runMaskCatalog],
   ['mask-derive', runMaskDerive],
+  ['mask-derive-equivalence', runMaskDeriveEquivalence],
   ['mask-authority', runMaskAuthority],
   ['sky-reach-access', runSkyReachAccess],
   ['paint-mask', runPaintMask],

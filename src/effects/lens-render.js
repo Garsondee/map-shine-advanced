@@ -573,7 +573,9 @@ export function buildLensCompositeMaterial({
   const adaptiveMix = mix(float(0), lowLight, uAdaptiveGrainEnabled);
   const grainBoost = float(1).add(adaptiveMix.mul(maxNode(uGrainLowLightBoost, float(0))));
   const cellPx = maxNode(
-    mix(maxNode(uGrainCellSizeBright, float(1)), maxNode(uGrainCellSizeDark, float(1)), adaptiveMix).mul(LENS_GRAIN_CELL_GAIN),
+    mix(maxNode(uGrainCellSizeBright, float(1)), maxNode(uGrainCellSizeDark, float(1)), adaptiveMix).mul(
+      LENS_GRAIN_CELL_GAIN
+    ),
     float(1)
   );
   const pixelCoord = floor(uv().mul(resolution).div(cellPx));

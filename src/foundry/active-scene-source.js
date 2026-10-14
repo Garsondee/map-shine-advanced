@@ -240,6 +240,92 @@ function levelDocsOf(sceneDoc) {
  *          |{ok:false, error:string}}
  */
 export function getActiveSceneFloors(sceneDoc, getRouteFn) {
+  // PER-FRAME CALLERS (2026-10-14, GC churn in a perf trace): the frame loop
+  // asks this 4-5 times a frame, and every call used to copy the level
+  // collection, sort it, run resolveAssetUrl per level, copy each
+  // `visibility.levels` set and build fresh floor objects — steady garbage at
+  // 120fps for an answer that only changes when an author edits a Level. The
+  // cache hands back the SAME result object while a non-allocating comparison
+  // says nothing it was derived from has changed. Callers treat it read-only.
+  // Only the default route function is cached (a custom one — tests — can
+  // change the urls without touching the scene).
+  if (sceneDoc && getRouteFn === undefined) {
+    const hit = _floorsCache;
+    if (hit && hit.sceneDoc === sceneDoc && floorsCacheStillValid(hit, sceneDoc)) return hit.result;
+    const result = computeActiveSceneFloors(sceneDoc, getRouteFn);
+    _floorsCache = result.ok ? snapshotFloorsInputs(sceneDoc, result) : null;
+    return result;
+  }
+  return computeActiveSceneFloors(sceneDoc, getRouteFn);
+}
+
+/** @type {{sceneDoc: object, name: *, bgSrc: *, levels: object[], result: object}|null} */
+let _floorsCache = null;
+
+/** Visit every Level doc without allocating an array. */
+function forEachLevel(sceneDoc, fn) {
+  const levels = sceneDoc?.levels;
+  if (!levels) return 0;
+  let n = 0;
+  for (const lvl of typeof levels.values === 'function' ? levels.values() : levels) fn(lvl, n++);
+  return n;
+}
+
+function snapshotFloorsInputs(sceneDoc, result) {
+  const levels = [];
+  forEachLevel(sceneDoc, (lvl) =>
+    levels.push({
+      lvl,
+      id: lvl?.id,
+      name: lvl?.name,
+      src: lvl?.background?.src,
+      bottom: lvl?.elevation?.bottom,
+      top: lvl?.elevation?.top,
+      vis: Array.from(lvl?.visibility?.levels ?? []),
+    })
+  );
+  return { sceneDoc, name: sceneDoc.name, bgSrc: sceneDoc.background?.src, levels, result };
+}
+
+/** Compare the live scene against what the cached result was derived from. */
+function floorsCacheStillValid(hit, sceneDoc) {
+  if (hit.name !== sceneDoc.name || hit.bgSrc !== sceneDoc.background?.src) return false;
+  let same = true;
+  const count = forEachLevel(sceneDoc, (lvl, i) => {
+    if (!same) return;
+    const c = hit.levels[i];
+    if (
+      !c ||
+      c.lvl !== lvl ||
+      c.id !== lvl?.id ||
+      c.name !== lvl?.name ||
+      c.src !== lvl?.background?.src ||
+      c.bottom !== lvl?.elevation?.bottom ||
+      c.top !== lvl?.elevation?.top
+    ) {
+      same = false;
+      return;
+    }
+    const vis = lvl?.visibility?.levels;
+    const size = vis ? (vis.size ?? vis.length ?? 0) : 0;
+    if (size !== c.vis.length) {
+      same = false;
+      return;
+    }
+    if (size > 0) {
+      let j = 0;
+      for (const id of vis) {
+        if (c.vis[j++] !== id) {
+          same = false;
+          return;
+        }
+      }
+    }
+  });
+  return same && count === hit.levels.length;
+}
+
+function computeActiveSceneFloors(sceneDoc, getRouteFn) {
   if (!sceneDoc) {
     return { ok: false, error: 'no active scene (canvas.scene is null) — open a scene in Foundry first' };
   }

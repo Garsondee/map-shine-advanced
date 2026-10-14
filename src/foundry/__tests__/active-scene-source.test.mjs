@@ -333,4 +333,61 @@ export function run(t) {
       computeVisibleFloorIndices(floors, 99).length === 0
     );
   }
+
+  // --- THE PER-FRAME CACHE (2026-10-14, GC churn) -----------------------------
+  // The frame loop asks 4-5 times a frame. Same scene, unchanged -> the SAME
+  // result object (no allocation); ANY edit a result depends on -> a fresh one.
+  {
+    const mk = () => ({
+      name: 'Cache Manor',
+      levels: [
+        {
+          id: 'g',
+          name: 'Ground',
+          elevation: { bottom: 0, top: 10 },
+          background: { src: 'm/g.webp' },
+          visibility: { levels: new Set(['b']) },
+        },
+        { id: 'b', name: 'Basement', elevation: { bottom: -10, top: 0 }, background: { src: 'm/b.webp' } },
+      ],
+    });
+    const scene = mk();
+    const first = getActiveSceneFloors(scene);
+    ok('getActiveSceneFloors cache: an unchanged scene returns the SAME object', getActiveSceneFloors(scene) === first);
+    const edits = {
+      'a background src change': (sc) => (sc.levels[0].background.src = 'm/g2.webp'),
+      'an elevation.bottom change': (sc) => (sc.levels[0].elevation.bottom = 5),
+      'an elevation.top change': (sc) => (sc.levels[0].elevation.top = 99),
+      'a level rename': (sc) => (sc.levels[1].name = 'Cellar'),
+      'a visibility.levels addition': (sc) => sc.levels[0].visibility.levels.add('x'),
+      'a visibility.levels swap': (sc) => {
+        sc.levels[0].visibility.levels.clear();
+        sc.levels[0].visibility.levels.add('z');
+      },
+      'a level removed': (sc) => sc.levels.pop(),
+      'a level added': (sc) =>
+        sc.levels.push({ id: 'a', name: 'Attic', elevation: { bottom: 20 }, background: { src: 'm/a.webp' } }),
+      'a level doc replaced by an equal-looking one': (sc) => (sc.levels[1] = { ...sc.levels[1] }),
+      'a scene rename': (sc) => (sc.name = 'Renamed'),
+    };
+    for (const [label, edit] of Object.entries(edits)) {
+      const sc = mk();
+      const before = getActiveSceneFloors(sc);
+      edit(sc);
+      const after = getActiveSceneFloors(sc);
+      ok(`getActiveSceneFloors cache: ${label} invalidates it`, after !== before);
+    }
+    const sc2 = mk();
+    sc2.levels[0].background.src = 'm/g3.webp';
+    ok(
+      'getActiveSceneFloors cache: the rebuilt result reflects the edit',
+      getActiveSceneFloors(sc2).floors.some((f) => f.url.endsWith('g3.webp'))
+    );
+    ok(
+      'getActiveSceneFloors cache: a different scene never returns another scene result',
+      getActiveSceneFloors(mk()) !== getActiveSceneFloors(mk())
+    );
+    const a = getActiveSceneFloors(mk(), (path) => `/r/${path}`);
+    ok('getActiveSceneFloors cache: a custom getRouteFn bypasses the cache', a.floors[0].url.startsWith('/r/'));
+  }
 }

@@ -190,6 +190,10 @@ export function run(t) {
     ok('no wall segments at all -> empty, no throw', empty.apertures.length === 0 && empty.totalFound === 0);
     const noArgs = findAperturesForLight({ x: 0, y: 0, radius: 50 }, undefined, 4);
     ok('undefined wall segments -> empty, no throw', noArgs.apertures.length === 0);
+    ok(
+      'the empty result is one shared frozen object (per-light per-frame: no allocation)',
+      empty === noArgs && Object.isFrozen(empty) && Object.isFrozen(empty.apertures)
+    );
   }
 
   // ==========================================================================

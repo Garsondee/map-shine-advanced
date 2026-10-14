@@ -13,7 +13,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { resolveLightElevationRank, resolveAnchorElevationRank } from '../point-light-pool.js';
+import { resolveLightElevationRank, resolveAnchorElevationRank, memoCandleLightSources } from '../point-light-pool.js';
 import { LIGHT_ELEVATION_UNCONFIGURED_SENTINEL, elevationRank } from '../point-light-illumination.js';
 
 const FLOORS = [
@@ -193,4 +193,51 @@ export function run(t) {
     'point-light-pool.js falls back to NO_LIGHT_ANIMATION in both createLightEntry and update()',
     (poolCode.match(/light\.animation \?\? NO_LIGHT_ANIMATION/g) ?? []).length >= 2
   );
+
+  // ── THE CANDLE-LIGHT MEMO (2026-10-14, per-frame GC churn) ───────────────
+  // The result is a pure function of (anchors identity, five scalars); the pool
+  // mutates only `shapePoints`, which every reuse must restore.
+  {
+    const anchors = [
+      { id: 'a', x: 100, y: 100, params: { intensity: 1 } },
+      { id: 'b', x: 900, y: 900, params: { intensity: 1 } },
+    ];
+    const opts = { lightRadiusPx: 300, colorHex: '#ffaa55', animationQuality: 'auto', windResponse: 1, perfTier: 3 };
+    const holder = { memo: null };
+    const first = memoCandleLightSources(holder, anchors, { ...opts });
+    ok('memoCandleLightSources builds lights for the anchors', first.length === 2);
+    ok(
+      'memoCandleLightSources: unchanged inputs return the SAME array and descriptors (no allocation)',
+      memoCandleLightSources(holder, anchors, { ...opts }) === first
+    );
+    // The pool swaps in a wall-clipped polygon, then (wall deleted) leaves the
+    // descriptor alone — the reuse must hand back the ORIGINAL circle, not the stale clip.
+    const original = first[0].shapePoints;
+    first[0].shapePoints = [1, 2, 3, 4, 5, 6];
+    const again = memoCandleLightSources(holder, anchors, { ...opts });
+    ok('memoCandleLightSources: a reuse restores the original shapePoints', again[0].shapePoints === original);
+    ok(
+      'memoCandleLightSources: a different anchors array rebuilds',
+      memoCandleLightSources(holder, [...anchors], { ...opts }) !== first
+    );
+    const second = memoCandleLightSources(holder, anchors, { ...opts });
+    for (const [label, change] of Object.entries({
+      lightRadiusPx: { lightRadiusPx: 500 },
+      colorHex: { colorHex: '#ffffff' },
+      animationQuality: { animationQuality: 2 },
+      windResponse: { windResponse: 0.5 },
+      perfTier: { perfTier: 1 },
+    })) {
+      const h = { memo: null };
+      const a = memoCandleLightSources(h, anchors, { ...opts });
+      ok(
+        `memoCandleLightSources: a ${label} change rebuilds`,
+        memoCandleLightSources(h, anchors, { ...opts, ...change }) !== a
+      );
+    }
+    ok(
+      'memoCandleLightSources: separate holders never share descriptors',
+      second !== memoCandleLightSources({ memo: null }, anchors, { ...opts })
+    );
+  }
 }

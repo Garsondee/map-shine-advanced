@@ -332,6 +332,54 @@ function shapePointsUnchanged(a, b) {
   return true;
 }
 
+/**
+ * `buildCandleLightSources`, memoized (2026-10-14, per-frame GC churn). Its
+ * result is a pure function of the anchors array and five scalar params, and
+ * boot.js's `getCandleRenderState` hands back the SAME anchors array until an
+ * anchor/floor/mask changes — yet it was re-run every frame, allocating a
+ * cluster Map, per-cluster id arrays, a fresh 64-point polygon and a ~30-field
+ * descriptor per light (~17 KB and ~0.2 ms a frame for 150 candles).
+ *
+ * The pool only ever MUTATES one field of these descriptors — `shapePoints`,
+ * swapped for a wall-clipped polygon when one exists and otherwise left alone
+ * ("KEEPS the naive circle"). That "left alone" relied on a fresh descriptor
+ * each frame; on a reused one a light that WAS clipped and no longer is (a wall
+ * deleted) would keep its stale clipped polygon. So every reuse first restores
+ * each descriptor's original `shapePoints` — a pointer write per light.
+ *
+ * `holder` is per-pool (`{memo: null}`), never module state, so two pools (a
+ * viewer restart, a test) can never share descriptors.
+ *
+ * @param {{memo: {anchors: *, radius: *, color: *, quality: *, wind: *, tier: *, lights: object[], base: *[]}|null}} holder
+ */
+export function memoCandleLightSources(holder, anchors, opts) {
+  const m = holder.memo;
+  if (
+    m &&
+    m.anchors === anchors &&
+    m.radius === opts.lightRadiusPx &&
+    m.color === opts.colorHex &&
+    m.quality === opts.animationQuality &&
+    m.wind === opts.windResponse &&
+    m.tier === opts.perfTier
+  ) {
+    for (let i = 0; i < m.lights.length; i++) m.lights[i].shapePoints = m.base[i];
+    return m.lights;
+  }
+  const lights = buildCandleLightSources(anchors, opts);
+  holder.memo = {
+    anchors,
+    radius: opts.lightRadiusPx,
+    color: opts.colorHex,
+    quality: opts.animationQuality,
+    wind: opts.windResponse,
+    tier: opts.perfTier,
+    lights,
+    base: lights.map((l) => l.shapePoints),
+  };
+  return lights;
+}
+
 function createLightEntry({
   light,
   animationQuality,
@@ -1015,6 +1063,8 @@ export function createPointLightPool({
    * `entry.scratchArray`/`entry.edgePoints` reuse discipline elsewhere. Read
    * exactly once per frame (a single `for...of` loop), never retained past
    * that loop, so reusing its identity across frames is safe. */
+  /** Per-pool memo for `memoCandleLightSources` (see its doc). */
+  const candleMemoHolder = { memo: null };
   const lightsScratch = [];
 
   /**
@@ -1315,7 +1365,7 @@ export function createPointLightPool({
     profiler?.beginById('light.pointLightSourceBuild');
     const candleLightState = getCandleRenderState();
     const candleLights = candleLightState.enabled
-      ? buildCandleLightSources(candleLightState.anchors, {
+      ? memoCandleLightSources(candleMemoHolder, candleLightState.anchors, {
           lightRadiusPx: candleLightState.params?.lightRadiusPx,
           colorHex: candleLightState.params?.color,
           animationQuality: candleLightState.params?.animationQuality,

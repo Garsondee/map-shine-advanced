@@ -510,6 +510,9 @@ export function computeAngularWidthFromLight(light, A, B) {
   return Math.acos(cos);
 }
 
+/** The shared, frozen "nothing found" result of `findAperturesForLight` (see its early return). */
+const NO_APERTURES = Object.freeze({ apertures: Object.freeze([]), totalFound: 0, dropped: 0 });
+
 /**
  * THE ASSIGNMENT PASS — which of a scene's aperture walls belong to THIS
  * light. A cheap CPU heuristic (proximity + angular-width ranking), not a
@@ -563,6 +566,10 @@ export function findAperturesForLight(
   maxApertureDistancePx = APERTURE_GOBO_DEFAULTS.maxApertureDistancePx,
   wallFrames = null
 ) {
+  // NO APERTURE WALLS AT ALL — the common case, and per-light per-frame: skip the
+  // `candidates` array, the `slice` and the result object (three allocations a
+  // light, every frame). One frozen shared result; callers only ever read it.
+  if (!wallSegments || wallSegments.length === 0) return NO_APERTURES;
   const cap = Number.isFinite(maxAperturesPerLight) && maxAperturesPerLight > 0 ? Math.floor(maxAperturesPerLight) : 0;
   const searchDistance = Math.max(
     0,

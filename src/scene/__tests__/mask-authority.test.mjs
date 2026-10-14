@@ -1231,6 +1231,11 @@ export async function run(t) {
       'getBakeStats reports it as a recompute that rebuilt nothing',
       cacheAuthority.getBakeStats().bakeNoops >= 1 && cacheAuthority.getBakeStats().derive.productsReused >= 2
     );
+    t.ok(
+      'the debug report carries the same counters, so a live trace can be read off the flight-recorder export',
+      cacheAuthority.getReport().bake?.bakeNoops >= 1 &&
+        typeof cacheAuthority.getReport().bake?.derive?.stampTexels === 'number'
+    );
 
     // A real change still bumps, exactly once, and serves the new content.
     cacheAuthority.ingestItemAlpha({ ownerId: 'tile:CT', grid: solidAlpha(255), imageWidth: 100, imageHeight: 100 });

@@ -1350,16 +1350,57 @@ export function createMaskAuthority({ readPageImageData, log }) {
   /** The debug-panel report payload — the whole story, one click. */
   function getReport() {
     recomputeIfDirty();
-    return buildMaskAuthorityReport({
-      catalog,
-      scene,
-      products,
-      version,
-      productsVersion,
-      counters,
-      extractErrors,
-      requiredMissingAuthoredIds,
-    });
+    return {
+      ...buildMaskAuthorityReport({
+        catalog,
+        scene,
+        products,
+        version,
+        productsVersion,
+        counters,
+        extractErrors,
+        requiredMissingAuthoredIds,
+      }),
+      // How much recompute work the load actually cost, and how much the derive
+      // cache saved — in the debug panel and the flight-recorder export, so
+      // "did the freeze go away" is a number rather than a feeling.
+      bake: readBakeStats(),
+    };
+  }
+
+  /**
+   * BAKE-GATE HEALTH — see `bakeRuns`/`bakeSkips`' own declaration above.
+   * Lifetime counters; a caller wanting one window's rate samples this
+   * before and after, same convention as `depth-proxy-material-pool.js`'s
+   * `stats()`. Deliberately NOT gated behind `recomputeIfDirty()` — this
+   * reports the counters' CURRENT state, and forcing a recompute just to
+   * read them would corrupt the very count being read.
+   */
+  function readBakeStats() {
+    const d = deriveCache.stats;
+    return {
+      bakeRuns,
+      bakeSkips,
+      // Recomputes that rebuilt NOTHING (every stage came from the derive cache):
+      // a touch with no real change. `bakeRuns - bakeNoops` is the count of
+      // recomputes that actually changed a product — and bumped the version.
+      bakeNoops,
+      // WHERE THE WORK WENT, in counts (no clocks): how many stages the cache
+      // served vs rebuilt (`partial` = the gate was patched from its predecessor
+      // over a cell rect instead of rebuilt), and how many texels were actually
+      // sampled (`stampTexels` is the unit derive cost scales with, on any machine).
+      derive: {
+        composites: { ...d.composites },
+        outdoors: { ...d.outdoors },
+        authored: { ...d.authored },
+        gate: { ...d.gate },
+        stampsComputed: d.stampsComputed,
+        stampHits: d.stampHits,
+        stampTexels: d.stampTexels,
+        productsBuilt: d.productsBuilt,
+        productsReused: d.productsReused,
+      },
+    };
   }
 
   /**
@@ -1500,31 +1541,7 @@ export function createMaskAuthority({ readPageImageData, log }) {
      * `stats()`. Deliberately NOT gated behind `recomputeIfDirty()` — this
      * reports the counters' CURRENT state, and forcing a recompute just to
      * read them would corrupt the very count being read. */
-    getBakeStats() {
-      const d = deriveCache.stats;
-      return {
-        bakeRuns,
-        bakeSkips,
-        // Recomputes that rebuilt NOTHING (every stage came from the derive cache):
-        // a touch with no real change. `bakeRuns - bakeNoops` is the count of
-        // recomputes that actually changed a product — and bumped the version.
-        bakeNoops,
-        // WHERE THE WORK WENT, in counts (no clocks): how many stages the cache
-        // served vs rebuilt, and how many texels were actually sampled
-        // (`stampTexels` is the unit derive cost scales with, on any machine).
-        derive: {
-          composites: { ...d.composites },
-          outdoors: { ...d.outdoors },
-          authored: { ...d.authored },
-          gate: { ...d.gate },
-          stampsComputed: d.stampsComputed,
-          stampHits: d.stampHits,
-          stampTexels: d.stampTexels,
-          productsBuilt: d.productsBuilt,
-          productsReused: d.productsReused,
-        },
-      };
-    },
+    getBakeStats: readBakeStats,
     /**
      * Which floors have AUTHORED content for a `rasterize: true` kind — the
      * input `resolveWaterFloor` (effects/water/water-floor.js) needs to decide

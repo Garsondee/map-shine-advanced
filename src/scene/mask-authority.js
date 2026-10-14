@@ -113,6 +113,7 @@ import {
   computeMaskGridSpec,
   createDeriveCache,
   deriveFloorProducts,
+  placementKey,
   sampleMaskGridWorld,
   extractContentWindow,
   sampleAuthoredSourcesAt,
@@ -298,6 +299,10 @@ export function createMaskAuthority({ readPageImageData, log }) {
     alphaOffered: 0,
     alphaIngested: 0,
     alphaIgnored: 0,
+    // Offers whose bytes and placement were IDENTICAL to what was already stored — a re-decode of the
+    // same art/mask. Counted as ingested, but nothing was stored and nothing was touched (see `ingestUnchanged`).
+    alphaUnchanged: 0,
+    pagesUnchanged: 0,
     // ⚠️ DID THE MASK'S OWN ALPHA SURVIVE THE DECODE? (2026-08-02). The
     // "transparent means unpainted" fix composites `_Outdoors` source-over by
     // the mask file's own alpha — which silently does NOTHING if the decode
@@ -354,6 +359,39 @@ export function createMaskAuthority({ readPageImageData, log }) {
   function touch() {
     version++;
     dirty = true;
+  }
+
+  /** @param {ArrayLike<number>|null|undefined} a @param {ArrayLike<number>|null|undefined} b */
+  function sameBytes(a, b) {
+    if (a === b) return true;
+    if (!a || !b || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    return true;
+  }
+
+  /** @param {{w:number,h:number,data:ArrayLike<number>}|null|undefined} a @param {{w:number,h:number,data:ArrayLike<number>}|null|undefined} b */
+  function sameGrid(a, b) {
+    if (!a || !b) return !a && !b;
+    return a.w === b.w && a.h === b.h && sameBytes(a.data, b.data);
+  }
+
+  /**
+   * WOULD STORING `next` CHANGE ANYTHING A DERIVATION READS? (2026-10-14.) The same
+   * art or mask can be decoded and offered more than once (a pack page re-decoded
+   * after eviction, a scene re-entered with warm caches), and each offer used to
+   * replace the ingest with an equal-valued NEW object — which the derive cache
+   * (it names content by identity) and every downstream baker (it reads the version)
+   * correctly treat as a change. Bytes, geometry and placement identical = not one.
+   * @param {{content: object, alpha?: object|null, placement: object}|undefined} existing
+   * @param {{content: object, alpha?: object|null, placement: object}} next
+   */
+  function ingestUnchanged(existing, next) {
+    return (
+      !!existing &&
+      sameGrid(existing.content, next.content) &&
+      sameGrid(existing.alpha ?? null, next.alpha ?? null) &&
+      placementKey(existing.placement) === placementKey(next.placement)
+    );
   }
 
   /**
@@ -526,12 +564,18 @@ export function createMaskAuthority({ readPageImageData, log }) {
       }
       if (anyTransparent) counters.maskPagesWithRealAlpha++;
       else counters.maskPagesFullyOpaque++;
+      let stored = false;
       for (const { contentId, channel } of plan) {
         const content = extractContentWindow(imageData, contentWindow, channel);
-        scene.ingests.set(`${ownerId}/${contentId}`, { content, placement, alpha });
+        const key = `${ownerId}/${contentId}`;
+        const next = { content, placement, alpha };
+        if (ingestUnchanged(scene.ingests.get(key), next)) continue;
+        scene.ingests.set(key, next);
+        stored = true;
       }
       counters.pagesIngested++;
-      touch();
+      if (stored) touch();
+      else counters.pagesUnchanged++;
     } catch (err) {
       counters.extractErrorCount++;
       extractErrors.push({ ownerId, layerName, error: String(err?.message || err) });
@@ -582,11 +626,14 @@ export function createMaskAuthority({ readPageImageData, log }) {
     }
     try {
       const placement = scene.resolvePlacement(item, { width: imageWidth, height: imageHeight });
-      scene.ingests.set(`${ownerId}/${ALBEDO_INPUT}`, {
-        content: { w: grid.w, h: grid.h, data: grid.data },
-        placement,
-      });
+      const key = `${ownerId}/${ALBEDO_INPUT}`;
+      const next = { content: { w: grid.w, h: grid.h, data: grid.data }, placement };
       counters.alphaIngested++;
+      if (ingestUnchanged(scene.ingests.get(key), next)) {
+        counters.alphaUnchanged++;
+        return true;
+      }
+      scene.ingests.set(key, next);
       touch();
       return true;
     } catch (err) {
@@ -666,6 +713,22 @@ export function createMaskAuthority({ readPageImageData, log }) {
     const key = `${floorIndex}/${kindId}`;
     if (!grid?.spec || !grid?.data) {
       if (scene.paintedIngests.delete(key)) touch();
+      return;
+    }
+    // ⚠️ `save()` RE-INGESTS EVERY IN-MEMORY LAYER ON EVERY SAVE, painted-empty ones included (see
+    // below), and each used to copy 16 MB, derive its alpha and re-rasterize that kind on that floor.
+    // A layer whose bytes and geometry are what is already stored changes nothing a derivation reads.
+    const stored = scene.paintedIngests.get(key);
+    if (
+      stored &&
+      stored.content.w === grid.spec.w &&
+      stored.content.h === grid.spec.h &&
+      stored.placement.x === grid.spec.x &&
+      stored.placement.y === grid.spec.y &&
+      stored.placement.width === grid.spec.width &&
+      stored.placement.height === grid.spec.height &&
+      sameBytes(stored.content.data, grid.data)
+    ) {
       return;
     }
     // ONE pass, two arrays: the snapshot copy and its own derived coverage.

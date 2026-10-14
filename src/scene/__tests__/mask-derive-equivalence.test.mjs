@@ -384,6 +384,20 @@ function mutate(rng, world) {
       if (f.outdoors.length) f.outdoors = f.outdoors.filter((_, i) => i !== pick(f.outdoors));
       break;
     }
+    case 14: {
+      // DRAW ORDER changes without any content changing (a tile's elevation was edited): two sources swap
+      const f = w.floors[pick(w.floors)];
+      const kind = ['outdoors', 'fire', 'water'][Math.floor(rng() * 3)];
+      const list = kind === 'outdoors' ? [...f.outdoors] : [...f.authored[kind].sources];
+      if (list.length >= 2) {
+        const i = pick(list);
+        const j = (i + 1 + Math.floor(rng() * (list.length - 1))) % list.length;
+        [list[i], list[j]] = [list[j], list[i]];
+        if (kind === 'outdoors') f.outdoors = list;
+        else f.authored = { ...f.authored, [kind]: { ...f.authored[kind], sources: list } };
+      }
+      break;
+    }
     default:
       // no-op: the same inputs re-sent (a Tile document hook touching nothing)
       break;
@@ -461,6 +475,7 @@ export function run(t) {
     let bad = null;
     let steps = 0;
     const seen = { hit: 0, append: 0, rebuild: 0 };
+    const patched = { gate: 0, outdoorsMiss: 0, authoredMiss: 0 };
     for (let seed = 1; seed <= 90 && !bad; seed++) {
       const rng = mulberry32(seed * 104729);
       let world = randomWorld(rng);
@@ -482,6 +497,9 @@ export function run(t) {
         world = mutate(rng, world);
       }
       for (const k of Object.keys(seen)) seen[k] += cache.stats.composites[k];
+      patched.gate += cache.stats.gate.partial;
+      patched.outdoorsMiss += cache.stats.outdoors.miss;
+      patched.authoredMiss += cache.stats.authored.miss;
     }
     t.ok(
       `cache: ${steps} derive steps through random ingest sequences match a fresh oracle derive every time${bad ? ` — FIRST FAIL: ${bad}` : ''}`,
@@ -490,6 +508,10 @@ export function run(t) {
     t.ok(
       'cache: the sequences actually exercised all three composite paths (hit / append / rebuild)',
       seen.hit > 20 && seen.append > 20 && seen.rebuild > 20
+    );
+    t.ok(
+      'cache: …and the region-patching paths (gate patched from its predecessor, outdoors/authored rebuilt by region)',
+      patched.gate > 50 && patched.outdoorsMiss > 50 && patched.authoredMiss > 50
     );
   }
 
@@ -601,6 +623,36 @@ export function run(t) {
       'claims: …and the rebuild is byte-identical (the old, brighter art is gone, not max-merged under the new)',
       diffProducts(afterReingest, oracleDeriveFloorProducts(freshArgs(reingested))) === null
     );
+
+    // THE GATE MAY ONLY BE PATCHED FROM AN INPUT THAT MOVED BY EXACTLY ONE GENERATION. Nothing in a derive skips a
+    // generation today, but a future frame-sliced derive could — so the guard is proven by forcing the case: roll the
+    // gate memo back to a stale snapshot, then advance `outdoors` twice more. A patch from that snapshot would carry
+    // the wrong rect; the guard must rebuild in full instead.
+    {
+      const gcache = createDeriveCache();
+      const g0 = base();
+      // The SAME source objects every generation (as the authority's ingests are), at disjoint footprints, so a
+      // patch from a stale predecessor would miss the generation in between.
+      const persistent = Array.from({ length: 3 }, (_, k) => ({
+        content: solid(5, 40 + k * 30),
+        placement: { x: 150 + k * 300, y: 500, width: 280, height: 900 },
+        ownerId: `o${k}`,
+      }));
+      const withOutdoors = (n) => ({
+        ...g0,
+        floors: [{ ...g0.floors[0], outdoors: persistent.slice(0, n) }, g0.floors[1]],
+      });
+      deriveFloorProducts({ ...withOutdoors(1), cache: gcache });
+      const staleGate = gcache.floors.get(0).gate;
+      deriveFloorProducts({ ...withOutdoors(2), cache: gcache });
+      gcache.floors.get(0).gate = staleGate; // the gate memo "missed" the second generation
+      const worldC = withOutdoors(3);
+      const viaGuard = deriveFloorProducts({ ...worldC, cache: gcache });
+      t.ok(
+        'claims: a gate memo that is TWO outdoors generations stale rebuilds in full (never patched with the wrong rect)',
+        diffProducts(viaGuard, oracleDeriveFloorProducts(freshArgs(worldC))) === null
+      );
+    }
 
     // A mask arriving touches that kind on that floor and nothing else.
     const w0 = base();

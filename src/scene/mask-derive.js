@@ -419,6 +419,45 @@ function axisTable(first, count, specOrigin, specTexel, pOrigin, pSize, pAnchor,
 }
 
 /**
+ * THE HORIZONTAL HALF OF EVERY SEPARABLE BILINEAR TAP, shared across output rows.
+ * `sampleContentBilinear` computes `top = a·(1−tx) + b·tx` for the source row above
+ * the sample and the same for the row below; for an axis-aligned item that value
+ * depends only on the SOURCE ROW and the OUTPUT COLUMN. A ≤248-texel source
+ * stretched over a 2048-texel grid reuses each source row for ~8–13 output rows,
+ * so computing `top`/`bot` once per (source row, column) — here, lazily — instead
+ * of once per output texel removes most of the per-texel loads and multiplies.
+ * Bit-identical: each stored value is the very expression the per-texel path
+ * evaluates, in the same order; only WHEN it is evaluated changed.
+ *
+ * @param {Uint8Array|Uint8ClampedArray} data - the source grid's bytes.
+ * @param {number} srcW @param {number} srcH
+ * @param {ReturnType<typeof axisTable>} xt - the X axis table of the composite.
+ * @param {number} w - output columns.
+ * @returns {(sy: number) => Float64Array} the interpolated row for a source row (computed on first use).
+ */
+function horizontalRows(data, srcW, srcH, xt, w) {
+  const rows = new Array(srcH).fill(null);
+  const xok = xt.ok;
+  const xi0 = xt.i0;
+  const xi1 = xt.i1;
+  const xt_ = xt.t;
+  const xomt = xt.omt;
+  return (sy) => {
+    let row = rows[sy];
+    if (row === null) {
+      row = new Float64Array(w);
+      const base = sy * srcW;
+      for (let k = 0; k < w; k++) {
+        if (xok[k] === 0) continue;
+        row[k] = data[base + xi0[k]] * xomt[k] + data[base + xi1[k]] * xt_[k];
+      }
+      rows[sy] = row;
+    }
+    return row;
+  };
+}
+
+/**
  * @typedef {object} MaskStamp - ONE ITEM'S SAMPLED FOOTPRINT at one grid
  *   resolution: the bytes every composite would offer the grid, without the grid.
  * @property {number} gx0 - first grid column the stamp covers.
@@ -457,26 +496,20 @@ export function rasterizeStamp(spec, content, placement, { scale = 1, wantValue 
   const plan = uvPlan(placement);
 
   if (isSeparablePlan(plan)) {
-    const cw = content.w;
-    const cd = content.data;
-    const xt = axisTable(gx0, w, spec.x, spec.texelW, plan.x, plan.width, plan.anchorX, cw);
+    const xt = axisTable(gx0, w, spec.x, spec.texelW, plan.x, plan.width, plan.anchorX, content.w);
     const yt = axisTable(gy0, h, spec.y, spec.texelH, plan.y, plan.height, plan.anchorY, content.h);
+    const rowOf = horizontalRows(content.data, content.w, content.h, xt, w);
+    const xok = xt.ok;
     for (let r = 0; r < h; r++) {
       if (yt.ok[r] === 0) continue;
-      const row0 = yt.i0[r] * cw;
-      const row1 = yt.i1[r] * cw;
+      const topRow = rowOf(yt.i0[r]);
+      const botRow = rowOf(yt.i1[r]);
       const ty = yt.t[r];
       const omty = yt.omt[r];
       let o = r * w;
       for (let k = 0; k < w; k++, o++) {
-        if (xt.ok[k] === 0) continue;
-        const c0 = xt.i0[k];
-        const c1 = xt.i1[k];
-        const tx = xt.t[k];
-        const omtx = xt.omt[k];
-        const top = cd[row0 + c0] * omtx + cd[row0 + c1] * tx;
-        const bot = cd[row1 + c0] * omtx + cd[row1 + c1] * tx;
-        const raw = top * omty + bot * ty;
+        if (xok[k] === 0) continue;
+        const raw = topRow[k] * omty + botRow[k] * ty;
         if (value) value[o] = Math.min(255, Math.round(scale === 1 ? raw : raw * scale));
         if (pass) pass[o] = raw < HEIGHT_COVERAGE_THRESHOLD ? 0 : 1;
       }
@@ -668,13 +701,21 @@ export function compositeItemMax(grid, content, placement, valueScale = 1) {
  * @param {ContentGrid|null} [alpha] - the mask image's OWN alpha, same
  *   geometry as `content` (both come from one `extractContentWindow` pass).
  * @param {object} [options]
+ * @param {CellRect|null} [options.clip=null] - only composite inside this
+ *   inclusive cell rect (default: the item's whole footprint).
  * @param {boolean} [options.areaAverage=false] - opt IN to the minifying box
  *   filter described above. `scene/mask-authority.js#ingestPaintedMask` is
  *   the one producer that sets it (carried on the source and forwarded by
  *   {@link rasterizeAuthored}); every file-based source leaves it false and
  *   takes the untouched bilinear path at any resolution ratio.
  */
-export function compositeItemOverwrite(grid, content, placement, alpha = null, { areaAverage = false } = {}) {
+export function compositeItemOverwrite(
+  grid,
+  content,
+  placement,
+  alpha = null,
+  { areaAverage = false, clip = null } = {}
+) {
   const { spec, data } = grid;
   // ── MAGNIFY OR MINIFY? ───────────────────────────────────────────────────
   // How much of the SOURCE does one DESTINATION texel cover, in source
@@ -705,7 +746,14 @@ export function compositeItemOverwrite(grid, content, placement, alpha = null, {
     // pass for a file, one derived LUT array for paint); a hypothetical
     // mismatch falls back to the bilinear path rather than reading garbage.
     (!alpha || (alpha.w === content.w && alpha.h === content.h));
-  const { gx0, gx1, gy0, gy1 } = footprintCellRange(placement, spec);
+  const range = footprintCellRange(placement, spec);
+  // `clip` (an inclusive cell rect) restricts the composite to a REGION — the incremental rasterize
+  // repaints only the cells under a source that arrived or left. Every texel's value is a function of
+  // its own position alone, so a clipped composite writes exactly what the full one would there.
+  const gx0 = clip ? Math.max(range.gx0, clip.x0) : range.gx0;
+  const gx1 = clip ? Math.min(range.gx1, clip.x1) : range.gx1;
+  const gy0 = clip ? Math.max(range.gy0, clip.y0) : range.gy0;
+  const gy1 = clip ? Math.min(range.gy1, clip.y1) : range.gy1;
   const w = gx1 - gx0 + 1;
   const h = gy1 - gy0 + 1;
   if (!(w > 0 && h > 0)) return;
@@ -719,52 +767,39 @@ export function compositeItemOverwrite(grid, content, placement, alpha = null, {
   // bytes written are identical to the per-texel path (fuzzed in
   // `mask-derive.test.mjs`). The minifying box filter keeps the general path.
   if (!useBox && isSeparablePlan(plan)) {
-    const cw = content.w;
-    const cd = content.data;
-    const xt = axisTable(gx0, w, spec.x, spec.texelW, plan.x, plan.width, plan.anchorX, cw);
+    const xt = axisTable(gx0, w, spec.x, spec.texelW, plan.x, plan.width, plan.anchorX, content.w);
     const yt = axisTable(gy0, h, spec.y, spec.texelH, plan.y, plan.height, plan.anchorY, content.h);
+    const rowOf = horizontalRows(content.data, content.w, content.h, xt, w);
     // The mask's own alpha normally shares `content`'s geometry (one
     // `extractContentWindow` pass), so the same tables serve both; a mismatched
-    // alpha gets tables of its own.
-    const ad = alpha ? alpha.data : null;
-    const aw = alpha ? alpha.w : 0;
+    // alpha gets tables of its own. Its horizontal rows are its own either way.
     const alphaShares = !alpha || (alpha.w === content.w && alpha.h === content.h);
     const xta =
-      alpha && !alphaShares ? axisTable(gx0, w, spec.x, spec.texelW, plan.x, plan.width, plan.anchorX, aw) : xt;
+      alpha && !alphaShares ? axisTable(gx0, w, spec.x, spec.texelW, plan.x, plan.width, plan.anchorX, alpha.w) : xt;
     const yta =
       alpha && !alphaShares ? axisTable(gy0, h, spec.y, spec.texelH, plan.y, plan.height, plan.anchorY, alpha.h) : yt;
+    const alphaRowOf = alpha ? horizontalRows(alpha.data, alpha.w, alpha.h, xta, w) : null;
+    const xok = xt.ok;
     for (let r = 0; r < h; r++) {
       if (yt.ok[r] === 0) continue;
-      const row0 = yt.i0[r] * cw;
-      const row1 = yt.i1[r] * cw;
+      const topRow = rowOf(yt.i0[r]);
+      const botRow = rowOf(yt.i1[r]);
       const ty = yt.t[r];
       const omty = yt.omt[r];
-      const arow0 = ad ? yta.i0[r] * aw : 0;
-      const arow1 = ad ? yta.i1[r] * aw : 0;
-      const aty = ad ? yta.t[r] : 0;
-      const aomty = ad ? yta.omt[r] : 0;
+      const aTopRow = alphaRowOf ? alphaRowOf(yta.i0[r]) : null;
+      const aBotRow = alphaRowOf ? alphaRowOf(yta.i1[r]) : null;
+      const aty = alphaRowOf ? yta.t[r] : 0;
+      const aomty = alphaRowOf ? yta.omt[r] : 0;
       let i = (gy0 + r) * spec.w + gx0;
       for (let k = 0; k < w; k++, i++) {
-        if (xt.ok[k] === 0) continue;
-        const tx = xt.t[k];
-        const omtx = xt.omt[k];
-        const c0 = xt.i0[k];
-        const c1 = xt.i1[k];
-        const top = cd[row0 + c0] * omtx + cd[row0 + c1] * tx;
-        const bot = cd[row1 + c0] * omtx + cd[row1 + c1] * tx;
-        const raw = top * omty + bot * ty;
-        if (!ad) {
+        if (xok[k] === 0) continue;
+        const raw = topRow[k] * omty + botRow[k] * ty;
+        if (!aTopRow) {
           data[i] = Math.min(255, Math.round(raw));
           continue;
         }
-        const atx = xta.t[k];
-        const aomtx = xta.omt[k];
-        const ac0 = xta.i0[k];
-        const ac1 = xta.i1[k];
-        const atop = ad[arow0 + ac0] * aomtx + ad[arow0 + ac1] * atx;
-        const abot = ad[arow1 + ac0] * aomtx + ad[arow1 + ac1] * atx;
         // SOURCE-OVER by the mask's own alpha — see the general path below.
-        const a = Math.max(0, Math.min(1, (atop * aomty + abot * aty) / 255));
+        const a = Math.max(0, Math.min(1, (aTopRow[k] * aomty + aBotRow[k] * aty) / 255));
         data[i] = Math.min(255, Math.round(data[i] * (1 - a) + raw * a));
       }
     }
@@ -1174,10 +1209,17 @@ export function describeAuthoredSources(sources, labelOf) {
   });
 }
 
-export function rasterizeAuthored(gridSpec, sources, absentValue) {
-  const grid = createMaskGrid(gridSpec);
-  const absentByte = Math.round(Math.max(0, Math.min(1, absentValue)) * 255);
-  grid.data.fill(absentByte);
+/** A kind's `absentValue` (0..1) as the byte its grid is filled with. @param {number} absentValue */
+function absentByteOf(absentValue) {
+  return Math.round(Math.max(0, Math.min(1, absentValue)) * 255);
+}
+
+/**
+ * Composite an ordered source list onto a grid, each source OVERWRITING the
+ * ones before it (`compositeItemOverwrite`) — optionally only inside `clip`.
+ * @param {MaskGrid} grid @param {Array<object>|undefined} sources @param {CellRect|null} clip
+ */
+function compositeSources(grid, sources, clip) {
   for (const source of sources ?? []) {
     if (!source?.content || !source?.placement) continue;
     // `source.alpha` is the mask file's OWN alpha, carried from
@@ -1190,8 +1232,15 @@ export function rasterizeAuthored(gridSpec, sources, absentValue) {
     // keeps them byte-for-byte on the untouched bilinear path.
     compositeItemOverwrite(grid, source.content, source.placement, source.alpha ?? null, {
       areaAverage: source.areaAverage === true,
+      clip,
     });
   }
+}
+
+export function rasterizeAuthored(gridSpec, sources, absentValue) {
+  const grid = createMaskGrid(gridSpec);
+  grid.data.fill(absentByteOf(absentValue));
+  compositeSources(grid, sources, null);
   return grid;
 }
 
@@ -1264,7 +1313,7 @@ export function createDeriveCache() {
       composites: { hit: 0, append: 0, rebuild: 0 },
       outdoors: { hit: 0, miss: 0 },
       authored: { hit: 0, miss: 0 },
-      gate: { hit: 0, miss: 0 },
+      gate: { hit: 0, miss: 0, partial: 0 },
       productsBuilt: 0,
       productsReused: 0,
     },
@@ -1348,11 +1397,146 @@ function tokensEqual(a, b) {
   return true;
 }
 
+// ── REGIONS: REDO ONLY THE CELLS A CHANGE CAN REACH (2026-10-14) ────────────────
+//
+// A tile's mask arriving changes the cells under that tile and nothing else, yet
+// each stage used to rebuild its whole grid — 4.2 M texels at the Extreme rung,
+// several times over, per floor. Every stage now knows the CELL RECT its last
+// change could have touched and is handed the previous grid to patch.
+//
+// EXACTNESS RESTS ON ONE FACT: every grid texel is a pure function of the inputs
+// AT THAT TEXEL (a source-over fold of the sources covering it, or a per-texel
+// combine of other grids at the same place — `outdoors` is read by WORLD
+// POSITION, which `preimageRect` inverts exactly). A texel outside the dirty
+// rect therefore has the same inputs as last time and the same output; a texel
+// inside is recomputed with the identical code the full pass runs.
+
+/** @typedef {{x0: number, y0: number, x1: number, y1: number}} CellRect - an INCLUSIVE range of grid cells. `null` = no cells. */
+
+/** @param {CellRect|null} a @param {CellRect|null} b @returns {CellRect|null} */
+function rectUnion(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  return { x0: Math.min(a.x0, b.x0), y0: Math.min(a.y0, b.y0), x1: Math.max(a.x1, b.x1), y1: Math.max(a.y1, b.y1) };
+}
+
+/** @param {MaskGridSpec} spec @returns {CellRect} */
+function fullRect(spec) {
+  return { x0: 0, y0: 0, x1: spec.w - 1, y1: spec.h - 1 };
+}
+
+/** @param {MaskStamp|null} stamp @returns {CellRect|null} */
+function stampRect(stamp) {
+  return stamp ? { x0: stamp.gx0, y0: stamp.gy0, x1: stamp.gx0 + stamp.w - 1, y1: stamp.gy0 + stamp.h - 1 } : null;
+}
+
+/** The grid cells a placement can reach, or null when it reaches none. @param {object} placement @param {MaskGridSpec} spec @returns {CellRect|null} */
+function placementRect(placement, spec) {
+  const { gx0, gx1, gy0, gy1 } = footprintCellRange(placement, spec);
+  return gx1 >= gx0 && gy1 >= gy0 ? { x0: gx0, y0: gy0, x1: gx1, y1: gy1 } : null;
+}
+
+/** @param {MaskGrid} grid @param {CellRect} rect @param {number} byte */
+function fillRect(grid, rect, byte) {
+  const w = grid.spec.w;
+  for (let y = rect.y0; y <= rect.y1; y++) grid.data.fill(byte, y * w + rect.x0, y * w + rect.x1 + 1);
+}
+
+/**
+ * The destination cells whose world position falls in a SOURCE-grid rect — the
+ * inverse of `worldIndexMap`, so a change to `outdoors` (shared resolution) can be
+ * carried to the caster-resolution grids that read it by world position. The
+ * mapping is monotone per axis, so the preimage of a range is a range.
+ * @param {{col: Int32Array, srow: Int32Array}} map @param {CellRect} rect
+ * @param {MaskGridSpec} dst @returns {CellRect|null}
+ */
+function preimageRect(map, rect, dst) {
+  let x0 = -1;
+  let x1 = -1;
+  for (let gx = 0; gx < dst.w; gx++) {
+    const c = map.col[gx];
+    if (c >= rect.x0 && c <= rect.x1) {
+      if (x0 < 0) x0 = gx;
+      x1 = gx;
+    }
+  }
+  let y0 = -1;
+  let y1 = -1;
+  for (let gy = 0; gy < dst.h; gy++) {
+    const r = map.srow[gy];
+    if (r >= rect.y0 && r <= rect.y1) {
+      if (y0 < 0) y0 = gy;
+      y1 = gy;
+    }
+  }
+  return x0 < 0 || y0 < 0 ? null : { x0, y0, x1, y1 };
+}
+
+/**
+ * Which sources differ between two draw-ordered lists — but only when the
+ * difference is ADDITIONS and REMOVALS that leave every surviving source's
+ * relative order alone, the one shape a stage can patch by redoing a region.
+ * Anything else (a reorder, a repeated token) returns null: rebuild the grid.
+ * @returns {Array<object>|null} added sources (from `nextSources`) and removed
+ *   sources (from `prevSources`, so their OLD footprint is repainted too).
+ */
+function changedSources(prevTokens, prevSources, nextTokens, nextSources) {
+  if (new Set(prevTokens).size !== prevTokens.length || new Set(nextTokens).size !== nextTokens.length) return null;
+  const nextIndex = new Map(nextTokens.map((t, i) => [t, i]));
+  const prevIndex = new Map(prevTokens.map((t, i) => [t, i]));
+  const changed = [];
+  let lastNext = -1;
+  for (let i = 0; i < prevTokens.length; i++) {
+    const j = nextIndex.get(prevTokens[i]);
+    if (j === undefined) {
+      changed.push(prevSources[i]);
+      continue;
+    }
+    if (j < lastNext) return null;
+    lastNext = j;
+  }
+  for (let j = 0; j < nextTokens.length; j++) if (!prevIndex.has(nextTokens[j])) changed.push(nextSources[j]);
+  return changed;
+}
+
+/**
+ * `rasterizeAuthored`, patching the previous grid instead of rebuilding it when
+ * the source list only gained/lost members: the cells under the changed sources'
+ * footprints are reset to the absent value and recomposited from EVERY source
+ * (clipped to that region); every other cell keeps last time's value, which is
+ * what a full rebuild would have written there.
+ *
+ * @param {MaskGridSpec} spec @param {Array<object>} sources @param {number} absentValue
+ * @param {string[]} tokens - `sourceTokens(sources)`.
+ * @param {{grid: MaskGrid, tokens: string[], sources: Array<object>}|null} prev - the last result for the SAME spec and absent value.
+ * @returns {{grid: MaskGrid, region: CellRect|null}} `region` = the cells that may differ from `prev.grid`
+ *   (the whole grid when there was nothing to patch; null when nothing in the grid changed, in which
+ *   case `grid` IS `prev.grid`).
+ */
+function rasterizeAuthoredIncremental(spec, sources, absentValue, tokens, prev) {
+  if (prev) {
+    const changed = changedSources(prev.tokens, prev.sources, tokens, sources);
+    if (changed) {
+      let region = null;
+      // A source with no content or placement is skipped by the rasterizer, added or removed alike.
+      for (const s of changed)
+        if (s?.content && s?.placement) region = rectUnion(region, placementRect(s.placement, spec));
+      if (!region) return { grid: prev.grid, region: null };
+      const grid = copyGrid(prev.grid);
+      fillRect(grid, region, absentByteOf(absentValue));
+      compositeSources(grid, sources, region);
+      return { grid, region };
+    }
+  }
+  return { grid: rasterizeAuthored(spec, sources, absentValue), region: fullRect(spec) };
+}
+
 /**
  * The stage of a floor's derivation that depends on its `_Outdoors` grid and its
  * composites: `skyReach`, the building channel, the exterior-gated overhead
  * channel and the merged height field. Pure of its inputs, so the caller
- * memoises it on the identity of those inputs.
+ * memoises it on the identity of those inputs — and, given the PREVIOUS result
+ * and the rects the inputs changed in, patches it instead of rebuilding it.
  *
  * ⚠️ WORLD-SAMPLED, NOT INDEX-ALIGNED (2026-07-30, casterGridDim). `outdoors`
  * always rasterizes at the SHARED `gridSpec` — it serves water/wind/etc. too,
@@ -1362,17 +1546,52 @@ function tokensEqual(a, b) {
  * world texel in each. `worldIndexMap` looks `outdoors` up by WORLD POSITION
  * (it is `sampleMaskGridWorld` hoisted out of the texel loop), which is correct
  * at any relative resolution and costs a table lookup when the two match.
+ *
+ * Four independent output groups, each recomputed only where ITS inputs moved
+ * (and shared with the previous result, untouched, where they did not — a grid
+ * is never edited once published):
+ *   sky       outdoors + cover                       (shared resolution)
+ *   building  outdoors                               (caster resolution)
+ *   overhead  raw overhead grids + outdoors          (caster resolution)
+ *   height    building + overhead + sky-reach height (caster resolution)
+ *
+ * @param {object} args
+ * @param {object|null} args.prev - the previous gate result (same structure), or null for a full build.
+ * @param {{cover: CellRect|null, sky: CellRect|null, overhead: CellRect|null, outdoors: CellRect|null}} [args.dirty] -
+ *   what changed since `prev`: `cover`/`outdoors` in SHARED cells, `sky`/`overhead` (the raw sky-reach
+ *   height and overhead composites) in CASTER cells. Ignored without `prev`.
  */
-function deriveGateProducts({ gridSpec, casterSpecActive, outdoors, comp, buildingByte }) {
-  const sky = createMaskGrid(gridSpec);
-  for (let i = 0; i < sky.data.length; i++) {
-    sky.data[i] = Math.round((outdoors.data[i] * (255 - comp.cover.data[i])) / 255);
-  }
-
+function deriveGateProducts({ gridSpec, casterSpecActive, outdoors, comp, buildingByte, prev = null, dirty = null }) {
+  const gw = gridSpec.w;
   const w = casterSpecActive.w;
-  const h = casterSpecActive.h;
   const map = worldIndexMap(casterSpecActive, outdoors.spec);
   const od = outdoors.data;
+  const hasBuilding = buildingByte >= 0;
+  const hasOverhead = comp.hasOverhead;
+
+  // The REGION each group must recompute. Without a predecessor that is everything.
+  const rOutdoors = prev
+    ? dirty.outdoors
+      ? preimageRect(map, dirty.outdoors, casterSpecActive)
+      : null
+    : fullRect(casterSpecActive);
+  const rSky = prev ? rectUnion(dirty.cover, dirty.outdoors) : fullRect(gridSpec);
+  const rBuilding = hasBuilding ? rOutdoors : null;
+  const rOverhead = hasOverhead ? (prev ? rectUnion(dirty.overhead, rOutdoors) : fullRect(casterSpecActive)) : null;
+  const rHeight = prev ? rectUnion(rectUnion(rBuilding, rOverhead), dirty.sky) : fullRect(casterSpecActive);
+
+  // A group's grids: fresh zeros for a full build; the predecessor's, SHARED when its region is empty;
+  // otherwise a private copy for the region pass to patch.
+  const own = (prevGrid, region, spec) => (!prev ? createMaskGrid(spec) : region ? copyGrid(prevGrid) : prevGrid);
+
+  const sky = own(prev?.sky, rSky, gridSpec);
+  if (rSky) {
+    const cd = comp.cover.data;
+    for (let y = rSky.y0; y <= rSky.y1; y++) {
+      let i = y * gw + rSky.x0;
+      for (let x = rSky.x0; x <= rSky.x1; x++, i++) sky.data[i] = Math.round((od[i] * (255 - cd[i])) / 255);
+    }
+  }
 
   // THE BUILDING CHANNEL — the dark of `_Outdoors` IS the building footprint.
   // No item, no alpha, no elevation: the author already painted where the
@@ -1384,18 +1603,20 @@ function deriveGateProducts({ gridSpec, casterSpecActive, outdoors, comp, buildi
   // half-covered texel casts a half-strength shadow, which is what a soft
   // threshold at a door should be. It used to scale the HEIGHT instead, which
   // made that same doorway a half-height wall casting a half-LENGTH shadow.
-  const coverBuilding = createMaskGrid(casterSpecActive);
-  const casterBuilding = createMaskGrid(casterSpecActive);
-  if (buildingByte >= 0) {
-    for (let gy = 0; gy < h; gy++) {
+  const coverBuilding = own(prev?.coverBuilding, rBuilding, casterSpecActive);
+  const casterBuilding = own(prev?.casterBuilding, rBuilding, casterSpecActive);
+  if (rBuilding) {
+    const cb = coverBuilding.data;
+    const bd = casterBuilding.data;
+    for (let gy = rBuilding.y0; gy <= rBuilding.y1; gy++) {
       const rowBase = map.row[gy];
-      for (let gx = 0; gx < w; gx++) {
-        const i = gy * w + gx;
+      let i = gy * w + rBuilding.x0;
+      for (let gx = rBuilding.x0; gx <= rBuilding.x1; gx++, i++) {
         const c = map.col[gx];
         const outdoorsByte = rowBase < 0 || c < 0 ? 255 : od[rowBase + c];
         const indoorness = 255 - outdoorsByte;
-        coverBuilding.data[i] = indoorness;
-        casterBuilding.data[i] = indoorness >= HEIGHT_COVERAGE_THRESHOLD ? buildingByte : 0;
+        cb[i] = indoorness;
+        bd[i] = indoorness >= HEIGHT_COVERAGE_THRESHOLD ? buildingByte : 0;
       }
     }
   }
@@ -1421,26 +1642,30 @@ function deriveGateProducts({ gridSpec, casterSpecActive, outdoors, comp, buildi
   // fails — never to the height directly, which would re-create the
   // alpha×height coupling this rethink exists to remove.
   //
-  // The composites are NOT mutated: gating works on COPIES, because the raw
-  // (pre-gate) grids are the cached composite stage's own and the next derive
-  // may need to re-gate them against a different `outdoors`.
+  // The raw composites are NOT mutated: they are the cached composite stage's
+  // own, and the next derive may need to re-gate them against a different
+  // `outdoors`. With no overhead item the raw grids (all zero) ARE the gated ones.
   let coverOverhead = comp.coverOverhead;
   let casterOverhead = comp.casterOverhead;
-  if (comp.hasOverhead) {
-    coverOverhead = copyGrid(comp.coverOverhead);
-    casterOverhead = copyGrid(comp.casterOverhead);
-    const cov = coverOverhead.data;
-    const cas = casterOverhead.data;
-    for (let gy = 0; gy < h; gy++) {
-      const rowBase = map.row[gy];
-      for (let gx = 0; gx < w; gx++) {
-        const i = gy * w + gx;
-        const c = map.col[gx];
-        const outdoorsByte = rowBase < 0 || c < 0 ? 255 : od[rowBase + c];
-        const isExterior = outdoorsByte >= OVERHEAD_EXTERIOR_THRESHOLD;
-        const gated = isExterior ? cov[i] : 0;
-        cov[i] = gated;
-        if (gated < HEIGHT_COVERAGE_THRESHOLD) cas[i] = 0;
+  if (hasOverhead) {
+    coverOverhead = own(prev?.coverOverhead, rOverhead, casterSpecActive);
+    casterOverhead = own(prev?.casterOverhead, rOverhead, casterSpecActive);
+    if (rOverhead) {
+      const rawCov = comp.coverOverhead.data;
+      const rawCas = comp.casterOverhead.data;
+      const cov = coverOverhead.data;
+      const cas = casterOverhead.data;
+      for (let gy = rOverhead.y0; gy <= rOverhead.y1; gy++) {
+        const rowBase = map.row[gy];
+        let i = gy * w + rOverhead.x0;
+        for (let gx = rOverhead.x0; gx <= rOverhead.x1; gx++, i++) {
+          const c = map.col[gx];
+          const outdoorsByte = rowBase < 0 || c < 0 ? 255 : od[rowBase + c];
+          const isExterior = outdoorsByte >= OVERHEAD_EXTERIOR_THRESHOLD;
+          const gated = isExterior ? rawCov[i] : 0;
+          cov[i] = gated;
+          cas[i] = gated < HEIGHT_COVERAGE_THRESHOLD ? 0 : rawCas[i];
+        }
       }
     }
   }
@@ -1450,15 +1675,21 @@ function deriveGateProducts({ gridSpec, casterSpecActive, outdoors, comp, buildi
   // shadows stacked, it is the tallest of the three. This is the same
   // reasoning `combineVisibility` uses for min-combining visibility, one
   // level down.
-  const casterHeight = createMaskGrid(casterSpecActive);
-  const bData = casterBuilding.data;
-  const oData = casterOverhead.data;
-  const sData = comp.casterSkyReach.data;
-  for (let i = 0; i < casterHeight.data.length; i++) {
-    const b = bData[i];
-    const o = oData[i];
-    const s = sData[i];
-    casterHeight.data[i] = b > o ? (b > s ? b : s) : o > s ? o : s;
+  const casterHeight = own(prev?.casterHeight, rHeight, casterSpecActive);
+  if (rHeight) {
+    const bData = casterBuilding.data;
+    const oData = casterOverhead.data;
+    const sData = comp.casterSkyReach.data;
+    const hData = casterHeight.data;
+    for (let gy = rHeight.y0; gy <= rHeight.y1; gy++) {
+      let i = gy * w + rHeight.x0;
+      for (let gx = rHeight.x0; gx <= rHeight.x1; gx++, i++) {
+        const b = bData[i];
+        const o = oData[i];
+        const s = sData[i];
+        hData[i] = b > o ? (b > s ? b : s) : o > s ? o : s;
+      }
+    }
   }
   return { sky, coverBuilding, casterBuilding, coverOverhead, casterOverhead, casterHeight };
 }
@@ -1716,17 +1947,38 @@ export function deriveFloorProducts({
     stats.composites[compMode]++;
     if (compMode !== 'hit') {
       const base = compMode === 'append' ? comp : null;
-      const cover = base ? copyGrid(base.cover) : createMaskGrid(gridSpec);
-      const coverCaster = casterGridSpec
-        ? base
-          ? copyGrid(base.coverCaster)
-          : createMaskGrid(casterSpecActive)
-        : cover;
-      const coverSkyReach = base ? copyGrid(base.coverSkyReach) : createMaskGrid(casterSpecActive);
-      const casterSkyReach = base ? copyGrid(base.casterSkyReach) : createMaskGrid(casterSpecActive);
-      const coverOverhead = base ? copyGrid(base.coverOverhead) : createMaskGrid(casterSpecActive);
-      const casterOverhead = base ? copyGrid(base.casterOverhead) : createMaskGrid(casterSpecActive);
+      let cover = base ? base.cover : createMaskGrid(gridSpec);
+      let coverCaster = base ? base.coverCaster : casterGridSpec ? createMaskGrid(casterSpecActive) : cover;
+      let coverSkyReach = base ? base.coverSkyReach : createMaskGrid(casterSpecActive);
+      let casterSkyReach = base ? base.casterSkyReach : createMaskGrid(casterSpecActive);
+      let coverOverhead = base ? base.coverOverhead : createMaskGrid(casterSpecActive);
+      let casterOverhead = base ? base.casterOverhead : createMaskGrid(casterSpecActive);
+      if (base) {
+        // COPY ONLY WHAT THE NEW OPS WRITE. A published grid is never edited, so every grid the
+        // delta does not touch is SHARED with the previous generation — which is also what lets a
+        // consumer that compares grids by identity (the sun-shadow pack) see "unchanged".
+        if (deltaOps.some((op) => op.above)) {
+          const aliased = base.coverCaster === base.cover;
+          cover = copyGrid(base.cover);
+          coverCaster = aliased ? cover : copyGrid(base.coverCaster);
+          if (wantSkyReach) casterSkyReach = copyGrid(base.casterSkyReach);
+        }
+        if (deltaOps.some((op) => !op.above)) {
+          coverOverhead = copyGrid(base.coverOverhead);
+          casterOverhead = copyGrid(base.casterOverhead);
+        }
+      }
+      // `coverSkyReach` IS `coverCaster`: both are the MAX of the same alpha stamps (every "above" item) at the
+      // same resolution, so their bytes are equal by construction — one merge, one buffer, two grid objects.
+      // (A published grid is never edited, so sharing the buffer cannot leak one grid's writes into the other.)
+      if (wantSkyReach && (!base || coverCaster !== base.coverCaster)) {
+        coverSkyReach = { spec: casterSpecActive, data: coverCaster.data };
+      }
       let hasOverhead = base ? base.hasOverhead : false;
+      // The cells this generation touched: `cover` in SHARED cells, the other two in CASTER cells.
+      let dirtyCover = null;
+      let dirtySky = null;
+      let dirtyOverhead = null;
       for (const op of deltaOps) {
         const stampShared = memo.stamp(gridSpec, gridKey, op.alpha, op.placement, wantHeights);
         const stampCaster = casterGridSpec
@@ -1734,15 +1986,17 @@ export function deriveFloorProducts({
           : stampShared;
         if (op.above) {
           mergeMaxStamp(cover, stampShared);
+          dirtyCover = rectUnion(dirtyCover, stampRect(stampShared));
           if (coverCaster !== cover) mergeMaxStamp(coverCaster, stampCaster);
           if (wantSkyReach) {
-            mergeMaxStamp(coverSkyReach, stampCaster);
             mergeHeightStamp(casterSkyReach, stampCaster, heightMergeValue(op.hb));
+            dirtySky = rectUnion(dirtySky, stampRect(stampCaster));
           }
         } else {
           hasOverhead = true;
           mergeMaxStamp(coverOverhead, stampCaster);
           mergeHeightStamp(casterOverhead, stampCaster, heightMergeValue(op.hb));
+          dirtyOverhead = rectUnion(dirtyOverhead, stampRect(stampCaster));
         }
       }
       comp = fm.composites = {
@@ -1756,6 +2010,11 @@ export function deriveFloorProducts({
         coverOverhead,
         casterOverhead,
         hasOverhead,
+        // What differs from generation `fromUid` (0 = a rebuild: nothing to patch from).
+        fromUid: base ? base.uid : 0,
+        dirtyCover,
+        dirtySky,
+        dirtyOverhead,
       };
     }
     const { cover, coverCaster, coverSkyReach, casterSkyReach } = comp;
@@ -1766,22 +2025,46 @@ export function deriveFloorProducts({
     // at whichever resolution THEY were built at, and nothing downstream reads
     // it at caster resolution the way the layer-smear pack reads `outdoors` and
     // `coverAbove` directly.
-    const outdoorsTokens = sourceTokens(floor.outdoors, memo);
+    const outdoorsSources = floor.outdoors ?? [];
+    const outdoorsTokens = sourceTokens(outdoorsSources, memo);
     const outdoorsKey = `${gridKey}|${casterGridSpec ? casterKey : ''}|${outdoorsAbsentValue}`;
     let om = fm.outdoors;
     if (om && om.key === outdoorsKey && tokensEqual(om.tokens, outdoorsTokens)) {
       stats.outdoors.hit++;
     } else {
       stats.outdoors.miss++;
-      const outdoors = rasterizeAuthored(gridSpec, floor.outdoors, outdoorsAbsentValue);
+      const prevOutdoors = om && om.key === outdoorsKey ? om : null;
+      const shared = rasterizeAuthoredIncremental(
+        gridSpec,
+        outdoorsSources,
+        outdoorsAbsentValue,
+        outdoorsTokens,
+        prevOutdoors && { grid: prevOutdoors.outdoors, tokens: prevOutdoors.tokens, sources: prevOutdoors.sources }
+      );
+      const caster = casterGridSpec
+        ? rasterizeAuthoredIncremental(
+            casterSpecActive,
+            outdoorsSources,
+            outdoorsAbsentValue,
+            outdoorsTokens,
+            prevOutdoors && {
+              grid: prevOutdoors.outdoorsCaster,
+              tokens: prevOutdoors.tokens,
+              sources: prevOutdoors.sources,
+            }
+          )
+        : shared;
       om = fm.outdoors = {
         uid: memo.uid(),
         key: outdoorsKey,
         tokens: outdoorsTokens,
-        outdoors,
-        outdoorsCaster: casterGridSpec
-          ? rasterizeAuthored(casterSpecActive, floor.outdoors, outdoorsAbsentValue)
-          : outdoors,
+        sources: outdoorsSources,
+        outdoors: shared.grid,
+        outdoorsCaster: caster.grid,
+        // The `outdoors` grid this one was patched from (0 = rebuilt from nothing), and the SHARED
+        // cells that may differ from it: the gate patches its own outputs from exactly that.
+        fromOutdoorsId: prevOutdoors ? memo.idOf(prevOutdoors.outdoors) : 0,
+        dirtyShared: shared.region,
         // ⚠️ WHAT ACTUALLY FED `outdoors`, per source. `outdoorsSource` below says
         // only "authored vs default"; when a floor's grid comes out wrong this
         // says WHICH of its sources did it. See `describeAuthoredSources`.
@@ -1807,18 +2090,23 @@ export function deriveFloorProducts({
     for (const kindId of authoredKinds) {
       const input = floor.authored[kindId];
       const kindGridSpec = authoredGridSpecs[kindId] ?? gridSpec;
-      const tokens = sourceTokens(input?.sources, memo);
-      const key = `${specKey(kindGridSpec)}|${input?.absentValue ?? 0}`;
+      const kindSources = input?.sources ?? [];
+      const absentValue = input?.absentValue ?? 0;
+      const tokens = sourceTokens(kindSources, memo);
+      const key = `${specKey(kindGridSpec)}|${absentValue}`;
       let km = fm.authored.get(kindId);
       if (km && km.key === key && tokensEqual(km.tokens, tokens)) {
         stats.authored.hit++;
       } else {
         stats.authored.miss++;
+        // A source arriving or leaving repaints only the cells under it (see `rasterizeAuthoredIncremental`).
+        const prevKind = km && km.key === key ? km : null;
         km = {
           uid: memo.uid(),
           key,
           tokens,
-          grid: rasterizeAuthored(kindGridSpec, input?.sources, input?.absentValue ?? 0),
+          sources: kindSources,
+          grid: rasterizeAuthoredIncremental(kindGridSpec, kindSources, absentValue, tokens, prevKind).grid,
         };
         fm.authored.set(kindId, km);
       }
@@ -1852,16 +2140,46 @@ export function deriveFloorProducts({
 
     // ── STAGE: GATE (sky, building, gated overhead, merged height) ────────────
     if (buildingByte >= 0 && buildingByte > maxCasterByte) maxCasterByte = buildingByte;
-    const gateKey = [casterKey, buildingByte, memo.idOf(outdoors), comp.uid].join('|');
+    const outdoorsId = memo.idOf(outdoors);
+    const gateStruct = `${casterKey}|${buildingByte}`;
     let gm = fm.gate;
-    if (gm && gm.key === gateKey) {
+    if (gm && gm.struct === gateStruct && gm.compUid === comp.uid && gm.outdoorsId === outdoorsId) {
       stats.gate.hit++;
     } else {
       stats.gate.miss++;
+      // PATCH, DON'T REBUILD. Each input either did not change since the gate was last
+      // computed, or changed by exactly ONE generation — and its stage recorded the cell
+      // rect that generation touched. Anything else (a spec/building change, a skipped
+      // generation, a composite rebuild) rebuilds in full.
+      const compSame = !!gm && gm.compUid === comp.uid;
+      const outdoorsSame = !!gm && gm.outdoorsId === outdoorsId;
+      const patchable =
+        !!gm &&
+        gm.struct === gateStruct &&
+        (compSame || comp.fromUid === gm.compUid) &&
+        (outdoorsSame || om.fromOutdoorsId === gm.outdoorsId);
+      if (patchable) stats.gate.partial++;
       gm = fm.gate = {
         uid: memo.uid(),
-        key: gateKey,
-        ...deriveGateProducts({ gridSpec, casterSpecActive, outdoors, comp, buildingByte }),
+        struct: gateStruct,
+        compUid: comp.uid,
+        outdoorsId,
+        ...deriveGateProducts({
+          gridSpec,
+          casterSpecActive,
+          outdoors,
+          comp,
+          buildingByte,
+          prev: patchable ? gm : null,
+          dirty: patchable
+            ? {
+                cover: compSame ? null : comp.dirtyCover,
+                sky: compSame ? null : comp.dirtySky,
+                overhead: compSame ? null : comp.dirtyOverhead,
+                outdoors: outdoorsSame ? null : om.dirtyShared,
+              }
+            : null,
+        }),
       };
     }
 
@@ -1985,7 +2303,9 @@ export function sampleMaskGridWorld(grid, wx, wy) {
  * for the same pair every time.
  *
  * @param {MaskGridSpec} dst @param {MaskGridSpec} src
- * @returns {{col: Int32Array, row: Int32Array}}
+ * `srow[gy]` is the same row WITHOUT the multiply (the source row index), which `preimageRect` inverts.
+ *
+ * @returns {{col: Int32Array, row: Int32Array, srow: Int32Array}}
  */
 export function worldIndexMap(dst, src) {
   const key = `${specKey(dst)}>${specKey(src)}`;
@@ -1998,12 +2318,15 @@ export function worldIndexMap(dst, src) {
     col[gx] = sx >= 0 && sx < src.w ? sx : -1;
   }
   const row = new Int32Array(dst.h);
+  const srow = new Int32Array(dst.h);
   for (let gy = 0; gy < dst.h; gy++) {
     const wy = dst.y + (gy + 0.5) * dst.texelH;
     const sy = Math.floor((wy - src.y) / src.texelH);
-    row[gy] = sy >= 0 && sy < src.h ? sy * src.w : -1;
+    const inside = sy >= 0 && sy < src.h;
+    row[gy] = inside ? sy * src.w : -1;
+    srow[gy] = inside ? sy : -1;
   }
-  const map = { col, row };
+  const map = { col, row, srow };
   // Specs only change on a tier switch or a scene change; a handful of pairs is every pair that is ever live.
   if (WORLD_INDEX_MAPS.size >= 16) WORLD_INDEX_MAPS.delete(WORLD_INDEX_MAPS.keys().next().value);
   WORLD_INDEX_MAPS.set(key, map);

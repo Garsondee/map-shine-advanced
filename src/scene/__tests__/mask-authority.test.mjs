@@ -1242,14 +1242,46 @@ export async function run(t) {
     );
     t.ok('…exactly once', cacheAuthority.getProductsVersion() === cacheV2);
 
-    // A different ingest of the SAME content (a re-decode) is a new object, so it is a real change too.
-    const stats = cacheAuthority.getBakeStats().derive;
+    // A RE-DECODE OF THE SAME BYTES (a pack page evicted and decoded again, a warm scene re-entry) is an offer
+    // that changes nothing: it must not replace the ingest, bump the version or rebuild a floor.
+    const decodedBefore = cacheAuthority.getBakeStats();
     cacheAuthority.ingestItemAlpha({ ownerId: 'tile:CT', grid: solidAlpha(255), imageWidth: 100, imageHeight: 100 });
-    cacheAuthority.getProductsVersion();
     t.ok(
-      'a re-ingest of an item replaces its art and rebuilds the floors that art reaches (max-composites cannot be un-merged)',
+      'a byte-identical re-ingest is recognised as nothing: no version bump, no recompute work, counted',
+      cacheAuthority.getProductsVersion() === cacheV2 &&
+        cacheAuthority.getReport().ingest.alphaUnchanged === 1 &&
+        cacheAuthority.getBakeStats().bakeRuns === decodedBefore.bakeRuns + 0
+    );
+
+    // DIFFERENT bytes for the same item REPLACE its art: not a superset of last time, so the floors it reaches
+    // must REBUILD (max-composites cannot be un-merged) — and the version moves.
+    const stats = cacheAuthority.getBakeStats().derive;
+    cacheAuthority.ingestItemAlpha({ ownerId: 'tile:CT', grid: solidAlpha(120), imageWidth: 100, imageHeight: 100 });
+    t.ok('re-ingesting DIFFERENT art bumps the version', cacheAuthority.getProductsVersion() > cacheV2);
+    t.ok(
+      '…and rebuilds the floors that art reaches',
       cacheAuthority.getBakeStats().derive.composites.rebuild > stats.composites.rebuild
     );
+    // The same item moved (same bytes, new placement) is a change too: the footprint is part of the ingest.
+    cachePlacements['tile:CT'] = { x: 60, y: 60, width: 50, height: 50 };
+    const beforeMove = cacheAuthority.getProductsVersion();
+    cacheAuthority.ingestItemAlpha({ ownerId: 'tile:CT', grid: solidAlpha(120), imageWidth: 100, imageHeight: 100 });
+    t.ok('the same bytes at a new placement are a real change', cacheAuthority.getProductsVersion() > beforeMove);
+
+    // The painter's Save re-ingests EVERY in-memory layer, changed or not. An unchanged one must cost nothing.
+    const paintSpec = { x: 0, y: 0, width: 100, height: 100, w: 8, h: 8 };
+    const paint = new Uint8Array(64);
+    paint[10] = 200;
+    cacheAuthority.ingestPaintedMask(0, 'fire', { spec: paintSpec, data: paint });
+    const afterPaint = cacheAuthority.getProductsVersion();
+    cacheAuthority.ingestPaintedMask(0, 'fire', { spec: { ...paintSpec }, data: paint.slice() });
+    t.ok(
+      're-saving an unchanged painted layer is recognised as nothing (no version bump)',
+      cacheAuthority.getProductsVersion() === afterPaint
+    );
+    paint[11] = 90;
+    cacheAuthority.ingestPaintedMask(0, 'fire', { spec: paintSpec, data: paint });
+    t.ok('a changed painted layer is a real change', cacheAuthority.getProductsVersion() > afterPaint);
 
     // reset() drops the cache: the previous scene's ingests must never serve the next scene.
     cacheAuthority.reset({

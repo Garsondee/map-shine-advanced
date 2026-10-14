@@ -65,6 +65,10 @@ export const FLAME_SHAPE = Object.freeze({
   lenMax: 0.48,
   /** How sharp the length limiter's knee is — higher stays linear for longer. */
   lenOrder: 6,
+  /** Tip exponent when the flame points AT the camera: equal to `profileBottom`, so the outline is a circle. */
+  profileTipRound: 0.5,
+  /** sin(tilt) can never reach 1 — a flame cannot project longer than it is, and the limit keeps the maths finite. */
+  maxSinTilt: 0.985,
 });
 
 /** The `s` at which the profile is widest. */
@@ -76,13 +80,45 @@ export const FLAME_PROFILE_NORM =
 
 /**
  * The flame's half-width at height `s` (0 = bottom of the bulb, 1 = tip), as a
- * fraction of `baseRadius`: 0 at both ends, exactly 1 at its widest.
- * @param {number} s @returns {number}
+ * fraction of `baseRadius`: 0 at both ends, exactly 1 at its widest. `tipExponent`
+ * morphs the outline (see `flameProfileTipExponent`); the maximum stays exactly 1.
+ * @param {number} s @param {number} [tipExponent] @returns {number}
  */
-export function flameHalfWidth01(s) {
+export function flameHalfWidth01(s, tipExponent = FLAME_SHAPE.profileTip) {
   const x = Number(s);
   if (!(x > 0 && x < 1)) return 0;
-  return FLAME_PROFILE_NORM * x ** FLAME_SHAPE.profileBottom * (1 - x) ** FLAME_SHAPE.profileTip;
+  const b = FLAME_SHAPE.profileBottom;
+  const peak = b / (b + tipExponent);
+  const norm = 1 / (peak ** b * (1 - peak) ** tipExponent);
+  return norm * x ** b * (1 - x) ** tipExponent;
+}
+
+/**
+ * THE FLAME AS A 3D OBJECT, seen from straight above. It has a true length and a
+ * tilt off vertical; the top-down camera sees the PROJECTION of its tail,
+ * `trueLen · sin(tilt)`. Upright (the reach is 0) it points at the camera: a round
+ * bulb. Blown flat the reach approaches the true length: the whole flame shows.
+ * That foreshortening is why a leaning-toward-the-viewer flame is SHORTER on screen.
+ * @param {number} reachLen - the projected horizontal reach (quad fractions).
+ * @param {number} trueLen - the flame's real length (quad fractions).
+ * @returns {{sinTilt: number, cosTilt: number}}
+ */
+export function flameTilt(reachLen, trueLen) {
+  const r = Number(reachLen);
+  const t = Number(trueLen);
+  if (!(r > 0) || !(t > 0)) return { sinTilt: 0, cosTilt: 1 };
+  const sinTilt = Math.min(FLAME_SHAPE.maxSinTilt, r / t);
+  return { sinTilt, cosTilt: Math.sqrt(1 - sinTilt * sinTilt) };
+}
+
+/**
+ * The profile's tip exponent for a tilt: `profileTipRound` (a circle) end-on,
+ * `profileTip` (the pointed teardrop) when blown flat.
+ * @param {number} sinTilt @returns {number}
+ */
+export function flameProfileTipExponent(sinTilt) {
+  const s = Math.min(1, Math.max(0, Number(sinTilt) || 0));
+  return FLAME_SHAPE.profileTipRound + (FLAME_SHAPE.profileTip - FLAME_SHAPE.profileTipRound) * s;
 }
 
 /**

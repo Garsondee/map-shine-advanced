@@ -13,6 +13,8 @@ import {
   FLAME_PROFILE_PEAK_S,
   FLAME_PROFILE_NORM,
   flameHalfWidth01,
+  flameTilt,
+  flameProfileTipExponent,
   limitFlameLength,
   srgbToLinear,
   srgbHexToLinear,
@@ -750,6 +752,58 @@ export function run(t) {
       Number.isFinite(FLAME_PROFILE_NORM) && FLAME_PROFILE_NORM > 1
     );
     ok('FLAME_SHAPE is frozen — the shader and the tests can never disagree by mutation', Object.isFrozen(FLAME_SHAPE));
+  }
+
+  // --- THE 3D POSE — a flame seen from above is a PROJECTION (author, 2026-10-14) ---
+  {
+    const up = flameTilt(0, 0.4);
+    ok('no reach = upright: sin 0, cos 1 (pointing at the camera)', up.sinTilt === 0 && up.cosTilt === 1);
+    ok(
+      'the projected tail is trueLen·sin(tilt): a reach of half the length is 30°',
+      approx(flameTilt(0.2, 0.4).sinTilt, 0.5) && approx(Math.asin(flameTilt(0.2, 0.4).sinTilt), Math.PI / 6, 1e-9)
+    );
+    const flat = flameTilt(5, 0.4);
+    ok(
+      'a flame can never project longer than it is (sin capped below 1)',
+      flat.sinTilt === FLAME_SHAPE.maxSinTilt && flat.cosTilt > 0
+    );
+    let unit = true;
+    let mono = true;
+    let last = -1;
+    for (let r = 0; r <= 0.6; r += 0.01) {
+      const { sinTilt, cosTilt } = flameTilt(r, 0.4);
+      unit = unit && approx(sinTilt * sinTilt + cosTilt * cosTilt, 1, 1e-9);
+      mono = mono && sinTilt >= last;
+      last = sinTilt;
+    }
+    ok('sin² + cos² = 1 everywhere', unit);
+    ok('a longer reach never gives a LESS tilted flame (monotone)', mono);
+    ok(
+      'degenerate inputs read as upright, never NaN',
+      flameTilt(NaN, 0.4).sinTilt === 0 && flameTilt(0.2, 0).cosTilt === 1 && flameTilt(-1, 0.4).sinTilt === 0
+    );
+
+    ok(
+      "end-on, the tip exponent equals the bottom's (so the outline is symmetric)",
+      flameProfileTipExponent(0) === FLAME_SHAPE.profileBottom
+    );
+    ok('blown flat, it is the pointed teardrop', flameProfileTipExponent(1) === FLAME_SHAPE.profileTip);
+    ok('in between it is monotone', flameProfileTipExponent(0.3) < flameProfileTipExponent(0.7));
+    // End-on the outline is exactly a CIRCLE: w(s) = sqrt(1 − (2s − 1)²), radius 1.
+    let circle = true;
+    for (let i = 1; i < 100; i++) {
+      const s = i / 100;
+      circle = circle && approx(flameHalfWidth01(s, flameProfileTipExponent(0)), Math.sqrt(1 - (2 * s - 1) ** 2), 1e-9);
+    }
+    ok('a flame pointing at the camera is a perfect circle', circle);
+    ok(
+      'the maximum stays exactly 1 at every tilt',
+      [0, 0.3, 0.6, 1].every((sn) => {
+        const e = flameProfileTipExponent(sn);
+        const peak = FLAME_SHAPE.profileBottom / (FLAME_SHAPE.profileBottom + e);
+        return approx(flameHalfWidth01(peak, e), 1, 1e-9);
+      })
+    );
   }
 
   // --- limitFlameLength — the smooth length limit (no clip at the quad edge) --

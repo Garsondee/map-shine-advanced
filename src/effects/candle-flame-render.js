@@ -49,7 +49,7 @@
 
 import { createWindHandle } from '../world/index.js';
 import { buildDepthHeightGateNode } from './lighting/point-light-illumination.js';
-import { computeCandleFlameArrays, FLAME_SHAPE, FLAME_PROFILE_NORM, srgbHexToLinear } from './candle-flame-geometry.js';
+import { computeCandleFlameArrays, FLAME_SHAPE, srgbHexToLinear } from './candle-flame-geometry.js';
 
 /**
  * THE TIER-0 FALLBACK HANDLE — a bake-less handle, so a caller that supplies
@@ -100,14 +100,26 @@ const TIER0_WIND_HANDLE = createWindHandle();
  * - the widest point lands at s ≈ 0.36, where the photos put it (0.37-0.46), and
  *   `norm` scales the maximum to exactly R.
  *
- * THE BEND. A wind-leaned flame is not a straight cone tilted off vertical —
- * it rises from the wick nearly upright and curls over (the sweeping lick in
- * the top-down photos). The chord runs wick → tip as before (so `uLean`, the
- * gust and the curl all keep steering the TIP exactly as they did); the
- * centre line is then bowed off that chord by a parabola that keeps the base
- * nearer vertical (`FLAME_ARC`), plus a per-candle sway and, at tier 2, a slow
- * travelling wave. All of it is a smooth offset in the across-the-flame
- * coordinate — no noise is ever added to the EDGE.
+ * THE 3D POSE (2026-10-14, author: "all of them are pointing north" — think of it as a
+ * fake 3D object that moves like a candle flame). The flame has a TRUE length and a tilt off
+ * vertical, and the top-down camera sees the PROJECTION of its tail, `trueLen · sin(tilt)`,
+ * toward an azimuth. Upright it points AT the camera and shows as a round bulb (the profile's
+ * tip exponent morphs to the bottom's, so the outline is exactly a circle); blown flat it shows
+ * its full length as the pointed teardrop. A flame that leans toward or away from the viewer
+ * therefore SHORTENS on screen, and one that leans across the view stretches. Nothing is
+ * "north" any more: each candle's rest azimuth comes from its position, and at tier >= 1 it
+ * DRIFTS slowly (a sheltered flame wanders in still air; measured: ~3 deg/s smoothed) while
+ * the tilt breathes. Wind adds a horizontal push on top, tilting the flame further and
+ * swinging it downwind. (An end-on flame is also brighter — you look down its core — and
+ * its bulb hangs lower.)
+ *
+ * THE BEND. The chord runs wick -> projected tip (so `uLean`, the gust and the curl all steer
+ * the flame); the centre line is then bowed off it by a per-candle sway and, at tier 2, a
+ * slow travelling wave, both scaled by how much of its side the flame shows (an end-on flame
+ * has no visible length to bend). All of it is a smooth offset in the across-the-flame
+ * coordinate — no noise is ever added to the EDGE. (There is no longer a "pull the base back
+ * toward vertical" arc: that assumed vertical is screen-north, but a flame's vertical is AT
+ * the camera, so its projected centre line is straight along the azimuth.)
  *
  * THE EDGE. Two terms, never one: a pixel-width antialiasing band taken from
  * the screen-space derivative of the edge distance (so a 24px flame and a 300px
@@ -122,19 +134,26 @@ const {
   profileTip: FLAME_PROFILE_TIP,
   lenMax: FLAME_LEN_MAX,
   lenOrder: FLAME_LEN_ORDER,
+  profileTipRound: FLAME_PROFILE_TIP_ROUND,
+  maxSinTilt: FLAME_MAX_SIN_TILT,
 } = FLAME_SHAPE;
-/** The resting spine's sideways bias (fraction of the quad). Zero: a calm flame
- * rises straight up; the wind, the curl and the sway lean it. */
-const FLAME_REST_CURL_X = 0.0;
 /** Edge softness: the soft falloff band's width as a fraction of the LOCAL
  * half-width. 0 = a knife edge; the photographs sit around 0.1-0.2. */
 const FLAME_EDGE_SOFT = 0.11;
 /** Antialiasing band, in screen pixels (of the edge's own derivative). */
 const FLAME_AA_PX = 1.1;
-/** The bend (see THE BEND). `ARC` = how far the base is pulled back toward
- * vertical on a leaned flame (0 = a straight tilted cone, 1 = base fully upright).
- * Sway and lick are tip offsets in quad fractions. */
-const FLAME_ARC = 0.5;
+/** THE 3D POSE (see the shader). A resting flame leans `REST_TILT` radians off vertical
+ * (so its projected tail is sin(35°) ≈ 0.57 of its true length), breathing by ±`REST_TILT_VAR`,
+ * toward an azimuth that wanders by ±`DRIFT_AZIMUTH` radians at `DRIFT_RATE`. `MAX_SIN_TILT`
+ * stops a flame projecting longer than it is, and `PROFILE_TIP_ROUND` (both from FLAME_SHAPE) is the
+ * tip exponent when it points at the camera (0.5 = a circle). `FACE_GAIN`: an end-on flame is brighter. */
+const FLAME_REST_TILT = 0.85;
+const FLAME_REST_TILT_VAR = 0.25;
+const FLAME_TILT_RATE = 0.15;
+const FLAME_DRIFT_AZIMUTH = 2.2;
+const FLAME_DRIFT_RATE = 0.028;
+const FLAME_FACE_GAIN = 0.25;
+/** The bend (see THE BEND): sway and lick are tip offsets in quad fractions. */
 const FLAME_SWAY_RATE = 0.8;
 const FLAME_SWAY_AMP = 0.07;
 const FLAME_LICK_AMP = 0.03; // tier 2: a slow S-wave that travels up the flame
@@ -414,10 +433,12 @@ export function buildCandleFlameGeometry(THREE, anchors, opts) {
  * HOW A FRAGMENT IS SHADED
  * ============================================================================
  *
+ * 0. THE POSE. True length (life envelope), rest tilt + drifting azimuth, plus the wind push,
+ *    give the projected reach; its ratio to the true length is sin(tilt) (see THE 3D POSE).
  * 1. THE FRAME. The tip vector (rest length from the life envelope + manual
  *    lean + wind lean + per-candle curl, then smoothly length-limited) defines
  *    a chord from the wick. `ax` is the distance along it, `lat` across it.
- * 2. THE BEND. The centre line is bowed off the chord (arc + sway + lick) —
+ * 2. THE BEND. The centre line is bowed off the chord (sway + lick) —
  *    `lat` becomes the distance from that bowed line.
  * 3. THE PROFILE. `w(s)` (see THE SHAPE) gives the half-width at this height;
  *    `f = |lat| − w` is the (signed) distance to the outline, negative inside.
@@ -446,7 +467,7 @@ export function buildCandleFlameGeometry(THREE, anchors, opts) {
  *   0 "low"      — a calm flame: a gentle per-candle emission flicker + a small
  *                  length pulse. No wind, no gutter, no sway. Cheapest.
  *   1 "standard" — full LIFE: chaotic flicker with cold gutter periods, wind
- *                  lean (coherent gust + per-candle curl), arc + sway, width and
+ *                  tilt (drifting rest lean + coherent gust + per-candle curl), sway, width and
  *                  length pulsing.
  *   2 "lavish"   — + a slow S-wave travelling up the flame (smooth, never at the
  *                  edge) — the flame licks.
@@ -494,6 +515,7 @@ export function buildCandleFlameMaterial({
     sqrt,
     exp,
     sin,
+    cos,
     fwidth,
     step,
     screenUV,
@@ -574,36 +596,6 @@ export function buildCandleFlameMaterial({
     life = clamp(float(0.5).add(nz(FLAME_LIFE_MID, float(0)).mul(float(0.22))), float(0), float(1));
   }
 
-  // THE TIP (wick → tip). A length that pulses with life (the flame elongating/
-  // shortening), plus — tier ≥1 — the wind lean + a per-candle curl (so
-  // neighbours' tips point differently), the whole thing elongating further
-  // with life. The wick end stays pinned at (0,0).
-  const restLen = float(FLAME_REST_LEN_BASE).add(life.mul(float(FLAME_REST_LEN_LIFE)));
-  let tip = uLean.add(vec2(float(FLAME_REST_CURL_X), restLen.negate()));
-  if (gust) {
-    const curl = vec2(nz(FLAME_CURL_RATE, float(3)), nz(FLAME_CURL_RATE, float(29)))
-      .mul(float(FLAME_CURL_AMP))
-      .mul(clamp(windExposure, float(0.25), float(1)));
-    const lean = gust
-      .add(curl)
-      .mul(float(FLAME_WIND_MAX))
-      .mul(uWindResponse)
-      .mul(float(1).add(life.mul(float(FLAME_TAIL_LIFE))));
-    tip = tip.add(lean);
-  }
-
-  // The tip as a chord: its length SMOOTHLY limited (the same expression as
-  // `limitFlameLength` in candle-flame-geometry.js, which the Node tests pin: it
-  // can never leave the quad), its direction and across-the-flame normal. `tipLen`
-  // replaces |tip| everywhere below; the direction is untouched, so the wind
-  // still steers exactly as before.
-  const tipLenRaw = max(length(tip), float(1e-4));
-  const tipLen = tipLenRaw.div(
-    pow(float(1).add(pow(tipLenRaw.div(float(FLAME_LEN_MAX)), float(FLAME_LEN_ORDER))), float(1 / FLAME_LEN_ORDER))
-  );
-  const dir = tip.div(tipLenRaw);
-  const nrm = vec2(dir.y.negate(), dir.x);
-
   // WIDTH — the bulb swells when alive, shrinks in the cold (tier ≥1).
   const sizeScale =
     quality >= 1
@@ -616,25 +608,75 @@ export function buildCandleFlameMaterial({
       : float(1);
   const baseR = float(FLAME_BASE_RADIUS).mul(sizeScale);
 
+  // THE FLAME AS A 3D OBJECT, seen from straight above. It has a TRUE length (the
+  // life envelope pulses it) and a tilt away from vertical; what the top-down camera
+  // sees of its tail is the PROJECTION, `trueLen · sin(tilt)`, along the azimuth the
+  // flame leans toward. Upright (tilt 0) it points AT the camera and shows as a round
+  // bulb; blown flat (tilt → 90°) it shows its full length. That foreshortening is the
+  // whole fake: a flame that leans toward or away from the viewer shortens, one that
+  // leans across the view stretches.
+  //   REST POSE — never "north": each candle has its own azimuth (from its position),
+  //   and at tier ≥1 it DRIFTS slowly (a sheltered flame wanders a little in the
+  //   still air, as a real one does) with a gently breathing tilt.
+  //   WIND — adds a horizontal push (the lean, in projected units) on top of the
+  //   rest pose: the flame tilts further and swings downwind.
+  const trueLen = float(FLAME_REST_LEN_BASE).add(life.mul(float(FLAME_REST_LEN_LIFE)));
+  let azimuth = seed.mul(float(2 * Math.PI));
+  let restTilt = float(FLAME_REST_TILT);
+  if (quality >= 1) {
+    azimuth = azimuth.add(nz(FLAME_DRIFT_RATE, float(91)).mul(float(FLAME_DRIFT_AZIMUTH)));
+    restTilt = restTilt.add(nz(FLAME_TILT_RATE, float(57)).mul(float(FLAME_REST_TILT_VAR)));
+  }
+  let reach = vec2(cos(azimuth), sin(azimuth))
+    .mul(trueLen.mul(sin(restTilt)))
+    .add(uLean);
+  if (gust) {
+    const curl = vec2(nz(FLAME_CURL_RATE, float(3)), nz(FLAME_CURL_RATE, float(29)))
+      .mul(float(FLAME_CURL_AMP))
+      .mul(clamp(windExposure, float(0.25), float(1)));
+    const lean = gust
+      .add(curl)
+      .mul(float(FLAME_WIND_MAX))
+      .mul(uWindResponse)
+      .mul(float(1).add(life.mul(float(FLAME_TAIL_LIFE))));
+    reach = reach.add(lean);
+  }
+  // Tilt from the projected reach: a flame cannot project longer than it is.
+  const reachRaw = max(length(reach), float(1e-4));
+  const sinTilt = clamp(reachRaw.div(trueLen), float(0), float(FLAME_MAX_SIN_TILT));
+  const cosTilt = sqrt(float(1).sub(sinTilt.mul(sinTilt)));
+  // The projected tail, SMOOTHLY limited (the same expression as `limitFlameLength` in
+  // candle-flame-geometry.js, which the Node tests pin: it can never leave the quad).
+  const tailRaw = trueLen.mul(sinTilt);
+  const tailLen = tailRaw.div(
+    pow(float(1).add(pow(tailRaw.div(float(FLAME_LEN_MAX)), float(FLAME_LEN_ORDER))), float(1 / FLAME_LEN_ORDER))
+  );
+  // The visible TOP of the flame along its chord: the foreshortened tail, or — when the
+  // flame points at the camera — the top of the round bulb (R · cos(tilt)).
+  const tipLen = sqrt(tailLen.mul(tailLen).add(baseR.mul(cosTilt).mul(baseR.mul(cosTilt))));
+  const dir = reach.div(reachRaw);
+  const nrm = vec2(dir.y.negate(), dir.x);
+
   // THE FRAME COORDINATES of this fragment: along the chord from the wick, and across it.
   const p = uv().sub(vec2(0.5, 0.5));
   const ax = dot(p, dir);
   const lat = dot(p, nrm);
   const tAlong = clamp(ax.div(tipLen), float(0), float(1)); // 0 at the wick, 1 at the tip
 
-  // THE BEND — a smooth bowing of the centre line off the chord. See THE BEND.
-  //  · ARC: pull the base back toward vertical on a leaned flame. `lean` is the
-  //    chord's sideways-per-upward ratio; the parabola 4t(1−t) is zero at both
-  //    ends, so the wick and the tip stay exactly where the chord puts them.
+  // THE BEND — a smooth bowing of the centre line off the chord. See THE BEND. (There
+  // is no "pull the base back toward vertical" arc any more: that assumed vertical is
+  // screen-north. A flame rising from the wick is vertical = AT the camera, so its
+  // projected centre line is straight along the azimuth; the curve comes from below.)
   //  · SWAY (tier ≥1): a slow per-candle S, a tip offset growing as t².
   //  · LICK (tier 2): a slow wave travelling up the flame, growing toward the tip.
-  const leanRatio = clamp(dir.x.div(max(dir.y.negate(), float(0.3))), float(-1.5), float(1.5));
-  let bend = leanRatio
-    .mul(tipLen)
-    .mul(float(-FLAME_ARC))
-    .mul(tAlong.mul(float(1).sub(tAlong)));
+  // Both scale with how much of its SIDE the flame shows — a flame pointing at the
+  // camera has no visible length to bend.
+  const showsSide = float(0.3).add(sinTilt.mul(float(0.7)));
+  let bend = float(0);
   if (quality >= 1) {
-    const swayAmp = float(FLAME_SWAY_AMP).mul(clamp(windExposure, float(0.25), float(1)));
+    const swayAmp = float(FLAME_SWAY_AMP)
+      .mul(clamp(windExposure, float(0.25), float(1)))
+      .mul(showsSide);
     bend = bend.add(nz(FLAME_SWAY_RATE, float(43)).mul(swayAmp).mul(tAlong.mul(tAlong)));
   }
   if (quality >= 2) {
@@ -647,6 +689,7 @@ export function buildCandleFlameMaterial({
     bend = bend.add(
       wave
         .mul(float(FLAME_LICK_AMP))
+        .mul(showsSide)
         .mul(tAlong)
         .mul(float(1).sub(tAlong.mul(float(0.4))))
     );
@@ -655,7 +698,13 @@ export function buildCandleFlameMaterial({
 
   // THE PROFILE — half-width at this height (see THE SHAPE). `s` runs from the
   // lowest point of the bulb (0) to the tip (1).
-  const aBot = baseR.mul(float(-FLAME_BULB_DROP));
+  // The profile MORPHS with the tilt: pointing at the camera (sin = 0) the tip exponent
+  // equals the bottom's (0.5 → w² ∝ s(1−s), a CIRCLE); blown flat it is the pointed
+  // teardrop. The bulb also hangs lower when it is seen end-on.
+  const profTip = mix(float(FLAME_PROFILE_TIP_ROUND), float(FLAME_PROFILE_TIP), sinTilt);
+  const peakS = float(FLAME_PROFILE_BOTTOM).div(float(FLAME_PROFILE_BOTTOM).add(profTip));
+  const profNorm = float(1).div(pow(peakS, float(FLAME_PROFILE_BOTTOM)).mul(pow(float(1).sub(peakS), profTip)));
+  const aBot = baseR.mul(float(-FLAME_BULB_DROP).sub(float(1 - FLAME_BULB_DROP).mul(cosTilt)));
   const span = tipLen.sub(aBot);
   const sRaw = ax.sub(aBot).div(span);
   const sAlong = clamp(sRaw, float(0), float(1));
@@ -665,9 +714,9 @@ export function buildCandleFlameMaterial({
   // the quad. Zero outside [0, 1], and the floor on `pow`'s base is far below it.
   const inRange = step(float(0), sRaw).mul(step(sRaw, float(1)));
   const w = baseR
-    .mul(float(FLAME_PROFILE_NORM))
+    .mul(profNorm)
     .mul(pow(max(sAlong, float(1e-9)), float(FLAME_PROFILE_BOTTOM)))
-    .mul(pow(max(float(1).sub(sAlong), float(1e-9)), float(FLAME_PROFILE_TIP)))
+    .mul(pow(max(float(1).sub(sAlong), float(1e-9)), profTip))
     .mul(inRange);
 
   // THE EDGE. `f` < 0 inside the outline. `cov` is 0 at the outline and ramps to
@@ -693,7 +742,7 @@ export function buildCandleFlameMaterial({
     .mul(
       float(FLAME_PROFILE_BOTTOM)
         .div(sSafe)
-        .sub(float(FLAME_PROFILE_TIP).div(float(1).sub(sSafe)))
+        .sub(profTip.div(float(1).sub(sSafe)))
     )
     .div(span);
   const depthSides = max(f.negate(), float(0)).div(sqrt(float(1).add(wPrime.mul(wPrime))));
@@ -702,8 +751,8 @@ export function buildCandleFlameMaterial({
   // bulb's own circle (radius = the profile's curvature radius at its lowest point) takes
   // over, blended out by the time that circle has reached its widest.
   const rhoV = baseR
-    .mul(float(FLAME_PROFILE_NORM))
-    .mul(baseR.mul(float(FLAME_PROFILE_NORM)))
+    .mul(profNorm)
+    .mul(baseR.mul(profNorm))
     .div(span.mul(float(2)));
   const yBulb = ax.sub(aBot);
   const depthCircle = max(rhoV.sub(length(vec2(latB, rhoV.sub(yBulb)))), float(0));
@@ -723,7 +772,8 @@ export function buildCandleFlameMaterial({
   const brightness = shoulder
     .mul(rimFade)
     .mul(float(1).sub(tipness.mul(float(FLAME_TIP_DIM))))
-    .mul(baseDim);
+    .mul(baseDim)
+    .mul(float(1).add(cosTilt.mul(float(FLAME_FACE_GAIN))));
 
   // COLOUR. The authored colour is an sRGB hex (see THE COLOUR) — decode it, so
   // the mid stop displays as exactly what was picked; the hot and cold stops are

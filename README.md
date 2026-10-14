@@ -62,7 +62,7 @@ These are the masks the module discovers (the source of truth is `src/scene/mask
 
 ## Features (current)
 
-This section describes the module's actual roster as of 0.6.5 (superseding an older description that named classes — `EffectComposer`, `TokenManager`, `LightingEffect`, and similar — that no longer exist under those names in `src/`; see mythica-machina-press#567). It's grouped by capability rather than by internal class name, since those names change across refactors and a name-level list is what went stale last time.
+This section describes the module's actual roster as of 0.7.0 (superseding an older description that named classes — `EffectComposer`, `TokenManager`, `LightingEffect`, and similar — that no longer exist under those names in `src/`; see mythica-machina-press#567). It's grouped by capability rather than by internal class name, since those names change across refactors and a name-level list is what went stale last time.
 
 ### Foundry syncing (`src/foundry/`, `src/scene/`)
 
@@ -78,7 +78,10 @@ This section describes the module's actual roster as of 0.6.5 (superseding an ol
 - **Vegetation** — GPU-driven wind sway and shadowing.
 - **Window** / **Specular** — mask-driven interior light pools and surface shine, both attachable to tiles.
 - **Fluid** — liquid-filled tiles (troughs, cauldrons, etc.) with their own mask channel.
-- **Precipitation** — rain/snow with splash/settle behavior.
+- **Precipitation** — rain/snow with splash/settle behavior, Storm Fog (reduced-visibility mist at high intensity), and an authored `_Drip` mask.
+- **Rope & Chain** — GM-placed two-point spans with sag, GPU wind-spring sway, and a matching shadow.
+- **Player-carried lights** — scene-permissioned Torch and Flashlight (cursor-aimed beam, flame and embers) plus Night Vision, Low-light, Infravision and Active Infravision grades.
+- **Atmospheric haze** — aerial perspective that builds as you zoom out, driven by zoom and cloud cover.
 - **Prism** / **Iridescence** — TSL/WebGPU-native refraction and iridescent surface finishes.
 - **Lens** — overlay/grime texture compositing on the camera lens.
 - **Bloom**, **Depth of Field**, **Grade** (color grading), **Sun Shadows**, **TAA** — the post-processing chain.
@@ -96,7 +99,7 @@ This section describes the module's actual roster as of 0.6.5 (superseding an ol
 
 ### UI
 
-- **Studio** (`src/ui/rooms/studio/`) — the GM's authoring panel, one card per effect.
+- **Studio** (`src/ui/rooms/studio/`) — the GM's authoring panel, one card per effect, plus named Scene Presets that save and re-apply a scene's whole look.
 - **Remote** (`src/ui/rooms/remote/`) — the in-session control surface (weather channels, sky/time dials, astrolabe).
 
 ## Roadmap (planned)

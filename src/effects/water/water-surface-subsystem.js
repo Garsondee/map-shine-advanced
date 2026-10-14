@@ -49,6 +49,7 @@
 import { createLogger } from '../../core/log.js';
 import {
   buildWaterSurfaceMaterial,
+  resolveWaterBuildTier,
   WATER_DEFAULT_TIER,
   WATER_TIER5_DISABLED_PENDING_SELF_CAPTURE_FIX,
 } from './water-render.js';
@@ -351,8 +352,21 @@ export function createWaterSurfaceSubsystem({
    * existing ones). Mirrors candle flame's own `candleFlameQuality` +
    * rebuild-on-change pattern (`vt-pan-viewer.js`). Seeded at the default so
    * the FIRST build (below, before any `sync()` has resolved a real tier)
-   * shows today's shipped look, same reasoning as `WATER_DEFAULT_TIER` itself. */
+   * shows today's shipped look, same reasoning as `WATER_DEFAULT_TIER` itself.
+   *
+   * ⚠️ THIS IS THE COMPILED TIER, NEVER THE REQUESTED ONE — it is overwritten
+   * with `surface.tier` straight after every build, the construction-time one
+   * included (the seed here only picks what the first build ASKS for). The
+   * builder clamps to 0 while there is no body pack, so the two differ on
+   * every floor with no water; `sync` therefore compares what a rebuild would
+   * compile at (`resolveWaterBuildTier`) against THIS, never the raw request
+   * (2026-10-14: the raw comparison rebuilt every material, per floor, per
+   * frame, in scenes with no water at all). */
   let builtForTier = WATER_DEFAULT_TIER;
+  /** The tier the cascade last RESOLVED for this floor (after the safety
+   * slide) — what the author asked for, reported beside `builtForTier` (what
+   * compiled) so a clamped floor reads as clamped rather than as a lie. */
+  let lastResolvedTier = WATER_DEFAULT_TIER;
   /** The `_causticsGateForce` value the CURRENT materials were built with —
    * same reasoning as `builtForTier` immediately above, tracked separately
    * because a diagnostic force change must trigger the identical rebuild
@@ -685,6 +699,13 @@ export function createWaterSurfaceSubsystem({
   }
 
   let surface = buildSurfaceForTier(builtForTier);
+  // The construction build almost always races ahead of the body pack's first
+  // bake (the bake waits on THIS surface's own mask fetch), so it compiled at
+  // tier 0 whatever it was asked for. Record that, not the seed — otherwise a
+  // first `sync()` resolving to the seed's value sees "nothing to do" and the
+  // floor keeps its tier-0 materials after water arrives (reproduced in Node
+  // at the standard profile, where the resolved tier equals the seed).
+  builtForTier = surface.tier;
   /** A cheap, permanently-inert stand-in for `meshes[2].material` whenever
    * `surface.refractMaterial` is `null` (below tier 5) — `THREE.Mesh` always
    * wants a real material object, and this is the SAME "always a real
@@ -823,8 +844,24 @@ export function createWaterSurfaceSubsystem({
     // `builtForWindVersion`'s own initial value, so "no handle at all"
     // never misreads as a version change on every single sync().
     const resolvedWindVersion = getWindHandle()?.version ?? -1;
+    // ⚠️ COMPARE WHAT A REBUILD WOULD COMPILE AT, NOT WHAT WAS ASKED FOR. The
+    // builder clamps the requested tier (no body pack → 0; tier 5 with no
+    // capture yet → 4), so `resolvedTier !== builtForTier` stayed true forever
+    // on any floor whose clamp never lifts — i.e. EVERY floor with no water
+    // (its body pack is never allocated) — and rebuilt all of the floor's
+    // materials every frame. `wouldBuildTier` is the same pure rule the
+    // builder applies, so "equal" means a rebuild is provably a no-op, and
+    // "different" still fires the moment the body pack (or the capture) does
+    // arrive — the self-correcting retry the 2026-08-18 fix wanted, without
+    // the per-frame spin.
+    const wouldBuildTier = resolveWaterBuildTier({
+      tier: resolvedTier,
+      hasBodyTexture: !!waterBody.texture,
+      hasCapturedTexture: !!waterRefraction?.texture,
+    });
+    lastResolvedTier = resolvedTier;
     if (
-      resolvedTier !== builtForTier ||
+      wouldBuildTier !== builtForTier ||
       resolvedCausticsGateForce !== builtForCausticsGateForce ||
       _causticsInsideGateOff !== builtForCausticsInsideGateOff ||
       _foamStructureGateOff !== builtForFoamStructureGateOff ||
@@ -858,6 +895,11 @@ export function createWaterSurfaceSubsystem({
       // sync() until a real rebuild at the real tier finally succeeds —
       // self-correcting regardless of how the two subsystems happen to race,
       // rather than depending on winning that race.
+      //
+      // ⚠️ "A MISMATCH" IS NOW `wouldBuildTier !== builtForTier` (above), not
+      // `resolvedTier !== builtForTier`: the retry still fires the moment the
+      // body pack lands, but a floor whose clamp can NEVER lift (no water)
+      // compares equal and stops rebuilding instead of spinning every frame.
       builtForTier = surface.tier;
       builtForCausticsGateForce = resolvedCausticsGateForce;
       builtForCausticsInsideGateOff = _causticsInsideGateOff;
@@ -1230,7 +1272,19 @@ export function createWaterSurfaceSubsystem({
         // N)` (water-render.js). They can disagree for at most one `sync()`
         // between a resolve and its rebuild; agreeing every other frame is
         // the proof the rebuild-on-change wiring is actually running.
+        //
+        // ⚠️ EXCEPT while a clamp is in force: with no body pack baked on this
+        // floor (a floor with no water at all, or water still baking) the
+        // builder compiles tier 0 whatever was asked for, and `perfTier`
+        // honestly says 0 while `resolvedTier` below says what the cascade
+        // wanted. `tierClamp` names the reason, so a clamped floor reads as
+        // clamped rather than as a broken tier gate.
         perfTier: builtForTier,
+        resolvedTier: lastResolvedTier,
+        tierClamp:
+          builtForTier < lastResolvedTier
+            ? 'no baked water body on this floor (nothing to draw yet), or tier 5 awaiting its first capture'
+            : null,
         // ⚠️ WHAT THE TIER COSTS THE AUTHOR, IN THEIR OWN VOCABULARY (2026-08-17).
         // `perfTier: 3` is a true statement that answered nobody's question: the
         // author had five live sliders doing nothing and no way to connect that
@@ -1242,9 +1296,12 @@ export function createWaterSurfaceSubsystem({
         inertControls:
           builtForTier >= 4
             ? 'none — every shipped water control is live at this rung'
-            : 'swashFoam, breakFoam, foamTrail, caustics (+ wave shoaling) are ALL compiled out: ' +
-              'they are rung 4, which needs the quality profile. Their sliders still move and are still ' +
-              'saved; nothing reads them until the profile is raised.',
+            : builtForTier < lastResolvedTier
+              ? `none to blame on the profile — the profile resolves tier ${lastResolvedTier}, but this floor ` +
+                'has no baked water body, so its materials are held at the cheap tier until water exists.'
+              : 'swashFoam, breakFoam, foamTrail, caustics (+ wave shoaling) are ALL compiled out: ' +
+                'they are rung 4, which needs the quality profile. Their sliders still move and are still ' +
+                'saved; nothing reads them until the profile is raised.',
         bounds: waterBody.getWaterBounds(),
         // `null` means the hi-res mask has not loaded, and the surface is
         // therefore hidden BY DESIGN — the SDF is not asked to draw the edge

@@ -588,6 +588,33 @@ export const WATER_TIER1_WET_STRENGTH = 0.38;
  */
 export const WATER_DEFAULT_TIER = 3;
 
+/**
+ * THE TIER `buildWaterSurfaceMaterial` ACTUALLY COMPILES for a requested tier,
+ * given which producer textures exist right now — the build-time clamp, pulled
+ * out as a pure function so the builder and `water-surface-subsystem.js#sync`
+ * can never disagree about it.
+ *
+ * Why `sync` needs it: a rebuild is only worth doing when it would produce a
+ * DIFFERENT compiled tier than the live materials already have. Comparing the
+ * REQUESTED tier against the compiled one (as `sync` used to) can never
+ * converge while a clamp is in force: on a floor with no water the body pack
+ * never exists, the build clamps to 0 forever, and a requested tier of 1-4 was
+ * "different" on every single frame — a full rebuild of every water material,
+ * per floor, per frame, in a scene with no water at all. The clamp rules:
+ *
+ *   - no body pack  → 0 (every rung >= 1 reads it unconditionally; see the
+ *     long note at the build site)
+ *   - tier >= 5 with no captured refraction texture yet → 4
+ *
+ * @param {{tier: number, hasBodyTexture: boolean, hasCapturedTexture: boolean}} args
+ * @returns {number} the tier the build will actually compile at.
+ */
+export function resolveWaterBuildTier({ tier, hasBodyTexture, hasCapturedTexture }) {
+  const requestedTier = Number.isFinite(tier) ? Math.max(0, Math.floor(tier)) : WATER_DEFAULT_TIER;
+  if (!hasBodyTexture) return 0;
+  return requestedTier >= 5 && !hasCapturedTexture ? 4 : requestedTier;
+}
+
 /** TIER 4 — the default SWASH strength: waves running up the beach and draining
  * back. An ADDITION to tier 2's own crest foam, never a replacement. */
 export const WATER_TIER4_SWASH_FOAM = 1;
@@ -1034,7 +1061,6 @@ export function buildWaterSurfaceMaterial({
   // cumulative rule (Effects.md §2: a rung may not depend on one above it)
   // true BY CONSTRUCTION rather than by trusting the resolver's contract a
   // second time.
-  const requestedTier = Number.isFinite(tier) ? Math.max(0, Math.floor(tier)) : WATER_DEFAULT_TIER;
   // ⚠️ ALSO CLAMPED TO 0 WHENEVER `bodyTexture` ISN'T READY YET (2026-08-18)
   // — live-reported the same day as the fix that caused it. Tier 1's own
   // block below calls `texture(bodyTexture, …)` unconditionally once
@@ -1078,7 +1104,15 @@ export function buildWaterSurfaceMaterial({
   // safety slide is a PRODUCTION WIRING decision, not a construction-time
   // one. `water-surface-subsystem.js#sync()` is where the real caller's
   // requested tier gets clamped before it ever reaches here.
-  const activeTier = bodyTexture ? (requestedTier >= 5 && !capturedTexture ? 4 : requestedTier) : 0;
+  //
+  // The clamp RULE lives in `resolveWaterBuildTier` (top of this file), not
+  // inline, so `sync()` can predict what a rebuild WOULD compile at and skip
+  // it when that equals what is already built — see that function's doc.
+  const activeTier = resolveWaterBuildTier({
+    tier,
+    hasBodyTexture: !!bodyTexture,
+    hasCapturedTexture: !!capturedTexture,
+  });
   const {
     texture,
     vec2,

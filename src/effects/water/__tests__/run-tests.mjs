@@ -29,6 +29,7 @@ import { run as runWaterBounds } from './water-bounds.test.mjs';
 import { run as runWaterShore } from './water-shore.test.mjs';
 import { run as runWaterRegistration } from './water-registration.test.mjs';
 import { run as runWaterSurfaceSubsystem } from './water-surface-subsystem.test.mjs';
+import { run as runWaterSurfaceRebuild } from './water-surface-rebuild.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -73,6 +74,7 @@ const suites = [
   // bundle — keeping them at the end means a failure in the pure-arithmetic
   // suites is reported before the heavyweight ones even load.
   ['water-render', runWaterRender],
+  ['water-surface-rebuild', runWaterSurfaceRebuild],
   ['water-flow', runWaterFlow],
   ['water-body-subsystem', runWaterBodySubsystem],
   ['water-flow-subsystem', runWaterFlowSubsystem],

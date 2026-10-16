@@ -16425,7 +16425,14 @@ function install() {
         // day clock exists, before its first painted frame. This is also what
         // makes scene-scoped manual hours survive refreshes independently of
         // later unrelated controls such as wind.
+        //
+        // The WEATHER needs the same second application (rain/clouds/temperature
+        // restored before the viewer existed landed on the outgoing viewer or
+        // nothing, so a reload came up dry until some later edit re-applied the
+        // look — while the stored value, and so the slider, was right).
+        applyLookToEngines(skyScope.sky);
         applyTimeToEngine(skyScope.sky, { sceneLoad: true });
+        MapShine.__remote?.refreshWeatherBoard?.();
         log.info(`real-scene VT viewer active for "${result.sceneName}" at floor ${targetFloorIndex}.`);
 
         // ARM THE REBUILD PROBES FOR THIS LOAD (mythica-machina-press#400

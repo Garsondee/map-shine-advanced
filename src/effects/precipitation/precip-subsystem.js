@@ -783,7 +783,18 @@ export function createPrecipitationSubsystem({
         // ⚠️ THE SPECIMEN TIER SLEEPS AS A JS `continue` — no engine built, no
         // kernel dispatched, no draw submitted (Effects.md Law 7). A uniform
         // set to zero would still pay the dispatch and the fill.
-        if (!specimenAwake) continue;
+        if (!specimenAwake) {
+          // ⚠️ SLEEPING MUST ALSO HIDE. Skipping the step alone leaves the mesh
+          // visible with its last-written buffer: the rain draws frozen in place
+          // (live report 2026-10-16: "rain stops dead when I zoom out"). A
+          // zero-live frame sets `mesh.visible = false`; the next awake frame's
+          // `setFrame` restores it.
+          const asleepFall = engines.get(speciesId);
+          if (asleepFall) asleepFall.setFrame({ ...frame, liveCount: 0 });
+          const asleepSplash = splashEngines.get(speciesId);
+          if (asleepSplash?.ok) asleepSplash.setFrame({ ...frame, liveCount: 0 });
+          continue;
+        }
 
         stepPopulation(renderer, speciesId, frame, rect, st, dtRealSec, nowMs);
       }

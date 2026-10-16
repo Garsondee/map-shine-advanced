@@ -452,8 +452,14 @@ export const PRECIP_SPECIES = Object.freeze({
     /** Below this many screen px per body, the specimen tier SLEEPS and the
      * curtain (P4) carries the picture alone — a JS `if`, never a uniform set
      * to zero (Effects.md Law 4). Rain streaks stay legible small, so this
-     * sits low. */
-    zoomSleepPxPerBody: 0.6,
+     * sits low.
+     *
+     * ⚠️ MEASURED AGAINST `body.sizePx[1]`, so it must be rescaled whenever that
+     * changes. 0.6 was calibrated for a 3.6 px widest drop (sleep at ~6x
+     * zoom-out); narrowing the drop to 1.5 px without this made rain freeze
+     * at ~2.5x zoom-out (live report 2026-10-16). 0.25 = 0.6 * 1.5 / 3.6
+     * keeps the original sleep zoom. */
+    zoomSleepPxPerBody: 0.25,
   }),
 
   /**

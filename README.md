@@ -62,7 +62,7 @@ These are the masks the module discovers (the source of truth is `src/scene/mask
 
 ## Features (current)
 
-This section describes the module's actual roster as of 0.8.0 (superseding an older description that named classes — `EffectComposer`, `TokenManager`, `LightingEffect`, and similar — that no longer exist under those names in `src/`; see mythica-machina-press#567). It's grouped by capability rather than by internal class name, since those names change across refactors and a name-level list is what went stale last time.
+This section describes the module's actual roster as of 0.8.1 (superseding an older description that named classes — `EffectComposer`, `TokenManager`, `LightingEffect`, and similar — that no longer exist under those names in `src/`; see mythica-machina-press#567). It's grouped by capability rather than by internal class name, since those names change across refactors and a name-level list is what went stale last time.
 
 ### Foundry syncing (`src/foundry/`, `src/scene/`)
 

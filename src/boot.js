@@ -16432,6 +16432,9 @@ function install() {
         // look — while the stored value, and so the slider, was right).
         applyLookToEngines(skyScope.sky);
         applyTimeToEngine(skyScope.sky, { sceneLoad: true });
+        // Wind has the same problem: canvasReady applied it before this viewer
+        // existed, so it sat at the slider's value but did nothing until a nudge.
+        applyAmbientWind();
         MapShine.__remote?.refreshWeatherBoard?.();
         log.info(`real-scene VT viewer active for "${result.sceneName}" at floor ${targetFloorIndex}.`);
 

@@ -862,12 +862,38 @@ export function run(t) {
     const d = resolveCandleFalloff({});
     ok('candle falloff defaults reproduce the legacy K=8 curve (c=1/sqrt 8)', near(d.coreFrac, 1 / Math.sqrt(8)));
     ok('...with p=2, full core, no halo', d.tailSteepness === 2 && d.coreStrength === 1 && d.haloStrength === 0);
-    ok('core radius 0 = automatic (legacy size) even with a radius set', near(resolveCandleFalloff({ lightRadiusPx: 600, lightCoreRadiusPx: 0 }).coreFrac, d.coreFrac));
-    ok('core radius is in PIXELS: 100px on a 600px light is c=1/6', near(resolveCandleFalloff({ lightRadiusPx: 600, lightCoreRadiusPx: 100 }).coreFrac, 1 / 6));
-    ok('...and stays 100px when the reach grows to 2000px (c=1/20)', near(resolveCandleFalloff({ lightRadiusPx: 2000, lightCoreRadiusPx: 100 }).coreFrac, 1 / 20));
-    const wild = resolveCandleFalloff({ lightRadiusPx: 600, lightCoreRadiusPx: 1, lightTailSteepness: 99, lightCoreStrength: -3, lightHaloStrength: 9, lightHaloFalloff: 0 });
-    ok('values are clamped into safe ranges', wild.coreFrac >= 0.005 && wild.tailSteepness === 6 && wild.coreStrength === 0 && wild.haloStrength === 1 && wild.haloFalloff === 0.5);
-    ok('garbage input falls back to defaults', resolveCandleFalloff({ lightTailSteepness: 'x', lightCoreStrength: null }).tailSteepness === 2);
+    ok(
+      'core radius 0 = automatic (legacy size) even with a radius set',
+      near(resolveCandleFalloff({ lightRadiusPx: 600, lightCoreRadiusPx: 0 }).coreFrac, d.coreFrac)
+    );
+    ok(
+      'core radius is in PIXELS: 100px on a 600px light is c=1/6',
+      near(resolveCandleFalloff({ lightRadiusPx: 600, lightCoreRadiusPx: 100 }).coreFrac, 1 / 6)
+    );
+    ok(
+      '...and stays 100px when the reach grows to 2000px (c=1/20)',
+      near(resolveCandleFalloff({ lightRadiusPx: 2000, lightCoreRadiusPx: 100 }).coreFrac, 1 / 20)
+    );
+    const wild = resolveCandleFalloff({
+      lightRadiusPx: 600,
+      lightCoreRadiusPx: 1,
+      lightTailSteepness: 99,
+      lightCoreStrength: -3,
+      lightHaloStrength: 9,
+      lightHaloFalloff: 0,
+    });
+    ok(
+      'values are clamped into safe ranges',
+      wild.coreFrac >= 0.005 &&
+        wild.tailSteepness === 6 &&
+        wild.coreStrength === 0 &&
+        wild.haloStrength === 1 &&
+        wild.haloFalloff === 0.5
+    );
+    ok(
+      'garbage input falls back to defaults',
+      resolveCandleFalloff({ lightTailSteepness: 'x', lightCoreStrength: null }).tailSteepness === 2
+    );
 
     const built = buildPointLightIlluminationMaterial({
       THREE,

@@ -540,13 +540,7 @@ export function run(t) {
     // one floor: an indoor one (left) and an outdoor one (right). Each fire's
     // own points are judged by its own label, so the indoor blob's points go
     // and the outdoor blob's stay, even though they share one cloud.
-    const rows = [
-      '................',
-      '..#####.....##..',
-      '..#####.....##..',
-      '..#####.....##..',
-      '................',
-    ];
+    const rows = ['................', '..#####.....##..', '..#####.....##..', '..#####.....##..', '................'];
     const g = gridFrom(rows, { texel: 20 });
     const { fires, nearestLabel, spec } = extractFiresWithLabels(g, { minDiameterPx: 4 });
     const cloud = extractFireSpawnPoints(g, { threshold: 0.5 });
@@ -561,11 +555,19 @@ export function run(t) {
     );
     t.ok(
       'with every fire outdoors, the ember cloud is untouched',
-      dropIndoorSpawnPoints(cloud, fires.map((f) => ({ ...f, outdoors01: 1 })), labelGrid).count === cloud.count
+      dropIndoorSpawnPoints(
+        cloud,
+        fires.map((f) => ({ ...f, outdoors01: 1 })),
+        labelGrid
+      ).count === cloud.count
     );
     t.ok(
       'with every fire indoors and no label grid, the cloud is dropped entirely',
-      dropIndoorSpawnPoints(cloud, fires.map((f) => ({ ...f, outdoors01: 0 })), null).count === 0
+      dropIndoorSpawnPoints(
+        cloud,
+        fires.map((f) => ({ ...f, outdoors01: 0 })),
+        null
+      ).count === 0
     );
   }
 }

@@ -616,8 +616,7 @@ export function resolveCandleFalloff(params) {
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
   const radius = num(params?.lightRadiusPx, 0);
   const corePx = num(params?.lightCoreRadiusPx, 0);
-  const coreFrac =
-    corePx > 0 && radius > 0 ? clamp(corePx / radius, 0.005, 2) : CANDLE_FALLOFF_DEFAULTS.coreFrac;
+  const coreFrac = corePx > 0 && radius > 0 ? clamp(corePx / radius, 0.005, 2) : CANDLE_FALLOFF_DEFAULTS.coreFrac;
   return {
     coreFrac,
     tailSteepness: clamp(num(params?.lightTailSteepness, CANDLE_FALLOFF_DEFAULTS.tailSteepness), 0.5, 6),
@@ -663,7 +662,9 @@ export function candleFalloff(TSL, dist) {
   const d2 = dist.mul(dist);
   const windowTerm = clamp(float(1).sub(d2.mul(d2)), float(0), float(1));
   const ratio = dist.div(u.coreFrac);
-  const core = u.coreStrength.mul(windowTerm.mul(windowTerm)).div(pow(max(ratio, float(0.00001)), u.tailSteepness).add(float(1)));
+  const core = u.coreStrength
+    .mul(windowTerm.mul(windowTerm))
+    .div(pow(max(ratio, float(0.00001)), u.tailSteepness).add(float(1)));
   const halo = u.haloStrength.mul(pow(clamp(float(1).sub(dist), float(0), float(1)), u.haloFalloff));
   return float(1).sub(float(1).sub(core).mul(float(1).sub(halo)));
 }

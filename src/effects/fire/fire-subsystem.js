@@ -493,10 +493,7 @@ export function createFireSubsystem({
         if (!transformedByKind.has(kind)) {
           if (kind === 'ember' && !emberCloud) emberCloud = dropIndoorSpawnPoints(effectiveCloud, fires, labelGrid);
           const source = kind === 'ember' ? emberCloud : effectiveCloud;
-          transformedByKind.set(
-            kind,
-            cloud && cohesion ? applyCohesion(source, fires, cohesion, labelGrid) : source
-          );
+          transformedByKind.set(kind, cloud && cohesion ? applyCohesion(source, fires, cohesion, labelGrid) : source);
         }
         engine.setSpawnPoints(transformedByKind.get(kind));
         lastCohesionByEngine.set(engine, cohesion);

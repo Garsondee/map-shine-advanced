@@ -220,6 +220,21 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
     return xy.add(vec2(cos(a1), sin(a1)).mul(r));
   };
 
+  /**
+   * ⭐ WHERE ON THE GROUND A DRIP MUST BE SO THAT IT IS *DRAWN* AT ITS EDGE POINT
+   * WHEN IT STARTS. The draw magnifies a body at height h outward about the camera
+   * centre by M(h), so a drip simply stored at the edge point was DRAWN outside the
+   * tile that sheds it and converged onto the edge as it fell — starting where it
+   * should have ended (author, with a screenshot). Storing the pre-image
+   * `C + (E − C) / M(h)` makes it start exactly on the edge as drawn and fall
+   * toward the view centre, which is what a drop leaving an eave does under this
+   * camera. `1 / M(h) = (D − h) / D`, with the same height clamp the draw uses.
+   */
+  const groundUnder = (edgeXY, heightPx) => {
+    const h = heightPx.max(float(0)).min(uCamHeight.mul(float(0.82)));
+    return uCamCentre.add(edgeXY.sub(uCamCentre).mul(uCamHeight.sub(h).div(uCamHeight)));
+  };
+
   const bodyConstants = (entropy) => {
     const brightness = hash11(entropy.mul(float(1.7))).pow(float(0.8));
     const sizePx = mix(float(SIZE_PX[0]), float(SIZE_PX[1]), hash11(entropy.mul(float(2.3)).add(float(11))));
@@ -239,12 +254,13 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
     seed.element(i).assign(fi);
     const p = pickPoint(fi);
     const b = bodyConstants(fi);
-    position.element(i).assign(jitterAround(p.xy, fi));
+    const startH = hash11(fi.mul(float(7.3))).mul(p.z);
+    position.element(i).assign(groundUnder(jitterAround(p.xy, fi), startH));
     // ⚠️ HEIGHTS STAGGERED ACROSS THE COLUMN, not all at the deck — otherwise
     // the whole roofline releases one synchronised sheet of drips that lands
     // together and leaves the eaves silent until the next. The fall staggers
     // height for the identical reason.
-    custom.element(i).assign(vec4(b.brightness, b.sizePx, b.speed, hash11(fi.mul(float(7.3))).mul(p.z)));
+    custom.element(i).assign(vec4(b.brightness, b.sizePx, b.speed, startH));
     lifeBuf.element(i).assign(mix(float(LIFE_SEC[0]), float(LIFE_SEC[1]), hash11(fi.mul(float(5.1)))).mul(float(1000)));
     age.element(i).assign(float(0));
   })().compute(cap);
@@ -302,7 +318,7 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
     const fresh = bodyConstants(entropy);
     const p = pickPoint(entropy);
 
-    position.element(i).assign(done.select(jitterAround(p.xy, entropy), nextPos));
+    position.element(i).assign(done.select(groundUnder(jitterAround(p.xy, entropy), p.z), nextPos));
     custom
       .element(i)
       .assign(done.select(vec4(fresh.brightness, fresh.sizePx, fresh.speed, p.z), vec4(c.x, c.y, c.z, nextH)));

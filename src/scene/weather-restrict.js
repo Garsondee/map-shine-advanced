@@ -6,8 +6,8 @@
  *
  * ## What the box means here
  *
- * A Tile with `restrictions.weather` set keeps the weather OFF whatever lies
- * under it: rain, snow, splashes and the mantle all sample ONE baked sky-reach
+ * A Tile with `restrictions.weather` set is a SKY OCCLUDER: the weather is drawn ON it (it is the
+ * topmost surface) and kept OFF whatever lies under it: rain, snow, splashes and the mantle all sample ONE baked sky-reach
  * texture (`vt/vt-pan-viewer.js#bakePrecipSkyReachTexture`), so occluding the
  * sky is a matter of darkening that texture under the tile's art. Weather
  * "above" the tile — viewed from a floor the tile lies wholly beneath — is
@@ -22,10 +22,11 @@
  * and (b) each restrictor's own footprint stamp, and this module lays them back
  * over it with the live opacity of each tile:
  *
- *     gate = skyWithoutRestrictors × Π (1 − footprint_t × opacity_t)
+ *     gate = sky × (1 − footprint_t) + footprint_t × opacity_t   (per tile)
  *
- * With every opacity at 1 (nothing faded) that is exactly the old permanent
- * cover for a roof-band tile, plus the new cover for the rest.
+ * Inside a tile's footprint the weather is exactly as visible as the tile is: full
+ * on an opaque roof, fading out WITH it on hover — the ground revealed beneath is
+ * below the tile, so weather never appears there. Outside it, the open sky.
  *
  * @module scene/weather-restrict
  */
@@ -88,7 +89,7 @@ export function composeWeatherGate({ sky, restrictors, opacityOf = () => 1, out 
   const plane = sky.data.slice(0, n);
   for (const { id, stamp } of restrictors) {
     const opacity = clamp01(opacityOf(id));
-    if (opacity <= 0 || !stamp?.value) continue;
+    if (!stamp?.value) continue;
     const { value, gx0, gy0, w: sw, h: sh } = stamp;
     for (let r = 0; r < sh; r++) {
       const gy = gy0 + r;
@@ -98,9 +99,9 @@ export function composeWeatherGate({ sky, restrictors, opacityOf = () => 1, out 
       for (let k = 0; k < sw; k++, s++, d++) {
         const gx = gx0 + k;
         if (gx < 0 || gx >= w) continue;
-        const cover = (value[s] * opacity) / 255;
+        const cover = value[s] / 255;
         if (cover <= 0) continue;
-        plane[d] = Math.round(plane[d] * (1 - cover));
+        plane[d] = Math.round(plane[d] * (1 - cover) + 255 * opacity * cover);
       }
     }
   }

@@ -56,11 +56,11 @@ export async function run(t) {
     t.ok('weather: nor does the dynamic cover', at(w.cover, 2, 5) === 0);
     const gate = composeWeatherGate({ sky: w.sky, restrictors: w.restrictors });
     t.ok(
-      'weather: composed at full opacity it equals the old permanent cover',
-      gate[(5 * 10 + 2) * 4] === 0 && gate[(5 * 10 + 7) * 4] === 255
+      'weather: at full opacity the weather is drawn ON the tile, and the open sky stays open',
+      gate[(5 * 10 + 2) * 4] === 255 && gate[(5 * 10 + 7) * 4] === 255
     );
     const faded = composeWeatherGate({ sky: w.sky, restrictors: w.restrictors, opacityOf: () => 0 });
-    t.ok('weather: composed at opacity 0 the weather is back under the roof', faded[(5 * 10 + 2) * 4] === 255);
+    t.ok('weather: faded away, NO weather appears under the tile', faded[(5 * 10 + 2) * 4] === 0);
   }
 
   // --- a non-flagged roof next to a flagged one stays permanent -----------------
@@ -72,7 +72,7 @@ export async function run(t) {
     const [f0] = derive(items);
     const faded = composeWeatherGate({ sky: f0.weather.sky, restrictors: f0.weather.restrictors, opacityOf: () => 0 });
     t.ok('weather: a plain roof stays covered while the flagged one is faded', faded[(5 * 10 + 2) * 4] === 0);
-    t.ok('weather: the faded flagged roof lets the weather in', faded[(5 * 10 + 7) * 4] === 255);
+    t.ok('weather: the faded flagged roof shows no weather beneath it', faded[(5 * 10 + 7) * 4] === 0);
   }
 
   // --- a restrictor in the OVERHEAD band (an awning) is cover it never was -------
@@ -82,7 +82,7 @@ export async function run(t) {
     t.ok('weather: not above', f0.weather.restrictors[0].above === false);
     t.ok('weather: ordinary skyReach never saw it', at(f0.skyReach, 2, 5) === 255);
     const gate = composeWeatherGate({ sky: f0.weather.sky, restrictors: f0.weather.restrictors });
-    t.ok('weather: the composed gate keeps the weather off what is under it', gate[(5 * 10 + 2) * 4] === 0);
+    t.ok('weather: the weather is drawn on the awning', gate[(5 * 10 + 2) * 4] === 255);
     t.ok('weather: and leaves the rest of the sky alone', gate[(5 * 10 + 7) * 4] === 255);
   }
 
@@ -151,7 +151,7 @@ export async function run(t) {
     const [f0] = derive([base('roof', 10, { restrictsWeather: true })]);
     const half = composeWeatherGate({ sky: f0.weather.sky, restrictors: f0.weather.restrictors, opacityOf: () => 0.5 });
     const v = half[(5 * 10 + 2) * 4];
-    t.ok(`weather: half-faded roof lets about half the weather through (got ${v})`, Math.abs(v - 128) <= 2);
+    t.ok(`weather: half-faded roof shows about half the weather (got ${v})`, Math.abs(v - 128) <= 2);
   }
 
   // --- the in-place buffer is reused -------------------------------------------------

@@ -95,6 +95,7 @@ import {
   computeEdgeSoftMarginNormalized,
   LIGHT_ELEVATION_UNCONFIGURED_SENTINEL,
   elevationRank,
+  setCandleFalloff,
 } from './point-light-illumination.js';
 import { buildPointLightColorationMaterial, computeColorationAlpha } from './point-light-coloration.js';
 import { canBatchLight, computeBucketKey, isColorationEligible } from './point-light-batch.js';
@@ -1406,6 +1407,10 @@ export function createPointLightPool({
     // radius/colour come from the candle effect's params, not a Foundry doc.
     profiler?.beginById('light.pointLightSourceBuild');
     const candleLightState = getCandleRenderState();
+    // The candle falloff shape (Core radius / steepness / strength / bounce glow)
+    // lives in shared uniforms, so a slider drag is five scalar writes — no
+    // descriptor change, no memo miss, no material rebuild.
+    setCandleFalloff(candleLightState.params);
     const candleLights = candleLightState.enabled
       ? memoCandleLightSources(candleMemoHolder, candleLightState.anchors, {
           lightRadiusPx: candleLightState.params?.lightRadiusPx,

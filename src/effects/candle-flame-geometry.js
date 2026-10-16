@@ -632,7 +632,9 @@ function buildOneLightSource(c, baseRadius, color, qualityTier, windResponse) {
     // Physical bright-centre/fast-drop-off falloff (author's ask) instead of
     // Foundry's attenuation corona — the scaffold branches on this at build
     // time (point-light-illumination.js#inverseSquareFalloff).
-    falloffModel: 'inverseSquare',
+    // 2026-10-16: 'candle' = the same curve with the author's live falloff
+    // controls (point-light-illumination.js#candleFalloff); defaults identical.
+    falloffModel: 'candle',
     // ANIMATED BY DEFAULT (2026-07-20, author's own direction): candles
     // get MSA's own `candleFlicker` type — a distinct registry entry
     // from Foundry's `torch` (effects/lighting/animations/candle-

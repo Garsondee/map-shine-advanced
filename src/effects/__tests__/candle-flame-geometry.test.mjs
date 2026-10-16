@@ -259,7 +259,7 @@ export function run(t) {
       L.radius > 150 && Number.isFinite(L.radius)
     );
     ok('carries a circular shapePoints polygon', Array.isArray(L.shapePoints) && L.shapePoints.length === 64);
-    ok('a candle uses the inverse-square falloff model (not Foundry corona)', L.falloffModel === 'inverseSquare');
+    ok('a candle uses the tunable candle falloff model (not Foundry corona)', L.falloffModel === 'candle');
     ok(
       'declares the fields the pool reconcile reads',
       [

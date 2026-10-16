@@ -162,10 +162,11 @@ export function run(t) {
     canBatchLight({ falloffModel: 'foundry' })
   );
   ok(
-    'BATCH_FALLOFF_MODELS is exactly the three models this codebase actually produces',
-    BATCH_FALLOFF_MODELS.length === 3 &&
+    'BATCH_FALLOFF_MODELS is exactly the four models this codebase actually produces',
+    BATCH_FALLOFF_MODELS.length === 4 &&
       BATCH_FALLOFF_MODELS.includes('foundry') &&
       BATCH_FALLOFF_MODELS.includes('inverseSquare') &&
+      BATCH_FALLOFF_MODELS.includes('candle') &&
       BATCH_FALLOFF_MODELS.includes('inverseSquareWide')
   );
 

@@ -570,6 +570,105 @@ export function inverseSquareFalloff(TSL, dist, steepness = INVERSE_SQUARE_STEEP
 }
 
 /**
+ * CANDLE FALLOFF (`falloffModel: 'candle'`, 2026-10-16) — the author-tunable
+ * successor of `inverseSquareFalloff` for candle lights. Same family, with the
+ * knobs `candle-flame.js` exposes (Core radius / Falloff steepness / Core
+ * strength / Bounce glow / Bounce falloff):
+ *
+ *   F(d) = 1 - (1 - core(d)) * (1 - halo(d)),            d = dist, 0..1
+ *   core(d) = coreStrength * (1-d⁴)² / (1 + (d/c)^p)     c = coreFrac, p = tailSteepness
+ *   halo(d) = haloStrength * (1-d)^haloFalloff
+ *
+ * The defaults (c = 1/√8, p = 2, strength 1, halo 0) are EXACTLY
+ * `inverseSquareFalloff`'s K=8 curve, so an untouched scene is unchanged.
+ *
+ * ⚠️ WHY IT IS DRIVEN BY UNIFORMS, not build-time constants like the other
+ * models: these are dragged live in a slider, and a graph-build constant would
+ * recompile every candle shader per tick. They are ONE pool-wide set (candle
+ * params are effect-wide), so a module singleton keyed on the TSL namespace is
+ * enough — no per-light or per-instance plumbing, and the batched path (which
+ * builds through the same `buildPointLightSharedTerms`) picks them up for free.
+ * `coreFrac` is `coreRadiusPx / lightRadiusPx` (the effect's GLOBAL radius):
+ * a cluster whose own radius is larger than the base one gets a proportionally
+ * larger core, which is the right direction for a stronger source.
+ */
+export const CANDLE_FALLOFF_DEFAULTS = Object.freeze({
+  coreFrac: 1 / Math.sqrt(INVERSE_SQUARE_STEEPNESS),
+  tailSteepness: 2,
+  coreStrength: 1,
+  haloStrength: 0,
+  haloFalloff: 2,
+});
+
+const candleFalloffValues = { ...CANDLE_FALLOFF_DEFAULTS };
+let candleFalloffUniforms = null;
+let candleFalloffUniformsTSL = null;
+
+/**
+ * Resolve the effect's raw params into the five shader values (pure, clamped,
+ * Node-testable). `coreRadiusPx <= 0` is "automatic" = the legacy core size.
+ * @param {{lightRadiusPx?:number, lightCoreRadiusPx?:number, lightTailSteepness?:number,
+ *   lightCoreStrength?:number, lightHaloStrength?:number, lightHaloFalloff?:number}} [params]
+ * @returns {{coreFrac:number, tailSteepness:number, coreStrength:number, haloStrength:number, haloFalloff:number}}
+ */
+export function resolveCandleFalloff(params) {
+  const num = (v, d) => (Number.isFinite(Number(v)) && v !== null && v !== '' ? Number(v) : d);
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const radius = num(params?.lightRadiusPx, 0);
+  const corePx = num(params?.lightCoreRadiusPx, 0);
+  const coreFrac =
+    corePx > 0 && radius > 0 ? clamp(corePx / radius, 0.005, 2) : CANDLE_FALLOFF_DEFAULTS.coreFrac;
+  return {
+    coreFrac,
+    tailSteepness: clamp(num(params?.lightTailSteepness, CANDLE_FALLOFF_DEFAULTS.tailSteepness), 0.5, 6),
+    coreStrength: clamp(num(params?.lightCoreStrength, CANDLE_FALLOFF_DEFAULTS.coreStrength), 0, 1),
+    haloStrength: clamp(num(params?.lightHaloStrength, CANDLE_FALLOFF_DEFAULTS.haloStrength), 0, 1),
+    haloFalloff: clamp(num(params?.lightHaloFalloff, CANDLE_FALLOFF_DEFAULTS.haloFalloff), 0.5, 6),
+  };
+}
+
+/**
+ * Push the candle effect's params into the live falloff uniforms (cheap:
+ * five scalar writes, no rebuild). Safe to call every frame, before or after
+ * any candle material exists.
+ * @param {object} [params] - see {@link resolveCandleFalloff}.
+ * @returns {object} the resolved values.
+ */
+export function setCandleFalloff(params) {
+  const v = resolveCandleFalloff(params);
+  Object.assign(candleFalloffValues, v);
+  if (candleFalloffUniforms) {
+    for (const k of Object.keys(v)) candleFalloffUniforms[k].value = v[k];
+  }
+  return v;
+}
+
+function getCandleFalloffUniforms(TSL) {
+  if (!candleFalloffUniforms || candleFalloffUniformsTSL !== TSL) {
+    candleFalloffUniforms = {};
+    for (const k of Object.keys(candleFalloffValues)) candleFalloffUniforms[k] = TSL.uniform(candleFalloffValues[k]);
+    candleFalloffUniformsTSL = TSL;
+  }
+  return candleFalloffUniforms;
+}
+
+/**
+ * The TSL half of {@link resolveCandleFalloff}'s curve (see the block above).
+ * @param {*} TSL - THREE.TSL. @param {*} dist - float node, 0..1.
+ * @returns {*} a float node in [0,1].
+ */
+export function candleFalloff(TSL, dist) {
+  const { float, clamp, pow, max } = TSL;
+  const u = getCandleFalloffUniforms(TSL);
+  const d2 = dist.mul(dist);
+  const windowTerm = clamp(float(1).sub(d2.mul(d2)), float(0), float(1));
+  const ratio = dist.div(u.coreFrac);
+  const core = u.coreStrength.mul(windowTerm.mul(windowTerm)).div(pow(max(ratio, float(0.00001)), u.tailSteepness).add(float(1)));
+  const halo = u.haloStrength.mul(pow(clamp(float(1).sub(dist), float(0), float(1)), u.haloFalloff));
+  return float(1).sub(float(1).sub(core).mul(float(1).sub(halo)));
+}
+
+/**
  * Ease Foundry's raw [0,1] attenuation slider into the value its shaders
  * actually use, replicated verbatim from `base-light-source.mjs`
  * (`_updateCommonUniforms`, cached as `computedAttenuation`):
@@ -1220,6 +1319,8 @@ export function buildPointLightSharedTerms({
   let falloff;
   if (falloffModel === 'inverseSquare') {
     falloff = inverseSquareFalloff(THREE.TSL, dist);
+  } else if (falloffModel === 'candle') {
+    falloff = candleFalloff(THREE.TSL, dist);
   } else if (falloffModel === 'inverseSquareWide') {
     falloff = inverseSquareFalloff(THREE.TSL, dist, FIRE_INVERSE_SQUARE_STEEPNESS);
   } else if (falloffModel === 'beam' && beamDirection && beamShape) {

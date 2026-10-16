@@ -67,7 +67,7 @@
  * naturally bucket separately from candle/lightning's `inverseSquare` —
  * no bucket-key change needed, only this admission list.
  */
-export const BATCH_FALLOFF_MODELS = Object.freeze(['foundry', 'inverseSquare', 'inverseSquareWide']);
+export const BATCH_FALLOFF_MODELS = Object.freeze(['foundry', 'inverseSquare', 'inverseSquareWide', 'candle']);
 
 /**
  * WebGPU's real per-pipeline vertex-buffer limit, as this codebase already

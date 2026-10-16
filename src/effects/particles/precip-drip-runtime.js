@@ -93,6 +93,12 @@ const CURL_PX = 7;
  * length of the building it fell off.
  */
 const STREAK_PER_PXS = 0.0034;
+/** How long a landed drip lingers as a splash ring, in seconds. The body keeps
+ * its slot after height hits 0 (height keeps counting negative) so the ring
+ * is born exactly where the drip landed. */
+const SPLASH_SEC = 0.28;
+/** Diameter of a fully-grown drip splash ring, world px. Deliberately tiny. */
+const SPLASH_DIAM_PX = 16;
 
 /**
  * @param {object} deps
@@ -182,6 +188,8 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
   /** mythica-machina-press#316 — `dripCurlPx`, replacing the module constant
    * {@link CURL_PX} as the live value `updateKernel`'s wobble term reads. */
   const uCurlPx = uniform(float(CURL_PX));
+  /** `dripSplashScale` — size multiplier for the ring where a drip lands. */
+  const uSplashScale = uniform(float(1));
 
   const hash11 = (x) => fract(sin(x.mul(12.9898)).mul(43758.5453));
   // Precipitation's compass is no longer this file's own (2026-09-04,
@@ -256,12 +264,17 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
       uCurlPx
     );
     const drift = windFlowVectorNode(TSL, uWindDirDeg).mul(uWindSpeed01).mul(uWindAirSpeed).mul(float(0.12)).add(curl);
-    const nextPos = pos.add(drift.mul(uDtSec));
+    // A landed drip (height <= 0) is a splash: it stays put where it hit.
+    const nextPos = c.w.lessThanEqual(float(0)).select(pos, pos.add(drift.mul(uDtSec)));
     const nextH = c.w.sub(c.z.mul(uDtSec));
 
     // Landed, or outlived its life. Both end it; the life is the backstop for a
     // drip whose deck height is large enough that it would otherwise streak.
-    const done = nextH.lessThanEqual(float(0)).or(nextAge.greaterThanEqual(lifeBuf.element(i)));
+    // Height keeps counting below 0 during the splash; the body ends once the
+    // splash has run SPLASH_SEC (or its life runs out).
+    const done = nextH
+      .lessThanEqual(c.z.mul(float(SPLASH_SEC)).negate())
+      .or(nextAge.greaterThanEqual(lifeBuf.element(i)));
     /**
      * ⚠️ **A POSITION-ONLY ENTROPY IS A FIXED POINT HERE**, and the author saw
      * it: *"they spawn at very predictable spots around the sky reach perimeter
@@ -326,8 +339,23 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
     // runs out. The fade is over LIFE rather than height, so a drip from a low
     // awning fades as gently as one from a bridge.
     const fade = float(1).sub(t).pow(float(0.7));
-    return vec4(t, c.x, alive.mul(fade), float(0));
+    // The falling streak is hidden once the drip has landed (height <= 0).
+    const airborne = c.w.greaterThan(float(0)).select(float(1), float(0));
+    return vec4(t, c.x, alive.mul(fade).mul(airborne), float(0));
   })().toVarying('vPrecipDrip');
+
+  /** `(splash01, brightness, visible, 0)` for the landing ring. */
+  const vSplash = Fn(() => {
+    const i = instanceIndex;
+    const c = custom.element(i);
+    const alive = float(i).lessThan(uActiveCount).select(float(1), float(0));
+    const landed = c.w.lessThanEqual(float(0)).select(float(1), float(0));
+    const prog = c.w
+      .negate()
+      .div(c.z.mul(float(SPLASH_SEC)).max(float(1)))
+      .clamp(float(0), float(1));
+    return vec4(prog, c.x, alive.mul(landed), float(0));
+  })().toVarying('vPrecipDripSplash');
 
   const material = new THREE.NodeMaterial();
   material.positionNode = Fn(() => {
@@ -342,7 +370,7 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
      * falling toward. THIS is what "dropping downwards" looks like from above,
      * and its absence is why the drips sat still.
      */
-    const persp = uCamHeight.div(uCamHeight.sub(c.w.min(uCamHeight.mul(float(0.82)))));
+    const persp = uCamHeight.div(uCamHeight.sub(c.w.max(float(0)).min(uCamHeight.mul(float(0.82)))));
     const drawn = uCamCentre.add(centre.sub(uCamCentre).mul(persp));
 
     /**
@@ -425,6 +453,49 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
   const scene = new THREE.Scene();
   scene.add(mesh);
 
+  // ── THE LANDING SPLASH ── a small expanding ring where the drip hit the
+  // ground, drawn from the same instance data (height <= 0 = splashing).
+  const splashGeometry = new THREE.InstancedBufferGeometry();
+  splashGeometry.index = base.index;
+  splashGeometry.setAttribute('position', base.attributes.position);
+  splashGeometry.setAttribute('uv', base.attributes.uv);
+  splashGeometry.instanceCount = cap;
+
+  const splashMaterial = new THREE.NodeMaterial();
+  splashMaterial.positionNode = Fn(() => {
+    const i = instanceIndex;
+    const centre = position.element(i);
+    const c = custom.element(i);
+    const prog = vSplash.x;
+    // Grows from ~40% to full size over the splash; scaled by the drop's size.
+    const diam = float(SPLASH_DIAM_PX)
+      .mul(uSplashScale)
+      .mul(c.y.div(float(1.8)))
+      .mul(mix(float(0.4), float(1), prog));
+    return vec3(centre.add(positionGeometry.xy.mul(diam)), float(zDepth));
+  })();
+  splashMaterial.colorNode = Fn(() => vec3(0.78, 0.86, 1.0).mul(vSplash.y).mul(uRgbMul))();
+  splashMaterial.opacityNode = Fn(() => {
+    const p = uv().sub(float(0.5)).mul(float(2));
+    const r = p.length();
+    const prog = vSplash.x;
+    const ringR = mix(float(0.3), float(0.85), prog);
+    const ring = float(1).sub(r.sub(ringR).abs().div(float(0.2))).clamp(float(0), float(1));
+    const fade = float(1).sub(prog).pow(float(1.4));
+    return ring.mul(fade).mul(vSplash.z).mul(uAlphaMul).mul(float(0.5));
+  })();
+  splashMaterial.transparent = true;
+  splashMaterial.depthWrite = false;
+  splashMaterial.depthTest = false;
+  splashMaterial.blending = THREE.NormalBlending;
+  splashMaterial.side = THREE.DoubleSide;
+
+  const splashMesh = new THREE.Mesh(splashGeometry, splashMaterial);
+  splashMesh.frustumCulled = false;
+  // Just under the falling streaks: the ring is on the ground.
+  splashMesh.renderOrder = renderOrder - 0.5;
+  scene.add(splashMesh);
+
   const pointData = new Float32Array(maxSpawnPoints * 4);
   let seeded = false;
   let liveCount = 0;
@@ -501,6 +572,7 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
       liveCount = Math.round(cap * rate);
       uActiveCount.value = liveCount;
       geometry.instanceCount = Math.max(1, liveCount);
+      splashGeometry.instanceCount = Math.max(1, liveCount);
       if (Number.isFinite(frame?.alphaMul)) uAlphaMul.value = frame.alphaMul;
       if (Number.isFinite(frame?.rgbMul)) uRgbMul.value = frame.rgbMul;
     },
@@ -531,6 +603,7 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
       // finite-then-floor pattern every dial above already uses.
       if (Number.isFinite(t.dripFallSpeedScale)) uFallSpeedScale.value = Math.max(0.01, t.dripFallSpeedScale);
       if (Number.isFinite(t.dripCurlPx)) uCurlPx.value = Math.max(0, t.dripCurlPx);
+      if (Number.isFinite(t.dripSplashScale)) uSplashScale.value = Math.max(0, t.dripSplashScale);
       // ⚠️ THE ONE PLAIN-JS ASSIGNMENT HERE, not a `.value` write — see
       // `tailDurationSec`'s own declaration for why. Floored well above zero:
       // `setFrame` DIVIDES by this every frame, and the schema's own min (0)

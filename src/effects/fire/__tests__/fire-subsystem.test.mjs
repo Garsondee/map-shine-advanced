@@ -672,13 +672,14 @@ export function run(t) {
     const flameCountIndoor = flameSealed?.paramCalls.at(-1)?.activeCount;
 
     t.ok(
-      `a fully indoor fire cuts ember/smoke activeCount well below the outdoor reading, matching the author's own 90% default (ember outdoor=${emberCountOutdoor} indoor=${emberCountIndoor}, smoke outdoor=${smokeCountOutdoor} indoor=${smokeCountIndoor})`,
+      `a fully indoor fire makes no embers and keeps its smoke count (2026-10-16; smoke is dimmed by opacity instead) (ember outdoor=${emberCountOutdoor} indoor=${emberCountIndoor}, smoke outdoor=${smokeCountOutdoor} indoor=${smokeCountIndoor})`,
       Number.isFinite(emberCountOutdoor) &&
         Number.isFinite(emberCountIndoor) &&
         Number.isFinite(smokeCountOutdoor) &&
         Number.isFinite(smokeCountIndoor) &&
-        emberCountIndoor < emberCountOutdoor &&
-        smokeCountIndoor < smokeCountOutdoor
+        emberCountIndoor === 0 &&
+        emberCountOutdoor > 0 &&
+        smokeCountIndoor === smokeCountOutdoor
     );
     t.ok(
       "flame's own activeCount is untouched by outdoors01 — the author's own ask was embers and smoke only",

@@ -1433,9 +1433,16 @@ export function fireOpennessGain01(openness) {
  */
 export function fireIndoorParticleResponse(indoor01, opts = {}) {
   const t = clampNum(Number.isFinite(indoor01) ? indoor01 : 0, 0, 1);
-  const emberSuppression = clampNum(Number.isFinite(opts.emberSuppression) ? opts.emberSuppression : 0.9, 0, 1);
+  // ⚠️ EMBERS DEFAULT TO A FULL CUT (2026-10-16). Author: "fires which are
+  // indoors should not produce embers, only outdoor fires should." An indoor
+  // fire emits none; the dial stays for anyone who wants some back.
+  const emberSuppression = clampNum(Number.isFinite(opts.emberSuppression) ? opts.emberSuppression : 1, 0, 1);
   const emberLifeScale = clampNum(Number.isFinite(opts.emberLifeScale) ? opts.emberLifeScale : 0.15, 0.05, 30);
-  const smokeSuppression = clampNum(Number.isFinite(opts.smokeSuppression) ? opts.smokeSuppression : 0.9, 0, 1);
+  // ⚠️ SMOKE DEFAULTS TO NO COUNT CUT (2026-10-16). Indoor smoke is reduced by
+  // OPACITY instead (below), so the author's ask — indoor smoke at half the
+  // opacity of outdoor smoke — reads exactly as asked, not as a stacked
+  // count cut on top of it.
+  const smokeSuppression = clampNum(Number.isFinite(opts.smokeSuppression) ? opts.smokeSuppression : 0, 0, 1);
   const smokeLifeScale = clampNum(Number.isFinite(opts.smokeLifeScale) ? opts.smokeLifeScale : 0.15, 0.05, 30);
   return {
     // At indoor01=0 (outdoors) every multiplier below is exactly 1 — a fire
@@ -1446,8 +1453,14 @@ export function fireIndoorParticleResponse(indoor01, opts = {}) {
     emberLifeMul: 1 + t * (emberLifeScale - 1),
     smokeActiveCountMul: 1 - t * smokeSuppression,
     smokeLifeMul: 1 + t * (smokeLifeScale - 1),
+    // Indoor smoke is drawn at INDOOR_SMOKE_OPACITY_FRACTION of its outdoor
+    // opacity: 1 outdoors, exactly that fraction fully indoors, linear between.
+    smokeOpacityMul: 1 - t * (1 - INDOOR_SMOKE_OPACITY_FRACTION),
   };
 }
+
+/** Fully-indoor smoke opacity as a fraction of outdoor smoke (author, 2026-10-16). */
+export const INDOOR_SMOKE_OPACITY_FRACTION = 0.5;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PARAMS → RUNTIME — the one place a control becomes a number
@@ -1527,9 +1540,9 @@ export function fireRuntimeFromParams(params = {}, chain = {}, wind = {}) {
   // suppression as a hard no-op, not an accidental full cut.
   const indoor01 = 1 - clampNum(Number.isFinite(wind?.outdoor01) ? wind.outdoor01 : 1, 0, 1);
   const indoorFx = fireIndoorParticleResponse(indoor01, {
-    emberSuppression: num(p.emberIndoorSuppression, 0.9),
+    emberSuppression: num(p.emberIndoorSuppression, 1),
     emberLifeScale: num(p.emberIndoorLifeScale, 0.15),
-    smokeSuppression: num(p.smokeIndoorSuppression, 0.9),
+    smokeSuppression: num(p.smokeIndoorSuppression, 0),
     smokeLifeScale: num(p.smokeIndoorLifeScale, 0.15),
   });
   return {
@@ -1676,7 +1689,8 @@ export function fireRuntimeFromParams(params = {}, chain = {}, wind = {}) {
         lifeAtWind0: clampNum(num(p.smokeLifeScale, 1), 0.05, 30) * indoorFx.smokeLifeMul,
         lifeAtWind1: clampNum(num(p.smokeLifeScale, 1), 0.05, 30) * indoorFx.smokeLifeMul,
         sizeScale: clampNum(num(p.smokeSizeScale, 1), 0.02, 20),
-        opacityScale: clampNum(num(p.smokeOpacity, 1), 0, 20),
+        // ⚠️ INDOOR-DIMMED (2026-10-16) — half the outdoor opacity fully indoors.
+        opacityScale: clampNum(num(p.smokeOpacity, 1), 0, 20) * indoorFx.smokeOpacityMul,
         growthScale: clampNum(num(p.smokeGrowth, 1), 0, 30),
         // Not a wind0/wind1 pair — smoke keeps its single "Smoke rise ×" dial
         // (out of scope this round), so both ends of the particle kernel's

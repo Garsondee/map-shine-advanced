@@ -847,17 +847,21 @@ export function run(t) {
 
     const indoors = fireIndoorParticleResponse(1);
     t.ok(
-      "indoor01=1 (fully indoors) hits the author's own defaults exactly — 90% count cut, 15% life",
-      near(indoors.emberActiveCountMul, 0.1, 1e-9) &&
-        near(indoors.smokeActiveCountMul, 0.1, 1e-9) &&
+      'indoor01=1 (fully indoors): embers are cut to ZERO (2026-10-16), smoke keeps its count, both live 15% as long, and smoke is drawn at half opacity',
+      near(indoors.emberActiveCountMul, 0, 1e-9) &&
+        near(indoors.smokeActiveCountMul, 1, 1e-9) &&
         near(indoors.emberLifeMul, 0.15, 1e-9) &&
-        near(indoors.smokeLifeMul, 0.15, 1e-9)
+        near(indoors.smokeLifeMul, 0.15, 1e-9) &&
+        near(indoors.smokeOpacityMul, 0.5, 1e-9) &&
+        near(outdoors.smokeOpacityMul, 1, 1e-9)
     );
 
     const half = fireIndoorParticleResponse(0.5);
     t.ok(
       'a linear blend, not eased like the wind curve — half indoor lands exactly halfway between the two endpoints',
-      near(half.emberActiveCountMul, 0.55, 1e-9) && near(half.emberLifeMul, 1 - 0.5 * (1 - 0.15), 1e-9)
+      near(half.emberActiveCountMul, 0.5, 1e-9) &&
+        near(half.emberLifeMul, 1 - 0.5 * (1 - 0.15), 1e-9) &&
+        near(half.smokeOpacityMul, 0.75, 1e-9)
     );
 
     const customised = fireIndoorParticleResponse(1, {
@@ -891,9 +895,14 @@ export function run(t) {
 
     const indoorRuntime = fireRuntimeFromParams({}, chain66Indoor, { outdoor01: 0 });
     t.ok(
-      "a fully indoor fire's ember/smoke activeCount drops to 10% of the outdoor value",
-      near(indoorRuntime.perKind.ember.activeCount, outdoorRuntime.perKind.ember.activeCount * 0.1, 1) &&
-        near(indoorRuntime.perKind.smoke.activeCount, outdoorRuntime.perKind.smoke.activeCount * 0.1, 1)
+      'a fully indoor fire makes NO embers (2026-10-16), and keeps its full smoke count',
+      indoorRuntime.perKind.ember.activeCount === 0 &&
+        indoorRuntime.perKind.smoke.activeCount === outdoorRuntime.perKind.smoke.activeCount
+    );
+    t.ok(
+      'a fully indoor fire draws its smoke at half the outdoor opacity, and outdoor smoke is untouched',
+      near(indoorRuntime.perKind.smoke.opacityScale, outdoorRuntime.perKind.smoke.opacityScale * 0.5, 1e-9) &&
+        outdoorRuntime.perKind.smoke.opacityScale === 1
     );
     t.ok(
       "flame's activeCount is completely untouched by indoor01 — the author's own ask was embers and smoke only",
@@ -925,16 +934,16 @@ export function run(t) {
       )
     );
 
-    // Wind and indoor suppression are independent axes and must stack, not
-    // fight — a windy, sealed-in indoor fire's smoke should be MORE
-    // suppressed than an equally windy outdoor one, never less. Partial wind
-    // speed (not 1) so wind alone has not already zeroed smoke out and
-    // masked whatever indoor01 does on top of it.
+    // Wind and indoor are independent axes. Indoor smoke no longer cuts the
+    // CPU-side count by default (2026-10-16 — it is dimmed by opacity instead),
+    // so an equally windy indoor and outdoor fire send the same smoke count;
+    // wind's own per-particle suppression still runs in the shader.
     const windyOutdoor = fireRuntimeFromParams({}, chain66Indoor, { speed01: 0.3, exposure01: 1, outdoor01: 1 });
     const windyIndoor = fireRuntimeFromParams({}, chain66Indoor, { speed01: 0.3, exposure01: 1, outdoor01: 0 });
     t.ok(
-      'wind and indoor suppression stack on smoke activeCount rather than one overriding the other',
-      windyIndoor.perKind.smoke.activeCount < windyOutdoor.perKind.smoke.activeCount
+      'an equally windy indoor fire sends the same smoke count, but at half the opacity',
+      windyIndoor.perKind.smoke.activeCount === windyOutdoor.perKind.smoke.activeCount &&
+        near(windyIndoor.perKind.smoke.opacityScale, windyOutdoor.perKind.smoke.opacityScale * 0.5, 1e-9)
     );
   }
 

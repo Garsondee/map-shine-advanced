@@ -214,7 +214,6 @@ import {
   // live fades (scene/weather-restrict.js).
   composeWeatherGate,
   composeDripCover,
-  dripRoofKey,
   quantizeOpacity,
   tileOpacity,
 } from '../scene/index.js';
@@ -2803,10 +2802,7 @@ export async function startVtPanViewer({
      */
     function traceRoofline(idx) {
       const wx = weatherGate && weatherGate.floorIndex === idx ? weatherGate.product : null;
-      const cover = wx
-        ? composeDripCover({ cover: wx.cover, restrictors: wx.restrictors, opacityOf: weatherOpacityOf })
-        : getCoverAboveGrid(idx);
-      if (wx) weatherGate.dripKey = dripRoofKey(wx.restrictors, weatherOpacityOf);
+      const cover = wx ? composeDripCover({ cover: wx.cover, restrictors: wx.restrictors }) : getCoverAboveGrid(idx);
       const roofline = extractDripEdges(cover, {
         heightGrid: getCasterHeightGrid(idx),
         heightScalePx: CASTER_HEIGHT_SCALE_PX,
@@ -4726,7 +4722,7 @@ export async function startVtPanViewer({
     /** The raw opacity this frame, written by the occlusion refresh loop. */
     const weatherOpacityRaw = new Map();
     const weatherOpacityOf = (id) => weatherOpacity.get(id) ?? 1;
-    /** @type {{floorIndex:number, product:object, data:Uint8Array, texture:object, dripKey:string}|null} */
+    /** @type {{floorIndex:number, product:object, data:Uint8Array, texture:object}|null} */
     let weatherGate = null;
 
     function bakePrecipSkyReachTexture(floorIndex) {
@@ -4773,7 +4769,7 @@ export async function startVtPanViewer({
       const tex = createMaskDataTexture(data, w, h, 'linear', false);
       precipSkyReachTexture?.dispose();
       precipSkyReachTexture = tex;
-      if (restrictors) weatherGate = { floorIndex, product: restrictors, data, texture: tex, dripKey: '' };
+      if (restrictors) weatherGate = { floorIndex, product: restrictors, data, texture: tex };
       precipSkyReachRect = {
         minX: grid.spec.x,
         minY: grid.spec.y,
@@ -4821,7 +4817,6 @@ export async function startVtPanViewer({
         out: gate.data,
       });
       gate.texture.needsUpdate = true;
-      if (dripRoofKey(gate.product.restrictors, weatherOpacityOf) !== gate.dripKey) traceRoofline(gate.floorIndex);
     }
 
     const precipitationSubsystem = createPrecipitationSubsystem({
@@ -4846,6 +4841,11 @@ export async function startVtPanViewer({
       // its own pass after the world would put snow on top of the tokens
       // standing in it.
       onMantleMeshes: (meshes) => {
+        for (const mesh of meshes) scene.add(mesh);
+      },
+      // The roof-edge drips draw in the WORLD scene too, sorted just beneath the
+      // viewed floor's overhead tiles (`updateDripLayerOrder`).
+      onDripMeshes: (meshes) => {
         for (const mesh of meshes) scene.add(mesh);
       },
       // ⚠️ MISNAMED, AND KNOWINGLY LEFT THAT WAY FOR NOW (2026-09-04,
@@ -8882,6 +8882,32 @@ export async function startVtPanViewer({
       cloudTopsCompositeQuad.render(renderer);
       renderer.autoClearColor = prevSceneLitAutoClear;
       renderer.setRenderTarget(null);
+    }
+
+    /**
+     * ⭐ THE DRIPS SORT BENEATH THE OVERHEAD TILES. They are shed by a roof or
+     * canopy edge, so they belong under the art that sheds them — drawn over it
+     * they ran across the roof — and a roof that hover-fades then reveals them.
+     * The viewed floor's own background is the highest `levelBackground` in the
+     * draw list and its elevation is the floor's ground; the overhead art is
+     * everything above that, plus any tile flagged "Restrict Weather". Drips sort
+     * a hair under the lowest of it, or just over the ground when there is none.
+     */
+    function updateDripLayerOrder(items) {
+      let ground = null;
+      for (const item of items) {
+        if (item.kind === 'levelBackground' && (!ground || item.key.elevation > ground.key.elevation)) ground = item;
+      }
+      if (!ground) return;
+      let lowest = Infinity;
+      for (const item of items) {
+        if (typeof item.renderOrder !== 'number' || item === ground || item.kind === 'levelBackground') continue;
+        const overhead = item.key.elevation > ground.key.elevation || item.restrictsWeather === true;
+        if (overhead && item.renderOrder < lowest) lowest = item.renderOrder;
+      }
+      precipitationSubsystem?.setDripLayerOrder(
+        Number.isFinite(lowest) ? lowest - 0.1 : (ground.renderOrder ?? 0) + 0.5
+      );
     }
 
     function runSurfacePrecipitationPass() {
@@ -21450,6 +21476,7 @@ export async function startVtPanViewer({
       profiler?.begin(Z.depthAuthorityRebuild);
       const items = depthAuthority.rebuild(buildItems(view.floorIndex));
       profiler?.end(Z.depthAuthorityRebuild);
+      updateDripLayerOrder(items);
       // Vegetation sorts at its OWN elevation inside the host floor's band, not
       // at its host's — the author-ruled exception (see `vegetation.js`'s own
       // "HOW A KIND SORTS"). Must run HERE, with the freshly sorted list: it

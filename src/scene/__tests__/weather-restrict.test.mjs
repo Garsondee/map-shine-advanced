@@ -8,7 +8,6 @@ import { createMaskAuthority } from '../mask-authority.js';
 import {
   composeWeatherGate,
   composeDripCover,
-  dripRoofKey,
   quantizeOpacity,
   tileOpacity,
   OPACITY_STEP,
@@ -162,21 +161,13 @@ export async function run(t) {
     t.ok('weather: compose fills the supplied buffer in place', ret === out && out[(5 * 10 + 2) * 4 + 3] === 255);
   }
 
-  // --- drips: a restrictor gets edges; a faded one loses them -------------------------
+  // --- drips: a restrictor gets edges, faded or not -------------------------
   {
     const [f0] = derive([base('awning', 5, { restrictsWeather: true })]);
     const solid = composeDripCover({ cover: f0.weather.cover, restrictors: f0.weather.restrictors });
     t.ok('drips: an awning that was never coverAbove is cover for the roofline', at(solid, 2, 5) === 255);
-    const faded = composeDripCover({
-      cover: f0.weather.cover,
-      restrictors: f0.weather.restrictors,
-      opacityOf: () => 0.2,
-    });
-    t.ok('drips: a mostly-faded tile stops being a roof', at(faded, 2, 5) === 0);
-    t.ok(
-      'drips: the roof key flips exactly when the threshold is crossed',
-      dripRoofKey(f0.weather.restrictors, () => 0.8) === '1' && dripRoofKey(f0.weather.restrictors, () => 0.2) === '0'
-    );
+    t.ok('drips: the ordinary cover is left without the tile', at(f0.weather.cover, 2, 5) === 0);
+    t.ok('drips: a fade never removes the roofline (the drips sit beneath the tile)', at(solid, 2, 5) === 255);
   }
 
   // --- through the mask authority: the flag on the item reaches the derive ---------------

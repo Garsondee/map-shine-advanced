@@ -191,6 +191,14 @@ export function createPrecipitationSubsystem({
    * draw order.
    */
   onMantleMeshes = null,
+  /**
+   * Called with each drip engine's draw meshes when it is built, so the caller
+   * can add them to the WORLD scene. Drips hang off roof edges: they belong
+   * BENEATH the overhead tiles (and so show through one that hover-fades), not
+   * in a post pass over the lit frame where they would draw across the roof
+   * that sheds them. Absent ⇒ the old post-pass draw via `scenes`.
+   */
+  onDripMeshes = null,
 }) {
   /** @type {Map<string, object>} speciesId → FALL engine, built lazily. */
   const engines = new Map();
@@ -241,6 +249,8 @@ export function createPrecipitationSubsystem({
    * settles), which the rate below expresses by reading `precip01` only while a
    * LIQUID species is falling. */
   let drips = null;
+  /** The renderOrder the drips sort at in the world scene (see `onDripMeshes`). */
+  let dripLayerOrder = null;
   let dripReason = 'no roofline supplied yet';
   /**
    * ⭐ THE AUTHORED LAYER (mythica-machina-press#316) — a SECOND, independent
@@ -268,6 +278,13 @@ export function createPrecipitationSubsystem({
     createMantleTarget && renderMantleStep
       ? 'not built yet — waiting for scene bounds'
       : 'no target allocator or render step injected';
+
+  /** Hand a new drip engine's meshes to the world scene and sort it. */
+  function adoptDripEngine(engine) {
+    if (!onDripMeshes) return;
+    if (dripLayerOrder !== null) engine.setLayerOrder(dripLayerOrder);
+    onDripMeshes(engine.meshes);
+  }
 
   /**
    * ⭐ Build one species' curtain on first use. Sized from the SCENE bounds, so
@@ -803,8 +820,8 @@ export function createPrecipitationSubsystem({
       // the identical reason, and in 'always' mode more strongly still — see
       // `sync()`'s own comment.
       if (activePopulations.length === 0) {
-        if (drips?.hasContent) out.push(drips.scene);
-        if (authoredDrips?.hasContent) out.push(authoredDrips.scene);
+        if (!onDripMeshes && drips?.hasContent) out.push(drips.scene);
+        if (!onDripMeshes && authoredDrips?.hasContent) out.push(authoredDrips.scene);
         return out;
       }
       /**
@@ -834,8 +851,8 @@ export function createPrecipitationSubsystem({
       // (mythica-machina-press#316) — a hand-painted drip is exactly as much
       // an overhead feature as an auto-detected one, and the two never
       // overlap in a way that makes their relative order visible.
-      if (drips?.hasContent) out.push(drips.scene);
-      if (authoredDrips?.hasContent) out.push(authoredDrips.scene);
+      if (!onDripMeshes && drips?.hasContent) out.push(drips.scene);
+      if (!onDripMeshes && authoredDrips?.hasContent) out.push(authoredDrips.scene);
       // ⭐ THE STORM FOG (mythica-machina-press#34/#314) — LAST of all, nearest
       // the eye of everything this subsystem draws. See `storm-fog-render.js`'s
       // own header for why: real heavy fog sits between the eye and literally
@@ -909,6 +926,19 @@ export function createPrecipitationSubsystem({
      * correct answer for a floor with nothing overhead — a rooftop's eaves are
      * below you, not above.
      */
+    /**
+     * Where the drips sort in the world scene's flat renderOrder — just beneath
+     * the lowest overhead tile of the viewed floor, so a roof draws over the
+     * drips it sheds and a hover-faded roof shows them. Cheap; call whenever the
+     * draw list is re-sorted.
+     */
+    setDripLayerOrder(order) {
+      if (!Number.isFinite(order) || order === dripLayerOrder) return;
+      dripLayerOrder = order;
+      drips?.setLayerOrder(order);
+      authoredDrips?.setLayerOrder(order);
+    },
+
     setDripEdges(edges) {
       if (!edges || !(edges.count > 0)) {
         dripReason = 'no roof edges on this floor';
@@ -917,6 +947,7 @@ export function createPrecipitationSubsystem({
       }
       if (!drips) {
         drips = createPrecipDripEngine({ THREE, renderOrder: renderOrder + 1 });
+        adoptDripEngine(drips);
         if (lastTuning) drips.setTuning(lastTuning);
       }
       dripReason = null;
@@ -949,6 +980,7 @@ export function createPrecipitationSubsystem({
           capacity: 2000,
           maxSpawnPoints: 128,
         });
+        adoptDripEngine(authoredDrips);
         if (lastTuning) authoredDrips.setTuning(lastTuning);
       }
       authoredDripReason = null;

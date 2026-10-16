@@ -125,6 +125,7 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
     mix,
     positionGeometry,
     instancedArray,
+    mrt,
   } = TSL;
 
   const cap = Math.max(1, Math.floor(capacity));
@@ -446,6 +447,10 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
    * NOTHING, silently. The seventh surface in this codebase to need this line;
    * it has cost this project a debug cycle once already in P2. */
   material.side = THREE.DoubleSide;
+  /** The drips draw INSIDE the world pass (under the overhead tiles — see
+   * `meshes`), which writes an MRT; an overlay with no `attr` output would
+   * leave that attachment undefined. A transparent zero adds nothing to it. */
+  material.mrtNode = mrt({ attr: vec4(0, 0, 0, 0) });
 
   const mesh = new THREE.Mesh(geometry, material);
   mesh.frustumCulled = false;
@@ -480,7 +485,9 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
     const r = p.length();
     const prog = vSplash.x;
     const ringR = mix(float(0.3), float(0.85), prog);
-    const ring = float(1).sub(r.sub(ringR).abs().div(float(0.2))).clamp(float(0), float(1));
+    const ring = float(1)
+      .sub(r.sub(ringR).abs().div(float(0.2)))
+      .clamp(float(0), float(1));
     const fade = float(1).sub(prog).pow(float(1.4));
     return ring.mul(fade).mul(vSplash.z).mul(uAlphaMul).mul(float(0.5));
   })();
@@ -489,12 +496,18 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
   splashMaterial.depthTest = false;
   splashMaterial.blending = THREE.NormalBlending;
   splashMaterial.side = THREE.DoubleSide;
+  splashMaterial.mrtNode = mrt({ attr: vec4(0, 0, 0, 0) });
 
   const splashMesh = new THREE.Mesh(splashGeometry, splashMaterial);
   splashMesh.frustumCulled = false;
   // Just under the falling streaks: the ring is on the ground.
   splashMesh.renderOrder = renderOrder - 0.5;
   scene.add(splashMesh);
+  // Hidden until there is something to draw: once the meshes are re-parented
+  // into the world scene nothing else gates them (the old post pass skipped
+  // an engine with no content).
+  mesh.visible = false;
+  splashMesh.visible = false;
 
   const pointData = new Float32Array(maxSpawnPoints * 4);
   let seeded = false;
@@ -511,6 +524,17 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
 
   return {
     scene,
+    /** The two draw meshes (drips, landing splashes), for a caller that draws them
+     * inside the WORLD scene — beneath the overhead tiles — rather than as a
+     * post pass over the lit frame. Adding them elsewhere re-parents them. */
+    meshes: [mesh, splashMesh],
+    /** Sort the drips at `order` in the world scene's flat renderOrder; the
+     * landing splash sits just under them (it is on the ground). */
+    setLayerOrder(order) {
+      if (!Number.isFinite(order)) return;
+      mesh.renderOrder = order;
+      splashMesh.renderOrder = order - 0.2;
+    },
     capacity: cap,
 
     /**
@@ -575,6 +599,7 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
       splashGeometry.instanceCount = Math.max(1, liveCount);
       if (Number.isFinite(frame?.alphaMul)) uAlphaMul.value = frame.alphaMul;
       if (Number.isFinite(frame?.rgbMul)) uRgbMul.value = frame.rgbMul;
+      mesh.visible = splashMesh.visible = spawnCount > 0 && liveCount > 0;
     },
 
     step(renderer, dtSec, timeMs, wind) {

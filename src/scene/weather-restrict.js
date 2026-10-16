@@ -34,9 +34,6 @@
 /** Opacity quantum — a fade is re-composed only when some tile moves this far. */
 export const OPACITY_STEP = 1 / 32;
 
-/** A tile at or above this opacity still counts as a roof for the DRIPS. */
-export const DRIP_OPACITY_THRESHOLD = 0.5;
-
 /** @param {number} v @returns {number} 0..1 */
 function clamp01(v) {
   return v > 0 ? (v < 1 ? v : 1) : 0;
@@ -117,22 +114,22 @@ export function composeWeatherGate({ sky, restrictors, opacityOf = () => 1, out 
 
 /**
  * The cover grid the DRIP roofline is traced from: the floor's cover WITHOUT the
- * restrictors, plus each restrictor that still reads as a roof (opacity at or
- * above {@link DRIP_OPACITY_THRESHOLD}). A faded roof stops dripping; a tile that
- * was never in `coverAbove` (an awning, a rug-height cover) gets its edges for
- * the first time. Restrictors are MAX-merged, so overlapping tiles share edges.
+ * restrictors, plus EVERY restrictor — hover fade does not matter here. The drips
+ * are drawn beneath the tile, so a roof that fades away reveals them still
+ * falling; a tile that was never in `coverAbove` (an awning, a rug-height
+ * cover) gets its edges for the first time. Restrictors are MAX-merged, so
+ * overlapping tiles share edges.
  *
  * @param {object} args
  * @param {{spec: object, data: Uint8Array}} args.cover - `weather.cover`.
  * @param {Array<{id: string, stamp: object}>} args.restrictors
- * @param {(id: string) => number} [args.opacityOf]
  * @returns {{spec: object, data: Uint8Array}} a NEW grid.
  */
-export function composeDripCover({ cover, restrictors, opacityOf = () => 1 }) {
+export function composeDripCover({ cover, restrictors }) {
   const { w, h } = cover.spec;
   const data = Uint8Array.from(cover.data);
-  for (const { id, stamp } of restrictors) {
-    if (clamp01(opacityOf(id)) < DRIP_OPACITY_THRESHOLD || !stamp?.value) continue;
+  for (const { stamp } of restrictors) {
+    if (!stamp?.value) continue;
     const { value, gx0, gy0, w: sw, h: sh } = stamp;
     for (let r = 0; r < sh; r++) {
       const gy = gy0 + r;
@@ -147,18 +144,4 @@ export function composeDripCover({ cover, restrictors, opacityOf = () => 1 }) {
     }
   }
   return { spec: cover.spec, data };
-}
-
-/**
- * Which restrictors currently count as a roof for the drips, as a string: the
- * caller re-traces the roofline only when this changes (a fade crossing the
- * threshold), not on every frame of the easing.
- * @param {Array<{id: string}>} restrictors
- * @param {(id: string) => number} opacityOf
- * @returns {string}
- */
-export function dripRoofKey(restrictors, opacityOf) {
-  let key = '';
-  for (const { id } of restrictors) key += clamp01(opacityOf(id)) >= DRIP_OPACITY_THRESHOLD ? '1' : '0';
-  return key;
 }

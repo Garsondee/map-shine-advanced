@@ -67,7 +67,7 @@ export { createSkyReachAccess, COVERED_THRESHOLD } from './sky-reach-access.js';
 
 // A TILE's "Restrict Weather" box as a sky occluder — the pure compose the viewer
 // runs each frame over the derive stage's restrictors (scene/weather-restrict.js).
-export { composeWeatherGate, composeDripCover, dripRoofKey, quantizeOpacity, tileOpacity } from './weather-restrict.js';
+export { composeWeatherGate, composeDripCover, quantizeOpacity, tileOpacity } from './weather-restrict.js';
 
 // THE ANCHOR CATALOG + AUTHORITY (scene/anchor-catalog.js's header is the map):
 // the "place" sibling of the mask authority's "paint" — discrete point effects

@@ -134,7 +134,7 @@ export const GATE_AA_LOD = 0;
  * }}
  */
 export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTexture = null, steps = 32 }) {
-  const { uniform, texture, uv, vec2, vec3, vec4, float, max, min, mix, select, log2, smoothstep, pow, Fn } = THREE.TSL;
+  const { uniform, texture, uv, vec2, vec4, float, max, min, mix, select, log2, smoothstep, pow, Fn } = THREE.TSL;
 
   const STEPS = Number.isFinite(steps) ? Math.max(4, Math.floor(steps)) : 32;
 
@@ -398,6 +398,15 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
     const selfCoverageWalls = channelOf(here, LAYER_WALLS);
     occ[LAYER_WALLS].assign(occ[LAYER_WALLS].mul(float(1).sub(selfCoverageWalls)));
     const selfCoverageOverhead = channelOf(here, LAYER_OVERHEAD);
+    // SNAPSHOT BEFORE THE EXCLUSION — the "tile is faded away" twin. While an
+    // overhead tile is opaque its own footprint must not be darkened by its own
+    // shadow (below), but the instant it hover-fades there is no tile there
+    // any more: the ground it was hiding should wear the FULL shadow, not a
+    // hole in the tile's shape (author, 2026-10-16). Both answers are baked
+    // (R = excluded, G = full) and `buildOverheadFadeMaterial` mixes them per
+    // pixel by the tile's live fade, so a fade costs one cheap composite, not a
+    // re-march.
+    const occOverheadRaw = occ[LAYER_OVERHEAD].toVar();
     occ[LAYER_OVERHEAD].assign(occ[LAYER_OVERHEAD].mul(float(1).sub(selfCoverageOverhead)));
 
     // Map-edge ramp, unchanged from the previous model.
@@ -409,11 +418,12 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
     // returns exactly 1 however many layers are stacked.
     const attenuate = strength.mul(gate).mul(ramp);
     const layerStrength = [uStrength.x, uStrength.y, uStrength.z, uStrength.w];
-    let transmittance = float(1);
-    transmittance = transmittance.mul(float(1).sub(occ[LAYER_WALLS].mul(layerStrength[LAYER_WALLS]).mul(attenuate)));
-    transmittance = transmittance.mul(
-      float(1).sub(occ[LAYER_OVERHEAD].mul(layerStrength[LAYER_OVERHEAD]).mul(attenuate))
-    );
+    // Built twice from one occlusion set — see `occOverheadRaw` above. Only the
+    // overhead term differs between the two.
+    const wallsAndOverheadTransmittance = (overheadOcc) =>
+      float(1)
+        .sub(occ[LAYER_WALLS].mul(layerStrength[LAYER_WALLS]).mul(attenuate))
+        .mul(float(1).sub(overheadOcc.mul(layerStrength[LAYER_OVERHEAD]).mul(attenuate)));
     // ⚠️ THE BANDS UNION, THEY DO NOT COMPOUND — the TSL twin of
     // `layer-smear.js#layerSmearVisibility`'s own band block; read THAT for the
     // full argument (they are ONE nested stack sliced at two elevations, not
@@ -423,8 +433,9 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
     for (const i of SHADOW_BAND_LAYER_INDICES) {
       bandOcc = max(bandOcc, occ[i].mul(layerStrength[i]));
     }
-    transmittance = transmittance.mul(float(1).sub(bandOcc.mul(attenuate)));
-    const ownVis = transmittance.clamp(0, 1);
+    const bandTransmittance = float(1).sub(bandOcc.mul(attenuate));
+    const ownVis = wallsAndOverheadTransmittance(occ[LAYER_OVERHEAD]).mul(bandTransmittance).clamp(0, 1);
+    const ownVisFull = wallsAndOverheadTransmittance(occOverheadRaw).mul(bandTransmittance).clamp(0, 1);
 
     // ⚠️ THE CASCADE — see `lowerFieldTexNode`'s own header for the model. A
     // JS-time branch: floor 0 has no lower field and compiles this out entirely.
@@ -448,6 +459,7 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
     // bake ORDER, not in the shader.
     const lower = lowerFieldTexNode ? lowerFieldTexNode.sample(uv()) : null;
     const vis = lower ? mix(lower.r, ownVis, lower.a) : ownVis;
+    const visFull = lower ? mix(lower.r, ownVisFull, lower.a) : ownVisFull;
 
     // ⚠️ ALPHA IS THE CASCADE'S PUBLICATION CHANNEL, not padding — see
     // `uCascade`'s own header. It is safe to spend because this material is
@@ -461,7 +473,11 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
     // image in the debug layer cycler — a shadow field you can LOOK at is the
     // difference between "this is broken" and "this has no casters".
     const blockage = max(channelOf(here, SHADOW_BAND_LAYER_INDICES[0]).mul(uCascade.x), uCascade.y).clamp(0, 1);
-    return vec4(vec3(vis, vis, vis), blockage);
+    // ⚠️ G IS NO LONGER A COPY OF R: it is the same visibility with the overhead
+    // layer's self-exclusion left OFF (`occOverheadRaw`). This target is the
+    // bake's INTERNAL one — `buildOverheadFadeMaterial` reads it and publishes
+    // the greyscale field every consumer samples.
+    return vec4(vis, visFull, vis, blockage);
   })();
 
   return {
@@ -520,6 +536,109 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
     },
     setEdgeBandPx(px) {
       uEdgeBandPx.value = px > 0 ? px : 0;
+    },
+  };
+}
+
+/** How many simultaneously-fading overhead tiles one composite resolves. Four
+ * is generous — hover-fade follows ONE pointer; the rest is token-proximity
+ * fade, which rarely lifts more than a couple of roofs at once. Extras beyond
+ * the strongest four simply keep their cutout (a stated cap, not a silent one:
+ * {@link packOverheadFades} reports `dropped`). */
+export const OVERHEAD_FADE_MAX = 4;
+
+/**
+ * Pick the strongest fading tiles for the composite. Pure, so a Node test can
+ * pin the selection without a GPU.
+ *
+ * @param {Array<{minX:number,minY:number,maxX:number,maxY:number,amount:number}>|null} list
+ * @param {number} [max]
+ * @returns {{fades: Array<object>, dropped: number, key: string}} `key` is
+ *   equal for two lists that would composite identically, so the caller can
+ *   skip a redundant pass. Amounts are quantised to 1/64 so a fade that is
+ *   still crawling toward 1.0 stops re-publishing once it can no longer be seen.
+ */
+export function packOverheadFades(list, max = OVERHEAD_FADE_MAX) {
+  const live = [];
+  for (const f of list ?? []) {
+    if (!f || !(f.amount > 0)) continue;
+    if (![f.minX, f.minY, f.maxX, f.maxY].every(Number.isFinite)) continue;
+    live.push({
+      minX: f.minX,
+      minY: f.minY,
+      maxX: f.maxX,
+      maxY: f.maxY,
+      amount: Math.round(Math.min(1, f.amount) * 64) / 64,
+    });
+  }
+  live.sort((a, b) => b.amount - a.amount);
+  const fades = live.slice(0, max).filter((f) => f.amount > 0);
+  const key = fades.map((f) => `${f.minX},${f.minY},${f.maxX},${f.maxY},${f.amount}`).join('|');
+  return { fades, dropped: Math.max(0, live.length - fades.length), key };
+}
+
+/**
+ * THE PUBLISH PASS — turns the bake's internal target into the field every
+ * consumer samples. R = excluded visibility (tiles do not shadow themselves),
+ * G = the same with that exclusion off; per pixel this writes
+ * `mix(R, G, fade)` where `fade` is the live hover-fade of any overhead tile
+ * whose footprint covers the pixel. So a faded roof reveals the FULL shadow on
+ * the ground it was hiding, not a hole in the roof's shape.
+ *
+ * Output is a flat greyscale (R = G = B), alpha passed through (the cascade's
+ * blockage), exactly the shape the field had before G carried anything.
+ *
+ * With no fades this is a straight copy of R — cheap enough to run after every
+ * bake, and the only per-frame work while a tile fades.
+ *
+ * @param {object} args
+ * @param {*} args.THREE
+ * @param {*} args.sourceTexture - the bake target's texture (bound once; slots resize, never reallocate).
+ */
+export function buildOverheadFadeMaterial({ THREE, sourceTexture }) {
+  const { uniform, texture, uv, vec2, vec4, float, max, mix, step, Fn } = THREE.TSL;
+  const srcNode = texture(sourceTexture);
+  const uRect = uniform(vec4(0, 0, 1, 1));
+  const uFadeRects = [];
+  const uFadeAmounts = [];
+  for (let i = 0; i < OVERHEAD_FADE_MAX; i++) {
+    uFadeRects.push(uniform(vec4(0, 0, 0, 0)));
+    uFadeAmounts.push(uniform(float(0)));
+  }
+
+  const material = new THREE.NodeMaterial();
+  material.depthTest = false;
+  material.depthWrite = false;
+  material.fragmentNode = Fn(() => {
+    const src = srcNode.sample(uv());
+    const world = vec2(uRect.x, uRect.y).add(uv().mul(vec2(uRect.z.sub(uRect.x), uRect.w.sub(uRect.y))));
+    let fade = float(0);
+    for (let i = 0; i < OVERHEAD_FADE_MAX; i++) {
+      const r = uFadeRects[i];
+      const inside = step(r.x, world.x).mul(step(world.x, r.z)).mul(step(r.y, world.y)).mul(step(world.y, r.w));
+      fade = max(fade, inside.mul(uFadeAmounts[i]));
+    }
+    const v = mix(src.r, src.g, fade);
+    return vec4(v, v, v, src.a);
+  })();
+
+  return {
+    material,
+    setRect(rect) {
+      uRect.value.set(rect.minX, rect.minY, rect.maxX, rect.maxY);
+    },
+    /** @param {Array<object>} fades - `packOverheadFades(...).fades`. */
+    setFades(fades) {
+      for (let i = 0; i < OVERHEAD_FADE_MAX; i++) {
+        const f = fades[i];
+        if (f) {
+          uFadeRects[i].value.set(f.minX, f.minY, f.maxX, f.maxY);
+          uFadeAmounts[i].value = f.amount;
+        } else {
+          uFadeRects[i].value.set(0, 0, 0, 0);
+          uFadeAmounts[i].value = 0;
+        }
+      }
     },
   };
 }

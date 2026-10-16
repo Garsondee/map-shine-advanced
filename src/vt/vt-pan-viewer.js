@@ -11138,6 +11138,9 @@ export async function startVtPanViewer({
      * alpha for a background-hosted tree answers "is the mouse anywhere over
      * the floor?", which is true almost continuously during ordinary play,
      * not "is the mouse over painted tree pixels specifically". That is what
+    /** Faded overhead tiles this frame, `{minX,minY,maxX,maxY,amount}` — reused
+     * like the scratch above and handed to `sunShadows.setOverheadFades`. */
+    const overheadFadeScratch = [];
      * pinned every such scene's `state.hoverFade.occlusion` at ~1 within
      * about a second of the mouse ever touching the canvas and held it there
      * thereafter: the canopy's alpha collapsed toward `uOccludedAlpha` (0 for
@@ -11599,6 +11602,10 @@ export async function startVtPanViewer({
         // ternary's `: 0` fallback for `uDepthOcclusionAmount` just above
         // (that one's "0 = not occluded"; this one's "1 = not faded" — same
         // fallback CASE, opposite-polarity uniform).
+      // Overhead tiles faded away THIS frame, handed to the sun shadows after
+      // the loop so a faded roof shows the full shadow beneath it instead of a
+      // cutout in its own shape. Empty almost every frame (no allocation).
+      overheadFadeScratch.length = 0;
         //
         // `setFadeForItem` is itself the cheap existence check (one
         // `entries.get(itemId)`, a silent no-op for the vastly-more-common
@@ -11672,6 +11679,18 @@ export async function startVtPanViewer({
             // the timer just advanced above: `occluded` stays hardcoded
             // false (a token standing under/near vegetation is not asked to
             // fade it — only the mouse-hover trigger is, by direct author
+        // The tile's own fade, whichever channel drove it (token proximity →
+        // `weights.fade`, hover → `hoverFade.occlusion`). `radial`/`surface`
+        // read a permanent 1 once configured, so they are deliberately not
+        // consulted. `worldBounds` is the quad's AABB — fine, the shadow field
+        // only differs from itself inside an overhead footprint anyway.
+        if (weights && state.worldBounds) {
+          const fadeAmount = Math.max(weights.fade, state.hoverFade.occlusion);
+          if (fadeAmount > 0) {
+            const wb = state.worldBounds;
+            overheadFadeScratch.push({ minX: wb.minX, minY: wb.minY, maxX: wb.maxX, maxY: wb.maxY, amount: fadeAmount });
+          }
+        }
             // decision) and `visionActive` stays false (vegetation has no
             // VISION channel of its own). Tracing `computeOcclusionState`
             // with these exact args: the `FADE` branch requires `occluded`,
@@ -11839,6 +11858,7 @@ export async function startVtPanViewer({
      * texture at decode time via decode-pool.js's `acquirePackedPages` — see
      * that function's header for why this halves+ the pack count without
      * touching a single line of atlas/cache/table code: a packed page is just
+      sunShadows.setOverheadFades(overheadFadeScratch);
      * another 256² RGBA page as far as everything downstream is concerned).
      */
     async function buildPack(ownerId, name, source, { coarsePinMaxPages } = {}) {

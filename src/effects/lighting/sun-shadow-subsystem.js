@@ -209,7 +209,7 @@
  * @module effects/lighting/sun-shadow-subsystem
  */
 
-import { buildLayerSmearBakeMaterial } from './layer-smear-render.js';
+import { buildLayerSmearBakeMaterial, buildOverheadFadeMaterial, packOverheadFades } from './layer-smear-render.js';
 import { sunNeedsRebake } from './sun-occlusion.js';
 import {
   resolveLayerSmear,
@@ -904,7 +904,28 @@ function createFloorSlot({
     filter: 'linear',
     depth: false,
   };
+  /** The PUBLISHED field — what every consumer (and the floor above's cascade)
+   * samples. Written by {@link publishField} only. */
   const sunShadowRt = allocator.create(rtName, sunShadowRtDesc);
+  /** The bake's own target: R = shadow with overhead tiles not shadowing
+   * themselves, G = the same with that exclusion off. `publishField` mixes the
+   * two by each overhead tile's live hover-fade, so a faded tile reveals the
+   * full shadow beneath it rather than a cutout in its own shape. */
+  const sunShadowBakeRt = allocator.create(`${rtName}.bake`, sunShadowRtDesc);
+  const overheadFade = buildOverheadFadeMaterial({ THREE, sourceTexture: sunShadowBakeRt.texture });
+  const overheadFadeQuad = new THREE.QuadMesh(overheadFade.material);
+  /** The fading tiles `publishField` last composited, and whether the field has
+   * been baked at all (before that there is nothing to composite). */
+  let publishedFades = [];
+  let publishedFadesKey = '';
+  let fadesDirty = false;
+  let fieldBaked = false;
+  function publishField() {
+    overheadFade.setRect(currentRect());
+    overheadFade.setFades(publishedFades);
+    renderSunShadowPass(sunShadowRt, overheadFadeQuad);
+    fadesDirty = false;
+  }
   /** THIS SLOT'S OWN rect uniform, for the debug view ONLY — see this
    * function's own `getEnvLight` doc for why the CONSUMER push goes through
    * `pushRect` instead. Owning a local copy means debug never has to reach
@@ -957,6 +978,7 @@ function createFloorSlot({
     sunShadowRtDesc.resolvedW = next;
     sunShadowRtDesc.resolvedH = next;
     allocator.resize(sunShadowRt, next, next, sunShadowRtDesc);
+    allocator.resize(sunShadowBakeRt, next, next, sunShadowRtDesc);
     // Pushed HERE too, not left to `applyQuality`/`bakeLayerTexture` alone: a
     // resize never actually changes the LAYER texture's own resolution
     // (`layerGridDimPx` — this call re-pushes the cached value, it does not
@@ -1316,7 +1338,9 @@ function createFloorSlot({
 
     // The literal save/bind/render/restore triplet lives in `vt/` (§3) — this
     // module only decides WHEN it needs to run.
-    renderSunShadowPass(sunShadowRt, sunShadowQuad);
+    renderSunShadowPass(sunShadowBakeRt, sunShadowQuad);
+    fieldBaked = true;
+    publishField();
 
     bakedSun = { azimuthDeg: atmosphere.azimuthDeg, elevationDeg: atmosphere.elevationDeg };
     // THE CASCADE'S STALENESS LINK — see `bakeSerial`'s own declaration.
@@ -1408,7 +1432,7 @@ function createFloorSlot({
    *   every caller that predates this parameter (every test in this file
    *   included) keeps its exact old behaviour with no change required.
    */
-  function maybeBake(floorIndex, nowMs) {
+  function maybeBakeInner(floorIndex, nowMs) {
     casterFieldFloor = floorIndex;
     const state = getSunShadowRenderState();
     const enabled = state.enabled !== false;
@@ -1544,8 +1568,33 @@ function createFloorSlot({
     }
   }
 
+  /** {@link maybeBakeInner}, then — only when the fading tiles changed and no
+   * bake already published them this call — the cheap publish pass alone. The
+   * fade is a live, per-frame quantity (a hover-fade runs ~750 ms); re-marching
+   * the shadow for it would be the wrong cost, which is why bake and publish
+   * are separate passes. Called from the frame loop like the bake itself. */
+  function maybeBake(floorIndex, nowMs) {
+    maybeBakeInner(floorIndex, nowMs);
+    if (fadesDirty && fieldBaked) publishField();
+  }
+
+  /**
+   * Tell this slot which overhead tiles are currently faded away (hover-fade or
+   * token-proximity fade) so their footprints stop being cut out of the shadow.
+   * Cheap and idempotent: an unchanged set is one string compare.
+   * @param {Array<{minX:number,minY:number,maxX:number,maxY:number,amount:number}>|null} list - world-px bounds + 0..1 fade.
+   */
+  function setOverheadFades(list) {
+    const packed = packOverheadFades(list);
+    if (packed.key === publishedFadesKey) return;
+    publishedFades = packed.fades;
+    publishedFadesKey = packed.key;
+    fadesDirty = true;
+  }
+
   return {
     texture: sunShadowRt.texture,
+    setOverheadFades,
     getRect: currentRect,
     getFloorIndex() {
       return casterFieldFloor;
@@ -1594,6 +1643,8 @@ function createFloorSlot({
     },
     dispose() {
       allocator.dispose(sunShadowRt);
+      allocator.dispose(sunShadowBakeRt);
+      overheadFade.material?.dispose?.();
       sunShadowBake.material?.dispose?.();
       debug?.material?.dispose?.();
       casterTexture?.dispose?.();
@@ -1729,6 +1780,15 @@ export function createSunShadowSubsystem({
      *   drives. */
     maybeBake(floorIndex, nowMs) {
       slotFor(floorIndex)?.maybeBake(floorIndex, nowMs);
+    },
+    /** Hand every slot this frame's faded overhead tiles (world-px bounds +
+     * 0..1 fade); each slot re-publishes its field on the next `maybeBake` if
+     * the set changed. Applied to ALL slots: a slot's field only differs from
+     * its un-faded self where it has its own overhead footprint, so a tile
+     * that belongs to another floor changes nothing here.
+     * @param {Array<{minX:number,minY:number,maxX:number,maxY:number,amount:number}>|null} list */
+    setOverheadFades(list) {
+      for (const slot of slots) slot.setOverheadFades(list);
     },
     /**
      * The fullscreen debug quad to draw INSTEAD of the present pass, or null

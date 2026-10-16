@@ -9,7 +9,12 @@
  * job (`tools/shader-lab/bench-sun-shadow.js`), and lab-green is still only
  * `BUILT (unverified)` until the author sees it on a real scene.
  */
-import { buildLayerSmearBakeMaterial } from '../layer-smear-render.js';
+import {
+  buildLayerSmearBakeMaterial,
+  buildOverheadFadeMaterial,
+  packOverheadFades,
+  OVERHEAD_FADE_MAX,
+} from '../layer-smear-render.js';
 import { resolveLayerSmear } from '../layer-smear.js';
 import * as THREE from '../../../vendor/three/three.webgpu.js';
 
@@ -168,5 +173,43 @@ export function run(t) {
         return err === null;
       })()
     );
+  }
+
+  // ── THE PUBLISH PASS: a faded overhead tile must reveal the FULL shadow ────
+  {
+    let fade = null;
+    let fadeError = null;
+    try {
+      fade = buildOverheadFadeMaterial({ THREE, sourceTexture: stubTexture });
+      fade.setRect({ minX: 0, minY: 0, maxX: 100, maxY: 100 });
+      fade.setFades([{ minX: 10, minY: 10, maxX: 20, maxY: 20, amount: 0.5 }]);
+      fade.setFades([]);
+    } catch (err) {
+      fadeError = err;
+    }
+    t.ok(
+      `the overhead-fade publish material constructs and takes rects${fadeError ? ` — threw: ${fadeError.message}` : ''}`,
+      fadeError === null && !!fade?.material
+    );
+
+    const box = (minX, amount) => ({ minX, minY: 0, maxX: minX + 10, maxY: 10, amount });
+    t.ok('no fades packs to nothing', packOverheadFades([]).fades.length === 0 && packOverheadFades(null).key === '');
+    t.ok(
+      'a zero or non-finite fade is ignored (an un-faded tile keeps its cutout)',
+      packOverheadFades([box(0, 0), { ...box(0, 1), maxX: NaN }]).fades.length === 0
+    );
+    t.ok(
+      'the strongest fades win when more than the cap are fading, and the overflow is reported',
+      (() => {
+        const p = packOverheadFades([1, 2, 3, 4, 5, 6].map((i) => box(i * 20, i / 10)));
+        return p.fades.length === OVERHEAD_FADE_MAX && p.dropped === 2 && p.fades[0].amount > p.fades[3].amount;
+      })()
+    );
+    t.ok(
+      'a fade creeping by less than 1/64 does not change the key (no redundant republish)',
+      packOverheadFades([box(0, 0.5)]).key === packOverheadFades([box(0, 0.5 + 1 / 200)]).key &&
+        packOverheadFades([box(0, 0.5)]).key !== packOverheadFades([box(0, 0.6)]).key
+    );
+    t.ok('a fade above 1 clamps to 1', packOverheadFades([box(0, 7)]).fades[0].amount === 1);
   }
 }

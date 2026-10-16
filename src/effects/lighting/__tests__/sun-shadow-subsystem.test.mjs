@@ -269,4 +269,33 @@ export function run(t) {
     subsystem.maybeBake(0, 1010);
     ok('disabled: a second immediate poll does not re-bake', pass.calls === rendersAfterOff);
   }
+
+  // ══ a hover-faded overhead tile reveals the full shadow: ONE cheap publish
+  // pass per change, never a re-march ═══════════════════════════════════════
+  {
+    const { subsystem, pass } = buildHarness();
+    const roof = { minX: 100, minY: 100, maxX: 300, maxY: 300 };
+
+    subsystem.setOverheadFades([{ ...roof, amount: 0.5 }]);
+    ok('fades set before the first bake render nothing by themselves', pass.calls === 0);
+
+    subsystem.maybeBake(0, 1000);
+    const afterBake = pass.calls;
+    ok('a bake is march + publish (two passes), so fades ride the same bake', afterBake >= 2);
+
+    subsystem.maybeBake(0, 1010);
+    ok('unchanged fades and an unchanged sun cost nothing', pass.calls === afterBake);
+
+    subsystem.setOverheadFades([{ ...roof, amount: 0.9 }]);
+    subsystem.maybeBake(0, 1020);
+    ok('a changed fade republishes with exactly one pass (no re-march)', pass.calls === afterBake + 1);
+
+    subsystem.setOverheadFades([{ ...roof, amount: 0.9 }]);
+    subsystem.maybeBake(0, 1030);
+    ok('the same fade again is a no-op', pass.calls === afterBake + 1);
+
+    subsystem.setOverheadFades([]);
+    subsystem.maybeBake(0, 1040);
+    ok('the tile coming back (no fades) republishes once to restore the cutout', pass.calls === afterBake + 2);
+  }
 }

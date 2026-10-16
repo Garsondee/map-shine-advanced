@@ -4226,8 +4226,13 @@ export async function startVtPanViewer({
     let bloomActiveMipCount = bloomResolveUsesFullPyramid() ? BLOOM_MIP_COUNT : BLOOM_CHEAP_MIP_COUNT;
     let bloomActiveAtmoTop = bloomResolveUsesFullPyramid() ? BLOOM_ATMO_TOP : BLOOM_CHEAP_ATMO_TOP;
     const bloomNum = (x, d) => (Number.isFinite(Number(x)) ? Number(x) : d);
-    // Map a 0..1 spread knob → the tent-filter UV reach (resolution-independent).
-    const bloomSpreadToRadius = (s) => 0.0015 + Math.max(0, Math.min(1, Number(s) || 0)) * 0.0085;
+    // Map a 0..1 spread knob → the tent-filter reach in SOURCE-MIP TEXELS. Texels
+    // (not UV) so the reach is round in pixels (UV reach was wider than tall by the
+    // aspect ratio) and the same fraction of every mip (a fixed UV reach fell
+    // under one texel at coarse mips → bilinear-of-one-texel axis-aligned columns).
+    const bloomSpreadToTexels = (s) => 0.5 + Math.max(0, Math.min(1, Number(s) || 0)) * 1.0;
+    const bloomSetUpRadius = (texels, src) =>
+      bloom.upsample.uFilterRadius.value.set(texels / src.width, texels / src.height);
     const describeBloomMip = (w, h) => ({
       resolvedW: Math.max(1, w),
       resolvedH: Math.max(1, h),
@@ -9616,8 +9621,9 @@ export async function startVtPanViewer({
       // (atmoTop=3) that is mip2 → mip1 → mip0, unchanged; the cheap tier
       // (atmoTop=2) shortens it to mip1 → mip0, one fewer step.
       profiler?.begin(Z.bloomUpCore);
-      bloom.upsample.uFilterRadius.value = bloomSpreadToRadius(bloomNum(p.coreSpread, 0.4));
+      const coreTexels = bloomSpreadToTexels(bloomNum(p.coreSpread, 0.4));
       for (let k = bloomActiveAtmoTop - 2; k >= 0; k--) {
+        bloomSetUpRadius(coreTexels, bloomMips[k + 1]);
         bloom.upsample.inputNode.value = bloomMips[k + 1].texture;
         renderer.setRenderTarget(bloomMips[k]);
         bloomUpQuad.render(renderer);
@@ -9628,8 +9634,9 @@ export async function startVtPanViewer({
       // At today's full pyramid that is mip5 → mip4 → mip3, unchanged; the
       // cheap tier shortens it to mip3 → mip2, one fewer step.
       profiler?.begin(Z.bloomUpAtmo);
-      bloom.upsample.uFilterRadius.value = bloomSpreadToRadius(bloomNum(p.atmoSpread, 0.7));
+      const atmoTexels = bloomSpreadToTexels(bloomNum(p.atmoSpread, 0.7));
       for (let k = bloomActiveMipCount - 2; k >= bloomActiveAtmoTop; k--) {
+        bloomSetUpRadius(atmoTexels, bloomMips[k + 1]);
         bloom.upsample.inputNode.value = bloomMips[k + 1].texture;
         renderer.setRenderTarget(bloomMips[k]);
         bloomUpQuad.render(renderer);

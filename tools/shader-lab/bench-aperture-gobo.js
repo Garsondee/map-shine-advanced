@@ -279,13 +279,13 @@ export function createApertureGoboBench({ THREE, log }) {
 
     // 3) UPSAMPLE (additive tent), TWO independent bands.
     renderer.autoClearColor = false;
-    bloom.upsample.uFilterRadius.value = st.coreSpreadRadius;
+    bloom.upsample.uFilterRadius.value.set(st.coreSpreadRadius, st.coreSpreadRadius);
     for (const k of [1, 0]) {
       bloom.upsample.inputNode.value = mips[k + 1].texture;
       renderer.setRenderTarget(mips[k]);
       upQuad.render(renderer);
     }
-    bloom.upsample.uFilterRadius.value = st.atmoSpreadRadius;
+    bloom.upsample.uFilterRadius.value.set(st.atmoSpreadRadius, st.atmoSpreadRadius);
     for (const k of [BLOOM_ATMO_TOP + 1, BLOOM_ATMO_TOP]) {
       bloom.upsample.inputNode.value = mips[k + 1].texture;
       renderer.setRenderTarget(mips[k]);

@@ -176,11 +176,12 @@ export function buildBloomMaterials({
   const downsample = makeDownsample(false, 'plain');
 
   // ── UPSAMPLE (3×3 tent, additive) ────────────────────────────────────────
-  // One material, reused for both bands; `uFilterRadius` (UV units) is the tent
-  // reach, set per band by the viewer (coreSpread vs atmoSpread). Additive blend
+  // One material, reused for both bands; `uFilterRadius` (vec2, UV units) is the tent
+  // reach — the viewer sets it PER PASS as spreadTexels / sourceMipSize, so it is a
+  // constant number of source texels in x AND y (isotropic in pixels, round bloom). Additive blend
   // accumulates the coarser mip into the finer one — the viewer guards the clear.
   const upInputNode = texture(null);
-  const uFilterRadius = uniform(0.005);
+  const uFilterRadius = uniform(new THREE.Vector2(0.005, 0.005));
   const upsampleMaterial = new THREE.NodeMaterial();
   upsampleMaterial.depthTest = false;
   upsampleMaterial.depthWrite = false;
@@ -189,7 +190,7 @@ export function buildBloomMaterials({
   upsampleMaterial.fragmentNode = Fn(() => {
     const base = uv();
     const r = uFilterRadius;
-    const S = (ox, oy) => upInputNode.sample(base.add(vec2(r.mul(ox), r.mul(oy)))).rgb;
+    const S = (ox, oy) => upInputNode.sample(base.add(vec2(r.x.mul(ox), r.y.mul(oy)))).rgb;
     const a = S(-1, 1);
     const b = S(0, 1);
     const c = S(1, 1);

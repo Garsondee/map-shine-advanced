@@ -59,7 +59,9 @@ export const CANDLE_FLAME_PARAMS = Object.freeze({
     // 2026-10-08: the shader now DECODES this sRGB hex to linear light before
     // using it (it used to emit the raw bytes, which displayed far paler —
     // #f8901c came out as #fcc65d), so this stop DISPLAYS as the colour picked.
-    default: '#f8901c',
+    // 2026-10-16 — author's live-tuned "new defaults" dump (was `#f8901c`):
+    // the same mid-stop role in the ramp, a lighter, yellower orange.
+    default: '#ffb057',
     category: 'Look',
     label: 'Flame colour',
     help: 'The colour of the candle flame (tints both the flame and the light it casts). The flame is built around it, like a real candle: a thin deep rim, then this colour, then gold and pale yellow, up to a white-hot core — with a blue base round the wick. It displays as the colour you pick.',
@@ -137,25 +139,29 @@ export const CANDLE_FLAME_PARAMS = Object.freeze({
   // on a dawn/dusk crossing and writes through `updateCandleAnchor` exactly
   // like the manual per-candle "Lit" checkbox does.
   //
-  // OFF BY DEFAULT — a deliberate, logged exception to
-  // feedback_default_on_new_features, the SAME reasoning world/day-clock.js's
-  // own `DEFAULT_RATE_HOURS_PER_MINUTE: 0` gives: a default-on roll would
-  // silently relight or snuff candles on every EXISTING scene the moment this
-  // ships, changing a look the author already lit on purpose. The author's
-  // own words: "This would be optional."
+  // ⚠️ FLIPPED false → true, 2026-10-16 — the author's live-tuned "new
+  // defaults" dump, shipped alongside BOTH chances below at 100% and full
+  // Reliability: every participating candle now comes up lit at every roll,
+  // day or night. Its original off-by-default posture (2026-08-06) existed
+  // because a default-on roll relights or snuffs candles on every EXISTING
+  // scene unasked; the author has since asked for exactly that look by
+  // default. A scene or client that explicitly stored a value keeps it —
+  // stored param layers sit on top of these defaults (effect-cascade.js).
   autoIgniteEnabled: {
     type: 'bool',
-    default: false,
+    default: true,
     category: 'Presence',
     label: 'Auto-ignite by time of day',
-    help: 'When on, each candle (that has not opted out below) rolls its own chance to be lit whenever day turns to night or back — a bit of spontaneous life. Off by default so no existing scene changes unasked; turn this on, then tune the chances and Reliability below.',
+    help: 'When on, each candle (that has not opted out below) rolls its own chance to be lit whenever day turns to night or back — a bit of spontaneous life. On by default; tune the chances and Reliability below, or turn this off to leave every candle exactly as authored.',
   },
   dayIgniteChancePct: {
     type: 'float',
     min: 0,
     max: 100,
     step: 1,
-    default: 25,
+    // 2026-10-16 — author's live-tuned "new defaults" dump (was 25): the
+    // day roll is now a certainty.
+    default: 100,
     category: 'Presence',
     label: 'Lit chance — day (%)',
     help: 'How likely each participating candle is to be lit while it is day. Only takes effect once "Auto-ignite by time of day" is on.',
@@ -165,7 +171,9 @@ export const CANDLE_FLAME_PARAMS = Object.freeze({
     min: 0,
     max: 100,
     step: 1,
-    default: 85,
+    // 2026-10-16 — author's live-tuned "new defaults" dump (was 85): the
+    // night roll is now a certainty too.
+    default: 100,
     category: 'Presence',
     label: 'Lit chance — night (%)',
     help: 'How likely each participating candle is to be lit while it is night. Only takes effect once "Auto-ignite by time of day" is on.',

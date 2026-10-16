@@ -227,10 +227,12 @@ const FLAME_BASE_DIM = 0.55;
  * Emission across the flame, in linear HDR units, as a function of the inset: a
  * white-hot core (`FLAME_E_CORE`) that falls to a ~1 shoulder (`FLAME_E_SHOULDER`)
  * and then a dim rim. The core is deliberately FAR above 1 — bloom thresholds
- * the scene's HDR luma (bloom.js, default 1.52), so a core that merely reaches
- * "white" sits on the edge of it and a flame mid-flicker never crosses, while
- * one at ~4-5 blooms easily (author, 2026-10-08: "bright enough that they
- * trigger bloom easily") — HDR emission, not a whiter colour. The shoulder is
+ * the scene's HDR luma (bloom.js; it was 1.52 when these constants were tuned
+ * on 2026-10-08, and 0.33 since the 2026-10-16 "new defaults" dump — under the
+ * current threshold the flame's whole body, shoulder included, blooms, which is
+ * the point of the lower cutoff; the ~4-5 core still crosses either tuning
+ * instantly, author 2026-10-08: "bright enough that they trigger bloom easily")
+ * — HDR emission, not a whiter colour. The shoulder is
  * ~1.3-1.8 on purpose: the colour stops only DISPLAY as themselves where the
  * emission is about that; much higher and the orange washes out to yellow-white,
  * much lower and it goes to brown (both seen in the lab).

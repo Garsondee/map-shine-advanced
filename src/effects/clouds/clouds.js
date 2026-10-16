@@ -65,7 +65,8 @@ export const CLOUD_LOOK_PARAMS = Object.freeze({
     // so a core pushed past black reads as solid shadow, never as NEGATIVE
     // light subtracting from whatever else lights that pixel.
     // 2026-09-25 — author's live-tuned "new defaults" dump (was 4).
-    default: 2,
+    // 2026-10-16 — second dump: a small trim (was 2), the same scale.
+    default: 1.91,
     category: 'Look',
     label: 'Shadow strength',
     help: 'How dark a passing cloud can make the ground light. 0 = no shadow at all; 1 = the natural depth derived from the sun/sky split (shallow at dawn, absent at night); past 1 exaggerates it darker than that natural ceiling allows. Window light has its own separate Window cloud contrast, below.',

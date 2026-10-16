@@ -39,26 +39,24 @@ export function run(t) {
 
   ok('id is the stable camelCase registry key', LENS.id === 'lens');
   ok('a mood tool is defended mid-weight, not first or last', LENS.visualWeight > 0.2 && LENS.visualWeight < 0.5);
-  // ⚠️ CHANGED 2026-09-16, mythica-machina-press#556 — deliberately the
-  // OPPOSITE pin from bloom/depth-of-field's own "on by default at every
-  // profile" block (effect-registration.test.mjs). Author, direct
-  // instruction: lens "needs to be fine tuned and off by default." This pin
-  // exists (same file header's own words) so a FUTURE accidental change back
-  // toward "on by default" gets caught, not so this one is permanent —
-  // update it again only alongside another deliberate author decision.
+  // ⚠️ CHANGED 2026-10-16 — the deliberate author decision the previous pin's
+  // own comment asked for ("update it again only alongside another deliberate
+  // author decision"): "Turns Lens On by default", shipped with the second
+  // "New defaults" dump. #556's off-by-default posture (2026-09-16) existed so
+  // the look could be fine-tuned first; that happened, twice. Lens now carries
+  // the SAME "on by default at every profile" posture bloom/depth-of-field
+  // pin in effect-registration.test.mjs.
+  ok('on by default (author instruction) — on at every profile', LENS.enabledFromProfile === 'low');
+  ok('resolves ON at low', resolveEffectEnabled(LENS, { profile: 'low' }) === true);
+  ok('resolves ON at standard, the default profile', resolveEffectEnabled(LENS, { profile: 'standard' }) === true);
+  ok('resolves ON at extreme too', resolveEffectEnabled(LENS, { profile: 'extreme' }) === true);
   ok(
-    'off by default (author instruction) — not on at any profile short of extreme',
-    LENS.enabledFromProfile === 'extreme'
+    'a player can still turn it OFF (final say)',
+    resolveEffectEnabled(LENS, { profile: 'standard', playerEnable: 'off' }) === false
   );
-  ok('resolves OFF at standard, the default profile', resolveEffectEnabled(LENS, { profile: 'standard' }) === false);
   ok(
-    'resolves OFF at quality too — extreme is the floor',
-    resolveEffectEnabled(LENS, { profile: 'quality' }) === false
-  );
-  ok('resolves ON at extreme, the ceiling', resolveEffectEnabled(LENS, { profile: 'extreme' }) === true);
-  ok(
-    'a GM can still opt a scene in at any profile (the Studio effect switch)',
-    resolveEffectEnabled(LENS, { profile: 'standard', gmEnable: 'on' }) === true
+    'a GM can still turn a scene off at any profile (the Studio effect switch)',
+    resolveEffectEnabled(LENS, { profile: 'standard', gmEnable: 'off' }) === false
   );
   ok('tier 0 is declared — a manifest without one is malformed', LENS.tiers[0]?.n === 0);
   ok('tiers 0-3 are real code', LENS.tiers.length === 4);

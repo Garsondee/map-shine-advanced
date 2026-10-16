@@ -54,14 +54,20 @@ export function run(t) {
   ok('GRADE_LOOK_PARAMS is a valid params schema', validateParamsSchema(GRADE_LOOK_PARAMS).ok);
   ok('GRADE is a valid manifest', validateEffectManifest(GRADE).ok);
   ok("the grade's id is grade", GRADE.id === 'grade');
+  ok('the grade ships enabled (a neutral whole-card default is the point)', GRADE.enabledFromProfile === 'low');
   ok(
-    "the grade ships enabled (its Look carries the author's 2026-09-25 live-tuned grade)",
-    GRADE.enabledFromProfile === 'low'
+    "toneMapping defaults to none (2026-10-15, author's call; a 2026-09-25 dump had put it on reinhard)",
+    GRADE_LOOK_PARAMS.toneMapping.default === 'none'
   );
-  ok(
-    'toneMapping defaults to reinhard (2026-09-25 live-tuned; was none/off)',
-    GRADE_LOOK_PARAMS.toneMapping.default === 'reinhard'
-  );
+  // 2026-10-15 — the author reset the whole card to its neutral defaults, so an
+  // un-authored scene is pixel-unchanged with the effect still enabled. Pin the
+  // Look sliders so a future stray tune has to be deliberate (mirrors how the
+  // tone-mapping line above pins its own reset).
+  ok('exposure defaults to 0 (no brightness change)', GRADE_LOOK_PARAMS.exposure.default === 0);
+  ok('contrast defaults to 1 (no contrast change)', GRADE_LOOK_PARAMS.contrast.default === 1);
+  ok('saturation defaults to 1 (no chroma change)', GRADE_LOOK_PARAMS.saturation.default === 1);
+  ok('temperature defaults to 0 (no white-balance change)', GRADE_LOOK_PARAMS.temperature.default === 0);
+  ok('vibrance defaults to 0 (off)', GRADE_LOOK_PARAMS.vibrance.default === 0);
   ok("'enabled' is NOT a grade param (the cascade owns it)", !('enabled' in GRADE_LOOK_PARAMS));
 
   // BLOOM — pinned because the declaration and the runtime disagreed for months.

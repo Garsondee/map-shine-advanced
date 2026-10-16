@@ -280,7 +280,7 @@ export const LENS_PARAMS = Object.freeze({
     default: false, // V2: false
     category: 'Autofocus',
     label: 'Autofocus pulses',
-    help: 'Every so often, the whole image briefly softens and re-sharpens — a camera hunting for focus, the same beat a real autofocus lens has when the shot changes. Off by default, matching V2\'s own shipped state.',
+    help: "Every so often, the whole image briefly softens and re-sharpens — a camera hunting for focus, the same beat a real autofocus lens has when the shot changes. Off by default, matching V2's own shipped state.",
   },
   autoFocusMinIntervalSeconds: {
     type: 'float',
@@ -377,7 +377,7 @@ export const LENS_PARAMS = Object.freeze({
     default: false, // V2: false
     category: 'Motion',
     label: 'Camera motion blur',
-    help: 'A brief directional smear whenever the camera pans or zooms quickly — the same motion blur a real camera picks up when it moves faster than its shutter can freeze. Off by default, matching V2\'s own shipped state.',
+    help: "A brief directional smear whenever the camera pans or zooms quickly — the same motion blur a real camera picks up when it moves faster than its shutter can freeze. Off by default, matching V2's own shipped state.",
   },
   motionBlurStrength: {
     type: 'float',

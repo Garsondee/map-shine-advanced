@@ -270,9 +270,11 @@ export function prismPreset(name) {
  * 3-30 Hz flicker band by construction, the same considered judgement
  * `lens.js`'s own header records for its autofocus pulses.
  *
- * `enabledFromProfile: 'extreme'` — mirrors `LENS`'s own current posture
- * (mythica-machina-press#556: "off by default" for a brand-new, not-yet-
- * live-tuned effect), for the identical reason even though this pass is now
+ * `enabledFromProfile: 'extreme'` — the posture `LENS` carried from
+ * mythica-machina-press#556 (2026-09-16: "off by default" for a brand-new,
+ * not-yet-live-tuned effect) until Lens's own live-tuning retune took it
+ * on-by-default (2026-10-16); Prism keeps the ceiling gate for the identical
+ * reason that gate existed even though this pass is now
  * genuinely `live`: nobody has watched Prism run against a real scene yet
  * (this project's own standing rule — only a live human check promotes a
  * built effect to a trusted default), and its own priciest rung is a real

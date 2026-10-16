@@ -55,7 +55,8 @@ export const CLOUD_TOPS_PARAMS = Object.freeze({
     min: 0,
     max: 2,
     step: 0.01,
-    default: 1,
+    // 2026-10-16 — author's live-tuned "new defaults" dump (was 1).
+    default: 0.8,
     category: 'Look',
     label: 'Tops opacity',
     help: 'Master strength for the lit cloud shapes themselves, once the zoom gate has let them appear. 0 hides them entirely without touching the ground shadow/window mood, which are a separate effect (Clouds). Past 1 pushes them more opaque than their own natural Beer-law alpha.',
@@ -65,7 +66,9 @@ export const CLOUD_TOPS_PARAMS = Object.freeze({
     min: 0.3,
     max: 3,
     step: 0.01,
-    default: 1,
+    // 2026-10-16 — author's live-tuned "new defaults" dump (was 1): the tops
+    // now wait for a wider view before appearing.
+    default: 0.79,
     category: 'Look',
     label: 'Zoom sensitivity',
     help: "How readily the tops appear as the camera zooms out — a multiplier on the camera's own virtual eye height. 1 is this feature's own derived starting point (tied to the old V2 cloud effect's shipped zoom thresholds); above 1 makes the tops appear sooner (at a less zoomed-out view); below 1 makes them wait for a wider view before appearing. Never affects the ground shadow, which draws at every zoom.",

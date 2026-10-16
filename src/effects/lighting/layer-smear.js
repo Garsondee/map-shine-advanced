@@ -172,10 +172,20 @@ export function layerDiffusionBlurPx(heightPx, softnessMul = 1) {
  * a millisecond figure, because counts are true on every GPU
  * (`feedback_instruments_must_not_lie`):
  *
- *   0 coarse   512² × 17  ≈    4.5 M
- *   1 standard 1024² × 25 ≈   26 M
- *   2 quality  1536² × 33 ≈   78 M
- *   3 extreme  2048² × 49 ≈  205 M
+ *   0 coarse    768² × 17 ≈   10 M
+ *   1 standard 1536² × 33 ≈   78 M
+ *   2 quality  2048² × 49 ≈  205 M
+ *   3 extreme  2048² × 65 ≈  273 M
+ *
+ * ⚠️ RE-BASED UP ONE RUNG, 2026-10-16 (author, on a diagonal shadow edge: "the
+ * stepped look is still there, we need higher resolution"). On the 10,650 px map
+ * the old standard rung (1024) was ~10 world px per texel with a ~1 px penumbra,
+ * so a diagonal edge showed one visible stair per texel. Every rung now sits
+ * where the one above it used to (coarse keeps a smaller silhouette than its
+ * field is wide); the 2048 allocation cap stops extreme growing past quality, so
+ * it buys stations (a smoother smear) instead of size. The
+ * silhouette also needed the per-item coverage grid to stop capping at 512
+ * (`vt/coarse-alpha.js#COARSE_ALPHA_MAX_DIM`).
  *
  * Extreme lands BELOW the model it replaces (~367 M at 1280² × 32 × 7 lateral
  * taps) while carrying twice the silhouette resolution — the lateral tap cone is
@@ -183,10 +193,10 @@ export function layerDiffusionBlurPx(heightPx, softnessMul = 1) {
  * one fetch instead of seven.
  */
 const LAYER_SMEAR_TIER_PLANS = Object.freeze([
-  Object.freeze({ fieldDim: 512, layerGridDim: 512, steps: 16, quantizeDeg: 1 }),
-  Object.freeze({ fieldDim: 1024, layerGridDim: 1024, steps: 24, quantizeDeg: 0.5 }),
-  Object.freeze({ fieldDim: 1536, layerGridDim: 1536, steps: 32, quantizeDeg: 0.5 }),
+  Object.freeze({ fieldDim: 768, layerGridDim: 1024, steps: 16, quantizeDeg: 1 }),
+  Object.freeze({ fieldDim: 1536, layerGridDim: 2048, steps: 32, quantizeDeg: 0.5 }),
   Object.freeze({ fieldDim: 2048, layerGridDim: 2048, steps: 48, quantizeDeg: 0.4 }),
+  Object.freeze({ fieldDim: 2048, layerGridDim: 2048, steps: 64, quantizeDeg: 0.3 }),
 ]);
 
 /** How many rungs the ladder has (so a status report can say "1 of 3"). */

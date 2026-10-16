@@ -57,7 +57,10 @@
  * twice. Raising this is the ONE lever that makes a cast shadow's contact edge
  * crisper (docs/planning/Sun-Shadows.md §7.7) — it is not a march parameter.
  */
-export const COARSE_ALPHA_MAX_DIM = 512;
+// 512 → 1024 (2026-10-16): a map-sized tile at 512 was ~21 world px per
+// coverage texel on a 10,650 px map, which capped how fine a cast shadow's
+// silhouette could ever be no matter how high the shadow tier went.
+export const COARSE_ALPHA_MAX_DIM = 1024;
 
 /**
  * Size a coarse alpha grid for a source image, preserving aspect ratio and

@@ -272,8 +272,10 @@ const CACHE_VERSION = 13;
  * records answer different questions, are produced by different requests, and
  * bumping one must not throw away megabytes of the other. `alpha:v2:${src}`.
  * v2 (2026-07-28): same freshness fix and same reasoning as CACHE_VERSION.
+ * v3 (2026-10-16): the grid's long side cap went 512 → 1024 (`coarse-alpha.js#
+ * COARSE_ALPHA_MAX_DIM`); a cached v2 grid would keep serving the coarse one.
  */
-const ALPHA_CACHE_VERSION = 2;
+const ALPHA_CACHE_VERSION = 3;
 
 /**
  * A cheap HEAD request for `src`'s CURRENT identity on the server — whichever

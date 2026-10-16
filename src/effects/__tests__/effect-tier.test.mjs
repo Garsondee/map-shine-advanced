@@ -437,14 +437,15 @@ export function run(t) {
   // move the rung back — not to update the numbers here.
   const sunShipped = layerSmearTierPlan(LAYER_SMEAR_DEFAULT_TIER);
   ok(
-    'the default rung reproduces TODAY exactly — 1024² field, 24 stations, re-baked every 0.5°',
-    sunShipped.fieldDim === 1024 && sunShipped.steps === 24 && sunShipped.quantizeDeg === 0.5
+    'the default rung is the re-based standard — 1536² field, 32 stations, re-baked every 0.5° (author, ' +
+      '2026-10-16: "the stepped look is still there, we need higher resolution" — deliberately moved up from ' +
+      '1024²/24, so update THIS pin only on another deliberate look change)',
+    sunShipped.fieldDim === 1536 && sunShipped.steps === 32 && sunShipped.quantizeDeg === 0.5
   );
   ok(
-    'the default rung`s layer-texture resolution now scales WITH fieldDim (1024²) — the 2026-08-02 fix that ' +
-      'stopped walls/overhead pinning to the shared 512 grid regardless of tier (found auditing every ' +
-      'sun-occlusion.js export before deleting the retired march)',
-    sunShipped.layerGridDim === 1024
+    'the default rung`s silhouette (layer texture) is 2048² — finer than its 1536² output so a roofline stays ' +
+      'crisp while the field is bilinear-upsampled (2026-10-16)',
+    sunShipped.layerGridDim === 2048
   );
   ok(
     'an absent tier falls back to that same rung, so an unwired caller sees no change',
@@ -462,9 +463,11 @@ export function run(t) {
     sunRungs.every((p, i) => i === 0 || p.fieldDim >= sunRungs[i - 1].fieldDim)
   );
   ok(
-    'the layer texture`s own resolution strictly climbs at every rung too — it now scales WITH fieldDim, ' +
-      'unlike the retired model`s shared-grid silhouette axis that stayed pinned at 512 regardless of tier',
-    sunRungs.every((p, i) => i === 0 || p.layerGridDim > sunRungs[i - 1].layerGridDim)
+    'the layer texture`s own resolution never drops as the ladder climbs, and the top rung reaches the 2048 ' +
+      'allocation cap (it plateaus there: extreme buys stations, not size)',
+    sunRungs.every((p, i) => i === 0 || p.layerGridDim >= sunRungs[i - 1].layerGridDim) &&
+      sunRungs[3].layerGridDim === 2048 &&
+      sunRungs[1].layerGridDim > sunRungs[0].layerGridDim
   );
   ok(
     'station count strictly increases — every rung buys a finer bake, none is a re-label',

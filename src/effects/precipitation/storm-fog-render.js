@@ -52,7 +52,7 @@ import { buildStormFogField } from './storm-fog-field.js';
  * legibility. Short of 1.0 on purpose — a token must never fully disappear
  * under weather, only read as hard to make out.
  */
-const MAX_FOG_ALPHA = 0.82;
+const MAX_FOG_ALPHA = 0.25;
 
 /**
  * Build the combined storm-fog quad.

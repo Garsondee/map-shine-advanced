@@ -232,6 +232,12 @@ export function createPrecipitationSubsystem({
   /** The floor's baked sky-reach texture + its world rect, held so an engine
    * built LATER (a species that first appears mid-session) still gets it. */
   let skyReach = { texture: null, rect: null };
+  /** The plain outdoors gate for the ATMOSPHERIC layers (veil + storm fog).
+   * Unlike `skyReach` it ignores overhead tiles: a roof over open ground does
+   * not make the air clear, only a genuinely indoor pixel does. Falls back to
+   * `skyReach` until it is supplied. */
+  let atmosGate = { texture: null, rect: null };
+  const fogGate = () => (atmosGate.texture ? atmosGate : skyReach);
   let fireMask = { texture: null, rect: null };
   let lastTuning = null;
   /** ONE mantle, for the floor currently in view. Built lazily on the first
@@ -304,7 +310,7 @@ export function createPrecipitationSubsystem({
       renderOrder: renderOrder - 0.5,
       openSkyTexture,
     });
-    if (skyReach.texture) curtain.setSkyReachTexture(skyReach.texture, skyReach.rect);
+    if (fogGate().texture) curtain.setSkyReachTexture(fogGate().texture, fogGate().rect);
     if (lastTuning) curtain.setTuning(lastTuning);
     curtains.set(speciesId, curtain);
     log.info(`built '${speciesId}' curtain over the scene rect`);
@@ -329,7 +335,7 @@ export function createPrecipitationSubsystem({
       renderOrder: renderOrder + 2,
       openSkyTexture,
     });
-    if (skyReach.texture) stormFog.setSkyReachTexture(skyReach.texture, skyReach.rect);
+    if (fogGate().texture) stormFog.setSkyReachTexture(fogGate().texture, fogGate().rect);
     if (lastTuning) stormFog.setTuning(lastTuning);
     log.info('built the storm-fog quad over the scene rect');
     return stormFog;
@@ -909,10 +915,26 @@ export function createPrecipitationSubsystem({
       if (mantle) results.mantle = mantle.setMasks({ skyReach, fireMask });
       // The curtain gates on the same mask — a veil over a hall is rain the
       // player can see indoors just as surely as a drop is.
-      for (const [id, c] of curtains) results[`${id}:curtain`] = c.setSkyReachTexture(texture, rect);
+      for (const [id, c] of curtains)
+        results[`${id}:curtain`] = c.setSkyReachTexture(fogGate().texture, fogGate().rect);
       // The storm fog gates on the same mask too — LAW 3, restated a third
       // time: reduced visibility is outdoor weather, never an indoor pixel.
-      if (stormFog) results.stormFog = stormFog.setSkyReachTexture(texture, rect);
+      if (stormFog) results.stormFog = stormFog.setSkyReachTexture(fogGate().texture, fogGate().rect);
+      return results;
+    },
+
+    /**
+     * The plain outdoors texture for the atmospheric layers (veil + storm
+     * fog). Falling bodies, splashes and snow accumulation stay on the
+     * sky-reach gate (a roof stops rain); the grey air does not (a roof does not
+     * make the outdoors clear). Null reverts them to sky-reach.
+     */
+    setAtmosphereGateTexture(texture, rect) {
+      atmosGate = { texture: texture ?? null, rect: rect ?? null };
+      const results = {};
+      for (const [id, c] of curtains)
+        results[`${id}:curtain`] = c.setSkyReachTexture(fogGate().texture, fogGate().rect);
+      if (stormFog) results.stormFog = stormFog.setSkyReachTexture(fogGate().texture, fogGate().rect);
       return results;
     },
 

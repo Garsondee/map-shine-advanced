@@ -73,17 +73,22 @@ export function tileOpacity(fadeAmount, occludedAlpha) {
  *   stage's sky WITHOUT restrictors.
  * @param {Array<{id: string, stamp: {gx0:number, gy0:number, w:number, h:number, value: Uint8Array}}>} args.restrictors
  * @param {(id: string) => number} [args.opacityOf] - 0..1 per restrictor; absent = 1.
+ * @param {{data: Uint8Array}} [args.outdoors] - the floor's plain outdoors grid (same
+ *   spec as `sky`). A restrictor is a surface weather is drawn ON, but only where the
+ *   ground under it is outdoors: a tile laid over a room painted indoors must not
+ *   rain on the room. Absent = no such limit.
  * @param {Uint8Array} [args.out] - a w*h*4 RGBA buffer to fill in place (the
  *   gate's own texture data, R replicated like the other mask bakes). Allocated
  *   when omitted.
  * @returns {Uint8Array} the RGBA bytes.
  */
-export function composeWeatherGate({ sky, restrictors, opacityOf = () => 1, out = null }) {
+export function composeWeatherGate({ sky, restrictors, opacityOf = () => 1, outdoors = null, out = null }) {
   const { w, h } = sky.spec;
   const n = w * h;
   const bytes = out && out.length === n * 4 ? out : new Uint8Array(n * 4);
   // Work in a flat 0..255 plane, then fan it out to RGBA once.
   const plane = sky.data.slice(0, n);
+  const od = outdoors?.data && outdoors.data.length >= n ? outdoors.data : null;
   for (const { id, stamp } of restrictors) {
     const opacity = clamp01(opacityOf(id));
     if (!stamp?.value) continue;
@@ -98,7 +103,8 @@ export function composeWeatherGate({ sky, restrictors, opacityOf = () => 1, out 
         if (gx < 0 || gx >= w) continue;
         const cover = value[s] / 255;
         if (cover <= 0) continue;
-        plane[d] = Math.round(plane[d] * (1 - cover) + 255 * opacity * cover);
+        const open = od ? od[d] / 255 : 1;
+        plane[d] = Math.round(plane[d] * (1 - cover) + 255 * opacity * open * cover);
       }
     }
   }
@@ -122,12 +128,15 @@ export function composeWeatherGate({ sky, restrictors, opacityOf = () => 1, out 
  *
  * @param {object} args
  * @param {{spec: object, data: Uint8Array}} args.cover - `weather.cover`.
+ * @param {{data: Uint8Array}} [args.outdoors] - `weather.outdoors`: a restrictor over
+ *   indoor ground makes no roofline (nothing outdoors for it to drip onto).
  * @param {Array<{id: string, stamp: object}>} args.restrictors
  * @returns {{spec: object, data: Uint8Array}} a NEW grid.
  */
-export function composeDripCover({ cover, restrictors }) {
+export function composeDripCover({ cover, restrictors, outdoors = null }) {
   const { w, h } = cover.spec;
   const data = Uint8Array.from(cover.data);
+  const od = outdoors?.data && outdoors.data.length >= data.length ? outdoors.data : null;
   for (const { stamp } of restrictors) {
     if (!stamp?.value) continue;
     const { value, gx0, gy0, w: sw, h: sh } = stamp;
@@ -139,7 +148,8 @@ export function composeDripCover({ cover, restrictors }) {
       for (let k = 0; k < sw; k++, s++, d++) {
         const gx = gx0 + k;
         if (gx < 0 || gx >= w) continue;
-        if (value[s] > data[d]) data[d] = value[s];
+        const v = od ? Math.min(value[s], od[d]) : value[s];
+        if (v > data[d]) data[d] = v;
       }
     }
   }

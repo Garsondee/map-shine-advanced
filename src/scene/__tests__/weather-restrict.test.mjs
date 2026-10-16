@@ -170,6 +170,24 @@ export async function run(t) {
     t.ok('drips: a fade never removes the roofline (the drips sit beneath the tile)', at(solid, 2, 5) === 255);
   }
 
+  // --- a restrictor over INDOOR ground draws no weather and no roofline -----------
+  {
+    const [f0] = derive([base('roof', 10, { restrictsWeather: true })]);
+    t.ok('weather: the product carries the plain outdoors grid', f0.weather.outdoors?.data?.length === 100);
+    const indoors = { data: new Uint8Array(100) }; // all painted indoors
+    const gate = composeWeatherGate({ sky: f0.weather.sky, restrictors: f0.weather.restrictors, outdoors: indoors });
+    t.ok('weather: an opaque overhead tile over indoor ground does not rain on it', gate[(5 * 10 + 2) * 4] === 0);
+    t.ok('weather: open sky outside the tile is untouched', gate[(5 * 10 + 7) * 4] === 255);
+    const open = composeWeatherGate({
+      sky: f0.weather.sky,
+      restrictors: f0.weather.restrictors,
+      outdoors: f0.weather.outdoors,
+    });
+    t.ok('weather: over outdoor ground the tile still shows the weather', open[(5 * 10 + 2) * 4] === 255);
+    const cover = composeDripCover({ cover: f0.weather.cover, restrictors: f0.weather.restrictors, outdoors: indoors });
+    t.ok('drips: a restrictor over indoor ground makes no roofline', at(cover, 2, 5) === 0);
+  }
+
   // --- through the mask authority: the flag on the item reaches the derive ---------------
   {
     const log = { info() {}, warn() {}, error() {}, debug() {} };

@@ -2245,7 +2245,7 @@ export function deriveFloorProducts({
           const stamp = memo.stamp(gridSpec, gridKey, item.alpha, item.placement, wantHeights);
           if (stamp?.value) restrictors.push({ id: item.id, elevation: item.elevation, above, stamp });
         }
-        weather = { uid: memo.uid(), sky: skyFree, cover: coverFree, restrictors };
+        weather = { uid: memo.uid(), sky: skyFree, cover: coverFree, outdoors, restrictors };
         fm.weather = { key: wxToken, value: weather };
       }
     } else {

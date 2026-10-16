@@ -84,7 +84,7 @@ export const DEFAULT_TINT = Object.freeze([0.7, 0.72, 0.76]);
  * and — critically — the thing a GM can turn off. A curtain that hid the floor
  * would be an effect nobody could disable without also stopping the rain.
  */
-const MAX_VEIL_ALPHA = 0.34;
+const MAX_VEIL_ALPHA = 0.1;
 
 /**
  * Build the curtain for one species.

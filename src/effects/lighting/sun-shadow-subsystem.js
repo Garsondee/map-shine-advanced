@@ -326,7 +326,10 @@ export const SUN_SHADOW_EDGE_BAND_PX = 384;
 // field's alpha, so index 3 is now an ordinary band and carries the same 0.95
 // its sibling does. The pin moved with the reason: `sun-shadow-multi-floor.
 // test.mjs` now asserts the two BANDS match each other instead.
-export const SUN_SHADOW_LAYER_STRENGTH = Object.freeze([0.95, 0.95, 0.95, 0.95]);
+// ⚠️ 0.95 → 0.665 (author, 2026-10-16: "make the shadow 30% less strong" —
+// 0.95 × 0.7). A constant, not the `strength01` param, so it applies to every
+// scene including ones whose saved slider value would have masked a new default.
+export const SUN_SHADOW_LAYER_STRENGTH = Object.freeze([0.665, 0.665, 0.665, 0.665]);
 /** Shape of the distance falloff — higher hugs the caster more tightly.
  * 1.6→1 2026-08-02 (author, live — the tuned "preferred default" pass). */
 export const SUN_SHADOW_FALLOFF_EXP = 1;

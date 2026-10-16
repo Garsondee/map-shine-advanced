@@ -40,6 +40,7 @@ import {
   LAYER_OVERHEAD,
   SHADOW_BAND_LAYER_INDICES,
   DIFFUSION_PER_HEIGHT_PX,
+  STATION_BLUR_OVERLAP,
 } from './layer-smear.js';
 
 /**
@@ -308,7 +309,7 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
       const spacing = maxThrow.mul(float((2 * u) / STEPS));
       const stationBlurPx = max(
         basePx.add(d.mul(float(PENUMBRA_PER_PX)).mul(uBlur.x)).mul(softnessMul),
-        max(spacing, texelWorldPx)
+        max(spacing.mul(float(STATION_BLUR_OVERLAP)), texelWorldPx)
       );
 
       for (let i = 0; i < SHADOW_LAYER_COUNT; i++) {

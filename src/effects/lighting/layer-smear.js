@@ -328,6 +328,14 @@ export function stationSpacingPx(j, n, maxThrowPx) {
   return (2 * maxThrowPx * (j / n)) / n;
 }
 
+/** How many station-gaps wide each station's blur is read (shader only — the
+ * twin has no texture to blur). At 1× a station's mip tent just touches its
+ * neighbour's, which still leaves a visible STAIRCASE along a long diagonal
+ * shadow edge (author, 2026-10-16, on a hover-faded roof's shadow: one step per
+ * station). Widening each read so neighbouring stations overlap well hides the
+ * steps; the far tip, already the faintest part, simply gets softer. */
+export const STATION_BLUR_OVERLAP = 2.5;
+
 /** How many ring samples approximate the shader's wide-mip isotropic read —
  * same technique, same sample count, as the old contact-AO ring this model's
  * predecessor used (the twin has no texture to blur). */

@@ -159,7 +159,9 @@ export const PRECIP_SPECIES = Object.freeze({
     fall: Object.freeze({
       /** V2 `:4994-5017` — 1400..5200 px/s. The spread IS the look: a uniform
        * fall speed reads as a moving texture rather than as weather. */
-      speedPxS: Object.freeze([1400, 5200]),
+      // 2026-10-16: floor raised 1400 -> 2800. Author: slow drops "look odd".
+      // The slowest drop is now half the fastest, not a fifth.
+      speedPxS: Object.freeze([2800, 5200]),
       /** Rain leans with the wind but is not carried by it — it has mass.
        * (Hail will be ~0.1, spore ~1.0; this is the middle of that scale.) */
       windCarry01: 0.45,
@@ -200,7 +202,9 @@ export const PRECIP_SPECIES = Object.freeze({
        * `streakPerPxS` below. */
       mode: 'streak',
       /** V2 `:4994` — 0.65..3.6 px WIDE. A streak's LENGTH comes from speed. */
-      sizePx: Object.freeze([0.65, 3.6]),
+      // 2026-10-16: 3.6 -> 1.5 max. Author: drops were "extremely wide and
+      // fat". With the speed floor raised, the widest drop is still a line.
+      sizePx: Object.freeze([0.55, 1.5]),
       /**
        * World px of streak length per (px/s) of speed. This one number is what
        * makes fast drops read as lines and slow ones as dots, for free.

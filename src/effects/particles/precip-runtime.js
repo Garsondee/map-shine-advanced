@@ -927,7 +927,11 @@ export function createPrecipEngine({
       .mul(speed)
       .mul(float(CHAOS_PER_SPEED))
       .mul(float(CHAOS_01))
-      .mul(uChaosScale);
+      .mul(uChaosScale)
+      // A streak's lateral wander is wind turbulence: in calm air rain falls
+      // straight (author: "at 0 wind they wobble from side to side"). Build-time
+      // branch; only streaks pay it.
+      .mul(isStreak ? mix(float(0.04), float(1), uWindSpeed01.clamp(float(0), float(1))) : float(1));
 
     // 3. Flutter — snow only. The paper-fall sway (V2 `:1556-1663`), and the
     //    whole character of a flake: without it snow falls like slow rain,
@@ -1552,7 +1556,25 @@ export function createPrecipEngine({
     if (isStreak) {
       // Lateral falloff only. The `pow` exponent turns `softness01` into an
       // edge profile: high exponent = a nearly hard line, low = a soft smear.
-      const across = uv().x.sub(float(0.5)).abs().mul(float(2));
+      // Not a perfect lozenge: the half-width wobbles along the length with two
+      // per-body incommensurate waves, and the centreline bows a little, so each
+      // drop is a slightly different lumpy filament. `bright` is the per-body
+      // identity (as for flakes). Kept shallow so the streak still reads as rain.
+      const bodyId = bright.mul(float(91.3));
+      const along = uv().y;
+      const lump = sin(along.mul(float(9.0)).add(bodyId))
+        .mul(float(0.55))
+        .add(sin(along.mul(float(23.0)).add(bodyId.mul(float(1.9)))).mul(float(0.45)));
+      const bow = sin(along.mul(float(3.4)).add(bodyId.mul(float(0.7)))).mul(float(0.14));
+      const halfW = float(1)
+        .add(lump.mul(float(0.3)))
+        .max(float(0.45));
+      const across = uv()
+        .x.sub(float(0.5))
+        .sub(bow.mul(float(0.5)))
+        .abs()
+        .mul(float(2))
+        .div(halfW);
       edge = float(1)
         .sub(across.pow(mix(float(8), float(1.4), float(SOFT))))
         .clamp(float(0), float(1));

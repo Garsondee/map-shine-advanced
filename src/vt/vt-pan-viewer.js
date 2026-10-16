@@ -209,6 +209,14 @@ import {
   CASTER_HEIGHT_SCALE_PX,
   resolveElevationFloorIndex,
   compareLayerKeys,
+  // A Tile's "Restrict Weather" box as a SKY OCCLUDER — pure compose of the
+  // weather gate / drip cover from the derive stage's restrictor footprints +
+  // live fades (scene/weather-restrict.js).
+  composeWeatherGate,
+  composeDripCover,
+  dripRoofKey,
+  quantizeOpacity,
+  tileOpacity,
 } from '../scene/index.js';
 import {
   computeCameraFrustum,
@@ -240,10 +248,11 @@ import {
   shouldPublishGlobalLightWindow,
   readSceneGlobalLightRaw,
   // THE DOOR-REVEAL BRIDGE (2026-08-31) — the inverse of the darkness
-  // write-back above: mirrors candle/fire light descriptors INTO Foundry's
-  // OWN canvas.effects.lightSources (client-local, never scene.update()),
-  // so a candle-lit room registers as lit for Foundry's native door-icon
-  // reveal. See `scene-synthetic-lights.js`'s own header.
+  // write-back above: mirrors MSA's own light descriptors (candles, fires,
+  // and — since 2026-10-16 — player-carried torches/flashlights) INTO
+  // Foundry's OWN canvas.effects.lightSources (client-local, never
+  // scene.update()), so a candle-lit room registers as lit for Foundry's
+  // native door-icon reveal. See `scene-synthetic-lights.js`'s own header.
   createSceneSyntheticLights,
   buildDaylitDoorDescriptors,
   readSceneDoorSegments,
@@ -278,6 +287,11 @@ import {
   // to Foundry's real game.video singleton so it plays under Foundry's own
   // first-gesture gate. See both files' own headers for the full mechanism.
   isVideoUrl,
+  // SVG SOURCES (2026-10-15) — the other "createImageBitmap cannot decode
+  // this" sibling. SVG IS an image (and the DEFAULT token icon is one), but it
+  // is a vector document, so the raster raw path must route it through
+  // rasterizeSvgToBitmap instead of createImageBitmap. See isSvgUrl's own doc.
+  isSvgUrl,
   playTileVideo,
   sceneRectToMinMax,
 } from '../foundry/index.js';
@@ -308,6 +322,7 @@ import {
   updateHoverFade,
   HOVER_FADE_CONFIG,
 } from '../scene/occlusion.js';
+
 import {
   buildEnvSnapshot,
   createDayClock,
@@ -365,14 +380,16 @@ import {
   candleAnimationQualityTier,
   candleTierPlan,
   buildCandleLightSources,
-  // PLAYER TORCH FLAME + EMBERS (mythica-machina-press#77/#578, Stage 2a) —
-  // the flame body re-uses candle's own builders (imported above); these are
-  // its ember-batch-specific siblings plus the torch-named re-exports.
-  buildTorchFlameGeometry,
-  buildTorchFlameMaterial,
-  buildTorchEmberGeometry,
-  buildTorchEmberMaterial,
-  PLAYER_TORCH_FLAME_SIZE_PX,
+  // PLAYER TORCH FIRE (mythica-machina-press#77/#578) — Fire's own sprite look
+  // (flame layers + sparks) on a moving emitter; see effects/player-torch-fire-*.
+  computeTorchParticleArrays,
+  createTorchFireSimulation,
+  TORCH_FIRE_MAX_FLAMES_PER_TORCH,
+  TORCH_FIRE_MAX_SPARKS_PER_TORCH,
+  buildTorchFireFlameMaterial,
+  buildTorchFireSparkMaterial,
+  buildTorchFireBatchGeometry,
+  updateTorchFireBatchGeometry,
   createLightningSubsystem,
   // ROPE & CHAIN (mythica-machina-press#1, Phase 2) — the per-instance CPU
   // subsystem (effects/rope-chain-subsystem.js's own header explains why
@@ -503,6 +520,9 @@ import {
   WATER_PRESENCE_EDGE1,
   cloudTopsGate,
   buildCloudTopsParallaxWorldXY,
+  // The infravision hot-body recolour's slot count — the producer below must
+  // agree with the node graph's own fixed unroll count.
+  PLAYER_VISION_TOKEN_SLOTS,
 } from '../effects/index.js';
 import { makeFrameClock, DEFAULT_PAUSE_RAMP_SEC, perfNowMs } from '../core/frame-clock.js';
 import {
@@ -1048,7 +1068,7 @@ function disposeActive() {
   // Not VRAM — every synthetic Foundry light source the door-reveal bridge
   // registered into canvas.effects.lightSources, so a scene switch or
   // Stop/Restart doesn't leave a ghost light revealing doors around a
-  // candle that no longer exists.
+  // candle or a carried torch that no longer exists.
   try {
     _active.disposeSyntheticLights?.();
   } catch (err) {
@@ -1255,7 +1275,7 @@ export async function startVtPanViewer({
   // un-wired caller (tests, the torture fixture) still constructs.
   getPlayerCarriedLightSources,
   // PLAYER VISION-MODE GRADE (mythica-machina-press#77 Stage 2b, #580) —
-  // boot.js's own per-frame closure: resolves "which of the four screen-
+  // boot.js's own per-frame closure: resolves "which of the five screen-
   // space vision grades (if any) should THIS client's present pass apply
   // right now" from live Foundry state (the viewer's own token, its
   // playerLightMode flag, the scene's GM-set permissions, whether this
@@ -1265,6 +1285,8 @@ export async function startVtPanViewer({
   // un-wired caller (tests, the torture fixture) still constructs without
   // supplying this param.
   getActivePlayerVisionMode,
+  /** World-space center of the token the viewer's active vision mode belongs to. */
+  getActivePlayerVisionAnchor,
   // PLAYER TORCH FLAME + EMBERS (mythica-machina-press#77/#578) — boot.js's
   // own per-frame closure: the SAME two live reads
   // (getPlayerCarriedLightSources' own header) projected into flame-body
@@ -1298,6 +1320,9 @@ export async function startVtPanViewer({
   getSkyReachGrid,
   getCoverAboveGrid,
   getCasterHeightGrid,
+  // The Tiles carrying "Restrict Weather" for a floor (mask authority's
+  // `getWeatherRestrictors`) — null when the floor has none.
+  getWeatherRestrictors,
   // mythica-machina-press#316 — the authored `_Drip` mask's own seam,
   // structurally identical to getFireMaskGrid above.
   getDripMaskGrid,
@@ -1383,6 +1408,8 @@ export async function startVtPanViewer({
   // answer for a floor with nothing overhead.
   getCoverAboveGrid ??= () => null;
   getCasterHeightGrid ??= () => null;
+  // No restrictors = the sky-reach gate and roofline are exactly what they were.
+  getWeatherRestrictors ??= () => null;
   // THE AUTHORED DRIP MASK's own input (mythica-machina-press#316) — absent
   // means no authored drip points on top of whatever the roofline finds,
   // same fail-silent posture as the two lines just above.
@@ -2768,6 +2795,27 @@ export async function startVtPanViewer({
     let lastPerFloorMaskRebake = null;
 
     /**
+     * ⭐ THE ROOFLINE, traced from the floor's cover — and, where Tiles carry
+     * "Restrict Weather", from the cover WITHOUT them plus each one that still
+     * reads as a roof (not hover-faded away). A restrictor tile therefore drips
+     * around its own edges, and stops when it fades. Shared by the per-floor
+     * rebake and the fade-threshold re-trace so the two cannot disagree.
+     */
+    function traceRoofline(idx) {
+      const wx = weatherGate && weatherGate.floorIndex === idx ? weatherGate.product : null;
+      const cover = wx
+        ? composeDripCover({ cover: wx.cover, restrictors: wx.restrictors, opacityOf: weatherOpacityOf })
+        : getCoverAboveGrid(idx);
+      if (wx) weatherGate.dripKey = dripRoofKey(wx.restrictors, weatherOpacityOf);
+      const roofline = extractDripEdges(cover, {
+        heightGrid: getCasterHeightGrid(idx),
+        heightScalePx: CASTER_HEIGHT_SCALE_PX,
+      });
+      precipitationSubsystem?.setDripEdges(roofline);
+      return roofline;
+    }
+
+    /**
      * ⭐ EVERY PER-FLOOR MASK BAKE, IN ONE PLACE — and it exists because the
      * hand-maintained alternative has now been forgotten FOUR TIMES.
      *
@@ -2822,11 +2870,7 @@ export async function startVtPanViewer({
       // re-sings a different roofline AND reveals a different hand-painted
       // patch), so it belongs at this exact chokepoint for the same reason
       // the roofline itself does.
-      const roofline = extractDripEdges(getCoverAboveGrid(idx), {
-        heightGrid: getCasterHeightGrid(idx),
-        heightScalePx: CASTER_HEIGHT_SCALE_PX,
-      });
-      precipitationSubsystem?.setDripEdges(roofline);
+      const roofline = traceRoofline(idx);
       const authoredDripPoints = extractDripMaskPoints(getDripMaskGrid(idx), {
         heightGrid: getCasterHeightGrid(idx),
         heightScalePx: CASTER_HEIGHT_SCALE_PX,
@@ -4672,8 +4716,28 @@ export async function startVtPanViewer({
      * `feedback_sdf_does_not_draw_the_edge` is the same lesson fire's own mask
      * records — a coarse gate was never meant to draw a crisp edge.
      */
+    /**
+     * ⭐ TILES WITH "RESTRICT WEATHER" (sky occluders). Their current opacity
+     * (1 = fully there, 0 = faded away), quantised so a hover fade re-composes
+     * the gate in steps rather than every frame. Keyed by tile id and kept across
+     * rebakes, so a faded roof does not pop back to opaque when a mask changes.
+     */
+    const weatherOpacity = new Map();
+    /** The raw opacity this frame, written by the occlusion refresh loop. */
+    const weatherOpacityRaw = new Map();
+    const weatherOpacityOf = (id) => weatherOpacity.get(id) ?? 1;
+    /** @type {{floorIndex:number, product:object, data:Uint8Array, texture:object, dripKey:string}|null} */
+    let weatherGate = null;
+
     function bakePrecipSkyReachTexture(floorIndex) {
-      const grid = getSkyReachGrid(floorIndex);
+      let restrictors = null;
+      try {
+        restrictors = getWeatherRestrictors(floorIndex);
+      } catch {
+        restrictors = null;
+      }
+      weatherGate = null;
+      const grid = restrictors?.sky ?? getSkyReachGrid(floorIndex);
       if (!grid?.spec || !grid?.data) {
         // Absent is the ORDINARY case on a floor whose art has not streamed.
         // Disarm rather than keep a stale other-floor gate — a disarmed gate
@@ -4691,17 +4755,25 @@ export async function startVtPanViewer({
         lastPrecipSkyReachBake = { ok: false, floorIndex, reason: `degenerate grid ${w}x${h}` };
         return lastPrecipSkyReachBake;
       }
-      const data = new Uint8Array(w * h * 4);
-      for (let i = 0; i < w * h; i++) {
-        const v = grid.data[i] ?? 255;
-        data[i * 4 + 0] = v;
-        data[i * 4 + 1] = v;
-        data[i * 4 + 2] = v;
-        data[i * 4 + 3] = 255;
+      let data;
+      if (restrictors) {
+        // The sky WITHOUT the restrictors, with each laid back over it at its
+        // live opacity — see scene/weather-restrict.js.
+        data = composeWeatherGate({ sky: grid, restrictors: restrictors.restrictors, opacityOf: weatherOpacityOf });
+      } else {
+        data = new Uint8Array(w * h * 4);
+        for (let i = 0; i < w * h; i++) {
+          const v = grid.data[i] ?? 255;
+          data[i * 4 + 0] = v;
+          data[i * 4 + 1] = v;
+          data[i * 4 + 2] = v;
+          data[i * 4 + 3] = 255;
+        }
       }
       const tex = createMaskDataTexture(data, w, h, 'linear', false);
       precipSkyReachTexture?.dispose();
       precipSkyReachTexture = tex;
+      if (restrictors) weatherGate = { floorIndex, product: restrictors, data, texture: tex, dripKey: '' };
       precipSkyReachRect = {
         minX: grid.spec.x,
         minY: grid.spec.y,
@@ -4712,8 +4784,44 @@ export async function startVtPanViewer({
       // is on. Its absence is what let the stale-gate bug survive: every
       // field said "armed", none said "armed against WHAT".
       precipitationSubsystem?.setSkyReachTexture(tex, precipSkyReachRect, floorIndex);
-      lastPrecipSkyReachBake = { ok: true, floorIndex, cols: w, rows: h, rect: precipSkyReachRect };
+      lastPrecipSkyReachBake = {
+        ok: true,
+        floorIndex,
+        cols: w,
+        rows: h,
+        rect: precipSkyReachRect,
+        restrictors: restrictors ? restrictors.restrictors.length : 0,
+      };
       return lastPrecipSkyReachBake;
+    }
+
+    /**
+     * Advance the weather gate to this frame's tile fades. Called once per frame
+     * after the occlusion refresh has written `weatherOpacityRaw`. Re-composes
+     * the gate texture only when some restrictor crossed a quantisation step, and
+     * re-traces the roofline only when one crossed the "still a roof" threshold —
+     * so a hover fade costs a few tiny uploads, and nothing at all at rest.
+     */
+    function updateWeatherRestrictFades() {
+      const gate = weatherGate;
+      if (!gate) return;
+      let changed = false;
+      for (const { id } of gate.product.restrictors) {
+        const q = quantizeOpacity(weatherOpacityRaw.get(id) ?? 1);
+        if (weatherOpacityOf(id) !== q) {
+          weatherOpacity.set(id, q);
+          changed = true;
+        }
+      }
+      if (!changed) return;
+      composeWeatherGate({
+        sky: gate.product.sky,
+        restrictors: gate.product.restrictors,
+        opacityOf: weatherOpacityOf,
+        out: gate.data,
+      });
+      gate.texture.needsUpdate = true;
+      if (dripRoofKey(gate.product.restrictors, weatherOpacityOf) !== gate.dripKey) traceRoofline(gate.floorIndex);
     }
 
     const precipitationSubsystem = createPrecipitationSubsystem({
@@ -4921,10 +5029,17 @@ export async function startVtPanViewer({
     // performance-tuned rendering path; recomputing the same clustering
     // independently here, throttled to a few times a SECOND rather than
     // every frame — see MIN_SYNC_INTERVAL_MS — costs nothing worth avoiding
-    // that coupling for). Same TDZ-safe closure pattern as `getWindHandle`
-    // above: `fireSubsystem` is declared further down this function, safe
-    // because neither closure is invoked until `syntheticLights.sync()`
-    // runs from the frame loop.
+    // that coupling for). Same posture for the player-carried lights'
+    // descriptors (2026-10-16): `getPlayerCarriedLightSources` — the SAME
+    // closure `pointLights` reads — is called a third time here, at this
+    // bridge's throttled cadence, so a torch/flashlight reveals Foundry's
+    // native door icons the way a candle already does. Passed as the bare
+    // function (not wrapped) so an un-wired caller's `undefined` stays
+    // `undefined` and the bridge's own `typeof === 'function'` guard skips
+    // it, exactly like `point-light-pool.js`'s own `= null` default. Same
+    // TDZ-safe closure pattern as `getWindHandle` above: `fireSubsystem` is
+    // declared further down this function, safe because neither closure is
+    // invoked until `syntheticLights.sync()` runs from the frame loop.
     const syntheticLights = createSceneSyntheticLights({
       getCandleDescriptors: () => {
         const state = getCandleRenderState();
@@ -4941,6 +5056,10 @@ export async function startVtPanViewer({
       // above (`fireSubsystem.lightSources()` — free to read again here,
       // not recomputed).
       getFireDescriptors: () => fireSubsystem.lightSources(),
+      // PLAYER-CARRIED LIGHTS (2026-10-16) — the torch/flashlight half of
+      // the same gap ("the door logo is not turning up when I flash the
+      // player lights at a door"). See this block's own header above.
+      getPlayerLightDescriptors: getPlayerCarriedLightSources,
       // DAYLIT DOORWAYS (2026-10-16) - "an exterior door during the day"
       // never got its icon: daylight is Foundry's GlobalLightSource, tested
       // per point, and the dark side of the door fails. See the header's
@@ -6455,97 +6574,98 @@ export async function startVtPanViewer({
     // change" — a torch walking every frame rebuilds every frame (cheap: a
     // handful of quads), a torch standing still costs nothing extra.
     //
-    // FLAME BODY — candle's own builders, completely unmodified, fed a LIVE
-    // anchor list instead of a static one. EMBERS — a second, independent
-    // batch (see player-torch-flame-render.js's own header for why this is
-    // NOT the fire particle engine).
-    // ------------------------------------------------------------------
-    // PLAYER TORCH FLAME LOOK — one place, named constants. sizePx mirrors
-    // candle's own default flame size; emberCount is the dispatch's own
-    // "good, distinct, functional... NOT V2's full per-control depth" bar —
-    // five is enough to read as a handful of rising embers, cheap even for
-    // several simultaneous torches (5 quads × N torches, one draw call).
-    // PLAYER_TORCH_FLAME_SIZE_PX (26 px, imported above) is the flame at full burn;
-    // a guttering torch's anchor overrides it per anchor.
-    const PLAYER_TORCH_EMBER_COUNT = 5;
+    // PLAYER TORCH FIRE (mythica-machina-press#77/#578). A held torch burns as a small
+    // fire drawn with the Fire effect's own sprite look: three flame LAYERS (a bright core,
+    // swirling tongues, a ragged ring; one mesh each, see TORCH_FIRE_FLAME_VARIANTS) plus
+    // sparks that fly out in every direction. The torch flame is NOT the Fire effect's GPU
+    // particle engine (its spawn points are painted-mask data, a torch moves) and no longer
+    // the candle flame body + five north-rising embers it started as. effects/player-torch-
+    // fire-geometry.js's header has the full account. Anchors come from boot.js's live read.
     const torchFlameScene = new THREE.Scene();
-    let torchFlameMesh = null;
-    let torchFlameMat = null;
-    let torchFlameKey = null;
+    /** One flame mesh + material per layer, in TORCH_FIRE_FLAME_VARIANTS order. */
+    let torchFlameMeshes = [];
+    let torchFlameMats = [];
+    const torchFireSimulation = createTorchFireSimulation();
     const torchEmberScene = new THREE.Scene();
-    let torchEmberMesh = null;
-    let torchEmberMat = null;
-    let torchEmberKey = null;
-
-    /** Same fold-a-position-list-into-an-integer-checksum trick as
-     * candleFlameSignature just above, minus the colour/size/per-anchor-
-     * override machinery candle's own signature carries (torches have no
-     * per-token overrides) — position + count is the whole dirty-check. */
-    function torchAnchorSignature(anchors) {
-      let h = (anchors.length * 1000003) | 0;
-      for (const a of anchors) {
-        // + the torch's burn: a guttering torch shrinks and reddens in place (its
-        // anchor carries a size and a colour derived from it), and must still redraw.
-        h = (h * 31 + Math.round(a.x) + Math.round(a.y) * 7 + Math.round((a.burn01 ?? 1) * 50) * 13) | 0;
-      }
-      return h;
+    let torchSparkMesh = null;
+    let torchSparkMat = null;
+    /** Whether there is any torch fire to draw this frame (the render pass reads these). */
+    let torchFlameVisible = false;
+    let torchSparkVisible = false;
+    function disposeTorchFireMeshes() {
+      for (const mesh of torchFlameMeshes) mesh.geometry?.dispose();
+      for (const mat of torchFlameMats) mat.material?.dispose();
+      for (const mesh of torchFlameMeshes) torchFlameScene.remove(mesh);
+      torchFlameMeshes = [];
+      torchFlameMats = [];
+      torchSparkMesh?.geometry?.dispose();
+      torchSparkMat?.material?.dispose();
+      if (torchSparkMesh) torchEmberScene.remove(torchSparkMesh);
+      torchSparkMesh = null;
+      torchSparkMat = null;
     }
 
-    function updatePlayerTorchFlame() {
+    function updatePlayerTorchFlame(nowMs) {
       const anchors = getPlayerCarriedTorchAnchors ? (getPlayerCarriedTorchAnchors() ?? []) : [];
       if (!anchors.length) {
-        if (torchFlameMesh) torchFlameMesh.visible = false;
-        if (torchEmberMesh) torchEmberMesh.visible = false;
+        torchFireSimulation.reset();
+        torchFlameVisible = false;
+        torchSparkVisible = false;
         return;
       }
-      const sig = torchAnchorSignature(anchors);
-
-      // FLAME BODY — a fixed tier (1, "standard": full chaotic life + wind
-      // tail, no domain-warped silhouette) rather than candle's own profile-
-      // resolved ladder; see this block's own header for why.
-      if (!torchFlameMat) {
-        torchFlameMat = buildTorchFlameMaterial({
-          THREE,
-          uGlobalTimeMs,
-          depthTexNode: envLight.depthTexNode,
-          depthFlagsTexNode: envLight.depthFlagsTexNode,
-          quality: 1,
-          windHandle,
+      // The emitter coordinates only seed each particle. The simulation owns
+      // every particle's world position/velocity/lifetime afterward, matching
+      // V2's worldSpace Quarks behavior rather than parenting sprites to the mouse.
+      if (!torchFlameMats.length) {
+        const emptyFlames = computeTorchParticleArrays([], []).flames;
+        torchFlameMats = emptyFlames.map(({ variant }) =>
+          buildTorchFireFlameMaterial({
+            THREE,
+            uGlobalTimeMs,
+            archetype: variant.archetype,
+            sizeScale: variant.sizeScale,
+            gain: variant.gain,
+          })
+        );
+        torchFlameMeshes = torchFlameMats.map((mat, i) => {
+          const geometry = buildTorchFireBatchGeometry(THREE, emptyFlames[i].batch, {
+            capacityQuads: anchors.length * TORCH_FIRE_MAX_FLAMES_PER_TORCH,
+          });
+          const mesh = new THREE.Mesh(geometry, mat.material);
+          mesh.frustumCulled = false;
+          mesh.renderOrder = i; // core under tongues under ring
+          torchFlameScene.add(mesh);
+          return mesh;
         });
-        torchFlameMesh = new THREE.Mesh(new THREE.BufferGeometry(), torchFlameMat.material);
-        torchFlameMesh.frustumCulled = false;
-        torchFlameScene.add(torchFlameMesh);
+        torchSparkMat = buildTorchFireSparkMaterial({ THREE, uGlobalTimeMs });
+        torchSparkMesh = new THREE.Mesh(
+          buildTorchFireBatchGeometry(THREE, computeTorchParticleArrays([], []).spark, {
+            capacityQuads: Math.max(1, anchors.length * TORCH_FIRE_MAX_SPARKS_PER_TORCH),
+          }),
+          torchSparkMat.material
+        );
+        torchSparkMesh.frustumCulled = false;
+        torchEmberScene.add(torchSparkMesh);
       }
-      if (sig !== torchFlameKey || !torchFlameMesh.geometry.getAttribute('position')) {
-        const old = torchFlameMesh.geometry;
-        const { geometry } = buildTorchFlameGeometry(THREE, anchors, { sizePx: PLAYER_TORCH_FLAME_SIZE_PX });
-        torchFlameMesh.geometry = geometry;
-        if (old) old.dispose();
-        torchFlameKey = sig;
+      const particles = torchFireSimulation.update(anchors, Number.isFinite(nowMs) ? nowMs : 0);
+      const arrays = computeTorchParticleArrays(particles.flames, particles.sparks);
+      arrays.flames.forEach(({ batch }, i) => {
+        const geometry = torchFlameMeshes[i].geometry;
+        if (!updateTorchFireBatchGeometry(geometry, batch)) {
+          const capacity = Math.max(batch.quadCount, (geometry.userData.torchFireCapacity || 1) * 2);
+          const replacement = buildTorchFireBatchGeometry(THREE, batch, { capacityQuads: capacity });
+          torchFlameMeshes[i].geometry = replacement;
+          geometry.dispose();
+        }
+      });
+      if (!updateTorchFireBatchGeometry(torchSparkMesh.geometry, arrays.spark)) {
+        const geometry = torchSparkMesh.geometry;
+        const capacity = Math.max(arrays.spark.quadCount, (geometry.userData.torchFireCapacity || 1) * 2);
+        torchSparkMesh.geometry = buildTorchFireBatchGeometry(THREE, arrays.spark, { capacityQuads: capacity });
+        geometry.dispose();
       }
-      torchFlameMat.uIntensity.value = 1;
-      torchFlameMesh.visible = true;
-
-      // EMBERS — a second independent batch; see this block's own header.
-      if (!torchEmberMat) {
-        torchEmberMat = buildTorchEmberMaterial({ THREE, uGlobalTimeMs });
-        torchEmberMesh = new THREE.Mesh(new THREE.BufferGeometry(), torchEmberMat.material);
-        torchEmberMesh.frustumCulled = false;
-        torchEmberScene.add(torchEmberMesh);
-      }
-      if (sig !== torchEmberKey || !torchEmberMesh.geometry.getAttribute('position')) {
-        const old = torchEmberMesh.geometry;
-        // sizePx deliberately OMITTED — buildTorchEmberGeometry's own default
-        // is what buildTorchEmberMaterial's shader assumes; see that
-        // function's own warning for why a mismatched override here would
-        // desync the ember's drawn position from its own quad.
-        const { geometry } = buildTorchEmberGeometry(THREE, anchors, { emberCount: PLAYER_TORCH_EMBER_COUNT });
-        torchEmberMesh.geometry = geometry;
-        if (old) old.dispose();
-        torchEmberKey = sig;
-      }
-      torchEmberMat.uIntensity.value = 1;
-      torchEmberMesh.visible = true;
+      torchFlameVisible = arrays.flames.some(({ batch }) => batch.quadCount > 0);
+      torchSparkVisible = arrays.spark.quadCount > 0;
     }
 
     /** Free both torch-flame subsystems' GPU resources (their lights, if any
@@ -6553,19 +6673,13 @@ export async function startVtPanViewer({
      * intensity — live in the shared pool, disposed by disposePointLights). */
     function disposePlayerTorchFlame() {
       try {
-        torchFlameMesh?.geometry?.dispose();
-        torchFlameMat?.material?.dispose();
-        torchEmberMesh?.geometry?.dispose();
-        torchEmberMat?.material?.dispose();
+        disposeTorchFireMeshes();
       } catch (err) {
-        log.error('player torch flame dispose failed — GPU buffers may leak until renderer.dispose():', err);
+        log.error('player torch fire dispose failed — GPU buffers may leak until renderer.dispose():', err);
       }
-      torchFlameMesh = null;
-      torchFlameMat = null;
-      torchFlameKey = null;
-      torchEmberMesh = null;
-      torchEmberMat = null;
-      torchEmberKey = null;
+      torchFireSimulation.reset();
+      torchFlameVisible = false;
+      torchSparkVisible = false;
     }
 
     // ── DOOR GRAPHICS (effects/door-graphics-subsystem.js) ────────────────
@@ -7787,7 +7901,7 @@ export async function startVtPanViewer({
       // own profiler zone yet (a handful of carried torches is inexpensive;
       // a follow-up can register a dedicated Z entry if it ever needs
       // measuring on its own).
-      updatePlayerTorchFlame();
+      updatePlayerTorchFlame(env.time?.tMs ?? uGlobalTimeMs.value);
       // THE DOOR-REVEAL BRIDGE'S own per-frame tick — throttles itself
       // (MIN_SYNC_INTERVAL_MS), so this call is cheap on every frame it
       // skips. `env.time.realMs`, NEVER `env.time.tMs` — sim time freezes
@@ -8385,13 +8499,13 @@ export async function startVtPanViewer({
       // guarded-additive draw as candle's just above, two separate scenes
       // (flame body, then embers on top) so the embers' own additive glow
       // never has to share a material/blend state with the flame body's.
-      if (torchFlameMesh && torchFlameMesh.visible) {
+      if (torchFlameVisible) {
         const prevTorchFlameAutoClear = renderer.autoClearColor;
         renderer.autoClearColor = false;
         renderer.render(torchFlameScene, camera);
         renderer.autoClearColor = prevTorchFlameAutoClear;
       }
-      if (torchEmberMesh && torchEmberMesh.visible) {
+      if (torchSparkVisible) {
         const prevTorchEmberAutoClear = renderer.autoClearColor;
         renderer.autoClearColor = false;
         renderer.render(torchEmberScene, camera);
@@ -9108,19 +9222,19 @@ export async function startVtPanViewer({
       // ── TIER 0 — always pushed; the shader compiles these in from tier 0
       // regardless of which higher tiers are also active. ─────────────────
       u.uTimeSec.value = nowSec;
-      u.uDistortion.value = lensNum(p.distortion, -0.03);
-      u.uChromaticAmountPx.value = lensNum(p.chromaticAmountPx, 0.8);
-      u.uChromaticEdgePower.value = lensNum(p.chromaticEdgePower, 1.16);
+      u.uDistortion.value = lensNum(p.distortion, -0.1);
+      u.uChromaticAmountPx.value = lensNum(p.chromaticAmountPx, 1.2);
+      u.uChromaticEdgePower.value = lensNum(p.chromaticEdgePower, 6);
       u.uVignetteIntensity.value = lensNum(p.vignetteIntensity, 1);
       u.uVignetteSoftness.value = lensNum(p.vignetteSoftness, 0.02);
-      u.uGrainAmount.value = lensNum(p.grainAmount, 0);
-      u.uGrainSpeed.value = lensNum(p.grainSpeed, 1);
+      u.uGrainAmount.value = lensNum(p.grainAmount, 0.003);
+      u.uGrainSpeed.value = lensNum(p.grainSpeed, 1.05);
       u.uAdaptiveGrainEnabled.value = p.adaptiveGrainEnabled === false ? 0 : 1;
-      u.uGrainLowLightBoost.value = lensNum(p.grainLowLightBoost, 0.25);
-      u.uGrainCellSizeBright.value = lensNum(p.grainCellSizeBright, 0.7);
-      u.uGrainCellSizeDark.value = lensNum(p.grainCellSizeDark, 3);
+      u.uGrainLowLightBoost.value = lensNum(p.grainLowLightBoost, 0.12);
+      u.uGrainCellSizeBright.value = lensNum(p.grainCellSizeBright, 0.6);
+      u.uGrainCellSizeDark.value = lensNum(p.grainCellSizeDark, 1.9);
       u.uDigitalNoiseEnabled.value = p.digitalNoiseEnabled === true ? 1 : 0;
-      u.uDigitalNoiseAmount.value = lensNum(p.digitalNoiseAmount, 0.066);
+      u.uDigitalNoiseAmount.value = lensNum(p.digitalNoiseAmount, 0.005);
       u.uDigitalNoiseChance.value = lensNum(p.digitalNoiseChance, 0.004);
       u.uDigitalNoiseGreenBias.value = lensNum(p.digitalNoiseGreenBias, 1);
       u.uDigitalNoiseLowLightBoost.value = lensNum(p.digitalNoiseLowLightBoost, 3.37);
@@ -9133,7 +9247,7 @@ export async function startVtPanViewer({
       // shader taps are even compiled in. ──────────────────────────────────
       // `!== false`, not `=== true` — defaults ON since the 2026-09-25 live
       // tuning (lens.js), same missing-means-default shape as adaptive grain's.
-      const autoFocusEnabled = p.autoFocusEnabled !== false;
+      const autoFocusEnabled = p.autoFocusEnabled === true;
       if (!autoFocusEnabled) {
         lensAutoFocusEventActive = false;
         lensAutoFocusAmount = 0;
@@ -9206,7 +9320,7 @@ export async function startVtPanViewer({
           dtSec,
           {
             strength: lensNum(p.motionBlurStrength, 1.77),
-            maxPx: lensNum(p.motionBlurMaxPx, 10),
+            maxPx: lensNum(p.motionBlurMaxPx, 9.5),
             smoothingSeconds: lensNum(p.motionBlurSmoothingSeconds, 0.8),
           }
         );
@@ -9216,7 +9330,7 @@ export async function startVtPanViewer({
         zoomBlurPx = computeZoomMotionBlurPx(
           lensCameraZoomVelocity,
           lensNum(p.motionBlurZoomStrength, 1.25),
-          lensNum(p.motionBlurMaxPx, 10)
+          lensNum(p.motionBlurMaxPx, 9.5)
         );
 
         // Zoom-triggered refocus — checked every frame a real previous
@@ -9253,6 +9367,9 @@ export async function startVtPanViewer({
         u.uAutoFocusAmount.value = autoFocusEnabled ? lensAutoFocusAmount : 0;
         u.uAutoFocusBlurPx.value = lensNum(p.autoFocusMaxBlurPx, 2.5);
         u.uAutoFocusShiftPx.value.set(lensAutoFocusShiftPx.x, lensAutoFocusShiftPx.y);
+        // `!== false`, not `=== true` — default flips ON with the 2026-10-16
+        // live tuning (lens.js), the same missing-means-default shape as
+        // autofocus's own gate above.
         const motionOn = p.motionBlurEnabled === true;
         u.uCameraMotionBlurPx.value.set(motionOn ? motionBlurPx.x : 0, motionOn ? motionBlurPx.y : 0);
         u.uZoomMotionBlurPx.value = motionOn ? zoomBlurPx : 0;
@@ -10864,6 +10981,22 @@ export async function startVtPanViewer({
     }
 
     /**
+     * Reusable slot scratch for `pushPlayerVisionTokens` — persistent objects,
+     * mutated in place, the same "no per-frame allocation in the frame loop"
+     * discipline every other per-frame pass in this file follows. `dists` is a
+     * parallel ascending-distance index so the insertion below keeps the
+     * NEAREST slots and never has to sort or allocate.
+     */
+    const visionTokenSlots = Array.from({ length: PLAYER_VISION_TOKEN_SLOTS }, () => ({
+      x: 0,
+      y: 0,
+      radiusX: 0,
+      radiusY: 0,
+    }));
+    const visionTokenSlotDists = new Float64Array(PLAYER_VISION_TOKEN_SLOTS);
+    let visionTokenSlotCount = 0;
+
+    /**
      * Read this frame's active player vision-mode grade and push it to the
      * present material (mythica-machina-press#77 Stage 2b, #580). Unlike
      * `pushGradeLook`/`pushStylize`, this does NOT go through the effect
@@ -10884,7 +11017,84 @@ export async function startVtPanViewer({
       // local `env`. One frame stale at worst (`lastEnvSnapshot` is written
       // AFTER this runs, each frame) — negligible for grain/scan animation.
       const timeMs = lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value;
-      gradePresent.setPlayerVisionMode(mode, timeMs);
+      const anchor = getActivePlayerVisionAnchor?.() ?? null;
+      gradePresent.setPlayerVisionMode(mode, timeMs, lastEnvSnapshot?.env?.darkness01, anchor);
+      // THE HOT-BODY TOKEN LIST (2026-10-15) — only the infravision modes read
+      // it, so it is only ever built for them. Every OTHER mode leaves the
+      // slots exactly as they were, which costs nothing: `buildTokenMaskNode`
+      // is not even called on those modes' own node graph.
+      if (mode === 'infravision' || mode === 'activeInfravision') pushPlayerVisionTokens(anchor);
+    }
+
+    /**
+     * The visible tokens the infravision hot-body recolour paints, in world
+     * pixels: `{x, y, radiusX, radiusY}` per token — the token's own bounding
+     * box, which is the shape the recolour paints (see `PLAYER_VISION_TOKEN_
+     * SLOTS`'s own note on why this is a box and not a radius) — NEAREST THE
+     * WEARER'S OWN ANCHOR FIRST (the eyepiece is centred there, so the nearest
+     * bodies are the ones actually inside the wearer's range), capped at
+     * `PLAYER_VISION_TOKEN_SLOTS`.
+     *
+     * WHERE THE POSITIONS COME FROM: `state.worldBounds` — the LIVE quad bounds
+     * `refreshItemPlacement` maintains from the token DOCUMENT every residency
+     * pass, and the same field the residency cull already tests. Deliberately
+     * NOT `item.footprint`: that is a collection-time SNAPSHOT
+     * (`foundry/scene-tokens.js`'s own note on the field) and would leave a
+     * moved token's hot body behind at its old position.
+     *
+     * WHY "VISIBLE" = "in `lastItems` and not hidden": `lastItems` IS this
+     * frame's draw list (elevation → sort → zIndex), so a token that is off
+     * screen, on another floor, or GM-hidden is simply absent — which is also
+     * what keeps this on the right side of Law 7 (the recolour can only ever
+     * repaint a pixel that is already being drawn, and the fragment shader
+     * still multiplies it by the same fog/`presence` gate as the mode's own
+     * ramp).
+     *
+     * Allocation-free: a fixed slot array plus an insertion by ascending
+     * distance, so the ninth-nearest body never evicts the first.
+     *
+     * @param {{x:number,y:number}|null} anchor - the wearer's own token centre.
+     */
+    function pushPlayerVisionTokens(anchor) {
+      const slots = visionTokenSlots;
+      const dists = visionTokenSlotDists;
+      const max = slots.length;
+      visionTokenSlotCount = 0;
+      const ax = Number.isFinite(anchor?.x) ? anchor.x : 0;
+      const ay = Number.isFinite(anchor?.y) ? anchor.y : 0;
+      for (const it of lastItems) {
+        if (it?.kind !== 'token' || it.hidden) continue;
+        const b = itemStates.get(it.id)?.worldBounds;
+        if (!b) continue;
+        const cx = (b.minX + b.maxX) * 0.5;
+        const cy = (b.minY + b.maxY) * 0.5;
+        const radiusX = (b.maxX - b.minX) * 0.5;
+        const radiusY = (b.maxY - b.minY) * 0.5;
+        if (!(radiusX > 0 && radiusY > 0)) continue;
+        const dx = cx - ax;
+        const dy = cy - ay;
+        const d = dx * dx + dy * dy;
+        if (visionTokenSlotCount >= max && d >= dists[max - 1]) continue;
+        let i = visionTokenSlotCount < max ? visionTokenSlotCount : max - 1;
+        while (i > 0 && dists[i - 1] > d) {
+          const prev = slots[i - 1];
+          const cur = slots[i];
+          cur.x = prev.x;
+          cur.y = prev.y;
+          cur.radiusX = prev.radiusX;
+          cur.radiusY = prev.radiusY;
+          dists[i] = dists[i - 1];
+          i--;
+        }
+        const slot = slots[i];
+        slot.x = cx;
+        slot.y = cy;
+        slot.radiusX = radiusX;
+        slot.radiusY = radiusY;
+        dists[i] = d;
+        if (visionTokenSlotCount < max) visionTokenSlotCount++;
+      }
+      gradePresent.setPlayerVisionTokens(slots, visionTokenSlotCount);
     }
 
     // THE OCCLUSION MASK — a REAL render target as of 2026-07-18. The MASK
@@ -11023,6 +11233,9 @@ export async function startVtPanViewer({
      * @type {Array<{elevation:number, x:number, y:number}>}
      */
     const occlusionTestTokenScratch = [];
+    /** Faded overhead tiles this frame, `{minX,minY,maxX,maxY,amount}` — reused
+     * like the scratch above and handed to `sunShadows.setOverheadFades`. */
+    const overheadFadeScratch = [];
 
     /**
      * Build (once, on first appearance) one token's disc mesh — a flat green-
@@ -11138,9 +11351,6 @@ export async function startVtPanViewer({
      * alpha for a background-hosted tree answers "is the mouse anywhere over
      * the floor?", which is true almost continuously during ordinary play,
      * not "is the mouse over painted tree pixels specifically". That is what
-    /** Faded overhead tiles this frame, `{minX,minY,maxX,maxY,amount}` — reused
-     * like the scratch above and handed to `sunShadows.setOverheadFades`. */
-    const overheadFadeScratch = [];
      * pinned every such scene's `state.hoverFade.occlusion` at ~1 within
      * about a second of the mouse ever touching the canvas and held it there
      * thereafter: the canopy's alpha collapsed toward `uOccludedAlpha` (0 for
@@ -11487,6 +11697,10 @@ export async function startVtPanViewer({
       // `core/frame-clock.js`'s own header exists to prevent.
       const hoverPoint = readMouseHoverPoint();
       const nowMs = lastEnvSnapshot?.env?.time?.realMs ?? 0;
+      // Overhead tiles faded away THIS frame, handed to the sun shadows after
+      // the loop so a faded roof shows the full shadow beneath it instead of a
+      // cutout in its own shape. Empty almost every frame (no allocation).
+      overheadFadeScratch.length = 0;
       for (const state of itemStates.values()) {
         const item = state.item;
         const elevation = item?.key?.elevation;
@@ -11560,6 +11774,33 @@ export async function startVtPanViewer({
         }
 
         refreshItemOcclusionUniforms(state.appearance, value, weights);
+        // The tile's own fade, whichever channel drove it (token proximity →
+        // `weights.fade`, hover → `hoverFade.occlusion`). `radial`/`surface`
+        // read a permanent 1 once configured, so they are deliberately not
+        // consulted. `worldBounds` is the quad's AABB — fine, the shadow field
+        // only differs from itself inside an overhead footprint anyway.
+        // A tile with "Restrict Weather" presents this opacity to the SKY — the
+        // same fade its own paint mixes toward (hover or token proximity), so the
+        // weather arrives exactly as the roof leaves.
+        if (item.kind === 'tile' && item.restrictsWeather === true) {
+          weatherOpacityRaw.set(
+            item.id,
+            weights ? tileOpacity(Math.max(weights.fade, state.hoverFade.occlusion), item.occlusion?.alpha) : 1
+          );
+        }
+        if (weights && state.worldBounds) {
+          const fadeAmount = Math.max(weights.fade, state.hoverFade.occlusion);
+          if (fadeAmount > 0) {
+            const wb = state.worldBounds;
+            overheadFadeScratch.push({
+              minX: wb.minX,
+              minY: wb.minY,
+              maxX: wb.maxX,
+              maxY: wb.maxY,
+              amount: fadeAmount,
+            });
+          }
+        }
         if (state.wholeImage) {
           for (const t of state.wholeImage.tiles) {
             refreshItemOcclusionUniforms(t.appearance, value, weights);
@@ -11602,10 +11843,6 @@ export async function startVtPanViewer({
         // ternary's `: 0` fallback for `uDepthOcclusionAmount` just above
         // (that one's "0 = not occluded"; this one's "1 = not faded" — same
         // fallback CASE, opposite-polarity uniform).
-      // Overhead tiles faded away THIS frame, handed to the sun shadows after
-      // the loop so a faded roof shows the full shadow beneath it instead of a
-      // cutout in its own shape. Empty almost every frame (no allocation).
-      overheadFadeScratch.length = 0;
         //
         // `setFadeForItem` is itself the cheap existence check (one
         // `entries.get(itemId)`, a silent no-op for the vastly-more-common
@@ -11679,18 +11916,6 @@ export async function startVtPanViewer({
             // the timer just advanced above: `occluded` stays hardcoded
             // false (a token standing under/near vegetation is not asked to
             // fade it — only the mouse-hover trigger is, by direct author
-        // The tile's own fade, whichever channel drove it (token proximity →
-        // `weights.fade`, hover → `hoverFade.occlusion`). `radial`/`surface`
-        // read a permanent 1 once configured, so they are deliberately not
-        // consulted. `worldBounds` is the quad's AABB — fine, the shadow field
-        // only differs from itself inside an overhead footprint anyway.
-        if (weights && state.worldBounds) {
-          const fadeAmount = Math.max(weights.fade, state.hoverFade.occlusion);
-          if (fadeAmount > 0) {
-            const wb = state.worldBounds;
-            overheadFadeScratch.push({ minX: wb.minX, minY: wb.minY, maxX: wb.maxX, maxY: wb.maxY, amount: fadeAmount });
-          }
-        }
             // decision) and `visionActive` stays false (vegetation has no
             // VISION channel of its own). Tracing `computeOcclusionState`
             // with these exact args: the `FADE` branch requires `occluded`,
@@ -11743,6 +11968,8 @@ export async function startVtPanViewer({
           }
         }
       }
+      sunShadows.setOverheadFades(overheadFadeScratch);
+      updateWeatherRestrictFades();
     }
 
     // itemId -> item state (see ensureItemLoaded). ONE entry per DRAWABLE, not
@@ -11858,7 +12085,6 @@ export async function startVtPanViewer({
      * texture at decode time via decode-pool.js's `acquirePackedPages` — see
      * that function's header for why this halves+ the pack count without
      * touching a single line of atlas/cache/table code: a packed page is just
-      sunShadows.setOverheadFades(overheadFadeScratch);
      * another 256² RGBA page as far as everything downstream is concerned).
      */
     async function buildPack(ownerId, name, source, { coarsePinMaxPages } = {}) {
@@ -12153,6 +12379,12 @@ export async function startVtPanViewer({
         packs, // masks only — there is no albedo pack any more
         layerErrors,
         imageSize: { width: dims.width, height: dims.height },
+        // #436 — dims resolved for a PENDING src swap, before it is committed
+        // (see `resolveSwapImageSize` + `ensureWholeImageMeshes`'s swap gate).
+        // `imageSize` above keeps naming the art currently ON SCREEN until a
+        // swap actually commits in `commitWholeImageBuild`.
+        pendingImageSize: null,
+        pendingImageSizeSrc: null,
         placement: null,
         worldBounds: null,
         geometry: null,
@@ -12165,6 +12397,53 @@ export async function startVtPanViewer({
       itemStates.set(item.id, state);
       requestItemAlphaGrid(item, dims);
       return state;
+    }
+
+    /**
+     * Re-read an item's NATIVE pixel dimensions after its `src` changed —
+     * mythica-machina-press#436, the "wide-short token overflows its box"
+     * report (see the swap gate at the top of `ensureWholeImageMeshes` for the
+     * full mechanism and why the old size cannot simply be reused).
+     *
+     * Deliberately ASYNC and OUT of `tryGetLoadedItem`: that function's whole
+     * contract is "answer synchronously, create no Promise, never yield"
+     * (2026-08-12) — it runs on every item, every residency pass. Fetching
+     * dimensions here, only when a src actually changed, keeps that contract
+     * intact while giving the swap the size it needs.
+     *
+     * Mirrors `loadNewItem`'s own video-vs-image branch so a swap between a
+     * video and a still (mythica-machina-press#430) resolves correctly. On
+     * FAILURE the OLD dims are reused rather than blocking the rebuild forever
+     * — byte-identical to the pre-#436 behaviour for that one case, which is
+     * the safe direction (a mis-fitted swap, not a missing one).
+     *
+     * @param {object} state @param {object} item
+     */
+    async function resolveSwapImageSize(state, item) {
+      let resolved;
+      try {
+        resolved = isVideoUrl(item.src) ? await getVideoDimensions(item.src) : await getSourceDimensions(item.src);
+      } catch (err) {
+        log.warn(`#436: could not re-read dimensions for "${item.id}" (${item.src}); keeping the old size:`, err);
+        if (state.pendingImageSizeSrc === item.src) {
+          state.pendingImageSize = { src: item.src, width: state.imageSize.width, height: state.imageSize.height };
+          state.pendingImageSizeSrc = null;
+          scheduleResidencyUpdate().catch(() => {});
+        }
+        return;
+      }
+      // Superseded while we waited (a newer src swap started) — drop this read
+      // rather than let a stale size overwrite the newer one.
+      if (state.pendingImageSizeSrc !== item.src) return;
+      state.pendingImageSize = { src: item.src, width: resolved.width, height: resolved.height };
+      state.pendingImageSizeSrc = null;
+      // Wake the residency pass that will actually run the rebuild with the
+      // fresh size — nothing else will, since a src change to a document that
+      // has already been read produces no further hook.
+      scheduleResidencyUpdate().catch(() => {
+        // Non-fatal: the next real input refreshes anyway, matching this file's
+        // other `scheduleResidencyUpdate` callers.
+      });
     }
 
     /**
@@ -15452,6 +15731,39 @@ export async function startVtPanViewer({
         // below — no second notification fires either.
         if (state.wholeImageRebuild && state.wholeImageRebuild.src === item.src) return state.wholeImage;
 
+        // ⚠ THE SOURCE'S OWN PIXEL SIZE MUST BE RE-READ BEFORE A REBUILD, OR
+        // THE REBUILD IS MIS-FITTED (mythica-machina-press#436).
+        //
+        // `state.imageSize` is read ONCE, at first load, in `loadNewItem` —
+        // and `tryGetLoadedItem`'s deliberately-synchronous fast path cannot
+        // re-fetch it (that is exactly why #436 was filed rather than folded
+        // into #431). A live `item.src` swap to a DIFFERENT-dimension art
+        // therefore rebuilt against the OLD art's width/height. The live file
+        // this closes: the author swapped a token's art to a WIDE, SHORT image
+        // and the result "extended outside the bounds of the token box" — a
+        // `contain` fit computed against the OLD square size, then applied to
+        // the NEW wide texture, overflows horizontally. Switching back to a
+        // square image "fixed" it, which is the signature of exactly this
+        // staleness.
+        //
+        // Resolution is ASYNC, so the rebuild WAITS for it: return the OLD
+        // (still-correct) art and kick off a one-shot dimension read;
+        // `resolveSwapImageSize` re-schedules a residency pass when it lands,
+        // and the next call falls through to the rebuild below with the NEW
+        // size. `state.imageSize` itself is deliberately NOT touched here — it
+        // keeps naming the dims of the art still ON SCREEN (`refreshItemPlacement`
+        // and `refreshWholeImageItem` both read it every pass), so nothing
+        // re-fits the visible old art while the swap is pending; the swap
+        // commits atomically in `commitWholeImageBuild`.
+        const swap = state.pendingImageSize?.src === item.src ? state.pendingImageSize : null;
+        if (!swap) {
+          if (state.pendingImageSizeSrc !== item.src) {
+            state.pendingImageSizeSrc = item.src;
+            resolveSwapImageSize(state, item);
+          }
+          return state.wholeImage; // old art stays exact until the new dims land
+        }
+
         // STALE-SRC REBUILD (mythica-machina-press#431 — live author report:
         // the "Stage Manager" macro sets an existing Tile's `texture.src` via
         // `TileDocument#update()`. Foundry's own document data updates
@@ -15600,16 +15912,17 @@ export async function startVtPanViewer({
         // gate this dedup check already provides.
         //
         // ⚠ ACCEPTED LIMITATIONS, stated rather than hidden:
-        //  - `state.imageSize` (mythica-machina-press#436, filed alongside
-        //    the original #431 fix and unchanged by this revision): the
-        //    SOURCE IMAGE's own pixel dimensions are read once, the first
-        //    time this ITEM — not this wholeImage — ever loaded
-        //    (`loadNewItem`), and `tryGetLoadedItem`'s deliberately-
-        //    synchronous fast path cannot re-fetch them without breaking its
-        //    own contract. A live `src` swap to a DIFFERENT-dimension image
-        //    rebuilds against the OLD image's `imageW`/`imageH` and can come
-        //    out mis-fitted. A real fix is a separately-scoped change to
-        //    that fast path's own contract — see #436.
+        //  - `state.imageSize` (mythica-machina-press#436) — FIXED 2026-10-15.
+        //    The SOURCE IMAGE's own pixel dimensions used to be read once, the
+        //    first time this ITEM (not this wholeImage) ever loaded
+        //    (`loadNewItem`), so a live `src` swap to a DIFFERENT-dimension
+        //    image rebuilt against the OLD image's width/height and came out
+        //    mis-fitted. Now the swap WAITS for a fresh dimension read (see the
+        //    #436 swap gate at this function's own top, and
+        //    `resolveSwapImageSize`), and `commitWholeImageBuild` commits the
+        //    new size atomically with the new art. `tryGetLoadedItem`'s
+        //    synchronous contract is untouched — the read happens on the
+        //    rebuild path, not in that fast path.
         //  - `tryGetLoadedItem`'s live per-frame tint/alpha/floorAttrItem
         //    refresh (a few thousand lines up) reads `existing.wholeImage`
         //    only. During a rebuild that correctly keeps the OLD, still-
@@ -15621,8 +15934,7 @@ export async function startVtPanViewer({
         //    A second, independent live-edit racing a src change on the
         //    same item is a narrow enough compound case that threading a
         //    second target into that fast path did not seem worth the added
-        //    surface here — flagged for the same reason #436 was filed
-        //    rather than folded in, not overlooked.
+        //    surface here — flagged rather than overlooked.
         log.debug(
           `ensureWholeImageMeshes: "${item.id}" src changed (${state.wholeImage.src} -> ${item.src}), rebuilding in the background (old art stays visible until the new art is ready)`
         );
@@ -15650,8 +15962,24 @@ export async function startVtPanViewer({
         // above.
       }
       const isRebuild = !!state.wholeImage;
-      const imageW = state.imageSize.width;
-      const imageH = state.imageSize.height;
+      // #436 — a rebuild uses the freshly-resolved dims for the NEW src (see the
+      // swap gate at this function's top); a fresh load's `state.imageSize` IS
+      // this item's own size, set from `loadNewItem`'s dimension read.
+      const sizeForBuild =
+        isRebuild && state.pendingImageSize?.src === item.src ? state.pendingImageSize : state.imageSize;
+      const imageW = sizeForBuild.width;
+      const imageH = sizeForBuild.height;
+
+      // SVG SOURCES (2026-10-15) — the DEFAULT token icon is one
+      // (`icons/svg/mystery-man.svg`). SVG is a VECTOR document: the block-
+      // compression worker and the raw path's `createImageBitmap` BOTH reject
+      // it outright, so both need to know early. The compressed attempt below
+      // is skipped entirely (it could only ever return null after a wasted
+      // worker round-trip + a log line), and the raw path rasterizes through
+      // `rasterizeSvgToBitmap` instead of `createImageBitmap`. Size reading
+      // never needed this flag — `decode-primitives.js#parseSvgDimensions`
+      // handles it by content, not by extension.
+      const svgSource = isSvgUrl(item.src);
 
       // VEGETATION CASE 1 (Vegetation.md) — the item's OWN texture is itself
       // `_Tree`/`_Bush`-suffixed (an artist dropped e.g. `oak-cluster_Tree.webp`
@@ -15880,6 +16208,13 @@ export async function startVtPanViewer({
         // back up into a TDR (the guard the streaming path uses too).
         const gpuQueue = renderer.backend?.isWebGPUBackend ? renderer.backend.device?.queue : null;
 
+        // SVG RASTER BUFFER (2026-10-15) — hoisted to this scope (NOT declared
+        // inside the raw path) so the `finally` below can close it on EVERY
+        // exit. A rasterized SVG is a live ImageBitmap, not a Blob, so leaving
+        // it un-closed would pin its pixels for the session — see
+        // `rasterizeSvgToBitmap`'s own doc.
+        let svgBitmap = null;
+
         try {
           // Our chain promise is only ever RESOLVED (releaseLoad in finally),
           // never rejected, so a plain await cannot propagate a prior failure.
@@ -15904,7 +16239,11 @@ export async function startVtPanViewer({
           // THROUGH to the proven raw path — compression must never break
           // rendering (the safety slide).
           try {
-            const c = await requestCompressedTexture(item.src);
+            // SVG is skipped outright: `createImageBitmap` (what the worker
+            // uses) cannot decode a vector document, so this could only return
+            // null after a wasted round-trip and a warn log. Falling straight
+            // through to the raw path is the same place a null result lands.
+            const c = svgSource ? null : await requestCompressedTexture(item.src);
             // Superseded while compression ran (possibly minutes) — discard
             // the result without committing it. Nothing GPU-resident exists
             // yet at this exact point (the CompressedTexture below is not
@@ -16098,17 +16437,24 @@ export async function startVtPanViewer({
           const res = await fetch(item.src);
           if (!res.ok) throw new Error(`HTTP ${res.status} for ${item.src}`);
           const blob = await res.blob();
+          // SVG HAS NO `createImageBitmap` AT ALL — see `rasterizeSvgToBitmap`'s
+          // own doc. Rasterize ONCE at the parsed native size, then take the
+          // SAME per-tile crops off that bitmap that `blob` gives every other
+          // format (a small token icon is one tile, but a large SVG split by
+          // `planImageTiles` must keep working too). `<img>`+canvas is the one
+          // decode route SVG has; everything downstream is unchanged.
+          if (svgSource) svgBitmap = await rasterizeSvgToBitmap(blob, imageW, imageH);
           for (const tile of plan.tiles) {
             const rw = Math.max(1, Math.round(tile.sw * rawScale));
             const rh = Math.max(1, Math.round(tile.sh * rawScale));
             const bitmap =
               rawScale < 1
-                ? await createImageBitmap(blob, tile.sx, tile.sy, tile.sw, tile.sh, {
+                ? await createImageBitmap(svgBitmap ?? blob, tile.sx, tile.sy, tile.sw, tile.sh, {
                     resizeWidth: rw,
                     resizeHeight: rh,
                     resizeQuality: 'high',
                   })
-                : await createImageBitmap(blob, tile.sx, tile.sy, tile.sw, tile.sh);
+                : await createImageBitmap(svgBitmap ?? blob, tile.sx, tile.sy, tile.sw, tile.sh);
             const tex = new THREE.Texture(bitmap);
             tex.flipY = false; // v=0 = image top row — the world-quad convention
             tex.colorSpace = THREE.SRGBColorSpace; // art is sRGB; sample decodes to linear
@@ -16283,6 +16629,14 @@ export async function startVtPanViewer({
           wi.error = String(err?.message || err);
           log.error(`whole-image load failed for "${item.id}" (${item.src}):`, err);
         } finally {
+          // Release the SVG raster (if any) — every tile crop took its own copy
+          // via createImageBitmap(svgBitmap, …), so this buffer is dead weight
+          // from here on. Best-effort, matching this file's other cleanup sites.
+          try {
+            svgBitmap?.close?.();
+          } catch (_) {
+            // Idempotent per spec even if already closed; nothing to recover.
+          }
           // Release the next queued load regardless of outcome, or one broken
           // image would stall every subsequent whole-image load forever.
           releaseLoad();
@@ -17034,6 +17388,19 @@ export async function startVtPanViewer({
         state.wholeImage = wi;
         state.wholeImageRebuild = null;
         wi.status = 'ready';
+        // #436 — THE SWAP COMMITS ITS NEW SIZE HERE, atomically with the art.
+        // `wi.imageSize` is the size this rebuild was actually built from (the
+        // freshly-resolved one, see `resolveSwapImageSize`); until this instant
+        // `state.imageSize` still named the OLD art, which is what kept the
+        // outgoing art correctly fitted for the whole wait. Now that the new
+        // art is the one on screen, placement is re-derived from the new size
+        // BEFORE the geometry refresh below, so the new quad is positioned and
+        // sized in one synchronous block — same no-flash guarantee as the art
+        // swap itself, just extended to cover the fit.
+        state.imageSize = { width: wi.imageSize.width, height: wi.imageSize.height };
+        state.pendingImageSize = null;
+        state.pendingImageSizeSrc = null;
+        refreshItemPlacement(state, item);
         refreshWholeImageItem(state, item, show, true);
         if (oldWi) disposeWholeImageTiles(oldWi);
       } else {
@@ -27178,6 +27545,62 @@ function makeDisclosurePlaceholderTexture(THREE) {
   const tex = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
   tex.needsUpdate = true;
   return tex;
+}
+
+/**
+ * Rasterize an SVG source to an `ImageBitmap` — the ONE decode path SVG cannot
+ * take, and the second half of the "default token renders nothing" fix
+ * (2026-10-15; the first half is `decode-primitives.js#parseSvgDimensions`,
+ * without which the item was written off before it ever got here).
+ *
+ * WHY NOT `createImageBitmap`: SVG is a VECTOR document, not a raster, so the
+ * bitmap decoder rejects it outright (`InvalidStateError` — pinned in
+ * tests/playwright-artifacts/look/alpha-hidden-verify.mjs). The browser CAN
+ * render it, though: an `<img>` element draws an SVG through the ordinary
+ * image pipeline, and a 2D canvas captures that render as pixels, which then
+ * converts to an `ImageBitmap` normally. That is exactly the three-step dance
+ * `ui/widgets/tile-thumbnail.js` already uses for its own SVG-capable loader.
+ *
+ * RASTERIZES AT THE DECLARED NATIVE SIZE (`width`/`height` the caller already
+ * read via `parseSvgDimensions`). Foundry's bundled icons declare only a
+ * `viewBox` and no `width`/`height`, and an intrinsic-size-less SVG loaded into
+ * an `<img>` otherwise takes the CSS default 300x150 box — so the element's own
+ * `width`/`height` are set BEFORE load to make the layout box the intended one,
+ * then `drawImage` renders the vector at the destination rect (browsers
+ * re-rasterize SVG at the draw size, which is what keeps it sharp).
+ *
+ * The caller owns the returned bitmap and MUST `.close()` it when the crops
+ * taken from it are done — see the raw path's `finally` (it is a live
+ * `ImageBitmap`, not a blob, and would otherwise pin its pixels).
+ *
+ * @param {Blob} blob @param {number} width @param {number} height
+ * @returns {Promise<ImageBitmap>}
+ */
+async function rasterizeSvgToBitmap(blob, width, height) {
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    const img = new Image();
+    if (width > 0) img.width = Math.round(width);
+    if (height > 0) img.height = Math.round(height);
+    await new Promise((resolve, reject) => {
+      img.onload = () => resolve();
+      img.onerror = () => reject(new Error('rasterizeSvgToBitmap: <img> failed to load the SVG'));
+      img.src = objectUrl;
+    });
+    const w = Math.max(1, Math.round(width || img.naturalWidth || 1));
+    const h = Math.max(1, Math.round(height || img.naturalHeight || 1));
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('rasterizeSvgToBitmap: no 2D canvas context');
+    ctx.drawImage(img, 0, 0, w, h);
+    return await createImageBitmap(canvas);
+  } finally {
+    // The <img> has already copied the SVG into the canvas by the time this
+    // runs — the object URL is only needed for the load itself.
+    URL.revokeObjectURL(objectUrl);
+  }
 }
 
 /**

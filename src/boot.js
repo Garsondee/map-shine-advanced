@@ -2319,18 +2319,20 @@ function install() {
    * is the real fix; this seed is the belt-and-braces half, the same posture
    * `water-registration.js` takes for the same reason. */
   let bloomReadout = { enabled: true, params: null };
-  // LENS (mythica-machina-press#57, seed corrected mythica-machina-press#573)
-  // — `enabledFromProfile: 'extreme'` (off at every profile short of the
-  // ceiling, `lens.js`'s own manifest since 2026-09-16's #556) means
-  // "not resolved yet" is honestly `false`, the same posture prism and
-  // iridescence take immediately below. Used to seed `true` on the older
-  // "a whole-image post pass costs nothing" reasoning, which predates #556
-  // flipping lens off-by-default and was never revisited.
-  let lensReadout = { enabled: false, params: null };
-  // PRISM (mythica-machina-press#137) — same seed posture as lens's own
-  // above, for the same reason: `enabledFromProfile: 'extreme'` (off at
-  // every profile short of the ceiling, `prism.js`'s own manifest) means
-  // "not resolved yet" is honestly `false`, never a flash-of-enabled.
+  // LENS (mythica-machina-press#57, seed corrected mythica-machina-press#573,
+  // flipped back with the 2026-10-16 live-tuning dump) —
+  // `enabledFromProfile: 'low'` again since the author's "Turns Lens On by
+  // default" decision (lens.js's own manifest), so `true` is the honest
+  // pre-resolve seed, the same posture as bloom/dof/clouds above. It read
+  // `false` from #573 (when #556's `'extreme'` gating made `false` the
+  // honest answer) until that instruction reversed; EFFECT_REAPPLIERS below
+  // closes the window at boot either way.
+  let lensReadout = { enabled: true, params: null };
+  // PRISM (mythica-machina-press#137) — `enabledFromProfile: 'extreme'` (off
+  // at every profile short of the ceiling, `prism.js`'s own manifest) means
+  // "not resolved yet" is honestly `false`, never a flash-of-enabled. (This
+  // entry used to cite lens's own seed above as its mirror; the 2026-10-16
+  // retune moved Lens to `'low'`, Prism itself is unchanged.)
   let prismReadout = { enabled: false, params: null };
   // IRIDESCENCE (mythica-machina-press#136, Prism's own direct sibling) —
   // the identical seed posture as `prismReadout` just above, for the
@@ -3556,7 +3558,7 @@ function install() {
     lastCandleIsDay = isDay;
 
     const params = candleReadout.params ?? {};
-    if (params.autoIgniteEnabled !== true) return; // off by default — see CANDLE_FLAME_PARAMS' own doc
+    if (params.autoIgniteEnabled !== true) return; // default ON since 2026-10-16 — see CANDLE_FLAME_PARAMS' own doc
 
     const dayChancePct = params.dayIgniteChancePct;
     const nightChancePct = params.nightIgniteChancePct;
@@ -4912,13 +4914,18 @@ function install() {
   // `playerAimChannel.annotate` stamps each aimable snapshot with the aim to
   // draw (this client's own cursor for its own token; the angle each other
   // bearer's client relayed over the module socket for theirs), and
-  // `buildPlayerLightSources` uses it in place of the token's stored rotation.
-  // With no aim known (no cursor moved yet, a relayed aim went stale, an NPC
-  // flashlight set by hand) the snapshot is left alone and the beam stays on
-  // that rotation. The channel's sender and socket listener start in the
-  // `ready` hook beside `listenForImpulses`. `annotate` never throws — a throw
-  // in this per-frame getter kills the render loop (a0402af8 was exactly that,
-  // on this same flashlight).
+  // `buildPlayerLightSources` draws the beam along it — a beam that lags its
+  // bearer and trembles in the hand, both decided per client.
+  // NO AIM MEANS NO LIGHT AT ALL (2026-10-15, the author's own ask: "let's not
+  // have any of the player lights active until the first time a token is
+  // selected or the player loads in that is controlling it"): with no aim known
+  // — no cursor moved yet, a relayed aim gone stale, a token selected by nobody
+  // — the snapshot is left unannotated and `player-light-geometry.js#
+  // hasCarriedLightAim` builds nothing, rather than a beam frozen pointing
+  // north. The channel's sender and socket listener start in the `ready` hook
+  // beside `listenForImpulses`. `annotate` never throws — a throw in this
+  // per-frame getter kills the render loop (a0402af8 was exactly that, on this
+  // same flashlight).
   const playerAimChannel = createPlayerAimChannel();
   // A console readout: what this client has sent, heard and refused, and why.
   MapShine.playerAimStats = () => playerAimChannel.getStats();
@@ -4931,7 +4938,7 @@ function install() {
   };
 
   // PLAYER VISION-MODE GRADE (mythica-machina-press#77 Stage 2b, #580) —
-  // this client's own per-frame answer to "which of the four screen-space
+  // this client's own per-frame answer to "which of the five screen-space
   // vision grades, if any, should MY present pass apply right now." Mirrors
   // `getPlayerCarriedLightSources` just above (a live-Foundry-read closure,
   // recomputed every call, never cached — a scene edit, a token swap or the
@@ -4952,6 +4959,20 @@ function install() {
     const mode = readTokenPlayerLightMode(token.document);
     const { permissions } = readScenePlayerLightPermissions();
     return resolveActivePlayerVisionModePreset({ isGM: false, mode, permissions });
+  };
+  // The same selected/owned token anchors the Night Vision eyepiece falloff.
+  // Return world-space pixels; vt/ maps them through its current camera rect,
+  // keeping this Foundry read on the adapter side of the boundary.
+  const getActivePlayerVisionAnchor = () => {
+    const token = resolveCarriedLightToken();
+    const center = token?.center;
+    if (!Number.isFinite(center?.x) || !Number.isFinite(center?.y)) return null;
+    const tokenSizePx = Math.min(Number(token.w), Number(token.h));
+    return {
+      x: center.x,
+      y: center.y,
+      tokenSizePx: Number.isFinite(tokenSizePx) && tokenSizePx > 0 ? tokenSizePx : 100,
+    };
   };
 
   // PLAYER TORCH FLAME + EMBERS (mythica-machina-press#77/#578, Stage 2a) —
@@ -5509,6 +5530,18 @@ function install() {
   const getCoverAboveGrid = (floorIndex) => {
     try {
       return maskAuthority.getDerived('coverAbove', floorIndex)?.grid ?? null;
+    } catch {
+      return null;
+    }
+  };
+  /**
+   * A floor's Tiles carrying "Restrict Weather": sky occluders for the rain/snow
+   * gate and the drip roofline. Swallowed like `skyReach` — null leaves both
+   * exactly as they were.
+   */
+  const getWeatherRestrictors = (floorIndex) => {
+    try {
+      return maskAuthority.getWeatherRestrictors(floorIndex);
     } catch {
       return null;
     }
@@ -12527,22 +12560,24 @@ function install() {
   // between them and the engines — it holds NO sky state of its own, because a
   // third copy is how a value acquires seven homes (Environment.md §0.4).
   let skyScope = { sky: null, source: 'world', sceneOverrides: false };
-  /** True once `applyLookToEngines` has run at least once — see its own
+  /** True once the resolved sky has been applied at least once — see the
    * "stale todHour vs. a live free drift" comment below for why the very
    * FIRST call is deliberately exempt from that guard. */
   let hasAppliedInitialTodHour = false;
 
-  /** Push one resolved look block at every engine it drives — sky AND grade,
-   * in one place so the resolve path and the edit path can never push different
-   * subsets. In `synced` mode the world clock owns the hour and setTimeOfDay is
-   * correctly refused; don't fight it or log a "failure" for the mode working. */
-  const applyLookToEngines = (sky) => {
+  /** Push the resolved time authority and starting hour into the active viewer.
+   * A scene load is different from an ordinary edit: the viewer may just have
+   * been constructed, so apply the persisted aesthetic hour immediately rather
+   * than easing from its noon construction default. Follow/Almanac instead
+   * subscribe to Foundry and jump to its current clock in setTimeMode(). */
+  const applyTimeToEngine = (sky, { sceneLoad = false } = {}) => {
     setVtPanViewerTimeMode(sky.mode);
     setVtPanViewerTimeRate(sky.rateHoursPerMinute);
-    // sweepVtPanViewerTimeOfDay, NOT the instant setVtPanViewerSunHour
-    // (2026-08-27 fix, author live-testing round: "I select 10s transition
-    // time... it happens instantly"). Root cause, traced end to end: a
-    // time-stop click called sweepVtPanViewerTimeOfDay to start a real walk,
+    // For ordinary resolves, use sweepVtPanViewerTimeOfDay, NOT the instant
+    // setVtPanViewerSunHour (2026-08-27 fix, author live-testing round: "I
+    // select 10s transition time... it happens instantly"). Root cause, traced
+    // end to end: a time-stop click called sweepVtPanViewerTimeOfDay to start
+    // a real walk,
     // then its OWN editSky({todHour}) commit landed here — synchronously
     // after, same tick — and the instant setter cancelled the walk it had
     // just started (day-clock.js#setHour hard-resets targetHour) before a
@@ -12551,8 +12586,8 @@ function install() {
     // the hour it is ALREADY walking toward is a no-op against the in-flight
     // rate (see that function's own doc), so this call can never interrupt a
     // sweep genuinely in progress — it only matters for a foreign change
-    // (another client, a scene load), where it still walks, just at the
-    // fast default rate (well under a scene load's own loading curtain).
+    // (another client) while this viewer is already active. A fresh scene
+    // viewer is explicitly restored to its authored hour after it starts.
     //
     // ⚠️ 2026-09-09 fix (author: "changing a mood changes the time of day...
     // I clicked 'Snow' and it changed the time of day"). `sky.todHour` is a
@@ -12582,10 +12617,28 @@ function install() {
     // (rate now 0) resyncs to where playback actually stopped, not to the
     // pre-drift snapshot.
     const freelyDrifting = sky.mode === 'aesthetic' && sky.rateHoursPerMinute > 0;
-    if (sky.mode === 'aesthetic' && (!freelyDrifting || !hasAppliedInitialTodHour)) {
-      sweepVtPanViewerTimeOfDay(sky.todHour);
+    if (sky.mode === 'aesthetic') {
+      if (sceneLoad) {
+        // `canvasReady` resolves the sky BEFORE the new viewer is built. That
+        // first application can hit the outgoing viewer (or no viewer at all),
+        // so every successful fresh viewer start must restore the saved hour
+        // once more. A direct set is intentional here: scene arrival is not a
+        // time-stop gesture and must never visibly start at noon or sweep from
+        // the previous scene's time.
+        setVtPanViewerSunHour(sky.todHour);
+      } else if (!freelyDrifting || !hasAppliedInitialTodHour) {
+        sweepVtPanViewerTimeOfDay(sky.todHour);
+      }
     }
     hasAppliedInitialTodHour = true;
+  };
+
+  /** Push one resolved look block at every engine it drives — sky AND grade,
+   * in one place so the resolve path and the edit path can never push different
+   * subsets. In `synced` mode the world clock owns the hour and setTimeOfDay is
+   * correctly refused; don't fight it or log a "failure" for the mode working. */
+  const applyLookToEngines = (sky) => {
+    applyTimeToEngine(sky);
     // ⭐ THE ALMANAC'S OWN MODE + CLIMATE, restored BEFORE the weather-archetype
     // restore just below — order matters here. `setWeatherArchetype`/
     // `setCloudCover` route through `weather.applyArchetype`, which (in
@@ -14030,13 +14083,15 @@ function install() {
         // construction (the pool's own `= null` default).
         getPlayerCarriedLightSources,
         // PLAYER VISION-MODE GRADE (mythica-machina-press#77 Stage 2b, #580):
-        // each frame, resolves which (if any) of the four screen-space vision
+        // each frame, resolves which (if any) of the five screen-space vision
         // grades THIS client should see, straight into the present-pass
         // material via `pushPlayerVisionMode`. Same real-scene-only injection
         // posture as getPlayerCarriedLightSources just above — the torture
         // fixture has no token/permission state and reads `?.()` as "never
         // any mode" (grade-present.js's own default).
         getActivePlayerVisionMode,
+        // Selected/owned token center for the personal Night Vision radius.
+        getActivePlayerVisionAnchor,
         // PLAYER TORCH FLAME + EMBERS (mythica-machina-press#77/#578): each
         // frame, the viewer draws a flame body + ember batch for every torch
         // token whose owner has picked it and the GM currently allows it.
@@ -14156,6 +14211,8 @@ function install() {
         getSkyReachGrid,
         getCoverAboveGrid,
         getCasterHeightGrid,
+        // Tiles with "Restrict Weather" — weather sky occluders (null = none).
+        getWeatherRestrictors,
         // THE AUTHORED DRIP MASK's seam (mythica-machina-press#316) — same
         // real-scene-only reasoning as getFireMaskGrid above; an unwired/
         // torture-fixture default of `() => null` simply means no authored
@@ -16335,6 +16392,13 @@ function install() {
           return;
         }
         lastRealSceneId = sceneDoc.id;
+        // `canvasReady`'s earlier resolve runs before `startRealSceneViewer`,
+        // when the outgoing viewer is still the active target (or there is no
+        // viewer yet). Re-apply only the time authority now that this scene's
+        // day clock exists, before its first painted frame. This is also what
+        // makes scene-scoped manual hours survive refreshes independently of
+        // later unrelated controls such as wind.
+        applyTimeToEngine(skyScope.sky, { sceneLoad: true });
         log.info(`real-scene VT viewer active for "${result.sceneName}" at floor ${targetFloorIndex}.`);
 
         // ARM THE REBUILD PROBES FOR THIS LOAD (mythica-machina-press#400

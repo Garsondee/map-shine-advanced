@@ -113,7 +113,9 @@ export function readSceneSky() {
     if (!scene) return { sky: null, sceneOverrides: false, sceneId: null, reason: 'no active scene' };
     return {
       sky: scene.getFlag(SKY_NAMESPACE, SCENE_SKY_FLAG) ?? null,
-      sceneOverrides: scene.getFlag(SKY_NAMESPACE, SCENE_SKY_OVERRIDE_FLAG) === true,
+      // Unset means ON (each scene keeps its own sky by default); only an
+      // explicit `false` — the GM unticking the box — uses the shared world sky.
+      sceneOverrides: scene.getFlag(SKY_NAMESPACE, SCENE_SKY_OVERRIDE_FLAG) !== false,
       sceneId: scene.id ?? null,
       reason: null,
     };

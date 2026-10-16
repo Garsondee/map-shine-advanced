@@ -14,6 +14,8 @@ import {
   shouldYieldByTime,
   __readLeadingBytes,
   parseImageDimensions,
+  parseSvgDimensions,
+  looksLikeXmlText,
   toRootAbsoluteAssetUrl,
   reducePinRefState,
   INITIAL_PIN_REF_STATE,
@@ -465,6 +467,112 @@ export async function run(t) {
         })()
       );
     }
+  }
+
+  // --- parseSvgDimensions: read {w,h} from an SVG's ROOT ELEMENT (2026-10-15,
+  // "dragging an NPC into the scene draws nothing" — the default token icon is
+  // an SVG, which has no binary header at all). SVG is a VECTOR document, so
+  // its size is whatever the root declares: an absolute width/height, else the
+  // viewBox. Foundry's bundled icons ship viewBox-only, so that is pinned FIRST
+  // — it is the common case, not an edge case. -----------------------------
+  {
+    {
+      // The real shape of Foundry's icons/svg/*.svg, reduced.
+      const d = parseSvgDimensions('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><path/></svg>');
+      ok(
+        'parseSvgDimensions: viewBox-only SVG (Foundry icon shape) reads the viewBox size',
+        d && d.width === 512 && d.height === 512
+      );
+    }
+    {
+      const d = parseSvgDimensions('<svg width="800" height="200"></svg>');
+      ok(
+        'parseSvgDimensions: absolute width/height wins (non-square, so a swap is caught)',
+        d && d.width === 800 && d.height === 200
+      );
+    }
+    {
+      const d = parseSvgDimensions('<svg width="640px" height="480px" viewBox="0 0 100 100"></svg>');
+      ok(
+        'parseSvgDimensions: a px suffix is accepted and takes priority over the viewBox',
+        d && d.width === 640 && d.height === 480
+      );
+    }
+    {
+      const d = parseSvgDimensions('<svg width="100%" height="100%" viewBox="0 0 24 36"></svg>');
+      ok(
+        'parseSvgDimensions: a percentage width has no absolute answer — the viewBox answers instead',
+        d && d.width === 24 && d.height === 36
+      );
+    }
+    {
+      // The `stroke-width` trap: a naive `\bwidth=` matches inside it ('-' is a
+      // non-word char, so the boundary is real) and would read 2 as the width.
+      const d = parseSvgDimensions('<svg viewBox="0 0 100 100"><rect stroke-width="2" width="50"/></svg>');
+      ok(
+        'parseSvgDimensions: stroke-width (or any child attribute) is never mistaken for the root width',
+        d && d.width === 100 && d.height === 100
+      );
+    }
+    {
+      const d = parseSvgDimensions(
+        "<?xml version='1.0'?>\n<!DOCTYPE svg>\n<svg\n  viewBox='0 0 64 32'\n  xmlns='http://www.w3.org/2000/svg'></svg>"
+      );
+      ok(
+        'parseSvgDimensions: single-quoted attributes and a newline-separated root tag are read',
+        d && d.width === 64 && d.height === 32
+      );
+    }
+
+    // FAIL-OPEN — every rejection returns null ("ask the decoder"), never a guess.
+    {
+      ok(
+        'parseSvgDimensions: null/empty input is null',
+        parseSvgDimensions(null) === null && parseSvgDimensions('') === null
+      );
+      ok('parseSvgDimensions: no <svg> element is null', parseSvgDimensions('<html><body></body></html>') === null);
+      ok('parseSvgDimensions: an <svg> with neither size is null', parseSvgDimensions('<svg></svg>') === null);
+      ok(
+        'parseSvgDimensions: a degenerate viewBox (zero extent) is null',
+        parseSvgDimensions('<svg viewBox="0 0 0 100"></svg>') === null
+      );
+      ok(
+        'parseSvgDimensions: only ONE absolute dimension falls back to the viewBox',
+        (() => {
+          const d = parseSvgDimensions('<svg width="10" viewBox="0 0 40 20"></svg>');
+          return d && d.width === 40 && d.height === 20;
+        })()
+      );
+    }
+  }
+
+  // --- looksLikeXmlText: the sniff that decides whether a rejected header is
+  // worth a SECOND, larger text fetch (see getSourceDimensions). Deliberately
+  // loose — a raster image must never trip it, an SVG always should. ---------
+  {
+    const bytesOf = (s) => new TextEncoder().encode(s);
+    ok('looksLikeXmlText: a plain SVG start is XML text', looksLikeXmlText(bytesOf('<svg viewBox="0 0 1 1"/>')));
+    ok('looksLikeXmlText: an XML declaration start is XML text', looksLikeXmlText(bytesOf('<?xml version="1.0"?>')));
+    ok(
+      'looksLikeXmlText: a UTF-8 BOM + whitespace before <svg is still XML text',
+      (() => {
+        const body = bytesOf('  <svg/>');
+        const withBom = new Uint8Array(body.length + 3);
+        withBom.set([0xef, 0xbb, 0xbf], 0);
+        withBom.set(body, 3);
+        return looksLikeXmlText(withBom);
+      })()
+    );
+    ok(
+      'looksLikeXmlText: a PNG signature is NOT XML text',
+      !looksLikeXmlText(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+    );
+    ok('looksLikeXmlText: a WebP "RIFF" start is NOT XML text', !looksLikeXmlText(bytesOf('RIFF....WEBP')));
+    ok(
+      'looksLikeXmlText: empty/whitespace-only input is not XML text',
+      !looksLikeXmlText(new Uint8Array(0)) && !looksLikeXmlText(bytesOf('   '))
+    );
+    ok('looksLikeXmlText: null input is not XML text', !looksLikeXmlText(null));
   }
 
   // --- toRootAbsoluteAssetUrl: the mansion mask 404 (2026-07-17). FilePicker

@@ -137,6 +137,30 @@ export function isVideoUrl(url) {
 }
 
 /**
+ * Extensions whose SOURCE PIXELS `createImageBitmap` cannot decode at all, no
+ * matter how the bytes are delivered. SVG belongs here, and it is the whole
+ * reason `isSvgUrl` exists separately from `isImageUrl` above: SVG IS an image
+ * to Foundry (it is in `IMAGE_EXTENSIONS`, and `icons/svg/mystery-man.svg` is
+ * the DEFAULT token icon), but it is a VECTOR document, so the raster decode
+ * path that works for every other entry in that set REJECTS it outright —
+ * `createImageBitmap(svgBlob)` throws `InvalidStateError` (pinned in
+ * tests/playwright-artifacts/look/alpha-hidden-verify.mjs). A caller therefore
+ * needs to be able to ask "is this the special image kind?" independently of
+ * "is this an image at all", exactly the same reason `isVideoUrl` is a sibling
+ * rather than a boolean flag on `isImageUrl`.
+ *
+ * WHAT A CALLER DOES WITH IT: rasterize through an `<img>` + canvas instead
+ * (vt-pan-viewer.js#rasterizeSvgToBitmap), and read its size through
+ * `vt/decode-primitives.js#parseSvgDimensions` rather than an image header.
+ *
+ * @param {string} url @returns {boolean} true if the URL's extension is `.svg`.
+ */
+export function isSvgUrl(url) {
+  const match = /\.([a-z0-9]+)(?:\?.*)?$/i.exec(url || '');
+  return !!match && match[1].toLowerCase() === 'svg';
+}
+
+/**
  * Resolve a Foundry-stored asset path to a fetchable URL. Foundry's own
  * `foundry.utils.getRoute()` (common/utils/helpers.mjs, verified in source)
  * applies the `ROUTE_PREFIX` reverse-proxy setting when one is configured —

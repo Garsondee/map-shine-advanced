@@ -7,6 +7,7 @@
 import {
   isImageUrl,
   isVideoUrl,
+  isSvgUrl,
   resolveAssetUrl,
   getActiveSceneBackground,
   getActiveSceneFloors,
@@ -44,6 +45,21 @@ export function run(t) {
       'isVideoUrl and isImageUrl are mutually exclusive for every extension either one accepts',
       !isVideoUrl('a.webp') && !isImageUrl('a.webm')
     );
+  }
+
+  // --- isSvgUrl (2026-10-15) — the DEFAULT token icon is an SVG ---------------
+  {
+    ok('isSvgUrl: accepts the default token icon (icons/svg/mystery-man.svg)', isSvgUrl('icons/svg/mystery-man.svg'));
+    ok('isSvgUrl: accepts a querystring suffix (cache-busting)', isSvgUrl('worlds/x/badge.svg?v=3'));
+    ok('isSvgUrl: is case-insensitive', isSvgUrl('a.SVG'));
+    // SVG is STILL an image to Foundry — isSvgUrl narrows the raster decode
+    // path, it does not contradict isImageUrl.
+    ok('isSvgUrl: an SVG is also an image (the two are not exclusive)', isSvgUrl('a.svg') && isImageUrl('a.svg'));
+    ok(
+      'isSvgUrl: rejects every other still-image extension and video',
+      !isSvgUrl('a.webp') && !isSvgUrl('a.png') && !isSvgUrl('a.mp4') && !isSvgUrl('a.webm')
+    );
+    ok('isSvgUrl: rejects no extension / empty / null', !isSvgUrl('noext') && !isSvgUrl('') && !isSvgUrl(null));
   }
 
   // --- resolveAssetUrl --------------------------------------------------------

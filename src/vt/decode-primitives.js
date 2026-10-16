@@ -212,6 +212,90 @@ export function parseImageDimensions(bytes) {
 }
 
 /**
+ * Read {width,height} from the opening of an SVG document — pure, Node-testable.
+ *
+ * WHY SVG NEEDS ITS OWN READER (2026-10-15): `parseImageDimensions` above reads
+ * fixed offsets inside a PNG/WebP container, and SVG has none — it is TEXT, and
+ * its size lives in the root `<svg>` element's own attributes. A default token
+ * icon (`icons/svg/mystery-man.svg`) therefore never produced a size, so
+ * `getSourceDimensions` threw, the whole item was written off as permanently
+ * broken (`vt-pan-viewer.js`'s `failedItemIds`) and the token never rendered:
+ * the live report was "dragging an NPC into the scene draws nothing at all".
+ *
+ * SVG IS RESOLUTION-INDEPENDENT, so "the size" is whatever the root element
+ * declares. An absolute `width`/`height` wins; failing that the `viewBox`
+ * rectangle's own w/h IS the intrinsic size — Foundry's bundled icons ship
+ * `viewBox="0 0 512 512"` with NO width/height, which makes this the COMMON
+ * case, not an edge case. A percentage width (`100%`) has no absolute pixel
+ * answer on its own, so it is treated as absent and the viewBox answers instead.
+ *
+ * FAIL-OPEN, like every other reader in this module: anything it does not
+ * positively recognise returns `null` ("ask the decoder"), never a guess.
+ *
+ * @param {string} text - the leading bytes of the file, decoded as UTF-8.
+ * @returns {{width:number, height:number}|null}
+ */
+export function parseSvgDimensions(text) {
+  if (typeof text !== 'string' || text === '') return null;
+  const tag = /<svg\b[^>]*>/i.exec(text);
+  if (!tag) return null;
+  // Pull the root element's attributes apart rather than regex-matching one
+  // name at a time: a naive `\bwidth\s*=` also matches inside `stroke-width`
+  // (the '-' is a non-word char, so the word boundary is real) and would read
+  // a stroke width as the image width.
+  const attrs = {};
+  const attrRe = /([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
+  let m;
+  while ((m = attrRe.exec(tag[0]))) attrs[m[1].toLowerCase()] = m[2] ?? m[3] ?? '';
+  const absolute = (raw) => {
+    if (raw == null) return null;
+    const s = raw.trim().replace(/px$/i, '');
+    // Any remaining letter or '%' is a relative length — no absolute answer here.
+    if (/[%a-z]/i.test(s)) return null;
+    const n = Number.parseFloat(s);
+    return Number.isFinite(n) && n > 0 ? Math.round(n) : null;
+  };
+  const w = absolute(attrs.width);
+  const h = absolute(attrs.height);
+  if (w && h) return { width: w, height: h };
+  const vb = attrs.viewbox;
+  if (vb) {
+    const parts = vb
+      .trim()
+      .split(/[\s,]+/)
+      .map(Number);
+    if (parts.length === 4 && parts.every(Number.isFinite) && parts[2] > 0 && parts[3] > 0) {
+      return { width: Math.round(parts[2]), height: Math.round(parts[3]) };
+    }
+  }
+  return null;
+}
+
+/**
+ * Byte sniff: could these leading bytes be the start of a text/XML document —
+ * i.e. an SVG — rather than a raster image?
+ *
+ * True for an optional UTF-8 BOM, then whitespace, then `<` (the opening of any
+ * tag). Used by `decode-pool.js#getSourceDimensions` to decide whether a header
+ * the binary parsers rejected is worth a SECOND, larger text read: SVG declares
+ * its size in the root element, which can sit well past the ~30 bytes a PNG/WebP
+ * header needs. Deliberately loose — a false positive costs one small extra
+ * fetch of a file that was not an SVG anyway, never a wrong answer.
+ *
+ * @param {Uint8Array} bytes - the file's leading bytes.
+ * @returns {boolean}
+ */
+export function looksLikeXmlText(bytes) {
+  if (!bytes || bytes.byteLength === 0) return false;
+  let i = 0;
+  if (bytes.byteLength >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) i = 3;
+  while (i < bytes.byteLength && (bytes[i] === 0x20 || bytes[i] === 0x09 || bytes[i] === 0x0a || bytes[i] === 0x0d)) {
+    i++;
+  }
+  return i < bytes.byteLength && bytes[i] === 0x3c; // '<'
+}
+
+/**
  * Normalize an asset URL to the ROOT-ABSOLUTE form ("/modules/…") the rest of
  * MSA already uses for Level art. Pure, idempotent, Node-testable.
  *

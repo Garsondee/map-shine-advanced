@@ -64,6 +64,8 @@ import {
   createSemaphore,
   shouldYieldByTime,
   parseImageDimensions,
+  parseSvgDimensions,
+  looksLikeXmlText,
   toRootAbsoluteAssetUrl,
   readLeadingBytes,
   reducePinRefState,
@@ -648,6 +650,36 @@ async function tryWorkerDimensions(url) {
   return worker.dimensions;
 }
 
+/**
+ * Read an SVG's declared size via its own text header — the SVG counterpart to
+ * `getSourceDimensions`'s PNG/WebP header read (see `parseSvgDimensions` for
+ * why SVG needs its own reader at all, and `getSourceDimensions` for the live
+ * "dragging an NPC draws nothing" report this closes).
+ *
+ * A SECOND, LARGER RANGED READ ON PURPOSE: the root `<svg>` element can sit
+ * past the ~30 bytes a PNG/WebP header needs (an XML declaration, a DOCTYPE, a
+ * leading comment), so this asks for a 64 KiB window — still bounded, still
+ * streamed-and-cancelled by `readLeadingBytes`, so a server that ignores Range
+ * and answers 200 cannot make this buffer the whole file. 64 KiB covers every
+ * realistic SVG header; a pathological one that declares its size later simply
+ * returns null and takes the ordinary decode fallback, exactly as before this
+ * existed.
+ *
+ * FAILS OPEN: any network error, non-OK status, or unrecognised document
+ * returns null (the caller falls through to the worker/main-thread fallbacks).
+ * @param {string} url @returns {Promise<{width:number, height:number}|null>}
+ */
+async function fetchSvgDimensions(url) {
+  try {
+    const res = await fetch(url, { headers: { Range: 'bytes=0-65535' } });
+    if (!res.ok && res.status !== 206) return null;
+    const bytes = await readLeadingBytes(res, 65536);
+    return parseSvgDimensions(new TextDecoder('utf-8').decode(bytes));
+  } catch (_) {
+    return null;
+  }
+}
+
 /** Fold a worker slice response's timing/counters into the shared _decodeStats + return the paged results. */
 function foldWorkerResults(worker, pages, sourcesDecodedDelta) {
   _decodeStats.workerSourceDecodes += sourcesDecodedDelta;
@@ -796,6 +828,19 @@ export async function getSourceDimensions(url) {
         // signal again instead of firing on every valid WebP.
         if (res.status !== 206) _decodeStats.rangedFetchMisses++;
         return dims;
+      }
+      // SVG (2026-10-15). SVG is TEXT, so the binary parsers above can only
+      // ever reject it — and a default token icon (`icons/svg/mystery-man.svg`)
+      // reaching the fallback below used to cost a worker round-trip and a
+      // main-thread decode that BOTH failed, throwing out of this function and
+      // permanently writing the token off (vt-pan-viewer.js's `failedItemIds`):
+      // "dragging an NPC into the scene draws nothing." The root <svg> element
+      // can sit well past the 30 bytes a PNG/WebP header needs, so this is a
+      // SECOND, larger ranged read, attempted ONLY when the leading bytes look
+      // like XML text (looksLikeXmlText) — every real raster image skips it.
+      if (looksLikeXmlText(header)) {
+        const svg = await fetchSvgDimensions(url);
+        if (svg) return svg;
       }
     }
   } catch (_) {}

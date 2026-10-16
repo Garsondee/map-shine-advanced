@@ -16,6 +16,7 @@ import {
   fireSpawnSignature,
   packSpawnPoints,
   applyCohesion,
+  dropIndoorSpawnPoints,
   SPAWN_POINT_STRIDE,
 } from '../fire-spawn-points.js';
 import { extractFiresWithLabels } from '../fire-mask.js';
@@ -532,5 +533,39 @@ export function run(t) {
     t.ok('a too-small buffer takes what fits', packSpawnPoints(dest, cloud, 4) === 4);
     t.ok('an undersized dest is refused rather than overflowing', packSpawnPoints(new Float32Array(3), cloud, 4) === 0);
     t.ok('a null cloud pads the whole buffer', packSpawnPoints(dest, null, 4) === 0 && dest.every((v) => v === 0));
+  }
+
+  {
+    // 2026-10-16 — embers spawn only from OUTDOOR fires. Two painted blobs on
+    // one floor: an indoor one (left) and an outdoor one (right). Each fire's
+    // own points are judged by its own label, so the indoor blob's points go
+    // and the outdoor blob's stay, even though they share one cloud.
+    const rows = [
+      '................',
+      '..#####.....##..',
+      '..#####.....##..',
+      '..#####.....##..',
+      '................',
+    ];
+    const g = gridFrom(rows, { texel: 20 });
+    const { fires, nearestLabel, spec } = extractFiresWithLabels(g, { minDiameterPx: 4 });
+    const cloud = extractFireSpawnPoints(g, { threshold: 0.5 });
+    const labelGrid = { nearestLabel, spec };
+    const tagged = fires.map((f) => ({ ...f, outdoors01: f.x < 150 ? 0 : 1 }));
+    const kept = dropIndoorSpawnPoints(cloud, tagged, labelGrid);
+    let keptLeft = 0;
+    for (let i = 0; i < kept.count; i++) if (kept.points[i * SPAWN_POINT_STRIDE] < 150) keptLeft++;
+    t.ok(
+      'an indoor fire contributes NO ember spawn points; the outdoor fire on the same floor keeps its own',
+      fires.length === 2 && kept.count > 0 && kept.count < cloud.count && keptLeft === 0
+    );
+    t.ok(
+      'with every fire outdoors, the ember cloud is untouched',
+      dropIndoorSpawnPoints(cloud, fires.map((f) => ({ ...f, outdoors01: 1 })), labelGrid).count === cloud.count
+    );
+    t.ok(
+      'with every fire indoors and no label grid, the cloud is dropped entirely',
+      dropIndoorSpawnPoints(cloud, fires.map((f) => ({ ...f, outdoors01: 0 })), null).count === 0
+    );
   }
 }

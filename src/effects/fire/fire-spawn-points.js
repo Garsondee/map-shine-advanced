@@ -434,3 +434,61 @@ export function packSpawnPoints(dest, cloud, capacity) {
   dest.fill(0, n * SPAWN_POINT_STRIDE, dest.length);
   return n;
 }
+
+/**
+ * Drop every spawn point that belongs to an INDOOR fire — the cloud the EMBER
+ * engine draws from (2026-10-16: "fires which are indoors should not produce
+ * embers, only outdoor fires should").
+ *
+ * Why per point and not via the engine's `activeCount`: the ember engine is one
+ * map-wide engine per floor, so its count is aggregated across every fire on
+ * the floor (`fire-subsystem.js`, the MAX `outdoors01` note). Cutting the count
+ * alone let an indoor hearth keep embers whenever an outdoor fire shared its
+ * floor. Removing an indoor fire's points from the cloud the ember engine
+ * spawns from is what actually silences it, and each fire is judged on its own.
+ *
+ * Ownership is the same structural label `applyCohesion` uses (never a
+ * nearest-fire guess, which is the cross-blob bug that label grid exists to
+ * avoid). A point whose label has no surviving fire, or no label at all, is
+ * left alone — it belongs to no fire we can call indoor.
+ *
+ * Without a label grid there is no way to tell fires apart, so the cloud is
+ * kept unless EVERY fire on the floor is indoor, in which case it is dropped.
+ *
+ * @param {{points: Float32Array, count: number, paintedTexels?: number, signature?: *}} cloud
+ * @param {Array<{x:number, y:number, label?:number, outdoors01?:number}>} fires
+ * @param {{nearestLabel: Int32Array, spec: object}|null} [labelGrid]
+ * @returns {{points: Float32Array, count: number, paintedTexels?: number, signature?: *}}
+ */
+export function dropIndoorSpawnPoints(cloud, fires, labelGrid = null) {
+  const count = Math.max(0, Math.floor(cloud?.count ?? 0));
+  if (!cloud?.points || count === 0 || !Array.isArray(fires) || fires.length === 0) return cloud;
+  const isIndoor = (f) => Number.isFinite(f?.outdoors01) && f.outdoors01 < 0.5;
+
+  if (!labelGrid?.nearestLabel || !labelGrid?.spec) {
+    if (!fires.every(isIndoor)) return cloud;
+    return { ...cloud, points: new Float32Array(0), count: 0 };
+  }
+
+  const firesByLabel = new Map();
+  for (const f of fires) {
+    const label = f?.label;
+    if (!Number.isInteger(label) || label === -1) continue;
+    if (!firesByLabel.has(label)) firesByLabel.set(label, []);
+    firesByLabel.get(label).push(f);
+  }
+
+  const kept = new Float32Array(count * SPAWN_POINT_STRIDE);
+  let keptCount = 0;
+  for (let i = 0; i < count; i++) {
+    const o = i * SPAWN_POINT_STRIDE;
+    const label = labelAtWorldPoint(cloud.points[o], cloud.points[o + 1], labelGrid);
+    const candidates = label === -1 ? null : firesByLabel.get(label);
+    // Keep when the point has no indoor owner: unlabelled, or its fire did not
+    // survive extraction. Only a point this fire's own paint placed is dropped.
+    if (candidates && candidates.length > 0 && candidates.every(isIndoor)) continue;
+    kept.set(cloud.points.subarray(o, o + SPAWN_POINT_STRIDE), keptCount * SPAWN_POINT_STRIDE);
+    keptCount++;
+  }
+  return { ...cloud, points: kept.subarray(0, keptCount * SPAWN_POINT_STRIDE), count: keptCount };
+}

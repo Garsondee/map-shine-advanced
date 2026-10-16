@@ -38,7 +38,7 @@ import {
   FIRE_DEFAULT_TIER,
 } from './fire-geometry.js';
 import { FLAME_ARCHETYPES } from './fire-sprite.js';
-import { applyCohesion } from './fire-spawn-points.js';
+import { applyCohesion, dropIndoorSpawnPoints } from './fire-spawn-points.js';
 
 /**
  * Map-wide particle budgets, split across every fire on the map.
@@ -144,6 +144,9 @@ function fireListSignature(fires) {
   for (const f of fires) {
     mix(Math.round(Number(f?.x) || 0));
     mix(Math.round(Number(f?.y) || 0));
+    // Indoor/outdoor flips decide which points the ember engine keeps
+    // (`dropIndoorSpawnPoints`), so they must re-push the cloud too.
+    mix(Number.isFinite(f?.outdoors01) && f.outdoors01 < 0.5 ? 1 : 0);
   }
   return hash;
 }
@@ -480,13 +483,19 @@ export function createFireSubsystem({
     const firesSignature = fireListSignature(fires);
     const cloudChanged = effectiveCloud.signature !== lastSpawnSignature || firesSignature !== lastFiresSignature;
     const transformedByKind = new Map();
+    // ⚠️ EMBERS SPAWN ONLY FROM OUTDOOR FIRES (2026-10-16). Each indoor fire's
+    // own points are removed from the ember engine's cloud; flame and smoke
+    // keep the full cloud. Built lazily — only the ember engine ever asks.
+    let emberCloud = null;
     for (const { engine, kind } of engines) {
       const cohesion = runtime.perKind?.[kind]?.cohesion ?? 0;
       if (cloudChanged || lastCohesionByEngine.get(engine) !== cohesion) {
         if (!transformedByKind.has(kind)) {
+          if (kind === 'ember' && !emberCloud) emberCloud = dropIndoorSpawnPoints(effectiveCloud, fires, labelGrid);
+          const source = kind === 'ember' ? emberCloud : effectiveCloud;
           transformedByKind.set(
             kind,
-            cloud && cohesion ? applyCohesion(cloud, fires, cohesion, labelGrid) : effectiveCloud
+            cloud && cohesion ? applyCohesion(source, fires, cohesion, labelGrid) : source
           );
         }
         engine.setSpawnPoints(transformedByKind.get(kind));

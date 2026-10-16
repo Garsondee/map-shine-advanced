@@ -618,9 +618,12 @@ export function renderWeatherBoard(container, ctx) {
       };
       const getValue = ctx[channel.getValue];
       const onCommit = ctx[channel.onCommit];
-      handGroup.row.appendChild(
-        buildVerticalFader(channel.key, decl, { value: getValue(), onChange: (v) => onCommit?.(v) }).root
-      );
+      const envFader = buildVerticalFader(channel.key, decl, { value: getValue(), onChange: (v) => onCommit?.(v) });
+      // Temperature now fades through the fade engine (fadeTemperatureTo), so it
+      // needs the same live handle Clouds/Rain have — without one its cap sat at
+      // the stale stored value for the whole fade ("slider never changes").
+      if (channel.key === 'temperature') liveFaderHandles.temperature01 = envFader;
+      handGroup.row.appendChild(envFader.root);
     }
     faderHost.appendChild(rack);
     // Scene override — copy rewritten 2026-08-18 (author, verbatim: "'This

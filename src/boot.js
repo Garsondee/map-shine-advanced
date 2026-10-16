@@ -1796,7 +1796,7 @@ function install() {
         // see `fadeTemperatureTo`'s own doc for why an instant commit here
         // was landing as an un-bypassed target for vt-pan-viewer's own
         // separate multi-minute "brisk" ease, ignoring Fade Time entirely.
-        getTemperature: () => skyScope.sky?.temperature01 ?? 0.55,
+        getTemperature: () => liveFadeValue('weather.temperature01') ?? skyScope.sky?.temperature01 ?? 0.55,
         onTemperatureCommit: (v) => fadeTemperatureTo(v, MapShine.__remote?.getFadeOverMs?.() ?? 0),
         // Wind strength (2026-08-27 fix, author: "wind speed should be one of
         // the vertical sliders") — same ENV_CHANNELS shape as Sky
@@ -11714,6 +11714,8 @@ function install() {
     // archetype id restores the row, see DEFAULT_SKY), so after a reload the
     // Rain fader showed 0% over a raining map and a fade started from 0.
     readLive: (field) => {
+      const fading = liveFadeValue(`weather.${field}`);
+      if (fading !== null) return fading;
       const dial = getVtPanViewerTimeDialState();
       const eased =
         field === 'cloudCover01' ? dial?.cloudCoverEased01 : field === 'precip01' ? dial?.precipEased01 : undefined;
@@ -11742,6 +11744,17 @@ function install() {
   /** Record<'weather.cloudCover01'|'weather.precip01', FadeEntry> — scene-
    * scoped, reloaded from the scene flag on every canvasReady (below). */
   let fadeState = {};
+  /** The eased value of a fade IN FLIGHT on `key`, else null. The Remote's
+   * faders read this first: a slider released mid-fade must follow the fade
+   * (and survive a board rebuild) rather than snap back to the stored or
+   * last-rendered number and sit there until the fade arrives. */
+  function liveFadeValue(key) {
+    const entry = fadeState[key];
+    const nowMs = wallClockMs();
+    if (!entry || isEntryExpired(entry, nowMs)) return null;
+    const v = computeEasedValue(entry, nowMs);
+    return Number.isFinite(v) ? v : null;
+  }
   /** gestureId -> what to persist once every fadeState key sharing that
    * gesture has arrived. Bookkeeping ONLY — fadeState itself holds per-KEY
    * entries, never groups. Two shapes (Remote UI pass — renamed from
@@ -13067,10 +13080,16 @@ function install() {
             // rather than a second timer. Harmless while no fade is running
             // (the values just aren't moving); `updateLiveWeatherAxisValues`
             // itself no-ops on any fader the GM's own hand is currently on.
-            MapShine.__remote?.updateLiveWeatherAxisValues?.({
-              cloudCover01: payload.cloudCoverEased01,
-              precip01: payload.precipEased01,
-            });
+            // A fade in flight wins over the rendered snapshot (same value the
+            // fade engine is writing; no snapshot lag), and Temperature, which
+            // has no rendered twin here, is live-pushed from its fade too.
+            const liveAxes = {
+              cloudCover01: liveFadeValue('weather.cloudCover01') ?? payload.cloudCoverEased01,
+              precip01: liveFadeValue('weather.precip01') ?? payload.precipEased01,
+            };
+            const fadingTemp = liveFadeValue('weather.temperature01');
+            if (fadingTemp !== null) liveAxes.temperature01 = fadingTemp;
+            MapShine.__remote?.updateLiveWeatherAxisValues?.(liveAxes);
           }
         }
       }

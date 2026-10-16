@@ -19,6 +19,7 @@ import { run as runPaintMask } from './paint-mask.test.mjs';
 import { run as runAnchorCatalog } from './anchor-catalog.test.mjs';
 import { run as runAnchorAuthority } from './anchor-authority.test.mjs';
 import { run as runDepthAuthority } from './depth-authority.test.mjs';
+import { run as runWeatherRestrict } from './weather-restrict.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -66,6 +67,7 @@ const suites = [
   ['anchor-catalog', runAnchorCatalog],
   ['anchor-authority', runAnchorAuthority],
   ['depth-authority', runDepthAuthority],
+  ['weather-restrict', runWeatherRestrict],
 ];
 
 for (const [name, fn] of suites) {

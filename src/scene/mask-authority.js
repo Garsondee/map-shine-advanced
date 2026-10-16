@@ -873,6 +873,12 @@ export function createMaskAuthority({ readPageImageData, log }) {
         : null;
       items.push({
         id: item.id,
+        // A TILE's authored "Restrict Weather" box becomes a weather sky occluder
+        // (mask-derive's weather stage). `kind` rides along because level
+        // BACKGROUNDS carry restrictsWeather=true by construction (scene-layers.js)
+        // — that is Foundry's own default for them, not an authored flag.
+        kind: item.kind,
+        restrictsWeather: item.kind === 'tile' && item.restrictsWeather === true,
         elevation: item.key?.elevation ?? 0,
         hidden: !!item.hidden,
         placement: ingest?.placement ?? null,
@@ -1512,6 +1518,19 @@ export function createMaskAuthority({ readPageImageData, log }) {
       return casterSpec.include.building ? casterSpec.buildingHeightPx : 0;
     },
     getDerived,
+    /**
+     * A floor's WEATHER RESTRICTORS — the Tiles carrying "Restrict Weather" that
+     * occlude the sky from that floor, with the sky and cover re-derived WITHOUT
+     * them so the viewer can lay them back over with their live hover-fade (see
+     * `scene/weather-restrict.js`). Null when the floor has none (or is unknown),
+     * which means "use `skyReach` / `coverAbove` exactly as they are".
+     * @param {number} floorIndex
+     * @returns {{sky: object, cover: object, restrictors: Array<{id: string, elevation: number, above: boolean, stamp: object}>}|null}
+     */
+    getWeatherRestrictors(floorIndex) {
+      recomputeIfDirty();
+      return products.find((p) => p.index === floorIndex)?.weather ?? null;
+    },
     sampleWorld,
     probeStackAt,
     authoredStatus,

@@ -941,6 +941,12 @@ export function compositeItemHeightMax(grid, content, placement, heightByte) {
  *   parts of the upper floors… we're not including 'background image' and
  *   'foreground image'"*. Floor membership is unambiguous and cannot drift, so
  *   for level art it is simply the better question to ask.
+ * @property {string} [kind] - 'tile' for a Tile, a level kind for level art. Only
+ *   read to tell a Tile's `restrictsWeather` from a level background's (which
+ *   scene-layers.js sets true for every background — NOT an authored flag).
+ * @property {boolean} [restrictsWeather] - a Tile's authored "Restrict Weather"
+ *   box. A TILE carrying it is a weather SKY OCCLUDER: see the weather stage in
+ *   {@link deriveFloorProducts} and `scene/weather-restrict.js`.
  * @property {number[]|null} [visibleFloorIndices] - for a TILE only: every
  *   floor index it is actually drawn on (`foundry/scene-layers.js#collectTiles`'s
  *   own `visibleOnLevelIds`, resolved to indices). Null when unknown (treated
@@ -1823,6 +1829,8 @@ export function deriveFloorProducts({
     // never be stale; only the expensive rasterization below is cached.
     /** @type {Array<{above: boolean, alpha: ContentGrid, placement: object, hb: number, token: string}>} */
     const ops = [];
+    /** Tiles carrying "Restrict Weather" that occlude the sky for THIS floor. */
+    const wxItems = [];
     for (const item of items) {
       // FLOOR MEMBERSHIP FIRST for a level's own art, elevation for everything
       // else — see `DeriveItemInput.ownerFloorIndex` for why the elevation test
@@ -1869,6 +1877,23 @@ export function deriveFloorProducts({
         hasArt: !!item.alpha,
         hidden: !!item.hidden,
       });
+      // ⭐ RESTRICT WEATHER (tile flag). Decided before the early exit because a
+      // restrictor need not be in either caster band: a rug-height tile flagged
+      // "Restrict Weather" still keeps the rain off what is under it. The ONLY
+      // tiles it does not occlude are the ones that lie wholly BELOW this floor's
+      // ground (a lower floor's art, seen from up here the rain is ABOVE them) —
+      // "particles above the layer, not below it". A tile drawn on this floor
+      // always counts, whatever its elevation number reads.
+      const isRestrictor = item.kind === 'tile' && item.restrictsWeather === true;
+      if (
+        isRestrictor &&
+        !item.hidden &&
+        item.alpha &&
+        item.placement &&
+        (isAbove || isOverhead || visibleHere || bottomElevation === null || item.elevation >= bottomElevation)
+      ) {
+        wxItems.push({ item, above: isAbove });
+      }
       if (!isAbove && !isOverhead) continue;
       if (item.hidden) {
         hiddenExcluded.push(item.id);
@@ -1889,7 +1914,7 @@ export function deriveFloorProducts({
           skyReachIds.push(item.id);
           hb = heightByteOf(item);
         }
-        ops.push({ above: true, alpha: item.alpha, placement: item.placement, hb, token: '' });
+        ops.push({ above: true, alpha: item.alpha, placement: item.placement, hb, token: '', wx: isRestrictor });
       } else if (wantOverhead) {
         overheadIds.push(item.id);
         ops.push({ above: false, alpha: item.alpha, placement: item.placement, hb: heightByteOf(item), token: '' });
@@ -2183,6 +2208,50 @@ export function deriveFloorProducts({
       };
     }
 
+    // ── STAGE: WEATHER RESTRICTORS (tiles with "Restrict Weather") ─────────────
+    // `skyReach` above treats every roof-band tile as PERMANENT cover. A restrictor
+    // must instead be DYNAMIC — a hover-faded roof lets the weather back in — so
+    // this stage re-derives the sky WITHOUT the restrictors that were counted as
+    // cover (`sky`, `cover`) and hands over each restrictor's own footprint
+    // (`restrictors`); `scene/weather-restrict.js` re-composes them with their
+    // live fade. Null when the floor has none, so a floor without one costs
+    // nothing and its `skyReach` is byte-for-byte what it was.
+    let weather = null;
+    if (wxItems.length > 0) {
+      const freeOps = ops.filter((op) => op.above && !op.wx);
+      const wxToken = [
+        gridKey,
+        outdoorsId,
+        freeOps.map((op) => op.token).join(','),
+        wxItems
+          .map(
+            (w) =>
+              w.item.id + ':' + (w.above ? 1 : 0) + ':' + memo.idOf(w.item.alpha) + ':' + placementKey(w.item.placement)
+          )
+          .join(','),
+      ].join('|');
+      if (fm.weather && fm.weather.key === wxToken) {
+        weather = fm.weather.value;
+      } else {
+        const coverFree = createMaskGrid(gridSpec);
+        for (const op of freeOps)
+          mergeMaxStamp(coverFree, memo.stamp(gridSpec, gridKey, op.alpha, op.placement, wantHeights));
+        const skyFree = createMaskGrid(gridSpec);
+        for (let i = 0; i < skyFree.data.length; i++) {
+          skyFree.data[i] = Math.round((outdoors.data[i] * (255 - coverFree.data[i])) / 255);
+        }
+        const restrictors = [];
+        for (const { item, above } of wxItems) {
+          const stamp = memo.stamp(gridSpec, gridKey, item.alpha, item.placement, wantHeights);
+          if (stamp?.value) restrictors.push({ id: item.id, elevation: item.elevation, above, stamp });
+        }
+        weather = { uid: memo.uid(), sky: skyFree, cover: coverFree, restrictors };
+        fm.weather = { key: wxToken, value: weather };
+      }
+    } else {
+      fm.weather = null;
+    }
+
     const completeness = {
       expectedItemIds: expected,
       missingItemIds: missing,
@@ -2223,7 +2292,14 @@ export function deriveFloorProducts({
 
     // ── THE PRODUCT, reused when nothing it is made of changed ────────────────
     // Same stage objects + same report = the SAME product object as last derive.
-    const productKey = [comp.uid, om.uid, gm.uid, ...authoredUids, JSON.stringify(completeness)].join('|');
+    const productKey = [
+      comp.uid,
+      om.uid,
+      gm.uid,
+      weather ? weather.uid : 0,
+      ...authoredUids,
+      JSON.stringify(completeness),
+    ].join('|');
     if (fm.product && fm.product.key === productKey) {
       stats.productsReused++;
       products.push(fm.product.value);
@@ -2256,6 +2332,7 @@ export function deriveFloorProducts({
         coverAbove: coverCaster,
       },
       outdoorsLedger: om.ledger,
+      weather,
       completeness,
     };
     fm.product = { key: productKey, value };

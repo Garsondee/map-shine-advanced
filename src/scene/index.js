@@ -65,6 +65,10 @@ export { createMaskAuthority, RequiredMaskMissingError } from './mask-authority.
 // sky-reach has to be an API, not a grid five consumers each sample differently.
 export { createSkyReachAccess, COVERED_THRESHOLD } from './sky-reach-access.js';
 
+// A TILE's "Restrict Weather" box as a sky occluder — the pure compose the viewer
+// runs each frame over the derive stage's restrictors (scene/weather-restrict.js).
+export { composeWeatherGate, composeDripCover, dripRoofKey, quantizeOpacity, tileOpacity } from './weather-restrict.js';
+
 // THE ANCHOR CATALOG + AUTHORITY (scene/anchor-catalog.js's header is the map):
 // the "place" sibling of the mask authority's "paint" — discrete point effects
 // (a candle flame) as the successor to V2's Map Points. The catalog is the ONLY

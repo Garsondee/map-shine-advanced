@@ -37,7 +37,7 @@ export const CANDLE_FLAME_PARAMS = Object.freeze({
     min: 1,
     max: 400,
     step: 1,
-    default: 24,
+    default: 13, // 2026-10-16 author's live-tuned defaults (was 24)
     category: 'Look',
     label: 'Flame size',
     help: 'Height of the flame in canvas pixels. Small — a candle flame is roughly a grid-quarter tall.',
@@ -74,7 +74,7 @@ export const CANDLE_FLAME_PARAMS = Object.freeze({
     // RAISED 400 → 600 (+50%, 2026-10-08, author: "the light radius for default
     // candles needs to be 50% bigger"). Only the DEFAULT moves: a scene or
     // candle that stored its own radius keeps it.
-    default: 600,
+    default: 2000, // 2026-10-16 author's live-tuned defaults (was 600); the falloff below keeps the core tight
     category: 'Light',
     label: 'Light radius',
     help: 'How far the candle casts light, in canvas pixels. 0 = a flame with no light. This is the point light we control.',
@@ -88,13 +88,13 @@ export const CANDLE_FLAME_PARAMS = Object.freeze({
   //   halo(d) = haloStrength * (1-d)^haloFalloff
   // where c = coreRadiusPx / lightRadiusPx. The core is sized in PIXELS, so the
   // reach (Light radius) can grow a lot without the bright pool growing with it.
-  // Every default below reproduces the pre-2026-10-16 curve 1/(1+8d²) exactly.
+  // The pre-2026-10-16 curve 1/(1+8d²) is core radius 0 (auto), steepness 2, strength 1, halo 0; the defaults below are the author's live-tuned look.
   lightCoreRadiusPx: {
     type: 'float',
     min: 0,
     max: 1000,
     step: 1,
-    default: 0,
+    default: 147, // was 0 = auto
     category: 'Light',
     label: 'Core radius',
     help: 'How far the bright pool round the flame reaches, in canvas pixels — the distance at which the core has dropped to half. Small = a tight hot spot with a long soft tail, so you can raise Light radius a lot without blowing out the area beside the flame. 0 = automatic (about a third of the Light radius, the original look).',
@@ -104,7 +104,7 @@ export const CANDLE_FLAME_PARAMS = Object.freeze({
     min: 0.5,
     max: 6,
     step: 0.05,
-    default: 2,
+    default: 6, // was 2
     category: 'Light',
     label: 'Falloff steepness',
     help: 'How fast the core drops off past its radius. 2 = a real inverse-square candle. Higher = a sharper edge to the pool; lower = a long gentle slope.',
@@ -114,7 +114,7 @@ export const CANDLE_FLAME_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 1,
+    default: 0.38, // was 1
     category: 'Light',
     label: 'Core strength',
     help: 'How strongly the light pool shows right next to the flame. 1 = full. Turn it down to take the glare off the area closest to the candle while keeping the wide glow.',
@@ -124,7 +124,7 @@ export const CANDLE_FLAME_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0,
+    default: 0.11, // was 0
     category: 'Light',
     label: 'Bounce glow',
     help: 'A wide, soft fill of bounced light that reaches all the way to the Light radius, on top of the core. 0 = none (the original look). Raise it with a big Light radius to light a whole room faintly.',
@@ -134,7 +134,7 @@ export const CANDLE_FLAME_PARAMS = Object.freeze({
     min: 0.5,
     max: 6,
     step: 0.05,
-    default: 2,
+    default: 5.2, // was 2
     category: 'Light',
     label: 'Bounce falloff',
     help: 'How the bounce glow fades with distance. Low = it stays strong most of the way out; high = it hugs the candle and dies quickly.',

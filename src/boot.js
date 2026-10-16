@@ -11709,7 +11709,16 @@ function install() {
     // `fadeTemperatureTo`'s own doc for the mechanism that bug actually hit.
     keys: () => ['cloudCover01', 'precip01', 'temperature01'],
     typeOf: () => 'float',
-    readLive: (field) => skyScope.sky?.[field] ?? 0,
+    // Cloud/rain read what the map is RENDERING, not the stored field: under a
+    // named mood the stored `cloudCover01`/`precip01` are stale by design (the
+    // archetype id restores the row, see DEFAULT_SKY), so after a reload the
+    // Rain fader showed 0% over a raining map and a fade started from 0.
+    readLive: (field) => {
+      const dial = getVtPanViewerTimeDialState();
+      const eased =
+        field === 'cloudCover01' ? dial?.cloudCoverEased01 : field === 'precip01' ? dial?.precipEased01 : undefined;
+      return Number.isFinite(eased) ? eased : (skyScope.sky?.[field] ?? 0);
+    },
     // LIVE push only — matches the astrolabe's own slider-drag preview
     // ("applies live every pointermove... PERSISTS only on release"). A
     // per-tick editSky() call here would scene-flag-write every frame of
@@ -11910,8 +11919,16 @@ function install() {
       },
       nowMs
     );
-    pendingSkyFadeCompletions.set(gestureId, { [axisName]: value });
-    void editSky({ weatherArchetype: 'custom' });
+    // Leaving a named mood for `custom` makes the stored cover/precip
+    // authoritative, so they must hold what the map is showing NOW — not the
+    // stale pre-mood numbers — or the untouched axis snaps back (and is what a
+    // reload restores). The dragged axis arrives via the completion patch.
+    const live = {
+      cloudCover01: fadeSourceRegistry.readLive('weather.cloudCover01'),
+      precip01: fadeSourceRegistry.readLive('weather.precip01'),
+    };
+    pendingSkyFadeCompletions.set(gestureId, { ...live, [axisName]: value });
+    void editSky({ weatherArchetype: 'custom', ...live });
     void writeFadeState(fadeState);
   }
 
@@ -12340,7 +12357,17 @@ function install() {
         // archetype id ('custom' skipped, nothing named to persist); an
         // object is a raw editSky() patch (fadeTemperatureTo's own gesture).
         if (typeof completion === 'string') {
-          if (completion !== 'custom') void editSky({ weatherArchetype: completion });
+          if (completion !== 'custom') {
+            // Keep the stored axes in step with the row too, so a later switch
+            // to `custom` (or another client reading the store) starts from
+            // the sky that was actually showing, not a stale pre-mood number.
+            const axes = WEATHER_ARCHETYPES.find((a) => a.id === completion)?.axes ?? {};
+            void editSky({
+              weatherArchetype: completion,
+              ...(Number.isFinite(axes.cloudCover01) ? { cloudCover01: axes.cloudCover01 } : {}),
+              ...(Number.isFinite(axes.precip01) ? { precip01: axes.precip01 } : {}),
+            });
+          }
         } else {
           void editSky(completion);
         }

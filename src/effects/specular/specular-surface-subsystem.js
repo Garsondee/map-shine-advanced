@@ -459,17 +459,45 @@ export function createSpecularSurfaceSubsystem({
     };
   }
 
-  /** UV-space content bounds × the mask's world rect → a padded world AABB.
+  /**
+   * UV-space content bounds × the mask's world rect → a padded world AABB,
+   * CLAMPED to the rect itself.
+   *
+   * ⚠️ THE CLAMP IS THE FIX FOR A LIVE BRIGHT RIM AT THE MAP EDGE. Its report:
+   * *"even though it's in a dark room it has a border where the specular is
+   * very bright and illuminated... a thin band around the edge of the map."*
+   *
+   * `SPECULAR_BOUNDS_PAD_PX` exists so a highlight near the painted content's
+   * edge is never clipped by the crop. But when the paint reaches the mask
+   * file's OWN edge — full-bleed interior art, a wall painted to the map
+   * border — the pad pushes the world AABB PAST the rect, so `toUvBounds`
+   * returns `minU < 0` / `maxU > 1`. The shader's `maskUv` then leaves `0..1`
+   * over that whole outer band (`specular-render.js`'s `mix(uMaskUvBounds, …)`),
+   * the mask texture's `ClampToEdgeWrapping` repeats the edge texel across it,
+   * `presence` reads that texel's own strength, and the additive shine paints a
+   * solid lit strip around the map edge. The invariant its own sibling
+   * `toUvBounds` is tested for — *"the bounds stay inside the file, so the
+   * sample can never leave the texture"* (`specular-render.js`'s mask-UV
+   * comment, and `specular-surface-subsystem.test.mjs`) — was only ever true
+   * for content that happened to sit far enough inside the file.
+   *
+   * Clamping HERE, rather than in the shader, keeps the rule in one place and
+   * cannot shrink a real highlight: the quad becomes the padded box INTERSECTED
+   * with the map, so the pad is kept everywhere there is map left to pad into
+   * (its entire purpose) and simply has nothing to add at the border, where
+   * there is no mask content beyond to protect. The only thing past the rect is
+   * off-map, where the mask has no paint and the shine has nothing to show.
+   *
    * @param {object|null} b @param {object} rect @returns {object|null} */
   function toWorldBounds(b, rect) {
     if (!b) return null;
     const w = rect.maxX - rect.minX;
     const h = rect.maxY - rect.minY;
     return {
-      minX: rect.minX + b.minU * w - SPECULAR_BOUNDS_PAD_PX,
-      minY: rect.minY + b.minV * h - SPECULAR_BOUNDS_PAD_PX,
-      maxX: rect.minX + b.maxU * w + SPECULAR_BOUNDS_PAD_PX,
-      maxY: rect.minY + b.maxV * h + SPECULAR_BOUNDS_PAD_PX,
+      minX: Math.max(rect.minX, rect.minX + b.minU * w - SPECULAR_BOUNDS_PAD_PX),
+      minY: Math.max(rect.minY, rect.minY + b.minV * h - SPECULAR_BOUNDS_PAD_PX),
+      maxX: Math.min(rect.maxX, rect.minX + b.maxU * w + SPECULAR_BOUNDS_PAD_PX),
+      maxY: Math.min(rect.maxY, rect.minY + b.maxV * h + SPECULAR_BOUNDS_PAD_PX),
     };
   }
 

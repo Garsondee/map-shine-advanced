@@ -40,9 +40,13 @@ function stubTexture() {
  * supplies them — so a change to that call site this harness does not follow
  * shows up here rather than on the author's screen.
  * @param {object} [state] - the mutable render state the seam returns.
+ * @param {object} [contentBounds] - the mask's measured painted extent in UV
+ *   space. Defaults to an INTERIOR box (0.1..0.9), the common case; a
+ *   full-bleed mask (paint to the file's own edge) passes 0..1 — see "THE
+ *   FULL-BLEED MASK" below.
  * @returns {object}
  */
-function makeSubsystem(state) {
+function makeSubsystem(state, contentBounds) {
   const { uniform, vec4 } = THREE.TSL;
   return createWindowSurfaceSubsystem({
     THREE,
@@ -53,7 +57,7 @@ function makeSubsystem(state) {
     // branch and keeps it hidden by design, not by failure.
     loadMaskImage: async () => ({
       texture: stubTexture(),
-      contentBounds: { minU: 0.1, minV: 0.1, maxU: 0.9, maxV: 0.9 },
+      contentBounds: contentBounds ?? { minU: 0.1, minV: 0.1, maxU: 0.9, maxV: 0.9 },
       data: new Uint8Array(4 * 4 * 4).fill(200),
       width: 4,
       height: 4,
@@ -196,6 +200,34 @@ export async function run(t) {
     'the bounds stay inside the file, so the sample can never leave the texture',
     b.minU >= 0 && b.minV >= 0 && b.maxU <= 1 && b.maxV <= 1
   );
+
+  // ── THE FULL-BLEED MASK (2026-10-15) — THE LINE ABOVE ONLY EVER PROVED THE
+  // INTERIOR CASE. `contentBounds` above is 0.1..0.9, so the 8 px pad lands
+  // comfortably inside the 1000 px rect and the "stay inside the file"
+  // assertion passes for free. Paint that reaches the mask file's OWN edge —
+  // a window on the map border, or a tile surface whose whole file is the mask
+  // — is the case that matters, and it is where the pad used to push
+  // `minU`/`maxU` OUT of 0..1, so the shader's `ClampToEdgeWrapping` sample
+  // repeated the edge texel and painted a lit band around the map edge (the
+  // specular sibling of this exact bug, reported live). Same shape as
+  // `specular-surface-subsystem.test.mjs`'s own full-bleed case.
+  {
+    const bleed = makeSubsystem({ enabled: true, params: {} }, { minU: 0, minV: 0, maxU: 1, maxV: 1 });
+    bleed.sync(0);
+    await Promise.resolve();
+    await Promise.resolve();
+    const bb = bleed.getStatus().maskUvBounds;
+    ok(
+      'a FULL-BLEED mask still keeps the crop bounds inside the file (the pad cannot spill past the rect)',
+      bb.minU >= 0 && bb.minV >= 0 && bb.maxU <= 1 && bb.maxV <= 1
+    );
+    // And the quad's world AABB — the geometry the pad actually inflates — is
+    // clamped to the map rect too, so no fragment can land off-map in the
+    // first place. Rect is 0..1000; unclamped, the pad would make this -8..1008.
+    const world = bleed.getStatus().bounds;
+    ok('the full-bleed quad does not spill past the mask rect', world.minX >= 0 && world.maxX <= 1000);
+    ok('…in Y as well', world.minY >= 0 && world.maxY <= 1000);
+  }
 
   // ── A FLOOR WITH NO PAINTED WINDOW LIGHT STAYS DARK, NOT INHERITED ──────
   const empty = createWindowSurfaceSubsystem({

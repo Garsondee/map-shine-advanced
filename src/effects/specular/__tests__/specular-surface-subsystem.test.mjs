@@ -81,7 +81,18 @@ function stubTexture() {
  *   since the real seam is one function returning one shape either way.
  * @returns {object}
  */
-function makeSubsystem(state, loaded = { data: paintedRgba(32, 32), width: 32, height: 32 }) {
+function makeSubsystem(
+  state,
+  loaded = {
+    data: paintedRgba(32, 32),
+    width: 32,
+    height: 32,
+    // Interior by default, so the AABB pad stays inside the file — the common
+    // case. A caller proving the EDGE case overrides this (see the edge-to-edge
+    // block in `run`).
+    contentBounds: { minU: 0.1, minV: 0.1, maxU: 0.9, maxV: 0.9 },
+  }
+) {
   const { uniform, vec4 } = THREE.TSL;
   return createSpecularSurfaceSubsystem({
     THREE,
@@ -92,7 +103,7 @@ function makeSubsystem(state, loaded = { data: paintedRgba(32, 32), width: 32, h
     // branch and keeps it hidden by design, not by failure.
     loadMaskImage: async () => ({
       texture: stubTexture(),
-      contentBounds: { minU: 0.1, minV: 0.1, maxU: 0.9, maxV: 0.9 },
+      contentBounds: loaded.contentBounds ?? { minU: 0.1, minV: 0.1, maxU: 0.9, maxV: 0.9 },
       // REAL BYTES. The island pack is baked from these rather than re-fetched,
       // so a harness that supplied none would exercise the never-baked path and
       // pass every assertion about a feature that had not run.
@@ -367,6 +378,34 @@ export async function run(t) {
     'the bounds stay inside the file, so the sample can never leave the texture',
     b.minU >= 0 && b.minV >= 0 && b.maxU <= 1 && b.maxV <= 1
   );
+
+  // ── EDGE-TO-EDGE PAINT: THE BRIGHT RIM AT THE MAP EDGE (live bug) ────────
+  // ⚠️ THE ASSERTION ABOVE ONLY PASSES BECAUSE ITS FIXTURE IS INTERIOR
+  // (content 0.1..0.9). Paint that reaches the mask file's own edge is the case
+  // that shipped a solid lit band around the map border: the AABB pad pushed
+  // `maskUvBounds` past [0,1], the mask's ClampToEdge repeated the edge texel
+  // across the whole outer band, and the additive shine drew it. This pins the
+  // fix (`toWorldBounds` now intersects the padded box with the rect) with the
+  // exact input that used to break it — full-bleed content, bounds 0..1.
+  const fullBleed = makeSubsystem(
+    { enabled: true, params: {}, debugChannel: 0 },
+    {
+      data: paintedRgba(32, 32),
+      width: 32,
+      height: 32,
+      contentBounds: { minU: 0, minV: 0, maxU: 1, maxV: 1 },
+    }
+  );
+  fullBleed.sync(0, VIEW_RECT);
+  await Promise.resolve();
+  await Promise.resolve();
+  const fb = fullBleed.getStatus().maskUvBounds;
+  ok(
+    'full-bleed paint KEEPS the bounds inside the file (the rim fix)',
+    fb.minU >= 0 && fb.minV >= 0 && fb.maxU <= 1 && fb.maxV <= 1
+  );
+  ok('…and the quad does not spill past the mask rect', fullBleed.getStatus().bounds.minX >= 0);
+  fullBleed.dispose();
 
   // ── SWITCHING TO A FLOOR WITH NO MASK CLEARS THE STALE QUAD ─────────────
   // Live bug, 2026-08-03: the author clicked three genuinely-metal, genuinely

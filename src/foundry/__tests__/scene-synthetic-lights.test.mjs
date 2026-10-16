@@ -4,7 +4,16 @@
  * live `canvas.effects.lightSources`/`CONFIG.Canvas.lightSourceClass` calls
  * inside `createSceneSyntheticLights`'s `sync`/`dispose` are browser-only.
  */
-import { buildVisionLightData, diffVisionLightState, DETECTION_RADIUS_MULTIPLIER } from '../scene-synthetic-lights.js';
+import {
+  buildVisionLightData,
+  buildDaylitDoorDescriptors,
+  diffVisionLightState,
+  DETECTION_RADIUS_MULTIPLIER,
+  DOOR_DAYLIGHT_DARKNESS_MAX,
+  DOOR_DAYLIGHT_RADIUS_PX,
+  DOOR_DAYLIGHT_PROBE_PX,
+} from '../scene-synthetic-lights.js';
+import { GLOBAL_LIGHT_DAYLIGHT_MAX } from '../scene-environment.js';
 
 export function run(t) {
   const { ok } = t;
@@ -139,6 +148,117 @@ export function run(t) {
     ok(
       'a non-array currentDescriptors is treated as empty, never throws',
       r.toApply.length === 0 && r.toRemoveIds.length === 0
+    );
+  }
+
+  // ---- daylit doors (2026-10-16) -----------------------------------------
+  // "An exterior door during the day is bright enough to see ... the icon
+  // should appear" - daylight is not a lightSources entry, so the doorway is
+  // marked lit directly.
+  ok(
+    'door daylight ends exactly where the global-light daylight window ends (one idea of "day")',
+    DOOR_DAYLIGHT_DARKNESS_MAX === GLOBAL_LIGHT_DAYLIGHT_MAX
+  );
+  {
+    // A vertical exterior door at x=1000: outdoors for x > 1000 only.
+    const door = { id: 'w1', x1: 1000, y1: 900, x2: 1000, y2: 1000 };
+    const outdoorsEast = (x) => (x > 1000 ? 1 : 0);
+    const day = buildDaylitDoorDescriptors({ doors: [door], sampleOutdoors: outdoorsEast, darkness01: 0 });
+    ok('a door with open sky on ONE side is daylit at noon', day.length === 1);
+    ok('its centre is the door midpoint', day[0].x === 1000 && day[0].y === 950);
+    ok('the id is namespaced per wall', day[0].sourceId === 'doorDaylight:w1');
+    const built = buildVisionLightData(day[0]);
+    ok(
+      'it builds as an exact marker: dim === bright === the doorway radius',
+      built.dim === DOOR_DAYLIGHT_RADIUS_PX && built.bright === DOOR_DAYLIGHT_RADIUS_PX
+    );
+    ok(
+      'no 2x detection multiplier on a doorway marker',
+      built.dim !== DOOR_DAYLIGHT_RADIUS_PX * DETECTION_RADIUS_MULTIPLIER
+    );
+    ok('it ignores walls and is a "magical" (priority) source', built.walls === false && built.priority > 0);
+    ok('it covers the +/-3 px icon probes with room to spare', DOOR_DAYLIGHT_RADIUS_PX > 3);
+    ok(
+      'an ordinary light still tests walls at priority 0',
+      buildVisionLightData({ sourceId: 'a', x: 1, y: 1, radius: 10 }).walls === true
+    );
+    ok(
+      'the probe is the same from either side (door drawn backwards)',
+      buildDaylitDoorDescriptors({
+        doors: [{ ...door, y1: 1000, y2: 900 }],
+        sampleOutdoors: outdoorsEast,
+        darkness01: 0,
+      }).length === 1
+    );
+    ok(
+      'at dusk (past the daylight ceiling) nothing is daylit',
+      buildDaylitDoorDescriptors({
+        doors: [door],
+        sampleOutdoors: outdoorsEast,
+        darkness01: DOOR_DAYLIGHT_DARKNESS_MAX + 0.01,
+      }).length === 0
+    );
+    ok(
+      'exactly at the ceiling still counts as day',
+      buildDaylitDoorDescriptors({
+        doors: [door],
+        sampleOutdoors: outdoorsEast,
+        darkness01: DOOR_DAYLIGHT_DARKNESS_MAX,
+      }).length === 1
+    );
+    ok(
+      'a fully indoor door (mask 0 everywhere) is NOT daylit',
+      buildDaylitDoorDescriptors({ doors: [door], sampleOutdoors: () => 0, darkness01: 0 }).length === 0
+    );
+    ok(
+      'a door whose sky is beyond the probe reach is not daylit',
+      buildDaylitDoorDescriptors({
+        doors: [door],
+        sampleOutdoors: (x) => (x > 1000 + DOOR_DAYLIGHT_PROBE_PX + 1 ? 1 : 0),
+        darkness01: 0,
+      }).length === 0
+    );
+    ok(
+      'secret doors are skipped',
+      buildDaylitDoorDescriptors({ doors: [{ ...door, secret: true }], sampleOutdoors: () => 1, darkness01: 0 })
+        .length === 0
+    );
+    ok(
+      'a non-finite darkness reads as "not day", never as day',
+      buildDaylitDoorDescriptors({ doors: [door], sampleOutdoors: () => 1, darkness01: NaN }).length === 0
+    );
+    ok(
+      'a NaN mask sample reads as indoors',
+      buildDaylitDoorDescriptors({ doors: [door], sampleOutdoors: () => NaN, darkness01: 0 }).length === 0
+    );
+    ok(
+      'a zero-length wall and a missing id are skipped, never NaN-poisoned',
+      buildDaylitDoorDescriptors({
+        doors: [{ id: 'z', x1: 5, y1: 5, x2: 5, y2: 5 }, { x1: 0, y1: 0, x2: 10, y2: 0 }, null],
+        sampleOutdoors: () => 1,
+        darkness01: 0,
+      }).length === 0
+    );
+    ok(
+      'no doors / no sampler is an empty list',
+      buildDaylitDoorDescriptors().length === 0 &&
+        buildDaylitDoorDescriptors({ doors: [door], darkness01: 0 }).length === 0
+    );
+    // Dawn -> dusk toggling diffs as add then remove (no leak of stale markers).
+    const a = buildDaylitDoorDescriptors({ doors: [door], sampleOutdoors: outdoorsEast, darkness01: 0 }).map(
+      buildVisionLightData
+    );
+    const applied = new Map(
+      a.map((d) => [
+        d.sourceId,
+        { x: d.x, y: d.y, elevation: d.elevation, dim: d.dim, bright: d.bright, walls: d.walls, priority: d.priority },
+      ])
+    );
+    ok('an unchanged daylit door diffs as unchanged', diffVisionLightState(a, applied).changed === false);
+    const dusk = diffVisionLightState([], applied);
+    ok(
+      'when day ends the marker is queued for removal',
+      dusk.toRemoveIds.length === 1 && dusk.toRemoveIds[0] === 'msa-vision:doorDaylight:w1'
     );
   }
 }

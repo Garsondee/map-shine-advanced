@@ -256,6 +256,8 @@ export {
   buildVisionLightData,
   diffVisionLightState,
   createSceneSyntheticLights,
+  buildDaylitDoorDescriptors,
+  readSceneDoorSegments,
   DETECTION_RADIUS_MULTIPLIER,
 } from './scene-synthetic-lights.js';
 

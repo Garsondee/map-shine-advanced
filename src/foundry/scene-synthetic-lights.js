@@ -11,6 +11,24 @@
  * a token standing beside a lit candle still can't see the door beside it —
  * reported live, confirmed even at point-blank range (author, 2026-08-31).
  *
+ * THE SAME GAP, THIRD REPORT — DOORS IN DAYLIGHT (2026-10-16): "an exterior
+ * door during the day is bright enough to see the door and the icon should
+ * appear but because there are technically no lights the process isn't quite
+ * working." Daylight is not a light source in Foundry's eyes either — it is
+ * the scene's `GlobalLightSource`, and `scene-environment.js#
+ * deriveGlobalLightWindow` already opens it by day. But `testInsideLight`
+ * asks per-POINT (`getDarknessLevel(point)`), and `DoorControl#isVisible`
+ * tests two points 3 px either side of the door. A token standing INSIDE
+ * looks at an exterior door whose room is darkness-adjusted by a Region
+ * (the interior side reads 0.5, outside the window) while the outdoor side
+ * - the only daylit point - is behind the closed door, outside its line of
+ * sight. Both probes fail; the icon never shows, at noon, beside a wall of
+ * sunlight. `buildDaylitDoorDescriptors` closes it: a door whose own
+ * neighbourhood is OUTDOORS by MSA's `_Outdoors` mask, while it is day, gets
+ * a tiny synthetic light ON the door ("this doorway is daylit"). It reveals
+ * nothing but that doorway - Foundry's own line-of-sight gate still decides
+ * who can see it.
+ *
  * THE FIX: mirror each candle/fire light descriptor MSA already computes
  * (`effects/candle-flame-geometry.js#buildCandleLightSources`,
  * `effects/fire/fire-subsystem.js`'s own `lightSources()`) into a REAL
@@ -101,6 +119,25 @@ export const SOURCE_ID_PREFIX = 'msa-vision:';
  */
 export const DETECTION_RADIUS_MULTIPLIER = 2;
 
+/** Reach of a daylit doorway's synthetic light, px. The icon's two probes sit
+ * 3 px either side of the midpoint (`DoorControl#isVisible`); anything above
+ * that covers both. Kept tiny on purpose - it marks a DOORWAY lit, it must not
+ * light the room around it. */
+export const DOOR_DAYLIGHT_RADIUS_PX = 12;
+
+/** How far from the door's midpoint, along its normal, the outdoors mask is
+ * probed on each side (px). Past the wall's own thickness and the mask's
+ * cell-edge blur, short of the next room. */
+export const DOOR_DAYLIGHT_PROBE_PX = 24;
+
+/** A probe at or above this `_Outdoors` value counts as open sky. */
+export const DOOR_DAYLIGHT_OUTDOORS_MIN = 0.5;
+
+/** Daylight ends where `scene-environment.js#GLOBAL_LIGHT_DAYLIGHT_MAX` ends it
+ * (duplicated as a literal to keep this module import-free; the test pins the
+ * two together) - ONE idea of "it is day" for doors and open ground alike. */
+export const DOOR_DAYLIGHT_DARKNESS_MAX = 0.25;
+
 /** Wall-clock floor between syncs. Matches `DARKNESS_PUBLISH_MIN_INTERVAL_MS`'s
  * own reasoning (`foundry/scene-environment.js`): a door's revealed-ness has
  * no need of frame-perfect precision, and `canvas.perception.update()` is
@@ -126,6 +163,23 @@ export function buildVisionLightData(descriptor) {
   if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(radiusPx) || radiusPx <= 0) return null;
   const elevationRaw = Number(descriptor.elevation);
   const elevation = Number.isFinite(elevationRaw) ? elevationRaw : 0;
+  // A DAYLIT DOORWAY (`buildDaylitDoorDescriptors`) is a marker, not a glow:
+  // exact radius (no 2x), no wall test (its centre sits ON a wall, and the
+  // sweep from there would collapse), and `priority: 1` - Foundry's own
+  // "magical light" flag (`PointLightSource#testPoint`), which skips the
+  // elevation gate too, so a tiny disc matches a point on any storey.
+  if (descriptor.detectExact === true) {
+    return {
+      sourceId: SOURCE_ID_PREFIX + descriptor.sourceId,
+      x,
+      y,
+      elevation,
+      bright: radiusPx,
+      dim: radiusPx,
+      walls: false,
+      priority: 1,
+    };
+  }
   return {
     sourceId: SOURCE_ID_PREFIX + descriptor.sourceId,
     x,
@@ -133,7 +187,101 @@ export function buildVisionLightData(descriptor) {
     elevation,
     bright: radiusPx,
     dim: radiusPx * DETECTION_RADIUS_MULTIPLIER,
+    walls: true,
+    priority: 0,
   };
+}
+
+/**
+ * Which doors are standing in daylight right now, as descriptors for
+ * `buildVisionLightData`. Pure.
+ *
+ * A door qualifies when (1) it is day - `darkness01` at or under
+ * `DOOR_DAYLIGHT_DARKNESS_MAX` - and (2) the `_Outdoors` mask reads open sky
+ * at the doorway or just beyond it on EITHER side
+ * (`DOOR_DAYLIGHT_PROBE_PX` along the wall normal). Either side, because the
+ * viewer is usually on the dark one. Secret doors are skipped (Foundry hides
+ * them from players regardless; no reason to mark one lit).
+ *
+ * @param {object} args
+ * @param {Array<{id:string, x1:number, y1:number, x2:number, y2:number, secret?:boolean, elevation?:number}>} args.doors
+ * @param {(x:number, y:number) => number} args.sampleOutdoors - 0 indoors .. 1 open sky.
+ * @param {number} args.darkness01 - MSA's resolved scene darkness.
+ * @returns {Array<object>}
+ */
+export function buildDaylitDoorDescriptors({ doors, sampleOutdoors, darkness01 } = {}) {
+  if (!Array.isArray(doors) || doors.length === 0 || typeof sampleOutdoors !== 'function') return [];
+  const dark = Number(darkness01);
+  if (!Number.isFinite(dark) || dark > DOOR_DAYLIGHT_DARKNESS_MAX) return [];
+  const out = [];
+  for (const door of doors) {
+    if (!door || door.secret || typeof door.id !== 'string' || !door.id) continue;
+    const { x1, y1, x2, y2 } = door;
+    if (![x1, y1, x2, y2].every(Number.isFinite)) continue;
+    const mx = (x1 + x2) / 2;
+    const my = (y1 + y2) / 2;
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const len = Math.hypot(dx, dy);
+    if (!(len > 0)) continue;
+    const nx = -dy / len;
+    const ny = dx / len;
+    const probes = [
+      [mx, my],
+      [mx + nx * DOOR_DAYLIGHT_PROBE_PX, my + ny * DOOR_DAYLIGHT_PROBE_PX],
+      [mx - nx * DOOR_DAYLIGHT_PROBE_PX, my - ny * DOOR_DAYLIGHT_PROBE_PX],
+    ];
+    let outdoors = false;
+    for (const [px, py] of probes) {
+      const v = Number(sampleOutdoors(px, py));
+      if (Number.isFinite(v) && v >= DOOR_DAYLIGHT_OUTDOORS_MIN) {
+        outdoors = true;
+        break;
+      }
+    }
+    if (!outdoors) continue;
+    out.push({
+      sourceId: `doorDaylight:${door.id}`,
+      x: mx,
+      y: my,
+      elevation: Number.isFinite(door.elevation) ? door.elevation : 0,
+      radius: DOOR_DAYLIGHT_RADIUS_PX,
+      detectExact: true,
+    });
+  }
+  return out;
+}
+
+/**
+ * The live half of the daylit-door bridge: every non-secret door wall on
+ * `levelId`'s floor (or every floor when `levelId` is null), as the plain
+ * `{id,x1,y1,x2,y2}` shape `buildDaylitDoorDescriptors` takes. Lives here
+ * because reading `canvas.scene.walls` is the `foundry/` adapter's job
+ * (`foundry/adapter-only`). Never throws.
+ *
+ * @param {string|null} [levelId]
+ * @returns {Array<{id:string, x1:number, y1:number, x2:number, y2:number, secret:boolean}>}
+ */
+export function readSceneDoorSegments(levelId = null) {
+  try {
+    const walls = typeof canvas !== 'undefined' ? canvas?.scene?.walls : null;
+    if (!walls) return [];
+    const out = [];
+    for (const wall of walls) {
+      // WALL_DOOR_TYPES: NONE 0 / DOOR 1 / SECRET 2 (common/constants.mjs).
+      if (!wall || !(wall.door > 0)) continue;
+      const levels = wall.levels;
+      if (levels && typeof levels.has === 'function' && levels.size > 0 && levelId != null && !levels.has(levelId)) {
+        continue;
+      }
+      const c = wall.c;
+      if (!Array.isArray(c) || c.length !== 4 || !c.every(Number.isFinite)) continue;
+      out.push({ id: String(wall.id), x1: c[0], y1: c[1], x2: c[2], y2: c[3], secret: wall.door === 2 });
+    }
+    return out;
+  } catch (_) {
+    return [];
+  }
 }
 
 /**
@@ -160,7 +308,9 @@ export function diffVisionLightState(currentDescriptors, appliedById) {
       prev.y === d.y &&
       prev.elevation === d.elevation &&
       prev.dim === d.dim &&
-      prev.bright === d.bright;
+      prev.bright === d.bright &&
+      prev.walls === d.walls &&
+      prev.priority === d.priority;
     if (!unchanged) toApply.push(d);
   }
   const toRemoveIds = [];
@@ -178,12 +328,14 @@ export function diffVisionLightState(currentDescriptors, appliedById) {
  * @param {object} args
  * @param {() => Array<object>} [args.getCandleDescriptors] - e.g. `() => buildCandleLightSources(getCandleRenderState().anchors, {...})`.
  * @param {() => Array<object>} [args.getFireDescriptors] - e.g. `() => fireSubsystem.lightSources()`.
+ * @param {(ctx?: object) => Array<object>} [args.getDoorDescriptors] - e.g. a closure over `buildDaylitDoorDescriptors`; handed `sync`'s `ctx` (the frame's `{darkness01}`).
  * @param {number} [args.minIntervalMs]
- * @returns {{sync:(realMs:number)=>object, dispose:()=>void}}
+ * @returns {{sync:(realMs:number, ctx?:object)=>object, dispose:()=>void}}
  */
 export function createSceneSyntheticLights({
   getCandleDescriptors,
   getFireDescriptors,
+  getDoorDescriptors,
   minIntervalMs = MIN_SYNC_INTERVAL_MS,
 } = {}) {
   /** Last data actually pushed into a live source, keyed by (prefixed) sourceId — plain data, mirrors `diffVisionLightState`'s expectations. */
@@ -192,7 +344,7 @@ export function createSceneSyntheticLights({
   const liveSources = new Map();
   let lastSyncMs = -Infinity;
 
-  function gatherCurrent() {
+  function gatherCurrent(ctx) {
     const out = [];
     const candles = typeof getCandleDescriptors === 'function' ? getCandleDescriptors() : null;
     const fires = typeof getFireDescriptors === 'function' ? getFireDescriptors() : null;
@@ -201,6 +353,12 @@ export function createSceneSyntheticLights({
       if (built) out.push(built);
     }
     for (const d of Array.isArray(fires) ? fires : []) {
+      const built = buildVisionLightData(d);
+      if (built) out.push(built);
+    }
+    // DAYLIT DOORWAYS (2026-10-16) - see the header's "THIRD REPORT".
+    const doors = typeof getDoorDescriptors === 'function' ? getDoorDescriptors(ctx) : null;
+    for (const d of Array.isArray(doors) ? doors : []) {
       const built = buildVisionLightData(d);
       if (built) out.push(built);
     }
@@ -225,7 +383,8 @@ export function createSceneSyntheticLights({
       // Respect real geometry, exactly like an authored light — a candle
       // must not reveal a door through a wall just because this bridge
       // exists (PointLightSource's own ClockwiseSweepPolygon handles this).
-      walls: true,
+      walls: data.walls,
+      priority: data.priority,
       // NOT a vision source (Foundry's separate `testVisibility`/darkvision
       // mechanic) — this module closes the light-PERCEPTION gap only.
       vision: false,
@@ -234,7 +393,15 @@ export function createSceneSyntheticLights({
       disabled: false,
     });
     source.add();
-    applied.set(data.sourceId, { x: data.x, y: data.y, elevation: data.elevation, dim: data.dim, bright: data.bright });
+    applied.set(data.sourceId, {
+      x: data.x,
+      y: data.y,
+      elevation: data.elevation,
+      dim: data.dim,
+      bright: data.bright,
+      walls: data.walls,
+      priority: data.priority,
+    });
   }
 
   /** Remove-and-destroy ONE live source. Browser-only. */
@@ -250,9 +417,10 @@ export function createSceneSyntheticLights({
 
   /**
    * @param {number} realMs - WALL time (`env.time.realMs`), never sim time. See this module's own header.
+   * @param {object} [ctx] - per-frame facts for the descriptor getters (`{darkness01}`).
    * @returns {{synced:boolean, reason?:string, changed?:boolean, applied?:number, removed?:number}}
    */
-  function sync(realMs) {
+  function sync(realMs, ctx) {
     try {
       if (typeof canvas === 'undefined' || !canvas?.effects?.lightSources || !canvas?.perception?.update) {
         return { synced: false, reason: 'no canvas' };
@@ -263,7 +431,7 @@ export function createSceneSyntheticLights({
       }
       lastSyncMs = Number.isFinite(n) ? n : lastSyncMs;
 
-      const current = gatherCurrent();
+      const current = gatherCurrent(ctx);
       const { toApply, toRemoveIds, changed } = diffVisionLightState(current, applied);
       if (!changed) return { synced: true, changed: false };
 

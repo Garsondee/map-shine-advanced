@@ -245,6 +245,8 @@ import {
   // so a candle-lit room registers as lit for Foundry's native door-icon
   // reveal. See `scene-synthetic-lights.js`'s own header.
   createSceneSyntheticLights,
+  buildDaylitDoorDescriptors,
+  readSceneDoorSegments,
   // THE VISION-SOURCE READER (Pillar 11) — consumes Foundry's own wall-swept
   // polygons; never reproduces the vision ruleset.
   readActiveVisionSources,
@@ -4939,6 +4941,22 @@ export async function startVtPanViewer({
       // above (`fireSubsystem.lightSources()` — free to read again here,
       // not recomputed).
       getFireDescriptors: () => fireSubsystem.lightSources(),
+      // DAYLIT DOORWAYS (2026-10-16) - "an exterior door during the day"
+      // never got its icon: daylight is Foundry's GlobalLightSource, tested
+      // per point, and the dark side of the door fails. See the header's
+      // "THIRD REPORT". `view`/`sampleWindExposureAt` are read lazily (TDZ-safe,
+      // like `fireSubsystem` above); the level scoping mirrors the wind bake's.
+      getDoorDescriptors: (ctx) => {
+        if (!Number.isFinite(ctx?.darkness01)) return [];
+        let levelId = null;
+        const floors = getActiveSceneFloors(globalThis.canvas?.scene ?? null);
+        if (floors.ok && view) levelId = floors.floors.find((f) => f.index === view.floorIndex)?.id ?? null;
+        return buildDaylitDoorDescriptors({
+          doors: readSceneDoorSegments(levelId),
+          sampleOutdoors: sampleWindExposureAt,
+          darkness01: ctx.darkness01,
+        });
+      },
     });
 
     // ------------------------------------------------------------------
@@ -7781,7 +7799,7 @@ export async function startVtPanViewer({
       // reads or persists this throttle's state from that call, so borrowing
       // the shared clock here does NOT reintroduce the tMs pause-latch bug
       // the comment above warns about.
-      syntheticLights.sync(env.time?.realMs ?? uGlobalTimeMs.value);
+      syntheticLights.sync(env.time?.realMs ?? uGlobalTimeMs.value, { darkness01: env.darkness01 });
       // Every loaded vegetation mesh's live motion/shadow uniforms — SAME
       // "every frame, not just on residency pass" placement as the candle
       // call just above (see `syncAllVegetationMotionForFrame`'s own header

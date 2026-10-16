@@ -1,0 +1,18 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Player light lab</title>
+    <style>
+      body { background: #111; color: #ccc; font: 12px monospace; margin: 8px; }
+      canvas { display: block; background: #000; margin-bottom: 6px; max-width: 100%; }
+      pre { white-space: pre-wrap; max-height: 160px; overflow: auto; }
+    </style>
+  </head>
+  <body>
+    <div>Player light lab: <code>window.plLab</code> (vision grades, torch fire, flashlight cookie). Renders real src/ code.</div>
+    <canvas id="view" width="1280" height="720"></canvas>
+    <pre id="status">loading…</pre>
+    <script type="module" src="/tools/shader-lab/player-light-lab.js"></script>
+  </body>
+</html>

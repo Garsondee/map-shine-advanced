@@ -39,6 +39,10 @@ export {
   // active-scene-source.js's own isVideoUrl doc for why this is a genuine
   // sibling rather than a boolean flag on isImageUrl.
   isVideoUrl,
+  // SVG SOURCES (2026-10-15) — the sibling check for "an image whose pixels
+  // `createImageBitmap` cannot decode at all" (the DEFAULT token icon is an
+  // SVG). See active-scene-source.js's own isSvgUrl doc.
+  isSvgUrl,
 } from './active-scene-source.js';
 
 // VIDEO TILE PLAYBACK (mythica-machina-press#430) — hands an MSA-owned
@@ -247,11 +251,12 @@ export {
   deriveGlobalLightConfig,
 } from './scene-lights.js';
 
-// THE INVERSE OF THE READER ABOVE — mirrors MSA's OWN candle/fire light
-// descriptors INTO canvas.effects.lightSources (client-local, never a
-// document write), so Foundry's native door-icon reveal / light-perception
-// detection actually sees a candle-lit room as lit. See scene-synthetic-
-// lights.js's own header for the full mechanism and why this is safe.
+// THE INVERSE OF THE READER ABOVE — mirrors MSA's OWN candle/fire/
+// player-carried light descriptors INTO canvas.effects.lightSources
+// (client-local, never a document write), so Foundry's native door-icon
+// reveal / light-perception detection actually sees a candle-lit room as
+// lit. See scene-synthetic-lights.js's own header for the full mechanism
+// and why this is safe.
 export {
   buildVisionLightData,
   diffVisionLightState,

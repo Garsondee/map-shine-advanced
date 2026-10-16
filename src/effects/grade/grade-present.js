@@ -45,7 +45,12 @@ import { STYLIZE_LOOK_NAMES } from '../stylize.js';
 // canvas, so it sees the fog gate and bloom's own work already done, and its
 // `buildStylizeNode`/`currentStyle` pattern just below is the EXACT
 // structural precedent this hook copies.
-import { buildPlayerVisionGradeNode, PLAYER_VISION_GRADE_MODE_KEYS } from '../vision/player-vision-grade-render.js';
+import {
+  buildPlayerVisionGradeNode,
+  PLAYER_VISION_GRADE_MODE_KEYS,
+  PLAYER_VISION_TOKEN_SLOTS,
+} from '../vision/player-vision-grade-render.js';
+import { VISION_MODE_PRESETS } from '../vision/player-vision-modes.js';
 
 const STYLE_NAMES_SAFE = new Set(STYLIZE_LOOK_NAMES);
 const PLAYER_VISION_MODE_NAMES_SAFE = new Set(PLAYER_VISION_GRADE_MODE_KEYS);
@@ -108,7 +113,7 @@ function writeGradeUniforms(u, params) {
  *   use for "this material needs something from outside its own zone."
  *   Omit → the render-scale governor's post-upscale sharpen never compiles
  *   in, same as never calling `setPostUpscaleSharpenActive`.
- * @returns {{ material, presentTexNode, setEnvGrade, setArtGrade, setStylize, setPlayerVisionMode, setLut, setPostUpscaleSharpenActive, rebindLit, gateCompiled }}
+ * @returns {{ material, presentTexNode, setEnvGrade, setArtGrade, setStylize, setPlayerVisionMode, setPlayerVisionTokens, setLut, setPostUpscaleSharpenActive, rebindLit, gateCompiled }}
  */
 export function buildGradePresentMaterial({
   THREE,
@@ -120,14 +125,14 @@ export function buildGradePresentMaterial({
   buildPostUpscaleSharpenNode,
 }) {
   const TSL = THREE.TSL;
-  const { texture, vec3, vec4, mix, uv, dot, uniform, float } = TSL;
+  const { texture, vec2, vec3, vec4, mix, uv, dot, uniform, float, max, min } = TSL;
 
   const presentTexNode = texture(litTexture);
   const uEnv = makeGradeUniforms(TSL, false);
   const uArt = makeGradeUniforms(TSL, true);
   const lutTexNode = lutTexture ? TSL.texture3D(lutTexture) : null;
 
-  const outdoors = buildOutdoorsGate(TSL, { uViewRect, uOutdoorsRect, outdoorsTexNode });
+  const gateCompiled = !!outdoorsTexNode;
 
   const material = new THREE.NodeMaterial();
   material.depthTest = false;
@@ -160,11 +165,36 @@ export function buildGradePresentMaterial({
    * from a live per-frame closure (`grade-present.js`'s own header, and
    * `player-vision-grade-render.js`'s header, have the full reasoning). */
   let currentPlayerVisionMode = 'none';
+  let requestedPlayerVisionMode = 'none';
+  let visionPowerTransition = { startMs: 0, from: 0, to: 0, durationMs: 0, flickerOnStart: false };
   /** Milliseconds, pushed every frame — drives grain/scan animation in the
    * active modes. A plain uniform, not a rebuild trigger: only the MODE
    * choice rebuilds the fragment, matching `uStylizeAmount`'s own split
    * between "structural choice" (rebuild) and "live value" (uniform only). */
   const uPlayerVisionTimeMs = uniform(float(0));
+  /** The scene's darkness 0..1, pushed every frame: Night Vision and Low-light fade in as it rises
+   * (V2's darkness gate), so a lit daytime map is left alone. Starts fully dark (always on). */
+  const uPlayerVisionDarkness = uniform(float(1));
+  /** The per-viewer NV tube's warm-up/shutdown envelope (V2). */
+  const uPlayerVisionPower = uniform(float(0));
+  /** World-pixel center of the selected/owned token for the NV falloff. */
+  const uPlayerVisionAnchorWorld = uniform(vec2(0, 0));
+  const uPlayerVisionAnchorValid = uniform(float(0));
+  /** Selected token's world-space diameter; keeps the radius zoom-stable. */
+  const uPlayerVisionTokenSize = uniform(float(100));
+  /**
+   * THE HOT-BODY COUNTER (2026-10-15) — `(worldX, worldY, radiusX, radiusY)`
+   * per visible token: the token's own bounding box in world pixels, which is
+   * the shape the infravision recolour paints. A fixed, JS-UNROLLED list of
+   * plain `vec4` uniforms, never a `uniformArray` read through a TSL `Loop`
+   * (live-confirmed broken on this renderer — see `player-vision-grade-
+   * render.js#buildTokenMaskNode`'s own header). The nodes are created once
+   * here and only their `.value`s are written per frame, so the mode's
+   * compile-time fragment rebuild never has to know how many tokens are on
+   * screen. `vt-pan-viewer.js#pushPlayerVisionTokens` is the only writer; slots
+   * past the supplied count are left at `radiusX = 0`.
+   */
+  const uPlayerVisionTokens = Array.from({ length: PLAYER_VISION_TOKEN_SLOTS }, () => uniform(vec4(0, 0, 0, 0)));
 
   /**
    * The Stylize effect's per-style colour transform, applied to the fully
@@ -197,36 +227,56 @@ export function buildGradePresentMaterial({
    * current post-upscale-sharpen active state. The env grade and the LUT are
    * unaffected (they are uniform/texture-driven). */
   function rebuildFragment() {
-    // POST-UPSCALE SHARPEN (2026-08-27) — sharpens the RAW present-resolution
-    // image BEFORE any grading, so colour grading applies on top unchanged
-    // (see buildPostUpscaleSharpenNode's own header for why this repair
-    // exists at all). Reads `presentTexNode.value` (the texture it is
-    // CURRENTLY bound to, kept current by `rebindLit` below), not the
-    // `litTexture` closure param directly — a resize that ever changed the
-    // underlying texture object's identity between rebuilds must not leave
-    // these taps sampling a stale reference the way a captured `litTexture`
-    // could. Native path (`sharpenActive` false) pays NOTHING extra: `lit`
-    // is `presentTexNode.rgb` exactly as before this feature existed.
-    const lit =
-      sharpenActive && buildPostUpscaleSharpenNode
-        ? buildPostUpscaleSharpenNode(THREE, presentTexNode.value, uv()).rgb
-        : presentTexNode.rgb; // linear
-    // ENVIRONMENTAL grade, outdoor-gated. No tail on this scope (Grade.md §13).
-    const gradedEnv = buildGradeNode(TSL, lit, uEnv);
-    const afterEnv = outdoors ? mix(lit, gradedEnv, outdoors) : lit;
-    // ARTISTIC grade + the whole-frame TAIL (tone map + LUT).
-    const gradedArt = buildGradeNode(TSL, afterEnv, uArt, {
-      toneMapping: currentToneMapping,
-      lutTexture: lutTexNode,
-      lutStrength: uArt.lutStrength,
-    });
-    // STYLIZE (mythica-machina-press#36) — strictly after Colour Grade's own
-    // tail, so a picked style layers on top of exposure/tone-map/LUT rather
-    // than competing with them. `null` (style 'none', the default) skips the
-    // mix entirely — byte-identical to before this effect existed, same
-    // "omitted input compiles to nothing" contract as `lutTexture` above.
-    const styled = buildStylizeNode(gradedArt, currentStyle);
-    const afterStylize = styled ? mix(gradedArt, styled, uStylizeAmount) : gradedArt;
+    /** Rebuild the complete pre-vision image at an arbitrary screen UV. V2's
+     * lens distortion and chromatic aberration refract the already graded
+     * display image, so their taps must travel through the same grade/LUT/
+     * stylize chain instead of sampling raw `scene.lit`. */
+    const buildStyledAt = (sampleUv) => {
+      const sampledLit =
+        sharpenActive && buildPostUpscaleSharpenNode
+          ? buildPostUpscaleSharpenNode(THREE, presentTexNode.value, sampleUv).rgb
+          : presentTexNode.sample(sampleUv).rgb;
+      // ENVIRONMENTAL grade, outdoor-gated. No tail on this scope (Grade.md §13).
+      const outdoorsAt = buildOutdoorsGate(TSL, {
+        uViewRect,
+        uOutdoorsRect,
+        outdoorsTexNode,
+        uvNode: sampleUv,
+      });
+      const gradedEnv = buildGradeNode(TSL, sampledLit, uEnv);
+      const afterEnv = outdoorsAt ? mix(sampledLit, gradedEnv, outdoorsAt) : sampledLit;
+      // ARTISTIC grade + the whole-frame TAIL (tone map + LUT).
+      const gradedArt = buildGradeNode(TSL, afterEnv, uArt, {
+        toneMapping: currentToneMapping,
+        lutTexture: lutTexNode,
+        lutStrength: uArt.lutStrength,
+      });
+      // STYLIZE remains before the personal viewing-device optics.
+      const styled = buildStylizeNode(gradedArt, currentStyle);
+      return styled ? mix(gradedArt, styled, uStylizeAmount) : gradedArt;
+    };
+    const afterStylize = buildStyledAt(uv());
+    // Convert the token's world-pixel center using the SAME live camera rect
+    // the environmental gate uses. This stays aligned while panning/zooming;
+    // computing UV on the JS side would trail the camera by a frame.
+    let visionCenter = null;
+    let visionWorldSize = null;
+    let visionTokenSize = null;
+    // EVERY grade mode now has a token-centered range (2026-10-15: the two
+    // infravision modes joined NV and both low-light modes), so any active
+    // mode — none is the only exception — needs the same world→UV mapping.
+    if (currentPlayerVisionMode !== 'none') {
+      const viewSpanX = max(uViewRect.z.sub(uViewRect.x), float(1e-5));
+      const viewSpanY = max(uViewRect.w.sub(uViewRect.y), float(1e-5));
+      visionWorldSize = vec2(viewSpanX, viewSpanY);
+      const worldCenterUv = vec2(
+        uPlayerVisionAnchorWorld.x.sub(uViewRect.x).div(viewSpanX),
+        uPlayerVisionAnchorWorld.y.sub(uViewRect.y).div(viewSpanY)
+      );
+      visionCenter = mix(vec2(0.5, 0.5), worldCenterUv, uPlayerVisionAnchorValid);
+      const fallbackTokenSize = max(min(viewSpanX, viewSpanY).div(float(20)), float(1));
+      visionTokenSize = mix(fallbackTokenSize, uPlayerVisionTokenSize, uPlayerVisionAnchorValid);
+    }
     // PLAYER VISION-MODE GRADE — strictly LAST, after Colour Grade's own
     // tail AND Stylize, since this is the viewing client's own personal
     // device/eye filter over whatever the shot already looks like (see
@@ -241,10 +291,45 @@ export function buildGradePresentMaterial({
       uv: uv(),
       mode: currentPlayerVisionMode,
       timeMs: uPlayerVisionTimeMs,
+      darkness01: uPlayerVisionDarkness,
+      modePower: uPlayerVisionPower,
+      visionCenter,
+      visionWorldSize,
+      visionTokenSize,
+      viewRect: uViewRect,
+      tokenSlots: uPlayerVisionTokens,
+      sampleRgbAt: buildStyledAt,
     });
     const finalRgb = visionGraded ?? afterStylize;
     material.fragmentNode = vec4(finalRgb, presentTexNode.a);
     material.needsUpdate = true;
+  }
+
+  function easedVisionPower(nowMs) {
+    const transition = visionPowerTransition;
+    if (transition.durationMs <= 0) return transition.to;
+    const elapsed = Math.max(0, nowMs - transition.startMs);
+    const t = Math.min(1, elapsed / transition.durationMs);
+    const eased = t * t * (3 - 2 * t);
+    let power = transition.from + (transition.to - transition.from) * eased;
+    if (transition.flickerOnStart && t < 1) {
+      const p = VISION_MODE_PRESETS.nightVision;
+      if (p.powerFlickerEnabled) {
+        const intensity = p.powerFlickerIntensity;
+        power *= 1 - intensity * (0.55 + 0.45 * Math.sin((nowMs - transition.startMs) * 0.001 * (22 + 17 * intensity)));
+      }
+    }
+    return Math.min(1, Math.max(0, power));
+  }
+
+  function beginVisionPowerTransition(from, to, nowMs, durationSeconds, flickerOnStart = false) {
+    visionPowerTransition = {
+      startMs: nowMs,
+      from,
+      to,
+      durationMs: Math.max(0, Number(durationSeconds) || 0) * 1000,
+      flickerOnStart,
+    };
   }
   rebuildFragment();
 
@@ -273,7 +358,7 @@ export function buildGradePresentMaterial({
      * (`effects/vision/player-vision-modes.js#resolveActivePlayerVisionModePreset`'s
      * result, threaded through `boot.js`'s injected per-frame closure and
      * `vt-pan-viewer.js`'s own `pushPlayerVisionMode`), never resolved here —
-     * this setter only knows "which of the four names, or none" and "what
+     * this setter only knows "which of the five names, or none" and "what
      * time is it," the same division of labour `setStylize` already has
      * between the cascade (elsewhere) and the uniform push (here). Rebuilds
      * ONLY if the mode actually changed (compile-time, same posture as
@@ -281,15 +366,80 @@ export function buildGradePresentMaterial({
      * rebuilds. An unrecognized/omitted mode is treated as `'none'` — fails
      * closed to "no grade" rather than risking a stale mode string wedging a
      * viewer into a permanent tint.
-     * @param {string|null} mode @param {number} timeMs
+     * @param {string|null} mode @param {number} timeMs @param {number} [darkness01] the scene's darkness (omitted = fully dark)
+     * @param {{x:number,y:number,tokenSizePx?:number}|null} [anchorWorld] selected token center/size in world pixels.
      */
-    setPlayerVisionMode: (mode, timeMs) => {
+    setPlayerVisionMode: (mode, timeMs, darkness01, anchorWorld) => {
       const next = PLAYER_VISION_MODE_NAMES_SAFE.has(mode) ? mode : 'none';
-      if (next !== currentPlayerVisionMode) {
-        currentPlayerVisionMode = next;
+      const nowMs = Number.isFinite(Number(timeMs)) ? Number(timeMs) : 0;
+      if (next !== requestedPlayerVisionMode) {
+        const powerNow = easedVisionPower(nowMs);
+        requestedPlayerVisionMode = next;
+        if (next === 'none') {
+          if (currentPlayerVisionMode === 'nightVision') {
+            beginVisionPowerTransition(powerNow, 0, nowMs, VISION_MODE_PRESETS.nightVision.shutdownSeconds);
+          } else {
+            beginVisionPowerTransition(0, 0, nowMs, 0);
+            currentPlayerVisionMode = 'none';
+            rebuildFragment();
+          }
+        } else {
+          const switchingFromNightVision = currentPlayerVisionMode === 'nightVision';
+          if (next !== currentPlayerVisionMode) {
+            currentPlayerVisionMode = next;
+            rebuildFragment();
+          }
+          if (next === 'nightVision') {
+            const warmupFrom = switchingFromNightVision ? powerNow : 0;
+            beginVisionPowerTransition(warmupFrom, 1, nowMs, VISION_MODE_PRESETS.nightVision.warmupSeconds, true);
+          } else {
+            beginVisionPowerTransition(1, 1, nowMs, 0);
+          }
+        }
+      }
+      uPlayerVisionTimeMs.value = nowMs;
+      const dark = Number(darkness01);
+      uPlayerVisionDarkness.value = Number.isFinite(dark) ? Math.min(1, Math.max(0, dark)) : 1;
+      const anchorX = Number(anchorWorld?.x);
+      const anchorY = Number(anchorWorld?.y);
+      if (Number.isFinite(anchorX) && Number.isFinite(anchorY)) {
+        uPlayerVisionAnchorWorld.value.set(anchorX, anchorY);
+        const tokenSize = Number(anchorWorld.tokenSizePx);
+        if (Number.isFinite(tokenSize) && tokenSize > 0) uPlayerVisionTokenSize.value = tokenSize;
+        else uPlayerVisionTokenSize.value = 100;
+        uPlayerVisionAnchorValid.value = 1;
+      } else {
+        uPlayerVisionAnchorValid.value = 0;
+      }
+      const power = easedVisionPower(nowMs);
+      uPlayerVisionPower.value = power;
+      if (requestedPlayerVisionMode === 'none' && currentPlayerVisionMode !== 'none' && power <= 1e-3) {
+        currentPlayerVisionMode = 'none';
         rebuildFragment();
       }
-      uPlayerVisionTimeMs.value = Number.isFinite(Number(timeMs)) ? Number(timeMs) : 0;
+    },
+    /**
+     * Push this frame's visible tokens for the infravision hot-body recolour
+     * (2026-10-15). `tokens[i]` is `{x, y, radiusX, radiusY}` in the SAME world
+     * pixels `uPlayerVisionAnchorWorld` uses — the token's own bounding box,
+     * which is the shape the recolour paints — ordered nearest-to-the-wearer
+     * first, and `count` says how many of them are real this frame: a caller can
+     * hand over its own persistent scratch array (which may be longer than
+     * `PLAYER_VISION_TOKEN_SLOTS`) with no slicing and no per-frame allocation.
+     * Every slot beyond `count` is switched OFF (`radiusX = 0`, which the shader
+     * reads as "no token") so a token that walks off screen stops reading hot
+     * the same frame. Never rebuilds the fragment — only uniform values change,
+     * exactly the split `setPlayerVisionMode`'s own `timeMs` uses.
+     * @param {ReadonlyArray<{x:number,y:number,radiusX:number,radiusY:number}>} [tokens]
+     * @param {number} [count] - how many leading entries of `tokens` are valid.
+     */
+    setPlayerVisionTokens: (tokens = [], count = tokens.length) => {
+      for (let i = 0; i < uPlayerVisionTokens.length; i++) {
+        const slot = uPlayerVisionTokens[i].value;
+        const t = i < count ? tokens[i] : null;
+        if (t) slot.set(t.x, t.y, Math.max(Number(t.radiusX) || 0, 0), Math.max(Number(t.radiusY) || 0, 0));
+        else slot.set(0, 0, 0, 0);
+      }
     },
     /**
      * Push the artistic grade. `gradeParams` are the primary ops; `tail` is
@@ -376,6 +526,6 @@ export function buildGradePresentMaterial({
      * @returns {*}
      */
     getLitSource: () => presentTexNode.value,
-    gateCompiled: !!outdoors,
+    gateCompiled,
   };
 }

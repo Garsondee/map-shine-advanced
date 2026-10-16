@@ -16,6 +16,7 @@ import { run as runCandleFlame } from './candle-flame.test.mjs';
 import { run as runCandleFlameGeometry } from './candle-flame-geometry.test.mjs';
 import { run as runCandleIgnite } from './candle-ignite.test.mjs';
 import { run as runPlayerTorchFlameGeometry } from './player-torch-flame-geometry.test.mjs';
+import { run as runPlayerTorchFireGeometry } from './player-torch-fire-geometry.test.mjs';
 import { run as runLightning } from './lightning.test.mjs';
 import { run as runLightningGeometry } from './lightning-geometry.test.mjs';
 import { run as runLightningSubsystem } from './lightning-subsystem.test.mjs';
@@ -72,6 +73,7 @@ const suites = [
   ['candle-flame-geometry', runCandleFlameGeometry],
   ['candle-ignite', runCandleIgnite],
   ['player-torch-flame-geometry', runPlayerTorchFlameGeometry],
+  ['player-torch-fire-geometry', runPlayerTorchFireGeometry],
   ['lightning', runLightning],
   ['lightning-geometry', runLightningGeometry],
   ['lightning-subsystem', runLightningSubsystem],

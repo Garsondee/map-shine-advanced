@@ -43,6 +43,8 @@
  * @property {number} [apertureCount] - a light with any apertures is NEVER
  *   admitted in v1 (design doc §3.1: apGoboCols/Rows are graph-build-time
  *   unroll counts, would fragment buckets by construction).
+ * @property {string|null} [cookiePattern] - textured cookie lights stay on
+ *   the per-light path until the batch shader has an equivalent sampler.
  * @property {boolean} [hasColor]
  * @property {number} vertexCount - this light's own triangulated fan vertex
  *   count this frame (`triangulateLightFan`'s own `vertexCount`).
@@ -104,8 +106,8 @@ export function computeBucketKey({ animationType, animationResolved, animationQu
  * @param {BatchLightDescriptor} light
  * @returns {boolean}
  */
-export function canBatchLight({ apertureCount, falloffModel }) {
-  if (Number(apertureCount) > 0) return false;
+export function canBatchLight({ apertureCount, falloffModel, cookiePattern }) {
+  if (Number(apertureCount) > 0 || cookiePattern) return false;
   return BATCH_FALLOFF_MODELS.includes(falloffModel);
 }
 

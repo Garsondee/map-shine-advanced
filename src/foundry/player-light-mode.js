@@ -21,7 +21,7 @@
 export const PLAYER_LIGHT_MODE_NAMESPACE = 'map-shine-advanced';
 export const PLAYER_LIGHT_MODE_FLAG = 'playerLightMode';
 
-/** The six modes #77 defines — mirrors `player-light-permissions.js#PLAYER_LIGHT_MODE_KEYS`
+/** The seven modes #77 defines — mirrors `player-light-permissions.js#PLAYER_LIGHT_MODE_KEYS`
  * (kept as a separate copy rather than a shared import: one is the GM's
  * allowance-map KEY SET, this is the valid VALUE set for one token's own
  * flag — they happen to be the same six strings today, but a future mode
@@ -33,6 +33,7 @@ export const PLAYER_LIGHT_MODES = Object.freeze([
   'flashlight',
   'nightVision',
   'lowLight',
+  'activeLowLight',
   'infravision',
   'activeInfravision',
 ]);
@@ -91,15 +92,21 @@ export async function writeTokenPlayerLightMode(tokenDocument, mode) {
  * Foundry document state (the flag is a synced Token document flag, not a
  * client-local setting).
  *
- * `rotation`/`lockRotation` (mythica-machina-press#579/#77 Stage 2a) — the
- * SAME live-read discipline as `x`/`y`: `token.document.rotation` is a real
- * synced Token-document field (`common/data/fields.mjs#AngleField`, degrees),
- * read fresh every call, never cached — a flashlight beam must follow the
- * bearer's live facing exactly as it already follows their live position.
- * Feeds `effects/lighting/player-light-geometry.js#tokenRotationToForwardVector`;
- * a non-beam mode (torch) simply ignores both fields.
+ * NOTHING HERE READS A FACING (2026-10-15). Stage 2a used to lift
+ * `TokenDocument.rotation`/`lockRotation` into this shape so an un-aimed beam
+ * could point along the token's stored facing, and a freshly loaded scene
+ * therefore always aimed north (the author's own report). Which way a beam
+ * points now comes from the bearer's live cursor alone —
+ * `foundry/player-aim-channel.js#annotate` stamps `aimAngleDeg` onto these very
+ * snapshots immediately after they are built, on the same shared objects — and
+ * `effects/lighting/player-light-geometry.js#hasCarriedLightAim` turns "nobody
+ * is steering this" into "there is no light". Dropping the two fields keeps
+ * this a pure "raw facts a light needs" read rather than carrying a facing
+ * nothing consumes. (The ANGLE UNIT is still `TokenDocument.rotation`'s:
+ * degrees, 0 = up, clockwise —
+ * `effects/lighting/player-light-geometry.js#tokenRotationToForwardVector`.)
  *
- * @returns {Array<{tokenId: string, x: number, y: number, elevation: number, mode: string, rotation: number, lockRotation: boolean, radiusPx: number}>}
+ * @returns {Array<{tokenId: string, x: number, y: number, elevation: number, mode: string, radiusPx: number}>}
  */
 export function readActivePlayerCarriedLightTokens() {
   if (typeof canvas === 'undefined' || !canvas?.tokens?.placeables) return [];
@@ -110,7 +117,6 @@ export function readActivePlayerCarriedLightTokens() {
     if (!mode) continue;
     const center = token.center ?? { x: token.document?.x ?? 0, y: token.document?.y ?? 0 };
     const elevation = Number(token.document?.elevation);
-    const rotation = Number(token.document?.rotation);
     // The circle the token occupies: half its smaller side, in pixels (`Token#w`/`#h`).
     // A flashlight sits on this circle's rim, not on the token's centre.
     const bodyPx = Math.min(Number(token.w), Number(token.h));
@@ -120,8 +126,6 @@ export function readActivePlayerCarriedLightTokens() {
       y: center.y,
       elevation: Number.isFinite(elevation) ? elevation : 0,
       mode,
-      rotation: Number.isFinite(rotation) ? rotation : 0,
-      lockRotation: token.document?.lockRotation === true,
       radiusPx: Number.isFinite(bodyPx) && bodyPx > 0 ? bodyPx / 2 : 0,
     });
   }

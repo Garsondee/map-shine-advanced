@@ -59,6 +59,73 @@ export function run(t) {
     buildVisionLightData({ sourceId: 'fire:xyz', x: 3, y: 4, radius: 20 }).sourceId === 'msa-vision:fire:xyz'
   );
 
+  // ---- player-carried lights (2026-10-16) -------------------------------
+  // The SAME door-reveal gap, reported a second time: "the door logo is not
+  // turning up when I flash the player lights at a door in a dark area".
+  {
+    // A torch: one circular glow at the flame, its own `radius` is a genuine
+    // glow radius — builds exactly like a candle.
+    const torch = buildVisionLightData({
+      sourceId: 'playerLight:t1',
+      x: 10,
+      y: 20,
+      elevation: 0,
+      radius: 690,
+      falloffModel: 'inverseSquare',
+    });
+    ok('a torch descriptor builds', torch !== null);
+    ok('the torch source is namespaced like every other MSA light', torch.sourceId === 'msa-vision:playerLight:t1');
+    ok('the torch reveals at double its own glow radius', torch.dim === 690 * DETECTION_RADIUS_MULTIPLIER);
+  }
+  {
+    // The flashlight's MAIN descriptor: `radius` 820 is the beam's THROW
+    // LENGTH, not a glow radius, and the pool paints a cone inside that
+    // circle — never the circle. Registering it would reveal in every
+    // direction at 1640 px, doors behind the bearer included.
+    ok(
+      'the flashlight beam descriptor is skipped, never turned into a 360° reveal',
+      buildVisionLightData({
+        sourceId: 'playerLight:t2',
+        x: 1,
+        y: 1,
+        elevation: 0,
+        radius: 820,
+        falloffModel: 'beam',
+        beamDirection: { x: 1, y: 0 },
+      }) === null
+    );
+    ok(
+      'a beam descriptor without geometry still skips (the guard runs first)',
+      buildVisionLightData({ sourceId: 'playerLight:t2', falloffModel: 'beam' }) === null
+    );
+    // ...the beam's reveal rides on WHERE IT LANDS instead. Both of these
+    // are genuine glow radii, so both pass.
+    const endpoint = buildVisionLightData({
+      sourceId: 'playerLightEndpoint:t2',
+      x: 400,
+      y: 200,
+      elevation: 0,
+      radius: 60,
+      ellipseAlongPx: 120,
+      ellipseAngleRad: 1.2,
+      falloffModel: 'foundry',
+      cookiePattern: 'flashlight',
+    });
+    ok('the beam endpoint spot DOES build (where the beam lands is where it reveals)', endpoint !== null);
+    ok('the endpoint keeps its own namespaced id', endpoint.sourceId === 'msa-vision:playerLightEndpoint:t2');
+    ok('the endpoint reveals at double its own glow radius', endpoint.dim === 120);
+    const bounce = buildVisionLightData({
+      sourceId: 'playerLightBounce:t2',
+      x: 400,
+      y: 200,
+      elevation: 0,
+      radius: 460,
+      falloffModel: 'foundry',
+    });
+    ok('the bounced fill DOES build (bounced light spills around the landing point)', bounce !== null);
+    ok('the bounce reveals at double its own glow radius', bounce.dim === 920);
+  }
+
   // ---- diffVisionLightState ---------------------------------------------
   {
     const r = diffVisionLightState([], new Map());

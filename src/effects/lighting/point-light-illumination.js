@@ -416,12 +416,15 @@ function beamSmoothstep01(edge0, edge1, x) {
  * future edit.
  *
  * THE SHAPE: `axial` = how far along the bearer's own facing direction a
- * fragment sits (0 at the bearer, 1 at the beam's max reach — the light's own
- * `radius`, matching `dist`'s identical unit-radius normalization); `lateral`
- * = the perpendicular offset from that facing axis, in the SAME normalized
- * units. The beam's half-width grows from `nearHalfWidth01` to
- * `farHalfWidth01` as `axial` goes 0→1 (a cone, not a cylinder); a fragment's
- * `lateralFrac` (lateral ÷ half-width-at-this-axial) drives a soft edge
+ * fragment sits (0 at the bearer, 1 at the END OF THE DRAWN BEAM — which is
+ * `reach01` of the light's own `radius`, the throw that `dist` is normalized
+ * against); `lateral` = the perpendicular offset from that facing axis, in the
+ * SAME normalized units. The cone's half-width is WORLD-ANCHORED: it grows from
+ * `nearHalfWidth01` (the flashlight's own mouth) to `farHalfWidth01` (that mouth
+ * plus its full divergence) over the world distance 0 → `radius`, so at a world
+ * distance of `reach01 · radius` it is `near + (far - near)·reach01` wide whether
+ * the beam was drawn that long or to full throw. A fragment's `lateralFrac`
+ * (lateral ÷ half-width-at-this-distance) drives a soft edge
  * (`edgeSoftness01`) and a three-stop hot-core/mid/rim brightness band
  * (fixed stops at 0.3/0.75 — not param-authored, this is the "own considered
  * take on the shape" the dispatch invited, not a V2 port). `lengthFalloffExponent`
@@ -441,12 +444,25 @@ export function computeBeamFalloff01({
   coreIntensity,
   midIntensity,
   rimIntensity,
+  reach01 = 1,
 }) {
   if (!Number.isFinite(axial) || !Number.isFinite(lateral)) return 0;
   const forwardMask = beamSmoothstep01(0, 0.02, axial); // a soft ramp, not a hard cutoff, for "behind the bearer"
   const t = Math.min(1, Math.max(0, axial));
-  const halfWidth = Math.max(0.001, nearHalfWidth01 + (farHalfWidth01 - nearHalfWidth01) * t);
-  const lateralFrac = Math.abs(lateral) / halfWidth;
+  // THE CONE'S WIDTH IS WORLD-ANCHORED (2026-10-15) — `nearHalfWidth01` is the
+  // flashlight's own MOUTH and the `far - near` ramp its divergence, both
+  // measured against the light's full `radius`, NOT against however long this
+  // beam happens to be drawn. `reach01` is the only thing that says how long that
+  // is (`axial = 1` is the beam's end, at `reach01` of the throw), so the two
+  // widths below are scaled by it: at `axial·reach01` along the throw the cone is
+  // the same width whether the beam is at full length or a fifth of it. A beam
+  // whose width scaled WITH its length instead would be a cone collapsing to a
+  // point at the bearer, i.e. a needle at point-blank range — the bug the author
+  // reported on 2026-10-15. At `reach01 = 1` (the default) this is byte-identical
+  // to the pre-2026-10-15 maths.
+  const reach = Number.isFinite(reach01) ? Math.min(1, Math.max(1e-4, reach01)) : 1;
+  const halfWidth = Math.max(0.001, nearHalfWidth01 + (farHalfWidth01 - nearHalfWidth01) * t * reach);
+  const lateralFrac = (Math.abs(lateral) * reach) / halfWidth;
   const softness = Math.max(0.001, edgeSoftness01);
   const edgeMask = 1 - beamSmoothstep01(1 - softness, 1 + softness, lateralFrac);
   const exponent = Math.max(0, lengthFalloffExponent);
@@ -471,11 +487,12 @@ export function computeBeamFalloff01({
  *   SAME node `dist = length(localUnitXY)` is already derived from).
  * @param {*} args.beamDirection - a vec2 TSL node/uniform: the bearer's own live
  *   facing direction (world-space, same convention as `localUnitXY` — see
- *   `player-light-geometry.js#tokenRotationToForwardVector` for the one place
- *   the direction is derived from a Foundry document). Unit length means the
- *   beam's full throw; a LONGER vector shortens the beam (length 1/f draws it at
- *   fraction f of its throw, cone angle preserved) because `axial`/`lateral`
- *   below are plain dot products with NO normalization — do not add one.
+ *   `player-light-geometry.js#tokenRotationToForwardVector`). Unit length means
+ *   the beam's full throw; a LONGER vector shortens the beam (length 1/f draws it
+ *   at fraction f of its throw) because `axial`/`lateral` below are plain dot
+ *   products with NO normalization — do not add one. That reciprocal is also how
+ *   this node recovers `reach01`, which is what keeps the cone's own WIDTH
+ *   anchored to the world rather than to the drawn length.
  * @param {number} args.nearHalfWidth01 @param {number} args.farHalfWidth01
  * @param {number} args.edgeSoftness01 @param {number} args.lengthFalloffExponent
  * @param {number} args.coreIntensity @param {number} args.midIntensity
@@ -498,14 +515,23 @@ export function buildBeamFalloffNode(
     rimIntensity,
   }
 ) {
-  const { float, vec2, dot, abs, clamp, smoothstep, mix, max, pow } = TSL;
+  const { float, vec2, dot, abs, clamp, smoothstep, mix, max, pow, length } = TSL;
   const perp = vec2(beamDirection.y.negate(), beamDirection.x);
   const axial = dot(localUnitXY, beamDirection);
   const lateral = abs(dot(localUnitXY, perp));
   const t = clamp(axial, float(0), float(1));
   const forwardMask = smoothstep(float(0), float(0.02), axial);
-  const halfWidth = max(mix(float(nearHalfWidth01), float(farHalfWidth01), t), float(0.001));
-  const lateralFrac = lateral.div(halfWidth);
+  // WORLD-ANCHORED WIDTH — `beamDirection`'s own length IS 1/reach01 (see
+  // player-light-geometry.js#resolveBeamReach01), so its reciprocal recovers the
+  // reach the beam was sized with: near/far are widths against the light's full
+  // `radius`, not against the drawn length. Mirrors computeBeamFalloff01's own
+  // `* reach` pair below and above it; at reach01 = 1 both are inert.
+  const reach01 = float(1).div(max(length(beamDirection), float(0.0001)));
+  const halfWidth = max(
+    float(nearHalfWidth01).add(float(farHalfWidth01).sub(float(nearHalfWidth01)).mul(t).mul(reach01)),
+    float(0.001)
+  );
+  const lateralFrac = lateral.mul(reach01).div(halfWidth);
   const softness = float(Math.max(0.001, edgeSoftness01));
   const edgeMask = float(1).sub(smoothstep(float(1).sub(softness), float(1).add(softness), lateralFrac));
   const lengthFalloff = pow(max(float(0), float(1).sub(t)), float(Math.max(0, lengthFalloffExponent)));
@@ -1137,6 +1163,8 @@ function makeSdPolygonEdgeDistance(TSL) {
  *   codebase gets).
  * @param {object} [args.beamShape] - the seven plain-number shape constants
  *   {@link buildBeamFalloffNode} takes, forwarded verbatim.
+ * @param {*} [args.cookieTexture] - optional 2D gobo/cookie sampled in this
+ *   light's local unit-circle space, so wall/depth gates still apply to it.
  * @returns {{dist: *, falloff: *, falloffGoboed: *, depthHere: *,
  *   depthFlagsHere: *, uApLampHeight: (*|null), apApertures: (Array|null)}}
  *   `falloff` is height-gated but NOT gobo-multiplied (illumination's own
@@ -1163,6 +1191,7 @@ export function buildPointLightSharedTerms({
   apertureGoboShared,
   beamDirection = null,
   beamShape = null,
+  cookieTexture = null,
 }) {
   const { float, screenUV, smoothstep, length, positionWorld, mix } = THREE.TSL;
 
@@ -1200,6 +1229,15 @@ export function buildPointLightSharedTerms({
   } else {
     const attenForFalloff = attenuationEased.max(float(0.0001));
     falloff = smoothstep(float(1), float(1).sub(attenForFalloff), dist);
+  }
+
+  // PROJECTED FLASHLIGHT COOKIE — part of this light's falloff, not a
+  // post-composite sprite, so its pattern inherits the light's own wall clip,
+  // vision/depth gate, and per-source MAX blend. Ordinary lights compile none.
+  if (cookieTexture) {
+    const cookieUv = localUnitXY.mul(float(0.5)).add(THREE.TSL.vec2(0.5, 0.5));
+    const cookie = THREE.TSL.texture(cookieTexture).sample(cookieUv).r.clamp(0, 1);
+    falloff = falloff.mul(cookie);
   }
 
   // Sampled here (once), not inside buildDepthHeightGateNode itself, so a
@@ -1315,6 +1353,7 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
     apGoboCols,
     apGoboRows,
     beamShape,
+    cookieTexture,
   } = flags;
   const {
     localUnitXY,
@@ -1405,6 +1444,7 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
     apertureGoboShared,
     beamDirection,
     beamShape,
+    cookieTexture,
   });
 
   // switchColor(bright, dim, dist) — TRANSITION, audit §5c. Exposed as a
@@ -1968,6 +2008,7 @@ export function buildPointLightIlluminationMaterial({
   apGoboCols,
   apGoboRows,
   apertureGoboShared,
+  cookieTexture = null,
   cloudUniforms,
   buildCloudField,
   buildCloudGroundVis,
@@ -2073,7 +2114,16 @@ export function buildPointLightIlluminationMaterial({
         cloudStrengthNode,
         cloudBlurNode,
       },
-      flags: { animation, animationQuality, falloffModel, apertureCount, apGoboCols, apGoboRows, beamShape },
+      flags: {
+        animation,
+        animationQuality,
+        falloffModel,
+        apertureCount,
+        apGoboCols,
+        apGoboRows,
+        beamShape,
+        cookieTexture,
+      },
     });
 
   const material = new THREE.NodeMaterial();

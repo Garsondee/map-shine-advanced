@@ -11,6 +11,19 @@
  * a token standing beside a lit candle still can't see the door beside it —
  * reported live, confirmed even at point-blank range (author, 2026-08-31).
  *
+ * THE SAME GAP, TWICE REPORTED — PLAYER-CARRIED LIGHTS (2026-10-16): "the
+ * lights produced by the 'Player Light' system do not reveal the presence of
+ * doors... the door logo is not turning up when I flash the player lights at
+ * a door in a dark area" (author's own live report). A torch or flashlight
+ * lights a room for MSA's renderer and was equally invisible to that same
+ * `testInsideLight` walk, for the same reason: `effects/lighting/player-
+ * light-geometry.js#buildPlayerLightSources`'s descriptors had never been
+ * fed into this bridge. They are now its THIRD descriptor source
+ * (`getPlayerLightDescriptors`), with one deliberate subtraction — a
+ * flashlight's MAIN descriptor is skipped, never registered; see
+ * `buildVisionLightData`'s own "A BEAM IS NOT A GLOW" guard for why the
+ * beam's reveal rides on its endpoint/bounce descriptors instead.
+ *
  * THE SAME GAP, THIRD REPORT — DOORS IN DAYLIGHT (2026-10-16): "an exterior
  * door during the day is bright enough to see the door and the icon should
  * appear but because there are technically no lights the process isn't quite
@@ -29,11 +42,9 @@
  * nothing but that doorway - Foundry's own line-of-sight gate still decides
  * who can see it.
  *
- * THE FIX: mirror each candle/fire light descriptor MSA already computes
- * (`effects/candle-flame-geometry.js#buildCandleLightSources`,
- * `effects/fire/fire-subsystem.js`'s own `lightSources()`) into a REAL
- * `PointLightSource`, registered into `canvas.effects.lightSources` the
- * exact way a real `AmbientLight` does
+ * THE FIX: mirror each MSA light descriptor — candle, fire, player-carried —
+ * into a REAL `PointLightSource`, registered into
+ * `canvas.effects.lightSources` the exact way a real `AmbientLight` does
  * (`client/canvas/placeables/light.mjs#initializeLightSource`:
  * `new sourceClass({sourceId, object}); source.initialize(data); source.add();`)
  * — except `object` is optional (`BaseEffectSource`'s own constructor:
@@ -66,7 +77,7 @@
  * radius (`PointLightSource.testPoint`), NOT a brightness threshold
  * (verified against `detection-mode/light-perception.mjs` +
  * `groups/effects.mjs#testInsideLight`) — so "reaches far enough" is the
- * whole ask. `bright` is set to the candle/fire's own already-scaled visual
+ * whole ask. `bright` is set to the light's own already-scaled visual
  * radius (matches what the player sees as lit); `dim` is
  * `DETECTION_RADIUS_MULTIPLIER` (2) times that — the author's own explicit
  * "up to double the normal radius" ask (2026-08-31) — for detection only.
@@ -80,10 +91,12 @@
  * convert the authored grid-unit fields to pixels before a source ever sees
  * them (`foundry/scene-lights.js`'s own header confirms the inverse: a LIVE
  * source's `.radius` is pixel-ready). MSA's own descriptors
- * (`buildCandleLightSources`/`buildFireLightSources`) are pixel radii from
- * the start (`fireCirclePolygon`/`candleCirclePolygon`), so no grid-size
- * conversion belongs in this file at all — passing them straight through as
- * `dim`/`bright` is the CORRECT unit, not a shortcut past one.
+ * (`buildCandleLightSources`/`buildFireLightSources`, and `player-light-
+ * geometry.js#buildPlayerLightSources`'s endpoint/bounce descriptors) are
+ * pixel radii from the start (`fireCirclePolygon`/`candleCirclePolygon`/
+ * `playerLightCirclePolygon`), so no grid-size conversion belongs in this
+ * file at all — passing them straight through as `dim`/`bright` is the
+ * CORRECT unit, not a shortcut past one.
  *
  * THROTTLED ON WALL TIME, NEVER SIM TIME — same mechanical bug this project
  * already paid for once
@@ -111,8 +124,8 @@
 export const SOURCE_ID_PREFIX = 'msa-vision:';
 
 /**
- * How much further than the candle/fire's own visual radius its DETECTION
- * reach extends, for Foundry's own vision/door-reveal math only. The
+ * How much further than a light's own visual radius its DETECTION reach
+ * extends, for Foundry's own vision/door-reveal math only. The
  * author's own explicit ask (2026-08-31): "up to double the normal light
  * radius." A named constant, not a new FOH slider — nobody asked for a
  * second knob, they asked for the gap closed.
@@ -146,16 +159,31 @@ export const MIN_SYNC_INTERVAL_MS = 300;
 
 /**
  * Build ONE synthetic light's Foundry-facing data from an MSA light
- * descriptor (candle or fire — both share this shape:
+ * descriptor (candle, fire, or player-carried — all share this shape:
  * `{sourceId, x, y, elevation, radius}`, pixels). Pure.
  *
  * @param {object} descriptor
  * @returns {{sourceId:string, x:number, y:number, elevation:number, dim:number, bright:number}|null}
  *   `null` for anything not worth registering — no id, non-finite geometry,
- *   or a radius that resolves to zero/negative (a candle authored with no
- *   light, `buildCandleLightSources`' own "radius ≤0 emits nothing" rule).
+ *   a radius that resolves to zero/negative (a candle authored with no
+ *   light, `buildCandleLightSources`' own "radius ≤0 emits nothing" rule),
+ *   or a beam's own main descriptor (see the guard below).
  */
 export function buildVisionLightData(descriptor) {
+  // A BEAM IS NOT A GLOW (2026-10-16) — a flashlight's MAIN descriptor
+  // (`playerLight:tokenId`) carries `radius` = the beam's own THROW LENGTH
+  // (player-light-geometry.js's flashlight preset, 820 px) and `falloffModel:
+  // 'beam'`; the pool paints a cone inside that circle, never the circle. A
+  // synthetic source built from it would reveal in every direction at DOUBLE
+  // the throw (1640 px) — a door behind the bearer included, and its circle
+  // would be centred on the bearer's rim rather than anywhere the beam points.
+  // The beam's reveal is carried where it actually LANDS instead: its endpoint
+  // spot and its bounced fill are separate descriptors, each a genuine glow
+  // radius (see `buildPlayerLightSources`'s own endpoint/bounce blocks), and
+  // the aim is wall-clamped before either is built — "flashed at a door" puts
+  // the endpoint ON the door. Skipping the main descriptor loses nothing;
+  // registering it would reveal through 360° of darkness.
+  if (descriptor?.falloffModel === 'beam') return null;
   if (!descriptor || typeof descriptor.sourceId !== 'string' || !descriptor.sourceId) return null;
   const x = Number(descriptor.x);
   const y = Number(descriptor.y);
@@ -328,6 +356,7 @@ export function diffVisionLightState(currentDescriptors, appliedById) {
  * @param {object} args
  * @param {() => Array<object>} [args.getCandleDescriptors] - e.g. `() => buildCandleLightSources(getCandleRenderState().anchors, {...})`.
  * @param {() => Array<object>} [args.getFireDescriptors] - e.g. `() => fireSubsystem.lightSources()`.
+ * @param {() => Array<object>} [args.getPlayerLightDescriptors] - e.g. `getPlayerCarriedLightSources` (`boot.js`'s own live closure — the SAME function `point-light-pool.js` reads). Torch descriptors become one circular reveal at the flame; a flashlight's beam MAIN descriptor is skipped inside `buildVisionLightData` (see its "A BEAM IS NOT A GLOW" guard) while its endpoint/bounce descriptors pass.
  * @param {(ctx?: object) => Array<object>} [args.getDoorDescriptors] - e.g. a closure over `buildDaylitDoorDescriptors`; handed `sync`'s `ctx` (the frame's `{darkness01}`).
  * @param {number} [args.minIntervalMs]
  * @returns {{sync:(realMs:number, ctx?:object)=>object, dispose:()=>void}}
@@ -335,6 +364,7 @@ export function diffVisionLightState(currentDescriptors, appliedById) {
 export function createSceneSyntheticLights({
   getCandleDescriptors,
   getFireDescriptors,
+  getPlayerLightDescriptors,
   getDoorDescriptors,
   minIntervalMs = MIN_SYNC_INTERVAL_MS,
 } = {}) {
@@ -346,21 +376,25 @@ export function createSceneSyntheticLights({
 
   function gatherCurrent(ctx) {
     const out = [];
-    const candles = typeof getCandleDescriptors === 'function' ? getCandleDescriptors() : null;
-    const fires = typeof getFireDescriptors === 'function' ? getFireDescriptors() : null;
-    for (const d of Array.isArray(candles) ? candles : []) {
-      const built = buildVisionLightData(d);
-      if (built) out.push(built);
-    }
-    for (const d of Array.isArray(fires) ? fires : []) {
-      const built = buildVisionLightData(d);
-      if (built) out.push(built);
-    }
-    // DAYLIT DOORWAYS (2026-10-16) - see the header's "THIRD REPORT".
-    const doors = typeof getDoorDescriptors === 'function' ? getDoorDescriptors(ctx) : null;
-    for (const d of Array.isArray(doors) ? doors : []) {
-      const built = buildVisionLightData(d);
-      if (built) out.push(built);
+    // Each getter is optional and may return anything — everything below
+    // tolerates a non-array (an un-wired caller, a getter that returned null)
+    // exactly like the single-source version always has.
+    const lists = [
+      typeof getCandleDescriptors === 'function' ? getCandleDescriptors() : null,
+      typeof getFireDescriptors === 'function' ? getFireDescriptors() : null,
+      // PLAYER-CARRIED LIGHTS (2026-10-16) — the torch/flashlight descriptors
+      // the pool is drawing this very frame (boot.js's own closure). The beam's
+      // main descriptor is dropped by `buildVisionLightData` itself, so no
+      // filtering belongs here — one rule, one place.
+      typeof getPlayerLightDescriptors === 'function' ? getPlayerLightDescriptors() : null,
+      // DAYLIT DOORWAYS (2026-10-16) - see the header's "THIRD REPORT".
+      typeof getDoorDescriptors === 'function' ? getDoorDescriptors(ctx) : null,
+    ];
+    for (const list of lists) {
+      for (const d of Array.isArray(list) ? list : []) {
+        const built = buildVisionLightData(d);
+        if (built) out.push(built);
+      }
     }
     return out;
   }

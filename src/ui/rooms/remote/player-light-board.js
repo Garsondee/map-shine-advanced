@@ -1,7 +1,7 @@
 /**
  * ui/rooms/remote/player-light-board.js — THE PLAYER LIGHT BOARD
  * (mythica-machina-press#77, mythica-machina-press#577), GM-only: which of
- * the six carried light/vision modes are offered on THIS scene, whether
+ * the seven carried light/vision modes are offered on THIS scene, whether
  * players can pick their own at all, and how hard night crushes toward true
  * black on a floor nothing is lighting.
  *
@@ -10,9 +10,9 @@
  * already use) rather than inventing a second control language for this
  * board.
  *
- * ⚠️ ALL SIX MODES RENDER SOMETHING AS OF STAGE 2B (mythica-machina-
+ * ⚠️ ALL SEVEN MODES RENDER SOMETHING AS OF STAGE 2B (mythica-machina-
  * press#77, mythica-machina-press#580) — Torch/Flashlight as real MSA-
- * rendered LIGHTS everyone at the table sees (Stage 2a), the other four as
+ * rendered LIGHTS everyone at the table sees (Stage 2a), the other five as
  * real MSA screen-space GRADES visible only to the wearer's own client
  * (`effects/vision/player-vision-grade-render.js`). Both kinds are real and
  * functional; the tooltip below says which is which so a GM isn't left
@@ -27,11 +27,11 @@
 import { buildParamControl } from '../../widgets/param-control.js';
 import { renderPlayerLightPicker } from '../player-light-picker.js';
 
-/** The six mode keys, in the order they should appear, and WHAT each one
+/** The seven mode keys, in the order they should appear, and WHAT each one
  * renders — matches `foundry/player-light-permissions.js#
  * PLAYER_LIGHT_MODE_KEYS` exactly (a literal copy, not an import: this is a
  * UI-ordering/labelling concern, the persistence module's own list is a
- * validity concern — the two happen to need the same six strings today, not
+ * validity concern — the two happen to need the same seven strings today, not
  * a reason to couple the files). `kind` matches `ui/rooms/player-light-
  * picker.js`'s own identical field (see that file's own header for why it
  * isn't a shared import either). */
@@ -40,6 +40,7 @@ const MODE_ROWS = Object.freeze([
   { key: 'flashlight', label: 'Flashlight', kind: 'light' },
   { key: 'nightVision', label: 'Night Vision', kind: 'grade' },
   { key: 'lowLight', label: 'Low-light Vision', kind: 'grade' },
+  { key: 'activeLowLight', label: 'Low Light (Active)', kind: 'grade' },
   { key: 'infravision', label: 'Infravision', kind: 'grade' },
   { key: 'activeInfravision', label: 'Active Infravision', kind: 'grade' },
 ]);

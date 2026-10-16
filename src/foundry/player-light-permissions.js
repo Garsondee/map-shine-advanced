@@ -31,13 +31,14 @@ export const PLAYER_LIGHT_NAMESPACE = 'map-shine-advanced';
 export const PLAYER_LIGHT_PERMISSIONS_FLAG = 'playerLightPermissions';
 
 /** Every mode key #77 defines, Stage-1-rendered or not — the allowance list
- * covers all six so Stage 2's vision-mode grades need no schema change when
+ * covers all seven so Stage 2's vision-mode grades need no schema change when
  * they land; only Torch/Flashlight's OWN render code exists yet. */
 export const PLAYER_LIGHT_MODE_KEYS = Object.freeze([
   'torch',
   'flashlight',
   'nightVision',
   'lowLight',
+  'activeLowLight',
   'infravision',
   'activeInfravision',
 ]);
@@ -46,7 +47,7 @@ export const PLAYER_LIGHT_MODE_KEYS = Object.freeze([
  * The defaults an unconfigured scene reads as — installing this feature must
  * change nothing about a scene nobody has touched yet, the same "opt-in
  * changes nothing visible until edited" posture `sky-persistence.js#
- * setSceneSkyOverride`'s own doc names. All six modes allowed, players free
+ * setSceneSkyOverride`'s own doc names. All seven modes allowed, players free
  * to choose, darkness realism at 0 (today's Foundry-parity floor —
  * `vt-pan-viewer.js#setDarknessRealism`'s own documented default).
  * @returns {{modes: Record<string, boolean>, playersCanChooseMode: boolean, darknessRealism01: number}}

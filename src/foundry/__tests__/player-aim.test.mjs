@@ -15,9 +15,14 @@ import {
   AIM_FLASHLIGHT_REACH_CAP_PX,
   torchBurnTarget01,
   createTorchBurn,
+  createTorchMotionGutter,
   torchWanderOffset,
   AIM_TORCH_WANDER_PX,
   AIM_TORCH_WANDER_STEP_PX,
+  AIM_TORCH_EASE_TAU_MS,
+  flashlightAimWanderDeg,
+  AIM_FLASHLIGHT_WANDER_DEG,
+  AIM_FLASHLIGHT_EASE_TAU_MS,
   AIM_MAX_REACH_PX,
   AIM_TORCH_WALL_MARGIN_PX,
   clampTorchReachPx,
@@ -124,7 +129,7 @@ export function run(t) {
     ];
     const allPoint = targets.every((p) => {
       const angle = aimAngleDegFromPoints(o, p);
-      const fwd = tokenRotationToForwardVector(angle, false);
+      const fwd = tokenRotationToForwardVector(angle);
       const len = Math.hypot(p.x - o.x, p.y - o.y);
       return near(fwd.x, (p.x - o.x) / len, 1e-9) && near(fwd.y, (p.y - o.y) / len, 1e-9);
     });
@@ -410,7 +415,7 @@ export function run(t) {
   );
   {
     const flash = buildOnePlayerLightSource(
-      { tokenId: 'x', x: 0, y: 0, mode: 'flashlight' },
+      { tokenId: 'x', x: 0, y: 0, mode: 'flashlight', aimAngleDeg: 90 },
       { modes: { flashlight: true } }
     );
     ok(
@@ -490,6 +495,55 @@ export function run(t) {
   }
 
   // ======================================================================
+  // a held beam's own tremor, and the leash it lags on
+  // ======================================================================
+  {
+    const A = AIM_FLASHLIGHT_WANDER_DEG;
+    let bounded = true;
+    let moved = false;
+    let maxStep = 0;
+    let sum = 0;
+    let n = 0;
+    let prev = flashlightAimWanderDeg('tok', 0);
+    for (let ms = 0; ms <= 60000; ms += 16) {
+      const w = flashlightAimWanderDeg('tok', ms);
+      bounded = bounded && Math.abs(w) <= A;
+      moved = moved || w !== prev;
+      maxStep = Math.max(maxStep, Math.abs(w - prev));
+      sum += w;
+      n += 1;
+      prev = w;
+    }
+    ok('beam wander: stays within its amplitude (degrees of bearing)', bounded);
+    ok('beam wander: actually moves', moved);
+    ok('beam wander: is smooth — no frame jumps, it is a hand not a strobe', maxStep <= A * 0.5);
+    ok('beam wander: is centred on the aim, not drifting off it', Math.abs(sum / n) < A * 0.25);
+    ok(
+      'beam wander: is a pure function of its inputs (every client computes the same tremor)',
+      flashlightAimWanderDeg('tok', 12345) === flashlightAimWanderDeg('tok', 12345)
+    );
+    let differs = 0;
+    for (let ms = 0; ms < 5000; ms += 50) {
+      if (flashlightAimWanderDeg('alpha', ms) !== flashlightAimWanderDeg('bravo', ms)) differs += 1;
+    }
+    ok('beam wander: two bearers’ beams do not tremble in step', differs > 60);
+    ok('beam wander: zero amplitude is perfectly still', flashlightAimWanderDeg('tok', 999, 0) === 0);
+    ok('beam wander: a bad clock is still, not NaN', flashlightAimWanderDeg('tok', NaN) === 0);
+    ok(
+      'beam wander: a custom amplitude scales it',
+      (() => {
+        let m = 0;
+        for (let ms = 0; ms < 20000; ms += 20) m = Math.max(m, Math.abs(flashlightAimWanderDeg('tok', ms, 20)));
+        return m > 12 && m <= 20;
+      })()
+    );
+    ok(
+      'the beam lags on a LONGER leash than a held torch (the author’s “on a string”), but not a sluggish one',
+      AIM_FLASHLIGHT_EASE_TAU_MS > AIM_TORCH_EASE_TAU_MS && AIM_FLASHLIGHT_EASE_TAU_MS <= 400
+    );
+  }
+
+  // ======================================================================
   // a torch guttering past its leash
   // ======================================================================
   {
@@ -519,6 +573,19 @@ export function run(t) {
     b.update('b', args(950));
     b.reset();
     ok('torch: reset relights', b.update('b', args(300)) === 1);
+  }
+  {
+    const gutter = createTorchMotionGutter();
+    ok('motion gutter starts warm', gutter.update('torch', { x: 0, y: 0 }, 0, 100) === 1);
+    const moving = gutter.update('torch', { x: 2000, y: 0 }, 100, 100);
+    ok('very fast cursor movement gutters the flame promptly', moving < 0.55 && moving >= 0.22);
+    let recovering = moving;
+    for (let t = 200; t <= 2500; t += 100) recovering = gutter.update('torch', { x: 2000, y: 0 }, t, 100);
+    ok('the torch slowly warms back up after the cursor stops', recovering > 0.95);
+    ok(
+      'one token cannot inherit another token’s gutter state',
+      gutter.update('other', { x: 0, y: 0 }, 2500, 100) === 1
+    );
   }
 
   // ======================================================================

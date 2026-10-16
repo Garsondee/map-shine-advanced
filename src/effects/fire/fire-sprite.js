@@ -173,8 +173,14 @@ const AGE_TO_TEMPERATURE = 2.5;
  * The author's reference ramp as ASCENDING stops, which is what
  * {@link piecewiseLinearRgb} needs — `FIRE_RAMP_WOOD` is authored hottest-first.
  */
-function referenceFlameStops() {
-  return [...FIRE_RAMP_WOOD].map((stop) => ({ t: stop.t, rgb: hexToRgb01(stop.hex) })).sort((a, b) => a.t - b.t);
+function referenceFlameStops(linear = false) {
+  // `linear`: decode the sRGB hex stops to linear first. The Fire effect uses them as they are (its look was
+  // signed off that way); a consumer that wants the hex colours to DISPLAY as authored (the player torch)
+  // asks for the decode, since scene.lit is linear and the canvas re-encodes it.
+  const decode = (c) => (linear ? Math.pow(c, 2.2) : c);
+  return [...FIRE_RAMP_WOOD]
+    .map((stop) => ({ t: stop.t, rgb: hexToRgb01(stop.hex).map(decode) }))
+    .sort((a, b) => a.t - b.t);
 }
 /** Per-layer emission multipliers — the ratio is what makes each layer read. */
 /**
@@ -557,6 +563,7 @@ export function buildFlameShapeAlpha(TSL, { nx, ny, phase, seed, archetype = 'pl
  * @param {*} [args.bandCount=null] - float node, step count for banding.
  * @param {*} [args.tintMul=null] - vec3 node, `fireTintMul`'s output. Null
  *   skips the multiply — same zero-cost-when-unused shape as posterizeAmount.
+ * @param {boolean} [args.linearRamp=false] - decode the ramp's sRGB stops to linear (see referenceFlameStops).
  * @returns {{rgb:*, alpha:*}} both nodes.
  */
 export function buildFlameShading(
@@ -570,6 +577,7 @@ export function buildFlameShading(
     posterizeAmount = null,
     bandCount = null,
     tintMul = null,
+    linearRamp = false,
   }
 ) {
   const { float, clamp, mix } = TSL;
@@ -605,7 +613,7 @@ export function buildFlameShading(
     const quantized = temp.mul(steps).round().div(steps);
     temp = mix(temp, quantized, posterizeAmount);
   }
-  let rgb = piecewiseLinearRgb(TSL, temp, referenceFlameStops());
+  let rgb = piecewiseLinearRgb(TSL, temp, referenceFlameStops(linearRamp));
   if (tintMul) rgb = rgb.mul(tintMul);
   const emission = piecewiseLinear(TSL, t01, FLAME_EMISSION_STOPS)
     .mul(float(FLAME_CORE_EMISSION * hdrGain))

@@ -333,6 +333,25 @@ function shapePointsUnchanged(a, b) {
 }
 
 /**
+ * Place a light's mesh in world space. Foundry's OWN convention: the geometry
+ * is already normalized to local unit-radius space by `triangulateLightFan`,
+ * so the transform scales it back out. A plain light is a uniform circle; a
+ * light carrying `ellipseAlongPx` + `ellipseAngleRad` (today only the
+ * flashlight's endpoint cookie) becomes a rotated oval — `radius` is the thin
+ * (perpendicular) axis and `ellipseAlongPx` the long one, so the shader's
+ * falloff and cookie UVs stretch with the mesh for free. Extracted so the
+ * illumination and coloration meshes can never diverge.
+ * @param {*} mesh - a THREE.Object3D with position/rotation/scale.
+ * @param {{x:number, y:number, radius:number, ellipseAlongPx?:number, ellipseAngleRad?:number}} light
+ */
+export function applyLightFootprint(mesh, light) {
+  const along = Number.isFinite(light.ellipseAlongPx) ? Math.max(light.radius, light.ellipseAlongPx) : light.radius;
+  mesh.position.set(light.x, light.y, 0);
+  mesh.rotation.z = Number.isFinite(light.ellipseAngleRad) ? light.ellipseAngleRad : 0;
+  mesh.scale.set(along, light.radius, 1);
+}
+
+/**
  * `buildCandleLightSources`, memoized (2026-10-14, per-frame GC churn). Its
  * result is a pure function of the anchors array and five scalar params, and
  * boot.js's `getCandleRenderState` hands back the SAME anchors array until an
@@ -397,6 +416,7 @@ function createLightEntry({
   apGoboCols,
   apGoboRows,
   apertureGoboShared,
+  flashlightCookieTexture,
 }) {
   const geometry = new THREE.BufferGeometry();
   // Pre-allocate ONCE, sized generously — see INITIAL_LIGHT_FAN_VERTICES
@@ -411,6 +431,7 @@ function createLightEntry({
   const uBackgroundColor = THREE.TSL.uniform(THREE.TSL.vec3(0.93, 0.93, 0.93));
   const uDimColor = THREE.TSL.uniform(THREE.TSL.vec3(0.93, 0.93, 0.93));
   const uBrightColor = THREE.TSL.uniform(THREE.TSL.vec3(1, 1, 1));
+  const cookieTexture = light.cookiePattern === 'flashlight' ? flashlightCookieTexture : null;
   // ANIMATED LIGHTS — resolved ONCE at material-build time (not per-frame):
   // the matched registry entry (or null for no/unbuilt animation) is baked
   // into the node graph via the seed-injection seam — mirrors Foundry's own
@@ -445,6 +466,7 @@ function createLightEntry({
     uGlobalTimeMs,
     animationQuality,
     falloffModel,
+    cookieTexture,
     // FLASHLIGHT BEAM (mythica-machina-press#579/#77 Stage 2a) — `light.
     // beamShape` is `null`/absent for every light except a beam-falloff one
     // (player-light-geometry.js's own flashlight preset). The seven shape
@@ -528,6 +550,7 @@ function createLightEntry({
     uRatio,
     animationQuality,
     falloffModel,
+    cookieTexture,
     // FLASHLIGHT BEAM — see the illumination material's own identical call,
     // just above, for why.
     beamShape: light.beamShape ?? null,
@@ -833,6 +856,25 @@ export function createPointLightPool({
    * 3) — its own render() call, its own target, so a per-frame clear behaves
    * correctly for a channel that should read zero where no light reaches. */
   const colorationScene = new THREE.Scene();
+  /** V2's Kenney light cookie, sampled only by the flashlight's endpoint spot. */
+  let flashlightCookieTexture = null;
+  try {
+    if (typeof THREE.TextureLoader === 'function') {
+      flashlightCookieTexture = new THREE.TextureLoader().load(
+        'modules/map-shine-advanced/assets/kenney%20assets/light_01.png'
+      );
+      flashlightCookieTexture.wrapS = THREE.ClampToEdgeWrapping;
+      flashlightCookieTexture.wrapT = THREE.ClampToEdgeWrapping;
+      flashlightCookieTexture.generateMipmaps = true;
+      flashlightCookieTexture.minFilter = THREE.LinearMipmapLinearFilter;
+      flashlightCookieTexture.magFilter = THREE.LinearFilter;
+      flashlightCookieTexture.flipY = false;
+      flashlightCookieTexture.colorSpace = THREE.NoColorSpace;
+    }
+  } catch (err) {
+    log.warn('flashlight cookie texture could not be initialized; endpoint uses a plain soft spot:', err);
+    flashlightCookieTexture = null;
+  }
   /** A THIRD dedicated Scene for the APERTURE SHADOW "pattern" debug mesh
    * ONLY (docs/planning/Aperture-Gobo.md). Rounds 1-9 (2026-08-03/04) used
    * this scene for the real effect too — a separate post-process pass,
@@ -1948,7 +1990,8 @@ export function createPointLightPool({
       // UNCHANGED per-light path below, which is ALSO Stage 2's own safety
       // slide: flag OFF makes `canBatch` false for every light, byte-
       // identical to before this branch existed).
-      const canBatch = pointLightBatchingEnabled && canBatchLight({ apertureCount, falloffModel });
+      const canBatch =
+        pointLightBatchingEnabled && canBatchLight({ apertureCount, falloffModel, cookiePattern: light.cookiePattern });
       if (canBatch) {
         // A light that batches THIS frame but had a per-light entry from a
         // PREVIOUS frame (its own apertureCount just dropped to 0 — the only
@@ -2133,6 +2176,7 @@ export function createPointLightPool({
           apGoboCols: apertureGoboCols,
           apGoboRows: apertureGoboRows,
           apertureGoboShared,
+          flashlightCookieTexture,
         });
         lightMeshes.set(light.sourceId, entry);
       } else {
@@ -2225,9 +2269,8 @@ export function createPointLightPool({
       }
       // Mirrors Foundry's OWN mesh placement exactly: geometry is normalized
       // to local unit-radius space by triangulateLightFan, then
-      // positioned/scaled back out to world space here.
-      entry.mesh.position.set(light.x, light.y, 0);
-      entry.mesh.scale.set(light.radius, light.radius, 1);
+      // positioned/scaled back out to world space by applyLightFootprint.
+      applyLightFootprint(entry.mesh, light);
       entry.mesh.visible = true;
       // APERTURE SHADOW DEBUG — round 10: the ONE surviving standalone
       // Object3D (shares `geometry` with `entry.mesh` but needs its OWN
@@ -2380,7 +2423,8 @@ export function createPointLightPool({
       // scene's overall brightness. Applied via the uniform
       // (`uColorationAlpha=0`), NOT a mesh-visibility toggle.
       entry.colorationMesh.position.set(light.x, light.y, 0);
-      entry.colorationMesh.scale.set(light.radius, light.radius, 1);
+      // Same rotated oval footprint as the illumination mesh (see above).
+      applyLightFootprint(entry.colorationMesh, light);
       entry.colorationMesh.visible = true;
       // SAME unfloored value as the illumination mesh above — coloration's
       // falloff uses the identical formula, so both channels harden/soften
@@ -2559,6 +2603,11 @@ export function createPointLightPool({
       }
     }
     colorBuckets.clear();
+    try {
+      flashlightCookieTexture?.dispose?.();
+    } catch (err) {
+      log.error('flashlight cookie texture dispose failed — VRAM may be leaked:', err);
+    }
   }
 
   /** The aperture-gobo readout — apertures found/dropped/lit-lights as of

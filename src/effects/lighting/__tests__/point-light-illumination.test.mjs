@@ -144,19 +144,28 @@ export function run(t) {
         (nearOffset === 0 || nearOffset < farOffset) && farOffset > 0
       );
     }
-    // A shorter beam is drawn by LENGTHENING `beamDirection` (length 1/f -> beam at
-    // fraction f of its throw) — the shader never normalizes it. Replicate exactly
-    // what `buildBeamFalloffNode` does with it and pin that this is the full beam
-    // scaled about the bearer, in every direction the bearer can face.
+    // A shorter beam is drawn by LENGTHENING `beamDirection` (length 1/f -> a beam
+    // drawn to fraction f of its throw) — the shader never normalizes it, it takes
+    // the reciprocal back out as `reach01` and uses it to keep the cone's own
+    // width anchored to the WORLD. Replicate exactly what `buildBeamFalloffNode`
+    // does with it and pin the 2026-10-15 property: a shortened beam is the full
+    // beam TRUNCATED — the same width at the same world point — never a copy
+    // scaled down about the bearer, which collapsed into a needle at point-blank
+    // range (the author's own report). `lengthFalloffExponent: 0` takes the one
+    // term that legitimately does follow the drawn length out of the comparison,
+    // so only the width shape is being compared; sampling stops short of f itself
+    // because `pow(0, 0)` is 1 and the beam's very end is dark by length anyway.
     {
-      const shaderBeam = (p, dir) => {
+      const shaderBeam = (p, dir, shape = BEAM_SHAPE) => {
         const perp = { x: -dir.y, y: dir.x }; // buildBeamFalloffNode: vec2(-dir.y, dir.x)
         return computeBeamFalloff01({
           axial: p.x * dir.x + p.y * dir.y,
           lateral: Math.abs(p.x * perp.x + p.y * perp.y),
-          ...BEAM_SHAPE,
+          reach01: 1 / Math.hypot(dir.x, dir.y),
+          ...shape,
         });
       };
+      const noLength = { ...BEAM_SHAPE, lengthFalloffExponent: 0 };
       let identical = true;
       let dark = true;
       let sampled = 0;
@@ -165,12 +174,14 @@ export function run(t) {
         const unit = { x: Math.sin(rad), y: -Math.cos(rad) };
         for (const f of [0.2, 0.5, 0.8]) {
           const shortened = { x: unit.x / f, y: unit.y / f };
-          for (const a of [0.05, 0.2, 0.5, 0.9]) {
+          for (const a of [0.1, 0.25, 0.5, 0.9]) {
+            if (a > f * 0.9) continue; // inside BOTH beams, clear of the far end
             for (const l of [-0.2, 0, 0.1, 0.3]) {
-              // the point at (a, l) in the full beam's frame, and where it sits once the beam is f as long
-              const full = { x: unit.x * a - unit.y * l, y: unit.y * a + unit.x * l };
-              const scaled = { x: full.x * f, y: full.y * f };
-              identical = identical && near(shaderBeam(scaled, shortened), shaderBeam(full, unit), 1e-9);
+              // the point at (a, l) in the FULL beam's own frame — the same WORLD
+              // point for both beams, which is the whole point of the comparison
+              const world = { x: unit.x * a - unit.y * l, y: unit.y * a + unit.x * l };
+              identical =
+                identical && near(shaderBeam(world, shortened, noLength), shaderBeam(world, unit, noLength), 1e-9);
               sampled += 1;
             }
           }
@@ -180,10 +191,27 @@ export function run(t) {
         }
       }
       ok(
-        'a beamDirection of length 1/f draws the full beam scaled by f about the bearer (' + sampled + ' samples)',
+        'a shortened beam keeps the full beam’s own WIDTH at every shared world point — truncated, not scaled (' +
+          sampled +
+          ' samples)',
         identical
       );
       ok('…and lights nothing beyond fraction f of the throw', dark);
+      // …and the width it keeps is the bearer's own MOUTH, not a point: at the
+      // preset's point-blank floor (2% of a throw) a fragment one mouth radius off
+      // the axis, 90% of the way along, is still INSIDE the cone. A cone scaled
+      // down with its length would put that same fragment ~6 half-widths out
+      // (dark) — precisely the "thin needle" the author reported. `lateral` is in
+      // the BEAM's frame, whose unit is f·radius, so one mouth is `near / f`.
+      ok(
+        'a point-blank beam is a stubby cone, not a needle — its mouth still has width at its own end',
+        computeBeamFalloff01({
+          axial: 0.9,
+          lateral: BEAM_SHAPE.nearHalfWidth01 / 0.02,
+          reach01: 0.02,
+          ...BEAM_SHAPE,
+        }) > 0
+      );
     }
     ok('never returns a negative value', computeBeamFalloff01({ axial: -5, lateral: 5, ...BEAM_SHAPE }) >= 0);
     ok(

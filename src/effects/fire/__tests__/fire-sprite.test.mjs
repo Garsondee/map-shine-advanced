@@ -119,13 +119,16 @@ export function run(t) {
   }
 
   {
-    // ⚠️ BLOOM IS A NUMBER, NOT A HOPE. `BLOOM_PARAMS.threshold` defaults to 4.0
-    // on an HDR scene. The previous (volumetric) fire peaked at 1.25 and could
-    // never have bloomed at any setting — the author asked why it did not glow
-    // and the answer was arithmetic. Pin that the newborn core clears it.
+    // ⚠️ BLOOM IS A NUMBER, NOT A HOPE. `BLOOM_PARAMS.threshold` was 4.0 when
+    // this pin was written on an HDR scene (1.52 through the 2026-09 rounds,
+    // 0.33 since the 2026-10-16 "new defaults" dump). The previous
+    // (volumetric) fire peaked at 1.25 and could never have bloomed at the
+    // threshold it shipped against — the author asked why it did not glow and
+    // the answer was arithmetic. This pin keeps a newborn core that clears
+    // every threshold this effect has ever shipped against, with room left.
     const peakEmission = Math.max(...FLAME_EMISSION_STOPS.map((s) => s.v));
     const corePeak = peakEmission * FLAME_CORE_EMISSION * FIRE_HDR_LINEAR_GAIN;
-    t.ok(`a newborn flame core clears bloom's 4.0 threshold (${corePeak.toFixed(1)})`, corePeak > 4);
+    t.ok(`a newborn flame core clears the old 4.0 bloom threshold (${corePeak.toFixed(1)})`, corePeak > 4);
     // ⚠️ HEADROOM CEILING ADDED AND THE FLOOR LOWERED, 2026-08-09. The original
     // assertion was `> 10`, which V2's gain met at ~15 — and that is precisely
     // what produced the author's *"Flame brightness effects just a white blur"*:

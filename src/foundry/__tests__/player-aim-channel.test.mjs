@@ -16,8 +16,10 @@
  */
 import { createPlayerAimChannel, AIM_SENDER_TICK_MS } from '../player-aim-channel.js';
 import { readActivePlayerCarriedLightTokens } from '../player-light-mode.js';
+import { AIM_FLASHLIGHT_EASE_TAU_MS } from '../player-aim.js';
 import { buildPlayerLightSources } from '../../effects/lighting/player-light-geometry.js';
 import { buildPlayerTorchFlameAnchors } from '../../effects/player-torch-flame-geometry.js';
+import { resolveTorchFireLook } from '../../effects/player-torch-fire-geometry.js';
 import { LogLevel, getLogLevel, setLogLevel, setLogSink } from '../../core/log.js';
 
 const near = (a, b, eps = 1e-6) => Math.abs(a - b) < eps;
@@ -166,8 +168,18 @@ function makeTimers() {
 
 function makeChannel(clock = makeClock(), options = {}) {
   const timers = makeTimers();
-  // wanderPx 0: every position assertion below is exact; the tremor has its own tests.
-  const channel = createPlayerAimChannel({ now: clock.now, wallNow: clock.now, wanderPx: 0, ...timers, ...options });
+  // wanderPx/wanderDeg 0: every position and bearing assertion below is exact;
+  // the tremor has its own tests. Each light's own ease is real, though — a test
+  // that moves a cursor must `clock.advance(…)` before it asserts where the light
+  // settled, exactly as the torch's own tests already do.
+  const channel = createPlayerAimChannel({
+    now: clock.now,
+    wallNow: clock.now,
+    wanderPx: 0,
+    wanderDeg: 0,
+    ...timers,
+    ...options,
+  });
   return { channel, clock, timers };
 }
 
@@ -183,16 +195,24 @@ export function run(t) {
     const w = makeWorld({
       tokens: [{ id: 't1', actorId: 'actor-p1', x: 100, y: 100, mode: 'flashlight', owners: ['p1'] }],
     });
-    const { channel } = makeChannel();
+    const { channel, clock } = makeChannel();
     withWorld(w, () => {
+      // The beam lags its bearer's cursor ("on a string", AIM_FLASHLIGHT_EASE_TAU_MS),
+      // so a settled value takes a frame to install the new target and a LATER
+      // frame to ease to it — the same shape as the torch's own tests below.
+      const settle = (milliseconds = 5000) => {
+        channel.annotate(readActivePlayerCarriedLightTokens());
+        clock.advance(milliseconds);
+        return channel.annotate(readActivePlayerCarriedLightTokens());
+      };
       let snaps = channel.annotate(readActivePlayerCarriedLightTokens());
       ok(
-        'annotate: before the pointer has ever moved, nothing is stamped (the stored rotation applies)',
+        'annotate: before the pointer has ever moved, nothing is stamped (so there is no light at all)',
         snaps[0].aimAngleDeg === undefined
       );
 
       w.setMouse(200, 100);
-      snaps = channel.annotate(readActivePlayerCarriedLightTokens());
+      snaps = settle();
       ok('annotate: the viewer’s own token aims at the cursor (due east is 90°)', near(snaps[0].aimAngleDeg, 90));
       const [src] = buildPlayerLightSources(snaps, ALLOW_FLASHLIGHT);
       const len = Math.hypot(src.beamDirection.x, src.beamDirection.y);
@@ -201,24 +221,57 @@ export function run(t) {
         near(src.beamDirection.x / len, 1) && near(src.beamDirection.y / len, 0)
       );
       ok(
-        'annotate: …and the cursor, 100 px away, shortens the beam (to its floor: 0.2 of a 620 px throw)',
-        near(snaps[0].reachPx, 100) && near(src.beamReach01, 0.2) && near(len, 5)
+        'annotate: …and the cursor, 100 px away, shortens the beam to 100/820 of its throw',
+        near(snaps[0].reachPx, 100) && near(src.beamReach01, 100 / 820) && near(len, 820 / 100)
       );
 
       w.setMouse(100, 0);
-      snaps = channel.annotate(readActivePlayerCarriedLightTokens());
+      snaps = settle();
       ok('annotate: moving the cursor north turns it to 0°', near(snaps[0].aimAngleDeg, 0));
 
       w.setMouse(100, 100);
-      snaps = channel.annotate(readActivePlayerCarriedLightTokens());
+      snaps = settle();
       ok('annotate: a cursor parked on the token itself holds the last aim', near(snaps[0].aimAngleDeg, 0));
 
       w.tokenObjects[0].center.x = 300; // the token walks away; the cursor stays where the token was
-      snaps = channel.annotate(readActivePlayerCarriedLightTokens());
+      snaps = settle();
       ok(
         'annotate: the aim follows the TOKEN moving past a still cursor (now due west, 270°)',
         near(snaps[0].aimAngleDeg, 270)
       );
+    });
+  }
+  {
+    // "…on a string" (2026-10-15, the author's own ask): a beam SWINGS to a new
+    // bearing behind the cursor rather than teleporting to it — the torch's own
+    // leash, worn longer (AIM_FLASHLIGHT_EASE_TAU_MS).
+    const w = makeWorld({
+      tokens: [{ id: 't1', actorId: 'actor-p1', x: 100, y: 100, mode: 'flashlight', owners: ['p1'] }],
+    });
+    const { channel, clock } = makeChannel();
+    withWorld(w, () => {
+      w.setMouse(300, 100); // due east
+      let snaps = channel.annotate(readActivePlayerCarriedLightTokens());
+      ok(
+        'leash: the first aim it ever draws is the cursor’s own — there is nothing to swing from yet',
+        near(snaps[0].aimAngleDeg, 90)
+      );
+
+      w.setMouse(100, 300); // due south
+      snaps = channel.annotate(readActivePlayerCarriedLightTokens());
+      ok('leash: the instant the cursor moves, the beam has not', near(snaps[0].aimAngleDeg, 90));
+
+      clock.advance(AIM_FLASHLIGHT_EASE_TAU_MS);
+      snaps = channel.annotate(readActivePlayerCarriedLightTokens());
+      const swing = snaps[0].aimAngleDeg;
+      ok(
+        'leash: one time constant along it has come most of the way round, not all of it',
+        swing > 90 && swing < 180 && near(swing, 90 + 90 * (1 - Math.exp(-1)), 1)
+      );
+
+      clock.advance(AIM_FLASHLIGHT_EASE_TAU_MS * 8);
+      snaps = channel.annotate(readActivePlayerCarriedLightTokens());
+      ok('leash: …and then it settles on the cursor', near(snaps[0].aimAngleDeg, 180, 0.1));
     });
   }
   {
@@ -314,7 +367,7 @@ export function run(t) {
       clock.advance(9000); // the bearer goes quiet for longer than the stale window
       snaps = channel.annotate(readActivePlayerCarriedLightTokens());
       ok(
-        'receive: an aim that is never refreshed expires — the stored rotation takes over again',
+        'receive: an aim that is never refreshed expires — that bearer’s light goes out entirely',
         snaps[1].aimAngleDeg === undefined
       );
     });
@@ -641,7 +694,8 @@ export function run(t) {
     });
   }
   {
-    // A flashlight's beam is as long as the cursor is far, up to its full throw.
+    // A flashlight's beam is as long as the cursor is far, up to its full throw;
+    // its endpoint is separately clamped to the first light-blocking wall.
     const checks = [];
     const w = makeWorld({
       tokens: [
@@ -654,7 +708,7 @@ export function run(t) {
           owners: ['p1'],
           checkCollision: () => {
             checks.push('wall test');
-            return { x: 120, y: 100 };
+            return null;
           },
         },
       ],
@@ -665,23 +719,25 @@ export function run(t) {
       let snaps = channel.annotate(readActivePlayerCarriedLightTokens());
       let [src] = buildPlayerLightSources(snaps, ALLOW_FLASHLIGHT);
       ok('flashlight beam: the cursor 300 px away is its reach', near(snaps[0].reachPx, 300));
-      ok('flashlight beam: …drawn at 300/620 of its full throw', near(src.beamReach01, 300 / 620));
+      ok('flashlight beam: …drawn at 300/820 of its full throw', near(src.beamReach01, 300 / 820));
       ok(
         'flashlight beam: …by lengthening the direction vector to 1/that fraction',
-        near(Math.hypot(src.beamDirection.x, src.beamDirection.y), 620 / 300)
+        near(Math.hypot(src.beamDirection.x, src.beamDirection.y), 820 / 300)
       );
       w.setMouse(3100, 100);
+      channel.annotate(readActivePlayerCarriedLightTokens()); // install the new target
+      clock.advance(5000); // …then let the beam's leash catch up to it
       snaps = channel.annotate(readActivePlayerCarriedLightTokens());
       [src] = buildPlayerLightSources(snaps, ALLOW_FLASHLIGHT);
       ok(
         'flashlight beam: a far cursor saturates at the cap (no traffic once the beam is full length)',
-        snaps[0].reachPx === 1000
+        near(snaps[0].reachPx, 1000, 0.05)
       );
       ok(
         'flashlight beam: …and the full beam is a unit vector',
         near(src.beamReach01, 1) && near(Math.hypot(src.beamDirection.x, src.beamDirection.y), 1)
       );
-      ok('flashlight beam: walls never clamp a flashlight (its light sweep stops at them itself)', checks.length === 0);
+      ok('flashlight beam: the live aim asks Foundry for wall intersections', checks.length > 0);
 
       w.setMouse(400, 100);
       ok(
@@ -701,6 +757,28 @@ export function run(t) {
       clock.advance(120);
       ok('flashlight beam (send): beyond the cap, a farther cursor is NOT news', channel.tick(clock.t) === false);
     });
+
+    const wallWorld = makeWorld({
+      tokens: [
+        {
+          id: 'wall-token',
+          actorId: 'actor-p1',
+          x: 100,
+          y: 100,
+          mode: 'flashlight',
+          owners: ['p1'],
+          checkCollision: () => ({ x: 120, y: 100 }),
+        },
+      ],
+    });
+    const wallChannel = makeChannel().channel;
+    withWorld(wallWorld, () => {
+      wallWorld.setMouse(400, 100);
+      const [snap] = wallChannel.annotate(readActivePlayerCarriedLightTokens());
+      const [beam] = buildPlayerLightSources([snap], ALLOW_FLASHLIGHT);
+      ok('flashlight endpoint reach is pulled back from the first wall', snap.reachPx === 16);
+      ok('flashlight cookie spot stays on the near side of that wall', beam.flashlightEndpoint.x <= 120);
+    });
   }
   {
     // A flashlight on another screen.
@@ -717,7 +795,7 @@ export function run(t) {
       let [src] = buildPlayerLightSources([remote], ALLOW_FLASHLIGHT);
       ok(
         'flashlight beam (remote): drawn at the relayed reach',
-        near(src.beamReach01, 0.2) && remote.offsetX === undefined
+        near(src.beamReach01, 124 / 820) && remote.offsetX === undefined
       );
       channel.handleMessage({ type: 'playerAim', tokenId: 't2', userId: 'p2', a: 90 });
       [, remote] = channel.annotate(readActivePlayerCarriedLightTokens());
@@ -862,7 +940,8 @@ export function run(t) {
       [light] = buildPlayerLightSources([snap], ALLOW_TORCH);
       ok('burn: …a dimmer, smaller light', light.alpha01 < fullAlpha && light.radius < fullRadius);
       const [flame] = buildPlayerTorchFlameAnchors([snap], ALLOW_TORCH);
-      ok('burn: …and a smaller flame', flame.params.customSizePx < 26);
+      const flameLook = resolveTorchFireLook(flame);
+      ok('burn: …and a smaller, redder flame', flameLook.burn01 < 1 && flameLook.tint[1] < 1);
 
       w.setMouse(1100, 100); // 1000 px: past the band
       snap = settle();
@@ -919,7 +998,10 @@ export function run(t) {
       clock.advance(150);
       w.setMouse(850, 100);
       channel.tick(clock.t);
-      ok('burn (send): a guttering one sends its burn', w.emitted[1].msg.b === 50 && w.emitted[1].msg.d === 600);
+      ok(
+        'burn (send): cursor speed compounds the distance gutter',
+        w.emitted[1].msg.b > 0 && w.emitted[1].msg.b < 50 && w.emitted[1].msg.d === 600
+      );
       clock.advance(150);
       w.setMouse(1100, 100);
       channel.tick(clock.t);
@@ -933,7 +1015,14 @@ export function run(t) {
       clock.advance(150);
       w.setMouse(150, 100);
       channel.tick(clock.t);
-      ok('burn (send): touching it relights, and the burn field disappears again', !('b' in w.emitted[4].msg));
+      ok('burn (send): touching relights it while motion gutter is still fading', w.emitted[4].msg.b > 0);
+      clock.advance(4500);
+      channel.annotate(readActivePlayerCarriedLightTokens()); // re-target the eased presentation
+      clock.advance(300);
+      channel.annotate(readActivePlayerCarriedLightTokens()); // let flame and light finish warming together
+      clock.advance(300);
+      channel.tick(clock.t);
+      ok('burn (send): after warming, full burn is represented by no burn field', !('b' in w.emitted[5].msg));
     });
   }
   {
@@ -1261,37 +1350,38 @@ export function run(t) {
     const w = makeWorld({
       tokens: [{ id: 't1', actorId: 'actor-p1', x: 1000, y: 1000, w: 100, h: 100, mode: 'flashlight', owners: ['p1'] }],
     });
-    const { channel } = makeChannel();
+    const { channel, clock } = makeChannel();
     withWorld(w, () => {
-      let snaps = channel.annotate(readActivePlayerCarriedLightTokens());
-      ok('rim: the snapshot carries the token’s radius (half of 100 px)', snaps[0].radiusPx === 50);
-      let [src] = buildPlayerLightSources(snaps, ALLOW_FLASHLIGHT);
+      const noAim = channel.annotate(readActivePlayerCarriedLightTokens());
+      ok('rim: the snapshot carries the token’s radius (half of 100 px)', noAim[0].radiusPx === 50);
       ok(
-        'rim: before any aim the light is on the rim along the stored rotation (due north)',
-        near(src.x, 1000) && near(src.y, 950)
+        'rim: before any aim there is NO light at all — not one parked on the rim along the stored rotation',
+        buildPlayerLightSources(noAim, ALLOW_FLASHLIGHT).length === 0
       );
 
       w.setMouse(1400, 1000);
-      snaps = channel.annotate(readActivePlayerCarriedLightTokens());
-      [src] = buildPlayerLightSources(snaps, ALLOW_FLASHLIGHT);
-      ok('rim: aimed east, the light sits on the east edge of the token', near(src.x, 1050) && near(src.y, 1000));
+      const [east] = buildPlayerLightSources(channel.annotate(readActivePlayerCarriedLightTokens()), ALLOW_FLASHLIGHT);
+      ok('rim: aimed east, the light sits on the east edge of the token', near(east.x, 1050) && near(east.y, 1000));
       ok(
         'rim: …and the beam, which now starts 50 px out, still ends exactly at the cursor',
-        near(src.x + src.beamReach01 * 620, 1400)
+        near(east.x + east.beamReach01 * 820, 1400)
       );
 
       w.setMouse(1000, 600);
-      snaps = channel.annotate(readActivePlayerCarriedLightTokens());
-      [src] = buildPlayerLightSources(snaps, ALLOW_FLASHLIGHT);
+      channel.annotate(readActivePlayerCarriedLightTokens()); // install the new bearing
+      clock.advance(5000); // …and let the beam swing round to it
+      const [north] = buildPlayerLightSources(channel.annotate(readActivePlayerCarriedLightTokens()), ALLOW_FLASHLIGHT);
       ok(
         'rim: swinging the cursor north rolls the light round to the north edge',
-        near(src.x, 1000) && near(src.y, 950)
+        near(north.x, 1000) && near(north.y, 950)
       );
 
       w.setMouse(1000, 1000);
-      snaps = channel.annotate(readActivePlayerCarriedLightTokens());
-      [src] = buildPlayerLightSources(snaps, ALLOW_FLASHLIGHT);
-      ok('rim: a cursor on the token itself keeps the last edge (no jump to the centre)', near(src.y, 950));
+      const [onToken] = buildPlayerLightSources(
+        channel.annotate(readActivePlayerCarriedLightTokens()),
+        ALLOW_FLASHLIGHT
+      );
+      ok('rim: a cursor on the token itself keeps the last edge (no jump to the centre)', near(onToken.y, 950));
     });
   }
   {

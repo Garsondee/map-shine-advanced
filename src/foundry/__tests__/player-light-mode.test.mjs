@@ -26,10 +26,12 @@ function fakeTokenDocument(initialMode) {
 export async function run(t) {
   const { ok } = t;
 
-  ok('exactly six modes are declared', PLAYER_LIGHT_MODES.length === 6);
+  ok('exactly seven modes are declared', PLAYER_LIGHT_MODES.length === 7);
   ok(
-    'torch/flashlight are among them',
-    PLAYER_LIGHT_MODES.includes('torch') && PLAYER_LIGHT_MODES.includes('flashlight')
+    'torch, flashlight and Active Low-light are among them',
+    PLAYER_LIGHT_MODES.includes('torch') &&
+      PLAYER_LIGHT_MODES.includes('flashlight') &&
+      PLAYER_LIGHT_MODES.includes('activeLowLight')
   );
 
   // ---- readTokenPlayerLightMode --------------------------------------

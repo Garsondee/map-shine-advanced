@@ -13,7 +13,12 @@
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { resolveLightElevationRank, resolveAnchorElevationRank, memoCandleLightSources } from '../point-light-pool.js';
+import {
+  resolveLightElevationRank,
+  resolveAnchorElevationRank,
+  memoCandleLightSources,
+  applyLightFootprint,
+} from '../point-light-pool.js';
 import { LIGHT_ELEVATION_UNCONFIGURED_SENTINEL, elevationRank } from '../point-light-illumination.js';
 
 const FLOORS = [
@@ -239,5 +244,62 @@ export function run(t) {
       'memoCandleLightSources: separate holders never share descriptors',
       second !== memoCandleLightSources({ memo: null }, anchors, { ...opts })
     );
+  }
+
+  // ======================================================================
+  // applyLightFootprint — the mesh transform shared by the illumination and
+  // coloration meshes. A plain light is a uniform circle; a light carrying an
+  // ellipse (the flashlight endpoint cookie) becomes a rotated oval whose LONG
+  // axis points along the beam, so the cookie lands as an oval on the beam.
+  // ======================================================================
+  {
+    const makeMesh = () => ({
+      position: {
+        x: 0,
+        y: 0,
+        z: 0,
+        set(x, y, z) {
+          this.x = x;
+          this.y = y;
+          this.z = z;
+        },
+      },
+      rotation: { z: 0 },
+      scale: {
+        x: 0,
+        y: 0,
+        z: 0,
+        set(x, y, z) {
+          this.x = x;
+          this.y = y;
+          this.z = z;
+        },
+      },
+    });
+    const plain = makeMesh();
+    applyLightFootprint(plain, { x: 100, y: 200, radius: 50 });
+    ok(
+      'a plain light is a uniform circle at its own position',
+      plain.position.x === 100 &&
+        plain.position.y === 200 &&
+        plain.scale.x === 50 &&
+        plain.scale.y === 50 &&
+        plain.rotation.z === 0
+    );
+    const oval = makeMesh();
+    // Beam pointing due south (world +y is down): angle = atan2(1, 0) = PI/2.
+    applyLightFootprint(oval, { x: 0, y: 0, radius: 40, ellipseAlongPx: 100, ellipseAngleRad: Math.PI / 2 });
+    ok(
+      'an ellipse light stretches its LONG axis, thin axis stays the radius',
+      oval.scale.x === 100 && oval.scale.y === 40
+    );
+    // Rotating the local long axis (+x, length 100) by the stored angle must
+    // land on the beam direction (0, 1) — i.e. the oval points down the beam.
+    const longX = oval.scale.x * Math.cos(oval.rotation.z);
+    const longY = oval.scale.x * Math.sin(oval.rotation.z);
+    ok('the oval extends along the beam direction, not across it', Math.abs(longY) > 90 && Math.abs(longX) < 1e-9);
+    const tiny = makeMesh();
+    applyLightFootprint(tiny, { x: 0, y: 0, radius: 30, ellipseAlongPx: 5, ellipseAngleRad: 0 });
+    ok('the long axis is never shorter than the radius', tiny.scale.x === 30);
   }
 }

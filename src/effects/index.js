@@ -79,23 +79,24 @@ export {
   PLAYER_LIGHT_RENDERED_MODES,
   tokenRotationToForwardVector,
 } from './lighting/player-light-geometry.js';
-// PLAYER TORCH FLAME + EMBERS (mythica-machina-press#77/#578, Stage 2a) — the
-// pure anchor builder (torch flame body reuses candle's own descriptor
-// shape) and the batched ember-quad vertex math. See player-torch-flame-
-// geometry.js's own header for the full "why".
+// PLAYER TORCH FIRE (mythica-machina-press#77/#578) — the pure flame anchors,
+// world-space particle simulation and batched quad math. See the fire geometry
+// module's own header for the V2-style detached-particle model.
+export { buildPlayerTorchFlameAnchors } from './player-torch-flame-geometry.js';
 export {
-  buildPlayerTorchFlameAnchors,
-  computeTorchEmberArrays,
-  PLAYER_TORCH_FLAME_SIZE_PX,
-} from './player-torch-flame-geometry.js';
-// The torch flame's THREE/TSL glue — the flame body is candle's own builders,
-// re-exported under torch-specific names; the ember batch is genuinely new.
+  computeTorchParticleArrays,
+  createTorchFireSimulation,
+  TORCH_FIRE_FLAME_VARIANTS,
+  TORCH_FIRE_MAX_FLAMES_PER_TORCH,
+  TORCH_FIRE_MAX_SPARKS_PER_TORCH,
+} from './player-torch-fire-geometry.js';
+// The torch fire's THREE/TSL glue: Fire's own sprite look on world-space particles.
 export {
-  buildTorchFlameGeometry,
-  buildTorchFlameMaterial,
-  buildTorchEmberGeometry,
-  buildTorchEmberMaterial,
-} from './player-torch-flame-render.js';
+  buildTorchFireFlameMaterial,
+  buildTorchFireSparkMaterial,
+  buildTorchFireBatchGeometry,
+  updateTorchFireBatchGeometry,
+} from './player-torch-fire-render.js';
 export {
   buildEnvironmentalLightMaterials,
   pickIllumMaterial,
@@ -218,6 +219,11 @@ export {
   PLAYER_VISION_GRADE_MODE_KEYS,
   resolveActivePlayerVisionModePreset,
 } from './vision/player-vision-modes.js';
+// The fixed token-slot count the infravision hot-body recolour carries — the
+// producer (`vt-pan-viewer.js#pushPlayerVisionTokens`) needs the SAME number
+// the node graph was built with, so it is exported from the render half rather
+// than duplicated as a second literal.
+export { PLAYER_VISION_TOKEN_SLOTS } from './vision/player-vision-grade-render.js';
 export {
   buildRegionRectangleMaterial,
   buildRegionEllipseMaterial,

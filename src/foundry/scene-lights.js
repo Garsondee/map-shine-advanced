@@ -418,17 +418,19 @@ export function readActiveLightSources(darkness01, { wallClipCache = null, floor
       // ⚠️ SKIP MSA'S OWN VISION-ONLY SYNTHETIC SOURCES (mythica-machina-press
       // #475, found chasing "fire's cast light throws white" through five
       // rounds of dead ends). `scene-synthetic-lights.js` registers a real
-      // `PointLightSource` per candle/fire into this SAME `canvas.effects.
-      // lightSources` collection so Foundry's OWN door-reveal/vision math can
-      // see it (`object: null`, its own header's whole point) — its header
-      // even says "NEVER VISUALLY DOUBLE-DRAWN", but that claim only covers
-      // Foundry's OWN PIXI lighting layer (suppressed via `canvas.effects.
-      // renderable = false`). It says nothing about THIS reader, which pulls
-      // from the identical collection with no exclusion — so every candle and
-      // fire was getting a SECOND, colourless point light drawn exactly on
-      // top of its real one, at DOUBLE the radius (`DETECTION_RADIUS_
-      // MULTIPLIER = 2`, scene-synthetic-lights.js's own constant — its dim/
-      // bright detection reach, never meant to be visual). A colourless light
+      // `PointLightSource` per MSA light — candle, fire, and (since
+      // 2026-10-16) player-carried torch/flashlight — into this SAME
+      // `canvas.effects.lightSources` collection so Foundry's OWN door-reveal/
+      // vision math can see it (`object: null`, its own header's whole point).
+      // Its header even says "NEVER VISUALLY DOUBLE-DRAWN", but that claim
+      // only covers Foundry's OWN PIXI lighting layer (suppressed via
+      // `canvas.effects.renderable = false`). It says nothing about THIS
+      // reader, which pulls from the identical collection with no exclusion —
+      // so every candle and fire was getting a SECOND, colourless point light
+      // drawn exactly on top of its real one, at DOUBLE the radius
+      // (`DETECTION_RADIUS_MULTIPLIER = 2`, scene-synthetic-lights.js's own
+      // constant — its dim/bright detection reach, never meant to be visual).
+      // A colourless light
       // contributes plain, hue-less ambient brightness (this file's own
       // `hasColor`/hue handling), so that second light was a small correctly-
       // coloured core (the real light) sitting inside a much bigger,

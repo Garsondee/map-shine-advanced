@@ -2802,7 +2802,9 @@ export async function startVtPanViewer({
      */
     function traceRoofline(idx) {
       const wx = weatherGate && weatherGate.floorIndex === idx ? weatherGate.product : null;
-      const cover = wx ? composeDripCover({ cover: wx.cover, restrictors: wx.restrictors }) : getCoverAboveGrid(idx);
+      const cover = wx
+        ? composeDripCover({ cover: wx.cover, restrictors: wx.restrictors, outdoors: wx.outdoors })
+        : getCoverAboveGrid(idx);
       const roofline = extractDripEdges(cover, {
         heightGrid: getCasterHeightGrid(idx),
         heightScalePx: CASTER_HEIGHT_SCALE_PX,
@@ -4055,6 +4057,9 @@ export async function startVtPanViewer({
         maxY: grid.spec.y + grid.spec.height,
       };
       envLight.setOutdoorsRect(outdoorsRect);
+      // The grey veil + storm fog gate on plain outdoors, not sky-reach: a roof
+      // stops rain falling, it does not make the outdoor air clear.
+      precipitationSubsystem?.setAtmosphereGateTexture?.(tex, outdoorsRect);
       lastOutdoorsBakeResult = { ok: true, floorIndex, cols: w, rows: h, rect: outdoorsRect };
       return lastOutdoorsBakeResult;
     }
@@ -4755,7 +4760,12 @@ export async function startVtPanViewer({
       if (restrictors) {
         // The sky WITHOUT the restrictors, with each laid back over it at its
         // live opacity — see scene/weather-restrict.js.
-        data = composeWeatherGate({ sky: grid, restrictors: restrictors.restrictors, opacityOf: weatherOpacityOf });
+        data = composeWeatherGate({
+          sky: grid,
+          restrictors: restrictors.restrictors,
+          opacityOf: weatherOpacityOf,
+          outdoors: restrictors.outdoors,
+        });
       } else {
         data = new Uint8Array(w * h * 4);
         for (let i = 0; i < w * h; i++) {
@@ -4780,6 +4790,8 @@ export async function startVtPanViewer({
       // is on. Its absence is what let the stale-gate bug survive: every
       // field said "armed", none said "armed against WHAT".
       precipitationSubsystem?.setSkyReachTexture(tex, precipSkyReachRect, floorIndex);
+      if (outdoorsTexture && outdoorsRect)
+        precipitationSubsystem?.setAtmosphereGateTexture?.(outdoorsTexture, outdoorsRect);
       lastPrecipSkyReachBake = {
         ok: true,
         floorIndex,
@@ -4814,6 +4826,7 @@ export async function startVtPanViewer({
         sky: gate.product.sky,
         restrictors: gate.product.restrictors,
         opacityOf: weatherOpacityOf,
+        outdoors: gate.product.outdoors,
         out: gate.data,
       });
       gate.texture.needsUpdate = true;

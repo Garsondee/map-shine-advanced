@@ -180,6 +180,7 @@ export function buildColorationShadingCore({ THREE, inputs, shared, flags }) {
     apGoboCols,
     apGoboRows,
     beamShape,
+    cookieTexture,
   } = flags;
   const {
     localUnitXY,
@@ -226,6 +227,7 @@ export function buildColorationShadingCore({ THREE, inputs, shared, flags }) {
     apertureGoboShared,
     beamDirection,
     beamShape,
+    cookieTexture,
   });
 
   // Technique 1 ("Adaptive Luminance", the LightData default): the tint is
@@ -413,6 +415,7 @@ export function buildPointLightColorationMaterial({
   animationQuality = 0,
   falloffModel = 'foundry',
   beamShape = null,
+  cookieTexture = null,
   windCenter,
   windExposure,
   windResponse,
@@ -475,7 +478,16 @@ export function buildPointLightColorationMaterial({
       beamDirection: uBeamDirection,
     },
     shared: { albedoTexture, depthTexNode, depthFlagsTexNode, apertureGoboShared, uGlobalTimeMs, windHandle },
-    flags: { animation, animationQuality, falloffModel, apertureCount, apGoboCols, apGoboRows, beamShape },
+    flags: {
+      animation,
+      animationQuality,
+      falloffModel,
+      apertureCount,
+      apGoboCols,
+      apGoboRows,
+      beamShape,
+      cookieTexture,
+    },
   });
 
   const material = new THREE.NodeMaterial();

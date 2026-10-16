@@ -12,9 +12,14 @@
  *      torch-flame getter): stamp each aimable carried light's snapshot with
  *      `aimAngleDeg` (and, for a torch, `offsetX/Y`, where its bearer holds it)
  *      — from THIS client's own cursor if the token is the one this user aims,
- *      else from the aim its own client relayed. No aim known → the fields stay
- *      unset and `player-light-geometry.js` falls back to the token's stored
- *      rotation (flashlight) or the token's centre (torch).
+ *      else from the aim its own client relayed. A HELD light is eased toward
+ *      that aim (an arm, not a laser pointer); a BEAM is eased on a longer leash
+ *      still (`AIM_FLASHLIGHT_EASE_TAU_MS`, the author's "on a string") and is
+ *      given a hand tremor of its own (`flashlightAimWanderDeg`). NOTHING is
+ *      stamped without an aim: a carried light nobody is steering renders no
+ *      light and no flame at all (`player-light-geometry.js#hasCarriedLightAim`),
+ *      which is why a freshly-loaded scene carries none until a token is
+ *      selected or its owner's client is aiming it.
  *   2. SEND (`tick`, every `AIM_SENDER_TICK_MS`, from a timer — NOT from the
  *      frame loop, so a stalled renderer or a hidden tab cannot starve it): if
  *      this user is aiming, put the angle on the module socket under
@@ -55,8 +60,8 @@
  * own character's token; for a GM it is the token they have SELECTED, unless an
  * active player owns it: that player's client steers it, and a GM who selected
  * a PC just to read its sheet must not be able to drag the player's beam around
- * with a mouse. A flashlight on some other token (set by hand or macro) keeps
- * following its stored rotation.
+ * with a mouse. A flashlight on a token nobody is steering is not a light at
+ * all — see `hasCarriedLightAim`.
  *
  * A FLASHLIGHT SITS ON ITS TOKEN'S RIM (`stampFlashlightRim`): the origin is the
  * point of the circle the token occupies that lies toward the aim, so the light
@@ -75,7 +80,8 @@
  * per-frame light getter, and a throw there kills the loop for everyone — it
  * already did once today (`a0402af8`, a null animation on this same flashlight).
  * So `annotate` and the timer's tick catch, log ONCE per distinct fault (not at
- * 20 Hz), and carry on with the stored rotation.
+ * 20 Hz), and carry on — with NO aim stamped at all, which reads back as "not
+ * lit" rather than as a beam thrown in an arbitrary direction.
  *
  * @module foundry/player-aim-channel
  */
@@ -91,6 +97,8 @@ import {
   PLAYER_AIM_REACH_MODES,
   PLAYER_AIM_HELD_MODES,
   AIM_FLASHLIGHT_REACH_CAP_PX,
+  AIM_FLASHLIGHT_EASE_TAU_MS,
+  AIM_FLASHLIGHT_WANDER_DEG,
   AIM_MESSAGE_TYPE,
   AIM_TORCH_LEASH_SQUARES,
   AIM_TORCH_EASE_TAU_MS,
@@ -98,6 +106,8 @@ import {
   AIM_TORCH_TOUCH_MARGIN_PX,
   AIM_TORCH_WANDER_PX,
   torchWanderOffset,
+  flashlightAimWanderDeg,
+  createTorchMotionGutter,
   encodeAimMessage,
   decodeAimMessage,
   clampTorchReachPx,
@@ -132,6 +142,7 @@ const UNRESOLVED = Symbol('unresolved');
  * @param {() => number} [options.now] - monotonic milliseconds (`core/frame-clock.js#perfNowMs`).
  * @param {() => number} [options.wallNow] - wall-clock milliseconds, for effects every client must agree on.
  * @param {number} [options.wanderPx] - a held torch's hand tremor, px (0 = none).
+ * @param {number} [options.wanderDeg] - a flashlight's hand tremor, degrees of bearing (0 = none).
  * @param {(fn: () => void, ms: number) => *} [options.setIntervalFn]
  * @param {(handle: *) => void} [options.clearIntervalFn]
  */
@@ -139,6 +150,7 @@ export function createPlayerAimChannel({
   now = perfNowMs,
   wallNow = wallClockMs,
   wanderPx = AIM_TORCH_WANDER_PX,
+  wanderDeg = AIM_FLASHLIGHT_WANDER_DEG,
   setIntervalFn = (fn, ms) => setInterval(fn, ms),
   clearIntervalFn = (handle) => clearInterval(handle),
 } = {}) {
@@ -148,8 +160,14 @@ export function createPlayerAimChannel({
   // bearers' aims are: each frame's target is `receive`d and `sampleAim`ed, so
   // the torch lags the cursor like an arm instead of snapping to it.
   const torchEase = createRemoteAimStore({ tauMs: AIM_TORCH_EASE_TAU_MS, maxEntries: 8 });
+  // ...and its OWN beam is eased on the longer leash of a flashlight "on a
+  // string" (2026-10-15, the author's own ask). Same machinery, a slower tau:
+  // the whole cone swings behind the cursor and settles, instead of the beam's
+  // far end tracking the mouse pixel for pixel.
+  const beamEase = createRemoteAimStore({ tauMs: AIM_FLASHLIGHT_EASE_TAU_MS, maxEntries: 8 });
   const policy = createAimSendPolicy();
   const torchBurn = createTorchBurn();
+  const torchMotionGutter = createTorchMotionGutter();
   /** The wall test for the same (origin, destination) is asked every frame the cursor is still: one memo per token. */
   const wallMemo = new Map();
 
@@ -223,16 +241,17 @@ export function createPlayerAimChannel({
    * Stamped as `rimPx`; `player-light-geometry.js#resolveFlashlightRimPx` places
    * the light. Runs for every client's flashlights, local or relayed, because the
    * rim is derived from the token and the aim every client already has.
+   *
+   * With NO aim there is no rim to work out — nothing is built from an unaimed
+   * beam at all (`player-light-geometry.js#hasCarriedLightAim`) — so the wall
+   * test is skipped rather than run for a light that will not exist.
    */
   function stampFlashlightRim(snap) {
     const radiusPx = Number(snap.radiusPx);
     if (!(radiusPx > 0)) return;
-    const angleDeg = Number.isFinite(snap.aimAngleDeg)
-      ? snap.aimAngleDeg
-      : snap.lockRotation
-        ? 0
-        : Number(snap.rotation);
-    const end = offsetFromAim(Number.isFinite(angleDeg) ? angleDeg : 0, radiusPx);
+    const angleDeg = Number(snap.aimAngleDeg);
+    if (!Number.isFinite(angleDeg)) return;
+    const end = offsetFromAim(angleDeg, radiusPx);
     const token = typeof canvas === 'undefined' ? null : canvas.tokens?.get?.(snap.tokenId);
     const hitPx = readWallHitDistancePx(token, snap, { x: snap.x + end.x, y: snap.y + end.y }, 'light');
     snap.rimPx = hitPx === null ? radiusPx : Math.max(0, Math.min(radiusPx, hitPx - AIM_FLASHLIGHT_WALL_MARGIN_PX));
@@ -246,16 +265,21 @@ export function createPlayerAimChannel({
    * client draws and what everyone else is told come from one calculation.
    * @returns {{angleDeg: number, reachPx: number|null, burn01: number|null}|null}
    */
-  function localAimTarget(token, snap) {
+  function localAimTarget(token, snap, nowMs = now()) {
     const cursor = readCursorWorld();
     const angleDeg = tracker.update(snap.tokenId, snap, cursor);
     if (angleDeg === null) return null;
     if (!PLAYER_AIM_REACH_MODES.includes(snap.mode)) return { angleDeg, reachPx: null, burn01: null };
     const cursorDistancePx = cursor ? Math.hypot(cursor.x - snap.x, cursor.y - snap.y) : 0;
-    // A flashlight is not displaced, so walls do not clamp it (its light sweep
-    // already stops at them); its reach just says how far away the cursor is.
+    // A flashlight is not displaced, but its projected endpoint/cookie must not
+    // be placed through a wall. Clamp the aim to the first light-blocking wall;
+    // the point-light fan still independently wall-clips the beam itself.
     if (!PLAYER_AIM_HELD_MODES.includes(snap.mode)) {
-      return { angleDeg, reachPx: Math.min(cursorDistancePx, AIM_FLASHLIGHT_REACH_CAP_PX), burn01: null };
+      const hitPx = cursor ? readWallHitDistancePx(token, snap, cursor, 'light') : null;
+      const safeReachPx = Number.isFinite(hitPx)
+        ? Math.max(0, hitPx - AIM_FLASHLIGHT_WALL_MARGIN_PX)
+        : cursorDistancePx;
+      return { angleDeg, reachPx: Math.min(safeReachPx, AIM_FLASHLIGHT_REACH_CAP_PX), burn01: null };
     }
     const gridPx = readGridSizePixels().gridSizePixels;
     const leashPx = gridPx * AIM_TORCH_LEASH_SQUARES;
@@ -269,11 +293,19 @@ export function createPlayerAimChannel({
       fadeBandPx: gridPx * AIM_TORCH_FADE_SQUARES,
       touchPx: radiusPx + AIM_TORCH_TOUCH_MARGIN_PX,
     });
+    // Quick wrist movement gutters the visible flame/light even when the
+    // cursor is still inside the torch's distance leash. This factor rides the
+    // existing burn wire field, so all clients render the same response.
+    const motionBurn01 = torchMotionGutter.update(snap.tokenId, cursor, nowMs, gridPx);
     const wanted = Math.min(cursorDistancePx, leashPx);
     const end = offsetFromAim(angleDeg, wanted);
     const wallHitDistancePx =
       wanted > 0 ? readWallHitDistancePx(token, snap, { x: snap.x + end.x, y: snap.y + end.y }) : null;
-    return { angleDeg, reachPx: clampTorchReachPx({ cursorDistancePx, leashPx, wallHitDistancePx }), burn01 };
+    return {
+      angleDeg,
+      reachPx: clampTorchReachPx({ cursorDistancePx, leashPx, wallHitDistancePx }),
+      burn01: burn01 * motionBurn01,
+    };
   }
 
   function hasPeers() {
@@ -284,7 +316,9 @@ export function createPlayerAimChannel({
    * Stamp every aimable carried light's snapshot with the aim to draw, IN PLACE -
    * the snapshots are this frame's own fresh objects
    * (`readActivePlayerCarriedLightTokens` builds them per call):
-   *   - `aimAngleDeg`, the bearing (a flashlight's beam direction);
+   *   - `aimAngleDeg`, the bearing (a flashlight's beam direction) — for a beam,
+   *     eased on its own longer leash and nudged by a hand tremor, both decided
+   *     here and never sent (`flashlightAimWanderDeg`);
    *   - `reachPx`: how far the cursor is — a flashlight's beam is that long
    *     (`player-light-geometry.js#resolveBeamReach01`);
    *   - for a held torch also `offsetX`/`offsetY`, where its bearer holds it
@@ -307,23 +341,36 @@ export function createPlayerAimChannel({
       for (const snap of snapshots) {
         if (!PLAYER_AIM_MODES.includes(snap?.mode)) continue;
         if (localToken === UNRESOLVED) localToken = resolveLocalAimToken();
+        const held = PLAYER_AIM_HELD_MODES.includes(snap.mode);
+        const beam = !held && PLAYER_AIM_REACH_MODES.includes(snap.mode);
         let aim = null;
         if (localToken && snap.tokenId === tokenIdOf(localToken)) {
-          const target = localAimTarget(localToken, snap);
-          if (target && !PLAYER_AIM_HELD_MODES.includes(snap.mode)) {
-            aim = target; // a beam follows the cursor exactly - no lag
-          } else if (target) {
+          const target = localAimTarget(localToken, snap, nowMs);
+          if (target && held) {
             torchEase.receive(snap.tokenId, target.angleDeg, nowMs, target.reachPx, target.burn01);
             aim = torchEase.sampleAim(snap.tokenId, nowMs);
+          } else if (target) {
+            // A BEAM lags too, on a longer leash of its own (2026-10-15, the
+            // author's "on a string") — the same machinery the torch above uses,
+            // only slower. No burn to relay: a flashlight does not gutter.
+            beamEase.receive(snap.tokenId, target.angleDeg, nowMs, target.reachPx, null);
+            aim = beamEase.sampleAim(snap.tokenId, nowMs);
           }
         } else {
           aim = store.sampleAim(snap.tokenId, nowMs);
         }
         if (aim) {
-          snap.aimAngleDeg = aim.angleDeg;
+          // A hand, not a tripod (2026-10-15): a BEAM's bearing wanders as well,
+          // drawn on every client from the wall clock so it never goes over the
+          // wire — the torch's own `torchWanderOffset` in the one domain a beam
+          // has, a bearing (`flashlightAimWanderDeg`). Stamped BEFORE the rim
+          // below, so the light's own origin rolls with the tremor too.
+          snap.aimAngleDeg = beam
+            ? aim.angleDeg + flashlightAimWanderDeg(snap.tokenId, wallMs, wanderDeg)
+            : aim.angleDeg;
           if (aim.reachPx !== null && PLAYER_AIM_REACH_MODES.includes(snap.mode)) {
             snap.reachPx = aim.reachPx;
-            if (PLAYER_AIM_HELD_MODES.includes(snap.mode)) {
+            if (held) {
               if (aim.burn01 !== null) snap.burn01 = aim.burn01;
               const offset = offsetFromAim(aim.angleDeg, aim.reachPx);
               // The hand's tremor is added at DRAW time on every client, from the wall
@@ -334,11 +381,11 @@ export function createPlayerAimChannel({
             }
           }
         }
-        // A flashlight sits on the rim of its token's circle even before any aim is
-        // known (it then follows the token's stored rotation).
-        if (PLAYER_AIM_REACH_MODES.includes(snap.mode) && !PLAYER_AIM_HELD_MODES.includes(snap.mode)) {
-          stampFlashlightRim(snap);
-        }
+        // A flashlight sits on the rim of its token's circle. With no aim stamped
+        // above, nothing is ever built from it
+        // (`player-light-geometry.js#hasCarriedLightAim`), so the rim only ever
+        // matters once somebody is steering the beam.
+        if (beam) stampFlashlightRim(snap);
       }
     } catch (err) {
       noteError('annotating player aim', err);
@@ -381,8 +428,8 @@ export function createPlayerAimChannel({
       policy.reset(); // alone at the table: say nothing, and say it all the moment someone joins
       return false;
     }
-    const target = localAimTarget(token, snap);
-    if (!target) return false; // no cursor yet — everyone keeps the stored rotation
+    const target = localAimTarget(token, snap, nowMs);
+    if (!target) return false; // no cursor yet (or none usable) — this bearer has no light, so there is nothing to tell anyone about
     const toSend = policy.decide(localId, target.angleDeg, nowMs, target.reachPx, target.burn01);
     if (toSend === null) return false;
     return emit(localId, toSend, target.reachPx, target.burn01);

@@ -17,14 +17,15 @@
  *     cursor; and
  *   - leaving each client its own aim — everyone else keeps seeing a north beam.
  * The message costs no writes, leaves the token art alone, and every receiver
- * falls back to the stored rotation whenever no fresh aim exists.
+ * simply has no light to draw for an aim that has gone stale — see
+ * `player-light-geometry.js#hasCarriedLightAim`.
  *
  * ANGLES use `TokenDocument.rotation`'s own convention — degrees, 0 = up (world
  * −Y, canvas Y grows downward), increasing clockwise — i.e. the convention
  * `effects/lighting/player-light-geometry.js#tokenRotationToForwardVector`
- * already turns into a beam direction. An aim is therefore a drop-in for the
- * rotation it overrides; nothing converts between two conventions on the way to
- * the shader. (`player-aim.test.mjs` locks the two together.)
+ * already turns into a beam direction. An aim therefore needed no new unit and
+ * no conversion on the way to the shader. (`player-aim.test.mjs` locks the two
+ * together.)
  *
  * WHAT TRAVELS is one angle per aiming token — plus, for a held torch, one
  * reach (px from the token, already clamped to the leash and the walls by the
@@ -41,8 +42,9 @@
  *   - RECEIVE SIDE (`createRemoteAimStore`) smooths the 10 Hz stream into the
  *     60 fps frame with a frame-rate-independent exponential ease along the
  *     SHORT arc (359° → 1° is a 2° turn, not a 358° spin), and lets an entry
- *     expire — a bearer who left the table must not freeze a beam in place
- *     forever; the stored rotation takes over again.
+ *     expire — a bearer who left the table must not leave a beam burning
+ *     forever; with the aim gone the light is simply not built
+ *     (`player-light-geometry.js#hasCarriedLightAim`).
  *   - NOTHING here reads a clock: every function that cares about time is handed
  *     `nowMs` (`time/one-clock`, tools/verify-structure.mjs).
  *
@@ -109,8 +111,43 @@ export const AIM_SEND_MIN_BURN_DELTA_PCT = 3;
 export const AIM_TORCH_WANDER_PX = 5;
 export const AIM_TORCH_WANDER_STEP_PX = 2;
 
+/** Quick hand movement gutters the torch; the motion response is intentionally
+ * separate from the distance leash, which can still snuff a torch completely. */
+export const AIM_TORCH_GUTTER_START_GRID_S = 12;
+export const AIM_TORCH_GUTTER_FULL_GRID_S = 28;
+export const AIM_TORCH_GUTTER_MIN_BURN01 = 0.22;
+export const AIM_TORCH_GUTTER_ATTACK_TAU_MS = 90;
+export const AIM_TORCH_GUTTER_RECOVERY_TAU_MS = 650;
+
 /** The torch lags the cursor slightly — an arm, not a laser pointer (V2 sprang it). */
 export const AIM_TORCH_EASE_TAU_MS = 90;
+
+/**
+ * The flashlight lags its bearer's cursor on a longer leash — "on a string"
+ * (2026-10-15, the author's own ask: "could we put the flashlight 'on a string'
+ * so that it lags a bit?"). Longer than the torch's own 90 ms on purpose: a beam
+ * is a whole SHAPE that swings, and the swing is what sells it, where a torch
+ * only moves its own small point. It is one number to re-tune if 220 ms reads as
+ * sluggish in the hand.
+ */
+export const AIM_FLASHLIGHT_EASE_TAU_MS = 220;
+
+/**
+ * And a flashlight is not held perfectly steady either: a hand trembles, so a
+ * beam's own bearing wanders by this many DEGREES (the torch's own
+ * `AIM_TORCH_WANDER_PX` displaces a POSITION — a beam has none of its own, its
+ * bearing is the thing a hand shakes).
+ *
+ * NOT quantized the way the torch's is, deliberately: the pool's wall-clip cache
+ * is keyed on the light's exact origin, and the beam's origin rides its own
+ * bearing at `rimPx` (tens of px, so a step of a fraction of a degree barely
+ * moves it) — but the beam's far END is amplified by its full throw, where a
+ * 0.4° step is already ~6 px of cookie. Snapping to a visible grid to buy cache
+ * hits would trade a smooth hand for a strobing one, so a flashlight carrying
+ * this tremble simply re-sweeps its clip like any other moving light
+ * (`point-light-pool.js`'s own `playerLightWallClipCache` declaration).
+ */
+export const AIM_FLASHLIGHT_WANDER_DEG = 1.6;
 
 /** The `type` this feature's messages carry on the shared module socket. */
 export const AIM_MESSAGE_TYPE = 'playerAim';
@@ -296,6 +333,86 @@ export function torchWanderOffset(
 }
 
 /**
+ * A hand-held flashlight's own tremor, as a signed offset in DEGREES of bearing —
+ * the beam-shaped twin of {@link torchWanderOffset} (see
+ * `AIM_FLASHLIGHT_WANDER_DEG` for the amplitude, the rates and why this one is
+ * NOT snapped to a step). Added to the aim at DRAW time on every client, from the
+ * wall clock and the token id, so it is never sent over the wire: two clients do
+ * not have to agree on a tremor, they simply both wobble.
+ *
+ * @param {string} tokenId
+ * @param {number} wallMs - wall-clock milliseconds (`core/frame-clock.js#wallClockMs`).
+ * @param {number} [amplitudeDeg]
+ * @returns {number} degrees, within ±amplitudeDeg.
+ */
+export function flashlightAimWanderDeg(tokenId, wallMs, amplitudeDeg = AIM_FLASHLIGHT_WANDER_DEG) {
+  if (!(amplitudeDeg > 0) || !Number.isFinite(wallMs)) return 0;
+  const t = wallMs / 1000;
+  const id = String(tokenId ?? '');
+  const tau = Math.PI * 2;
+  const wave = (rateA, rateB, salt) =>
+    0.65 * Math.sin(tau * (rateA * t + hash01(id, salt))) + 0.35 * Math.sin(tau * (rateB * t + hash01(id, salt + 1)));
+  return amplitudeDeg * wave(1.05, 2.35, 53);
+}
+
+/** Stateful, frame-rate-independent torch response to cursor speed. Fast motion
+ * dims the flame promptly; it warms back up more slowly when the hand settles. */
+export function createTorchMotionGutter({
+  startGridPerSecond = AIM_TORCH_GUTTER_START_GRID_S,
+  fullGridPerSecond = AIM_TORCH_GUTTER_FULL_GRID_S,
+  minimumBurn01 = AIM_TORCH_GUTTER_MIN_BURN01,
+  attackTauMs = AIM_TORCH_GUTTER_ATTACK_TAU_MS,
+  recoveryTauMs = AIM_TORCH_GUTTER_RECOVERY_TAU_MS,
+  maxEntries = 64,
+} = {}) {
+  const entries = new Map();
+  return {
+    /** @param {string} tokenId @param {{x:number,y:number}|null} cursor @param {number} nowMs @param {number} gridPx */
+    update(tokenId, cursor, nowMs, gridPx) {
+      if (!tokenId || !Number.isFinite(nowMs)) return 1;
+      const previous = entries.get(tokenId);
+      if (!previous) {
+        if (entries.size >= maxEntries) entries.delete(entries.keys().next().value);
+        entries.set(tokenId, {
+          x: Number.isFinite(cursor?.x) ? cursor.x : null,
+          y: Number.isFinite(cursor?.y) ? cursor.y : null,
+          nowMs,
+          burn01: 1,
+        });
+        return 1;
+      }
+
+      // Long gaps (tab throttling, a paused fixture) must not invent an
+      // instantaneous mouse sprint; use the elapsed sample interval itself.
+      const dtMs = Math.max(0, Math.min(10000, nowMs - previous.nowMs));
+      const validCursor = Number.isFinite(cursor?.x) && Number.isFinite(cursor?.y);
+      let speedGridPerSecond = 0;
+      if (validCursor && Number.isFinite(previous.x) && Number.isFinite(previous.y) && dtMs > 0 && gridPx > 0) {
+        speedGridPerSecond = (Math.hypot(cursor.x - previous.x, cursor.y - previous.y) / gridPx) * (1000 / dtMs);
+      }
+      const span = Math.max(1e-4, fullGridPerSecond - startGridPerSecond);
+      const t = Math.min(1, Math.max(0, (speedGridPerSecond - startGridPerSecond) / span));
+      const eased = t * t * (3 - 2 * t);
+      const target = 1 - eased * (1 - Math.min(1, Math.max(0, minimumBurn01)));
+      const tau = target < previous.burn01 ? attackTauMs : recoveryTauMs;
+      const blend = dtMs > 0 ? 1 - Math.exp(-dtMs / Math.max(1, tau)) : 0;
+      const burn01 = previous.burn01 + (target - previous.burn01) * blend;
+      entries.set(tokenId, {
+        x: validCursor ? cursor.x : previous.x,
+        y: validCursor ? cursor.y : previous.y,
+        nowMs,
+        burn01,
+      });
+      return Math.min(1, Math.max(minimumBurn01, burn01));
+    },
+    reset(tokenId) {
+      if (tokenId === undefined) entries.clear();
+      else entries.delete(tokenId);
+    },
+  };
+}
+
+/**
  * How brightly a torch burns for a cursor `cursorDistancePx` from its bearer:
  * full inside the leash, falling linearly to nothing `fadeBandPx` beyond it.
  * @returns {number} 0..1
@@ -364,8 +481,12 @@ export function encodeAimMessage({ tokenId, angleDeg, userId, reachPx, burn01 } 
   // `d` only when there is a reach to carry (a held torch): a flashlight's message stays as small as before,
   // and a receiver that predates it simply ignores the extra field.
   if (Number.isFinite(reachPx) && reachPx >= 0) msg.d = Math.min(AIM_MAX_REACH_PX, Math.round(reachPx));
-  // `b`: a torch's burn as a whole percent, only when it is not at full (a missing `b` reads as burning).
-  if (Number.isFinite(burn01) && burn01 < 1) msg.b = Math.max(0, Math.round(burn01 * 100));
+  // `b`: a torch's burn as a whole percent. Test the quantized value so a
+  // eased 0.999999 does not send `b:100` (missing `b` is the full-burn form).
+  if (Number.isFinite(burn01)) {
+    const burnPct = Math.max(0, Math.min(100, Math.round(burn01 * 100)));
+    if (burnPct < 100) msg.b = burnPct;
+  }
   return msg;
 }
 
@@ -533,8 +654,9 @@ export function createAimSendPolicy({
  * depend on how often the renderer happened to sample. `sample` (once per frame
  * per token) advances the ease the rest of the way to `nowMs`.
  *
- * An entry not refreshed within `staleMs` is gone: `sample` returns `null` and
- * the caller falls back to the token's stored rotation.
+ * An entry not refreshed within `staleMs` is gone: `sample`/`sampleAim` return
+ * `null`, and the caller has no aim to draw with — the light is not built at all
+ * (`player-light-geometry.js#hasCarriedLightAim`).
  *
  * @param {{staleMs?: number, tauMs?: number, maxEntries?: number}} [options]
  */

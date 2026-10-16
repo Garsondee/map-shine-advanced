@@ -11,12 +11,12 @@
  * TOKEN (`resolveCarriedLightTarget`). It first shipped excluding GMs outright,
  * which left a GM with no way to give anything a light, aim it, or see a vision
  * mode. It is mounted in the Remote's Player Lights board for a GM and in the
- * Player room for everyone else; the GM sees all six modes (marking any the
+ * Player room for everyone else; the GM sees all seven modes (marking any the
  * scene switches off), a player only the ones the GM allows.
  *
- * ⚠️ ALL SIX MODES ARE PICKABLE (when the scene allows them) AND ALL SIX NOW
+ * ⚠️ ALL SEVEN MODES ARE PICKABLE (when the scene allows them) AND ALL SEVEN NOW
  * RENDER SOMETHING (Stage 2b, mythica-machina-press#77/#580) — Torch/
- * Flashlight as real lights everyone sees, the other four as a real
+ * Flashlight as real lights everyone sees, the other five as a real
  * screen-space grade visible only to this token's own viewer. The tooltip
  * below says which kind each chip is rather than lumping both under one
  * "rendered" label.
@@ -32,14 +32,14 @@ import {
   readScenePlayerLightPermissions,
 } from '../../foundry/index.js';
 
-/** The six modes, in display order, with WHAT each one actually renders —
+/** The seven modes, in display order, with WHAT each one actually renders —
  * a local, UI-owned copy (see `remote/player-light-board.js`'s own identical
  * `MODE_ROWS` for why this isn't a shared import: the two lists answer
- * different questions that happen to share six strings today). All six
+ * different questions that happen to share seven strings today). All seven
  * render something as of Stage 2b (mythica-machina-press#77, #580):
  * `'light'` = a real MSA-rendered light everyone at the table sees
  * (Torch/Flashlight, Stage 2a); `'grade'` = a real MSA screen-space colour
- * grade visible ONLY to this token's own viewer (the other four,
+ * grade visible ONLY to this token's own viewer (the other five,
  * `effects/vision/player-vision-grade-render.js`) — different enough in
  * kind to say so in the tooltip rather than lumping both under "rendered". */
 const MODE_ROWS = Object.freeze([
@@ -47,6 +47,7 @@ const MODE_ROWS = Object.freeze([
   { key: 'flashlight', label: 'Flashlight', kind: 'light' },
   { key: 'nightVision', label: 'Night Vision', kind: 'grade' },
   { key: 'lowLight', label: 'Low-light Vision', kind: 'grade' },
+  { key: 'activeLowLight', label: 'Low Light (Active)', kind: 'grade' },
   { key: 'infravision', label: 'Infravision', kind: 'grade' },
   { key: 'activeInfravision', label: 'Active Infravision', kind: 'grade' },
 ]);
@@ -130,7 +131,7 @@ export function renderPlayerLightPicker(container) {
       return;
     }
     const isAllowed = (key) => permissions.modes?.[key] === true;
-    // A player is only offered what the GM allows. A GM sees all six, with the
+    // A player is only offered what the GM allows. A GM sees all seven, with the
     // switched-off ones marked, so there is always something to try.
     const rows = gm ? MODE_ROWS : MODE_ROWS.filter((row) => isAllowed(row.key));
     if (rows.length === 0) {

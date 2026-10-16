@@ -1221,13 +1221,15 @@ function sampleOutdoorsAtWorldXY(TSL, uOutdoorsRect, outdoorsTexNode, worldX, wo
  * @param {*} args.uViewRect - vec4 uniform, the camera world rect (minX,minY,maxX,maxY).
  * @param {*} args.uOutdoorsRect - vec4 uniform, the rect the mask covers.
  * @param {*} args.outdoorsTexNode - the `_Outdoors` texture node, or null.
+ * @param {*} [args.uvNode] - optional screen UV (defaults to `uv()`), for refracted samples.
  * @returns {*|null} a scalar 0..1 node, or null if no mask.
  */
-export function buildOutdoorsGate(TSL, { uViewRect, uOutdoorsRect, outdoorsTexNode }) {
+export function buildOutdoorsGate(TSL, { uViewRect, uOutdoorsRect, outdoorsTexNode, uvNode: screenUvNode = null }) {
   if (!outdoorsTexNode) return null;
   const { uv, mix } = TSL;
-  const worldX = mix(uViewRect.x, uViewRect.z, uv().x);
-  const worldY = mix(uViewRect.y, uViewRect.w, uv().y);
+  const screenUv = screenUvNode ?? uv();
+  const worldX = mix(uViewRect.x, uViewRect.z, screenUv.x);
+  const worldY = mix(uViewRect.y, uViewRect.w, screenUv.y);
   return sampleOutdoorsAtWorldXY(TSL, uOutdoorsRect, outdoorsTexNode, worldX, worldY);
 }
 

@@ -150,6 +150,10 @@ export function run(t) {
       !canBatchLight({ apertureCount: 4, falloffModel: 'foundry' })
   );
   ok(
+    'a textured flashlight endpoint cookie stays on the per-light sampler path',
+    !canBatchLight({ apertureCount: 0, falloffModel: 'inverseSquareWide', cookiePattern: 'flashlight' })
+  );
+  ok(
     'an unrecognized falloffModel string is inadmissible — a closed list, not a negative check',
     !canBatchLight({ apertureCount: 0, falloffModel: 'somethingNew' })
   );

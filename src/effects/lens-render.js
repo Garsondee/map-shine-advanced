@@ -46,27 +46,28 @@
 
 /** Tier 0 (`optics`) default constants — mirror `effects/lens.js#LENS_PARAMS`'s
  * own defaults exactly (a change lands in both or neither). They started as
- * V2's OWN shipped defaults (`LensEffectV2.js`'s own `this.params`); the six
- * marked `// V2: <old>` were live-tuned by the author 2026-09-25 (lens.js's
- * own LENS_PARAMS doc). */
-export const LENS_TIER0_DISTORTION = -0.03; // V2: -0.08
-export const LENS_TIER0_CHROMATIC_AMOUNT_PX = 0.8; // V2: 4.22 (live-tuned 1.7, toned down again 2026-10-08)
-export const LENS_TIER0_CHROMATIC_EDGE_POWER = 1.16; // V2: 2.11
+ * V2's OWN shipped defaults (`LensEffectV2.js`'s own `this.params`); the ones
+ * marked `// V2: <old>` were live-tuned by the author 2026-09-25 and again
+ * 2026-10-16 (lens.js's own LENS_PARAMS doc). */
+export const LENS_TIER0_DISTORTION = -0.1; // V2: -0.08
+export const LENS_TIER0_CHROMATIC_AMOUNT_PX = 1.2; // V2: 4.22 (live-tuned 1.7 → 0.8 → 4.1 → 1.2, 2026-10-16)
+export const LENS_TIER0_CHROMATIC_EDGE_POWER = 6; // V2: 2.11
 export const LENS_TIER0_VIGNETTE_INTENSITY = 1;
 export const LENS_TIER0_VIGNETTE_SOFTNESS = 0.02; // V2: 0.34
-export const LENS_TIER0_GRAIN_AMOUNT = 0; // V2: 0.01 (2026-09-25 live-tuned, was 0.001)
-export const LENS_TIER0_GRAIN_SPEED = 1;
-export const LENS_TIER0_GRAIN_LOW_LIGHT_BOOST = 0.25;
-export const LENS_TIER0_GRAIN_CELL_SIZE_BRIGHT = 0.7; // V2: 1.4
-export const LENS_TIER0_GRAIN_CELL_SIZE_DARK = 3;
+export const LENS_TIER0_GRAIN_AMOUNT = 0.003; // V2: 0.01 (2026-09-25 tuned to 0, 0.002 then 0.003 on 2026-10-16)
+export const LENS_TIER0_GRAIN_SPEED = 1.05;
+export const LENS_TIER0_GRAIN_LOW_LIGHT_BOOST = 0.12;
+export const LENS_TIER0_GRAIN_CELL_SIZE_BRIGHT = 0.6; // V2: 1.4
+export const LENS_TIER0_GRAIN_CELL_SIZE_DARK = 1.9;
 
 /** 2026-10-08 — the author found grain far too coarse and ~50% too strong at
- * their stored settings. These calibration gains are applied in the shader (not
- * the defaults, which already seed grain at 0) so every stored scene picks them
- * up: amplitude ×0.5, speck size ×0.5 (still floored at 1 screen px). */
+ * their stored settings. These calibration gains are applied in the shader (so
+ * every stored scene picks them up, not just fresh ones): amplitude ×0.5, speck
+ * size ×0.5 (still floored at 1 screen px). The 2026-10-16 default (0.002) was
+ * tuned in-app with these gains already active. */
 export const LENS_GRAIN_AMOUNT_GAIN = 0.5;
 export const LENS_GRAIN_CELL_GAIN = 0.5;
-export const LENS_TIER0_DIGITAL_NOISE_AMOUNT = 0.066;
+export const LENS_TIER0_DIGITAL_NOISE_AMOUNT = 0.005; // 2026-10-16 (was 0.066)
 export const LENS_TIER0_DIGITAL_NOISE_CHANCE = 0.004;
 export const LENS_TIER0_DIGITAL_NOISE_GREEN_BIAS = 1;
 export const LENS_TIER0_DIGITAL_NOISE_LOW_LIGHT_BOOST = 3.37;

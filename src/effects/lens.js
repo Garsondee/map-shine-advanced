@@ -91,12 +91,19 @@
  *
  * LIVE-TUNED 2026-09-25 — the author's own in-app "New defaults" dump, the
  * fine-tuning pass mythica-machina-press#556 asked for ("needs to be fine
- * tuned and off by default"). Seven values now carry the author's tuned
+ * tuned and off by default"). Seven values picked up the author's tuned
  * number instead of V2's, each marked `// V2: <old>` beside it: distortion,
  * chromaticAmountPx, chromaticEdgePower, vignetteSoftness, grainAmount,
- * grainCellSizeBright, autoFocusEnabled. The dump's own `enabled: true` is
- * the live panel's switch state, NOT a request to un-gate the effect —
- * `LENS.enabledFromProfile` stays `'extreme'` (below), still off by default.
+ * grainCellSizeBright, autoFocusEnabled.
+ *
+ * LIVE-TUNED AGAIN 2026-10-16 — a second "New defaults" dump that is ALSO a
+ * deliberate un-gating: author instruction, "Turns Lens On by default."
+ * `LENS.enabledFromProfile` moves `'extreme'` → `'low'` (below), reversing
+ * the 2026-09-16 #556 off-by-default posture now that the look is tuned —
+ * and four values move with the dump: chromaticAmountPx (0.8 → 4.1),
+ * grainAmount (0 → 0.002), digitalNoiseAmount (0.066 → 0.005) and
+ * motionBlurEnabled (false → true).
+ *
  * `lens-render.js`'s `LENS_TIER0_*` constants and `vt-pan-viewer.js`'s
  * `runPostLensPass` fallbacks mirror these and change with them.
  *
@@ -109,7 +116,7 @@ export const LENS_PARAMS = Object.freeze({
     min: -0.3,
     max: 0.3,
     step: 0.005,
-    default: -0.03, // V2: -0.08
+    default: -0.1, // V2: -0.08
     category: 'Optics',
     label: 'Lens curvature',
     help: "How much the image bows away from a flat plane, like looking through real camera glass. Negative pulls the edges in (a gentle pincushion, V2's own default); positive pushes them out (barrel). 0 is a perfectly flat, distortion-free image.",
@@ -119,7 +126,7 @@ export const LENS_PARAMS = Object.freeze({
     min: 0,
     max: 12,
     step: 0.1,
-    default: 0.8, // V2: 4.22 (live-tuned 1.7, toned down again 2026-10-08)
+    default: 1.2, // V2: 4.22 (live-tuned 1.7, 0.8 on 2026-10-08, 4.1 then 1.2 on the 2026-10-16 "new defaults" dumps)
     category: 'Optics',
     label: 'Colour fringing',
     help: 'Red/blue channel separation at the edges of the frame, in screen pixels — the coloured fringing real lenses show on high-contrast edges, strongest where the curvature above is strongest. 0 removes it entirely.',
@@ -129,7 +136,7 @@ export const LENS_PARAMS = Object.freeze({
     min: 0.2,
     max: 6,
     step: 0.01,
-    default: 1.16, // V2: 2.11
+    default: 6, // V2: 2.11
     category: 'Optics',
     label: 'Fringing falloff',
     help: 'How sharply the colour fringing above concentrates at the very edge of frame versus spreading toward the centre. Higher keeps the centre clean and pushes the fringing further out.',
@@ -162,7 +169,11 @@ export const LENS_PARAMS = Object.freeze({
     max: 0.15,
     step: 0.001,
     // 2026-09-25 — author's live-tuned "new defaults" dump (was 0.001). V2: 0.01.
-    default: 0,
+    // 2026-10-16 — second dump: grain comes back, small (was 0). Tuned live
+    // with the shader's 2026-10-08 calibration gains (×0.5 amplitude, ×0.5
+    // speck size) already active, so this is the author's in-app look, not a
+    // raw pre-gain number.
+    default: 0.003,
     category: 'Grain',
     label: 'Film grain',
     help: 'Fine per-pixel brightness noise, like real film stock or a camera sensor at speed — the texture that keeps a flat CG-perfect image from reading as sterile. 0 removes it entirely.',
@@ -172,7 +183,7 @@ export const LENS_PARAMS = Object.freeze({
     min: 0,
     max: 4,
     step: 0.05,
-    default: 1,
+    default: 1.05,
     category: 'Grain',
     label: 'Grain speed',
     help: 'How fast the grain pattern itself re-rolls, in cycles per second. Low values read as a textured but fairly stable image; high values read as a busier, more electric shimmer.',
@@ -189,7 +200,7 @@ export const LENS_PARAMS = Object.freeze({
     min: 0,
     max: 2,
     step: 0.01,
-    default: 0.25,
+    default: 0.12,
     category: 'Grain',
     label: 'Low-light grain boost',
     help: 'How much stronger the grain above gets in full darkness, once "boost grain in the dark" is on. 0 leaves grain the same everywhere regardless of exposure.',
@@ -199,7 +210,7 @@ export const LENS_PARAMS = Object.freeze({
     min: 0.5,
     max: 6,
     step: 0.1,
-    default: 0.7, // V2: 1.4
+    default: 0.6, // V2: 1.4
     category: 'Grain',
     label: 'Grain size (bright)',
     help: 'How large each grain speck reads, in screen pixels, in well-lit parts of the image. Smaller is finer and less visible; larger reads as coarser, more obviously textured film.',
@@ -209,7 +220,7 @@ export const LENS_PARAMS = Object.freeze({
     min: 0.5,
     max: 10,
     step: 0.1,
-    default: 3,
+    default: 1.9,
     category: 'Grain',
     label: 'Grain size (dark)',
     help: 'The same speck size as above, but for the darkest parts of the image once "boost grain in the dark" is on — real high-ISO grain reads visibly coarser than low-ISO grain, not just brighter.',
@@ -226,7 +237,8 @@ export const LENS_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.005,
-    default: 0.066,
+    // 2026-10-16 — author's live-tuned "new defaults" dump (was 0.066).
+    default: 0.005,
     category: 'Grain',
     label: 'Digital noise strength',
     help: 'How bright each speck of digital sensor noise reads once it fires. Only visible while "digital sensor noise" above is on.',
@@ -265,10 +277,10 @@ export const LENS_PARAMS = Object.freeze({
   // ── Autofocus (tier 1 — the lens hunting for focus) ───────────────────────
   autoFocusEnabled: {
     type: 'bool',
-    default: true, // V2: false
+    default: false, // V2: false
     category: 'Autofocus',
     label: 'Autofocus pulses',
-    help: 'Every so often, the whole image briefly softens and re-sharpens — a camera hunting for focus, the same beat a real autofocus lens has when the shot changes. On by default (V2 shipped it off) — part of the tuned lens look, so it comes along whenever Lens itself is switched on.',
+    help: 'Every so often, the whole image briefly softens and re-sharpens — a camera hunting for focus, the same beat a real autofocus lens has when the shot changes. Off by default, matching V2\'s own shipped state.',
   },
   autoFocusMinIntervalSeconds: {
     type: 'float',
@@ -361,10 +373,11 @@ export const LENS_PARAMS = Object.freeze({
   // ── Motion (tier 1 — camera-driven blur) ──────────────────────────────────
   motionBlurEnabled: {
     type: 'bool',
-    default: false,
+    // 2026-10-16 — author's live-tuned "new defaults" dump (was false).
+    default: false, // V2: false
     category: 'Motion',
     label: 'Camera motion blur',
-    help: "A brief directional smear whenever the camera pans or zooms quickly — the same motion blur a real camera picks up when it moves faster than its shutter can freeze. Off by default, matching V2's own shipped state.",
+    help: 'A brief directional smear whenever the camera pans or zooms quickly — the same motion blur a real camera picks up when it moves faster than its shutter can freeze. Off by default, matching V2\'s own shipped state.',
   },
   motionBlurStrength: {
     type: 'float',
@@ -381,7 +394,7 @@ export const LENS_PARAMS = Object.freeze({
     min: 0,
     max: 40,
     step: 0.5,
-    default: 10,
+    default: 9.5,
     category: 'Motion',
     label: 'Max blur',
     help: 'The hardest ceiling on how far the smear can reach, in screen pixels, regardless of how fast the camera is actually moving — keeps a sudden snap-pan from tearing the image apart.',
@@ -688,7 +701,18 @@ export function lensPreset(name) {
  * This does not remove the look: `effect-cascade.js#resolveEffectEnabled`'s
  * `gmEnable`/`playerEnable` override still turns it on for any scene whose
  * GM actually wants it, at any profile — the Studio effect switch is that
- * override, live. Off by default; on by choice.
+ * override, live. Off by default; on by choice. (REVERSED 2026-10-16 — see the
+ * next paragraph.)
+ *
+ * ⚠️ CHANGED BACK 2026-10-16 — author direct instruction: "Turns Lens On by
+ * default", shipped with the second "New defaults" dump (this module's own
+ * header, above). The #556 pass that gated it off existed so the look could
+ * be fine-tuned first; that tuning has now happened, twice, so `'low'` is
+ * the deliberate ceiling-free default again — the same "ship the best look,
+ * dial DOWN on request" posture bloom/candle/clouds carry
+ * (feedback_default_on_new_features). The cascade still gives every layer
+ * the final say: a GM or player `off` override, or the Studio effect switch,
+ * turns it back off for a scene or a client.
  *
  * @type {import('./effect-manifest.js').EffectManifest}
  */
@@ -697,11 +721,11 @@ export const LENS = Object.freeze({
   title: 'Lens',
   visualWeight: 0.35,
   a11y: Object.freeze({ photosensitive: false }),
-  enabledFromProfile: 'extreme',
+  enabledFromProfile: 'low',
   readiness: Object.freeze({
     firstRunWork: false,
     coverage: 'none',
-    why: "A post pass over buffers the frame graph already owns, same posture as bloom's own readiness doc: no masks to bake, no assets to load below tier 2. Tier 2 (light burn) allocates a small persistent render-target pair on first use, covered by settle.js's pipeline-growth criterion rather than a dedicated probe, matching bloom's reasoning for its own pipeline-compilation cost. Tier 3 (overlay) DOES fetch a real bundled asset on first use (`vt/lens-overlay-image.js`) — deliberately NOT wired into a settle.js probe of its own (unlike `post.grade`'s named `gradeLut` probe for its own bundled `.cube` fetch): Lens is off by default at every profile short of `extreme`, the overlay sub-feature defaults off even once Lens itself is on, and the look it adds is a slow-cycling decorative layer, not a scene-defining look a visible pop would be jarring for the way a LUT swap is. A cold first load shows no overlay for one fetch's worth of latency, then fades in on its own next natural crossfade — a degraded-but-honest first frame, the same posture `vt/baked-textures.js`'s own header states for a missing bake, never a broken one.",
+    why: "A post pass over buffers the frame graph already owns, same posture as bloom's own readiness doc: no masks to bake, no assets to load below tier 2. Tier 2 (light burn) allocates a small persistent render-target pair on first use, covered by settle.js's pipeline-growth criterion rather than a dedicated probe, matching bloom's reasoning for its own pipeline-compilation cost. Tier 3 (overlay) DOES fetch a real bundled asset on first use (`vt/lens-overlay-image.js`) — deliberately NOT wired into a settle.js probe of its own (unlike `post.grade`'s named `gradeLut` probe for its own bundled `.cube` fetch): the overlay sub-feature defaults off even with Lens itself on (and its rung only exists at `extreme` besides), and the look it adds is a slow-cycling decorative layer, not a scene-defining look a visible pop would be jarring for the way a LUT swap is. A cold first load shows no overlay for one fetch's worth of latency, then fades in on its own next natural crossfade — a degraded-but-honest first frame, the same posture `vt/baked-textures.js`'s own header states for a missing bake, never a broken one.",
   }),
   params: LENS_PARAMS,
   tiers: Object.freeze([

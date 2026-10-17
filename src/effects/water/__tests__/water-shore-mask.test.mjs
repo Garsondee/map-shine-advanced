@@ -113,11 +113,32 @@ export function run(t) {
         worldXY,
         shoreDist: float(10),
         tSec,
+        flowDir: vec2(0, 1),
+        farOutward: vec2(1, 0),
       });
     } catch (e) {
       built = { error: e };
     }
     ok('buildMaskShoreDensity constructs', !!built && !built.error && !!built.density && !!built.dist);
+    ok(
+      'it hands back the shore normal and the facing it derived (the caller steers along-bank drift by them)',
+      !!built?.outward && !!built?.front
+    );
+    let bare = null;
+    try {
+      bare = buildMaskShoreDensity(THREE, {
+        maskTexNode,
+        maskUvAt: (offset) => vec2(0.5, 0.5).add(offset.mul(float(0.001))),
+        worldXY,
+        tSec,
+      });
+    } catch (e) {
+      bare = { error: e };
+    }
+    ok(
+      'it still constructs with no flow and no SDF (still water, a tier without the body pack)',
+      !!bare && !bare.error
+    );
     ok('it hands back the texture-size node the foam texture reads', !!built?.uTexturePx);
     ok('it hands back the hardness (the spray gate) and the spray strength node', !!built?.hardness && !!built?.uSpray);
     const names = [
@@ -151,20 +172,41 @@ export function run(t) {
     } catch (e) {
       tex = { error: e };
     }
-    ok('buildFoamTexture constructs', !!tex && !tex.error);
+    ok('buildFoamTexture constructs (still water)', !!tex && !tex.error);
+    let flowing = null;
+    try {
+      flowing = buildFoamTexture(THREE, {
+        worldXY,
+        density: float(0.5),
+        tSec,
+        texturePx: float(26),
+        velocityPx: vec2(0, 70),
+      });
+    } catch (e) {
+      flowing = { error: e };
+    }
+    ok('buildFoamTexture constructs carried by a current (the two-phase flow map)', !!flowing && !flowing.error);
 
     let specks = null;
+    let sprayCalls = 0;
+    let waterCalls = 0;
     try {
       specks = buildBreakSpecks(THREE, {
         worldXY,
         tSec,
         velocityPx: vec2(0, 70),
-        gate: float(1),
+        insideHere: float(1),
+        sprayAt: () => (sprayCalls++, float(1)),
+        waterAt: () => (waterCalls++, float(1)),
         uSpray: uniform(float(1)),
       });
     } catch (e) {
       specks = { error: e };
     }
     ok('buildBreakSpecks constructs', !!specks && !specks.error);
+    ok(
+      'every fleck asks the emitter at its OWN spawn point and the mask at its landing point (one of each per frame)',
+      sprayCalls > 1 && sprayCalls === waterCalls
+    );
   }
 }

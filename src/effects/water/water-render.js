@@ -2301,6 +2301,18 @@ export function buildWaterSurfaceMaterial({
   let breakSpecks = null;
   if (activeTier >= 4) {
     const tSecFoam = (timeMsNode ?? float(0)).mul(float(1 / 1000));
+    // THE CURRENT AGAINST THE SHORE (2026-10-17, author: "make it react to the stream
+    // movement"). Within a few texels of any shore the flow pack is degenerate (zero
+    // velocity inside solid texels), so there the GLOBAL heading stands in for the
+    // local one; the shore's own normal comes from the mask (see `outward` in
+    // `water-shore-mask.js`), with the body pack's rotated tangent only as the far
+    // fallback.
+    const nearBank = float(1).sub(smoothstep(float(8), float(48), shoreDist));
+    const facingDirRaw = mix(localFlowDirSafe, uFlowDir, nearBank);
+    const facingDir = facingDirRaw.div(max(length(facingDirRaw), float(1e-4)));
+    const bodyOutward = vec2(bodyTexNode.a, bodyTexNode.b.negate());
+    const maskUvOfWorld = (w) =>
+      vec2(clamp(w.x.sub(uMaskRect.x).div(spanX), 0, 1), clamp(w.y.sub(uMaskRect.y).div(spanY), 0, 1));
     const maskShore = buildMaskShoreDensity(THREE, {
       maskTexNode,
       maskUvAt: (offset) =>
@@ -2311,8 +2323,24 @@ export function buildWaterSurfaceMaterial({
       worldXY: vec2(positionWorld.x, positionWorld.y),
       shoreDist,
       tSec: tSecFoam,
+      flowDir: facingDir,
+      farOutward: bodyOutward,
     });
     maskShoreSetters = maskShore.setters;
+    // THE CURRENT THAT CARRIES FOAM AND FLECKS: the solved local flow in open water;
+    // along the bank near a shore — the mask normal turned a quarter, pointed
+    // downstream, fading to a standstill where the bank faces the current square-on
+    // (a pier's nose), so foam splits there instead of flickering between directions.
+    const bankTangent = vec2(maskShore.outward.y.negate(), maskShore.outward.x);
+    const downstream = smoothstep(float(-0.25), float(0.25), dot(bankTangent, uFlowDir)).mul(float(2)).sub(float(1));
+    const alongBankPx = bankTangent.mul(downstream).mul(uFlowSpeedPx).mul(float(0.7));
+    const currentPx = mix(localVel.mul(uFlowSpeedPx), alongBankPx, nearBank);
+    // Landed flecks ride the BULK current, which is the same everywhere. A fleck is
+    // found by undoing its drift at the pixel being shaded, so the drift must not vary
+    // between neighbouring pixels: with the local flow (≈4 px/s per px of shear beside a
+    // wall) two seconds of riding smeared every fleck to nothing — measured in the lab,
+    // no riding fleck survived. One drift for all keeps each one an exact 1×1/2×2.
+    const fleckCurrentPx = uFlowDir.mul(uFlowSpeedPx).mul(float(0.85));
     const simShoreFade = smoothstep(float(0), float(0.25), inside).mul(smoothstep(float(8), float(48), shoreDist));
     foamDensity = max(max(maskShore.density, waterSimFoam.mul(simShoreFade)), field.foam.mul(crestPatch));
     foamTexture = buildFoamTexture(THREE, {
@@ -2320,21 +2348,20 @@ export function buildWaterSurfaceMaterial({
       density: foamDensity,
       tSec: tSecFoam,
       texturePx: maskShore.uTexturePx,
+      velocityPx: currentPx,
     });
-    // BREAK SPRAY — `water-shore-mask.js#buildBreakSpecks`. Where water is deep right
-    // against a hard edge AND the current drives into it (`shore.breakFacing`, the
-    // tier-4 rotation of the bank tangent), plus the sim's own open-water wakes — the
-    // foam it shed off those same faces and carried downstream. Soft shores never
-    // qualify: `hardness` is 0 on a ramp, and the sim's shore emission is faded out.
-    const sprayGate = max(
-      maskShore.hardness.mul(smoothstep(float(0.05), float(0.5), shore.breakFacing)),
-      waterSimFoam.mul(simShoreFade).mul(float(0.5))
-    ).mul(smoothstep(float(0.3), float(0.7), inside));
+    // BREAK SPRAY — `water-shore-mask.js#buildBreakSpecks`. Each fleck asks the EMITTER
+    // at its own spawn point — the sim pack's G (`water-sim.js#WATER_SIM_SPRAY_GAIN`:
+    // the current driving into a solid face whose water is already deep, i.e. a hard
+    // edge) — so it can fly, land and ride the current far from where it was thrown,
+    // and soft shores never throw one. Whether it landed wet or dry is the mask itself.
     breakSpecks = buildBreakSpecks(THREE, {
       worldXY: vec2(positionWorld.x, positionWorld.y),
       tSec: tSecFoam,
-      velocityPx: localVel.mul(uFlowSpeedPx),
-      gate: sprayGate,
+      velocityPx: fleckCurrentPx,
+      insideHere: inside,
+      sprayAt: (w) => waterSimTexNode.sample(maskUvOfWorld(w)).g,
+      waterAt: (w) => maskTexNode.sample(maskUvOfWorld(w)).r,
       uSpray: maskShore.uSpray,
     });
   }

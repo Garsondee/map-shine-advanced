@@ -192,6 +192,23 @@ export const WATER_SIM_CLUMP_AA_PX = 1.5;
  * is not a value a future consumer could safely assume is display-ready. */
 export const WATER_SIM_STORAGE_CEIL = 3;
 
+/**
+ * THE SPRAY EMITTER, in the stored pack's G channel (2026-10-17) — how hard the
+ * current is breaking against a HARD edge at this texel, 0..1, recomputed every
+ * step (never accumulated, never advected). Read by
+ * `water-shore-mask.js#buildBreakSpecks` at each fleck's SPAWN point, so a fleck
+ * can fly, land and drift far from the face that threw it while still being born
+ * only where water really smashes into something.
+ *
+ * `emitFront`'s own geometry (heading into a solid, near a solid) WITHOUT its
+ * `speed01` factor — the current slows to a stop right at the face it hits
+ * hardest, so speed would put the least spray exactly at a pier's nose — times a
+ * HARD-edge test: the body pack's depth (`G`, the mask itself) is already high on
+ * the open texel beside the solid. A soft painted ramp is still near 0 there, so
+ * a gently shelving bank never sprays. This gain maps a head-on hit to ~1.
+ */
+export const WATER_SIM_SPRAY_GAIN = 10;
+
 /** Gain on the shear emission term (`length` of the flow field's own local
  * gradient) — a heuristic strength, not a physical unit, tuned on the bench. */
 export const WATER_SIM_SHEAR_GAIN = 3.0;
@@ -507,7 +524,19 @@ export function buildWaterSimStepMaterial({
   // placeholder value. Neither decayed nor emitted into: inventing decay/
   // emission semantics for a channel nothing reads yet is exactly the
   // speculative design this codebase avoids doing ahead of need.
-  material.fragmentNode = vec4(storedR, prevSharpNode.g, prevSharpNode.b, prevSharpNode.a);
+  // G = THE SPRAY EMITTER (2026-10-17) — see `WATER_SIM_SPRAY_GAIN`. Was reserved for S7
+  // (sediment) and carried through unread; it is recomputed here every step instead.
+  const hardHere = smoothstep(float(0.25), float(0.6), bodyTexNode.g);
+  const sprayEmit = clamp(
+    max(dot(velDir, solidGrad), float(0))
+      .mul(nearSolid)
+      .mul(hardHere)
+      .mul(float(WATER_SIM_SPRAY_GAIN))
+      .mul(float(1).sub(solidityHere)),
+    float(0),
+    float(1)
+  );
+  material.fragmentNode = vec4(storedR, sprayEmit, prevSharpNode.b, prevSharpNode.a);
   const quad = new THREE.QuadMesh(material);
 
   return { material, quad, flowTexNodes, bodyTexNode, simPrevTexNodes };

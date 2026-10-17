@@ -1029,7 +1029,15 @@ export function buildWaterSurfaceField({
   // already multiplied by `inside` downstream.
   const bankInfluence = float(1).sub(smoothstep(float(0), float(WATER_BANK_REACH_PX), shoreDist));
   const alongBank = tangentXY.mul(dot(current, tangentXY)).mul(bankInfluence);
-  const bankWarp = alongBank.mul(uWaveScalePx.mul(bankInfluenceNode));
+  // ⚠️ FADED IN FROM THE SHORE TOO (2026-10-17), over `WATER_FLOW_WARP_SOLID_FADE_PX`.
+  // Measured in the shader lab at a Tower Bridge pier nose: `tangentXY` is the jump
+  // flood's nearest-seed direction, and within a few texels of a wall it flips between
+  // the staircase's orientations texel by texel — shifting the domain by up to a whole
+  // wave cell along it tore the crest foam into ~7 px checker squares (bankInfluence 0
+  // made them vanish). The bend still runs from there out to `WATER_BANK_REACH_PX`.
+  const bankWarp = alongBank
+    .mul(uWaveScalePx.mul(bankInfluenceNode))
+    .mul(smoothstep(float(0), float(WATER_FLOW_WARP_SOLID_FADE_PX), shoreDist));
 
   // FLOW WARP — `bankWarp`'s sibling, see `WATER_FLOW_WARP_INFLUENCE`'s own
   // doc for the full safety argument. `localFlowDir` defaults to `null`

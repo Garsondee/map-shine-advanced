@@ -21,6 +21,7 @@ import {
   WATER_SIM_NOISE_CELL_PX,
   WATER_SIM_NOISE_TIME_SCALE,
   WATER_SIM_NOISE_FLOOR,
+  WATER_SIM_SPRAY_GAIN,
 } from '../water-sim.js';
 
 /** A 1×1 texture — enough for a node to reference; never sampled here (no
@@ -41,6 +42,13 @@ const SIZES = [
 export function run(t) {
   const { ok } = t;
   const { uniform, float } = THREE.TSL;
+
+  // THE SPRAY EMITTER in G (2026-10-17) — `water-shore-mask.js#buildBreakSpecks` reads it
+  // at each fleck's spawn point; a non-positive gain would silently mean no spray at all.
+  ok(
+    'WATER_SIM_SPRAY_GAIN is a positive, finite gain',
+    Number.isFinite(WATER_SIM_SPRAY_GAIN) && WATER_SIM_SPRAY_GAIN > 0
+  );
 
   for (const [label, width, height] of SIZES) {
     let result = null;

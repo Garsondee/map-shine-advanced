@@ -115,8 +115,14 @@ export function maskShoreDistance(m, gradLen, level, farDistPx = null, sigmaPx =
  * @param {*} args.worldXY - vec2 world position.
  * @param {*|null} [args.shoreDist] - the body SDF's distance into the water (≥ 0).
  * @param {*} args.tSec - seconds.
+ * @param {*|null} [args.flowDir] - vec2 unit, which way the water is going here.
+ * @param {*|null} [args.farOutward] - vec2 unit pointing away from the nearest shore, for
+ *   where the mask has no gradient to give one (the body pack's rotated tangent).
  */
-export function buildMaskShoreDensity(THREE, { maskTexNode, maskUvAt, worldXY, shoreDist = null, tSec }) {
+export function buildMaskShoreDensity(
+  THREE,
+  { maskTexNode, maskUvAt, worldXY, shoreDist = null, tSec, flowDir = null, farOutward = null }
+) {
   const {
     uniform,
     vec2,
@@ -132,6 +138,7 @@ export function buildMaskShoreDensity(THREE, { maskTexNode, maskUvAt, worldXY, s
     fwidth,
     length,
     mix,
+    dot,
     mx_fractal_noise_float,
   } = THREE.TSL;
 
@@ -165,6 +172,18 @@ export function buildMaskShoreDensity(THREE, { maskTexNode, maskUvAt, worldXY, s
   const gradLen = length(vec2(gx, gy)).div(sigma);
   const dMask = clamp(m.sub(level).div(max(gradLen, float(MIN_GRADIENT))), float(-MAX_DIST_PX), float(MAX_DIST_PX));
   const dist = shoreDist ? min(dMask, max(shoreDist.add(sigma.mul(float(0.9))), sigma.mul(float(2)))) : dMask;
+
+  // ── THE SHORE NORMAL, from the same taps ────────────────────────────────
+  // ∇m points into the water, and here it is smooth to the pixel. The body pack's
+  // tangent is NOT, right at a wall: it is the jump flood's nearest-seed direction,
+  // which flips between the staircase's orientations texel by texel — anything
+  // steered by it there (facing, along-bank drift) comes out as ~7 px squares.
+  // Where the mask has no gradient (deep water past a hard edge) the body pack's is
+  // used, and it is smooth that far from the boundary.
+  const maskNormal = vec2(gx, gy).div(max(length(vec2(gx, gy)), float(1e-6)));
+  const normalTrust = smoothstep(float(0.0015), float(0.006), gradLen);
+  const outwardRaw = farOutward ? mix(farOutward, maskNormal, normalTrust) : maskNormal;
+  const outward = outwardRaw.div(max(length(outwardRaw), float(1e-4)));
 
   // ── MOTION: swash, wobble ───────────────────────────────────────────────
   const breakupUv = worldXY.div(float(BREAKUP_SCALE_PX));
@@ -200,9 +219,22 @@ export function buildMaskShoreDensity(THREE, { maskTexNode, maskUvAt, worldXY, s
     mix(float(0.2), float(1.9), smoothstep(float(-0.32), float(0.32), widthNoise)),
     variation
   );
-  const coverage = mix(float(1), smoothstep(float(-0.18), float(0.28), coverNoise), variation);
+  // THE CURRENT'S SAY (2026-10-17, author: "make it react to the stream movement"):
+  // a face the current drives into piles foam up wider and heavier and keeps a solid
+  // line; a wall the current merely runs past gets streaks and a line broken about half
+  // the time; the lee side, where the water pulls away, keeps only scraps.
+  const flowIntoShore = flowDir ? dot(flowDir, outward) : float(0);
+  const frontN = max(flowIntoShore.negate(), float(0));
+  const leeN = max(flowIntoShore, float(0));
+  const coverage = mix(float(1), smoothstep(float(-0.1), float(0.32), coverNoise), variation).mul(
+    mix(float(1), float(0.3), leeN)
+  );
   // The line itself only breaks in the deepest gaps; elsewhere it thins and thickens.
-  const lineGate = mix(float(1), smoothstep(float(-0.45), float(-0.15), coverNoise), variation);
+  const lineGate = mix(
+    mix(float(1), smoothstep(float(-0.15), float(0.15), coverNoise), variation),
+    float(1),
+    frontN
+  ).mul(mix(float(1), float(0.4), leeN));
   const weightMul = mix(
     float(1),
     mix(float(0.25), float(2.2), smoothstep(float(-0.3), float(0.3), weightNoise)),
@@ -215,11 +247,16 @@ export function buildMaskShoreDensity(THREE, { maskTexNode, maskUvAt, worldXY, s
   const xp = max(x, float(0));
   const lineW = float(LINE_PX)
     .mul(float(1).add(wobbleNoise.mul(float(1.8))))
-    .mul(weightMul);
+    .mul(weightMul)
+    .mul(float(1).add(frontN.mul(float(0.8))));
   const line = float(1)
     .sub(smoothstep(lineW.sub(aa), lineW.add(aa), xp))
     .mul(lineGate);
-  const tail = exp(xp.div(widthPx.mul(widthMul)).negate()).mul(float(0.85));
+  const reach = widthPx
+    .mul(widthMul)
+    .mul(float(1).add(frontN.mul(float(1.4))))
+    .mul(float(1).sub(leeN.mul(float(0.6))));
+  const tail = exp(xp.div(max(reach, float(1))).negate()).mul(float(0.85));
   const patchNoise = mx_fractal_noise_float(
     vec3(breakupUv.x.add(float(17.3)), breakupUv.y, tSec.mul(float(0.015))),
     2,
@@ -241,6 +278,8 @@ export function buildMaskShoreDensity(THREE, { maskTexNode, maskUvAt, worldXY, s
     density,
     dist,
     hardness,
+    outward,
+    front: frontN,
     uTexturePx: uB.y,
     uSpray: uB.w,
     setters: {
@@ -272,142 +311,281 @@ export function buildMaskShoreDensity(THREE, { maskTexNode, maskUvAt, worldXY, s
   };
 }
 
-/** Spray cell size, world px — at most one speck per cell per generation. */
-const SPECK_CELL_PX = 8;
-/** One speck's life, seconds. Two generations half a life apart overlap. */
-const SPECK_LIFE_SEC = 1.6;
-/** Fraction of cells holding a speck where the gate is fully open. */
-const SPECK_DENSITY = 0.9;
-/** The author's own number: *"simple 2x2 and 1x1 75% opacity foam pixels"*. */
-const SPECK_OPACITY = 0.75;
+/** Fleck cell size, world px — at most one fleck per cell per (direction, generation). */
+const FLECK_CELL_PX = 8;
+/** One fleck's whole life, seconds: a short flight, then a long ride on the current. */
+const FLECK_LIFE_SEC = 4.5;
+/** Time in the air, seconds. */
+const FLECK_AIR_SEC = 0.7;
+/** A fleck that lands on dry ground is gone this long after landing, seconds. */
+const FLECK_GROUND_FADE_SEC = 0.35;
+/** Launch directions per generation (each a shared flight frame). */
+const FLECK_DIRECTIONS = 6;
+/** Fraction of cells that throw a fleck where the emitter is fully on. */
+const FLECK_DENSITY = 1;
+/** Launch speed range, world px/s. */
+const FLECK_SPEED_MIN = 50;
+const FLECK_SPEED_MAX = 130;
+/** Once on the water, each launch group also slides sideways at up to ± this, world px/s,
+ * so a batch thrown together spreads out instead of travelling as a sheet. */
+const FLECK_SCATTER_PX = 18;
+/** Each fleck's launch point sits up to this far BACK along its own flight path, world
+ * px. Every fleck of a (direction, generation) frame moves together, and the emitter is
+ * a line along the wall — so without this a whole batch left that line at the same
+ * instant and travelled as a dotted line. With it, a batch is a cloud: some flecks
+ * already well out, some only just leaving, as if thrown at different speeds. */
+const FLECK_LEAD_PX = 30;
+/** The author's own number: *"simple 2x2 and 1x1 75% opacity foam pixels"* — at the
+ * top of its arc a fleck is a little brighter. */
+const FLECK_OPACITY = 0.75;
 
 /**
- * BREAK SPRAY — 1×1 and 2×2 world-pixel specks of foam, 75% opaque, jittering
- * where the water breaks against a hard edge and riding the current downstream.
- * Author: *"simple 2x2 and 1x1 75% opacity foam pixels bouncing around where the
- * water smashes into a hard edge... carried by the water downstream. It should only
- * happen where the water is breaking against sharp edges though."*
+ * BREAK SPRAY — 1×1 and 2×2 world-pixel flecks of foam, thrown up where the current
+ * smashes into a hard edge, gliding back down, then riding the current downstream
+ * if they land on water, or fading out if they land on dry ground.
+ * Author: *"flecks of foam which got launched up into the air then which glide back
+ * down and land on the water then get carried down stream or land on the ground
+ * outside the water and fade out."*
  *
- * STATELESS, so nothing here has a grid to show: space is cut into
- * `SPECK_CELL_PX` cells in a frame that moves WITH the local current for one
- * speck life, every (cell, generation) hashes whether it holds a speck, where,
- * how big and which way it bursts; at the end of a life the frame snaps back and a
- * new generation hashes fresh specks. Two generations half a life apart overlap, so
- * there is never a moment with none. The test against the speck is done on the
- * integer pixel of the moving frame, so a speck is always exactly 1×1 or 2×2 map
- * pixels and steps a whole pixel at a time as it travels — crisp, never smeared.
+ * STATELESS, and BORN AT THE SOURCE: every (direction, generation) is a frame that
+ * carries all its flecks the same way — out along its launch direction for the
+ * flight, then (for a pixel on water) with the local current — so a pixel finds the
+ * one fleck that can be on it by undoing that frame's displacement, and then asks
+ * the EMITTER at that fleck's own spawn point (`sprayAt`, the sim pack's G) whether
+ * it was ever thrown. That is what lets a fleck end up far from the face that threw
+ * it. Whether it landed on water or ground is asked at its landing point
+ * (`waterAt`), so a drifting fleck is never conjured where one landed on stone.
+ * The test is on the integer pixel of the moving frame, so a fleck is always exactly
+ * 1×1 or 2×2 map pixels and steps a whole pixel at a time.
  *
  * @param {*} THREE
  * @param {object} args
  * @param {*} args.worldXY - vec2 world px.
  * @param {*} args.tSec
- * @param {*} args.velocityPx - vec2 world px/s, the local current.
- * @param {*} args.gate - 0..1, where spray may exist (the caller's break test).
+ * @param {*} args.velocityPx - vec2 world px/s, the local current at this pixel.
+ * @param {*} args.insideHere - 0..1, is this pixel water.
+ * @param {(w: *) => *} args.sprayAt - world vec2 → emitter 0..1 there.
+ * @param {(w: *) => *} args.waterAt - world vec2 → water presence 0..1 there.
  * @param {*} args.uSpray - strength, 0 = off.
- * @returns {*} coverage 0..`SPECK_OPACITY`
+ * @returns {*} coverage 0..1
  */
-export function buildBreakSpecks(THREE, { worldXY, tSec, velocityPx, gate, uSpray }) {
-  const { vec2, vec3, float, floor, fract, sin, cos, step, max, clamp, smoothstep, fwidth, mx_cell_noise_float } =
-    THREE.TSL;
-  const cellPx = float(SPECK_CELL_PX);
+export function buildBreakSpecks(THREE, { worldXY, tSec, velocityPx, insideHere, sprayAt, waterAt, uSpray }) {
+  const {
+    vec2,
+    vec3,
+    float,
+    floor,
+    fract,
+    sin,
+    cos,
+    step,
+    max,
+    min,
+    mix,
+    clamp,
+    smoothstep,
+    fwidth,
+    mx_cell_noise_float,
+  } = THREE.TSL;
+  const cellPx = float(FLECK_CELL_PX);
+  const inWater = step(float(0.5), insideHere);
   let out = float(0);
   for (let g = 0; g < 2; g++) {
-    const phase = tSec.div(float(SPECK_LIFE_SEC)).add(float(g * 0.5));
-    const generation = floor(phase);
-    const age = fract(phase);
-    // The frame rides the current for this generation's whole life.
-    const q = worldXY.sub(velocityPx.mul(age.mul(float(SPECK_LIFE_SEC))));
-    const cell = floor(q.div(cellPx));
-    const seed = vec3(cell.x, cell.y, generation.add(float(g * 977)));
-    const hExist = mx_cell_noise_float(seed);
-    const hX = mx_cell_noise_float(seed.add(vec3(13, 0, 0)));
-    const hY = mx_cell_noise_float(seed.add(vec3(0, 29, 0)));
-    const hSize = mx_cell_noise_float(seed.add(vec3(0, 0, 71)));
-    const hDir = mx_cell_noise_float(seed.add(vec3(41, 17, 5)));
-    // Spawn in the cell's middle, burst outward (fast, then slowing), and jitter —
-    // all inside the cell, so no speck is ever clipped by a neighbour it cannot see.
-    const spawn = vec2(hX, hY).mul(float(0.4)).add(float(0.3)).mul(cellPx);
-    const angle = hDir.mul(float(2 * Math.PI));
-    const ease = float(1).sub(float(1).sub(age).mul(float(1).sub(age)));
-    const burst = vec2(cos(angle), sin(angle))
-      .mul(cellPx.mul(float(0.17)))
-      .mul(ease);
-    const jitter = vec2(
-      sin(tSec.mul(float(19)).add(hX.mul(float(50)))),
-      cos(tSec.mul(float(15)).add(hY.mul(float(50))))
-    ).mul(float(0.7));
-    const corner = floor(spawn.add(burst).add(jitter));
-    const size = float(1).add(step(float(0.45), hSize)); // 1 or 2 px, a little over half 2×2
-    const pix = floor(q.sub(cell.mul(cellPx)));
-    const inside = step(corner.x.sub(float(0.5)), pix.x)
-      .mul(step(pix.x, corner.x.add(size).sub(float(0.5))))
-      .mul(step(corner.y.sub(float(0.5)), pix.y))
-      .mul(step(pix.y, corner.y.add(size).sub(float(0.5))));
-    const alive = step(hExist, gate.mul(float(SPECK_DENSITY)).mul(uSpray))
-      .mul(smoothstep(float(0), float(0.06), age))
-      .mul(float(1).sub(smoothstep(float(0.8), float(1), age)));
-    out = max(out, inside.mul(alive));
+    for (let k = 0; k < FLECK_DIRECTIONS; k++) {
+      const phase = tSec.div(float(FLECK_LIFE_SEC)).add(float(g * 0.5 + k * 0.137));
+      const generation = floor(phase);
+      const age = fract(phase);
+      const tau = age.mul(float(FLECK_LIFE_SEC));
+      // This frame's launch: direction k, turned a different amount every generation,
+      // at a speed of its own.
+      const turn = fract(generation.mul(float(0.618034)).add(float(k * 0.271)));
+      const angle = float(k / FLECK_DIRECTIONS)
+        .add(turn.mul(float(1 / FLECK_DIRECTIONS)))
+        .mul(float(2 * Math.PI));
+      const speed = mix(
+        float(FLECK_SPEED_MIN),
+        float(FLECK_SPEED_MAX),
+        fract(generation.mul(float(0.3719)).add(float(k * 0.4142)))
+      );
+      const dir = vec2(cos(angle), sin(angle));
+      const tAir = min(tau, float(FLECK_AIR_SEC));
+      const airFrac = tAir.div(float(FLECK_AIR_SEC));
+      // Out along the launch direction, slowing as it falls.
+      const flight = dir
+        .mul(speed)
+        .mul(tAir)
+        .mul(float(1).sub(airFrac.mul(float(0.4))));
+      const landOffset = dir.mul(speed).mul(float(FLECK_AIR_SEC * 0.6));
+      const afterAir = max(tau.sub(float(FLECK_AIR_SEC)), float(0));
+      const scatter = vec2(dir.y.negate(), dir.x).mul(
+        fract(generation.mul(float(0.7311)).add(float(k * 0.1913)))
+          .sub(float(0.5))
+          .mul(float(2 * FLECK_SCATTER_PX))
+      );
+      const drift = velocityPx.add(scatter).mul(afterAir).mul(inWater);
+      const q = worldXY.sub(flight).sub(drift);
+
+      const cell = floor(q.div(cellPx));
+      const seed = vec3(cell.x, cell.y, generation.add(float(k * 131 + g * 977)));
+      const hExist = mx_cell_noise_float(seed);
+      const hX = mx_cell_noise_float(seed.add(vec3(13, 0, 0)));
+      const hY = mx_cell_noise_float(seed.add(vec3(0, 29, 0)));
+      const hSize = mx_cell_noise_float(seed.add(vec3(0, 0, 71)));
+      const hLead = mx_cell_noise_float(seed.add(vec3(53, 0, 19)));
+      // Spawn well inside the cell, so a 2×2 fleck is never clipped by a neighbour.
+      const spawn = cell.add(vec2(hX, hY).mul(float(0.5)).add(float(0.25))).mul(cellPx);
+      // Waves come in sets: a whole stretch of wall throws, or doesn't, per generation.
+      const hBurst = mx_cell_noise_float(
+        vec3(floor(spawn.x.div(float(48))), floor(spawn.y.div(float(48))), generation.add(float(k * 7)))
+      );
+      // Where this fleck actually left the water: back along its own path by its lead.
+      const launchedAt = spawn.sub(dir.mul(hLead.mul(float(FLECK_LEAD_PX))));
+      const thrown = step(hExist, sprayAt(launchedAt).mul(float(FLECK_DENSITY)).mul(uSpray)).mul(
+        step(float(0.35), hBurst)
+      );
+
+      const landedWet = step(float(0.25), waterAt(spawn.add(landOffset)));
+      const airborne = step(tau, float(FLECK_AIR_SEC));
+      const riding = inWater.mul(landedWet).mul(float(1).sub(smoothstep(float(0.65), float(1), age)));
+      const grounded = float(1)
+        .sub(inWater)
+        .mul(float(1).sub(landedWet))
+        .mul(float(1).sub(smoothstep(float(FLECK_AIR_SEC), float(FLECK_AIR_SEC + FLECK_GROUND_FADE_SEC), tau)));
+      const visible = airborne
+        .add(float(1).sub(airborne).mul(riding.add(grounded)))
+        .mul(smoothstep(float(0), float(0.02), age));
+
+      // Height of the arc: 2×2 and a touch brighter near the top.
+      const height = airFrac.mul(float(1).sub(airFrac)).mul(float(4)).mul(airborne);
+      const size = float(1).add(max(step(float(0.5), height), step(float(0.55), hSize)));
+      const corner = floor(spawn);
+      const pix = floor(q);
+      const inside = step(corner.x.sub(float(0.5)), pix.x)
+        .mul(step(pix.x, corner.x.add(size).sub(float(0.5))))
+        .mul(step(corner.y.sub(float(0.5)), pix.y))
+        .mul(step(pix.y, corner.y.add(size).sub(float(0.5))));
+      const bright = mix(float(FLECK_OPACITY), float(0.95), height);
+      out = max(out, inside.mul(thrown).mul(visible).mul(bright));
+    }
   }
-  // Zoomed far out a speck is smaller than a screen pixel and would only sparkle.
+  // Zoomed far out a fleck is smaller than a screen pixel and would only sparkle.
   const fadeOut = smoothstep(float(2.5), float(1), fwidth(worldXY.x));
-  return clamp(out.mul(fadeOut), float(0), float(1)).mul(float(SPECK_OPACITY));
+  return clamp(out.mul(fadeOut), float(0), float(1));
 }
+
+/** One flow-map cycle, seconds: how long the foam texture rides the current before it
+ * is cross-faded to a fresh copy. Short enough that shear along a wall streaks it
+ * rather than shredding it. */
+const FLOW_CYCLE_SEC = 1.6;
 
 /**
  * WHAT foam looks like, for any density 0..1: domain-warped fractal clumps,
- * thresholded by density, with lace holes. Returns coverage 0..1.
+ * thresholded by density, with round bubble holes — and, given a velocity, CARRIED
+ * BY THE CURRENT (a two-phase flow map: two copies scrolling with the local flow,
+ * half a cycle apart, each faded out at its own reset). Returns coverage 0..1.
+ *
+ * Only evaluated where there is foam: the noise lives inside a per-pixel `If` on
+ * the density, and every `fwidth` it needs is taken from the domain BEFORE the
+ * branch (WGSL forbids derivatives under non-uniform control flow).
  * @param {*} THREE
  * @param {object} args
  * @param {*} args.worldXY @param {*} args.density @param {*} args.tSec
  * @param {*} args.texturePx - clump size, world px (a node).
+ * @param {*|null} [args.velocityPx] - vec2 world px/s; null = still water.
  */
-export function buildFoamTexture(THREE, { worldXY, density, tSec, texturePx }) {
-  const { vec2, vec3, float, max, clamp, smoothstep, fwidth, mix, mx_worley_noise_vec2, mx_fractal_noise_float } =
-    THREE.TSL;
+export function buildFoamTexture(THREE, { worldXY, density, tSec, texturePx, velocityPx = null }) {
+  const {
+    vec2,
+    vec3,
+    float,
+    max,
+    abs,
+    sqrt,
+    clamp,
+    smoothstep,
+    fwidth,
+    mix,
+    fract,
+    Fn,
+    If,
+    mx_worley_noise_vec2,
+    mx_fractal_noise_float,
+  } = THREE.TSL;
   const scale = max(texturePx, float(4));
   const p = worldXY.div(scale);
-  // Warp: two low-frequency noises push the domain around by ~a third of a clump,
-  // so neither the clumps nor the lace line up into a visible lattice.
-  const warp = vec2(
-    mx_fractal_noise_float(vec3(p.x.mul(float(0.35)), p.y.mul(float(0.35)), tSec.mul(float(0.04))), 2, 2.0, 0.5),
-    mx_fractal_noise_float(
-      vec3(p.x.mul(float(0.35)).add(float(31.7)), p.y.mul(float(0.35)), tSec.mul(float(0.04))),
-      2,
-      2.0,
-      0.5
-    )
-  ).mul(float(0.9));
-  const q = p.add(warp);
-  // Clumps: fbm (RMS ≈ 0.28) stretched to roughly 0..1.
-  const clumpN = mx_fractal_noise_float(vec3(q.x, q.y, tSec.mul(float(0.07))), 3, 2.0, 0.5);
-  const nn = clamp(clumpN.mul(float(1.7)).add(float(0.5)), float(0), float(1));
-  // The cut slides from above the noise's ceiling (density 0 → nothing, even where
-  // `nn` saturates at 1) to below its floor (density 1 → solid).
-  const k = max(float(0.14), fwidth(nn).mul(float(1.5)));
-  const cut = mix(float(1).add(k), k.negate(), clamp(density, float(0), float(1)));
-  const clumps = smoothstep(cut.sub(k), cut.add(k), nn);
-  // Bubbles: ROUND holes (Worley F1 discs around each feature point) at two scales —
-  // big and many where the foam is thin, small and few where it is dense. Round on
-  // purpose: the F2−F1 cell walls the first version punched holes with are straight-
-  // sided polygons, and polygons read as shards, not foam.
-  const bubbleRad = mix(float(0.42), float(0.12), smoothstep(float(0.3), float(0.95), density));
-  const f1a = mx_worley_noise_vec2(q.mul(float(2.8)), float(1)).x;
-  const f1b = mx_worley_noise_vec2(q.mul(float(6.1)).add(vec2(13.7, 5.1)), float(1)).x;
-  const aaA = max(float(0.05), fwidth(f1a).mul(float(1.5)));
-  const aaB = max(float(0.05), fwidth(f1b).mul(float(1.5)));
-  const holeA = float(1).sub(smoothstep(bubbleRad.sub(aaA), bubbleRad.add(aaA), f1a));
-  const holeB = float(1).sub(smoothstep(bubbleRad.mul(float(0.8)).sub(aaB), bubbleRad.mul(float(0.8)).add(aaB), f1b));
-  const hole = max(holeA, holeB.mul(float(0.8)));
-  const shade = float(0.82).add(clumpN.mul(float(0.5)));
-  // Thin foam is a translucent fleck, dense foam is solid: opacity follows density too,
-  // so the tail fades into the water instead of ending in hard white specks.
-  const opacity = mix(float(0.3), float(1), smoothstep(float(0.05), float(0.8), density));
-  return clamp(
-    clumps
-      .mul(float(1).sub(hole.mul(float(0.75))))
-      .mul(shade)
-      .mul(opacity),
-    float(0),
-    float(1)
-  );
+  // Screen-space AA widths, from the domain's own derivative, OUTSIDE the branch.
+  const fwP = fwidth(p.x).add(fwidth(p.y));
+  const k = max(float(0.14), fwP.mul(float(4)));
+  const aaA = max(float(0.05), fwP.mul(float(2.8 * 1.5)));
+  const aaB = max(float(0.05), fwP.mul(float(6.1 * 1.5)));
+  const d = clamp(density, float(0), float(1));
+  const vel = velocityPx ? velocityPx.div(scale) : vec2(0, 0);
+  const cyc = tSec.div(float(FLOW_CYCLE_SEC));
+  const ph0 = fract(cyc);
+  const ph1 = fract(cyc.add(float(0.5)));
+  // Triangle weights: each copy is invisible at its own reset.
+  const w0 = float(1).sub(abs(ph0.mul(float(2)).sub(float(1))));
+  const w1 = float(1).sub(w0);
+
+  const layer = (q) => {
+    // Warp: two low-frequency noises push the domain around by ~a third of a clump,
+    // so neither the clumps nor the bubbles line up into a visible lattice.
+    const warp = vec2(
+      mx_fractal_noise_float(vec3(q.x.mul(float(0.35)), q.y.mul(float(0.35)), tSec.mul(float(0.04))), 2, 2.0, 0.5),
+      mx_fractal_noise_float(
+        vec3(q.x.mul(float(0.35)).add(float(31.7)), q.y.mul(float(0.35)), tSec.mul(float(0.04))),
+        2,
+        2.0,
+        0.5
+      )
+    ).mul(float(0.9));
+    const qw = q.add(warp);
+    const clumpN = mx_fractal_noise_float(vec3(qw.x, qw.y, tSec.mul(float(0.07))), 3, 2.0, 0.5);
+    // Bubbles: ROUND holes (Worley F1 discs) at two scales — big and many where the
+    // foam is thin, small and few where it is dense. Round on purpose: holes punched
+    // along F2−F1 cell walls are straight-sided polygons, and read as shards.
+    const bubbleRad = mix(float(0.42), float(0.12), smoothstep(float(0.3), float(0.95), d));
+    const f1a = mx_worley_noise_vec2(qw.mul(float(2.8)), float(1)).x;
+    const f1b = mx_worley_noise_vec2(qw.mul(float(6.1)).add(vec2(13.7, 5.1)), float(1)).x;
+    const holeA = float(1).sub(smoothstep(bubbleRad.sub(aaA), bubbleRad.add(aaA), f1a));
+    const rb = bubbleRad.mul(float(0.8));
+    const holeB = float(1).sub(smoothstep(rb.sub(aaB), rb.add(aaB), f1b));
+    return { clumpN, hole: max(holeA, holeB.mul(float(0.8))) };
+  };
+
+  return Fn(() => {
+    const out = float(0).toVar('foamTextureOut');
+    If(d.greaterThan(float(0.002)), () => {
+      const l0 = layer(p.sub(vel.mul(ph0.mul(float(FLOW_CYCLE_SEC)))));
+      const l1 = layer(p.sub(vel.mul(ph1.mul(float(FLOW_CYCLE_SEC)))).add(vec2(37.1, 11.3)));
+      // Variance-preserving blend of the two noises BEFORE the threshold, so clumps
+      // stay crisp mid-fade instead of becoming a double exposure.
+      const norm = sqrt(w0.mul(w0).add(w1.mul(w1)));
+      const clumpN = l0.clumpN
+        .mul(w0)
+        .add(l1.clumpN.mul(w1))
+        .div(max(norm, float(1e-3)));
+      const nn = clamp(clumpN.mul(float(1.7)).add(float(0.5)), float(0), float(1));
+      // The cut slides from above the noise's ceiling (density 0 → nothing, even where
+      // `nn` saturates at 1) to below its floor (density 1 → solid).
+      const cut = mix(float(1).add(k), k.negate(), d);
+      const clumps = smoothstep(cut.sub(k), cut.add(k), nn);
+      const hole = l0.hole.mul(w0).add(l1.hole.mul(w1));
+      const shade = float(0.82).add(clumpN.mul(float(0.5)));
+      // Thin foam is a translucent fleck, dense foam is solid: opacity follows density
+      // too, so the tail fades into the water instead of ending in hard white specks.
+      const opacity = mix(float(0.3), float(1), smoothstep(float(0.05), float(0.8), d));
+      out.assign(
+        clamp(
+          clumps
+            .mul(float(1).sub(hole.mul(float(0.75))))
+            .mul(shade)
+            .mul(opacity),
+          float(0),
+          float(1)
+        )
+      );
+    });
+    return out;
+  })();
 }

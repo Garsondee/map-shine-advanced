@@ -310,6 +310,7 @@ import {
   WATER_FOAM_PATCH_SIZE_PX,
 } from './water-shore.js';
 import { WATER_SIM_CLUMP_LO, WATER_SIM_CLUMP_HI, WATER_SIM_CLUMP_AA_PX } from './water-sim.js';
+import { buildMaskShoreDensity, buildFoamTexture, buildBreakSpecks } from './water-shore-mask.js';
 import { buildDebugChannelColor } from '../debug-channel-select.js';
 import { WATER_DEBUG_CHANNELS } from './water.js';
 // Intra-zone: the ONE hex→byte decoder, already shared by the candle and by
@@ -2278,7 +2279,69 @@ export function buildWaterSurfaceMaterial({
     uPatchiness: uFoamPatchiness,
     uPatchSizePx: uFoamPatchSizePx,
   });
-  const totalFoam = min(max(field.foam.mul(crestPatch), waterSimFoamStructured), float(1)).mul(foamSharpnessFactor);
+  // ── FOAM DENSITY + ONE FOAM TEXTURE (2026-10-17) — `water-shore-mask.js` has the
+  // whole case. From tier 4 every foam source contributes only a DENSITY — the shoreline
+  // from the full-resolution mask, the sim pack's wakes (faded out near the shore by the
+  // full-res `inside` and the SDF's smooth distance: its staircase lives within a few px
+  // of the SDF's zero contour), and tier 2's crest — and ONE procedural texture draws it.
+  // The sim's old Worley structure no longer reaches the screen here: thresholding a
+  // ~7 px field into shapes is what drew the lumps.
+  let foamDensity = null;
+  let foamTexture = null;
+  let maskShoreSetters = {
+    setShoreFoam() {},
+    setShoreFoamLevel() {},
+    setShoreFoamWidthPx() {},
+    setShoreFoamSwashPx() {},
+    setShoreFoamSoftPx() {},
+    setFoamTexturePx() {},
+    setShoreFoamVariation() {},
+    setBreakSpray() {},
+  };
+  let breakSpecks = null;
+  if (activeTier >= 4) {
+    const tSecFoam = (timeMsNode ?? float(0)).mul(float(1 / 1000));
+    const maskShore = buildMaskShoreDensity(THREE, {
+      maskTexNode,
+      maskUvAt: (offset) =>
+        vec2(
+          clamp(positionWorld.x.add(offset.x).sub(uMaskRect.x).div(spanX), 0, 1),
+          clamp(positionWorld.y.add(offset.y).sub(uMaskRect.y).div(spanY), 0, 1)
+        ),
+      worldXY: vec2(positionWorld.x, positionWorld.y),
+      shoreDist,
+      tSec: tSecFoam,
+    });
+    maskShoreSetters = maskShore.setters;
+    const simShoreFade = smoothstep(float(0), float(0.25), inside).mul(smoothstep(float(8), float(48), shoreDist));
+    foamDensity = max(max(maskShore.density, waterSimFoam.mul(simShoreFade)), field.foam.mul(crestPatch));
+    foamTexture = buildFoamTexture(THREE, {
+      worldXY: vec2(positionWorld.x, positionWorld.y),
+      density: foamDensity,
+      tSec: tSecFoam,
+      texturePx: maskShore.uTexturePx,
+    });
+    // BREAK SPRAY — `water-shore-mask.js#buildBreakSpecks`. Where water is deep right
+    // against a hard edge AND the current drives into it (`shore.breakFacing`, the
+    // tier-4 rotation of the bank tangent), plus the sim's own open-water wakes — the
+    // foam it shed off those same faces and carried downstream. Soft shores never
+    // qualify: `hardness` is 0 on a ramp, and the sim's shore emission is faded out.
+    const sprayGate = max(
+      maskShore.hardness.mul(smoothstep(float(0.05), float(0.5), shore.breakFacing)),
+      waterSimFoam.mul(simShoreFade).mul(float(0.5))
+    ).mul(smoothstep(float(0.3), float(0.7), inside));
+    breakSpecks = buildBreakSpecks(THREE, {
+      worldXY: vec2(positionWorld.x, positionWorld.y),
+      tSec: tSecFoam,
+      velocityPx: localVel.mul(uFlowSpeedPx),
+      gate: sprayGate,
+      uSpray: maskShore.uSpray,
+    });
+  }
+  const foamDrawn = foamTexture ? (breakSpecks ? max(foamTexture, breakSpecks) : foamTexture) : null;
+  const totalFoam = min(foamDrawn ?? max(field.foam.mul(crestPatch), waterSimFoamStructured), float(1)).mul(
+    foamSharpnessFactor
+  );
 
   // ── TIER 4: CAUSTICS' OWN AUTHOR-FACING GAIN ─────────────────────────────
   // `field.causticBrightness` already carries the calibrated
@@ -2802,6 +2865,9 @@ export function buildWaterSurfaceMaterial({
     // broken.
     foamEdgeSharpness: vec3(foamSharpnessGate, foamSharpnessGate, foamSharpnessGate),
     foamPatch: vec3(crestPatch, crestPatch, crestPatch),
+    // THE FOAM DENSITY (2026-10-17) — what the one foam texture is drawn from, tier 4+;
+    // see `water-shore-mask.js`. Black below tier 4 (the old path, no density).
+    foamDensity: vec3(foamDensity ?? float(0), foamDensity ?? float(0), foamDensity ?? float(0)),
   };
   // ⚠️ ARITHMETIC, NOT `select()` — see `effects/debug-channel-select.js`'s
   // header for the twelve specular rounds this trap cost before anyone dumped
@@ -2954,6 +3020,7 @@ export function buildWaterSurfaceMaterial({
     setFoamGrainTimeScale(v) {
       uFoamGrainTimeScale.value = v;
     },
+    ...maskShoreSetters,
     // The four sim-foam knobs share one packed vec4 (see `uSimFoamBand`): write the component, not
     // an alias node — `uSimClumpLo` and friends are read-only swizzles with no `.value` setter.
     setSimClumpLo(v) {

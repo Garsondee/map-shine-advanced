@@ -422,6 +422,22 @@ export const WATER_FLOW_WARP_CAP_CELLS = 1.0;
 /** How far from the bank foam has fully died away, world px. Foam is a
  * shoaling phenomenon — it breaks where the water shallows — so it is strongest
  * at the waterline and gone in the deep channel. */
+/**
+ * FLOW WARP FADES OUT AT SOLIDS (2026-10-17), world px from the shore (the body
+ * SDF's own distance). Author, live, at the rock below Tower Bridge's east bank:
+ * *"look at the rock further to the south and you'll see the horribly distorted
+ * way that the foam can end up looking."* Measured in the shader lab: inside and
+ * beside every SOLID texel of the flow pack the local velocity is zero, so
+ * `localFlowDir` degenerates and `flowWarp` jumps to its cap (one whole noise
+ * cell, 88 px at the author's settings) across a single ~7 px texel — adjacent
+ * pixels then sample unrelated noise and every consumer of `domainOffset` (the
+ * crest foam most visibly) tears into stair-stepped shards along the flow grid.
+ * Fading the warp in over this distance keeps the deflection in open water,
+ * where the solve is meaningful, and removes it exactly where the grid's own
+ * edge would show. `bankWarp` still bends the pattern along the bank there.
+ */
+export const WATER_FLOW_WARP_SOLID_FADE_PX = 48;
+
 export const WATER_FOAM_SHORE_PX = 140;
 
 /**
@@ -1068,7 +1084,9 @@ export function buildWaterSurfaceField({
   const flowWarpCapPx = uWaveScalePx.mul(float(WATER_FLOW_WARP_CAP_CELLS));
   const flowWarpLen = length(flowWarpRaw);
   const flowWarpCapScale = min(float(1), flowWarpCapPx.div(max(flowWarpLen, float(1e-4))));
-  const flowWarp = flowWarpRaw.mul(flowWarpCapScale);
+  // ⚠️ FADED OUT AT SOLIDS — see `WATER_FLOW_WARP_SOLID_FADE_PX` (2026-10-17).
+  const flowWarpSolidFade = smoothstep(float(0), float(WATER_FLOW_WARP_SOLID_FADE_PX), shoreDist);
+  const flowWarp = flowWarpRaw.mul(flowWarpCapScale).mul(flowWarpSolidFade);
 
   // THE COMBINED, ALREADY-SAFE DOMAIN SHIFT — travel plus bank warp plus flow warp, together.
   // Returned to the caller (below) so TIER 4's filament foam

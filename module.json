@@ -1,7 +1,7 @@
 {
   "id": "map-shine-advanced",
   "title": "Map Shine Advanced",
-  "description": "This Foundry VTT module is designed to bring the capabilities of three.js into Foundry VTT with a focus on producing 2.5 battlemaps with BPR shading, particles and advanced rendering options.",
+  "description": "This Foundry VTT module is designed to bring the capabilities of three.js into Foundry VTT with a focus on producing 2.5D battlemaps with PBR shading, particles and advanced rendering options.",
   "version": "0.8.2",
   "socket": true,
   "library": "false",

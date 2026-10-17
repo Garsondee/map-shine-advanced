@@ -7,7 +7,7 @@ Map Shine Advanced is a Foundry VTT module that brings a Three.js-based renderer
 ## What this module does
 
 - **Renders the scene in Three.js** while Foundry continues to provide game logic + UI.
-- **Syncs Foundry documents** (tokens, tiles, walls, drawings, notes, templates, lights) into Three.js managers.
+- **Syncs Foundry documents** (tokens, tiles, walls, doors, lights, regions) into Three.js managers. Drawings, notes and templates stay in Foundry's own canvas layer, drawn on top.
 - **Uses a suffix-based texture system** so map authors can provide extra masks like `_Specular`, `_Outdoors`, `_Windows`, etc.
 
 ## Installation
@@ -66,14 +66,14 @@ This section describes the module's actual roster as of 0.8.2 (superseding an ol
 
 ### Foundry syncing (`src/foundry/`, `src/scene/`)
 
-- Tokens, tiles (including overhead/roof), walls, doors, lights, regions, and drawings/notes/templates are synced from the live Foundry scene into the Three.js world and kept live as the GM edits.
+- Tokens, tiles (including overhead/roof), walls, doors, lights and regions are synced from the live Foundry scene into the Three.js world and kept live as the GM edits. Drawings, notes and templates stay in Foundry's PIXI interface layer.
 - Vision/fog-of-war ownership, occlusion (walls, floors, roofs), and depth authority are handled natively rather than layered on top of Foundry's own PIXI rendering.
 - Tile motion (scrolling/animated tiles, with per-tile specular/window attachment) and player-light modes (torch/flashlight/night vision/etc.) are first-class, not bolted on.
 
 ### Effects (`src/effects/`)
 
-- **Clouds** — ground shadow + high-altitude tops, both zoom-aware.
-- **Water** — refraction, caustics, foam, and a real simulation, not a static ripple texture.
+- **Clouds** — ground shadow and high-altitude tops. Only the tops are zoom-gated.
+- **Water** — tiered surface with refraction, caustics and shore foam, driven by a per-floor water simulation (flow, and foam memory). Interactive ripples and splash spray are not built yet.
 - **Fire** — wind-responsive flame/spark rendering.
 - **Vegetation** — GPU-driven wind sway and shadowing.
 - **Window** / **Specular** — mask-driven interior light pools and surface shine, both attachable to tiles.
@@ -102,28 +102,18 @@ This section describes the module's actual roster as of 0.8.2 (superseding an ol
 - **Studio** (`src/ui/rooms/studio/`) — the GM's authoring panel, one card per effect, plus named Scene Presets that save and re-apply a scene's whole look.
 - **Remote** (`src/ui/rooms/remote/`) — the in-session control surface (weather channels, sky/time dials, astrolabe).
 
-## Roadmap (planned)
+## Still to build
 
-This list predates a large amount of work that has since shipped (cloud shadows, vision/fog-of-war ownership, and more) — treat it as historical rather than current, and check the GitHub issue tracker for live status.
+Checked against the code on 2026-10-17. Shipped items have been removed from this list. The GitHub issue tracker is the live status.
 
-- **Cloud system expansion**
-
-  - Spatial window dimming based on cloud shadows
-  - Sky reflections on specular surfaces
-  - ~~Zoom-dependent cloud tops~~ — shipped (Cloud Tops)
-
-- **Wall-aware lighting**
-
-  - Mesh-based light polygons derived from Foundry visibility polygons
-  - Light accumulation buffer + composition pass
-
-- **Vision-driven early discard / performance culling**
-
-  - Centralized visibility texture for early fragment discard across expensive effects
-
-- **Smart particles + editing**
-  - Three.js-native map points authoring tools (interactive placement, dragging, areas)
-  - More effect types powered by map points (steam, lightning, etc.)
+- **Ambient particle dressing**: dust motes, ash kick-up, flies and fireflies, and shoreline spray. The particle passes are live, but today they draw only debug motes and gust ribbons.
+- **Interactive water**: rain and token ripples, distinct water body types, and splash spray.
+- **Post finishers**: screen-space distortion and heat haze, dazzle and eye adaptation, and the ASCII, halftone and dot-screen stylisers.
+- **Painted shadows**: an authored `_Shadow` mask that the sun term reads.
+- **Storm lightning**: a sky flash that briefly brightens the whole scene's grade.
+- **Weather on materials**: rain on window glass, and wet or frost sheen on specular surfaces.
+- **Vision polish**: the Vision occlusion mode (roof reveal from a token's sight), Foundry's native vision-mode grades, and detection-mode indicators.
+- **Third-party bridges**: Dice So Nice and Sequencer/JB2A. Nothing in `src/` implements them yet.
 
 ## Development
 
@@ -146,7 +136,7 @@ src/vendor/three/three.webgpu.js
 
 - **Nothing renders / black screen**
 
-  - Check the browser console for capability errors. The module requires WebGL.
+  - Check the browser console for capability errors. The module needs WebGPU or WebGL2: WebGPU is preferred, and Three.js picks the backend.
 
 - **Effects look like they do nothing**
 

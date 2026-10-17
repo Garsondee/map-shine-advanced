@@ -19390,15 +19390,18 @@ export async function startVtPanViewer({
       }
       // THE CRITTERS' compute steps — the same no-target-bound block, for the same reason as fire's.
       //
-      // ⚠️ REAL SECONDS, like the rain below: a fly is presentation pacing, and a GM who slows the
-      // world clock must not put the swarm in slow motion (nor freeze it on pause, which would
-      // make a paused scene read as a screenshot). The env snapshot rides along because the sky is
-      // what decides how many of them are out — daylight and weather for the flies, the sun's
-      // twilight window for the fireflies — and the sky is the frame's ONE, never re-derived here.
+      // ⚠️ REAL TIME, BOTH THE DELTA AND THE CLOCK, like the rain below: a fly is presentation pacing,
+      // and a GM who slows the world clock must not put the swarm in slow motion (nor freeze it on
+      // pause, which would make a paused scene read as a screenshot). The clock matters as much as
+      // the delta: wing phases, the bob and the grooming rhythm are functions of it, so a sim clock
+      // frozen by a pause would freeze a grooming fly's legs mid-stroke while it kept walking. The
+      // env snapshot rides along because the sky is what decides how many of them are out — daylight
+      // and weather for the flies, the sun's twilight window for the fireflies — and the sky is the
+      // frame's ONE, never re-derived here.
       if (view && smellyFliesSubsystem) {
         smellyFliesSubsystem.sync(
           renderer,
-          lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value,
+          lastEnvSnapshot?.env?.time?.realMs ?? uGlobalTimeMs.value,
           lastEnvSnapshot?.env?.time?.realDtSec ?? 0,
           windSpawnRect,
           lastEnvSnapshot?.env ?? null
@@ -19407,7 +19410,7 @@ export async function startVtPanViewer({
       if (view && firefliesSubsystem) {
         firefliesSubsystem.sync(
           renderer,
-          lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value,
+          lastEnvSnapshot?.env?.time?.realMs ?? uGlobalTimeMs.value,
           lastEnvSnapshot?.env?.time?.realDtSec ?? 0,
           windSpawnRect,
           lastEnvSnapshot?.env ?? null

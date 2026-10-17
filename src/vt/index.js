@@ -124,6 +124,7 @@ export {
   // Fire's own per-frame counts — wired 2026-08-15 to answer "are fire LIGHTS
   // even being built on this floor" (see getFireStatus's own doc).
   getVtPanViewerFireStatus,
+  getVtPanViewerCritterStatus,
   setVtPanViewerEarlyZComposition,
   getVtPanViewerEarlyZComposition,
   // ⚖️ RECKONING CENSUS (TEMPORARY — docs/holy/V4-Reckoning.md; remove with

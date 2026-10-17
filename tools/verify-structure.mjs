@@ -954,8 +954,12 @@ export const RULES = [
     // MASK_KINDS declaration, not as a pre-reserved V2 name like the others —
     // `_Drip` has no V2 precedent at all, it is a wholly new authored-mask
     // kind, so there was no earlier commit for it to have been reserved in.
+    // `Flies` and `Fireflies` joined with their own MASK_KINDS declarations (the
+    // procedural critters). `Fireflies` needs its own alternative: the boundary
+    // `(?![a-zA-Z])` correctly refuses to read `_Fire` inside `_Fireflies`, which
+    // is exactly the property that keeps identifiers like `_FireballCache` legal.
     pattern:
-      /_(?:Outdoors|Shadow|Fire|Drip|Specular|Window|Windows|Structural|Tree|Bush|Water|Roughness|Normal|Iridescence|Prism|Fluid|Dust|Ash)(?![a-zA-Z])/,
+      /_(?:Outdoors|Shadow|Fire|Drip|Flies|Fireflies|Specular|Window|Windows|Structural|Tree|Bush|Water|Roughness|Normal|Iridescence|Prism|Fluid|Dust|Ash)(?![a-zA-Z])/,
     allow: [`${sep}scene${sep}mask-catalog.js`],
     why:
       'V2 held the mask-suffix convention in THREE independent copies — assets/loader.js EFFECT_MASKS ' +

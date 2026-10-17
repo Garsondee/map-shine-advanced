@@ -49,7 +49,7 @@ export const DOF_PARAMS = Object.freeze({
     // preset rescale). `strength` is a clean multiplier on the blur RADIUS
     // (computeDofMipSample, depth-of-field-blur.js) with no other coupling,
     // so a straight divide-by-4 is the correct, isolated fix.
-    default: 0.125,
+    default: 0.0625, // HALVED 0.125 → 0.0625 (2026-10-17) — direct author ask: half the current blur strength
     category: 'Look',
     label: 'Strength',
     help: "Overall amount of blur applied to floors below the one you're viewing — scales the blur radius, not its opacity. 0 = no extra blur (floors below sample the least-blurred mip); 1 = the full ramp set by Blur per floor and Maximum blur. A below-floor pixel is always a full replace, never a sharp/blurred cross-fade.",
@@ -96,9 +96,10 @@ export const DOF_PARAMS = Object.freeze({
 // AMOUNT (strength), not how fast it ramps per floor or where it caps.
 export const DOF_PRESETS = Object.freeze({
   none: {},
-  subtle: { strength: 0.14, blurPerFloor: 0.7, maxBlur: 0.6 },
-  moderate: { strength: 0.21, blurPerFloor: 1.2, maxBlur: 0.85 },
-  heavy: { strength: 0.25, blurPerFloor: 2.2, maxBlur: 1.0 },
+  // Halved 2026-10-17 in step with the schema default (same ladder-preserving rescale as 2026-08-27).
+  subtle: { strength: 0.07, blurPerFloor: 0.7, maxBlur: 0.6 },
+  moderate: { strength: 0.105, blurPerFloor: 1.2, maxBlur: 0.85 },
+  heavy: { strength: 0.125, blurPerFloor: 2.2, maxBlur: 1.0 },
 });
 
 /** The schema defaults as a flat object — the base a preset diffs over. */

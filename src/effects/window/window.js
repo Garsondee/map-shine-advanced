@@ -46,7 +46,7 @@ export const WINDOW_PARAMS = Object.freeze({
     // own max back toward neutral; the author's own dialled-in scene,
     // recorded exactly. Was RAISED 1 → 3 (2026-09-09) before this round.
     // 2026-09-25 — author's live-tuned "new defaults" dump (was 1).
-    default: 3,
+    default: 1, // 2026-10-17 author's live-tuned defaults (was 3)
     category: 'Look',
     label: 'Window light',
     help: 'Master strength of every light cookie this effect draws. Turn it to 0 to see the map with no window light at all.',
@@ -95,7 +95,7 @@ export const WINDOW_PARAMS = Object.freeze({
     step: 0.5,
     // LOWERED 20 → 6.5 (2026-09-21) — new live-tuned default; the author's
     // own dialled-in scene, recorded exactly.
-    default: 6.5,
+    default: 3.5, // 2026-10-17 author's live-tuned defaults (was 6.5)
     category: 'Glass',
     label: 'Glass thickness',
     help: 'How much the uneven pane bends the light, as a maximum shift in world pixels. 0 = perfectly flat modern glass: no distortion, no prism, no caustics. Raise it for thick, wavy, hand-blown panes.',
@@ -115,7 +115,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 8,
     max: 400,
     step: 1,
-    default: 400,
+    default: 249, // 2026-10-17 author's live-tuned defaults (was 400)
     category: 'Glass',
     label: 'Blob size',
     help: 'The size of the lumps in the glass, in world pixels. Small = a fine rippled or seeded pane; large = a few broad rolling waves, like a big crown-glass round.',

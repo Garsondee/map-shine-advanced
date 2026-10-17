@@ -137,7 +137,7 @@ export const SPECULAR_LAYER_COUNT = 6;
  * ⚠️ RAISED 3.79 → 9.96 (ROUND 23, 2026-09-09) — new live-tuned defaults;
  * the author's own dialled-in scene, recorded exactly.
  */
-export const SPECULAR_DEFAULT_STRENGTH = 9.96;
+export const SPECULAR_DEFAULT_STRENGTH = 4.92; // LOWERED 9.96 → 4.92 (ROUND 24, 2026-10-17) — new live-tuned defaults
 /**
  * ⚠️ RAISED FROM 1 TO 1.3 (ROUND 16, 2026-08-03) — now that the shader
  * actually honours values past 1 (see the tint mix's own comment), a MODEST
@@ -158,7 +158,7 @@ export const SPECULAR_DEFAULT_STRENGTH = 9.96;
  * new live-tuned defaults; the author's own dialled-in scene, recorded
  * exactly.
  */
-export const SPECULAR_DEFAULT_SATURATION = 2;
+export const SPECULAR_DEFAULT_SATURATION = 1.1; // LOWERED 2 → 1.1 (ROUND 24, 2026-10-17)
 /**
  * THE SHADOW-CONTRAST CURVE (2026-09-02, mythica-machina-press#432) — an
  * exponent on `decodeSpecularMask`'s own `strength` axis, direct author ask:
@@ -182,7 +182,7 @@ export const SPECULAR_DEFAULT_SATURATION = 2;
  * still well above the pass-through, the author's own dialled-in scene,
  * recorded exactly.
  */
-export const SPECULAR_DEFAULT_MASK_CONTRAST = 1.74;
+export const SPECULAR_DEFAULT_MASK_CONTRAST = 4.09; // RAISED 1.74 → 4.09 (ROUND 24, 2026-10-17)
 /**
  * THE PATTERN'S WORLD SIZE, in px per pattern unit. **16384, V2's own default,
  * and it is much larger than it looks.**
@@ -203,7 +203,7 @@ export const SPECULAR_DEFAULT_MASK_CONTRAST = 1.74;
  * back toward fewer, larger cells across the map, though still well under
  * V2's original 16384.
  */
-export const SPECULAR_DEFAULT_PATTERN_SCALE_PX = 10816;
+export const SPECULAR_DEFAULT_PATTERN_SCALE_PX = 11840; // RAISED 10816 → 11840 (ROUND 24, 2026-10-17)
 /**
  * The master parallax gain. **1 = V2's measured ≈1:1 world-space slide**, i.e.
  * the shimmer is very nearly SCREEN-LOCKED and sweeps across the map as the
@@ -223,7 +223,7 @@ export const SPECULAR_DEFAULT_PATTERN_SCALE_PX = 10816;
  * new live-tuned defaults; back to the exaggerated slide, the author's own
  * dialled-in scene, recorded exactly.
  */
-export const SPECULAR_DEFAULT_PARALLAX_STRENGTH = 3;
+export const SPECULAR_DEFAULT_PARALLAX_STRENGTH = 1.61; // LOWERED 3 → 1.61 (ROUND 24, 2026-10-17)
 /**
  * How far islands' hashed parallax may diverge. 1 = the full hashed range,
  * 0 = every island moves identically (exactly V2's behaviour).
@@ -294,7 +294,7 @@ export const SPECULAR_DEFAULT_PULSE = 0.28;
  * longer the schema's own max — the author's own dialled-in scene, recorded
  * exactly.
  */
-export const SPECULAR_DEFAULT_SHIMMER_GAIN = 5.55;
+export const SPECULAR_DEFAULT_SHIMMER_GAIN = 12.65; // RAISED 5.55 → 12.65 (ROUND 24, 2026-10-17)
 /**
  * THE LIGHT FLOOR. **0, corrected DOWN from 0.18 (2026-07-27) on direct live
  * feedback: metal was reading as SELF-ILLUMINATING in genuinely dark rooms —

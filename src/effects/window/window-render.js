@@ -78,7 +78,7 @@ export const WINDOW_MASK_IMAGE_SCALE = 0.5;
 // Was LOWERED 3 → 1 (2026-09-21) — new live-tuned default; a change lands in
 // both or neither. Was RAISED 1 → 3 = WINDOW_PARAMS.strength's own max
 // (2026-09-09) before this round.
-export const WINDOW_DEFAULT_STRENGTH = 3;
+export const WINDOW_DEFAULT_STRENGTH = 1; // 2026-10-17 author's live-tuned defaults (was 3)
 // RAISED 0.69 → 1 (2026-09-21) — new live-tuned default, back to neutral;
 // see `WINDOW_PARAMS.contrast`'s own header (window.js). Was LOWERED 1 →
 // 0.69 (2026-09-08, recovered from a stash that missed both this file's own
@@ -132,9 +132,9 @@ export const WINDOW_DEPTH_FLAG_IS_TILE_MIRROR = 16;
 /** The glass defaults, mirroring `WINDOW_PARAMS`'s own `Glass` category. */
 // LOWERED 20 → 6.5 (2026-09-21) — new live-tuned default; a change lands in
 // both or neither.
-export const WINDOW_DEFAULT_GLASS_WARP_PX = 6.5;
+export const WINDOW_DEFAULT_GLASS_WARP_PX = 3.5; // 2026-10-17 author's live-tuned defaults (was 6.5)
 export const WINDOW_DEFAULT_GLASS_DISPERSION = 1;
-export const WINDOW_DEFAULT_GLASS_SCALE = 400;
+export const WINDOW_DEFAULT_GLASS_SCALE = 249; // 2026-10-17 author's live-tuned defaults (was 400)
 export const WINDOW_DEFAULT_GLASS_DETAIL = 1;
 export const WINDOW_DEFAULT_GLASS_STRIATION = 0;
 export const WINDOW_DEFAULT_GLASS_STRIATION_ANGLE = 0;

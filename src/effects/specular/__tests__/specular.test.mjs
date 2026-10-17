@@ -368,8 +368,9 @@ export function run(t) {
   // relationship worth calling out is that parallaxStrength is back at its
   // schema's own max, which Round 21 had deliberately moved away from.
   ok(
-    'parallaxStrength is back at its schema max — a return to the exaggerated slide Round 21 moved away from',
-    SPECULAR_PARAMS.parallaxStrength.default === SPECULAR_PARAMS.parallaxStrength.max
+    'parallaxStrength is a moderate slide (1.61, Round 24, 2026-10-17) — off the schema max Rounds 18/22 shipped',
+    SPECULAR_PARAMS.parallaxStrength.default === 1.61 &&
+      SPECULAR_PARAMS.parallaxStrength.default < SPECULAR_PARAMS.parallaxStrength.max
   );
 
   // ── ROUND 23 (2026-09-09) — FOURTH SET OF LIVE-CONFIRMED DEFAULTS, SAME

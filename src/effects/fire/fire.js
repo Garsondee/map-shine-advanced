@@ -66,7 +66,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 2,
     step: 0.05,
-    default: 1.8,
+    default: 0.1, // 2026-10-17 author's live-tuned defaults (was 1.8)
     category: 'Presence',
     label: 'Fire intensity',
     help: 'How hard everything burns. Above 1 pushes hotter and brighter; below 1 banks it down toward embers.',
@@ -96,7 +96,7 @@ export const FIRE_PARAMS = Object.freeze({
     // texel derived grid) that a bolder threshold simply never sees. 0.05
     // lit every one of them. See fire-mask.js's own MIN_PEAK_TEXELS/
     // PAINT_THRESHOLD headers — real authored fire is routinely this small.
-    default: 0.07,
+    default: 0.12, // 2026-10-17 author's live-tuned defaults (was 0.07)
     category: 'Presence',
     label: 'Mask sensitivity',
     help: 'How much of the painted fire mask counts as real paint before a fire registers there. LOWER catches fainter or smaller painted strokes — turn this DOWN if fire you painted is not appearing. HIGHER requires bolder, more solid paint before a fire lights at all.',
@@ -119,7 +119,7 @@ export const FIRE_PARAMS = Object.freeze({
   color: {
     type: 'color',
     space: 'srgb',
-    default: '#fdba35',
+    default: '#ffe7b8', // 2026-10-17 author's live-tuned defaults (was #fdba35)
     category: 'Look',
     label: 'Flame tint',
     help: 'Tints the flame only — never the smoke, which is lit by the fire rather than made of it. The default matches the reference ramp’s own golden midpoint exactly, so it is a genuine no-op until you move it.',
@@ -158,7 +158,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: -180,
     max: 180,
     step: 1,
-    default: -6,
+    default: -3, // 2026-10-17 author's live-tuned defaults (was -6)
     category: 'Look',
     label: 'Hue shift',
     help: 'Rotates the flame, embers and smoke around the colour wheel together — the way to get a green alchemical fire or a blue foxfire without hand-picking every stop. Adds to whatever the chosen Fuel already contributes (magical fuel carries its own built-in 180° shift). ±180° already covers the whole wheel in either direction; there is no further edge to push past.',
@@ -168,7 +168,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 3,
     step: 0.05,
-    default: 0.65,
+    default: 0.55, // 2026-10-17 author's live-tuned defaults (was 0.65)
     category: 'Look',
     label: 'Flame brightness',
     help: 'Master brightness for the flame itself. Push it too far and the banding blows out into a flat disc.',
@@ -194,7 +194,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 500,
     step: 1,
-    default: 500,
+    default: 19, // 2026-10-17 author's live-tuned defaults (was 500)
     category: 'Flame',
     label: 'Flame count',
     help: 'Flame sprites per fire, PER ARCHETYPE — there are four, so the real total is four times this. V2 ran about 51 for a whole floor.',
@@ -231,7 +231,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0.02,
     max: 100,
     step: 0.02,
-    default: 1.28,
+    default: 2, // 2026-10-17 author's live-tuned defaults (was 1.28)
     category: 'Flame',
     label: 'Flame size ×',
     help: 'Multiplies sprite size on top of the automatic scaling to the fire’s painted width.',
@@ -241,7 +241,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 50,
     step: 0.05,
-    default: 0.35,
+    default: 2.25, // 2026-10-17 author's live-tuned defaults (was 0.35)
     category: 'Flame',
     label: 'Flame opacity ×',
     help: 'How solid each flame sprite is. Raise this if the fire looks thin or washed out.',
@@ -251,7 +251,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 250,
     step: 0.1,
-    default: 23.9,
+    default: 31, // 2026-10-17 author's live-tuned defaults (was 23.9)
     category: 'Flame',
     label: 'Flame emission ×',
     help: 'Raw brightness of the flame colour. Above about 3 the hues start saturating toward white where sprites overlap — that is the "white blur" failure.',
@@ -261,7 +261,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0.1,
     max: 30,
     step: 0.05,
-    default: 12,
+    default: 5.55, // 2026-10-17 author's live-tuned defaults (was 12)
     category: 'Flame',
     label: 'Colour cooling rate',
     help: 'How fast a sprite walks down the reference ramp. LOW = stays pale/white-hot for most of its life. HIGH = drops to deep orange and rust almost immediately. This is the orange-vs-white dial.',
@@ -289,7 +289,7 @@ export const FIRE_PARAMS = Object.freeze({
     // guarantee, so a real default that actually gives every fire a visible
     // hot core is the correct ship state, not an opt-in experiment. Retuned
     // to 0.66 in the 2026-08-27 author preset pass.
-    default: 0.66,
+    default: 0.2, // 2026-10-17 author's live-tuned defaults (was 0.66)
     category: 'Flame',
     label: 'Cohesion (pull together)',
     help: 'Pulls every flame toward the brightest part of its own fire. 0 = spawns spread across the full painted shape. 1 = every flame collapses onto that single hottest point. Negative pushes flames apart instead, beyond their painted region.',
@@ -299,7 +299,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 200,
     step: 0.05,
-    default: 1.5,
+    default: 8.6, // 2026-10-17 author's live-tuned defaults (was 1.5)
     category: 'Flame',
     label: 'Flame wind push ×',
     help: "How hard wind physically shoves flame sideways, on top of the engine's own baked-in guarantee that full wind moves a flame several times its own size. 1 = exactly that guarantee; higher throws flame further, lower holds it closer to the hearth even in a gale. Only affects flame that is actually exposed to wind (see the Response category) — sheltered flame is untouched regardless of this dial.",
@@ -311,7 +311,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 500,
     step: 1,
-    default: 39,
+    default: 3, // 2026-10-17 author's live-tuned defaults (was 39)
     category: 'Ember',
     label: 'Ember count',
     help: 'Sparks per fire. V2 ran about 95 for a whole floor.',
@@ -321,7 +321,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0.02,
     max: 100,
     step: 0.02,
-    default: 1.8,
+    default: 4.78, // 2026-10-17 author's live-tuned defaults (was 1.8)
     category: 'Ember',
     label: 'Ember size ×',
     help: 'Base is 2.3-8.7 world px — already a third of V2’s own, at the author’s request.',
@@ -340,7 +340,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0.05,
     max: 200,
     step: 0.05,
-    default: 8.6,
+    default: 0.75, // 2026-10-17 author's live-tuned defaults (was 8.6)
     category: 'Ember',
     label: 'Ember lifetime × (Wind 0)',
     help: 'How long a spark survives in still air. Longer lives let embers travel further before dying.',
@@ -350,7 +350,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0.05,
     max: 200,
     step: 0.05,
-    default: 2.2,
+    default: 9.55, // 2026-10-17 author's live-tuned defaults (was 2.2)
     category: 'Ember',
     label: 'Ember lifetime × (Wind 1)',
     help: 'The same, for a spark in full wind exposure. Higher than Wind 0 by default — a wind-blown ember gets a little longer to travel sideways before it dies. Set equal to Wind 0 to turn off wind-driven lifespan change entirely.',
@@ -360,7 +360,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 200,
     step: 0.05,
-    default: 6.6,
+    default: 14.15, // 2026-10-17 author's live-tuned defaults (was 6.6)
     category: 'Ember',
     label: 'Ember chaos × (Wind 0)',
     help: 'Strength of the swirling flow that pushes embers around in still air. 0 leaves them drifting only with wind.',
@@ -370,7 +370,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 200,
     step: 0.05,
-    default: 0.5,
+    default: 68, // 2026-10-17 author's live-tuned defaults (was 0.5)
     category: 'Ember',
     label: 'Ember chaos × (Wind 1)',
     help: 'The same, for an ember in full wind exposure. Lower than Wind 0 by default, so a real gale reads as WIND-DRIVEN motion rather than random swirl — raise it back up if you want embers to stay chaotic even in a storm.',
@@ -380,7 +380,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 200,
     step: 0.05,
-    default: 1.5,
+    default: 0.1, // 2026-10-17 author's live-tuned defaults (was 1.5)
     category: 'Ember',
     label: 'Ember rise × (Wind 0)',
     help: 'How fast embers climb in still air. Height drives the perspective effect, so this also controls how much they grow and splay outward as they go.',
@@ -400,7 +400,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 200,
     step: 0.05,
-    default: 38,
+    default: 200, // 2026-10-17 author's live-tuned defaults (was 38)
     category: 'Ember',
     label: 'Ember wind push ×',
     help: "How hard wind physically shoves embers sideways, on top of the engine's own baked-in guarantee that full wind moves an ember many times its own (tiny) size. 1 = exactly that guarantee; higher throws sparks further, lower keeps them closer even in a gale. Only affects embers actually exposed to wind (see the Response category).",
@@ -410,7 +410,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 250,
     step: 0.1,
-    default: 50,
+    default: 5.5, // 2026-10-17 author's live-tuned defaults (was 50)
     category: 'Ember',
     label: 'Ember brightness ×',
     help: 'Embers are ~8x hotter than flames by design — that ratio is what makes a tiny dot read as a spark rather than a speck.',
@@ -462,7 +462,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 1000,
     step: 1,
-    default: 24,
+    default: 9, // 2026-10-17 author's live-tuned defaults (was 24)
     category: 'Smoke',
     label: 'Smoke count',
     help: 'Smoke puffs per fire. V2 ran about 139 for a whole floor.',
@@ -482,7 +482,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0.05,
     max: 200,
     step: 0.05,
-    default: 1,
+    default: 0.75, // 2026-10-17 author's live-tuned defaults (was 1)
     category: 'Smoke',
     label: 'Smoke lifetime ×',
     help: 'Longer-lived smoke drifts further and builds a denser column.',
@@ -492,7 +492,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 100,
     step: 0.05,
-    default: 10.9,
+    default: 13.35, // 2026-10-17 author's live-tuned defaults (was 10.9)
     category: 'Smoke',
     label: 'Smoke opacity ×',
     help: 'Smoke is the one layer that DARKENS the map rather than adding light, so this genuinely obscures what is beneath it.',
@@ -512,7 +512,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 200,
     step: 0.05,
-    default: 1,
+    default: 0.1, // 2026-10-17 author's live-tuned defaults (was 1)
     category: 'Smoke',
     label: 'Smoke rise ×',
     help: 'How fast smoke climbs, which drives its perspective growth and outward drift.',
@@ -549,7 +549,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 100,
     step: 0.05,
-    default: 1.75,
+    default: 20.05, // 2026-10-17 author's live-tuned defaults (was 1.75)
     category: 'Depth',
     label: 'Perspective strength',
     help: 'Fakes V2’s perspective camera per particle: risen particles grow and splay away from the view centre. 1 = V2 exactly (camera 1000 units up). 0 = perfectly flat. Best judged while panning.',
@@ -590,7 +590,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0.25,
     max: 3,
     step: 0.05,
-    default: 1,
+    default: 3, // 2026-10-17 author's live-tuned defaults (was 1)
     category: 'Light',
     label: 'Light reach',
     // ⚠️ NOT WIDENED IN THE 2026-09-04 ROH RANGE PASS, DELIBERATELY — unlike
@@ -603,7 +603,7 @@ export const FIRE_PARAMS = Object.freeze({
   lightColor: {
     type: 'color',
     space: 'srgb',
-    default: '#fe7e06',
+    default: '#ffa047', // 2026-10-17 author's live-tuned defaults (was #fe7e06)
     category: 'Light',
     label: 'Light colour',
     help: "The colour this fire throws into the room, separate from the flame's own tint.",
@@ -615,7 +615,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 2,
     step: 0.05,
-    default: 0.9,
+    default: 2, // 2026-10-17 author's live-tuned defaults (was 0.9)
     category: 'Motion',
     label: 'Wind response',
     help: 'How much wind reaches this fire at all — the master gate every other wind dial (Flame/Ember wind push, lifetime/chaos/rise Wind 1 values) multiplies against. At 0 this fire ignores wind entirely, at 2 it reacts to a fraction of the map wind other fires need. The lean grows with height on its own, so a tall fire streams further than a short one at the same setting.',
@@ -625,7 +625,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0.1,
     max: 3,
     step: 0.05,
-    default: 1,
+    default: 3, // 2026-10-17 author's live-tuned defaults (was 1)
     category: 'Motion',
     label: 'Speed',
     help: 'How fast the fire itself moves — the flame silhouette boiling and the turbulence carrying embers and smoke. Separate from the Life× dials (how long a particle survives) and the chaos/rise dials (how hard it gets pushed around).',
@@ -637,7 +637,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.05,
-    default: 1,
+    default: 0.1, // 2026-10-17 author's live-tuned defaults (was 1)
     category: 'Response',
     label: 'Weather response',
     help: 'How much rain and wind affect this fire. At 1, rain cools and steams it and a hard enough gale blows it out; at 0 it burns regardless.',

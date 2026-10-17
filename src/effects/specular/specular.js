@@ -69,7 +69,7 @@ export const SPECULAR_PARAMS = Object.freeze({
     // header (specular-render.js).
     // RAISED 3.79 → 9.96 (ROUND 23, 2026-09-09) — new live-tuned defaults;
     // see SPECULAR_DEFAULT_STRENGTH's own header (specular-render.js).
-    default: 9.96,
+    default: 4.92, // LOWERED 9.96 → 4.92 (ROUND 24, 2026-10-17)
     category: 'Look',
     label: 'Shine strength',
     help: 'Master strength of everything this effect draws. Turn it to 0 to see what the map looks like with no shine at all — turn it up past 5-10 to brute-force the shine through anything else that might be dimming it, as a diagnostic before reaching for the more targeted controls under Response.',
@@ -87,7 +87,7 @@ export const SPECULAR_PARAMS = Object.freeze({
     // RAISED 1.25 → 2 = THE SCHEMA'S OWN MAX (ROUND 22, 2026-09-09) — new
     // live-tuned defaults; see SPECULAR_DEFAULT_SATURATION's own header
     // (specular-render.js).
-    default: 2,
+    default: 1.1, // LOWERED 2 → 1.1 (ROUND 24, 2026-10-17)
     category: 'Look',
     label: 'Metal colour',
     help: "How much of the colour you painted into the specular mask survives into the shine. 0 makes every metal a neutral white sheen; 1 keeps gold gold and copper copper; above 1 pushes the colour further than you painted it — the default sits slightly above 1 to counteract the screen's own tonemap, which desaturates highlights as they brighten. This is the control that decides whether a map reads as treasure or as polished stone.",
@@ -108,7 +108,7 @@ export const SPECULAR_PARAMS = Object.freeze({
     // SPECULAR_DEFAULT_MASK_CONTRAST's own header (specular-render.js).
     // LOWERED 2.03 → 1.74 (ROUND 23, 2026-09-09) — new live-tuned defaults;
     // see SPECULAR_DEFAULT_MASK_CONTRAST's own header (specular-render.js).
-    default: 1.74,
+    default: 4.09, // RAISED 1.74 → 4.09 (ROUND 24, 2026-10-17)
     category: 'Look',
     label: 'Shadow contrast',
     help: "How much extra weight the DARK end of your painted specular mask carries before anything else reads it. At 1 the mask is read exactly as painted, with no extra curve. Raise it and dim metal paint fades toward true black much faster than bright paint does — reach for this if dark ink linework or shadowed iron in your artwork is picking up a sheen it shouldn't have (sometimes called \"bleaching\"). Below 1 does the reverse, lifting dark paint up, kept for symmetry. This reshapes the mask's OWN value range only — for how this effect responds to the SCENE's light, see Light response and its neighbours under Response instead.",
@@ -130,7 +130,7 @@ export const SPECULAR_PARAMS = Object.freeze({
     // LOWERED 40 → 5.55 (ROUND 22, 2026-09-09) — new live-tuned defaults; no
     // longer the schema's own max; see SPECULAR_DEFAULT_SHIMMER_GAIN's own
     // header (specular-render.js).
-    default: 5.55,
+    default: 12.65, // RAISED 5.55 → 12.65 (ROUND 24, 2026-10-17)
     category: 'Look',
     label: 'Shimmer contrast',
     help: 'How far the moving patterns may brighten the metal above its resting shine. Low gives an even satin surface; high gives hard bright glints against darker metal, which is what reads as polished and slightly blown out. At 0 the metal still shines, it just stops moving.',
@@ -145,7 +145,7 @@ export const SPECULAR_PARAMS = Object.freeze({
     // finer field. See `SPECULAR_DEFAULT_PATTERN_SCALE_PX`'s own header.
     // RAISED 6528 → 10816 (ROUND 21, 2026-08-05) — new live-tuned defaults;
     // see SPECULAR_DEFAULT_PATTERN_SCALE_PX's own header (specular-render.js).
-    default: 10816,
+    default: 11840, // RAISED 10816 → 11840 (ROUND 24, 2026-10-17)
     category: 'Look',
     label: 'Pattern size',
     help: 'How large the shimmer shapes are, measured across the MAP rather than the screen — so they stay the same physical size whether you are zoomed in or out. Large values give a few huge soft sweeps across the whole map; small values give many small busy ones. The fine glitter is not set here: that comes from how brightly you painted the mask.',
@@ -185,7 +185,7 @@ export const SPECULAR_PARAMS = Object.freeze({
     // LOWERED 36.75 → 16.55 (ROUND 23, 2026-09-09) — new live-tuned
     // defaults; see SPECULAR_INCIDENT_STEEPNESS's own header
     // (specular-pattern.js).
-    default: 16.55,
+    default: 10.5, // LOWERED 16.55 → 10.5 (ROUND 24, 2026-10-17)
     category: 'Response',
     label: 'Light response',
     // NEW (2026-08-03, ROUND 17) — exposes `SPECULAR_INCIDENT_STEEPNESS`
@@ -217,7 +217,7 @@ export const SPECULAR_PARAMS = Object.freeze({
     // RAISED 0.15 → 0.22 (ROUND 23, 2026-09-09) — new live-tuned defaults,
     // the first live-tuned value this control has shipped; see
     // SPECULAR_INCIDENT_KNEE's own header (specular-pattern.js).
-    default: 0.22,
+    default: 0.01, // LOWERED 0.22 → 0.01 = THE SCHEMA'S OWN MIN (ROUND 24, 2026-10-17)
     category: 'Response',
     label: 'Full-shine light level',
     help: 'How much light a surface needs before its metal shines at full strength. Low values mean even a single candle makes gold flash; high values mean only direct sunlight does. This is the control to reach for when metal looks right outdoors but stays dead indoors near lamps and candles — it moves where "brightly lit" begins, while "Light response" above decides how fast the shine dies away below that point. At 1 only a pure white, fully-lit pixel counts as bright, which is how this behaved before the control existed.',
@@ -233,7 +233,7 @@ export const SPECULAR_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.5,
+    default: 0.66, // RAISED 0.5 → 0.66 (ROUND 24, 2026-10-17)
     category: 'Response',
     label: 'Highlight rolloff',
     help: "How gracefully the shine tops out once a surface is well lit. At 0 it slams into full brightness the moment a light is bright enough and stays pinned there — which both blows out the highlight and freezes it, because a pinned value cannot flicker. Turn this up to let bright metal keep getting gradually brighter instead of clipping, and to let a candle's own flicker keep showing through on well-lit metal. This is the first control to try if the shine looks blown out OR looks strangely static under a lamp.",
@@ -243,7 +243,7 @@ export const SPECULAR_PARAMS = Object.freeze({
     min: 0,
     max: 4,
     step: 0.01,
-    default: 0.55,
+    default: 0.23, // LOWERED 0.55 → 0.23 (ROUND 24, 2026-10-17)
     category: 'Response',
     label: 'Lamp-light gain',
     help: 'A straight brightness multiplier on the shine that light produces, applied after the response curve. The blunt "all of this is too strong / too weak" dial. Separate from the main Strength control on purpose: this one only scales how much LIGHT-DRIVEN shine you get, so you can pull candle-lit metal back without changing how the effect reads outdoors at noon.',
@@ -353,7 +353,7 @@ export const SPECULAR_PARAMS = Object.freeze({
     // RAISED 0.9 → 3 = THE SCHEMA'S OWN MAX AGAIN (ROUND 22, 2026-09-09) —
     // new live-tuned defaults; see SPECULAR_DEFAULT_PARALLAX_STRENGTH's own
     // header (specular-render.js).
-    default: 3,
+    default: 1.61, // LOWERED 3 → 1.61 (ROUND 24, 2026-10-17)
     category: 'Motion',
     label: 'Parallax',
     help: 'How much the shimmer slides across the metal as you pan the map. This is the single most important control for making the shine feel like a REFLECTION rather than a texture someone painted on. At 1 the patterns are nearly locked to your screen, sweeping over the map as you move, which is what light actually does. At 0 they are glued to the map and the illusion collapses.',

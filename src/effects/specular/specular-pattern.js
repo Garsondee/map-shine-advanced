@@ -480,7 +480,7 @@ export function steepenIncidentRgb(rgb, lumaWeights, steepness) {
  * still well past the original 3, the author's own dialled-in scene,
  * recorded exactly.
  */
-export const SPECULAR_INCIDENT_STEEPNESS = 16.55;
+export const SPECULAR_INCIDENT_STEEPNESS = 10.5; // LOWERED 16.55 → 10.5 (ROUND 24, 2026-10-17)
 
 /**
  * THE KNEE — the incident-light level at which metal reaches its FULL shine.
@@ -541,7 +541,7 @@ export const SPECULAR_INCIDENT_STEEPNESS = 16.55;
  * author's own measured "ordinarily lit" reading of 0.115, the same posture
  * the original 0.15 argued for, moved slightly higher on a real scene.
  */
-export const SPECULAR_INCIDENT_KNEE = 0.22;
+export const SPECULAR_INCIDENT_KNEE = 0.01; // LOWERED 0.22 → 0.01 = THE SCHEMA'S OWN MIN (ROUND 24, 2026-10-17)
 
 /**
  * ============================================================================
@@ -573,7 +573,7 @@ export const SPECULAR_INCIDENT_KNEE = 0.22;
  * way up. Default `0.5` — real rolloff, without discarding the knee's whole
  * point of "past here, metal is properly lit."
  */
-export const SPECULAR_KNEE_SOFTNESS = 0.5;
+export const SPECULAR_KNEE_SOFTNESS = 0.66; // RAISED 0.5 → 0.66 (ROUND 24, 2026-10-17)
 
 /**
  * A plain multiplier on the shine response, applied AFTER the curve. The
@@ -584,7 +584,7 @@ export const SPECULAR_KNEE_SOFTNESS = 0.5;
  * author called "far too much" rather than a nominal one — the curve controls
  * around it are what let that be dialled back up per scene.
  */
-export const SPECULAR_INCIDENT_GAIN = 0.55;
+export const SPECULAR_INCIDENT_GAIN = 0.23; // LOWERED 0.55 → 0.23 (ROUND 24, 2026-10-17)
 
 /**
  * ============================================================================

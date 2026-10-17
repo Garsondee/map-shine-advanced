@@ -47,7 +47,7 @@
  *
  * @module effects/critters/fly-brain
  */
-import { wrapAngle } from './critter-sdf.js';
+import { wrapAngle, safeAtan2 } from './critter-sdf.js';
 
 const TAU = Math.PI * 2;
 
@@ -84,7 +84,7 @@ export const FLY_BRAIN = Object.freeze({ STRIDE_LENGTHS, DRAG, TURN_RATE });
  * @returns {{update: (s: object) => object, spawn: (s: object) => object, lost: (s: object) => *}}
  */
 export function buildFlyBrain(TSL, { u, zone }) {
-  const { float, vec2, select, mix, clamp, min, max, abs, sin, cos, atan, exp, length, smoothstep, floor, pow } = TSL;
+  const { float, vec2, select, mix, clamp, min, max, abs, sin, cos, exp, length, smoothstep, floor, pow, fract } = TSL;
 
   const angDiff = (a, b) => wrapAngle(TSL, b.sub(a));
   const lerpAng = (a, b, t) => a.add(angDiff(a, b).mul(clamp(t, 0, 1)));
@@ -114,7 +114,7 @@ export function buildFlyBrain(TSL, { u, zone }) {
 
     const flyH = u('flyHeight');
     const dist = s.zs.distance; // signed px, > 0 inside the zone
-    const gradAng = atan(s.zs.grad.y, s.zs.grad.x); // the way INTO the zone
+    const gradAng = safeAtan2(TSL, s.zs.grad.y, s.zs.grad.x); // the way INTO the zone
     const toHome = s.home.sub(s.P);
     const dHome = max(length(toHome), 1e-3);
     const homeDir = toHome.div(dHome);
@@ -138,7 +138,7 @@ export function buildFlyBrain(TSL, { u, zone }) {
     const burstNow = s.TMR.lessThanEqual(0);
     const dur = mix(float(0.05), float(0.25), s.rnd(1));
     const rAng = s.rnd(2).mul(TAU);
-    const homeAng = atan(toHome.y, toHome.x);
+    const homeAng = safeAtan2(TSL, toHome.y, toHome.x);
     const homeBias = min(float(1), dHome.div(200).mul(u('tether').div(25)));
     const angToHome = rAng.add(homeBias.mul(angDiff(rAng, homeAng)).mul(0.6));
     // Steer inward before arriving at the wall: full inward bias at it, none a wall-width inside the rim.
@@ -169,7 +169,11 @@ export function buildFlyBrain(TSL, { u, zone }) {
       .mul(0.04)
       .mul(flyH);
     const zFly = mix(z, flyH.add(bob), min(float(1), s.dt.mul(3)));
-    const hdgFly = select(length(vFly).greaterThan(10), lerpAng(hdg, atan(vFly.y, vFly.x), s.dt.mul(12)), hdg);
+    const hdgFly = select(
+      length(vFly).greaterThan(10),
+      lerpAng(hdg, safeAtan2(TSL, vFly.y, vFly.x), s.dt.mul(12)),
+      hdg
+    );
     const pLand = float(1).sub(exp(u('landChance').negate().mul(s.dt)));
     const wantLand = s
       .rnd(6)
@@ -265,15 +269,20 @@ export function buildFlyBrain(TSL, { u, zone }) {
 
     // ─────────────────────── choose by current state ───────────────────────
     const pick = (fly, land, walk, take) => select(isFly, fly, select(isLand, land, select(isWalk, walk, take)));
+    // The heading and the gait are ACCUMULATORS, and an accumulator that only ever grows loses its
+    // fraction: a float32 gait that has walked ten thousand cycles resolves a cycle to a thousandth, and
+    // the legs would step in quantised jumps after an hour. Both are only ever read modulo their period
+    // (the body takes `fract(gait + offset)`; every use of the heading goes through sin/cos or a wrapped
+    // difference), so they are kept in one period and keep full precision however long the swarm lives.
     return {
       P: pick(pFly, pLand2, pWalk, pTake2),
       V: pick(vFly, vLand, vWalk, vTake),
       TMR: pick(tmrFly, tmrLand, tmrWalk, tmrTake),
       PH: pick(phFly, phLand, phWalk, phTake),
       C: TSL.vec4(
-        pick(hdgFly, hdg, hdgWalk, hdg),
+        wrapAngle(TSL, pick(hdgFly, hdg, hdgWalk, hdg)),
         pick(zFly, zLandOut, float(0), zTake),
-        pick(gait, gait, gaitWalk, gait),
+        fract(pick(gait, gait, gaitWalk, gait)),
         pick(auxFly, aux, auxWalk, aux)
       ),
     };

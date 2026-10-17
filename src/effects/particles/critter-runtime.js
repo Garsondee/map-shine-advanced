@@ -44,17 +44,23 @@
 import { ParticleArena, BYTES_PER_PARTICLE } from './particle-arena.js';
 import { createUniformBank, CRITTER_UNIFORM_DEFAULTS, CRITTER_KIND_DEFAULTS } from '../critters/critter-uniforms.js';
 import { buildZoneSampler } from '../critters/critter-zone-sample.js';
+import { readSeed, MIN_LENGTH_PX } from '../critters/critter-instance.js';
+import { STAMP_STEPS } from '../critters/critter-zone.js';
 import { buildFlyBrain } from '../critters/fly-brain.js';
 import { buildFlyMaterials } from '../critters/fly-render.js';
 import { buildMaggotBrain } from '../critters/maggot-brain.js';
 import { buildMaggotMaterials } from '../critters/maggot-render.js';
-import { buildFireflyBrain } from '../critters/firefly-brain.js';
+import { buildFireflyBrain, FIREFLY_SYNC } from '../critters/firefly-brain.js';
 import { buildFireflyMaterials } from '../critters/firefly-render.js';
 
 /** The CPU clock handed to shaders is wrapped so `sin()` keeps its precision all session. */
 const TIME_WRAP_SEC = 1000;
 /** A frame longer than this is a hitch, not time: a fly does not teleport because the tab was hidden. */
 const MAX_DT_SEC = 0.05;
+/** Any state component beyond this is not a state, it is a fault (NaN fails the `< FAR` test too). */
+const FAR = 1e7;
+/** Two stamps differ when they are at least a step apart; half a step is the line between "same" and "not". */
+const STAMP_TOLERANCE = 0.5 / STAMP_STEPS;
 
 /**
  * Per-kind wiring: the mind, the body, and which uniforms size and pace it.
@@ -116,6 +122,9 @@ export function allocateCritterBuffers(THREE, capacity) {
  * @param {number} [deps.zDepth=0] @param {number} [deps.renderOrder=0] - the MESH's order (see fire's note: not the scene's).
  * @param {*} [deps.illumTexNode] @param {*} [deps.colorationTexNode] @param {*} [deps.depthTexNode] @param {*} [deps.depthFlagsTexNode]
  * @param {() => number} [deps.random] - the per-frame salt source. `Math.random` by default; a lab injects a seeded one.
+ * @param {{seeded: boolean, signature: number|null, colony: number}|null} [deps.resume] - a predecessor's
+ *   {@link resumeToken}: a tier change rebuilds the engine around the SAME arena, and the swarm in it is
+ *   still a good swarm, so the successor carries on from it instead of reseeding.
  */
 export function createCritterEngine({
   THREE,
@@ -130,18 +139,18 @@ export function createCritterEngine({
   depthTexNode = null,
   depthFlagsTexNode = null,
   random = Math.random,
+  resume = null,
 }) {
   const spec = KINDS[kind];
   if (!spec) throw new Error(`createCritterEngine: unknown kind '${kind}' (expected ${Object.keys(KINDS).join(', ')})`);
   const TSL = THREE.TSL;
-  const { Fn, instanceIndex, float, vec2, select, fract, sin, min, abs, hash } = TSL;
+  const { Fn, instanceIndex, float, vec2, select, min, max, abs, hash } = TSL;
   const { buffers, capacity } = memory;
   const bank = createUniformBank(TSL, { ...CRITTER_UNIFORM_DEFAULTS, ...CRITTER_KIND_DEFAULTS[kind] });
   const u = bank.get;
   const zoneSampler = buildZoneSampler(TSL, { buffer: zoneBuffer.node, u });
   const brain = spec.brain(TSL, { u, zone: zoneSampler });
 
-  const hash11 = (x) => fract(sin(x.mul(12.9898)).mul(43758.5453));
   // 24 fresh random bits per frame from the CPU (a float holds an integer this size exactly).
   const frameSalt = u('rand').mul(16777216).floor().toUint();
 
@@ -157,24 +166,29 @@ export function createCritterEngine({
     const V = buffers.velocity.element(i).toVar();
     const AGE = buffers.age.element(i).toVar();
     const TMR = buffers.life.element(i).toVar();
-    const S = seedNode ?? buffers.seed.element(i).toVar();
+    const Sraw = seedNode ?? buffers.seed.element(i).toVar();
     const C = buffers.custom.element(i).toVar();
     const PH = buffers.phase.element(i).toVar();
     const homeRec = zoneSampler.home(fi);
-    const sizeMul = float(1).add(hash11(S.mul(1.7).add(3.1)).sub(0.5).mul(2).mul(u(spec.variationParam)));
+    const look = readSeed(TSL, Sraw, u(spec.variationParam));
     return {
       fi,
       P,
       V,
       AGE,
       TMR,
-      S,
       C,
       PH,
+      Sraw,
+      // The slot's IDENTITY: what a brain hashes for a per-individual phase. The seed's fractional part is the
+      // stamp of the home it last spawned under, which is the runtime's business and nobody else's.
+      S: look.id,
+      stamp: look.stamp,
+      homeStamp: homeRec.z,
       home: vec2(homeRec.x, homeRec.y),
       zoneArea: homeRec.w,
-      seed01: hash11(S.mul(3.1).add(0.5)),
-      L: u(spec.sizeParam).mul(sizeMul),
+      seed01: look.seed01,
+      L: max(u(spec.sizeParam).mul(look.sizeMul), MIN_LENGTH_PX),
       // Per-frame, per-slot, per-decision randomness. Every client rolls its own.
       // PCG (`TSL.hash`) rather than `fract(sin(x)·43758)`: that hash over-fires small
       // probabilities (measured on the GPU: 28% too many hits at p = 0.0033, and a take-off
@@ -197,7 +211,7 @@ export function createCritterEngine({
     slot.zs = zoneSampler.sample(slot.P);
     slot.dt = float(0);
     const fresh = brain.spawn(slot);
-    buffers.seed.element(i).assign(slot.S);
+    buffers.seed.element(i).assign(slot.S.add(slot.homeStamp));
     buffers.position.element(i).assign(fresh.P);
     buffers.velocity.element(i).assign(fresh.V);
     buffers.life.element(i).assign(fresh.TMR);
@@ -212,12 +226,20 @@ export function createCritterEngine({
     const s = readSlot(i);
     s.zs = zoneSampler.sample(s.P);
     const dtReal = u('dt');
+    s.dtReal = dtReal;
     s.dt = spec.speedParam ? dtReal.mul(u(spec.speedParam)) : dtReal;
     const next = brain.update(s);
     const fresh = brain.spawn(s);
     // Slots past the population have no home and are never simulated.
     const simulate = s.fi.lessThan(u('population'));
-    const dead = brain.lost(s).or(abs(s.P.x).greaterThan(1e7)).or(abs(s.P.y).greaterThan(1e7));
+    // Three reasons to start over: the brain says the agent is lost (the paint moved under it); some part
+    // of its state is not a number any more (NaN fails `abs(x) < FAR`, and a NaN is permanent: it poisons
+    // every later step); or its home has changed hands (the stamp it spawned under is not the home's).
+    const sound = [s.P.x, s.P.y, s.V.x, s.V.y, s.C.x, s.C.y, s.C.z, s.C.w, s.PH, s.TMR]
+      .map((x) => abs(x).lessThan(FAR))
+      .reduce((all, ok) => all.and(ok));
+    const homeChanged = abs(s.stamp.sub(s.homeStamp)).greaterThan(STAMP_TOLERANCE);
+    const dead = brain.lost(s).or(sound.not()).or(homeChanged);
     const reborn = simulate.and(dead);
     const keep = (old, advanced, fresher) => select(simulate, select(reborn, fresher, advanced), old);
     buffers.position.element(i).assign(keep(s.P, next.P, fresh.P));
@@ -228,6 +250,9 @@ export function createCritterEngine({
     buffers.age
       .element(i)
       .assign(select(simulate, select(reborn, float(0), min(s.AGE.add(dtReal), float(1e5))), s.AGE));
+    // The agent now answers to the home it is simulated under (a slot out of play keeps what it had, so
+    // that coming back reads as a change).
+    buffers.seed.element(i).assign(select(simulate, s.S.add(s.homeStamp), s.Sraw));
   })().compute(capacity);
 
   // ── DRAW: one instanced quad per slot, built once ──
@@ -260,11 +285,12 @@ export function createCritterEngine({
     meshes.push(mesh);
   }
 
-  let seeded = false;
+  let seeded = Boolean(resume?.seeded);
   let zoneValid = false;
   /** A colony's shared flash clock (cycles). Integrated, so dragging the period slider never jumps it. */
-  let colony = random();
-  let lastSignature = null;
+  let colony = Number.isFinite(resume?.colony) ? resume.colony : random();
+  let lastSignature = resume?.signature ?? null;
+  let disposed = false;
 
   return {
     scene,
@@ -279,7 +305,8 @@ export function createCritterEngine({
      * Point the engine at a zone. Cheap and idempotent; call when the field or the
      * population changes, never per frame. A NEW FIELD reseeds the swarm (the paint
      * moved under it); a population-only change does not (a slider drag must not
-     * reshuffle every fly).
+     * reshuffle every fly) — the few slots whose zone changed hands notice through
+     * their home's stamp and respawn themselves (`critter-zone.js#createSlotStamper`).
      *
      * @param {{field: object|null, homesOffset: number, population: number}} a
      */
@@ -294,9 +321,14 @@ export function createCritterEngine({
       bank.set('zoneDims', [field.cols, field.rows]);
       bank.set('homesOffset', homesOffset);
       bank.set('population', population);
-      if (!zoneValid || field.signature !== lastSignature) seeded = false;
+      if (field.signature !== lastSignature) seeded = false;
       lastSignature = field.signature;
       zoneValid = true;
+    },
+
+    /** What a successor engine needs to carry on from this one (see `deps.resume`). */
+    resumeToken() {
+      return { seeded, signature: lastSignature, colony };
     },
 
     /** How many slots are showing, as a FLOAT (the fraction is the next slot fading in). */
@@ -314,6 +346,21 @@ export function createCritterEngine({
       bank.set('camCentre', [(rect.minX + rect.maxX) * 0.5, (rect.minY + rect.maxY) * 0.5]);
     },
 
+    /**
+     * Give back what the renderer holds for this engine: its draw geometry, its materials and the pipelines
+     * both kernels compiled into. The ARENA is not touched — a storage buffer cannot be freed, and the next
+     * engine is handed the same one (`allocateCritterBuffers`). Safe to call twice.
+     */
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      seedKernel.dispose();
+      updateKernel.dispose();
+      geometry.dispose();
+      for (const material of Object.values(mats)) material?.dispose?.();
+      zoneValid = false;
+    },
+
     /** The first-seed pass, exposed so a lab can force it. */
     init(renderer) {
       if (seeded || !zoneValid) return;
@@ -323,14 +370,16 @@ export function createCritterEngine({
     },
 
     step(renderer, { dtSec, tMs, worldRect }) {
-      if (!zoneValid) return;
+      if (!zoneValid || disposed) return;
       if (worldRect) this.setView(worldRect);
-      bank.set('dt', Math.min(MAX_DT_SEC, Math.max(0, Number.isFinite(dtSec) ? dtSec : 0)));
+      // ONE step length for everything that keeps time. The colony's clock must advance by exactly what the
+      // fireflies' own clocks do, or a hitch (a hidden tab) would leave them a long way from the beat.
+      const dt = Math.min(MAX_DT_SEC, Math.max(0, Number.isFinite(dtSec) ? dtSec : 0));
+      bank.set('dt', dt);
       bank.set('timeSec', ((tMs || 0) / 1000) % TIME_WRAP_SEC);
       bank.set('rand', random());
       if (spec.colonyClock) {
-        colony =
-          (colony + (Number.isFinite(dtSec) ? Math.max(0, dtSec) : 0) / Math.max(0.5, u('flashPeriod').value)) % 1;
+        colony = (colony + dt / Math.max(FIREFLY_SYNC.PERIOD_FLOOR, u('flashPeriod').value)) % 1;
         bank.set('colonyPhase', colony);
       }
       if (!seeded) this.init(renderer);

@@ -158,11 +158,11 @@ export const PAINT_REACH = Object.freeze({
     why: 'Drip spawn points read the painted grid directly, exactly like fire — paint it and it drips.',
   },
   // ⭐ `flies`/`fireflies` — the critter effects' own zones. Both read
-  // `maskAuthority.getDerived(kind, floor)` through `boot.js#getFliesMaskGrid`/
-  // `getFirefliesMaskGrid` (mirroring `getFireMaskGrid` exactly) and turn the
-  // composited grid into a perception field on the CPU, so the in-app brush
-  // reaches them with no file at all. Both declare `authoring.paint`, so they DO
-  // get a tile.
+  // `maskAuthority.getDerived(kind, floor)` through the `getMaskGrid` closure boot.js
+  // hands `createCritterRegistration` (the same swallow-to-null shape as
+  // `getFireMaskGrid`, one registration for both effects) and turn the composited
+  // grid into a perception field on the CPU, so the in-app brush reaches them with
+  // no file at all. Both declare `authoring.paint`, so they DO get a tile.
   flies: {
     reach: 'renders',
     why: 'The swarm reads the painted grid directly — paint a blob and flies gather over it.',

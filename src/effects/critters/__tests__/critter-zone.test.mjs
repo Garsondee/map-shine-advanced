@@ -8,10 +8,14 @@
 import {
   ZONE_CELL_STRIDE,
   ZONE_HOME_STRIDE,
+  ZONE_EDGE_CELLS,
+  ZONE_FIELD_CELLS_MAX,
+  STAMP_STEPS,
   buildZoneField,
   sampleZoneField,
   allocateZonePopulation,
   pickSlotHomes,
+  createSlotStamper,
   packZoneBuffer,
   zoneBufferElementCount,
   zoneGridSignature,
@@ -188,11 +192,22 @@ export function run(t) {
   for (let s = 0; s < pop.total; s++) {
     const hx = homes[s * ZONE_HOME_STRIDE];
     const hy = homes[s * ZONE_HOME_STRIDE + 1];
-    const zi = homes[s * ZONE_HOME_STRIDE + 2];
     const sample = sampleZoneField(tf, hx, hy);
-    if (zi === pop.slotZone[s] && sample.distance > -tf.cellW) inZone++;
+    // the home must be inside the zone this slot was DEALT, not merely inside some zone: the zone's own
+    // bounds (padded by a cell for the jitter) are the check that tells two blobs apart
+    const b = tf.zones[pop.slotZone[s]].bounds;
+    const within =
+      hx >= b.minX - tf.cellW && hx <= b.maxX + tf.cellW && hy >= b.minY - tf.cellH && hy <= b.maxY + tf.cellH;
+    if (within && sample.distance > -tf.cellW) inZone++;
   }
   t.ok(`every home sits inside (or on the rim of) its own zone (${inZone}/${pop.total})`, inZone === pop.total);
+  t.ok(
+    'without stamps the record carries 0 in its stamp slot, and the zone area in its last',
+    Array.from({ length: pop.total }, (_, k) => k).every(
+      (k) =>
+        homes[k * ZONE_HOME_STRIDE + 2] === 0 && homes[k * ZONE_HOME_STRIDE + 3] === tf.zones[pop.slotZone[k]].areaPx2
+    )
+  );
   t.ok('homes are deterministic', Array.from(pickSlotHomes(tf, pop)).join() === Array.from(homes).join());
   // Z-order stratification: 4 homes in one square zone land in 4 different quadrants
   const sq = buildZoneField(
@@ -236,6 +251,173 @@ export function run(t) {
   );
   packZoneBuffer(backing, null, maxCells, [{ offset: maxCells, capacity: flies, homes: null }]);
   t.ok('a null field clears the buffer', backing[0] === 0 && backing[maxCells * 4] === 0);
+
+  // ---- the allocator keeps its promises --------------------------------------------------------
+  {
+    const many = Array.from({ length: 40 }, (_, i) => ({ index: i, areaPx2: 40000 }));
+    const squeezed = allocateZonePopulation(many, { perZone: 100, areaScaling: 0, capacity: 100 });
+    t.ok('capacity binds exactly', squeezed.total === 100);
+    t.ok(
+      'forty blobs and a hundred slots: every blob still has company',
+      Array.from(squeezed.counts).every((c) => c >= 1 && c <= 3)
+    );
+
+    // [1, 1, 24] wants 26 slots from 10: proportional thinning empties the two small zones, and the floor
+    // takes their one agent each from the fullest zone, not from nowhere
+    const lopsided = [
+      { index: 0, areaPx2: 10000 },
+      { index: 1, areaPx2: 10000 },
+      { index: 2, areaPx2: 240000 },
+    ];
+    const lop = allocateZonePopulation(lopsided, { perZone: 4, areaScaling: 1, capacity: 10 });
+    t.ok(
+      'the floor of one survives the thinning, paid for by the fullest zone',
+      Array.from(lop.counts).join() === '1,1,8' && lop.total === 10
+    );
+
+    const crowded = Array.from({ length: 12 }, (_, i) => ({ index: i, areaPx2: 40000 * (i + 1) }));
+    const crowd = allocateZonePopulation(crowded, { perZone: 10, areaScaling: 1, capacity: 5 });
+    t.ok(
+      'more blobs than slots: the budget is spent, never exceeded, and no count goes negative',
+      crowd.total === 5 && Array.from(crowd.counts).every((c) => c >= 0) && crowd.counts.some((c) => c === 0)
+    );
+    t.ok(
+      '…and it goes to the biggest zones',
+      Array.from(crowd.counts.slice(0, 6)).every((c) => c === 0) && crowd.counts[11] >= 1
+    );
+  }
+
+  // ---- a zone that runs to the edge of the map still has a rim ---------------------------------
+  {
+    const edgeGrid = makeGrid({ w: 30, h: 30, texelW: 10, texelH: 10, paint: (x, y) => (x < 12 && y < 12 ? 255 : 0) });
+    const ef = buildZoneField(edgeGrid, { marginPx: 200 });
+    t.ok(
+      `the field extends ${ZONE_EDGE_CELLS} virtual cells past the grid on every side`,
+      ef.originX === -ZONE_EDGE_CELLS * 10 &&
+        ef.originY === -ZONE_EDGE_CELLS * 10 &&
+        ef.cols === 30 + 2 * ZONE_EDGE_CELLS
+    );
+    const atCorner = sampleZoneField(ef, 5, 5);
+    t.ok(
+      `the corner cell is inside by half a cell, not buried (distance ${atCorner.distance.toFixed(1)})`,
+      atCorner.distance > 0 && atCorner.distance < 16
+    );
+    t.ok(
+      `…and its gradient points INTO the zone (${atCorner.gradX.toFixed(2)}, ${atCorner.gradY.toFixed(2)}) — it used to point off the map`,
+      atCorner.gradX > 0.4 && atCorner.gradY > 0.4
+    );
+    const offMap = sampleZoneField(ef, -15, -15);
+    t.ok(
+      'past the map edge the zone is outside, and the way in is back across it',
+      offMap.distance < 0 && offMap.gradX > 0.4 && offMap.gradY > 0.4
+    );
+    t.ok('the virtual cells carry no coverage', offMap.coverage === 0);
+
+    // a grid painted solid has no interior ridge at the border any more: its gradient is a direction almost everywhere
+    const solid = makeGrid({ w: 40, h: 40, texelW: 10, texelH: 10, paint: () => 255 });
+    const sf = buildZoneField(solid, { marginPx: 100 });
+    let directed = 0;
+    for (let i = 0; i < sf.cols * sf.rows; i++) {
+      const gx = sf.cells[i * ZONE_CELL_STRIDE + 2];
+      const gy = sf.cells[i * ZONE_CELL_STRIDE + 3];
+      if (Math.abs(Math.hypot(gx, gy) - 1) < 1e-4) directed++;
+    }
+    t.ok(
+      `a fully painted grid has a unit gradient in ${directed} of ${sf.cols * sf.rows} cells (it had none)`,
+      directed / (sf.cols * sf.rows) > 0.9
+    );
+    const inward = sampleZoneField(sf, 3, 200);
+    t.ok('at the left border of a solid grid the way in is +x', inward.distance > 0 && inward.gradX > 0.9);
+    const full = buildZoneField(makeGrid({ w: 512, h: 512, texelW: 20, texelH: 20, paint: () => 255 }), {
+      marginPx: 128,
+    });
+    t.ok(
+      `a full 512² grid fills the zone buffer's budget exactly (${full.cols}×${full.rows})`,
+      full.cols * full.rows === ZONE_FIELD_CELLS_MAX && ZONE_FIELD_CELLS_MAX === 516 * 516
+    );
+  }
+
+  // ---- a home changes hands: the stamp ---------------------------------------------------------
+  {
+    const stamper = createSlotStamper(64);
+    const lopsided = [
+      { index: 0, areaPx2: 40000 },
+      { index: 1, areaPx2: 90000 },
+    ];
+    const deal = (perZone) => allocateZonePopulation(lopsided, { perZone, areaScaling: 1, refAreaPx2: 40000 });
+    const first = deal(4);
+    const a = stamper.stamp(first);
+    t.ok(
+      'the first deal stamps every slot (nothing was dealt before), with a value that is not 0',
+      a.changed === first.total && Array.from(a.stamps).every((v) => v > 0 && v < 1)
+    );
+    t.ok(
+      'stamps are whole steps of 1/STAMP_STEPS, so they survive a float32 trip through the seed exactly',
+      Array.from(a.stamps).every((v) => Number.isInteger(v * STAMP_STEPS) && Math.fround(2049 + v) - 2049 === v)
+    );
+    const again = stamper.stamp(deal(4));
+    t.ok(
+      'dealing the same population again changes nothing',
+      again.changed === 0 && Array.from(again.stamps).join() === Array.from(a.stamps).join()
+    );
+
+    const second = deal(6);
+    const b = stamper.stamp(second);
+    let moved = 0;
+    let movedRight = true;
+    for (let s = 0; s < Math.min(first.total, second.total); s++) {
+      const changedZone = first.slotZone[s] !== second.slotZone[s];
+      if (changedZone) moved++;
+      // a stamp differs exactly when the slot's zone differs
+      if (changedZone !== (b.stamps[s] !== a.stamps[s])) movedRight = false;
+    }
+    t.ok(`this re-deal moves ${moved} of ${first.total} slots to another zone — enough to matter`, moved >= 2);
+    t.ok('…and exactly those slots get a new stamp (the rest keep theirs and carry on)', movedRight);
+    t.ok(
+      'slots that are new in this deal are stamped too',
+      second.total > first.total && Array.from(b.stamps.slice(first.total)).every((v) => v > 0)
+    );
+
+    // shrink to nothing, grow back: every slot is a newcomer again
+    const empty = stamper.stamp(allocateZonePopulation(lopsided, { perZone: 0 }));
+    t.ok('a zero head-count stamps nothing', empty.stamps.length === 0);
+    const back = stamper.stamp(deal(6));
+    t.ok(
+      'coming back from zero re-stamps every slot (a slot out of play has no position worth keeping)',
+      back.changed === second.total && Array.from(back.stamps).every((v, s) => v !== b.stamps[s])
+    );
+
+    // a slot is bumped once per change, and the counter wraps without ever returning to 0
+    const solo = createSlotStamper(1);
+    const seen = new Set();
+    let zero = false;
+    for (let k = 0; k < 3 * STAMP_STEPS; k++) {
+      // the slot alternates between zone 0 and zone 1, so every call is one change
+      const v = solo.stamp({ total: 1, slotZone: Int32Array.of(k % 2) }).stamps[0];
+      if (v === 0) zero = true;
+      seen.add(v);
+    }
+    t.ok('the stamp cycles through every non-zero step and never lands on 0', !zero && seen.size === STAMP_STEPS - 1);
+
+    // homes carry the stamp in their third float
+    const field = buildZoneField(
+      makeGrid({
+        w: 40,
+        h: 20,
+        texelW: 10,
+        texelH: 10,
+        paint: (x, y) => (disc(8, 10, 5)(x, y) || disc(30, 10, 7)(x, y) ? 255 : 0),
+      }),
+      { marginPx: 30 }
+    );
+    const pop = allocateZonePopulation(field.zones, { perZone: 3, areaScaling: 0 });
+    const st = createSlotStamper(16).stamp(pop);
+    const stamped = pickSlotHomes(field, pop, st.stamps);
+    t.ok(
+      'pickSlotHomes writes each slot’s stamp into its record',
+      Array.from({ length: pop.total }, (_, k) => k).every((k) => stamped[k * ZONE_HOME_STRIDE + 2] === st.stamps[k])
+    );
+  }
 
   // ---- signature -------------------------------------------------------------------------------
   const s0 = zoneGridSignature(grid);

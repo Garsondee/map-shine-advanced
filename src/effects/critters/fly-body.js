@@ -47,9 +47,22 @@
  *
  * @module effects/critters/fly-body
  */
-import { coverage, stroke, sdCapsule, sdEllipse, wrapAngle, emptyLayer, layer, over } from './critter-sdf.js';
+import {
+  coverage,
+  stroke,
+  sdCapsule,
+  sdEllipse,
+  wrapAngle,
+  safeAtan2,
+  emptyLayer,
+  layer,
+  over,
+} from './critter-sdf.js';
 
 const PI = Math.PI;
+
+/** The brightest un-premultiplied channel the body may emit (a wet catch-light is ~2; see the end of `buildFlyBody`). */
+const RGB_CEILING = 4;
 
 // ── Geometry, in body lengths. Head at +x. Hips, resting feet and segment lengths
 // are listed front → middle → hind, for the LEFT side (+y); the right side mirrors.
@@ -213,9 +226,19 @@ export function buildFlyBody(TSL, { p, aa, pose, gait, seed01, lightLocal, tint,
   // ── Lighting of the dome-shaped parts ──
   const L3 = normalize(vec3(lightLocal.x.mul(0.6), lightLocal.y.mul(0.6), float(0.75)));
   const H3 = normalize(L3.add(vec3(0, 0, 1)));
-  /** Shade of an ellipsoid-ish part: a hemispherical normal from the ellipse's own coordinates. */
+  /**
+   * Shade of an ellipsoid-ish part: a hemispherical normal from the ellipse's own coordinates.
+   *
+   * The normal is only meaningful INSIDE the ellipse (|n2| ≤ 1). Outside it `nz` is 0 and |n2| keeps growing
+   * with distance, and the anti-aliasing ramp reaches that far when the fly is small on screen (the ramp is
+   * ±1 px, so a 3 px fly has a ramp the size of the whole body). A specular power of 36 on a "normal" five
+   * units long is 10^25 — multiplied by a coverage that is merely small, and then divided back up by the
+   * layer stack's `/ alpha`, it lands in the HDR buffer (and in bloom) as Inf. Folding the vector back onto
+   * the unit disc makes the fringe shade like the rim, which is what the eye expects there anyway.
+   */
   const dome = (q, ab) => {
-    const n2 = q.div(ab);
+    const nRaw = q.div(ab);
+    const n2 = nRaw.div(max(length(nRaw), 1));
     const r2 = dot(n2, n2);
     const nz = sqrt(max(float(1).sub(r2), 0));
     const n = vec3(n2.x, n2.y, nz);
@@ -396,7 +419,7 @@ export function buildFlyBody(TSL, { p, aa, pose, gait, seed01, lightLocal, tint,
   const wing = (pp, mean, amp) => {
     const q = pp.sub(hingeV);
     const r = max(length(q), 1e-4);
-    const th = atan(q.y, q.x);
+    const th = safeAtan2(TSL, q.y, q.x);
     const rn = r.sub(WING_LENGTH / 2).div(WING_LENGTH / 2);
     const env = sqrt(max(float(1).sub(rn.mul(rn)), 0));
     const halfW = env.mul(WING_WIDTH / 2).mul(float(0.35).add(k(0, 0.3, r).mul(0.65)));
@@ -452,8 +475,11 @@ export function buildFlyBody(TSL, { p, aa, pose, gait, seed01, lightLocal, tint,
   }
 
   // ── Finish ──
+  // The stack is premultiplied, so un-premultiplying divides by a coverage that can be arbitrarily small in
+  // the anti-aliasing fringe. Anything finite that reaches here is a colour, so cap it: a brighter value
+  // than a catch-light ever needs would only feed bloom.
   const alpha = stack.a;
-  const rgb = stack.c.div(max(alpha, 1e-5)).mul(tint);
+  const rgb = min(stack.c.div(max(alpha, 1e-5)), vec3(RGB_CEILING, RGB_CEILING, RGB_CEILING)).mul(tint);
   return { rgb, alpha };
 }
 

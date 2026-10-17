@@ -30,7 +30,7 @@
  *
  * @module effects/critters/maggot-brain
  */
-import { wrapAngle } from './critter-sdf.js';
+import { wrapAngle, safeAtan2 } from './critter-sdf.js';
 
 const TAU = Math.PI * 2;
 const PH_WRITHE = 0;
@@ -46,6 +46,19 @@ const WRITHE_PAUSE = [0.9, 3.6];
 const CRAWL_CHANCE = 0.55;
 
 /**
+ * The wave phase is an accumulator, and an accumulator that only grows loses its fraction: at nine radians
+ * a second a float32 has an ulp of 0.004 rad after an hour and 0.06 after a day, against steps of 0.15–0.3.
+ * It is wrapped at a period the whole rig repeats over. The rig reads the phase at three rates — 1× (the
+ * two lateral waves' first term and the squeeze), 1.37× (the second lateral wave) and 0.5× (the crawl's
+ * heading sway) — and a wrap is invisible only if EVERY one of them has completed a whole number of
+ * turns: 200 × 2π gives 200, 274 and 100. (Wrapping at 2π alone would put a seam in the 1.37× wave
+ * every half minute.) A Node test holds this to the rig's own constants.
+ */
+export const WAVE_PERIOD = Math.PI * 2 * 200;
+/** The crawl heading sways at this multiple of the wave phase (the third rate the wrap has to respect). */
+export const CRAWL_SWAY_RATE = 0.5;
+
+/**
  * @param {*} TSL
  * @param {object} deps
  * @param {(name: string) => *} deps.u - the uniform bank's `get`.
@@ -53,7 +66,7 @@ const CRAWL_CHANCE = 0.55;
  * @returns {{update: (s: object) => object, spawn: (s: object) => object, lost: (s: object) => *}}
  */
 export function buildMaggotBrain(TSL, { u, zone }) {
-  const { float, vec2, vec4, select, mix, clamp, min, max, sin, cos, atan, sqrt, floor, smoothstep } = TSL;
+  const { float, vec2, vec4, select, mix, clamp, min, max, sin, cos, sqrt, floor, smoothstep, mod } = TSL;
 
   const angDiff = (a, b) => wrapAngle(TSL, b.sub(a));
   const dir = (a) => vec2(cos(a), sin(a));
@@ -69,7 +82,7 @@ export function buildMaggotBrain(TSL, { u, zone }) {
     const speedPx = s.C.w;
     const isCrawl = floor(s.PH).greaterThan(0.5);
     const dist = s.zs.distance;
-    const gradAng = atan(s.zs.grad.y, s.zs.grad.x);
+    const gradAng = safeAtan2(TSL, s.zs.grad.y, s.zs.grad.x);
     const wriggle = u('maggotWriggle');
 
     // How worked-up it is: a crawl is hard work; a writhe is an individual's own resting level.
@@ -80,7 +93,7 @@ export function buildMaggotBrain(TSL, { u, zone }) {
     const omega = float(TAU)
       .mul(float(0.7).add(excNext.mul(1.5)))
       .mul(float(0.55).add(wriggle.mul(0.45)));
-    const waveNext = wave.add(omega.mul(s.dt));
+    const waveNext = mod(wave.add(omega.mul(s.dt)), WAVE_PERIOD);
 
     // ── timers and the next decision ──
     const tmr = s.TMR.sub(s.dt);
@@ -125,7 +138,7 @@ export function buildMaggotBrain(TSL, { u, zone }) {
     const pulse = float(1).add(sin(waveNext.sub(1.0)).mul(0.8));
     const rimNear = float(1).sub(smoothstep(float(0), s.L.mul(1.5), dist));
     const steer = angDiff(hdg, gradAng).mul(rimNear).mul(s.dt).mul(6);
-    const crawlHdg = hdg.add(steer).add(sin(waveNext.mul(0.5)).mul(0.5).mul(s.dt));
+    const crawlHdg = hdg.add(steer).add(sin(waveNext.mul(CRAWL_SWAY_RATE)).mul(0.5).mul(s.dt));
     const crawlStep = dir(crawlHdg).mul(speedPx).mul(pulse).mul(s.dt);
     const crawlDone = tmr.lessThanEqual(0);
     const crawlTmr = select(crawlDone, mix(float(WRITHE_PAUSE[0]), float(WRITHE_PAUSE[1]), s.rnd(24)), tmr);
@@ -137,7 +150,7 @@ export function buildMaggotBrain(TSL, { u, zone }) {
       TMR: select(isCrawl, crawlTmr, writheTmr),
       PH: select(isCrawl, crawlPh, writhePh),
       C: vec4(
-        select(isCrawl, crawlHdg, writheHdg),
+        wrapAngle(TSL, select(isCrawl, crawlHdg, writheHdg)),
         waveNext,
         excNext,
         select(isCrawl, select(crawlDone, float(0), speedPx), writheSpeed)

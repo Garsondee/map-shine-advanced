@@ -10,6 +10,9 @@ import { validateParamsSchema } from '../../../core/params-schema.js';
 import { MASK_KINDS } from '../../../scene/mask-catalog.js';
 import { SMELLY_FLIES, SMELLY_FLIES_PARAMS } from '../smelly-flies.js';
 import { FIREFLIES, FIREFLIES_PARAMS } from '../fireflies.js';
+import { FIREFLY_SYNC } from '../firefly-brain.js';
+import { MASK_GRID_MAX_DIM } from '../../../scene/mask-derive.js';
+import { ZONE_GRID_SIDE_MAX } from '../critter-zone.js';
 import {
   CRITTER_KINDS,
   CRITTER_CAPACITY,
@@ -102,6 +105,19 @@ export function run(t) {
   );
   t.ok('fireflies default to the real sky, not "always on"', FIREFLIES_PARAMS.alwaysActive.default === false);
   t.ok('the glow is bright enough to bloom by default', FIREFLIES_PARAMS.intensity.default > 1);
+  t.ok(
+    'the flash period cannot be set below the kernel’s own floor (the photosensitivity promise has ONE number)',
+    FIREFLIES_PARAMS.flashPeriod.min >= FIREFLY_SYNC.PERIOD_FLOOR &&
+      FIREFLIES_PARAMS.flashPeriod.default >= FIREFLIES_PARAMS.flashPeriod.min
+  );
+  t.ok(
+    'fireflies stay out of the photosensitive class — which is only honest while the floor holds',
+    FIREFLIES.a11y.photosensitive === false
+  );
+  t.ok(
+    'the zone field is sized from the mask authority’s own grid cap (the two constants cannot drift)',
+    ZONE_GRID_SIDE_MAX === MASK_GRID_MAX_DIM
+  );
 
   // ---- species tables ----------------------------------------------------------------------------
   t.ok('three kinds', CRITTER_KINDS.join() === 'fly,maggot,firefly');
@@ -115,7 +131,7 @@ export function run(t) {
       CRITTER_CAPACITY.maggot >= SMELLY_FLIES_PARAMS.maggotsPerZone.max &&
       CRITTER_CAPACITY.firefly >= FIREFLIES_PARAMS.countPerZone.max
   );
-  t.ok('the zone buffer holds a full 512² derived grid', ZONE_MAX_CELLS === 512 * 512);
+  t.ok('the zone buffer holds a full 512² derived grid plus its 2-cell border', ZONE_MAX_CELLS === 516 * 516);
 
   // tier plans: monotone — a feature bought at one rung is never taken away higher up
   for (const family of ['fly', 'firefly']) {

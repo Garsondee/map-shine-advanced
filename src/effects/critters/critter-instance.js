@@ -22,6 +22,39 @@
  */
 
 /**
+ * The smallest an individual may be relative to the author's size. A variation of 1 would otherwise let a
+ * slot's multiplier reach 0 — a fly of zero length, and a division by it in the brain that poisons the
+ * slot with NaN for good.
+ */
+export const MIN_SIZE_MUL = 0.3;
+
+/** No body is shorter than this many px, whatever the sliders say: it is a divisor all over the brains. */
+export const MIN_LENGTH_PX = 1;
+
+/**
+ * What a slot's stored seed means. The seed is `id + stamp`: the INTEGER part is the slot's identity, and
+ * everything about how this individual looks derives from it (so it never changes); the FRACTIONAL part is
+ * the stamp of the home it last spawned under (`critter-zone.js#createSlotStamper` says why the brain
+ * wants it). Splitting here, in one place, is what lets the stamp change without a fly changing colour.
+ *
+ * @param {*} TSL
+ * @param {*} seedNode - the stored seed (float node).
+ * @param {*} variationNode - how much individuals differ in size (float node, 0..1).
+ * @returns {{id: *, stamp: *, seed01: *, sizeMul: *}} float nodes.
+ */
+export function readSeed(TSL, seedNode, variationNode) {
+  const { float, floor, fract, sin, max } = TSL;
+  const hash11 = (x) => fract(sin(x.mul(12.9898)).mul(43758.5453));
+  const id = floor(seedNode);
+  return {
+    id,
+    stamp: seedNode.sub(id),
+    seed01: hash11(id.mul(3.1).add(0.5)),
+    sizeMul: max(float(1).add(hash11(id.mul(1.7).add(3.1)).sub(0.5).mul(2).mul(variationNode)), MIN_SIZE_MUL),
+  };
+}
+
+/**
  * @param {*} TSL
  * @param {object} a
  * @param {Record<string, *>} a.buffers - the arena's storage nodes.
@@ -29,23 +62,20 @@
  * @param {string} a.sizeParam - uniform naming this kind's body length in px.
  * @param {string} a.variationParam - uniform naming how much individuals differ in size.
  * @param {number} [a.fadeInSec=0.6]
- * @returns {object} nodes: `i, fi, P, V, AGE, S, C, PH, seed01, L, alpha`.
+ * @returns {object} nodes: `i, fi, P, V, AGE, S (the slot's identity), C, PH, seed01, L, alpha`.
  */
 export function buildInstance(TSL, { buffers, u, sizeParam, variationParam, fadeInSec = 0.6 }) {
-  const { float, instanceIndex, fract, sin, clamp, select } = TSL;
+  const { float, instanceIndex, clamp, select, max } = TSL;
   const i = instanceIndex;
   const fi = float(i);
   const P = buffers.position.element(i);
   const V = buffers.velocity.element(i);
   const AGE = buffers.age.element(i);
-  const S = buffers.seed.element(i);
   const C = buffers.custom.element(i);
   const PH = buffers.phase.element(i);
 
-  const hash11 = (x) => fract(sin(x.mul(12.9898)).mul(43758.5453));
-  const seed01 = hash11(S.mul(3.1).add(0.5));
-  const sizeMul = float(1).add(hash11(S.mul(1.7).add(3.1)).sub(0.5).mul(2).mul(u(variationParam)));
-  const L = u(sizeParam).mul(sizeMul);
+  const { id: S, seed01, sizeMul } = readSeed(TSL, buffers.seed.element(i), u(variationParam));
+  const L = max(u(sizeParam).mul(sizeMul), MIN_LENGTH_PX);
 
   const slotAlpha = clamp(u('active').sub(fi), 0, 1);
   const alpha = slotAlpha

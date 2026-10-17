@@ -9,7 +9,9 @@
  *
  * Paint a meadow, a hedgerow, a marsh edge. When the sun drops into its twilight
  * window the colony hatches from that paint and drifts over it, glowing; as the
- * sky goes fully dark most of them settle again, and rain sends them to ground.
+ * sky goes fully dark most of them fade away again, and rain clears the air (the
+ * colony thins out rather than landing: a landing is one insect's decision, this
+ * is a head-count).
  * The WINDOW is keyed to sun elevation (`critter-activity.js`), not to clock
  * hours, so it follows the astrolabe's own twilight arcs and a GM who changes the
  * sun's peak height moves it for free.
@@ -19,11 +21,16 @@
  * steer by, a GPU state machine per insect, a procedural body. Only the glow is
  * different — and it is emissive HDR on purpose, so the bloom pass picks it up.
  *
- * ⚠️ `photosensitive: false`, deliberately and with a reason. Each flash is a
- * point of light a few pixels across, and the slowest rate any style allows is
- * well under 3 Hz per insect (`flashPeriod` bottoms out at half a second). The
- * accessibility class exists for large-area flicker; if that ever changes, the
- * schema's minimum is the place to enforce it.
+ * ⚠️ `photosensitive: false`, deliberately and with a reason: no insect, in any
+ * style, at any setting, flashes more than three times in any one second — the
+ * line WCAG 2.3.1 draws, which holds whatever area the flashes cover.
+ * `flashPeriod` bottoms out at one second; the kernel clamps it there as well
+ * (`FIREFLY_SYNC.PERIOD_FLOOR`), so a stale saved value cannot get under it; the
+ * colony coupling can quicken an insect by at most 0.18 flashes a second; and the
+ * flash clock runs on REAL time, so the Tempo slider cannot speed it up (it once
+ * did, until a review measured 4 Hz at Tempo 2). The busiest style is Double, two
+ * flashes a cycle: 2 a second at the floor, 3 at the coupling's worst. If any of
+ * these numbers change, the schema's minimum is the place to keep the promise.
  *
  * ⚠️ THE DEFAULTS ARE A FIRST PASS, tuned in the lab and not yet by the author on
  * a real scene.
@@ -71,7 +78,7 @@ export const FIREFLIES_PARAMS = Object.freeze({
     default: false,
     category: 'Twilight',
     label: 'Ignore time of day',
-    help: 'Show the fireflies whatever the sun is doing — for a game that does not run a day clock, or for checking your paint at noon. Rain still grounds them.',
+    help: 'Show the fireflies whatever the sun is doing — for a game that does not run a day clock, or for checking your paint at noon. Rain still clears them.',
   },
   dusk: {
     type: 'bool',
@@ -125,7 +132,7 @@ export const FIREFLIES_PARAMS = Object.freeze({
     default: 0.2,
     category: 'Twilight',
     label: 'Stay out all night',
-    help: 'The fraction of the colony still glowing in the dead of night. 0 sends every one to ground once the sky is dark.',
+    help: 'The fraction of the colony still glowing in the dead of night. 0 puts every one away once the sky is dark.',
   },
   weatherResponse: {
     type: 'float',
@@ -135,7 +142,7 @@ export const FIREFLIES_PARAMS = Object.freeze({
     default: 1,
     category: 'Twilight',
     label: 'Weather response',
-    help: 'How much rain and wind send them to ground. At 1, rain empties the air completely and a gale thins it.',
+    help: 'How much rain and wind thin the colony out. At 1, rain clears the air completely and a gale thins it.',
   },
 
   // ── Flight ───────────────────────────────────────────────────────────────
@@ -147,7 +154,7 @@ export const FIREFLIES_PARAMS = Object.freeze({
     default: 1,
     category: 'Flight',
     label: 'Tempo',
-    help: 'A master clock for how fast they drift, turn and decide.',
+    help: 'A master clock for how fast they drift, turn and decide. It does not change the flash rhythm: that runs on real time, set by the flash period.',
   },
   driftSpeed: {
     type: 'float',
@@ -249,13 +256,13 @@ export const FIREFLIES_PARAMS = Object.freeze({
   },
   flashPeriod: {
     type: 'float',
-    min: 0.5,
+    min: 1,
     max: 20,
     step: 0.1,
     default: 3.6,
     category: 'Glow',
     label: 'Flash period (s)',
-    help: 'Seconds between the start of one flash and the next, for each firefly. Never faster than two a second.',
+    help: 'Seconds between the start of one flash and the next, for each firefly. Never faster than one a second (the Double pattern flashes twice in each period, so never more than three a second).',
   },
   synchrony: {
     type: 'float',

@@ -126,6 +126,20 @@ export function wrapAngle(TSL, a) {
 }
 
 /**
+ * `atan2(y, x)` that is defined at the origin. The standard leaves `atan2(0, 0)` unspecified (GLSL.std.450,
+ * which the Vulkan driver compiles WGSL to, makes it undefined), and a zero vector is not rare here: a
+ * zone field's gradient is exactly (0, 0) where it has no direction to give, and a fly sitting on its home
+ * has a zero vector TO its home. A NaN angle becomes a NaN heading becomes a NaN position, and a NaN
+ * position never recovers on its own. So a vector too short to have a direction is given one (0).
+ * @param {*} TSL @param {*} y @param {*} x
+ */
+export function safeAtan2(TSL, y, x) {
+  const { atan, select, float } = TSL;
+  const degenerate = x.mul(x).add(y.mul(y)).lessThan(1e-12);
+  return atan(select(degenerate, float(0), y), select(degenerate, float(1), x));
+}
+
+/**
  * A PREMULTIPLIED-ALPHA LAYER STACK. A body is several translucent layers (legs
  * under the abdomen, wings over everything); the fragment shader composites them
  * back-to-front by hand because the GPU's own blending only ever sees the final

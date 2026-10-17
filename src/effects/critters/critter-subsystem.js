@@ -33,10 +33,22 @@
  * client rolls its own dice (`Math.random()` salts the kernels), the activity is a
  * pure function of the shared sky, and no result of any of this is ever read back.
  *
+ * ⚠️ A SWARM MAY NEVER TAKE THE FRAME DOWN. `sync` runs inside the viewer's sims block, which has no
+ * try/catch of its own: a throw from here would abort the whole frame, every frame, for a cosmetic
+ * effect. So a throw is caught at this boundary, said once per distinct message (loudly: the error
+ * log, the flight recorder, `getStatus().fault`), the swarm hides, and the subsystem stands down for
+ * a few seconds before it tries again. It never goes quiet about it, and it never freezes the map.
+ *
  * @module effects/critters/critter-subsystem
  */
 import { createLogger } from '../../core/log.js';
-import { buildZoneField, allocateZonePopulation, pickSlotHomes, zoneGridSignature } from './critter-zone.js';
+import {
+  buildZoneField,
+  allocateZonePopulation,
+  pickSlotHomes,
+  zoneGridSignature,
+  createSlotStamper,
+} from './critter-zone.js';
 import { flyActivity, fireflyActivity, approach, activeSlotCount } from './critter-activity.js';
 import {
   critterTierPlan,
@@ -55,6 +67,8 @@ const log = createLogger('critter-subsystem');
 
 /** Never rebuild a zone field more often than this: a brush stroke bumps the mask version every few frames. */
 const MIN_FIELD_REBUILD_MS = 250;
+/** After a frame throws, how long the swarm stays hidden before the subsystem tries again. */
+const FAULT_RETRY_MS = 5000;
 
 /**
  * What an ENGINE of each kind is, as data: its tier family, its slot budget, where it sorts
@@ -247,6 +261,9 @@ export function createCritterSubsystem({
   const slots = new Map();
   let hasContent = false;
   let lastStatus = { group, zones: 0, engines: [] };
+  /** The last frame that threw: what it said, how many have, and when the subsystem will try again. */
+  let fault = null;
+  let lastFaultMessage = '';
   let lastShadowKey = '';
   let shadowValues = null;
   /** Bumped whenever the shared zone buffer must be rewritten (a field or ANY engine's homes changed). */
@@ -326,6 +343,7 @@ export function createCritterSubsystem({
         tier: null,
         population: null,
         homes: null,
+        stamper: createSlotStamper(spec.capacity),
         populationKey: '',
         activity: null,
         lastParams: null,
@@ -337,7 +355,14 @@ export function createCritterSubsystem({
       slots.set(spec.kind, slot);
     }
     if (slot.engine && slot.tier === tier) return slot;
-    if (slot.engine) scene.remove(slot.engine.scene);
+    // A tier change rebuilds the kernels and materials (a rung changes which shader nodes exist) around the
+    // SAME arena: the successor carries on from the swarm the old engine left in it rather than reseeding, and
+    // the old engine gives back what the renderer holds for it (geometry, materials, pipelines).
+    const resume = slot.engine?.resumeToken?.() ?? null;
+    if (slot.engine) {
+      scene.remove(slot.engine.scene);
+      slot.engine.dispose?.();
+    }
     const plan = critterTierPlan(spec.family, tier);
     slot.engine = createEngine({
       THREE,
@@ -351,6 +376,7 @@ export function createCritterSubsystem({
       depthTexNode,
       depthFlagsTexNode,
       random,
+      resume,
     });
     slot.plan = plan;
     slot.tier = tier;
@@ -374,7 +400,10 @@ export function createCritterSubsystem({
       capacity: spec.capacity,
       minPerZone: 1,
     });
-    slot.homes = pickSlotHomes(field, slot.population);
+    // Every slot whose zone changed in this deal gets a new stamp, and respawns itself at its new home.
+    const { stamps, changed } = slot.stamper.stamp(slot.population);
+    slot.restamped = changed;
+    slot.homes = pickSlotHomes(field, slot.population, stamps);
     slot.populationKey = key;
     slot.placed = false;
     return true;
@@ -413,9 +442,24 @@ export function createCritterSubsystem({
    * @param {object|null} [env] - the frame's env snapshot (`world/environment.js`).
    */
   function sync(renderer, nowMs, dtSec, worldRect, env = null) {
+    // Standing down after a fault: the swarm is hidden and the frame goes on without it.
+    if (fault && nowMs < fault.untilMs) return;
     profiler?.beginById(groupDef.syncZone);
     try {
       syncUnguarded(renderer, nowMs, dtSec, worldRect, env);
+    } catch (err) {
+      const message = String(err?.message ?? err);
+      fault = { message, count: (fault?.count ?? 0) + 1, untilMs: nowMs + FAULT_RETRY_MS };
+      hideAll();
+      lastStatus = { group, zones: 0, engines: [] };
+      // Once per distinct failure: a persistent one would otherwise print every few seconds forever.
+      if (message !== lastFaultMessage) {
+        lastFaultMessage = message;
+        log.error(
+          `${group}: ${message} — the swarm is hidden for ${FAULT_RETRY_MS / 1000} s, then it tries again`,
+          err
+        );
+      }
     } finally {
       profiler?.endById(groupDef.syncZone);
     }
@@ -503,6 +547,8 @@ export function createCritterSubsystem({
         tier: slot.tier,
         population: slot.population.total,
         activity: Number(slot.activity.toFixed(3)),
+        // how many slots the last deal moved to another zone (each respawned itself at its new home)
+        restamped: slot.restamped ?? 0,
       });
     }
     scene.visible = any;
@@ -523,12 +569,19 @@ export function createCritterSubsystem({
     get hasContent() {
       return hasContent;
     },
-    getStatus: () => ({ ...lastStatus, perEngine: [...slots.values()].map((s) => s.engine?.debugState?.() ?? null) }),
+    getStatus: () => ({
+      ...lastStatus,
+      fault: fault ? { message: fault.message, count: fault.count } : null,
+      perEngine: [...slots.values()].map((s) => s.engine?.debugState?.() ?? null),
+    }),
     dispose() {
-      // ⚠️ There is no engine dispose path — a storage buffer cannot be freed
-      // (`particle-arena.js`), and the shared pool is kept on purpose so the next
-      // viewer reuses it. Dropping the scene children is all that can honestly be done.
-      for (const s of slots.values()) if (s.engine) scene.remove(s.engine.scene);
+      // The ARENA is not freed — a storage buffer cannot be (`particle-arena.js`), and the shared pool is kept
+      // on purpose so the next viewer reuses it — but everything the renderer holds for an engine is.
+      for (const s of slots.values()) {
+        if (!s.engine) continue;
+        scene.remove(s.engine.scene);
+        s.engine.dispose?.();
+      }
       slots.clear();
       zone.field = null;
       zone.key = '';

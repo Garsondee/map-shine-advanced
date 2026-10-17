@@ -15,8 +15,11 @@
 import { FLY_GEOMETRY } from '../fly-body.js';
 import { FLY_BRAIN } from '../fly-brain.js';
 import { WING_FLIGHT, WING_FOLDED, WING_SPREAD, WING_FLARE, WING_BEAT_AMP } from '../fly-pose.js';
-import { MAGGOT_GEOMETRY } from '../maggot-body.js';
+import { MAGGOT_GEOMETRY, WAVE_RATES } from '../maggot-body.js';
+import { WAVE_PERIOD, CRAWL_SWAY_RATE } from '../maggot-brain.js';
 import { FIREFLY_SYNC } from '../firefly-brain.js';
+import { FLASH_EVENTS_PER_CYCLE } from '../firefly-body.js';
+import { FIREFLY_FLASH_STYLES } from '../critter-species.js';
 import { activeSlotCount } from '../critter-activity.js';
 
 const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
@@ -170,6 +173,42 @@ export function run(t) {
   t.ok(`synchrony 0.5: mostly locked (${r50.toFixed(2)})`, r50 > r25 && r50 > 0.55);
   t.ok(`synchrony 1: unison (${r100.toFixed(2)})`, r100 > 0.95);
   t.ok('the dial is monotonic from strangers to unison', r0 < r25 && r25 < r50 && r50 < r100);
+
+  // ── PHOTOSENSITIVITY: the busiest a firefly can possibly flash ──
+  // The fastest cycle the clock allows is one per PERIOD_FLOOR seconds, plus the most the colony coupling
+  // can add (K/2π cycles a second at synchrony 1). Every style's light events per cycle, times that, is the
+  // event rate; WCAG 2.3.1's line is three a second, whatever area they cover.
+  const fastest = 1 / FIREFLY_SYNC.PERIOD_FLOOR + FIREFLY_SYNC.COUPLING / (2 * Math.PI);
+  t.ok(
+    `a firefly cycles at most ${fastest.toFixed(2)} times a second (floor ${FIREFLY_SYNC.PERIOD_FLOOR} s plus the coupling's pull)`,
+    fastest < 1.2
+  );
+  t.ok(
+    'every flash style is accounted for in the events table',
+    Object.keys(FLASH_EVENTS_PER_CYCLE).join() === [...FIREFLY_FLASH_STYLES].join()
+  );
+  for (const style of FIREFLY_FLASH_STYLES) {
+    const perSecond = FLASH_EVENTS_PER_CYCLE[style] * fastest;
+    t.ok(`${style}: at most ${perSecond.toFixed(2)} light events a second — under the 3 a second line`, perSecond <= 3);
+  }
+
+  // ── MAGGOT: the wave phase is wrapped, and the wrap leaves no seam in any harmonic the rig reads ──
+  const turns = (rate) => (WAVE_PERIOD * rate) / (2 * Math.PI);
+  for (const rate of [...WAVE_RATES, CRAWL_SWAY_RATE]) {
+    t.ok(
+      `the wave period holds a whole number of turns at ${rate}× (${turns(rate).toFixed(6)})`,
+      Math.abs(turns(rate) - Math.round(turns(rate))) < 1e-9
+    );
+  }
+  t.ok(
+    'wrapping at one turn alone WOULD leave a seam in the second wave (the reason for the long period)',
+    Math.abs(1.37 - Math.round(1.37)) > 0.3
+  );
+  const ulp = 2 ** (Math.floor(Math.log2(WAVE_PERIOD)) - 23); // the spacing of float32 values near the period
+  t.ok(
+    `the period is short enough to keep float32 fine (one ulp is ${ulp.toExponential(1)} rad, a frame moves 0.15)`,
+    ulp < 0.001
+  );
 
   // ── the head-count law the sky drives ──
   t.ok('activeSlotCount ramps by fractions, so one firefly fades in at a time', activeSlotCount(0.37, 100) === 37);

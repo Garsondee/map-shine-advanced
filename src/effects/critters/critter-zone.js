@@ -52,14 +52,46 @@
  * "home" was the spawn point and its tether pulled flies back to it; here the home
  * is both where a slot (re)spawns and the centre its swarm orbits.
  *
+ * ============================================================================
+ * A HOME CHANGES HANDS — THE STAMP
+ * ============================================================================
+ *
+ * Slots are dealt to zones round-robin, so when the head-count moves (a slider, the
+ * area scaling) a few slots of a multi-zone scene change zone: their home is now in
+ * a different blob from the one the fly is in. The wall that keeps a fly over its
+ * paint then keeps it there FOREVER, pressed against the rim of the wrong blob and
+ * pulled toward a home it can never reach. The agent has to be told its home has
+ * changed hands, and a GPU agent can only be told by data. Every home record
+ * therefore carries a STAMP (a small number that is bumped whenever the slot's zone
+ * assignment changes); the agent keeps the stamp it last spawned under and respawns
+ * itself the moment the two differ. See {@link createSlotStamper}.
+ *
  * @module effects/critters/critter-zone
  */
 
 /** Floats per field cell: coverage01, signedDistancePx, gradX, gradY. */
 export const ZONE_CELL_STRIDE = 4;
 
-/** Floats per slot home: x, y, zoneIndex, zoneAreaPx2. */
+/** Floats per slot home: x, y, stamp, zoneAreaPx2. */
 export const ZONE_HOME_STRIDE = 4;
+
+/**
+ * Unpainted cells kept beyond the mask grid on every side. A zone that runs to the
+ * edge of the mask rect would otherwise have no "outside" there to measure from: the
+ * distance transform would peak AT the border and its gradient would point off the
+ * map. Two cells is what the central-difference gradient needs to see across the rim.
+ */
+export const ZONE_EDGE_CELLS = 2;
+
+/**
+ * The largest mask grid side the field is built from (the derived grid is capped at 512²), and the
+ * most cells a field can therefore have once {@link ZONE_EDGE_CELLS} are added on every side.
+ */
+export const ZONE_GRID_SIDE_MAX = 512;
+export const ZONE_FIELD_CELLS_MAX = (ZONE_GRID_SIDE_MAX + 2 * ZONE_EDGE_CELLS) ** 2;
+
+/** How many distinct non-zero stamps a slot cycles through (see {@link createSlotStamper}). */
+export const STAMP_STEPS = 1024;
 
 /**
  * A stand-in for "no source" in the distance transform. Finite on purpose: with
@@ -283,23 +315,28 @@ export function buildZoneField(grid, { threshold = DEFAULT_ZONE_THRESHOLD, margi
   }
   if (painted === 0) return null;
 
-  // Crop = painted bounds + margin, clamped to the grid. Two extra cells always
-  // survive so the distance transform has "outside" on every side to measure from.
+  // Crop = painted bounds + margin, clamped to the grid PLUS `ZONE_EDGE_CELLS` of virtual, unpainted cells on
+  // every side. The clamp must not be the grid itself: a zone that touches the mask rect would have no
+  // "outside" past its edge, the distance transform would peak at the border, and the stored gradient there
+  // would point off the map (a fully painted grid had a zero gradient in every cell). The virtual cells read
+  // as unpainted, so the rim of an edge-touching zone is a real rim, one cell beyond the map.
   const padX = Math.ceil(marginPx / texelW) + 2;
   const padY = Math.ceil(marginPx / texelH) + 2;
-  const x0 = Math.max(0, minX - padX);
-  const y0 = Math.max(0, minY - padY);
-  const x1 = Math.min(gw - 1, maxX + padX);
-  const y1 = Math.min(gh - 1, maxY + padY);
+  const x0 = Math.max(-ZONE_EDGE_CELLS, minX - padX);
+  const y0 = Math.max(-ZONE_EDGE_CELLS, minY - padY);
+  const x1 = Math.min(gw - 1 + ZONE_EDGE_CELLS, maxX + padX);
+  const y1 = Math.min(gh - 1 + ZONE_EDGE_CELLS, maxY + padY);
   const cols = x1 - x0 + 1;
   const rows = y1 - y0 + 1;
   const n = cols * rows;
+  /** The paint value of a grid cell; the virtual cells beyond the grid are unpainted. */
+  const paintAt = (gx, gy) => (gx >= 0 && gx < gw && gy >= 0 && gy < gh ? data[gy * gw + gx] : 0);
 
   const inside = new Uint8Array(n);
   const outside = new Uint8Array(n);
   for (let y = 0; y < rows; y++) {
     for (let x = 0; x < cols; x++) {
-      const on = data[(y0 + y) * gw + (x0 + x)] >= cut ? 1 : 0;
+      const on = paintAt(x0 + x, y0 + y) >= cut ? 1 : 0;
       inside[y * cols + x] = on;
       outside[y * cols + x] = on ? 0 : 1;
     }
@@ -336,7 +373,7 @@ export function buildZoneField(grid, { threshold = DEFAULT_ZONE_THRESHOLD, margi
       const gy = (sdfCells[yp * cols + x] - sdfCells[ym * cols + x]) / Math.max(1, yp - ym);
       const len = Math.hypot(gx, gy);
       const o = (y * cols + x) * ZONE_CELL_STRIDE;
-      out[o] = data[(y0 + y) * gw + (x0 + x)] / 255;
+      out[o] = paintAt(x0 + x, y0 + y) / 255;
       out[o + 1] = sdfCells[y * cols + x] * cellPx;
       out[o + 2] = len > 1e-6 ? gx / len : 0;
       out[o + 3] = len > 1e-6 ? gy / len : 0;
@@ -440,8 +477,10 @@ export function buildZoneField(grid, { threshold = DEFAULT_ZONE_THRESHOLD, margi
 
 /**
  * The CPU twin of the kernel's field lookup: bilinear over the four nearest cell
- * CENTRES, edge-clamped. The shader transcribes exactly this; the lab compares
- * the two, and any disagreement is a transcription bug — not a tolerance.
+ * CENTRES, edge-clamped. The shader transcribes exactly this, and
+ * `tools/shader-lab/critter-lab.js#samplerParity` runs both over the same points on a
+ * real GPU (measured: 5e-7 on coverage, 1e-4 px on distance, 2e-6 on the gradient —
+ * float32 against float64). A disagreement beyond that is a transcription bug.
  *
  * Outside the field's rectangle the clamped edge cell stands in, with the distance
  * to the rectangle subtracted from the signed distance so "farther out" still
@@ -491,8 +530,12 @@ export function sampleZoneField(field, x, y) {
  *
  * `n(zone) = round(perZone × lerp(1, clamp(area/refArea, 0.25, 6), areaScaling))`,
  * floored at `minPerZone` while `perZone > 0`. When the total would exceed
- * `capacity` the LARGEST zones keep their share and the rest are thinned
- * proportionally — never truncated mid-zone, which would leave one blob empty.
+ * `capacity` EVERY zone is thinned by the same factor (so the swarms stay in
+ * proportion to each other) — never truncated mid-zone, which would leave one blob
+ * empty. The floor survives the thinning for as long as the budget can seat it
+ * (`zones × minPerZone ≤ capacity`): the cheapest agents are taken from the fullest
+ * zones to pay for it. Past that — more painted blobs than there are slots — the
+ * smallest shares round down to nothing, because there is nowhere to put them.
  *
  * @param {ZoneInfo[]} zones
  * @param {object} opts
@@ -523,12 +566,33 @@ export function allocateZonePopulation(
     total += counts[z];
   }
   if (total > capacity) {
-    // Thin proportionally, keeping at least one in every zone that can afford one.
+    // Thin every zone by the same factor, so the swarms keep their proportions...
     const scale = capacity / total;
     total = 0;
     for (let z = 0; z < count; z++) {
       counts[z] = Math.max(0, Math.floor(counts[z] * scale));
       total += counts[z];
+    }
+    // ...then give back the floor the rounding took, as far as the budget can seat it. A zone the
+    // thinning emptied takes one agent from whichever zone has the most; that is the cheapest agent
+    // in the plague to lose, and no blob is left bare while any other has company to spare.
+    const seatable = Math.min(Math.max(0, minPerZone | 0), Math.floor(capacity / count));
+    if (seatable > 0) {
+      for (let z = 0; z < count; z++) {
+        if (counts[z] < seatable) {
+          total += seatable - counts[z];
+          counts[z] = seatable;
+        }
+      }
+      while (total > capacity) {
+        let donor = -1;
+        for (let z = 0; z < count; z++) {
+          if (counts[z] > seatable && (donor < 0 || counts[z] > counts[donor])) donor = z;
+        }
+        if (donor < 0) break;
+        counts[donor]--;
+        total--;
+      }
     }
     // Hand leftover slots to the largest zones first so rounding never wastes them.
     const bySize = [...zones].sort((a, b) => b.areaPx2 - a.areaPx2);
@@ -577,9 +641,11 @@ function hash01(a, b) {
  * stratified: n homes cover the zone instead of clumping on one end of a raster.
  *
  * @param {ZoneField} field @param {ZonePopulation} population
- * @returns {Float32Array} total * {@link ZONE_HOME_STRIDE}: x, y, zoneIndex, zoneAreaPx2.
+ * @param {ArrayLike<number>|null} [stamps] - per-slot stamps from {@link createSlotStamper}; null stamps every
+ *   home 0 (a one-shot caller that never re-deals has nothing to notice).
+ * @returns {Float32Array} total * {@link ZONE_HOME_STRIDE}: x, y, stamp, zoneAreaPx2.
  */
-export function pickSlotHomes(field, population) {
+export function pickSlotHomes(field, population, stamps = null) {
   const homes = new Float32Array(population.total * ZONE_HOME_STRIDE);
   for (let s = 0; s < population.total; s++) {
     const zone = field.zones[population.slotZone[s]];
@@ -594,10 +660,51 @@ export function pickSlotHomes(field, population) {
     const o = s * ZONE_HOME_STRIDE;
     homes[o] = field.originX + (cx + 0.5 + jx * 0.9) * field.cellW;
     homes[o + 1] = field.originY + (cy + 0.5 + jy * 0.9) * field.cellH;
-    homes[o + 2] = zone.index;
+    homes[o + 2] = stamps ? stamps[s] : 0;
     homes[o + 3] = zone.areaPx2;
   }
   return homes;
+}
+
+/**
+ * Which slots have changed zone since the last time the population was dealt, as a per-slot STAMP.
+ *
+ * A stamp is `k / STAMP_STEPS` for k in 1 … STAMP_STEPS − 1 (0 means "never dealt"), bumped to the next
+ * value whenever the slot's zone assignment differs from the last deal's — or the slot was not in play at
+ * all, which covers a head-count that grows back. The values are dyadic fractions, so they survive the
+ * float32 round trip through the agent's seed (`id + stamp`, see `critter-runtime.js`) EXACTLY; the kernel
+ * compares them with a tolerance of half a step and never has to trust float equality.
+ *
+ * Pure bookkeeping, one instance per engine: it remembers the previous deal's zones, nothing else.
+ *
+ * @param {number} capacity - the engine's slot count.
+ * @returns {{stamp: (population: ZonePopulation) => {stamps: Float32Array, changed: number}}}
+ */
+export function createSlotStamper(capacity) {
+  const cap = Math.max(1, capacity | 0);
+  /** The zone each slot was last dealt to, or −1 for "not in play". */
+  const zoneOf = new Int32Array(cap).fill(-1);
+  const epoch = new Uint16Array(cap);
+  let inPlay = 0;
+  return {
+    stamp(population) {
+      const total = Math.min(population.total, cap);
+      const stamps = new Float32Array(total);
+      let changed = 0;
+      for (let s = 0; s < total; s++) {
+        if (zoneOf[s] !== population.slotZone[s]) {
+          epoch[s] = (epoch[s] % (STAMP_STEPS - 1)) + 1;
+          zoneOf[s] = population.slotZone[s];
+          changed++;
+        }
+        stamps[s] = epoch[s] / STAMP_STEPS;
+      }
+      // Slots past the new head-count are out of play: forget their zone, so coming back reads as a change.
+      for (let s = total; s < inPlay; s++) zoneOf[s] = -1;
+      inPlay = total;
+      return { stamps, changed };
+    },
+  };
 }
 
 /**
@@ -619,8 +726,8 @@ export function zoneBufferElementCount(maxCells, homeCapacities) {
  * Write a field's cells and a set of home sections into the flat backing array of
  * the zone storage buffer (`vec4` elements, so 4 floats each). Sections past the
  * end of `homeSections` and slots past `population.total` are zeroed, which reads
- * as "no home" (zoneIndex 0, area 0) — the kernel never reads them because those
- * slots are beyond the active count.
+ * as "no home" (stamp 0, area 0) — the kernel never simulates them because those
+ * slots are beyond the population.
  *
  * @param {Float32Array} backing - the storage attribute's own `.array`.
  * @param {ZoneField|null} field - null clears the cells (no zone).

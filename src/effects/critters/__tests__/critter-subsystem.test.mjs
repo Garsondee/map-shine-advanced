@@ -5,6 +5,7 @@
  * what is proven is the lifecycle — not the GPU, which the shader lab checks.
  */
 import { createCritterSubsystem, critterUniformValues, flyShadowFromSky } from '../critter-subsystem.js';
+import { getLogLevel, setLogLevel } from '../../../core/log.js';
 import { SMELLY_FLIES_PARAMS } from '../smelly-flies.js';
 import { FIREFLIES_PARAMS } from '../fireflies.js';
 import { CRITTER_CAPACITY, FLY_LOOKS, FIREFLY_FLASH_STYLES } from '../critter-species.js';
@@ -16,6 +17,19 @@ function discGrid({ w = 64, h = 48, texel = 10, cx = 32, cy = 24, r = 10 } = {})
   const data = new Uint8Array(w * h);
   for (let y = 0; y < h; y++)
     for (let x = 0; x < w; x++) if ((x - cx) ** 2 + (y - cy) ** 2 <= r * r) data[y * w + x] = 255;
+  return { spec: { x: 0, y: 0, width: w * texel, height: h * texel, w, h, texelW: texel, texelH: texel }, data };
+}
+
+/** A MaskGrid with two painted discs of different sizes, far apart: two zones, a small one on the left. */
+function twoDiscGrid({ w = 64, h = 48, texel = 10 } = {}) {
+  const data = new Uint8Array(w * h);
+  const discs = [
+    [15, 24, 6],
+    [48, 24, 12],
+  ];
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++)
+      if (discs.some(([cx, cy, r]) => (x - cx) ** 2 + (y - cy) ** 2 <= r * r)) data[y * w + x] = 255;
   return { spec: { x: 0, y: 0, width: w * texel, height: h * texel, w, h, texelW: texel, texelH: texel }, data };
 }
 
@@ -45,6 +59,7 @@ function harness(group, { params, state = {}, THREE = { Scene: FakeScene } } = {
       paramCalls: [],
       steps: [],
       zoneValid: false,
+      disposed: false,
       setZone(z) {
         this.setZoneCalls.push(z);
         this.zoneValid = !!z.field && z.population > 0;
@@ -63,6 +78,12 @@ function harness(group, { params, state = {}, THREE = { Scene: FakeScene } } = {
       },
       debugState() {
         return { kind: this.kind };
+      },
+      resumeToken() {
+        return { seeded: true, signature: 42, colony: 0.25 };
+      },
+      dispose() {
+        this.disposed = true;
       },
     };
     spy.engines.push(e);
@@ -349,7 +370,7 @@ export function run(t) {
     for (let i = 0; i < 40; i++) sub.sync(RENDERER, 1500 + i * 500, 0.5, RECT, DUSK);
     t.ok('…and fills the population', e.active > pop * 0.98 && sub.hasContent === true);
     for (let i = 0; i < 40; i++) sub.sync(RENDERER, 30000 + i * 500, 0.5, RECT, RAINY_DUSK);
-    t.ok('rain grounds the whole colony', e.active < pop * 0.02);
+    t.ok('rain clears the whole colony', e.active < pop * 0.02);
   }
   {
     const { sub, spy } = harness('fireflies', { params: { alwaysActive: true } });
@@ -443,6 +464,66 @@ export function run(t) {
       'the new engine is told where the zone is and what its params are',
       spy.engines[1].setZoneCalls.length >= 1 && spy.engines[1].paramCalls.length === 1
     );
+    t.ok('the old engine is disposed: its geometry, materials and pipelines go back to the renderer', first.disposed);
+    t.ok('…and the new one is not', spy.engines[1].disposed === false);
+    t.ok(
+      'the successor is handed the old engine’s resume token, so the swarm carries on rather than reseeding',
+      spy.engines[1].args.resume?.seeded === true &&
+        spy.engines[1].args.resume.signature === 42 &&
+        spy.engines[1].args.resume.colony === 0.25
+    );
+    t.ok('the very first engine has nothing to resume from', first.args.resume === null);
+    renderState.perfTier = 2;
+    sub.sync(RENDERER, 1032, 0.016, RECT, DAY);
+    t.ok(
+      'tier changes can go back and forth; each hands on to the next',
+      spy.engines.length === 3 && spy.engines[1].disposed && spy.engines[2].args.resume?.seeded === true
+    );
+  }
+
+  // ---- a re-dealt head-count tells the slots whose zone changed ----------------------------------
+  {
+    const { sub, spy, renderState } = harness('smellyFlies', {
+      params: { fliesPerZone: 6, areaScaling: 1 },
+      state: { maskGrid: twoDiscGrid() },
+    });
+    sub.sync(RENDERER, 1000, 0.016, RECT, DAY);
+    const zb = spy.zoneBuffers[0];
+    const fresh = zb.writes.at(-1).sections[0];
+    const stride = 4;
+    t.ok(
+      'a first deal stamps every home (a stamp of 0 would read as "never dealt")',
+      Array.from({ length: fresh.length / stride }, (_, k) => fresh[k * stride + 2]).every((v) => v > 0 && v < 1)
+    );
+    renderState.params = { ...renderState.params, fliesPerZone: 10 }; // the author drags the slider
+    sub.sync(RENDERER, 1016, 0.016, RECT, DAY);
+    const dealt = zb.writes.at(-1).sections[0];
+    t.ok('the head-count grew and the buffer was rewritten', dealt.length > fresh.length && zb.writes.length === 2);
+    t.ok('a population-only change keeps the same engine (a slider drag must not rebuild)', spy.engines.length === 1);
+    const leftOf = (hs, k) => hs[k * stride] < 320; // the small disc is the left one
+    let moved = 0;
+    let right = true;
+    for (let k = 0; k < fresh.length / stride; k++) {
+      const hopped = leftOf(fresh, k) !== leftOf(dealt, k);
+      const restamped = dealt[k * stride + 2] !== fresh[k * stride + 2];
+      if (hopped) moved++;
+      if (hopped !== restamped) right = false;
+    }
+    t.ok(
+      `${moved} slots changed blob when the head-count grew, and exactly those were re-stamped`,
+      moved >= 1 && right
+    );
+    t.ok(
+      'slots that are new in the larger deal are stamped',
+      Array.from(
+        { length: (dealt.length - fresh.length) / stride },
+        (_, k) => dealt[fresh.length + k * stride + 2]
+      ).every((v) => v > 0)
+    );
+    // dealing the same numbers again changes nothing — a stamp is a change counter, not a clock
+    renderState.params = { ...renderState.params, fliesPerZone: 10, tether: 30 };
+    sub.sync(RENDERER, 1032, 0.016, RECT, DAY);
+    t.ok('an unrelated param change does not re-deal the homes', zb.writes.length === 2);
   }
 
   // ---- allocations outlive a subsystem ---------------------------------------------------------
@@ -450,14 +531,61 @@ export function run(t) {
     const THREE = { Scene: FakeScene };
     const a = harness('smellyFlies', { THREE });
     a.sub.sync(RENDERER, 1000, 0.016, RECT, DAY);
+    const built = a.spy.engines[0];
     a.sub.dispose();
     t.ok('dispose detaches the engines', a.sub.scene.children.length === 0 && a.sub.hasContent === false);
+    t.ok('…and hands each one back to the renderer', built.disposed === true);
     // a second viewer on the SAME three reuses the buffers: build it with the first's allocators
     const b = harness('smellyFlies', { THREE });
     b.sub.sync(RENDERER, 1000, 0.016, RECT, DAY);
     t.ok(
       'each harness has its own spies, but a shared THREE shares the pool (the second never allocates)',
       b.spy.allocs.length === 0 && b.spy.zoneBuffers.length === 0
+    );
+  }
+
+  // ---- a swarm never takes the frame down --------------------------------------------------------
+  {
+    const { sub, spy } = harness('smellyFlies');
+    sub.sync(RENDERER, 1000, 0.016, RECT, DAY);
+    const e = spy.engines[0];
+    let boom = true;
+    const realStep = e.step.bind(e);
+    e.step = (...a) => {
+      if (boom) throw new Error('compute exploded');
+      return realStep(...a);
+    };
+    let threw = false;
+    // the subsystem logs the fault at error level, which is the point; keep it out of the test run's output
+    const level = getLogLevel();
+    setLogLevel(Infinity);
+    try {
+      sub.sync(RENDERER, 1016, 0.016, RECT, DAY);
+    } catch {
+      threw = true;
+    } finally {
+      setLogLevel(level);
+    }
+    t.ok('a throw inside the sync does not escape to the frame loop', threw === false);
+    t.ok(
+      '…the swarm hides, and the status says what happened (loudly, not silently)',
+      sub.hasContent === false && sub.scene.visible === false && sub.getStatus().fault?.message === 'compute exploded'
+    );
+    const stepsAfterFault = e.steps.length;
+    sub.sync(RENDERER, 1500, 0.016, RECT, DAY);
+    t.ok(
+      'the subsystem stands down for a few seconds instead of throwing every frame',
+      e.steps.length === stepsAfterFault
+    );
+    boom = false;
+    sub.sync(RENDERER, 7000, 0.016, RECT, DAY);
+    t.ok(
+      'then it tries again, and a healthy frame brings the swarm back',
+      e.steps.length === stepsAfterFault + 1 && sub.hasContent === true
+    );
+    t.ok(
+      'the fault stays on record (count) so a flaky swarm is not mistaken for a healthy one',
+      sub.getStatus().fault.count === 1
     );
   }
 

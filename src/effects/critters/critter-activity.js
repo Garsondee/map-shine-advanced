@@ -49,11 +49,38 @@ function clamp01(x) {
   return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0;
 }
 
-/** Hermite smoothstep on [edge0, edge1]; works for edge0 > edge1 (a falling edge). */
-function smooth(edge0, edge1, x) {
-  if (edge0 === edge1) return x < edge0 ? 0 : 1;
-  const t = clamp01((x - edge0) / (edge1 - edge0));
+/**
+ * A FALLING Hermite step: 0 at or above `high`, 1 at or below `low`, smooth between. Every edge of the
+ * twilight window is this shape (the sun is going down), so the direction is part of the name and the
+ * function cannot be handed an edge pair that means the opposite: `high <= low` (including equal) is a hard
+ * step at `low`. (It used to be a general smoothstep whose equal-edge case returned the RISING step, which
+ * is the wrong way round for a falling edge — an inverted window, silently.)
+ */
+function smoothFall(high, low, x) {
+  if (!(high > low)) return x <= low ? 1 : 0;
+  const t = clamp01((high - x) / (high - low));
   return t * t * (3 - 2 * t);
+}
+
+/** The narrowest a twilight ramp may be, in degrees of sun elevation. */
+const MIN_RAMP_DEG = 0.5;
+
+/**
+ * The window's three edges, put in the only order that means anything: the sun must pass `appear`, then
+ * `full`, then `fadeBy` on its way down. The schema lets each slider move over a range that overlaps the
+ * others' (appear −10…30, full −30…10, fade −60…0), so a GM can drag them into any order, and an
+ * unordered window was not merely odd but INVERTED (a full colony at noon and none at night). Instead of
+ * rejecting a setting, each edge is held at least {@link MIN_RAMP_DEG} below the one before it.
+ *
+ * @param {number} appear @param {number} full @param {number} fadeBy
+ * @returns {{appear: number, full: number, low: number, mid: number}}
+ */
+export function twilightEdges(appear, full, fadeBy) {
+  const num = (v, fallback) => (Number.isFinite(Number(v)) ? Number(v) : fallback);
+  const a = num(appear, 4);
+  const f = Math.min(num(full, -6), a - MIN_RAMP_DEG);
+  const low = Math.min(num(fadeBy, -20), f - MIN_RAMP_DEG);
+  return { appear: a, full: f, low, mid: (f + low) / 2 };
 }
 
 /**
@@ -100,7 +127,7 @@ export function flyActivity(env, { nightActivity = 0.1, weatherResponse = 1 } = 
  * @param {number} [params.fullBelowDeg=-6] - …and at or below this the population is complete.
  * @param {number} [params.fadeByDeg=-20] - below this, only the stragglers remain.
  * @param {number} [params.nightResidual=0.2] - fraction that stays out through the dark.
- * @param {number} [params.weatherResponse=1] - 0..1: rain and wind send them to ground.
+ * @param {number} [params.weatherResponse=1] - 0..1: rain and wind thin the colony out.
  * @returns {number} 0..1
  */
 export function fireflyActivity(
@@ -125,18 +152,20 @@ export function fireflyActivity(
   const allowed = env.sun.rising === true ? dawn !== false : dusk !== false;
   if (!allowed) return 0;
 
-  const ramp = smooth(appearBelowDeg, fullBelowDeg, elevation); // 0 above, 1 once low enough
-  // The decay begins halfway between "full" and "fade by", so there is a plateau
-  // rather than a single peak. `lowEdge` guards a GM who drags fadeBy above full.
-  const lowEdge = Math.min(fadeByDeg, fullBelowDeg);
-  const decay = smooth((fullBelowDeg + lowEdge) / 2, lowEdge, elevation); // 0 on the plateau, 1 once faded
+  // The three edges are put in order first (`twilightEdges`), so the window cannot be inverted by sliders
+  // that overlap. The decay begins halfway between "full" and "fade by", so there is a plateau rather than
+  // a single peak.
+  const edges = twilightEdges(appearBelowDeg, fullBelowDeg, fadeByDeg);
+  const ramp = smoothFall(edges.appear, edges.full, elevation); // 0 above, 1 once low enough
+  const decay = smoothFall(edges.mid, edges.low, elevation); // 0 on the plateau, 1 once faded
   const residual = clamp01(nightResidual);
   return clamp01(ramp * (1 - (1 - residual) * decay) * calm);
 }
 
 /**
- * Rain grounds fireflies completely; wind thins them. Unlike the fly term this has
- * no 10% floor — a downpour with glowing insects hovering in it reads as a bug.
+ * Rain clears fireflies from the air completely; wind thins them. Unlike the fly term this has
+ * no 10% floor — a downpour with glowing insects hovering in it reads as a bug. (The colony fades
+ * out as a head-count; nothing lands, which is a per-insect decision the population law does not make.)
  *
  * @param {object|null} env @param {number} response 0..1
  * @returns {number} 0..1

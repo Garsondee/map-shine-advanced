@@ -5,9 +5,9 @@
  * Reads the zone buffer (a flat `vec4` storage buffer: coverage, signed distance,
  * gradient x, gradient y per cell — see `critter-zone.js`), bilinear over the four
  * nearest cell centres, edge-clamped, with the distance to the field's rectangle
- * subtracted so "farther out" still reads as farther out past the margin. The lab
- * compares this against the CPU twin on the real GPU; any disagreement is a
- * transcription bug, not a tolerance.
+ * subtracted so "farther out" still reads as farther out past the margin. The critter
+ * lab's `samplerParity()` compares this against the CPU twin on a real GPU; a
+ * disagreement beyond float32 rounding is a transcription bug.
  *
  * Storage buffer, not texture, because a texture sampled from a compute kernel is
  * the thing this renderer has never been shown to do correctly
@@ -74,7 +74,7 @@ export function buildZoneSampler(TSL, { buffer, u }) {
     return unpack(cellAt(ix, iy), pos);
   }
 
-  /** The slot's home record: (x, y, zoneIndex, zoneAreaPx2). */
+  /** The slot's home record: (x, y, stamp, zoneAreaPx2). */
   function home(slotIndexFloat) {
     return buffer.element(homesOffset.add(float(slotIndexFloat)).toInt());
   }

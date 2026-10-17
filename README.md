@@ -78,7 +78,7 @@ This section describes the module's actual roster as of 0.8.2 (superseding an ol
 - **Water** — tiered surface with refraction, caustics and shore foam, driven by a per-floor water simulation (flow, and foam memory). Interactive ripples and splash spray are not built yet.
 - **Fire** — wind-responsive flame/spark rendering.
 - **Smelly Flies** — paint a zone and a swarm of procedurally drawn flies buzzes over it, lands, walks (with planted feet), grooms and takes off again; a slider adds maggots that wriggle in the same paint. Fewer come out at night and in rain and wind.
-- **Fireflies** — paint a zone and a colony of glowing beetles drifts over it during the twilight window (keyed to the sun's elevation, so it follows the sky's own dusk and dawn), flashing in a chosen pattern with adjustable synchrony. Rain sends them to ground.
+- **Fireflies** — paint a zone and a colony of glowing beetles drifts over it during the twilight window (keyed to the sun's elevation, so it follows the sky's own dusk and dawn), flashing in a chosen pattern with adjustable synchrony (no insect flashes more than three times a second). Rain clears them.
 - **Vegetation** — GPU-driven wind sway and shadowing.
 - **Window** / **Specular** — mask-driven interior light pools and surface shine, both attachable to tiles.
 - **Fluid** — liquid-filled tiles (troughs, cauldrons, etc.) with their own mask channel.

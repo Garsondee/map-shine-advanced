@@ -289,7 +289,7 @@ A standalone page (not a bench on the shared `index.html`): `/tools/shader-lab/c
 It imports the REAL `createCritterSubsystem` + `createCritterEngine` and runs them over a ground, a sky
 and a zone you **paint with the mouse** (shift erases). The Paint selector picks which zone you are
 painting (flies' or fireflies'); the Sky sliders drive the same env snapshot the game feeds them, so
-sliding the sun below the horizon hatches the fireflies and the rain grounds them.
+sliding the sun below the horizon hatches the fireflies and the rain clears them.
 
 Driving it from a script (`window.critterLab`), headless:
 
@@ -310,6 +310,7 @@ lab.setSky({ elevationDeg: -12 }); lab.setGround('night', 0.15)
 await lab.advance(10, 30)
 const { dataUrl } = await lab.capture('dusk')             // 1280×720 PNG data URL (no bloom — see below)
 lab.status()                                              // zones, per-engine head-counts, activity
+await lab.samplerParity()                                 // GPU zone sampler vs its CPU twin; ok:true, errors ~1e-6
 ```
 
 ⚠️ **No bloom, flat light.** The fireflies' HDR glow looks tighter here than in the game (the bloom pass

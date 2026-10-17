@@ -9,6 +9,7 @@
  *
  * @module effects/critters/critter-species
  */
+import { ZONE_FIELD_CELLS_MAX } from './critter-zone.js';
 
 /** The three bodies the engine can build. */
 export const CRITTER_KINDS = Object.freeze(['fly', 'maggot', 'firefly']);
@@ -25,11 +26,12 @@ export const CRITTER_KINDS = Object.freeze(['fly', 'maggot', 'firefly']);
 export const CRITTER_CAPACITY = Object.freeze({ fly: 1024, maggot: 2048, firefly: 1536 });
 
 /**
- * The most cells the shared zone buffer can hold. `MASK_GRID_MAX_DIM` is 512 and a
- * derived grid is at most 512 × 512; the buffer is allocated once at this maximum
- * because a storage buffer cannot be freed or resized (`particle-arena.js`).
+ * The most cells the shared zone buffer can hold. `MASK_GRID_MAX_DIM` is 512 and a derived grid is at
+ * most 512 × 512, plus the unpainted border cells the field keeps beyond the grid so that paint running to
+ * the edge of the map still has a rim (516 × 516 — `critter-zone.js#ZONE_FIELD_CELLS_MAX`). The buffer is
+ * allocated once at this maximum because a storage buffer cannot be freed or resized (`particle-arena.js`).
  */
-export const ZONE_MAX_CELLS = 512 * 512;
+export const ZONE_MAX_CELLS = ZONE_FIELD_CELLS_MAX;
 
 /** The default ladder rung — what the `standard` profile resolves to. Anti-drift tested. */
 export const CRITTER_DEFAULT_TIER = 2;

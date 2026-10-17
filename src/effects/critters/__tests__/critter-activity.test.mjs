@@ -8,6 +8,7 @@ import { buildEnvSnapshot } from '../../../world/environment.js';
 import {
   flyActivity,
   fireflyActivity,
+  twilightEdges,
   weatherCalm,
   fireflyWeather,
   approach,
@@ -81,10 +82,70 @@ export function run(t) {
     'a lower appear threshold delays the hatch',
     fireflyActivity(at(17.8), { appearBelowDeg: 4 }) > fireflyActivity(at(17.8), { appearBelowDeg: -2 })
   );
-  t.ok('a misconfigured fadeBy above full does not invert the curve', fireflyActivity(at(18.5), { fadeByDeg: 0 }) >= 0);
+
+  // The three edge sliders have overlapping ranges, so a GM can drag them into any order. The window must
+  // mean the same thing however they are left: dark at noon, a plateau in the blue hour, the residual at night.
+  const sunAt = (deg, rising = false) => ({ sun: { elevationDeg: deg, rising }, weather: {}, wind: {} });
+  const sweep = (params) => {
+    const out = [];
+    for (let deg = 60; deg >= -70; deg -= 0.25) out.push({ deg, a: fireflyActivity(sunAt(deg), params) });
+    return out;
+  };
+  const dragged = [
+    ['appear below full', { appearBelowDeg: -8, fullBelowDeg: 5, fadeByDeg: -20 }],
+    ['fade above full', { appearBelowDeg: 4, fullBelowDeg: -6, fadeByDeg: -2 }],
+    ['all three equal', { appearBelowDeg: 0, fullBelowDeg: 0, fadeByDeg: 0 }],
+    ['appear equals full', { appearBelowDeg: -3, fullBelowDeg: -3, fadeByDeg: -20 }],
+    ['the ranges’ far corner', { appearBelowDeg: -10, fullBelowDeg: 10, fadeByDeg: 0 }],
+    ['the ranges’ other corner', { appearBelowDeg: 30, fullBelowDeg: -30, fadeByDeg: -60 }],
+    ['garbage', { appearBelowDeg: NaN, fullBelowDeg: 'x', fadeByDeg: undefined }],
+  ];
+  for (const [name, params] of dragged) {
+    const e = twilightEdges(params.appearBelowDeg, params.fullBelowDeg, params.fadeByDeg);
+    const curve = sweep({ ...params, nightResidual: 0.2 });
+    t.ok(
+      `${name}: the edges come out in order (appear ${e.appear} > full ${e.full} > fade ${e.low})`,
+      e.appear > e.full && e.full > e.low
+    );
+    t.ok(
+      `${name}: every value is a number in 0..1`,
+      curve.every((c) => Number.isFinite(c.a) && c.a >= 0 && c.a <= 1)
+    );
+    t.ok(
+      `${name}: no firefly while the sun is above the first edge (${e.appear}°) — noon is never full`,
+      curve.filter((c) => c.deg >= e.appear).every((c) => c.a === 0)
+    );
+    t.ok(
+      `${name}: deep night is the residual, and nothing else`,
+      curve.filter((c) => c.deg <= e.low).every((c) => Math.abs(c.a - 0.2) < 1e-9)
+    );
+    // as the sun sinks: up to the plateau, level, then down to the residual — one hump, never a second
+    const rises = curve.map((c, i) => (i === 0 ? 0 : Math.sign(c.a - curve[i - 1].a)));
+    const firstFall = rises.findIndex((r) => r < 0);
+    t.ok(
+      `${name}: one hump — once it starts to fall it never rises again`,
+      firstFall < 0 || rises.slice(firstFall).every((r) => r <= 0)
+    );
+    t.ok(`${name}: the plateau reaches full strength`, Math.max(...curve.map((c) => c.a)) > 0.999);
+  }
+  // the two settings the review measured, by name
+  t.ok(
+    'appear −8 / full 5: noon used to be a full colony and midnight none — now noon is empty',
+    fireflyActivity(sunAt(40), { appearBelowDeg: -8, fullBelowDeg: 5, fadeByDeg: -20 }) === 0 &&
+      fireflyActivity(sunAt(-13), { appearBelowDeg: -8, fullBelowDeg: 5, fadeByDeg: -20, nightResidual: 0 }) > 0.9
+  );
+  t.ok(
+    'fade −2 / full −6: still full at the end of the blue hour, no longer the reverse',
+    fireflyActivity(sunAt(-6.2), { appearBelowDeg: 4, fullBelowDeg: -6, fadeByDeg: -2 }) > 0.9
+  );
+  const ordered = twilightEdges(4, -6, -20);
+  t.ok(
+    'edges already in order are left exactly as the GM set them',
+    ordered.appear === 4 && ordered.full === -6 && ordered.low === -20 && ordered.mid === -13
+  );
 
   // weather
-  t.ok('rain grounds fireflies completely', fireflyActivity(at(18.5, { precip01: 1 })) === 0);
+  t.ok('rain clears fireflies from the air completely', fireflyActivity(at(18.5, { precip01: 1 })) === 0);
   t.ok(
     'weatherResponse 0 lets them fly in the rain',
     fireflyActivity(at(18.5, { precip01: 1 }), { weatherResponse: 0 }) > 0.9

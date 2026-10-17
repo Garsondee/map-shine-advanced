@@ -45,6 +45,15 @@ const TAU = Math.PI * 2;
 export const TRAIL_SECONDS = 0.9;
 
 /**
+ * How many separate light events one flash CYCLE holds, per style (`FIREFLY_FLASH_STYLES` order of keys):
+ * a swell, a single blink, the pair of a double flash, the two shimmers riding a steady glow. Multiplied by
+ * the fastest cycle rate the clock allows (`FIREFLY_SYNC`), this is the photosensitivity ceiling —
+ * a Node test holds it under three a second, and {@link buildFlash} reads the shimmer count from here so
+ * the table and the pattern cannot disagree.
+ */
+export const FLASH_EVENTS_PER_CYCLE = Object.freeze({ breathe: 1, blink: 1, double: 2, steady: 2 });
+
+/**
  * The flash pattern: brightness 0..1 for a phase in cycles.
  *
  * `styleIndex` follows `FIREFLY_FLASH_STYLES`: 0 breathe, 1 blink, 2 double, 3 steady. All four are
@@ -64,12 +73,14 @@ export function buildFlash(TSL, { phase, styleIndex }) {
     const d = near(c).div(w);
     return exp(d.mul(d).negate());
   };
-  const breathe = pow(float(0.5).sub(cos(phase.mul(TAU)).mul(0.5)), 1.4)
+  // `max(…, 0)`: cos can come back a hair over 1 from hardware, and a negative base under a fractional power is NaN
+  const breathe = pow(max(float(0.5).sub(cos(phase.mul(TAU)).mul(0.5)), 0), 1.4)
     .mul(0.96)
     .add(0.04);
   const blink = bump(0.1, 0.05).add(0.03);
   const double = bump(0.07, 0.035).add(bump(0.25, 0.035).mul(0.9)).add(0.03);
-  const steady = float(0.8).add(sin(phase.mul(TAU * 3).add(1.7)).mul(0.2));
+  // few enough shimmers a cycle that, at the period floor with the coupling's worst pull, they stay under 3 a second
+  const steady = float(0.8).add(sin(phase.mul(TAU * FLASH_EVENTS_PER_CYCLE.steady).add(1.7)).mul(0.2));
   return max(
     select(
       styleIndex.lessThan(0.5),

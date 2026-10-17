@@ -10,9 +10,12 @@
  *
  *   • Paint with the left mouse button, erase with shift. The Paint selector picks which
  *     zone you are painting (flies' or fireflies').
- *   • Slide the sun below the horizon to hatch the fireflies; raise the rain to ground them.
+ *   • Slide the sun below the horizon to hatch the fireflies; raise the rain to clear them.
  *   • `window.critterLab` is the scripted door (describe / setParam / setSky / paint /
- *     advance / capture / status), for an agent or the console.
+ *     advance / capture / status / samplerParity), for an agent or the console.
+ *   • `samplerParity()` is the one check a Node test cannot make: it runs the GPU zone sampler (the
+ *     kernels' only window on the world) over a few hundred points and compares each answer with its CPU
+ *     twin, `sampleZoneField`. They are two transcriptions of one formula, and any disagreement is a bug.
  *
  * ⚠️ WHAT THIS DOES NOT PROVE. There is no bloom here, so the fireflies' HDR glow looks
  * tighter and less hazy than it will in the game; the scene's lighting is one flat
@@ -29,6 +32,10 @@ import { createCritterEngine, allocateCritterBuffers } from '../../src/effects/p
 import { createCritterZoneBuffer } from '../../src/effects/particles/critter-zone-buffer.js';
 import { SMELLY_FLIES_PARAMS } from '../../src/effects/critters/smelly-flies.js';
 import { FIREFLIES_PARAMS } from '../../src/effects/critters/fireflies.js';
+import { buildZoneField, sampleZoneField } from '../../src/effects/critters/critter-zone.js';
+import { buildZoneSampler } from '../../src/effects/critters/critter-zone-sample.js';
+import { createUniformBank } from '../../src/effects/critters/critter-uniforms.js';
+import { ZONE_MAX_CELLS, critterMarginPx } from '../../src/effects/critters/critter-species.js';
 
 const TSL = THREE.TSL;
 const { texture, vec2, vec3, vec4, float, positionWorld, sRGBTransferEOTF, floor, mod, mix, uniform } = TSL;
@@ -323,6 +330,96 @@ async function main() {
     return { name, dataUrl: cv.toDataURL('image/png') };
   }
 
+  // ── the zone sampler, GPU against CPU ──────────────────────────────────────
+  // Built on first use and kept: a storage buffer can never be freed, so the lab owns exactly one pair.
+  let parityRig = null;
+  const PARITY_POINTS = 1024;
+  function makeParityRig() {
+    const zoneBuffer = createCritterZoneBuffer({ THREE, maxCells: ZONE_MAX_CELLS, homeCapacities: [] });
+    // The throwaway arena is the sanctioned door to storage memory: `position` carries the points in,
+    // `custom` (a vec4) carries (coverage, distance, gradX, gradY) out.
+    const memory = allocateCritterBuffers(THREE, PARITY_POINTS);
+    const bank = createUniformBank(TSL);
+    const sampler = buildZoneSampler(TSL, { buffer: zoneBuffer.node, u: bank.get });
+    const { Fn, instanceIndex } = TSL;
+    const kernel = Fn(() => {
+      const r = sampler.sample(memory.buffers.position.element(instanceIndex));
+      memory.buffers.custom.element(instanceIndex).assign(vec4(r.coverage, r.distance, r.grad.x, r.grad.y));
+    })().compute(PARITY_POINTS);
+    return { zoneBuffer, memory, bank, kernel };
+  }
+  /**
+   * Run the TSL zone sampler and `sampleZoneField` over the same points — inside the field, across its
+   * edge, and well beyond it (where the overshoot term takes over) — and report the worst disagreement.
+   * Float32 against float64, so the tolerances are a few ulps, not zero.
+   */
+  async function samplerParity({ layer = 'flies' } = {}) {
+    const key = layer === 'flies' ? 'smellyFlies' : 'fireflies';
+    const field = buildZoneField(state.grids[layer], {
+      threshold: state.params[key].maskSensitivity,
+      marginPx: critterMarginPx(100),
+    });
+    if (!field) return { ok: false, why: `nothing is painted on the ${layer} layer — paint a zone first` };
+    parityRig ??= makeParityRig();
+    const { zoneBuffer, memory, bank, kernel } = parityRig;
+    zoneBuffer.write(field, []);
+    bank.setMany({
+      zoneOrigin: [field.originX, field.originY],
+      zoneCell: [field.cellW, field.cellH],
+      zoneDims: [field.cols, field.rows],
+      homesOffset: 0,
+    });
+    // a fixed spread: random points over the field's rectangle widened by half its size, plus the exact cell centres of the first row
+    const spanX = field.cols * field.cellW;
+    const spanY = field.rows * field.cellH;
+    let rng = 12345;
+    const next = () => (rng = (Math.imul(rng, 1664525) + 1013904223) >>> 0) / 4294967296;
+    const points = [];
+    for (let i = 0; i < PARITY_POINTS; i++) {
+      if (i < field.cols && i < 64) {
+        points.push([field.originX + (i + 0.5) * field.cellW, field.originY + (field.rows >> 1) * field.cellH]);
+      } else {
+        points.push([field.originX + (next() * 2 - 0.5) * spanX, field.originY + (next() * 2 - 0.5) * spanY]);
+      }
+    }
+    const input = memory.buffers.position.value;
+    for (let i = 0; i < PARITY_POINTS; i++) {
+      input.array[i * 2] = points[i][0];
+      input.array[i * 2 + 1] = points[i][1];
+    }
+    input.needsUpdate = true;
+    renderer.compute(kernel);
+    const out = new Float32Array(await renderer.getArrayBufferAsync(memory.buffers.custom.value));
+    let coverageErr = 0;
+    let distanceErr = 0;
+    let gradErr = 0;
+    let beyond = 0;
+    let worst = null;
+    for (let i = 0; i < PARITY_POINTS; i++) {
+      const [x, y] = points[i];
+      const cpu = sampleZoneField(field, x, y);
+      const dc = Math.abs(out[i * 4] - cpu.coverage);
+      const dd = Math.abs(out[i * 4 + 1] - cpu.distance);
+      const dg = Math.hypot(out[i * 4 + 2] - cpu.gradX, out[i * 4 + 3] - cpu.gradY);
+      if (x < field.originX || y < field.originY || x > field.originX + spanX || y > field.originY + spanY) beyond++;
+      coverageErr = Math.max(coverageErr, dc);
+      gradErr = Math.max(gradErr, dg);
+      if (dd > distanceErr) {
+        distanceErr = dd;
+        worst = { x, y, gpu: Array.from(out.subarray(i * 4, i * 4 + 4)), cpu };
+      }
+    }
+    return {
+      ok: coverageErr < 1e-4 && distanceErr < 0.05 && gradErr < 1e-3,
+      samples: PARITY_POINTS,
+      beyondTheField: beyond,
+      maxCoverageError: coverageErr,
+      maxDistanceErrorPx: distanceErr,
+      maxGradientError: gradErr,
+      worst,
+    };
+  }
+
   // ── the panel ──────────────────────────────────────────────────────────────
   const panel = document.getElementById('panel');
   const heading = (t) => {
@@ -491,7 +588,7 @@ async function main() {
   slider('size', 3, 60, 1, ff('size'), setFf('size'));
   slider('glow strength', 0, 20, 0.5, ff('intensity'), setFf('intensity'));
   slider('glow radius', 2, 120, 1, ff('glowRadius'), setFf('glowRadius'));
-  slider('flash period s', 0.5, 12, 0.1, ff('flashPeriod'), setFf('flashPeriod'));
+  slider('flash period s', 1, 12, 0.1, ff('flashPeriod'), setFf('flashPeriod'));
   slider('synchrony', 0, 1, 0.05, ff('synchrony'), setFf('synchrony'));
   slider('drift speed', 5, 250, 1, ff('driftSpeed'), setFf('driftSpeed'));
   slider('roaming range', 0, 800, 10, ff('range'), setFf('range'));
@@ -513,7 +610,7 @@ async function main() {
       groups: Object.keys(state.params),
       sky: { ...state.sky },
       tier: state.tier,
-      note: 'setParam(group, patch) · setSky(patch) · setTier(n) · paint(layer,x,y,r,erase) · demo() · clear(layer?) · await advance(sec,hz?) · await capture(name?) · status()',
+      note: 'setParam(group, patch) · setSky(patch) · setTier(n) · paint(layer,x,y,r,erase) · demo() · clear(layer?) · await advance(sec,hz?) · await capture(name?) · await samplerParity({layer?}) · status()',
     }),
     setParam,
     setSky(patch) {
@@ -556,6 +653,7 @@ async function main() {
       paused = on;
     },
     capture,
+    samplerParity,
     status: () => ({
       frames,
       clockSec: clockMs / 1000,

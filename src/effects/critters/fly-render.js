@@ -37,7 +37,7 @@
  */
 import { buildFlyBody, buildFlyShadow } from './fly-body.js';
 import { buildFlyPose } from './fly-pose.js';
-import { wrapAngle } from './critter-sdf.js';
+import { wrapAngle, safeAtan2 } from './critter-sdf.js';
 import { buildInstance } from './critter-instance.js';
 import { litLinear, occlusionGate, createCritterMaterial } from './critter-surface.js';
 
@@ -53,7 +53,7 @@ const WORLD_LIGHT = [-0.5, -0.8];
  * shared by the body and the shadow, so the two can never disagree about where a fly is.
  */
 function flyInstance(TSL, { buffers, u }) {
-  const { float, floor, atan, clamp, select, min, max } = TSL;
+  const { float, floor, clamp, select, min, max } = TSL;
   const base = buildInstance(TSL, { buffers, u, sizeParam: 'size', variationParam: 'sizeVariation' });
   const { V, C, PH } = base;
 
@@ -67,7 +67,7 @@ function flyInstance(TSL, { buffers, u }) {
 
   // Turn rate, derived from what is stored: a flying fly's heading lags its velocity
   // (so the gap is its turn), a walking fly turns toward `custom.w`.
-  const velAng = atan(V.y, V.x);
+  const velAng = safeAtan2(TSL, V.y, V.x);
   const turnRate = select(
     isFly,
     wrapAngle(TSL, velAng.sub(hdg)).mul(12),

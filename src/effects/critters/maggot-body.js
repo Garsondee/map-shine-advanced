@@ -55,6 +55,14 @@ const R_MAX = 0.105;
 const PROFILE = [0.2, 0.52, 0.76, 0.92, 1.0, 1.0, 0.96, 0.9, 0.8];
 /** Skin grooves along the body — real larvae have eleven visible segments. */
 const GROOVES = 11;
+/**
+ * The rates, as multiples of the stored wave phase, at which the rig reads it: the first lateral wave and
+ * the squeeze at 1×, the second lateral wave at 1.37×. (The brain adds a 0.5× sway to the crawl heading.)
+ * The brain wraps the phase at a period every one of these completes whole turns over, so a wrap leaves no
+ * seam — `maggot-brain.js#WAVE_PERIOD` says why, and a Node test holds the two files together.
+ */
+export const WAVE_RATES = Object.freeze([1, 1.37]);
+const SECOND_WAVE_RATE = WAVE_RATES[1];
 
 /**
  * The spine for this instant.
@@ -93,7 +101,7 @@ export function buildMaggotRig(TSL, { wave, excite, wriggle, seed01 }) {
     );
     const w2 = sin(
       wave
-        .mul(1.37)
+        .mul(SECOND_WAVE_RATE)
         .negate()
         .add(phi.mul(2.1))
         .add(TAU * 1.9 * s)

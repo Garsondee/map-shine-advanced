@@ -47,7 +47,7 @@
  *
  * @module effects/critters/firefly-brain
  */
-import { wrapAngle } from './critter-sdf.js';
+import { wrapAngle, safeAtan2 } from './critter-sdf.js';
 
 const TAU = Math.PI * 2;
 const PH_FLY = 0;
@@ -69,7 +69,7 @@ const COUPLING = 1.1;
  * @returns {{update: (s: object) => object, spawn: (s: object) => object, lost: (s: object) => *}}
  */
 export function buildFireflyBrain(TSL, { u, zone }) {
-  const { float, vec2, vec4, select, clamp, min, max, sin, cos, atan, exp, fract, floor, smoothstep, pow } = TSL;
+  const { float, vec2, vec4, select, clamp, min, max, sin, cos, exp, fract, floor, smoothstep, pow } = TSL;
 
   const angDiff = (a, b) => wrapAngle(TSL, b.sub(a));
   const dir = (a) => vec2(cos(a), sin(a));
@@ -91,7 +91,7 @@ export function buildFireflyBrain(TSL, { u, zone }) {
     const isRest = ord.greaterThan(1.5).and(ord.lessThan(2.5));
 
     const dist = s.zs.distance; // signed px, > 0 inside the paint
-    const gradAng = atan(s.zs.grad.y, s.zs.grad.x); // the way back in
+    const gradAng = safeAtan2(TSL, s.zs.grad.y, s.zs.grad.x); // the way back in
     const range = max(u('range'), s.L.mul(3));
     const hover = u('hoverHeight');
     const t = s.tSec;
@@ -100,8 +100,12 @@ export function buildFireflyBrain(TSL, { u, zone }) {
     const a3 = s.seed01.mul(TAU * 3.7);
 
     // ── the flash clock (every state keeps time) ──
+    // It runs on REAL time (`s.dtReal`), never on the author's Tempo (`s.dt`): Tempo is how fast they fly,
+    // and a flash that sped up with it would break two promises at once — the colony clock the coupling
+    // pulls toward runs on real time too, so a scaled oscillator would never lock to it; and the
+    // "no faster than a flash a second" ceiling (`FIREFLY_SYNC.PERIOD_FLOOR`) would be a function of a slider.
     const period = max(
-      float(0.5),
+      float(FIREFLY_SYNC.PERIOD_FLOOR),
       u('flashPeriod').mul(float(FIREFLY_SYNC.PERIOD_MIN).add(s.seed01.mul(FIREFLY_SYNC.PERIOD_SPAN)))
     );
     // Quadratic in the author's dial: the lock range grows with K, so a linear dial would jump from
@@ -110,7 +114,7 @@ export function buildFireflyBrain(TSL, { u, zone }) {
       .mul(u('synchrony'))
       .mul(COUPLING / TAU)
       .mul(sin(u('colonyPhase').sub(fph).mul(TAU)));
-    const fphNext = fract(fph.add(s.dt.mul(float(1).div(period).add(pull))));
+    const fphNext = fract(fph.add(s.dtReal.mul(float(1).div(period).add(pull))));
 
     // ── the wall: bounce off the contour `range` px beyond the paint ──
     const wall = (Pn, Vn) => {
@@ -169,7 +173,7 @@ export function buildFireflyBrain(TSL, { u, zone }) {
       TMR: s.TMR,
       PH: pick(phFly, phLand, phRest, phLift),
       C: vec4(
-        pick(hdgFly, hdg, hdgRest, hdg),
+        wrapAngle(TSL, pick(hdgFly, hdg, hdgRest, hdg)),
         pick(zFly, zLand, float(0), zLift),
         fphNext,
         pick(auxFly, aux, aux, aux)
@@ -205,8 +209,14 @@ export function buildFireflyBrain(TSL, { u, zone }) {
 export const FIREFLY_PHASES = Object.freeze({ fly: PH_FLY, land: PH_LAND, rest: PH_REST, lift: PH_LIFT });
 
 /**
- * The flash clock's constants — the coupling and how far an individual's period strays from the author's —
- * exported so the renderer (which needs each firefly's period for its afterglow) and a Node model of the
- * oscillator read the SAME numbers the kernel does.
+ * The flash clock's constants — the coupling, how far an individual's period strays from the author's, and
+ * the FLOOR no period may go under (seconds) — exported so the renderer (which needs each firefly's period
+ * for its afterglow), the engine's colony clock and a Node model of the oscillator read the SAME numbers
+ * the kernel does.
+ *
+ * The floor is the photosensitivity guarantee. At one second per cycle a single-flash style flashes once a
+ * second; the colony coupling can pull an insect ahead by at most `COUPLING/2π` ≈ 0.18 cycles a second; and
+ * the busiest style (two flashes a cycle) therefore never exceeds three flashes in any one-second window —
+ * the line WCAG 2.3.1 draws, which holds whatever area the flashes cover.
  */
-export const FIREFLY_SYNC = Object.freeze({ COUPLING, PERIOD_MIN: 0.85, PERIOD_SPAN: 0.3 });
+export const FIREFLY_SYNC = Object.freeze({ COUPLING, PERIOD_MIN: 0.85, PERIOD_SPAN: 0.3, PERIOD_FLOOR: 1 });

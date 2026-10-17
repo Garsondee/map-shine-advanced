@@ -104,11 +104,15 @@ export async function run(t) {
   // point cloud from the painted region exactly as `fire-spawn-points.js`
   // does from fire's — the same "a CPU consumer is a consumer" case fire
   // itself forced the `rasterize`/`ownsPackedAlpha` split over.
+  // `flies` and `fireflies` joined with the procedural critters, positioned
+  // right after `drip`: their CPU consumer is `effects/critters/critter-zone.js`,
+  // which turns the painted region into the perception field (signed distance +
+  // inward gradient) the GPU agents steer by — the same CPU-consumer case again.
   t.ok(
-    'outdoors, fire, drip, specular, window, water, fluid, prism and iridescence are the rasterized kinds',
+    'outdoors, fire, drip, flies, fireflies, specular, window, water, fluid, prism and iridescence are the rasterized kinds',
     rasterizedKinds()
       .map((k) => k.id)
-      .join(',') === 'outdoors,fire,drip,specular,window,water,fluid,prism,iridescence'
+      .join(',') === 'outdoors,fire,drip,flies,fireflies,specular,window,water,fluid,prism,iridescence'
   );
   t.ok(
     'fire is rasterized but does NOT own the packed alpha — the two flags are separate questions',

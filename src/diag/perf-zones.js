@@ -267,6 +267,33 @@ export const ZONES = Object.freeze(
       false,
       'fireSubsystem.sync'
     ),
+    // THE CRITTERS' sync zones — in `sims`, kind:'both', for exactly the reason fire's own is: the
+    // subsystem's `sync()` covers the CPU bookkeeping (zone-field rebuilds, population, activity,
+    // param pushes) AND a real `renderer.compute()` dispatch per engine, so a 'cpu' zone would have
+    // no GPU timestamp slot at all. One zone per effect, because each effect is its own subsystem
+    // and each brackets itself (`beginById` — the viewer never wraps the call).
+    z(
+      'light.smellyFliesSync',
+      'Smelly flies sync (zone, population, flies + maggots step)',
+      'sims',
+      null,
+      'smellyFlies',
+      'both',
+      'conditional',
+      false,
+      'smellyFliesSubsystem.sync'
+    ),
+    z(
+      'light.firefliesSync',
+      'Fireflies sync (zone, population, colony step)',
+      'sims',
+      null,
+      'fireflies',
+      'both',
+      'conditional',
+      false,
+      'firefliesSubsystem.sync'
+    ),
 
     // ---- masks.occlusion -----------------------------------------------------
     z(
@@ -920,6 +947,28 @@ export const ZONES = Object.freeze(
       'conditional',
       false,
       'fireSubsystem.scene'
+    ),
+    z(
+      'light.drawSmellyFlies',
+      'Smelly flies draw (maggots, fly shadows, flies)',
+      'lighting',
+      'light.accumulate',
+      'smellyFlies',
+      'gpu',
+      'conditional',
+      false,
+      'smellyFliesSubsystem.scene'
+    ),
+    z(
+      'light.drawFireflies',
+      'Fireflies draw (beetles, additive glow)',
+      'lighting',
+      'light.accumulate',
+      'fireflies',
+      'gpu',
+      'conditional',
+      false,
+      'firefliesSubsystem.scene'
     ),
     z(
       'light.drawWindOverlay',
@@ -1694,6 +1743,19 @@ export const EFFECT_ZONING = Object.freeze({
     // removed. See perf-zones.js's own comment on the relocated declaration
     // for the full account.
     why: "light.fireSync (state read, spawn-cloud/cohesion bookkeeping, and the per-engine TSL-compute step loop — including its real renderer.compute() dispatch, now actually measurable) and light.drawFire (the particle billboard draw — flame/ember/smoke sprites, no longer double-counting the sync call) are both zoned, but fire's LIGHT SOURCES (buildFireLightSources, built inside sync() and merged into the point-light pool via getFireLightSources) draw through the shared, null-owned light.drawPointLights/light.drawColoration zones — the exact same structural gap that hid candles' cost for as long as it did (Performance-Insights.md §5B/§5C), now true of fire too and not fixable without restructuring how source types share those two zones.",
+  }),
+  // THE CRITTERS — each is its own subsystem with its own pair of zones, and unlike fire neither
+  // casts a light into the shared point-light pool (fireflies' light is purely their own additive
+  // glow; the deferred `ground-light` rung would change that and this entry with it), so the
+  // zoning really is complete. `smellyFlies` also covers its maggot engine: the maggots are a
+  // second engine INSIDE the same subsystem and share both zones by construction.
+  smellyFlies: Object.freeze({
+    coverage: 'full',
+    why: 'light.smellyFliesSync (the zone-field rebuild, population and activity bookkeeping, and the fly + maggot compute dispatches) and light.drawSmellyFlies (the maggot, fly-shadow and fly draws, one scene) together cover its entire cost. An effect with nothing painted early-outs before building anything, so both read ~0 on a scene with nothing painted for it — the true cost, not a blind spot.',
+  }),
+  fireflies: Object.freeze({
+    coverage: 'full',
+    why: "light.firefliesSync (the zone-field rebuild, population, the twilight-window activity and the colony's compute dispatch) and light.drawFireflies (the beetle and additive-glow draws, one scene) together cover its entire cost; it casts no light into the shared point-light pool. An effect with nothing painted early-outs before building anything, so both read ~0 on a scene with nothing painted for it.",
   }),
   // Added 2026-09-16 (perf-instrumentation-audit, mythica-machina-press#553) —
   // candleFlame owned zones (light.candleSync, light.drawCandleFlame) with no

@@ -54,6 +54,8 @@ import {
   zonesForPass,
 } from '../perf-zones.js';
 import { FIRE } from '../../effects/fire/fire.js';
+import { SMELLY_FLIES } from '../../effects/critters/smelly-flies.js';
+import { FIREFLIES } from '../../effects/critters/fireflies.js';
 
 const MANIFESTS = [
   APERTURE_GOBO,
@@ -100,6 +102,10 @@ const MANIFESTS = [
   // night) owns two real zones (surface.iridescenceSync/Draw) — added for the
   // identical reason.
   IRIDESCENCE,
+  // The critters each own two zones (light.<effect>Sync + light.draw<Effect>) — listed so
+  // `EFFECT_ZONING.smellyFlies/fireflies` validate against real, registered effect ids.
+  SMELLY_FLIES,
+  FIREFLIES,
 ];
 
 export function run(t) {

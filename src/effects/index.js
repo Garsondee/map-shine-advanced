@@ -18,6 +18,7 @@ export { createParticleEngine } from './particles/particle-engine.js';
 export { WIND_DIAGNOSTIC_PARTICLES } from './particles/wind-diagnostic-particles.js';
 export { createGustEngine } from './particles/particle-engine.js';
 export { createFireParticleEngine } from './particles/particle-engine.js';
+export { createCritterEngine, allocateCritterBuffers, createCritterZoneBuffer } from './particles/particle-engine.js';
 export { WIND_GUSTS } from './particles/wind-gusts.js';
 export { buildLightVisibilityPass } from './lighting/lighting-pass.js';
 export {
@@ -817,6 +818,15 @@ export {
 export { buildFireMaterial, buildFireGeometry, fireSizeClass, fireSizeClassDiameter } from './fire/fire-render.js';
 export { extractFiresFromMask, extractFiresWithLabels, fireMaskSignature, chamferDistance } from './fire/fire-mask.js';
 export { createFireSubsystem } from './fire/fire-subsystem.js';
+// SMELLY FLIES + FIREFLIES (and the maggots in the flies' zone) — procedurally drawn GPU
+// agents over a painted zone. Declaration, then the pure zone/activity math, then the
+// lifecycle (`createCritterSubsystem`, one per effect) and the registration factory that
+// keeps `boot.js` to a single call. The engine itself is under `./particles/` (see the
+// `createCritterEngine` export near the top of this file).
+export { SMELLY_FLIES, SMELLY_FLIES_PARAMS } from './critters/smelly-flies.js';
+export { FIREFLIES, FIREFLIES_PARAMS } from './critters/fireflies.js';
+export { createCritterSubsystem } from './critters/critter-subsystem.js';
+export { createCritterRegistration } from './critters/critter-registration.js';
 // PRECIPITATION (P1, docs/planning/Precipitation.md) — the FALL. ⚠️ BUILT and
 // shader-lab-verified, but NOT drawing into the live frame yet: LAW 3 (rain
 // indoors must be unrepresentable) needs the sky-reach gate first, and

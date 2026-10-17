@@ -401,6 +401,14 @@ import {
   createPrecipitationSubsystem,
   precipTierPlan,
   createFireParticleEngine,
+  // THE CRITTERS (flies, maggots, fireflies) — procedurally drawn GPU agents over a painted zone.
+  // One lifecycle factory (called once per effect) and the three allocators it is handed: they
+  // are injected, not imported by the subsystem, because `particles/allocator-only` keeps every
+  // `instancedArray` under `effects/particles/` (fire's own `createEngine` posture, one door over).
+  createCritterSubsystem,
+  createCritterEngine,
+  allocateCritterBuffers,
+  createCritterZoneBuffer,
   createDoorGraphicsSubsystem,
   KNOWN_DEFERRED_ANIMATIONS,
   createParticleEngine,
@@ -1265,6 +1273,12 @@ export async function startVtPanViewer({
   getLightningRenderState,
   getRopeChainAnchors,
   getFireRenderState,
+  // THE CRITTERS' render-state seams — `{enabled, params, perfTier, floorIndex, elevation, gridPx,
+  // maskGrid, maskVersion}`, composed by boot's `createCritterRegistration`. REQUIRED, not defaulted:
+  // a defaulted seam is how water shipped every control inert with a green suite, and the
+  // `seams/viewer-wired` wall checks boot actually passes both.
+  getSmellyFliesRenderState,
+  getFirefliesRenderState,
   // PLAYER-CARRIED LIGHTS (mythica-machina-press#77) — boot.js's own
   // per-frame closure: reads the live per-token snapshot + the scene's
   // resolved GM permissions and builds this frame's torch/flashlight
@@ -4690,6 +4704,40 @@ export async function startVtPanViewer({
         return computeTieSafeExpectedDepth(rank, depthAuthority.maxRank);
       },
     });
+
+    /**
+     * THE CRITTERS (effects/critters/critter-subsystem.js) — two subsystems, one per effect, built
+     * from ONE factory: Smelly Flies (maggots under flies, over a painted `_Flies` zone) and
+     * Fireflies (a colony over `_Fireflies`). Neither allocates a thing until its zone has paint AND
+     * its head-count is non-zero, so a scene with neither costs nothing.
+     *
+     * Same injection posture as fire right above: the allocators come in as arguments, the occlusion
+     * gate reads this viewer's own depth nodes, and each subsystem gets its OWN copy of that wiring
+     * (keyhole-depth-authority-design.md: every depth consumer builds its own, never a shared
+     * reference). `illumTexNode`/`colorationTexNode` are the scene's own lighting buffers, which is
+     * what lets a fly in a torch pool read warm and one in the dark read dark (the `lit` rung).
+     */
+    const makeCritterSubsystem = (group, getRenderState) =>
+      createCritterSubsystem({
+        THREE,
+        group,
+        getRenderState,
+        createEngine: createCritterEngine,
+        allocateBuffers: allocateCritterBuffers,
+        createZoneBuffer: createCritterZoneBuffer,
+        profiler,
+        illumTexNode: envLight.illumTexNode,
+        colorationTexNode: envLight.colorationTexNode,
+        depthTexNode: envLight.depthTexNode,
+        depthFlagsTexNode: envLight.depthFlagsTexNode,
+        resolveExpectedDepth: (elevation) => {
+          const safeElevation = Number.isFinite(elevation) ? elevation : 0;
+          const rank = depthAuthority.rankOfElevation(safeElevation);
+          return computeTieSafeExpectedDepth(rank, depthAuthority.maxRank);
+        },
+      });
+    const smellyFliesSubsystem = makeCritterSubsystem('smellyFlies', getSmellyFliesRenderState);
+    const firefliesSubsystem = makeCritterSubsystem('fireflies', getFirefliesRenderState);
 
     // ========================================================================
     // PRECIPITATION — THE FALL (docs/planning/Precipitation.md P1)
@@ -8552,6 +8600,26 @@ export async function startVtPanViewer({
         renderer.render(fireSubsystem.scene, camera);
         renderer.autoClearColor = prevFireAutoClear;
         profiler?.end(Z.lightDrawFire);
+      }
+      // THE CRITTERS — the same guarded draw as fire just above, one per effect, in the order a
+      // reader sees them: the flies and maggots (normal blend, lit by the scene), then the
+      // fireflies' ADDITIVE glow on top, so the colony's HDR light feeds the bloom pass that runs
+      // after this block. `sync()` already decided the frame's population; this is a visibility check.
+      if (smellyFliesSubsystem.hasContent) {
+        profiler?.begin(Z.lightDrawSmellyFlies);
+        const prevFliesAutoClear = renderer.autoClearColor;
+        renderer.autoClearColor = false;
+        renderer.render(smellyFliesSubsystem.scene, camera);
+        renderer.autoClearColor = prevFliesAutoClear;
+        profiler?.end(Z.lightDrawSmellyFlies);
+      }
+      if (firefliesSubsystem.hasContent) {
+        profiler?.begin(Z.lightDrawFireflies);
+        const prevFirefliesAutoClear = renderer.autoClearColor;
+        renderer.autoClearColor = false;
+        renderer.render(firefliesSubsystem.scene, camera);
+        renderer.autoClearColor = prevFirefliesAutoClear;
+        profiler?.end(Z.lightDrawFireflies);
       }
       // (PRECIPITATION does NOT draw here. It is a declared pass and runs from
       // `runPassPlan` via `runSurfacePrecipitationPass` — see that function.
@@ -18946,6 +19014,8 @@ export async function startVtPanViewer({
       lightDrawCandle: profiler?.indexOf('light.drawCandleFlame') ?? -1,
       lightDrawLightning: profiler?.indexOf('light.drawLightning') ?? -1,
       lightDrawFire: profiler?.indexOf('light.drawFire') ?? -1,
+      lightDrawSmellyFlies: profiler?.indexOf('light.drawSmellyFlies') ?? -1,
+      lightDrawFireflies: profiler?.indexOf('light.drawFireflies') ?? -1,
       lightDrawWindOverlay: profiler?.indexOf('light.drawWindOverlay') ?? -1,
       surfSpecularSync: profiler?.indexOf('surface.specularSync') ?? -1,
       surfSpecular: profiler?.indexOf('surface.specularDraw') ?? -1,
@@ -19316,6 +19386,31 @@ export async function startVtPanViewer({
           lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value,
           lastEnvSnapshot?.env?.time?.dtSec ?? 0,
           windSpawnRect
+        );
+      }
+      // THE CRITTERS' compute steps — the same no-target-bound block, for the same reason as fire's.
+      //
+      // ⚠️ REAL SECONDS, like the rain below: a fly is presentation pacing, and a GM who slows the
+      // world clock must not put the swarm in slow motion (nor freeze it on pause, which would
+      // make a paused scene read as a screenshot). The env snapshot rides along because the sky is
+      // what decides how many of them are out — daylight and weather for the flies, the sun's
+      // twilight window for the fireflies — and the sky is the frame's ONE, never re-derived here.
+      if (view && smellyFliesSubsystem) {
+        smellyFliesSubsystem.sync(
+          renderer,
+          lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value,
+          lastEnvSnapshot?.env?.time?.realDtSec ?? 0,
+          windSpawnRect,
+          lastEnvSnapshot?.env ?? null
+        );
+      }
+      if (view && firefliesSubsystem) {
+        firefliesSubsystem.sync(
+          renderer,
+          lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value,
+          lastEnvSnapshot?.env?.time?.realDtSec ?? 0,
+          windSpawnRect,
+          lastEnvSnapshot?.env ?? null
         );
       }
       // PRECIPITATION — its compute step, in the same no-target-bound block as
@@ -20531,6 +20626,10 @@ export async function startVtPanViewer({
         gustEngine.step(renderer, { dtSec: WARM_UP_SIM_DT_SEC, tMs, worldRect: windSpawnRect });
       }
       if (fireSubsystem) fireSubsystem.sync(renderer, tMs, WARM_UP_SIM_DT_SEC, windSpawnRect);
+      // No env snapshot yet at warm-up: flies read as a plain day and fireflies as "not yet", which
+      // is exactly right for compiling the fly and maggot kernels without conjuring a colony.
+      if (smellyFliesSubsystem) smellyFliesSubsystem.sync(renderer, tMs, WARM_UP_SIM_DT_SEC, windSpawnRect, null);
+      if (firefliesSubsystem) firefliesSubsystem.sync(renderer, tMs, WARM_UP_SIM_DT_SEC, windSpawnRect, null);
       if (precipitationSubsystem) {
         precipitationSubsystem.sync(renderer, WARM_UP_SIM_DT_SEC, tMs, windSpawnRect);
       }
@@ -25231,6 +25330,19 @@ export async function startVtPanViewer({
        * forever.
        */
       getFireStatus: () => fireSubsystem.getStatus(),
+      /**
+       * THE CRITTERS' own per-frame counts — for each effect, the zone count, the field's size
+       * and every engine's tier, head-count and how much of it the sky is showing.
+       * A getter, not a value: the status is rewritten every `sync()`.
+       */
+      getCritterStatus: () => ({
+        smellyFlies: smellyFliesSubsystem.getStatus(),
+        fireflies: firefliesSubsystem.getStatus(),
+      }),
+      disposeCritters: () => {
+        smellyFliesSubsystem.dispose();
+        firefliesSubsystem.dispose();
+      },
       /** PRECIPITATION's own status — every factor that decides whether a drop
        * is visible, plus the sky-reach bake's own result. */
       getPrecipitationStatus: () => ({
@@ -28769,6 +28881,15 @@ export function sampleVtPanViewerSceneSettleNow() {
 export function getVtPanViewerFireStatus() {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.getFireStatus();
+}
+
+/**
+ * The critters' per-frame counts — `{smellyFlies, fireflies}`, each `{zones, fieldCells, engines[]}`.
+ * @returns {object} the status, or `{skipped:true}` when nothing is running.
+ */
+export function getVtPanViewerCritterStatus() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.getCritterStatus();
 }
 
 export function getVtPanViewerEarlyZComposition() {

@@ -321,6 +321,7 @@ import {
   setVtPanViewerWindAmbient,
   setVtPanViewerWindGustiness,
   getVtPanViewerFireStatus,
+  getVtPanViewerCritterStatus,
   setVtPanViewerSunHour,
   sweepVtPanViewerTimeOfDay,
   setVtPanViewerTimeRate,
@@ -443,6 +444,12 @@ import {
   LIGHTNING_PARAMS,
   FIRE,
   FIRE_PARAMS,
+  // SMELLY FLIES (+ the maggots in their zone) and FIREFLIES — procedurally drawn GPU agents over a
+  // painted zone. Everything about their registration lives in `createCritterRegistration`, so
+  // this file makes ONE call for both rather than growing two more hand-typed blocks.
+  SMELLY_FLIES_PARAMS,
+  FIREFLIES_PARAMS,
+  createCritterRegistration,
   extractFiresWithLabels,
   fireMaskSignature,
   extractFireSpawnPoints,
@@ -3025,6 +3032,11 @@ function install() {
     // exactly "silent, and invisible to a green test suite" from the note
     // above, because nothing exercises boot's own reapply wiring.
     ['fire', () => reapplyFire()],
+    // The critters register in ONE factory, so they enter this list as two lines — and are here for
+    // the reason the header above gives: an effect left out of it sits at its pre-resolve seed
+    // (`enabled: false`) on every real scene load until someone types a console command.
+    ['smelly flies', () => critters.smellyFlies.reapply()],
+    ['fireflies', () => critters.fireflies.reapply()],
     ['vegetation', () => reapplyVegetation()],
     ['door graphics', () => reapplyDoors()],
     ['water', () => water.reapply()],
@@ -5737,6 +5749,49 @@ function install() {
     log,
   });
 
+  // SMELLY FLIES + FIREFLIES — the cascade layers, live overrides, console setters and render-state
+  // seams for BOTH, from one factory (effects/critters/critter-registration.js). The four closures it
+  // is handed are the only things it needs to know about this scene:
+  //   • the painted zone, as a MaskGrid — `_Flies`/`_Fireflies` (`rasterize: true`, so the authority
+  //     composites painted strokes with any file) — swallowed to null like `getFireMaskGrid`/
+  //     `getDripMaskGrid` (an absent mask is the ORDINARY case, never an error);
+  //   • which floor is viewed, and its ground elevation (the depth gate's input);
+  //   • the mask authority's change counter, which gates the zone field's rebuild;
+  //   • the grid size, which sizes "a swarm of reference size".
+  // The optional chaining on `canvas?.scene` is the adapter-boundary convention `getFireRenderState`
+  // (above) follows, not an accident.
+  const critters = createCritterRegistration({
+    effectRegistry,
+    deriveEffectLayers,
+    readSetting: (key) => readSetting(MODULE_ID, key),
+    writeSetting,
+    moduleId: MODULE_ID,
+    effectEnableKey,
+    readSceneEffectParams,
+    writeSceneEffectParams,
+    log,
+    getMaskGrid: (kind, floorIndex) => {
+      try {
+        return maskAuthority.getDerived(kind, floorIndex)?.grid ?? null;
+      } catch {
+        return null;
+      }
+    },
+    getFloorContext: () =>
+      activeFloorContext
+        ? {
+            floorIndex: activeFloorContext.floorIndex ?? 0,
+            // The floor's own ground, not the probe point `elevation` holds (see getFireRenderState's note).
+            elevation: activeFloorContext.band?.[0] ?? activeFloorContext.elevation ?? 0,
+          }
+        : null,
+    getMaskVersion: () => getMaskAuthorityVersion(),
+    getGridPx: () => {
+      const size = Number(canvas?.scene?.grid?.size);
+      return size > 0 ? size : 100;
+    },
+  });
+
   // LIVE MASK-AUTHORITY CROSS-CHECK (2026-07-22, the wind+particle probe's
   // own next question): the probe's `wind.exposure` field reads wind's own
   // CACHED snapshot (`windExposureGrid`, refreshed by bakeWindField — see
@@ -5805,6 +5860,8 @@ function install() {
     specular: specular.reapply,
     window: windowLight.reapply,
     apertureGobo: apertureGobo.reapply,
+    smellyFlies: critters.smellyFlies.reapply,
+    fireflies: critters.fireflies.reapply,
   };
   function forceEffectEnabled(id, enabled) {
     if (enabled == null) {
@@ -8325,6 +8382,13 @@ function install() {
   // those without the number is the failure mode, not the shortcut.
   MapShine.getFireStatus = () => getVtPanViewerFireStatus();
 
+  // THE CRITTERS' PER-FRAME COUNTS — `{smellyFlies, fireflies}`, each with the zone count, the zone
+  // field's size, and every engine's tier, head-count and how much of the
+  // population the sky is currently showing. The one call that splits "I painted a zone and nothing
+  // is there" in half: `zones: 0` ⇒ the paint is not being read (check `maskSensitivity`, and that the
+  // viewed floor is the one painted); `zones > 0` with `activity: 0` ⇒ the sky is keeping them in.
+  MapShine.getCritterStatus = () => getVtPanViewerCritterStatus();
+
   // ═══ ⚖️ THE RECKONING REPORT (TEMPORARY — docs/holy/V4-Reckoning.md) ═══
   // One press, one paste: the campaign's floor-mystery observables in a single
   // clipboard dump (the panel machinery auto-copies every action's result —
@@ -10259,6 +10323,35 @@ function install() {
     },
   });
 
+  // SMELLY FLIES — a swarm over a painted `_Flies` zone, with maggots wriggling in the same paint.
+  // The generic mask-derived paint button applies (the manifest declares `authoring.paint: 'flies'`).
+  registerSimpleEffectCard('smellyFlies', {
+    icon: 'bug',
+    title: 'Smelly flies',
+    accVar: '--c-particles',
+    filterCategory: 'particles',
+    schema: SMELLY_FLIES_PARAMS,
+    fohKeys: ['fliesPerZone', 'maggotsPerZone', 'size', 'buzz', 'nightActivity', 'species'],
+    getReadout: () => critters.smellyFlies.getReadout(),
+    setValue: (patch) => MapShine.setSmellyFlies(patch),
+    status: (readout) =>
+      !readout.enabled ? 'off' : critters.smellyFlies.hasPaint() ? 'swarming' : 'nothing painted yet',
+  });
+
+  // FIREFLIES — a colony over a painted `_Fireflies` zone, out in the twilight window.
+  registerSimpleEffectCard('fireflies', {
+    icon: 'dust',
+    title: 'Fireflies',
+    accVar: '--c-particles',
+    filterCategory: 'particles',
+    schema: FIREFLIES_PARAMS,
+    fohKeys: ['countPerZone', 'intensity', 'flashStyle', 'synchrony', 'alwaysActive', 'color'],
+    getReadout: () => critters.fireflies.getReadout(),
+    setValue: (patch) => MapShine.setFireflies(patch),
+    status: (readout) =>
+      !readout.enabled ? 'off' : critters.fireflies.hasPaint() ? 'glowing at dusk' : 'nothing painted yet',
+  });
+
   registerSimpleEffectCard('precipitation', {
     icon: 'rain',
     title: 'Precipitation',
@@ -10977,6 +11070,11 @@ function install() {
   // `apertureGobo` key — the SAME bridge `pointLights` uses one line above
   // it in that file, not a direct call from here.
   MapShine.setApertureGobo = apertureGobo.setApertureGobo;
+  // SMELLY FLIES / FIREFLIES — the console tuners AND the cards' write path, e.g.
+  //   MapShine.setSmellyFlies({ fliesPerZone: 24, maggotsPerZone: 40 })
+  //   MapShine.setFireflies({ alwaysActive: true, flashStyle: 'blink' })
+  MapShine.setSmellyFlies = critters.smellyFlies.set;
+  MapShine.setFireflies = critters.fireflies.set;
   /** `MapShine.setApertureGoboDebug(true)` — the OLD console twin, kept working
    * (maps to the `'pattern'` channel) alongside the picker below. */
   MapShine.setApertureGoboDebug = (on) => apertureGobo.setDebug(on);
@@ -14165,6 +14263,11 @@ function install() {
         // (`feedback_seam_default_hides_unwired`), and `createFireSubsystem`
         // THROWS on a missing one rather than defaulting for that reason.
         getFireRenderState,
+        // THE CRITTERS' render-state seams — one per effect, from the one registration factory above.
+        // ⚠️ Passed, not merely declared (see the fire note just above), and `createCritterSubsystem`
+        // throws on a missing one for the same reason.
+        getSmellyFliesRenderState: critters.smellyFlies.getRenderState,
+        getFirefliesRenderState: critters.fireflies.getRenderState,
         // DOOR GRAPHICS (effects/door-graphics-render.js): each frame the viewer
         // reconciles + animates the door leaves, reading the cascade-resolved
         // enable + motion params and the active-floor door snapshots from here.

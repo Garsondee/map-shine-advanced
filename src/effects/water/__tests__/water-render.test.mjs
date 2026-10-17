@@ -55,6 +55,10 @@ import {
   WATER_PRESENCE_EDGE0,
   WATER_PRESENCE_EDGE1,
   WATER_PRESENCE_EDGE_AA_PX,
+  WATER_SIM_FOAM_SMOOTH_TEXELS,
+  WATER_SHORE_FOAM_DRY_COVER,
+  WATER_SHORE_FOAM_DRY_GLOW,
+  WATER_SHORE_FOAM_DRY_LIFT,
 } from '../water-render.js';
 import { WATER_DEBUG_CHANNELS } from '../water.js';
 import { buildFoamCellularStructure } from '../water-shore.js';
@@ -790,6 +794,44 @@ export function run(t) {
       withSimArg.waterSimTexNode.isTextureNode === true
     );
   }
+
+  // ══ SOFT SHORE FOAM (2026-10-17) — `WATER_SIM_FOAM_SMOOTH_TEXELS` ══════════
+  // The 24 extra sim taps are `waterSimTexNode.sample(...)` CLONES, not fresh
+  // `texture()` nodes, precisely so `setWaterSimTexture`'s one `.value` write
+  // still reaches every tap (a fresh node per tap would sample the 1×1
+  // placeholder forever — the `maskTexNodes` trap). This pins the property that
+  // makes that true: a clone's value IS the base node's value, live.
+  {
+    const a = stubTexture();
+    const b = stubTexture();
+    const surf = buildWaterSurfaceMaterial(args({ tier: 4, waterSimTexture: a }));
+    const tap = surf.waterSimTexNode.sample(THREE.TSL.vec2(0.5, 0.5));
+    ok('a sim tap starts on the same texture as the base node', tap.value === a);
+    surf.waterSimTexNode.value = b;
+    ok('re-pointing the base node re-points every .sample() tap with it', tap.value === b);
+    ok(
+      'the base node is still the real TextureNode after the soft gather is built',
+      surf.waterSimTexNode.isTextureNode
+    );
+
+    ok('setSimFoamSmoothing exists', typeof surf.setSimFoamSmoothing === 'function');
+    surf.setSimFoamSmoothing(0);
+    surf.setSimFoamSmoothing(WATER_SIM_FOAM_SMOOTH_TEXELS);
+    ok('setSimFoamSmoothing takes 0 (off) and the default without throwing', true);
+    ok('setShoreFoamDry exists (tuning hook for the dry-ground blend)', typeof surf.setShoreFoamDry === 'function');
+  }
+  ok(
+    'WATER_SIM_FOAM_SMOOTH_TEXELS is a positive, finite radius (0 would silently be the old look)',
+    Number.isFinite(WATER_SIM_FOAM_SMOOTH_TEXELS) && WATER_SIM_FOAM_SMOOTH_TEXELS > 0
+  );
+  ok(
+    'dry-ground foam terms thin the foam (cover, glow in (0,1]) and only ever LIFT the terrain (lift >= 0) — never darken it',
+    WATER_SHORE_FOAM_DRY_COVER > 0 &&
+      WATER_SHORE_FOAM_DRY_COVER <= 1 &&
+      WATER_SHORE_FOAM_DRY_GLOW > 0 &&
+      WATER_SHORE_FOAM_DRY_GLOW <= 1 &&
+      WATER_SHORE_FOAM_DRY_LIFT >= 0
+  );
 
   // ══ THE DEBUG CHANNELS (2026-08-16, Water-Testament W0) — THE INSTRUMENT
   // MUST NOT LIE ══════════════════════════════════════════════════════════

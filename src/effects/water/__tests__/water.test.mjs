@@ -34,7 +34,12 @@ import {
   waterFlowSpeedPx,
 } from '../water-field.js';
 import { WATER_TIER3_SHADOW_RESPONSE, WATER_TIER3_GLOSSINESS, WATER_MIN_ROUGHNESS } from '../water-light.js';
-import { WATER_TIER4_SWASH_FOAM, WATER_TIER4_BREAK_FOAM, WATER_TIER4_CAUSTICS } from '../water-render.js';
+import {
+  WATER_TIER4_SWASH_FOAM,
+  WATER_TIER4_BREAK_FOAM,
+  WATER_TIER4_CAUSTICS,
+  WATER_SIM_FOAM_SMOOTH_TEXELS,
+} from '../water-render.js';
 import { WATER_FOAM_PATCHINESS, WATER_FOAM_PATCH_SIZE_PX } from '../water-shore.js';
 
 export function run(t) {
@@ -50,6 +55,20 @@ export function run(t) {
   ok(
     'foamPatchiness reaches 0 — the old every-shore-foams look stays reachable',
     WATER_PARAMS.foamPatchiness.min === 0
+  );
+  ok(
+    'simFoamSmoothing schema default matches WATER_SIM_FOAM_SMOOTH_TEXELS (water-render.js)',
+    WATER_PARAMS.simFoamSmoothing.default === WATER_SIM_FOAM_SMOOTH_TEXELS
+  );
+  ok(
+    'simFoamSmoothing reaches 0 — the raw-grid look stays reachable',
+    WATER_PARAMS.simFoamSmoothing.min === 0 && WATER_PARAMS.simFoamSmoothing.max > WATER_PARAMS.simFoamSmoothing.default
+  );
+  ok(
+    'every water preset that names simFoamSmoothing agrees with the schema default (the preset that matches the defaults must stay matching)',
+    Object.values(WATER_PRESETS).every(
+      (p) => p.simFoamSmoothing === undefined || p.simFoamSmoothing === WATER_PARAMS.simFoamSmoothing.default
+    )
   );
 
   // --- the declaration validates ------------------------------------------

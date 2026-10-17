@@ -823,6 +823,16 @@ export const WATER_PARAMS = Object.freeze({
     label: 'Sim foam edge softness',
     help: 'How many screen pixels wide the transition is between "not foam" and "solid foam" at minimum, regardless of how tightly the appear/solid band above is set. 0 allows a hard, aliased edge on close zoom; higher values keep the edge visibly soft no matter how far in you zoom.',
   },
+  simFoamSmoothing: {
+    type: 'float',
+    min: 0,
+    max: 4,
+    step: 0.05,
+    default: 1.5,
+    category: 'Shape',
+    label: 'Sim foam smoothing',
+    help: "How softly the foam memory buffer is gathered before it is drawn, measured in cells of the buffer's own grid (roughly 7 map pixels each on a large map). That grid treats a bank or rock as a hard on/off edge, so unsmoothed foam piles up against a staircase of cells — the hard, lumpy, pixelated white line along a shoreline, however smooth the painted water edge is. Raise this to melt the staircase into a soft, wide band that also thins to a translucent film over dry ground; 0 draws the raw grid (hard-edged, though still translucent over dry ground). Past about 3 the foam starts to lose its fine shape.",
+  },
 });
 
 /**
@@ -1657,6 +1667,7 @@ export const WATER_PRESETS = Object.freeze({
     simClumpLo: 0,
     simClumpHi: 0.21,
     simClumpAaPx: 12,
+    simFoamSmoothing: 1.5,
   },
 });
 

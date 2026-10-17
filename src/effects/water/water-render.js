@@ -455,6 +455,48 @@ export const WATER_PRESENCE_EDGE1 = 0.5;
 export const WATER_PRESENCE_EDGE_AA_PX = 1.5;
 
 /**
+ * SOFT SHORE FOAM (2026-10-17) — author, live, zoomed on the Tower Bridge east
+ * bank: *"the white is the foam at a shoreline. It's very ugly... a hard lumpy
+ * pixelated grey white edge... on an edge which is actually a smooth gradient in
+ * the _Water file."* Measured in the shader lab on the real Tower Bridge mask, real
+ * body/flow/sim bakes at production grid sizes and the author's own settings, on the
+ * `simFoam` channel along the east bank: a land-side edge with 5.9-6.6 px RMS stair-step
+ * and only 5.6 px between 90% and 10% foam. With the smoothing at its default: 1.7-2.4
+ * px RMS and a 13-16 px edge (the range is the row-selection threshold of the
+ * instrument, not noise in the fix). Open water moves by under 0.5% of white.
+ *
+ * THE CAUSE WAS NOT THE MASK. It was the sim pack: `water-sim.js` hard-zeroes foam in
+ * every SOLID texel (`storedR · (1 − solidity)`), solidity is binary, and the sim grid
+ * is ~7 world px per texel — so the foam's land-side edge IS the solid staircase. The
+ * shear emission (`emitShear`) peaks on the last open texel ring beside it (velocity
+ * drops from ~0.8 to 0 across one texel), so the brightest foam sits exactly against
+ * the staircase, one texel thick, and `simDiffuse` ≈ 0 leaves it that way.
+ *
+ * A finer sim grid would not fix it (the lesson `water-sampling.js` already records
+ * for the body pack: more texels move the creases closer together, they do not remove
+ * them). The cure is on the READ side, where the full-resolution mask lives: the sim
+ * foam is gathered with a small smooth kernel (`WATER_SIM_FOAM_SMOOTH_TEXELS`, the
+ * radius of its ring in sim texels) before the clump threshold, so the one-texel ring
+ * becomes a soft band and the staircase averages out; and over DRY ground (where the
+ * full-res `inside` is low) foam is drawn as a translucent film that lifts the terrain
+ * underneath instead of painting opaque white over it — so it blends into the cobbles
+ * rather than sitting on them.
+ *
+ * Open water (`inside` = 1) is untouched by the dry-ground terms: they all `mix` toward
+ * their neutral value with `1 − inside`.
+ */
+export const WATER_SIM_FOAM_SMOOTH_TEXELS = 1.5;
+
+/** Over dry ground foam keeps this fraction of its normal opacity (how much of the
+ * terrain it hides)... */
+export const WATER_SHORE_FOAM_DRY_COVER = 0.4;
+/** ...and this fraction of its additive white glow... */
+export const WATER_SHORE_FOAM_DRY_GLOW = 0.7;
+/** ...and brightens the terrain beneath it multiplicatively by up to `1 + this`, so the
+ * stones stay readable through it and it picks up the scene's own lighting. */
+export const WATER_SHORE_FOAM_DRY_LIFT = 0.6;
+
+/**
  * TIER 1 — ABSORPTION. How fast light is lost with depth (Beer–Lambert's σ,
  * in units of "per unit of mask depth", since the mask's 0..1 R IS the depth
  * axis).
@@ -1302,9 +1344,22 @@ export function buildWaterSurfaceMaterial({
   // ROH TUNING (2026-08-19) — the sim-foam clump/break threshold, display-
   // time only (`water-sim.js`'s own header on why these are never fed back
   // into the stored accumulator).
-  const uSimClumpLo = uniform(float(WATER_SIM_CLUMP_LO));
-  const uSimClumpHi = uniform(float(WATER_SIM_CLUMP_HI));
-  const uSimClumpAaPx = uniform(float(WATER_SIM_CLUMP_AA_PX));
+  // The sim foam's four display knobs live in ONE vec4 (x clump-lo, y clump-hi, z clump AA px, w
+  // gather smoothing in sim texels) and the dry-ground blend in ONE vec3 (cover, glow, lift):
+  // `effects/uniform-budget` is a shrink-only wall (60 → 59 here, not 60 → 64), and the three
+  // clump scalars were already one concern. The names below are swizzle ALIASES, so every read
+  // further down is unchanged; only the setters write through to the packed `.value`.
+  const uSimFoamBand = uniform(
+    vec4(WATER_SIM_CLUMP_LO, WATER_SIM_CLUMP_HI, WATER_SIM_CLUMP_AA_PX, WATER_SIM_FOAM_SMOOTH_TEXELS)
+  );
+  const uSimClumpLo = uSimFoamBand.x;
+  const uSimClumpHi = uSimFoamBand.y;
+  const uSimClumpAaPx = uSimFoamBand.z;
+  const uSimFoamSmooth = uSimFoamBand.w;
+  const uShoreFoamDry = uniform(vec3(WATER_SHORE_FOAM_DRY_COVER, WATER_SHORE_FOAM_DRY_GLOW, WATER_SHORE_FOAM_DRY_LIFT));
+  const uShoreFoamDryCover = uShoreFoamDry.x;
+  const uShoreFoamDryGlow = uShoreFoamDry.y;
+  const uShoreFoamDryLift = uShoreFoamDry.z;
   const uWetBandPx = uniform(float(wetBandPx));
   const uWetStrength = uniform(float(wetStrength));
   // THE INSTRUMENT's OWN SELECTOR — never a param (see `water.js#
@@ -1472,16 +1527,46 @@ export function buildWaterSurfaceMaterial({
   // band's own CENTRE never moves — only its half-width, floored by
   // `fwidth`, so the clump/break threshold's own calibrated MIDPOINT is
   // unchanged and only the transition's screen-space smoothness improves.
+  // ── SOFT GATHER (2026-10-17) — see `WATER_SIM_FOAM_SMOOTH_TEXELS`. A 5×5 binomial kernel
+  // ([1 4 6 4 1]² / 256, sigma = one tap spacing) with the taps `uSimFoamSmooth` sim texels
+  // apart, every tap through the same C2 reconstruction as the centre. DENSE ON PURPOSE: a
+  // sparse ring (the first prototype, 3×3 at ~2.4 texels) turns a one-texel-wide foam ring
+  // into three separate streaks; taps closer together than one C2 support (±1 texel) overlap
+  // and read as one soft band. `.sample()` clones of `waterSimTexNode` read its value through
+  // `referenceNode`, so `setWaterSimTexture`'s single re-point still reaches every tap (a
+  // fresh `texture()` per tap would have to be collected and re-pointed by hand — the
+  // `maskTexNodes` trap).
+  const simTexelUv = vec2(float(1), float(1)).div(max(uWaterSimTexSize, vec2(1, 1)));
+  const simSoftBaseUv = vec2(clamp(maskU, 0, 1), clamp(maskV, 0, 1));
+  const SIM_SOFT_W = [1, 4, 6, 4, 1];
+  let simSoft = null;
+  for (let iy = -2; iy <= 2; iy++) {
+    for (let ix = -2; ix <= 2; ix++) {
+      const w = (SIM_SOFT_W[ix + 2] * SIM_SOFT_W[iy + 2]) / 256;
+      const tap =
+        ix === 0 && iy === 0
+          ? waterSimTexNode.r
+          : waterSimTexNode.sample(
+              buildSmoothTexelUv(THREE.TSL, {
+                uvNode: clamp(
+                  simSoftBaseUv.add(vec2(float(ix), float(iy)).mul(simTexelUv).mul(uSimFoamSmooth)),
+                  vec2(0, 0),
+                  vec2(1, 1)
+                ),
+                uTexSize: uWaterSimTexSize,
+              })
+            ).r;
+      simSoft = simSoft ? simSoft.add(tap.mul(float(w))) : tap.mul(float(w));
+    }
+  }
   const clumpCenter = uSimClumpLo.add(uSimClumpHi).mul(float(0.5));
   const clumpHalfWidth = max(
     uSimClumpHi.sub(uSimClumpLo).mul(float(0.5)),
-    fwidth(waterSimTexNode.r).mul(uSimClumpAaPx.mul(float(0.5)))
+    fwidth(simSoft).mul(uSimClumpAaPx.mul(float(0.5)))
   );
-  const waterSimFoam = smoothstep(
-    clumpCenter.sub(clumpHalfWidth),
-    clumpCenter.add(clumpHalfWidth),
-    waterSimTexNode.r
-  ).mul(inRect);
+  const waterSimFoam = smoothstep(clumpCenter.sub(clumpHalfWidth), clumpCenter.add(clumpHalfWidth), simSoft).mul(
+    inRect
+  );
 
   // The raw local direction plus a DIVIDE-BY-ZERO-GUARDED unit direction.
   const localVel = vec2(flowPackGated.r, flowPackGated.g);
@@ -2512,9 +2597,14 @@ export function buildWaterSurfaceMaterial({
   // foam patch actually look like. Both reach exactly 1 at f = 1, so the
   // thickest foam is still fully opaque white and nothing overshoots. Two
   // multiplies, no transcendental, no new texture read.
-  const foamCover = totalFoam.mul(totalFoam);
-  const foamGlow = totalFoam.mul(float(2).sub(totalFoam));
+  // ── DRY-GROUND BLEND (2026-10-17) — see `WATER_SIM_FOAM_SMOOTH_TEXELS`. `inside` is the
+  // full-resolution presence, so `shoreDry` is smooth to the pixel; each term mixes from
+  // its old value (open water, `shoreDry` = 0) toward a gentler one over dry ground.
+  const shoreDry = float(1).sub(inside);
+  const foamCover = totalFoam.mul(totalFoam).mul(mix(float(1), uShoreFoamDryCover, shoreDry));
+  const foamGlow = totalFoam.mul(float(2).sub(totalFoam)).mul(mix(float(1), uShoreFoamDryGlow, shoreDry));
   const foamHide = float(1).sub(foamCover);
+  const foamLift = float(1).add(totalFoam.mul(shoreDry).mul(uShoreFoamDryLift));
 
   const absorbMaterial = new THREE.NodeMaterial();
   // CAUSTICS BRIGHTEN THE BED, MULTIPLICATIVELY — the correct mesh for them:
@@ -2524,7 +2614,11 @@ export function buildWaterSurfaceMaterial({
   // AFTER the wet band and foam hide, so caustics never brighten damp ground
   // (no volume above it to refract through) or the underside of foam (which
   // scatters, it does not focus).
-  const absorbColor = bedTransmit.mul(float(1).sub(wetBand)).mul(foamHide).mul(float(1).add(causticExcess));
+  const absorbColor = bedTransmit
+    .mul(float(1).sub(wetBand))
+    .mul(foamHide)
+    .mul(foamLift)
+    .mul(float(1).add(causticExcess));
   // OCCLUDED → `vec3(1,1,1)`, the multiply's OWN neutral element (see the
   // header on why white, not black — [[feedback_blend_neutral_element_is_per_blend]]):
   // whatever already won this pixel passes through completely untouched,
@@ -2860,14 +2954,22 @@ export function buildWaterSurfaceMaterial({
     setFoamGrainTimeScale(v) {
       uFoamGrainTimeScale.value = v;
     },
+    // The four sim-foam knobs share one packed vec4 (see `uSimFoamBand`): write the component, not
+    // an alias node — `uSimClumpLo` and friends are read-only swizzles with no `.value` setter.
     setSimClumpLo(v) {
-      uSimClumpLo.value = v;
+      uSimFoamBand.value.x = v;
     },
     setSimClumpHi(v) {
-      uSimClumpHi.value = v;
+      uSimFoamBand.value.y = v;
     },
     setSimClumpAaPx(v) {
-      uSimClumpAaPx.value = v;
+      uSimFoamBand.value.z = v;
+    },
+    setSimFoamSmoothing(v) {
+      uSimFoamBand.value.w = v;
+    },
+    setShoreFoamDry(cover, glow, lift) {
+      uShoreFoamDry.value.set(cover, glow, lift);
     },
     setFlowSpeedPx(v) {
       uFlowSpeedPx.value = v;

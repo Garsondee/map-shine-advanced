@@ -1090,6 +1090,7 @@ export function createWaterSurfaceSubsystem({
       p.simClumpLo,
       p.simClumpHi,
       p.simClumpAaPx,
+      p.simFoamSmoothing,
       p.windRipple,
     ].join('|');
     if (key !== lastParamsKey) {
@@ -1156,6 +1157,7 @@ export function createWaterSurfaceSubsystem({
       if (Number.isFinite(p.simClumpLo)) surface.setSimClumpLo(p.simClumpLo);
       if (Number.isFinite(p.simClumpHi)) surface.setSimClumpHi(p.simClumpHi);
       if (Number.isFinite(p.simClumpAaPx)) surface.setSimClumpAaPx(p.simClumpAaPx);
+      if (Number.isFinite(p.simFoamSmoothing)) surface.setSimFoamSmoothing(p.simFoamSmoothing);
       debugChannel = Number.isFinite(state.debugChannel) ? Math.max(0, Math.round(state.debugChannel)) : 0;
       surface.setDebugChannel(debugChannel);
       enabled = state.enabled !== false;

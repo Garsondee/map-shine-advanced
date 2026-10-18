@@ -1276,8 +1276,9 @@ export async function startVtPanViewer({
   // THE CRITTERS' render-state seams — `{enabled, params, perfTier, floorIndex, elevation, gridPx,
   // maskGrid, maskVersion}`, composed by boot's `createCritterRegistration`. REQUIRED, not defaulted:
   // a defaulted seam is how water shipped every control inert with a green suite, and the
-  // `seams/viewer-wired` wall checks boot actually passes both.
+  // `seams/viewer-wired` wall checks boot actually passes all three.
   getSmellyFliesRenderState,
+  getMaggotsRenderState,
   getFirefliesRenderState,
   // PLAYER-CARRIED LIGHTS (mythica-machina-press#77) — boot.js's own
   // per-frame closure: reads the live per-token snapshot + the scene's
@@ -4706,10 +4707,11 @@ export async function startVtPanViewer({
     });
 
     /**
-     * THE CRITTERS (effects/critters/critter-subsystem.js) — two subsystems, one per effect, built
-     * from ONE factory: Smelly Flies (maggots under flies, over a painted `_Flies` zone) and
-     * Fireflies (a colony over `_Fireflies`). Neither allocates a thing until its zone has paint AND
-     * its head-count is non-zero, so a scene with neither costs nothing.
+     * THE CRITTERS (effects/critters/critter-subsystem.js) — three subsystems, one per effect, built
+     * from ONE factory: Smelly Flies (a swarm over a painted `_Flies` zone), Maggots (a writhing mass
+     * over `_Maggots`) and Fireflies (a colony over `_Fireflies`). Three separate masks, so a corpse
+     * can have any combination. None allocates a thing until its zone has paint AND its head-count is
+     * non-zero, so a scene with none of them costs nothing.
      *
      * Same injection posture as fire right above: the allocators come in as arguments, the occlusion
      * gate reads this viewer's own depth nodes, and each subsystem gets its OWN copy of that wiring
@@ -4737,6 +4739,7 @@ export async function startVtPanViewer({
         },
       });
     const smellyFliesSubsystem = makeCritterSubsystem('smellyFlies', getSmellyFliesRenderState);
+    const maggotsSubsystem = makeCritterSubsystem('maggots', getMaggotsRenderState);
     const firefliesSubsystem = makeCritterSubsystem('fireflies', getFirefliesRenderState);
 
     // ========================================================================
@@ -8602,9 +8605,18 @@ export async function startVtPanViewer({
         profiler?.end(Z.lightDrawFire);
       }
       // THE CRITTERS — the same guarded draw as fire just above, one per effect, in the order a
-      // reader sees them: the flies and maggots (normal blend, lit by the scene), then the
-      // fireflies' ADDITIVE glow on top, so the colony's HDR light feeds the bloom pass that runs
-      // after this block. `sync()` already decided the frame's population; this is a visibility check.
+      // reader sees them: the maggots on the ground first, the flies over them (normal blend, lit by
+      // the scene), then the fireflies' ADDITIVE glow on top, so the colony's HDR light feeds the
+      // bloom pass that runs after this block. `sync()` already decided the frame's population; this
+      // is a visibility check.
+      if (maggotsSubsystem.hasContent) {
+        profiler?.begin(Z.lightDrawMaggots);
+        const prevMaggotsAutoClear = renderer.autoClearColor;
+        renderer.autoClearColor = false;
+        renderer.render(maggotsSubsystem.scene, camera);
+        renderer.autoClearColor = prevMaggotsAutoClear;
+        profiler?.end(Z.lightDrawMaggots);
+      }
       if (smellyFliesSubsystem.hasContent) {
         profiler?.begin(Z.lightDrawSmellyFlies);
         const prevFliesAutoClear = renderer.autoClearColor;
@@ -19407,6 +19419,15 @@ export async function startVtPanViewer({
           lastEnvSnapshot?.env ?? null
         );
       }
+      if (view && maggotsSubsystem) {
+        maggotsSubsystem.sync(
+          renderer,
+          lastEnvSnapshot?.env?.time?.realMs ?? uGlobalTimeMs.value,
+          lastEnvSnapshot?.env?.time?.realDtSec ?? 0,
+          windSpawnRect,
+          lastEnvSnapshot?.env ?? null
+        );
+      }
       if (view && firefliesSubsystem) {
         firefliesSubsystem.sync(
           renderer,
@@ -20632,6 +20653,7 @@ export async function startVtPanViewer({
       // No env snapshot yet at warm-up: flies read as a plain day and fireflies as "not yet", which
       // is exactly right for compiling the fly and maggot kernels without conjuring a colony.
       if (smellyFliesSubsystem) smellyFliesSubsystem.sync(renderer, tMs, WARM_UP_SIM_DT_SEC, windSpawnRect, null);
+      if (maggotsSubsystem) maggotsSubsystem.sync(renderer, tMs, WARM_UP_SIM_DT_SEC, windSpawnRect, null);
       if (firefliesSubsystem) firefliesSubsystem.sync(renderer, tMs, WARM_UP_SIM_DT_SEC, windSpawnRect, null);
       if (precipitationSubsystem) {
         precipitationSubsystem.sync(renderer, WARM_UP_SIM_DT_SEC, tMs, windSpawnRect);
@@ -25340,10 +25362,12 @@ export async function startVtPanViewer({
        */
       getCritterStatus: () => ({
         smellyFlies: smellyFliesSubsystem.getStatus(),
+        maggots: maggotsSubsystem.getStatus(),
         fireflies: firefliesSubsystem.getStatus(),
       }),
       disposeCritters: () => {
         smellyFliesSubsystem.dispose();
+        maggotsSubsystem.dispose();
         firefliesSubsystem.dispose();
       },
       /** PRECIPITATION's own status — every factor that decides whether a drop

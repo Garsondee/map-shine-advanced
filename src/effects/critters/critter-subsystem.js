@@ -49,7 +49,8 @@ import {
   zoneGridSignature,
   createSlotStamper,
 } from './critter-zone.js';
-import { flyActivity, fireflyActivity, approach, activeSlotCount } from './critter-activity.js';
+import { flyActivity, maggotActivity, fireflyActivity, approach, activeSlotCount } from './critter-activity.js';
+import { skyFeel, weatherDrive, CALM_DRIVE } from './critter-weather.js';
 import {
   critterTierPlan,
   critterRefAreaPx2,
@@ -73,7 +74,8 @@ const FAULT_RETRY_MS = 5000;
 /**
  * What an ENGINE of each kind is, as data: its tier family, its slot budget, where it sorts
  * among the group's draws, which param sets its head-count, and the law that decides how much
- * of it is showing. `activity` receives the frame's env and the group's params.
+ * of it is showing. `activity` receives the frame's env and the group's params; `tauSec` is the
+ * reaction time used until the effect's own `fadeTime` says otherwise.
  */
 const ENGINE_SPECS = Object.freeze({
   fly: Object.freeze({
@@ -82,16 +84,17 @@ const ENGINE_SPECS = Object.freeze({
     renderOrder: 10,
     perZoneParam: 'fliesPerZone',
     tauSec: 2.5,
-    activity: (env, p) => flyActivity(env, { nightActivity: p.nightActivity, weatherResponse: p.weatherResponse }),
+    // daylight × weather
+    activity: (env, p) => flyActivity(env, p),
   }),
   maggot: Object.freeze({
     family: 'fly',
     capacity: CRITTER_CAPACITY.maggot,
     renderOrder: 0,
-    perZoneParam: 'maggotsPerZone',
-    tauSec: 1,
-    // Maggots live IN the thing; neither dusk nor rain sends them anywhere.
-    activity: () => 1,
+    perZoneParam: 'countPerZone',
+    tauSec: 1.5,
+    // Maggots live IN the thing: dusk does not send them anywhere, only weather thins them.
+    activity: (env, p) => maggotActivity(env, p),
   }),
   firefly: Object.freeze({
     family: 'firefly',
@@ -99,25 +102,41 @@ const ENGINE_SPECS = Object.freeze({
     renderOrder: 20,
     perZoneParam: 'countPerZone',
     tauSec: 3,
-    activity: (env, p) =>
-      fireflyActivity(env, {
-        alwaysActive: p.alwaysActive,
-        dusk: p.dusk,
-        dawn: p.dawn,
-        appearBelowDeg: p.appearBelowDeg,
-        fullBelowDeg: p.fullBelowDeg,
-        fadeByDeg: p.fadeByDeg,
-        nightResidual: p.nightResidual,
-        weatherResponse: p.weatherResponse,
-      }),
+    // the twilight window × weather
+    activity: (env, p) => fireflyActivity(env, p),
   }),
 });
 
-/** Which engines each group owns, in the order their homes are packed into the shared zone buffer. */
+/**
+ * Which engine each effect (group) owns. Three effects, three masks, three engines: one group is one
+ * painted zone, one engine and one `syncZone` profiler id. (The flies and the maggots used to share a group
+ * and a mask; they are separate effects now, so a corpse can have either or both.)
+ */
 const GROUPS = Object.freeze({
-  smellyFlies: Object.freeze({ engines: Object.freeze(['fly', 'maggot']), syncZone: 'light.smellyFliesSync' }),
+  smellyFlies: Object.freeze({ engines: Object.freeze(['fly']), syncZone: 'light.smellyFliesSync' }),
+  maggots: Object.freeze({ engines: Object.freeze(['maggot']), syncZone: 'light.maggotsSync' }),
   fireflies: Object.freeze({ engines: Object.freeze(['firefly']), syncZone: 'light.firefliesSync' }),
 });
+
+/** The reaction time of the weather's push on the survivors (wind, shelter, cold): wind does not snap on. */
+const DRIVE_TAU_SEC = 1.2;
+
+/** Ease the weather drive toward its target, per component, and say whether anything moved enough to push. */
+function easeDrive(current, target, dtSec) {
+  const e = (a, b) => approach(a, b, dtSec, DRIVE_TAU_SEC);
+  return {
+    windPush: [e(current.windPush[0], target.windPush[0]), e(current.windPush[1], target.windPush[1])],
+    agitation: e(current.agitation, target.agitation),
+    shelter: e(current.shelter, target.shelter),
+    tempo: e(current.tempo, target.tempo),
+  };
+}
+const driveChanged = (a, b) =>
+  Math.abs(a.windPush[0] - b.windPush[0]) > 0.05 ||
+  Math.abs(a.windPush[1] - b.windPush[1]) > 0.05 ||
+  Math.abs(a.agitation - b.agitation) > 1e-3 ||
+  Math.abs(a.shelter - b.shelter) > 1e-3 ||
+  Math.abs(a.tempo - b.tempo) > 1e-3;
 
 /**
  * GPU allocations that outlive a subsystem. A storage buffer cannot be freed
@@ -156,6 +175,7 @@ export function critterUniformValues(kind, params, shadow = null) {
   }
   if (kind === 'fly') {
     out.tint = hexToRgb01(params?.tint ?? '#ffffff');
+    out.eyeColor = hexToRgb01(params?.eyeColor ?? '#80160d');
     out.lookIndex = Math.max(0, FLY_LOOKS.indexOf(params?.species));
     if (shadow) {
       out.shadowShift = shadow.shadowShift;
@@ -163,7 +183,7 @@ export function critterUniformValues(kind, params, shadow = null) {
       out.shadowAmount = shadow.shadowAmount;
     }
   } else if (kind === 'maggot') {
-    out.maggotColor = hexToRgb01(params?.maggotColor ?? '#e6dcb8');
+    out.color = hexToRgb01(params?.color ?? '#e6dcb8');
   } else if (kind === 'firefly') {
     out.color = hexToRgb01(params?.color ?? '#b8ff3a');
     out.flashStyleIndex = Math.max(0, FIREFLY_FLASH_STYLES.indexOf(params?.flashStyle));
@@ -195,7 +215,7 @@ export function flyShadowFromSky(env, params) {
 /**
  * @param {object} deps
  * @param {*} deps.THREE - injected.
- * @param {'smellyFlies'|'fireflies'} deps.group
+ * @param {'smellyFlies'|'maggots'|'fireflies'} deps.group
  * @param {() => object} deps.getRenderState - `{enabled, params, perfTier, floorIndex, elevation,
  *   gridPx, maskGrid, maskVersion}`. REQUIRED and deliberately not defaulted: a defaulted
  *   render-state seam is how water shipped every control inert with a green test suite.
@@ -351,6 +371,8 @@ export function createCritterSubsystem({
         lastDepth: null,
         pushed: false,
         placed: false,
+        drive: null,
+        pushedDrive: null,
       };
       slots.set(spec.kind, slot);
     }
@@ -382,6 +404,7 @@ export function createCritterSubsystem({
     slot.tier = tier;
     slot.placed = false; // a new engine has to be told where the zone is
     slot.pushed = false; // ...and what its params are
+    slot.pushedDrive = null; // ...and what the weather is doing to it
     scene.add(slot.engine.scene);
     return slot;
   }
@@ -515,6 +538,7 @@ export function createCritterSubsystem({
     // ── activity, params, step ──
     let any = false;
     const engines = [];
+    const feel = skyFeel(env); // the sky as an insect feels it, once a frame, for every engine's weather
     for (const spec of specs) {
       const slot = slots.get(spec.kind);
       if (!slot?.engine || !slot.population || slot.population.total === 0) {
@@ -522,9 +546,20 @@ export function createCritterSubsystem({
         continue;
       }
       const target = spec.activity(env, params);
+      // The effect's own reaction time (`fadeTime`) sets how fast the head-count follows the sky.
+      const tau = Number.isFinite(params.fadeTime) && params.fadeTime > 0 ? params.fadeTime : spec.tauSec;
       // Born at its target: a scene that loads at dusk opens with its colony, not an empty field that fills.
-      slot.activity = slot.activity === null ? target : approach(slot.activity, target, dtSec, spec.tauSec);
+      slot.activity = slot.activity === null ? target : approach(slot.activity, target, dtSec, tau);
       slot.engine.setActive(activeSlotCount(slot.activity, slot.population.total));
+
+      // The weather's hand on the ones that stayed: wind carries and agitates them, rain drives fliers down and
+      // maggots to squirm, cold slows them. Eased (wind does not snap on), and pushed only when it moved.
+      const driveTarget = weatherDrive(feel, params);
+      slot.drive = slot.drive ? easeDrive(slot.drive, driveTarget, dtSec) : { ...CALM_DRIVE, ...driveTarget };
+      if (!slot.pushedDrive || driveChanged(slot.drive, slot.pushedDrive)) {
+        slot.engine.setParams(slot.drive);
+        slot.pushedDrive = slot.drive;
+      }
 
       if (
         params !== slot.lastParams ||

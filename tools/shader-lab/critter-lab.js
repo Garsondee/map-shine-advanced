@@ -8,9 +8,10 @@
  * runs; the lab supplies only what Foundry would (a mask grid, an env snapshot, the scene's
  * illumination).
  *
- *   • Paint with the left mouse button, erase with shift. The Paint selector picks which
- *     zone you are painting (flies' or fireflies').
- *   • Slide the sun below the horizon to hatch the fireflies; raise the rain to clear them.
+ *   • Paint with the left mouse button, erase with shift. The Paint selector picks which of the three
+ *     zones you are painting (flies', maggots' or fireflies' — three effects, three masks).
+ *   • Slide the sun below the horizon to hatch the fireflies; raise the rain, snow, wind or cold to see
+ *     each population respond in its own way (the same sliders the game's weather drives).
  *   • `window.critterLab` is the scripted door (describe / setParam / setSky / paint /
  *     advance / capture / status / samplerParity), for an agent or the console.
  *   • `samplerParity()` is the one check a Node test cannot make: it runs the GPU zone sampler (the
@@ -31,6 +32,7 @@ import { createCritterSubsystem } from '../../src/effects/critters/critter-subsy
 import { createCritterEngine, allocateCritterBuffers } from '../../src/effects/particles/critter-runtime.js';
 import { createCritterZoneBuffer } from '../../src/effects/particles/critter-zone-buffer.js';
 import { SMELLY_FLIES_PARAMS } from '../../src/effects/critters/smelly-flies.js';
+import { MAGGOTS_PARAMS } from '../../src/effects/critters/maggots.js';
 import { FIREFLIES_PARAMS } from '../../src/effects/critters/fireflies.js';
 import { buildZoneField, sampleZoneField } from '../../src/effects/critters/critter-zone.js';
 import { buildZoneSampler } from '../../src/effects/critters/critter-zone-sample.js';
@@ -90,11 +92,22 @@ async function main() {
     ambient: 1,
     paintLayer: 'flies',
     brush: 46,
-    sky: { elevationDeg: 50, rising: false, precip01: 0, wind01: 0, cloud01: 0 },
-    maskVersion: { flies: 1, fireflies: 1 },
-    grids: { flies: makeGrid(), fireflies: makeGrid() },
+    sky: {
+      elevationDeg: 50,
+      rising: false,
+      precip01: 0,
+      precipKind: 'rain',
+      wind01: 0,
+      gust01: 0,
+      windDirectionDeg: 90,
+      temperature01: 0.55,
+      cloud01: 0,
+    },
+    maskVersion: { flies: 1, maggots: 1, fireflies: 1 },
+    grids: { flies: makeGrid(), maggots: makeGrid(), fireflies: makeGrid() },
     params: {
       smellyFlies: { ...defaultsOf(SMELLY_FLIES_PARAMS) },
+      maggots: { ...defaultsOf(MAGGOTS_PARAMS) },
       fireflies: { ...defaultsOf(FIREFLIES_PARAMS) },
     },
   };
@@ -108,8 +121,13 @@ async function main() {
       // the real curve (world/sun.js): eased across civil twilight to clear sun
       dayFactor01: smooth01((state.sky.elevationDeg + 6) / 16),
     },
-    weather: { precip01: state.sky.precip01, cloudCover01: state.sky.cloud01 },
-    wind: { speed01: state.sky.wind01 },
+    weather: {
+      precip01: state.sky.precip01,
+      precipKind: state.sky.precipKind,
+      cloudCover01: state.sky.cloud01,
+      temperature01: state.sky.temperature01,
+    },
+    wind: { speed01: state.sky.wind01, gustiness01: state.sky.gust01, directionDeg: state.sky.windDirectionDeg },
   });
 
   // ── the scene's lighting: one flat multiplier standing in for the illumination buffer ──
@@ -121,7 +139,7 @@ async function main() {
   const illumTexNode = texture(illumTex);
   const colorationTexNode = texture(colorationTex);
 
-  // ── the two subsystems, exactly as the viewer builds them ───────────────────
+  // ── the three subsystems (one per effect), exactly as the viewer builds them ───────────────────
   const renderState = (key, layer) => () => ({
     enabled: true,
     params: state.params[key],
@@ -146,8 +164,11 @@ async function main() {
     });
   const subs = {
     smellyFlies: make('smellyFlies', 'smellyFlies', 'flies'),
+    maggots: make('maggots', 'maggots', 'maggots'),
     fireflies: make('fireflies', 'fireflies', 'fireflies'),
   };
+  /** The effect (params group) each paint layer feeds. */
+  const LAYER_GROUP = { flies: 'smellyFlies', maggots: 'maggots', fireflies: 'fireflies' };
 
   // ── drawing ────────────────────────────────────────────────────────────────
   const uNight = uniform(0);
@@ -159,18 +180,24 @@ async function main() {
     tex.needsUpdate = true;
     return tex;
   };
-  const paintTex = { flies: paintTexture(state.grids.flies), fireflies: paintTexture(state.grids.fireflies) };
+  const paintTex = {
+    flies: paintTexture(state.grids.flies),
+    maggots: paintTexture(state.grids.maggots),
+    fireflies: paintTexture(state.grids.fireflies),
+  };
   const worldUv = positionWorld.xy.div(vec2(W, H));
   const fliesPaint = texture(paintTex.flies, worldUv).r;
+  const maggotsPaint = texture(paintTex.maggots, worldUv).r;
   const firefliesPaint = texture(paintTex.fireflies, worldUv).r;
   const ground = new THREE.NodeMaterial();
   const chk = mod(floor(positionWorld.x.div(48)).add(floor(positionWorld.y.div(48))), 2);
   const dayCol = mix(vec3(0.22, 0.19, 0.13), vec3(0.28, 0.24, 0.17), chk);
   const nightCol = mix(vec3(0.012, 0.02, 0.018), vec3(0.018, 0.028, 0.024), chk);
   const base = mix(dayCol, nightCol, uNight);
-  // a faint wash, only a hint of where each zone is (warm for the flies', green for the fireflies')
+  // a faint wash, only a hint of where each zone is (warm for the flies', tan for the maggots', green for the fireflies')
   const tint = vec3(0.1, 0.045, 0.0)
     .mul(fliesPaint)
+    .add(vec3(0.07, 0.07, 0.0).mul(maggotsPaint))
     .add(vec3(0.0, 0.07, 0.015).mul(firefliesPaint))
     .mul(uShowPaint)
     .mul(float(1).sub(uNight.mul(0.6)));
@@ -273,6 +300,12 @@ async function main() {
       [470, 330, 90],
     ])
       paintDisc('flies', x, y, r);
+    // the maggots sit in the heart of the first fly zone (a corpse draws both) and in a patch of their own
+    for (const [x, y, r] of [
+      [300, 390, 70],
+      [640, 560, 60],
+    ])
+      paintDisc('maggots', x, y, r);
     for (const [x, y, r] of [
       [900, 300, 190],
       [1040, 520, 100],
@@ -354,7 +387,7 @@ async function main() {
    * Float32 against float64, so the tolerances are a few ulps, not zero.
    */
   async function samplerParity({ layer = 'flies' } = {}) {
-    const key = layer === 'flies' ? 'smellyFlies' : 'fireflies';
+    const key = LAYER_GROUP[layer];
     const field = buildZoneField(state.grids[layer], {
       threshold: state.params[key].maskSensitivity,
       marginPx: critterMarginPx(100),
@@ -422,10 +455,12 @@ async function main() {
 
   // ── the panel ──────────────────────────────────────────────────────────────
   const panel = document.getElementById('panel');
+  /** Where the next widget is appended: the panel itself, or the effect block being built. */
+  let host = panel;
   const heading = (t) => {
     const h = document.createElement('h4');
     h.textContent = t;
-    panel.appendChild(h);
+    host.appendChild(h);
   };
   const slider = (label, min, max, step, get, set) => {
     const row = document.createElement('label');
@@ -444,7 +479,7 @@ async function main() {
       val.textContent = input.value;
     });
     row.append(name, input, val);
-    panel.appendChild(row);
+    host.appendChild(row);
   };
   const select = (label, options, get, set) => {
     const row = document.createElement('label');
@@ -455,7 +490,7 @@ async function main() {
     sel.value = String(get());
     sel.addEventListener('change', () => set(sel.value));
     row.append(name, sel, document.createElement('span'));
-    panel.appendChild(row);
+    host.appendChild(row);
   };
   const toggle = (label, get, set) => {
     const row = document.createElement('label');
@@ -466,13 +501,13 @@ async function main() {
     box.checked = !!get();
     box.addEventListener('change', () => set(box.checked));
     row.append(name, box, document.createElement('span'));
-    panel.appendChild(row);
+    host.appendChild(row);
   };
   const button = (label, fn) => {
     const b = document.createElement('button');
     b.textContent = label;
     b.addEventListener('click', fn);
-    panel.appendChild(b);
+    host.appendChild(b);
   };
   /** A fresh params object per change: the subsystem re-pushes uniforms when the object's identity moves. */
   const setParam = (group, patch) => {
@@ -482,7 +517,7 @@ async function main() {
   heading('Paint');
   select(
     'layer',
-    ['flies', 'fireflies'],
+    ['flies', 'maggots', 'fireflies'],
     () => state.paintLayer,
     (v) => (state.paintLayer = v)
   );
@@ -533,6 +568,36 @@ async function main() {
     (v) => (state.sky.wind01 = v)
   );
   slider(
+    'gustiness',
+    0,
+    1,
+    0.05,
+    () => state.sky.gust01,
+    (v) => (state.sky.gust01 = v)
+  );
+  slider(
+    'wind direction °',
+    0,
+    360,
+    5,
+    () => state.sky.windDirectionDeg,
+    (v) => (state.sky.windDirectionDeg = v)
+  );
+  select(
+    'precipitation',
+    ['rain', 'snow', 'sleet', 'ash'],
+    () => state.sky.precipKind,
+    (v) => (state.sky.precipKind = v)
+  );
+  slider(
+    'temperature (0 = freezing)',
+    0,
+    1,
+    0.05,
+    () => state.sky.temperature01,
+    (v) => (state.sky.temperature01 = v)
+  );
+  slider(
     'scene light',
     0.05,
     1.5,
@@ -559,46 +624,55 @@ async function main() {
     (v) => (state.tier = Number(v))
   );
 
-  heading('Flies and maggots');
-  const sf = (id) => () => state.params.smellyFlies[id];
-  const setSf = (id) => (v) => setParam('smellyFlies', { [id]: v });
-  slider('flies / swarm', 0, 80, 1, sf('fliesPerZone'), setSf('fliesPerZone'));
-  slider('maggots / swarm', 0, 200, 1, sf('maggotsPerZone'), setSf('maggotsPerZone'));
-  slider('fly size', 6, 80, 1, sf('size'), setSf('size'));
-  slider('maggot size', 6, 80, 1, sf('maggotSize'), setSf('maggotSize'));
-  slider('buzz', 200, 4000, 50, sf('buzz'), setSf('buzz'));
-  slider('land chance /s', 0, 0.6, 0.01, sf('landChance'), setSf('landChance'));
-  slider('take-off chance /s', 0, 0.6, 0.01, sf('takeoffChance'), setSf('takeoffChance'));
-  slider('fly height', 5, 300, 5, sf('flyHeight'), setSf('flyHeight'));
-  slider('wing blur', 0, 1, 0.05, sf('wingBlur'), setSf('wingBlur'));
-  slider('maggot wriggle', 0, 3, 0.05, sf('maggotWriggle'), setSf('maggotWriggle'));
-  slider('maggot clustering', 0, 1, 0.05, sf('maggotClustering'), setSf('maggotClustering'));
-  slider('flies at night', 0, 1, 0.05, sf('nightActivity'), setSf('nightActivity'));
-  select(
-    'species',
-    SMELLY_FLIES_PARAMS.species.values,
-    () => state.params.smellyFlies.species,
-    (v) => setParam('smellyFlies', { species: v })
-  );
-
-  heading('Fireflies');
-  const ff = (id) => () => state.params.fireflies[id];
-  const setFf = (id) => (v) => setParam('fireflies', { [id]: v });
-  slider('fireflies / colony', 0, 120, 1, ff('countPerZone'), setFf('countPerZone'));
-  slider('size', 3, 60, 1, ff('size'), setFf('size'));
-  slider('glow strength', 0, 20, 0.5, ff('intensity'), setFf('intensity'));
-  slider('glow radius', 2, 120, 1, ff('glowRadius'), setFf('glowRadius'));
-  slider('flash period s', 1, 12, 0.1, ff('flashPeriod'), setFf('flashPeriod'));
-  slider('synchrony', 0, 1, 0.05, ff('synchrony'), setFf('synchrony'));
-  slider('drift speed', 5, 250, 1, ff('driftSpeed'), setFf('driftSpeed'));
-  slider('roaming range', 0, 800, 10, ff('range'), setFf('range'));
-  toggle('ignore time of day', ff('alwaysActive'), setFf('alwaysActive'));
-  select(
-    'flash style',
-    FIREFLIES_PARAMS.flashStyle.values,
-    () => state.params.fireflies.flashStyle,
-    (v) => setParam('fireflies', { flashStyle: v })
-  );
+  // The three effects' controls are GENERATED from their schemas — the same declarations the Studio's cards are
+  // built from — so the lab can never offer a slider the effect no longer has, or miss one it has gained.
+  const colorInput = (label, get, set) => {
+    const row = document.createElement('label');
+    const name = document.createElement('span');
+    name.textContent = label;
+    const input = document.createElement('input');
+    input.type = 'color';
+    input.value = get();
+    input.addEventListener('input', () => set(input.value));
+    row.append(name, input, document.createElement('span'));
+    host.appendChild(row);
+  };
+  /** One collapsible block per effect, a sub-heading per category, a control per param. */
+  function schemaSection(title, group, schema) {
+    const det = document.createElement('details');
+    const sum = document.createElement('summary');
+    sum.textContent = title;
+    det.appendChild(sum);
+    panel.appendChild(det);
+    host = det;
+    try {
+      const byCategory = new Map();
+      for (const [id, def] of Object.entries(schema)) {
+        if (!byCategory.has(def.category)) byCategory.set(def.category, []);
+        byCategory.get(def.category).push([id, def]);
+      }
+      for (const [category, entries] of byCategory) {
+        const h = document.createElement('h5');
+        h.textContent = category;
+        host.appendChild(h);
+        for (const [id, def] of entries) {
+          const get = () => state.params[group][id];
+          const set = (v) => setParam(group, { [id]: v });
+          if (def.type === 'bool') toggle(def.label, get, set);
+          else if (def.type === 'enum') select(def.label, def.values, get, set);
+          else if (def.type === 'color') colorInput(def.label, get, set);
+          else slider(def.label, def.min, def.max, def.step ?? (def.type === 'int' ? 1 : 0.01), get, set);
+        }
+      }
+    } finally {
+      host = panel;
+    }
+    return det;
+  }
+  heading('Effects (three masks, three cards)');
+  schemaSection('Smelly flies', 'smellyFlies', SMELLY_FLIES_PARAMS).open = true;
+  schemaSection('Maggots', 'maggots', MAGGOTS_PARAMS);
+  schemaSection('Fireflies', 'fireflies', FIREFLIES_PARAMS);
 
   // ── the scripted door ──────────────────────────────────────────────────────
   const lab = {
@@ -610,7 +684,7 @@ async function main() {
       groups: Object.keys(state.params),
       sky: { ...state.sky },
       tier: state.tier,
-      note: 'setParam(group, patch) · setSky(patch) · setTier(n) · paint(layer,x,y,r,erase) · demo() · clear(layer?) · await advance(sec,hz?) · await capture(name?) · await samplerParity({layer?}) · status()',
+      note: 'groups: smellyFlies · maggots · fireflies — setParam(group, patch) · setSky(patch) · setTier(n) · paint(layer,x,y,r,erase) · demo() · clear(layer?) · await advance(sec,hz?) · await capture(name?) · await samplerParity({layer?}) · status()',
     }),
     setParam,
     setSky(patch) {
@@ -658,6 +732,7 @@ async function main() {
       frames,
       clockSec: clockMs / 1000,
       smellyFlies: subs.smellyFlies.getStatus(),
+      maggots: subs.maggots.getStatus(),
       fireflies: subs.fireflies.getStatus(),
     }),
   };
@@ -672,7 +747,7 @@ async function main() {
         .map((e) => `${e.kind} ${e.population} @${e.activity}`)
         .join(', ')}`;
     say(
-      `frame ${s.frames}  t ${s.clockSec.toFixed(1)} s\n${line('flies', s.smellyFlies)}\n${line('fireflies', s.fireflies)}`
+      `frame ${s.frames}  t ${s.clockSec.toFixed(1)} s\n${line('flies', s.smellyFlies)}\n${line('maggots', s.maggots)}\n${line('fireflies', s.fireflies)}`
     );
   }, 250);
   return lab;

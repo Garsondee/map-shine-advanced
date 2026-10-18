@@ -75,7 +75,9 @@ function flyInstance(TSL, { buffers, u }) {
   );
 
   // Perspective from the camera (fire's law): bigger and pushed outward with height.
-  const camH = u('camHeight');
+  // `perspective` is the author's strength of the law (0 = flat, 1 = as drawn, 2 = exaggerated): the camera is that
+  // much farther away (a weaker law) or nearer (a stronger one). The floor keeps the camera finite at 0.
+  const camH = u('camHeight').div(max(u('perspective'), 0.05));
   const hClamped = min(height, camH.mul(0.6));
   const persp = camH.div(camH.sub(hClamped));
   const centre = u('camCentre');
@@ -135,6 +137,8 @@ export function buildFlyMaterials(
     turnRate: inst.turnRate,
     groomChance: u('groomChance'),
     wingBlurAmt: u('wingBlur'),
+    wingSpread: u('wingSpread'),
+    bankAmount: u('bankAmount'),
   });
   const vPose0 = Fn(() => vec4(pose.wingMean, pose.wingAmp, pose.wingBlur, pose.wingPhase))().toVarying('vPose0');
   const vPose1 = Fn(() => vec4(pose.stride, pose.turnDir, pose.tuck, pose.reach))().toVarying('vPose1');
@@ -178,9 +182,19 @@ export function buildFlyMaterials(
     tint: u('tint'),
     plan,
     lookIndex: u('lookIndex'),
+    wingOpacity: u('wingOpacity'),
+    sheen: u('sheen'),
+    legWeight: u('legWeight'),
+    eyeColor: u('eyeColor'),
   });
 
-  body.colorNode = litLinear(TSL, { rgb: look.rgb, lit: plan.lit, illumTexNode, colorationTexNode });
+  body.colorNode = litLinear(TSL, {
+    rgb: look.rgb,
+    lit: plan.lit,
+    illumTexNode,
+    colorationTexNode,
+    influence: u('lightInfluence'),
+  });
   const gate = occlusionGate(TSL, { depthTexNode, depthFlagsTexNode, expectedDepth: u('expectedDepth') });
   body.opacityNode = look.alpha.mul(vInfo.y).mul(gate);
 
@@ -192,6 +206,7 @@ export function buildFlyMaterials(
     // soft with height: a landed fly's shadow is a tight contact shadow, a high one a broad smudge
     const vSoft = Fn(() => {
       const soft = u('shadowSoft')
+        .mul(u('shadowSoftness'))
         .div(inst.L)
         .mul(float(0.3).add(inst.height01.mul(0.7)))
         .add(0.03);
@@ -216,6 +231,7 @@ export function buildFlyMaterials(
       seed01: vInfo.x,
       plan,
       lookIndex: u('lookIndex'),
+      wingOpacity: u('wingOpacity'),
     });
     shadow.colorNode = vec3(0.01, 0.008, 0.006);
     shadow.opacityNode = silhouette

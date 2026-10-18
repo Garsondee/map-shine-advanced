@@ -68,6 +68,13 @@ export const CATEGORY_ORDER = Object.freeze([
   'Shape',
   'Extent',
   'Outdoor',
+  // The critters' two couplings to the sky (2026-10-18). A swarm answers to the TIME OF DAY (fireflies hatch
+  // in the twilight window, flies sleep at night) and to the WEATHER (rain, snow, wind and cold each thin
+  // it by a response of their own, and drive how the survivors move) — a dozen controls that belong
+  // together and that a single 'Response' group would bury among the rest. They sit just before
+  // 'Response', which keeps the generic couplings (a reaction time, a fade) beneath them.
+  'Twilight',
+  'Weather',
   'Response',
   'Technical',
 ]);

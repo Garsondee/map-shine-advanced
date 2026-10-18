@@ -161,7 +161,24 @@ const PALETTES = [
  *   blended arithmetically either way, so changing species costs nothing and rebuilds nothing.
  * @returns {{rgb: *, alpha: *}} straight sRGB-space colour and alpha.
  */
-export function buildFlyBody(TSL, { p, aa, pose, gait, seed01, lightLocal, tint, plan, lookIndex }) {
+export function buildFlyBody(
+  TSL,
+  {
+    p,
+    aa,
+    pose,
+    gait,
+    seed01,
+    lightLocal,
+    tint,
+    plan,
+    lookIndex,
+    wingOpacity = null,
+    sheen = null,
+    legWeight = null,
+    eyeColor = null,
+  }
+) {
   const {
     float,
     vec2,
@@ -188,6 +205,11 @@ export function buildFlyBody(TSL, { p, aa, pose, gait, seed01, lightLocal, tint,
   const px = p.x;
   const py = p.y;
   const absY = abs(py);
+  // The author's look multipliers, each 1 (the look as drawn) when the caller supplies none — the shadow, the
+  // pose gallery and the lab all build this body without a uniform bank.
+  const wingOp = wingOpacity ?? float(1);
+  const sheenAmt = sheen ?? float(1);
+  const legW = legWeight ?? float(1);
 
   // ── Species weights: one-hot over the four palettes, from the `species` param or, for 'mixed', a roll of the seed ──
   const isMixed = lookIndex.lessThan(0.5);
@@ -301,7 +323,10 @@ export function buildFlyBody(TSL, { p, aa, pose, gait, seed01, lightLocal, tint,
   abdColour = mix(abdColour, inkCol, midline.mul(stripeW).mul(float(1).sub(checkerW)).mul(0.7));
   abdColour = mix(abdColour, inkCol, segLine.mul(float(0.3).add(stripeW.mul(0.15))));
   const abdSheen = plan.sheen
-    ? sheenCol.mul(abdShade.gloss.mul(0.55).add(abdShade.spec.mul(0.35))).mul(metalW)
+    ? sheenCol
+        .mul(abdShade.gloss.mul(0.55).add(abdShade.spec.mul(0.35)))
+        .mul(metalW)
+        .mul(sheenAmt)
     : vec3(0, 0, 0);
   const abdRgb = abdColour
     .mul(abdShade.shade)
@@ -311,7 +336,10 @@ export function buildFlyBody(TSL, { p, aa, pose, gait, seed01, lightLocal, tint,
   // thorax colour
   const thoColour = mix(thoraxBase, inkCol, thoStripes.mul(stripeW).mul(0.8));
   const thoSheen = plan.sheen
-    ? sheenCol.mul(thoShade.gloss.mul(0.5).add(thoShade.spec.mul(0.3))).mul(metalW)
+    ? sheenCol
+        .mul(thoShade.gloss.mul(0.5).add(thoShade.spec.mul(0.3)))
+        .mul(metalW)
+        .mul(sheenAmt)
     : vec3(0, 0, 0);
   const thoRgb = thoColour
     .mul(thoShade.shade)
@@ -324,7 +352,7 @@ export function buildFlyBody(TSL, { p, aa, pose, gait, seed01, lightLocal, tint,
     .mul(float(1).sub(headShade.rim.mul(0.4)));
 
   // eyes: red-brown, with a bright catch-light
-  const eyeBase = vec3(0.5, 0.085, 0.05);
+  const eyeBase = eyeColor ?? vec3(0.5, 0.085, 0.05);
   const eyeRgb = eyeBase
     .mul(eyeShade.shade)
     .mul(float(1).sub(eyeShade.rim.mul(0.5)))
@@ -401,8 +429,8 @@ export function buildFlyBody(TSL, { p, aa, pose, gait, seed01, lightLocal, tint,
 
       const dFemur = sdCapsule(TSL, p, hip, knee, float(0));
       const dTibia = sdCapsule(TSL, p, knee, foot, float(0));
-      const cov = max(stroke(TSL, dFemur, 0.017, aa), stroke(TSL, dTibia, 0.012, aa));
-      const pad = coverage(TSL, length(p.sub(foot)).sub(0.017), aa);
+      const cov = max(stroke(TSL, dFemur, legW.mul(0.017), aa), stroke(TSL, dTibia, legW.mul(0.012), aa));
+      const pad = coverage(TSL, length(p.sub(foot)).sub(legW.mul(0.017)), aa);
       legsAlpha = max(legsAlpha, max(cov, pad.mul(0.8)));
     }
     stack = over(TSL, layer(TSL, legColour, legsAlpha.mul(0.95)), stack);
@@ -453,11 +481,11 @@ export function buildFlyBody(TSL, { p, aa, pose, gait, seed01, lightLocal, tint,
   const wingColour = vec3(0.82, 0.86, 0.9);
   const wingInk = vec3(0.12, 0.12, 0.13);
   const wingLayer = (w) => {
-    const crispA = w.crisp.mul(0.34);
+    const crispA = w.crisp.mul(0.34).mul(wingOp);
     // A blurred wing can be no more opaque than the wing itself (crispA), so the fan stays at or under it.
-    const fanA = w.fan.mul(0.38);
+    const fanA = w.fan.mul(0.38).mul(wingOp);
     const alpha = mix(crispA, fanA, w.useFan);
-    const veinMix = w.veinAlpha.mul(w.crisp).mul(float(1).sub(w.useFan)).mul(0.55);
+    const veinMix = w.veinAlpha.mul(w.crisp).mul(float(1).sub(w.useFan)).mul(0.55).mul(wingOp);
     return layer(TSL, mix(wingColour, wingInk, veinMix), max(alpha, veinMix.mul(0.5)));
   };
   // The fly is symmetric: one wing evaluated on the folded-to-left half-plane IS both, unless banking
@@ -494,7 +522,7 @@ export function buildFlyBody(TSL, { p, aa, pose, gait, seed01, lightLocal, tint,
  *   (a node: it grows with the fly's height).
  * @returns {*} alpha 0..1 (multiply by shadow strength).
  */
-export function buildFlyShadow(TSL, { p, softness, pose, gait, seed01, plan, lookIndex }) {
+export function buildFlyShadow(TSL, { p, softness, pose, gait, seed01, plan, lookIndex, wingOpacity = null }) {
   const { vec2, vec3 } = TSL;
   const shadowPlan = { ...plan, legs: false, veins: false, groom: false, bank: false, sheen: false };
   const body = buildFlyBody(TSL, {
@@ -507,6 +535,7 @@ export function buildFlyShadow(TSL, { p, softness, pose, gait, seed01, plan, loo
     tint: vec3(1, 1, 1),
     plan: shadowPlan,
     lookIndex,
+    wingOpacity,
   });
   return body.alpha;
 }

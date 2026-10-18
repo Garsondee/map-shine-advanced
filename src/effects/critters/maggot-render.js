@@ -46,7 +46,7 @@ export function buildMaggotMaterials(
   }
 ) {
   const { Fn, float, vec2, vec3, vec4, positionGeometry, fwidth, max, sin, cos } = TSL;
-  const inst = buildInstance(TSL, { buffers, u, sizeParam: 'maggotSize', variationParam: 'sizeVariation' });
+  const inst = buildInstance(TSL, { buffers, u, sizeParam: 'size', variationParam: 'sizeVariation' });
   const hdg = inst.C.x;
   const rotate = (v, a) => vec2(v.x.mul(cos(a)).sub(v.y.mul(sin(a))), v.x.mul(sin(a)).add(v.y.mul(cos(a))));
   const corner = positionGeometry.xy;
@@ -55,8 +55,11 @@ export function buildMaggotMaterials(
   const rig = buildMaggotRig(TSL, {
     wave: inst.C.y,
     excite: inst.C.z,
-    wriggle: u('maggotWriggle'),
+    // the wriggle the brain integrates is the author's, driven harder by rain — the body shows the same one
+    wriggle: u('wriggle').mul(u('agitation')),
     seed01: inst.seed01,
+    waveCount: u('waveCount'),
+    girth: u('girth'),
   });
   const varyPoints = rig.points.map((pt, i) => Fn(() => pt)().toVarying(`vSpine${i}`));
   const vInfo = Fn(() => vec4(inst.seed01, inst.alpha, inst.L, 0))().toVarying('vInfo');
@@ -78,11 +81,21 @@ export function buildMaggotMaterials(
     aa,
     points: varyPoints,
     lightLocal: vLight,
-    colour: u('maggotColor'),
+    colour: u('color'),
     seed01: vInfo.x,
     plan,
+    gloss: u('gloss'),
+    segmentDepth: u('segmentDepth'),
+    gutLine: u('gutLine'),
+    contactShadow: u('contactShadow'),
   });
-  body.colorNode = litLinear(TSL, { rgb: look.rgb, lit: plan.lit, illumTexNode, colorationTexNode });
+  body.colorNode = litLinear(TSL, {
+    rgb: look.rgb,
+    lit: plan.lit,
+    illumTexNode,
+    colorationTexNode,
+    influence: u('lightInfluence'),
+  });
   const gate = occlusionGate(TSL, { depthTexNode, depthFlagsTexNode, expectedDepth: u('expectedDepth') });
   body.opacityNode = look.alpha.mul(vInfo.y).mul(gate);
 

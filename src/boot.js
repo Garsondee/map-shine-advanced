@@ -444,11 +444,22 @@ import {
   LIGHTNING_PARAMS,
   FIRE,
   FIRE_PARAMS,
-  // SMELLY FLIES (+ the maggots in their zone) and FIREFLIES — procedurally drawn GPU agents over a
-  // painted zone. Everything about their registration lives in `createCritterRegistration`, so
-  // this file makes ONE call for both rather than growing two more hand-typed blocks.
+  // SMELLY FLIES, MAGGOTS and FIREFLIES — procedurally drawn GPU agents over a painted zone, three
+  // effects with three separate masks. Everything about their registration lives in
+  // `createCritterRegistration`, so this file makes ONE call for all three rather than growing three
+  // more hand-typed blocks.
   SMELLY_FLIES_PARAMS,
+  SMELLY_FLIES_PRESETS,
+  SMELLY_FLIES_FOH,
+  smellyFliesPreset,
+  MAGGOTS_PARAMS,
+  MAGGOTS_PRESETS,
+  MAGGOTS_FOH,
+  maggotsPreset,
   FIREFLIES_PARAMS,
+  FIREFLIES_PRESETS,
+  FIREFLIES_FOH,
+  firefliesPreset,
   createCritterRegistration,
   extractFiresWithLabels,
   fireMaskSignature,
@@ -3032,10 +3043,11 @@ function install() {
     // exactly "silent, and invisible to a green test suite" from the note
     // above, because nothing exercises boot's own reapply wiring.
     ['fire', () => reapplyFire()],
-    // The critters register in ONE factory, so they enter this list as two lines — and are here for
+    // The critters register in ONE factory, so they enter this list as three lines — and are here for
     // the reason the header above gives: an effect left out of it sits at its pre-resolve seed
     // (`enabled: false`) on every real scene load until someone types a console command.
     ['smelly flies', () => critters.smellyFlies.reapply()],
+    ['maggots', () => critters.maggots.reapply()],
     ['fireflies', () => critters.fireflies.reapply()],
     ['vegetation', () => reapplyVegetation()],
     ['door graphics', () => reapplyDoors()],
@@ -5861,6 +5873,7 @@ function install() {
     window: windowLight.reapply,
     apertureGobo: apertureGobo.reapply,
     smellyFlies: critters.smellyFlies.reapply,
+    maggots: critters.maggots.reapply,
     fireflies: critters.fireflies.reapply,
   };
   function forceEffectEnabled(id, enabled) {
@@ -10323,19 +10336,40 @@ function install() {
     },
   });
 
-  // SMELLY FLIES — a swarm over a painted `_Flies` zone, with maggots wriggling in the same paint.
-  // The generic mask-derived paint button applies (the manifest declares `authoring.paint: 'flies'`).
+  // THE CRITTERS — three effects, three painted masks, three Studio sections. Each card is its own
+  // FOH strip (the few controls a GM reaches for live) over a categorised ROH (Advanced): Presence, Look,
+  // Detail, Motion, Ground, Depth, Twilight, Weather, Response — every category in the Studio's own
+  // vocabulary (`ui/widgets/param-groups.js#CATEGORY_ORDER`), so nothing is swept into "Technical".
+  // The generic mask-derived paint button applies to each (the manifests declare `authoring.paint`), and
+  // each opens the brush on its OWN mask.
+
+  // SMELLY FLIES — a swarm over a painted `_Flies` zone.
   registerSimpleEffectCard('smellyFlies', {
     icon: 'bug',
     title: 'Smelly flies',
     accVar: '--c-particles',
     filterCategory: 'particles',
     schema: SMELLY_FLIES_PARAMS,
-    fohKeys: ['fliesPerZone', 'maggotsPerZone', 'size', 'buzz', 'nightActivity', 'species'],
+    fohKeys: SMELLY_FLIES_FOH,
+    presets: { table: SMELLY_FLIES_PRESETS, pick: smellyFliesPreset },
     getReadout: () => critters.smellyFlies.getReadout(),
     setValue: (patch) => MapShine.setSmellyFlies(patch),
     status: (readout) =>
       !readout.enabled ? 'off' : critters.smellyFlies.hasPaint() ? 'swarming' : 'nothing painted yet',
+  });
+
+  // MAGGOTS — a writhing mass over a painted `_Maggots` zone, independent of the flies.
+  registerSimpleEffectCard('maggots', {
+    icon: 'bug',
+    title: 'Maggots',
+    accVar: '--c-particles',
+    filterCategory: 'particles',
+    schema: MAGGOTS_PARAMS,
+    fohKeys: MAGGOTS_FOH,
+    presets: { table: MAGGOTS_PRESETS, pick: maggotsPreset },
+    getReadout: () => critters.maggots.getReadout(),
+    setValue: (patch) => MapShine.setMaggots(patch),
+    status: (readout) => (!readout.enabled ? 'off' : critters.maggots.hasPaint() ? 'writhing' : 'nothing painted yet'),
   });
 
   // FIREFLIES — a colony over a painted `_Fireflies` zone, out in the twilight window.
@@ -10345,7 +10379,8 @@ function install() {
     accVar: '--c-particles',
     filterCategory: 'particles',
     schema: FIREFLIES_PARAMS,
-    fohKeys: ['countPerZone', 'intensity', 'flashStyle', 'synchrony', 'alwaysActive', 'color'],
+    fohKeys: FIREFLIES_FOH,
+    presets: { table: FIREFLIES_PRESETS, pick: firefliesPreset },
     getReadout: () => critters.fireflies.getReadout(),
     setValue: (patch) => MapShine.setFireflies(patch),
     status: (readout) =>
@@ -11071,9 +11106,10 @@ function install() {
   // it in that file, not a direct call from here.
   MapShine.setApertureGobo = apertureGobo.setApertureGobo;
   // SMELLY FLIES / FIREFLIES — the console tuners AND the cards' write path, e.g.
-  //   MapShine.setSmellyFlies({ fliesPerZone: 24, maggotsPerZone: 40 })
+  //   MapShine.setSmellyFlies({ fliesPerZone: 24, windResponse: 0.4 })
   //   MapShine.setFireflies({ alwaysActive: true, flashStyle: 'blink' })
   MapShine.setSmellyFlies = critters.smellyFlies.set;
+  MapShine.setMaggots = critters.maggots.set;
   MapShine.setFireflies = critters.fireflies.set;
   /** `MapShine.setApertureGoboDebug(true)` — the OLD console twin, kept working
    * (maps to the `'pattern'` channel) alongside the picker below. */
@@ -14267,6 +14303,7 @@ function install() {
         // ⚠️ Passed, not merely declared (see the fire note just above), and `createCritterSubsystem`
         // throws on a missing one for the same reason.
         getSmellyFliesRenderState: critters.smellyFlies.getRenderState,
+        getMaggotsRenderState: critters.maggots.getRenderState,
         getFirefliesRenderState: critters.fireflies.getRenderState,
         // DOOR GRAPHICS (effects/door-graphics-render.js): each frame the viewer
         // reconciles + animates the door leaves, reading the cascade-resolved

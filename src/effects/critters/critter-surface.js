@@ -32,14 +32,18 @@ import { buildDepthHeightGateNode } from '../lighting/point-light-illumination.j
  * @param {*} a.rgb - vec3, straight sRGB albedo.
  * @param {boolean} a.lit - the tier flag; false (or no illumination) is unlit.
  * @param {*} [a.illumTexNode] @param {*} [a.colorationTexNode] - texture nodes sampled at the screen UV.
+ * @param {*} [a.influence] - float node 0..1, the author's "lit by the scene": 1 is the scene's own
+ *   light on the body, 0 is the unlit albedo at full brightness. It only has anything to blend at a rung
+ *   that lights the body at all (`lit`); below that every body is unlit and there is nothing to dial.
  * @returns {*} vec3 linear.
  */
-export function litLinear(TSL, { rgb, lit, illumTexNode = null, colorationTexNode = null }) {
-  const { vec3, screenUV, sRGBTransferEOTF } = TSL;
+export function litLinear(TSL, { rgb, lit, illumTexNode = null, colorationTexNode = null, influence = null }) {
+  const { vec3, screenUV, sRGBTransferEOTF, mix } = TSL;
   if (lit && illumTexNode) {
     const illum = illumTexNode.sample(screenUV).rgb;
     const coloration = colorationTexNode ? colorationTexNode.sample(screenUV).rgb : vec3(0, 0, 0);
-    return sRGBTransferEOTF(rgb.mul(illum).add(coloration));
+    const lighted = rgb.mul(illum).add(coloration);
+    return sRGBTransferEOTF(influence ? mix(rgb, lighted, influence) : lighted);
   }
   return sRGBTransferEOTF(rgb);
 }

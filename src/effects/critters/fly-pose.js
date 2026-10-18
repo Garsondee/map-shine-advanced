@@ -60,12 +60,22 @@ export const WALK_MOVE_FRAC = 0.7;
  * @param {*} a.turnRate - signed yaw rate in rad/s (for banking and in-place stepping).
  * @param {*} a.groomChance - 0..1, how often an idle spell is spent grooming.
  * @param {*} a.wingBlurAmt - 0..1 (the `wingBlur` param).
+ * @param {*} [a.wingSpread] - float node, a multiplier on the flight wing angle and beat (1 = as drawn).
+ * @param {*} [a.bankAmount] - float node, a multiplier on how far a fly leans into a turn (1 = as drawn).
  * @returns {{wingMean:*, wingAmp:*, wingBlur:*, wingPhase:*, stride:*, turnDir:*,
  *   tuck:*, reach:*, groom:*, groomPhase:*, bank:*}} nodes.
  */
-export function buildFlyPose(TSL, { ordinal, frac, timeSec, seed01, turnRate, groomChance, wingBlurAmt }) {
+export function buildFlyPose(
+  TSL,
+  { ordinal, frac, timeSec, seed01, turnRate, groomChance, wingBlurAmt, wingSpread = null, bankAmount = null }
+) {
   const { float, smoothstep, mix, sin, select, abs, clamp, fract, floor, sign, max } = TSL;
   const PI = Math.PI;
+  // The flight wing angle and beat, scaled by the author's spread. Landing STARTS from these and take-off ENDS
+  // on them, so a change of spread cannot pop at the hand-over between flying and the other two.
+  const spread = wingSpread ?? float(1);
+  const flightMean = float(WING_FLIGHT).mul(spread);
+  const flightAmp = float(WING_BEAT_AMP).mul(spread);
   const k = (a, b, x) => smoothstep(float(a), float(b), x);
 
   const isFly = ordinal.lessThan(0.5);
@@ -81,16 +91,14 @@ export function buildFlyPose(TSL, { ordinal, frac, timeSec, seed01, turnRate, gr
 
   // ── FLY ──
   const wobble = sin(timeSec.mul(3.1).add(seed01.mul(40)));
-  const flyMean = float(WING_FLIGHT)
-    .add(wobble.mul(0.07))
-    .sub(clamp(abs(turnRate).mul(0.04), 0, 0.12));
+  const flyMean = flightMean.add(wobble.mul(0.07)).sub(clamp(abs(turnRate).mul(0.04), 0, 0.12));
   const flyPhase = timeSec.mul(7).add(seed01.mul(2 * PI));
 
   // ── LAND (frac = progress) ──
   const pL = frac;
-  const landMean = mix(mix(float(WING_FLIGHT), float(1.25), k(0, 0.55, pL)), float(WING_FLARE), k(0.5, 0.78, pL));
+  const landMean = mix(mix(flightMean, float(1.25), k(0, 0.55, pL)), float(WING_FLARE), k(0.5, 0.78, pL));
   const landMeanFolded = mix(landMean, float(WING_FOLDED), k(0.82, 1.0, pL));
-  const landAmp = mix(float(WING_BEAT_AMP), float(0.3), k(0.2, 0.6, pL)).mul(float(1).sub(k(0.8, 0.98, pL)));
+  const landAmp = mix(flightAmp, float(0.3), k(0.2, 0.6, pL)).mul(float(1).sub(k(0.8, 0.98, pL)));
   const landBlur = float(1).sub(k(0.45, 0.85, pL));
   const landPhase = pL.mul(float(2 * PI * 9)).mul(float(1).sub(pL.mul(0.5)));
   const landTuck = float(1).sub(k(0.3, 0.7, pL));
@@ -98,8 +106,8 @@ export function buildFlyPose(TSL, { ordinal, frac, timeSec, seed01, turnRate, gr
 
   // ── TAKE-OFF (frac = progress) ──
   const pT = frac;
-  const takeMean = mix(mix(float(WING_FOLDED), float(WING_SPREAD), k(0, 0.2, pT)), float(WING_FLIGHT), k(0.3, 0.7, pT));
-  const takeAmp = k(0.05, 0.4, pT).mul(WING_BEAT_AMP * 0.9);
+  const takeMean = mix(mix(float(WING_FOLDED), float(WING_SPREAD), k(0, 0.2, pT)), flightMean, k(0.3, 0.7, pT));
+  const takeAmp = k(0.05, 0.4, pT).mul(flightAmp).mul(0.9);
   const takeBlur = k(0.12, 0.55, pT);
   const takePhase = pT.mul(float(2 * PI * 14));
   const takeTuck = k(0.35, 0.85, pT);
@@ -120,7 +128,7 @@ export function buildFlyPose(TSL, { ordinal, frac, timeSec, seed01, turnRate, gr
   const pick = (fly, land, walk, take) => select(isFly, fly, select(isLand, land, select(isWalk, walk, take)));
 
   const wingMean = pick(flyMean, landMeanFolded, float(WING_FOLDED), takeMean);
-  const wingAmp = pick(float(WING_BEAT_AMP), landAmp, float(0), takeAmp);
+  const wingAmp = pick(flightAmp, landAmp, float(0), takeAmp);
   const blur = pick(float(1), landBlur, float(0), takeBlur).mul(wingBlurAmt);
   const wingPhase = pick(flyPhase, landPhase, float(0), takePhase);
 
@@ -129,7 +137,7 @@ export function buildFlyPose(TSL, { ordinal, frac, timeSec, seed01, turnRate, gr
   const turnDir = select(isTurn, sign(turnRate), float(0));
   const tuck = pick(float(1), landTuck, float(0), takeTuck);
   const reach = pick(float(0), landReach, float(0), takeReach);
-  const bank = select(isFly, clamp(turnRate.mul(0.25), -1, 1), float(0));
+  const bank = select(isFly, clamp(turnRate.mul(0.25), -1, 1), float(0)).mul(bankAmount ?? float(1));
 
   // A touch of life while standing: a slow wing-twitch the eye reads as breathing.
   const idleTwitch = select(

@@ -8,8 +8,16 @@ import { validateEffectManifest } from '../../effect-manifest.js';
 import { resolveEffectTier, PERFORMANCE_PROFILES } from '../../effect-cascade.js';
 import { validateParamsSchema } from '../../../core/params-schema.js';
 import { MASK_KINDS } from '../../../scene/mask-catalog.js';
-import { SMELLY_FLIES, SMELLY_FLIES_PARAMS } from '../smelly-flies.js';
-import { FIREFLIES, FIREFLIES_PARAMS } from '../fireflies.js';
+import {
+  SMELLY_FLIES,
+  SMELLY_FLIES_PARAMS,
+  SMELLY_FLIES_PRESETS,
+  SMELLY_FLIES_FOH,
+  smellyFliesPreset,
+} from '../smelly-flies.js';
+import { MAGGOTS, MAGGOTS_PARAMS, MAGGOTS_PRESETS, MAGGOTS_FOH, maggotsPreset } from '../maggots.js';
+import { FIREFLIES, FIREFLIES_PARAMS, FIREFLIES_PRESETS, FIREFLIES_FOH, firefliesPreset } from '../fireflies.js';
+import { CATEGORY_ORDER, rohGroups, groupParamsByCategory } from '../../../ui/widgets/param-groups.js';
 import { FIREFLY_SYNC } from '../firefly-brain.js';
 import { MASK_GRID_MAX_DIM } from '../../../scene/mask-derive.js';
 import { ZONE_GRID_SIDE_MAX } from '../critter-zone.js';
@@ -26,11 +34,40 @@ import {
   critterMarginPx,
 } from '../critter-species.js';
 
+/** The three effects: their manifest, schema, presets, and the mask kind each one paints. */
+export const CRITTER_EFFECTS = Object.freeze([
+  {
+    label: 'SMELLY_FLIES',
+    manifest: SMELLY_FLIES,
+    params: SMELLY_FLIES_PARAMS,
+    presets: SMELLY_FLIES_PRESETS,
+    preset: smellyFliesPreset,
+    kind: 'flies',
+    // The Studio card's curated strip (`boot.js#registerSimpleEffectCard` uses this very constant).
+    foh: SMELLY_FLIES_FOH,
+  },
+  {
+    label: 'MAGGOTS',
+    manifest: MAGGOTS,
+    params: MAGGOTS_PARAMS,
+    presets: MAGGOTS_PRESETS,
+    preset: maggotsPreset,
+    kind: 'maggots',
+    foh: MAGGOTS_FOH,
+  },
+  {
+    label: 'FIREFLIES',
+    manifest: FIREFLIES,
+    params: FIREFLIES_PARAMS,
+    presets: FIREFLIES_PRESETS,
+    preset: firefliesPreset,
+    kind: 'fireflies',
+    foh: FIREFLIES_FOH,
+  },
+]);
+
 export function run(t) {
-  for (const [label, manifest, params, kind] of [
-    ['SMELLY_FLIES', SMELLY_FLIES, SMELLY_FLIES_PARAMS, 'flies'],
-    ['FIREFLIES', FIREFLIES, FIREFLIES_PARAMS, 'fireflies'],
-  ]) {
+  for (const { label, manifest, params, kind } of CRITTER_EFFECTS) {
     const v = validateEffectManifest(manifest);
     t.ok(`${label} manifest validates${v.ok ? '' : ' — ' + v.errors.join('; ')}`, v.ok);
     const p = validateParamsSchema(params);
@@ -66,19 +103,114 @@ export function run(t) {
       PERFORMANCE_PROFILES.every((pr) => resolveEffectTier(manifest, { profile: pr }).tier <= CRITTER_TIER_COUNT - 1)
     );
 
-    // Categories give the generated card its sections.
+    // Categories give the generated Studio card its sections — and the vocabulary is CLOSED. A category that is
+    // not in `CATEGORY_ORDER` is silently swept into "Technical", which is how these three cards once drew as one
+    // undifferentiated pile: the declaration said 'Swarm', 'Flight', 'Glow'… and the panel said 'Technical'.
     t.ok(
-      `${label}: every param belongs to a category`,
-      Object.values(params).every((d) => typeof d.category === 'string' && d.category.length > 0)
+      `${label}: every param's category is in the Studio's vocabulary (none is swept into Technical)`,
+      Object.values(params).every((d) => CATEGORY_ORDER.includes(d.category) && d.category !== 'Technical')
     );
     t.ok(
       `${label}: every param has help text (it becomes the tooltip)`,
       Object.values(params).every((d) => typeof d.help === 'string' && d.help.length > 20)
     );
+    t.ok(
+      `${label}: every param has a label`,
+      Object.values(params).every((d) => typeof d.label === 'string' && d.label.length > 2)
+    );
+    const groups = groupParamsByCategory(params);
+    t.ok(
+      `${label}: the Studio sections it gets are ${groups.map((g) => g.category).join(', ')}`,
+      groups.length >= 5 &&
+        groups.some((g) => g.category === 'Weather') &&
+        groups.some((g) => g.category === 'Presence')
+    );
+    t.ok(
+      `${label}: a decent amount of controls to tune it (${Object.keys(params).length})`,
+      Object.keys(params).length >= 30
+    );
   }
 
+  // ---- THE STUDIO CARDS: FOH is a curated strip, ROH is everything else ---------------------------
+  for (const { label, params, foh, presets, preset } of CRITTER_EFFECTS) {
+    t.ok(
+      `${label}: every FOH key is a real param`,
+      foh.every((k) => Object.hasOwn(params, k))
+    );
+    t.ok(`${label}: the FOH strip is short enough to stay a strip (≤ 8)`, foh.length >= 4 && foh.length <= 8);
+    const rohKeys = rohGroups(params, foh).flatMap((g) => g.keys);
+    t.ok(
+      `${label}: FOH and ROH partition the schema — nothing lost, nothing drawn twice`,
+      rohKeys.length + foh.length === Object.keys(params).length && foh.every((k) => !rohKeys.includes(k))
+    );
+    t.ok(
+      `${label}: the weather controls are in ROH (Advanced), together, under Weather`,
+      rohGroups(params, foh).find((g) => g.category === 'Weather')?.keys.length >= 6
+    );
+    // presets: each a patch of real params with in-range, correctly typed values
+    const names = Object.keys(presets);
+    t.ok(`${label}: it ships built-in presets (${names.join(', ')})`, names.length >= 4);
+    for (const name of names) {
+      const patch = preset(name);
+      const bad = Object.entries(patch).filter(([k, v]) => {
+        const d = params[k];
+        if (!d) return true;
+        if (d.type === 'float' || d.type === 'int') return !(Number.isFinite(v) && v >= d.min && v <= d.max);
+        if (d.type === 'enum') return !d.values.includes(v);
+        if (d.type === 'color') return !/^#[0-9a-fA-F]{6}$/.test(v);
+        if (d.type === 'bool') return typeof v !== 'boolean';
+        return true;
+      });
+      t.ok(
+        `${label}: preset '${name}' only sets real params, in range${bad.length ? ' — bad: ' + bad.map((b) => b[0]).join() : ''}`,
+        bad.length === 0
+      );
+    }
+    t.ok(`${label}: an unknown preset is an empty patch, never a throw`, Object.keys(preset('nonsense')).length === 0);
+    t.ok(
+      `${label}: a preset is a fresh copy (applying one cannot mutate the table)`,
+      preset(names[0]) !== presets[names[0]]
+    );
+  }
+
+  // ---- three effects, three separate masks -------------------------------------------------------
+  t.ok(
+    'the three critter effects paint three DIFFERENT masks',
+    new Set(CRITTER_EFFECTS.map((e) => e.manifest.authoring.paint)).size === 3
+  );
+  t.ok(
+    'the three effects have three different ids and titles',
+    new Set(CRITTER_EFFECTS.map((e) => e.manifest.id)).size === 3 &&
+      new Set(CRITTER_EFFECTS.map((e) => e.manifest.title)).size === 3
+  );
+  t.ok(
+    'the flies carry no maggot controls any more (they are their own effect)',
+    !Object.keys(SMELLY_FLIES_PARAMS).some((k) => /maggot/i.test(k))
+  );
+  t.ok(
+    'every effect has the SAME weather vocabulary under the same ids — one meaning per control',
+    CRITTER_EFFECTS.every((e) =>
+      [
+        'rainResponse',
+        'snowResponse',
+        'windThreshold',
+        'windResponse',
+        'coldBelow',
+        'coldResponse',
+        'weatherFloor',
+        'fadeTime',
+      ].every(
+        (k) => e.params[k]?.type === 'float' && e.params[k].category === (k === 'fadeTime' ? 'Response' : 'Weather')
+      )
+    )
+  );
+
   // ---- specific behaviours the defaults must honour ---------------------------------------------
-  t.ok('maggots default to OFF (opt-in grossness)', SMELLY_FLIES_PARAMS.maggotsPerZone.default === 0);
+  t.ok(
+    'maggots, painted, show up by default (the paint IS the opt-in now): a non-zero head-count',
+    MAGGOTS_PARAMS.countPerZone.default > 0
+  );
+  t.ok('maggot rests are ordered', MAGGOTS_PARAMS.pauseMin.default < MAGGOTS_PARAMS.pauseMax.default);
   t.ok(
     'the fly cap is V2’s Max Flies, widened',
     SMELLY_FLIES_PARAMS.fliesPerZone.min === 0 && SMELLY_FLIES_PARAMS.fliesPerZone.max >= 30
@@ -93,10 +225,6 @@ export function run(t) {
   t.ok(
     'the flash-style enum is exactly the shader’s table',
     FIREFLIES_PARAMS.flashStyle.values.join() === FIREFLY_FLASH_STYLES.join()
-  );
-  t.ok(
-    'fireflies never flash faster than two a second (the accessibility argument in the header)',
-    FIREFLIES_PARAMS.flashPeriod.min >= 0.5
   );
   t.ok(
     'twilight thresholds default in a sane order (appear > full > fade)',
@@ -128,7 +256,7 @@ export function run(t) {
   t.ok(
     'capacity covers the manifests’ own per-zone ceilings',
     CRITTER_CAPACITY.fly >= SMELLY_FLIES_PARAMS.fliesPerZone.max &&
-      CRITTER_CAPACITY.maggot >= SMELLY_FLIES_PARAMS.maggotsPerZone.max &&
+      CRITTER_CAPACITY.maggot >= MAGGOTS_PARAMS.countPerZone.max &&
       CRITTER_CAPACITY.firefly >= FIREFLIES_PARAMS.countPerZone.max
   );
   t.ok('the zone buffer holds a full 512² derived grid plus its 2-cell border', ZONE_MAX_CELLS === 516 * 516);

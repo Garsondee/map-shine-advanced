@@ -13,13 +13,17 @@
  * whole zone popping on.
  *
  * ============================================================================
- * FLIES — diurnal, and driven off by weather (V2 parity)
+ * FLIES — diurnal, and driven off by weather (V2 parity, with more dials)
  * ============================================================================
  *
  * V2 thinned its swarm with `max(0.1, 1 − (precip·0.5 + wind·0.3))` and nothing
- * else — flies buzzed at midnight. Here the same weather term is kept (blended by
- * `weatherResponse` so a GM can turn it off) and a daylight term is added:
- * `nightActivity` is the fraction of the swarm that stays out after dark.
+ * else — flies buzzed at midnight. Here the weather is `critter-weather.js#weatherFactor`
+ * (rain, snow, wind above a threshold, and cold, each with its own response — V2's
+ * single rule is the special case) and a daylight term is added: `nightActivity` is
+ * the fraction of the swarm that stays out after dark.
+ *
+ * MAGGOTS have no sky at all but the weather: they live IN the thing, so only what
+ * weather does to them (rain drives them under, a cold snap stills them) thins them.
  *
  * ============================================================================
  * FIREFLIES — a window in SUN ELEVATION, not in clock hours
@@ -42,6 +46,8 @@
  *
  * @module effects/critters/critter-activity
  */
+
+import { skyFeel, weatherFactor } from './critter-weather.js';
 
 /** @param {number} x @returns {number} */
 function clamp01(x) {
@@ -84,35 +90,30 @@ export function twilightEdges(appear, full, fadeBy) {
 }
 
 /**
- * V2's weather term, `max(0.1, 1 − (precip·0.5 + wind·0.3))`, blended by how much
- * the GM wants weather to matter. `response = 0` is "weather never matters".
- *
- * @param {{weather?: {precip01?: number}, wind?: {speed01?: number}}|null} env
- * @param {number} response - 0..1
- * @returns {number} 0.1..1
- */
-export function weatherCalm(env, response) {
-  const precip = clamp01(env?.weather?.precip01);
-  const wind = clamp01(env?.wind?.speed01);
-  const v2 = Math.max(0.1, 1 - (precip * 0.5 + wind * 0.3));
-  const r = clamp01(response);
-  return 1 + (v2 - 1) * r;
-}
-
-/**
  * How active the FLY swarm is: daylight × weather.
  *
  * @param {object|null} env - the frame's env snapshot (`world/environment.js`).
- * @param {{nightActivity?: number, weatherResponse?: number}} params
+ * @param {object} [params] - the effect's params: `nightActivity` and the weather responses
+ *   (`critter-weather.js#weatherFactor`).
  * @returns {number} 0..1
  */
-export function flyActivity(env, { nightActivity = 0.1, weatherResponse = 1 } = {}) {
+export function flyActivity(env, params = {}) {
   // No snapshot yet (the very first frame) reads as an ordinary day: a swarm that
   // is briefly too visible is a better failure than one that is briefly missing.
   const day = Number.isFinite(env?.sun?.dayFactor01) ? clamp01(env.sun.dayFactor01) : 1;
-  const night = clamp01(nightActivity);
+  const night = clamp01(params.nightActivity ?? 0.1);
   const daylight = night + (1 - night) * day;
-  return clamp01(daylight * weatherCalm(env, weatherResponse));
+  return clamp01(daylight * weatherFactor(skyFeel(env), params));
+}
+
+/**
+ * How active the MAGGOT population is: the weather and nothing else (day and night are the same to a maggot).
+ *
+ * @param {object|null} env @param {object} [params] - the weather responses.
+ * @returns {number} 0..1
+ */
+export function maggotActivity(env, params = {}) {
+  return clamp01(weatherFactor(skyFeel(env), params));
 }
 
 /**
@@ -127,7 +128,8 @@ export function flyActivity(env, { nightActivity = 0.1, weatherResponse = 1 } = 
  * @param {number} [params.fullBelowDeg=-6] - …and at or below this the population is complete.
  * @param {number} [params.fadeByDeg=-20] - below this, only the stragglers remain.
  * @param {number} [params.nightResidual=0.2] - fraction that stays out through the dark.
- * @param {number} [params.weatherResponse=1] - 0..1: rain and wind thin the colony out.
+ * @param {object} [params.weather] - everything else in `params` is read as the weather responses
+ *   (`critter-weather.js#weatherFactor`): rain, snow, wind, cold and the floor.
  * @returns {number} 0..1
  */
 export function fireflyActivity(
@@ -140,10 +142,10 @@ export function fireflyActivity(
     fullBelowDeg = -6,
     fadeByDeg = -20,
     nightResidual = 0.2,
-    weatherResponse = 1,
+    ...weather
   } = {}
 ) {
-  const calm = fireflyWeather(env, weatherResponse);
+  const calm = weatherFactor(skyFeel(env), weather);
   if (alwaysActive) return calm;
   const elevation = env?.sun?.elevationDeg;
   if (!Number.isFinite(elevation)) return 0;
@@ -160,22 +162,6 @@ export function fireflyActivity(
   const decay = smoothFall(edges.mid, edges.low, elevation); // 0 on the plateau, 1 once faded
   const residual = clamp01(nightResidual);
   return clamp01(ramp * (1 - (1 - residual) * decay) * calm);
-}
-
-/**
- * Rain clears fireflies from the air completely; wind thins them. Unlike the fly term this has
- * no 10% floor — a downpour with glowing insects hovering in it reads as a bug. (The colony fades
- * out as a head-count; nothing lands, which is a per-insect decision the population law does not make.)
- *
- * @param {object|null} env @param {number} response 0..1
- * @returns {number} 0..1
- */
-export function fireflyWeather(env, response) {
-  const r = clamp01(response);
-  const precip = clamp01(env?.weather?.precip01);
-  const wind = clamp01(env?.wind?.speed01);
-  const factor = clamp01(1 - precip * 1.0) * clamp01(1 - wind * 0.6);
-  return 1 + (factor - 1) * r;
 }
 
 /**

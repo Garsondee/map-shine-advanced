@@ -288,8 +288,11 @@ BOTH openness and the exterior flag at 0 — leaving the flag at 1 keeps ordinar
 A standalone page (not a bench on the shared `index.html`): `/tools/shader-lab/critter-lab.html`.
 It imports the REAL `createCritterSubsystem` + `createCritterEngine` and runs them over a ground, a sky
 and a zone you **paint with the mouse** (shift erases). The Paint selector picks which zone you are
-painting (flies' or fireflies'); the Sky sliders drive the same env snapshot the game feeds them, so
-sliding the sun below the horizon hatches the fireflies and the rain clears them.
+painting (flies', maggots' or fireflies' — three effects, three masks); the Sky sliders (sun, rain, snow,
+wind, gustiness, wind direction, temperature) drive the same env snapshot the game feeds them, so sliding the
+sun below the horizon hatches the fireflies, and rain, snow, a gale or a freeze each thin and move the three
+populations in their own way. The effect panels are GENERATED from the schemas, so a control the effect has is a
+control the lab has.
 
 Driving it from a script (`window.critterLab`), headless:
 
@@ -305,7 +308,8 @@ Driving it from a script (`window.critterLab`), headless:
 
 ```js
 await lab.advance(8, 30)                                  // 8 s of sim at 30 Hz, throttled to the GPU
-lab.setParam('smellyFlies', { maggotsPerZone: 40 })
+lab.setParam('maggots', { countPerZone: 40 })        // groups: smellyFlies · maggots · fireflies
+lab.setSky({ wind01: 1, gust01: 0.3, precipKind: 'snow', precip01: 0.7, temperature01: 0.1 })
 lab.setSky({ elevationDeg: -12 }); lab.setGround('night', 0.15)
 await lab.advance(10, 30)
 const { dataUrl } = await lab.capture('dusk')             // 1280×720 PNG data URL (no bloom — see below)

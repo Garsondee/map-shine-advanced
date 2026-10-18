@@ -55,6 +55,7 @@ import {
 } from '../perf-zones.js';
 import { FIRE } from '../../effects/fire/fire.js';
 import { SMELLY_FLIES } from '../../effects/critters/smelly-flies.js';
+import { MAGGOTS } from '../../effects/critters/maggots.js';
 import { FIREFLIES } from '../../effects/critters/fireflies.js';
 
 const MANIFESTS = [
@@ -103,8 +104,9 @@ const MANIFESTS = [
   // identical reason.
   IRIDESCENCE,
   // The critters each own two zones (light.<effect>Sync + light.draw<Effect>) — listed so
-  // `EFFECT_ZONING.smellyFlies/fireflies` validate against real, registered effect ids.
+  // `EFFECT_ZONING.smellyFlies/maggots/fireflies` validate against real, registered effect ids.
   SMELLY_FLIES,
+  MAGGOTS,
   FIREFLIES,
 ];
 

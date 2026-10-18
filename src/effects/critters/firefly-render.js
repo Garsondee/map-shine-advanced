@@ -72,6 +72,8 @@ export function buildFireflyMaterials(
     length,
     clamp,
     select,
+    dot,
+    cross,
     sRGBTransferEOTF,
   } = TSL;
   const inst = buildInstance(TSL, { buffers, u, sizeParam: 'size', variationParam: 'sizeVariation' });
@@ -95,7 +97,8 @@ export function buildFireflyMaterials(
   );
 
   // perspective: bigger and displaced outward with height (fire's law)
-  const camH = u('camHeight');
+  // the author's `perspective` strengthens or weakens the law (a farther or nearer camera); floored so 0 stays finite
+  const camH = u('camHeight').div(max(u('perspective'), 0.05));
   const persp = camH.div(camH.sub(min(height, camH.mul(0.6))));
   const centre = u('camCentre');
   const bodyCentre = centre.add(inst.P.sub(centre).mul(persp));
@@ -103,7 +106,9 @@ export function buildFireflyMaterials(
   // the flash now; a resting firefly glows low and steady, like a female waiting for a signal
   const flashStyle = u('flashStyleIndex');
   const flashAir = buildFlash(TSL, { phase: fph, styleIndex: flashStyle });
-  const restGlow = float(0.3).add(sin(u('timeSec').mul(TAU_REST).add(inst.seed01.mul(6.28))).mul(0.1));
+  const restGlow = u('restGlow').mul(
+    float(1).add(sin(u('timeSec').mul(TAU_REST).add(inst.seed01.mul(6.28))).mul(0.33))
+  );
   const flash = flashAir.add(restGlow.sub(flashAir).mul(restAmt));
 
   const sizePx = inst.L.mul(persp);
@@ -113,15 +118,28 @@ export function buildFireflyMaterials(
     float(0.5),
     u('flashPeriod').mul(float(FIREFLY_SYNC.PERIOD_MIN).add(inst.seed01.mul(FIREFLY_SYNC.PERIOD_SPAN)))
   );
-  const trailLen = plan.trail ? length(inst.V).mul(TRAIL_SECONDS).mul(persp) : float(0);
+  const trailSeconds = float(TRAIL_SECONDS).mul(u('afterglow'));
+  const trailLen = plan.trail ? length(inst.V).mul(trailSeconds).mul(persp) : float(0);
   const worldLight = vec2(WORLD_LIGHT[0], WORLD_LIGHT[1]).normalize();
 
   const vInfo = Fn(() => vec4(inst.alpha, flash, float(1).sub(restAmt), sizePx))().toVarying('vInfo');
-  const vFlashA = Fn(() => vec4(fph, flashStyle, float(TRAIL_SECONDS).div(period), trailLen))().toVarying('vFlashA');
+  const vFlashA = Fn(() => vec4(fph, flashStyle, trailSeconds.div(period), trailLen))().toVarying('vFlashA');
   const vLight = Fn(() => rotate(worldLight, hdg.negate()))().toVarying('vLight');
   const live = inst.alpha.greaterThan(0.002).select(float(1), float(0));
   const gate = occlusionGate(TSL, { depthTexNode, depthFlagsTexNode, expectedDepth: u('expectedDepth') });
-  const glowColor = u('color');
+  // Each firefly's own colour: the author's glow colour with its hue rotated by a per-insect amount about the grey
+  // axis (Rodrigues), so a colony mixes yellow-green and blue-green individuals. `colorVariation` 0 is one hue.
+  const hueAngle = inst.seed01.sub(0.5).mul(2).mul(u('colorVariation')).mul(0.9);
+  const axis = vec3(0.57735, 0.57735, 0.57735);
+  const vGlowColor = Fn(() => {
+    const c = u('color');
+    const rotated = c
+      .mul(cos(hueAngle))
+      .add(cross(axis, c).mul(sin(hueAngle)))
+      .add(axis.mul(dot(axis, c)).mul(float(1).sub(cos(hueAngle))));
+    return max(rotated, vec3(0, 0, 0));
+  })().toVarying('vGlowColor');
+  const glowColor = vGlowColor;
 
   // ── BODY ──
   let body = null;
@@ -142,7 +160,13 @@ export function buildFireflyMaterials(
       lightLocal: vLight,
       plan,
     });
-    const lit = litLinear(TSL, { rgb: look.rgb, lit: plan.lit, illumTexNode, colorationTexNode });
+    const lit = litLinear(TSL, {
+      rgb: look.rgb,
+      lit: plan.lit,
+      illumTexNode,
+      colorationTexNode,
+      influence: u('lightInfluence'),
+    });
     // the lantern's own light is added AFTER lighting: it is not reflected, it is made
     body.colorNode = lit.add(sRGBTransferEOTF(glowColor).mul(look.emissive).mul(float(1.2)));
     body.opacityNode = look.alpha.mul(u('bodyVisibility')).mul(vInfo.x).mul(gate);
@@ -168,6 +192,9 @@ export function buildFireflyMaterials(
     color: sRGBTransferEOTF(glowColor),
     intensity: u('intensity'),
     plan,
+    coreSize: u('coreSize'),
+    haloAmount: u('haloAmount'),
+    afterglow: u('afterglow'),
     trail: plan.trail ? { length: vFlashA.w, phase: vFlashA.x, dPhase: vFlashA.z, styleIndex: vFlashA.y } : null,
   });
   glow.colorNode = radiance;

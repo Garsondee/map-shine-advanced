@@ -36,14 +36,12 @@ const TAU = Math.PI * 2;
 const PH_WRITHE = 0;
 const PH_CRAWL = 1;
 
-/** A crawl covers this many body lengths (min, max). */
+/** A crawl covers this many body lengths (min, max), before the author's `crawlLength`. */
 const CRAWL_LENGTHS = [0.7, 2.0];
-/** Crawl speed in body lengths per second, before the author's multiplier. */
+/** Crawl speed in body lengths per second, before the author's `crawlSpeed`. */
 const CRAWL_SPEED_LENGTHS = [0.5, 1.0];
-/** Writhing pauses, seconds. */
-const WRITHE_PAUSE = [0.9, 3.6];
-/** Chance a finished writhe is followed by a crawl rather than another writhe. */
-const CRAWL_CHANCE = 0.55;
+// The writhing pauses are `pauseMin`..`pauseMax` seconds and the chance a finished writhe is followed by a
+// crawl is `crawlChance` — author controls now, with the values this file once hard-coded as their defaults.
 
 /**
  * The wave phase is an accumulator, and an accumulator that only grows loses its fraction: at nine radians
@@ -83,7 +81,10 @@ export function buildMaggotBrain(TSL, { u, zone }) {
     const isCrawl = floor(s.PH).greaterThan(0.5);
     const dist = s.zs.distance;
     const gradAng = safeAtan2(TSL, s.zs.grad.y, s.zs.grad.x);
-    const wriggle = u('maggotWriggle');
+    // The author's wriggle, driven harder by the rain (`agitation`, 1 in dry weather): a wet heap squirms.
+    const wriggle = u('wriggle').mul(s.agitation);
+    // A rest between decisions, `pauseMin`..`pauseMax` seconds (kept ordered: a min above the max reads as the min).
+    const restFor = (k) => mix(u('pauseMin'), max(u('pauseMax'), u('pauseMin')), s.rnd(k));
 
     // How worked-up it is: a crawl is hard work; a writhe is an individual's own resting level.
     const restLevel = float(0.3).add(s.seed01.mul(0.35));
@@ -104,11 +105,11 @@ export function buildMaggotBrain(TSL, { u, zone }) {
     // pull toward the middle: strong at the rim, gone by the time it is 70% of the way in
     const pull = float(1)
       .sub(clamp(dist.div(max(zoneR.mul(0.7), s.L)), 0, 1))
-      .mul(u('maggotClustering'));
+      .mul(u('clustering'));
     const candidate = (k) => {
       const th0 = s.rnd(10 + k).mul(TAU);
       const th = th0.add(angDiff(th0, gradAng).mul(pull).mul(0.85));
-      const len = s.L.mul(mix(float(CRAWL_LENGTHS[0]), float(CRAWL_LENGTHS[1]), s.rnd(14 + k)));
+      const len = s.L.mul(mix(float(CRAWL_LENGTHS[0]), float(CRAWL_LENGTHS[1]), s.rnd(14 + k))).mul(u('crawlLength'));
       const probe = zone.nearest(s.P.add(dir(th).mul(len)));
       return { th, len, ok: probe.distance.greaterThan(s.L.mul(0.5)) };
     };
@@ -118,17 +119,13 @@ export function buildMaggotBrain(TSL, { u, zone }) {
     const thNew = select(c0.ok, c0.th, select(c1.ok, c1.th, select(c2.ok, c2.th, gradAng)));
     const lenNew = select(c0.ok, c0.len, select(c1.ok, c1.len, select(c2.ok, c2.len, s.L)));
     const speedNew = s.L.mul(mix(float(CRAWL_SPEED_LENGTHS[0]), float(CRAWL_SPEED_LENGTHS[1]), s.rnd(18))).mul(
-      u('maggotSpeed')
+      u('crawlSpeed')
     );
-    const goCrawl = s.rnd(20).lessThan(CRAWL_CHANCE).and(u('maggotSpeed').greaterThan(0.001));
+    const goCrawl = s.rnd(20).lessThan(u('crawlChance')).and(u('crawlSpeed').greaterThan(0.001));
 
     // ── WRITHE ──
     const startCrawl = expired.and(goCrawl);
-    const writheTmr = select(
-      expired,
-      select(goCrawl, lenNew.div(max(speedNew, 1e-3)), mix(float(WRITHE_PAUSE[0]), float(WRITHE_PAUSE[1]), s.rnd(22))),
-      tmr
-    );
+    const writheTmr = select(expired, select(goCrawl, lenNew.div(max(speedNew, 1e-3)), restFor(22)), tmr);
     const writhePh = select(startCrawl, float(PH_CRAWL), float(PH_WRITHE));
     const writheHdg = select(startCrawl, thNew, hdg);
     const writheSpeed = select(startCrawl, speedNew, float(0));
@@ -141,7 +138,7 @@ export function buildMaggotBrain(TSL, { u, zone }) {
     const crawlHdg = hdg.add(steer).add(sin(waveNext.mul(CRAWL_SWAY_RATE)).mul(0.5).mul(s.dt));
     const crawlStep = dir(crawlHdg).mul(speedPx).mul(pulse).mul(s.dt);
     const crawlDone = tmr.lessThanEqual(0);
-    const crawlTmr = select(crawlDone, mix(float(WRITHE_PAUSE[0]), float(WRITHE_PAUSE[1]), s.rnd(24)), tmr);
+    const crawlTmr = select(crawlDone, restFor(24), tmr);
     const crawlPh = select(crawlDone, float(PH_WRITHE), float(PH_CRAWL));
 
     return {
@@ -167,7 +164,7 @@ export function buildMaggotBrain(TSL, { u, zone }) {
     return {
       P,
       V: zero2,
-      TMR: s.rnd(5).mul(WRITHE_PAUSE[1]),
+      TMR: s.rnd(5).mul(max(u('pauseMax'), u('pauseMin'))),
       PH: float(PH_WRITHE),
       C: vec4(s.rnd(4).mul(TAU), s.rnd(6).mul(TAU), float(0.4), float(0)),
     };

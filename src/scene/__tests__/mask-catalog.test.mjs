@@ -108,11 +108,23 @@ export async function run(t) {
   // right after `drip`: their CPU consumer is `effects/critters/critter-zone.js`,
   // which turns the painted region into the perception field (signed distance +
   // inward gradient) the GPU agents steer by — the same CPU-consumer case again.
+  // `maggots` is the third critter mask, between the other two: flies, maggots and fireflies are painted
+  // separately (a puddle of blood wants flies and no maggots; a compost heap wants maggots and no swarm).
   t.ok(
-    'outdoors, fire, drip, flies, fireflies, specular, window, water, fluid, prism and iridescence are the rasterized kinds',
+    'outdoors, fire, drip, flies, maggots, fireflies, specular, window, water, fluid, prism and iridescence are the rasterized kinds',
     rasterizedKinds()
       .map((k) => k.id)
-      .join(',') === 'outdoors,fire,drip,flies,fireflies,specular,window,water,fluid,prism,iridescence'
+      .join(',') === 'outdoors,fire,drip,flies,maggots,fireflies,specular,window,water,fluid,prism,iridescence'
+  );
+  t.ok(
+    'the three critters are three separate single-file gray masks, each with its own suffix',
+    ['flies', 'maggots', 'fireflies'].every((id) => {
+      const k = maskKindById(id);
+      return k.channels === 'gray' && k.rasterize === true && k.packChannel === null && !k.required;
+    }) &&
+      maskKindById('flies').suffixes.join() === '_Flies' &&
+      maskKindById('maggots').suffixes.join() === '_Maggots' &&
+      maskKindById('fireflies').suffixes.join() === '_Fireflies'
   );
   t.ok(
     'fire is rasterized but does NOT own the packed alpha — the two flags are separate questions',

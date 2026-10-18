@@ -144,7 +144,9 @@ export function buildFlyBrain(TSL, { u, zone }) {
     // Steer inward before arriving at the wall: full inward bias at it, none a wall-width inside the rim.
     const edgeBias = float(1).sub(smoothstep(wallPx.negate(), wallPx, dist));
     const dartAng = angToHome.add(angDiff(angToHome, gradAng).mul(edgeBias).mul(0.9));
+    // `agitation` is the wind's: a gale makes the darts more violent (1 in calm air).
     const kick = u('buzz')
+      .mul(s.agitation)
       .mul(float(0.3).add(s.rnd(3).mul(0.7)))
       .mul(dur)
       .mul(0.75);
@@ -159,22 +161,37 @@ export function buildFlyBrain(TSL, { u, zone }) {
       )
       .mul(s.dt);
     const vRaw = s.V.add(dart).add(tetherPull);
-    const vFly0 = vRaw
-      .mul(min(float(1), u('maxSpeed').div(max(length(vRaw), 1e-3))))
-      .mul(float(1).sub(s.dt.mul(DRAG * 0.5)));
+    // THE AIR MOVES. Drag and the speed limit act on the velocity RELATIVE TO THE AIR, so a fly that stops
+    // flapping is carried at the wind's own speed (`windPush`, px/s; zero in calm air, where this is exactly
+    // V2's `V·(1 − drag·½·dt)`), and a fly that flaps hard against it still tops out at `maxSpeed` airspeed.
+    // The tether, the wall and the zone's edge then hold the swarm over its paint: the wind shifts and shears
+    // the cloud downwind, it does not blow it off the map.
+    const vAir = vRaw.sub(s.windPush);
+    const vFly0 = s.windPush.add(
+      vAir.mul(min(float(1), u('maxSpeed').div(max(length(vAir), 1e-3)))).mul(float(1).sub(s.dt.mul(DRAG * 0.5)))
+    );
     const flyWall = wall(s.P.add(vFly0.mul(s.dt)), vFly0);
     const vFly = flyWall.V;
     const pFly = flyWall.P;
     const bob = sin(s.tSec.mul(3.7).add(s.S.mul(1.3)))
       .mul(0.04)
-      .mul(flyH);
+      .mul(flyH)
+      .mul(u('hoverBob'));
     const zFly = mix(z, flyH.add(bob), min(float(1), s.dt.mul(3)));
     const hdgFly = select(
       length(vFly).greaterThan(10),
       lerpAng(hdg, safeAtan2(TSL, vFly.y, vFly.x), s.dt.mul(12)),
       hdg
     );
-    const pLand = float(1).sub(exp(u('landChance').negate().mul(s.dt)));
+    // Rain and snow (`shelter`, 0..1) drive a fly down: up to four times as likely to land...
+    const pLand = float(1).sub(
+      exp(
+        u('landChance')
+          .mul(float(1).add(s.shelter.mul(3)))
+          .negate()
+          .mul(s.dt)
+      )
+    );
     const wantLand = s
       .rnd(6)
       .lessThan(pLand)
@@ -237,7 +254,15 @@ export function buildFlyBrain(TSL, { u, zone }) {
     const gaitMove = gait.add(length(vMove).mul(s.dt).div(s.L.mul(STRIDE_LENGTHS)));
     const moveDone = tmrMove.lessThanEqual(0);
 
-    const pTake = float(1).sub(exp(u('takeoffChance').negate().mul(s.dt)));
+    // ...and, once down, nearly 6× less likely to leave the ground again.
+    const pTake = float(1).sub(
+      exp(
+        u('takeoffChance')
+          .mul(float(1).sub(s.shelter.mul(0.85)))
+          .negate()
+          .mul(s.dt)
+      )
+    );
     const wantTake = s.rnd(8).lessThan(pTake);
 
     const phIdleNext = select(idleDone, float(PH_TURN), float(PH_IDLE));

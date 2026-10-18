@@ -24,6 +24,15 @@ import { computeEasedValue, isEntryExpired } from '../../src/world/index.js';
 // mechanism end to end, not just the card shell around a fake.
 import { WATER_PARAMS, WATER_DIALS } from '../../src/effects/water/water.js';
 import { wrapForReadTracking, getParamHealth } from '../../src/diag/param-read-health.js';
+// The three critter effects — the REAL schemas, curated FOH strips, presets and mask suffixes (the very constants
+// boot.js registers), so this page shows the cards the author will actually get.
+import {
+  SMELLY_FLIES_PARAMS,
+  SMELLY_FLIES_PRESETS,
+  SMELLY_FLIES_FOH,
+} from '../../src/effects/critters/smelly-flies.js';
+import { MAGGOTS_PARAMS, MAGGOTS_PRESETS, MAGGOTS_FOH } from '../../src/effects/critters/maggots.js';
+import { FIREFLIES_PARAMS, FIREFLIES_PRESETS, FIREFLIES_FOH } from '../../src/effects/critters/fireflies.js';
 
 installTokens();
 document.documentElement.dataset.theme = 'dark';
@@ -322,6 +331,69 @@ studio.registerEffectCard('water', () => ({
   },
   status: () => (waterState.enabled ? '' : 'off'),
 }));
+
+// ---- the three critter cards: flies, maggots, fireflies — three effects, three masks ----
+for (const spec of [
+  {
+    id: 'smellyFlies',
+    icon: 'bug',
+    title: 'Smelly flies',
+    schema: SMELLY_FLIES_PARAMS,
+    foh: SMELLY_FLIES_FOH,
+    presets: SMELLY_FLIES_PRESETS,
+    suffix: '_Flies',
+  },
+  {
+    id: 'maggots',
+    icon: 'bug',
+    title: 'Maggots',
+    schema: MAGGOTS_PARAMS,
+    foh: MAGGOTS_FOH,
+    presets: MAGGOTS_PRESETS,
+    suffix: '_Maggots',
+  },
+  {
+    id: 'fireflies',
+    icon: 'dust',
+    title: 'Fireflies',
+    schema: FIREFLIES_PARAMS,
+    foh: FIREFLIES_FOH,
+    presets: FIREFLIES_PRESETS,
+    suffix: '_Fireflies',
+  },
+]) {
+  const state = { enabled: true, params: {} };
+  for (const [key, decl] of Object.entries(spec.schema)) state.params[key] = decl.default;
+  studio.registerEffectCard(spec.id, () => ({
+    id: spec.id,
+    icon: spec.icon,
+    title: spec.title,
+    accVar: '--c-particles',
+    filterCategory: 'particles',
+    tier: { tier: 2, maxTier: 4, source: 'profile' },
+    mask: { suffix: spec.suffix, found: false },
+    presets: Object.keys(spec.presets),
+    onPresetPick: (name) => {
+      Object.assign(state.params, spec.presets[name]);
+      document.getElementById('log').textContent = `${spec.id} preset: ${name}`;
+    },
+    schema: spec.schema,
+    fohKeys: spec.foh,
+    getValue: (id) => state.params[id],
+    onChange: (id, value) => {
+      state.params[id] = value;
+      document.getElementById('log').textContent = `${spec.id}.${id} -> ${value}`;
+    },
+    enabled: state.enabled,
+    onToggleEnabled: (next) => {
+      state.enabled = next;
+    },
+    onPaint: () => {
+      document.getElementById('log').textContent = `paint ${spec.suffix} armed (fake)`;
+    },
+    status: () => (state.enabled ? 'nothing painted yet' : 'off'),
+  }));
+}
 
 // A second, simpler effect with NO mask/presets/tier — proves the card
 // shell degrades gracefully when those fields are absent (matches the 11

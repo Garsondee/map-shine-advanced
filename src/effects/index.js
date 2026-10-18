@@ -818,13 +818,26 @@ export {
 export { buildFireMaterial, buildFireGeometry, fireSizeClass, fireSizeClassDiameter } from './fire/fire-render.js';
 export { extractFiresFromMask, extractFiresWithLabels, fireMaskSignature, chamferDistance } from './fire/fire-mask.js';
 export { createFireSubsystem } from './fire/fire-subsystem.js';
-// SMELLY FLIES + FIREFLIES (and the maggots in the flies' zone) — procedurally drawn GPU
-// agents over a painted zone. Declaration, then the pure zone/activity math, then the
-// lifecycle (`createCritterSubsystem`, one per effect) and the registration factory that
-// keeps `boot.js` to a single call. The engine itself is under `./particles/` (see the
-// `createCritterEngine` export near the top of this file).
-export { SMELLY_FLIES, SMELLY_FLIES_PARAMS } from './critters/smelly-flies.js';
-export { FIREFLIES, FIREFLIES_PARAMS } from './critters/fireflies.js';
+// SMELLY FLIES, MAGGOTS and FIREFLIES — procedurally drawn GPU agents over a painted zone, three
+// effects with three separate masks. Declaration (params, presets, manifest), then the pure
+// zone/activity/weather math, then the lifecycle (`createCritterSubsystem`, one per effect) and the
+// registration factory that keeps `boot.js` to a single call. The engine itself is under
+// `./particles/` (see the `createCritterEngine` export near the top of this file).
+export {
+  SMELLY_FLIES,
+  SMELLY_FLIES_PARAMS,
+  SMELLY_FLIES_PRESETS,
+  SMELLY_FLIES_FOH,
+  smellyFliesPreset,
+} from './critters/smelly-flies.js';
+export { MAGGOTS, MAGGOTS_PARAMS, MAGGOTS_PRESETS, MAGGOTS_FOH, maggotsPreset } from './critters/maggots.js';
+export {
+  FIREFLIES,
+  FIREFLIES_PARAMS,
+  FIREFLIES_PRESETS,
+  FIREFLIES_FOH,
+  firefliesPreset,
+} from './critters/fireflies.js';
 export { createCritterSubsystem } from './critters/critter-subsystem.js';
 export { createCritterRegistration } from './critters/critter-registration.js';
 // PRECIPITATION (P1, docs/planning/Precipitation.md) — the FALL. ⚠️ BUILT and

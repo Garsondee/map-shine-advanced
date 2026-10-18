@@ -65,8 +65,9 @@ const STAMP_TOLERANCE = 0.5 / STAMP_STEPS;
 /**
  * Per-kind wiring: the mind, the body, and which uniforms size and pace it.
  *
- * `speedParam` is the uniform that scales the mind's clock (the author's "Tempo");
- * null leaves it on real time, for a kind whose own params already say how fast it goes.
+ * `speedParam` is the uniform that scales the mind's clock (the author's "Tempo"); every kind has one,
+ * and the weather's own `tempo` (cold slows everything) multiplies it. Null would leave a kind on real
+ * time, for one whose own params already say how fast it goes.
  */
 const KINDS = Object.freeze({
   fly: Object.freeze({
@@ -80,9 +81,9 @@ const KINDS = Object.freeze({
   maggot: Object.freeze({
     brain: buildMaggotBrain,
     materials: buildMaggotMaterials,
-    sizeParam: 'maggotSize',
+    sizeParam: 'size',
     variationParam: 'sizeVariation',
-    speedParam: null,
+    speedParam: 'speed',
     renderOrders: Object.freeze({ body: 0 }),
   }),
   firefly: Object.freeze({
@@ -227,7 +228,15 @@ export function createCritterEngine({
     s.zs = zoneSampler.sample(s.P);
     const dtReal = u('dt');
     s.dtReal = dtReal;
-    s.dt = spec.speedParam ? dtReal.mul(u(spec.speedParam)) : dtReal;
+    // The pace of every decision: the author's Tempo, slowed by the cold (`tempo`). The firefly's FLASH clock
+    // deliberately reads `dtReal` instead — it is a promise about flashes a second, not a pace.
+    s.dt = (spec.speedParam ? dtReal.mul(u(spec.speedParam)) : dtReal).mul(u('tempo'));
+    // The weather's hand on the ones that stayed (see `critter-weather.js#weatherDrive`). The wind carries only the
+    // slots that are SHOWING: a slot the sky has sent in (`active` counts the ones out) is out of the world, and a
+    // gale must not blow it to the far wall of the zone so that it reappears there when the air calms.
+    s.windPush = u('windPush').mul(min(max(u('active').sub(s.fi), 0), 1));
+    s.agitation = u('agitation');
+    s.shelter = u('shelter');
     const next = brain.update(s);
     const fresh = brain.spawn(s);
     // Slots past the population have no home and are never simulated.

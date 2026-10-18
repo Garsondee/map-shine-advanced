@@ -5,11 +5,13 @@
  */
 import { run as runZone } from './critter-zone.test.mjs';
 import { run as runActivity } from './critter-activity.test.mjs';
+import { run as runWeather } from './critter-weather.test.mjs';
 import { run as runDeclarations } from './critter-declarations.test.mjs';
 import { run as runSubsystem } from './critter-subsystem.test.mjs';
 import { run as runRegistration } from './critter-registration.test.mjs';
 import { run as runGeometry } from './critter-geometry.test.mjs';
 import { run as runUniforms } from './critter-uniforms.test.mjs';
+import { run as runConsumption } from './critter-consumption.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -40,11 +42,13 @@ const t = {
 
 runZone(t);
 runActivity(t);
+runWeather(t);
 runDeclarations(t);
 runSubsystem(t);
 await runRegistration(t);
 runGeometry(t);
 runUniforms(t);
+runConsumption(t);
 console.log(`\nsrc/effects/critters verification: ${passed} passed, ${failed} failed`);
 if (failed) {
   console.error('Failures:', fails);

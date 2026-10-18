@@ -1,7 +1,7 @@
 /**
  * SMELLY FLIES — THE DECLARATION. Params schema + manifest, pure data, no THREE
  * and no TSL. The agents live in `effects/particles/critter-runtime.js`, their
- * bodies in `fly-body.js` / `maggot-body.js`, the perception in `critter-zone.js`
+ * bodies in `fly-body.js`, the perception in `critter-zone.js`
  * and the lifecycle in `critter-subsystem.js`.
  *
  * ⚠️ `apply` IS NOT DECLARED HERE. It is injected at registration (boot.js), so
@@ -32,8 +32,11 @@
  *     per-fly JavaScript object (V2's actual bottleneck). Nothing here needs to
  *     match between players, and nothing about it affects play.
  *
- * NEW: maggots (`maggotsPerZone`) wriggle where the flies gather, flies sleep at
- * night (`nightActivity`), and a fly grooms (rubs its legs) while it idles.
+ * NEW: flies sleep at night (`nightActivity`), a fly grooms (rubs its legs) while it idles,
+ * and the weather has a dial per cause — rain, snow, wind above a threshold, and cold each
+ * thin the swarm by their own response, and the air carries a flying fly downwind
+ * (`critter-weather.js`). Maggots are their OWN effect with their own mask (`maggots.js`,
+ * `_Maggots`): a corpse wants both, a puddle of blood only flies.
  *
  * ⚠️ THE DEFAULTS ARE A FIRST PASS, tuned in the lab and not yet by the author on
  * a real scene. Ranges are deliberately generous — "I'll find the values" is this
@@ -42,48 +45,176 @@
  * @module effects/critters/smelly-flies
  */
 import { FLY_LOOKS } from './critter-species.js';
+import { freezeParams, presenceParams, weatherParams } from './critter-params.js';
 
-export const SMELLY_FLIES_PARAMS = Object.freeze({
-  // ── Swarm ────────────────────────────────────────────────────────────────
-  fliesPerZone: {
-    type: 'int',
-    min: 0,
+export const SMELLY_FLIES_PARAMS = freezeParams({
+  // ── Presence ─────────────────────────────────────────────────────────────
+  ...presenceParams({
+    countId: 'fliesPerZone',
+    noun: 'flies',
+    unit: 'swarm',
     max: 200,
+    count: 10,
+    areaScaling: 0.5,
+    countHelpExtra: 'V2 called this Max Flies and stopped at 30.',
+  }),
+
+  // ── Look ─────────────────────────────────────────────────────────────────
+  size: {
+    type: 'float',
+    min: 6,
+    max: 120,
     step: 1,
-    default: 10,
-    category: 'Swarm',
-    label: 'Flies per swarm',
-    help: 'How many flies hover over a painted blob of reference size (about two and a half grid squares across). Every separate painted blob is its own swarm. V2 called this Max Flies and stopped at 30.',
+    default: 18,
+    category: 'Look',
+    label: 'Fly size',
+    help: 'Body length in pixels. V2’s Flying Scale was 18.',
   },
-  areaScaling: {
+  sizeVariation: {
     type: 'float',
     min: 0,
     max: 1,
     step: 0.05,
-    default: 0.5,
-    category: 'Swarm',
-    label: 'Bigger blob, bigger swarm',
-    help: '0 gives every painted blob the same number of flies, as V2 did. 1 makes the swarm proportional to the blob’s area, so a painted marsh buzzes and a painted puddle does not.',
+    default: 0.25,
+    category: 'Look',
+    label: 'Size variation',
+    help: 'How much individual flies differ in size.',
   },
-  maskSensitivity: {
+  species: {
+    type: 'enum',
+    values: [...FLY_LOOKS],
+    default: 'mixed',
+    category: 'Look',
+    label: 'Kind of fly',
+    help: 'Mixed rolls a kind for each fly. Housefly is grey with a striped back; bluebottle and greenbottle are the metallic blowflies that find a corpse first; flesh fly has a chequered abdomen.',
+  },
+  tint: {
+    type: 'color',
+    space: 'srgb',
+    default: '#ffffff',
+    category: 'Look',
+    label: 'Tint',
+    help: 'Multiplies the fly’s own colouring. White is a no-op.',
+  },
+  eyeColor: {
+    type: 'color',
+    space: 'srgb',
+    default: '#80160d',
+    category: 'Look',
+    label: 'Eye colour',
+    help: 'The compound eyes. Houseflies are the red-brown of the default; a pale orange or a deep crimson reads as a different species at a glance.',
+  },
+  opacity: {
     type: 'float',
-    min: 0.02,
-    max: 0.6,
-    step: 0.01,
-    default: 0.15,
-    category: 'Swarm',
-    label: 'Mask sensitivity',
-    help: 'How much paint counts as part of a swarm’s zone. LOWER catches faint or thin strokes — turn it DOWN if flies you painted are not appearing. HIGHER wants bold, solid paint.',
+    min: 0,
+    max: 1,
+    step: 0.05,
+    default: 1,
+    category: 'Look',
+    label: 'Opacity',
+    help: 'Overall opacity of the flies (and their shadows).',
+  },
+  lightInfluence: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.05,
+    default: 1,
+    category: 'Look',
+    label: 'Lit by the scene',
+    help: 'How much the scene’s own lighting darkens and tints a fly: 1 puts it in the torchlight or the gloom like everything else, 0 draws it full-bright whatever the room is doing. Needs the "lit" quality rung (2) or above.',
+  },
+  shadowStrength: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.05,
+    default: 0.45,
+    category: 'Look',
+    label: 'Shadow',
+    help: 'How dark the fly’s shadow on the ground is. It slides away from the body as the fly climbs and merges back when it lands — the cue that tells the eye the fly is airborne.',
+  },
+  shadowSoftness: {
+    type: 'float',
+    min: 0.2,
+    max: 4,
+    step: 0.05,
+    default: 1,
+    category: 'Look',
+    label: 'Shadow softness ×',
+    help: 'How blurred the shadow is, as a multiple of what the sky’s own cloud cover and sun height give it. Under 1 is a hard noon shadow; over 1 is the smudge under an overcast sky.',
   },
 
-  // ── Flight ───────────────────────────────────────────────────────────────
+  // ── Detail ───────────────────────────────────────────────────────────────
+  wingBlur: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.05,
+    default: 1,
+    category: 'Detail',
+    label: 'Wing blur',
+    help: 'How smeared the wings are when flapping fast. 1 is the translucent fan a real fly shows at 60 fps; 0 draws crisp wings frozen at one angle (V2’s Motion Blur switch, as a dial).',
+  },
+  wingOpacity: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.05,
+    default: 1,
+    category: 'Detail',
+    label: 'Wing opacity',
+    help: 'How solid the wings are. Lower is the near-invisible gauze of a small fly; 1 is the default glassy pane with its veins.',
+  },
+  wingSpread: {
+    type: 'float',
+    min: 0.7,
+    max: 1.25,
+    step: 0.01,
+    default: 1,
+    category: 'Detail',
+    label: 'Wing spread ×',
+    help: 'How wide the wings are held in flight, and how far they beat. Under 1 is the tight, rapid buzz of a small fly; over 1 is a lumbering blowfly with its wings out.',
+  },
+  sheen: {
+    type: 'float',
+    min: 0,
+    max: 2,
+    step: 0.05,
+    default: 1,
+    category: 'Detail',
+    label: 'Metallic sheen',
+    help: 'How glossy a bluebottle’s or greenbottle’s back is. 0 is matte, 2 a lacquered gem. Needs the "detail" quality rung (3) or above.',
+  },
+  legWeight: {
+    type: 'float',
+    min: 0.5,
+    max: 2,
+    step: 0.05,
+    default: 1,
+    category: 'Detail',
+    label: 'Leg thickness ×',
+    help: 'How thick the legs are drawn. Thicker reads better from far away; thinner is a crane-fly’s spidery limbs. Needs the "legs" quality rung (1) or above.',
+  },
+  bankAmount: {
+    type: 'float',
+    min: 0,
+    max: 2,
+    step: 0.05,
+    default: 1,
+    category: 'Detail',
+    label: 'Banking ×',
+    help: 'How far a fly leans into a turn, the two wings no longer symmetrical. 0 holds it level like a drawing. Needs the "detail" quality rung (3) or above.',
+  },
+
+  // ── Motion (flight) ──────────────────────────────────────────────────────
   buzz: {
     type: 'float',
     min: 200,
     max: 4000,
     step: 50,
     default: 1500,
-    category: 'Flight',
+    category: 'Motion',
     label: 'Buzz intensity',
     help: 'How hard a fly darts. Each dart is a short burst in a random direction (a twentieth to a quarter of a second), so this is the jitter in the flight path. V2’s Buzz Intensity.',
   },
@@ -93,7 +224,7 @@ export const SMELLY_FLIES_PARAMS = Object.freeze({
     max: 100,
     step: 1,
     default: 20,
-    category: 'Flight',
+    category: 'Motion',
     label: 'Tether strength',
     help: 'How strongly a fly that has strayed is steered back to its own home spot in the swarm. Low lets them roam the whole zone; high keeps each one in a tight personal cloud.',
   },
@@ -103,7 +234,7 @@ export const SMELLY_FLIES_PARAMS = Object.freeze({
     max: 600,
     step: 5,
     default: 100,
-    category: 'Flight',
+    category: 'Motion',
     label: 'Swarm radius',
     help: 'How far, in pixels, a fly wanders from its home spot before the tether starts to pull. V2 hard-coded 100.',
   },
@@ -113,19 +244,9 @@ export const SMELLY_FLIES_PARAMS = Object.freeze({
     max: 3000,
     step: 50,
     default: 600,
-    category: 'Flight',
+    category: 'Motion',
     label: 'Top speed',
-    help: 'The fastest a fly can travel, in pixels per second.',
-  },
-  flyHeight: {
-    type: 'float',
-    min: 5,
-    max: 400,
-    step: 5,
-    default: 80,
-    category: 'Flight',
-    label: 'Fly height',
-    help: 'How high above the ground a flying fly hovers. Height makes it look bigger (it is nearer the camera), throws its shadow further away, and is what the landing and take-off animations travel between.',
+    help: 'The fastest a fly can travel through the air, in pixels per second.',
   },
   landChance: {
     type: 'float',
@@ -133,7 +254,7 @@ export const SMELLY_FLIES_PARAMS = Object.freeze({
     max: 0.6,
     step: 0.005,
     default: 0.1,
-    category: 'Flight',
+    category: 'Motion',
     label: 'Land chance (per second)',
     help: 'The chance each second that a flying fly decides to land, if it is over its zone. 0 keeps the whole swarm in the air forever.',
   },
@@ -143,7 +264,7 @@ export const SMELLY_FLIES_PARAMS = Object.freeze({
     max: 4,
     step: 0.05,
     default: 0.8,
-    category: 'Flight',
+    category: 'Motion',
     label: 'Landing time (s)',
     help: 'How long the descent takes: the fly slows, drops its legs, flares its wings and folds them on touchdown.',
   },
@@ -153,12 +274,32 @@ export const SMELLY_FLIES_PARAMS = Object.freeze({
     max: 3,
     step: 0.05,
     default: 0.5,
-    category: 'Flight',
+    category: 'Motion',
     label: 'Take-off time (s)',
     help: 'How long a take-off takes: a crouch, the wings snapping open and beating up to a blur, then the climb.',
   },
+  hoverBob: {
+    type: 'float',
+    min: 0,
+    max: 4,
+    step: 0.05,
+    default: 1,
+    category: 'Motion',
+    label: 'Hover bob ×',
+    help: 'How much a flying fly bobs up and down as it hovers. 0 holds a perfectly level altitude; higher is a drunken, bouncing flight.',
+  },
+  speed: {
+    type: 'float',
+    min: 0.1,
+    max: 6,
+    step: 0.05,
+    default: 1,
+    category: 'Motion',
+    label: 'Tempo',
+    help: 'A master clock for the flies’ decisions — how quickly they dart, land, walk and pause. 1 is the natural pace; V2’s Speed slider defaulted to 2.75 and scaled everything.',
+  },
 
-  // ── Ground ───────────────────────────────────────────────────────────────
+  // ── Ground (landed flies) ────────────────────────────────────────────────
   walkSpeed: {
     type: 'float',
     min: 5,
@@ -210,166 +351,154 @@ export const SMELLY_FLIES_PARAMS = Object.freeze({
     help: 'The longest a landed fly stops between walks.',
   },
 
-  // ── Look ─────────────────────────────────────────────────────────────────
-  size: {
+  // ── Depth ────────────────────────────────────────────────────────────────
+  flyHeight: {
     type: 'float',
-    min: 6,
-    max: 120,
-    step: 1,
-    default: 18,
-    category: 'Look',
-    label: 'Fly size',
-    help: 'Body length in pixels. V2’s Flying Scale was 18.',
+    min: 5,
+    max: 400,
+    step: 5,
+    default: 80,
+    category: 'Depth',
+    label: 'Fly height',
+    help: 'How high above the ground a flying fly hovers. Height makes it look bigger (it is nearer the camera), throws its shadow further away, and is what the landing and take-off animations travel between.',
   },
-  sizeVariation: {
-    type: 'float',
-    min: 0,
-    max: 1,
-    step: 0.05,
-    default: 0.25,
-    category: 'Look',
-    label: 'Size variation',
-    help: 'How much individual flies differ in size.',
-  },
-  species: {
-    type: 'enum',
-    values: [...FLY_LOOKS],
-    default: 'mixed',
-    category: 'Look',
-    label: 'Kind of fly',
-    help: 'Mixed rolls a kind for each fly. Housefly is grey with a striped back; bluebottle and greenbottle are the metallic blowflies that find a corpse first; flesh fly has a chequered abdomen.',
-  },
-  tint: {
-    type: 'color',
-    space: 'srgb',
-    default: '#ffffff',
-    category: 'Look',
-    label: 'Tint',
-    help: 'Multiplies the fly’s own colouring. White is a no-op.',
-  },
-  wingBlur: {
+  perspective: {
     type: 'float',
     min: 0,
-    max: 1,
+    max: 2,
     step: 0.05,
     default: 1,
-    category: 'Look',
-    label: 'Wing blur',
-    help: 'How smeared the wings are when flapping fast. 1 is the translucent fan a real fly shows at 60 fps; 0 draws crisp wings frozen at one angle (V2’s Motion Blur switch, as a dial).',
-  },
-  shadowStrength: {
-    type: 'float',
-    min: 0,
-    max: 1,
-    step: 0.05,
-    default: 0.45,
-    category: 'Look',
-    label: 'Shadow',
-    help: 'How dark the fly’s shadow on the ground is. It slides away from the body as the fly climbs and merges back when it lands — the cue that tells the eye the fly is airborne.',
-  },
-  opacity: {
-    type: 'float',
-    min: 0,
-    max: 1,
-    step: 0.05,
-    default: 1,
-    category: 'Look',
-    label: 'Opacity',
-    help: 'Overall opacity of the flies and maggots.',
+    category: 'Depth',
+    label: 'Perspective ×',
+    help: 'How much being high in the air makes a fly look bigger and pushes it away from the middle of the view. 0 flattens the swarm onto the ground; 2 exaggerates the sense of depth.',
   },
 
-  // ── Behaviour ────────────────────────────────────────────────────────────
-  speed: {
-    type: 'float',
-    min: 0.1,
-    max: 6,
-    step: 0.05,
-    default: 1,
-    category: 'Behaviour',
-    label: 'Tempo',
-    help: 'A master clock for the flies’ decisions — how quickly they dart, land, walk and pause. 1 is the natural pace; V2’s Speed slider defaulted to 2.75 and scaled everything.',
-  },
+  // ── Twilight ─────────────────────────────────────────────────────────────
   nightActivity: {
     type: 'float',
     min: 0,
     max: 1,
     step: 0.05,
     default: 0.1,
-    category: 'Behaviour',
+    category: 'Twilight',
     label: 'Flies at night',
     help: 'The fraction of the swarm still out after dark. Flies are daytime insects; at 0 they all vanish at dusk and return at dawn, one by one.',
   },
-  weatherResponse: {
-    type: 'float',
-    min: 0,
-    max: 1,
-    step: 0.05,
-    default: 1,
-    category: 'Behaviour',
-    label: 'Weather response',
-    help: 'How much rain and wind thin the swarm (V2’s own rule: down to a tenth in a gale and a downpour). 0 makes them indifferent to weather.',
-  },
 
-  // ── Maggots ──────────────────────────────────────────────────────────────
-  maggotsPerZone: {
-    type: 'int',
-    min: 0,
-    max: 300,
-    step: 1,
-    default: 0,
-    category: 'Maggots',
-    label: 'Maggots per swarm',
-    help: 'How many maggots wriggle on a blob of reference size. They live in the same painted zones as the flies, so a corpse gets both. 0 is none — the slider to reach for if you want it grosser.',
-  },
-  maggotSize: {
+  // ── Weather ──────────────────────────────────────────────────────────────
+  ...weatherParams({
+    noun: 'flies',
+    defaults: {
+      rain: 0.85,
+      snow: 1,
+      windThreshold: 0.35,
+      wind: 0.8,
+      coldBelow: 0.3,
+      cold: 1,
+      floor: 0.1,
+      fadeTime: 2.5,
+    },
+  }),
+  windDrift: {
     type: 'float',
-    min: 6,
-    max: 120,
-    step: 1,
-    default: 20,
-    category: 'Maggots',
-    label: 'Maggot size',
-    help: 'Body length in pixels.',
+    min: 0,
+    max: 500,
+    step: 5,
+    default: 140,
+    category: 'Weather',
+    label: 'Wind carries them (px/s)',
+    help: 'How fast a full gale blows a flying fly downwind, in pixels per second. They fight back — the tether and the paint’s edge hold the swarm over its zone — so this shifts the cloud downwind and smears it, rather than blowing it away. Landed flies are not moved.',
   },
-  maggotSpeed: {
+  windAgitation: {
     type: 'float',
     min: 0,
     max: 4,
     step: 0.05,
-    default: 1,
-    category: 'Maggots',
-    label: 'Crawl speed ×',
-    help: 'How fast maggots crawl. Even at 1 they mostly writhe in place, then shuffle a body length or so and stop.',
+    default: 1.2,
+    category: 'Weather',
+    label: 'Wind makes them frantic ×',
+    help: 'How much more violently a fly darts in wind: its buzz is multiplied by 1 + this × the wind. 0 leaves their flight untouched.',
   },
-  maggotWriggle: {
+  rainShelter: {
     type: 'float',
     min: 0,
-    max: 3,
+    max: 1,
     step: 0.05,
-    default: 1,
-    category: 'Maggots',
-    label: 'Wriggle ×',
-    help: 'How violently the body writhes — the sideways S-wave and the squeeze-and-stretch along its length.',
+    default: 0.5,
+    category: 'Weather',
+    label: 'Rain drives them down',
+    help: 'How strongly rain or snow makes the flies that stay land and stay landed: more landing, less taking off. The ones the rain has not cleared sit tight on the ground.',
   },
-  maggotClustering: {
+  coldSlowdown: {
     type: 'float',
     min: 0,
     max: 1,
     step: 0.05,
     default: 0.6,
-    category: 'Maggots',
-    label: 'Clustering',
-    help: 'How strongly maggots pile toward the middle of a zone, where the thing they are eating is. 0 spreads them evenly over the paint.',
-  },
-  maggotColor: {
-    type: 'color',
-    space: 'srgb',
-    default: '#e6dcb8',
-    category: 'Maggots',
-    label: 'Maggot colour',
-    help: 'The body colour. Real maggots run from cream to dull yellow.',
+    category: 'Weather',
+    label: 'Cold slows them',
+    help: 'How sluggish the cold makes the flies that remain: every decision, dart and step slows. Uses the same "too cold below" temperature.',
   },
 });
+
+/**
+ * The Studio card's front-of-house strip: the handful of controls a GM reaches for while running a scene (how many,
+ * how big, which flies, how restless, how they land, whether they keep out after dark, and the two weather
+ * responses). Everything else is on the card's ROH, grouped by category. Held to the schema by a Node test.
+ */
+export const SMELLY_FLIES_FOH = Object.freeze([
+  'fliesPerZone',
+  'size',
+  'species',
+  'buzz',
+  'landChance',
+  'nightActivity',
+  'rainResponse',
+  'windResponse',
+]);
+
+/**
+ * Built-in presets: a named patch of the params above. Each is a starting point, not a prison — every
+ * control stays live after one is applied. `critter-declarations.test.mjs` holds every key to the schema.
+ */
+export const SMELLY_FLIES_PRESETS = Object.freeze({
+  'Corpse swarm': Object.freeze({ fliesPerZone: 24, buzz: 1800, landChance: 0.12, size: 16, areaScaling: 0.7 }),
+  'Lazy afternoon': Object.freeze({
+    fliesPerZone: 6,
+    buzz: 900,
+    landChance: 0.2,
+    takeoffChance: 0.03,
+    speed: 0.8,
+    hoverBob: 1.6,
+    swarmRadius: 140,
+  }),
+  Plague: Object.freeze({ fliesPerZone: 60, areaScaling: 0.9, buzz: 2200, size: 14, maxSpeed: 800, tether: 12 }),
+  'Ignores the weather': Object.freeze({
+    rainResponse: 0,
+    snowResponse: 0,
+    windResponse: 0,
+    coldResponse: 0,
+    windDrift: 0,
+    windAgitation: 0,
+    rainShelter: 0,
+    coldSlowdown: 0,
+  }),
+  'Fair-weather flies': Object.freeze({
+    rainResponse: 1,
+    snowResponse: 1,
+    windThreshold: 0.15,
+    windResponse: 1,
+    coldBelow: 0.45,
+    coldResponse: 1,
+    weatherFloor: 0,
+    windDrift: 260,
+  }),
+});
+
+/** @param {string} name @returns {Record<string, *>} a fresh patch, `{}` for an unknown name. */
+export function smellyFliesPreset(name) {
+  return { ...(SMELLY_FLIES_PRESETS[name] ?? {}) };
+}
 
 /**
  * THE MANIFEST.
@@ -387,7 +516,7 @@ export const SMELLY_FLIES = Object.freeze({
   readiness: Object.freeze({
     firstRunWork: true,
     coverage: 'none',
-    why: 'Builds its fly and maggot engines lazily on the first sync that has a painted zone (ensureEngines) — real first-run work (two compute kernels and two materials), but SYNCHRONOUS, with no pending window a probe could observe, and a "built yet?" flag would hold readiness open forever on a scene with no flies painted. It is covered globally instead: each engine’s kernels grow the pipeline set, which is precisely what settle.js’s pipeline-growth criterion exists to catch.',
+    why: 'Builds its fly engine lazily on the first sync that has a painted zone (ensureEngine) — real first-run work (two compute kernels and two materials), but SYNCHRONOUS, with no pending window a probe could observe, and a "built yet?" flag would hold readiness open forever on a scene with no flies painted. It is covered globally instead: the engine’s kernels grow the pipeline set, which is precisely what settle.js’s pipeline-growth criterion exists to catch.',
   }),
   params: SMELLY_FLIES_PARAMS,
   authoring: Object.freeze({ paint: 'flies' }),
@@ -433,7 +562,7 @@ export const SMELLY_FLIES = Object.freeze({
       name: 'plague',
       fromProfile: 'extreme',
       cost: Object.freeze({ class: 'C8', estMsPerMp: 0.09 }),
-      adds: 'a quarter more flies and maggots than the author asked for',
+      adds: 'a quarter more flies than the author asked for',
     }),
   ]),
 

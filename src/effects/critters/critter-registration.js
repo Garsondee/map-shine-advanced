@@ -1,5 +1,5 @@
 /**
- * THE CRITTERS' REGISTRATION — two effects' cascade layers, live overrides, console
+ * THE CRITTERS' REGISTRATION — three effects' cascade layers, live overrides, console
  * setters and render-state seams, in one factory.
  *
  * `boot.js`'s `install()` is a frozen god-object (see `water-registration.js`'s own
@@ -7,9 +7,9 @@
  * INJECTED here and `boot.js` makes one call. This file knows nothing about Foundry's
  * settings, the debug panel or `MapShine`.
  *
- * Smelly Flies and Fireflies are siblings with the same shape — a painted zone, the same
- * engine, the same readout — so they share the code and differ only by the table row they
- * are built from (`EFFECTS` below). A third critter is a row, not a copy.
+ * Smelly Flies, Maggots and Fireflies are siblings with the same shape — a painted zone, the
+ * same engine, the same readout — so they share the code and differ only by the table row they
+ * are built from (`EFFECTS` below). A fourth critter is a row, not a copy.
  *
  * ============================================================================
  * WHAT THE RENDER STATE CARRIES
@@ -30,12 +30,14 @@
  * @module effects/critters/critter-registration
  */
 import { SMELLY_FLIES, SMELLY_FLIES_PARAMS } from './smelly-flies.js';
+import { MAGGOTS, MAGGOTS_PARAMS } from './maggots.js';
 import { FIREFLIES, FIREFLIES_PARAMS } from './fireflies.js';
 import { projectCascadeRenderState, buildCascadeReadout } from '../effect-readout.js';
 
-/** The two effects, as data. `maskKind` is the id in `scene/mask-catalog.js`. */
+/** The three effects, as data. `maskKind` is the id in `scene/mask-catalog.js` — one separate mask each. */
 const EFFECTS = Object.freeze([
   Object.freeze({ key: 'smellyFlies', manifest: SMELLY_FLIES, params: SMELLY_FLIES_PARAMS, maskKind: 'flies' }),
+  Object.freeze({ key: 'maggots', manifest: MAGGOTS, params: MAGGOTS_PARAMS, maskKind: 'maggots' }),
   Object.freeze({ key: 'fireflies', manifest: FIREFLIES, params: FIREFLIES_PARAMS, maskKind: 'fireflies' }),
 ]);
 
@@ -55,7 +57,7 @@ const EFFECTS = Object.freeze([
  * @param {() => {floorIndex?: number, elevation?: number}|null} args.getFloorContext - the viewed floor.
  * @param {() => number} args.getMaskVersion - the mask authority's change counter.
  * @param {() => number} args.getGridPx - the scene's px per grid square.
- * @returns {Record<'smellyFlies'|'fireflies', {reapply: () => void, set: (partial?: object) => object,
+ * @returns {Record<'smellyFlies'|'maggots'|'fireflies', {reapply: () => void, set: (partial?: object) => object,
  *   getReadout: () => object, getRenderState: () => object, hasPaint: () => boolean}>}
  */
 export function createCritterRegistration({
@@ -101,7 +103,8 @@ export function createCritterRegistration({
     }
 
     /**
-     * `MapShine.setSmellyFlies({ fliesPerZone: 20 })` — the console tuner and the card's write path.
+     * `MapShine.setSmellyFlies({ fliesPerZone: 20 })` (or `setMaggots` / `setFireflies`) — the console
+     * tuner and the card's write path.
      * `enabled` writes the PLAYER setting (persisted); every other key lands in the live override
      * (transient) and, unless the param is declared client-scoped, in the scene's own params.
      * @param {object} [partial]

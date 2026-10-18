@@ -58,6 +58,8 @@ const PH_LIFT = 3;
 /** Seconds a landing / a lift-off takes (fireflies have no author knob for it: they are slow and graceful). */
 const LAND_SEC = 1.0;
 const LIFT_SEC = 0.8;
+/** How hard a firefly beyond the painted edge turns back toward it, per second (1 = the whole angle in a second). */
+const HOMING_RATE = 0.3;
 /** Colony coupling strength K at `synchrony = 1`, radians per second (see the header; the dial is squared). */
 const COUPLING = 1.1;
 
@@ -129,18 +131,35 @@ export function buildFireflyBrain(TSL, { u, zone }) {
 
     // ── FLY ──
     const speed = u('driftSpeed').mul(float(0.7).add(sin(t.mul(0.8).add(a1)).mul(0.3)));
-    const turn = u('wander').mul(
-      sin(t.mul(0.37).add(a1))
-        .mul(0.9)
-        .add(sin(t.mul(0.91).add(a2)).mul(0.6))
-    );
+    // `agitation` is the wind's: they meander more in a breeze (1 in calm air).
+    const turn = u('wander')
+      .mul(s.agitation)
+      .mul(
+        sin(t.mul(0.37).add(a1))
+          .mul(0.9)
+          .add(sin(t.mul(0.91).add(a2)).mul(0.6))
+      );
     const edge = float(1).sub(smoothstep(range.negate(), range.mul(-0.5), dist));
-    const hdgFly = hdg.add(turn.mul(s.dt)).add(angDiff(hdg, gradAng).mul(edge).mul(s.dt).mul(4));
-    const vFly0 = dir(hdgFly).mul(speed);
+    // Past the paint's own edge there is also a weak, steady turn back toward it (`HOMING_RATE`), so the roaming
+    // range is a soft shell and not a wall: a colony a gale has blown against the far side comes home in a
+    // quarter-minute instead of sitting there until the random walk happens to bring it back.
+    const outside = float(1).sub(smoothstep(range.mul(-0.5), 0, dist));
+    const homing = max(edge.mul(4), outside.mul(HOMING_RATE));
+    const hdgFly = hdg.add(turn.mul(s.dt)).add(angDiff(hdg, gradAng).mul(homing).mul(s.dt));
+    // Their own lazy flight, carried by the air (`windPush`, px/s; zero in calm air).
+    const vFly0 = dir(hdgFly).mul(speed).add(s.windPush);
     const flyWall = wall(s.P.add(vFly0.mul(s.dt)), vFly0);
-    const hoverNow = hover.mul(float(1).add(sin(t.mul(0.5).add(a3)).mul(0.3)));
+    const hoverNow = hover.mul(float(1).add(sin(t.mul(0.5).add(a3)).mul(float(0.3).mul(u('hoverBob')))));
     const zFly = z.add(hoverNow.sub(z).mul(min(float(1), s.dt.mul(1.5))));
-    const pRest = float(1).sub(exp(u('restChance').negate().mul(s.dt)));
+    // Rain and snow (`shelter`) make a firefly settle: up to five times as likely to land...
+    const pRest = float(1).sub(
+      exp(
+        u('restChance')
+          .mul(float(1).add(s.shelter.mul(4)))
+          .negate()
+          .mul(s.dt)
+      )
+    );
     const wantRest = s.rnd(6).lessThan(pRest).and(dist.greaterThan(s.L));
     const phFly = select(wantRest, float(PH_LAND), float(PH_FLY));
     const auxFly = select(wantRest, zFly, aux);
@@ -153,7 +172,15 @@ export function buildFireflyBrain(TSL, { u, zone }) {
     const phLand = select(doneL, float(PH_REST), float(PH_LAND).add(min(progL, 0.999)));
 
     // ── REST ── glowing on the ground until the urge to fly returns
-    const pLift = float(1).sub(exp(u('liftChance').negate().mul(s.dt)));
+    // ...and, once settled, nearly 7× less likely to lift off again.
+    const pLift = float(1).sub(
+      exp(
+        u('liftChance')
+          .mul(float(1).sub(s.shelter.mul(0.85)))
+          .negate()
+          .mul(s.dt)
+      )
+    );
     const wantLift = s.rnd(8).lessThan(pLift);
     const phRest = select(wantLift, float(PH_LIFT), float(PH_REST));
     const hdgRest = select(wantLift, s.rnd(9).mul(TAU), hdg);
@@ -161,7 +188,10 @@ export function buildFireflyBrain(TSL, { u, zone }) {
     // ── LIFT ── rise and pick up speed
     const progT = frac.add(s.dt.div(LIFT_SEC));
     const zLift = hover.mul(ease(progT));
-    const vLift0 = dir(hdg).mul(u('driftSpeed')).mul(ease(progT));
+    const vLift0 = dir(hdg)
+      .mul(u('driftSpeed'))
+      .mul(ease(progT))
+      .add(s.windPush.mul(ease(progT)));
     const liftWall = wall(s.P.add(vLift0.mul(s.dt)), vLift0);
     const doneT = progT.greaterThanEqual(1);
     const phLift = select(doneT, float(PH_FLY), float(PH_LIFT).add(min(progT, 0.999)));

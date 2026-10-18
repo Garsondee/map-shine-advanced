@@ -274,7 +274,7 @@ export const ZONES = Object.freeze(
     // and each brackets itself (`beginById` — the viewer never wraps the call).
     z(
       'light.smellyFliesSync',
-      'Smelly flies sync (zone, population, flies + maggots step)',
+      'Smelly flies sync (zone, population, fly step)',
       'sims',
       null,
       'smellyFlies',
@@ -282,6 +282,17 @@ export const ZONES = Object.freeze(
       'conditional',
       false,
       'smellyFliesSubsystem.sync'
+    ),
+    z(
+      'light.maggotsSync',
+      'Maggots sync (zone, population, maggot step)',
+      'sims',
+      null,
+      'maggots',
+      'both',
+      'conditional',
+      false,
+      'maggotsSubsystem.sync'
     ),
     z(
       'light.firefliesSync',
@@ -949,8 +960,19 @@ export const ZONES = Object.freeze(
       'fireSubsystem.scene'
     ),
     z(
+      'light.drawMaggots',
+      'Maggots draw',
+      'lighting',
+      'light.accumulate',
+      'maggots',
+      'gpu',
+      'conditional',
+      false,
+      'maggotsSubsystem.scene'
+    ),
+    z(
       'light.drawSmellyFlies',
-      'Smelly flies draw (maggots, fly shadows, flies)',
+      'Smelly flies draw (fly shadows, flies)',
       'lighting',
       'light.accumulate',
       'smellyFlies',
@@ -1747,11 +1769,15 @@ export const EFFECT_ZONING = Object.freeze({
   // THE CRITTERS — each is its own subsystem with its own pair of zones, and unlike fire neither
   // casts a light into the shared point-light pool (fireflies' light is purely their own additive
   // glow; the deferred `ground-light` rung would change that and this entry with it), so the
-  // zoning really is complete. `smellyFlies` also covers its maggot engine: the maggots are a
-  // second engine INSIDE the same subsystem and share both zones by construction.
+  // zoning really is complete. Three effects, three subsystems, three pairs of zones — the maggots
+  // used to be a second engine inside the flies' subsystem and are an effect of their own now.
   smellyFlies: Object.freeze({
     coverage: 'full',
-    why: 'light.smellyFliesSync (the zone-field rebuild, population and activity bookkeeping, and the fly + maggot compute dispatches) and light.drawSmellyFlies (the maggot, fly-shadow and fly draws, one scene) together cover its entire cost. An effect with nothing painted early-outs before building anything, so both read ~0 on a scene with nothing painted for it — the true cost, not a blind spot.',
+    why: 'light.smellyFliesSync (the zone-field rebuild, population and activity bookkeeping, and the fly compute dispatch) and light.drawSmellyFlies (the fly-shadow and fly draws, one scene) together cover its entire cost. An effect with nothing painted early-outs before building anything, so both read ~0 on a scene with nothing painted for it — the true cost, not a blind spot.',
+  }),
+  maggots: Object.freeze({
+    coverage: 'full',
+    why: 'light.maggotsSync (the zone-field rebuild, population and weather bookkeeping, and the maggot compute dispatch) and light.drawMaggots (the maggot draws, one scene) together cover its entire cost. An effect with nothing painted early-outs before building anything, so both read ~0 on a scene with nothing painted for it.',
   }),
   fireflies: Object.freeze({
     coverage: 'full',

@@ -82,7 +82,7 @@ export function run(t) {
   ok(
     'the canonical order runs surface → emission → behaviour → size → couplings → machinery',
     CATEGORY_ORDER.join(',') ===
-      'Presence,Look,Detail,Flame,Ember,Smoke,Splash,Fall,Veil,Ground,Drips,Light,Motion,Depth,Shape,Extent,Outdoor,Response,Technical'
+      'Presence,Look,Detail,Flame,Ember,Smoke,Splash,Fall,Veil,Ground,Drips,Light,Motion,Depth,Shape,Extent,Outdoor,Twilight,Weather,Response,Technical'
   );
   // ⚠️ Flame/Ember/Smoke/Depth added 2026-08-09 for fire's particle rebuild, and
   // placed by MEANING rather than appended: the three bodies are SURFACE groups
@@ -150,6 +150,22 @@ export function run(t) {
     'a param with an UNRECOGNISED category also falls to Technical, never dropped',
     groupParamsByCategory({ p: { type: 'float', category: 'Nonsense' } })[0].keys.includes('p')
   );
+
+  // --- the critters' Twilight and Weather groups are real categories ----------
+  // They were once declared and silently swept into Technical, which drew the whole flies/fireflies card as one
+  // undifferentiated pile. The vocabulary is closed; these two are in it, in the order a reader meets them.
+  {
+    const grouped = groupParamsByCategory({
+      a: { type: 'float', category: 'Weather' },
+      b: { type: 'float', category: 'Twilight' },
+      c: { type: 'float', category: 'Response' },
+      d: { type: 'float', category: 'Look' },
+    }).map((g) => g.category);
+    ok(
+      'Twilight and Weather are recognised categories, ordered Look → Twilight → Weather → Response',
+      grouped.join(',') === 'Look,Twilight,Weather,Response'
+    );
+  }
 
   // --- degenerate inputs are total, never throw ------------------------------
   ok('an empty schema yields zero groups', groupParamsByCategory({}).length === 0);

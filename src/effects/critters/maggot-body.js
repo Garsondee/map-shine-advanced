@@ -73,13 +73,19 @@ const SECOND_WAVE_RATE = WAVE_RATES[1];
  * @param {*} a.excite - float node 0..1: how worked-up it is (`custom.z`).
  * @param {*} a.wriggle - float node: the author's wriggle multiplier.
  * @param {*} a.seed01 - float node: per-maggot random.
+ * @param {*} [a.waveCount] - float node, a multiplier on how many bend waves fit along the body (1 = as drawn).
+ * @param {*} [a.girth] - float node, a multiplier on every radius (1 = as drawn).
  * @returns {{points: Array<*>}} nine vec3 nodes, (x, y, radius) in body lengths, head first,
  *   +x toward the head, centred on the body's centroid.
  */
-export function buildMaggotRig(TSL, { wave, excite, wriggle, seed01 }) {
+export function buildMaggotRig(TSL, { wave, excite, wriggle, seed01, waveCount = null, girth = null }) {
   const { float, vec3, sin, sqrt, max, min } = TSL;
   const N = MAGGOT_SEGMENTS;
   const phi = seed01.mul(TAU);
+  // Spatial wave numbers (radians per body length) scale with the author's ripple count. This leaves the TIME
+  // harmonics alone — the wave phase wraps at a period only those must divide (`maggot-brain.js#WAVE_PERIOD`).
+  const ripples = waveCount ?? float(1);
+  const fatness = girth ?? float(1);
 
   // sideways amplitude: always a little, much more when worked up, scaled by the author
   const amp = min(float(0.2), float(0.04).add(excite.mul(0.075)).mul(wriggle));
@@ -97,14 +103,14 @@ export function buildMaggotRig(TSL, { wave, excite, wriggle, seed01 }) {
       wave
         .negate()
         .add(phi)
-        .add(TAU * 0.85 * s)
+        .add(ripples.mul(TAU * 0.85 * s))
     );
     const w2 = sin(
       wave
         .mul(SECOND_WAVE_RATE)
         .negate()
         .add(phi.mul(2.1))
-        .add(TAU * 1.9 * s)
+        .add(ripples.mul(TAU * 1.9 * s))
     );
     ys.push(amp.mul(env).mul(w1.mul(0.7).add(w2.mul(0.3))));
   }
@@ -114,7 +120,7 @@ export function buildMaggotRig(TSL, { wave, excite, wriggle, seed01 }) {
   let sum = float(0);
   for (let j = 0; j < N; j++) {
     const sMid = (j + 0.5) / N;
-    const r = float(1).add(squeeze.mul(sin(wave.add(TAU * 1.25 * sMid))));
+    const r = float(1).add(squeeze.mul(sin(wave.add(ripples.mul(TAU * 1.25 * sMid)))));
     raw.push(r);
     sum = sum.add(r);
   }
@@ -135,8 +141,16 @@ export function buildMaggotRig(TSL, { wave, excite, wriggle, seed01 }) {
   for (let i = 0; i <= N; i++) {
     const s = i / N;
     // where the squeeze wave is thin the body is long, and vice versa
-    const fat = float(1).sub(squeeze.mul(0.9).mul(sin(wave.add(TAU * 1.25 * s))));
-    points.push(vec3(xs[i].sub(meanX), ys[i], float(R_MAX * PROFILE[i]).mul(fat)));
+    const fat = float(1).sub(squeeze.mul(0.9).mul(sin(wave.add(ripples.mul(TAU * 1.25 * s)))));
+    points.push(
+      vec3(
+        xs[i].sub(meanX),
+        ys[i],
+        float(R_MAX * PROFILE[i])
+          .mul(fat)
+          .mul(fatness)
+      )
+    );
   }
   return { points };
 }
@@ -153,12 +167,34 @@ export function buildMaggotRig(TSL, { wave, excite, wriggle, seed01 }) {
  * @param {*} a.colour - vec3 node: the author's maggot colour (sRGB).
  * @param {*} a.seed01 - float node.
  * @param {object} a.plan - `critterTierPlan('fly', n)` (maggots follow the fly ladder).
+ * @param {*} [a.gloss] @param {*} [a.segmentDepth] @param {*} [a.gutLine] @param {*} [a.contactShadow] - float
+ *   nodes, each a multiplier on the look as drawn (1 when absent): the moist highlight, the grooves between
+ *   segments, the dark gut seen through the skin, and the soft shadow under the body.
  * @returns {{rgb: *, alpha: *}} straight sRGB colour and alpha.
  */
-export function buildMaggotBody(TSL, { p, aa, points, lightLocal, colour, seed01, plan }) {
+export function buildMaggotBody(
+  TSL,
+  {
+    p,
+    aa,
+    points,
+    lightLocal,
+    colour,
+    seed01,
+    plan,
+    gloss = null,
+    segmentDepth = null,
+    gutLine = null,
+    contactShadow = null,
+  }
+) {
   const { float, vec2, vec3, select, clamp, mix, smoothstep, length, dot, sqrt, max, min, pow, fract, normalize } = TSL;
   const N = MAGGOT_SEGMENTS;
   const k = (a, b, x) => smoothstep(float(a), float(b), x);
+  const glossAmt = gloss ?? float(1);
+  const grooveAmt = segmentDepth ?? float(1);
+  const gutAmt = gutLine ?? float(1);
+  const contactAmt = contactShadow ?? float(1);
 
   // nearest point on the tapered tube: the union of linearly-tapered capsules
   let best = float(1e3);
@@ -207,15 +243,15 @@ export function buildMaggotBody(TSL, { p, aa, points, lightLocal, colour, seed01
   const band = fract(bestT.mul(GROOVES));
   const edge = min(band, float(1).sub(band));
   const groove = float(1).sub(k(0, 0.11, edge));
-  rgb = rgb.mul(float(1).sub(groove.mul(float(0.05).add(bestT.mul(0.08)))));
+  rgb = rgb.mul(float(1).sub(groove.mul(float(0.05).add(bestT.mul(0.08))).mul(grooveAmt)));
   // the dark gut line, seen through the skin along the back
   const gut = float(1)
     .sub(k(0, 0.42, across))
     .mul(k(0.16, 0.34, bestT))
     .mul(float(1).sub(k(0.86, 0.98, bestT)));
-  rgb = mix(rgb, skin.mul(vec3(0.62, 0.52, 0.4)), gut.mul(0.34));
-  if (plan.sheen) rgb = rgb.add(vec3(1, 0.97, 0.9).mul(spec).mul(0.5));
-  else rgb = rgb.add(vec3(1, 0.97, 0.9).mul(spec).mul(0.18));
+  rgb = mix(rgb, skin.mul(vec3(0.62, 0.52, 0.4)), gut.mul(0.34).mul(gutAmt));
+  if (plan.sheen) rgb = rgb.add(vec3(1, 0.97, 0.9).mul(spec).mul(0.5).mul(glossAmt));
+  else rgb = rgb.add(vec3(1, 0.97, 0.9).mul(spec).mul(0.18).mul(glossAmt));
 
   let stack = layer(TSL, rgb, coverage(TSL, best, aa));
 
@@ -234,7 +270,8 @@ export function buildMaggotBody(TSL, { p, aa, points, lightLocal, colour, seed01
   // the body's own distance, widened, is already in hand
   const contact = float(1)
     .sub(k(0, 0.085, max(best, float(0))))
-    .mul(0.34);
+    .mul(0.34)
+    .mul(contactAmt);
   stack = over(TSL, stack, layer(TSL, vec3(0.02, 0.015, 0.01), contact));
 
   const alpha = stack.a;

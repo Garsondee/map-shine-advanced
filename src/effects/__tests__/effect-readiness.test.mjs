@@ -43,6 +43,7 @@ import { LIGHTNING } from '../lightning.js';
 import { PRECIPITATION } from '../precipitation/precipitation.js';
 import { PRISM } from '../prism/prism.js';
 import { SMELLY_FLIES } from '../critters/smelly-flies.js';
+import { MAGGOTS } from '../critters/maggots.js';
 import { SPECULAR } from '../specular/specular.js';
 import { STYLIZE } from '../stylize.js';
 import { SUN_SHADOWS } from '../sun-shadows.js';
@@ -88,6 +89,7 @@ const MANIFESTS = [
   // night `surface.prism` flipped to `live` — check 2 below now REQUIRES it.
   PRISM,
   SMELLY_FLIES,
+  MAGGOTS,
   SPECULAR,
   STYLIZE,
   SUN_SHADOWS,

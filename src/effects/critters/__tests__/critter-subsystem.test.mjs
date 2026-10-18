@@ -7,8 +7,9 @@
 import { createCritterSubsystem, critterUniformValues, flyShadowFromSky } from '../critter-subsystem.js';
 import { getLogLevel, setLogLevel } from '../../../core/log.js';
 import { SMELLY_FLIES_PARAMS } from '../smelly-flies.js';
+import { MAGGOTS_PARAMS } from '../maggots.js';
 import { FIREFLIES_PARAMS } from '../fireflies.js';
-import { CRITTER_CAPACITY, FLY_LOOKS, FIREFLY_FLASH_STYLES } from '../critter-species.js';
+import { CRITTER_CAPACITY, FLY_LOOKS, FIREFLY_FLASH_STYLES, critterTierPlan } from '../critter-species.js';
 
 const defaultsOf = (schema) => Object.fromEntries(Object.entries(schema).map(([id, def]) => [id, def.default]));
 
@@ -112,7 +113,7 @@ function harness(group, { params, state = {}, THREE = { Scene: FakeScene } } = {
     spy.zoneBuffers.push(buf);
     return buf;
   };
-  const schema = group === 'smellyFlies' ? SMELLY_FLIES_PARAMS : FIREFLIES_PARAMS;
+  const schema = { smellyFlies: SMELLY_FLIES_PARAMS, maggots: MAGGOTS_PARAMS, fireflies: FIREFLIES_PARAMS }[group];
   const renderState = {
     enabled: true,
     params: { ...defaultsOf(schema), ...params },
@@ -153,6 +154,9 @@ const DUSK = {
 };
 const RAINY_DUSK = { ...DUSK, weather: { precip01: 1, cloudCover01: 1 } };
 const RENDERER = {};
+/** An engine's setParams calls, split into the two kinds the subsystem makes: the author's values and the weather drive. */
+const valueCalls = (e) => e.paramCalls.filter((c) => 'expectedDepth' in c);
+const driveCalls = (e) => e.paramCalls.filter((c) => 'windPush' in c);
 const RECT = { minX: 0, minY: 0, maxX: 640, maxY: 480 };
 
 export function run(t) {
@@ -194,10 +198,7 @@ export function run(t) {
     'an unknown species falls back to "mixed" (0), never a negative index',
     critterUniformValues('fly', { species: 'wasp' }).lookIndex === 0
   );
-  t.ok(
-    'maggots carry their own colour',
-    critterUniformValues('maggot', { maggotColor: '#ffffff' }).maggotColor.join() === '1,1,1'
-  );
+  t.ok('maggots carry their own colour', critterUniformValues('maggot', { color: '#ffffff' }).color.join() === '1,1,1');
   const ff = critterUniformValues('firefly', {
     ...defaultsOf(FIREFLIES_PARAMS),
     flashStyle: 'double',
@@ -239,31 +240,24 @@ export function run(t) {
     sub.sync(RENDERER, 1100, 0.016, RECT, DAY);
     t.ok('enabled but nothing painted: still no engine', spy.engines.length === 0);
     renderState.maskGrid = discGrid();
-    renderState.params = { ...renderState.params, fliesPerZone: 0, maggotsPerZone: 0 };
+    renderState.params = { ...renderState.params, fliesPerZone: 0 };
     sub.sync(RENDERER, 1200, 0.016, RECT, DAY);
-    t.ok('painted but zero flies and zero maggots: still no engine', spy.engines.length === 0);
+    t.ok('painted but zero flies: still no engine', spy.engines.length === 0);
   }
   {
     const { sub, spy } = harness('smellyFlies');
     sub.sync(RENDERER, 1000, 0.016, RECT, DAY);
-    t.ok(
-      'painted: exactly the fly engine is built (maggots default to 0)',
-      spy.engines.length === 1 && spy.engines[0].kind === 'fly'
-    );
+    t.ok('painted: exactly the fly engine is built', spy.engines.length === 1 && spy.engines[0].kind === 'fly');
     const e = spy.engines[0];
     t.ok(
       'the fly arena is allocated once at the kind’s capacity',
       spy.allocs.length === 1 && spy.allocs[0] === CRITTER_CAPACITY.fly
     );
-    t.ok('one shared zone buffer, sized for the group (fly + maggot sections)', spy.zoneBuffers.length === 1);
+    t.ok('one zone buffer for the effect', spy.zoneBuffers.length === 1);
     const zb = spy.zoneBuffers[0];
     t.ok(
-      'the zone buffer is written once with the field and both homes sections',
-      zb.writes.length === 1 && zb.writes[0].sections.length === 2
-    );
-    t.ok(
-      'the fly section has homes; the unbuilt maggot section is null',
-      zb.writes[0].sections[0]?.length > 0 && zb.writes[0].sections[1] === null
+      'the zone buffer is written once with the field and the effect’s one homes section',
+      zb.writes.length === 1 && zb.writes[0].sections.length === 1 && zb.writes[0].sections[0]?.length > 0
     );
     const z = e.setZoneCalls.at(-1);
     t.ok(
@@ -276,10 +270,17 @@ export function run(t) {
       'the engine is stepped with the REAL dt, the clock and the view rect',
       e.steps.length === 1 && e.steps[0].dtSec === 0.016 && e.steps[0].tMs === 1000 && e.steps[0].worldRect === RECT
     );
-    const pushed = e.paramCalls.at(-1);
+    const pushed = valueCalls(e).at(-1);
     t.ok(
       'params are pushed once with the converted values',
-      e.paramCalls.length === 1 && pushed.buzz === 1500 && Array.isArray(pushed.tint)
+      valueCalls(e).length === 1 && pushed.buzz === 1500 && Array.isArray(pushed.tint)
+    );
+    t.ok(
+      'the weather drive is pushed with them, calm on a calm day',
+      driveCalls(e).length === 1 &&
+        driveCalls(e)[0].agitation === 1 &&
+        driveCalls(e)[0].tempo === 1 &&
+        driveCalls(e)[0].shelter === 0
     );
     t.ok('the occlusion gate’s expected depth is resolved from the floor elevation', pushed.expectedDepth === 1);
     t.ok('it has something to draw', sub.hasContent === true && sub.scene.visible === true);
@@ -288,7 +289,7 @@ export function run(t) {
     // a second frame changes nothing structural and does not re-push unchanged params
     sub.sync(RENDERER, 1016, 0.016, RECT, DAY);
     t.ok('frame 2: no rebuild, no second zone write', spy.engines.length === 1 && zb.writes.length === 1);
-    t.ok('frame 2: unchanged params are not pushed again', e.paramCalls.length === 1);
+    t.ok('frame 2: unchanged params and an unchanged sky are not pushed again', e.paramCalls.length === 2);
     t.ok('frame 2: but the kernel steps every frame', e.steps.length === 2);
     t.ok(
       'status reports the zone and the engines',
@@ -296,50 +297,40 @@ export function run(t) {
     );
   }
 
-  // ---- maggots join the fly zone in their own section -----------------------------------------
+  // ---- maggots are their own effect: their own mask, engine and sky rules --------------------------
   {
-    const { sub, spy, renderState } = harness('smellyFlies', { params: { maggotsPerZone: 30 } });
-    sub.sync(RENDERER, 1000, 0.016, RECT, DAY);
+    const { sub, spy, renderState } = harness('maggots');
+    sub.sync(RENDERER, 1000, 0.016, RECT, NIGHT);
+    const e = spy.engines[0];
     t.ok(
-      'with maggots on, both engines exist',
-      spy.engines
-        .map((e) => e.kind)
-        .sort()
-        .join() === 'fly,maggot'
-    );
-    const zb = spy.zoneBuffers[0];
-    const [flyE, maggotE] = ['fly', 'maggot'].map((k) => spy.engines.find((e) => e.kind === k));
-    t.ok('they share ONE zone buffer', spy.zoneBuffers.length === 1);
-    t.ok(
-      'the maggots read their own homes section',
-      maggotE.setZoneCalls.at(-1).homesOffset === zb.sectionOffsets[1] &&
-        flyE.setZoneCalls.at(-1).homesOffset === zb.sectionOffsets[0]
+      'the maggots effect builds exactly one engine, of the maggot kind',
+      spy.engines.length === 1 && e.kind === 'maggot'
     );
     t.ok(
-      'both sections are written in one go',
-      zb.writes.at(-1).sections.every((s) => s && s.length > 0)
+      'it has its own arena at the maggot capacity and its own zone buffer',
+      spy.allocs.length === 1 && spy.allocs[0] === CRITTER_CAPACITY.maggot && spy.zoneBuffers.length === 1
     );
+    const pop = e.setZoneCalls.at(-1).population;
+    t.ok('maggots are always out — night does not send them anywhere', e.active === pop);
     t.ok(
-      'maggots are always out — night and rain do not send them anywhere',
-      (() => {
-        sub.sync(RENDERER, 1016, 0.016, RECT, NIGHT);
-        return maggotE.active === maggotE.setZoneCalls.at(-1).population;
-      })()
+      'maggots follow the fly ladder (the sprite look is the same class)',
+      e.args.plan === critterTierPlan('fly', 2)
     );
-    t.ok('maggots follow the fly ladder (the sprite look is the same class)', maggotE.args.plan === flyE.args.plan);
-    t.ok('maggots draw beneath flies (render order)', maggotE.args.renderOrder < flyE.args.renderOrder);
-    // turning maggots off keeps the engine but empties it
-    renderState.params = { ...renderState.params, maggotsPerZone: 0 };
-    sub.sync(RENDERER, 1032, 0.016, RECT, DAY);
-    t.ok(
-      'maggots set back to 0: the engine is emptied (zero population, nothing showing)',
-      maggotE.active === 0 && maggotE.setZoneCalls.at(-1).population === 0
-    );
+    t.ok('the maggot colour reached the shader as an sRGB triple', Array.isArray(valueCalls(e).at(-1).color));
+    // rain drives them under, a little (default rainResponse 0.25), but a gale does not touch them
+    for (let i = 0; i < 30; i++) sub.sync(RENDERER, 2000 + i * 500, 0.5, RECT, { ...NIGHT, weather: { precip01: 1 } });
+    t.ok('heavy rain thins the maggots only a little', e.active > pop * 0.6 && e.active < pop * 0.95);
+    for (let i = 0; i < 30; i++) sub.sync(RENDERER, 20000 + i * 500, 0.5, RECT, { ...NIGHT, wind: { speed01: 1 } });
+    t.ok('a gale does not (maggots do not fly)', e.active > pop * 0.99);
+    // turning them off keeps the engine but empties it
+    renderState.params = { ...renderState.params, countPerZone: 0 };
+    sub.sync(RENDERER, 40000, 0.016, RECT, DAY);
+    t.ok('set back to 0 maggots: nothing is showing', sub.hasContent === false && e.active === 0);
   }
 
   // ---- the sky decides how many flies are out --------------------------------------------------
   {
-    const { sub, spy } = harness('smellyFlies', { params: { nightActivity: 0.1, weatherResponse: 1 } });
+    const { sub, spy } = harness('smellyFlies', { params: { nightActivity: 0.1 } });
     sub.sync(RENDERER, 1000, 0.016, RECT, NIGHT);
     const e = spy.engines[0];
     const pop = e.setZoneCalls.at(-1).population;
@@ -355,6 +346,63 @@ export function run(t) {
     );
     for (let i = 0; i < 40; i++) sub.sync(RENDERER, 1500 + i * 500, 0.5, RECT, DAY);
     t.ok('…and gets there', e.active > pop * 0.99);
+  }
+
+  // ---- weather: the head-count thins by cause, and the survivors are pushed around -------------------
+  {
+    const GALE = { ...DAY, wind: { speed01: 1, gustiness01: 0, directionDeg: 90 } };
+    const settle = (sub, env, from = 5000) => {
+      for (let i = 0; i < 40; i++) sub.sync(RENDERER, from + i * 500, 0.5, RECT, env);
+    };
+    const { sub, spy } = harness('smellyFlies');
+    sub.sync(RENDERER, 1000, 0.016, RECT, DAY);
+    const e = spy.engines[0];
+    const pop = e.setZoneCalls.at(-1).population;
+    t.ok('on a calm day the whole swarm is out', e.active === pop);
+    settle(sub, GALE);
+    t.ok('a gale sends most of them in (windResponse 0.8)', e.active < pop * 0.3 && e.active > pop * 0.1);
+    const gale = driveCalls(e).at(-1);
+    t.ok(
+      'the survivors are carried downwind: the push is pointed along the wind, and as strong as windDrift',
+      Math.hypot(gale.windPush[0], gale.windPush[1]) > 100 && gale.agitation > 1.5
+    );
+    settle(sub, { ...DAY, weather: { precip01: 0.7, precipKind: 'snow' } }, 40000);
+    t.ok('snow thins the swarm too, with its own response', e.active < pop * 0.1 + 0.01);
+    t.ok('…and drives the survivors to ground (shelter)', driveCalls(e).at(-1).shelter > 0.4);
+    settle(sub, { ...DAY, weather: { precip01: 0, temperature01: 0 } }, 80000);
+    t.ok('a hard freeze stills what is left, and stops them dead (coldBelow/coldResponse)', e.active <= pop * 0.11);
+    t.ok('…and slows the ones that remain', driveCalls(e).at(-1).tempo < 0.5);
+    settle(sub, DAY, 120000);
+    t.ok('the sky clearing brings the whole swarm back', e.active > pop * 0.99 && driveCalls(e).at(-1).shelter < 0.01);
+  }
+  {
+    const { sub, spy } = harness('smellyFlies', {
+      params: {
+        rainResponse: 0,
+        snowResponse: 0,
+        windResponse: 0,
+        coldResponse: 0,
+        windDrift: 0,
+        windAgitation: 0,
+        rainShelter: 0,
+        coldSlowdown: 0,
+      },
+    });
+    sub.sync(RENDERER, 1000, 0.016, RECT, DAY);
+    const e = spy.engines[0];
+    const pop = e.setZoneCalls.at(-1).population;
+    const storm = {
+      ...DAY,
+      weather: { precip01: 1, temperature01: 0 },
+      wind: { speed01: 1, gustiness01: 1, directionDeg: 0 },
+    };
+    for (let i = 0; i < 40; i++) sub.sync(RENDERER, 2000 + i * 500, 0.5, RECT, storm);
+    t.ok('with every response at 0 the swarm ignores a full storm', e.active > pop * 0.999);
+    const d = driveCalls(e).at(-1);
+    t.ok(
+      '…and is not pushed, shaken, sheltered or slowed either',
+      Math.hypot(d.windPush[0], d.windPush[1]) < 1e-6 && d.agitation === 1 && d.shelter === 0 && d.tempo === 1
+    );
   }
 
   // ---- fireflies: a window in sun elevation ---------------------------------------------------
@@ -462,7 +510,9 @@ export function run(t) {
     );
     t.ok(
       'the new engine is told where the zone is and what its params are',
-      spy.engines[1].setZoneCalls.length >= 1 && spy.engines[1].paramCalls.length === 1
+      spy.engines[1].setZoneCalls.length >= 1 &&
+        valueCalls(spy.engines[1]).length === 1 &&
+        driveCalls(spy.engines[1]).length === 1
     );
     t.ok('the old engine is disposed: its geometry, materials and pipelines go back to the renderer', first.disposed);
     t.ok('…and the new one is not', spy.engines[1].disposed === false);

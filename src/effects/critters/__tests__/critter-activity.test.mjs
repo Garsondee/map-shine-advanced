@@ -7,27 +7,35 @@
 import { buildEnvSnapshot } from '../../../world/environment.js';
 import {
   flyActivity,
+  maggotActivity,
   fireflyActivity,
   twilightEdges,
-  weatherCalm,
-  fireflyWeather,
   approach,
   activeSlotCount,
 } from '../critter-activity.js';
+import { skyFeel, weatherFactor } from '../critter-weather.js';
 
 const at = (todHour, weather = {}, wind = {}) =>
   buildEnvSnapshot({ time: { frame: 1, tMs: 1000, dtSec: 0.016 }, todHour, weather, wind });
 
 export function run(t) {
-  // ---- weather term is V2's, blended ------------------------------------------------------------
-  t.ok('calm weather = 1', weatherCalm(at(12), 1) === 1);
+  // ---- V2's weather rule is one setting of the new weather model ------------------------------------
+  // V2: `max(0.1, 1 − (precip·0.5 + wind·0.3))`. The model is richer (rain, snow, wind above a threshold
+  // and cold each have a response of their own) and V2's rule is reproduced by a rain response of 0.5 / 0.7
+  // (V2's precip term saturated at 1; ours at 0.7), a wind response of 0.3 from a threshold of 0, and a
+  // floor of 0.1. The numbers below are the sky's own: real snapshots.
+  const v2 = { rainResponse: 0.35, windThreshold: 0, windResponse: 0.3, weatherFloor: 0.1 };
+  t.ok('calm weather = 1', weatherFactor(skyFeel(at(12)), v2) === 1);
   t.ok(
-    'V2 formula: precip 1 + wind 1 → max(0.1, 1−0.8) = 0.2',
-    Math.abs(weatherCalm(at(12, { precip01: 1 }, { speed01: 1 }), 1) - 0.2) < 1e-9
+    'a gale and a downpour hit V2’s floor of a tenth',
+    Math.abs(
+      weatherFactor(skyFeel(at(12, { precip01: 1, precipKind: 'rain' }, { speed01: 1 })), {
+        ...v2,
+        rainResponse: 1,
+        windResponse: 1,
+      }) - 0.1
+    ) < 1e-9
   );
-  t.ok('V2 floors at 0.1', weatherCalm({ weather: { precip01: 1 }, wind: { speed01: 1 } }, 1) >= 0.1);
-  t.ok('response 0 ignores weather entirely', weatherCalm(at(12, { precip01: 1 }, { speed01: 1 }), 0) === 1);
-  t.ok('response 0.5 is halfway', Math.abs(weatherCalm(at(12, { precip01: 1 }, { speed01: 1 }), 0.5) - 0.6) < 1e-9);
 
   // ---- flies: diurnal ---------------------------------------------------------------------------
   t.ok('flies at noon: fully active', flyActivity(at(12)) === 1);
@@ -42,7 +50,29 @@ export function run(t) {
     prev = a;
   }
   t.ok('flies wake monotonically through the morning', monotone);
-  t.ok('rain thins the swarm', flyActivity(at(12, { precip01: 1 })) < 0.6);
+  t.ok(
+    'rain thins the swarm, by the effect’s own rain response',
+    flyActivity(at(12, { precip01: 1, precipKind: 'rain' }), { rainResponse: 1 }) === 0 &&
+      flyActivity(at(12, { precip01: 1, precipKind: 'rain' }), { rainResponse: 0.5 }) === 0.5 &&
+      flyActivity(at(12, { precip01: 1, precipKind: 'rain' }), { rainResponse: 0 }) === 1
+  );
+  t.ok(
+    'snow thins it by the snow response, and a snow-proof effect ignores it',
+    flyActivity(at(12, { precip01: 1, precipKind: 'snow' }), { snowResponse: 1 }) === 0 &&
+      flyActivity(at(12, { precip01: 1, precipKind: 'snow' }), { rainResponse: 1 }) === 1
+  );
+  t.ok(
+    'a gale clears a wind-shy swarm; a breeze below the threshold does not',
+    flyActivity(at(12, {}, { speed01: 1 }), { windThreshold: 0.4, windResponse: 1 }) === 0 &&
+      flyActivity(at(12, {}, { speed01: 0.3 }), { windThreshold: 0.4, windResponse: 1 }) === 1
+  );
+  t.ok(
+    'maggots care about weather only: noon, midnight and a calm sky are all the same to them',
+    maggotActivity(at(12)) === 1 &&
+      maggotActivity(at(0)) === 1 &&
+      maggotActivity(at(12, { precip01: 1, precipKind: 'rain' }), { rainResponse: 1 }) === 0 &&
+      maggotActivity(at(12, { precip01: 1, precipKind: 'rain' }), { rainResponse: 0.3 }) > 0.6
+  );
   t.ok('no snapshot yet reads as an ordinary day', flyActivity(null) === 1);
 
   // ---- fireflies: a window in sun elevation -----------------------------------------------------
@@ -144,20 +174,37 @@ export function run(t) {
     ordered.appear === 4 && ordered.full === -6 && ordered.low === -20 && ordered.mid === -13
   );
 
-  // weather
-  t.ok('rain clears fireflies from the air completely', fireflyActivity(at(18.5, { precip01: 1 })) === 0);
+  // weather: each cause has its own response, and the twilight window multiplies with it
+  const shy = { rainResponse: 1, snowResponse: 1, windThreshold: 0.3, windResponse: 0.7 };
   t.ok(
-    'weatherResponse 0 lets them fly in the rain',
-    fireflyActivity(at(18.5, { precip01: 1 }), { weatherResponse: 0 }) > 0.9
+    'rain clears fireflies from the air completely',
+    fireflyActivity(at(18.5, { precip01: 1, precipKind: 'rain' }), shy) === 0
   );
   t.ok(
-    'wind thins but does not erase them',
-    fireflyActivity(at(18.5, {}, { speed01: 1 })) > 0.3 && fireflyWeather(at(18.5, {}, { speed01: 1 }), 1) < 0.5
+    'a rain response of 0 lets them fly in the rain',
+    fireflyActivity(at(18.5, { precip01: 1, precipKind: 'rain' }), { ...shy, rainResponse: 0 }) > 0.9
+  );
+  t.ok(
+    'snow clears them by its own response',
+    fireflyActivity(at(18.5, { precip01: 1, precipKind: 'snow' }), shy) === 0 &&
+      fireflyActivity(at(18.5, { precip01: 1, precipKind: 'snow' }), { ...shy, snowResponse: 0 }) > 0.9
+  );
+  t.ok(
+    'wind thins but does not erase them (a response of 0.7 leaves 0.3 in a full gale)',
+    Math.abs(fireflyActivity(at(18.5, {}, { speed01: 1 }), shy) - 0.3) < 0.05
+  );
+  t.ok(
+    'a cold snap clears a cold-shy colony',
+    fireflyActivity(at(18.5, { temperature01: 0 }), { coldBelow: 0.3, coldResponse: 1 }) === 0 &&
+      fireflyActivity(at(18.5, { temperature01: 0.6 }), { coldBelow: 0.3, coldResponse: 1 }) > 0.9
   );
 
   // alwaysActive: for a GM without a day clock
   t.ok('alwaysActive ignores the sky', fireflyActivity(at(12), { alwaysActive: true }) === 1);
-  t.ok('…but still respects the rain', fireflyActivity(at(12, { precip01: 1 }), { alwaysActive: true }) === 0);
+  t.ok(
+    '…but still respects the rain',
+    fireflyActivity(at(12, { precip01: 1, precipKind: 'rain' }), { alwaysActive: true, rainResponse: 1 }) === 0
+  );
   t.ok('no env at all → none (never guess a hatch)', fireflyActivity(null) === 0);
 
   // ---- smoothing --------------------------------------------------------------------------------

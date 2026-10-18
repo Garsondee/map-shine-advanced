@@ -102,15 +102,22 @@ export function buildFlash(TSL, { phase, styleIndex }) {
  * @param {*} a.intensity - float node: HDR peak.
  * @param {object} a.plan
  * @param {object} [a.trail] - `{length, phase, dPhase, styleIndex}` (nodes) when `plan.trail`.
+ * @param {*} [a.coreSize] @param {*} [a.haloAmount] @param {*} [a.afterglow] - float nodes, multipliers on the
+ *   look as drawn (1 when absent): how wide the hot centre is, how strong the soft halo is, and how bright the
+ *   streak behind a flying firefly is.
  * @returns {*} vec3 node: linear HDR radiance to ADD.
  */
-export function buildGlow(TSL, { q, radius, flash, color, intensity, plan, trail = null }) {
+export function buildGlow(
+  TSL,
+  { q, radius, flash, color, intensity, plan, trail = null, coreSize = null, haloAmount = null, afterglow = null }
+) {
   const { float, vec2, vec3, exp, length, smoothstep, clamp, mix, max } = TSL;
   const r = length(q).div(radius);
-  const core = exp(r.div(0.14).mul(r.div(0.14)).negate());
+  const coreW = float(0.14).mul(coreSize ?? float(1));
+  const core = exp(r.div(coreW).mul(r.div(coreW)).negate());
   const halo = exp(r.div(0.55).mul(r.div(0.55)).negate());
   const window = float(1).sub(smoothstep(float(0.9), float(1.25), r));
-  let level = flash.mul(core.add(halo.mul(0.32))).mul(window);
+  let level = flash.mul(core.add(halo.mul(0.32).mul(haloAmount ?? float(1)))).mul(window);
 
   if (plan.trail && trail) {
     // distance to the streak: a segment from the insect back along −x
@@ -130,7 +137,8 @@ export function buildGlow(TSL, { q, radius, flash, color, intensity, plan, trail
       .mul(float(1).sub(s).mul(float(1).sub(s)))
       .mul(behind)
       .mul(moving)
-      .mul(0.55);
+      .mul(0.55)
+      .mul(afterglow ?? float(1));
     level = max(level, streak);
   }
 

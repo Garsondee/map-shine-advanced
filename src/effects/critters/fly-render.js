@@ -45,6 +45,8 @@ import { litLinear, occlusionGate, createCritterMaterial } from './critter-surfa
 const QUAD_HALF = 0.95;
 /** The shadow's quad is larger: its blur needs room to fade out. */
 const SHADOW_HALF = 1.35;
+/** …and is never allowed to grow past this (body lengths), so a very soft shadow cannot flood the screen. */
+const SHADOW_HALF_MAX = 8;
 /** Light direction in WORLD space (y is down): from the upper left. */
 const WORLD_LIGHT = [-0.5, -0.8];
 
@@ -202,19 +204,23 @@ export function buildFlyMaterials(
   let shadow = null;
   if (plan.shadow) {
     shadow = createCritterMaterial(THREE);
-    const vShadowLocal = Fn(() => corner.mul(SHADOW_HALF * 2))().toVarying('vShadowLocal');
     // soft with height: a landed fly's shadow is a tight contact shadow, a high one a broad smudge
-    const vSoft = Fn(() => {
-      const soft = u('shadowSoft')
+    const softNode = () =>
+      u('shadowSoft')
         .mul(u('shadowSoftness'))
         .div(inst.L)
         .mul(float(0.3).add(inst.height01.mul(0.7)))
         .add(0.03);
-      return soft;
-    })().toVarying('vSoft');
+    // The quad GROWS with the blur. The penumbra is a fixed number of pixels, so in body lengths it is
+    // `px / L` -- the smaller the fly, the wider the blur relative to it. A fixed quad cut that blur off at
+    // its edge (a hard straight border on a soft shadow), worst on the smallest flies. The coverage ramp
+    // reaches softness/2 past the silhouette; 0.55 leaves a little to spare.
+    const shadowHalf = () => float(SHADOW_HALF).add(softNode().mul(0.55)).min(SHADOW_HALF_MAX);
+    const vShadowLocal = Fn(() => corner.mul(shadowHalf().mul(2)))().toVarying('vShadowLocal');
+    const vSoft = Fn(() => softNode())().toVarying('vSoft');
     shadow.positionNode = Fn(() => {
       const sizePx = inst.L;
-      const off = rotate(corner.mul(SHADOW_HALF * 2), inst.hdg).mul(sizePx);
+      const off = rotate(corner.mul(shadowHalf().mul(2)), inst.hdg).mul(sizePx);
       const throwPx = u('shadowShift').mul(inst.height);
       const live = inst.alpha.greaterThan(0.002).select(float(1), float(0));
       return vec3(

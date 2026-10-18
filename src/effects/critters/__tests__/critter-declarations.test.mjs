@@ -215,7 +215,7 @@ export function run(t) {
     'the fly cap is V2’s Max Flies, widened',
     SMELLY_FLIES_PARAMS.fliesPerZone.min === 0 && SMELLY_FLIES_PARAMS.fliesPerZone.max >= 30
   );
-  t.ok('V2 default swarm of 10 survives', SMELLY_FLIES_PARAMS.fliesPerZone.default === 10);
+  t.ok('default swarm of 5 (V2 had 10; tuned down 2026-10-18)', SMELLY_FLIES_PARAMS.fliesPerZone.default === 5);
   t.ok('pause range is ordered', SMELLY_FLIES_PARAMS.pauseMin.default < SMELLY_FLIES_PARAMS.pauseMax.default);
   t.ok('flies sleep mostly at night by default', SMELLY_FLIES_PARAMS.nightActivity.default < 0.5);
   t.ok(

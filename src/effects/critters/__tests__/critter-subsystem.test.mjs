@@ -192,7 +192,7 @@ export function run(t) {
     'the species name becomes its shader index',
     fly.lookIndex === FLY_LOOKS.indexOf('bluebottle') && fly.lookIndex === 2
   );
-  t.ok('plain numbers are passed through by their own names', fly.buzz === 1500 && fly.size === 18);
+  t.ok('plain numbers are passed through by their own names', fly.buzz === 4000 && fly.size === 4);
   t.ok('the sky-resolved shadow rides along', fly.shadowAmount === 0.3 && fly.shadowShift[1] === 0.2);
   t.ok(
     'an unknown species falls back to "mixed" (0), never a negative index',
@@ -273,7 +273,7 @@ export function run(t) {
     const pushed = valueCalls(e).at(-1);
     t.ok(
       'params are pushed once with the converted values',
-      valueCalls(e).length === 1 && pushed.buzz === 1500 && Array.isArray(pushed.tint)
+      valueCalls(e).length === 1 && pushed.buzz === 4000 && Array.isArray(pushed.tint)
     );
     t.ok(
       'the weather drive is pushed with them, calm on a calm day',

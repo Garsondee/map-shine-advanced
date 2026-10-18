@@ -87,7 +87,7 @@ export function run(t) {
   // ── kinds differ only where the table says so ──
   const fly = createUniformBank(stubTSL(), { ...CRITTER_UNIFORM_DEFAULTS, ...CRITTER_KIND_DEFAULTS.fly });
   const firefly = createUniformBank(stubTSL(), { ...CRITTER_UNIFORM_DEFAULTS, ...CRITTER_KIND_DEFAULTS.firefly });
-  t.ok('a fly is 18 px by default and a firefly 8', fly.get('size').value === 18 && firefly.get('size').value === 8);
+  t.ok('a fly is 4 px by default and a firefly 3', fly.get('size').value === 4 && firefly.get('size').value === 3);
   t.ok('everything else is shared', fly.get('opacity').value === firefly.get('opacity').value);
   t.ok(
     'the per-kind overrides name only uniforms the table declares (no typo can hide in them)',

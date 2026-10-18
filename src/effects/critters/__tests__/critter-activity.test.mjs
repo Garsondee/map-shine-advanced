@@ -13,8 +13,10 @@ import {
   approach,
   activeSlotCount,
 } from '../critter-activity.js';
+import { FIREFLIES_PARAMS } from '../fireflies.js';
 import { skyFeel, weatherFactor } from '../critter-weather.js';
 
+const FIREFLIES_DEFAULTS = Object.fromEntries(Object.entries(FIREFLIES_PARAMS).map(([k, d]) => [k, d.default]));
 const at = (todHour, weather = {}, wind = {}) =>
   buildEnvSnapshot({ time: { frame: 1, tMs: 1000, dtSec: 0.016 }, todHour, weather, wind });
 
@@ -97,6 +99,10 @@ export function run(t) {
     down.every((d, i) => i === 0 || d.a <= down[i - 1].a + 1e-9)
   );
   t.ok('deep night leaves only the residual', Math.abs(fireflyActivity(at(23), { nightResidual: 0.2 }) - 0.2) < 1e-9);
+  t.ok(
+    'by default the colony is gone at midnight (no stragglers, none at dawn)',
+    fireflyActivity(at(23.99), FIREFLIES_DEFAULTS) === 0 && fireflyActivity(at(0), FIREFLIES_DEFAULTS) === 0
+  );
   t.ok('nightResidual 0 means none after the fade', fireflyActivity(at(23), { nightResidual: 0 }) === 0);
   t.ok('the sky window is real: at 18:30 they are out', fireflyActivity(at(18.5)) > 0.9);
 

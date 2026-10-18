@@ -72,10 +72,10 @@ export const CRITTER_UNIFORM_DEFAULTS = Object.freeze({
   legWeight: 1,
   bankAmount: 1,
   shadowSoftness: 1,
-  buzz: 1500,
-  tether: 20,
-  swarmRadius: 100,
-  maxSpeed: 600,
+  buzz: 4000,
+  tether: 10,
+  swarmRadius: 600,
+  maxSpeed: 450,
   flyHeight: 80,
   landChance: 0.1,
   landingTime: 0.8,
@@ -83,22 +83,22 @@ export const CRITTER_UNIFORM_DEFAULTS = Object.freeze({
   walkSpeed: 60,
   takeoffChance: 0.04,
   groomChance: 0.6,
-  size: 18,
+  size: 4,
   wingBlur: 1,
   lookIndex: 0,
   // ── maggots ──
   color: [0.72, 1, 0.23],
-  girth: 1,
+  girth: 1.6,
   contactShadow: 1,
   gloss: 1,
   segmentDepth: 1,
   gutLine: 1,
-  wriggle: 1,
+  wriggle: 0.6,
   waveCount: 1,
-  crawlSpeed: 1,
+  crawlSpeed: 0.35,
   crawlChance: 0.55,
   crawlLength: 1,
-  clustering: 0.6,
+  clustering: 0.25,
   // ── fireflies ──
   driftSpeed: 30,
   wander: 1,
@@ -122,13 +122,13 @@ export const CRITTER_UNIFORM_DEFAULTS = Object.freeze({
 
 /**
  * Where a kind's own default differs from the table's (the table is shared, and `size` means a fly's
- * 18 px there but a firefly's 8). Applied over the base when a kind's bank is built.
+ * 4 px there but a firefly's 3). Applied over the base when a kind's bank is built.
  */
 export const CRITTER_KIND_DEFAULTS = Object.freeze({
   fly: Object.freeze({}),
   // `color` is the glow's in the table (a firefly's) and the skin's here; a maggot rests in longer pauses than a fly.
-  maggot: Object.freeze({ size: 20, color: [0.902, 0.863, 0.722], pauseMin: 0.9, pauseMax: 3.6 }),
-  firefly: Object.freeze({ size: 8, sizeVariation: 0.2 }),
+  maggot: Object.freeze({ size: 6, sizeVariation: 0.65, color: [0.902, 0.863, 0.722], pauseMin: 0.9, pauseMax: 3.6 }),
+  firefly: Object.freeze({ size: 3, sizeVariation: 0.2 }),
 });
 
 /**

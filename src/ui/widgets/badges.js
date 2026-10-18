@@ -28,24 +28,20 @@
 
 import { iconMarkup } from './icon-sprite.js';
 
-const MUTED = 'var(--ink2, #8fa3c4)';
-const FAIL = 'var(--fail, #ef6d5a)';
-
+/**
+ * One badge. Looks come from the `.msa-badge` classes in the Studio's own
+ * stylesheet (`rooms/studio/studio-style.js`) — this module is only ever
+ * mounted by the Studio's effect cards — so a badge can have real
+ * hover/press/focus states, which an inline style object cannot express.
+ * `opts.action` makes it a `<button>` (keyboard-reachable, announced as
+ * clickable) instead of a bare `<span>` that merely had a click listener.
+ */
 function chip(text, opts = {}) {
-  const el = document.createElement('span');
-  Object.assign(el.style, {
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: '3px',
-    padding: '1px 6px',
-    borderRadius: '999px',
-    fontSize: '9px',
-    lineHeight: '1.6',
-    border: `1px solid ${opts.planned ? FAIL : 'var(--line, rgba(196,208,232,.13))'}`,
-    borderStyle: opts.planned ? 'dashed' : 'solid',
-    color: opts.planned ? FAIL : MUTED,
-    flex: '0 0 auto',
-  });
+  const el = document.createElement(opts.action ? 'button' : 'span');
+  if (opts.action) el.type = 'button';
+  el.className = ['msa-badge', opts.planned && 'msa-badge--planned', opts.action && 'msa-badge--action']
+    .filter(Boolean)
+    .join(' ');
   el.innerHTML = text;
   if (opts.title) el.title = opts.title;
   return el;
@@ -118,19 +114,15 @@ export function healthBadge({ declared, read, onClick, plannedReason } = {}) {
     return chip(`${iconMarkup('health', 'style="width:9px;height:9px"')} ?`, { planned: true, title: plannedReason });
   }
   const orphaned = Math.max(0, declared - read);
-  const el = chip(`${iconMarkup('health', 'style="width:9px;height:9px"')} ${read}/${declared}`);
-  if (orphaned > 0) {
-    el.style.borderColor = 'var(--warn, #e0a940)';
-    el.style.color = 'var(--warn, #e0a940)';
-  }
+  const el = chip(`${iconMarkup('health', 'style="width:9px;height:9px"')} ${read}/${declared}`, {
+    action: typeof onClick === 'function',
+  });
+  if (orphaned > 0) el.classList.add('msa-badge--warn');
   el.title =
     orphaned > 0
       ? `${read} of ${declared} params observed reaching the renderer this session — ${orphaned} not yet observed ` +
         '(may be a genuinely orphaned control, or simply not exercised yet). Click for the full Control Health report.'
       : `${read} of ${declared} params observed reaching the renderer this session — every declared param has been read.`;
-  if (typeof onClick === 'function') {
-    el.style.cursor = 'pointer';
-    el.addEventListener('click', onClick);
-  }
+  if (typeof onClick === 'function') el.addEventListener('click', onClick);
   return el;
 }

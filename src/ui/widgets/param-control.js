@@ -47,7 +47,7 @@ export function styled(tag, style) {
 }
 
 function row() {
-  return styled('label', {
+  const el = styled('label', {
     display: 'flex',
     alignItems: 'center',
     gap: '7px',
@@ -56,6 +56,34 @@ function row() {
     color: TEXT,
     pointerEvents: 'auto',
   });
+  // A stable hook for the Studio's stylesheet (row hover, type scale) — the
+  // inline values above stay as the fallback every OTHER consumer (the old
+  // debug panel, the Remote) renders with, so nothing there changes.
+  el.className = 'msa-row';
+  return el;
+}
+
+/**
+ * How far along its track a slider's thumb sits, 0..1. Drives the filled
+ * portion of the track (the `--p` custom property the Studio stylesheet reads)
+ * — Foundry's own range style draws an empty dark track, so without this you
+ * cannot see a value's position at a glance, only by finding the thumb.
+ * Pure and clamped: a degenerate range (`max <= min`) or a non-number is 0.
+ * @param {number|string} value @param {number|string} min @param {number|string} max
+ * @returns {number}
+ */
+export function fillFraction(value, min, max) {
+  const v = Number(value);
+  const lo = Number(min);
+  const hi = Number(max);
+  if (!Number.isFinite(v) || !Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo) return 0;
+  return Math.round(Math.min(1, Math.max(0, (v - lo) / (hi - lo))) * 10000) / 10000;
+}
+
+/** Mirror a range input's current position onto its `--p` custom property
+ * (also used by `dial-control.js`, whose dial IS a range input). */
+export function paintFill(input) {
+  input.style.setProperty('--p', String(fillFraction(input.value, input.min, input.max)));
 }
 
 function labelSpan(decl, id) {
@@ -80,12 +108,17 @@ function formatNum(v) {
 function buildRangeRow(id, decl, { value, onChange }) {
   const wrap = row();
   wrap.title = decl.help ?? '';
-  const input = styled('input', { flex: '1', accentColor: ACCENT, pointerEvents: 'auto' });
+  // `minWidth:0` — a range input's intrinsic width otherwise stops the flex
+  // row shrinking, so in a narrow card the readout was pushed past the card's
+  // own right edge.
+  const input = styled('input', { flex: '1', minWidth: '0', accentColor: ACCENT, pointerEvents: 'auto' });
   input.type = 'range';
+  input.className = 'msa-range';
   input.min = String(decl.min ?? 0);
   input.max = String(decl.max ?? 1);
   input.step = String(decl.step ?? (decl.type === 'int' ? 1 : 0.01));
   input.value = String(value);
+  paintFill(input);
   const readout = styled('span', {
     minWidth: '38px',
     textAlign: 'right',
@@ -95,6 +128,7 @@ function buildRangeRow(id, decl, { value, onChange }) {
   readout.textContent = formatNum(value);
   input.addEventListener('input', () => {
     readout.textContent = formatNum(input.value);
+    paintFill(input);
   });
   input.addEventListener('change', () => {
     onChange(decl.type === 'int' ? parseInt(input.value, 10) : parseFloat(input.value));
@@ -332,6 +366,7 @@ function buildCheckboxRow(id, decl, { value, onChange }) {
   wrap.title = decl.help ?? '';
   const input = styled('input', { pointerEvents: 'auto' });
   input.type = 'checkbox';
+  input.className = 'msa-switch-input';
   input.checked = value === true;
   input.addEventListener('change', () => onChange(input.checked));
   wrap.append(labelSpan(decl, id), input);
@@ -344,6 +379,7 @@ function buildColorRow(id, decl, { value, onChange }) {
   wrap.title = decl.help ?? '';
   const input = styled('input', { pointerEvents: 'auto', width: '36px', height: '20px', padding: '0', border: 'none' });
   input.type = 'color';
+  input.className = 'msa-color';
   input.value = typeof value === 'string' ? value : (decl.default ?? '#ffaa00');
   input.addEventListener('change', () => onChange(input.value));
   wrap.append(labelSpan(decl, id), input);
@@ -364,6 +400,7 @@ function buildEnumRow(id, decl, { value, onChange }) {
     font: '10.5px/1.2 Signika, sans-serif',
     padding: '3px',
   });
+  select.className = 'msa-select';
   for (const v of decl.values ?? []) {
     const opt = document.createElement('option');
     opt.value = v;
@@ -487,12 +524,14 @@ export function buildInheritableRangeRow({
   wrap.title = help ?? '';
   const labelEl = styled('span', { flex: '0 0 auto', minWidth: '92px', opacity: '0.9' });
   labelEl.textContent = label + (isOverridden ? ' •' : '');
-  const input = styled('input', { flex: '1', accentColor: ACCENT, pointerEvents: 'auto' });
+  const input = styled('input', { flex: '1', minWidth: '0', accentColor: ACCENT, pointerEvents: 'auto' });
   input.type = 'range';
+  input.className = 'msa-range';
   input.min = String(min);
   input.max = String(max);
   input.step = String(step ?? 1);
   input.value = String(effectiveValue);
+  paintFill(input);
   const readout = styled('span', {
     minWidth: '38px',
     textAlign: 'right',
@@ -502,6 +541,7 @@ export function buildInheritableRangeRow({
   readout.textContent = formatNum(effectiveValue);
   input.addEventListener('input', () => {
     readout.textContent = formatNum(input.value);
+    paintFill(input);
   });
   input.addEventListener('change', () => onDrag(parseFloat(input.value)));
   attachFineDrag(input);

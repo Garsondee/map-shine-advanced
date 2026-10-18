@@ -35,9 +35,13 @@ import { renderSystemDepartment } from './system-department.js';
 import { renderLabDepartment } from './lab-department.js';
 import { installSearchPalette, buildSearchIndex } from './search-palette.js';
 import { raiseRoom, raiseRoomOnPress } from '../room-stack.js';
+import { studioCss } from './studio-style.js';
+import { installTooltips } from '../../widgets/tooltip.js';
 
 const ROOM_ID = 'msa-studio';
 const STYLE_ID = 'msa-studio-style';
+/** `localStorage` key for where the GM last dragged the room to. */
+const POSITION_STORAGE_KEY = 'msa-studio-position';
 
 /**
  * The six departments, fixed set (Law 9). `dev:true` marks LAB — gated on
@@ -90,81 +94,12 @@ function injectStyle() {
   if (document.getElementById(STYLE_ID)) return;
   const el = document.createElement('style');
   el.id = STYLE_ID;
-  // Ported verbatim from the mock's own #studio/#rail/#deptBody/.depthead/
-  // .deptscroll rules (tools/ui-mock/index.html) — geometry, rail button
-  // shape, the --dept-acc active-indicator mechanism, dev-gating via a
-  // `.dbg` class the mock ties to a `data-debug` attribute this file does
-  // not yet set (see the class doc comment on DEPTS above).
-  el.textContent = `
-#${ROOM_ID}{top:44px; left:24px; width:1180px; height:800px;
-  max-width:calc(100vw - 460px); max-height:calc(100vh - 60px);
-  min-width:760px; min-height:520px; resize:both;
-  position:fixed; z-index:100; background:var(--glass);
-  backdrop-filter:blur(var(--glass-blur));
-  border:1px solid var(--line); border-radius:var(--r-room);
-  box-shadow:var(--shadow3); display:flex; flex-direction:column; overflow:hidden}
-#${ROOM_ID} .room-head{display:flex; align-items:center; gap:var(--sp2);
-  padding:8px 14px; border-bottom:1px solid var(--line); cursor:grab; user-select:none; flex:none}
-#${ROOM_ID} .room-head:active{cursor:grabbing}
-#${ROOM_ID} .rtitle{font-weight:600; letter-spacing:.14em; font-size:.72rem;
-  color:var(--ink1); text-transform:uppercase; display:flex; gap:8px; align-items:center}
-#${ROOM_ID} .rtitle .ico{color:var(--shine)}
-#${ROOM_ID} .spacer{flex:1}
-#${ROOM_ID} .hbtn{width:24px; height:24px; display:grid; place-items:center; border-radius:6px;
-  color:var(--ink2); pointer-events:auto}
-#${ROOM_ID} .hbtn:hover{background:var(--bg3); color:var(--ink0)}
-#${ROOM_ID} .frame{display:flex; flex:1; min-height:0}
-#${ROOM_ID} .rail{width:58px; flex:none; border-right:1px solid var(--line); display:flex;
-  flex-direction:column; align-items:center; padding:10px 0; gap:4px}
-#${ROOM_ID} .rail button{width:42px; height:42px; display:grid; place-items:center; border-radius:11px;
-  color:var(--ink2); position:relative; transition:all var(--t-micro); pointer-events:auto}
-#${ROOM_ID} .rail button .ico{width:19px; height:19px}
-#${ROOM_ID} .rail button:hover{background:var(--bg3); color:var(--ink0)}
-${ACCENT_VARS.map(
-  (v) => `#${ROOM_ID} .rail button[aria-pressed="true"][data-acc="${v}"]{color:var(${v});
-  background:color-mix(in oklab, var(${v}) 14%, transparent)}
-#${ROOM_ID} .rail button[aria-pressed="true"][data-acc="${v}"]::before{content:""; position:absolute; left:-9px; top:9px;
-  bottom:9px; width:3px; border-radius:2px; background:var(${v})}`
-).join('\n')}
-#${ROOM_ID} .rail button[disabled]{opacity:.4; cursor:default}
-#${ROOM_ID} .railspacer{flex:1}
-#${ROOM_ID} .devtag{font-size:.56rem; color:var(--ink2); letter-spacing:.12em; margin-top:2px}
-#${ROOM_ID} .deptBody{flex:1; min-width:0; display:flex; flex-direction:column}
-#${ROOM_ID} .depthead{flex:none; display:flex; align-items:center; gap:10px; padding:12px 18px 10px;
-  border-bottom:1px solid var(--line)}
-#${ROOM_ID} .depthead h2{font-size:.95rem; font-weight:650; display:flex; gap:9px; align-items:center; margin:0}
-#${ROOM_ID} .depthead h2 .ico{width:1.15em; height:1.15em}
-#${ROOM_ID} .depthead .sub{color:var(--ink2); font-size:.72rem}
-#${ROOM_ID} #studioSearchBox{display:flex; align-items:center; gap:6px; background:var(--bg2);
-  border:1px solid var(--line); border-radius:999px; padding:5px 12px; width:250px; pointer-events:auto}
-#${ROOM_ID} #studioSearchBox input{background:none; border:none; width:100%; font-size:.76rem; color:var(--ink0)}
-#${ROOM_ID} #studioSearchBox .ico{color:var(--ink2)}
-#${ROOM_ID} #studioSearchBox kbd{font-size:.6rem; background:var(--bg3); border:1px solid var(--line);
-  border-radius:4px; padding:1px 5px; color:var(--ink2)}
-#${ROOM_ID} .deptscroll{flex:1; overflow-y:auto; overflow-x:hidden; padding:16px 18px 24px; scrollbar-width:thin}
-#${ROOM_ID} .stagePlaceholder{margin:auto; text-align:center; color:var(--ink2); font-size:.85rem; max-width:360px}
-#${ROOM_ID} .stagePlaceholder b{color:var(--ink1); display:block; margin-bottom:6px; font-size:1rem}
-#${ROOM_ID} summary{list-style:none}
-#${ROOM_ID} summary::-webkit-details-marker{display:none}
-#${ROOM_ID} .msa-chev{display:inline-block; transition:transform var(--t-micro); opacity:.55}
-/* \`> summary >\` and not a descendant selector — same trap diag/debug-panel-
-   controls.js already documents: a descendant rule would rotate a NESTED
-   details' own chevron just because an ANCESTOR details is open. */
-#${ROOM_ID} details[open] > summary .msa-chev{transform:rotate(90deg)}
-/* mythica-machina-press#548 — this class (an effect card's preset/debug-
-   channel <select>, e.g. water's "Off — normal render" picker built by
-   boot.js#buildWaterDebugSelect) carried NO matching rule anywhere this room
-   reaches, the exact "raw browser chrome in a themed panel" gap
-   diag/debug-panel-controls.js's own #msa-debug-panel copy of this rule
-   already documents fixing once for the OLD panel — that fix never made it
-   to this shell. Token-driven rather than that rule's hardcoded rgba(), so
-   it follows the Studio's own live theme instead of being pinned to dark. */
-#${ROOM_ID} .msa-effect-preset-select{background:var(--bg2); color:var(--ink0);
-  border:1px solid var(--line); border-radius:var(--r-ctl,6px); padding:3px 8px;
-  font:inherit; font-size:.72rem; outline:none}
-#${ROOM_ID} .msa-effect-preset-select:hover{border-color:var(--line-strong)}
-#${ROOM_ID} .msa-effect-preset-select:focus-visible{border-color:var(--shine)}
-`.trim();
+  // The whole stylesheet lives in ./studio-style.js (the press/hover/focus
+  // model, the switch, the slider fill, the motion, and the resets that win
+  // back Foundry's global button/input rules) — it grew past what belongs
+  // inline in a shell file. `ACCENT_VARS` stays here because it is derived
+  // from this file's own DEPTS table.
+  el.textContent = studioCss(ROOM_ID, ACCENT_VARS);
   document.head.appendChild(el);
 }
 
@@ -181,6 +116,10 @@ function deptHead(dept, subtitle, onSearchInput) {
   const sub = document.createElement('span');
   sub.className = 'sub';
   sub.textContent = subtitle;
+  // One line with an ellipsis (see studio-style.js) — the whole subtitle is the
+  // tooltip, shown only when it actually got cut off.
+  sub.dataset.tip = subtitle;
+  sub.dataset.tipTruncated = '';
   const spacer = document.createElement('span');
   spacer.className = 'spacer';
   const box = document.createElement('div');
@@ -248,6 +187,7 @@ export function installStudio({ debugPanel, ...roomCtx } = {}) {
   const headSpacer = document.createElement('span');
   headSpacer.className = 'spacer';
   const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
   closeBtn.className = 'hbtn';
   closeBtn.title = 'Close Studio';
   closeBtn.innerHTML = iconMarkup('x');
@@ -269,7 +209,17 @@ export function installStudio({ debugPanel, ...roomCtx } = {}) {
   // 2026-08-18 fix: .room-head already carried the mock's own cursor:grab
   // CSS (line ~105) with no listener behind it — looked draggable, silently
   // did nothing. Wired for real now, shared with the Remote/Player rooms.
-  makeDraggable(head, room);
+  // 2026-10-18: the position the GM dragged it to is remembered (per browser,
+  // same as the Remote) — it used to snap back to the corner on every reload.
+  const positioning = makeDraggable(head, room, { storageKey: POSITION_STORAGE_KEY });
+  // `animationend` bubbles, and cards inside the room run their own short
+  // animations — only the room's OWN entrance may clear the class.
+  room.addEventListener('animationend', (e) => {
+    if (e.target === room) room.classList.remove('msa-enter');
+  });
+  // Themed tooltips for every control in the room and its pop-outs (a no-op on
+  // touch-first devices) — see ui/widgets/tooltip.js.
+  installTooltips();
 
   const railButtons = new Map();
   for (const dept of DEPTS) {
@@ -278,6 +228,11 @@ export function installStudio({ debugPanel, ...roomCtx } = {}) {
     btn.type = 'button';
     btn.innerHTML = iconMarkup(dept.icon);
     btn.title = dept.label + (dept.dev ? ' (dev-gated)' : '') + (dept.stage ? ` — lands in ${dept.stage}` : '');
+    // Icon-only, so the name has to be real: `title` alone is not reliably an
+    // accessible name once the tooltip widget takes it over. The tooltip opens
+    // to the RIGHT of the rail, not over the content it is introducing.
+    btn.setAttribute('aria-label', dept.label);
+    btn.dataset.tipSide = 'right';
     btn.dataset.acc = dept.accVar;
     btn.setAttribute('aria-pressed', String(dept.id === state.dept));
     if (dept.dev) btn.classList.add('dbg');
@@ -292,6 +247,20 @@ export function installStudio({ debugPanel, ...roomCtx } = {}) {
       rail.append(Object.assign(document.createElement('div'), { className: 'devtag', textContent: 'DEV' }));
     railButtons.set(dept.id, btn);
   }
+  // Up/Down/Home/End walk the rail. Focus only — Enter/Space still activates —
+  // so arrowing past a department never switches (and re-renders) it by accident.
+  rail.addEventListener('keydown', (e) => {
+    const keys = { ArrowDown: 1, ArrowUp: -1, Home: 'first', End: 'last' };
+    if (!(e.key in keys)) return;
+    const buttons = [...rail.querySelectorAll('button:not([disabled])')];
+    const at = buttons.indexOf(document.activeElement);
+    if (at < 0) return;
+    const step = keys[e.key];
+    const next =
+      step === 'first' ? 0 : step === 'last' ? buttons.length - 1 : (at + step + buttons.length) % buttons.length;
+    e.preventDefault();
+    buttons[next].focus();
+  });
 
   /**
    * Switch the active department and re-render — the ONE place `state.dept`
@@ -321,8 +290,21 @@ export function installStudio({ debugPanel, ...roomCtx } = {}) {
     render();
   }
 
+  /** dept id -> how far its body was scrolled. Switching to Scene and back (or
+   * closing and reopening the room) used to drop a GM at the top of a long
+   * Effects list every time. */
+  const scrollMemory = new Map();
+  /** Note where the department on screen is scrolled to — call BEFORE it is
+   * torn down or hidden (a hidden element reports scrollTop 0). */
+  function rememberScroll() {
+    const shown = deptBody.querySelector('.deptscroll');
+    if (shown && deptBody.dataset.dept) scrollMemory.set(deptBody.dataset.dept, shown.scrollTop);
+  }
+
   function render() {
+    rememberScroll();
     deptBody.innerHTML = '';
+    deptBody.dataset.dept = state.dept;
     const dept = DEPTS.find((d) => d.id === state.dept);
     if (!dept.render) {
       deptBody.append(
@@ -347,18 +329,34 @@ export function installStudio({ debugPanel, ...roomCtx } = {}) {
       deptHead(dept, subtitle ?? '', (q) => palette?.open(q)),
       scroll
     );
+    // Only meaningful once it is in the document and laid out (this forces that).
+    scroll.scrollTop = scrollMemory.get(state.dept) ?? 0;
   }
 
   const openChangeListeners = new Set();
   const controller = {
     open() {
+      // `open()` is also called while ALREADY open (the search palette's "go to
+      // this card" path does) — that must not replay the entrance.
+      const wasOpen = state.open;
       state.open = true;
       room.hidden = false;
+      // Rect is only real once un-hidden — see makeDraggable's own doc.
+      positioning.ensurePositioned();
       raiseRoom(room);
       render();
+      // A short entrance, replayed on every open: drop the class, force a
+      // reflow so the animation restarts, add it back; it removes itself when
+      // it ends so no `animation` sticks to the room (and its transform) forever.
+      if (!wasOpen) {
+        room.classList.remove('msa-enter');
+        void room.offsetWidth;
+        room.classList.add('msa-enter');
+      }
       for (const fn of openChangeListeners) fn(true);
     },
     close() {
+      rememberScroll();
       state.open = false;
       room.hidden = true;
       // "Pop-outs are views — closing the Studio closes its children."

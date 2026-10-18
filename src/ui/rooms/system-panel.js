@@ -73,6 +73,9 @@ let msaEnabledAtLoad = null;
 function sectionHead(text) {
   const h = document.createElement('div');
   h.textContent = text;
+  // `.msa-sechead` in the Studio's stylesheet; the inline values stay as the
+  // fallback the Player room (which does not load that sheet) renders with.
+  h.className = 'msa-sechead';
   Object.assign(h.style, {
     fontSize: '.64rem',
     letterSpacing: '.14em',
@@ -135,6 +138,7 @@ export function renderSystemPanel(container, ctx) {
   // loop, matching cues-department.js/weather-board.js's own local pattern.
   function render() {
     const wrap = document.createElement('div');
+    wrap.className = 'msa-system';
     Object.assign(wrap.style, { display: 'flex', flexDirection: 'column', gap: '9px', maxWidth: '520px' });
 
     const put = (id, decl, value, onChange) =>
@@ -165,6 +169,7 @@ export function renderSystemPanel(container, ctx) {
     if (msaEnabledAtLoad === null) msaEnabledAtLoad = msaEnabledNow;
     if (msaEnabledNow !== msaEnabledAtLoad) {
       const pending = document.createElement('div');
+      pending.className = 'msa-pending';
       Object.assign(pending.style, {
         display: 'flex',
         alignItems: 'center',
@@ -180,6 +185,10 @@ export function renderSystemPanel(container, ctx) {
       const reloadBtn = document.createElement('button');
       reloadBtn.type = 'button';
       reloadBtn.textContent = 'Reload now';
+      // Inside the Studio this takes the shared button look (hover, press,
+      // focus) from its stylesheet; the Player room, which does not load that
+      // sheet, keeps the plain inline sizing it always had.
+      reloadBtn.className = 'msa-btn msa-btn--sm msa-btn--gold';
       Object.assign(reloadBtn.style, { flex: 'none', padding: '3px 10px', fontSize: '.72rem', cursor: 'pointer' });
       reloadBtn.addEventListener('click', () => window.location.reload());
       pending.append(note, reloadBtn);

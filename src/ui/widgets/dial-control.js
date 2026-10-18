@@ -17,6 +17,7 @@
 
 import { resolveDialDrives, dialPositionFromParams } from '../../core/dials-schema.js';
 import { attachFineDrag, createFineDragHandle } from './fine-drag.js';
+import { paintFill } from './param-control.js';
 
 const ACCENT = 'var(--shine, rgb(143,214,255))';
 const TEXT = 'var(--ink0, #dcecff)';
@@ -62,6 +63,7 @@ export function buildDialControl(id, decl, { paramValues, onChange }) {
     color: TEXT,
     pointerEvents: 'auto',
   });
+  wrap.className = 'msa-row';
   wrap.title = decl.help ?? '';
   wrap.dataset.msaDial = id;
 
@@ -71,8 +73,9 @@ export function buildDialControl(id, decl, { paramValues, onChange }) {
   const [lo, hi] = decl.range;
   const startPos = dialPositionFromParams(decl, paramValues ?? {});
 
-  const input = styled('input', { flex: '1', accentColor: ACCENT, pointerEvents: 'auto' });
+  const input = styled('input', { flex: '1', minWidth: '0', accentColor: ACCENT, pointerEvents: 'auto' });
   input.type = 'range';
+  input.className = 'msa-range';
   input.min = String(lo);
   input.max = String(hi);
   // 200 steps across the dial's own range — fine enough to feel continuous
@@ -80,6 +83,7 @@ export function buildDialControl(id, decl, { paramValues, onChange }) {
   // drag), independent of any single driven param's own `step`.
   input.step = String((hi - lo) / 200 || 0.01);
   input.value = String(startPos);
+  paintFill(input);
 
   const readout = styled('span', {
     minWidth: '38px',
@@ -91,6 +95,7 @@ export function buildDialControl(id, decl, { paramValues, onChange }) {
 
   input.addEventListener('input', () => {
     readout.textContent = formatNum(input.value);
+    paintFill(input);
   });
   input.addEventListener('change', () => {
     onChange(resolveDialDrives(decl, parseFloat(input.value)));

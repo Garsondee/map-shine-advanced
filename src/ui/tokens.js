@@ -39,6 +39,16 @@ const SHARED = Object.freeze({
   '--t-move': '200ms',
   '--t-room': '320ms',
   '--ease': 'cubic-bezier(.22,.7,.3,1)',
+  // Added 2026-10-18 (Studio polish pass) — NEW tokens, not retunings of the
+  // mock's own values, so no mock edit is owed. The built-in CSS easings are
+  // too weak to feel intentional; these are the stronger curves the Studio's
+  // press/enter/switch motion is built on. `--ease-out` for anything entering
+  // or responding to the pointer, `--ease-in-out` for movement already on
+  // screen, `--ease-drawer` for slide-in panels. Never `ease-in` for UI —
+  // it delays the exact moment the user is watching.
+  '--ease-out': 'cubic-bezier(.23,1,.32,1)',
+  '--ease-in-out': 'cubic-bezier(.77,0,.175,1)',
+  '--ease-drawer': 'cubic-bezier(.32,.72,0,1)',
 });
 
 /**

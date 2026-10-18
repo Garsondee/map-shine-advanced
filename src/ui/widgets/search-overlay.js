@@ -28,7 +28,7 @@ function injectStyle() {
   // share one injected stylesheet.
   el.textContent = `
 .msa-search-overlay{position:fixed; inset:0; z-index:450; display:none; align-items:flex-start;
-  justify-content:center; padding-top:14vh; background:rgba(6,8,14,.45)}
+  justify-content:center; padding-top:14vh; background:rgba(6,8,14,.45); font-family:var(--font, system-ui, sans-serif)}
 .msa-search-overlay.open{display:flex}
 .msa-search-overlay .box{width:560px; max-width:92vw; background:var(--glass);
   backdrop-filter:blur(var(--glass-blur)); border:1px solid var(--line-strong);
@@ -43,13 +43,18 @@ function injectStyle() {
 .msa-search-overlay.wide .box{width:860px; display:flex; flex-direction:column}
 .msa-search-overlay .pin{display:flex; gap:9px; align-items:center; padding:12px 16px;
   border-bottom:1px solid var(--line)}
-.msa-search-overlay .pin input{flex:1; background:none; border:none; font-size:.95rem; color:var(--ink0); pointer-events:auto}
+.msa-search-overlay .pin input{flex:1; height:auto; padding:0; background:none; border:none; outline:none; box-shadow:none;
+  font-size:.95rem; color:var(--ink0); pointer-events:auto}
 .msa-search-overlay .frame{display:flex; min-height:0}
 .msa-search-overlay .rail{width:168px; flex:none; border-right:1px solid var(--line); padding:8px;
   display:flex; flex-direction:column; gap:2px; overflow-y:auto; max-height:600px; scrollbar-width:thin}
-.msa-search-overlay .rail button{text-align:left; padding:6px 9px; border-radius:7px; border:none;
-  background:none; color:var(--ink2); font-size:.72rem; cursor:pointer; pointer-events:auto}
-.msa-search-overlay .rail button:hover{background:var(--bg2); color:var(--ink0)}
+.msa-search-overlay .rail button{display:block; width:auto; height:auto; min-height:0; margin:0; text-align:left;
+  padding:6px 9px; border-radius:7px; border:none; background:none; box-shadow:none; outline:none; color:var(--ink2);
+  font:inherit; font-size:.72rem; cursor:pointer; pointer-events:auto; transition:background-color 100ms ease, color 100ms ease}
+.msa-search-overlay .rail button:focus-visible{outline:2px solid var(--shine); outline-offset:-2px}
+@media (hover:hover) and (pointer:fine){
+  .msa-search-overlay .rail button:hover{background:var(--bg2); color:var(--ink0)}
+}
 .msa-search-overlay .rail button.active{background:var(--shine-soft); color:var(--shine); font-weight:600}
 /* Greyed and inert while a search query is live (2026-09-10 fix, full-audit
    pass) -- with a query typed, drawHits() below renders a FLAT hit list with
@@ -60,12 +65,24 @@ function injectStyle() {
    here rather than hiding it outright, so the rail's own width doesn't
    reflow the results column out from under the GM's eye mid-search. */
 .msa-search-overlay .rail.searching{opacity:.35; pointer-events:none}
-.msa-search-overlay .results{max-height:380px; overflow-y:auto; padding:6px; scrollbar-width:thin; flex:1; min-width:0}
+.msa-search-overlay .results{max-height:380px; overflow-y:auto; padding:6px; scrollbar-width:thin;
+  scrollbar-color:var(--line-strong) transparent; flex:1; min-width:0}
 /* justify-content: Foundry's own button rule centres flex content, so a hit with a
    short description drifted right of its neighbours (UI test pass 2026-09-26). */
+/* Foundry's core stylesheet restyles every bare <button> (a translucent fill, a
+   light 1px border, height:2em, a 0.5s transition, an orange hover) — which drew
+   a bordered box around EVERY result. A result is a row: reset all of it. Plain
+   unlayered rules beat Foundry's layered ones, so no !important is needed. */
 .msa-search-overlay .hit{display:flex; align-items:center; justify-content:flex-start; gap:9px; padding:7px 11px; border-radius:8px;
-  width:100%; text-align:left; color:var(--ink1); font-size:.78rem; pointer-events:auto}
-.msa-search-overlay .hit:hover, .msa-search-overlay .hit.sel{background:var(--bg2); color:var(--ink0)}
+  width:100%; height:auto; min-height:0; margin:0; text-align:left; color:var(--ink1); font:inherit; font-size:.78rem;
+  background:transparent; border:0; box-shadow:none; outline:none; cursor:pointer; pointer-events:auto;
+  transition:background-color 100ms ease, color 100ms ease}
+.msa-search-overlay div.hit{cursor:default}
+.msa-search-overlay .hit.sel{background:var(--bg2); color:var(--ink0)}
+.msa-search-overlay .hit:focus-visible{outline:2px solid var(--shine); outline-offset:-2px}
+@media (hover:hover) and (pointer:fine){
+  .msa-search-overlay button.hit:hover{background:var(--bg2); color:var(--ink0)}
+}
 .msa-search-overlay .hit .crumb{margin-left:auto; color:var(--ink2); font-size:.64rem}
 .msa-search-overlay .hit .dot{width:7px; height:7px; border-radius:50%; background:var(--acc); flex:none}
 .msa-search-overlay .hit .htext{display:flex; flex-direction:column; gap:1px; min-width:0}
@@ -188,17 +205,61 @@ export function buildSearchOverlay({ ariaLabel, placeholder, onQuery, rail }) {
     });
   }
 
+  /** Every selectable result (a "Nothing found" placeholder is a div, not one). */
+  const hitButtons = () => [...results.querySelectorAll('button.hit')];
+  /** Move the highlight to `next` (a button) and keep it in view. */
+  function highlight(next) {
+    for (const b of hitButtons()) b.classList.toggle('sel', b === next);
+    next?.scrollIntoView({ block: 'nearest' });
+  }
+  /** While the user is typing a query the best match should already be armed,
+   * so "type, Enter" works without touching an arrow key. */
+  function armFirstWhileSearching() {
+    if (input.value.trim() && !results.querySelector('button.hit.sel'))
+      results.querySelector('button.hit')?.classList.add('sel');
+  }
+
   function open(q = '') {
     root.classList.add('open');
     if (document.activeElement !== input) input.value = q;
     input.focus();
     onQuery(input.value, results);
+    armFirstWhileSearching();
   }
   function close() {
     root.classList.remove('open');
   }
 
-  input.addEventListener('input', (e) => onQuery(e.target.value, results));
+  input.addEventListener('input', (e) => {
+    onQuery(e.target.value, results);
+    armFirstWhileSearching();
+  });
+  // A palette is keyboard-first (it opens on "/"): ↑/↓ walk the results, Enter
+  // takes the highlighted one. The first result was already drawn highlighted —
+  // promising exactly this — but nothing handled the keys, so Enter did nothing.
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      const list = hitButtons();
+      if (!list.length) return;
+      e.preventDefault();
+      const at = list.findIndex((b) => b.classList.contains('sel'));
+      const step = e.key === 'ArrowDown' ? 1 : -1;
+      const to = at < 0 ? (step > 0 ? 0 : list.length - 1) : (at + step + list.length) % list.length;
+      highlight(list[to]);
+    } else if (e.key === 'Enter') {
+      const sel = results.querySelector('button.hit.sel');
+      if (sel) {
+        e.preventDefault();
+        sel.click();
+      }
+    }
+  });
+  // The pointer moves the same highlight (on real movement only — a list that
+  // scrolls under a resting pointer must not steal the highlight).
+  results.addEventListener('pointermove', (e) => {
+    const b = e.target instanceof Element ? e.target.closest('button.hit') : null;
+    if (b && !b.classList.contains('sel')) highlight(b);
+  });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && root.classList.contains('open')) close();
   });

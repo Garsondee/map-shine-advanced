@@ -6,14 +6,18 @@
  * from the mock's `#cueBuild`/`.cueitem` (tools/ui-mock/index.html) — see
  * Petition P15 for exactly what changed in the port.
  *
- * ⚠️ NAME COMES FROM A NATIVE `prompt()`, NOT A NEW LANTERN DIALOG. The
- * mock's own Capture button never actually asks for a name at all — its
- * `.cname` is static, unwired text (a real gap in the mock itself, not
- * something this file is simplifying away). "Capture-then-name" (§4.3)
- * reads as ONE gesture, so this asks immediately, inline, rather than
- * inventing a rename affordance that doesn't exist anywhere yet. A
- * cancelled/empty prompt still captures, under a clock-stamped default
- * name — a one-click "capture the moment" action must never dead-end.
+ * ⚠️ NAMING IS INLINE, NOT A NATIVE `prompt()` (changed 2026-10-18). The mock's
+ * own Capture button never actually asks for a name at all — its `.cname` is
+ * static, unwired text (a real gap in the mock itself). "Capture-then-name"
+ * (§4.3) reads as ONE gesture, so Capture opens a one-line name field right
+ * where the button was, pre-filled with a clock-stamped default and selected —
+ * type to replace it, or just press Enter. A cancelled/empty entry still
+ * captures under the default name: a one-click "capture the moment" action
+ * must never dead-end. (The old native `prompt()` froze the whole tab — and
+ * the live map with it — behind a grey OS dialog that ignored the theme.)
+ * Deleting is a two-click confirm on the button itself, and every refusal the
+ * engine returns (a test already running, a bad fade time, a failed capture)
+ * now shows as a line of text instead of vanishing.
  *
  * ⚠️ CURVE IS DISPLAY-ONLY THIS ROUND. The mock's own per-cue `<select>`
  * (labelled fade time) has no `onchange` handler wired anywhere in the
@@ -21,14 +25,14 @@
  * wired for real (`ctx.updateCueFadeMs`); curve is shown as a small badge
  * next to it, matching §5.4's "name · fade time · curve · what it
  * touches" as a set of DISPLAYED properties — editing curve per cue is a
- * real, scoped follow-up, not built this round. Deleting a cue is also
- * not built this round (not part of §9's own U3 checklist wording).
+ * real, scoped follow-up, not built this round.
  *
  * @module ui/rooms/studio/cues-department
  */
 
 import { iconMarkup } from '../../widgets/icon-sprite.js';
 import { buildImpulseButton } from '../../widgets/impulse-button.js';
+import { buildArmButton, buildNameComposer } from '../../widgets/inline-actions.js';
 
 /** The Remote's own TEMPO list (fade-time.js), duplicated as plain data
  * here rather than imported — this file needs {label, ms} pairs for a
@@ -57,24 +61,31 @@ function nearestTempoLabel(ms) {
   return best.label;
 }
 
-function styledButton(html, { gold = false } = {}) {
-  const b = document.createElement('button');
+/** Tiny element factory. */
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+/** A `.msa-btn`, optionally with a leading icon. */
+function button(label, { icon, gold = false, small = false, title } = {}) {
+  const b = el('button', `msa-btn${gold ? ' msa-btn--gold' : ''}${small ? ' msa-btn--sm' : ''}`);
   b.type = 'button';
-  b.innerHTML = html;
-  Object.assign(b.style, {
-    padding: '6px 12px',
-    borderRadius: '8px',
-    border: gold ? '1px solid var(--shine)' : '1px solid var(--line)',
-    background: gold ? 'color-mix(in oklab, var(--shine) 20%, var(--bg2))' : 'var(--bg2)',
-    color: gold ? 'var(--shine)' : 'var(--ink1)',
-    fontSize: '.74rem',
-    fontWeight: '600',
-    cursor: 'pointer',
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: '6px',
-    flex: 'none',
-  });
+  if (icon) b.insertAdjacentHTML('beforeend', iconMarkup(icon));
+  b.append(document.createTextNode(label));
+  if (title) b.title = title;
+  return b;
+}
+
+/** A `.hbtn` icon-only button with an accessible name. */
+function iconButton(icon, title, extraClass = '') {
+  const b = el('button', `hbtn${extraClass ? ` ${extraClass}` : ''}`);
+  b.type = 'button';
+  b.title = title;
+  b.setAttribute('aria-label', title);
+  b.innerHTML = iconMarkup(icon);
   return b;
 }
 
@@ -95,20 +106,39 @@ function styledButton(html, { gold = false } = {}) {
  * @returns {string} department subtitle.
  */
 export function renderCuesDepartment(container, ctx) {
-  function render() {
-    const wrap = document.createElement('div');
-    Object.assign(wrap.style, { display: 'flex', flexDirection: 'column', gap: '10px', maxWidth: '760px' });
+  /** A refusal/failure to show once, on the next paint (then it is gone). */
+  let flash = null;
+  const complain = (res, fallback) => {
+    if (res && res.ok === false) flash = { text: res.reason || fallback, tone: 'fail' };
+  };
 
-    const captureBtn = styledButton(`${iconMarkup('camera')} Capture current look as a cue`, { gold: true });
-    captureBtn.style.alignSelf = 'flex-start';
-    captureBtn.addEventListener('click', async () => {
+  function render() {
+    const wrap = el('div', 'msa-cues');
+
+    // ---- capture: one button that becomes a name field in place --------------
+    const captureRow = el('div', 'msa-row-flex');
+    const captureBtn = button('Capture current look as a cue', { icon: 'camera', gold: true });
+    captureBtn.addEventListener('click', () => {
       const stamp = new Date().toLocaleTimeString();
-      const typed = window.prompt('Name this cue:', `Captured — ${stamp}`);
-      const name = typed && typed.trim().length > 0 ? typed.trim() : `Captured — ${stamp}`;
-      await ctx.captureCue(name);
-      render();
+      const fallback = `Captured — ${stamp}`;
+      const composer = buildNameComposer({
+        initial: fallback,
+        placeholder: 'Cue name',
+        ariaLabel: 'Name this cue',
+        submitLabel: 'Capture',
+        allowEmpty: true,
+        fallback,
+        onCancel: render,
+        onSubmit: async (name) => {
+          complain(await ctx.captureCue(name), 'Could not capture the cue.');
+          render();
+        },
+      });
+      captureRow.replaceChildren(composer.el);
+      composer.focus();
     });
-    wrap.append(captureBtn);
+    captureRow.append(captureBtn);
+    wrap.append(captureRow);
 
     // A test preview survives a department switch (boot.js's own per-frame
     // pump keeps running regardless of which Studio tab is showing) — so
@@ -116,70 +146,43 @@ export function renderCuesDepartment(container, ctx) {
     // this file's own local state, and stays correct even after navigating
     // away and back mid-test.
     if (ctx.isCueTestActive?.()) {
-      const strip = document.createElement('div');
-      Object.assign(strip.style, {
-        display: 'flex',
-        alignItems: 'center',
-        gap: '8px',
-        background: 'var(--bg2)',
-        border: '1px solid var(--shine)',
-        borderRadius: '8px',
-        padding: '6px 10px',
-        fontSize: '.72rem',
-        color: 'var(--ink1)',
-      });
-      strip.append(document.createTextNode('🔬 A cue test is live on this client only —'));
-      const revertBtn = styledButton('↺ Revert now');
+      const strip = el('div', 'msa-testbar');
+      strip.insertAdjacentHTML('beforeend', iconMarkup('flask'));
+      strip.append(document.createTextNode('A cue test is live on this client only —'));
+      const revertBtn = button('Revert now', { icon: 'reset', small: true });
       revertBtn.addEventListener('click', () => {
-        ctx.revertCueTest();
+        complain(ctx.revertCueTest(), 'Could not revert the test.');
         render();
       });
       strip.append(revertBtn);
       wrap.append(strip);
     }
 
+    if (flash) {
+      const note = el('p', 'msa-status', flash.text);
+      note.dataset.tone = flash.tone;
+      note.setAttribute('role', 'status');
+      wrap.append(note);
+      flash = null;
+    }
+
     const cues = ctx.listCues();
     if (cues.length === 0) {
-      const empty = document.createElement('div');
-      empty.style.cssText = 'color:var(--ink2); font-size:.8rem; padding:20px 4px';
-      empty.textContent = 'No cues staged yet — capture the world exactly as it is right now to start the stack.';
-      wrap.append(empty);
+      wrap.append(
+        el('div', 'msa-empty', 'No cues staged yet — capture the world exactly as it is right now to start the stack.')
+      );
     }
 
     cues.forEach((cue, i) => {
-      const item = document.createElement('div');
-      Object.assign(item.style, {
-        display: 'flex',
-        alignItems: 'center',
-        gap: '10px',
-        background: 'var(--bg1)',
-        border: '1px solid var(--line)',
-        borderRadius: 'var(--r-card, 10px)',
-        padding: '8px 12px',
-      });
+      const item = el('div', 'msa-cue');
 
-      const order = document.createElement('span');
-      Object.assign(order.style, { display: 'flex', flexDirection: 'column', gap: '1px', flex: 'none' });
-      const upBtn = document.createElement('button');
-      upBtn.type = 'button';
-      upBtn.title = 'Move up';
-      upBtn.textContent = '▲';
-      const downBtn = document.createElement('button');
-      downBtn.type = 'button';
-      downBtn.title = 'Move down';
-      downBtn.textContent = '▼';
-      for (const b of [upBtn, downBtn]) {
-        // `.hbtn` (shell.js, shared by every icon-only tool in this room)
-        // for a real click target — the previous 18×14px box, half the
-        // room's own header-button size, was a real miss to land a click on.
-        b.className = 'hbtn';
-        Object.assign(b.style, {
-          width: '20px',
-          height: '18px',
-          fontSize: '.6rem',
-          lineHeight: '1',
-        });
-      }
+      const order = el('span', 'msa-cue-order');
+      // `.hbtn` (studio-style.js, shared by every icon-only tool in this room)
+      // for a real click target — the original 18×14px box, half the room's
+      // own header-button size, was a real miss to land a click on. A
+      // chevron icon turned a quarter each way, not a ▲/▼ text glyph.
+      const upBtn = iconButton('chev', 'Move up', 'msa-cue-up');
+      const downBtn = iconButton('chev', 'Move down', 'msa-cue-down');
       upBtn.addEventListener('click', () => {
         ctx.moveCueOrder(cue.id, -1);
         render();
@@ -190,108 +193,69 @@ export function renderCuesDepartment(container, ctx) {
       });
       order.append(upBtn, downBtn);
 
-      const cnum = document.createElement('span');
-      cnum.textContent = String(i + 1);
-      Object.assign(cnum.style, {
-        width: '26px',
-        height: '26px',
-        borderRadius: '50%',
-        background: 'var(--bg2)',
-        display: 'grid',
-        placeItems: 'center',
-        fontSize: '.72rem',
-        color: 'var(--ink2)',
-        flex: 'none',
-      });
+      const cnum = el('span', 'msa-cue-num', String(i + 1));
 
-      const info = document.createElement('span');
-      Object.assign(info.style, { flex: '1', minWidth: '0' });
-      const nameEl = document.createElement('span');
-      nameEl.textContent = cue.name;
-      Object.assign(nameEl.style, {
-        fontWeight: '600',
-        fontSize: '.8rem',
-        display: 'block',
-        overflow: 'hidden',
-        textOverflow: 'ellipsis',
-        whiteSpace: 'nowrap',
-      });
-      const glyphs = document.createElement('span');
-      Object.assign(glyphs.style, {
-        display: 'flex',
-        alignItems: 'center',
-        gap: '5px',
-        color: 'var(--ink2)',
-        marginTop: '2px',
-      });
-      const glyphIcons = Object.keys(cue.targets)
+      const info = el('span', 'msa-cue-info');
+      const nameEl = el('span', 'msa-cue-name', cue.name);
+      nameEl.dataset.tip = cue.name;
+      nameEl.dataset.tipTruncated = '';
+      const glyphs = el('span', 'msa-cue-glyphs');
+      glyphs.innerHTML = Object.keys(cue.targets)
         .map((key) => AXIS_ICON[key.includes('.') ? key.slice(key.indexOf('.') + 1) : key])
         .filter(Boolean)
         .map((icon) => iconMarkup(icon))
         .join('');
-      glyphs.innerHTML = glyphIcons;
       const check = ctx.validateCue(cue);
       if (!check.ok) {
-        const badge = document.createElement('span');
-        badge.textContent = '⚠';
+        const badge = el('span', 'msa-cue-warn');
+        badge.innerHTML = iconMarkup('warn');
         badge.title = check.errors.join('; ');
-        Object.assign(badge.style, { color: 'var(--fail)', fontSize: '.78rem' });
         glyphs.append(badge);
       }
       info.append(nameEl, glyphs);
 
-      const fadeSelect = document.createElement('select');
-      Object.assign(fadeSelect.style, {
-        background: 'var(--bg2)',
-        border: '1px solid var(--line)',
-        borderRadius: 'var(--r-ctl, 6px)',
-        padding: '4px 8px',
-        color: 'var(--ink0)',
-        fontSize: '.72rem',
-        flex: 'none',
-      });
+      const fadeSelect = el('select', 'msa-select');
       fadeSelect.title = 'Fade time';
+      fadeSelect.setAttribute('aria-label', `Fade time for ${cue.name}`);
       const currentLabel = nearestTempoLabel(longestOverMs(cue));
       for (const opt of TEMPO_OPTIONS) {
-        const o = document.createElement('option');
+        const o = el('option', '', opt.label);
         o.value = String(opt.ms);
-        o.textContent = opt.label;
         o.selected = opt.label === currentLabel;
         fadeSelect.append(o);
       }
       fadeSelect.addEventListener('change', () => {
-        ctx.updateCueFadeMs(cue.id, Number(fadeSelect.value));
+        complain(ctx.updateCueFadeMs(cue.id, Number(fadeSelect.value)), 'Could not change the fade time.');
         render();
       });
 
-      const curveBadge = document.createElement('span');
+      const curveBadge = el('span', 'msa-cue-curve');
       const curves = [...new Set(Object.values(cue.targets).map((t) => t.curve))];
       curveBadge.textContent = curves.length === 1 ? curves[0] : 'mixed';
       curveBadge.title = 'Curve — editing this per cue is a real follow-up, not built this round.';
-      Object.assign(curveBadge.style, { fontSize: '.66rem', color: 'var(--ink2)', flex: 'none' });
 
-      const testBtn = styledButton('Test');
+      const testBtn = button('Test', { icon: 'play', small: true });
       testBtn.title = 'Fire this cue now to check it — never persisted, never seen by anyone else.';
       testBtn.addEventListener('click', () => {
-        ctx.testFireCue(cue.id);
+        complain(ctx.testFireCue(cue.id), 'Could not test this cue.');
         render();
       });
 
       item.append(order, cnum, info, fadeSelect, curveBadge, testBtn);
       if (typeof ctx.deleteCue === 'function') {
-        const delBtn = document.createElement('button');
-        delBtn.type = 'button';
-        delBtn.className = 'hbtn';
-        delBtn.title = 'Delete this cue from the stack';
-        delBtn.textContent = '✕';
-        Object.assign(delBtn.style, { flex: 'none', fontSize: '.7rem' });
-        delBtn.addEventListener('click', () => {
-          if (!window.confirm(`Delete cue "${cue.name}"?`)) return;
-          const res = ctx.deleteCue(cue.id);
-          if (!res?.ok) window.alert(`Could not delete the cue: ${res?.reason}`);
-          render();
-        });
-        item.append(delBtn);
+        item.append(
+          buildArmButton({
+            icon: 'trash',
+            armedLabel: 'Delete?',
+            title: 'Delete this cue from the stack',
+            armedTitle: `Click again to delete "${cue.name}"`,
+            className: 'hbtn',
+            onConfirm: () => {
+              complain(ctx.deleteCue(cue.id), 'Could not delete the cue.');
+              render();
+            },
+          })
+        );
       }
       wrap.append(item);
     });
@@ -306,21 +270,21 @@ export function renderCuesDepartment(container, ctx) {
     // blended into the cue list itself.
     const impulses = ctx.impulses ?? [];
     if (impulses.length > 0) {
-      const sep = document.createElement('div');
-      sep.style.cssText = 'border-top:1px solid var(--line); margin:4px 0';
-      const heading = document.createElement('div');
-      heading.textContent = 'IMPULSES — instant, ignore Fade Time';
-      heading.style.cssText =
-        'font-size:.68rem; letter-spacing:.1em; text-transform:uppercase; color:var(--ink2); margin-top:4px';
-      const row = document.createElement('div');
-      Object.assign(row.style, { display: 'flex', flexWrap: 'wrap', gap: '8px' });
-      const statusEl = document.createElement('div');
-      statusEl.style.cssText = 'font-size:.7rem; color:var(--ink2); min-height:14px';
+      const row = el('div', 'msa-row-flex');
+      row.style.flexWrap = 'wrap';
+      row.style.gap = '8px';
+      const statusEl = el('div', 'msa-status');
+      statusEl.setAttribute('role', 'status');
       const onStatus = (text) => {
         statusEl.textContent = text ?? '';
       };
       for (const decl of impulses) row.append(buildImpulseButton(decl, { onStatus, showLabel: true }));
-      wrap.append(sep, heading, row, statusEl);
+      wrap.append(
+        el('div', 'msa-sep'),
+        el('div', 'msa-eyebrow', 'IMPULSES — instant, ignore Fade Time'),
+        row,
+        statusEl
+      );
     }
 
     container.innerHTML = '';

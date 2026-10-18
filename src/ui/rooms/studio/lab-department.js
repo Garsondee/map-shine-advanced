@@ -29,38 +29,20 @@ export function renderLabDepartment(container, { debugPanel } = {}) {
 
   if (typeof debugPanel?.renderLabBody !== 'function') {
     const notice = document.createElement('div');
-    notice.style.cssText = 'color:var(--ink2); font-size:.8rem; padding:20px';
+    notice.className = 'msa-empty';
     notice.textContent = 'The debug panel has not installed yet — the Lab has nothing to mount.';
     container.append(notice);
     return 'dev-gated — customers never wander in';
   }
 
   const banner = document.createElement('div');
-  Object.assign(banner.style, {
-    display: 'flex',
-    gap: '8px',
-    alignItems: 'center',
-    padding: '8px 10px',
-    marginBottom: '10px',
-    background: 'var(--bg2)',
-    border: '1px solid var(--line)',
-    borderRadius: 'var(--r-card, 10px)',
-    fontSize: '.72rem',
-    color: 'var(--ink1)',
-  });
+  banner.className = 'msa-banner';
   banner.textContent =
     'The same reports, actions, and tools the old panel’s Lab zone has always had — mounted here, not duplicated.';
 
   const statusEl = document.createElement('div');
-  Object.assign(statusEl.style, {
-    padding: '6px 10px',
-    marginBottom: '10px',
-    fontSize: '.72rem',
-    color: 'var(--ink2)',
-    background: 'var(--bg2)',
-    border: '1px solid var(--line)',
-    borderRadius: 'var(--r-card, 10px)',
-  });
+  statusEl.className = 'msa-banner msa-banner--quiet';
+  statusEl.setAttribute('role', 'status');
   statusEl.textContent = 'Output copies to your clipboard.';
 
   const body = debugPanel.renderLabBody({ getStatusEl: () => statusEl });

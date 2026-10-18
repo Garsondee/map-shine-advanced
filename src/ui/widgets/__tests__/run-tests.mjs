@@ -9,6 +9,8 @@ import { run as runParamControl } from './param-control.test.mjs';
 import { run as runParamGroups } from './param-groups.test.mjs';
 import { run as runFineDrag } from './fine-drag.test.mjs';
 import { run as runVerticalFader } from './vertical-fader.test.mjs';
+import { run as runTooltip } from './tooltip.test.mjs';
+import { run as runInlineActions } from './inline-actions.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -30,6 +32,8 @@ const suites = [
   ['param-groups', runParamGroups],
   ['fine-drag', runFineDrag],
   ['vertical-fader', runVerticalFader],
+  ['tooltip', runTooltip],
+  ['inline-actions', runInlineActions],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

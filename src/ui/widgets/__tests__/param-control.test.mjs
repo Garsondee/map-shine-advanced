@@ -10,7 +10,7 @@
  * Moved verbatim from diag/__tests__/effect-controls.test.mjs at U0
  * (docs/holy/UI-Testament.md §9) alongside the widgets themselves.
  */
-import { COMPASS_POINTS, COMPASS_SNAP_DEG, wrapDeg, nearestCompassPoint } from '../param-control.js';
+import { COMPASS_POINTS, COMPASS_SNAP_DEG, wrapDeg, nearestCompassPoint, fillFraction } from '../param-control.js';
 
 export function run(t) {
   const { ok } = t;
@@ -63,4 +63,21 @@ export function run(t) {
     if (!p.label || p.delta > 22.5 || p.delta < 0) everyBearingNamed = false;
   }
   ok('every bearing on the circle names a point at most half a sector away', everyBearingNamed);
+
+  // ---- slider fill (the filled part of the track in the Studio) -------------
+  ok('fill is 0 at the minimum, 1 at the maximum', fillFraction(0, 0, 1) === 0 && fillFraction(1, 0, 1) === 1);
+  ok('fill is proportional in between', fillFraction(0.25, 0, 1) === 0.25 && fillFraction(50, 0, 200) === 0.25);
+  ok('fill honours a non-zero minimum', fillFraction(5, 4, 64) === 0.0167 && fillFraction(34, 4, 64) === 0.5);
+  ok(
+    'fill is clamped: a value outside the range never draws past either end',
+    fillFraction(-3, 0, 1) === 0 && fillFraction(9, 0, 1) === 1
+  );
+  ok('fill accepts the strings an <input> hands back', fillFraction('0.5', '0', '1') === 0.5);
+  ok(
+    'a degenerate or non-numeric range is 0, never NaN (which would poison the CSS calc())',
+    fillFraction(1, 1, 1) === 0 &&
+      fillFraction(1, 2, 1) === 0 &&
+      fillFraction('x', 0, 1) === 0 &&
+      fillFraction(1, 0, undefined) === 0
+  );
 }

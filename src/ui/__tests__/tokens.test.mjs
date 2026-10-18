@@ -132,6 +132,26 @@ export function run(t) {
     })
   );
 
+  // The motion tokens the Studio's press/enter/switch animation is built on.
+  // Every theme shares them; a typo here would silently drop a whole component
+  // back to the browser's weak built-in easing.
+  const bezier = /^cubic-bezier\(\s*-?[\d.]+\s*,\s*-?[\d.]+\s*,\s*-?[\d.]+\s*,\s*-?[\d.]+\s*\)$/;
+  for (const theme of THEMES) {
+    const tokens = getThemeTokens(theme);
+    t.ok(
+      `[${theme}] --ease-out / --ease-in-out / --ease-drawer are all valid cubic-bezier curves`,
+      ['--ease-out', '--ease-in-out', '--ease-drawer'].every((k) => bezier.test(tokens[k] ?? ''))
+    );
+  }
+  t.ok(
+    '--ease-out is a strong ease-out: it reaches 1 on the y axis early (second control point y = 1) and starts steep',
+    (() => {
+      const easeOut = getThemeTokens('dark')['--ease-out'];
+      const [x1, y1, x2, y2] = easeOut.match(/-?[\d.]+/g).map(Number);
+      return y2 === 1 && y1 >= 1 && x1 < 0.5 && x2 < 0.5;
+    })()
+  );
+
   t.ok(
     'an unknown theme throws rather than silently falling back to dark',
     (() => {

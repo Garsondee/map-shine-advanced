@@ -176,9 +176,42 @@ requestAnimationFrame(function tick() {
 // mask-authority to launch in this harness, so armBrush just logs, same
 // "throwaway orchestration, real shape" precedent as the rest of this file.
 const FAKE_PAINTABLE = [
-  { id: 'fire', title: 'Fire', suffixes: ['_Fire'], found: false },
-  { id: 'water', title: 'Water', suffixes: ['_Water'], found: true },
+  { id: 'fire', title: 'Fire', suffixes: ['_Fire'], kinds: ['fire'], found: false },
+  { id: 'water', title: 'Water', suffixes: ['_Water'], kinds: ['water'], found: true },
+  { id: 'specular', title: 'Specular', suffixes: ['_Specular'], kinds: ['specular'], found: true, painted: true },
 ];
+
+// ---- THE EFFECT-PRESET LIBRARY'S OWN STAND-IN (mythica-machina-press#102) -----
+// Same shapes as boot.js's MapShine.list/save/apply/deleteEffectPreset: list is
+// sync (names), the other three return a Promise<{ok, reason?}>. In-memory only.
+const fakePresetLibrary = new Map([['water', new Map([['Stormy harbour', { depth: 0.9 }]])]]);
+const presetsOf = (effectId) => fakePresetLibrary.get(effectId) ?? new Map();
+function listEffectPresets(effectId) {
+  return [...presetsOf(effectId).keys()];
+}
+function saveEffectPreset(effectId, name) {
+  if (name.toLowerCase() === 'fail')
+    return Promise.resolve({ ok: false, reason: 'the shared library is read-only (preview stand-in)' });
+  const lib = presetsOf(effectId);
+  lib.set(name, {});
+  fakePresetLibrary.set(effectId, lib);
+  document.getElementById('log').textContent = `saved preset ${effectId}/${name}`;
+  return Promise.resolve({ ok: true });
+}
+function applyEffectPreset(effectId, name) {
+  document.getElementById('log').textContent = `applied preset ${effectId}/${name}`;
+  return Promise.resolve({ ok: presetsOf(effectId).has(name) });
+}
+function deleteEffectPreset(effectId, name) {
+  presetsOf(effectId).delete(name);
+  document.getElementById('log').textContent = `deleted preset ${effectId}/${name}`;
+  return Promise.resolve({ ok: true });
+}
+
+// ---- THE SCENE DEPARTMENT'S OWN STAND-INS (mask board, copy/paste, presets) ---
+let sceneClipboard = null;
+const fakeScenePresets = [{ name: 'Rainy dusk', capturedAt: '2026-10-01T18:00:00Z', effectCount: 6 }];
+let fakeDarkness = 0.5;
 
 // ---- THE SYSTEM PANEL'S OWN STAND-IN (U5) ----------------------------------
 // A tiny fake settings store (plain object) standing in for game.settings --
@@ -260,7 +293,49 @@ const studio = installStudio({
   updateCueFadeMs: (id, overMs) => updateCueFadeMs(id, overMs),
   moveCueOrder: (id, direction) => moveCueOrder(id, direction),
   testFireCue: (id) => testFireCue(id),
+  deleteCue: (id) => {
+    const before = cueStack.length;
+    cueStack = cueStack.filter((c) => c.id !== id);
+    return before === cueStack.length ? { ok: false, reason: `no cue with id '${id}'` } : { ok: true, reason: null };
+  },
   revertCueTest: () => revertCueTest(),
+  listEffectPresets,
+  saveEffectPreset,
+  applyEffectPreset,
+  deleteEffectPreset,
+  getMaskBoard: () => [
+    { suffix: '_Water', found: true },
+    { suffix: '_Fire', found: false },
+    { suffix: '_Specular', found: true },
+    { suffix: '_Outdoors', found: false },
+  ],
+  getTileMotionSummary: () => ({ totalTileCount: 12, enabledCount: 3, playing: true }),
+  openTileMotionDialog: () => {
+    document.getElementById('log').textContent = 'tile motion dialog (fake)';
+  },
+  getDarknessRealism: () => fakeDarkness,
+  setDarknessRealism: (v) => {
+    fakeDarkness = v;
+  },
+  copySceneEffectSettings: () => {
+    sceneClipboard = ['water', 'bloom'];
+    return { ok: true, effectIds: sceneClipboard };
+  },
+  pasteSceneEffectSettings: () =>
+    Promise.resolve(
+      sceneClipboard ? { ok: true, effectIds: sceneClipboard } : { ok: false, reason: 'nothing copied yet' }
+    ),
+  listScenePresets: () => ({ presets: fakeScenePresets }),
+  saveScenePreset: (name) => {
+    fakeScenePresets.push({ name, capturedAt: '2026-10-18T12:00:00Z', effectCount: 6 });
+    return Promise.resolve({ ok: true });
+  },
+  applyScenePreset: () => Promise.resolve({ ok: true }),
+  deleteScenePreset: (name) => {
+    const i = fakeScenePresets.findIndex((p) => p.name === name);
+    if (i >= 0) fakeScenePresets.splice(i, 1);
+    return Promise.resolve({ ok: true });
+  },
   isCueTestActive: () => isCueTestActive(),
   validateCue: (cue) => validateCue(cue, resolveType),
   listPaintableEffects: () => FAKE_PAINTABLE,
@@ -397,6 +472,132 @@ studio.registerEffectCard('candleFlame', () => ({
   paintVerb: 'Place',
   status: () => (candleState.enabled ? '' : 'off'),
 }));
+
+// A fourth card: DISABLED, long title, long status — proves the dimmed-body state
+// (header + switch stay fully lit) and the title/status ellipsis + tooltip.
+const stormState = { enabled: false, params: { intensity: 0.7, wetSurfaces: true, tint: '#8fb4ff', mode: 'rolling' } };
+studio.registerEffectCard('storm', () => ({
+  id: 'storm',
+  icon: 'bolt',
+  title: 'Precipitation, lightning and distant thunder',
+  accVar: '--c-particles',
+  filterCategory: 'particles',
+  schema: {
+    intensity: {
+      type: 'float',
+      min: 0,
+      max: 1,
+      step: 0.01,
+      default: 0.5,
+      category: 'Look',
+      label: 'Intensity',
+      help: 'How hard it comes down.',
+    },
+    wetSurfaces: {
+      type: 'bool',
+      default: true,
+      category: 'Look',
+      label: 'Wet surfaces',
+      help: 'Darken and gloss surfaces while it rains.',
+    },
+    tint: {
+      type: 'color',
+      default: '#8fb4ff',
+      category: 'Look',
+      label: 'Sky tint',
+      help: 'Colour cast on the whole scene.',
+    },
+    mode: {
+      type: 'enum',
+      values: ['rolling', 'sharp', 'distant'],
+      default: 'rolling',
+      category: 'Technical',
+      label: 'Thunder',
+      help: 'Thunder character.',
+    },
+  },
+  fohKeys: ['intensity', 'wetSurfaces'],
+  getValue: (id) => stormState.params[id],
+  onChange: (id, value) => {
+    stormState.params[id] = value;
+  },
+  enabled: stormState.enabled,
+  onToggleEnabled: (next) => {
+    stormState.enabled = next;
+  },
+  status: () => (stormState.enabled ? 'Raining — heavy, with occasional lightning over the north field' : 'off'),
+}));
+
+// A fifth card: its mask is MISSING (the "Paint one" link), it carries an opaque
+// `extra` element (a boot.js-style debug select, class msa-effect-preset-select)
+// and an `extraAdvanced` one, and one param is marked status:'planned' — so the
+// less common card paths render here too, not only the happy ones.
+const fireState = { enabled: true, params: { intensity: 0.6, flicker: 0.3 } };
+studio.registerEffectCard('fire', () => {
+  const debugSelect = document.createElement('select');
+  debugSelect.className = 'msa-effect-preset-select';
+  for (const label of ['Off — normal render', 'Heat map', 'Spawn points']) debugSelect.append(new Option(label, label));
+  const advancedNote = document.createElement('div');
+  advancedNote.textContent = 'Extra advanced content (opaque, built by the effect).';
+  advancedNote.style.cssText = 'font-size:11px; color:var(--ink2); padding:4px 0';
+  return {
+    id: 'fire',
+    icon: 'fire',
+    title: 'Fire',
+    accVar: '--c-lighting',
+    filterCategory: 'lighting',
+    mask: { suffix: '_Fire', found: false },
+    schema: {
+      intensity: {
+        type: 'float',
+        min: 0,
+        max: 1,
+        step: 0.01,
+        default: 0.5,
+        category: 'Look',
+        label: 'Intensity',
+        help: 'How fiercely it burns.',
+      },
+      flicker: {
+        type: 'float',
+        min: 0,
+        max: 1,
+        step: 0.01,
+        default: 0.3,
+        category: 'Motion',
+        label: 'Flicker',
+        help: 'Flame flutter.',
+      },
+      embers: {
+        type: 'float',
+        min: 0,
+        max: 1,
+        step: 0.01,
+        default: 0.2,
+        category: 'Motion',
+        label: 'Embers',
+        help: 'Rising sparks.',
+        status: 'planned',
+        plannedReason: 'Ember particles are not wired yet.',
+      },
+    },
+    fohKeys: ['intensity'],
+    getValue: (id) => fireState.params[id] ?? 0,
+    onChange: (id, value) => {
+      fireState.params[id] = value;
+    },
+    enabled: fireState.enabled,
+    onToggleEnabled: (next) => {
+      fireState.enabled = next;
+    },
+    onPaint: () => {
+      document.getElementById('log').textContent = 'paint fire mask armed (fake)';
+    },
+    extra: () => [debugSelect],
+    extraAdvanced: [advancedNote],
+    status: () => (fireState.enabled ? 'Burning' : 'off'),
+  };
+});
 
 document.getElementById('toggleBtn').addEventListener('click', () => studio.toggle());
 document.getElementById('playerBtn').addEventListener('click', () => player.toggle());

@@ -16,7 +16,8 @@
  *
  * Foundry ships the file at `<install>/resources/app/public/css/foundry2.css`
  * (its fonts sit beside it). Serve that `public/` folder from any static server
- * that sends `Access-Control-Allow-Origin: *`, then open a harness with
+ * that sends `Access-Control-Allow-Origin: *` (`node tools/preview-shared/
+ * serve-foundry-css.mjs` does exactly that), then open a harness with
  *   ?foundry=http://localhost:8942/css/foundry2.css
  * It is loaded with `crossorigin="anonymous"` so a script can also READ the
  * rules (`document.styleSheets[n].cssRules`) — that is how the audits list every

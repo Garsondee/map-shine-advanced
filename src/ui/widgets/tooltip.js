@@ -14,12 +14,23 @@
  * moves its `title` into `data-tip` (so the browser stops drawing its own) and
  * mirrors it to `aria-label` when the element has no other accessible name —
  * an icon-only button whose only name was the `title` stays announced. Code
- * that assigns `.title` again later just gets converted again on the next hover.
+ * that assigns `.title` again later just gets converted again on the next hover
+ * — except code that re-assigns it OFTEN (a speed readout refreshed ten times a
+ * second): the native tooltip would reappear between hovers. That code calls
+ * {@link setTip}, which writes whichever of the two the element is using now.
+ *
+ * ONE TOOLTIP, MANY ROOMS. The Studio installed this first, with its own scope;
+ * the Remote and the Player room added theirs later. Every `installTooltips`
+ * call therefore ADDS its scope to the one live tooltip (see
+ * {@link mergeTooltipScopes}) rather than being refused as a repeat — the first
+ * version quietly ignored later calls, so a second room's tooltips would have
+ * stayed native.
  *
  * Pure halves are exported and tested in Node: {@link computeTooltipPosition}
- * (placement, flip, clamp) and {@link createTooltipMachine} (the delay /
- * warm-window / suppress state machine, with injectable timers). The DOM
- * wiring below them is verified live in the studio-preview harness.
+ * (placement, flip, clamp), {@link createTooltipMachine} (the delay /
+ * warm-window / suppress state machine, with injectable timers),
+ * {@link mergeTooltipScopes} and {@link setTip}. The DOM wiring below them is
+ * verified live in the preview harnesses.
  *
  * ⚠️ NO WALL CLOCK. The structure suite's `time/one-clock` rule forbids reading
  * `performance.now()`/`Date.now()` in `src/ui`; the "recently closed, answer
@@ -39,6 +50,55 @@ export const TOOLTIP_WARM_MS = 320;
 
 const GAP = 8;
 const VIEWPORT_MARGIN = 8;
+
+/** The Studio's own scope — what {@link installTooltips} covers when no scope is given. */
+export const DEFAULT_TOOLTIP_SCOPE = '#msa-studio, .msa-studio-pop';
+
+/**
+ * Add a selector list to the scopes already covered: split on the commas that
+ * are NOT inside parentheses (`:is(a, b)` stays whole), trimmed, blanks dropped,
+ * and anything already present skipped — so every room can call
+ * `installTooltips` without caring who got there first.
+ * @param {readonly string[]} current @param {string} scope
+ * @returns {string[]} a new list (the input is not changed).
+ */
+export function mergeTooltipScopes(current, scope) {
+  const out = [...current];
+  const parts = [];
+  let depth = 0;
+  let part = '';
+  for (const ch of String(scope ?? '')) {
+    if (ch === '(') depth++;
+    else if (ch === ')') depth = Math.max(0, depth - 1);
+    if (ch === ',' && depth === 0) {
+      parts.push(part);
+      part = '';
+    } else {
+      part += ch;
+    }
+  }
+  parts.push(part);
+  for (const raw of parts) {
+    const sel = raw.trim();
+    if (sel && !out.includes(sel)) out.push(sel);
+  }
+  return out;
+}
+
+/**
+ * Change an element's tooltip text from code that runs repeatedly. Once the
+ * widget has taken an element over (`title` moved into `data-tip`), writing
+ * `title` again would bring the browser's own tooltip back beside the themed one;
+ * before that, writing `data-tip` would hide the text on a touch device, where the
+ * widget never installs and the native long-press `title` is all there is.
+ * @param {{hasAttribute: (name: string) => boolean, dataset: Record<string, string>, title: string}|null|undefined} el
+ * @param {string} text
+ */
+export function setTip(el, text) {
+  if (!el) return;
+  if (el.hasAttribute('data-tip')) el.dataset.tip = text;
+  else el.title = text;
+}
 
 /**
  * Where to put a tooltip. Prefers `side` (default: below), flips to the
@@ -196,26 +256,42 @@ function injectStyle() {
   document.head.appendChild(el);
 }
 
-let installed = false;
+/** @type {{destroy: () => void}|null} the one live tooltip, once installed */
+let liveHandle = null;
+/** The selector lists every room has asked for so far (see {@link mergeTooltipScopes}). */
+let scopes = [];
+/** @type {HTMLElement|null} */
+let liveTip = null;
 
 /**
- * Turn on themed tooltips for everything inside `scope`. Idempotent. A no-op on
- * touch-first devices (no hover), where the native long-press `title` stays.
+ * Turn on themed tooltips for everything inside `scope`. Safe to call from every
+ * room: the first call installs the tooltip, every later call ADDS its `scope` to
+ * it and returns the same handle. A no-op on touch-first devices (no hover),
+ * where the native long-press `title` stays.
  * @param {{scope?: string, openDelayMs?: number, warmMs?: number}} [opts]
  *   `scope` — a CSS selector list; only elements inside a match are handled.
- * @returns {{destroy: () => void}|null} null when not installed (touch / repeat call).
+ *   `openDelayMs`/`warmMs` are read by the FIRST call only.
+ * @returns {{destroy: () => void}|null} null when not installed (touch-first device).
  */
-export function installTooltips({ scope = '#msa-studio, .msa-studio-pop', openDelayMs, warmMs } = {}) {
-  if (installed || typeof document === 'undefined') return null;
+export function installTooltips({ scope = DEFAULT_TOOLTIP_SCOPE, openDelayMs, warmMs } = {}) {
+  if (typeof document === 'undefined') return null;
   if (typeof matchMedia === 'function' && !matchMedia('(hover: hover) and (pointer: fine)').matches) return null;
-  installed = true;
+  scopes = mergeTooltipScopes(scopes, scope);
+  if (liveHandle) {
+    // The tooltip element publishes what it covers — handy in devtools, and it is
+    // how tools/preview-shared/control-audit.js knows a `title` is already handled.
+    if (liveTip) liveTip.dataset.scope = scopes.join(', ');
+    return liveHandle;
+  }
   injectStyle();
 
   const tip = document.createElement('div');
   tip.className = 'msa-tip';
   tip.setAttribute('role', 'tooltip');
   tip.id = 'msa-tooltip';
+  tip.dataset.scope = scopes.join(', ');
   document.body.appendChild(tip);
+  liveTip = tip;
 
   /** @type {Element|null} */
   let describing = null;
@@ -265,7 +341,7 @@ export function installTooltips({ scope = '#msa-studio, .msa-studio-pop', openDe
   function tipTarget(node) {
     if (!(node instanceof Element)) return null;
     const el = node.closest('[title],[data-tip]');
-    if (!el || !node.closest(scope)) return null;
+    if (!el || !node.closest(scopes.join(', '))) return null;
     const title = el.getAttribute('title');
     if (title) {
       el.dataset.tip = title;
@@ -319,7 +395,7 @@ export function installTooltips({ scope = '#msa-studio, .msa-studio-pop', openDe
   document.addEventListener('keydown', onKey, true);
   document.addEventListener('scroll', onScroll, true);
 
-  return {
+  liveHandle = {
     destroy() {
       document.removeEventListener('pointerover', onOver, true);
       document.removeEventListener('pointerout', onOut, true);
@@ -330,7 +406,10 @@ export function installTooltips({ scope = '#msa-studio, .msa-studio-pop', openDe
       document.removeEventListener('scroll', onScroll, true);
       machine.reset();
       tip.remove();
-      installed = false;
+      liveHandle = null;
+      liveTip = null;
+      scopes = [];
     },
   };
+  return liveHandle;
 }

@@ -30,49 +30,22 @@ import { installIconSprite, iconMarkup } from '../widgets/icon-sprite.js';
 import { makeDraggable } from '../widgets/draggable.js';
 import { renderSystemPanel } from './system-panel.js';
 import { renderPlayerLightPicker } from './player-light-picker.js';
+import { installTooltips } from '../widgets/tooltip.js';
 import { raiseRoom, raiseRoomOnPress } from './room-stack.js';
+import { replayClass } from './room-style.js';
+import { PLAYER_ROOM_ID, PLAYER_TOOLTIP_SCOPE, playerCss } from './player-style.js';
 
-const ROOM_ID = 'msa-player';
+const ROOM_ID = PLAYER_ROOM_ID;
 const STYLE_ID = 'msa-player-style';
 
 function injectStyle() {
   if (document.getElementById(STYLE_ID)) return;
   const el = document.createElement('style');
   el.id = STYLE_ID;
-  el.textContent = `
-#${ROOM_ID}{position:fixed; top:44px; right:24px; width:360px; max-width:calc(100vw - 48px);
-  max-height:calc(100vh - 60px); background:var(--glass); backdrop-filter:blur(var(--glass-blur));
-  border:1px solid var(--line); border-radius:var(--r-room); box-shadow:var(--shadow3);
-  display:flex; flex-direction:column; overflow:hidden; z-index:100; font:12px/1.4 var(--font); color:var(--ink0)}
-#${ROOM_ID} .msa-player-head{display:flex; align-items:center; gap:var(--sp2); padding:8px 14px;
-  border-bottom:1px solid var(--line); flex:none; cursor:grab; user-select:none}
-#${ROOM_ID} .msa-player-head:active{cursor:grabbing}
-#${ROOM_ID} .msa-player-title{font-weight:600; letter-spacing:.1em; font-size:.72rem; text-transform:uppercase;
-  color:var(--ink1); display:flex; gap:8px; align-items:center}
-#${ROOM_ID} .msa-player-title .ico{color:var(--shine)}
-#${ROOM_ID} .msa-spacer{flex:1}
-#${ROOM_ID} .hbtn{width:26px; height:26px; display:grid; place-items:center; border-radius:6px;
-  color:var(--ink2); background:none; border:none; cursor:pointer; pointer-events:auto}
-#${ROOM_ID} .hbtn:hover{background:var(--bg3); color:var(--ink0)}
-#${ROOM_ID} .msa-player-body{flex:1; overflow-y:auto; padding:14px}
-/* THE CARRIED-LIGHT PICKER (mythica-machina-press#77) — its own sibling
-   section, above the scrollable settings body, same DOM position every
-   other room's own fixed-header-strip lives at. Reuses the Remote's own
-   .msa-wx-* chip/label vocabulary (weather-board.js's own idiom) rather
-   than a third toggle language — scoped under THIS room's id since CSS
-   custom classes are not shared across rooms even when the class names
-   match. */
-#${ROOM_ID} .msa-player-light-host{flex:none; padding:10px 14px 0 14px}
-#${ROOM_ID} .msa-wx-blocklabel{font-size:.64rem; letter-spacing:.22em; text-transform:uppercase;
-  color:var(--ink2); display:flex; align-items:center; gap:6px; margin-bottom:6px}
-#${ROOM_ID} .msa-wx-hint{letter-spacing:.02em; text-transform:none; color:var(--ink2); opacity:.8; font-size:.68rem}
-#${ROOM_ID} .msa-wx-chips{display:flex; flex-wrap:wrap; gap:5px; margin-top:6px}
-#${ROOM_ID} .msa-wx-chip{padding:5px 8px; border-radius:999px; border:1px solid var(--line); background:var(--bg2);
-  color:var(--ink1); font-size:.68rem; cursor:pointer; pointer-events:auto}
-#${ROOM_ID} .msa-wx-chip:hover{background:var(--bg3)}
-#${ROOM_ID} .msa-wx-chip[aria-pressed="true"]{background:color-mix(in oklab, var(--shine) 18%, transparent);
-  border-color:var(--shine); color:var(--shine)}
-`.trim();
+  // The stylesheet lives in ./player-style.js, on the shared kit (./room-style.js) — the same
+  // switch, field skin and press / hover / focus model the Studio's System department gives this
+  // very component tree.
+  el.textContent = playerCss();
   document.head.appendChild(el);
 }
 
@@ -141,6 +114,13 @@ export function installPlayer(opts = {}) {
   document.body.appendChild(room);
   raiseRoomOnPress(room);
   makeDraggable(head, room);
+  // Only the room's OWN entrance may clear the class (`animationend` bubbles).
+  room.addEventListener('animationend', (e) => {
+    if (e.target === room) room.classList.remove('msa-enter');
+  });
+  // Themed tooltips for this room (added to the Studio's and the Remote's; a no-op on touch-first
+  // devices) — see ui/widgets/tooltip.js.
+  installTooltips({ scope: PLAYER_TOOLTIP_SCOPE });
 
   const openChangeListeners = new Set();
   const controller = {
@@ -150,9 +130,12 @@ export function installPlayer(opts = {}) {
         paint();
         lightPickerHandle = renderPlayerLightPicker(lightHost);
       }
+      // `open()` can run while ALREADY open — that must not replay the entrance.
+      const wasOpen = state.open;
       state.open = true;
       room.hidden = false;
       raiseRoom(room);
+      if (!wasOpen) replayClass(room, 'msa-enter');
       for (const fn of openChangeListeners) fn(true);
     },
     close() {

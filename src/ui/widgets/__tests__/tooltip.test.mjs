@@ -9,7 +9,31 @@
  * window that never closes, a tooltip that reappears under a slider you are
  * dragging, or one that hangs off the edge of the screen.
  */
-import { computeTooltipPosition, createTooltipMachine, TOOLTIP_OPEN_DELAY_MS, TOOLTIP_WARM_MS } from '../tooltip.js';
+import {
+  computeTooltipPosition,
+  createTooltipMachine,
+  mergeTooltipScopes,
+  setTip,
+  installTooltips,
+  DEFAULT_TOOLTIP_SCOPE,
+  TOOLTIP_OPEN_DELAY_MS,
+  TOOLTIP_WARM_MS,
+} from '../tooltip.js';
+
+/** The slice of an element `setTip` touches: attributes, `dataset`, `title`. */
+function fakeEl({ title = '', dataTip } = {}) {
+  const attrs = new Map();
+  const el = {
+    dataset: {},
+    title,
+    hasAttribute: (name) => attrs.has(name),
+  };
+  if (dataTip !== undefined) {
+    attrs.set('data-tip', dataTip);
+    el.dataset.tip = dataTip;
+  }
+  return el;
+}
 
 /** A virtual clock: `setTimer` queues, `advance(ms)` runs everything due. */
 function fakeTimers() {
@@ -268,4 +292,57 @@ export function run(t) {
     timers.advance(450);
     ok('the requested side is passed through to show()', shows()[0].side === 'right');
   }
+
+  // ---- several rooms, one tooltip ------------------------------------------------
+  ok(
+    'the default scope is still the Studio (its call site passes none)',
+    DEFAULT_TOOLTIP_SCOPE === '#msa-studio, .msa-studio-pop'
+  );
+  ok(
+    'a scope list is split into selectors and added after the ones already covered',
+    mergeTooltipScopes(['#msa-studio'], '#msa-remote, #msa-player').join('|') === '#msa-studio|#msa-remote|#msa-player'
+  );
+  ok(
+    'a selector already covered is not added twice (every room may call install, in any order)',
+    mergeTooltipScopes(['#msa-studio', '.pop'], '.pop, #msa-studio, #msa-remote').join('|') ===
+      '#msa-studio|.pop|#msa-remote'
+  );
+  ok(
+    'commas INSIDE parentheses do not split a selector (:is(a, b) stays whole)',
+    mergeTooltipScopes([], ':is(#a, #b) .x, #c').join('|') === ':is(#a, #b) .x|#c'
+  );
+  ok(
+    'blank entries and a missing scope add nothing',
+    mergeTooltipScopes(['#a'], ' , ,').join('|') === '#a' &&
+      mergeTooltipScopes(['#a'], undefined).join('|') === '#a' &&
+      mergeTooltipScopes([], '').length === 0
+  );
+  {
+    const before = ['#a'];
+    mergeTooltipScopes(before, '#b');
+    ok('the list passed in is never mutated', before.length === 1);
+  }
+  ok(
+    'installTooltips is a no-op without a document (Node) rather than throwing',
+    installTooltips({ scope: '#msa-remote' }) === null
+  );
+
+  // ---- changing a tooltip's text while the widget owns it ----------------------------
+  {
+    const el = fakeEl({ title: 'old' });
+    setTip(el, 'Pause time flow');
+    ok(
+      'before the widget has taken over, the text goes to `title` (touch devices keep it)',
+      el.title === 'Pause time flow'
+    );
+  }
+  {
+    const el = fakeEl({ dataTip: 'Play time flow' });
+    setTip(el, 'Pause time flow');
+    ok(
+      'after the takeover it goes to `data-tip`, and the native `title` stays empty (no second tooltip)',
+      el.dataset.tip === 'Pause time flow' && el.title === ''
+    );
+  }
+  ok('setTip on nothing is harmless', (setTip(null, 'x'), setTip(undefined, 'x'), true));
 }

@@ -26,13 +26,20 @@
  * editable homes for the same value. An angle has no vertical-fader
  * equivalent, so direction stays exactly where it was.
  *
+ * ⚠️ CLASSES, NOT INLINE STYLES (2026-10-18) — the window is styled in
+ * `remote-style.js` with the same rules as the camera-path popover, so its close
+ * button has a hover, a press and a focus ring; it opens scaled out of the corner
+ * nearest the room it sits beside.
+ *
  * @module ui/rooms/remote/wind-popover
  */
 
 import { buildParamControl } from '../../widgets/param-control.js';
 import { iconMarkup } from '../../widgets/icon-sprite.js';
+import { replayClass } from '../room-style.js';
+import { WIND_PANEL_ID } from './remote-style.js';
 
-const PANEL_ID = 'msa-remote-wind';
+const PANEL_ID = WIND_PANEL_ID;
 
 const DIRECTION_DECL = Object.freeze({
   type: 'angle',
@@ -54,36 +61,19 @@ export function installWindPopover(ctx = {}) {
   const win = document.createElement('div');
   win.id = PANEL_ID;
   win.hidden = true;
-  Object.assign(win.style, {
-    position: 'fixed',
-    top: '80px',
-    right: '20px',
-    width: '220px',
-    zIndex: '400',
-    background: 'var(--glass)',
-    backdropFilter: 'blur(var(--glass-blur))',
-    border: '1px solid var(--line-strong)',
-    borderRadius: 'var(--r-room, 14px)',
-    boxShadow: 'var(--shadow3)',
-    padding: '10px',
-    font: '11px/1.4 var(--font)',
-    color: 'var(--ink0)',
-  });
 
   const head = document.createElement('div');
-  head.style.cssText = 'display:flex; align-items:center; gap:8px; margin-bottom:8px';
+  head.className = 'msa-pop-head';
   const title = document.createElement('span');
-  title.style.cssText = 'font-weight:700; font-size:.8rem; display:flex; gap:6px; align-items:center';
+  title.className = 'msa-pop-title';
   title.innerHTML = `${iconMarkup('wind')}Wind`;
-  const spacer = document.createElement('span');
-  spacer.style.flex = '1';
   const closeBtn = document.createElement('button');
   closeBtn.type = 'button';
+  closeBtn.className = 'hbtn';
   closeBtn.title = 'Close';
   closeBtn.innerHTML = iconMarkup('x');
-  closeBtn.style.cssText = 'color:var(--ink2); background:none; border:none; cursor:pointer';
   closeBtn.addEventListener('click', () => controller.close());
-  head.append(title, spacer, closeBtn);
+  head.append(title, closeBtn);
 
   const bodyHost = document.createElement('div');
   win.append(head, bodyHost);
@@ -105,14 +95,20 @@ export function installWindPopover(ctx = {}) {
 
   // Beside the room that opened it, when the caller says where that is
   // (UI test pass, 2026-09-26): the fixed top-right fallback sat over
-  // Foundry's own sidebar, a whole screen away from the wind pill.
+  // Foundry's own sidebar, a whole screen away from the wind pill. It grows out of
+  // the corner facing the room (a popover scales from its trigger).
   function place() {
     const r = ctx.getAnchorRect?.();
     if (!r || !(r.width > 0)) return;
     const w = win.offsetWidth || 220;
     const fitsRight = r.right + 8 + w <= window.innerWidth - 8;
     const left = fitsRight ? r.right + 8 : Math.max(8, r.left - 8 - w);
-    Object.assign(win.style, { left: `${left}px`, right: 'auto', top: `${Math.max(8, r.top + 48)}px` });
+    Object.assign(win.style, {
+      left: `${left}px`,
+      right: 'auto',
+      top: `${Math.max(8, r.top + 48)}px`,
+      transformOrigin: fitsRight ? '0 0' : '100% 0',
+    });
   }
 
   const controller = {
@@ -120,6 +116,7 @@ export function installWindPopover(ctx = {}) {
       render();
       win.hidden = false;
       place();
+      replayClass(win, 'msa-pop-enter');
     },
     close() {
       win.hidden = true;

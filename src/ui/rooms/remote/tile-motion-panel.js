@@ -62,53 +62,22 @@ import { installIconSprite, iconMarkup } from '../../widgets/icon-sprite.js';
 import { makeDraggable } from '../../widgets/draggable.js';
 import { buildParamControl } from '../../widgets/param-control.js';
 import { createTileThumbnailCanvas } from '../../widgets/tile-thumbnail.js';
+import { installTooltips, setTip } from '../../widgets/tooltip.js';
+import { replayClass } from '../room-style.js';
+import { TILE_MOTION_ID, TILE_MOTION_TOOLTIP_SCOPE, tileMotionCss } from './remote-style.js';
 
-const ROOM_ID = 'msa-tile-motion';
+const ROOM_ID = TILE_MOTION_ID;
 const STYLE_ID = 'msa-tile-motion-style';
 
 function injectStyle() {
   if (document.getElementById(STYLE_ID)) return;
   const el = document.createElement('style');
   el.id = STYLE_ID;
-  el.textContent = `
-#${ROOM_ID}{position:fixed; top:80px; right:440px; width:320px; max-height:80vh;
-  background:var(--glass); backdrop-filter:blur(var(--glass-blur)); border:1px solid var(--line);
-  border-radius:var(--r-room); box-shadow:var(--shadow3); display:flex; flex-direction:column;
-  overflow:hidden; z-index:400; font:11px/1.4 var(--font); color:var(--ink0)}
-#${ROOM_ID}[data-minimized="true"] .msa-tm-body{display:none}
-#${ROOM_ID} .msa-tm-head{display:flex; align-items:center; gap:8px; padding:8px 12px;
-  border-bottom:1px solid var(--line); flex:none; cursor:grab; user-select:none}
-#${ROOM_ID} .msa-tm-head:active{cursor:grabbing}
-#${ROOM_ID} .msa-tm-title{font-weight:700; font-size:.8rem; display:flex; gap:6px; align-items:center; color:var(--ink0)}
-#${ROOM_ID} .msa-tm-title .ico{color:var(--shine)}
-#${ROOM_ID} .msa-tm-spacer{flex:1}
-#${ROOM_ID} .msa-tm-hbtn{width:22px; height:22px; display:grid; place-items:center; border-radius:5px;
-  color:var(--ink2); background:none; border:none; cursor:pointer; pointer-events:auto}
-#${ROOM_ID} .msa-tm-hbtn:hover{background:var(--bg3); color:var(--ink0)}
-#${ROOM_ID} .msa-tm-hbtn.msa-minimized svg{transform-box:fill-box; transform-origin:center; transform:rotate(-90deg)}
-#${ROOM_ID} .msa-tm-body{overflow-y:auto; padding:10px 12px}
-#${ROOM_ID} .msa-tm-row{display:flex; align-items:center; gap:6px; margin-bottom:6px; flex-wrap:wrap; pointer-events:auto}
-#${ROOM_ID} .msa-tm-row label{font-size:.68rem; color:var(--ink2)}
-#${ROOM_ID} h4{margin:10px 0 6px; font-size:.68rem; color:var(--ink2); text-transform:uppercase;
-  letter-spacing:.05em; border-top:1px solid var(--line); padding-top:8px}
-#${ROOM_ID} input[type=number]{width:64px; background:var(--bg2); color:var(--ink0); border:1px solid var(--line);
-  border-radius:4px; padding:2px 4px; font:inherit; pointer-events:auto}
-#${ROOM_ID} select{background:var(--bg2); color:var(--ink0); border:1px solid var(--line); border-radius:4px;
-  padding:2px 4px; font:inherit; max-width:200px; pointer-events:auto}
-#${ROOM_ID} button.msa-tm-ghost{background:var(--bg3); color:var(--ink1); border:1px solid var(--line);
-  border-radius:6px; padding:3px 8px; cursor:pointer; font-size:.72rem; pointer-events:auto}
-#${ROOM_ID} button.msa-tm-ghost:hover{border-color:var(--shine-glow); color:var(--ink0)}
-#${ROOM_ID} button.msa-tm-ghost:disabled{opacity:.5; cursor:default}
-#${ROOM_ID} .msa-tm-status{font-size:.68rem; color:var(--ink2); margin:4px 0}
-#${ROOM_ID} .msa-tm-thumbs{display:grid; grid-template-columns:repeat(auto-fill, 56px); gap:6px;
-  max-height:220px; overflow-y:auto; padding:2px 2px 8px; margin-bottom:4px}
-#${ROOM_ID} .msa-tm-thumb{width:56px; height:56px; border-radius:6px; border:1px solid var(--line);
-  background:var(--bg2); cursor:pointer; padding:0; display:grid; place-items:center; overflow:hidden;
-  pointer-events:auto}
-#${ROOM_ID} .msa-tm-thumb canvas{display:block}
-#${ROOM_ID} .msa-tm-thumb:hover{border-color:var(--shine-glow)}
-#${ROOM_ID} .msa-tm-thumb[aria-current="true"]{border-color:var(--shine); box-shadow:0 0 0 1px var(--shine)}
-`.trim();
+  // The panel's stylesheet lives in ./remote-style.js (#tileMotionCss), on the same kit as
+  // the Remote: the press / hover / focus model, the switch, the field skin. It was ~40
+  // lines here that styled bare buttons Foundry then restyled — 22px header buttons that
+  // were really 22×28, an orange checkbox glyph, a serif h4.
+  el.textContent = tileMotionCss();
   document.head.appendChild(el);
 }
 
@@ -140,6 +109,7 @@ function sectionHeading(text) {
 function numberInput(value, step, onChange, opts = {}) {
   const input = document.createElement('input');
   input.type = 'number';
+  input.className = 'msa-input msa-input--num';
   input.step = String(step ?? 1);
   if (opts.min !== undefined) input.min = String(opts.min);
   if (opts.max !== undefined) input.max = String(opts.max);
@@ -150,6 +120,7 @@ function numberInput(value, step, onChange, opts = {}) {
 
 function selectInput(options, current, onChange) {
   const select = document.createElement('select');
+  select.className = 'msa-select';
   for (const opt of options) {
     const o = document.createElement('option');
     o.value = opt.value ?? opt;
@@ -164,7 +135,7 @@ function selectInput(options, current, onChange) {
 function ghostButton(text, title, onClick) {
   const btn = document.createElement('button');
   btn.type = 'button';
-  btn.className = 'msa-tm-ghost';
+  btn.className = 'msa-btn msa-btn--sm';
   btn.textContent = text;
   if (title) btn.title = title;
   btn.addEventListener('click', onClick);
@@ -201,13 +172,13 @@ export function installTileMotionPanel() {
   spacer.className = 'msa-tm-spacer';
   const minimizeBtn = document.createElement('button');
   minimizeBtn.type = 'button';
-  minimizeBtn.className = 'msa-tm-hbtn';
+  minimizeBtn.className = 'hbtn';
   minimizeBtn.title = 'Minimize';
   minimizeBtn.innerHTML = iconMarkup('chev');
   minimizeBtn.addEventListener('click', () => controller.toggleMinimize());
   const closeBtn = document.createElement('button');
   closeBtn.type = 'button';
-  closeBtn.className = 'msa-tm-hbtn';
+  closeBtn.className = 'hbtn';
   closeBtn.title = 'Close';
   closeBtn.innerHTML = iconMarkup('x');
   closeBtn.addEventListener('click', () => controller.close());
@@ -729,10 +700,20 @@ export function installTileMotionPanel() {
   room.append(head, body);
   document.body.appendChild(room);
   makeDraggable(head, room);
+  // Only the panel's OWN entrance may clear the class (`animationend` bubbles).
+  room.addEventListener('animationend', (e) => {
+    if (e.target === room) room.classList.remove('msa-enter');
+  });
+  // Themed tooltips for this panel (added to the Studio's and the Remote's; a no-op on
+  // touch-first devices) — see ui/widgets/tooltip.js.
+  installTooltips({ scope: TILE_MOTION_TOOLTIP_SCOPE });
 
   const controller = {
     open() {
+      // `open()` is also called while ALREADY open — that must not replay the entrance.
+      const wasOpen = !room.hidden;
       room.hidden = false;
+      if (!wasOpen) replayClass(room, 'msa-enter');
       activateTileMotionNativeTool();
       // Pre-select the first tile if nothing is selected yet (2026-08-27
       // fix, author: "when initially loading the tile motion sub-UI it
@@ -779,7 +760,7 @@ export function installTileMotionPanel() {
       minimized = !minimized;
       room.dataset.minimized = String(minimized);
       minimizeBtn.classList.toggle('msa-minimized', minimized);
-      minimizeBtn.title = minimized ? 'Expand' : 'Minimize';
+      setTip(minimizeBtn, minimized ? 'Expand' : 'Minimize');
     },
     isOpen: () => !room.hidden,
   };

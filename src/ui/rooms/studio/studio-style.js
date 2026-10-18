@@ -1,57 +1,24 @@
 /**
- * ui/rooms/studio/studio-style.js — the Studio's whole stylesheet, in one place.
+ * ui/rooms/studio/studio-style.js — the Studio's stylesheet: its room chrome,
+ * department rail and the layouts of its departments, on top of the shared kit.
  *
  * Moved out of `shell.js` (where the first version was a ~60-line port of the
  * mock's room/rail/head rules) when the polish pass of 2026-10-18 turned it
- * into a small design system: a press/hover/focus model every control shares,
- * a real switch, slider fill, and the motion. One stylesheet means one place
- * to read what "a button in the Studio" does, instead of that knowledge being
- * scattered across inline `Object.assign(el.style, ...)` blocks in six
- * department files — inline styles cannot express `:hover`, `:active` or
- * `:focus-visible` at all, which is why nothing in the panel used to respond
- * to a press.
+ * into a small design system, and the generic half of it — the press / hover /
+ * focus model, buttons, chips, switches, fields, parameter rows, slider fill —
+ * moved on to `../room-style.js` when the Remote and Player room got the same
+ * pass. The motion rules, and the Foundry global-CSS bleed this sheet has to
+ * win back (button `height:2em`, `transition:0.5s`, an orange hover, a focus
+ * glow, a serif `h2`, `select{width:100%}`), are explained at the top of that
+ * file; what stays here is genuinely the Studio's own.
  *
- * ============================================================================
- * ⚠️ THE FOUNDRY PROBLEM THIS SHEET HAS TO WIN, ON PURPOSE
- * ============================================================================
- * This room lives inside Foundry's page, and Foundry's core stylesheet styles
- * every bare `button`, `input`, `select`, `h2`, `kbd` and `input[type=range]`.
- * Measured in the preview harness with the real `foundry2.css` loaded:
- *  - `button{height:2em; min-height:2em; transition:0.5s; padding:0 .5rem;
- *    border:1px solid <brown>; background:<translucent>}` — so a 28px switch
- *    rendered as a CIRCLE (min-height beat its 16px), every 24px header
- *    button was really 24×28, and every state change took half a second;
- *  - `button:hover{background:<orange-red>}` and `button:focus{outline+glow}` —
- *    hover turned unstyled buttons orange, and a plain mouse click left a
- *    glowing focus ring behind;
- *  - `h2` is set in a serif display face, the range input is a dark 4px track
- *    with no fill, and a checkbox is a Font Awesome glyph.
- * All of Foundry's rules sit inside `@layer`s; ANY unlayered rule beats ANY
- * layered one regardless of specificity, which is why this sheet can win with
- * plain class selectors and never needs `!important` against Foundry itself.
- * The few `!important`s below are against INLINE styles from `param-control.js`
- * (shared with the old debug panel, which relies on them as its fallback look),
- * and say so where they appear.
- *
- * ============================================================================
- * THE MOTION RULES (Emil Kowalski's design-engineering rules, applied)
- * ============================================================================
- *  - Frequency decides. Keyboard-opened things (the search palette) and things
- *    used hundreds of times a day (department switching, slider drags) do not
- *    animate; occasional things (opening the room, a pop-out, a switch) do.
- *  - Press feedback on everything pressable: `scale(.97)`, 160ms, ease-out.
- *  - Only `transform` and `opacity` move; colour changes are short (120ms).
- *    Never `transition: all`.
- *  - Strong custom curves (`--ease-out`, tokens.js), never the built-ins, and
- *    never ease-in on UI.
- *  - Enter slower than exit; popovers scale from where they came from; nothing
- *    scales from 0 (start at .96–.985 plus opacity).
- *  - Hover effects are gated behind `(hover:hover) and (pointer:fine)` so a tap
- *    on a touch screen never leaves a stuck hover state.
- *  - Reduced motion is handled once, globally, by `ui/tokens.js`'s BASE_CSS.
+ * Inline styles cannot express `:hover`, `:active` or `:focus-visible` at all,
+ * which is why nothing in the panel used to respond to a press.
  *
  * @module ui/rooms/studio/studio-style
  */
+
+import { HOVER_GATE, MOTION_KEYFRAMES, uiKitCss, uiKitHoverCss } from '../room-style.js';
 
 /** Class on a detached pop-out window so the shared component rules reach it. */
 export const POPOUT_CLASS = 'msa-studio-pop';
@@ -65,8 +32,6 @@ export function studioCss(roomId, accentVars) {
   const R = `#${roomId}`;
   // Both the room and any detached pop-out window.
   const IN = `:is(${R}, .${POPOUT_CLASS})`;
-  // Everything that is pressed — one reset, one focus ring, one press response.
-  const PRESS = `${IN} :is(.msa-btn, .hbtn, .msa-chip, .msa-tile, .msa-switch, .msa-badge--action, .msa-link)`;
   const RAIL = `${R} .rail button`;
 
   return `
@@ -83,9 +48,7 @@ ${R}{top:44px; left:24px; width:1180px; height:800px;
    short entrance (ease-out, 200ms, from .985 — never from 0). Closing is
    instant: the system should be fastest when it is the one responding. */
 ${R}.msa-enter{animation:msaRoomIn 200ms var(--ease-out) both}
-@keyframes msaRoomIn{from{opacity:0; transform:translateY(8px) scale(.985)}}
-@keyframes msaPopIn{from{opacity:0; transform:scale(.96)}}
-@keyframes msaFadeUp{from{opacity:0; transform:translateY(4px)}}
+${MOTION_KEYFRAMES}
 
 ${R} .room-head{display:flex; align-items:center; gap:var(--sp2);
   padding:8px 14px; border-bottom:1px solid var(--line); cursor:grab; user-select:none; flex:none}
@@ -96,153 +59,7 @@ ${R} .rtitle .ico{color:var(--shine)}
 ${R} .spacer{flex:1}
 ${R} .frame{display:flex; flex:1; min-height:0}
 
-/* ---- the press model: every pressable thing, one reset ------------------- */
-${PRESS}, ${RAIL}{
-  /* height:auto — Foundry's button rule is \`height:2em\`, i.e. twice THIS
-     button's own font-size, which is a different height for every size of text
-     we put in one. Components that need a fixed size set their own below. */
-  box-sizing:border-box; height:auto; min-height:0; margin:0; font:inherit; line-height:1.2;
-  letter-spacing:normal; text-transform:none; text-decoration:none; text-shadow:none;
-  box-shadow:none; outline:none; cursor:pointer; pointer-events:auto; user-select:none;
-  -webkit-tap-highlight-color:transparent; touch-action:manipulation;
-  transition:transform 160ms var(--ease-out), background-color 120ms ease, border-color 120ms ease,
-    color 120ms ease, opacity 120ms ease}
-${PRESS}:focus-visible, ${RAIL}:focus-visible{outline:2px solid var(--shine); outline-offset:2px}
-${PRESS}:active:not(:disabled), ${RAIL}:active:not(:disabled){transform:scale(.97)}
-${PRESS}:disabled, ${RAIL}:disabled{cursor:default; opacity:.45}
-
-/* icon-only tool button (header close, card tools, cue arrows) */
-${IN} .hbtn{width:24px; height:24px; display:grid; place-items:center; padding:0;
-  border:0; border-radius:6px; background:transparent; color:var(--ink2)}
-${IN} .hbtn .ico{width:15px; height:15px}
-${IN} .hbtn[aria-pressed="true"]{color:var(--acc, var(--shine))}
-${IN} .hbtn.msa-planned{border:1px dashed var(--fail); color:var(--fail)}
-
-/* labelled button */
-${IN} .msa-btn{display:inline-flex; align-items:center; justify-content:center; gap:6px;
-  padding:5px 11px; border-radius:var(--r-ctl); border:1px solid var(--line);
-  background:var(--bg2); color:var(--ink1); font-size:.72rem; font-weight:600; white-space:nowrap; flex:none}
-${IN} .msa-btn .ico{width:13px; height:13px}
-${IN} .msa-btn-ico{display:inline-flex}
-${IN} .msa-btn--sm{padding:3px 9px; font-size:.7rem}
-${IN} .msa-btn--gold{border-color:var(--shine); background:color-mix(in oklab, var(--shine) 18%, var(--bg2)); color:var(--shine)}
-${IN} .msa-btn.is-armed, ${IN} .msa-btn--danger{border-color:var(--fail); color:var(--fail);
-  background:color-mix(in oklab, var(--fail) 14%, var(--bg2))}
-${IN} .msa-btn.msa-planned{border-style:dashed; border-color:var(--fail); color:var(--fail)}
-
-/* filter chip — accent comes from the chip's own --acc */
-${IN} .msa-chip{padding:4px 11px; border-radius:999px; border:1px solid var(--line);
-  background:var(--bg2); color:var(--ink1); font-size:.72rem}
-${IN} .msa-chip[aria-pressed="true"]{border-color:var(--acc, var(--shine));
-  background:color-mix(in oklab, var(--acc, var(--shine)) 16%, transparent); color:var(--acc, var(--shine))}
-
-/* inline text link ("Paint one") */
-${IN} .msa-link{margin-left:auto; padding:2px 4px; border:0; background:none; color:inherit;
-  text-decoration:underline; text-underline-offset:2px; font-size:inherit}
-
-/* small status badge (health / tier / scope) */
-${IN} .msa-badge{display:inline-flex; align-items:center; gap:3px; padding:1px 7px;
-  border-radius:999px; font-size:10px; line-height:1.6; border:1px solid var(--line);
-  background:transparent; color:var(--ink2); flex:none; white-space:nowrap}
-${IN} .msa-badge--planned{border-style:dashed; border-color:var(--fail); color:var(--fail)}
-${IN} .msa-badge--warn{border-color:var(--warn); color:var(--warn)}
-
-/* ---- the enable switch ---------------------------------------------------
-   One real switch: a 30×18 track, a 12px thumb that SLIDES (translateX, the
-   only property that moves) and a track that changes colour. The card re-
-   renders on every toggle, so effects-department.js builds the new switch in
-   its PREVIOUS state and flips it a frame later — that is what lets this
-   transition run at all on a freshly built element. */
-${IN} .msa-switch{position:relative; width:30px; height:18px; flex:none; padding:0;
-  border-radius:999px; border:1px solid var(--line-strong); background:var(--bg3)}
-${IN} .msa-switch::after{content:""; position:absolute; top:2px; left:2px; width:12px; height:12px;
-  border-radius:50%; background:var(--ink2);
-  transition:transform 200ms var(--ease-out), background-color 160ms ease}
-${IN} .msa-switch[aria-checked="true"]{background:var(--ok); border-color:transparent}
-${IN} .msa-switch[aria-checked="true"]::after{transform:translateX(12px); background:#0d1016}
-
-/* the same switch, for a boolean PARAM (a native checkbox underneath, so
-   keyboard, label-click and form semantics all stay the browser's). Foundry
-   draws checkboxes as Font Awesome glyphs through ::before/::after — both are
-   replaced outright here. */
-${IN} input.msa-switch-input{-webkit-appearance:none; appearance:none; position:relative; flex:none;
-  width:30px; height:18px; margin:0; padding:0; border-radius:999px;
-  border:1px solid var(--line-strong); background:var(--bg3); cursor:pointer;
-  transition:background-color 160ms ease, border-color 160ms ease}
-${IN} input.msa-switch-input::before{content:""; position:absolute; top:2px; left:2px;
-  width:12px; height:12px; border-radius:50%; background:var(--ink2); outline:0; font-size:0;
-  transition:transform 200ms var(--ease-out), background-color 160ms ease}
-${IN} input.msa-switch-input::after{content:none}
-${IN} input.msa-switch-input:checked{background:var(--shine); border-color:transparent}
-${IN} input.msa-switch-input:checked::before{transform:translateX(12px); background:var(--bg0)}
-${IN} input.msa-switch-input:focus-visible{outline:2px solid var(--shine); outline-offset:2px}
-/* a switch sits at the row's right edge, in line with the selects/sliders
-   beside it, rather than hugging the end of its label */
-${IN} .msa-row input.msa-switch-input{margin-left:auto}
-
-/* ---- fields ---------------------------------------------------------------- */
-/* width:auto — Foundry's own \`select{width:100%}\` otherwise makes every dropdown
-   swallow its whole flex row (the cue row's fade-time select squeezed the cue's
-   NAME to nothing). Rows that WANT a stretching field say so with flex:1. */
-${IN} .msa-input, ${IN} .msa-select, ${IN} .msa-effect-preset-select{
-  width:auto; max-width:100%; height:26px; padding:0 8px; background:var(--bg2); color:var(--ink0);
-  border:1px solid var(--line); border-radius:var(--r-ctl); font:inherit; font-size:.72rem;
-  outline:none; box-shadow:none; transition:border-color 120ms ease, box-shadow 120ms ease}
-${IN} .msa-input{flex:1; min-width:0; cursor:text}
-${IN} .msa-input::placeholder{color:var(--ink2)}
-${IN} .msa-select, ${IN} .msa-effect-preset-select{cursor:pointer}
-${IN} .msa-input:focus, ${IN} .msa-select:focus, ${IN} .msa-effect-preset-select:focus{
-  border-color:var(--shine); box-shadow:0 0 0 3px var(--shine-soft)}
-${IN} .msa-input[aria-invalid="true"]{border-color:var(--fail);
-  box-shadow:0 0 0 3px color-mix(in oklab, var(--fail) 22%, transparent)}
-/* param-control.js builds its own <select> with INLINE colours (the old debug
-   panel's fallback look). !important is the contained way to re-skin it here
-   without forking the widget the old panel still depends on. */
-${IN} .msa-row .msa-select{background:var(--bg2) !important; color:var(--ink0) !important;
-  border:1px solid var(--line) !important; border-radius:var(--r-ctl) !important;
-  font:inherit !important; font-size:.72rem !important; padding:0 6px !important}
-${IN} .msa-row .msa-select:focus{border-color:var(--shine) !important}
-${IN} .msa-color{width:36px !important; height:20px !important; padding:0 !important;
-  border:1px solid var(--line-strong) !important; border-radius:5px !important; background:none !important; cursor:pointer}
-${IN} .msa-color::-webkit-color-swatch-wrapper{padding:0}
-${IN} .msa-color::-webkit-color-swatch{border:0; border-radius:4px}
-
-/* a search/filter field: the wrapper owns the border and the focus ring */
-${IN} .msa-field{flex-basis:100%; display:flex; align-items:center; gap:6px; height:28px;
-  padding:0 10px; background:var(--bg2); border:1px solid var(--line); border-radius:var(--r-ctl);
-  transition:border-color 120ms ease, box-shadow 120ms ease}
-${IN} .msa-field:focus-within{border-color:var(--shine); box-shadow:0 0 0 3px var(--shine-soft)}
-${IN} .msa-field .ico{color:var(--ink2); width:12px; height:12px; flex:none}
-${IN} .msa-field input{flex:1; min-width:0; height:auto; padding:0; background:none; border:none;
-  outline:none; box-shadow:none; font:inherit; font-size:.74rem; line-height:1.4; color:var(--ink0)}
-
-/* ---- parameter rows & sliders ----------------------------------------------
-   Rows come from ui/widgets/param-control.js with inline styles that the old
-   debug panel still relies on; the Studio sets its own type scale on top
-   (!important beats inline) — slightly larger than the panel's 10.5px, and in
-   the LANTERN face rather than the old panel's Signika. */
-${IN} .msa-row{font-size:11.5px !important; font-family:inherit !important; line-height:1.3 !important; min-height:22px}
-${IN} input.msa-range{-webkit-appearance:none; appearance:none; height:20px; margin:0; padding:0;
-  border:0; background:transparent; cursor:pointer; --p:0}
-/* The track is a gradient whose hard stop follows --p (0..1, written by
-   param-control.js#paintFill) — offset by half a thumb each end so the fill
-   meets the thumb's CENTRE at every value, not its edge. */
-${IN} .msa-range::-webkit-slider-runnable-track{height:4px; border:0; border-radius:999px;
-  box-shadow:inset 0 0 0 1px var(--line);
-  background:linear-gradient(to right, var(--shine) calc(6px + (100% - 12px) * var(--p)),
-    var(--bg3) calc(6px + (100% - 12px) * var(--p)))}
-${IN} .msa-range::-webkit-slider-thumb{-webkit-appearance:none; appearance:none; box-sizing:border-box;
-  width:12px; height:12px; margin-top:-4px; border-radius:50%; background:var(--ink0);
-  border:2px solid var(--shine); box-shadow:0 1px 3px rgba(0,0,0,.45);
-  transition:transform 120ms var(--ease-out), box-shadow 120ms ease}
-${IN} .msa-range::-moz-range-track{height:4px; border:0; border-radius:999px; background:var(--bg3);
-  box-shadow:inset 0 0 0 1px var(--line)}
-${IN} .msa-range::-moz-range-progress{height:4px; border-radius:999px; background:var(--shine)}
-${IN} .msa-range::-moz-range-thumb{box-sizing:border-box; width:12px; height:12px; border-radius:50%;
-  background:var(--ink0); border:2px solid var(--shine); box-shadow:0 1px 3px rgba(0,0,0,.45)}
-${IN} .msa-range:active::-webkit-slider-thumb{transform:scale(1.2)}
-${IN} .msa-range:focus-visible{outline:none}
-${IN} .msa-range:focus-visible::-webkit-slider-thumb{box-shadow:0 0 0 4px var(--shine-soft), 0 1px 3px rgba(0,0,0,.45)}
+${uiKitCss(IN, { pressAfter: [RAIL] })}
 
 /* ---- the department rail ---------------------------------------------------- */
 ${R} .rail{width:58px; flex:none; border-right:1px solid var(--line); display:flex;
@@ -441,23 +258,8 @@ ${IN} .msa-pending span{flex:1}
 
 /* ---- hover: only where hover exists --------------------------------------------
    Gated so a tap on a touch screen never leaves a stuck hover state. */
-@media (hover:hover) and (pointer:fine){
-  ${IN} .hbtn:hover{background:var(--bg3); color:var(--ink0)}
-  ${IN} .hbtn[aria-pressed="true"]:hover{color:var(--acc, var(--shine))}
-  ${IN} .msa-btn:hover{background:var(--bg3); border-color:var(--line-strong); color:var(--ink0)}
-  ${IN} .msa-btn--gold:hover{background:color-mix(in oklab, var(--shine) 28%, var(--bg2)); color:var(--shine)}
-  ${IN} .msa-btn.is-armed:hover, ${IN} .msa-btn--danger:hover{border-color:var(--fail); color:var(--fail);
-    background:color-mix(in oklab, var(--fail) 22%, var(--bg2))}
-  ${IN} .msa-chip:hover{border-color:var(--line-strong); color:var(--ink0)}
-  ${IN} .msa-chip[aria-pressed="true"]:hover{color:var(--acc, var(--shine))}
-  ${IN} .msa-switch:hover{border-color:var(--ink2)}
-  ${IN} input.msa-switch-input:hover{border-color:var(--ink2)}
-  ${IN} .msa-select:hover, ${IN} .msa-effect-preset-select:hover, ${IN} .msa-input:hover{border-color:var(--line-strong)}
-  ${IN} .msa-row .msa-select:hover{border-color:var(--line-strong) !important}
-  ${IN} .msa-range:hover::-webkit-slider-thumb{transform:scale(1.15)}
-  ${IN} .msa-range:active:hover::-webkit-slider-thumb{transform:scale(1.2)}
-  ${IN} .msa-badge--action:hover{background:var(--bg3); color:var(--ink0)}
-  ${IN} .msa-link:hover{opacity:.75}
+${HOVER_GATE}{
+${uiKitHoverCss(IN)}
   ${IN} .msa-adv-sum:hover{color:var(--ink0); background:var(--bg3)}
   ${IN} .msa-tile:hover{background:var(--bg2); border-color:var(--line-strong)}
   ${RAIL}:hover{background:var(--bg3); color:var(--ink0)}

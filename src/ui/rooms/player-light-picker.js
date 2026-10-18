@@ -100,8 +100,8 @@ export function renderPlayerLightPicker(container) {
 
   function paintNote(text) {
     const note = document.createElement('div');
-    note.className = 'msa-wx-hint';
-    note.style.marginLeft = '0'; // a full-width line under the chips, not the inline trailing caption
+    // `--block`: a full-width line under the chips, not the inline trailing caption
+    note.className = 'msa-wx-hint msa-wx-hint--block';
     note.textContent = text;
     body.appendChild(note);
   }

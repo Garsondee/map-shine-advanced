@@ -106,6 +106,27 @@ export function run(t) {
     ok('...and the next press starts over rather than confirming', m.press() === false);
   }
 
+  // ---- an action that only SOMETIMES needs asking about ---------------------------
+  {
+    const { m, log } = arm();
+    ok(
+      'press(false) on a disarmed button fires at once and never arms (nothing to replace, nothing to ask)',
+      m.press(false) === true && m.isArmed() === false && log.length === 0
+    );
+  }
+  {
+    const { m, timers } = arm();
+    m.press(true);
+    ok(
+      'an ARMED button takes its second press as the confirm whatever needsConfirm now says',
+      m.press(false) === true && m.isArmed() === false && timers.pending() === 0
+    );
+  }
+  {
+    const { m } = arm();
+    ok('press() with no argument still means "ask" (the default is the safe one)', m.press() === false && m.isArmed());
+  }
+
   // ---- name entry ---------------------------------------------------------
   ok(
     'a typed name is trimmed',

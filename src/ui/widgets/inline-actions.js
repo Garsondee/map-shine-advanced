@@ -24,6 +24,7 @@
  */
 
 import { iconMarkup } from './icon-sprite.js';
+import { setTip } from './tooltip.js';
 
 /** How long an armed button waits for its second click. */
 export const ARM_MS = 4000;
@@ -32,8 +33,11 @@ export const ARM_MS = 4000;
  * The arm → confirm state machine, free of the DOM.
  * @param {{armMs?: number, onArm?: () => void, onDisarm?: () => void,
  *   setTimer?: (fn: () => void, ms: number) => any, clearTimer?: (h: any) => void}} [deps]
- * @returns {{press: () => boolean, disarm: () => void, isArmed: () => boolean}}
+ * @returns {{press: (needsConfirm?: boolean) => boolean, disarm: () => void, isArmed: () => boolean}}
  *   `press()` returns `true` exactly when this press CONFIRMS (fires the action).
+ *   `press(false)` is for an action that only SOMETIMES needs asking about (replace
+ *   what is there, versus fill an empty list): while disarmed it fires at once and
+ *   never arms; an already-armed button still takes its second press as the confirm.
  */
 export function createArmMachine({
   armMs = ARM_MS,
@@ -52,8 +56,9 @@ export function createArmMachine({
     onDisarm();
   }
   return {
-    press() {
+    press(needsConfirm = true) {
       if (!armed) {
+        if (!needsConfirm) return true;
         armed = true;
         onArm();
         timer = setTimer(disarm, armMs);
@@ -102,8 +107,14 @@ function labelled(icon, text) {
  * A button that needs two clicks to fire. Icon-only while idle (if `label` is
  * omitted), growing a short red label while armed so the second click is never
  * a surprise.
- * @param {{icon?: string, label?: string, armedLabel?: string, title?: string,
- *   armedTitle?: string, className?: string, onConfirm: () => void}} opts
+ * @param {{icon?: string, label?: string, armedLabel?: string|(() => string), title?: string,
+ *   armedTitle?: string|(() => string), className?: string, onConfirm: () => void,
+ *   needsConfirm?: () => boolean}} opts
+ *   `armedLabel`/`armedTitle` may be functions, read at the moment the button arms
+ *   ("Replace 3 keyframes?" — the count is only known then). `needsConfirm` is asked
+ *   on each press of a disarmed button: false fires `onConfirm` straight away, so an
+ *   action that is only destructive sometimes (replacing keyframes that exist) asks
+ *   only then.
  * @returns {HTMLButtonElement}
  */
 export function buildArmButton({
@@ -114,20 +125,24 @@ export function buildArmButton({
   armedTitle = 'Click again within a few seconds to confirm',
   className = 'msa-btn msa-btn--sm',
   onConfirm,
+  needsConfirm = () => true,
 }) {
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = className;
+  const read = (v) => (typeof v === 'function' ? v() : v);
   const paint = (armed) => {
-    btn.replaceChildren(labelled(icon, armed ? armedLabel : label));
-    btn.title = armed ? armedTitle : title;
+    btn.replaceChildren(labelled(icon, armed ? read(armedLabel) : label));
+    // `setTip`, not `.title =`: once the themed tooltip has taken a hover over,
+    // the text lives in `data-tip`, and a plain `title` would bring the native one back.
+    setTip(btn, armed ? read(armedTitle) : title);
     btn.classList.toggle('is-armed', armed);
     btn.setAttribute('aria-live', 'polite');
   };
   const machine = createArmMachine({ onArm: () => paint(true), onDisarm: () => paint(false) });
   paint(false);
   btn.addEventListener('click', () => {
-    if (machine.press()) onConfirm();
+    if (machine.press(needsConfirm())) onConfirm();
   });
   // Clicking elsewhere (focus moves away) cancels, so a half-forgotten armed
   // button does not sit there red and loaded.

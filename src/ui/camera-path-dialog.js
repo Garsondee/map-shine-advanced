@@ -30,6 +30,7 @@ import {
   CAMERA_PATH_PRESETS,
   CAMERA_PATH_DEFAULT_SETTINGS,
 } from '../foundry/index.js';
+import { buildArmButton } from './widgets/inline-actions.js';
 
 const STYLE_ID = 'msa-camera-path-dialog-style';
 let panelEl = null;
@@ -56,6 +57,8 @@ function injectStyle() {
     #msa-camera-path-dialog select { background: #12151a; color: #d8dee9; border: 1px solid #3a3f4a; border-radius: 4px; padding: 2px 4px; }
     #msa-camera-path-dialog button { background: #2c313a; color: #d8dee9; border: 1px solid #3a3f4a; border-radius: 4px; padding: 3px 7px; cursor: pointer; font-size: 11px; }
     #msa-camera-path-dialog button:hover { background: #3a3f4a; }
+    /* The armed (second-click-to-confirm) state of a destructive button — see inline-actions.js. */
+    #msa-camera-path-dialog button.is-armed, #msa-camera-path-dialog button.is-armed:hover { background: #4a2a26; border-color: #e06c5a; color: #f2a395; }
     #msa-camera-path-dialog label { font-size: 11px; color: #9aa4b2; }
     #msa-camera-path-dialog .msa-cpd-footer { display: flex; gap: 6px; margin-top: 8px; border-top: 1px solid #2e333c; padding-top: 8px; }
   `;
@@ -257,16 +260,7 @@ function renderPresetRow() {
   }
   row.appendChild(select);
 
-  const genBtn = document.createElement('button');
-  genBtn.textContent = 'Generate';
-  genBtn.title = "Auto-frame a starting sweep from this scene's own dimensions (V2's own preset math)";
-  genBtn.addEventListener('click', () => {
-    if (
-      pathState.keyframes.length > 0 &&
-      !window.confirm(`Replace the current ${pathState.keyframes.length} keyframe(s) with the generated preset?`)
-    ) {
-      return;
-    }
+  const generate = () => {
     const result = generatePresetKeyframes(select.value, { letterboxEnabled: pathState.settings.letterbox });
     if (!result) return setStatus('No active scene to frame — open a scene first.');
     pathState.keyframes = result.keyframes;
@@ -280,6 +274,20 @@ function renderPresetRow() {
     setStatus(
       `Generated "${select.value}" (${result.keyframes.length} keyframes, ${result.suggestedSweepMs}ms/sweep).`
     );
+  };
+  // Replacing keyframes asks IN PLACE (2026-10-18), not with `window.confirm`: a native confirm
+  // blocks the whole tab — the live WebGPU map with it — behind a grey OS box. The first click
+  // arms the button ("Replace 3 keyframe(s)?"), the second within a few seconds fires; with
+  // nothing to lose it just generates. The same two-click confirm every other room uses.
+  const genBtn = buildArmButton({
+    label: 'Generate',
+    title: "Auto-frame a starting sweep from this scene's own dimensions (V2's own preset math)",
+    needsConfirm: () => pathState.keyframes.length > 0,
+    armedLabel: () => `Replace ${pathState.keyframes.length} keyframe(s)?`,
+    armedTitle:
+      'This replaces the keyframes below with the generated preset. Click again within a few seconds to confirm.',
+    className: 'msa-cpd-arm',
+    onConfirm: generate,
   });
   row.appendChild(genBtn);
   return row;

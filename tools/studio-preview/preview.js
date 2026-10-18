@@ -15,6 +15,7 @@
  * http://localhost:8934/tools/studio-preview/index.html
  */
 import { installTokens, THEMES } from '../../src/ui/tokens.js';
+import { preparePreviewPage, stripReducedMotionRule } from '../preview-shared/page-setup.js';
 import { installStudio, installPlayer } from '../../src/ui/index.js';
 import { validateCue, validateCueStack, orderedCues } from '../../src/core/cues-schema.js';
 import { computeEasedValue, isEntryExpired } from '../../src/world/index.js';
@@ -36,6 +37,11 @@ import { FIREFLIES_PARAMS, FIREFLIES_PRESETS, FIREFLIES_FOH } from '../../src/ef
 
 installTokens();
 document.documentElement.dataset.theme = 'dark';
+// `?foundry=<url of foundry2.css>` loads Foundry's REAL core stylesheet so the room is judged the way
+// it looks in the game; `?pane=1` shims the desktop app's background pane. See preview-shared/page-setup.js
+// (and control-audit.js, which lists what a room still gets wrong under it).
+const pageSetup = await preparePreviewPage();
+if (pageSetup.pane) stripReducedMotionRule();
 
 // ---- a fake debugPanel, just real enough to prove the LAB mount path ------
 const fakeDebugPanel = {

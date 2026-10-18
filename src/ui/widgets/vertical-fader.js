@@ -141,8 +141,8 @@ function injectFaderStyle() {
 .msa-vf{display:flex; flex-direction:column; align-items:center; gap:3px; flex:1 1 0; min-width:0; max-width:56px}
 .msa-vf-readout{font-size:.62rem; line-height:1.35; color:var(--ink1, #a8b1c2); font-variant-numeric:tabular-nums;
   padding:0 5px; border-radius:4px; cursor:ns-resize; user-select:none; touch-action:none; pointer-events:auto;
-  white-space:nowrap}
-.msa-vf-readout:hover,.msa-vf.is-scrub .msa-vf-readout{background:var(--bg3, #272c3a); color:var(--shine, #e7c368)}
+  white-space:nowrap; transition:background-color 120ms ease, color 120ms ease}
+.msa-vf.is-scrub .msa-vf-readout{background:var(--bg3, #272c3a); color:var(--shine, #e7c368)}
 .msa-vf-well{position:relative; width:100%; height:${heightPx}px; cursor:pointer; touch-action:none; pointer-events:auto}
 .msa-vf-slot{position:absolute; left:50%; top:0; bottom:0; width:6px; margin-left:-3px; border-radius:3px;
   background:var(--bg0, #14161d); box-shadow:inset 0 0 0 1px var(--line, rgba(196,208,232,.13))}
@@ -159,10 +159,15 @@ function injectFaderStyle() {
   background:color-mix(in oklab, var(--ink1, #a8b1c2) 55%, transparent)}
 .msa-vf-cap{position:absolute; left:50%; width:22px; height:${capPx}px; margin:${-capPx / 2}px 0 0 -11px;
   border-radius:3px; background:var(--ink0, #ecEFf5); display:flex; align-items:center; justify-content:center;
-  pointer-events:none}
+  pointer-events:none; transition:background-color 120ms ease}
 .msa-vf-cap>span{display:block; width:14px; height:2px; border-radius:1px; background:var(--bg1, #191c25)}
-.msa-vf-well:hover .msa-vf-cap,.msa-vf.is-held .msa-vf-cap{background:var(--shine, #e7c368)}
+.msa-vf.is-held .msa-vf-cap{background:var(--shine, #e7c368)}
 .msa-vf.is-focus .msa-vf-cap{outline:2px solid var(--shine, #e7c368); outline-offset:2px}
+/* Hover only where hover exists, so a tap on a touch screen never leaves a lit cap behind. */
+@media (hover:hover) and (pointer:fine){
+  .msa-vf-readout:hover{background:var(--bg3, #272c3a); color:var(--shine, #e7c368)}
+  .msa-vf-well:hover .msa-vf-cap{background:var(--shine, #e7c368)}
+}
 .msa-vf-input{position:absolute; left:0; top:0; width:1px; height:1px; margin:0; padding:0; border:0;
   opacity:0; pointer-events:none; overflow:hidden}
 .msa-vf-icon{display:flex; height:14px; color:var(--ink2, #78829a)}

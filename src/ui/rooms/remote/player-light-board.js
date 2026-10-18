@@ -77,8 +77,8 @@ export function renderPlayerLightBoard(container, ctx) {
   label.appendChild(title);
 
   const hint = document.createElement('div');
-  hint.className = 'msa-wx-hint';
-  hint.style.marginLeft = '0'; // .msa-wx-hint defaults to margin-left:auto (an inline trailing caption); here it's its own full-width line
+  // `--block`: .msa-wx-hint is by default an inline trailing caption (margin-left:auto); here it is its own full-width line
+  hint.className = 'msa-wx-hint msa-wx-hint--block';
   hint.textContent = 'Which carried light/vision modes players may pick on THIS scene.';
 
   const chipRow = document.createElement('div');
@@ -90,7 +90,7 @@ export function renderPlayerLightBoard(container, ctx) {
   // The GM's own picker: gives the SELECTED token a Torch/Flashlight/vision mode.
   // Without it a GM had no way to carry a light at all.
   const carriedHost = document.createElement('div');
-  carriedHost.style.marginTop = '0.6rem';
+  carriedHost.className = 'msa-pl-carried';
 
   wrap.append(label, hint, chipRow, masterHost, realismHost, carriedHost);
   container.appendChild(wrap);

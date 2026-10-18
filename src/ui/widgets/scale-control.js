@@ -40,6 +40,8 @@
  * @module ui/widgets/scale-control
  */
 
+import { HOVER_GATE, pressModelCss } from './press-model.js';
+
 const STYLE_ID = 'msa-scale-control-style';
 const MIN_SCALE = 0.75;
 const MAX_SCALE = 1.5;
@@ -50,18 +52,24 @@ function injectStyle() {
   if (document.getElementById(STYLE_ID)) return;
   const el = document.createElement('style');
   el.id = STYLE_ID;
+  // The buttons take the shared press model (widgets/press-model.js): Foundry's \`min-height:2em\`
+  // had made these 22px circles 22×27 ovals, every press was a 0.5s fade, and a click left an
+  // orange focus glow. The strip is a standalone widget, so it carries the model itself rather
+  // than relying on whichever room it hangs off.
   el.textContent = `
 .msa-scale-strip{position:absolute; top:50%; left:-8px; transform:translate(-100%, -50%);
   display:flex; flex-direction:column; align-items:center; gap:2px; padding:4px;
   background:var(--glass); backdrop-filter:blur(var(--glass-blur)); border:1px solid var(--line);
   border-radius:999px; box-shadow:var(--shadow3); z-index:5; pointer-events:auto}
+${pressModelCss(['.msa-scale-strip button'])}
 .msa-scale-strip button{width:22px; height:22px; display:grid; place-items:center; border-radius:50%;
-  color:var(--ink1); background:none; border:none; cursor:pointer; pointer-events:auto; font-size:.85rem;
+  color:var(--ink1); background:none; border:none; padding:0; font-size:.85rem;
   font-weight:700; line-height:1}
-.msa-scale-strip button:hover{background:var(--bg3); color:var(--ink0)}
 .msa-scale-strip button:disabled{opacity:.35; cursor:default}
-.msa-scale-strip button:disabled:hover{background:none}
 .msa-scale-strip .msa-scale-readout{font-size:.6rem; color:var(--ink2); font-weight:600; padding:1px 0; pointer-events:none}
+${HOVER_GATE}{
+  .msa-scale-strip button:not(:disabled):hover{background:var(--bg3); color:var(--ink0)}
+}
 `.trim();
   document.head.appendChild(el);
 }

@@ -24,6 +24,7 @@
 import { jumpToHour, advanceDays, advanceWeeks, isPenArmed } from '../../../foundry/index.js';
 import { iconMarkup } from '../../widgets/icon-sprite.js';
 import { buildImpulseButton } from '../../widgets/impulse-button.js';
+import { setTip } from '../../widgets/tooltip.js';
 import { TIME_RATE_STEPS, TIME_RATE_MULTIPLIERS, nearestRateIndex, formatRate } from '../../astrolabe-geometry.js';
 
 /** Dawn/Noon/Dusk/Midnight — matches the mock's own #jumpPop quick-taps. */
@@ -41,9 +42,12 @@ function cornerBox(cornerClass) {
   return el;
 }
 
+/** One button in a corner cluster. `msa-corner-btn` is the single class remote-style.js's
+ * press model hangs on (see its specificity contract) — the cluster is styled by position. */
 function iconBtn(icon, title, onClick) {
   const btn = document.createElement('button');
   btn.type = 'button';
+  btn.className = 'msa-corner-btn';
   btn.title = title;
   btn.innerHTML = iconMarkup(icon);
   btn.addEventListener('click', onClick);
@@ -53,10 +57,20 @@ function iconBtn(icon, title, onClick) {
 function ghostSlotBtn(onClick) {
   const btn = document.createElement('button');
   btn.type = 'button';
-  btn.className = 'msa-ghost-slot';
+  btn.className = 'msa-corner-btn msa-ghost-slot';
   btn.title = 'Reserved for a future quick-access shortcut';
   btn.addEventListener('click', onClick);
   return btn;
+}
+
+/** A row of the speed / jump menu that hangs under a corner button. */
+function menuItemBtn(text, title) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'msa-menu-item';
+  b.textContent = text;
+  if (title) b.title = title;
+  return b;
 }
 
 /** Non-zero steps only — 0 is "paused," owned entirely by the play/pause
@@ -108,6 +122,7 @@ function buildClockModeRow(ctx) {
   const buttons = CLOCK_MODES.map((m) => {
     const btn = document.createElement('button');
     btn.type = 'button';
+    btn.className = 'msa-seg';
     btn.textContent = m.label;
     btn.title = m.title;
     btn.addEventListener('click', () => {
@@ -194,18 +209,24 @@ function buildCornerTL(ctx) {
     }
   );
   flowBtn.setAttribute('aria-pressed', String(ctx.isFlowPlaying()));
+  // Runs on every astrolabe pump (~10 Hz): only touch the DOM when the state CHANGED.
+  // Rewriting the icon each tick re-parsed an SVG ten times a second for nothing, and
+  // re-assigning `title` that often would bring the browser's native tooltip back
+  // beside the themed one (see widgets/tooltip.js#setTip).
+  let shownPlaying = ctx.isFlowPlaying();
   function syncFlowBtn() {
     const playing = ctx.isFlowPlaying();
+    if (playing === shownPlaying) return;
+    shownPlaying = playing;
     flowBtn.innerHTML = iconMarkup(playing ? 'pause' : 'play');
-    flowBtn.title = playing ? 'Pause time flow' : 'Play time flow';
+    setTip(flowBtn, playing ? 'Pause time flow' : 'Play time flow');
     flowBtn.setAttribute('aria-pressed', String(playing));
   }
 
   const speedBtn = document.createElement('button');
   speedBtn.type = 'button';
-  speedBtn.className = 'msa-corner-txt';
+  speedBtn.className = 'msa-corner-btn msa-corner-txt';
   speedBtn.title = 'Time speed — how fast the world clock runs';
-  speedBtn.style.position = 'relative';
   // The "×N" text lives in its own span: syncSpeedBtn runs on every astrolabe
   // pump (~10 Hz), and writing speedBtn.textContent there deleted the open
   // speed menu (a child of this button) within ~100 ms of it appearing — the
@@ -221,8 +242,10 @@ function buildCornerTL(ctx) {
   function syncSpeedBtn() {
     const rate = ctx.getFlowRate?.() ?? 0;
     const idx = nearestRateIndex(rate > 0 ? rate : FLOW_SPEED_STEPS[0]);
-    speedLabel.textContent = `×${TIME_RATE_MULTIPLIERS[idx]}`;
-    speedBtn.title = `Time speed — how fast the world clock runs (${formatRate(TIME_RATE_STEPS[idx])})`;
+    const text = `×${TIME_RATE_MULTIPLIERS[idx]}`;
+    // ~10 Hz: write only on a change, and the tooltip through setTip (see syncFlowBtn).
+    if (speedLabel.textContent !== text) speedLabel.textContent = text;
+    setTip(speedBtn, `Time speed — how fast the world clock runs (${formatRate(TIME_RATE_STEPS[idx])})`);
   }
   speedBtn.addEventListener('click', () => {
     if (!aestheticActive()) return explainNotAesthetic();
@@ -236,10 +259,7 @@ function buildCornerTL(ctx) {
     const menu = document.createElement('div');
     menu.className = 'msa-jump-menu';
     FLOW_SPEED_STEPS.forEach((step, i) => {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.textContent = `×${FLOW_SPEED_MULTIPLIERS[i]}`;
-      b.title = `×${FLOW_SPEED_MULTIPLIERS[i]} — ${formatRate(step)}`;
+      const b = menuItemBtn(`×${FLOW_SPEED_MULTIPLIERS[i]}`, `×${FLOW_SPEED_MULTIPLIERS[i]} — ${formatRate(step)}`);
       b.setAttribute('aria-pressed', String(step === current));
       b.addEventListener('click', (e) => {
         // Without this, the click bubbles from b -> menu -> speedBtn, and
@@ -281,9 +301,7 @@ function buildCornerTL(ctx) {
     const menu = document.createElement('div');
     menu.className = 'msa-jump-menu';
     for (const j of HOUR_JUMPS) {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.textContent = j.label;
+      const b = menuItemBtn(j.label);
       // stopPropagation, same reason as the speed popover's own item
       // handler above: unguarded, this click bubbles to jumpBtn's own
       // listener and silently reopens a fresh menu right after this one is
@@ -300,9 +318,7 @@ function buildCornerTL(ctx) {
       [1, '+1 Day'],
       [7, '+1 Week'],
     ]) {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.textContent = label;
+      const b = menuItemBtn(label);
       b.addEventListener('click', async (e) => {
         e.stopPropagation();
         menu.remove();
@@ -324,8 +340,6 @@ function buildCornerTL(ctx) {
     };
     setTimeout(() => document.addEventListener('pointerdown', closeOnOutside, true), 0);
   });
-  jumpBtn.style.position = 'relative';
-
   el.append(flowBtn, speedBtn, jumpBtn);
   return {
     el,
@@ -353,7 +367,13 @@ function buildCornerTL(ctx) {
 function buildCornerTR(impulses, onStatus) {
   const el = cornerBox('msa-corner-tr');
   el.setAttribute('aria-label', 'Impulses');
-  for (const decl of impulses ?? []) el.append(buildImpulseButton(decl, { onStatus }));
+  for (const decl of impulses ?? []) {
+    const wrap = buildImpulseButton(decl, { onStatus });
+    // The widget's icon-only button carries no class of its own (the Studio's labelled
+    // one is a `msa-btn`); in this corner it is a corner button like its neighbours.
+    wrap.querySelector('button')?.classList.add('msa-corner-btn');
+    el.append(wrap);
+  }
   return el;
 }
 

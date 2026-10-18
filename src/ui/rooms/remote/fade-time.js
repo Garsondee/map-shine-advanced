@@ -40,6 +40,7 @@ export function createFadeTimeControl(initialIndex = 0) {
   const buttons = TEMPO.map((tempo, i) => {
     const btn = document.createElement('button');
     btn.type = 'button';
+    btn.className = 'msa-seg';
     btn.textContent = tempo.label;
     btn.title = i === 0 ? 'Cut — no fade, changes land instantly' : `Ease over ${tempo.label}`;
     btn.setAttribute('aria-pressed', String(i === index));

@@ -339,10 +339,12 @@ export function renderWeatherBoard(container, ctx) {
   modeRow.setAttribute('aria-label', 'Weather steering mode');
   const directBtn = document.createElement('button');
   directBtn.type = 'button';
+  directBtn.className = 'msa-seg';
   directBtn.textContent = 'Direct';
   directBtn.title = 'You choose the sky — mood chips are destinations, faders are trims.';
   const driftBtn = document.createElement('button');
   driftBtn.type = 'button';
+  driftBtn.className = 'msa-seg';
   driftBtn.textContent = 'Drift';
   driftBtn.title = 'You set a climate — the sky wanders inside it on its own.';
   modeRow.append(directBtn, driftBtn);
@@ -683,6 +685,10 @@ export function renderWeatherBoard(container, ctx) {
         text.textContent = `Forecast: → ${label} in ${eta}`;
       }
     }
+    // One line with an ellipsis: the whole forecast is the tooltip, shown only when it was
+    // actually cut off (see widgets/tooltip.js).
+    text.dataset.tip = text.textContent;
+    text.dataset.tipTruncated = '';
     forecastHost.appendChild(text);
     // Through the SAME buildParamControl door every bool row in this file
     // already uses (Scene override, above) — ui/canon-only's own ratchet

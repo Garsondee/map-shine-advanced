@@ -8,11 +8,26 @@
  * canvas, which only boot.js's own real integration can ultimately prove
  * (see Petition P11's honesty note on that gap).
  *
+ * Also mounts the PLAYER room (`installPlayer`) and the tile-motion panel, over a
+ * tiny fake `game`/`canvas` — just the globals the carried-light picker reads —
+ * so the Remote's Player Lights board and the Player room show their real chips.
+ * `?gm=0` makes the fake viewer a player (the picker's other branch).
+ *
  * Run: node tools/shader-lab/serve.mjs, then open
  * http://localhost:8934/tools/remote-preview/index.html
+ * Judge it the way it will look inside Foundry: add `?foundry=<url of foundry2.css>`
+ * (and `&pane=1` in the desktop app's background browser pane) — see
+ * tools/preview-shared/page-setup.js.
  */
 import { installTokens, THEMES } from '../../src/ui/tokens.js';
-import { installRemote, buildAstrolabeDial, phaseDisplayName } from '../../src/ui/index.js';
+import {
+  installRemote,
+  installPlayer,
+  installTileMotionPanel,
+  buildAstrolabeDial,
+  phaseDisplayName,
+} from '../../src/ui/index.js';
+import { preparePreviewPage, stripReducedMotionRule } from '../preview-shared/page-setup.js';
 import {
   WEATHER_ARCHETYPES,
   mergeFadeState,
@@ -25,6 +40,10 @@ import { validateCue, orderedCues, cueToFadePatch } from '../../src/core/cues-sc
 
 installTokens();
 document.documentElement.dataset.theme = 'dark';
+// `?foundry=<url>` loads Foundry's REAL core stylesheet; `?pane=1` shims the
+// desktop app's background pane (see preview-shared/page-setup.js).
+const pageSetup = await preparePreviewPage();
+if (pageSetup.pane) stripReducedMotionRule();
 
 // FOUNDRY'S OWN GLOBAL SLIDER STYLE (mythica-machina-press#626). Live, every
 // `<input type="range">` on the page gets Foundry v14's rules from
@@ -32,7 +51,8 @@ document.documentElement.dataset.theme = 'dark';
 // 388/448, dark theme). This harness never loaded them, which is exactly how
 // the Remote's faders shipped wearing a half-Foundry thumb no preview here
 // ever showed. A faithful copy, cascade layer and all, so any native range
-// input MSA draws looks here the way it looks in the game.
+// input MSA draws looks here the way it looks in the game. (Skipped when the
+// real file is loaded with `?foundry=` — it carries these rules itself.)
 const foundrySliderStyle = document.createElement('style');
 foundrySliderStyle.textContent = `
 @layer elements.forms {
@@ -51,7 +71,70 @@ foundrySliderStyle.textContent = `
     background:var(--range-thumb-background-color); border:1px solid var(--range-thumb-border-color);
     border-radius:4px}
 }`;
-document.head.appendChild(foundrySliderStyle);
+if (!pageSetup.foundry) document.head.appendChild(foundrySliderStyle);
+
+// ---- A FAKE FOUNDRY, just enough for the carried-light picker ---------------
+// `ui/rooms/player-light-picker.js` reads `game.user.isGM`, the controlled /
+// placed tokens and the scene's flags through `foundry/` (every accessor
+// guards `typeof game/canvas`, so without these the picker only ever shows its
+// "select a token" message). `?gm=0` makes the viewer a PLAYER who owns the
+// fake token — the picker's other branch (only the modes the GM allows).
+const viewerIsGM = new URLSearchParams(window.location.search).get('gm') !== '0';
+const fakeFlags = new Map();
+const fakeToken = {
+  name: 'Aldric the Bold',
+  actor: { id: 'actor-aldric' },
+  isOwner: true,
+  document: {
+    name: 'Aldric the Bold',
+    hidden: false,
+    getFlag: (ns, key) => fakeFlags.get(`${ns}.${key}`),
+    setFlag: async (ns, key, value) => {
+      fakeFlags.set(`${ns}.${key}`, value);
+      return value;
+    },
+    testUserPermission: () => false,
+  },
+};
+globalThis.game = { user: { isGM: viewerIsGM, character: { id: 'actor-aldric' } }, users: [] };
+globalThis.canvas = {
+  tokens: { controlled: [fakeToken], placeables: [fakeToken] },
+  // `stage`/`pan`/`dimensions` are what the camera-path popover reads (capture a keyframe, preview it,
+  // generate a preset from the scene's size) — enough to exercise its whole flow, including the
+  // two-click "Replace N keyframes?" confirm.
+  stage: { pivot: { x: 2000, y: 1500 }, scale: { x: 0.5 } },
+  pan: () => {},
+  scene: {
+    id: 'fake-scene',
+    dimensions: { sceneX: 0, sceneY: 0, sceneWidth: 4000, sceneHeight: 3000 },
+    getFlag: (ns, key) => fakeFlags.get(`${ns}.${key}`),
+    setFlag: async (ns, key, value) => {
+      fakeFlags.set(`${ns}.${key}`, value);
+      return value;
+    },
+  },
+};
+// The scene's player-light permissions (the Remote's Player Lights board edits
+// them; the picker reads them back through the fake scene flag). Two modes start
+// OFF so both the allowed and the forbidden chip states are on screen.
+const fakePlayerLight = {
+  modes: {
+    torch: true,
+    flashlight: true,
+    nightVision: false,
+    lowLight: true,
+    activeLowLight: true,
+    infravision: false,
+    activeInfravision: true,
+  },
+  playersCanChooseMode: true,
+  darknessRealism01: 0.4,
+};
+function syncFakePlayerLightFlag() {
+  fakeFlags.set('map-shine-advanced.playerLightPermissions', structuredClone(fakePlayerLight));
+}
+syncFakePlayerLightFlag();
+let fakeRenderer = 'msa';
 
 const fakeSky = {
   todHour: 14,
@@ -398,6 +481,49 @@ const remote = installRemote({
     fadeToArchetype('clear', overMs); // preview stand-in: "baseline" = clear sky
     log(`baseline -> fading to clear over ${overMs}ms`);
   },
+  // The footer's Safety button (a real two-click arm, only wired when this is
+  // supplied), the Renderer dropdown, the wind popover and the tile-motion
+  // opener — all supplied by boot.js in the game, so all present here too.
+  onEngageSafety: () => log('Safety engaged (preview stand-in — nothing is torn down here)'),
+  getRendererOverride: () => fakeRenderer,
+  onRendererOverrideChange: async (value) => {
+    fakeRenderer = value;
+    log(`renderer -> ${value}`);
+  },
+  windPopover: {
+    getDirectionDeg: () => fakeSky.windDirectionDeg,
+    onCommit: ({ directionDeg }) => {
+      if (Number.isFinite(directionDeg)) fakeSky.windDirectionDeg = directionDeg;
+      log(`wind direction -> ${directionDeg}`);
+    },
+  },
+  onOpenTileMotion: () => tileMotion.toggle(),
+  // THE PLAYER LIGHTS BOARD (GM) — which carried-light modes players may pick.
+  // Throwaway state: the real one is a scene flag (foundry/player-light-
+  // permissions.js); its read-back is what the picker's chips use, so this
+  // also writes the fake scene flag the fake `canvas.scene` serves.
+  playerLight: {
+    getPermissions: () => fakePlayerLight,
+    onModeToggle: (modeKey, allowed) => {
+      fakePlayerLight.modes[modeKey] = allowed;
+      log(`player light ${modeKey} -> ${allowed ? 'allowed' : 'forbidden'}`);
+      syncFakePlayerLightFlag();
+      remote.refreshPlayerLightBoard();
+      player.refreshPlayerLightPicker();
+    },
+    onPlayersCanChooseModeToggle: (allowed) => {
+      fakePlayerLight.playersCanChooseMode = allowed;
+      log(`players can choose -> ${allowed}`);
+      syncFakePlayerLightFlag();
+      remote.refreshPlayerLightBoard();
+      player.refreshPlayerLightPicker();
+    },
+    onDarknessRealismCommit: (v) => {
+      fakePlayerLight.darknessRealism01 = v;
+      log(`night darkness -> ${v}`);
+      syncFakePlayerLightFlag();
+    },
+  },
   cueDeck: {
     listCues: () => orderedCues(cueStack),
     fireCue: (id) => fireCueById(id),
@@ -435,6 +561,56 @@ setInterval(() => {
   });
 }, 250);
 
+// ---- THE TILE-MOTION PANEL (opened from the dial's bottom-right corner) -----
+const tileMotion = installTileMotionPanel();
+
+// ---- THE PLAYER ROOM ---------------------------------------------------------
+// Same fake settings store the Studio preview uses (real GLOBAL_SETTING_KEYS
+// vocabulary, a plain object standing in for game.settings). `isGM` is hard
+// false inside installPlayer itself; the carried-light picker above it reads
+// `game.user.isGM` from the fake Foundry — hence `?gm=0` for the player branch.
+const fakeSettingsStore = {
+  msaEnabled: true,
+  performanceProfile: 'standard',
+  reducePhotosensitiveEffects: false,
+  reducedMotion: false,
+  uiTheme: 'dark',
+  'fire.playerEnable': 'auto',
+  'water.playerEnable': 'on',
+  'lightning.playerEnable': 'auto',
+};
+const FAKE_EFFECT_ROWS = [
+  { id: 'fire', title: 'Fire', photosensitive: false, playerKey: 'fire.playerEnable', gmKey: 'fire.gmEnable' },
+  { id: 'water', title: 'Water', photosensitive: false, playerKey: 'water.playerEnable', gmKey: 'water.gmEnable' },
+  {
+    id: 'lightning',
+    title: 'Lightning',
+    photosensitive: true,
+    playerKey: 'lightning.playerEnable',
+    gmKey: 'lightning.gmEnable',
+  },
+];
+const player = installPlayer({
+  getSystemPanelCtx: () => ({
+    read: (key) => fakeSettingsStore[key],
+    write: (key, value) => {
+      fakeSettingsStore[key] = value;
+      log(`setting ${key} -> ${value}`);
+    },
+    profiles: ['low', 'performance', 'standard', 'quality', 'extreme'].map((v) => ({ value: v, label: v })),
+    renderScaleChoices: ['auto', '0.5', '0.75', '1'].map((v) => ({ value: v, label: v })),
+    enableChoices: ['auto', 'on', 'off'].map((v) => ({ value: v, label: v })),
+    effectRows: FAKE_EFFECT_ROWS,
+    keys: {
+      msaEnabled: 'msaEnabled',
+      profile: 'performanceProfile',
+      reducePhotosensitive: 'reducePhotosensitiveEffects',
+      reducedMotion: 'reducedMotion',
+      theme: 'uiTheme',
+    },
+  }),
+});
+
 requestAnimationFrame(tickFades);
 
 // A console-debug door (2026-08-18 fix), same spirit as the UI mock's own
@@ -443,9 +619,11 @@ requestAnimationFrame(tickFades);
 // UI trigger in this harness at all, since nothing here simulates the
 // Almanac's own autonomous weather walk. Set `__preview.fakeSky.<field>`,
 // then call `__preview.remote.refreshWeatherBoard()` to repaint.
-window.__preview = { fakeSky, remote };
+window.__preview = { fakeSky, remote, player, tileMotion, fakePlayerLight };
 
 document.getElementById('toggleBtn').addEventListener('click', () => remote.toggle());
+document.getElementById('playerBtn').addEventListener('click', () => player.toggle());
+document.getElementById('tileBtn').addEventListener('click', () => tileMotion.toggle());
 
 let themeIdx = 0;
 document.getElementById('themeBtn').addEventListener('click', () => {

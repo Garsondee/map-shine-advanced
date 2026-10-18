@@ -39,6 +39,7 @@
  */
 
 import { iconMarkup } from '../../widgets/icon-sprite.js';
+import { setTip } from '../../widgets/tooltip.js';
 
 const SPARK_N = 24;
 
@@ -157,7 +158,12 @@ export function renderDebugStrip(container, ctx) {
   // buildActionButton's button sets font/padding/background/border/color as
   // INLINE styles, which beat .msa-debug-btn's CSS by specificity regardless
   // of class order.
+  // `transition` too (2026-10-18): the inline `background .1s` replaced the press model's own
+  // transition list, so these two buttons alone answered a press with no motion. (Their
+  // mouseenter/mouseleave handlers still write an inline background — remote-style.js wins
+  // that one with a contained !important rather than forking buildActionButton.)
   Object.assign(probeBtn.style, {
+    transition: '',
     font: '',
     fontWeight: '',
     padding: '',
@@ -199,6 +205,7 @@ export function renderDebugStrip(container, ctx) {
   // probeBtn's look exactly rather than a bespoke smaller-but-still-
   // different size.
   Object.assign(perfBtn.style, {
+    transition: '',
     font: '',
     fontWeight: '',
     padding: '',
@@ -267,6 +274,9 @@ export function renderDebugStrip(container, ctx) {
   accordionToggle.addEventListener('click', () => {
     const expanded = accordionToggle.getAttribute('aria-expanded') === 'true';
     accordionToggle.setAttribute('aria-expanded', String(!expanded));
+    setTip(accordionToggle, expanded ? 'More debug tools' : 'Fewer debug tools');
+    // Un-hiding restarts the body's short fade-up (remote-style.js: a CSS animation begins
+    // whenever an element stops being display:none); hiding is instant.
     body.hidden = expanded;
   });
 

@@ -19,6 +19,20 @@
  * draft invented a library of named paths that don't exist — keyframes
  * (`x,y,scale,holdMs,cutBefore`), not waypoints; one path per SCENE.
  *
+ * ⚠️ PRESENTATION IS CLASSES, NOT INLINE STYLES (2026-10-18). It used to be
+ * `style.cssText` strings on bare `<button>`/`<input>`/`<select>` elements, which
+ * can answer no hover, press or focus — and under Foundry's real stylesheet left
+ * every checkbox as its orange pair-of-boxes glyph, every select stretched to the
+ * window's width and every button on a 0.5s transition with a stuck focus glow. The
+ * classes (`msa-btn`, `msa-input`, `msa-select`, `msa-switch-input`, `msa-pop-*`)
+ * are styled in `remote-style.js`, from the same kit every room uses.
+ *
+ * ⚠️ REPLACING KEYFRAMES ASKS INLINE, NOT WITH `window.confirm` (2026-10-18). A
+ * native confirm blocks the whole tab — the live WebGPU map with it — behind a grey
+ * OS box that ignores the theme. "Generate" arms on the first click ("Replace 3
+ * keyframe(s)?") and fires on the second, exactly like every other destructive
+ * button; with no keyframes to lose it just generates.
+ *
  * @module ui/rooms/remote/camera-path-popover
  */
 
@@ -36,19 +50,22 @@ import {
   CAMERA_PATH_DEFAULT_SETTINGS,
 } from '../../../foundry/index.js';
 import { iconMarkup } from '../../widgets/icon-sprite.js';
+import { buildArmButton } from '../../widgets/inline-actions.js';
+import { replayClass } from '../room-style.js';
+import { CAMERA_PATH_PANEL_ID } from './remote-style.js';
 
-const PANEL_ID = 'msa-remote-camera-path';
+const PANEL_ID = CAMERA_PATH_PANEL_ID;
 
 function row(...children) {
   const el = document.createElement('div');
-  el.style.cssText = 'display:flex; align-items:center; gap:6px; margin-bottom:6px; flex-wrap:wrap';
+  el.className = 'msa-pop-row';
   el.append(...children);
   return el;
 }
 
 function label(text) {
   const el = document.createElement('label');
-  el.style.cssText = 'font-size:.68rem; color:var(--ink2)';
+  el.className = 'msa-pop-label';
   el.textContent = text;
   return el;
 }
@@ -60,11 +77,9 @@ function fieldRow(labelText, inputEl) {
 function numberInput(value, step, onChange) {
   const input = document.createElement('input');
   input.type = 'number';
+  input.className = 'msa-input msa-input--num';
   input.step = String(step ?? 1);
   input.value = String(value);
-  input.style.cssText =
-    'width:64px; background:var(--bg2); color:var(--ink0); border:1px solid var(--line); ' +
-    'border-radius:4px; padding:2px 4px; font:inherit';
   input.addEventListener('change', () => onChange(Number(input.value)));
   return input;
 }
@@ -72,6 +87,9 @@ function numberInput(value, step, onChange) {
 function checkboxInput(checked, title, onChange) {
   const input = document.createElement('input');
   input.type = 'checkbox';
+  // The kit's real switch (a native checkbox underneath, so keyboard / label-click /
+  // form semantics stay the browser's) — Foundry draws a bare checkbox as a glyph.
+  input.className = 'msa-switch-input';
   input.checked = checked;
   if (title) input.title = title;
   input.addEventListener('change', () => onChange(input.checked));
@@ -80,9 +98,7 @@ function checkboxInput(checked, title, onChange) {
 
 function selectInput(options, current, onChange) {
   const select = document.createElement('select');
-  select.style.cssText =
-    'background:var(--bg2); color:var(--ink0); border:1px solid var(--line); border-radius:4px; ' +
-    'padding:2px 4px; font:inherit';
+  select.className = 'msa-select';
   for (const opt of options) {
     const o = document.createElement('option');
     o.value = opt.value ?? opt;
@@ -97,11 +113,9 @@ function selectInput(options, current, onChange) {
 function ghostButton(text, title, onClick) {
   const btn = document.createElement('button');
   btn.type = 'button';
+  btn.className = 'msa-btn msa-btn--sm';
   btn.textContent = text;
   if (title) btn.title = title;
-  btn.style.cssText =
-    'background:var(--bg3); color:var(--ink1); border:1px solid var(--line); border-radius:6px; ' +
-    'padding:3px 8px; cursor:pointer; font-size:.72rem';
   btn.addEventListener('click', onClick);
   return btn;
 }
@@ -119,13 +133,7 @@ function buildBody(pathState, rerender, onStatus) {
     CAMERA_PATH_PRESETS[0]?.id,
     () => {}
   );
-  const genBtn = ghostButton('Generate', "Auto-frame a starting sweep from this scene's own dimensions", () => {
-    if (
-      pathState.keyframes.length > 0 &&
-      !window.confirm(`Replace the current ${pathState.keyframes.length} keyframe(s) with the generated preset?`)
-    ) {
-      return;
-    }
+  const generate = () => {
     const result = generatePresetKeyframes(presetSelect.value, { letterboxEnabled: pathState.settings.letterbox });
     if (!result) return onStatus('No active scene to frame — open a scene first.');
     pathState.keyframes = result.keyframes;
@@ -135,6 +143,16 @@ function buildBody(pathState, rerender, onStatus) {
     onStatus(
       `Generated "${presetSelect.value}" (${result.keyframes.length} keyframes, ${result.suggestedSweepMs}ms/sweep).`
     );
+  };
+  const genBtn = buildArmButton({
+    label: 'Generate',
+    title: "Auto-frame a starting sweep from this scene's own dimensions",
+    // Only asks when there is something to lose — and says how much.
+    needsConfirm: () => pathState.keyframes.length > 0,
+    armedLabel: () => `Replace ${pathState.keyframes.length} keyframe(s)?`,
+    armedTitle:
+      'This replaces the keyframes below with the generated preset. Click again within a few seconds to confirm.',
+    onConfirm: generate,
   });
   body.append(row(presetSelect, genBtn));
 
@@ -152,18 +170,17 @@ function buildBody(pathState, rerender, onStatus) {
 
   pathState.keyframes.forEach((kf, index) => {
     const wrap = document.createElement('div');
-    wrap.style.cssText =
-      'border:1px solid var(--line); border-radius:8px; padding:6px 8px; margin-bottom:6px; background:var(--bg2)';
+    wrap.className = 'msa-pop-kf';
     const title = document.createElement('strong');
-    title.style.cssText = 'font-size:.72rem; color:var(--ink0)';
+    title.className = 'msa-pop-kf-title';
     title.textContent = `#${index + 1}`;
-    const upBtn = ghostButton('↑', null, () => {
+    const upBtn = ghostButton('↑', 'Move this keyframe earlier', () => {
       const arr = pathState.keyframes;
       [arr[index - 1], arr[index]] = [arr[index], arr[index - 1]];
       rerender();
     });
     upBtn.disabled = index === 0;
-    const downBtn = ghostButton('↓', null, () => {
+    const downBtn = ghostButton('↓', 'Move this keyframe later', () => {
       const arr = pathState.keyframes;
       [arr[index], arr[index + 1]] = [arr[index + 1], arr[index]];
       rerender();
@@ -207,7 +224,7 @@ function buildBody(pathState, rerender, onStatus) {
   // ---- path settings ------------------------------------------------------
   const s = pathState.settings;
   const settingsWrap = document.createElement('div');
-  settingsWrap.style.cssText = 'margin-top:8px; border-top:1px solid var(--line); padding-top:8px';
+  settingsWrap.className = 'msa-pop-settings';
   settingsWrap.append(
     fieldRow(
       'sweep (ms)',
@@ -276,46 +293,27 @@ export function installCameraPathPopover() {
   const win = document.createElement('div');
   win.id = PANEL_ID;
   win.hidden = true;
-  Object.assign(win.style, {
-    position: 'fixed',
-    top: '80px',
-    right: '20px',
-    width: '340px',
-    maxHeight: '80vh',
-    overflowY: 'auto',
-    zIndex: '400',
-    background: 'var(--glass)',
-    backdropFilter: 'blur(var(--glass-blur))',
-    border: '1px solid var(--line-strong)',
-    borderRadius: 'var(--r-room, 14px)',
-    boxShadow: 'var(--shadow3)',
-    padding: '10px',
-    font: '11px/1.4 var(--font)',
-    color: 'var(--ink0)',
-  });
 
   const head = document.createElement('div');
-  head.style.cssText = 'display:flex; align-items:center; gap:8px; margin-bottom:8px';
+  head.className = 'msa-pop-head';
   const title = document.createElement('span');
-  title.style.cssText = 'font-weight:700; font-size:.8rem; display:flex; gap:6px; align-items:center';
+  title.className = 'msa-pop-title';
   title.innerHTML = `${iconMarkup('camera')}Camera Path`;
-  const spacer = document.createElement('span');
-  spacer.style.flex = '1';
   const closeBtn = document.createElement('button');
   closeBtn.type = 'button';
+  closeBtn.className = 'hbtn';
   closeBtn.title = 'Close';
   closeBtn.innerHTML = iconMarkup('x');
-  closeBtn.style.cssText = 'color:var(--ink2); background:none; border:none; cursor:pointer';
   closeBtn.addEventListener('click', () => controller.close());
-  head.append(title, spacer, closeBtn);
+  head.append(title, closeBtn);
 
   const bodyHost = document.createElement('div');
   const statusEl = document.createElement('div');
-  statusEl.style.cssText = 'margin-top:6px; color:var(--ink2); font-size:.68rem';
+  statusEl.className = 'msa-pop-status';
   const setStatus = (text) => (statusEl.textContent = text ?? '');
 
   const footer = document.createElement('div');
-  footer.style.cssText = 'display:flex; gap:6px; margin-top:8px; border-top:1px solid var(--line); padding-top:8px';
+  footer.className = 'msa-pop-foot';
 
   function render() {
     bodyHost.innerHTML = '';
@@ -350,6 +348,7 @@ export function installCameraPathPopover() {
       open = true;
       win.hidden = false;
       win.style.display = 'block';
+      replayClass(win, 'msa-pop-enter');
       render();
       setStatus(`Loaded ${pathState.keyframes.length} keyframe(s) from this scene.`);
     },

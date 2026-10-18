@@ -52,6 +52,7 @@ function injectStyle() {
   padding:6px 9px; border-radius:7px; border:none; background:none; box-shadow:none; outline:none; color:var(--ink2);
   font:inherit; font-size:.72rem; cursor:pointer; pointer-events:auto; transition:background-color 100ms ease, color 100ms ease}
 .msa-search-overlay .rail button:focus-visible{outline:2px solid var(--shine); outline-offset:-2px}
+.msa-search-overlay .rail button:active{background:var(--bg3); color:var(--ink0)}
 @media (hover:hover) and (pointer:fine){
   .msa-search-overlay .rail button:hover{background:var(--bg2); color:var(--ink0)}
 }
@@ -131,7 +132,13 @@ function injectStyle() {
 .msa-search-overlay.wide .frame{flex:1; min-height:0}
 .msa-search-overlay.wide .rail{max-height:none}
 .msa-search-overlay.wide .results{max-height:none; display:grid; align-content:start;
-  grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:8px}
+  grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:8px;
+  /* Rows are sized by their content, stated outright (2026-10-18, measured under Foundry's real
+     stylesheet): with the default \`auto\` rows and a card that is \`height:100%\`, every row collapsed
+     to ~28px -- Foundry's own button height -- while each card's text needed ~54px, so the blurb of
+     every card ran out of the bottom of its box and under the next card, and the hover/selected
+     highlight covered only the title. */
+  grid-auto-rows:max-content}
 .msa-search-overlay.wide .grouphead{grid-column:1/-1; margin-top:6px}
 .msa-search-overlay.wide .grouphead:first-child{margin-top:0}
 /* Bigger, less-cramped hit CARDS for the wide variant specifically (author:
@@ -141,7 +148,10 @@ function injectStyle() {
    own tallest card's height, matching a normal card grid's own look rather
    than each card hugging just its own text. */
 .msa-search-overlay.wide .hit{padding:9px 12px; font-size:.82rem; gap:11px; height:100%; box-sizing:border-box;
-  align-items:flex-start}
+  align-items:flex-start; transition:background-color 100ms ease, color 100ms ease, transform 160ms var(--ease-out, ease-out)}
+/* A card is a real button: it answers a press like every other pressable thing in the rooms
+   (a subtle scale, ease-out). The compact palette's rows are rows, and do not scale. */
+.msa-search-overlay.wide button.hit:active{transform:scale(.985)}
 .msa-search-overlay.wide .hit .dot{margin-top:6px}
 .msa-search-overlay.wide .hit .htext .sub{white-space:normal}
 `.trim();

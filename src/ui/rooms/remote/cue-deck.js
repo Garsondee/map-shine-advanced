@@ -52,6 +52,7 @@ export function renderCueDeck(container, ctx) {
   listBtn.type = 'button';
   listBtn.className = 'msa-cue-listbtn';
   listBtn.textContent = 'show list ▾';
+  listBtn.setAttribute('aria-expanded', 'false');
   label.appendChild(listBtn);
 
   const row = document.createElement('div');
@@ -109,6 +110,9 @@ export function renderCueDeck(container, ctx) {
     if (nextIx > stack.length) nextIx = 0;
     const cue = stack[nextIx] ?? null;
     nameSpan.textContent = cue ? cue.name : stack.length === 0 ? 'No cues staged yet' : 'End of cue list';
+    // An ellipsised name is revealed by the themed tooltip — only when it was actually cut off.
+    nameSpan.dataset.tip = nameSpan.textContent;
+    nameSpan.dataset.tipTruncated = '';
     meta.innerHTML = cue ? `${iconMarkup('clock')}fades over ${fmtOverMs(headlineOverMs(cue))}` : '';
     goBtn.disabled = !cue;
 
@@ -170,6 +174,7 @@ export function renderCueDeck(container, ctx) {
     open = !open;
     list.classList.toggle('open', open);
     listBtn.textContent = open ? 'hide list ▴' : 'show list ▾';
+    listBtn.setAttribute('aria-expanded', String(open));
   });
 
   paint();

@@ -14,6 +14,7 @@
  */
 import { run as runSpecularMaterial } from './specular-material.test.mjs';
 import { run as runSpecularPattern } from './specular-pattern.test.mjs';
+import { run as runSpecularSoftEdges } from './specular-soft-edges.test.mjs';
 import { run as runSpecularIslands } from './specular-islands.test.mjs';
 import { run as runSpecularRender } from './specular-render.test.mjs';
 import { run as runSpecularSubsystem } from './specular-surface-subsystem.test.mjs';
@@ -51,6 +52,7 @@ const t = {
 const suites = [
   ['specular-material', runSpecularMaterial],
   ['specular-pattern', runSpecularPattern],
+  ['specular-soft-edges', runSpecularSoftEdges],
   ['specular-islands', runSpecularIslands],
   ['specular-render', runSpecularRender],
   ['specular-surface-subsystem', runSpecularSubsystem],

@@ -66,6 +66,13 @@ import {
   SPECULAR_FLICKER_SPEED,
   SPECULAR_FLICKER_SCALE_PX,
   SPECULAR_FLICKER_ROUGHNESS,
+  SPECULAR_FLICKER_LOG_GAIN,
+  BLOB_BLEND_WIDTH,
+  BLOB_REACH_MIN_DISTANCE,
+  BLOB_CUT_ONSET,
+  SOFT_EXP_CLAMP,
+  LAYER_UNION_POWER,
+  softWindowParams,
 } from './specular-pattern.js';
 import { ISLAND_PARALLAX_RANGE } from './specular-islands.js';
 import { SPECULAR_DEBUG_CHANNELS, SPECULAR_DEBUG_BOOST } from './specular.js';
@@ -489,6 +496,17 @@ export const SPECULAR_LAYER_DEFAULTS = Object.freeze([
 ]);
 
 /**
+ * A layer's soft window as the three floats its `uWindow` uniform carries —
+ * `specular-pattern.js#softWindowParams`, with `contrast` clamped the way
+ * `setLayerContrast` clamps it.
+ * @param {number} contrast @returns {[number, number, number]} mid, sharp, peakInv
+ */
+function softWindowValues(contrast) {
+  const { mid, sharp, peakInv } = softWindowParams(Math.min(1, Math.max(0, contrast)));
+  return [mid, sharp, peakInv];
+}
+
+/**
  * THE PERFORMANCE-TIER LADDER — wired 2026-08-29.
  *
  * ============================================================================
@@ -732,7 +750,10 @@ export function buildSpecularSurfaceMaterial({
     uStreak: uniform(float(d.streak)),
     uSoftness: uniform(float(d.softness)),
     uRowSpacing: uniform(float(d.rowSpacing)),
-    uContrast: uniform(float(d.contrast)),
+    // The soft window's (mid, sharp, peakInv) — derived from `contrast` on the
+    // CPU (`softWindowParams`), so the shader never takes a logarithm. Written
+    // by `setLayerContrast` and nowhere else.
+    uWindow: uniform(vec3(...softWindowValues(d.contrast))),
     uLayerStrength: uniform(float(d.strength)),
     uParallaxDepth: uniform(float(d.parallaxDepth)),
   }));
@@ -887,19 +908,13 @@ export function buildSpecularSurfaceMaterial({
   }
 
   /**
-   * ONE ANISOTROPIC BLOB LATTICE SAMPLE — `specular-pattern.js#anisotropicBlob`.
-   * @param {*} p @param {object} L @returns {*}
+   * ONE CELL'S BLOB EXPONENT — `specular-pattern.js#cellBlobExponent`.
+   * @param {*} cell this cell's lattice index (vec2)
+   * @param {*} off the point's offset from THIS cell's centre, in cells (vec2)
+   * @param {*} rows @param {object} L @param {*} spreadMul
+   * @returns {*}
    */
-  function anisotropicBlob(p, L) {
-    const rows = max(L.uRowSpacing, float(MIN_ROW_SPACING));
-    const scale = max(L.uDensity, float(0.25));
-    const perp = vec2(L.uGrain.y.negate(), L.uGrain.x);
-    const along = dot(p, L.uGrain).mul(scale);
-    const across = dot(p, perp).mul(scale).div(rows);
-
-    const cell = vec2(floor(along), floor(across)).toVar();
-    const off = vec2(along.sub(cell.x).sub(float(0.5)), across.sub(cell.y).sub(float(0.5))).toVar();
-
+  function cellBlobExponent(cell, off, rows, L, spreadMul) {
     // ⚠️ ROTATE BEFORE THE STRETCH. Rotating a circle then stretching gives a
     // skewed ellipse with a real orientation; stretching then rotating gives
     // the same ellipse every time, merely turned — every glint on the map ends
@@ -909,9 +924,8 @@ export function buildSpecularSurfaceMaterial({
       .sub(float(0.5))
       .mul(L.uStreak)
       .mul(float(STREAK_RADIANS));
-    const c = cos(rot);
-    const s = sin(rot);
-    const rotated = vec2(off.x.mul(c).sub(off.y.mul(s)), off.x.mul(s).add(off.y.mul(c))).toVar();
+    const c = cos(rot).toVar();
+    const s = sin(rot).toVar();
 
     // Per-cell jitter, so the lattice is not readable as a grid.
     const jx = hash12(cell.add(vec2(127.1, 311.7)))
@@ -920,12 +934,68 @@ export function buildSpecularSurfaceMaterial({
     const jy = hash12(cell.add(vec2(269.5, 183.3)))
       .sub(float(0.5))
       .mul(float(CELL_JITTER));
-    const local = vec2(rotated.x.sub(jx), rotated.y.sub(jy));
+    const rx = off.x.mul(c).sub(off.y.mul(s)).sub(jx);
+    const ry = off.x.mul(s).add(off.y.mul(c)).sub(jy);
+    const sy = ry.mul(rows);
+    return rx.mul(rx).add(sy.mul(sy)).mul(spreadMul);
+  }
 
-    const spreadMul = mix(float(SPREAD_TIGHT), float(SPREAD_LOOSE), clamp(L.uSoftness, 0, 1));
-    const sx = local.x;
-    const sy = local.y.mul(rows);
-    return exp(sx.mul(sx).add(sy.mul(sy)).mul(spreadMul).negate());
+  /** `specular-pattern.js#smoothMin` — `min(a, b)` exactly where the two differ
+   * by `BLOB_BLEND_WIDTH` or more, a C¹ blend where they are closer.
+   * @param {*} a @param {*} b @returns {*} */
+  function smoothMin(a, b) {
+    const w = float(BLOB_BLEND_WIDTH);
+    const h = max(w.sub(abs(a.sub(b))), float(0)).div(w);
+    return min(a, b).sub(h.mul(h).mul(w).mul(float(0.25)));
+  }
+
+  /**
+   * THE BLOB FIELD'S EXPONENT — `specular-pattern.js#blobExponent`: the smooth
+   * union of the four cells the point leans toward, so no blob is ever cut at a
+   * cell border (the straight-edged slices the lab measured at a 0.59
+   * display-luminance step in one pixel). Four is exact, not a heuristic — the
+   * header of the pattern module and `softWindow`'s cut carry the proof.
+   * @param {*} p @param {object} L @returns {{e: *, spreadMul: *}}
+   */
+  function blobExponent(p, L) {
+    const rows = max(L.uRowSpacing, float(MIN_ROW_SPACING));
+    const scale = max(L.uDensity, float(0.25));
+    const perp = vec2(L.uGrain.y.negate(), L.uGrain.x);
+    const along = dot(p, L.uGrain).mul(scale);
+    const across = dot(p, perp).mul(scale).div(rows);
+
+    const cell = vec2(floor(along), floor(across)).toVar();
+    const off = vec2(along.sub(cell.x).sub(float(0.5)), across.sub(cell.y).sub(float(0.5))).toVar();
+    // ±1 per axis: which side of its own cell's centre this point leans toward.
+    // ARITHMETIC (`step`), not `select()` — this file's standing rule.
+    const lean = vec2(
+      step(float(0), off.x).mul(float(2)).sub(float(1)),
+      step(float(0), off.y).mul(float(2)).sub(float(1))
+    ).toVar();
+    const dx = vec2(lean.x, float(0));
+    const dy = vec2(float(0), lean.y);
+    const spreadMul = mix(float(SPREAD_TIGHT), float(SPREAD_LOOSE), clamp(L.uSoftness, 0, 1)).toVar();
+
+    const e00 = cellBlobExponent(cell, off, rows, L, spreadMul);
+    const e10 = cellBlobExponent(cell.add(dx), off.sub(dx), rows, L, spreadMul);
+    const e01 = cellBlobExponent(cell.add(dy), off.sub(dy), rows, L, spreadMul);
+    const e11 = cellBlobExponent(cell.add(dx).add(dy), off.sub(dx).sub(dy), rows, L, spreadMul);
+    return { e: smoothMin(smoothMin(e00, e10), smoothMin(e01, e11)).toVar(), spreadMul };
+  }
+
+  /**
+   * THE SOFT WINDOW — `specular-pattern.js#softWindow`: a logistic in the blob's
+   * exponent instead of a thresholded `smoothstep`, so a glint's edge is an
+   * exponential skirt and not a cut. `L.uWindow` is (mid, sharp, peakInv).
+   * @param {*} e @param {object} L @param {*} spreadMul @returns {*}
+   */
+  function softWindow(e, L, spreadMul) {
+    const x = min(L.uWindow.y.mul(e.sub(L.uWindow.x)), float(SOFT_EXP_CLAMP));
+    const s = min(float(1), L.uWindow.z.div(float(1).add(exp(x))));
+    // Fade to exactly zero where the four-cell neighbourhood stops being exact
+    // — `specular-pattern.js#blobCutExponent`, minus the blend width.
+    const cut = spreadMul.mul(float(BLOB_REACH_MIN_DISTANCE * BLOB_REACH_MIN_DISTANCE)).sub(float(BLOB_BLEND_WIDTH));
+    return s.mul(float(1).sub(smoothstep(cut.mul(float(BLOB_CUT_ONSET)), cut, e)));
   }
 
   /**
@@ -947,15 +1017,12 @@ export function buildSpecularSurfaceMaterial({
     return mix(float(1), bias, outdoors.mul(uSunBias));
   }
 
-  /** One full shimmer layer: its own parallax depth, blob, contrast window,
-   * sun bias. @param {object} L @returns {*} */
+  /** One full shimmer layer: its own parallax depth, seamless blob field, soft
+   * window, sun bias. @param {object} L @returns {*} */
   function shimmerLayer(L) {
     const p = worldUv.sub(parallaxBase.mul(L.uParallaxDepth)).add(drift);
-    const blob = anisotropicBlob(p, L);
-    const c = clamp(L.uContrast, 0, 1);
-    const lo = mix(float(0.55), float(0.08), c);
-    const hi = mix(float(0.95), float(0.45), c);
-    return smoothstep(lo, hi, blob).mul(sunGrainBias(L)).mul(L.uLayerStrength);
+    const { e, spreadMul } = blobExponent(p, L);
+    return softWindow(e, L, spreadMul).mul(sunGrainBias(L)).mul(L.uLayerStrength);
   }
 
   // ── THE CELLULAR BASE — where the mask acts like roughness ───────────────
@@ -1023,8 +1090,26 @@ export function buildSpecularSurfaceMaterial({
     // regions (most of the area, since the layers sit at different parallax
     // depths and grain angles) are UNCHANGED: `max(a, 0, 0, ...) = a`,
     // identical to `sum`.
-    let layeredTerm = shimmerLayer(layers[0]);
-    for (let i = 1; i < SPECULAR_LAYER_COUNT; i++) layeredTerm = max(layeredTerm, shimmerLayer(layers[i]));
+    //
+    // ⚠️ NOW A 6-NORM, NOT A LITERAL `max` (soft-edge rework, 2026-10-18).
+    // `max` has a crease wherever two layers' skirts cross, and with the shine
+    // gain behind it that crease reads as a thin hard line — the exact thing
+    // this pass must not draw. `(Σ vᵖ)^(1/p)` at p = 6 is within 12 % of `max`
+    // wherever one layer dominates (so the paragraph above still holds — two
+    // equal layers stack by 2^(1/6) = 1.12, not by 2) and smooth everywhere
+    // else. `specular-pattern.js#unionLayers` is the twin.
+    const raiseToUnionPower = (v) => {
+      let r = v;
+      for (let i = 1; i < LAYER_UNION_POWER; i++) r = r.mul(v);
+      return r;
+    };
+    let layerPowerSum = raiseToUnionPower(shimmerLayer(layers[0]).toVar());
+    for (let i = 1; i < SPECULAR_LAYER_COUNT; i++) {
+      layerPowerSum = layerPowerSum.add(raiseToUnionPower(shimmerLayer(layers[i]).toVar()));
+    }
+    // 1e-37 (a normal f32) rather than 0: the root of an exact zero is the one
+    // input `pow` is not defined for on every backend.
+    const layeredTerm = pow(max(layerPowerSum, float(1e-37)), float(1 / LAYER_UNION_POWER));
     // LADDER TIER 3 ('life'), pulse half — see `drift`'s own comment above
     // for the other half. Below tier 3 this is a constant 1 (no breathing).
     const pulseNode = plan.lifeEnabled
@@ -1293,10 +1378,14 @@ export function buildSpecularSurfaceMaterial({
   // `kneeT` is the light-presence weight: ~0 where nothing lights this pixel,
   // ~1 under a lamp. Reusing it rather than inventing a second threshold means
   // the flutter can never appear anywhere the shine itself does not.
-  const flicker = max(
-    float(1).add(flickerNoise.mul(uFlickerAmount).mul(kneeT)),
-    float(0) // a large amplitude must dim toward dark, never invert the shine
-  ).toVar('specFlicker');
+  // ⚠️ `exp`, NOT `max(1 + noise·amount·kneeT, 0)` (soft-edge rework,
+  // 2026-10-18): the clamp zeroed the shine over a third of the area at the live
+  // amount of 3 and the ramp back out of it was steep enough to read as a crisp
+  // dark notch bitten into a glint. Strictly positive with a bounded log-gradient
+  // — `specular-pattern.js#flickerFactor` has the arithmetic.
+  const flicker = exp(flickerNoise.mul(uFlickerAmount).mul(kneeT).mul(float(SPECULAR_FLICKER_LOG_GAIN))).toVar(
+    'specFlicker'
+  );
   const shineResponse = incident
     .mul(pow(kneeT, max(uIncidentSteepness.sub(float(1)), float(0))))
     .mul(uIncidentGain)
@@ -1747,7 +1836,7 @@ export function buildSpecularSurfaceMaterial({
       eachLayer(i, (L) => (L.uRowSpacing.value = Math.max(MIN_ROW_SPACING, v)));
     },
     setLayerContrast(i, v) {
-      eachLayer(i, (L) => (L.uContrast.value = Math.min(1, Math.max(0, v))));
+      eachLayer(i, (L) => L.uWindow.value.set(...softWindowValues(v)));
     },
     setLayerStrength(i, v) {
       eachLayer(i, (L) => (L.uLayerStrength.value = Math.max(0, v)));

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Specular look lab</title>
+    <style>
+      body {
+        margin: 0;
+        background: #101010;
+        color: #cfcfcf;
+        font:
+          12px/1.4 ui-monospace,
+          Consolas,
+          monospace;
+      }
+      #wrap {
+        display: flex;
+        gap: 12px;
+        padding: 12px;
+        align-items: flex-start;
+        flex-wrap: wrap;
+      }
+      canvas {
+        background: #000;
+        max-width: 100%;
+        height: auto;
+      }
+      pre {
+        margin: 0;
+        white-space: pre-wrap;
+        max-width: 520px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="wrap">
+      <canvas id="view" width="1024" height="1024"></canvas>
+      <pre id="status">loading…</pre>
+    </div>
+    <!-- See specular-lab.js for the API (window.specLab) and what this page is for. -->
+    <script type="module" src="./specular-lab.js"></script>
+  </body>
+</html>

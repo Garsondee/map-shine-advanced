@@ -54,15 +54,66 @@
  * confusion, and this project has already paid for a control whose name
  * disagreed with its code (`feedback_unconsumed_api_rots_silently`).
  *
+ * ============================================================================
+ * THE FIELD HAS NO HARD EDGE ANYWHERE (soft-edge rework, 2026-10-18)
+ * ============================================================================
+ * The author asked for this twice — *"strictly it needs to be gradients and
+ * never cut off angles or edges"* (Round 19) and again on 2026-10-18 — and
+ * raising the `contrast` floor, the first answer, did not touch the causes.
+ * Measured on the real shader (`tools/shader-lab/specular-lab.js`), there were
+ * three, and each is fixed at its root rather than damped:
+ *
+ *   1. **THE LATTICE WAS CUT ALONG ITS OWN CELL BORDERS.** Each pixel evaluated
+ *      only the blob of the cell it sat in. A blob jittered/rotated toward a
+ *      border (±0.3 cell of jitter plus a ~0.4-cell reach — more than the 0.5
+ *      to the border) was sliced off dead straight: a single pixel stepped 0.59
+ *      of display luminance in the raw field at quarter zoom (0.032 now), every
+ *      few blobs, as long as the cell's side.
+ *      `blobExponent` now blends the four NEAREST cells (the 2×2 the point
+ *      leans toward) with a smooth minimum, so a blob that crosses a border
+ *      simply continues into the next cell. Four cells are provably enough: the
+ *      nearest cell not evaluated is ≥ `BLOB_REACH_MIN_DISTANCE` (0.58) of a cell
+ *      away, and `blobCutExponent` fades every blob to exactly zero before the
+ *      exponent such a cell could reach, less the blend width so it cannot
+ *      touch even the smooth minimum — the four-cell result IS the full-lattice
+ *      result over the whole parameter space (asserted against a full 3×3 in
+ *      `specular-pattern.test.mjs`).
+ *   2. **THE CONTRAST WINDOW WAS A THRESHOLDED GAUSSIAN.** `smoothstep(lo, hi,
+ *      blob)` is exactly 0 below `lo` (blob 0.15, i.e. 1.9 in the exponent) with
+ *      a quadratic foot, so the glint's visible edge — the display's 10 → 90 %
+ *      rise — was only 25-159 world px wide for a ROUND blob on the six shipped
+ *      layers, and a thin streak's edge is only as wide as the streak is thin.
+ *      It is now a LOGISTIC in the blob's exponent (`softWindow`): the same shape
+ *      where the eye reads the glint's outline, but with an exponential skirt
+ *      instead of a cut — 57-359 px, ≈2.3× wider on every layer at the shipped
+ *      defaults. Brightness parity with the old window was MEASURED, not
+ *      assumed: mean display luminance of the six-layer field is within 0.5 %
+ *      of before and the area above half brightness within 1.5 %
+ *      (`SOFT_WINDOW_*`).
+ *   3. **`max` ACROSS LAYERS CREASES WHERE TWO SKIRTS CROSS.** Replaced by a
+ *      6-norm (`unionLayers`): `max` to within 12 % wherever one layer
+ *      dominates, smooth everywhere, and still never stacks brightness.
+ *
+ * What the CPU twin cannot show is shaded in `specular-render.js`: the
+ * light-coupled flicker used to clamp at zero (`max(1 + n·A, 0)`), cutting dark
+ * notches into glints with a log-gradient that is unbounded at the clamp. It is
+ * now `exp(n·A·gain)` (`flickerFactor`) — strictly positive, bounded slope.
+ *
  * @module effects/specular/specular-pattern
  */
 
-/** Rows-of-glints spacing floor. Below this the `across` divide explodes the
- * lattice into a smear; V2 clamped at the same value. */
-export const MIN_ROW_SPACING = 0.18;
+/** Rows-of-glints spacing floor.
+ *
+ * ⚠️ RAISED 0.18 → 1 (soft-edge rework, 2026-10-18). Below 1 the blob is wider
+ * ACROSS the grain than a row is tall, so it spills over several rows and the
+ * four-cell neighbourhood that makes the lattice seamless can no longer see all
+ * of it (a 2×2 misses up to 0.43 of the field at 0.5, and the rest of that range
+ * rendered as stacked, chopped strips anyway). 1 is the "even scatter" the Row
+ * spacing help text already names as the dense end. */
+export const MIN_ROW_SPACING = 1;
 
 /** Gaussian tightness endpoints for `softness` 0..1 — `mix(18, 5, softness)`.
- * 18 is a hard dot, 5 a broad soft pool. V2's `spreadMul`, verbatim. */
+ * 18 is a tight dot, 5 a broad soft pool. V2's `spreadMul`, verbatim. */
 export const SPREAD_TIGHT = 18;
 export const SPREAD_LOOSE = 5;
 
@@ -95,6 +146,68 @@ export const SUN_BIAS_MIN = 0.35;
  */
 export const CELL_SCALE_DULL = 2.5;
 export const CELL_SCALE_BRIGHT = 13;
+
+/**
+ * How wide, in blob-exponent units, two neighbouring cells' blobs are blended
+ * where their outlines meet (`smoothMin`). Narrow enough that a blob far from
+ * any neighbour is untouched, wide enough that no crease survives where two
+ * meet. Not a look control: it only chooses how the seam between two blobs is
+ * rounded.
+ */
+export const BLOB_BLEND_WIDTH = 0.45;
+
+/**
+ * The closest, in cells, a cell OUTSIDE the evaluated 2×2 can be to any point:
+ * the point leans toward the 2×2's cells, so the next cell out is a whole cell
+ * away, less its own centre jitter — which is a VECTOR of up to
+ * `CELL_JITTER/2` on each axis, i.e. `CELL_JITTER/√2` long, not `CELL_JITTER/2`
+ * (the first draft of this constant forgot the diagonal and the 2×2 differed
+ * from the full lattice by 1e-2 at the loose end of the Softness slider). This
+ * is the number the four-cell neighbourhood's exactness rests on.
+ */
+export const BLOB_REACH_MIN_DISTANCE = 1 - CELL_JITTER / Math.SQRT2;
+
+/**
+ * Where, as a fraction of the cut exponent (`blobCutExponent`), the fade to
+ * exactly zero begins. Past the cut no cell outside the evaluated 2×2 could
+ * have mattered, so the four-cell result IS the full-lattice result — not an
+ * approximation that happens to be small. At the shipped softness range
+ * (0.31-0.5) the cut sits at an exponent of 3.4-4.2, where the window below is
+ * already ~2e-3: it fades the faint outer end of the skirt a little, and it is
+ * what makes the loose end of the Softness slider seamless too.
+ */
+export const BLOB_CUT_ONSET = 0.6;
+
+/**
+ * THE SOFT WINDOW — a logistic in the blob's exponent, anchored to where the
+ * pre-rework `smoothstep(lo, hi, blob)` put the glint's visible outline.
+ *
+ * The anchor is the point `SOFT_WINDOW_ANCHOR` of the way up the OLD window
+ * (the 22 % point of its smoothstep), because at the shipped gain that is where
+ * the eye reads an outline; the logistic is placed so it passes through the
+ * same value there, then falls off exponentially instead of being cut.
+ * `SOFT_WINDOW_SHARPNESS / (the old window's width in exponent units)` is its
+ * steepness, clamped to `[SOFT_SHARP_MIN, SOFT_SHARP_MAX]`: lower is a broader,
+ * softer skirt. 3.0 and 0.3 were chosen by sweeping both against the old field
+ * and holding mean display luminance (+0.4 %) and the area above half
+ * brightness (-1.2 %) while widening every ramp ≈2.3× and cutting the steepest
+ * per-pixel step at quarter zoom from 0.44 to 0.08 (`tools/shader-lab`'s
+ * `edgeReport` on the real shader agrees with the CPU sweep).
+ */
+export const SOFT_WINDOW_ANCHOR = 0.3;
+export const SOFT_WINDOW_SHARPNESS = 3.0;
+export const SOFT_SHARP_MIN = 2.0;
+export const SOFT_SHARP_MAX = 5.5;
+/** `exp()` argument ceiling — far past where the window is 0, and short of f32 overflow. */
+export const SOFT_EXP_CLAMP = 30;
+
+/**
+ * The p of the p-norm that joins the six layers. 6 keeps the result within
+ * 12 % of `max` where one layer dominates (the author's reason for `max` over
+ * `sum`: overlapping layers must not stack brightness) and is smooth where two
+ * cross, which `max` is not.
+ */
+export const LAYER_UNION_POWER = 6;
 
 /**
  * The hash. Deliberately the sin-based one `effects/particles/gust-runtime.js`
@@ -135,22 +248,77 @@ function smoothstep01(e0, e1, x) {
 }
 
 /**
- * ONE ANISOTROPIC BLOB LATTICE SAMPLE — V2's `anisotropicBlob`.
+ * The Gaussian tightness for a `softness` 0..1 — `mix(SPREAD_TIGHT,
+ * SPREAD_LOOSE, softness)`, V2's `spreadMul`.
+ * @param {number} softness @returns {number}
+ */
+export function spreadForSoftness(softness) {
+  return mix(SPREAD_TIGHT, SPREAD_LOOSE, clamp01(softness));
+}
+
+/**
+ * Smooth minimum, the polynomial form: EXACTLY `min(a, b)` wherever the two
+ * differ by at least `w`, and a C¹ curve (never a crease) where they are
+ * closer. Used on blob EXPONENTS, where the smaller exponent is the nearer
+ * blob, so this is the smooth union of two blobs.
+ * @param {number} a @param {number} b @param {number} w @returns {number}
+ */
+export function smoothMin(a, b, w) {
+  const h = Math.max(w - Math.abs(a - b), 0) / w;
+  return Math.min(a, b) - h * h * w * 0.25;
+}
+
+/**
+ * ONE CELL'S BLOB EXPONENT — `spreadMul · (sx² + sy²)` for the blob hashed to
+ * lattice cell (`cellX`, `cellY`), seen from `offX`/`offY` (the point's offset
+ * from THAT cell's centre, in cells). `exp(-result)` is the Gaussian.
+ *
+ * @param {number} cellX @param {number} cellY @param {number} offX @param {number} offY
+ * @param {number} rows @param {number} streak @param {number} spreadMul
+ * @returns {number} >= 0
+ */
+export function cellBlobExponent(cellX, cellY, offX, offY, rows, streak, spreadMul) {
+  // ⚠️ THE ROTATION HAPPENS BEFORE THE STRETCH, AND THAT ORDER IS THE EFFECT.
+  // Rotating a circle then stretching it yields a skewed ellipse with a real
+  // orientation; stretching then rotating yields the same ellipse every time,
+  // merely turned. Swap these two blocks and every glint on the map becomes
+  // identically oriented — the lattice reappears and it reads as wallpaper.
+  const rot = (hash12(cellX + 17.3, cellY + 91.7) - 0.5) * streak * STREAK_RADIANS;
+  const c = Math.cos(rot);
+  const s = Math.sin(rot);
+  let rx = offX * c - offY * s;
+  let ry = offX * s + offY * c;
+
+  // Per-cell jitter, so the lattice is not readable as a grid.
+  rx -= (hash12(cellX + 127.1, cellY + 311.7) - 0.5) * CELL_JITTER;
+  ry -= (hash12(cellX + 269.5, cellY + 183.3) - 0.5) * CELL_JITTER;
+
+  const sy = ry * rows;
+  return (rx * rx + sy * sy) * spreadMul;
+}
+
+/**
+ * THE BLOB FIELD'S EXPONENT — the smooth union of the four nearest cells' blobs.
  *
  * A hash lattice rotated into the grain's frame, one Gaussian blob per cell,
- * each jittered and rotated by its own hash. See the module header for what
- * each control genuinely does and why three of them are renamed.
+ * each jittered and rotated by its own hash (see the module header for what
+ * each control genuinely does and why three of them are renamed) — and, since
+ * the soft-edge rework, every blob is allowed to cross into the next cell.
+ *
+ * The four cells are the point's own and its three neighbours on the side it
+ * leans toward (the sign of its offset from the centre). That is enough and not
+ * a heuristic: see `BLOB_REACH_MIN_DISTANCE`.
  *
  * @param {object} args
  * @param {number} args.u @param {number} args.v - pattern-space coordinate.
  * @param {number} args.grainX @param {number} args.grainY - UNIT grain vector.
  * @param {number} args.density - cells per pattern unit along the grain.
- * @param {number} args.rowSpacing - row pitch across the grain, in cells.
+ * @param {number} args.rowSpacing - row pitch across the grain, in cells (>= 1).
  * @param {number} args.softness - 0 tight dot .. 1 broad pool.
  * @param {number} args.streak - per-cell rotation amount. THE streak control.
- * @returns {number} 0..1
+ * @returns {number} the exponent: 0 at a blob's centre, growing outward.
  */
-export function anisotropicBlob({ u, v, grainX, grainY, density, rowSpacing, softness, streak }) {
+export function blobExponent({ u, v, grainX, grainY, density, rowSpacing, softness, streak }) {
   const rows = Math.max(rowSpacing, MIN_ROW_SPACING);
   const scale = Math.max(density, 0.25);
   // The grain's own frame. `perp` is the grain rotated +90°.
@@ -161,31 +329,104 @@ export function anisotropicBlob({ u, v, grainX, grainY, density, rowSpacing, sof
 
   const cellX = Math.floor(along);
   const cellY = Math.floor(across);
-  let offX = along - cellX - 0.5;
-  let offY = across - cellY - 0.5;
+  const offX = along - cellX - 0.5;
+  const offY = across - cellY - 0.5;
+  const stepX = offX < 0 ? -1 : 1;
+  const stepY = offY < 0 ? -1 : 1;
+  const spreadMul = spreadForSoftness(softness);
 
-  // ⚠️ THE ROTATION HAPPENS BEFORE THE STRETCH, AND THAT ORDER IS THE EFFECT.
-  // Rotating a circle then stretching it yields a skewed ellipse with a real
-  // orientation; stretching then rotating yields the same ellipse every time,
-  // merely turned. Swap these two blocks and every glint on the map becomes
-  // identically oriented — the lattice reappears and it reads as wallpaper.
-  const rot = (hash12(cellX + 17.3, cellY + 91.7) - 0.5) * streak * STREAK_RADIANS;
-  const c = Math.cos(rot);
-  const s = Math.sin(rot);
-  const rx = offX * c - offY * s;
-  const ry = offX * s + offY * c;
-  offX = rx;
-  offY = ry;
+  const e00 = cellBlobExponent(cellX, cellY, offX, offY, rows, streak, spreadMul);
+  const e10 = cellBlobExponent(cellX + stepX, cellY, offX - stepX, offY, rows, streak, spreadMul);
+  const e01 = cellBlobExponent(cellX, cellY + stepY, offX, offY - stepY, rows, streak, spreadMul);
+  const e11 = cellBlobExponent(cellX + stepX, cellY + stepY, offX - stepX, offY - stepY, rows, streak, spreadMul);
+  return smoothMin(smoothMin(e00, e10, BLOB_BLEND_WIDTH), smoothMin(e01, e11, BLOB_BLEND_WIDTH), BLOB_BLEND_WIDTH);
+}
 
-  // Per-cell jitter, so the lattice is not readable as a grid.
-  const seed = hash12(cellX + 127.1, cellY + 311.7);
-  offX -= (seed - 0.5) * CELL_JITTER;
-  offY -= (hash12(cellX + 269.5, cellY + 183.3) - 0.5) * CELL_JITTER;
+/**
+ * The blob value itself — `exp(-blobExponent)`, 0..1 (marginally above 1 is
+ * clamped: two blobs whose centres coincide blend to a slightly negative
+ * exponent). Kept as the public name V2's controls and this file's tests speak.
+ *
+ * @param {object} args - `blobExponent`'s.
+ * @returns {number} 0..1
+ */
+export function anisotropicBlob(args) {
+  return Math.min(1, Math.exp(-blobExponent(args)));
+}
 
-  const spreadMul = mix(SPREAD_TIGHT, SPREAD_LOOSE, clamp01(softness));
-  const sx = offX;
-  const sy = offY * rows;
-  return Math.exp(-(sx * sx + sy * sy) * spreadMul);
+/**
+ * The exponent at which a blob has been faded to exactly zero, and so the last
+ * one at which the four-cell neighbourhood can differ from the full lattice.
+ *
+ * A cell outside the 2×2 is at least `BLOB_REACH_MIN_DISTANCE` away, so its
+ * exponent is at least `k · BLOB_REACH_MIN_DISTANCE²` (with `rowSpacing >= 1`
+ * the stretch only ever ADDS to the exponent). It can move the smooth minimum
+ * only while it is within `BLOB_BLEND_WIDTH` of it, so the window is zero from
+ * that exponent less the blend width upward. See `BLOB_CUT_ONSET`.
+ * @param {number} spreadMul @returns {number}
+ */
+export function blobCutExponent(spreadMul) {
+  return spreadMul * BLOB_REACH_MIN_DISTANCE * BLOB_REACH_MIN_DISTANCE - BLOB_BLEND_WIDTH;
+}
+
+/**
+ * The window the soft window REPLACED — `smoothstep(mix(0.55, 0.08, c),
+ * mix(0.95, 0.45, c), blob)`. Kept so the new window's placement is derived
+ * from it rather than from a second set of magic numbers, and so a test can
+ * compare the two.
+ * @param {number} contrast @returns {{lo: number, hi: number}}
+ */
+export function legacyWindow(contrast) {
+  const c = clamp01(contrast);
+  return { lo: mix(0.55, 0.08, c), hi: mix(0.95, 0.45, c) };
+}
+
+/**
+ * The soft window's three numbers for a `contrast`: its midpoint and steepness
+ * in exponent space, and the factor that scales its peak to exactly 1.
+ * Computed on the CPU and pushed as ONE `vec3` uniform per layer — the
+ * shader never takes a logarithm.
+ *
+ * @param {number} contrast 0..1 (the schema allows 0.5..1)
+ * @returns {{mid: number, sharp: number, peakInv: number}}
+ */
+export function softWindowParams(contrast) {
+  const { lo, hi } = legacyWindow(contrast);
+  const anchorExponent = -Math.log(lo + SOFT_WINDOW_ANCHOR * (hi - lo));
+  const legacyWidth = Math.log(hi / lo);
+  const sharp = Math.min(SOFT_SHARP_MAX, Math.max(SOFT_SHARP_MIN, SOFT_WINDOW_SHARPNESS / legacyWidth));
+  const anchorValue = smoothstep01(0, 1, SOFT_WINDOW_ANCHOR);
+  const mid = anchorExponent - Math.log(1 / anchorValue - 1) / sharp;
+  // 1 / logistic(0): the blob's centre reads exactly 1, whatever `mid` is.
+  const peakInv = 1 + Math.exp(-sharp * mid);
+  return { mid, sharp, peakInv };
+}
+
+/**
+ * THE SOFT WINDOW — a blob exponent in, a 0..1 glint out. See the module header
+ * for why it is a logistic and how its placement was chosen.
+ *
+ * @param {number} e - `blobExponent`'s result.
+ * @param {{mid: number, sharp: number, peakInv: number}} wp - `softWindowParams`'s.
+ * @param {number} [cutExponent] - `blobCutExponent`'s, to fade the skirt out
+ *   where the four-cell neighbourhood stops being exact. Omit for none.
+ * @returns {number} 0..1
+ */
+export function softWindow(e, wp, cutExponent = Infinity) {
+  const x = Math.min(wp.sharp * (e - wp.mid), SOFT_EXP_CLAMP);
+  const s = Math.min(1, wp.peakInv / (1 + Math.exp(x)));
+  if (!Number.isFinite(cutExponent)) return s;
+  return s * (1 - smoothstep01(cutExponent * BLOB_CUT_ONSET, cutExponent, e));
+}
+
+/**
+ * The 6-norm that joins the layers: `(Σ vᵖ)^(1/p)`. See `LAYER_UNION_POWER`.
+ * @param {number[]} values each >= 0 @returns {number}
+ */
+export function unionLayers(values) {
+  let sum = 0;
+  for (const v of values) sum += Math.pow(Math.max(v, 0), LAYER_UNION_POWER);
+  return Math.pow(sum, 1 / LAYER_UNION_POWER);
 }
 
 /**
@@ -208,18 +449,20 @@ export function sunGrainBias(grainX, grainY, sunAzimuthRad) {
 /**
  * ONE FULL SHIMMER LAYER — blob, contrast window, sun bias.
  *
- * @param {object} args - `anisotropicBlob`'s args, plus:
- * @param {number} args.contrast - 0 = a narrow window (sparse hard glints),
+ * @param {object} args - `blobExponent`'s args, plus:
+ * @param {number} args.contrast - 0 = a tight window (small soft pools),
  *   1 = a wide one (broad connected sheen). V2's mislabelled "Cluster size".
+ *   The schema stops at 0.5: below that the pools get small enough that no
+ *   window can keep their skirt wide.
  * @param {number} [args.sunBias] - `sunGrainBias`'s result, or 1 indoors.
  * @returns {number} 0..1
  */
 export function shimmerLayer(args) {
-  const blob = anisotropicBlob(args);
-  const c = clamp01(args.contrast);
-  const lo = mix(0.55, 0.08, c);
-  const hi = mix(0.95, 0.45, c);
-  return smoothstep01(lo, hi, blob) * (args.sunBias ?? 1);
+  const e = blobExponent(args);
+  return (
+    softWindow(e, softWindowParams(args.contrast), blobCutExponent(spreadForSoftness(args.softness))) *
+    (args.sunBias ?? 1)
+  );
 }
 
 /**
@@ -631,6 +874,40 @@ export const SPECULAR_FLICKER_SCALE_PX = 320;
  * ⚠️ RAISED 0.5 → 0.64 (ROUND 23, 2026-09-09) — new live-tuned defaults, the
  * first live-tuned value this control has shipped. */
 export const SPECULAR_FLICKER_ROUGHNESS = 0.64;
+
+/**
+ * THE FLUTTER'S SHAPE (soft-edge rework, 2026-10-18) — `exp(LOG_GAIN · amount ·
+ * noise · lightWeight)`, replacing `max(1 + amount · noise · lightWeight, 0)`.
+ *
+ * ⚠️ WHY THE OLD FORM WAS A HARD EDGE FACTORY. At the live amount of 3 the
+ * clamp zeroes the shine wherever `noise < -1/3` (a third of the area) and the
+ * ramp back up is `3 · |∇noise|` per px ≈ 0.09 — so over ~11 world px the shine
+ * went from nothing to full, and the glint's own gain then saturates the display
+ * within a couple of px of that. The picture: crisp, crescent-shaped dark notches
+ * bitten out of the middle of glints (`slab-effect-s05` in the lab). A
+ * multiplier that reaches exactly 0 with a finite slope has an unbounded
+ * log-gradient at that point, and the display responds to the LOG of the light.
+ *
+ * The exponential has a constant log-gradient (`LOG_GAIN · amount · |∇noise|`,
+ * ≈ 0.02 per px at amount 3 — an e-fold per ~50 px) and is strictly positive, so
+ * the dark patches are dim rather than off and nothing in it can be an edge.
+ * `0.5` keeps the author's amount-3 mottling in the range the clamp had (×0.3
+ * .. ×3.3 at |noise| 0.8 against 0 .. ×3.4); at the small amounts the effect
+ * shipped with, `exp(0.5·x)` and `1 + 0.5·x` agree to first order.
+ */
+export const SPECULAR_FLICKER_LOG_GAIN = 0.5;
+
+/**
+ * The flutter multiplier on the shine: 1 where nothing lights the pixel
+ * (`lightWeight` 0) or the amount is 0, strictly positive everywhere.
+ * @param {number} noise - the flutter noise, roughly -1..1.
+ * @param {number} amount - `SPECULAR_FLICKER_AMOUNT` or the author's own.
+ * @param {number} lightWeight - 0..1, how strongly lit the pixel is.
+ * @returns {number}
+ */
+export function flickerFactor(noise, amount, lightWeight) {
+  return Math.exp(SPECULAR_FLICKER_LOG_GAIN * amount * noise * lightWeight);
+}
 
 /**
  * How brightly the SHEEN (the always-on base, no shimmer) may peak before its

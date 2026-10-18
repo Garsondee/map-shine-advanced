@@ -476,11 +476,16 @@ export const SPECULAR_LAYER_PARAMS = Object.freeze({
     step: 0.01,
     default: 0.31,
     label: 'Softness',
-    help: 'How sharp each glint edge is, from a hard bright speck to a broad soft pool.',
+    help: 'How wide each glint is, from a tight bright speck to a broad soft pool. At any setting every edge stays a gradient.',
   },
   rowSpacing: {
     type: 'float',
-    min: 0.18,
+    // ⚠️ FLOOR RAISED 0.18 → 1 (soft-edge rework, 2026-10-18) — equals
+    // `MIN_ROW_SPACING` (specular-pattern.js), which the shader clamps to. Below
+    // 1 a glint spills over several rows and the four-cell neighbourhood that
+    // keeps the field free of cut-off edges can no longer see all of it; the
+    // 0.18-1 stretch of this slider drew stacked, chopped strips anyway.
+    min: 1,
     max: 8,
     step: 0.02,
     default: 4,

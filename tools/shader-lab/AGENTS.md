@@ -322,6 +322,40 @@ spreads it), and the scene's lighting is one multiplier, not the real illuminati
 "what do the agents and bodies do, and do they look right"; it does not answer how the glow reads against
 a real night scene. Lab-green is BUILT (unverified).
 
+## 12c. The specular look lab — the real shine on a real map, with numbers for "how hard is this edge"
+
+A standalone page (not a bench on `index.html`): `/tools/shader-lab/specular-lab.html?w=1024&h=1024&run=<name>`.
+`bench-specular.js` answers "which factor of the composite is zero" on a synthetic 512² plate; this answers **what
+the shimmer field looks like** — its blobs, streaks and above all its EDGES — at the resolution and zoom a player
+sees. It builds the REAL `buildSpecularSurfaceMaterial`, loads a real `_Specular` through the production loader at
+`SPECULAR_MASK_IMAGE_SCALE`, adds the map's own art underneath (in JS — the shine is additive, so it is exact), and
+saves PNGs to `tools/shader-lab/runs/<run>/`. Nothing is presented to a surface, so it is headless-safe; rendering
+is on demand, so a hidden pane cannot starve it.
+
+```js
+await specLab.ready
+await specLab.loadMap({ maskUrl, artUrl })            // a real map (world rect = the art's pixel size, 1:1)
+await specLab.loadSlab({ size: 4096 })                // OR an all-metal slab: no mask edge anywhere, only the field
+await specLab.shot({ name: 'a', cx: 2048, cy: 2048, scale: 0.5, metrics: true })   // scale = screen px per world px
+await specLab.shot({ name: 'f', channel: 'shimmer', base: 'none' })                // any debug channel, undiluted
+specLab.setParam('shimmerGain', 8); specLab.setLayer(2, 'softness', 0.6)           // any surface.setXxx
+await specLab.scan({ scale: 0.5, nx: 3, ny: 3 })      // tile the map, find the worst place instead of guessing
+await specLab.bench()                                 // ms/frame of the pass (load a slab first for the unGated cost)
+```
+
+`metrics: true` adds `edges` = per-pixel step statistics of display luminance (`max`, `p9999`, `over035` = pixels whose
+step to a neighbour exceeds 0.35) and a `.grad.png` heat map (black smooth, white hard). Over a real map the metric
+runs on **what the shine added** (art cancelled), but a real `_Specular` has authored ink lines and silhouettes that
+are genuinely hard — judge the SHAPES on the slab and the silhouette separately.
+
+**Before/after discipline.** Keep a frozen worktree of the old code beside the one you edit
+(`git worktree add --detach <dir> <sha>`), serve each with `serve.mjs` on its own port, copy this page into both, and
+run the same script in each: the PNGs of the same view then differ only by the code. (How the soft-edge rework,
+2026-10-18, was measured: the raw field's steepest single-pixel step went 0.59 → 0.03 at quarter zoom, and the six
+shipped layers' worst step per quarter pixel went 1.0 → 0.004.) A real map's masks live outside the repo; point a
+junction at them from the worktree's `tools/shader-lab/dev/` — and **remove the junction with
+`[System.IO.Directory]::Delete(path)` before `git worktree remove`**, or the delete follows it into the map folder.
+
 ## 13. Known-good smoke test
 
 ```js

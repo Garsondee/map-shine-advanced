@@ -31,13 +31,17 @@
  * `effects/fluid/fluid-registration.js#createFluidSeams`, and the vegetation
  * URL block in `boot.js`).
  *
- * ⚠️ ONLY EIGHT TILES, NOT TWELVE. `scene/mask-catalog.js#MASK_KINDS` has
- * twelve entries (`prism` joined 2026-09-19, mythica-machina-press#137;
+ * ⚠️ ONLY ELEVEN TILES, NOT FIFTEEN. `scene/mask-catalog.js#MASK_KINDS` has
+ * fifteen entries (`prism` joined 2026-09-19, mythica-machina-press#137;
  * `iridescence` joined the same night, mythica-machina-press#136, Prism's
- * own direct sibling; `drip` joined 2026-09-20, mythica-machina-press#316),
- * but only eight effects declare `authoring.paint`
- * (fire, water, window, specular, fluid, prism, iridescence, vegetation —
- * vegetation covers two masks, tree+bush, as one tile). `shadow`/`outdoors`/
+ * own direct sibling; `drip` joined 2026-09-20, mythica-machina-press#316;
+ * `flies`, `maggots` and `fireflies` joined with the procedural critters —
+ * three separate masks, so a corpse can have flies and maggots and a puddle
+ * of blood only flies),
+ * but only eleven effects declare `authoring.paint`
+ * (fire, water, window, specular, fluid, prism, iridescence, vegetation,
+ * smellyFlies, maggots, fireflies — vegetation covers two masks, tree+bush, as one
+ * tile). `shadow`/`outdoors`/
  * `drip` have no owning effect at all (precipitation's authored-drip layer
  * reads `drip` straight off the mask authority, the same seam fire's own
  * tile is built on, but #316 deliberately did not give it a Studio tile or an
@@ -45,8 +49,8 @@
  * why) — Law 5 applies here exactly as it does to `ui/no-dead-axis` for
  * weather: a mask kind with no OWNING TILE doesn't get one just because the
  * painter's OWN internal kind-picker still lists it.
- * `PAINT_REACH` below still covers all twelve, because that picker DOES list
- * all twelve and the tile-less kinds are exactly where a wrong belief
+ * `PAINT_REACH` below still covers all fifteen, because that picker DOES list
+ * all fifteen and the tile-less kinds are exactly where a wrong belief
  * has nothing to correct it. Prism gets a real tile despite `graph/
  * passes.js#surface.prism` being a declared `seam` — `authoring.paint` and
  * "does the render pass exist yet" are different questions (`effects/
@@ -76,7 +80,7 @@ import { iconMarkup } from '../../widgets/icon-sprite.js';
  *   'file-only' — the effect resolves a real file URL and never consults
  *                 painted content. Paint saves, and nothing renders.
  *
- * Exhaustive over `MASK_KINDS` on purpose (twelve entries, including the
+ * Exhaustive over `MASK_KINDS` on purpose (fifteen entries, including the
  * three with no tile). `paintReachOf` falls back to the PESSIMISTIC verdict for an
  * id absent here and says "not evaluated" out loud, so a new kind added to
  * the catalog cannot silently inherit a confident wrong answer — the
@@ -154,6 +158,24 @@ export const PAINT_REACH = Object.freeze({
   drip: {
     reach: 'renders',
     why: 'Drip spawn points read the painted grid directly, exactly like fire — paint it and it drips.',
+  },
+  // ⭐ `flies`/`maggots`/`fireflies` — the critter effects' own zones, three SEPARATE masks.
+  // Each reads `maskAuthority.getDerived(kind, floor)` through the `getMaskGrid` closure
+  // boot.js hands `createCritterRegistration` (the same swallow-to-null shape as
+  // `getFireMaskGrid`, one registration for all three effects) and turns the composited
+  // grid into a perception field on the CPU, so the in-app brush reaches them with no
+  // file at all. All three declare `authoring.paint`, so they DO get a tile.
+  flies: {
+    reach: 'renders',
+    why: 'The swarm reads the painted grid directly — paint a blob and flies gather over it.',
+  },
+  maggots: {
+    reach: 'renders',
+    why: 'The maggots read the painted grid directly — paint a blob and they writhe in it, piling toward its middle.',
+  },
+  fireflies: {
+    reach: 'renders',
+    why: 'The colony reads the painted grid directly — paint a meadow and fireflies rise from it at dusk.',
   },
 });
 

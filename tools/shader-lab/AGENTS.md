@@ -283,6 +283,45 @@ Run them with `window.lab.run('fire', '<name>')`. Start the lab with `preview_st
 few cells before the wall, so "is there a gale outside" must be measured ≥300 px out; and a sealed cell has
 BOTH openness and the exterior flag at 0 — leaving the flag at 1 keeps ordinary outdoor turbulence (~0.07).
 
+## 12b. The critter lab — flies, maggots, fireflies
+
+A standalone page (not a bench on the shared `index.html`): `/tools/shader-lab/critter-lab.html`.
+It imports the REAL `createCritterSubsystem` + `createCritterEngine` and runs them over a ground, a sky
+and a zone you **paint with the mouse** (shift erases). The Paint selector picks which zone you are
+painting (flies', maggots' or fireflies' — three effects, three masks); the Sky sliders (sun, rain, snow,
+wind, gustiness, wind direction, temperature) drive the same env snapshot the game feeds them, so sliding the
+sun below the horizon hatches the fireflies, and rain, snow, a gale or a freeze each thin and move the three
+populations in their own way. The effect panels are GENERATED from the schemas, so a control the effect has is a
+control the lab has.
+
+Driving it from a script (`window.critterLab`), headless:
+
+```
+/tools/shader-lab/critter-lab.html?present=0&paused=1&seed=7&tier=3
+```
+
+- `present=0` — never draw to the on-screen canvas. **Required headless**: a software WebGPU adapter
+  has no surface, and presenting there takes the whole device down ("A valid external Instance
+  reference no longer exists" at the next readback — which looks like a readback bug and is not).
+- `paused=1` — stop the display-rate loop; step the world yourself.
+- `seed=N` — seeded randomness, so two runs of the same script agree.
+
+```js
+await lab.advance(8, 30)                                  // 8 s of sim at 30 Hz, throttled to the GPU
+lab.setParam('maggots', { countPerZone: 40 })        // groups: smellyFlies · maggots · fireflies
+lab.setSky({ wind01: 1, gust01: 0.3, precipKind: 'snow', precip01: 0.7, temperature01: 0.1 })
+lab.setSky({ elevationDeg: -12 }); lab.setGround('night', 0.15)
+await lab.advance(10, 30)
+const { dataUrl } = await lab.capture('dusk')             // 1280×720 PNG data URL (no bloom — see below)
+lab.status()                                              // zones, per-engine head-counts, activity
+await lab.samplerParity()                                 // GPU zone sampler vs its CPU twin; ok:true, errors ~1e-6
+```
+
+⚠️ **No bloom, flat light.** The fireflies' HDR glow looks tighter here than in the game (the bloom pass
+spreads it), and the scene's lighting is one multiplier, not the real illumination buffer. The lab answers
+"what do the agents and bodies do, and do they look right"; it does not answer how the glow reads against
+a real night scene. Lab-green is BUILT (unverified).
+
 ## 13. Known-good smoke test
 
 ```js

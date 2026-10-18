@@ -53,6 +53,9 @@ These are the masks the module discovers (the source of truth is `src/scene/mask
 - **`_Shadow`** (grayscale): hand-painted shadow; black is shadowed.
 - **`_Fire`** (grayscale): where fire spawns.
 - **`_Drip`** (grayscale): where drips spawn (cave ceilings, leaking pipes).
+- **`_Flies`** (grayscale): the zone a swarm of flies hovers over. Every separate painted blob is its own swarm.
+- **`_Maggots`** (grayscale): the zone a writhing mass of maggots crawls in. Independent of `_Flies` — paint both over a corpse, or either alone.
+- **`_Fireflies`** (grayscale): the zone a firefly colony glows over during twilight. Every separate painted blob is its own colony.
 - **`_Specular`** (colour): metal and shine; the hue is the reflection colour.
 - **`_Window`** (colour): interior window-light cookie. `_Windows` and `_Structural` are still accepted as older names.
 - **`_Water`** (RGBA): water depth and presence.
@@ -75,6 +78,12 @@ This section describes the module's actual roster as of 0.8.2 (superseding an ol
 - **Clouds** — ground shadow and high-altitude tops. Only the tops are zoom-gated.
 - **Water** — tiered surface with refraction, caustics and shore foam, driven by a per-floor water simulation (flow, and foam memory). Interactive ripples and splash spray are not built yet.
 - **Fire** — wind-responsive flame/spark rendering.
+- **Smelly Flies** — paint a `_Flies` zone and a swarm of procedurally drawn flies buzzes over it, lands, walks (with planted feet), grooms and takes off again. Species, wing detail, metallic sheen, flight height, buzz, tether and landing behaviour are all adjustable.
+- **Maggots** — paint a `_Maggots` zone and a mass of segmented, moist-looking maggots wriggles and crawls in it, clumping together and pausing to rest. Girth, gloss, segmentation, wriggle rhythm and crawl behaviour are adjustable.
+- **Fireflies** — paint a `_Fireflies` zone and a colony of glowing beetles drifts over it during the twilight window (keyed to the sun's elevation, so it follows the sky's own dusk and dawn), flashing in a chosen pattern with adjustable synchrony (no insect flashes more than three times a second).
+
+  All three are separate effects with their own Studio cards: a short front-of-house strip for running a scene, and the full set of controls grouped by Presence, Look, Detail, Motion, Depth and more under Advanced. Each one responds to the weather on its own terms. How much **rain**, **snow**, **high wind** (above a tolerance you set) and **cold** (below a threshold you set) clears the population is adjustable per cause, and so is what the weather does to the ones that stay: wind carries flying insects downwind and makes them erratic, rain drives fliers to the ground or makes maggots squirm, cold slows everything. Flies are driven off easily, fireflies are fair-weather creatures, and maggots barely mind — and every one of those defaults is a slider.
+
 - **Vegetation** — GPU-driven wind sway and shadowing.
 - **Window** / **Specular** — mask-driven interior light pools and surface shine, both attachable to tiles.
 - **Fluid** — liquid-filled tiles (troughs, cauldrons, etc.) with their own mask channel.
@@ -106,7 +115,7 @@ This section describes the module's actual roster as of 0.8.2 (superseding an ol
 
 Checked against the code on 2026-10-17. Shipped items have been removed from this list. The GitHub issue tracker is the live status.
 
-- **Ambient particle dressing**: dust motes, ash kick-up, flies and fireflies, and shoreline spray. The particle passes are live, but today they draw only debug motes and gust ribbons.
+- **Ambient particle dressing**: dust motes, ash kick-up, and shoreline spray. The particle passes are live, but today they draw only debug motes and gust ribbons.
 - **Interactive water**: rain and token ripples, distinct water body types, and splash spray.
 - **Post finishers**: screen-space distortion and heat haze, dazzle and eye adaptation, and the ASCII, halftone and dot-screen stylisers.
 - **Painted shadows**: an authored `_Shadow` mask that the sun term reads.

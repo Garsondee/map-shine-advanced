@@ -625,6 +625,11 @@ export function run(t) {
       t.ok('the catalog file exists on disk', existsSync(join(ROOT, 'src', 'scene', 'mask-catalog.js')));
       t.ok('the wall bites a bare suffix concat', matches(rule, "const s = base + '_Outdoors.webp';"));
       t.ok('the wall bites template interpolation', matches(rule, 'const u = `${dir}/${base}_Specular.${ext}`;'));
+      t.ok('the wall bites the fly-zone suffix', matches(rule, "const s = base + '_Flies.webp';"));
+      t.ok('the wall bites the maggot-zone suffix', matches(rule, "const s = base + '_Maggots.webp';"));
+      t.ok('the wall bites the firefly-zone suffix', matches(rule, "const s = base + '_Fireflies.webp';"));
+      t.ok('…and _Fireflies is not mistaken for _Fire plus a letter', matches(rule, "const s = '_Fireflies';"));
+      t.ok('an identifier that merely starts with _Flies is not a suffix', !matches(rule, 'this._FliesBuffer = null;'));
     }
   }
 

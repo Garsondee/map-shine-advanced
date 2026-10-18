@@ -47,3 +47,11 @@ export { createGustEngine } from './gust-runtime.js';
 // deliberately takes NO wind grid (fire reads one ambient vector, as V2 did),
 // which keeps it at seven storage buffers inside the guaranteed eight.
 export { createFireParticleEngine } from './fire-particle-runtime.js';
+// THE CRITTERS — flies, maggots and fireflies — a FOURTH runtime under the same roof, and the
+// first whose particles DECIDE things: each slot perceives a painted zone's signed-distance
+// field and runs a small state machine, as branch-free GPU arithmetic over the same arena.
+// Three exports, all allocation: the agents' memory (allocated once per kind and never freed,
+// like every arena here), the shared zone-perception buffer, and the engine that builds the
+// kernels and materials over them. See critter-runtime.js's header for the whole account.
+export { createCritterEngine, allocateCritterBuffers } from './critter-runtime.js';
+export { createCritterZoneBuffer } from './critter-zone-buffer.js';

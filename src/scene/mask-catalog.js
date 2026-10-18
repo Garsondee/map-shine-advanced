@@ -195,6 +195,59 @@ export const MASK_KINDS = Object.freeze([
       'always follows the weather regardless). Absent = no authored drip points anywhere.',
   },
   {
+    id: 'flies',
+    suffixes: ['_Flies'],
+    channels: 'gray',
+    // Not a packed-trio member, for the same reason `drip` is not: the trio is
+    // author-confirmed complete at exactly three, so this rides as its own
+    // ordinary single-file gray mask.
+    packChannel: null,
+    absentValue: 0,
+    // A CPU consumer is a consumer — the `fire`/`drip` case `rasterize` exists to
+    // declare. `effects/critters/critter-zone.js` reads this per-floor grid and
+    // turns it into the perception field (signed distance + inward gradient) the
+    // GPU fly/maggot agents steer by, plus each blob's area for its population.
+    rasterize: true,
+    meaning:
+      'white = a place flies gather: a corpse, a midden, rot, a spill, a dung heap. Each separate painted ' +
+      'blob is its own SWARM, hovering over it, landing on it and walking it. A bigger blob can carry a ' +
+      'bigger swarm (the effect’s own `areaScaling`). The paint never shows — only the flies do. Maggots ' +
+      'are a separate effect with their own mask (`_Maggots`): paint both where a corpse should have both. ' +
+      'Absent = no flies anywhere.',
+  },
+  {
+    id: 'maggots',
+    suffixes: ['_Maggots'],
+    channels: 'gray',
+    // Its own mask, not a layer of `flies`: a puddle of blood wants flies and no maggots, a corpse wants
+    // both, a compost heap wants maggots under no swarm at all — so the two are painted separately.
+    packChannel: null,
+    absentValue: 0,
+    // The same CPU-consumer case as `flies`: `effects/critters/critter-zone.js` turns this grid into the
+    // perception field the GPU maggot agents steer by (and the depth gradient they cluster up).
+    rasterize: true,
+    meaning:
+      'white = a place maggots writhe: the thing being eaten. Each separate painted blob is its own ' +
+      'writhing mass; they crawl a body length or two at a time and pile toward the middle of the blob, ' +
+      'where the food is (the effect’s own `clustering`). The paint never shows — only the maggots do. ' +
+      'Absent = no maggots anywhere.',
+  },
+  {
+    id: 'fireflies',
+    suffixes: ['_Fireflies'],
+    channels: 'gray',
+    packChannel: null,
+    absentValue: 0,
+    // Same CPU-consumer case as `flies` just above — the same zone-field builder
+    // reads it, at the fireflies' own (wider) wander margin.
+    rasterize: true,
+    meaning:
+      'white = a meadow, a hedgerow, a marsh edge: somewhere fireflies live. They hatch from this region ' +
+      'at dusk (and dawn, if enabled) and drift over it, glowing, then settle again as the sky darkens or ' +
+      'the rain comes. Each separate painted blob is its own colony. The paint never shows — only the ' +
+      'fireflies do, and only while the sun is in their twilight window. Absent = no fireflies anywhere.',
+  },
+  {
     id: 'specular',
     suffixes: ['_Specular'],
     channels: 'color',

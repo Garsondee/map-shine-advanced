@@ -34,6 +34,7 @@ import { CLOUD_TOPS } from '../clouds/cloud-tops.js';
 import { DEPTH_OF_FIELD } from '../depth-of-field.js';
 import { DOOR_GRAPHICS } from '../door-graphics.js';
 import { FIRE } from '../fire/fire.js';
+import { FIREFLIES } from '../critters/fireflies.js';
 import { FLUID } from '../fluid/fluid.js';
 import { GRADE } from '../grade/grade.js';
 import { IRIDESCENCE } from '../iridescence/iridescence.js';
@@ -41,6 +42,8 @@ import { LENS } from '../lens.js';
 import { LIGHTNING } from '../lightning.js';
 import { PRECIPITATION } from '../precipitation/precipitation.js';
 import { PRISM } from '../prism/prism.js';
+import { SMELLY_FLIES } from '../critters/smelly-flies.js';
+import { MAGGOTS } from '../critters/maggots.js';
 import { SPECULAR } from '../specular/specular.js';
 import { STYLIZE } from '../stylize.js';
 import { SUN_SHADOWS } from '../sun-shadows.js';
@@ -64,6 +67,10 @@ const MANIFESTS = [
   DEPTH_OF_FIELD,
   DOOR_GRAPHICS,
   FIRE,
+  // The critters own two zones apiece (light.<effect>Sync / light.draw<Effect>) from day one, so check 2
+  // below REQUIRES them. Both declare `firstRunWork: true` (a compute kernel and a material, built
+  // lazily on the first sync that has paint) with `coverage: 'none'` and the reason why.
+  FIREFLIES,
   FLUID,
   GRADE,
   // IRIDESCENCE (mythica-machina-press#136, Prism's own direct sibling, same
@@ -81,6 +88,8 @@ const MANIFESTS = [
   // PRISM owns real zones (surface.prismSync/Draw/Refraction) as of the same
   // night `surface.prism` flipped to `live` — check 2 below now REQUIRES it.
   PRISM,
+  SMELLY_FLIES,
+  MAGGOTS,
   SPECULAR,
   STYLIZE,
   SUN_SHADOWS,

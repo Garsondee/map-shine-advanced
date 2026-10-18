@@ -19,6 +19,7 @@
 import { PAINT_REACH, paintReachOf, paintStatusLine } from '../rooms/studio/painter-department.js';
 import { MASK_KINDS } from '../../scene/mask-catalog.js';
 import { createMaskAuthority } from '../../scene/mask-authority.js';
+import { buildZoneField } from '../../effects/critters/critter-zone.js';
 
 /** A painted layer exactly as `ui/paint-mode.js` hands it over: one coverage
  * byte per texel, sized over the scene rect. */
@@ -114,6 +115,39 @@ export async function run(t) {
     anyNonZero(authority.getDerived('specular', 0)?.grid)
   );
   t.ok('PAINT_REACH still refuses to claim specular renders', PAINT_REACH.specular.reach === 'file-only');
+
+  // THE THREE CRITTER MASKS — flies, maggots, fireflies are three SEPARATE paintable kinds, and each one's
+  // paint must reach the perception field its agents steer by. Proven through the real authority and the
+  // real zone-field builder (the CPU half of the very path `boot.js#createCritterRegistration` serves), not
+  // by asserting the table back at itself.
+  const critterAuthority = paintedOnlyAuthority();
+  const critterKinds = ['flies', 'maggots', 'fireflies'];
+  critterAuthority.ingestPaintedMask(0, 'maggots', paintedGrid());
+  t.ok(
+    'painting ONLY maggots gives the maggots a grid, and the flies and fireflies none (separate masks)',
+    anyNonZero(critterAuthority.getDerived('maggots', 0)?.grid) &&
+      !anyNonZero(critterAuthority.getDerived('flies', 0)?.grid) &&
+      !anyNonZero(critterAuthority.getDerived('fireflies', 0)?.grid)
+  );
+  for (const kind of critterKinds) {
+    critterAuthority.ingestPaintedMask(0, kind, paintedGrid());
+    const derived = critterAuthority.getDerived(kind, 0);
+    t.ok(`painted-only: ${kind} serves a derived grid carrying the paint`, anyNonZero(derived?.grid));
+    const field = buildZoneField(derived?.grid, { marginPx: 20 });
+    t.ok(
+      `${kind}: the painted grid becomes a perception field with a zone to live in`,
+      !!field && field.zones.length === 1 && field.zones[0].areaPx2 > 0
+    );
+    t.ok(`PAINT_REACH agrees: ${kind} renders from paint`, PAINT_REACH[kind].reach === 'renders');
+  }
+  // erasing one critter's paint leaves the others standing
+  critterAuthority.ingestPaintedMask(0, 'flies', { ...paintedGrid(), data: new Uint8Array(64) });
+  t.ok(
+    'erasing the flies leaves the maggots and fireflies painted',
+    !anyNonZero(critterAuthority.getDerived('flies', 0)?.grid) &&
+      anyNonZero(critterAuthority.getDerived('maggots', 0)?.grid) &&
+      anyNonZero(critterAuthority.getDerived('fireflies', 0)?.grid)
+  );
 
   // TREE — the total black hole. Ingest succeeds, and nothing composites it.
   authority.ingestPaintedMask(0, 'tree', paintedGrid());

@@ -15,11 +15,16 @@
  * as honest `status:'planned'` cards rather than either hiding them or
  * faking a working button. See Petition P10.
  *
+ * Looks come from the shared `.msa-panel`/`.msa-btn`/`.msa-input` classes in
+ * `studio-style.js` (2026-10-18) — this file used to inline a copy of the same
+ * button style three times, none of which could hover, press or show focus.
+ *
  * @module ui/rooms/studio/scene-department
  */
 
 import { iconMarkup } from '../../widgets/icon-sprite.js';
 import { buildParamControl } from '../../widgets/param-control.js';
+import { buildArmButton } from '../../widgets/inline-actions.js';
 
 /** Same 3 presets, same snap-to-nearest read, same help text as the old
  * panel's own `darkness-realism` select (boot.js) — ported verbatim (UI
@@ -37,29 +42,48 @@ const DARKNESS_REALISM_DECL = Object.freeze({
     'drives that floor to true black.',
 });
 
-function plannedCard(icon, title, reason) {
-  const card = document.createElement('div');
-  Object.assign(card.style, {
-    background: 'var(--bg1)',
-    border: '1px dashed var(--fail)',
-    borderRadius: 'var(--r-card, 10px)',
-    padding: '10px 12px',
-  });
-  card.title = reason;
-  card.innerHTML = `<h3 style="font-size:.74rem; letter-spacing:.1em; text-transform:uppercase; color:var(--ink2); display:flex; gap:7px; align-items:center; margin:0 0 6px">${iconMarkup(icon)}${title} <span style="margin-left:auto; color:var(--fail); font-size:.68rem; font-weight:400; letter-spacing:0; text-transform:none">◇ planned</span></h3><p style="margin:0; font-size:.72rem; color:var(--ink2)">${reason}</p>`;
-  return card;
+/** Tiny element factory. */
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
 }
 
-function realCard(icon, title, bodyHtml) {
-  const card = document.createElement('div');
-  Object.assign(card.style, {
-    background: 'var(--bg1)',
-    border: '1px solid var(--line)',
-    borderRadius: 'var(--r-card, 10px)',
-    padding: '10px 12px',
-  });
-  card.innerHTML = `<h3 style="font-size:.74rem; letter-spacing:.1em; text-transform:uppercase; color:var(--ink2); display:flex; gap:7px; align-items:center; margin:0 0 6px">${iconMarkup(icon)}${title}</h3>${bodyHtml}`;
-  return card;
+/** A small `.msa-btn`. */
+function smallBtn(label, title) {
+  const b = el('button', 'msa-btn msa-btn--sm', label);
+  b.type = 'button';
+  if (title) b.title = title;
+  return b;
+}
+
+/** A status line (`role="status"`, so a screen reader hears the result). */
+function statusLine(text = '') {
+  const p = el('p', 'msa-status', text);
+  p.setAttribute('role', 'status');
+  return p;
+}
+
+function setTone(node, text, ok) {
+  node.textContent = text;
+  node.dataset.tone = ok === true ? 'ok' : ok === false ? 'fail' : '';
+}
+
+/**
+ * One panel: icon + uppercase title, then whatever the caller appends.
+ * @param {string} icon @param {string} title
+ * @param {{planned?: boolean, reason?: string}} [opts]
+ */
+function panel(icon, title, { planned = false, reason } = {}) {
+  const root = el('div', `msa-panel${planned ? ' msa-panel--planned' : ''}`);
+  if (reason) root.title = reason;
+  const h = el('h3', 'msa-panel-title');
+  h.innerHTML = iconMarkup(icon);
+  h.append(document.createTextNode(title));
+  if (planned) h.append(el('span', 'msa-panel-tag', '◇ planned'));
+  root.append(h);
+  return root;
 }
 
 /**
@@ -86,7 +110,7 @@ function realCard(icon, title, bodyHtml) {
  * @returns {string} department subtitle.
  */
 export function renderSceneDepartment(container, ctx) {
-  const grid = document.createElement('div');
+  const grid = el('div');
   Object.assign(grid.style, {
     display: 'grid',
     gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))',
@@ -98,13 +122,18 @@ export function renderSceneDepartment(container, ctx) {
   // ⟲ Baseline fades back to the authored look, and the scene-preset library
   // (mythica-machina-press#177) is real. Presets get a real card below;
   // Baseline needs none (it IS "the look this department authors").
-  grid.append(
-    plannedCard(
-      'layers',
-      'Levels',
+  const levels = panel('layers', 'Levels', {
+    planned: true,
+    reason: 'Floor-band authoring — no confirmed src/ hook traced yet for editing scene.levels bands from this panel.',
+  });
+  levels.append(
+    el(
+      'p',
+      'msa-note',
       'Floor-band authoring — no confirmed src/ hook traced yet for editing scene.levels bands from this panel.'
     )
   );
+  grid.append(levels);
 
   let maskBoard = [];
   try {
@@ -112,16 +141,20 @@ export function renderSceneDepartment(container, ctx) {
   } catch (_) {
     maskBoard = [];
   }
-  const maskBody =
-    maskBoard.length > 0
-      ? `<div style="display:flex; flex-wrap:wrap; gap:6px; font-size:.7rem">${maskBoard
-          .map(
-            (m) =>
-              `<span style="color:${m.found ? 'var(--ok)' : 'var(--ink2)'}"><code>${m.suffix}</code> ${m.found ? iconMarkup('check') : '—'}</span>`
-          )
-          .join('')}</div>`
-      : `<p style="margin:0; font-size:.72rem; color:var(--ink2)">Mask board data not available.</p>`;
-  grid.append(realCard('gem', 'Masks aboard', maskBody));
+  const masks = panel('gem', 'Masks aboard');
+  if (maskBoard.length > 0) {
+    const list = el('div', 'msa-masklist');
+    for (const m of maskBoard) {
+      const item = el('span');
+      item.style.color = m.found ? 'var(--ok)' : 'var(--ink2)';
+      item.insertAdjacentHTML('beforeend', `<code>${m.suffix}</code> ${m.found ? iconMarkup('check') : '—'}`);
+      list.append(item);
+    }
+    masks.append(list);
+  } else {
+    masks.append(el('p', 'msa-note', 'Mask board data not available.'));
+  }
+  grid.append(masks);
 
   // COPY/PASTE SCENE SETTINGS (mythica-machina-press#12) — the backend
   // (MapShine.copySceneEffectSettings/pasteSceneEffectSettings,
@@ -132,45 +165,27 @@ export function renderSceneDepartment(container, ctx) {
   // on each effect's own card) — "copy this scene, go paste it on that one"
   // in the same session, nothing persisted between reloads.
   if (typeof ctx.copySceneEffectSettings === 'function' && typeof ctx.pasteSceneEffectSettings === 'function') {
-    const copyPasteCard = realCard(
-      'map',
-      'Copy/paste scene settings',
-      '<p style="margin:0 0 8px; font-size:.72rem; color:var(--ink2)">Copy every effect\'s authored look from this scene, then switch scenes and paste — an in-memory clipboard for this session only.</p>'
+    const copyPasteCard = panel('map', 'Copy/paste scene settings');
+    copyPasteCard.append(
+      el(
+        'p',
+        'msa-note',
+        "Copy every effect's authored look from this scene, then switch scenes and paste — an in-memory clipboard for this session only."
+      )
     );
-    const status = document.createElement('p');
-    Object.assign(status.style, { margin: '0 0 8px', fontSize: '.7rem', color: 'var(--ink2)' });
-    status.textContent = 'Nothing copied yet.';
-    const btnRow = document.createElement('div');
-    Object.assign(btnRow.style, { display: 'flex', gap: '6px' });
-    const mkBtn = (label) => {
-      const b = document.createElement('button');
-      b.textContent = label;
-      Object.assign(b.style, {
-        background: 'var(--bg2, #23262d)',
-        color: 'var(--ink0)',
-        border: '1px solid var(--line)',
-        borderRadius: '6px',
-        padding: '3px 10px',
-        cursor: 'pointer',
-        fontSize: '.72rem',
-      });
-      return b;
-    };
-    const copyBtn = mkBtn('Copy from this scene');
+    const status = statusLine('Nothing copied yet.');
+    const btnRow = el('div', 'msa-row-flex');
+    const copyBtn = smallBtn('Copy from this scene');
     copyBtn.addEventListener('click', () => {
       const res = ctx.copySceneEffectSettings();
-      status.textContent = res.ok
-        ? `Copied ${res.effectIds.length} effect(s) — switch scenes, then Paste.`
-        : `Nothing to copy: ${res.reason}`;
-      status.style.color = res.ok ? 'var(--ok, #6c6)' : 'var(--ink2)';
+      if (res.ok) setTone(status, `Copied ${res.effectIds.length} effect(s) — switch scenes, then Paste.`, true);
+      else setTone(status, `Nothing to copy: ${res.reason}`, null);
     });
-    const pasteBtn = mkBtn('Paste into this scene');
+    const pasteBtn = smallBtn('Paste into this scene');
     pasteBtn.addEventListener('click', () => {
       Promise.resolve(ctx.pasteSceneEffectSettings()).then((res) => {
-        status.textContent = res.ok
-          ? `Pasted ${res.effectIds.length} effect(s) onto this scene.`
-          : `Paste failed: ${res.reason}`;
-        status.style.color = res.ok ? 'var(--ok, #6c6)' : 'var(--fail)';
+        if (res.ok) setTone(status, `Pasted ${res.effectIds.length} effect(s) onto this scene.`, true);
+        else setTone(status, `Paste failed: ${res.reason}`, false);
       });
     });
     btnRow.append(copyBtn, pasteBtn);
@@ -183,10 +198,13 @@ export function renderSceneDepartment(container, ctx) {
   // (getDarknessRealism/setDarknessRealism), same widget canon every other
   // enum in this codebase already renders through.
   if (typeof ctx.getDarknessRealism === 'function' && typeof ctx.setDarknessRealism === 'function') {
-    const darknessCard = realCard(
-      'moon',
-      'Darkness at max',
-      '<p style="margin:0 0 8px; font-size:.72rem; color:var(--ink2)">How dark an unlit scene gets at full night. Same setting as the Remote’s Night darkness slider — saved on this scene, so every player sees it.</p>'
+    const darknessCard = panel('moon', 'Darkness at max');
+    darknessCard.append(
+      el(
+        'p',
+        'msa-note',
+        'How dark an unlit scene gets at full night. Same setting as the Remote’s Night darkness slider — saved on this scene, so every player sees it.'
+      )
     );
     const snapToPreset = (v) => (v <= 0.25 ? '0' : v >= 0.75 ? '1' : '0.5');
     darknessCard.appendChild(
@@ -203,35 +221,18 @@ export function renderSceneDepartment(container, ctx) {
   // console-only. Same semantics as the API: effect params only, instant
   // apply, a world-scoped library the whole table shares.
   if (typeof ctx.listScenePresets === 'function' && typeof ctx.saveScenePreset === 'function') {
-    const presetCard = realCard(
-      'map',
-      'Scene presets',
-      '<p style="margin:0 0 8px; font-size:.72rem; color:var(--ink2)">Save this scene’s whole effect look under a name, then apply it here or on any other scene. Applying replaces every effect setting on this scene at once.</p>'
+    const presetCard = panel('map', 'Scene presets');
+    presetCard.append(
+      el(
+        'p',
+        'msa-note',
+        'Save this scene’s whole effect look under a name, then apply it here or on any other scene. Applying replaces every effect setting on this scene at once.'
+      )
     );
-    const status = document.createElement('p');
-    Object.assign(status.style, { margin: '0 0 8px', fontSize: '.7rem', color: 'var(--ink2)' });
-    const list = document.createElement('div');
-    Object.assign(list.style, { display: 'flex', flexDirection: 'column', gap: '4px', marginBottom: '8px' });
-    const setStatus = (text, ok) => {
-      status.textContent = text;
-      status.style.color = ok === true ? 'var(--ok, #6c6)' : ok === false ? 'var(--fail)' : 'var(--ink2)';
-    };
-    const smallBtn = (label, title) => {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.textContent = label;
-      if (title) b.title = title;
-      Object.assign(b.style, {
-        background: 'var(--bg2, #23262d)',
-        color: 'var(--ink0)',
-        border: '1px solid var(--line)',
-        borderRadius: '6px',
-        padding: '3px 10px',
-        cursor: 'pointer',
-        fontSize: '.72rem',
-      });
-      return b;
-    };
+    const status = statusLine();
+    const list = el('div');
+    Object.assign(list.style, { display: 'flex', flexDirection: 'column', gap: '4px' });
+    const setStatus = (text, ok) => setTone(status, text, ok);
     const renderList = () => {
       list.innerHTML = '';
       let presets = [];
@@ -241,16 +242,13 @@ export function renderSceneDepartment(container, ctx) {
         presets = [];
       }
       if (presets.length === 0) {
-        const empty = document.createElement('span');
-        Object.assign(empty.style, { fontSize: '.7rem', color: 'var(--ink2)' });
-        empty.textContent = 'No scene presets saved yet.';
-        list.appendChild(empty);
+        list.appendChild(el('span', 'msa-note', 'No scene presets saved yet.'));
         return;
       }
       for (const p of presets) {
-        const row = document.createElement('div');
-        Object.assign(row.style, { display: 'flex', alignItems: 'center', gap: '6px', fontSize: '.72rem' });
-        const name = document.createElement('span');
+        const row = el('div', 'msa-row-flex');
+        row.style.fontSize = '.72rem';
+        const name = el('span', '', p.name);
         Object.assign(name.style, {
           flex: '1',
           minWidth: '0',
@@ -258,8 +256,7 @@ export function renderSceneDepartment(container, ctx) {
           textOverflow: 'ellipsis',
           whiteSpace: 'nowrap',
         });
-        name.textContent = p.name;
-        name.title = `${p.effectCount} effect(s)${p.capturedAt ? ` · saved ${new Date(p.capturedAt).toLocaleString()}` : ''}`;
+        name.dataset.tip = `${p.name} — ${p.effectCount} effect(s)${p.capturedAt ? ` · saved ${new Date(p.capturedAt).toLocaleString()}` : ''}`;
         const applyBtn = smallBtn('Apply', `Replace this scene's effect settings with '${p.name}'`);
         applyBtn.addEventListener('click', () => {
           Promise.resolve(ctx.applyScenePreset(p.name)).then((res) =>
@@ -268,31 +265,41 @@ export function renderSceneDepartment(container, ctx) {
               : setStatus(`Apply failed: ${res?.reason}`, false)
           );
         });
-        const delBtn = smallBtn('✕', `Delete '${p.name}' from the shared library`);
-        delBtn.addEventListener('click', () => {
-          if (!window.confirm(`Delete scene preset '${p.name}'? It is shared with the whole table.`)) return;
-          Promise.resolve(ctx.deleteScenePreset(p.name)).then((res) => {
-            if (res?.ok) setStatus(`Deleted '${p.name}'.`, null);
-            else setStatus(`Delete failed: ${res?.reason}`, false);
-            renderList();
-          });
+        // Two-click confirm in place (it used to be a blocking native
+        // confirm()): the preset is shared with the whole table, so the armed
+        // label says so.
+        const delBtn = buildArmButton({
+          icon: 'trash',
+          armedLabel: 'Delete?',
+          title: `Delete '${p.name}' from the shared library`,
+          armedTitle: `Click again to delete '${p.name}' — it is shared with the whole table`,
+          className: 'hbtn',
+          onConfirm: () => {
+            Promise.resolve(ctx.deleteScenePreset(p.name)).then((res) => {
+              if (res?.ok) setStatus(`Deleted '${p.name}'.`, null);
+              else setStatus(`Delete failed: ${res?.reason}`, false);
+              renderList();
+            });
+          },
         });
         row.append(name, applyBtn, delBtn);
         list.appendChild(row);
       }
     };
-    const saveRow = document.createElement('div');
-    Object.assign(saveRow.style, { display: 'flex', gap: '6px' });
-    const nameInput = document.createElement('input');
+    const saveRow = el('div', 'msa-row-flex');
+    const nameInput = el('input', 'msa-input');
     nameInput.type = 'text';
     nameInput.placeholder = 'Preset name';
     nameInput.setAttribute('aria-label', 'Scene preset name');
-    Object.assign(nameInput.style, { flex: '1', minWidth: '0', fontSize: '.72rem' });
+    nameInput.addEventListener('input', () => nameInput.removeAttribute('aria-invalid'));
     const saveBtn = smallBtn('Save', 'Save this scene’s current effect look under this name');
+    saveBtn.classList.add('msa-btn--gold');
     const doSave = () => {
       const presetName = nameInput.value.trim();
       if (!presetName) {
+        nameInput.setAttribute('aria-invalid', 'true');
         setStatus('Type a name first.', false);
+        nameInput.focus();
         return;
       }
       Promise.resolve(ctx.saveScenePreset(presetName)).then((res) => {
@@ -319,21 +326,18 @@ export function renderSceneDepartment(container, ctx) {
   } catch (_) {
     tileMotionSummary = null;
   }
-  const tileMotionBody = tileMotionSummary
-    ? `<p style="margin:0 0 8px; font-size:.72rem; color:var(--ink2)">${tileMotionSummary.enabledCount} of ${tileMotionSummary.totalTileCount} tile(s) animated · ${tileMotionSummary.playing ? 'Playing' : 'Stopped'}</p>`
-    : `<p style="margin:0 0 8px; font-size:.72rem; color:var(--ink2)">Tile motion data not available.</p>`;
-  const tileMotionCard = realCard('play', 'Motion tiles', tileMotionBody);
-  const openBtn = document.createElement('button');
-  openBtn.textContent = 'Open';
-  Object.assign(openBtn.style, {
-    background: 'var(--bg2, #23262d)',
-    color: 'var(--ink0)',
-    border: '1px solid var(--line)',
-    borderRadius: '6px',
-    padding: '3px 10px',
-    cursor: 'pointer',
-    fontSize: '.72rem',
-  });
+  const tileMotionCard = panel('play', 'Motion tiles');
+  tileMotionCard.append(
+    el(
+      'p',
+      'msa-note',
+      tileMotionSummary
+        ? `${tileMotionSummary.enabledCount} of ${tileMotionSummary.totalTileCount} tile(s) animated · ${tileMotionSummary.playing ? 'Playing' : 'Stopped'}`
+        : 'Tile motion data not available.'
+    )
+  );
+  const openBtn = smallBtn('Open');
+  openBtn.style.alignSelf = 'flex-start';
   openBtn.addEventListener('click', () => ctx.openTileMotionDialog?.());
   tileMotionCard.appendChild(openBtn);
   grid.append(tileMotionCard);

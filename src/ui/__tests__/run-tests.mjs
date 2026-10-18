@@ -16,6 +16,7 @@ import { run as runFloorTransition } from './floor-transition.test.mjs';
 import { run as runTokens } from './tokens.test.mjs';
 import { run as runAstrolabeDial } from './astrolabe-dial.test.mjs';
 import { run as runPainterDepartment } from './painter-department.test.mjs';
+import { run as runStudioStyle } from './studio-style.test.mjs';
 import { run as runPaintMode } from './paint-mode.test.mjs';
 
 let passed = 0;
@@ -59,6 +60,7 @@ const suites = [
   ['tokens', runTokens],
   ['astrolabe-dial', runAstrolabeDial],
   ['painter-department', runPainterDepartment],
+  ['studio-style', runStudioStyle],
   // LAST on purpose: paint-mode installs a `document` shim for its toolbar
   // half. It removes it again, but `floor-transition` above asserts the
   // no-DOM path, so ordering it after that suite costs nothing and removes

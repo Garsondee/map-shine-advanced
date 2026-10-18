@@ -30,8 +30,7 @@ import { renderSystemPanel } from '../system-panel.js';
  */
 export function renderSystemDepartment(container, ctx) {
   if (typeof ctx.getSystemPanelCtx !== 'function') {
-    container.innerHTML =
-      '<div style="color:var(--ink2); font-size:.8rem; padding:20px">System settings are not available.</div>';
+    container.innerHTML = '<div class="msa-empty">System settings are not available.</div>';
     return "profile, per-effect enables, and this table's own defaults";
   }
   return renderSystemPanel(container, {

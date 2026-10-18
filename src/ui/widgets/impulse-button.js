@@ -55,7 +55,10 @@ export function buildImpulseButton(decl, { onStatus, showLabel = false } = {}) {
   btn.type = 'button';
   btn.title = planned ? `${decl.label} — ${decl.plannedReason}` : decl.label;
   if (showLabel) {
-    Object.assign(btn.style, { display: 'inline-flex', alignItems: 'center', gap: '6px' });
+    // The Studio's labelled variant takes the shared button look (states, press
+    // feedback) from its stylesheet; the Remote's icon-only corner buttons keep
+    // their own room-scoped styling and never reach this branch.
+    btn.className = 'msa-btn';
     btn.innerHTML = `${iconMarkup(decl.icon)}<span>${decl.label}</span>`;
   } else {
     btn.innerHTML = iconMarkup(decl.icon);

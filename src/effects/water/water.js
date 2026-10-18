@@ -823,6 +823,98 @@ export const WATER_PARAMS = Object.freeze({
     label: 'Sim foam edge softness',
     help: 'How many screen pixels wide the transition is between "not foam" and "solid foam" at minimum, regardless of how tightly the appear/solid band above is set. 0 allows a hard, aliased edge on close zoom; higher values keep the edge visibly soft no matter how far in you zoom.',
   },
+  simFoamSmoothing: {
+    type: 'float',
+    min: 0,
+    max: 4,
+    step: 0.05,
+    default: 1.5,
+    category: 'Shape',
+    label: 'Sim foam smoothing',
+    help: "How softly the foam memory buffer is gathered before it is drawn, measured in cells of the buffer's own grid (roughly 7 map pixels each on a large map). That grid treats a bank or rock as a hard on/off edge, so unsmoothed foam piles up against a staircase of cells — the hard, lumpy, pixelated white line along a shoreline, however smooth the painted water edge is. Raise this to melt the staircase into a soft, wide band that also thins to a translucent film over dry ground; 0 draws the raw grid (hard-edged, though still translucent over dry ground). Past about 3 the foam starts to lose its fine shape.",
+  },
+  // ── SHORELINE FOAM FROM THE MASK + THE ONE FOAM TEXTURE (2026-10-17, tier 4+) —
+  // `water-shore-mask.js`. Defaults pinned equal to that module's constants by a test.
+  shoreFoam: {
+    type: 'float',
+    min: 0,
+    max: 2,
+    step: 0.01,
+    default: 1,
+    category: 'Shape',
+    label: 'Shoreline foam',
+    help: "How strong the foam line along every shore is. It is drawn from the painted water mask itself, at the mask's full resolution, so it follows exactly what was painted — no grid steps, no blocks. 0 turns the shoreline foam off; wakes and crest foam still draw.",
+  },
+  shoreFoamLevel: {
+    type: 'float',
+    min: 0.02,
+    max: 0.9,
+    step: 0.01,
+    default: 0.2,
+    category: 'Shape',
+    label: 'Shoreline foam position',
+    help: 'Where along a soft, gradually painted water edge the foam line sits, as a mask brightness: lower moves it toward the dry end of the fade, higher moves it out into the water. A hard-painted edge is the same place at every value.',
+  },
+  shoreFoamWidthPx: {
+    type: 'float',
+    min: 2,
+    max: 200,
+    step: 1,
+    default: 30,
+    category: 'Shape',
+    label: 'Shoreline foam reach',
+    help: 'How far the foam trails out into the water behind the line, in map pixels, before it has thinned to scattered flecks.',
+  },
+  shoreFoamSwashPx: {
+    type: 'float',
+    min: 0,
+    max: 60,
+    step: 0.5,
+    default: 8,
+    category: 'Motion',
+    label: 'Shoreline foam swash',
+    help: 'How far the foam line slides up and back as the water laps at the shore, in map pixels. Each stretch of shore moves on its own rhythm. 0 holds the line still.',
+  },
+  shoreFoamSoftPx: {
+    type: 'float',
+    min: 0.5,
+    max: 16,
+    step: 0.1,
+    default: 4,
+    category: 'Shape',
+    label: 'Shoreline foam smoothing',
+    help: "How much the painted edge is smoothed before the foam follows it, in map pixels. Raise it if the line picks up the mask's own brush noise or jaggies; lower it to keep tight corners (it rounds them off by about this much).",
+  },
+  foamTexturePx: {
+    type: 'float',
+    min: 4,
+    max: 120,
+    step: 1,
+    default: 26,
+    category: 'Shape',
+    label: 'Foam clump size',
+    help: 'The size of the foam clumps and the bubbles between them, in map pixels. Shared by the shoreline foam, the wakes and the crest foam, which all draw through one texture from water tier 4 up.',
+  },
+  shoreFoamVariation: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.85,
+    category: 'Shape',
+    label: 'Shoreline foam variation',
+    help: 'How uneven the shoreline foam is. At 0 it is the same band all along every shore; raised, each stretch of shore gets its own reach, its own coverage (with real gaps) and its own line weight, all slowly changing over tens of seconds.',
+  },
+  breakSpray: {
+    type: 'float',
+    min: 0,
+    max: 2,
+    step: 0.01,
+    default: 1,
+    category: 'Motion',
+    label: 'Break spray',
+    help: 'Tiny one- and two-pixel flecks of foam that jitter where the current drives into a hard edge — a pier, a rock, a wall — and get carried away downstream. Soft, gradually painted shores never spray. 0 turns it off.',
+  },
 });
 
 /**
@@ -1514,6 +1606,17 @@ export const WATER_DEBUG_CHANNELS = Object.freeze([
       'mostly black = patchiness near 1. Patches should drift/reshape over tens of seconds — a frozen field ' +
       'with the clock running means the time term is not reaching it.',
   }),
+  Object.freeze({
+    n: 31,
+    id: 'foamDensity',
+    label: '30 · Foam density (2026-10-17)',
+    reads:
+      'The foam DENSITY the one procedural foam texture is drawn from (tier 4+, water-shore-mask.js): the ' +
+      'shoreline line from the full-resolution mask, the sim wakes and the crest foam, whichever is strongest. ' +
+      'White = solid foam, grey = scattered clumps, black = none. A shoreline that shows grid steps HERE means ' +
+      'the mask distance handed over to the SDF too close to the edge; flat black below tier 4 is correct (the ' +
+      'old path has no density).',
+  }),
 ]);
 
 // ===========================================================================
@@ -1657,6 +1760,15 @@ export const WATER_PRESETS = Object.freeze({
     simClumpLo: 0,
     simClumpHi: 0.21,
     simClumpAaPx: 12,
+    simFoamSmoothing: 1.5,
+    shoreFoam: 1,
+    shoreFoamLevel: 0.2,
+    shoreFoamWidthPx: 30,
+    shoreFoamSwashPx: 8,
+    shoreFoamSoftPx: 4,
+    foamTexturePx: 26,
+    shoreFoamVariation: 0.85,
+    breakSpray: 1,
   },
 });
 

@@ -83,6 +83,13 @@ export const ICONS = Object.freeze({
   // (mythica-machina-press#626), in the set's own 24px/stroke-only style.
   thermometer: '<path d="M10 14.2V5a2 2 0 0 1 4 0v9.2a4 4 0 1 1-4 0Z"/><path d="M12 9v8.5"/>',
   globe: '<circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M4.8 7.5h14.4M4.8 16.5h14.4"/>',
+  // Not from the mock — drawn 2026-10-18 for the Studio polish pass, in the
+  // set's own 24px/stroke-only style, to replace the colour emoji (📋 💾 🗑)
+  // the effect card's copy/save/delete buttons used: an emoji in a themed
+  // panel ignores the theme entirely and reads as a different design system.
+  copy: '<rect x="8.5" y="8.5" width="11.5" height="11.5" rx="2.2"/><path d="M15.5 8.5V6.2A2.2 2.2 0 0 0 13.3 4H6.2A2.2 2.2 0 0 0 4 6.2v7.1a2.2 2.2 0 0 0 2.2 2.2h2.3"/>',
+  save: '<path d="M5.5 4h10.7L20 7.8v10.7a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18.5v-13A1.5 1.5 0 0 1 5.5 4Z"/><path d="M8 4v5h7V4M8 20v-6h8v6"/>',
+  trash: '<path d="M4.5 7h15M9.5 7V4.5h5V7M6.5 7l.8 12.5h9.4L17.5 7M10 11v5.5M14 11v5.5"/>',
 });
 
 /**

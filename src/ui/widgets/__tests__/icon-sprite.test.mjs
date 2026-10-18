@@ -28,6 +28,38 @@ export function run(t) {
     t.ok(`'${must}' is in the sprite`, must in ICONS);
   }
 
+  // The icons the Studio's own department/widget code names (the copy/save/trash
+  // set was drawn for the 2026-10-18 polish pass to replace colour emoji). A
+  // missing one renders as an empty box with no error anywhere.
+  for (const must of [
+    'copy',
+    'save',
+    'trash',
+    'check',
+    'x',
+    'chev',
+    'reset',
+    'flask',
+    'play',
+    'warn',
+    'camera',
+    'popout',
+    'pin',
+    'brush',
+    'search',
+    'cloud',
+    'rain',
+    'layers',
+    'gem',
+    'map',
+    'moon',
+    'clap',
+    'bolt',
+    'wind',
+  ]) {
+    t.ok(`the Studio's own '${must}' icon is in the sprite`, must in ICONS);
+  }
+
   t.ok(
     'iconMarkup produces the exact <svg class="ico"><use.../></svg> shape',
     iconMarkup('sun') === '<svg class="ico" ><use href="#i-sun"/></svg>'

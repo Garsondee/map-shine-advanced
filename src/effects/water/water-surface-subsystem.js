@@ -1090,6 +1090,15 @@ export function createWaterSurfaceSubsystem({
       p.simClumpLo,
       p.simClumpHi,
       p.simClumpAaPx,
+      p.simFoamSmoothing,
+      p.shoreFoam,
+      p.shoreFoamLevel,
+      p.shoreFoamWidthPx,
+      p.shoreFoamSwashPx,
+      p.shoreFoamSoftPx,
+      p.foamTexturePx,
+      p.shoreFoamVariation,
+      p.breakSpray,
       p.windRipple,
     ].join('|');
     if (key !== lastParamsKey) {
@@ -1156,6 +1165,15 @@ export function createWaterSurfaceSubsystem({
       if (Number.isFinite(p.simClumpLo)) surface.setSimClumpLo(p.simClumpLo);
       if (Number.isFinite(p.simClumpHi)) surface.setSimClumpHi(p.simClumpHi);
       if (Number.isFinite(p.simClumpAaPx)) surface.setSimClumpAaPx(p.simClumpAaPx);
+      if (Number.isFinite(p.simFoamSmoothing)) surface.setSimFoamSmoothing(p.simFoamSmoothing);
+      if (Number.isFinite(p.shoreFoam)) surface.setShoreFoam(p.shoreFoam);
+      if (Number.isFinite(p.shoreFoamLevel)) surface.setShoreFoamLevel(p.shoreFoamLevel);
+      if (Number.isFinite(p.shoreFoamWidthPx)) surface.setShoreFoamWidthPx(p.shoreFoamWidthPx);
+      if (Number.isFinite(p.shoreFoamSwashPx)) surface.setShoreFoamSwashPx(p.shoreFoamSwashPx);
+      if (Number.isFinite(p.shoreFoamSoftPx)) surface.setShoreFoamSoftPx(p.shoreFoamSoftPx);
+      if (Number.isFinite(p.foamTexturePx)) surface.setFoamTexturePx(p.foamTexturePx);
+      if (Number.isFinite(p.shoreFoamVariation)) surface.setShoreFoamVariation(p.shoreFoamVariation);
+      if (Number.isFinite(p.breakSpray)) surface.setBreakSpray(p.breakSpray);
       debugChannel = Number.isFinite(state.debugChannel) ? Math.max(0, Math.round(state.debugChannel)) : 0;
       surface.setDebugChannel(debugChannel);
       enabled = state.enabled !== false;

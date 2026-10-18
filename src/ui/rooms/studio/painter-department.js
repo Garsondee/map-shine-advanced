@@ -253,11 +253,6 @@ export function paintStatusLine({ found = false, painted = false, reach = 'file-
   return { text: '— nothing here yet; this effect needs a mask file', tone: 'idle', icon: null };
 }
 
-/** Status-line colour per tone. Kept beside `paintStatusLine` so a new tone
- * cannot be introduced without a colour, which is how a status line ends up
- * silently inheriting `--ink0`. */
-const TONE_COLOR = { ok: 'var(--ok)', warn: 'var(--warn)', idle: 'var(--ink2)' };
-
 /**
  * @param {HTMLElement} container
  * @param {{
@@ -272,19 +267,11 @@ export function renderPainterDepartment(container, ctx) {
   Object.assign(wrap.style, { display: 'flex', flexDirection: 'column', gap: '14px' });
 
   const notice = document.createElement('div');
-  Object.assign(notice.style, {
-    background: 'var(--bg1)',
-    border: '1px solid var(--line)',
-    borderRadius: 'var(--r-card, 10px)',
-    padding: '10px 12px',
-    fontSize: '.74rem',
-    color: 'var(--ink2)',
-    lineHeight: '1.5',
-  });
+  notice.className = 'msa-notice';
   notice.innerHTML =
-    `<b style="color:var(--ink1)">Paint, then Save.</b> Saving hands your strokes to the mask authority — ` +
+    `<b>Paint, then Save.</b> Saving hands your strokes to the mask authority — ` +
     `not yet live while you're still dragging the brush (a real, separate follow-up).<br>` +
-    `<b style="color:var(--warn)">Not every effect can read a painted mask.</b> Each tile says which it is. ` +
+    `<b class="warn">Not every effect can read a painted mask.</b> Each tile says which it is. ` +
     `An effect marked as reading the mask file wants a full-resolution image beside the map art — ` +
     `painting it saves your strokes and renders nothing, so the tile warns instead of pretending.`;
   wrap.append(notice);
@@ -306,67 +293,40 @@ export function renderPainterDepartment(container, ctx) {
 
     const tile = document.createElement('button');
     tile.type = 'button';
-    Object.assign(tile.style, {
-      // height/minHeight: Foundry's own core stylesheet (public/css/
-      // foundry2.css) carries an unscoped `button { height: var(--button-
-      // size); min-height: var(--button-size) }` (~2em, a toolbar-icon
-      // height) that otherwise wins here — this tile is a bare <button>
-      // with no class, unlike every other Studio button (`.hbtn`, `.rail
-      // button`), which already gets its own explicit, scoped height from
-      // shell.js and so never meets Foundry's rule. Left uncontested, each
-      // tile's box collapsed to ~2em while its real content (title +
-      // suffixes + reach line + status, 4 lines) kept rendering at full
-      // height and spilled down through the grid rows below it — the
-      // "cards overlapping" report (mythica-machina-press#481/#479).
-      // Confirmed in isolation: painter-department.js's own grid/tile code,
-      // rendered standalone with no Foundry stylesheet loaded, lays out
-      // with zero overlap — the collision needed Foundry's CSS in the page
-      // to reproduce.
-      height: 'auto',
-      minHeight: 'auto',
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'flex-start',
-      gap: '6px',
-      textAlign: 'left',
-      background: 'var(--bg1)',
-      border: '1px solid var(--line)',
-      borderRadius: 'var(--r-card, 10px)',
-      padding: '12px 14px',
-      cursor: 'pointer',
-      color: 'var(--ink0)',
-    });
+    // `.msa-tile` (studio-style.js) carries `height:auto` on purpose: Foundry's
+    // own core stylesheet (public/css/foundry2.css) has an unscoped `button {
+    // height: var(--button-size); min-height: var(--button-size) }` (~2em, a
+    // toolbar-icon height) that otherwise wins here — this tile is a bare
+    // <button>, and left uncontested each tile's box collapsed to ~2em while its
+    // real content (title + suffixes + reach line + status, 4 lines) kept
+    // rendering at full height and spilled down through the grid rows below it —
+    // the "cards overlapping" report (mythica-machina-press#481/#479). The
+    // stylesheet's shared button reset now wins that fight for every button in
+    // the room, so this tile no longer needs its own inline copy of the fix.
+    tile.className = 'msa-tile';
     tile.title =
       `Opens the brush on the floor you are viewing, with ${effect.suffixes.join(' / ')} ready to paint. ` +
       verdict.why;
 
     const head = document.createElement('span');
-    Object.assign(head.style, {
-      display: 'flex',
-      alignItems: 'center',
-      gap: '8px',
-      fontWeight: '650',
-      fontSize: '.86rem',
-    });
+    head.className = 'msa-tile-head';
     head.innerHTML = `${iconMarkup('brush')}${effect.title}`;
 
     const suffixLine = document.createElement('span');
+    suffixLine.className = 'msa-tile-suffix';
     suffixLine.textContent = effect.suffixes.join(' / ');
-    Object.assign(suffixLine.style, { fontSize: '.7rem', color: 'var(--ink2)' });
 
     // THE LINE THIS WHOLE FILE EXISTS TO GET RIGHT — what painting this tile
     // will actually do, stated before the click rather than discovered after
     // a save that drew nothing.
     const reachLine = document.createElement('span');
+    reachLine.className = 'msa-tile-reach';
+    reachLine.dataset.reach = verdict.reach;
     reachLine.textContent = verdict.why;
-    Object.assign(reachLine.style, {
-      fontSize: '.68rem',
-      lineHeight: '1.4',
-      color: verdict.reach === 'renders' ? 'var(--ink1)' : 'var(--warn)',
-    });
 
     const statusLine = document.createElement('span');
-    Object.assign(statusLine.style, { fontSize: '.68rem', color: TONE_COLOR[status.tone] });
+    statusLine.className = 'msa-tile-status';
+    statusLine.dataset.tone = status.tone;
     statusLine.innerHTML = `${status.icon ? iconMarkup(status.icon) : ''}${status.text}`;
 
     tile.append(head, suffixLine, reachLine, statusLine);
@@ -375,7 +335,7 @@ export function renderPainterDepartment(container, ctx) {
   }
   if (effects.length === 0) {
     const empty = document.createElement('div');
-    empty.style.cssText = 'color:var(--ink2); font-size:.8rem; padding:20px';
+    empty.className = 'msa-empty';
     empty.textContent = 'No effect declares authoring.paint yet.';
     grid.append(empty);
   }

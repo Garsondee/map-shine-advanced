@@ -5702,13 +5702,14 @@ function install() {
   // SHINE's `getSpecularBackgroundItemId` above. `getWindowMaskItems`
   // (mythica-machina-press#538/#539) is the newer, THIRD seam — see
   // `getSpecularMaskItems`'s own comment just above for the shared reasoning.
-  const { getWindowMaskRect, getWindowMaskUrl, getWindowBackgroundItemId, getWindowMaskItems } = createWindowSeams({
-    maskAuthority,
-    getFloors: () => lastKnownFloors,
-    getItems: () => coverItems,
-    getItemCorners: (item) => maskItemCorners(item),
-    getItemRenderOrder: (item) => maskItemRenderOrder(item),
-  });
+  const { getWindowMaskRect, getWindowMaskUrl, getWindowBackgroundItemId, getWindowMaskItems, getWindowOutdoorsGrid } =
+    createWindowSeams({
+      maskAuthority,
+      getFloors: () => lastKnownFloors,
+      getItems: () => coverItems,
+      getItemCorners: (item) => maskItemCorners(item),
+      getItemRenderOrder: (item) => maskItemRenderOrder(item),
+    });
   // PRISM's tile seam (mythica-machina-press#137) — TILE-ONLY, mirroring
   // `getSpecularMaskItems`'s own per-item door: no floor-level door exists
   // for Prism yet (`prism-seams.js`'s own header), so this is the whole of
@@ -14487,6 +14488,9 @@ function install() {
         // press#538/#539) — see `window-seams.js#getWindowMaskItems`'s own
         // header for why this is a THIRD, separate population.
         getWindowMaskItems,
+        // RAIN ON THE GLASS's one door onto `_Outdoors` (window-seams.js#getWindowOutdoorsGrid): the buildings that
+        // tell a window which way is down the pane. Unwired, rain still falls on the windows as splashes.
+        getWindowOutdoorsGrid,
         getWindowRenderState: windowLight.getRenderState,
         // PRISM's own tile seam (mythica-machina-press#137) — see
         // `createPrismSeams`'s own construction comment above for why this

@@ -47,7 +47,7 @@
  *   texture sizes a placement needs; null defers the item to a later frame).
  * @param {(item: object) => number|null} [args.getItemRenderOrder] - the
  *   item's CURRENT `renderOrder`, same contract as `createFluidSeams`'s own.
- * @returns {{getWindowMaskRect: Function, getWindowMaskUrl: Function, getWindowBackgroundItemId: Function, getWindowMaskItems: Function}}
+ * @returns {{getWindowMaskRect: Function, getWindowMaskUrl: Function, getWindowBackgroundItemId: Function, getWindowMaskItems: Function, getWindowOutdoorsGrid: Function}}
  */
 export function createWindowSeams({ maskAuthority, getFloors, getItems, getItemCorners, getItemRenderOrder }) {
   return {
@@ -61,6 +61,35 @@ export function createWindowSeams({ maskAuthority, getFloors, getItems, getItemC
       const spec = maskAuthority.getDerived('window', floorIndex)?.grid?.spec ?? null;
       if (!spec) return null;
       return { minX: spec.x, minY: spec.y, maxX: spec.x + spec.width, maxY: spec.y + spec.height };
+    },
+
+    /**
+     * The floor's painted `_Outdoors` grid, for the rain-on-glass flow field
+     * (`window-rain-flow.js`): its black blocks are buildings, and "down the
+     * pane" is OUTWARD from them. Only the RAIN reads this; the light itself
+     * never does.
+     *
+     * Asked for with `acknowledgeMissingRequired`: `_Outdoors` is a required
+     * kind, and a floor that never painted one would otherwise throw out of a
+     * per-frame query. The honest degradation here is the catalog's own absent
+     * value (all open air), which the flow derivation reads as "no building
+     * anywhere" and answers with no direction at all: those windows get
+     * splashes and no running drops.
+     *
+     * Returns the grid's `spec`/`data` PLUS the authority's product `version`:
+     * the authority patches grids incrementally, so the array's identity alone
+     * is not a safe cache key for the flow field derived from it, and the
+     * version is what changes when the content does.
+     *
+     * @param {number} floorIndex
+     * @returns {{spec: object, data: Uint8Array, version: number}|null}
+     */
+    getWindowOutdoorsGrid: (floorIndex) => {
+      const product = maskAuthority.getDerived('outdoors', floorIndex, { acknowledgeMissingRequired: true });
+      const grid = product?.grid ?? null;
+      return grid && grid.spec && grid.data
+        ? { spec: grid.spec, data: grid.data, version: product.version ?? 0 }
+        : null;
     },
 
     /**

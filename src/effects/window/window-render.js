@@ -31,6 +31,13 @@
  * strong, and what colour — this shader reads exactly that, cropped to the
  * mask's own AABB and gated to the viewed floor. Nothing here derives a beam.
  *
+ * ⚠️ ONE ADDITION, AND IT IS NOT THE LIGHT: RAIN ON THE GLASS. Rain has to run
+ * DOWN the pane, and "down" for a window is toward the wall it sits in — which
+ * is a fact about the BUILDING, not about the painted cookie. `window-rain.js`
+ * (injected as `rain`) reads a per-pool flow field derived from `_Outdoors`
+ * (`window-rain-flow.js`); this module only adds the offset and gain it returns
+ * (see `buildGlassCookie`). Omit `rain` and none of it is constructed.
+ *
  * ============================================================================
  * ⚠️ THE CLOUD FACTOR IS A SEAM, NOT A FEATURE — READ THIS BEFORE ADDING ONE
  * ============================================================================
@@ -287,6 +294,11 @@ export function windowTierPlan(tier) {
  *   caller and every `transform`-mode/static tile omits it, leaving the
  *   lookup exactly `uv()` as before — see this file's own "THE MASK UV"
  *   comment below.
+ * @param {{build: Function}|null} [args.rain] - `window-rain.js#createWindowRain`'s handle. A JS-TIME branch like
+ *   `glass`: `null`/omitted constructs NO rain nodes, so the compiled shader is exactly what it was before rain
+ *   existed. With it, the cookie is read through the drops' lens offset (added to the glass warp, or to the mask
+ *   UV when there is no glass) and multiplied by the drops' gain. Whether there is rain RIGHT NOW is a runtime
+ *   value inside that handle, never a rebuild.
  * @returns {object} the material plus its setters.
  */
 export function buildWindowSurfaceMaterial({
@@ -332,6 +344,7 @@ export function buildWindowSurfaceMaterial({
   // shader-side when the caller already has the one number this material
   // needs. `null`/omitted ⇒ `float(1)`, a provable no-op.
   cloudNoonBoostNode = null,
+  rain = null,
   strength = WINDOW_DEFAULT_STRENGTH,
   contrast = WINDOW_DEFAULT_CONTRAST,
   glass = true,
@@ -624,6 +637,9 @@ export function buildWindowSurfaceMaterial({
     // mid-grey, which is exactly what their reading guides say "off" looks like.
     let debugGlassHeight = vec3(0.5, 0.5, 0.5);
     let debugGlassOffset = vec3(0.5, 0.5, 0.5);
+    // Built HERE, inside this function, on purpose: the gated build calls this again inside an `Fn()`, and the
+    // rain nodes (with their own `If()`s and flow-texture taps) must be constructed in that same context.
+    const rainNodes = rain ? rain.build() : null;
 
     if (glass) {
       const glassScaleSafe = max(uGlassScale, float(1));
@@ -687,7 +703,9 @@ export function buildWindowSurfaceMaterial({
       // rides the base offset and red/blue sit symmetrically either side of it,
       // so turning the split up separates the channels rather than sliding the
       // whole cookie. World px → mask UV through the subsystem's conversion.
-      const baseOffsetPx = gradWorld.mul(uGlassWarpPx).toVar('winGlassOffsetPx');
+      const glassOffsetPx = gradWorld.mul(uGlassWarpPx).toVar('winGlassOffsetPx');
+      // The drops' lens joins the glass's own warp BEFORE the prism split, so each bead gets a coloured fringe too.
+      const baseOffsetPx = rainNodes ? glassOffsetPx.add(rainNodes.offsetPx).toVar('winOffsetPx') : glassOffsetPx;
       const baseOffsetUv = baseOffsetPx.mul(uUvPerWorldPx).toVar('winGlassOffsetUv');
       const dispersionK = uGlassDispersion.mul(float(GLASS_DISPERSION_SPREAD)).toVar('winGlassDispK');
 
@@ -739,18 +757,31 @@ export function buildWindowSurfaceMaterial({
       // dividing by the live slider would renormalise the picture as it moved,
       // and the channel could then never show "the warp is off" (flat grey),
       // which is the single most useful thing it has to say.
+      // The GLASS's offset alone: the rain's has its own channel, so this one stays honest about what it names.
       debugGlassOffset = vec3(
-        baseOffsetPx.x.div(float(2 * GLASS_DEBUG_OFFSET_REF_PX)).add(float(0.5)),
-        baseOffsetPx.y.div(float(2 * GLASS_DEBUG_OFFSET_REF_PX)).add(float(0.5)),
+        glassOffsetPx.x.div(float(2 * GLASS_DEBUG_OFFSET_REF_PX)).add(float(0.5)),
+        glassOffsetPx.y.div(float(2 * GLASS_DEBUG_OFFSET_REF_PX)).add(float(0.5)),
         float(0.5)
       );
     } else {
       // NO GLASS: one tap, monochrome presence — byte-for-byte the pre-glass
       // effect, and a visibly smaller compiled shader.
-      tapG = sampleCookieAt(maskUv, 'win');
+      // No glass, so no warp to add the drops' lens to: read the mask displaced by it directly.
+      tapG = sampleCookieAt(
+        rainNodes ? maskUv.add(rainNodes.offsetPx.mul(uUvPerWorldPx)).toVar('winRainMaskUv') : maskUv,
+        'win'
+      );
       cookie = tapG.cookie.mul(tapG.presence).toVar('winCookie');
     }
-    return { tapG, cookie, causticGain, debugGlassHeight, debugGlassOffset };
+    return {
+      tapG,
+      cookie,
+      causticGain,
+      debugGlassHeight,
+      debugGlassOffset,
+      rainNodes,
+      rainGain: rainNodes ? rainNodes.gain : null,
+    };
   }
 
   // UNGATED — the debug material's own channels must never lie about the
@@ -861,11 +892,15 @@ export function buildWindowSurfaceMaterial({
           const out = vec3(0, 0, 0).toVar('winCookieTintedGated');
           If(visibility01.greaterThan(float(0)), () => {
             const gated = buildGlassCookie();
-            out.assign(gated.cookie.mul(gated.causticGain));
+            const gatedLit = gated.cookie.mul(gated.causticGain);
+            out.assign(gated.rainGain ? gatedLit.mul(gated.rainGain) : gatedLit);
           });
           return out;
         })().toVar('winCookieTinted')
-      : debugGlass.cookie.mul(debugGlass.causticGain).toVar('winCookieTinted');
+      : (debugGlass.rainGain
+          ? debugGlass.cookie.mul(debugGlass.causticGain).mul(debugGlass.rainGain)
+          : debugGlass.cookie.mul(debugGlass.causticGain)
+        ).toVar('winCookieTinted');
 
   // ── THE CLOUD SEAM — see this module's header ────────────────────────────
   //
@@ -1008,6 +1043,10 @@ export function buildWindowSurfaceMaterial({
     caustic: vec3(1, 1, 1).mul(debugGlass.causticGain.mul(float(0.5))),
     rawLight: rawLight.mul(float(WINDOW_DEBUG_BOOST)),
     final: cookieLight.mul(float(WINDOW_DEBUG_BOOST)),
+    // Rain's three views. Without rain they are neutral: black, black, and mid-grey (gain 1, offset 0).
+    rainFlow: debugGlass.rainNodes ? debugGlass.rainNodes.debugFlow : vec3(0, 0, 0),
+    rainFlowAux: debugGlass.rainNodes ? debugGlass.rainNodes.debugAux : vec3(0, 0, 0),
+    rainDrops: debugGlass.rainNodes ? debugGlass.rainNodes.debugDrops : vec3(0.5, 0.5, 0.5),
   };
   // ⚠️ ARITHMETIC, NOT `select()`. This shared the specular selector's exact
   // shape and therefore its exact defect — every channel's maths inside its own
@@ -1135,6 +1174,9 @@ export function buildWindowSurfaceMaterial({
       uDebugChannel.value = Number.isFinite(n) ? Math.max(0, Math.round(n)) : 0;
     },
     floorGateCompiled: !!depthTexture,
+    /** The rain handle this material was built with (or null), so the subsystem pushes weather to the one that is live. */
+    rain,
+    rainCompiled: !!rain,
     // Whether the production material actually took the gated build — false
     // whenever `gateGlass` was off OR there was no depth texture to gate on,
     // matching `cookieTinted`'s own condition exactly rather than echoing

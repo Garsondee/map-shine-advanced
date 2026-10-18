@@ -69,6 +69,8 @@
  * @module effects/critters/critter-zone
  */
 
+import { EDT_INF, squaredDistanceField } from '../../scene/index.js';
+
 /** Floats per field cell: coverage01, signedDistancePx, gradX, gradY. */
 export const ZONE_CELL_STRIDE = 4;
 
@@ -92,14 +94,6 @@ export const ZONE_FIELD_CELLS_MAX = (ZONE_GRID_SIDE_MAX + 2 * ZONE_EDGE_CELLS) *
 
 /** How many distinct non-zero stamps a slot cycles through (see {@link createSlotStamper}). */
 export const STAMP_STEPS = 1024;
-
-/**
- * A stand-in for "no source" in the distance transform. Finite on purpose: with
- * Infinity the parabola intersection `(f[q]+q²) − (f[p]+p²)` becomes ∞−∞ = NaN.
- * 1e12 is large against any grid (a 512-cell side squares to 2.6e5) yet small
- * enough that float64 still resolves the q² terms exactly.
- */
-const EDT_INF = 1e12;
 
 /** Default paint value (0..1) counted as "in the zone". Matches fire's spawn gate. */
 export const DEFAULT_ZONE_THRESHOLD = 0.18;
@@ -133,70 +127,6 @@ export function zoneGridSignature(grid) {
     h = Math.imul(h, 16777619) >>> 0;
   }
   return h === 0 ? 1 : h;
-}
-
-/**
- * One 1D pass of the exact squared-distance transform (Felzenszwalb &
- * Huttenlocher 2012, "Distance Transforms of Sampled Functions", fig. 1).
- * `f` holds 0 at sources and EDT_INF elsewhere (later passes feed it partial
- * results); `out` receives the squared distance to the nearest source along the
- * line. `v`/`z` are caller-owned scratch so the 2D driver allocates once.
- *
- * @param {Float64Array} f @param {number} n @param {Float64Array} out
- * @param {Int32Array} v @param {Float64Array} z
- */
-function distance1d(f, n, out, v, z) {
-  let k = 0;
-  v[0] = 0;
-  z[0] = -EDT_INF;
-  z[1] = EDT_INF;
-  for (let q = 1; q < n; q++) {
-    let s = (f[q] + q * q - (f[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k]);
-    while (s <= z[k]) {
-      k--;
-      s = (f[q] + q * q - (f[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k]);
-    }
-    k++;
-    v[k] = q;
-    z[k] = s;
-    z[k + 1] = EDT_INF;
-  }
-  k = 0;
-  for (let q = 0; q < n; q++) {
-    while (z[k + 1] < q) k++;
-    const d = q - v[k];
-    out[q] = d * d + f[v[k]];
-  }
-}
-
-/**
- * Squared Euclidean distance (in CELLS) from every cell to the nearest cell whose
- * `isSource` flag is 1. Two separable passes, O(cells).
- *
- * @param {Uint8Array} isSource - cols*rows, 1 = distance 0.
- * @param {number} cols @param {number} rows
- * @returns {Float64Array} cols*rows squared distances (≥ EDT_INF/2 means "no source anywhere").
- */
-function squaredDistanceField(isSource, cols, rows) {
-  const out = new Float64Array(cols * rows);
-  const maxSide = Math.max(cols, rows);
-  const f = new Float64Array(maxSide);
-  const d = new Float64Array(maxSide);
-  const v = new Int32Array(maxSide);
-  const z = new Float64Array(maxSide + 1);
-  // Columns first: vertical distance to the nearest source in the same column.
-  for (let x = 0; x < cols; x++) {
-    for (let y = 0; y < rows; y++) f[y] = isSource[y * cols + x] ? 0 : EDT_INF;
-    distance1d(f, rows, d, v, z);
-    for (let y = 0; y < rows; y++) out[y * cols + x] = d[y];
-  }
-  // Then rows, feeding the vertical result in as the sampled function.
-  for (let y = 0; y < rows; y++) {
-    for (let x = 0; x < cols; x++) f[x] = out[y * cols + x];
-    distance1d(f, cols, d, v, z);
-    for (let x = 0; x < cols; x++) out[y * cols + x] = d[x];
-  }
-  return out;
 }
 
 /** Interleave the low 16 bits of x and y into a Z-order (Morton) key. */

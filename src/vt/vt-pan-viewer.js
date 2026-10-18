@@ -1357,6 +1357,7 @@ export async function startVtPanViewer({
   getWindowMaskRect,
   getWindowBackgroundItemId,
   getWindowMaskItems,
+  getWindowOutdoorsGrid,
   getWindowRenderState,
   // PRISM (mythica-machina-press#137) — TILE-ONLY, mirroring
   // `getSpecularMaskItems`'s own per-item seam (no floor-level door exists
@@ -1512,6 +1513,9 @@ export async function startVtPanViewer({
   // default and the effect behaves exactly as it would with `depthTexture`
   // itself unwired — inert by construction, not silently broken.
   getWindowBackgroundItemId ??= () => null;
+  // RAIN ON THE GLASS's door onto `_Outdoors` (`window-seams.js#getWindowOutdoorsGrid`): which way is down the pane
+  // comes from the buildings. Unwired (the torture fixture) windows still get rain as splashes, just no running drops.
+  getWindowOutdoorsGrid ??= () => null;
   // TILES with their OWN authored `_Window` file (mythica-machina-
   // press#538/#539) — a THIRD population, alongside the two seams above,
   // never a replacement for either (see `window-seams.js#
@@ -13544,6 +13548,10 @@ export async function startVtPanViewer({
         // call, so capturing `.env.sun` here would freeze the tint at whatever
         // hour the viewer booted at.
         getEnvSun: () => lastEnvSnapshot?.env?.sun ?? null,
+        // RAIN ON THE GLASS: the weather, the sim clock and the wind, as a GETTER for the same reason (the snapshot
+        // is REASSIGNED every frame), plus the buildings that say which way is down the pane.
+        getEnv: () => lastEnvSnapshot?.env ?? null,
+        getWindowOutdoorsGrid,
         // THE OUTSIDE-AMBIENT CEILING (2026-08-09) — a GETTER for the same
         // reason: `lastAmbientColors`/`lastGlobalLightFloor` are REASSIGNED
         // every `runLightAccumulatePass()` call. `.background` (raised by any

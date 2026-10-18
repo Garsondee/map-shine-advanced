@@ -180,6 +180,149 @@ export const WINDOW_PARAMS = Object.freeze({
     label: 'Pattern seed',
     help: 'Moves this pane to a different part of the glass. Change it when two windows on one map are showing the same lumps.',
   },
+
+  // ── RAIN ON THE GLASS (window-rain.js). Every one of these is read by window-surface-subsystem.js, which pushes
+  // it into the shader or into the flow-field derivation; the water itself follows the weather on its own. ────────
+  rainResponse: {
+    type: 'float',
+    min: 0,
+    max: 2,
+    step: 0.01,
+    default: 1,
+    category: 'Rain',
+    label: 'Rain on the glass',
+    help: 'How much rain shows on the windows. It follows the weather on its own: no rain, no drops. This scales how wet the glass gets for the rain that is falling. 0 switches rain on glass off; above 1 makes light rain read as heavier.',
+  },
+  rainDropScalePx: {
+    type: 'float',
+    min: 12,
+    max: 120,
+    step: 1,
+    default: 40,
+    category: 'Rain',
+    label: 'Drop size',
+    help: 'The size of a typical bead of water, in map pixels. The large drops are about this size and the small ones half of it.',
+  },
+  rainSplatDensity: {
+    type: 'float',
+    min: 0,
+    max: 2,
+    step: 0.01,
+    default: 1,
+    category: 'Rain',
+    label: 'Drop count',
+    help: 'How many drops land and cling to the glass. Splashes already grow from a few in a drizzle to a crowd in a storm; this scales that. 0 = none.',
+  },
+  rainRefraction: {
+    type: 'float',
+    min: 0,
+    max: 2,
+    step: 0.01,
+    default: 1,
+    category: 'Rain',
+    label: 'Drop lens',
+    help: 'How much each bead bends the light behind it, the wobble you see in the light pool. 0 leaves the light shape alone.',
+  },
+  rainCaustic: {
+    type: 'float',
+    min: 0,
+    max: 2,
+    step: 0.01,
+    default: 0.8,
+    category: 'Rain',
+    label: 'Drop highlight',
+    help: 'The bright spot each bead of water focuses into the light.',
+  },
+  rainRimDarken: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.35,
+    category: 'Rain',
+    label: 'Drop shadow',
+    help: 'How dark the edge of each bead and each wet streak is. This is the small, varying dimming the light gets under rain.',
+  },
+  rainSliders: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.7,
+    category: 'Rain',
+    label: 'Running drops',
+    help: 'How many drops run down the glass toward the sill. They need the outdoors mask (the buildings) to know which way is down. 0 = no running drops, only splashes.',
+  },
+  rainSlideSpeed: {
+    type: 'float',
+    min: 0,
+    max: 3,
+    step: 0.01,
+    default: 1,
+    category: 'Rain',
+    label: 'Run speed',
+    help: 'How fast the running drops slide. They stick, then slip, then stick again, so this is the pace of the slips.',
+  },
+  rainTrail: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.6,
+    category: 'Rain',
+    label: 'Wet trails',
+    help: 'The thin wet streak a running drop leaves behind it. 0 = none.',
+  },
+  rainProjectionStretch: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.35,
+    category: 'Rain',
+    label: 'Drop stretch',
+    help: 'Stretches each drop along the way the water runs, the way a window thrown onto the floor is stretched. 0 = round drops.',
+  },
+  rainCornerEasePx: {
+    type: 'float',
+    min: 8,
+    max: 200,
+    step: 1,
+    default: 48,
+    category: 'Rain',
+    label: 'Corner blend',
+    help: 'Around a building corner, how far the running direction takes to turn, in map pixels. Small gives a sharp switch between the two walls; large a long gentle blend. Needs the outdoors mask.',
+  },
+  rainWindwardBias: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.6,
+    category: 'Rain',
+    label: 'Wind-driven rain',
+    help: 'How much the wind decides which windows get wet. At 1 the windows facing into the wind stream with water and the sheltered ones stay almost dry.',
+  },
+  rainSheeting: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.6,
+    category: 'Rain',
+    label: 'Storm sheeting',
+    help: 'In the heaviest rain, a slow sheet of water runs over the glass and dims the light unevenly. 0 = none.',
+  },
+  rainLingerSec: {
+    type: 'float',
+    min: 2,
+    max: 180,
+    step: 1,
+    default: 40,
+    category: 'Rain',
+    label: 'Drying time',
+    help: 'How long beads cling to the glass after the rain stops, in seconds. Longer is a window that stays wet.',
+  },
 });
 
 /**
@@ -320,6 +463,41 @@ export const WINDOW_DEBUG_CHANNELS = Object.freeze([
       'before this effect touched it — nothing left in this effect alone can fix that (see window-' +
       'cookie.js#shoulderedContribution`s own header for the honest limit).',
   }),
+  Object.freeze({
+    n: 13,
+    id: 'rainFlow',
+    label: '13 · Rain flow direction',
+    reads:
+      'Which way is DOWN THE PANE, per window pool, as a colour: R = 0.5 + 0.5x and G = 0.5 + 0.5y of the ' +
+      'direction the water runs (toward the wall the window sits in, i.e. outward from the building), so ' +
+      'east reads red, south green, west dark and north dark. Blue is the pane height: 0 at the sill, 1 at ' +
+      'the far end of the pool. BLACK over a pool means no direction was found (no outdoors mask, the pool ' +
+      'is not inside a building, or it sits between two opposite walls): that pool gets splashes and no ' +
+      'running drops. A south-wall window that does not read green is an inverted field — see ' +
+      'window-rain-flow.js.',
+  }),
+  Object.freeze({
+    n: 14,
+    id: 'rainFlowAux',
+    label: '14 · Rain facet blend / confidence / height',
+    reads:
+      'R = how far a pool near a corner has blended from its first facet to its second (0 = all first, ' +
+      '1 = all second); G = how honest the direction is (1 = fully, 0 = none); B = pane height. A straight ' +
+      'wall is black in R. At a building corner R should ramp smoothly from 0 to 1 across it: a hard edge ' +
+      'there means Corner blend is too small.',
+  }),
+  Object.freeze({
+    n: 15,
+    id: 'rainDrops',
+    label: '15 · Rain drops (gain, offset)',
+    reads:
+      'The rain as the shader adds it. R = brightness gain / 2 (so mid-red is 1.0, no change), G and B = ' +
+      'the lens offset in x and y (mid = 0 px, full scale = 24 px either way). A dry pane is flat ' +
+      '(0.5, 0.5, 0.5). Beads should read as a bright core with a dark rim in R and a small ' +
+      'push-pull in G/B; running drops should be the same shape stretched along the flow of channel 13. ' +
+      'Nothing at all while it is raining means the rain amount is 0 (check Rain on the glass and the ' +
+      'weather) or this tier does not compile rain.',
+  }),
 ]);
 
 /** Channel 12's (and 11's) amplification — see their own reading guides above. */
@@ -391,7 +569,10 @@ export const WINDOW = Object.freeze({
         'compiled in unconditionally at every profile. Below this rung, tier 0 alone is byte-identical ' +
         "to what the author's `glassWarpPx = 0` already produced (every glass term vanishes exactly " +
         'there) — this rung is the SAME picture, minus the five taps it costs to prove it, restored at ' +
-        'the profile a player has NOT opted below.',
+        'the profile a player has NOT opted below. RAIN ON THE GLASS rides this rung too ' +
+        '(window-rain.js): when the weather is rain, beads of water lens the light, drops run down the ' +
+        'pane toward the wall, and a storm sheets water over it. It costs nothing dry (one uniform ' +
+        'branch) and is not compiled below this rung.',
     }),
   ]),
   deferredRungs: Object.freeze([

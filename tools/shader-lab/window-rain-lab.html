@@ -1,0 +1,83 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Window rain lab</title>
+    <style>
+      body {
+        background: #111;
+        color: #ccc;
+        font: 12px monospace;
+        margin: 8px;
+      }
+      #wrap {
+        display: flex;
+        gap: 10px;
+        align-items: flex-start;
+      }
+      canvas {
+        display: block;
+        background: #000;
+        max-width: 100%;
+      }
+      #left {
+        flex: none;
+      }
+      #panel {
+        width: 340px;
+        flex: none;
+        max-height: 1040px;
+        overflow-y: auto;
+      }
+      #panel h4 {
+        margin: 10px 0 4px;
+        color: #9c9;
+      }
+      #panel label {
+        display: grid;
+        grid-template-columns: 130px 1fr 44px;
+        gap: 4px;
+        align-items: center;
+        margin: 2px 0;
+      }
+      #panel select,
+      #panel button {
+        font: inherit;
+      }
+      #windowRainStatus {
+        white-space: pre-wrap;
+        max-height: 220px;
+        overflow: auto;
+        margin: 6px 0 0;
+        color: #8f8;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="wrap">
+      <div id="left">
+        <canvas id="windowRainView" width="1024" height="1024"></canvas>
+        <pre id="windowRainStatus">loading…</pre>
+      </div>
+      <div id="panel">
+        <h4>Window rain bench</h4>
+        <div>
+          <select id="windowRainScenario"></select>
+          <button id="windowRainRun">Run scenario</button>
+        </div>
+        <div style="margin-top: 6px">
+          <button id="windowRainDraw">Redraw</button>
+          <button id="windowRainPlay">Play</button>
+          <label style="display: inline">tier <select id="windowRainTier"><option value="glass">glass</option><option value="cookie">cookie</option></select></label>
+        </div>
+        <h4>Weather</h4>
+        <div id="windowRainWeather"></div>
+        <h4>Rain dials (WINDOW_PARAMS)</h4>
+        <div id="windowRainDials"></div>
+        <h4>Debug channel</h4>
+        <div id="windowRainChannel"></div>
+      </div>
+    </div>
+    <script type="module" src="/tools/shader-lab/window-rain-lab.js"></script>
+  </body>
+</html>

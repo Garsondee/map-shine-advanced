@@ -108,3 +108,7 @@ export {
 // replacing vt/scene-attr.js's light-elevation gate. A rank is exactly
 // sortByLayer's existing ordinal, made queryable.
 export { createDepthAuthority, BELOW_EVERYTHING } from './depth-authority.js';
+
+// THE EXACT DISTANCE TRANSFORM on a byte grid — one implementation, shared by critter zones and the rain-on-glass
+// flow field (it lived privately inside critter-zone.js until a second consumer needed it).
+export { squaredDistanceField, EDT_INF } from './grid-edt.js';

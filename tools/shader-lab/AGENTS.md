@@ -356,6 +356,49 @@ shipped layers' worst step per quarter pixel went 1.0 → 0.004.) A real map's m
 junction at them from the worktree's `tools/shader-lab/dev/` — and **remove the junction with
 `[System.IO.Directory]::Delete(path)` before `git worktree remove`**, or the delete follows it into the map folder.
 
+## 12d. The window-rain bench — rain on window light, running down toward the wall
+
+A standalone page (not a bench on the shared `index.html`): `/tools/shader-lab/window-rain-lab.html`.
+Start the lab **from your worktree** (`SHADER_LAB_PORT=8951 node tools/shader-lab/serve.mjs`), open that page, then
+`window.lab.run('window-rain', '<scenario>')`. It builds a synthetic house (a building painted black in an
+`_Outdoors`-style grid, one pool of window light against each wall and one at a corner) and renders the REAL
+`buildWindowSurfaceMaterial` with the REAL `createWindowRain` handle and the REAL `deriveWindowRainFlow`. The page also
+has live sliders for the weather and every `Rain` dial (generated from `WINDOW_PARAMS`), a Play button that runs the clock,
+a tier switch (glass / cookie) and the debug channels 13-15.
+
+| Scenario | What it proves (measured, not asserted) |
+| --- | --- |
+| `dry-is-identity` | A dry pane is **byte-identical** to a material built with no rain handle at all (0 differing bytes), at both tiers; and rain does change the picture, so that is not a vacuous pass. |
+| `flow-texture-orientation` | Reads the flow field back through debug channel 13 and checks every pool reports its own wall's direction (south green, north dark green, east red, west dark red), pane height 0 at the sill, the corner blend ramping across its diagonal. A Y-flip in the texture sampling would fail it loudly. |
+| `twin-parity` | The GPU's gain and lens offset (debug channel 15) against `evalWindowRainPixel`, 65,536 pixels x 3 weathers. **Expect 0 mismatches**, worst gain error ~0.005 and offset ~0.12 px (8-bit readout quantisation). |
+| `slide-direction-per-side` | The running drops tracked frame to frame by **block matching**, per wall, sliders only: south must travel +y, north -y, east +x, west -x. Expect cosine ~1.000. (Takes ~16 s: 320 renders and a lot of SAD.) |
+| `corner-no-tear` | Gradient energy of the sliding-drop pattern in a band along the corner bisector against the rest of the pool; expect a ratio ~1.1. A lattice rotated per pixel tears there and scores far higher. |
+| `intensity-ladder` | Changed-pixel fraction grows with the rain (0.1% -> 66%) and a storm costs the light ~7%. Saves `ladder.png`. |
+| `cookie-tier-rain` | The no-glass build (one mask tap) still shows rain, by displacing the mask read directly. |
+| `weather-never-rebuilds` | Sweeps weather, wind, clocks and every dial and rewrites the flow textures in place while counting compiled pipelines: it must stay flat (7 -> 7). |
+
+Diagnostic: `window.windowRainBench.compareRegion(cfg, {x0,y0,x1,y1})` returns the GPU's and the twin's gain/offset as
+arrays for one weather, so you can read actual numbers around one drop. `dumpShader()` and `rebuild({glass, withRain})` give
+the WGSL either side of the rain subgraph.
+
+Things this bench learned that are worth carrying into any new shader that has a CPU twin:
+
+- **A float hash is not an oracle.** The first parity run failed 2.6% / 5.1% of pixels (drizzle at t=12 passed at 0.3%), and
+  the diagnosis was not a shader bug: the sine-free float hash multiplies two numbers near 1e2 as its last step, so float32
+  differs from float64 by ~3e-3, and anything that then does `floor(clock / hashedPeriod)` flips its cycle index in ~8% of
+  cells by t=100 s. The fix was an **integer hash** (`hashU32`, wrapping u32 multiplies = `Math.imul`): bit-exact on both
+  sides, so parity went to **0 mismatches**, and as a side effect every player's GPU now draws the same drops. If a twin
+  disagrees on a few percent of pixels and means agree, suspect chaotic amplification of a precision difference before
+  suspecting the transcription.
+- **Time-dependent speeds must be integrated, not multiplied.** A slide speed that multiplied absolute time inside the
+  shader would teleport every drop each time the rain intensity moved; the shader reads a `slideClock` the caller
+  integrates against the current speed.
+- **The readback of this render target is Y-flipped**, as the glass bench also found; the fixture is deliberately asymmetric
+  (south pool 320 wide, north 192) so `calibrate()` can establish it.
+- **`renderWith` restores the state afterwards**, so anything computed from `state` AFTER it returns (e.g. the twin's clocks)
+  is the restored value, not the one the frame was drawn with. `compareRegion` reads them from the `cfg` it was given.
+- Lab-green is **BUILT (unverified)**. Only the author, on a real scene with real weather, says LIVE.
+
 ## 13. Known-good smoke test
 
 ```js

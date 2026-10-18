@@ -129,4 +129,30 @@ export function run(t) {
     'with no getItems/getItemCorners wired, getWindowMaskItems returns [] rather than throwing',
     bare.getWindowMaskItems(0).length === 0
   );
+
+  // ── getWindowOutdoorsGrid — the rain flow field's only door onto _Outdoors ──
+  {
+    const calls = [];
+    const grid = { spec: { w: 4, h: 4, x: 0, y: 0, width: 80, height: 80 }, data: new Uint8Array(16) };
+    const authority = {
+      getDerived(id, floorIndex, opts) {
+        calls.push({ id, floorIndex, opts });
+        if (floorIndex === 0) return { grid, version: 3 };
+        if (floorIndex === 1) return { grid: { spec: null, data: new Uint8Array(4) }, version: 3 };
+        return null;
+      },
+    };
+    const seams = createWindowSeams({ maskAuthority: authority, getFloors: () => [FLOOR0] });
+    const served = seams.getWindowOutdoorsGrid(0);
+    ok(
+      'getWindowOutdoorsGrid returns the floor’s outdoors grid, spec, data and the authority’s version',
+      served.spec === grid.spec && served.data === grid.data && served.version === 3
+    );
+    ok(
+      'it asks for the raw outdoors kind and acknowledges a missing required mask (a per-frame query must not throw)',
+      calls[0].id === 'outdoors' && calls[0].floorIndex === 0 && calls[0].opts?.acknowledgeMissingRequired === true
+    );
+    ok('a floor with no product answers null', seams.getWindowOutdoorsGrid(7) === null);
+    ok('a grid with no spec is not served', seams.getWindowOutdoorsGrid(1) === null);
+  }
 }

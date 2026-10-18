@@ -48,8 +48,54 @@ import {
 import { QUAD_UVS, QUAD_INDICES, buildQuadPositions } from '../../scene/index.js';
 import { computeSeedOffset } from './window-glass.js';
 import { WINDOW_DEFAULT_AMBIENT_CEILING } from './window-cookie.js';
+import {
+  createWindowRain,
+  resolveRainFrame,
+  rainKindWeight,
+  stepWindowWetness,
+  WINDOW_RAIN_DEFAULTS,
+} from './window-rain.js';
+import { deriveWindowRainFlow, buildWindowPresenceGrid, RAIN_FLOW_DEFAULT_EASE_PX } from './window-rain-flow.js';
+import { windFlowVector } from '../../world/index.js';
 
 const log = createLogger('WindowSurface');
+
+/** The first ladder rung that compiles rain on the glass (the `glass` rung and up; the bare `cookie` rung does not). */
+const WINDOW_RAIN_MIN_TIER = 1;
+
+/** Rain's clocks wrap here, in sim seconds (about 28 hours). float32 keeps its sub-millisecond phase well inside it. */
+const RAIN_CLOCK_WRAP_SEC = 100000;
+
+/** The longest frame step the sliding drops' clock will take, so a stalled tab cannot teleport every drop. */
+const RAIN_SLIDE_DT_MAX_SEC = 0.25;
+
+const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
+
+/**
+ * The author's rain dials, resolved from the render state's params with the effect's own defaults standing in for
+ * anything missing (a Node harness passes `params: {}`).
+ * @param {object} p
+ */
+function resolveRainLook(p) {
+  const D = WINDOW_RAIN_DEFAULTS;
+  const n = (v, d) => (Number.isFinite(v) ? v : d);
+  return {
+    response: n(p.rainResponse, D.response),
+    dropScalePx: n(p.rainDropScalePx, D.dropScalePx),
+    splatDensity: n(p.rainSplatDensity, D.splatDensity),
+    refraction: n(p.rainRefraction, D.refraction),
+    caustic: n(p.rainCaustic, D.caustic),
+    rimDarken: n(p.rainRimDarken, D.rimDarken),
+    sliders: n(p.rainSliders, D.sliders),
+    slideSpeed: n(p.rainSlideSpeed, D.slideSpeed),
+    trail: n(p.rainTrail, D.trail),
+    projectionStretch: n(p.rainProjectionStretch, D.projectionStretch),
+    windwardBias: n(p.rainWindwardBias, D.windwardBias),
+    sheeting: n(p.rainSheeting, D.sheeting),
+    lingerSec: n(p.rainLingerSec, D.lingerSec),
+    cornerEasePx: n(p.rainCornerEasePx, RAIN_FLOW_DEFAULT_EASE_PX),
+  };
+}
 
 /** Padding on the measured AABB, world px. Mirrors `SPECULAR_BOUNDS_PAD_PX`:
  * the mask uploads at `WINDOW_MASK_IMAGE_SCALE`, so the outermost painted
@@ -136,6 +182,12 @@ const WINDOW_MATERIAL_SIDE_NAMES = Object.freeze({ 0: 'front', 1: 'back', 2: 'do
  *   window-light ceiling at whatever the sky looked like at construction.
  *   `null`/malformed falls back to `WINDOW_DEFAULT_AMBIENT_CEILING` — see
  *   `window-render.js#uAmbientCeiling`'s own doc.
+ * @param {() => (object|null)} [args.getEnv] - a GETTER for the viewer's env snapshot (`world/environment.js`), for
+ *   the rain: `weather.precip01`/`precipKind`/`precipMixWeight`, `time.tMs`/`dtSec`, `wind.*`. A getter for the same
+ *   reason as `getEnvSun`: the viewer REASSIGNS its snapshot every frame. `null` means a dry, still day.
+ * @param {(floorIndex: number) => ({spec: object, data: Uint8Array, version: number}|null)} [args.getWindowOutdoorsGrid]
+ *   - `window-seams.js#getWindowOutdoorsGrid`: the floor's `_Outdoors` grid, from which the rain's "which way is down
+ *   the pane" field is derived (only when it first rains). `null` means windows get splashes and no running drops.
  * @param {*} [args.profiler] - so `sync()` can bracket its own per-frame cost
  *   (`light.windowSync` — perf-instrumentation-audit-2026-08-12: this ran
  *   with zero profiler coverage despite pushing a per-frame depth-authority
@@ -165,6 +217,8 @@ export function createWindowSurfaceSubsystem({
   getWindowRenderState,
   getEnvSun,
   getAmbientCeilingRgb,
+  getEnv,
+  getWindowOutdoorsGrid,
   profiler = null,
 }) {
   // ⚠️ `seams/viewer-wired` exists because water shipped exactly this shape
@@ -173,6 +227,8 @@ export function createWindowSurfaceSubsystem({
   getWindowRenderState ??= () => ({ enabled: true, params: {}, debugChannel: 0 });
   getEnvSun ??= () => null;
   getAmbientCeilingRgb ??= () => null;
+  getEnv ??= () => null;
+  getWindowOutdoorsGrid ??= () => null;
   resolveExpectedDepth ??= () => 0;
 
   /** A dedicated scene — see the header. */
@@ -212,6 +268,57 @@ export function createWindowSurfaceSubsystem({
   let maskReloadHits = 0;
   let maskReloadMisses = 0;
 
+  // ── RAIN ON THE GLASS ─────────────────────────────────────────────────────
+  // Declared BEFORE `buildSurfaceForTier` runs for the first time below: that call builds the rain handle, which
+  // needs the neutral flow textures, and a `let` read before its declaration is a TDZ error.
+  /** How wet the glass is, 0..1: rises in rain, lingers after it (`stepWindowWetness`). */
+  let wet01 = 0;
+  /** Sim seconds integrated against the CURRENT slide speed: a speed that multiplied absolute time would
+   * teleport every running drop each time the rain intensity moved. */
+  let slideClock = 0;
+  let lastRainTMs = null;
+  let rainLookKey = '';
+  let rainReport = { rain01: 0, wet01: 0, presence: 0 };
+  /** The window mask's decoded pixels (RGBA; the SAME array the texture wraps, never mutated) - what the flow
+   * field pools window presence from. */
+  let maskPixels = null;
+  /** Neutral 1x1 flow textures (confidence 0: splats only) until a field is derived. */
+  let neutralDirs = null;
+  let neutralAux = null;
+  /** The derived flow field's uploaded form, and the inputs it was derived from. */
+  const rainFlow = {
+    dirsTex: null,
+    auxTex: null,
+    w: 0,
+    h: 0,
+    rect: null,
+    source: null,
+    derived: false,
+    pools: 0,
+    twoFacet: 0,
+    /** How many times a derivation actually ran (the field is only re-derived when its inputs change). */
+    attempts: 0,
+  };
+
+  function ensureNeutralFlowTextures() {
+    if (neutralDirs) return;
+    neutralDirs = createMaskTexture(new Uint8Array([128, 128, 128, 128]), 1, 1, 'linear');
+    neutralAux = createMaskTexture(new Uint8Array([0, 0, 0, 255]), 1, 1, 'linear');
+  }
+
+  /** A fresh rain handle (one per built surface: a tier rebuild makes a new material and so a new handle). */
+  function createRainHandle() {
+    ensureNeutralFlowTextures();
+    const { max, float } = THREE.TSL;
+    return createWindowRain({
+      THREE,
+      flowDirsTexture: neutralDirs,
+      flowAuxTexture: neutralAux,
+      // World px across the view, from the same view-rect uniform the floor gate maps screen UV with.
+      viewSpanNode: max(uViewRect.z.sub(uViewRect.x), float(1)),
+    });
+  }
+
   /**
    * Rebuilds the whole material for a new ladder rung — closes over the
    * subsystem's OWN current `maskTexture` rather than taking it as a
@@ -224,6 +331,8 @@ export function createWindowSurfaceSubsystem({
   function buildSurfaceForTier(tier) {
     return buildWindowSurfaceMaterial({
       THREE,
+      // A JS-time branch like `glass`: below the glass rung no rain node is ever constructed.
+      rain: tier >= WINDOW_RAIN_MIN_TIER ? createRainHandle() : null,
       maskTexture,
       depthTexture,
       depthFlagsTexture,
@@ -326,6 +435,8 @@ export function createWindowSurfaceSubsystem({
         loadedFloor = -1;
         contentBoundsWorld = null;
         paddedBoundsUv = null;
+        maskPixels = null;
+        rainFlow.source = null;
         refreshVisibility();
       }
       return;
@@ -356,6 +467,10 @@ export function createWindowSurfaceSubsystem({
         loadedUrl = url;
         loadedFloor = requestedFloor;
         loadedMaskRect = rect;
+        // Keep the decoded pixels (the texture wraps this very array, so it costs nothing) for the rain's flow field,
+        // and forget any field derived from the previous mask.
+        maskPixels = loaded.data ? { data: loaded.data, width: loaded.width, height: loaded.height } : null;
+        rainFlow.source = null;
         loadedContentBoundsUv = loaded.contentBounds ?? null;
         contentBoundsWorld = toWorldBounds(loaded.contentBounds, rect);
         // THE MASK LOOKUP'S ONLY INPUT, derived from the SAME world bounds the
@@ -493,6 +608,151 @@ export function createWindowSurfaceSubsystem({
     }
   }
 
+  /** Point the CURRENT rain handle at whatever flow field is derived (or at the neutral one). */
+  function pushRainFlowToSurface() {
+    const rain = surface.rain;
+    if (!rain) return;
+    if (rainFlow.derived && rainFlow.dirsTex) {
+      rain.setFlow({ dirsTexture: rainFlow.dirsTex, auxTexture: rainFlow.auxTex, rect: rainFlow.rect });
+    } else {
+      ensureNeutralFlowTextures();
+      rain.setFlow({ dirsTexture: neutralDirs, auxTexture: neutralAux, rect: null });
+    }
+  }
+
+  /**
+   * Upload a derived flow field, rewriting the existing textures IN PLACE when the grid is the same size: a new
+   * texture object is a new binding and every consumer rebuilds (the lesson of the wind bake), and the field is
+   * re-derived whenever the author nudges Corner blend.
+   * @param {import('./window-rain-flow.js').RainFlowField|null} field
+   */
+  function uploadRainFlow(field) {
+    if (!field) {
+      rainFlow.derived = false;
+      rainFlow.pools = 0;
+      rainFlow.twoFacet = 0;
+      pushRainFlowToSurface();
+      return;
+    }
+    const { w, h } = field.spec;
+    if (!rainFlow.dirsTex || rainFlow.w !== w || rainFlow.h !== h) {
+      rainFlow.dirsTex?.dispose?.();
+      rainFlow.auxTex?.dispose?.();
+      rainFlow.dirsTex = createMaskTexture(field.dirs, w, h, 'linear');
+      rainFlow.auxTex = createMaskTexture(field.aux, w, h, 'linear');
+      rainFlow.w = w;
+      rainFlow.h = h;
+    } else {
+      rainFlow.dirsTex.image.data.set(field.dirs);
+      rainFlow.dirsTex.needsUpdate = true;
+      rainFlow.auxTex.image.data.set(field.aux);
+      rainFlow.auxTex.needsUpdate = true;
+    }
+    rainFlow.rect = { x: field.spec.x, y: field.spec.y, width: field.spec.width, height: field.spec.height };
+    rainFlow.derived = true;
+    rainFlow.pools = field.stats.components;
+    rainFlow.twoFacet = field.stats.twoFacet;
+    pushRainFlowToSurface();
+    log.info(`rain flow derived: ${field.stats.components} window pool(s), ${field.stats.twoFacet} with two facets`);
+  }
+
+  /**
+   * Derive the "which way is down the pane" field - only once it has started to rain (a dry session never pays
+   * for it) and only when what it is derived from has changed: the `_Outdoors` product version, the window mask's
+   * pixels, the floor, or the author's Corner blend.
+   * @param {number} floorIndex @param {ReturnType<typeof resolveRainLook>} look
+   */
+  function ensureRainFlow(floorIndex, look) {
+    if (!maskPixels || !loadedMaskRect) return;
+    const outdoors = getWindowOutdoorsGrid(floorIndex);
+    const src = rainFlow.source;
+    if (
+      src &&
+      src.floor === floorIndex &&
+      src.version === (outdoors ? outdoors.version : -1) &&
+      src.maskData === maskPixels.data &&
+      src.ease === look.cornerEasePx
+    ) {
+      return;
+    }
+    rainFlow.attempts += 1;
+    rainFlow.source = {
+      floor: floorIndex,
+      version: outdoors ? outdoors.version : -1,
+      maskData: maskPixels.data,
+      ease: look.cornerEasePx,
+    };
+    let field = null;
+    if (outdoors) {
+      const presence = buildWindowPresenceGrid({
+        data: maskPixels.data,
+        width: maskPixels.width,
+        height: maskPixels.height,
+        rect: loadedMaskRect,
+        spec: outdoors.spec,
+      });
+      if (presence) field = deriveWindowRainFlow({ outdoors, presence, easePx: look.cornerEasePx });
+    }
+    uploadRainFlow(field);
+  }
+
+  /**
+   * The rain, once per frame: the author's dials, the weather resolved to what the shader reads, the two clocks,
+   * and (when it is raining) the flow field. Only uniforms are written - rain never rebuilds the material.
+   * @param {number} floorIndex @param {object} state - the render state.
+   */
+  function syncRain(floorIndex, state) {
+    const rain = surface.rain;
+    if (!rain) return;
+    const look = resolveRainLook(state.params ?? {});
+    const lookKey = [
+      look.dropScalePx,
+      look.refraction,
+      look.caustic,
+      look.rimDarken,
+      look.trail,
+      look.projectionStretch,
+    ].join('|');
+    if (lookKey !== rainLookKey) {
+      rainLookKey = lookKey;
+      rain.setLook(look);
+    }
+
+    const env = getEnv();
+    const weather = env?.weather;
+    const rain01 = clamp01(
+      (Number.isFinite(weather?.precip01) ? weather.precip01 : 0) *
+        rainKindWeight(weather?.precipKind, weather?.precipMixWeight) *
+        look.response
+    );
+    const tMs = Number.isFinite(env?.time?.tMs) ? env.time.tMs : null;
+    // The frame step: the clock's own `dtSec`, or zero when this floor has already seen this frame's time (every
+    // floor syncs once per frame against the same snapshot, and a repeat must not integrate twice).
+    let dtSec = Number.isFinite(env?.time?.dtSec) ? env.time.dtSec : 0;
+    if (tMs !== null && tMs === lastRainTMs) dtSec = 0;
+    lastRainTMs = tMs;
+
+    wet01 = stepWindowWetness(wet01, rain01, dtSec, look.lingerSec);
+    const wind = env?.wind;
+    const frame = resolveRainFrame({
+      rain01,
+      wet01,
+      look,
+      windSpeed01: Number.isFinite(wind?.speed01) ? wind.speed01 : 0,
+      gust01: Number.isFinite(wind?.gustiness01) ? wind.gustiness01 : 0,
+    });
+    slideClock =
+      (slideClock + Math.min(Math.max(dtSec, 0), RAIN_SLIDE_DT_MAX_SEC) * frame.slideSpeedMul) % RAIN_CLOCK_WRAP_SEC;
+    const flow = windFlowVector(wind?.directionDeg);
+    rain.setFrame(frame, {
+      clock: tMs === null ? 0 : (tMs / 1000) % RAIN_CLOCK_WRAP_SEC,
+      slideClock,
+      windFlow: [flow.x, flow.y],
+    });
+    rainReport = { rain01, wet01, presence: frame.presence };
+    if (frame.presence) ensureRainFlow(floorIndex, look);
+  }
+
   /**
    * Per-frame, called from `runLightAccumulatePass` after the point-light
    * MAX-blend.
@@ -533,6 +793,9 @@ export function createWindowSurfaceSubsystem({
       // correctly while no mask has loaded yet.
       if (paddedBoundsUv) surface.setMaskUvBounds(paddedBoundsUv);
       pushUvPerWorldPx();
+      // The fresh handle starts neutral: hand it the flow textures already derived, and make the look re-push.
+      pushRainFlowToSurface();
+      rainLookKey = '';
       // Force every cached value below to re-push onto the FRESH material —
       // it starts back at its constructor defaults, and the key-based cache
       // below exists to skip REDUNDANT writes, not the first write to a new
@@ -541,6 +804,7 @@ export function createWindowSurfaceSubsystem({
     }
 
     ensureMaskImage(floorIndex);
+    syncRain(floorIndex, state);
 
     // THE EXPECTED DEPTH (2026-08-05). Pushed every frame and NEVER gated on
     // a cached key, unlike the old `uFloorIndex01` (a static property of
@@ -698,6 +962,22 @@ export function createWindowSurfaceSubsystem({
         maskUvBounds: paddedBoundsUv,
         maskRect: loadedMaskRect,
         ambientCeiling,
+        // RAIN ON THE GLASS, reported every time rather than behind a console call: is it compiled at this rung,
+        // is the glass wet, and did the flow field (which way is down) derive. `flow.derived: false` while it
+        // rains means windows are getting splashes only - no _Outdoors, no pool inside a building, or no mask yet.
+        rain: {
+          compiled: !!surface.rain,
+          ...rainReport,
+          // The uniforms as actually pushed (is the clock moving? is the slide clock?), for a live report.
+          uniforms: surface.rain ? surface.rain.snapshot() : null,
+          flow: {
+            attempts: rainFlow.attempts,
+            derived: rainFlow.derived,
+            grid: `${rainFlow.w}x${rainFlow.h}`,
+            pools: rainFlow.pools,
+            twoFacet: rainFlow.twoFacet,
+          },
+        },
         /** POOL HEALTH — see maskReloadHits' own declaration for the exact
          * hit/miss doctrine. */
         maskReloadGate: { hits: maskReloadHits, misses: maskReloadMisses },
@@ -744,6 +1024,10 @@ export function createWindowSurfaceSubsystem({
       surface.windowMaterial?.dispose?.();
       surface.debugMaterial?.dispose?.();
       maskTexture?.dispose?.();
+      rainFlow.dirsTex?.dispose?.();
+      rainFlow.auxTex?.dispose?.();
+      neutralDirs?.dispose?.();
+      neutralAux?.dispose?.();
     },
   };
 }

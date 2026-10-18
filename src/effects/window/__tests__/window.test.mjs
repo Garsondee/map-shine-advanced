@@ -157,7 +157,14 @@ export function run(t) {
   ok('channel 1 is the quad — is the mesh drawing at all, and where', WINDOW_DEBUG_CHANNELS[1]?.id === 'quad');
   ok('the mask is read before the level derived from it', ids.indexOf('mask') < ids.indexOf('level'));
   ok('presence is read before the gate that multiplies it', ids.indexOf('presence') < ids.indexOf('floorGate'));
-  ok('the final channel closes the chain, after everything it composes', ids.indexOf('final') === ids.length - 1);
+  // `final` closes the chain of channels 1-12 that COMPOSE the light. The rain views (13+) are appended after it
+  // rather than slotted in before it, only because renumbering `rawLight`/`final` would change channel numbers
+  // authors already know; they must be the ONLY thing that follows it.
+  const afterFinal = ids.slice(ids.indexOf('final') + 1);
+  ok(
+    'the final channel closes the chain, after everything it composes (only the rain views follow it)',
+    ids.indexOf('final') === 12 && afterFinal.length > 0 && afterFinal.every((id) => id.startsWith('rain'))
+  );
   ok('the boost is a real amplification, not a no-op', WINDOW_DEBUG_BOOST > 1);
   // rawLight/final are a deliberate PAIR (compare pre- and post-shoulder) —
   // pin that rawLight sits immediately before final, so a future rung cannot

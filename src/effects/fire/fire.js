@@ -66,7 +66,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 2,
     step: 0.05,
-    default: 0.1, // 2026-10-17 author's live-tuned defaults (was 1.8)
+    default: 0.05, // 2026-10-19 author's live-tuned defaults (was 0.1)
     category: 'Presence',
     label: 'Fire intensity',
     help: 'How hard everything burns. Above 1 pushes hotter and brighter; below 1 banks it down toward embers.',
@@ -96,7 +96,7 @@ export const FIRE_PARAMS = Object.freeze({
     // texel derived grid) that a bolder threshold simply never sees. 0.05
     // lit every one of them. See fire-mask.js's own MIN_PEAK_TEXELS/
     // PAINT_THRESHOLD headers — real authored fire is routinely this small.
-    default: 0.12, // 2026-10-17 author's live-tuned defaults (was 0.07)
+    default: 0.04, // 2026-10-19 author's live-tuned defaults (was 0.12)
     category: 'Presence',
     label: 'Mask sensitivity',
     help: 'How much of the painted fire mask counts as real paint before a fire registers there. LOWER catches fainter or smaller painted strokes — turn this DOWN if fire you painted is not appearing. HIGHER requires bolder, more solid paint before a fire lights at all.',
@@ -129,16 +129,10 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.05,
-    // ⚠️ 0, NOT 0.85. This param's own default predates the particle rebuild
-    // and was written for a volumetric material that no longer ships
-    // (fire-render.js is orphaned — see fire.js's tiers doc above). Because
-    // this was dead, every fire the author has already live-approved
-    // (Tower Bridge included) was rendered at an EFFECTIVE posterize of 0 —
-    // shipping the old 0.85 the moment this control came alive would have
-    // silently reshaped every existing scene's fire into cel-shaded bands
-    // nobody asked for. 0 preserves the smooth look already seen live; the
-    // slider now genuinely bands the ramp for anyone who dials it up.
-    default: 0,
+    // 2026-10-19: the default is 0.85 (cel-shaded bands) by the author's
+    // explicit choice. It was 0 while this control was dead (see the
+    // fire-subsystem.js wiring note above); it now genuinely bands the ramp.
+    default: 0.85, // 2026-10-19 author's live-tuned defaults (was 0)
     category: 'Look',
     label: 'Banding',
     help: 'How hard the colour steps between temperature bands. 0 is a smooth photographic ramp (today’s look); 1 is flat cel-shaded bands.',
@@ -148,7 +142,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 3,
     max: 12,
     step: 1,
-    default: 8,
+    default: 3, // 2026-10-19 author's live-tuned defaults (was 8)
     category: 'Look',
     label: 'Band count',
     help: 'How many distinct colour steps the banding uses once Banding is above 0. Fewer reads as more stylised.',
@@ -168,7 +162,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 3,
     step: 0.05,
-    default: 0.55, // 2026-10-17 author's live-tuned defaults (was 0.65)
+    default: 0.65, // 2026-10-19 author's live-tuned defaults (was 0.55)
     category: 'Look',
     label: 'Flame brightness',
     help: 'Master brightness for the flame itself. Push it too far and the banding blows out into a flat disc.',
@@ -194,7 +188,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 500,
     step: 1,
-    default: 19, // 2026-10-17 author's live-tuned defaults (was 500)
+    default: 32, // 2026-10-19 author's live-tuned defaults (was 19)
     category: 'Flame',
     label: 'Flame count',
     help: 'Flame sprites per fire, PER ARCHETYPE — there are four, so the real total is four times this. V2 ran about 51 for a whole floor.',
@@ -231,7 +225,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0.02,
     max: 100,
     step: 0.02,
-    default: 2, // 2026-10-17 author's live-tuned defaults (was 1.28)
+    default: 1.16, // 2026-10-19 author's live-tuned defaults (was 2)
     category: 'Flame',
     label: 'Flame size ×',
     help: 'Multiplies sprite size on top of the automatic scaling to the fire’s painted width.',
@@ -241,7 +235,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 50,
     step: 0.05,
-    default: 2.25, // 2026-10-17 author's live-tuned defaults (was 0.35)
+    default: 50, // 2026-10-19 author's live-tuned defaults (was 2.25)
     category: 'Flame',
     label: 'Flame opacity ×',
     help: 'How solid each flame sprite is. Raise this if the fire looks thin or washed out.',
@@ -251,7 +245,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 250,
     step: 0.1,
-    default: 31, // 2026-10-17 author's live-tuned defaults (was 23.9)
+    default: 100, // 2026-10-19 author's live-tuned defaults (was 31)
     category: 'Flame',
     label: 'Flame emission ×',
     help: 'Raw brightness of the flame colour. Above about 3 the hues start saturating toward white where sprites overlap — that is the "white blur" failure.',
@@ -261,7 +255,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0.1,
     max: 30,
     step: 0.05,
-    default: 5.55, // 2026-10-17 author's live-tuned defaults (was 12)
+    default: 8.15, // 2026-10-19 author's live-tuned defaults (was 5.55)
     category: 'Flame',
     label: 'Colour cooling rate',
     help: 'How fast a sprite walks down the reference ramp. LOW = stays pale/white-hot for most of its life. HIGH = drops to deep orange and rust almost immediately. This is the orange-vs-white dial.',
@@ -289,7 +283,7 @@ export const FIRE_PARAMS = Object.freeze({
     // guarantee, so a real default that actually gives every fire a visible
     // hot core is the correct ship state, not an opt-in experiment. Retuned
     // to 0.66 in the 2026-08-27 author preset pass.
-    default: 0.2, // 2026-10-17 author's live-tuned defaults (was 0.66)
+    default: 0, // 2026-10-19 author's live-tuned defaults (was 0.2)
     category: 'Flame',
     label: 'Cohesion (pull together)',
     help: 'Pulls every flame toward the brightest part of its own fire. 0 = spawns spread across the full painted shape. 1 = every flame collapses onto that single hottest point. Negative pushes flames apart instead, beyond their painted region.',

@@ -343,6 +343,6 @@ export async function run(t) {
     state.params = {};
     envRef.value = rainyEnv({ tMs: 4000 });
     sub.sync(0);
-    ok('rain: missing dials fall back to the effect defaults', sub.getStatus().rain.uniforms.scale === 2);
+    ok('rain: missing dials fall back to the effect defaults', sub.getStatus().rain.uniforms.scale === 1.2);
   }
 }

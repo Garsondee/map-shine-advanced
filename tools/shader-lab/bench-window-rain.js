@@ -162,6 +162,7 @@ export function createWindowRainBench({ THREE, log }) {
     slideClock: 25,
     windSpeed01: 0,
     windDirDeg: 0,
+    windShift: [0, 0],
     gust01: 0,
     look: { ...WINDOW_RAIN_DEFAULTS },
     easePx: 96,
@@ -301,7 +302,12 @@ export function createWindowRainBench({ THREE, log }) {
     frame.windFlowX = wind.x;
     frame.windFlowY = wind.y;
     lastFrame = frame;
-    rain.setFrame(frame, { clock: state.clock, slideClock: state.slideClock, windFlow: [wind.x, wind.y] });
+    rain.setFrame(frame, {
+      clock: state.clock,
+      slideClock: state.slideClock,
+      windFlow: [wind.x, wind.y],
+      windShift: state.windShift,
+    });
   }
 
   async function renderFrame() {
@@ -439,7 +445,12 @@ export function createWindowRainBench({ THREE, log }) {
         sx += px;
         sy += py;
         n++;
-        for (const [qx, qy] of [[px + 1, py], [px - 1, py], [px, py + 1], [px, py - 1]]) {
+        for (const [qx, qy] of [
+          [px + 1, py],
+          [px - 1, py],
+          [px, py + 1],
+          [px, py - 1],
+        ]) {
           if (qx < 0 || qy < 0 || qx >= w || qy >= h) continue;
           const j = qy * w + qx;
           if (!seen[j] && mag[j] > 10) {
@@ -704,7 +715,13 @@ export function createWindowRainBench({ THREE, log }) {
           2
         )
       );
-      return { checks, calibration, artifacts: artifact ? [artifact] : [], inputs: { pools: POOLS }, stats: { s, n, e, w, c } };
+      return {
+        checks,
+        calibration,
+        artifacts: artifact ? [artifact] : [],
+        inputs: { pools: POOLS },
+        stats: { s, n, e, w, c },
+      };
     },
   });
 
@@ -712,7 +729,7 @@ export function createWindowRainBench({ THREE, log }) {
   scenarios.set('twin-parity', {
     name: 'twin-parity',
     summary:
-      'The GPU against the JS twin, pixel for pixel: the rainDrops channel encodes the shader\'s gain and lens ' +
+      "The GPU against the JS twin, pixel for pixel: the rainDrops channel encodes the shader's gain and lens " +
       'offset; this decodes it and compares with evalWindowRainPixel for the same weather, clocks, wind and flow ' +
       'field. Three weathers: drizzle, rain with a crosswind, a gusty storm.',
     async run(ctx) {
@@ -726,9 +743,38 @@ export function createWindowRainBench({ THREE, log }) {
       }
       const REGION = { x0: 640, y0: 640, x1: 896, y1: 896 }; // the corner pool, the south pool's east end, the walls
       const configs = [
-        { name: 'drizzle', rain01: 0.15, wet01: 0.3, windSpeed01: 0, windDirDeg: 0, gust01: 0, clock: 12.4, slideClock: 7.1 },
-        { name: 'rain-crosswind', rain01: 0.55, wet01: 0.9, windSpeed01: 0.7, windDirDeg: 90, gust01: 0.1, clock: 37.3, slideClock: 21.7 },
-        { name: 'gusty-storm', rain01: 1, wet01: 1, windSpeed01: 0.9, windDirDeg: 200, gust01: 0.8, clock: 101.9, slideClock: 66.2 },
+        {
+          name: 'drizzle',
+          rain01: 0.15,
+          wet01: 0.3,
+          windSpeed01: 0,
+          windDirDeg: 0,
+          gust01: 0,
+          clock: 12.4,
+          slideClock: 7.1,
+        },
+        {
+          name: 'rain-crosswind',
+          rain01: 0.55,
+          wet01: 0.9,
+          windSpeed01: 0.7,
+          windDirDeg: 90,
+          gust01: 0.1,
+          clock: 37.3,
+          slideClock: 21.7,
+          windShift: [41.7, -23.9],
+        },
+        {
+          name: 'gusty-storm',
+          rain01: 1,
+          wet01: 1,
+          windSpeed01: 0.9,
+          windDirDeg: 200,
+          gust01: 0.8,
+          clock: 101.9,
+          slideClock: 66.2,
+          windShift: [-310.2, 88.4],
+        },
       ];
       const artifacts = [];
       const stats = {};
@@ -763,6 +809,8 @@ export function createWindowRainBench({ THREE, log }) {
               slideClock: cfg.slideClock,
               flow,
               viewSpanPx: DIM,
+              windShiftX: cfg.windShift?.[0] ?? 0,
+              windShiftY: cfg.windShift?.[1] ?? 0,
             });
             const dg = Math.abs(gGpu - twin.gain);
             const dox = Math.abs(oxGpu - twin.offsetX);
@@ -857,8 +905,20 @@ export function createWindowRainBench({ THREE, log }) {
         let lastB = null;
         for (let k = 0; k < 40; k++) {
           const sc = 3 + k * 0.7;
-          const a = await renderWith({ rain01: 0.8, wet01: 1, override: SLIDERS_ONLY, slideClock: sc, debugChannel: DEBUG_RAIN_DROPS });
-          const b = await renderWith({ rain01: 0.8, wet01: 1, override: SLIDERS_ONLY, slideClock: sc + DT, debugChannel: DEBUG_RAIN_DROPS });
+          const a = await renderWith({
+            rain01: 0.8,
+            wet01: 1,
+            override: SLIDERS_ONLY,
+            slideClock: sc,
+            debugChannel: DEBUG_RAIN_DROPS,
+          });
+          const b = await renderWith({
+            rain01: 0.8,
+            wet01: 1,
+            override: SLIDERS_ONLY,
+            slideClock: sc + DT,
+            debugChannel: DEBUG_RAIN_DROPS,
+          });
           const A = blobsOf(a, x0, y0, x1, y1);
           const B = blobsOf(b, x0, y0, x1, y1);
           // Heads are small and most of them stand still (stick-slip), so a global block match is dragged to zero by
@@ -891,7 +951,13 @@ export function createWindowRainBench({ THREE, log }) {
         const len = Math.hypot(mx, my);
         const [ex, ey] = EXPECT_DIR[side];
         const cos = len > 0 ? (mx * ex + my * ey) / len : 0;
-        stats[side] = { pairs, moving, meanShiftPx: [+mx.toFixed(2), +my.toFixed(2)], speedPxPerStep: +len.toFixed(2), cosToExpected: +cos.toFixed(3) };
+        stats[side] = {
+          pairs,
+          moving,
+          meanShiftPx: [+mx.toFixed(2), +my.toFixed(2)],
+          speedPxPerStep: +len.toFixed(2),
+          cosToExpected: +cos.toFixed(3),
+        };
         checks.push(
           evaluate(`${side}-drops-travel-toward-the-${side}-wall`, () => ({
             ok: moving >= 4 && len >= 0.8 && cos > 0.9,
@@ -915,7 +981,13 @@ export function createWindowRainBench({ THREE, log }) {
           );
         }
       }
-      return { checks, calibration, artifacts: artifacts.filter(Boolean), inputs: { dtSec: DT, maxShiftPx: MAXS }, stats };
+      return {
+        checks,
+        calibration,
+        artifacts: artifacts.filter(Boolean),
+        inputs: { dtSec: DT, maxShiftPx: MAXS },
+        stats,
+      };
     },
   });
 
@@ -942,7 +1014,13 @@ export function createWindowRainBench({ THREE, log }) {
       let farN = 0;
       let lastFrame2 = null;
       for (let k = 0; k < 14; k++) {
-        const bytes = await renderWith({ rain01: 0.9, wet01: 1, override: SLIDERS_ONLY, slideClock: 4 + k * 1.7, debugChannel: DEBUG_RAIN_DROPS });
+        const bytes = await renderWith({
+          rain01: 0.9,
+          wet01: 1,
+          override: SLIDERS_ONLY,
+          slideClock: 4 + k * 1.7,
+          debugChannel: DEBUG_RAIN_DROPS,
+        });
         lastFrame2 = bytes;
         const G = grab(bytes, 0, p.x0, p.y0, p.x1, p.y1);
         for (let y = inner; y < G.h - inner; y++) {
@@ -968,8 +1046,15 @@ export function createWindowRainBench({ THREE, log }) {
       checks.push(
         evaluate('the-gradient-energy-along-the-bisector-is-not-a-seam', () => ({
           ok: bandN > 500 && farN > 2000 && ratio < 1.5,
-          measured: { bandMeanGradient: +band.toFixed(4), farMeanGradient: +far.toFixed(4), ratio: +ratio.toFixed(3), bandSamples: bandN, farSamples: farN },
-          expected: 'ratio under 1.5: the band has no more edge energy than the rest of the pool (a torn lattice scores far higher)',
+          measured: {
+            bandMeanGradient: +band.toFixed(4),
+            farMeanGradient: +far.toFixed(4),
+            ratio: +ratio.toFixed(3),
+            bandSamples: bandN,
+            farSamples: farN,
+          },
+          expected:
+            'ratio under 1.5: the band has no more edge energy than the rest of the pool (a torn lattice scores far higher)',
         }))
       );
       checks.push(
@@ -979,8 +1064,18 @@ export function createWindowRainBench({ THREE, log }) {
           expected: 'drops exist away from the seam, so a low band energy is not just an empty picture',
         }))
       );
-      const artifact = await saveCanvasPng(ctx.runId, 'corner-gain.png', cropCanvas(lastFrame2, p.x0 - 20, p.y0 - 20, p.x1 + 20, p.y1 + 20, 3, 'corner gain, sliders only'));
-      return { checks, calibration, artifacts: artifact ? [artifact] : [], inputs: { pool: p }, stats: { band, far, ratio } };
+      const artifact = await saveCanvasPng(
+        ctx.runId,
+        'corner-gain.png',
+        cropCanvas(lastFrame2, p.x0 - 20, p.y0 - 20, p.x1 + 20, p.y1 + 20, 3, 'corner gain, sliders only')
+      );
+      return {
+        checks,
+        calibration,
+        artifacts: artifact ? [artifact] : [],
+        inputs: { pool: p },
+        stats: { band, far, ratio },
+      };
     },
   });
 
@@ -1008,18 +1103,30 @@ export function createWindowRainBench({ THREE, log }) {
         const bytes = await renderWith({ rain01: r, wet01: Math.min(1, r * 1.6) });
         frames.push(bytes);
         const lit = litStats(bytes);
-        stats.rungs.push({ rain01: r, changedFraction: +changedFraction(dry, bytes).toFixed(4), meanRatio: +(lit.mean / stats.dry.mean).toFixed(4) });
+        stats.rungs.push({
+          rain01: r,
+          changedFraction: +changedFraction(dry, bytes).toFixed(4),
+          meanRatio: +(lit.mean / stats.dry.mean).toFixed(4),
+        });
       }
       const fr = stats.rungs.map((s) => s.changedFraction);
       checks.push(
         evaluate('more-rain-changes-more-of-the-picture', () => {
           let mono = true;
           for (let i = 1; i < fr.length; i++) if (fr[i] < fr[i - 1] - 0.002) mono = false;
-          return { ok: mono && fr[fr.length - 1] > fr[0] * 2, measured: fr, expected: 'monotone non-decreasing, and the storm well above the drizzle' };
+          return {
+            ok: mono && fr[fr.length - 1] > fr[0] * 2,
+            measured: fr,
+            expected: 'monotone non-decreasing, and the storm well above the drizzle',
+          };
         })
       );
       checks.push(
-        evaluate('drizzle-is-light', () => ({ ok: fr[0] < 0.2, measured: fr[0], expected: 'a drizzle touches under 20% of the lit pixels' }))
+        evaluate('drizzle-is-light', () => ({
+          ok: fr[0] < 0.2,
+          measured: fr[0],
+          expected: 'a drizzle touches under 20% of the lit pixels',
+        }))
       );
       checks.push(
         evaluate('a-storm-costs-the-light-only-a-little', () => ({
@@ -1032,7 +1139,10 @@ export function createWindowRainBench({ THREE, log }) {
         ctx.runId,
         'ladder.png',
         montage(
-          [cropCanvas(dry, 320, 700, 704, 860, 2, 'dry'), ...frames.map((f, i) => cropCanvas(f, 320, 700, 704, 860, 2, `rain ${levels[i]}`))],
+          [
+            cropCanvas(dry, 320, 700, 704, 860, 2, 'dry'),
+            ...frames.map((f, i) => cropCanvas(f, 320, 700, 704, 860, 2, `rain ${levels[i]}`)),
+          ],
           2
         )
       );
@@ -1064,8 +1174,18 @@ export function createWindowRainBench({ THREE, log }) {
           expected: 'between 1% and 70% of the lit pixels change',
         }))
       );
-      const artifact = await saveCanvasPng(ctx.runId, 'cookie-tier.png', montage([cropCanvas(dry, 320, 700, 704, 860, 2, 'dry'), cropCanvas(wet, 320, 700, 704, 860, 2, 'rain 0.7')], 1));
-      return { checks, calibration, artifacts: artifact ? [artifact] : [], inputs: {}, stats: { changedFraction: frac } };
+      const artifact = await saveCanvasPng(
+        ctx.runId,
+        'cookie-tier.png',
+        montage([cropCanvas(dry, 320, 700, 704, 860, 2, 'dry'), cropCanvas(wet, 320, 700, 704, 860, 2, 'rain 0.7')], 1)
+      );
+      return {
+        checks,
+        calibration,
+        artifacts: artifact ? [artifact] : [],
+        inputs: {},
+        stats: { changedFraction: frac },
+      };
     },
   });
 
@@ -1089,10 +1209,28 @@ export function createWindowRainBench({ THREE, log }) {
       const seen = [litStats(first).mean];
       const texturesBefore = [flowDirs, flowAux];
       for (const r of [0, 0.2, 0.9, 1, 0.3]) {
-        const b = await renderWith({ rain01: r, wet01: Math.min(1, r * 1.6), clock: 10 + r * 50, slideClock: 5 + r * 30, windSpeed01: r, windDirDeg: r * 300, gust01: r });
+        const b = await renderWith({
+          rain01: r,
+          wet01: Math.min(1, r * 1.6),
+          clock: 10 + r * 50,
+          slideClock: 5 + r * 30,
+          windSpeed01: r,
+          windDirDeg: r * 300,
+          gust01: r,
+        });
         seen.push(litStats(b).mean);
       }
-      const dials = await renderWith({ look: { ...state.look, dropScalePx: 4, refraction: 1.8, caustic: 1.5, rimDarken: 0.8, trail: 1, projectionStretch: 0.9 } });
+      const dials = await renderWith({
+        look: {
+          ...state.look,
+          dropScalePx: 4,
+          refraction: 1.8,
+          caustic: 1.5,
+          rimDarken: 0.8,
+          trail: 1,
+          projectionStretch: 0.9,
+        },
+      });
       seen.push(litStats(dials).mean);
       const afterSweep = pipelineCount();
       deriveFlow(160);
@@ -1109,7 +1247,10 @@ export function createWindowRainBench({ THREE, log }) {
       checks.push(
         evaluate('rewriting-the-flow-textures-in-place-compiles-no-pipeline', () => ({
           ok: afterRewrite === afterFirst && texturesBefore[0] === flowDirs && texturesBefore[1] === flowAux,
-          measured: { afterRewrite, sameTextureObjects: texturesBefore[0] === flowDirs && texturesBefore[1] === flowAux },
+          measured: {
+            afterRewrite,
+            sameTextureObjects: texturesBefore[0] === flowDirs && texturesBefore[1] === flowAux,
+          },
           expected: 'same texture objects, same pipeline count',
         }))
       );
@@ -1160,6 +1301,8 @@ export function createWindowRainBench({ THREE, log }) {
           slideClock: cfg.slideClock ?? state.slideClock,
           flow: sampleWindowRainField(field, wx + 0.5, wy + 0.5),
           viewSpanPx: DIM,
+          windShiftX: cfg.windShift?.[0] ?? state.windShift[0],
+          windShiftY: cfg.windShift?.[1] ?? state.windShift[1],
         });
         twin[o] = t.gain;
         twin[o + 1] = t.offsetX;

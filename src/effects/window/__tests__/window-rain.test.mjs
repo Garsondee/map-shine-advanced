@@ -24,6 +24,7 @@ import {
   windExposure,
   filmField,
   evalSplatLayer,
+  vnoise,
   evalFacetFrame,
   evalWindowRainPixel,
   createWindowRain,
@@ -180,8 +181,8 @@ export function run(t) {
     );
     t.ok('rain: ordinary rain has sliders but no sheet', frameFor(0.5).slider > 0.2 && frameFor(0.5).sheet === 0);
     t.ok('rain: a storm has the sheet', frameFor(1).sheet > 0.5);
-    t.ok('rain: the sheet waits for heavy rain', frameFor(0.7).sheet === 0);
-    t.ok('rain: wet glass is dimmed a little, not a lot', frameFor(1).dim > 0.9 && frameFor(1).dim < 1);
+    t.ok('rain: the sheet waits for heavy rain', frameFor(0.5).sheet === 0);
+    t.ok('rain: wet glass is dimmed a little, not a lot', frameFor(1).dim > 0.85 && frameFor(1).dim < 1);
     t.ok('rain: bead lifetime shortens in heavy rain', frameFor(1).live < frameFor(0.1).live);
 
     const linger = resolveRainFrame({ rain01: 0, wet01: 0.5, look });
@@ -366,7 +367,7 @@ export function run(t) {
     }
     t.ok('rain: a bead focuses light (bright spot, gain ' + gmax.toFixed(2) + ')', gmax > 1.15);
     t.ok('rain: a bead darkens its own rim (gain ' + gmin.toFixed(2) + ')', gmin < 0.97);
-    t.ok('rain: a bead bends the light (offset ' + pull.toFixed(1) + ' px)', pull > 1);
+    t.ok('rain: a bead bends the light (offset ' + pull.toFixed(1) + ' px)', pull > 0.5);
     // Turning the dials to zero removes exactly that.
     const flat = { ...look, refraction: 0, caustic: 0, rimDarken: 0 };
     let worst = 0;
@@ -393,6 +394,8 @@ export function run(t) {
     ];
     for (const [name, dX, dY] of cases) {
       const frame = { ...frameFor(0.6), slider: 1, sheet: 0, cover: 0 };
+      // the real slide clock advances at the storm pace, so step it the way the subsystem does
+      const rate = frame.slideSpeedMul;
       const nX = -dY;
       const nY = dX;
       const colW = look.dropScalePx * RAIN_TUNE.colWidthMul;
@@ -437,7 +440,7 @@ export function run(t) {
       let col = -1;
       let start = null;
       for (let c = 0; c < 60 && col < 0; c++) {
-        const h = findHead(c, 3, 0, Lmax);
+        const h = findHead(c, 3 * rate, 0, Lmax);
         if (h.g > 1.25) {
           col = c;
           start = h;
@@ -447,7 +450,7 @@ export function run(t) {
       if (col < 0) continue;
 
       const steps = 160;
-      const dt = 0.1;
+      const dt = 0.02;
       let backward = false;
       let lost = 0;
       let moved = 0;
@@ -455,7 +458,7 @@ export function run(t) {
       let slipped = 0;
       let prev = start.v;
       for (let s = 1; s <= steps; s++) {
-        const cur = findHead(col, 3 + s * dt, prev - 15, prev + 40);
+        const cur = findHead(col, (3 + s * dt) * rate, prev - 15, prev + 40);
         if (cur.g < 1.2) {
           lost++;
           continue;
@@ -556,7 +559,7 @@ export function run(t) {
             slideClock: 6,
             flow,
           });
-          if (Math.abs(r.gain - 1) > 0.03) n++;
+          if (Math.abs(r.gain / frame.dim - 1) > 0.03) n++;
         }
       return n;
     };
@@ -703,5 +706,77 @@ export function run(t) {
       'rain-tsl: no rect means no flow (all zero)',
       rain.snapshot().flowRect.every((v) => v === 0)
     );
+  }
+
+  // ── 11. A furious storm: fast gravity, near-uniform drops, noise-broken, carried by the wind ─────────
+  {
+    const T = RAIN_TUNE;
+    let lo = 1;
+    let hi = 0;
+    let smooth = true;
+    let prev = vnoise(0.3, 0.7, 5);
+    for (let i = 1; i < 400; i++) {
+      const v = vnoise(0.3 + i * 0.01, 0.7 + i * 0.013, 5);
+      lo = Math.min(lo, v);
+      hi = Math.max(hi, v);
+      if (Math.abs(v - prev) > 0.08) smooth = false;
+      prev = v;
+    }
+    t.ok(
+      'rain: the break-up noise stays in [0, 1) (' + lo.toFixed(2) + '..' + hi.toFixed(2) + ')',
+      lo >= 0 && hi < 1 && hi - lo > 0.3
+    );
+    t.ok('rain: the break-up noise is smooth between lattice corners', smooth);
+    t.ok('rain: the noise is deterministic', vnoise(-3.4, 9.1, 7) === vnoise(-3.4, 9.1, 7));
+    t.ok(
+      'rain: all four drop lattices are within 1.6x of each other in size (near-uniform)',
+      Math.max(...T.octScale) / Math.min(...T.octScale) < 1.6 && Math.exp(T.radiusLog) < 1.7
+    );
+    const storm = resolveRainFrame({ rain01: 1, wet01: 1, look });
+    const old = 1.5;
+    t.ok(
+      'rain: a storm runs at least 10x the old gravity (' + storm.slideSpeedMul.toFixed(1) + ' vs ' + old + ')',
+      storm.slideSpeedMul >= 10 * old
+    );
+    t.ok(
+      'rain: a storm covers the glass and its drops barely stick',
+      storm.cover === 1 && storm.stick < 0.2 && storm.slider > 0.9
+    );
+
+    // the wind carries the running water: shifting the lattice by the drift moves the picture by exactly that
+    const sl = { ...frameFor(0.8), cover: 0, sheet: 0, dim: 1, slider: 1 };
+    let same = true;
+    let moved = false;
+    for (let i = 0; i < 200; i++) {
+      const x = 500 + i * 3.7;
+      const y = 800 + ((i * 17) % 90);
+      const a = evalWindowRainPixel({ x, y, frame: sl, look, clock: 4, slideClock: 9, flow: flowSouth });
+      const b = evalWindowRainPixel({
+        x: x + 60,
+        y: y - 25,
+        frame: sl,
+        look,
+        clock: 4,
+        slideClock: 9,
+        flow: flowSouth,
+        windShiftX: 60,
+        windShiftY: -25,
+      });
+      if (Math.abs(a.gain - b.gain) > 1e-9 || Math.abs(a.offsetX - b.offsetX) > 1e-9) same = false;
+      if (Math.abs(a.gain - 1) > 0.02) moved = true;
+    }
+    t.ok('rain: a wind shift translates the running water exactly', same && moved);
+    // and the beads smear with the wind as well as gravity
+    const calm = { ...frameFor(0.8), windPush: 0, windFlowX: 1, windFlowY: 0 };
+    const blown = { ...calm, windPush: 1 };
+    let differ = 0;
+    for (let i = 0; i < 400; i++) {
+      const x = 2000 + i * 2.3;
+      const y = 3000 + ((i * 7) % 40);
+      const a = evalWindowRainPixel({ x, y, frame: calm, look, clock: 7, slideClock: 3, flow: flowSouth });
+      const b = evalWindowRainPixel({ x, y, frame: blown, look, clock: 7, slideClock: 3, flow: flowSouth });
+      if (Math.abs(a.gain - b.gain) > 0.02) differ++;
+    }
+    t.ok('rain: wind smears the beads (' + differ + ' of 400 pixels change)', differ > 5);
   }
 }

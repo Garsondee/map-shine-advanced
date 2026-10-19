@@ -54,6 +54,7 @@ import {
   rainKindWeight,
   stepWindowWetness,
   WINDOW_RAIN_DEFAULTS,
+  RAIN_TUNE,
 } from './window-rain.js';
 import { deriveWindowRainField, buildWindowPresenceGrid, RAIN_FIELD_DEFAULT_EASE_PX } from './window-rain-field.js';
 import { windFlowVector } from '../../world/index.js';
@@ -68,6 +69,7 @@ const RAIN_CLOCK_WRAP_SEC = 100000;
 
 /** The longest frame step the sliding drops' clock will take, so a stalled tab cannot teleport every drop. */
 const RAIN_SLIDE_DT_MAX_SEC = 0.25;
+const RAIN_WIND_SHIFT_WRAP_PX = 1048576;
 
 const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
 
@@ -276,6 +278,9 @@ export function createWindowSurfaceSubsystem({
   /** Sim seconds integrated against the CURRENT slide speed: a speed that multiplied absolute time would
    * teleport every running drop each time the rain intensity moved. */
   let slideClock = 0;
+  /** The wind's drift of the running water, world px, integrated the same way (a change of wind changes the speed
+   * it drifts at, never where the pattern is). Wrapped far away: one pop every ~2 h of full wind. */
+  const windShift = [0, 0];
   let lastRainTMs = null;
   let rainLookKey = '';
   let rainReport = { rain01: 0, wet01: 0, presence: 0 };
@@ -759,7 +764,11 @@ export function createWindowSurfaceSubsystem({
     slideClock =
       (slideClock + Math.min(Math.max(dtSec, 0), RAIN_SLIDE_DT_MAX_SEC) * frame.slideSpeedMul) % RAIN_CLOCK_WRAP_SEC;
     const flow = windFlowVector(wind?.directionDeg);
+    const driftPx = Math.min(Math.max(dtSec, 0), RAIN_SLIDE_DT_MAX_SEC) * frame.windPush * RAIN_TUNE.windDriftPx;
+    windShift[0] = (windShift[0] + flow.x * driftPx) % RAIN_WIND_SHIFT_WRAP_PX;
+    windShift[1] = (windShift[1] + flow.y * driftPx) % RAIN_WIND_SHIFT_WRAP_PX;
     rain.setFrame(frame, {
+      windShift,
       clock: tMs === null ? 0 : (tMs / 1000) % RAIN_CLOCK_WRAP_SEC,
       slideClock,
       windFlow: [flow.x, flow.y],

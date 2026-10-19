@@ -54,20 +54,22 @@
 
 /** Every tuned constant, shared by the JS twin and the shader. Change one place. */
 export const RAIN_TUNE = Object.freeze({
-  // splats: FOUR octaves of world-aligned cells. Octave o has a typical radius of dropScalePx * octScale[o] and
-  // a cell of cellMul times that, so the number of candidate drops falls as the inverse square of their size
-  // (many tiny, few large): a heavy-tailed size distribution. Each drop's radius is log-uniform over a factor 2.
-  octScale: [0.5, 1, 2, 4],
+  // splats: FOUR interleaved lattices of world-aligned cells, all nearly the same size (rain on glass is fairly
+  // uniform: the author asked for the size of the small drops with a little variation). Slightly different cell sizes
+  // keep the four lattices from lining up. Each drop's radius is log-uniform over a factor of ~1.6.
+  octScale: [0.85, 1, 1.15, 1.3],
   octSeed: [11, 53, 97, 131],
-  // the share of each octave's cells that may host a drop: light rain is almost all small, a storm adds big ones
-  octDry: [1, 0.5, 0.1, 0],
-  octStorm: [0.8, 1, 0.7, 0.35],
-  cellMul: 7,
-  periodMin: 2.2,
-  periodSpan: 2.8,
+  cellMul: 5,
+  periodMin: 1.2,
+  periodSpan: 1.6,
   jitter: 0.4,
-  radiusMin: 0.13,
-  radiusLog: 0.693147,
+  radiusMin: 0.16,
+  radiusLog: 0.47,
+  // high-frequency noise that breaks a drop up: edge wobble, speckle in its focus, a ragged crown
+  noiseFreq: 3.5,
+  noiseEdge: 0.3,
+  noiseSpeckle: 0.45,
+  noiseLens: 0.3,
   growSec: 0.1,
   impactSec: 0.12,
   aliveSoft: 0.08,
@@ -76,28 +78,35 @@ export const RAIN_TUNE = Object.freeze({
   rimK: 0.55,
   coreShift: 0.22,
   coreSigma: 0.4,
-  stretchMax: 0.5,
+  stretchMax: 1.4,
   impactRingGain: 0.55,
   impactRipple: 0.3,
   // sliders
   colWidthMul: 6,
-  colPeriodMul: 9,
-  stepFrac: 0.3,
+  colPeriodMul: 12,
+  stepFrac: 0.45,
   cycleSec: 3.2,
-  stickFrac: 0.55,
   meander: 0.11,
   headMin: 0.17,
   headSpan: 0.13,
   headStretch: 0.9,
+  // motion smear: heads elongate and trails lengthen as the run speed rises to `rateRef`
+  headBlur: 1.4,
+  trailSpeedGain: 1.2,
+  rateRef: 15,
   trailLenMul: 0.55,
   trailWidthMul: 0.3,
   // sheet
   sheetScaleMul: 100,
-  sheetSpeedPx: 18,
+  sheetSpeedPx: 5,
   sheetDim: 0.16,
   sheetWobblePx: 3,
   sheetGust: 0.4,
   sheetGustHz: 2.3,
+  // wind carries the running water: px/s the whole film drifts at full wind
+  windDriftPx: 140,
+  // how much of a bead's smear follows gravity (toward the wall) against the wind
+  gravitySmear: 0.8,
   // wind exposure
   windLee: 0.05,
   windWind: 1.6,
@@ -108,14 +117,14 @@ export const RAIN_TUNE = Object.freeze({
   maxGain: 2,
   // a drop fades out as its on-screen radius falls through lodLo..lodHi px (screen px = world px * 1920 / viewSpan)
   lodRefPx: 1920,
-  lodLo: 0.35,
-  lodHi: 1,
+  lodLo: 0.3,
+  lodHi: 0.8,
 });
 
 /** Look defaults, mirroring `WINDOW_PARAMS.rain*` (window.js quotes these). */
 export const WINDOW_RAIN_DEFAULTS = Object.freeze({
   response: 1,
-  dropScalePx: 2,
+  dropScalePx: 1.2,
   splatDensity: 1,
   refraction: 1,
   caustic: 0.8,
@@ -224,21 +233,25 @@ export function resolveRainFrame({ rain01, wet01, look, windSpeed01 = 0, gust01 
   const rain = clamp01(rain01);
   const wet = clamp01(wet01);
   const dens = Math.max(0, look.splatDensity);
-  const cover = clamp01(0.62 * Math.pow(rain, 0.85) * dens + 0.26 * wet * dens);
-  const slider = clamp01(look.sliders * 0.85 * smoothstep(0.08, 0.85, Math.max(rain, 0.6 * wet)));
-  const sheet = clamp01(smoothstep(0.72, 1, rain) * look.sheeting);
+  const cover = clamp01(1.0 * Math.pow(rain, 0.85) * dens + 0.26 * wet * dens);
+  const slider = clamp01(look.sliders * 1.4 * smoothstep(0.08, 0.7, Math.max(rain, 0.6 * wet)));
+  const sheet = clamp01(smoothstep(0.55, 1, rain) * look.sheeting);
   return {
     cover,
-    mixRain: Math.max(rain, 0.6 * wet),
-    live: lerp(0.9, 0.5, rain),
+    live: lerp(0.9, 0.6, rain),
+    // the fraction of each slip cycle a run drop sits still: a drizzle drop mostly sticks, a storm drop runs
+    stick: lerp(0.55, 0.12, rain),
     impact: smoothstep(0.02, 0.15, rain),
     slider,
     sheet,
     gust: clamp01(gust01),
-    dim: 1 - 0.07 * Math.max(rain, 0.6 * wet),
+    dim: 1 - 0.1 * Math.max(rain, 0.6 * wet),
     windBias: clamp01(windSpeed01) * clamp01(look.windwardBias),
+    // how hard the wind pushes the water (0..1), whatever the author's windward dial says
+    windPush: clamp01(windSpeed01),
     presence: cover > 0.002 || slider > 0.002 || sheet > 0.002 ? 1 : 0,
-    slideSpeedMul: lerp(0.55, 1.5, rain) * Math.max(0, look.slideSpeed),
+    // gravity: ten times what it was (a storm's drops run at ~200 px/s)
+    slideSpeedMul: 10 * lerp(0.55, 1.5, rain) * Math.max(0, look.slideSpeed),
   };
 }
 
@@ -278,8 +291,7 @@ export function evalSplatLayer({ x, y, octave, clock, frame, look, ddx, ddy, pan
   const h2 = hash2(cx, cy, kw, seed * 4 + 2);
   const h3 = hash2(cx, cy, kw, seed * 4 + 3);
 
-  const share = lerp(T.octDry[octave], T.octStorm[octave], frame.mixRain);
-  const cover = clamp01(frame.cover * exposure * lerp(0.75, 1.25, paneH) * share);
+  const cover = clamp01(frame.cover * exposure * lerp(0.75, 1.25, paneH));
   const alive = 1 - smoothstep(cover - T.aliveSoft, cover, h2[0]);
   const life = a / frame.live;
   const lifeFade = 1 - smoothstep(0.65, 1, life);
@@ -297,7 +309,13 @@ export function evalSplatLayer({ x, y, octave, clock, frame, look, ddx, ddy, pan
   const along = dx * ddx + dy * ddy;
   dx += ddx * along * stretch;
   dy += ddy * along * stretch;
-  const dist = Math.hypot(dx, dy);
+  // High-frequency noise, in the drop's OWN coordinates (units of its radius), breaks it up: a ragged edge, speckle in
+  // the bright focus, a lens that is not perfectly smooth. Per cycle (h3 changes), so every drop is different.
+  const nx = dx / r0 + h3[0] * 37;
+  const ny = dy / r0 + h3[1] * 41;
+  const n1 = 2 * vnoise(nx * T.noiseFreq, ny * T.noiseFreq, seed) - 1;
+  const n2 = 2 * vnoise(nx * T.noiseFreq * 2.3 + 11, ny * T.noiseFreq * 2.3 + 5, seed + 1) - 1;
+  const dist = Math.hypot(dx, dy) * (1 + T.noiseEdge * n1);
   const dn = dist / r;
 
   // The bead: a convex lens that pulls the sample toward its centre, a bright focus
@@ -307,10 +325,10 @@ export function evalSplatLayer({ x, y, octave, clock, frame, look, ddx, ddy, pan
   const sx = dx + ddx * T.coreShift * r;
   const sy = dy + ddy * T.coreShift * r;
   const sig = T.coreSigma * r;
-  const core = Math.exp(-(sx * sx + sy * sy) / (sig * sig));
+  const core = Math.exp(-(sx * sx + sy * sy) / (sig * sig)) * (1 + T.noiseSpeckle * n2);
   const ring = smoothstep(0.55, 0.85, dn) * (1 - smoothstep(0.92, 1.05, dn));
   const beadGain = 1 + bead * (look.caustic * T.causticK * core - look.rimDarken * T.rimK * ring);
-  const lensPx = -cellPx * T.lensK * look.refraction * lens * bead;
+  const lensPx = -cellPx * T.lensK * look.refraction * lens * bead * (1 + T.noiseLens * n2);
   let ox = dx * lensPx;
   let oy = dy * lensPx;
 
@@ -330,7 +348,7 @@ export function evalSplatLayer({ x, y, octave, clock, frame, look, ddx, ddy, pan
   const p1 = TAU * h3[1];
   const p2 = TAU * h2[1];
   const wob = 0.62 * (z5x * Math.cos(p1) - z5y * Math.sin(p1)) + 0.38 * (z6x * Math.cos(p2) - z6y * Math.sin(p2));
-  const ringR = r0 * (0.6 + 1.2 * smoothstep(0, T.impactSec, tAge)) * (1 + 0.16 * wob);
+  const ringR = r0 * (0.6 + 1.2 * smoothstep(0, T.impactSec, tAge)) * (1 + 0.16 * wob + 0.25 * n1);
   const ringW = 0.35 * r0 + 0.01;
   const ringProfile = Math.exp(-(((dist - ringR) / ringW) ** 2));
   const impGain = 1 + T.impactRingGain * impEnv * ringProfile;
@@ -339,6 +357,24 @@ export function evalSplatLayer({ x, y, octave, clock, frame, look, ddx, ddy, pan
   oy += zy * ripple;
 
   return { ox: ox * vis, oy: oy * vis, gain: 1 + vis * (beadGain * impGain - 1) };
+}
+
+/**
+ * Smooth value noise in [0, 1): the integer hash at the four lattice corners, smoothstep-interpolated. Exact twin of
+ * `vnoiseT` (the hashes are bit-exact; only the final float blend can differ, by ~1e-7).
+ */
+export function vnoise(x, y, seed) {
+  const ix = Math.floor(x);
+  const iy = Math.floor(y);
+  const fx = x - ix;
+  const fy = y - iy;
+  const sx = fx * fx * (3 - 2 * fx);
+  const sy = fy * fy * (3 - 2 * fy);
+  const a = unit24(hashU32(ix, iy, seed, 7));
+  const b = unit24(hashU32(ix + 1, iy, seed, 7));
+  const c = unit24(hashU32(ix, iy + 1, seed, 7));
+  const d = unit24(hashU32(ix + 1, iy + 1, seed, 7));
+  return lerp(lerp(a, b, sx), lerp(c, d, sx), sy);
 }
 
 /** The wet streak function of a sheet of water: smooth bands, no noise table, so the twin is exact. */
@@ -395,7 +431,9 @@ export function evalFacetFrame({
     const speedCol = 0.7 + 0.6 * hc[1];
     const ts = (slideClock * speedCol) / T.cycleSec + hd[0] * 37;
     const cyc = Math.floor(ts);
-    const slide = smoothstep(T.stickFrac, 1, ts - cyc);
+    const slide = smoothstep(frame.stick, 1, ts - cyc);
+    // how fast the water is running, 0..1: smears the head and lengthens its trail
+    const speedNorm = clamp01(frame.slideSpeedMul / T.rateRef);
     const phi = (cyc + slide) * T.stepFrac * Lc;
     const sRel = (v - off - phi) / Lc;
     const vh = off + Math.ceil(sRel) * Lc + phi;
@@ -409,25 +447,29 @@ export function evalFacetFrame({
     const ucHead = m(vHead);
     const ucTrail = m(v);
     const rh = colW * (T.headMin + T.headSpan * hc[1]) * (1 + 0.5 * (1 - paneH) * (1 - paneH));
-    const rhv = rh * (1 + T.headStretch * look.projectionStretch);
+    const rhv = rh * (1 + T.headStretch * look.projectionStretch + T.headBlur * speedNorm);
     const act = active * smoothstep(T.lodLo, T.lodHi, rh * pxPerWorld);
     const ex = ((uf - ucHead) * colW) / rh;
     const ey = dvHead / rhv;
-    const dn = Math.hypot(ex, ey);
+    const hn1 = 2 * vnoise(ex * T.noiseFreq + hc[0] * 41, ey * T.noiseFreq + hd[1] * 43, 202) - 1;
+    const hn2 = 2 * vnoise(ex * T.noiseFreq * 2.3 + 7, ey * T.noiseFreq * 2.3 + 3, 203) - 1;
+    const dn = Math.hypot(ex, ey) * (1 + T.noiseEdge * hn1);
     const bead = 1 - smoothstep(0.92, 1.08, dn);
     const lens = clamp01(1 - dn * dn);
-    const core = Math.exp(-(ex * ex + (ey + T.coreShift * 1.3) ** 2) / (T.coreSigma * T.coreSigma));
+    const core =
+      Math.exp(-(ex * ex + (ey + T.coreShift * 1.3) ** 2) / (T.coreSigma * T.coreSigma)) * (1 + T.noiseSpeckle * hn2);
     const ring = smoothstep(0.55, 0.85, dn) * (1 - smoothstep(0.92, 1.05, dn));
     const headGain = 1 + bead * (look.caustic * T.causticK * core - look.rimDarken * T.rimK * ring);
     const lensK = -T.lensK * look.refraction * lens * bead;
     const offU = ex * rh * lensK;
     const offV = ey * rhv * lensK;
     // The trail: behind the head, thin, beaded, drawing the sample toward its axis.
-    const trailLen = look.trail * T.trailLenMul * Lc;
+    const trailLen = look.trail * T.trailLenMul * Lc * (1 + T.trailSpeedGain * speedNorm);
     const tr = trailLen > 1e-3 ? 1 - smoothstep(0, trailLen, -dv) : 0;
     const latPx = (uf - ucTrail) * colW;
     const wT = rh * T.trailWidthMul * (0.75 + 0.5 * (0.5 + 0.5 * Math.sin(dv * 0.12 + TAU * hc[0])));
-    const tmask = tr * (1 - smoothstep(0.5 * wT, wT, Math.abs(latPx)));
+    const tbreak = clamp01(0.4 + 1.2 * vnoise(dv * 0.25 + hc[0] * 50, latPx * 0.6, 303));
+    const tmask = tr * (1 - smoothstep(0.5 * wT, wT, Math.abs(latPx))) * tbreak;
     const offT = -Math.sign(latPx) * Math.min(Math.abs(latPx), wT) * 0.5 * look.refraction * tmask;
     const trailGain = 1 - 0.14 * look.rimDarken * tmask;
     const sliderOffU = offU + offT;
@@ -468,10 +510,22 @@ const unitOrDown = (vx, vy) => {
  * @param {number} a.clock - sim seconds.
  * @param {number} a.slideClock - sim seconds integrated against the slide speed.
  * @param {{ax:number,ay:number,bx:number,by:number,w:number,kappa:number,h:number}|null} [a.flow]
- * @param {number} [a.viewSpanPx] - world px across the view, for the detail fade (0 = no fade).
+ * @param {number} [a.viewSpanPx] - world px across the view; a drop fades out as its on-screen radius shrinks (0 = no fade).
+ * @param {number} [a.windShiftX] @param {number} [a.windShiftY] - the wind's integrated drift of the running water, world px.
  * @returns {{offsetX:number, offsetY:number, gain:number}}
  */
-export function evalWindowRainPixel({ x, y, frame, look, clock, slideClock, flow = null, viewSpanPx = 0 }) {
+export function evalWindowRainPixel({
+  x,
+  y,
+  frame,
+  look,
+  clock,
+  slideClock,
+  flow = null,
+  viewSpanPx = 0,
+  windShiftX = 0,
+  windShiftY = 0,
+}) {
   if (!(frame.presence > 0.5)) return { offsetX: 0, offsetY: 0, gain: 1 };
   const T = RAIN_TUNE;
   const f = flow ?? NO_FLOW;
@@ -483,6 +537,15 @@ export function evalWindowRainPixel({ x, y, frame, look, clock, slideClock, flow
   const exposure =
     kappa > 0 ? windExposure(bdx, bdy, frame.windFlowX ?? 0, frame.windFlowY ?? 0, frame.windBias, kappa) : 1;
   const pxPerWorld = viewSpanPx > 0 ? T.lodRefPx / viewSpanPx : 1;
+  // Gravity and wind together: a bead smears along the SUM of "toward the wall" and "where the wind blows".
+  const wpush = frame.windPush ?? 0;
+  let smx = bdx * kappa * T.gravitySmear + (frame.windFlowX ?? 0) * wpush;
+  let smy = bdy * kappa * T.gravitySmear + (frame.windFlowY ?? 0) * wpush;
+  const sml = Math.hypot(smx, smy);
+  if (sml > 1) {
+    smx /= sml;
+    smy /= sml;
+  }
 
   let ox = 0;
   let oy = 0;
@@ -498,8 +561,8 @@ export function evalWindowRainPixel({ x, y, frame, look, clock, slideClock, flow
       clock,
       frame,
       look,
-      ddx: bdx * kappa,
-      ddy: bdy * kappa,
+      ddx: smx,
+      ddy: smy,
       paneH,
       exposure,
       lod,
@@ -512,7 +575,20 @@ export function evalWindowRainPixel({ x, y, frame, look, clock, slideClock, flow
   // The rigid facet frames P (nearest level) and S. Without a direction the sheet still runs, in a world-down frame.
   const [pdx, pdy] = kappa > 0 ? unitOrDown(f.px, f.py) : [0, 1];
   const [sdx, sdy] = kappa > 0 ? unitOrDown(f.qx, f.qy) : [0, 1];
-  const common = { x, y, slideClock, frame, look, paneH, exposure, kappa, clock, pxPerWorld };
+  // the running water is carried by the wind: its whole lattice drifts (an integrated shift, so a change of wind
+  // changes the drift speed, never the pattern)
+  const common = {
+    x: x - windShiftX,
+    y: y - windShiftY,
+    slideClock,
+    frame,
+    look,
+    paneH,
+    exposure,
+    kappa,
+    clock,
+    pxPerWorld,
+  };
   if (mixS < 0.999) {
     const A = evalFacetFrame({ ...common, dx: pdx, dy: pdy });
     const wa = 1 - mixS;
@@ -599,7 +675,11 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
   // ── the weather, resolved by `resolveRainFrame` ──────────────────────────
   const uPresence = uniform(float(0));
   const uCover = uniform(float(0));
-  const uMixRain = uniform(float(0));
+  const uStick = uniform(float(0.5));
+  const uRate = uniform(float(1));
+  const uWindPush = uniform(float(0));
+  /** The wind's integrated drift of the running water, world px (CPU-integrated: see `evalWindowRainPixel`). */
+  const uWindShift = uniform(vec2(0, 0));
   const uLive = uniform(float(0.9));
   const uImpact = uniform(float(0));
   const uSlider = uniform(float(0));
@@ -633,6 +713,19 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
     return h.bitXor(h.shiftRight(U(16)));
   };
   const unit24T = (h) => float(h.shiftRight(U(8))).div(16777216);
+  /** Smooth value noise in [0, 1) - `vnoise`. */
+  const vnoiseT = (x, y, seed) => {
+    const x0 = floor(x);
+    const y0 = floor(y);
+    const fx = x.sub(x0);
+    const fy = y.sub(y0);
+    const sx = fx.mul(fx).mul(F(3).sub(fx.mul(2)));
+    const sy = fy.mul(fy).mul(F(3).sub(fy.mul(2)));
+    const ix = int(x0);
+    const iy = int(y0);
+    const hv = (i, j) => unit24T(hashUT(i, j, seed, 7));
+    return mix(mix(hv(ix, iy), hv(ix.add(1), iy), sx), mix(hv(ix, iy.add(1)), hv(ix.add(1), iy.add(1)), sx), sy);
+  };
   const hash2T = (a, b, c, d) => vec2(unit24T(hashUT(a, b, c, d)), unit24T(hashUT(a, b, c, U(d).add(U(0x632be5ab)))));
 
   /** The flow fetch: both facets, the blend weight, the confidence and the pane height. */
@@ -677,13 +770,7 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
     const h2 = hash2T(cx, cy, kw, seed * 4 + 2);
     const h3 = hash2T(cx, cy, kw, seed * 4 + 3);
 
-    const share = mix(F(T.octDry[octave]), F(T.octStorm[octave]), uMixRain);
-    const cover = sat(
-      uCover
-        .mul(exposure)
-        .mul(mix(F(0.75), F(1.25), paneH))
-        .mul(share)
-    );
+    const cover = sat(uCover.mul(exposure).mul(mix(F(0.75), F(1.25), paneH)));
     const alive = F(1).sub(smoothstep(cover.sub(T.aliveSoft), cover, h2.x));
     const life = a.div(uLive);
     const lifeFade = F(1).sub(smoothstep(F(0.65), F(1), life));
@@ -705,17 +792,30 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
         .sub(1);
       const along = dot(d, dd);
       d = d.add(dd.mul(along.mul(stretch)));
-      const dist = length(d);
+      const nx = d.x.div(r0).add(h3.x.mul(37));
+      const ny = d.y.div(r0).add(h3.y.mul(41));
+      const n1 = vnoiseT(nx.mul(T.noiseFreq), ny.mul(T.noiseFreq), seed).mul(2).sub(1);
+      const n2 = vnoiseT(nx.mul(T.noiseFreq * 2.3).add(11), ny.mul(T.noiseFreq * 2.3).add(5), seed + 1)
+        .mul(2)
+        .sub(1);
+      const dist = length(d).mul(F(1).add(n1.mul(T.noiseEdge)));
       const dn = dist.div(r);
 
       const bead = F(1).sub(smoothstep(F(0.92), F(1.08), dn));
       const lens = sat(F(1).sub(dn.mul(dn)));
       const sc = d.add(dd.mul(r.mul(T.coreShift)));
       const sig = r.mul(T.coreSigma);
-      const core = exp(sc.x.mul(sc.x).add(sc.y.mul(sc.y)).div(sig.mul(sig)).negate());
+      const core = exp(sc.x.mul(sc.x).add(sc.y.mul(sc.y)).div(sig.mul(sig)).negate()).mul(
+        F(1).add(n2.mul(T.noiseSpeckle))
+      );
       const ring = smoothstep(F(0.55), F(0.85), dn).mul(F(1).sub(smoothstep(F(0.92), F(1.05), dn)));
       const beadGain = F(1).add(bead.mul(uCaustic.mul(T.causticK).mul(core).sub(uRim.mul(T.rimK).mul(ring))));
-      const lensPx = uRefract.mul(lens).mul(bead).mul(cellPx).mul(-T.lensK);
+      const lensPx = uRefract
+        .mul(lens)
+        .mul(bead)
+        .mul(cellPx)
+        .mul(-T.lensK)
+        .mul(F(1).add(n2.mul(T.noiseLens)));
       const off = d.mul(lensPx).toVar();
 
       const impEnv = F(1)
@@ -731,7 +831,9 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
       const wob = F(0.62)
         .mul(z5.x.mul(cos(p1)).sub(z5.y.mul(sin(p1))))
         .add(F(0.38).mul(z6.x.mul(cos(p2)).sub(z6.y.mul(sin(p2)))));
-      const ringR = r0.mul(F(0.6).add(smoothstep(F(0), F(T.impactSec), tAge).mul(1.2))).mul(F(1).add(wob.mul(0.16)));
+      const ringR = r0
+        .mul(F(0.6).add(smoothstep(F(0), F(T.impactSec), tAge).mul(1.2)))
+        .mul(F(1).add(wob.mul(0.16)).add(n1.mul(0.25)));
       const ringW = r0.mul(0.35).add(0.01);
       const rp = dist.sub(ringR).div(ringW);
       const ringProfile = exp(rp.mul(rp).negate());
@@ -774,7 +876,8 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
       const speedCol = F(0.7).add(hc.y.mul(0.6));
       const ts = uSlideClock.mul(speedCol).div(T.cycleSec).add(hd.x.mul(37));
       const cyc = floor(ts);
-      const slide = smoothstep(F(T.stickFrac), F(1), ts.sub(cyc));
+      const slide = smoothstep(uStick, F(1), ts.sub(cyc));
+      const speedNorm = sat(uRate.div(T.rateRef));
       const phi = cyc.add(slide).mul(T.stepFrac).mul(Lc);
       const sRel = v.sub(offc).sub(phi).div(Lc);
       const vh = offc.add(ceil(sRel).mul(Lc)).add(phi);
@@ -788,11 +891,17 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
       const ucTrail = sin(v.mul(kM).add(phM)).mul(T.meander);
       const oneMinusH = F(1).sub(paneH);
       const rh = colW.mul(F(T.headMin).add(hc.y.mul(T.headSpan))).mul(F(1).add(oneMinusH.mul(oneMinusH).mul(0.5)));
-      const rhv = rh.mul(F(1).add(uStretch.mul(T.headStretch)));
+      const rhv = rh.mul(F(1).add(uStretch.mul(T.headStretch)).add(speedNorm.mul(T.headBlur)));
       const act = active.mul(smoothstep(F(T.lodLo), F(T.lodHi), rh.mul(pxPerWorld)));
       const ex = uf.sub(ucHead).mul(colW).div(rh);
       const ey = dvHead.div(rhv);
-      const dn = length(vec2(ex, ey));
+      const hn1 = vnoiseT(ex.mul(T.noiseFreq).add(hc.x.mul(41)), ey.mul(T.noiseFreq).add(hd.y.mul(43)), 202)
+        .mul(2)
+        .sub(1);
+      const hn2 = vnoiseT(ex.mul(T.noiseFreq * 2.3).add(7), ey.mul(T.noiseFreq * 2.3).add(3), 203)
+        .mul(2)
+        .sub(1);
+      const dn = length(vec2(ex, ey)).mul(F(1).add(hn1.mul(T.noiseEdge)));
       const bead = F(1).sub(smoothstep(F(0.92), F(1.08), dn));
       const lens = sat(F(1).sub(dn.mul(dn)));
       const eyc = ey.add(T.coreShift * 1.3);
@@ -802,13 +911,16 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
           .add(eyc.mul(eyc))
           .div(T.coreSigma * T.coreSigma)
           .negate()
-      );
+      ).mul(F(1).add(hn2.mul(T.noiseSpeckle)));
       const ring = smoothstep(F(0.55), F(0.85), dn).mul(F(1).sub(smoothstep(F(0.92), F(1.05), dn)));
       const headGain = F(1).add(bead.mul(uCaustic.mul(T.causticK).mul(core).sub(uRim.mul(T.rimK).mul(ring))));
       const lensK = uRefract.mul(lens).mul(bead).mul(-T.lensK);
       const offU = ex.mul(rh).mul(lensK);
       const offV = ey.mul(rhv).mul(lensK);
-      const trailLen = uTrail.mul(T.trailLenMul).mul(Lc);
+      const trailLen = uTrail
+        .mul(T.trailLenMul)
+        .mul(Lc)
+        .mul(F(1).add(speedNorm.mul(T.trailSpeedGain)));
       const tr = select(
         trailLen.greaterThan(1e-3),
         F(1).sub(smoothstep(F(0), max(trailLen, F(1e-3)), dv.negate())),
@@ -823,7 +935,12 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
             .mul(0.5)
         )
       );
-      const tmask = tr.mul(F(1).sub(smoothstep(wT.mul(0.5), wT, abs(latPx))));
+      const tbreak = sat(
+        vnoiseT(dv.mul(0.25).add(hc.x.mul(50)), latPx.mul(0.6), 303)
+          .mul(1.2)
+          .add(0.4)
+      );
+      const tmask = tr.mul(F(1).sub(smoothstep(wT.mul(0.5), wT, abs(latPx)))).mul(tbreak);
       const offT = sign(latPx)
         .negate()
         .mul(min(abs(latPx), wT))
@@ -874,7 +991,9 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
         const kappa = select(fl.kappa.greaterThan(0.01), fl.kappa, F(0));
         const paneH = select(kappa.greaterThan(0), fl.h, F(0.5));
         const bdir = unitOrDownT(mix(fl.P, fl.S, fl.mix));
-        const dd = bdir.mul(kappa);
+        // gravity and wind together: a bead smears along the sum of "toward the wall" and "where the wind blows"
+        const smearRaw = bdir.mul(kappa.mul(T.gravitySmear)).add(uWindFlow.mul(uWindPush));
+        const dd = smearRaw.mul(min(F(1), F(1).div(max(length(smearRaw), F(1e-4)))));
         const dirA = select(kappa.greaterThan(0), unitOrDownT(fl.P), vec2(0, 1));
         const dirB = select(kappa.greaterThan(0), unitOrDownT(fl.S), vec2(0, 1));
         const rawExp = clamp(F(T.windBase).sub(dot(uWindFlow, bdir).mul(T.windGain)), T.windLee, T.windWind);
@@ -890,14 +1009,15 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
           gain.mulAssign(s.gain);
         }
 
+        const Pw = P.sub(uWindShift);
         const wa = F(1).sub(fl.mix);
         If(fl.mix.lessThan(0.999), () => {
-          const A = facetFrameT(P, dirA, paneH, exposure, kappa, pxPerWorld);
+          const A = facetFrameT(Pw, dirA, paneH, exposure, kappa, pxPerWorld);
           off.addAssign(A.off.mul(wa));
           gain.mulAssign(F(1).add(A.gain.sub(1).mul(wa)));
         });
         If(fl.mix.greaterThan(0.001), () => {
-          const B = facetFrameT(P, dirB, paneH, exposure, kappa, pxPerWorld);
+          const B = facetFrameT(Pw, dirB, paneH, exposure, kappa, pxPerWorld);
           off.addAssign(B.off.mul(fl.mix));
           gain.mulAssign(F(1).add(B.gain.sub(1).mul(fl.mix)));
         });
@@ -954,7 +1074,9 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
     setFrame(frame, clocks) {
       uPresence.value = frame.presence ? 1 : 0;
       uCover.value = num(frame.cover, 0);
-      uMixRain.value = num(frame.mixRain, 0);
+      uStick.value = num(frame.stick, 0.5);
+      uRate.value = num(frame.slideSpeedMul, 1);
+      uWindPush.value = num(frame.windPush, 0);
       uLive.value = Math.max(0.05, num(frame.live, 0.9));
       uImpact.value = num(frame.impact, 0);
       uSlider.value = num(frame.slider, 0);
@@ -966,6 +1088,8 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
       uWindFlow.value.set(num(wf[0], 0), num(wf[1], 1));
       uClock.value = num(clocks.clock, 0);
       uSlideClock.value = num(clocks.slideClock, 0);
+      const ws = Array.isArray(clocks.windShift) ? clocks.windShift : [0, 0];
+      uWindShift.value.set(num(ws[0], 0), num(ws[1], 0));
     },
     /**
      * The flow field's textures and world rect. Updates every texture node already built AND the textures later
@@ -997,7 +1121,10 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
       stretch: uStretch.value,
       presence: uPresence.value,
       cover: uCover.value,
-      mixRain: uMixRain.value,
+      stick: uStick.value,
+      rate: uRate.value,
+      windPush: uWindPush.value,
+      windShift: [uWindShift.value.x, uWindShift.value.y],
       live: uLive.value,
       impact: uImpact.value,
       slider: uSlider.value,

@@ -198,10 +198,10 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0.75,
     max: 8,
     step: 0.05,
-    default: 2,
+    default: 1.2,
     category: 'Rain',
     label: 'Drop size',
-    help: 'The radius of a typical bead of water, in map pixels. Drops come in four sizes from half of this to four times it, many small ones and a few large ones, and a storm adds more of the large. Drops too small to see at the current zoom fade away.',
+    help: 'The radius of a bead of water, in map pixels. Beads are all close to this size with a little variation, and each has a ragged edge. Drops too small to see at the current zoom fade away.',
   },
   rainSplatDensity: {
     type: 'float',
@@ -261,7 +261,7 @@ export const WINDOW_PARAMS = Object.freeze({
     default: 1,
     category: 'Rain',
     label: 'Run speed',
-    help: 'How fast the running drops slide. They stick, then slip, then stick again, so this is the pace of the slips.',
+    help: 'How fast the running drops slide, as a multiple of the storm pace (a storm runs at about 200 px per second). They stick, then slip, then stick again; the harder it rains the less they stick, and the wind carries them sideways.',
   },
   rainTrail: {
     type: 'float',

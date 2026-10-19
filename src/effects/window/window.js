@@ -283,6 +283,16 @@ export const WINDOW_PARAMS = Object.freeze({
     label: 'Drop stretch',
     help: 'Stretches each drop along the way the water runs, the way a window thrown onto the floor is stretched. 0 = round drops.',
   },
+  rainDropWobblePx: {
+    type: 'float',
+    min: 0,
+    max: 6,
+    step: 0.1,
+    default: 1.5,
+    category: 'Rain',
+    label: 'Drop wobble (px)',
+    help: 'How far a running drop sways from side to side as it runs, in map pixels. Every drop sways its own way, so no two follow the same route. 0 = perfectly straight runs.',
+  },
   rainCornerEasePx: {
     type: 'float',
     min: 8,

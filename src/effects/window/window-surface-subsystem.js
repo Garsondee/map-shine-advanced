@@ -113,6 +113,7 @@ function resolveRainLook(p) {
     sheeting: n(p.rainSheeting, D.sheeting),
     lingerSec: n(p.rainLingerSec, D.lingerSec),
     maskFloorPct: n(p.rainMaskFloorPct, D.maskFloorPct),
+    wobblePx: n(p.rainDropWobblePx, D.wobblePx),
     cornerEasePx: n(p.rainCornerEasePx, RAIN_FIELD_DEFAULT_EASE_PX),
   };
 }
@@ -754,6 +755,7 @@ export function createWindowSurfaceSubsystem({
       look.trail,
       look.projectionStretch,
       look.maskFloorPct,
+      look.wobblePx,
     ].join('|');
     if (lookKey !== rainLookKey) {
       rainLookKey = lookKey;

@@ -175,8 +175,9 @@ export function run(t) {
       zero.amount === 0 && zero.rgb.every((v) => v === 0)
     );
 
+    const unit = G.glintVarying({ ...base, strength: 1 });
     const strong = G.glintVarying({ ...base, strength: 2 });
-    t.ok('the strength dial scales the glint', near(strong.amount, lit.amount * 2, 1e-9));
+    t.ok('the strength dial scales the glint', near(strong.amount, unit.amount * 2, 1e-9));
 
     const dusk = G.glintVarying({ ...base, dayFactor01: 0.75 });
     t.ok('dusk glints less than night, more than day', dusk.amount < lit.amount && dusk.amount > 0);

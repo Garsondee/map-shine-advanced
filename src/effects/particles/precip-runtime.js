@@ -146,7 +146,7 @@ const TIER0_WIND_HANDLE = createWindHandle();
  * they describe the same V2 camera but are free to diverge if one look needs
  * it, and a shared constant would make that divergence a cross-effect edit.
  */
-const PERSPECTIVE_CAMERA_HEIGHT = 2000;
+const PERSPECTIVE_CAMERA_HEIGHT = 5000;
 
 /**
  * How far outside the view rect bodies keep spawning, as a fraction of the
@@ -429,7 +429,7 @@ export function createPrecipEngine({
    * it) would double-drive the exact same number from two different callers
    * and corrupt the gust response. 1.0 = exactly today's speed.
    */
-  const uFallSpeedScale = uniform(float(1));
+  const uFallSpeedScale = uniform(float(0.4));
 
   // ── ⭐ THE SKY-REACH GATE (Precipitation.md LAW 3) ────────────────────────
   //
@@ -570,7 +570,7 @@ export function createPrecipEngine({
    * `tan(θ)·D` from the nadir — so the convergence shift falls straight out of
    * it with no second calibration to get wrong.
    */
-  const uWindAirSpeed = uniform(float(2600));
+  const uWindAirSpeed = uniform(float(2250));
   /**
    * ⭐ THE SQUALL FIELD's inputs (P4, §3.4 job 2). `gustiness01` is the wind
    * door's own axis; `squallDepth` at 0 makes the field a constant 1, i.e.
@@ -578,8 +578,8 @@ export function createPrecipEngine({
    * not a value that merely looks unchanged.
    */
   const uGustiness01 = uniform(float(0));
-  const uSquallDepth = uniform(float(0.8));
-  const uSquallScale = uniform(float(1));
+  const uSquallDepth = uniform(float(1));
+  const uSquallScale = uniform(float(3.9));
 
   /**
    * ⭐ ZOOM INVARIANCE — the view's span relative to {@link REFERENCE_VIEW_SPAN}.
@@ -614,7 +614,7 @@ export function createPrecipEngine({
    */
   const uViewRect = uniform(vec4(0, 0, 1, 1));
   /** 0 = unlit sprites (V2's proven scalar model alone), 1 = full pickup. */
-  const uIllumLit01 = uniform(float(0.85));
+  const uIllumLit01 = uniform(float(1));
   /**
    * ⚠️ A SEPARATE `texture()` NODE, AND SAMPLED WITH A **SCREEN** UV — this is
    * the exact case `feedback_shared_texture_node_carries_the_wrong_uv` is about.

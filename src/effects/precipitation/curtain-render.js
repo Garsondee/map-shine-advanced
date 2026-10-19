@@ -118,8 +118,8 @@ export function createPrecipCurtain({
   /** The species' own `respond.veil(precip01)` — ZERO below its threshold, so
    * drizzle does not grey the air and a downpour does (§2.3). */
   const uVeil01 = uniform(float(0));
-  const uBandDepth = uniform(float(0.8));
-  const uBandScale = uniform(float(1));
+  const uBandDepth = uniform(float(1));
+  const uBandScale = uniform(float(3.9));
   const uStrength = uniform(float(1));
   const uTint = uniform(vec3(...(VEIL_TINT[speciesId] ?? DEFAULT_TINT)));
   /** V2's scalar day/night lighting, the same pair the bodies ride — a veil

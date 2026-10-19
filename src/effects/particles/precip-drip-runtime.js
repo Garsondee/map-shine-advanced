@@ -76,7 +76,7 @@ const RAIN_REFERENCE_SPEED = 3300;
  * author-tunable dial (`dripTailDurationSec`) now owns the live value via the
  * closure variable `tailDurationSec` inside {@link createPrecipDripEngine};
  * this constant is what that variable initializes to and never changes. */
-const TAIL_DURATION_SEC = 300;
+const TAIL_DURATION_SEC = 560;
 /** …and how strong it starts, relative to raining emission. V2's 260/300.
  * NOT author-tunable (unlike TAIL_DURATION_SEC) — nothing in Precipitation.md
  * §4.3 or the live-tuning record asked for this one, so it stays fixed. */
@@ -85,7 +85,7 @@ const TAIL_STRENGTH = 260 / 300;
  * ⚠️ THE DEFAULT ONLY, since mythica-machina-press#316: `dripCurlPx` now
  * drives the live `uCurlPx` uniform below; this constant is only that
  * uniform's initial value. */
-const CURL_PX = 7;
+const CURL_PX = 1;
 /**
  * World px of streak per (px/s) of apparent speed — rain's own `streakPerPxS`
  * (0.0065) scaled down, because a drip falls at 0.64× rain's speed from a few
@@ -153,7 +153,7 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
   const uActiveCount = uniform(float(0));
   const uWindDirDeg = uniform(float(0));
   const uWindSpeed01 = uniform(float(0));
-  const uWindAirSpeed = uniform(float(2600));
+  const uWindAirSpeed = uniform(float(2250));
   /**
    * ⭐ THE PERSPECTIVE PAIR — AND THEIR ABSENCE WAS THE BIGGEST DRIP BUG.
    *
@@ -167,17 +167,17 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
    * it. A drip that does not converge is a drip that does not fall.
    */
   const uCamCentre = uniform(vec2(0, 0));
-  const uCamHeight = uniform(float(2000));
+  const uCamHeight = uniform(float(5000));
   /** ⭐ *"I don't mind if the roof drip edge is a bit more fuzzy."* — how far a
    * drip may be born from its extracted edge point, in world px. The roofline
    * is a coarse grid's boundary; a line of drips exactly on it reads as a
    * dotted rule, while a real eave sheds along its whole lip. */
-  const uEdgeJitterPx = uniform(float(26));
-  const uStreakScale = uniform(float(1));
+  const uEdgeJitterPx = uniform(float(100));
+  const uStreakScale = uniform(float(3));
   /** ⭐ How much of the radial (falling-toward-you) term steers the streak.
    * *"We want perspective, just not too much of it."* See its use site. */
   const uParallax01 = uniform(float(0.3));
-  const uSizeScale = uniform(float(1));
+  const uSizeScale = uniform(float(2.95));
   const uAlphaMul = uniform(float(1));
   const uRgbMul = uniform(float(1));
   /** mythica-machina-press#316 — `dripFallSpeedScale`. Stacks ON TOP of the
@@ -185,7 +185,7 @@ export function createPrecipDripEngine({ THREE, capacity = 6000, zDepth = 0, ren
    * {@link bodyConstants}, it does not replace it — 1.0 means "exactly the
    * physical baseline", same distance-from-reference convention every other
    * dial in this file uses. */
-  const uFallSpeedScale = uniform(float(1));
+  const uFallSpeedScale = uniform(float(0.3));
   /** mythica-machina-press#316 — `dripCurlPx`, replacing the module constant
    * {@link CURL_PX} as the live value `updateKernel`'s wobble term reads. */
   const uCurlPx = uniform(float(CURL_PX));

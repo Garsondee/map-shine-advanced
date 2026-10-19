@@ -276,7 +276,7 @@ export function createMantleRuntime({
   const uWetTint = uniform(vec3(0.62, 0.66, 0.72));
   const uSnowStrength = uniform(float(1));
   const uDustStrength = uniform(float(1));
-  const uWetStrength = uniform(float(1));
+  const uWetStrength = uniform(float(1.25));
 
   /** The mantle sampled at a WORLD position — the overlay quad spans the same
    * rect the buffer does, so this is `positionGeometry` mapped straight back

@@ -82,7 +82,7 @@ export function createStormFog({
   /** The combined populations' weighted `fog01` — see this module's own
    * header for why this is a SUM, not a per-species value. */
   const uIntensity01 = uniform(float(0));
-  const uStrength = uniform(float(1));
+  const uStrength = uniform(float(0.7));
   const uTint = uniform(vec3(0.7, 0.72, 0.76));
   /** V2's day/night scalar pair, the same one the curtain and every falling
    * body rides — fog lit like noon at midnight is the same "stops belonging

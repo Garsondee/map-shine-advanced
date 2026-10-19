@@ -38,9 +38,9 @@
 export const LUMA = Object.freeze({ r: 0.2126, g: 0.7152, b: 0.0722 });
 
 /** Default of the "Rain light response" dial (1 = the designed strength). */
-export const GLINT_DEFAULT_STRENGTH = 1;
+export const GLINT_DEFAULT_STRENGTH = 2;
 /** Default of the "Rain glint" dial (how much streaks differ and twinkle). */
-export const GLINT_DEFAULT_VARIATION = 0.6;
+export const GLINT_DEFAULT_VARIATION = 1;
 
 /** Light excess below this is noise in the illum buffer, not a light. */
 export const LIT_FLOOR = 0.02;

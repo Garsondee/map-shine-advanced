@@ -316,7 +316,7 @@ export function createPrecipSplashEngine({
   const uWindDirDeg = uniform(float(0));
   /** The wind field's own px/s at full gale — the fall's calibration, shared by
    * value. Only the DRIFT reads it; the smear reads `speed01` directly. */
-  const uWindAirSpeed = uniform(float(2600));
+  const uWindAirSpeed = uniform(float(2250));
   /**
    * ⭐ §4.1's THIRD RATE FACTOR, FINALLY PRESENT. This engine's header has said
    * since P2 that `rate ∝ precip01 × skyReach × squallField` was missing its
@@ -326,8 +326,8 @@ export function createPrecipSplashEngine({
    * read the same one.
    */
   const uGustiness01 = uniform(float(0));
-  const uSquallDepth = uniform(float(0.8));
-  const uSquallScale = uniform(float(1));
+  const uSquallDepth = uniform(float(1));
+  const uSquallScale = uniform(float(3.9));
 
   // ── THE GATES ────────────────────────────────────────────────────────────
   /** `w <= 0` disables the clip — the same fail-open polarity as the fall: a

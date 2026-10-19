@@ -577,7 +577,7 @@ export function buildWindowSurfaceMaterial({
     // `rgb × level` would darken saturated paint twice, once for being dark
     // and once for being coloured (see window-cookie.js's own header).
     const tint = s.rgb.div(max(value, float(1e-4))).toVar(`${label}Tint`);
-    return { sample: s, presence, level, tint, cookie: tint.mul(level).toVar(`${label}Cookie`) };
+    return { sample: s, gated, presence, level, tint, cookie: tint.mul(level).toVar(`${label}Cookie`) };
   };
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -639,7 +639,7 @@ export function buildWindowSurfaceMaterial({
     let debugGlassOffset = vec3(0.5, 0.5, 0.5);
     // Built HERE, inside this function, on purpose: the gated build calls this again inside an `Fn()`, and the
     // rain nodes (with their own `If()`s and flow-texture taps) must be constructed in that same context.
-    const rainNodes = rain ? rain.build() : null;
+    const rainNodes = rain ? rain.build({ maskGated: () => sampleCookieAt(maskUv, 'winRainGate').gated }) : null;
 
     if (glass) {
       const glassScaleSafe = max(uGlassScale, float(1));

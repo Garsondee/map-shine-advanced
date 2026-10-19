@@ -28,6 +28,8 @@ import {
   evalFacetFrame,
   evalWindowRainPixel,
   createWindowRain,
+  rainMaskFade,
+  RAIN_MASK_FADE_SOFT,
 } from '../window-rain.js';
 
 const look = { ...WINDOW_RAIN_DEFAULTS };
@@ -801,5 +803,126 @@ export function run(t) {
       if (Math.abs(a.gain - b.gain) > 0.02) differ++;
     }
     t.ok('rain: wind smears the beads (' + differ + ' of 400 pixels change)', differ > 5);
+  }
+
+  // ── "Rain only in the brightest N% of the mask" (rainMaskFloorPct) ─────────
+  {
+    t.ok('rain-mask: the shipped default is 100 (off)', WINDOW_RAIN_DEFAULTS.maskFloorPct === 100);
+    // at the default the fade is exactly 1 for every mask value, and evalWindowRainPixel is bit-identical to before
+    let allOne = true;
+    for (let i = 0; i <= 100; i++) if (rainMaskFade({ maskValue: i / 100, peak: 1, pct: 100 }) !== 1) allOne = false;
+    t.ok('rain-mask: at 100 the weight is exactly 1 everywhere', allOne);
+    const frame = frameFor(0.8);
+    let identical = true;
+    for (let i = 0; i < 300; i++) {
+      const x = 1500 + i * 3.1;
+      const y = 2500 + ((i * 11) % 90);
+      const a = evalWindowRainPixel({ x, y, frame, look, clock: 5, slideClock: 2, flow: flowSouth });
+      const b = evalWindowRainPixel({
+        x,
+        y,
+        frame,
+        look,
+        clock: 5,
+        slideClock: 2,
+        flow: flowSouth,
+        maskValue: 0,
+        maskPeak: 1,
+      });
+      if (a.offsetX !== b.offsetX || a.offsetY !== b.offsetY || a.gain !== b.gain) identical = false;
+    }
+    t.ok('rain-mask: at 100 the picture is bit-identical to before, even over a black mask', identical);
+
+    // at a low value: zero in dark areas, unchanged in the brightest area
+    const low = { ...look, maskFloorPct: 30 };
+    let darkZero = true;
+    let brightSame = true;
+    let rainSeen = 0;
+    for (let i = 0; i < 300; i++) {
+      const x = 1500 + i * 3.1;
+      const y = 2500 + ((i * 11) % 90);
+      const base = evalWindowRainPixel({ x, y, frame, look, clock: 5, slideClock: 2, flow: flowSouth });
+      const dark = evalWindowRainPixel({
+        x,
+        y,
+        frame,
+        look: low,
+        clock: 5,
+        slideClock: 2,
+        flow: flowSouth,
+        maskValue: 0.2,
+        maskPeak: 1,
+      });
+      const peak = evalWindowRainPixel({
+        x,
+        y,
+        frame,
+        look: low,
+        clock: 5,
+        slideClock: 2,
+        flow: flowSouth,
+        maskValue: 1,
+        maskPeak: 1,
+      });
+      if (dark.offsetX !== 0 || dark.offsetY !== 0 || dark.gain !== 1) darkZero = false;
+      if (peak.offsetX !== base.offsetX || peak.offsetY !== base.offsetY || peak.gain !== base.gain) brightSame = false;
+      if (base.gain !== 1) rainSeen++;
+    }
+    t.ok('rain-mask: with rain actually present in the sample (' + rainSeen + ')', rainSeen > 20);
+    t.ok('rain-mask: at 30 the dark mask (20% of peak) has no rain at all', darkZero);
+    t.ok('rain-mask: at 30 the brightest mask is exactly the unfaded rain', brightSame);
+
+    // monotonic in mask brightness and smooth (no step), for several dial values
+    let mono = true;
+    let maxStep = 0;
+    for (const pct of [0, 10, 30, 50, 80, 95, 99]) {
+      let prev = -1;
+      for (let i = 0; i <= 1000; i++) {
+        const w = rainMaskFade({ maskValue: i / 1000, peak: 1, pct });
+        if (w < prev - 1e-12) mono = false;
+        if (prev >= 0) maxStep = Math.max(maxStep, Math.abs(w - prev));
+        prev = w;
+      }
+    }
+    t.ok('rain-mask: the weight never decreases as the mask gets brighter', mono);
+    // the steepest smoothstep over SOFT is 1.5/SOFT per unit; a step of 1/1000 may move 1.5/(SOFT*1000)
+    t.ok(
+      'rain-mask: no step (largest jump ' + maxStep.toFixed(4) + ')',
+      maxStep <= 1.5 / (RAIN_MASK_FADE_SOFT * 1000) + 1e-9
+    );
+    // continuous in the dial too: 100 -> 99 changes the weight only a little
+    const w99 = rainMaskFade({ maskValue: 0, peak: 1, pct: 99 });
+    t.ok('rain-mask: dialling 100 -> 99 is continuous (' + w99.toFixed(3) + ')', w99 > 0.95 && w99 < 1);
+    // relative to the mask's own peak: the same picture at half the brightness behaves the same
+    const a = rainMaskFade({ maskValue: 0.3, peak: 0.6, pct: 40 });
+    const b = rainMaskFade({ maskValue: 0.5, peak: 1, pct: 40 });
+    t.ok('rain-mask: relative to the mask peak, not absolute brightness', Math.abs(a - b) < 1e-12);
+    t.ok(
+      'rain-mask: 0 leaves drops only at the very peak',
+      rainMaskFade({ maskValue: 0.5, peak: 1, pct: 0 }) === 0 && rainMaskFade({ maskValue: 1, peak: 1, pct: 0 }) === 1
+    );
+
+    // CPU and GPU agree: the shader's uniform is the twin's threshold, and the graph builds with the mask tap
+    const rain = createWindowRain({
+      THREE,
+      flowDirsTexture: new THREE.DataTexture(new Uint8Array(4), 1, 1),
+      flowAuxTexture: new THREE.DataTexture(new Uint8Array(4), 1, 1),
+    });
+    let agree = true;
+    for (const pct of [0, 25, 60, 100]) {
+      rain.setLook({ ...look, maskFloorPct: pct });
+      if (Math.abs(rain.snapshot().maskT - (1 - pct / 100)) > 1e-6) agree = false;
+    }
+    t.ok('rain-mask: the shader threshold uniform is 1 - pct/100, the twin t', agree);
+    rain.setMaskPeak(0.8);
+    t.ok('rain-mask: setMaskPeak reaches the shader uniform', Math.abs(rain.snapshot().maskPeak - 0.8) < 1e-6);
+    let built = true;
+    try {
+      const nodes = rain.build({ maskGated: () => THREE.TSL.float(0.5) });
+      built = !!nodes.offsetPx && !!nodes.gain;
+    } catch (e) {
+      built = false;
+    }
+    t.ok('rain-mask: the TSL graph constructs with the mask tap', built);
   }
 }

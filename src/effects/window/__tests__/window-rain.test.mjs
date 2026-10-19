@@ -31,6 +31,13 @@ import {
   createWindowRain,
   rainMaskFade,
   RAIN_MASK_FADE_SOFT,
+  hashBits,
+  dropKey,
+  dropCycle,
+  dropParams,
+  dropLatMax,
+  dropCenterU,
+  runningDrop,
 } from '../window-rain.js';
 
 const look = { ...WINDOW_RAIN_DEFAULTS };
@@ -274,7 +281,8 @@ export function run(t) {
       for (let j = 0; j < 80; j++) {
         for (let i = 0; i < 80; i++) {
           const r = evalWindowRainPixel({
-            x: 2000 + i * 2.5,
+            // wide in x so many running-drop columns are counted: a drop is random, a two-column patch is noise
+            x: 2000 + i * 7.3,
             y: 3000 + j * 2.5,
             frame,
             look: moderateLook,
@@ -292,7 +300,8 @@ export function run(t) {
     t.ok('rain: no rain covers nothing', c[0] === 0);
     t.ok(
       'rain: coverage grows from drizzle to storm (' + c.map((v) => v.toFixed(3)).join(' < ') + ')',
-      c[1] > 0 && c[1] < c[2] && c[2] < c[3] && c[3] < c[4]
+      // the running drops saturate near rain 0.7 and overlapping water can cancel, so the last step is "no sparser"
+      c[1] > 0 && c[1] < c[2] && c[2] < c[3] && c[4] > c[3] - 0.02
     );
     t.ok('rain: even a storm leaves most of the glass clear', c[4] < 0.85);
   }
@@ -430,12 +439,11 @@ export function run(t) {
       const nX = -dY;
       const nY = dX;
       const colW = look.dropScalePx * RAIN_TUNE.colWidthMul;
-      const Lmax = colW * RAIN_TUNE.colPeriodMul * 1.3;
-      // The best gain at along-coordinate v across column `col`. A head meanders a few px either side of the
-      // column's centre line, so one line would lose a small head; sample across the column instead.
+      // The best gain at along-coordinate v across column `col`. A drop sits anywhere in its column (and sways), so
+      // sample the whole column width.
       const gainAt = (col, v, slideClock) => {
         let best = -Infinity;
-        for (const du of [-2, -1, 0, 1, 2]) {
+        for (let du = -colW / 2; du <= colW / 2; du += 1.5) {
           const u0 = (col + 0.5) * colW + du;
           const r = evalFacetFrame({
             x: u0 * nX + v * dX,
@@ -455,7 +463,7 @@ export function run(t) {
         return best;
       };
       // A head is tracked by its bright focus: the single positive peak (the rim and trail only dim), searched
-      // locally around where it was a moment ago. The pattern is periodic and unbounded, so it never wraps.
+      // locally around where it was a moment ago.
       const findHead = (col, slideClock, lo, hi) => {
         let bv = lo;
         let bg = -Infinity;
@@ -468,46 +476,58 @@ export function run(t) {
         }
         return { v: bv, g: bg };
       };
-      let col = -1;
-      let start = null;
-      for (let c = 0; c < 60 && col < 0; c++) {
-        const h = findHead(c, 3 * rate, 0, Lmax);
-        if (h.g > 1.25) {
-          col = c;
-          start = h;
-        }
-      }
-      t.ok('rain: ' + name + ' frame has an active slider column', col >= 0);
-      if (col < 0) continue;
-
+      // A drop lives one cycle (a second or two at this pace) and is then replaced, so follow one for as long as it
+      // lasts and judge that run.
       const steps = 160;
       const dt = 0.02;
-      let backward = false;
-      let lost = 0;
-      let moved = 0;
-      let stuck = 0;
-      let slipped = 0;
-      let prev = start.v;
-      for (let s = 1; s <= steps; s++) {
-        const cur = findHead(col, (3 + s * dt) * rate, prev - 15, prev + 40);
-        if (cur.g < 1.2) {
-          lost++;
-          continue;
+      const follow = (col, t0) => {
+        const start = findHead(col, t0 * rate, 0, 400);
+        if (start.g <= 1.25) return null;
+        const run = { backward: false, tracked: 0, moved: 0, stuck: 0, slipped: 0 };
+        let prev = start.v;
+        let missed = 0;
+        for (let s = 1; s <= steps && missed < 2; s++) {
+          const cur = findHead(col, (t0 + s * dt) * rate, prev - 15, prev + 40);
+          if (cur.g < 1.2) {
+            missed++;
+            continue;
+          }
+          missed = 0;
+          const delta = cur.v - prev;
+          if (delta < -1) run.backward = true;
+          if (delta > 0) run.moved += delta;
+          if (Math.abs(delta) < 0.5) run.stuck++;
+          if (delta > 2) run.slipped++;
+          run.tracked++;
+          prev = cur.v;
         }
-        const delta = cur.v - prev;
-        if (delta < -1) backward = true;
-        if (delta > 0) moved += delta;
-        if (Math.abs(delta) < 0.5) stuck++;
-        if (delta > 2) slipped++;
-        prev = cur.v;
+        return run;
+      };
+      let best = null;
+      for (let c = 0; c < 60 && !(best && best.tracked >= 60); c++) {
+        for (const t0 of [3, 4, 5]) {
+          const run = follow(c, t0);
+          if (run && (!best || run.tracked > best.tracked)) best = run;
+        }
       }
-      t.ok('rain: ' + name + ' sliders never run back up the pane', !backward);
-      t.ok('rain: ' + name + ' sliders can be followed the whole way (' + lost + ' steps lost)', lost === 0);
-      t.ok('rain: ' + name + ' sliders do travel (' + moved.toFixed(0) + ' px in ' + steps * dt + ' s)', moved > 40);
-      t.ok('rain: ' + name + ' sliders stick (' + stuck + ' of ' + steps + ' steps barely move)', stuck > steps * 0.1);
+      t.ok('rain: ' + name + ' frame has an active slider column', best !== null);
+      if (!best) continue;
+      t.ok('rain: ' + name + ' sliders never run back up the pane', !best.backward);
       t.ok(
-        'rain: ' + name + ' sliders slip (' + slipped + ' of ' + steps + ' steps move fast)',
-        slipped > steps * 0.05
+        'rain: ' + name + ' a drop can be followed for a good while (' + best.tracked + ' steps)',
+        best.tracked >= 60
+      );
+      t.ok(
+        'rain: ' + name + ' sliders do travel (' + best.moved.toFixed(0) + ' px in ' + best.tracked * dt + ' s)',
+        best.moved > 40
+      );
+      t.ok(
+        'rain: ' + name + ' sliders stick (' + best.stuck + ' of ' + best.tracked + ' steps barely move)',
+        best.stuck > best.tracked * 0.1
+      );
+      t.ok(
+        'rain: ' + name + ' sliders slip (' + best.slipped + ' of ' + best.tracked + ' steps move fast)',
+        best.slipped > best.tracked * 0.05
       );
     }
   }
@@ -1161,5 +1181,379 @@ export function run(t) {
       built = false;
     }
     t.ok('combined: the TSL graph builds with all three changes in', built);
+  }
+
+  // ── 15. Running drops start anywhere, take their own route, and sway (2026-10-19, mmp-59y) ───────────────────
+  {
+    const key = dropKey(0, 1);
+    const colW = look.dropScalePx * RAIN_TUNE.colWidthMul;
+    const T = RAIN_TUNE;
+
+    // (a) The same drop slot, cycle after cycle: a new start every time, spread over the block.
+    {
+      const N = 2000;
+      const pos = [];
+      const lat = [];
+      const tuples = new Set();
+      let consecutiveSame = 0;
+      for (let c = 0; c < N; c++) {
+        const p = dropParams(7, 3, c, key);
+        pos.push(p.pos);
+        lat.push(p.lat);
+        tuples.add(p.pos + '/' + p.lat + '/' + p.life + '/' + p.wphase);
+        if (c > 0 && p.pos === pos[c - 1]) consecutiveSame++;
+      }
+      t.ok(
+        'drops: one slot draws a different drop every cycle (' + tuples.size + ' of ' + N + ' distinct)',
+        tuples.size > N * 0.99
+      );
+      t.ok('drops: a slot does not repeat its start from one cycle to the next', consecutiveSame <= 4);
+      const lo = T.dropPosLo;
+      const span = T.dropPosSpan;
+      t.ok(
+        'drops: starts stay in their allowed range of the block',
+        pos.every((x) => x >= lo && x < lo + span)
+      );
+      const bins = new Array(10).fill(0);
+      for (const x of pos) bins[Math.min(9, Math.floor(((x - lo) / span) * 10))]++;
+      t.ok(
+        'drops: the starts are spread evenly across the block (' + bins.join(',') + ')',
+        bins.every((b) => b > N * 0.07 && b < N * 0.13)
+      );
+      t.ok(
+        'drops: the lateral start covers the whole column both ways',
+        Math.min(...lat) < -0.9 && Math.max(...lat) > 0.9 && Math.abs(mean(lat)) < 0.05
+      );
+      // a fixed seed: the first cycles of the slot are not the cycles 1000 later
+      let replays = 0;
+      for (let c = 0; c < 200; c++) if (dropParams(7, 3, c, key).pos === dropParams(7, 3, c + 1000, key).pos) replays++;
+      t.ok('drops: later cycles do not replay the first ones (' + replays + ' of 200 match)', replays <= 2);
+      // length (life) and speed change from cycle to cycle, inside the declared ranges
+      const lives = [];
+      const spds = [];
+      for (let c = 0; c < N; c++) {
+        const p = dropParams(11, -5, c, key);
+        lives.push(p.life);
+        spds.push(p.spd);
+      }
+      t.ok(
+        'drops: length and speed vary per cycle inside their ranges',
+        Math.min(...lives) >= T.dropLifeLo &&
+          Math.max(...lives) < T.dropLifeLo + T.dropLifeSpan &&
+          Math.max(...lives) - Math.min(...lives) > 0.4 * T.dropLifeSpan &&
+          Math.min(...spds) >= 1 - T.dropSpeedVar &&
+          Math.max(...spds) <= 1 + T.dropSpeedVar &&
+          Math.max(...spds) - Math.min(...spds) > 1.6 * T.dropSpeedVar
+      );
+      // the cycle number is in the seed of the drop and the block moves through cycles as the column travels
+      const c0 = dropCycle(7, 3, key, 0, 300);
+      const c1 = dropCycle(7, 3, key, 300 * 5.5, 300);
+      t.ok('drops: the travel of a column advances the cycle number', c1.cyc >= c0.cyc + 5 && c1.a >= 0 && c1.a < 1);
+    }
+
+    // (b) Neighbouring slots do not sway in step.
+    {
+      let apart = 0;
+      let same = 0;
+      const ph = [];
+      const fr = [];
+      const M = 500;
+      for (let b = 0; b < M; b++) {
+        const p = dropParams(4, b, 5, key);
+        const q = dropParams(4, b + 1, 5, key);
+        if (Math.abs(p.wphase - q.wphase) > 0.05) apart++;
+        if (p.wphase === q.wphase && p.wfreq === q.wfreq) same++;
+        ph.push(p.wphase);
+        fr.push(p.wfreq);
+      }
+      t.ok(
+        'drops: neighbouring slots have different wobble phases (' + apart + ' of ' + M + ')',
+        apart > M * 0.97 && same === 0
+      );
+      let cov = 0;
+      let va = 0;
+      let vb = 0;
+      const ma = mean(ph);
+      const mb = mean(fr);
+      for (let i = 0; i < M; i++) {
+        cov += (ph[i] - ma) * (fr[i] - mb);
+        va += (ph[i] - ma) ** 2;
+        vb += (fr[i] - mb) ** 2;
+      }
+      t.ok('drops: the wobble phase and rate of a drop are unrelated', Math.abs(cov / Math.sqrt(va * vb)) < 0.1);
+      const fMin = Math.min(...fr);
+      const fMax = Math.max(...fr);
+      t.ok(
+        'drops: the wobble rate is random within its range',
+        fMin >= T.wobbleFreqLo && fMax < T.wobbleFreqLo + T.wobbleFreqSpan && fMax - fMin > 0.8 * T.wobbleFreqSpan
+      );
+    }
+
+    // (c) Wobble 0 is a straight route; wobble on is not.
+    {
+      const lat = 0.07;
+      let straight = true;
+      for (let s = 0; s <= 800; s += 7) if (dropCenterU(lat, 1.3, 0.05, s, 0, colW) !== lat) straight = false;
+      t.ok('drops: wobble 0 gives a perfectly straight route', straight);
+      let swayed = 0;
+      for (let s = 0; s <= 800; s += 7)
+        if (Math.abs(dropCenterU(lat, 1.3, 0.05, s, 1.5 / colW, colW) - lat) > 0.02) swayed++;
+      t.ok('drops: wobble on makes the route sway (' + swayed + ' samples off the line)', swayed > 30);
+
+      // End to end through the pixel model: follow one drop's bright focus. With the wobble off its sideways position
+      // does not change; with a big wobble it swings.
+      const frame = { ...frameFor(0.8), slider: 1, sheet: 0, cover: 0 };
+      const rate = frame.slideSpeedMul;
+      const lateralSwing = (wobblePx) => {
+        const lk = { ...look, wobblePx };
+        const at = (u, v, sc) =>
+          evalFacetFrame({
+            x: u,
+            y: v,
+            dx: 0,
+            dy: 1,
+            clock: 0,
+            slideClock: sc,
+            frame,
+            look: lk,
+            paneH: 0.5,
+            exposure: 1,
+            kappa: 1,
+          }).gain;
+        // a drop whose bright focus is easy to find, mid-life: scan one column across u and v
+        let best = null;
+        for (let col = 0; col < 40 && !best; col++) {
+          for (let v = 0; v < 600 && !best; v += 2) {
+            for (let du = -colW / 2; du <= colW / 2; du += 0.5) {
+              const u = (col + 0.5) * colW + du;
+              if (at(u, v, 3 * rate) > 1.5) {
+                best = { col, u, v };
+                break;
+              }
+            }
+          }
+        }
+        if (!best) return null;
+        // follow it in time: v moves on, u is searched within the column
+        let u = best.u;
+        let v = best.v;
+        const us = [u];
+        for (let s = 1; s <= 60; s++) {
+          let bg = -Infinity;
+          let bu = u;
+          let bv = v;
+          for (let vv = v - 4; vv <= v + 40; vv += 1) {
+            for (let du = -colW / 2; du <= colW / 2; du += 0.25) {
+              const uu = (best.col + 0.5) * colW + du;
+              const g = at(uu, vv, (3 + s * 0.02) * rate);
+              if (g > bg) {
+                bg = g;
+                bu = uu;
+                bv = vv;
+              }
+            }
+          }
+          if (bg < 1.3) break;
+          u = bu;
+          v = bv;
+          us.push(u);
+        }
+        return { steps: us.length, swing: Math.max(...us) - Math.min(...us) };
+      };
+      const straightRun = lateralSwing(0);
+      const swayRun = lateralSwing(4);
+      t.ok('drops: a drop is found and followed in the pixel model', straightRun !== null && straightRun.steps > 15);
+      if (straightRun) {
+        t.ok(
+          'drops: with wobble 0 the followed drop keeps its sideways position (swing ' +
+            straightRun.swing.toFixed(2) +
+            ' px)',
+          straightRun.swing <= 0.5
+        );
+      }
+      if (straightRun && swayRun) {
+        t.ok(
+          'drops: with wobble on the followed drop swings sideways (' + swayRun.swing.toFixed(2) + ' px)',
+          swayRun.swing > straightRun.swing + 0.5
+        );
+      }
+    }
+
+    // (d) The wobble stays inside its amplitude, starts at zero, and the drop stays inside its column.
+    {
+      const wobPx = 3;
+      const wc = wobPx / colW;
+      let bound = true;
+      let startZero = true;
+      let reached = 0;
+      let inside = true;
+      for (let i = 0; i < 400; i++) {
+        const p = dropParams(i, -i, i * 3, key);
+        const sizeFrac = (T.headMin + T.headSpan * p.size) * 1.5;
+        const latC = p.lat * dropLatMax(sizeFrac, wc);
+        if (dropCenterU(latC, p.wphase, p.wfreq, 0, wc, colW) !== latC) startZero = false;
+        let top = 0;
+        for (let s = 0; s <= 2000; s += 3) {
+          const off = dropCenterU(latC, p.wphase, p.wfreq, s, wc, colW) - latC;
+          const ramp = Math.min(1, Math.max(0, s / (T.wobbleRampCol * colW)));
+          if (Math.abs(off) > wc * (ramp * ramp * (3 - 2 * ramp)) + 1e-12) bound = false;
+          top = Math.max(top, Math.abs(off));
+          if (Math.abs(latC) + Math.abs(off) + 1.25 * sizeFrac > 0.5 + 1e-9 && sizeFrac * 1.25 < 0.5 - wc)
+            inside = false;
+        }
+        if (top > 0.9 * wc) reached++;
+      }
+      t.ok('drops: the sway never exceeds its amplitude, and fades in from the start', bound);
+      t.ok('drops: the sway starts at zero offset', startZero);
+      t.ok('drops: the sway does use its amplitude (' + reached + ' of 400 drops reach 90%)', reached > 300);
+      t.ok('drops: a drop and its sway stay inside its column', inside);
+      t.ok(
+        'drops: a drop that is born never jumps: the centre line is continuous in travel',
+        (() => {
+          let worst = 0;
+          const p = dropParams(3, 9, 4, key);
+          let prev = dropCenterU(0, p.wphase, p.wfreq, 0, wc, colW);
+          for (let s = 0.5; s <= 600; s += 0.5) {
+            const cur = dropCenterU(0, p.wphase, p.wfreq, s, wc, colW);
+            worst = Math.max(worst, Math.abs(cur - prev));
+            prev = cur;
+          }
+          return worst < 0.01;
+        })()
+      );
+    }
+
+    // (e) The running-drop density is what it was (the old model's share of bright-focus pixels, same sampling).
+    {
+      const OLD_FOCUS_SHARE = 0.01094; // measured on the pre-mmp-59y model with exactly this sampling
+      const fr = {
+        ...resolveRainFrame({ rain01: 0.7, wet01: 1, look, windSpeed01: 0 }),
+        windFlowX: 0,
+        windFlowY: 1,
+        sheet: 0,
+      };
+      let n = 0;
+      let hit = 0;
+      for (const xo of [0, 12000, 24000, 36000, 48000, 60000, 72000, 84000]) {
+        for (const sc of [1, 3.7, 8.2, 15.1, 27.9, 40.3]) {
+          for (let iy = 0; iy < 250; iy++) {
+            for (let ix = 0; ix < 250; ix++) {
+              const r = evalFacetFrame({
+                x: ix * 23.7 + 7 + xo,
+                y: iy * 3.1 + 11,
+                dx: 0,
+                dy: 1,
+                clock: 0,
+                slideClock: sc * fr.slideSpeedMul,
+                frame: fr,
+                look,
+                paneH: 0.5,
+                exposure: 1,
+                kappa: 1,
+              });
+              n++;
+              if (r.gain > 1.3) hit++;
+            }
+          }
+        }
+      }
+      const share = hit / n;
+      t.ok(
+        'drops: the density of running drops is unchanged (' + share.toFixed(5) + ' against ' + OLD_FOCUS_SHARE + ')',
+        Math.abs(share / OLD_FOCUS_SHARE - 1) < 0.07
+      );
+      // the same count from the other side: expected live drops per Lc of an active column is 1 (blocks x duty)
+      let alive = 0;
+      const Lc = 140;
+      for (let c = 0; c < 4000; c++) {
+        const d = runningDrop({
+          col: 1,
+          block: c,
+          key,
+          phi: 0,
+          off: 0,
+          blockPx: Lc * T.dropBlock,
+          cyclePx: T.dropCycleBlocks * Lc * T.dropBlock,
+          coverCol: 2,
+          paneFac: 1,
+          wobbleCol: 0,
+        });
+        alive += d.alive > 0.5 ? 1 : 0;
+      }
+      const perLc = alive / 4000 / T.dropBlock;
+      t.ok(
+        'drops: about one live drop per Lc of an active column (' + perLc.toFixed(2) + ')',
+        perLc > 0.8 && perLc < 1.15
+      );
+    }
+
+    // (f) The integer hashes the shader reuses are bit-exact (golden values), and the bit fields are exact in float32.
+    {
+      const k2 = dropKey(0, 1);
+      t.ok('drops: golden key', k2 === 16 && dropKey(-3, 50) === (-3 * 211 + 50) * 16);
+      t.ok(
+        'drops: golden drop hashes',
+        hashU32(7, 3, 12, k2 + 2) === 2758428092 &&
+          hashU32(7, 3, 12, k2 + 3) === 386377243 &&
+          hashU32(-4, -9, 0, dropKey(-3, 50) + 1) === 1867219094
+      );
+      const gp = dropParams(7, 3, 12, k2);
+      t.ok(
+        'drops: golden drop parameters',
+        gp.pos === 0.4734375 &&
+          gp.act === 0.56640625 &&
+          gp.life === 0.595703125 &&
+          gp.lat === 0.296875 &&
+          gp.size === 0.0859375
+      );
+      let exact = true;
+      for (let i = 0; i < 500; i++) {
+        const h = hashU32(i, -i, i * 7, 99);
+        for (const [sh, n] of [
+          [0, 10],
+          [10, 8],
+          [18, 8],
+          [26, 6],
+          [0, 9],
+          [9, 8],
+          [17, 8],
+          [25, 7],
+        ]) {
+          const x = hashBits(h, sh, n);
+          if (Math.fround(x) !== x || x < 0 || x >= 1) exact = false;
+        }
+      }
+      t.ok('drops: the hash bit fields are in [0, 1) and exact in float32', exact);
+      const cyc0 = dropCycle(7, 3, k2, 0, 300);
+      t.ok(
+        'drops: the cycle phase of a block is the 24-bit unit of its own hash',
+        cyc0.cyc === 0 && cyc0.a === (hashU32(7, 3, 0, k2 + 1) >>> 8) / 16777216
+      );
+    }
+
+    // The Studio setting reaches the shader, and the graph builds with it.
+    {
+      const tex = () =>
+        new THREE.DataTexture(new Uint8Array([128, 128, 128, 128]), 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
+      const gpu = createWindowRain({ THREE, flowDirsTexture: tex(), flowAuxTexture: tex() });
+      t.ok('drops: the shader starts at the default wobble', gpu.snapshot().wobble === WINDOW_RAIN_DEFAULTS.wobblePx);
+      gpu.setLook({ wobblePx: 4 });
+      t.ok('drops: setLook pushes the wobble', gpu.snapshot().wobble === 4);
+      gpu.setLook({ wobblePx: -3 });
+      t.ok('drops: a negative wobble is clamped to 0', gpu.snapshot().wobble === 0);
+      gpu.setLook({ wobblePx: NaN });
+      t.ok('drops: a NaN wobble falls back to the default', gpu.snapshot().wobble === WINDOW_RAIN_DEFAULTS.wobblePx);
+      let built = true;
+      try {
+        built = !!gpu.build().gain;
+      } catch (e) {
+        built = false;
+      }
+      t.ok('drops: the TSL graph builds with the running-drop model', built);
+      t.ok(
+        'drops: the wobble default is small but not zero',
+        WINDOW_RAIN_DEFAULTS.wobblePx > 0 && WINDOW_RAIN_DEFAULTS.wobblePx < 4
+      );
+    }
   }
 }

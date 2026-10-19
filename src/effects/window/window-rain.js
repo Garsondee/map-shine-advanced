@@ -31,7 +31,10 @@
  *   SLIDERS  beads that run down the pane. For a facet direction d (see
  *            `window-rain-field.js`) the frame is rigid: u across, v along d.
  *            Columns of drops stick, then slide, then stick (stick-slip), each
- *            leaving a thin beaded trail. v increases TOWARD the wall (the sill).
+ *            leaving a thin beaded trail. A drop is born at a random place in
+ *            its column, sways a little side to side as it runs, dries up after
+ *            a random run and is replaced by a new one elsewhere (`runningDrop`).
+ *            v increases TOWARD the wall (the sill).
  *            A pool near a corner has two facets, A and B; this evaluates the
  *            second frame only where the blend weight w is strictly between 0
  *            and 1 and cross-fades them. No lattice is ever rotated per pixel.
@@ -86,7 +89,26 @@ export const RAIN_TUNE = Object.freeze({
   colPeriodMul: 6.75,
   stepFrac: 0.6,
   cycleSec: 1.6,
-  meander: 0.12,
+  // A running drop is born anywhere, lives one cycle and is re-rolled (see `runningDrop`). A column's moving frame is cut
+  // into blocks `dropBlock` x Lc long; each block hosts one drop per cycle of `dropCycleBlocks` blocks of travel. A drop
+  // is only alive for part of its cycle (and fades in and out), so the blocks are shorter than Lc: `dropBlock` was
+  // tuned so the head count per area matches the old one-head-per-Lc stream (measured, see the density test).
+  // Within the block the drop starts at a random point (`dropPos*`), lives a random part of the cycle (`dropLife*`),
+  // runs at a speed within +-`dropSpeedVar` of the column's, and sits up to `dropLatCap` of the column width off its centre line.
+  dropBlock: 0.76,
+  dropCycleBlocks: 12,
+  dropPosLo: 0.3,
+  dropPosSpan: 0.4,
+  dropSpeedVar: 0.05,
+  dropLifeLo: 0.55,
+  dropLifeSpan: 0.45,
+  dropFadeIn: 0.02,
+  dropFadeOut: 0.05,
+  dropLatCap: 0.3,
+  // the side-to-side wobble: rad per px of travel, and how far the amplitude takes to grow in (column widths)
+  wobbleFreqLo: 0.03,
+  wobbleFreqSpan: 0.06,
+  wobbleRampCol: 2,
   headMin: 0.196,
   headSpan: 0.15,
   headStretch: 0.9,
@@ -146,6 +168,8 @@ export const WINDOW_RAIN_DEFAULTS = Object.freeze({
   lingerSec: 40,
   /** Rain only in the brightest N% of the mask (relative to the mask's own peak). 100 = everywhere, as before. */
   maskFloorPct: 100,
+  /** Side-to-side wobble of a running drop's path, px (the amplitude; random phase and rate per drop). 0 = straight runs. */
+  wobblePx: 1.5,
 });
 
 /** Width (in fractions of the mask peak) of the soft edge of the "rain only in the brightest" fade. */
@@ -435,6 +459,105 @@ export function filmField(u, v) {
   );
 }
 
+// ── the running drops: one hash per (column, block, cycle), sliced into bit fields ────────────────────────────
+//
+// WHY THE OLD DROPS REPEATED. A column's drops were one infinite, periodic stream: heads at off + n*Lc + phi for
+// every integer n, where the column's `Lc`, `off`, activity (`hc.x`), size (`hc.y`) and meander (`kM`, `phM`) came from
+// ONE hash of (column, facet) and nothing else - no cycle number, no per-drop index. So (1) the starting points were a
+// fixed lattice (column centres x multiples of Lc, advancing in lock-step), (2) a column was either always running or
+// never, (3) every head in a column followed the very same sine route `meander * sin(v*kM + phM)`, and (4) the
+// pattern replayed itself exactly, forever. The bead layer (`evalSplatLayer`) does take a cycle number (`kw`) in its
+// seed, so its drops re-roll; it stays inside its cell (`jitter` 0.4) and `modp(k, 61)` repeats it after 61 cycles.
+
+/** `n` bits of `h` starting at bit `shift`, as a float in [0, 1): exact in float32 (n <= 11), so the shader's value is this one. */
+export function hashBits(h, shift, n) {
+  return ((h >>> shift) & ((1 << n) - 1)) / (1 << n);
+}
+
+/** The facet's hash key (its direction to 1/50) folded into one int; the low 4 bits are left free for a tag. */
+export function dropKey(fsx, fsy) {
+  return (fsx * 211 + fsy) * 16;
+}
+
+/** Where in its cycle a block is at travel `phi` (px): `cyc` the cycle number, `a` 0..1 how far through it. */
+export function dropCycle(col, block, key, phi, cyclePx) {
+  const cf = phi / cyclePx + unit24(hashU32(col, block, 0, key + 1));
+  const cyc = Math.floor(cf);
+  return { cyc, a: cf - cyc };
+}
+
+/**
+ * Everything random about ONE drop in ONE cycle: 64 bits from two hashes whose seed includes the cycle number, so the
+ * same block draws a different drop (start, life, speed, wobble, size) every cycle.
+ * @returns {{pos:number, act:number, life:number, lat:number, wphase:number, wfreq:number, spd:number, size:number}}
+ */
+export function dropParams(col, block, cyc, key) {
+  const T = RAIN_TUNE;
+  const hA = hashU32(col, block, cyc, key + 2);
+  const hB = hashU32(col, block, cyc, key + 3);
+  return {
+    pos: T.dropPosLo + T.dropPosSpan * hashBits(hA, 0, 10),
+    act: hashBits(hA, 10, 8),
+    life: T.dropLifeLo + T.dropLifeSpan * hashBits(hA, 18, 8),
+    lat: 2 * hashBits(hA, 26, 6) - 1 + 1 / 64,
+    wphase: TAU * hashBits(hB, 0, 9),
+    wfreq: T.wobbleFreqLo + T.wobbleFreqSpan * hashBits(hB, 9, 8),
+    spd: 1 + T.dropSpeedVar * (2 * hashBits(hB, 17, 8) - 1),
+    size: hashBits(hB, 25, 7),
+  };
+}
+
+/** The drop's visibility over its cycle: it forms, runs, and dries up at `life` (a fraction of the cycle). */
+export function dropLifeEnv(a, life) {
+  return smoothstep(0, RAIN_TUNE.dropFadeIn, a) * (1 - smoothstep(life - RAIN_TUNE.dropFadeOut, life, a));
+}
+
+/** How far (column widths) the drop's start may sit off the column's centre line: its body and its wobble must stay in the column. */
+export function dropLatMax(sizeFrac, wobbleCol) {
+  return clamp(0.5 - 1.25 * sizeFrac - wobbleCol, 0, RAIN_TUNE.dropLatCap);
+}
+
+/**
+ * The drop's centre line at `s` px of travel since it was born, in column widths from the column's centre: a fixed
+ * lateral start (`latC`) plus a sine of the travel with random phase and rate, `wobbleCol` (= wobble px / column width) in
+ * amplitude and zero at the start. `wobbleCol` 0 is a straight run.
+ */
+export function dropCenterU(latC, wphase, wfreq, s, wobbleCol, colW) {
+  const ramp = smoothstep(0, RAIN_TUNE.wobbleRampCol * colW, s);
+  return latC + wobbleCol * ramp * Math.sin(wfreq * s + wphase);
+}
+
+/**
+ * One running drop of a column, at column-frame travel `phi`.
+ * @param {{col:number, block:number, key:number, phi:number, off:number, blockPx:number, cyclePx:number,
+ *   coverCol:number, paneFac:number, wobbleCol:number}} a - `blockPx`/`cyclePx`: the block and the cycle in px of the
+ *   column's travel; `paneFac` the pane-height growth of the head; `wobbleCol` the sway amplitude in column widths.
+ * @returns {{vPos:number, trav:number, alive:number, latC:number, wphase:number, wfreq:number, size:number,
+ *   sizeFrac:number, cyc:number, a:number}} `vPos` along-run position of the head (px); `trav` px travelled since its
+ *   birth; `alive` 0..1 (activity x life envelope); `latC` its start off the column centre line (column widths).
+ */
+export function runningDrop({ col, block, key, phi, off, blockPx, cyclePx, coverCol, paneFac, wobbleCol }) {
+  const T = RAIN_TUNE;
+  const { cyc, a } = dropCycle(col, block, key, phi, cyclePx);
+  const p = dropParams(col, block, cyc, key);
+  const active = 1 - smoothstep(coverCol - T.aliveSoft, coverCol, p.act);
+  const sizeFrac = (T.headMin + T.headSpan * p.size) * paneFac;
+  return {
+    // its place in the column's moving frame, plus the frame's travel; the speed spread is a drift (centred on mid-life,
+    // at most +-dropCycleBlocks * dropSpeedVar / 2 = 0.3 of a block) that keeps the drop inside its own block
+    vPos: off + (block + p.pos + (a - 0.5) * T.dropCycleBlocks * (p.spd - 1)) * blockPx + phi,
+    trav: a * cyclePx * p.spd,
+    alive: active * dropLifeEnv(a, p.life),
+    latC: p.lat * dropLatMax(sizeFrac, wobbleCol),
+    wphase: p.wphase,
+    wfreq: p.wfreq,
+    size: p.size,
+    sizeFrac,
+    cyc,
+    a,
+  };
+}
+
 /**
  * Everything that lives in ONE rigid facet frame: the sliding columns and the sheet.
  * @returns {{ox:number, oy:number, gain:number}}
@@ -469,12 +592,13 @@ export function evalFacetFrame({
   const colW = look.dropScalePx * T.colWidthMul;
   const coverCol = clamp01(frame.slider * exposure * kappa);
   if (coverCol > 0.001) {
+    const wobblePx = Number.isFinite(look.wobblePx) ? Math.max(0, look.wobblePx) : WINDOW_RAIN_DEFAULTS.wobblePx;
+    const wobbleCol = wobblePx / colW;
     const u = u0 / colW;
     const col = Math.floor(u);
     const uf = u - col - 0.5;
     const hc = hash2(col, fsx, fsy, 101);
     const hd = hash2(col, fsx, fsy, 202);
-    const active = 1 - smoothstep(coverCol - T.aliveSoft, coverCol, hc[0]);
     const Lc = colW * T.colPeriodMul * (0.8 + 0.5 * hd[0]);
     const off = hd[1] * Lc;
     const speedCol = 0.7 + 0.6 * hc[1];
@@ -484,47 +608,85 @@ export function evalFacetFrame({
     // how fast the water is running, 0..1: smears the head and lengthens its trail
     const speedNorm = clamp01(frame.slideSpeedMul / T.rateRef);
     const phi = (cyc + slide) * T.stepFrac * Lc;
-    const sRel = (v - off - phi) / Lc;
-    const vh = off + Math.ceil(sRel) * Lc + phi;
-    const dv = v - vh; // (-Lc, 0]: the head AHEAD of this pixel has already passed it
-    const behind = dv + Lc < -dv;
-    const dvHead = behind ? dv + Lc : dv;
-    const vHead = v - dvHead;
-    const kM = 0.021 + 0.01 * hd[0];
-    const phM = TAU * hc[1];
-    const m = (vv) => T.meander * Math.sin(vv * kM + phM);
-    const ucHead = m(vHead);
-    const ucTrail = m(v);
-    const rh = colW * (T.headMin + T.headSpan * hc[1]) * (1 + 0.5 * (1 - paneH) * (1 - paneH));
-    const rhv = rh * (1 + T.headStretch * look.projectionStretch + T.headBlur * speedNorm);
-    const act = active * smoothstep(T.lodLo, T.lodHi, rh * pxPerWorld);
-    const ex = ((uf - ucHead) * colW) / rh;
-    const ey = dvHead / rhv;
-    const hn1 = 2 * vnoise(ex * T.noiseFreq + hc[0] * 41, ey * T.noiseFreq + hd[1] * 43, 202) - 1;
-    const hn2 = 2 * vnoise(ex * T.noiseFreq * 2.3 + 7, ey * T.noiseFreq * 2.3 + 3, 203) - 1;
-    const dn = Math.hypot(ex, ey) * (1 + T.noiseEdge * hn1);
-    const bead = 1 - smoothstep(0.92, 1.08, dn);
-    const lens = clamp01(1 - dn * dn);
-    const core =
-      Math.exp(-(ex * ex + (ey + T.coreShift * 1.3) ** 2) / (T.coreSigma * T.coreSigma)) * (1 + T.noiseSpeckle * hn2);
-    const ring = smoothstep(0.55, 0.85, dn) * (1 - smoothstep(0.92, 1.05, dn));
-    const headGain = 1 + bead * (look.caustic * T.causticK * core - look.rimDarken * T.rimK * ring);
-    const lensK = -T.lensK * look.refraction * lens * bead;
-    const offU = ex * rh * lensK;
-    const offV = ey * rhv * lensK;
-    // The trail: behind the head, thin, beaded, drawing the sample toward its axis.
-    const trailLen = look.trail * T.trailLenMul * Lc * (1 + T.trailSpeedGain * speedNorm);
-    const tr = trailLen > 1e-3 ? 1 - smoothstep(0, trailLen, -dv) : 0;
-    const latPx = (uf - ucTrail) * colW;
-    const wT = rh * T.trailWidthMul * (0.75 + 0.5 * (0.5 + 0.5 * Math.sin(dv * 0.12 + TAU * hc[0])));
-    const tbreak = clamp01(0.4 + 1.2 * vnoise(dv * 0.25 + hc[0] * 50, latPx * 0.6, 303));
-    const tmask = tr * (1 - smoothstep(0.5 * wT, wT, Math.abs(latPx))) * tbreak;
-    const offT = -Math.sign(latPx) * Math.min(Math.abs(latPx), wT) * 0.5 * look.refraction * tmask;
-    const trailGain = 1 - 0.14 * look.rimDarken * tmask;
-    const sliderOffU = offU + offT;
-    ox += act * (nX * sliderOffU + dX * offV);
-    oy += act * (nY * sliderOffU + dY * offV);
-    gain *= 1 + act * (headGain * trailGain - 1);
+
+    // The column's drops. Its moving frame is cut into blocks; each block hosts one drop per cycle, re-rolled every
+    // cycle (`runningDrop`). A pixel's nearest head is among the blocks around it: a drop sits inside its own block, so
+    // the block of the pixel and its two neighbours are every candidate. The head is the nearest drop that is alive; the
+    // trail belongs to the nearest alive drop AHEAD of the pixel (the water behind its head).
+    const blockPx = Lc * T.dropBlock;
+    const cyclePx = T.dropCycleBlocks * blockPx;
+    const key = dropKey(fsx, fsy);
+    const paneFac = 1 + 0.5 * (1 - paneH) * (1 - paneH);
+    const b0 = Math.floor((v - off - phi) / blockPx);
+    let head = null;
+    let headDv = 0;
+    let headD = Infinity;
+    let trailer = null;
+    let trailDv = 0;
+    let trailD = Infinity;
+    for (let k = -1; k <= 1; k++) {
+      const d = runningDrop({ col, block: b0 + k, key, phi, off, blockPx, cyclePx, coverCol, paneFac, wobbleCol });
+      if (!(d.alive > 0.001)) continue;
+      const dvk = v - d.vPos;
+      const ad = Math.abs(dvk);
+      if (ad < headD) {
+        headD = ad;
+        head = d;
+        headDv = dvk;
+      }
+      if (dvk <= 0 && ad < trailD) {
+        trailD = ad;
+        trailer = d;
+        trailDv = dvk;
+      }
+    }
+
+    if (head) {
+      const dvHead = headDv; // the head's offset along the run: negative while the head is still ahead of this pixel
+      const rh = colW * head.sizeFrac;
+      const rhv = rh * (1 + T.headStretch * look.projectionStretch + T.headBlur * speedNorm);
+      const act = head.alive * smoothstep(T.lodLo, T.lodHi, rh * pxPerWorld);
+      const ucHead = dropCenterU(head.latC, head.wphase, head.wfreq, head.trav, wobbleCol, colW);
+      const ex = ((uf - ucHead) * colW) / rh;
+      const ey = dvHead / rhv;
+      const hn1 = 2 * vnoise(ex * T.noiseFreq + (head.wphase / TAU) * 41, ey * T.noiseFreq + head.size * 43, 202) - 1;
+      const hn2 = 2 * vnoise(ex * T.noiseFreq * 2.3 + 7, ey * T.noiseFreq * 2.3 + 3, 203) - 1;
+      const dn = Math.hypot(ex, ey) * (1 + T.noiseEdge * hn1);
+      const bead = 1 - smoothstep(0.92, 1.08, dn);
+      const lens = clamp01(1 - dn * dn);
+      const core =
+        Math.exp(-(ex * ex + (ey + T.coreShift * 1.3) ** 2) / (T.coreSigma * T.coreSigma)) * (1 + T.noiseSpeckle * hn2);
+      const ring = smoothstep(0.55, 0.85, dn) * (1 - smoothstep(0.92, 1.05, dn));
+      const headGain = 1 + bead * (look.caustic * T.causticK * core - look.rimDarken * T.rimK * ring);
+      const lensK = -T.lensK * look.refraction * lens * bead;
+      const offU = ex * rh * lensK;
+      const offV = ey * rhv * lensK;
+      ox += act * (nX * offU + dX * offV);
+      oy += act * (nY * offU + dY * offV);
+      gain *= 1 + act * (headGain - 1);
+    }
+
+    // The trail: behind the head, thin, beaded, drawing the sample toward its axis. It follows the path the drop took
+    // (the same wobble, `sT` px of travel from its birth) and does not exist before the drop was born.
+    if (trailer) {
+      const dv = trailDv; // (-Lc, 0]: the head AHEAD of this pixel has already passed it
+      const rh = colW * trailer.sizeFrac;
+      const sT = trailer.trav + dv;
+      const actT =
+        trailer.alive * smoothstep(T.lodLo, T.lodHi, rh * pxPerWorld) * smoothstep(0, T.wobbleRampCol * colW, sT);
+      const ucTrail = dropCenterU(trailer.latC, trailer.wphase, trailer.wfreq, sT, wobbleCol, colW);
+      const trailLen = look.trail * T.trailLenMul * Lc * (1 + T.trailSpeedGain * speedNorm);
+      const tr = trailLen > 1e-3 ? 1 - smoothstep(0, trailLen, -dv) : 0;
+      const latPx = (uf - ucTrail) * colW;
+      const wT = rh * T.trailWidthMul * (0.75 + 0.5 * (0.5 + 0.5 * Math.sin(dv * 0.12 + trailer.wphase)));
+      const tbreak = clamp01(0.4 + 1.2 * vnoise(dv * 0.25 + trailer.size * 50, latPx * 0.6, 303));
+      const tmask = tr * (1 - smoothstep(0.5 * wT, wT, Math.abs(latPx))) * tbreak;
+      const offT = -Math.sign(latPx) * Math.min(Math.abs(latPx), wT) * 0.5 * look.refraction * tmask;
+      const trailGain = 1 - 0.14 * look.rimDarken * tmask;
+      ox += actT * nX * offT;
+      oy += actT * nY * offT;
+      gain *= 1 + actT * (trailGain - 1);
+    }
   }
 
   // ── the sheet (storm) ─────────────────────────────────────────────────────
@@ -704,7 +866,6 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
     smoothstep,
     step,
     floor,
-    ceil,
     mod,
     sin,
     cos,
@@ -728,6 +889,8 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
   const uRim = uniform(float(D.rimDarken));
   const uTrail = uniform(float(D.trail));
   const uStretch = uniform(float(D.projectionStretch));
+  /** The side-to-side wobble of a running drop, px (0 = straight). */
+  const uWobble = uniform(float(D.wobblePx));
   // ── the weather, resolved by `resolveRainFrame` ──────────────────────────
   const uPresence = uniform(float(0));
   const uCover = uniform(float(0));
@@ -907,6 +1070,60 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
     return { off: outOff, gain: outGain };
   };
 
+  /** `n` bits of a u32 starting at `shift`, as a float in [0, 1) - `hashBits`. */
+  const bitsT = (h, shift, n) => float(h.shiftRight(U(shift)).bitAnd(U((1 << n) - 1))).div(1 << n);
+
+  /**
+   * One running drop of a column in nodes - `runningDrop`. `blockF` is the (float) block index, `keyF` the facet key
+   * as a float; the ints are made here, from floats, so a negative block or key stays negative in the hash.
+   */
+  const runningDropT = (colI, blockF, keyF, phi, off, blockPx, cyclePx, coverCol, paneFac, wobbleCol) => {
+    const blockI = int(blockF);
+    const tag = (n) => int(keyF.add(n));
+    const cf = phi.div(cyclePx).add(unit24T(hashUT(colI, blockI, 0, tag(1))));
+    const cycF = floor(cf);
+    const a = cf.sub(cycF);
+    const cycI = int(cycF);
+    const hA = hashUT(colI, blockI, cycI, tag(2));
+    const hB = hashUT(colI, blockI, cycI, tag(3));
+    const pos = F(T.dropPosLo).add(bitsT(hA, 0, 10).mul(T.dropPosSpan));
+    const act = bitsT(hA, 10, 8);
+    const life = F(T.dropLifeLo).add(bitsT(hA, 18, 8).mul(T.dropLifeSpan));
+    const lat = bitsT(hA, 26, 6)
+      .mul(2)
+      .sub(1)
+      .add(1 / 64);
+    const wphase = bitsT(hB, 0, 9).mul(TAU);
+    const wfreq = F(T.wobbleFreqLo).add(bitsT(hB, 9, 8).mul(T.wobbleFreqSpan));
+    const spd = F(1).add(bitsT(hB, 17, 8).mul(2).sub(1).mul(T.dropSpeedVar));
+    const size = bitsT(hB, 25, 7);
+    const active = F(1).sub(smoothstep(coverCol.sub(T.aliveSoft), coverCol, act));
+    const env = smoothstep(F(0), F(T.dropFadeIn), a).mul(F(1).sub(smoothstep(life.sub(T.dropFadeOut), life, a)));
+    const sizeFrac = F(T.headMin).add(size.mul(T.headSpan)).mul(paneFac);
+    const latMax = clamp(F(0.5).sub(sizeFrac.mul(1.25)).sub(wobbleCol), 0, T.dropLatCap);
+    return {
+      vPos: off
+        .add(
+          blockF
+            .add(pos)
+            .add(a.sub(0.5).mul(T.dropCycleBlocks).mul(spd.sub(1)))
+            .mul(blockPx)
+        )
+        .add(phi),
+      trav: a.mul(cyclePx).mul(spd),
+      alive: active.mul(env),
+      latC: lat.mul(latMax),
+      wphase,
+      wfreq,
+      size,
+      sizeFrac,
+    };
+  };
+  const DROP_FIELDS = ['dv', 'alive', 'trav', 'latC', 'wphase', 'wfreq', 'size', 'sizeFrac', 'hd', 'td'];
+  /** `dropCenterU`: a drop's centre line (column widths from the column centre) `s` px after its birth. */
+  const dropCenterT = (latC, wphase, wfreq, s, wobbleCol, colW) =>
+    latC.add(wobbleCol.mul(smoothstep(F(0), colW.mul(T.wobbleRampCol), s)).mul(sin(wfreq.mul(s).add(wphase))));
+
   /** Everything in one rigid facet frame - `evalFacetFrame`. */
   const facetFrameT = (P, dir, paneH, exposure, kappa, pxPerWorld) => {
     const dX = dir.x;
@@ -924,13 +1141,13 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
     const colW = uScale.mul(T.colWidthMul);
     const coverCol = sat(uSlider.mul(exposure).mul(kappa));
     If(coverCol.greaterThan(0.001), () => {
+      const wobbleCol = uWobble.div(colW);
       const u = u0.div(colW);
       const col = floor(u);
       const uf = u.sub(col).sub(0.5);
       const colI = int(col);
       const hc = hash2T(colI, fsx, fsy, 101);
       const hd = hash2T(colI, fsx, fsy, 202);
-      const active = F(1).sub(smoothstep(coverCol.sub(T.aliveSoft), coverCol, hc.x));
       const Lc = colW.mul(T.colPeriodMul).mul(F(0.8).add(hd.x.mul(0.5)));
       const offc = hd.y.mul(Lc);
       const speedCol = F(0.7).add(hc.y.mul(0.6));
@@ -939,78 +1156,115 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
       const slide = smoothstep(uStick, F(1), ts.sub(cyc));
       const speedNorm = sat(uRate.div(T.rateRef));
       const phi = cyc.add(slide).mul(T.stepFrac).mul(Lc);
-      const sRel = v.sub(offc).sub(phi).div(Lc);
-      const vh = offc.add(ceil(sRel).mul(Lc)).add(phi);
-      const dv = v.sub(vh);
-      const behind = F(1).sub(step(dv.negate(), dv.add(Lc)));
-      const dvHead = dv.add(Lc.mul(behind));
-      const vHead = v.sub(dvHead);
-      const kM = F(0.021).add(hd.x.mul(0.01));
-      const phM = hc.y.mul(TAU);
-      const ucHead = sin(vHead.mul(kM).add(phM)).mul(T.meander);
-      const ucTrail = sin(v.mul(kM).add(phM)).mul(T.meander);
+
+      // The column's drops: three candidate blocks around the pixel (see the twin).
+      const blockPx = Lc.mul(T.dropBlock);
+      const cyclePx = blockPx.mul(T.dropCycleBlocks);
+      const keyF = float(fsx).mul(211).add(float(fsy)).mul(16);
       const oneMinusH = F(1).sub(paneH);
-      const rh = colW.mul(F(T.headMin).add(hc.y.mul(T.headSpan))).mul(F(1).add(oneMinusH.mul(oneMinusH).mul(0.5)));
-      const rhv = rh.mul(F(1).add(uStretch.mul(T.headStretch)).add(speedNorm.mul(T.headBlur)));
-      const act = active.mul(smoothstep(F(T.lodLo), F(T.lodHi), rh.mul(pxPerWorld)));
-      const ex = uf.sub(ucHead).mul(colW).div(rh);
-      const ey = dvHead.div(rhv);
-      const hn1 = vnoiseT(ex.mul(T.noiseFreq).add(hc.x.mul(41)), ey.mul(T.noiseFreq).add(hd.y.mul(43)), 202)
-        .mul(2)
-        .sub(1);
-      const hn2 = vnoiseT(ex.mul(T.noiseFreq * 2.3).add(7), ey.mul(T.noiseFreq * 2.3).add(3), 203)
-        .mul(2)
-        .sub(1);
-      const dn = length(vec2(ex, ey)).mul(F(1).add(hn1.mul(T.noiseEdge)));
-      const bead = F(1).sub(smoothstep(F(0.92), F(1.08), dn));
-      const lens = sat(F(1).sub(dn.mul(dn)));
-      const eyc = ey.add(T.coreShift * 1.3);
-      const core = exp(
-        ex
-          .mul(ex)
-          .add(eyc.mul(eyc))
-          .div(T.coreSigma * T.coreSigma)
-          .negate()
-      ).mul(F(1).add(hn2.mul(T.noiseSpeckle)));
-      const ring = smoothstep(F(0.55), F(0.85), dn).mul(F(1).sub(smoothstep(F(0.92), F(1.05), dn)));
-      const headGain = F(1).add(bead.mul(uCaustic.mul(T.causticK).mul(core).sub(uRim.mul(T.rimK).mul(ring))));
-      const lensK = uRefract.mul(lens).mul(bead).mul(-T.lensK);
-      const offU = ex.mul(rh).mul(lensK);
-      const offV = ey.mul(rhv).mul(lensK);
-      const trailLen = uTrail
-        .mul(T.trailLenMul)
-        .mul(Lc)
-        .mul(F(1).add(speedNorm.mul(T.trailSpeedGain)));
-      const tr = select(
-        trailLen.greaterThan(1e-3),
-        F(1).sub(smoothstep(F(0), max(trailLen, F(1e-3)), dv.negate())),
-        F(0)
-      );
-      const latPx = uf.sub(ucTrail).mul(colW);
-      const wT = rh.mul(T.trailWidthMul).mul(
-        F(0.75).add(
-          sin(dv.mul(0.12).add(hc.x.mul(TAU)))
-            .mul(0.5)
-            .add(0.5)
-            .mul(0.5)
+      const paneFac = F(1).add(oneMinusH.mul(oneMinusH).mul(0.5));
+      const b0 = floor(v.sub(offc).sub(phi).div(blockPx));
+      const BIG = 1e9;
+      const cand = [-1, 0, 1].map((k) => {
+        const d = runningDropT(colI, b0.add(k), keyF, phi, offc, blockPx, cyclePx, coverCol, paneFac, wobbleCol);
+        const dv = v.sub(d.vPos);
+        const ok = d.alive.greaterThan(0.001);
+        return {
+          ...d,
+          dv,
+          hd: select(ok, abs(dv), F(BIG)),
+          td: select(ok.and(dv.lessThanEqual(0)), abs(dv), F(BIG)),
+        };
+      });
+      // the nearest candidate by `key`; on a tie the earlier one, as in the twin
+      const nearest = (key) =>
+        cand.reduce((best, c) => {
+          const better = c[key].lessThan(best[key]);
+          const o = {};
+          for (const f of DROP_FIELDS) o[f] = select(better, c[f], best[f]);
+          return o;
+        });
+      const head = nearest('hd');
+      const trailer = nearest('td');
+
+      // ── the head ──
+      {
+        const rh = colW.mul(head.sizeFrac);
+        const rhv = rh.mul(F(1).add(uStretch.mul(T.headStretch)).add(speedNorm.mul(T.headBlur)));
+        const aliveH = select(head.hd.lessThan(BIG * 0.5), head.alive, F(0));
+        const act = aliveH.mul(smoothstep(F(T.lodLo), F(T.lodHi), rh.mul(pxPerWorld)));
+        const ucHead = dropCenterT(head.latC, head.wphase, head.wfreq, head.trav, wobbleCol, colW);
+        const ex = uf.sub(ucHead).mul(colW).div(rh);
+        const ey = head.dv.div(rhv);
+        const hn1 = vnoiseT(
+          ex.mul(T.noiseFreq).add(head.wphase.div(TAU).mul(41)),
+          ey.mul(T.noiseFreq).add(head.size.mul(43)),
+          202
         )
-      );
-      const tbreak = sat(
-        vnoiseT(dv.mul(0.25).add(hc.x.mul(50)), latPx.mul(0.6), 303)
-          .mul(1.2)
-          .add(0.4)
-      );
-      const tmask = tr.mul(F(1).sub(smoothstep(wT.mul(0.5), wT, abs(latPx)))).mul(tbreak);
-      const offT = sign(latPx)
-        .negate()
-        .mul(min(abs(latPx), wT))
-        .mul(0.5)
-        .mul(uRefract)
-        .mul(tmask);
-      const trailGain = F(1).sub(uRim.mul(0.14).mul(tmask));
-      const sliderOffU = offU.add(offT);
-      off.addAssign(vec2(nX.mul(sliderOffU).add(dX.mul(offV)), nY.mul(sliderOffU).add(dY.mul(offV))).mul(act));
-      gain.mulAssign(F(1).add(act.mul(headGain.mul(trailGain).sub(1))));
+          .mul(2)
+          .sub(1);
+        const hn2 = vnoiseT(ex.mul(T.noiseFreq * 2.3).add(7), ey.mul(T.noiseFreq * 2.3).add(3), 203)
+          .mul(2)
+          .sub(1);
+        const dn = length(vec2(ex, ey)).mul(F(1).add(hn1.mul(T.noiseEdge)));
+        const bead = F(1).sub(smoothstep(F(0.92), F(1.08), dn));
+        const lens = sat(F(1).sub(dn.mul(dn)));
+        const eyc = ey.add(T.coreShift * 1.3);
+        const core = exp(
+          ex
+            .mul(ex)
+            .add(eyc.mul(eyc))
+            .div(T.coreSigma * T.coreSigma)
+            .negate()
+        ).mul(F(1).add(hn2.mul(T.noiseSpeckle)));
+        const ring = smoothstep(F(0.55), F(0.85), dn).mul(F(1).sub(smoothstep(F(0.92), F(1.05), dn)));
+        const headGain = F(1).add(bead.mul(uCaustic.mul(T.causticK).mul(core).sub(uRim.mul(T.rimK).mul(ring))));
+        const lensK = uRefract.mul(lens).mul(bead).mul(-T.lensK);
+        const offU = ex.mul(rh).mul(lensK);
+        const offV = ey.mul(rhv).mul(lensK);
+        off.addAssign(vec2(nX.mul(offU).add(dX.mul(offV)), nY.mul(offU).add(dY.mul(offV))).mul(act));
+        gain.mulAssign(F(1).add(act.mul(headGain.sub(1))));
+      }
+
+      // ── the trail: the water behind the nearest drop ahead of this pixel ──
+      {
+        const dv = trailer.dv;
+        const rh = colW.mul(trailer.sizeFrac);
+        const sT = trailer.trav.add(dv);
+        const aliveT = select(trailer.td.lessThan(BIG * 0.5), trailer.alive, F(0));
+        const actT = aliveT
+          .mul(smoothstep(F(T.lodLo), F(T.lodHi), rh.mul(pxPerWorld)))
+          .mul(smoothstep(F(0), colW.mul(T.wobbleRampCol), sT));
+        const ucTrail = dropCenterT(trailer.latC, trailer.wphase, trailer.wfreq, sT, wobbleCol, colW);
+        const trailLen = uTrail
+          .mul(T.trailLenMul)
+          .mul(Lc)
+          .mul(F(1).add(speedNorm.mul(T.trailSpeedGain)));
+        const tr = select(
+          trailLen.greaterThan(1e-3),
+          F(1).sub(smoothstep(F(0), max(trailLen, F(1e-3)), dv.negate())),
+          F(0)
+        );
+        const latPx = uf.sub(ucTrail).mul(colW);
+        const wT = rh
+          .mul(T.trailWidthMul)
+          .mul(F(0.75).add(sin(dv.mul(0.12).add(trailer.wphase)).mul(0.5).add(0.5).mul(0.5)));
+        const tbreak = sat(
+          vnoiseT(dv.mul(0.25).add(trailer.size.mul(50)), latPx.mul(0.6), 303)
+            .mul(1.2)
+            .add(0.4)
+        );
+        const tmask = tr.mul(F(1).sub(smoothstep(wT.mul(0.5), wT, abs(latPx)))).mul(tbreak);
+        const offT = sign(latPx)
+          .negate()
+          .mul(min(abs(latPx), wT))
+          .mul(0.5)
+          .mul(uRefract)
+          .mul(tmask);
+        const trailGain = F(1).sub(uRim.mul(0.14).mul(tmask));
+        off.addAssign(vec2(nX.mul(offT), nY.mul(offT)).mul(actT));
+        gain.mulAssign(F(1).add(actT.mul(trailGain.sub(1))));
+      }
     });
 
     // ── the sheet (storm) ───────────────────────────────────────────────────
@@ -1135,6 +1389,7 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
       uRim.value = clamp01(num(look.rimDarken, D.rimDarken));
       uTrail.value = clamp01(num(look.trail, D.trail));
       uStretch.value = clamp01(num(look.projectionStretch, D.projectionStretch));
+      uWobble.value = Math.max(0, num(look.wobblePx, D.wobblePx));
       // clamp01, not clamp: inside this factory `clamp` is the TSL node (it would make the uniform NaN)
       uMaskT.value = 1 - clamp01(num(look.maskFloorPct, D.maskFloorPct) / 100);
     },
@@ -1196,6 +1451,7 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
       rim: uRim.value,
       trail: uTrail.value,
       stretch: uStretch.value,
+      wobble: uWobble.value,
       maskT: uMaskT.value,
       maskPeak: uMaskPeak.value,
       presence: uPresence.value,

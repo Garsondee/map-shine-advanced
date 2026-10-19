@@ -52,6 +52,34 @@ export function pointInRectangle(px, py, rect) {
 }
 
 /**
+ * Edge slack (world units) the rectangle region SHADER adds on every side,
+ * so two rectangles that share an edge never leave a gap pixel between them.
+ * Each shape is its own mesh and each mesh interpolates `positionWorld`
+ * separately in float32, so for a fragment sitting on the shared edge (grid-
+ * aligned edges land on pixel centres at common zooms) mesh A can compute a
+ * local coordinate a few ULP beyond its edge while mesh B computes one a few
+ * ULP short of its own: both reject, the ambient (bright) fill shows through
+ * as a hairline across the whole seam. ULP at scene coordinates (<= ~16k) is
+ * ~1e-3, so 0.02 is ~10x the error and ~0.0004 of a 50-unit grid square.
+ */
+export const REGION_EDGE_TOLERANCE = 0.02;
+
+/**
+ * Local-space rectangle containment with edge slack — the exact test the
+ * rectangle material evaluates per fragment (`tolerance` 0 is the plain
+ * inclusive test `pointInRectangle` uses).
+ * @param {number} lx @param {number} ly local (un-rotated, origin-relative) point
+ * @param {number} left @param {number} top @param {number} width @param {number} height
+ * @param {number} [tolerance]
+ * @returns {boolean}
+ */
+export function localRectangleContains(lx, ly, left, top, width, height, tolerance = 0) {
+  return (
+    lx >= left - tolerance && lx <= left + width + tolerance && ly >= top - tolerance && ly <= top + height + tolerance
+  );
+}
+
+/**
  * `EllipseShapeData`: center `(x,y)`, `radiusX`/`radiusY`, rotated around the
  * center. A `CircleShapeData` is the special case `radiusX === radiusY === radius`.
  *

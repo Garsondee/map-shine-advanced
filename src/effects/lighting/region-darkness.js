@@ -143,7 +143,7 @@
 // resolution) moved to ./region-geometry.js on 2026-07-25 (size-ratchet
 // god-object reversal); this file keeps the TSL per-fragment material
 // builders. DARKNESS_ADJUST_MODES is the one enum both halves share.
-import { DARKNESS_ADJUST_MODES } from './region-geometry.js';
+import { DARKNESS_ADJUST_MODES, REGION_EDGE_TOLERANCE } from './region-geometry.js';
 
 /* -------------------------------------------- */
 /*  TSL — per-pixel rendering (2026-07-19)       */
@@ -278,11 +278,14 @@ export function buildRegionRectangleMaterial({ THREE, uDaylightColor, uDarknessC
     const ly = rel.x.mul(sinR).add(rel.y.mul(cosR));
     const left = uAnchor.x.negate().mul(uSize.x);
     const top = uAnchor.y.negate().mul(uSize.y);
+    // Mirrors localRectangleContains(..., REGION_EDGE_TOLERANCE): the slack
+    // keeps two edge-sharing rectangles from leaving a float-error gap pixel.
+    const tol = float(REGION_EDGE_TOLERANCE);
     const inside = lx
-      .greaterThanEqual(left)
-      .and(lx.lessThanEqual(left.add(uSize.x)))
-      .and(ly.greaterThanEqual(top))
-      .and(ly.lessThanEqual(top.add(uSize.y)));
+      .greaterThanEqual(left.sub(tol))
+      .and(lx.lessThanEqual(left.add(uSize.x).add(tol)))
+      .and(ly.greaterThanEqual(top.sub(tol)))
+      .and(ly.lessThanEqual(top.add(uSize.y).add(tol)));
     inside.not().discard();
     const color = computeRegionColor(THREE.TSL, { uMode, uModifier, uBaseDarkness01, uDaylightColor, uDarknessColor });
     return vec4(color, float(1));

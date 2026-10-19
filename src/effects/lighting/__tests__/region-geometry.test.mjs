@@ -20,6 +20,8 @@ import {
   computeMinimumDarknessFloor,
   regionOverlapsElevationBand,
   DARKNESS_ADJUST_MODES,
+  REGION_EDGE_TOLERANCE,
+  localRectangleContains,
 } from '../region-geometry.js';
 // MAX_REGION_POLYGON_POINTS is a plain number export — importing it does not
 // touch any THREE/TSL code in region-darkness.js (verified: that module only
@@ -643,5 +645,48 @@ export function run(t) {
     );
 
     ok('a null entry in the array is skipped, not thrown on', computeMinimumDarknessFloor([null, ...bench]) === 0.5);
+  }
+
+  // ======================================================================
+  // Abutting rectangles — no hairline seam (mmp-fn1). Each shape is its own
+  // mesh, so a fragment ON the shared edge gets an independently float-
+  // perturbed local coordinate per shape; model that with +/- d.
+  // ======================================================================
+  {
+    const d = 1e-3; // ~1 ULP at scene coordinates of a few thousand units
+    // Shape A spans local x 0..100, shape B (origin x=100) spans local x 0..100.
+    // A fragment at world x=100 sees A: 100+d (just past A's far edge) and
+    // B: -d (just short of B's near edge) — the worst case, both reject.
+    const covered = (lxA, lxB, tol) =>
+      localRectangleContains(lxA, 50, 0, 0, 100, 100, tol) || localRectangleContains(lxB, 50, 0, 0, 100, 100, tol);
+    ok(
+      'OLD behaviour (tolerance 0): a perturbed fragment on the shared edge is covered by NEITHER shape (the seam)',
+      !covered(100 + d, -d, 0)
+    );
+    ok('with REGION_EDGE_TOLERANCE the same fragment is covered', covered(100 + d, -d, REGION_EDGE_TOLERANCE));
+    let gaps = 0;
+    for (let i = -20; i <= 20; i++) {
+      const e = (i * d) / 2;
+      if (!covered(100 + e, e, REGION_EDGE_TOLERANCE) && !covered(100 - e, -e, REGION_EDGE_TOLERANCE)) gaps++;
+    }
+    ok('no gap across a sweep of +/-1e-2 perturbations along the seam', gaps === 0);
+    // horizontal seam (same maths on the y axis)
+    ok(
+      'horizontal seam: perturbed y on the shared edge is covered',
+      localRectangleContains(50, 100 + d, 0, 0, 100, 100, REGION_EDGE_TOLERANCE) ||
+        localRectangleContains(50, -d, 0, 0, 100, 100, REGION_EDGE_TOLERANCE)
+    );
+    // one shape alone: interior and a clearly-outside point are unchanged
+    ok('single rect: interior still inside', localRectangleContains(50, 50, 0, 0, 100, 100, REGION_EDGE_TOLERANCE));
+    ok(
+      'single rect: 0.5 units outside is still outside',
+      !localRectangleContains(100.5, 50, 0, 0, 100, 100, REGION_EDGE_TOLERANCE)
+    );
+    ok('single rect: tolerance is far below a pixel (< 0.05 world units)', REGION_EDGE_TOLERANCE < 0.05);
+    ok(
+      'tolerance 0 equals pointInRectangle',
+      localRectangleContains(100, 50, 0, 0, 100, 100) ===
+        pointInRectangle(100, 50, { x: 0, y: 0, width: 100, height: 100 })
+    );
   }
 }

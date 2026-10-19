@@ -1135,7 +1135,8 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
       uRim.value = clamp01(num(look.rimDarken, D.rimDarken));
       uTrail.value = clamp01(num(look.trail, D.trail));
       uStretch.value = clamp01(num(look.projectionStretch, D.projectionStretch));
-      uMaskT.value = 1 - clamp(num(look.maskFloorPct, D.maskFloorPct), 0, 100) / 100;
+      // clamp01, not clamp: inside this factory `clamp` is the TSL node (it would make the uniform NaN)
+      uMaskT.value = 1 - clamp01(num(look.maskFloorPct, D.maskFloorPct) / 100);
     },
     /** The mask's brightest gated value (0..1), for the "brightest only" fade. @param {number} peak */
     setMaskPeak(peak) {

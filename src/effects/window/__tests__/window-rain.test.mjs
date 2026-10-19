@@ -966,7 +966,8 @@ export function run(t) {
     let agree = true;
     for (const pct of [0, 25, 60, 100]) {
       rain.setLook({ ...look, maskFloorPct: pct });
-      if (Math.abs(rain.snapshot().maskT - (1 - pct / 100)) > 1e-6) agree = false;
+      // written as !(<=) so a NaN uniform fails (NaN > x is false)
+      if (!(Math.abs(rain.snapshot().maskT - (1 - pct / 100)) <= 1e-6)) agree = false;
     }
     t.ok('rain-mask: the shader threshold uniform is 1 - pct/100, the twin t', agree);
     rain.setMaskPeak(0.8);
@@ -1074,5 +1075,91 @@ export function run(t) {
       if (gpu.snapshot().gravityMix !== directionMix(w).gravity) agree = false;
     }
     t.ok('mix: the shader uniform carries directionMix at every wind', agree);
+  }
+
+  // ── 14. The three 2026-10-19 rain changes together: 4x running drops, the mask floor, wind/gravity blend ──
+  {
+    const T = RAIN_TUNE;
+    const lookC = { ...look, maskFloorPct: 30 };
+    const storm = (w, lk = lookC) => ({
+      ...resolveRainFrame({ rain01: 1, wet01: 1, look: lk, windSpeed01: w }),
+      windFlowX: 1,
+      windFlowY: 0,
+    });
+    const gale = storm(1);
+    const calm = storm(0);
+    // the run boost and the bead thinning survive, and the mask dial does not touch the frame
+    t.ok(
+      'combined: running coverage is boost-scaled (gale/calm = 4/1.5) and the beads thin at full wind',
+      Math.abs(gale.slider / calm.slider - T.runBoostGale / T.runBoostCalm) < 1e-9 && gale.cover < calm.cover
+    );
+    const plain = storm(1, look);
+    t.ok(
+      'combined: the mask floor dial leaves the weather frame alone',
+      plain.slider === gale.slider && plain.cover === gale.cover && plain.gravityMix === gale.gravityMix
+    );
+    // gravity is gone at full wind, and fully there in calm
+    t.ok(
+      'combined: full wind has no downhill slide, calm keeps it',
+      gale.gravityMix === 0 && gale.slideSpeedMul === 0 && calm.gravityMix === 1 && calm.slideSpeedMul > 0
+    );
+
+    // at full wind with the dial at 30: dark mask has no rain, the brightest is exactly the unfaded picture
+    let rainSeen = 0;
+    let darkZero = true;
+    let brightSame = true;
+    for (let i = 0; i < 400; i++) {
+      const p = { x: 1700 + i * 2.9, y: 2600 + ((i * 13) % 80), frame: gale, clock: 6, slideClock: 4, flow: flowSouth };
+      const base = evalWindowRainPixel({ ...p, look });
+      const dark = evalWindowRainPixel({ ...p, look: lookC, maskValue: 0.2, maskPeak: 1 });
+      const peak = evalWindowRainPixel({ ...p, look: lookC, maskValue: 1, maskPeak: 1 });
+      if (base.gain !== 1) rainSeen++;
+      if (dark.offsetX !== 0 || dark.offsetY !== 0 || dark.gain !== 1) darkZero = false;
+      if (peak.offsetX !== base.offsetX || peak.offsetY !== base.offsetY || peak.gain !== base.gain) brightSame = false;
+    }
+    t.ok('combined: a full-wind storm puts rain in the sample (' + rainSeen + ' of 400)', rainSeen > 40);
+    t.ok('combined: at full wind the dim mask still has no rain', darkZero);
+    t.ok('combined: at full wind the brightest mask is exactly the unfaded rain', brightSame);
+
+    // the boosted running drops drift with the wind (the wind shift moves them exactly), under the mask fade too
+    const runOnly = { ...gale, cover: 0, sheet: 0 };
+    let same = true;
+    let moved = false;
+    for (let i = 0; i < 200; i++) {
+      const x = 500 + i * 3.7;
+      const y = 800 + ((i * 17) % 90);
+      const q = { frame: runOnly, look: lookC, clock: 4, slideClock: 9, flow: flowSouth, maskValue: 0.9, maskPeak: 1 };
+      const a = evalWindowRainPixel({ ...q, x, y });
+      const b = evalWindowRainPixel({ ...q, x: x + 60, y, windShiftX: 60, windShiftY: 0 });
+      if (Math.abs(a.gain - b.gain) > 1e-9 || Math.abs(a.offsetX - b.offsetX) > 1e-9) same = false;
+      if (Math.abs(a.gain - 1) > 0.02) moved = true;
+    }
+    t.ok('combined: at full wind the running drops ride the wind drift exactly', same && moved);
+
+    // the shader gets all three at once and still builds with the mask tap
+    const tex = () =>
+      new THREE.DataTexture(new Uint8Array([128, 128, 128, 128]), 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
+    const gpu = createWindowRain({ THREE, flowDirsTexture: tex(), flowAuxTexture: tex() });
+    gpu.setLook(lookC);
+    gpu.setMaskPeak(0.8);
+    gpu.setFrame(gale, { clock: 1, slideClock: 1, windFlow: [1, 0] });
+    const s = gpu.snapshot();
+    t.ok(
+      'combined: shader uniforms carry the boost, the mask floor and zero gravity together',
+      Math.abs(s.slider - gale.slider) < 1e-6 &&
+        Math.abs(s.cover - gale.cover) < 1e-6 &&
+        Math.abs(s.maskT - 0.7) < 1e-6 &&
+        Math.abs(s.maskPeak - 0.8) < 1e-6 &&
+        s.gravityMix === 0 &&
+        s.rate === 0
+    );
+    let built = true;
+    try {
+      const nodes = gpu.build({ maskGated: () => THREE.TSL.float(0.5) });
+      built = !!nodes.offsetPx && !!nodes.gain;
+    } catch (e) {
+      built = false;
+    }
+    t.ok('combined: the TSL graph builds with all three changes in', built);
   }
 }

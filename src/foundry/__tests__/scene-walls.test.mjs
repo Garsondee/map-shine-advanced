@@ -119,6 +119,36 @@ export function run(t) {
     !deriveWallAperture({})
   );
   ok('no argument at all is also safe (never throws)', deriveWallAperture() === false);
+  // THE SECOND CONVENTION (2026-10-19): the Mad Scientist's Compound marks its 47 windows light:NONE + sight:PROXIMITY.
+  ok(
+    'move:NORMAL + light:NONE + sight:PROXIMITY (the Mad Scientist windows) IS an aperture',
+    deriveWallAperture({ move: 20, light: 0, sight: 30 })
+  );
+  ok(
+    'light:NONE + sight:NORMAL (terrain edges: Broken Hills, Deep Forest, ...) is NOT an aperture',
+    !deriveWallAperture({ move: 20, light: 0, sight: 20 })
+  );
+  ok(
+    'light:NONE + sight:NONE (railings, fences, glass you can see through) is NOT an aperture',
+    !deriveWallAperture({ move: 20, light: 0, sight: 0 })
+  );
+  ok('light:NONE + sight:LIMITED is NOT an aperture', !deriveWallAperture({ move: 20, light: 0, sight: 10 }));
+  ok(
+    'light:NONE with no sight given reads as an ordinary sight-blocking wall, not an aperture',
+    !deriveWallAperture({ move: 20, light: 0 })
+  );
+  ok(
+    'move:NONE + light:NONE + sight:PROXIMITY IS an aperture (a window authored without a movement block, e.g. one in the Mad Scientist row)',
+    deriveWallAperture({ move: 0, light: 0, sight: 30 })
+  );
+  ok(
+    'move:NONE + light:PROXIMITY is still NOT an aperture (the first convention needs a wall to cut into)',
+    !deriveWallAperture({ move: 0, light: 30, sight: 30 })
+  );
+  ok(
+    'light:NORMAL + sight:PROXIMITY is NOT an aperture (the light sense decides)',
+    !deriveWallAperture({ move: 20, light: 20, sight: 30 })
+  );
   ok(
     'a leaded-glass proximity wall (light:PROXIMITY, sight:NORMAL — blocks vision, passes light near it) IS still an aperture — sight is not read',
     deriveWallAperture({ move: 20, light: 30, sight: 20 }) // sight is not a parameter at all — passing it is ignored

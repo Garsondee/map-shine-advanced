@@ -2,24 +2,32 @@
  * window-reach.test.mjs — how far a candle's / fire's light keeps shining once it has
  * crossed a window (`window-reach.js`).
  *
- * THE LIVE SYMPTOM THIS PINS (2026-10-19): a candle with the default 2000 px reach, next to
- * a `light: PROXIMITY` window, threw straight-edged fans of light far across the ground
- * outside. The CPU spec below is what the TSL port mirrors; the graph tests prove the
- * port constructs with the real vendored three.webgpu TSL (they cannot prove the pixels —
- * that was a before/after render in a real Foundry scene, see the bead).
+ * THE LIVE SYMPTOM THIS PINS (2026-10-19): a candle with the default 2000 px reach, in a
+ * building with dozens of windows, threw straight-edged fans of light far across the ground
+ * outside. The CPU spec below is what the TSL port mirrors; the graph tests prove the port
+ * constructs with the real vendored three.webgpu TSL (they cannot prove the pixels — that was a
+ * before/after render in a real Foundry scene, see the bead).
  */
 import * as THREE from '../../../vendor/three/three.webgpu.js';
 import {
   WINDOW_REACH_OFF_PX,
   WINDOW_REACH_DEFAULT_PX,
-  MAX_WINDOWS_PER_LIGHT,
+  WINDOW_REACH_BINS,
+  WINDOW_SOFT_RAMP_PX,
+  WINDOW_NONE,
+  WINDOW_EDGE_SOFT_FRACTION,
   windowReachLimited,
   windowReachFade,
+  windowEdgeSoftness,
+  windowCrossing,
   distancePastWindow,
   computeWindowReachMultiplier,
-  findWindowsForReach,
+  windowReachAlongRay,
+  computeWindowReachProfile,
+  sampleWindowReachProfile,
   buildWindowReachTerm,
 } from '../window-reach.js';
+import { deriveWallBlocksLight } from '../../../foundry/scene-walls.js';
 import { canBatchLight } from '../point-light-batch.js';
 import { createApertureGoboSharedUniforms } from '../aperture-gobo-render.js';
 import { APERTURE_GOBO_DEFAULTS } from '../aperture-gobo.js';
@@ -57,7 +65,22 @@ export function run(t) {
   ok('no hard edge: it is nearly flat-zero just before the reach', windowReachFade(190, 200) < 0.003);
   eq('a zero reach does not divide by zero', windowReachFade(10, 0), 0);
 
-  // ── geometry: a window in the wall y = 100, light at (0, 0), glass from x=-50 to 50 ──
+  // ── soft sides: the beam fades in over the outer part of the glass at each side ──
+  eq('nothing at the very edge of the glass', windowEdgeSoftness(0), 0);
+  eq('nothing at the other edge either', windowEdgeSoftness(1), 0);
+  eq('full strength through the middle of the glass', windowEdgeSoftness(0.5), 1);
+  eq('full strength right at the inner edge of the soft zone', windowEdgeSoftness(WINDOW_EDGE_SOFT_FRACTION), 1);
+  ok(
+    'half-way up the soft zone is part-way (a smooth ramp, not a step)',
+    windowEdgeSoftness(WINDOW_EDGE_SOFT_FRACTION / 2) > 0.4 && windowEdgeSoftness(WINDOW_EDGE_SOFT_FRACTION / 2) < 0.6
+  );
+  ok('symmetric', Math.abs(windowEdgeSoftness(0.1) - windowEdgeSoftness(0.9)) < 1e-12);
+  ok(
+    'outside the glass (slack) is 0, never negative',
+    windowEdgeSoftness(-0.01) === 0 && windowEdgeSoftness(1.01) === 0
+  );
+
+  // ── one window, geometry: a window in the wall y = 100, light at (0, 0), glass x = -50 .. 50 ──
   const L = { x: 0, y: 0 };
   const win = { ax: -50, ay: 100, bx: 50, by: 100 };
   ok(
@@ -65,16 +88,15 @@ export function run(t) {
     distancePastWindow(L, { x: 0, y: 60 }, win) === -1
   );
   ok('straight through: 50 px past the glass', near(distancePastWindow(L, { x: 0, y: 150 }, win), 50));
-  ok('a point on the glass line itself is 0 past', near(distancePastWindow(L, { x: 20, y: 100 }, win), 0, 1e-9));
+  ok(
+    'windowCrossing reports where across the glass the ray goes (0.5 = the middle)',
+    Math.abs(windowCrossing(L, { x: 0, y: 150 }, win).u - 0.5) < 1e-9
+  );
   ok(
     'a ray that misses the glass (beside the window) is not "past" it',
     distancePastWindow(L, { x: 300, y: 150 }, win) === -1
   );
   ok('behind the light is not past the window', distancePastWindow(L, { x: 0, y: -150 }, win) === -1);
-  ok(
-    'a ray that grazes just past the glass end is still caught (2 px slack)',
-    distancePastWindow(L, { x: 51 * 1.5, y: 150 }, win) >= 0
-  );
   ok(
     'a degenerate (zero-length) window never hits',
     distancePastWindow(L, { x: 0, y: 150 }, { ax: 5, ay: 100, bx: 5, by: 100 }) === -1
@@ -83,9 +105,6 @@ export function run(t) {
     'a ray parallel to the window never hits',
     distancePastWindow(L, { x: 500, y: 0 }, { ax: 0, ay: 0, bx: 100, by: 0 }) === -1
   );
-
-  // ── the multiplier: indoors is EXACTLY 1, outdoors fades ────────────────
-  const windows = [win];
   for (const p of [
     { x: 0, y: 99 },
     { x: -300, y: 40 },
@@ -93,72 +112,136 @@ export function run(t) {
     { x: 900, y: 99 },
     { x: 0, y: 0 },
   ]) {
-    eq(`indoors (${p.x},${p.y}) is multiplied by exactly 1`, computeWindowReachMultiplier(L, p, windows, 200), 1);
+    eq(
+      `one window, indoors (${p.x},${p.y}) is multiplied by exactly 1`,
+      computeWindowReachMultiplier(L, p, [win], 200),
+      1
+    );
   }
+
+  // ── THE PROFILE: a room with MANY windows, only some of which the light shines out of ──
+  const wall = (x1, y1, x2, y2, aperture = false) => ({ x1, y1, x2, y2, aperture });
+  // An 800 x 800 room centred on the light (walls at +-400), with a window in the south and west walls and TWO
+  // on the north wall, plus 40 more windows far away that the light cannot see (the compound has 47).
+  const room = [
+    wall(-400, 400, -150, 400),
+    wall(-150, 400, 150, 400, true), // south window, 300 wide
+    wall(150, 400, 400, 400),
+    wall(-400, -400, -250, -400),
+    wall(-250, -400, -120, -400, true), // north window A
+    wall(-120, -400, 120, -400),
+    wall(120, -400, 250, -400, true), // north window B
+    wall(250, -400, 400, -400),
+    wall(-400, -400, -400, -100),
+    wall(-400, -100, -400, 100, true), // west window
+    wall(-400, 100, -400, 400),
+    wall(400, -400, 400, 400),
+  ];
+  const farWindows = [];
+  for (let i = 0; i < 40; i++) farWindows.push(wall(1500, -1800 + i * 90, 1500, -1800 + i * 90 + 50, true));
+  const walls = [...room, ...farWindows];
+  const light = { x: 0, y: 0, radius: 2000 };
+  const bytes = new Uint8Array(WINDOW_REACH_BINS * 4);
+  const count = computeWindowReachProfile(light, walls, bytes);
+  ok('the profile finds directions through windows', count > 0 && count < WINDOW_REACH_BINS);
   ok(
-    'just outside the glass is almost full strength',
-    computeWindowReachMultiplier(L, { x: 0, y: 105 }, windows, 200) > 0.9
+    'the profile is RGBA8: alpha is always 255',
+    (() => {
+      for (let i = 0; i < WINDOW_REACH_BINS; i++) if (bytes[i * 4 + 3] !== 255) return false;
+      return true;
+    })()
   );
-  ok('well outside it is dim', computeWindowReachMultiplier(L, { x: 0, y: 250 }, windows, 200) < 0.1);
-  eq(
-    'past the reach it is exactly 0 (this is what removes the long fan)',
-    computeWindowReachMultiplier(L, { x: 0, y: 900 }, windows, 200),
-    0
-  );
+  const reach = 200;
+  const m = (x, y) => sampleWindowReachProfile(bytes, light, { x, y }, reach);
+  // indoors: exactly 1, in every direction, up to the walls
+  let indoorsMin = 1;
+  for (let a = 0; a < 360; a += 1) {
+    for (const r of [10, 100, 250, 390]) {
+      const x = Math.cos((a * Math.PI) / 180) * r;
+      const y = Math.sin((a * Math.PI) / 180) * r;
+      if (Math.abs(x) < 399 && Math.abs(y) < 399) indoorsMin = Math.min(indoorsMin, m(x, y));
+    }
+  }
+  eq('everywhere INSIDE the room the light is multiplied by exactly 1', indoorsMin, 1);
+  ok('just outside the south window (middle) is nearly full strength', m(0, 410) > 0.9);
+  ok('well outside the south window is dim', m(0, 500) < 0.3);
+  eq('past the reach it is exactly 0, straight out of the south window', m(0, 400 + reach + 30), 0);
+  eq('and out of the north window', m(-185 * 1.8, -400 * 1.8), 0);
+  eq('and out of the SECOND north window', m(185 * 1.8, -400 * 1.8), 0);
+  eq('and out of the west window', m(-400 - reach - 30, 0), 0);
   ok(
-    'the wedge BESIDE the glass the ray cannot reach is untouched (light that came another way)',
-    computeWindowReachMultiplier(L, { x: 400, y: 150 }, windows, 200) === 1
+    'outside a SOLID part of the wall there is no light at all to curtail: stays 1 (never got out)',
+    m(350, -500) === 1
+  );
+  ok('the 40 far windows the light cannot see do not touch the room', m(-300, 0) === 1);
+  ok(
+    'the soft sides: a ray through the very edge of the south glass is dimmer than through the middle',
+    m(144, 480) < m(0, 480)
   );
   ok(
     'a bigger reach lets more light through',
-    computeWindowReachMultiplier(L, { x: 0, y: 250 }, windows, 400) >
-      computeWindowReachMultiplier(L, { x: 0, y: 250 }, windows, 200)
+    sampleWindowReachProfile(bytes, light, { x: 0, y: 500 }, 400) > m(0, 500)
   );
-  // series: the SMALLEST multiplier wins
-  const second = { ax: -400, ay: 200, bx: 400, by: 200 };
-  const p = { x: 0, y: 260 };
-  const one = computeWindowReachMultiplier(L, p, [win], 300);
-  const both = computeWindowReachMultiplier(L, p, [win, second], 300);
   ok(
-    'windows in series take the smallest multiplier',
-    both <= one && both === Math.min(one, computeWindowReachMultiplier(L, p, [second], 300))
+    'the multiplier is always within 0..1',
+    (() => {
+      for (let a = 0; a < 360; a += 3)
+        for (const r of [50, 450, 520, 700, 1500]) {
+          const v = m(Math.cos((a * Math.PI) / 180) * r, Math.sin((a * Math.PI) / 180) * r);
+          if (!(v >= 0 && v <= 1)) return false;
+        }
+      return true;
+    })()
   );
-  eq('no windows at all: 1', computeWindowReachMultiplier(L, { x: 0, y: 500 }, [], 200), 1);
+  // the along-the-ray function and its edges
+  eq('before the window the ray is 1', windowReachAlongRay(100, 400, 1, 200), 1);
+  eq('the "no window" sentinel is 1 at any distance', windowReachAlongRay(1900, WINDOW_NONE, 1, 200), 1);
+  ok(
+    'soft sides ease in over the ramp, not a step at the glass',
+    windowReachAlongRay(401, 400, 0, 200) > 0.9 && windowReachAlongRay(400 + WINDOW_SOFT_RAMP_PX, 400, 0, 2000) < 0.1
+  );
 
-  // ── which windows a light uses ──────────────────────────────────────────
-  const seg = (x1, y1, x2, y2, aperture = true) => ({ x1, y1, x2, y2, aperture });
-  const found = findWindowsForReach({ x: 0, y: 0, radius: 500 }, [
-    seg(-50, 300, 50, 300),
-    seg(-50, 100, 50, 100),
-    seg(-50, 900, 50, 900),
-    seg(-50, 50, 50, 50, false),
-  ]);
+  // no windows / no walls
+  const none = new Uint8Array(WINDOW_REACH_BINS * 4);
   eq(
-    'only windows within the light radius, nearest first',
-    found.map((w) => w.ay),
-    [100, 300]
+    'a room with no windows has an empty profile',
+    computeWindowReachProfile(
+      light,
+      room.map((w) => ({ ...w, aperture: false })),
+      none
+    ),
+    0
   );
+  eq('no walls at all: empty', computeWindowReachProfile(light, [], none), 0);
   eq(
-    'a non-aperture wall is never a window',
-    found.some((w) => w.ay === 50),
-    false
+    'a light whose radius reaches nothing: empty',
+    computeWindowReachProfile({ x: 0, y: 0, radius: 10 }, walls, none),
+    0
   );
-  const many = [];
-  for (let i = 1; i <= 9; i++) many.push(seg(-10, i * 40, 10, i * 40));
-  const capped = findWindowsForReach({ x: 0, y: 0, radius: 1000 }, many);
-  eq(`at most ${MAX_WINDOWS_PER_LIGHT} windows`, capped.length, MAX_WINDOWS_PER_LIGHT);
+  const behind = new Uint8Array(WINDOW_REACH_BINS * 4);
   eq(
-    'the capped list is the nearest ones',
-    capped.map((w) => w.ay),
-    [40, 80, 120, 160]
+    'a window hidden behind a solid wall is never "first"',
+    computeWindowReachProfile(
+      { x: 0, y: 0, radius: 1000 },
+      [wall(-500, 200, 500, 200), wall(-50, 300, 50, 300, true)],
+      behind
+    ),
+    0
   );
-  const reuse = [];
+
+  // ── what stops light ────────────────────────────────────────────────────
+  ok('an ordinary wall stops light', deriveWallBlocksLight({ light: 20 }) === true);
+  ok('light:NONE does not (windows, railings, terrain edges)', deriveWallBlocksLight({ light: 0 }) === false);
   ok(
-    'the result array is the caller’s own (no allocation per frame)',
-    findWindowsForReach({ x: 0, y: 0, radius: 500 }, many, reuse) === reuse && reuse.length === 4
+    'a PROXIMITY window blocks like a wall until the window code takes over',
+    deriveWallBlocksLight({ light: 30 }) === true
   );
-  eq('a radius of zero finds nothing', findWindowsForReach({ x: 0, y: 0, radius: 0 }, many).length, 0);
-  eq('no walls: empty', findWindowsForReach({ x: 0, y: 0, radius: 500 }, []).length, 0);
+  ok('a closed door stops light', deriveWallBlocksLight({ light: 20, door: 1, ds: 0 }) === true);
+  ok('an open door lets it through', deriveWallBlocksLight({ light: 20, door: 1, ds: 1 }) === false);
+  ok(
+    'a missing field reads as an ordinary wall',
+    deriveWallBlocksLight({}) === true && deriveWallBlocksLight() === true
+  );
 
   // ── batching: a window-reach light cannot share a batched bucket ────────
   ok(
@@ -175,29 +258,26 @@ export function run(t) {
   const shared = createApertureGoboSharedUniforms(THREE);
   ok('the shared reach uniform exists', !!shared.uWindowReachPx);
   const posXY = vec2(uniform(float(0)), uniform(float(0)));
+  const tex = new THREE.DataTexture(bytes, WINDOW_REACH_BINS, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
+  tex.needsUpdate = true;
   eq(
     'zero windows compiles out entirely',
-    buildWindowReachTerm({ THREE, positionWorldXY: posXY, windowCount: 0, shared }),
+    buildWindowReachTerm({ THREE, positionWorldXY: posXY, windowCount: 0, shared, profileTexture: tex }),
     null
   );
-  for (let n = 1; n <= MAX_WINDOWS_PER_LIGHT; n++) {
-    let term = null;
-    let err = null;
-    try {
-      term = buildWindowReachTerm({ THREE, positionWorldXY: posXY, windowCount: n, shared });
-    } catch (e) {
-      err = e;
-    }
-    ok(
-      `${n} window(s) construct (${err ? err.message : 'clean'})`,
-      err === null && term && term.windows.length === n && !!term.node && !!term.uLight
-    );
-  }
   eq(
-    'more windows than the cap are clamped',
-    buildWindowReachTerm({ THREE, positionWorldXY: posXY, windowCount: 99, shared }).windows.length,
-    MAX_WINDOWS_PER_LIGHT
+    'no texture compiles out too (never a half-built graph)',
+    buildWindowReachTerm({ THREE, positionWorldXY: posXY, windowCount: 1, shared, profileTexture: null }),
+    null
   );
+  let term = null;
+  let err = null;
+  try {
+    term = buildWindowReachTerm({ THREE, positionWorldXY: posXY, windowCount: 1, shared, profileTexture: tex });
+  } catch (e) {
+    err = e;
+  }
+  ok(`the term constructs (${err ? err.message : 'clean'})`, err === null && !!term && !!term.node && !!term.uLight);
 
   // ── both materials carry it, through the real builders ──────────────────
   const common = {
@@ -209,7 +289,7 @@ export function run(t) {
     falloffModel: 'candle',
     apertureGoboShared: shared,
   };
-  const illumHolder = { count: 2, shared, handle: null };
+  const illumHolder = { count: 1, shared, texture: tex, handle: null };
   let illumErr = null;
   try {
     buildPointLightIlluminationMaterial({ ...common, windowReach: illumHolder });
@@ -220,18 +300,11 @@ export function run(t) {
     `the illumination material builds with a window-reach term (${illumErr ? illumErr.message : 'clean'})`,
     illumErr === null
   );
-  ok(
-    'it hands back two window uniform slots and the light position',
-    illumHolder.handle?.windows?.length === 2 && !!illumHolder.handle.uLight
-  );
-  const noneHolder = { count: 0, shared, handle: null };
-  try {
-    buildPointLightIlluminationMaterial({ ...common, windowReach: noneHolder });
-  } catch (e) {
-    illumErr = e;
-  }
+  ok('it hands back the light position uniform', !!illumHolder.handle?.uLight);
+  const noneHolder = { count: 0, shared, texture: tex, handle: null };
+  buildPointLightIlluminationMaterial({ ...common, windowReach: noneHolder });
   ok('with zero windows nothing is compiled in and no handle is returned', noneHolder.handle === null);
-  const colorHolder = { count: 3, shared, handle: null };
+  const colorHolder = { count: 1, shared, texture: tex, handle: null };
   let colorErr = null;
   try {
     buildPointLightColorationMaterial({
@@ -249,5 +322,5 @@ export function run(t) {
     `the coloration material builds with a window-reach term (${colorErr ? colorErr.message : 'clean'})`,
     colorErr === null
   );
-  ok('and hands back three slots', colorHolder.handle?.windows?.length === 3);
+  ok('and hands back its own light position uniform', !!colorHolder.handle?.uLight);
 }

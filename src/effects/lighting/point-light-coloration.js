@@ -211,7 +211,8 @@ export function buildColorationShadingCore({ THREE, inputs, shared, flags }) {
   // illumination-channel-only (switchColor bright/dim) concept.
   const {
     dist,
-    falloffGoboed: falloff,
+    falloffGoboed: falloffNoReach,
+    windowReachNode,
     uApLampHeight: uApColLampHeight,
     apApertures: apColApertures,
   } = buildPointLightSharedTerms({
@@ -231,6 +232,9 @@ export function buildColorationShadingCore({ THREE, inputs, shared, flags }) {
     beamShape,
     cookieTexture,
   });
+
+  // WINDOW REACH: the coloration is `colour * falloff`, so scaling the falloff scales its whole output.
+  const falloff = windowReachNode ? falloffNoReach.mul(windowReachNode) : falloffNoReach;
 
   // Technique 1 ("Adaptive Luminance", the LightData default): the tint is
   // scaled by the underlying MAP pixel's own perceived brightness — BT.709

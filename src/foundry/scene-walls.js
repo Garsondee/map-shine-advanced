@@ -107,6 +107,8 @@ const WALL_DOOR_STATE_OPEN = 1; // CONST.WALL_DOOR_STATES.OPEN
 // is Foundry's own real "window" sense — see deriveWallAperture's own header
 // for why this replaced an initial (wrong) NONE(0) reading.
 const WALL_LIGHT_NORMAL = 20; // CONST.EDGE_SENSE_TYPES.NORMAL — the schema's own default (blocks light)
+const WALL_LIGHT_NONE = 0; // CONST.EDGE_SENSE_TYPES.NONE — light passes unconditionally
+const WALL_SIGHT_PROXIMITY = 30; // CONST.EDGE_SENSE_TYPES.PROXIMITY, read off `sight`
 const WALL_LIGHT_PROXIMITY = 30; // CONST.EDGE_SENSE_TYPES.PROXIMITY — Foundry's own window convention: opaque beyond threshold.light, passable within it
 const WALL_DIR_BOTH = 0; // CONST.WALL_DIRECTIONS.BOTH === CONST.EDGE_DIRECTIONS.BOTH — the schema's own default (collides from both sides)
 
@@ -168,6 +170,22 @@ export function deriveWallBlocksExterior({ move } = {}) {
 }
 
 /**
+ * Does this wall stop LIGHT? Pure. `light: NONE` lets it through (a window, a railing, terrain), an open
+ * door lets it through, everything else (NORMAL, LIMITED, PROXIMITY, DISTANCE) stops it for the purposes
+ * of "which windows can a light see" (`window-reach.js`): a window blocks like a wall until the light's
+ * own window handling takes over, so the nearest window along a ray is the one that counts.
+ * @param {{light?: number, door?: number, ds?: number}} [wall]
+ * @returns {boolean}
+ */
+export function deriveWallBlocksLight({ light, door, ds } = {}) {
+  const lightVal = Number.isFinite(light) ? light : WALL_LIGHT_NORMAL;
+  if (lightVal === WALL_LIGHT_NONE) return false;
+  const isDoor = Number.isFinite(door) ? door !== WALL_DOOR_NONE : false;
+  const dsVal = Number.isFinite(ds) ? ds : WALL_DOOR_STATE_CLOSED;
+  return !(isDoor && dsVal === WALL_DOOR_STATE_OPEN);
+}
+
+/**
  * Is this wall an APERTURE — solid to movement, but a window for LIGHT?
  * (`docs/planning/Aperture-Gobo.md` §2.1.) Pure — no Foundry, no canvas — so
  * this is Node-tested the same way `deriveWallSolid` is.
@@ -190,9 +208,19 @@ export function deriveWallBlocksExterior({ move } = {}) {
  *   as `deriveWallSolid`/`deriveWallBlocksExterior`.
  * @returns {boolean}
  */
-export function deriveWallAperture({ move, light } = {}) {
+export function deriveWallAperture({ move, light, sight } = {}) {
   const moveVal = Number.isFinite(move) ? move : WALL_MOVEMENT_NORMAL;
   const lightVal = Number.isFinite(light) ? light : WALL_LIGHT_NORMAL;
+  // A missing `sight` reads as the schema default (NORMAL): never a window.
+  const sightVal = Number.isFinite(sight) ? sight : WALL_LIGHT_NORMAL;
+  // THE SECOND WINDOW CONVENTION (2026-10-19, found on the author's own Mad Scientist's Compound, whose 47
+  // windows are `light: NONE, sight: PROXIMITY`): a wall that lets light through unconditionally but that you
+  // can only see through up close is a pane of glass, not terrain. `sight: PROXIMITY` is what tells it apart
+  // from the `light: NONE` walls this module must NOT claim (terrain edges are `sight: NORMAL`, railings and
+  // fences `sight: NONE` — the 317-wall over-match the header describes). It counts whether or not it also
+  // blocks movement (one window in that map has movement left off, in a row of otherwise identical windows).
+  if (lightVal === WALL_LIGHT_NONE && sightVal === WALL_SIGHT_PROXIMITY) return true;
+  // The first convention: `light: PROXIMITY` on a wall that blocks movement.
   return moveVal !== WALL_MOVEMENT_NONE && lightVal === WALL_LIGHT_PROXIMITY;
 }
 
@@ -234,7 +262,9 @@ export function readSceneWallSegments(levelId = null) {
         // a raw wall, added here rather than a second `canvas.scene.walls`
         // reader (`foundry/adapter-only` — this file is already the one place
         // that reads it).
-        aperture: deriveWallAperture({ move: wall.move, light: wall.light }),
+        aperture: deriveWallAperture({ move: wall.move, light: wall.light, sight: wall.sight }),
+        // Stops light (see deriveWallBlocksLight) — `window-reach.js` uses it to find which windows a light can see.
+        blocksLight: deriveWallBlocksLight({ light: wall.light, door: wall.door, ds: wall.ds }),
       });
     }
     return out;

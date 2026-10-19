@@ -180,7 +180,7 @@ export const APERTURE_GOBO_DEFAULTS = Object.freeze({
   maxApertureDistancePx: 400,
   // WINDOW REACH (2026-10-19, `window-reach.js`'s own header): how far a candle's or fire's light keeps
   // going once it has crossed a window, in scene px. 2000 (the slider's end) = no limit.
-  outsideReachPx: 200,
+  outsideReachPx: 150,
   // GLASS QUALITY & GRIME (round 13, 2026-08-04) — "have some fun with it."
   // 0.5 default: neither pure blob nor pure faceted, so the FIRST look at
   // this feature shows both kernels' own character at once, rather than

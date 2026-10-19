@@ -209,7 +209,7 @@ export function createApertureGoboSharedUniforms(THREE, defaults = APERTURE_GOBO
     uStrength: uniform(float(defaults.strength)),
     // WINDOW REACH (`window-reach.js`) — read by the candle/fire window-reach term, not by the
     // pattern maths above; lives here because this object is already threaded to every material.
-    uWindowReachPx: uniform(float(defaults.outsideReachPx ?? 200)),
+    uWindowReachPx: uniform(float(defaults.outsideReachPx ?? 150)),
   };
 }
 

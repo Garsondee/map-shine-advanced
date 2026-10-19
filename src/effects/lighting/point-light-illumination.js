@@ -1257,10 +1257,10 @@ function makeSdPolygonEdgeDistance(TSL) {
  *   @param {number} [args.apGoboRows] @param {object} [args.apertureGoboShared] -
  *   see `buildApertureGoboTerm`'s own params; `apertureCount` is
  *   graph-BUILD-time (`tsl/no-uniform-gates`) — 0 compiles the whole term out.
- * @param {{count:number, shared:object, handle:(object|null)}} [args.windowReach] -
- *   the window-reach term (`window-reach.js`): `count` windows (graph-build
- *   time, 0 compiles it out), `shared.uWindowReachPx`, and `handle` which this
- *   function fills with `{uLight, windows:[{uSeg}]}` for the pool to write.
+ * @param {{count:number, shared:object, texture:*, handle:(object|null)}} [args.windowReach] -
+ *   the window-reach term (`window-reach.js`): `count` (graph-build time, 0 compiles it out),
+ *   `shared.uWindowReachPx`, the light's lookup `texture`, and `handle` which this function fills
+ *   with `{uLight}` for the pool to write.
  * @param {*} [args.beamDirection] - REQUIRED (with `beamShape`) when
  *   `falloffModel === 'beam'` — see {@link buildBeamFalloffNode}'s own params.
  *   Absent → a `'beam'` request falls back to the `foundry` corona rather than
@@ -1402,20 +1402,35 @@ export function buildPointLightSharedTerms({
   // of it, and indoor fragments multiply by exactly 1). The uniform handles go
   // back to the caller through `windowReach.handle` (an out-param, so the three
   // wrapper return shapes above this function stay untouched).
+  // NOT multiplied into `falloffGoboed`: the caller applies it where it belongs. The illumination material
+  // scales its WHOLE output colour by it (a light's own "ambient floor" is brighter than the true night ambient
+  // outside, so fading only the brightness left the light's whole polygon showing as pale fans); the coloration
+  // material multiplies it into its falloff, which is already its whole output.
+  let windowReachNode = null;
   if (windowReach && windowReach.count > 0) {
     const reachResult = buildWindowReachTerm({
       THREE,
       positionWorldXY: positionWorld.xy,
       windowCount: windowReach.count,
       shared: windowReach.shared,
+      profileTexture: windowReach.texture,
     });
     if (reachResult) {
-      falloffGoboed = falloffGoboed.mul(reachResult.node);
-      windowReach.handle = { uLight: reachResult.uLight, windows: reachResult.windows };
+      windowReachNode = reachResult.node;
+      windowReach.handle = { uLight: reachResult.uLight };
     }
   }
 
-  return { dist, falloff, falloffGoboed, depthHere, depthFlagsHere, uApLampHeight, apApertures };
+  return {
+    dist,
+    falloff,
+    falloffGoboed,
+    windowReachNode,
+    depthHere,
+    depthFlagsHere,
+    uApLampHeight,
+    apApertures,
+  };
 }
 
 /**
@@ -1555,6 +1570,7 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
     dist,
     falloff: combinedFalloff,
     falloffGoboed: combinedFalloffGoboed,
+    windowReachNode,
     depthFlagsHere,
     uApLampHeight,
     apApertures,
@@ -1851,7 +1867,10 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
   // version this replaced.
 
   // FRAGMENT_END (illumination), audit §5c: mix(background, finalColor, depth).
-  const outputColor = mix(backgroundFloor, finalColorExposed, combinedFalloffGoboed);
+  const litColor = mix(backgroundFloor, finalColorExposed, combinedFalloffGoboed);
+  // WINDOW REACH (`window-reach.js`): scales the whole output, down to black = "this light adds nothing here" under
+  // the MAX blend, so the true ambient shows through. 1.0 everywhere the light has not crossed a window.
+  const outputColor = windowReachNode ? litColor.mul(windowReachNode) : litColor;
 
   return {
     finalNode: outputColor,

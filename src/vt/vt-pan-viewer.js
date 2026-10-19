@@ -5055,6 +5055,10 @@ export async function startVtPanViewer({
       // default, which it already treats as "no player lights this rig."
       getPlayerCarriedLightSources,
       getApertureGoboRenderState,
+      // WINDOW REACH (`effects/lighting/window-reach.js`) — each candle/fire light's own 720 x 1 lookup of
+      // "where does my light first cross a window, in every direction". RGBA8 + NEAREST on purpose (the
+      // island pack's comment above records why float textures bit this renderer once).
+      createWindowReachTexture: (bytes, width) => createMaskDataTexture(bytes, width, 1, 'nearest'),
       // STAGE 2 BATCHING (S2.5) — the SAME TDZ-safe closure pattern as
       // `getWindHandle` just above (`pointLightBatching` is declared FURTHER
       // DOWN this function, safe because this arrow is not invoked until

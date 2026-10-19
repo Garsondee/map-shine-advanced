@@ -1037,26 +1037,25 @@ export function run(t) {
     );
   }
 
-  // ---- Union semantics: two APPLICABLE apertures both lighting the same
-  // point combine via MAX (the brighter path wins), never a product. -------
+  // ---- Two applicable apertures, only ONE on the ray's glass (mmp-8nr,
+  // 2026-10-19: this block was "union semantics — the MAX wins"). P is past
+  // both windows' lines, but the ray crosses A's line BESIDE A's glass
+  // (sW≈-33, A's term reads 0 — the old "half-plane" darkness) and B's line
+  // on B's glass. The old max hid A's false zero behind B's value; the new
+  // combine gives A no say at all (weight 0) — same answer here, and the
+  // reason it is right no longer depends on another window being brighter
+  // (`aperture-gobo-walls.test.mjs` cases A-D are the ones where it did).
   {
     const p = windowParams({ wallLen: 200, cols: 1, rows: 1, frame: 0, sillPx: 0, headPx: 220 });
-    // Both apertures see P as exterior; A is centred on P (fully lit, ~1),
-    // B is shifted far enough that P sits near/in B's own frame (darker).
     const apertureA = { A: { x: -100, y: 0 }, dir: { x: 1, y: 0 }, nrm: { x: 0, y: 1 }, sL: -100, a: 10, wallLen: 200 };
     const apertureB = { A: { x: 400, y: 0 }, dir: { x: 1, y: 0 }, nrm: { x: 0, y: 1 }, sL: 400, a: 10, wallLen: 200 };
     const P = { x: 0, y: 20 };
     const a = computeApertureGoboTerm(P, apertureA, 40, 0, p);
     const b = computeApertureGoboTerm(P, apertureB, 40, 0, p);
     const combined = computeApertureGoboForLight(P, [apertureA, apertureB], 40, 0, p);
-    ok(
-      'the combine is the MAX of the two applicable terms, not their product',
-      near(combined, Math.max(a.gobo, b.gobo), 1e-9)
-    );
-    ok(
-      '...and specifically brighter than the product would have been (no double-shadowing)',
-      combined >= a.gobo * b.gobo - 1e-9
-    );
+    ok("sanity: A is applicable but its ray misses A's glass (weight 0)", a.applicable && a.weight === 0);
+    ok('sanity: B is crossed on its glass (weight 1)', b.applicable && b.weight === 1);
+    ok("an off-glass aperture has no say: the combine is B's own term", near(combined, b.gobo, 1e-12));
   }
 
   // ==========================================================================

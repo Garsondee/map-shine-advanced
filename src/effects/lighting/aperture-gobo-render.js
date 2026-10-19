@@ -103,7 +103,7 @@
  * loop that UNROLLS into straight-line arithmetic, the same shape
  * `layer-smear-render.js`'s own 32-station march already uses safely. No
  * `Loop`, no `uniformArray`, no uniform-bounded iteration, no `select()`
- * FOLD (the running max/anyApplicable accumulation below is `select()` used
+ * FOLD (the running min/anyApplicable accumulation below is `select()` used
  * as a per-iteration ternary on a scalar, never chained across branches the
  * way the stranded-variable trap needs). Still a live A/B question, not a
  * coin flip, if this reproduces a black screen — but nothing here matches
@@ -126,6 +126,7 @@ import {
   GRIME_PATCH_SCALE_PX,
   GRIME_GRIT_SCALE_PX,
   CRACK_WIDTH_PX,
+  SEGMENT_RAMP_MIN_PX,
 } from './aperture-gobo.js';
 import { simplexFloat, fbmFloat, voronoiFloat } from './animations/tsl-noise-toolkit.js';
 
@@ -272,7 +273,7 @@ export function buildApertureGoboTerm({ THREE, positionWorldXY, dist, apertureCo
   const uLampHeight = uniform(float(APERTURE_GOBO_DEFAULTS.defaultLampHeightPx));
 
   const apertures = [];
-  let runningMax = float(0);
+  let combined = float(1);
   let anyApplicable = float(0);
 
   for (let k = 0; k < count; k++) {
@@ -603,14 +604,31 @@ export function buildApertureGoboTerm({ THREE, positionWorldXY, dist, apertureCo
     const dimRadiusSuppress = select(hiFrac.lessThanEqual(loFrac), float(1), rawDimRadiusSuppress);
     const suppressedGobo = fadedGobo.mul(windowEdgeSuppress).mul(dimRadiusSuppress);
 
-    // ---- THE COMBINE (aperture-gobo.js#computeApertureGoboForLight) — a
-    // per-iteration `select()` ternary accumulated into a running scalar,
-    // NOT a branch fold — see this module's own §6.0 header.
-    runningMax = max(runningMax, select(applicable, suppressedGobo, float(0)));
-    anyApplicable = max(anyApplicable, select(applicable, float(1), float(0)));
+    // ---- THE SEGMENT WEIGHT (aperture-gobo.js#computeApertureSegmentWeight,
+    // mmp-8nr) ---- how much say this aperture has here at all: 1 where the
+    // ray crosses the wall line ON the glass (`sW` in [0, wallLen], unwarped),
+    // fading to 0 within the spoke blur width past either end. Without it,
+    // every ray crossing the window's INFINITE line beside the glass read as
+    // blocked — a hard 0/1 line along the wall's extension through doorways,
+    // open ground, L-shaped rooms. `smoothstep(0, ramp, d)` is 0 for any
+    // `d <= 0` (on the glass), so the weight is exactly 1 there, matching
+    // the CPU twin's own early return; `ramp >= SEGMENT_RAMP_MIN_PX` keeps the
+    // edges strictly ordered.
+    const outsideSegment = max(sW.negate(), sW.sub(wallLen));
+    const segmentRamp = max(spokeSoft, float(SEGMENT_RAMP_MIN_PX));
+    const segmentWeight = float(1).sub(smoothstep(float(0), segmentRamp, outsideSegment));
+    const weight = select(applicable, segmentWeight, float(0));
+
+    // ---- THE COMBINE (aperture-gobo.js#computeApertureGoboForLight) — MIN
+    // over the windows the ray crosses on the glass, each faded in by its
+    // weight (`g + (1-g)(1-w)`: exactly `g` at w=1, exactly 1 at w=0). A
+    // per-iteration scalar accumulation, NOT a branch fold — see this
+    // module's own §6.0 header.
+    const transmitted = suppressedGobo.add(float(1).sub(suppressedGobo).mul(float(1).sub(weight)));
+    combined = min(combined, transmitted);
+    anyApplicable = max(anyApplicable, weight);
   }
 
-  const combined = select(anyApplicable.greaterThan(float(0.5)), runningMax, float(1));
   // Exposed separately from `combined` (which is already 1 wherever this is
   // false) specifically for standalone debug visualization — it needs to
   // tell "genuinely unmodulated" apart from "no window reaches this

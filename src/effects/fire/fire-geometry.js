@@ -1541,6 +1541,16 @@ export function fireRuntimeFromParams(params = {}, chain = {}, wind = {}) {
     weatherResponse01: weatherResponse,
     snuffWind: chain?.snuffWind,
   });
+  // The PUSH signal: identical, minus the weather gate (see
+  // `fire-particle-runtime.js#uWindPushMotion01`). `weatherResponse` decides
+  // how far wind snuffs and dims a fire; it must not decide whether wind moves it.
+  const windPushMotion01 = fireWindMotion01({
+    windSpeed01: wind?.speed01,
+    windExposure01: 1,
+    windResponseGain,
+    weatherResponse01: 1,
+    snuffWind: chain?.snuffWind,
+  });
   const windSuppression = fireWindSuppressionFloors(canBeSnuffed);
   // ⚠️ `outdoor01` DEFAULTS TO 1 (fully outdoors), NOT 0 — a caller that never
   // passes it (every pre-2026-09-07 call site and test) must see indoor
@@ -1728,6 +1738,7 @@ export function fireRuntimeFromParams(params = {}, chain = {}, wind = {}) {
     // (fire-particle-runtime.js's `uWindMotion01`, multiplied by a live
     // `windHandle.kernel()` sample at each particle's own position).
     windMotion01,
+    windPushMotion01,
     /**
      * The flame's floors for the per-particle suppression curve
      * (`fire-sprite.js#buildFireWindSuppressionNode`) — what the CPU used to

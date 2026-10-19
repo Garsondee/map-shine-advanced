@@ -617,6 +617,20 @@ export function createFireParticleEngine({
    */
   const uWindMotion01 = uniform(float(0));
   /**
+   * THE PUSH SIGNAL — the same ambient speed × `windResponse` gain as
+   * `uWindMotion01`, but WITHOUT the `weatherResponse` gate (2026-10-19). That
+   * gate answers "how much does weather blow this fire OUT" (population and
+   * brightness suppression, `windSuppressionAt`), and the author's tuned
+   * default of 0.1 correctly keeps a gale from snuffing it. Feeding it to the
+   * push as well scaled the push to a tenth and then squared by the gust curve
+   * — about 2% of the intended shove at full wind — so embers and flames stood
+   * still whatever the wind and wind-response dials said. Push, mobilisation,
+   * chaos/rise and lifespan blends read THIS; suppression reads
+   * `uWindMotion01`. Falls back to `windMotion01` when `setParams` is not given
+   * a separate push value.
+   */
+  const uWindPushMotion01 = uniform(float(0));
+  /**
    * The flame's floors for the per-particle wind suppression curve
    * (`buildFireWindSuppressionNode`) — how far its population and brightness
    * can be pushed down by wind. 1 = no suppression (the safe start, until the
@@ -637,11 +651,11 @@ export function createFireParticleEngine({
    * `cell.openness` alone rather than the full `kernel()` result the force
    * computation also needs.
    */
-  const effectiveWindMotionAt = (posVec) => {
+  const effectiveWindMotionAt = (posVec, base = uWindPushMotion01) => {
     const openness = windOpennessBuffer
       ? windHandle.kernel(TSL, { centerXY: posVec, time: uTimeMs, cellBuffer: windOpennessBuffer }).openness
       : float(1);
-    return uWindMotion01.mul(buildFireOpennessGainNode(TSL, openness));
+    return base.mul(buildFireOpennessGainNode(TSL, openness));
   };
 
   /**
@@ -655,7 +669,7 @@ export function createFireParticleEngine({
    */
   const windSuppressionAt = (posVec) =>
     buildFireWindSuppressionNode(TSL, {
-      motion01: windOpennessBuffer ? effectiveWindMotionAt(posVec) : uWindMotion01,
+      motion01: windOpennessBuffer ? effectiveWindMotionAt(posVec, uWindMotion01) : uWindMotion01,
       kind,
       countFloor: uWindCountFloor,
       opacityFloor: uWindOpacityFloor,
@@ -821,7 +835,7 @@ export function createFireParticleEngine({
     // makes an indoor fire's flame stay calm while an outdoor one on the same
     // map genuinely gets shoved, instead of every fire on the floor sharing
     // one blended reading (the author's own "averaging is dumb" objection).
-    const effectiveWindMotion = uWindMotion01.mul(opennessGain);
+    const effectiveWindMotion = uWindPushMotion01.mul(opennessGain);
     // Chaos and rise blend the SAME way life does (`effectiveWindMotionAt`'s
     // own note, construction site) — real per-position exposure, not the
     // map-wide dial, so THIS particle's own local wind decides how much of
@@ -1260,6 +1274,7 @@ export function createFireParticleEngine({
       set(uBandCount, p2.bandCount);
       set(uExpectedDepth, p2.expectedDepth);
       set(uWindMotion01, p2.windMotion01);
+      set(uWindPushMotion01, Number.isFinite(p2.windPushMotion01) ? p2.windPushMotion01 : p2.windMotion01);
       set(uWindCountFloor, p2.windCountFloor);
       set(uWindOpacityFloor, p2.windOpacityFloor);
       if (Array.isArray(p2.tintMul) && p2.tintMul.length === 3) {
@@ -1323,6 +1338,7 @@ export function createFireParticleEngine({
         activeCount: uActiveCount.value,
         camHeight: uCamHeight.value,
         windMotion01: uWindMotion01.value,
+        windPushMotion01: uWindPushMotion01.value,
         hasOpennessGrid: !!windOpennessBuffer,
         // The guaranteed floor from ROUND 6's audit — at effectiveWindMotion=1,
         // a mobile particle's wind accel reaches referenceSizePx *

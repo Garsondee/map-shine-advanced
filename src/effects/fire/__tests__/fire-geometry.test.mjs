@@ -786,6 +786,28 @@ export function run(t) {
       fullWind.windMotion01 > 0.9
     );
 
+    // ⚠️ WEATHER RESPONSE MUST NOT GATE THE PUSH (2026-10-19). The author tuned
+    // `weatherResponse` down to 0.1 so a gale stops snuffing/dimming fires, and
+    // wind then stopped MOVING them too: one gated signal fed both, so a full
+    // gale reached the push as 0.1 (and ~2% of the shove after the gust curve).
+    const lowWeather = fireRuntimeFromParams({ weatherResponse: 0.1, windResponse: 2 }, chain66, { speed01: 1 });
+    t.ok(
+      'weatherResponse 0.1 leaves the PUSH signal at full strength in a full gale',
+      lowWeather.windPushMotion01 > 0.9
+    );
+    t.ok(
+      'weatherResponse 0.1 still scales the suppression signal down (guttering stays the weather dial)',
+      near(lowWeather.windMotion01, lowWeather.windPushMotion01 * 0.1, 1e-9)
+    );
+    t.ok(
+      'windResponse 0 still turns the push off entirely',
+      fireRuntimeFromParams({ weatherResponse: 1, windResponse: 0 }, chain66, { speed01: 1 }).windPushMotion01 === 0
+    );
+    t.ok(
+      'no wind, no push',
+      fireRuntimeFromParams({}, chain66, { speed01: 0 }).windPushMotion01 === 0
+    );
+
     // ⚠️ THE SPLIT, COMPLETED (2026-10-07). 2026-09-04 moved PUSH, lifespan and
     // chaos/rise to per-particle exposure and left the flame/smoke population on
     // the CPU "because a shared arena has no per-particle home for it". It does:

@@ -2159,6 +2159,97 @@ export function createFireBench({ THREE, log }) {
     },
   });
 
+  scenarios.set('weather-response-does-not-gate-push', {
+    name: 'weather-response-does-not-gate-push',
+    summary:
+      'Open-field embers in a full gale with the shipped weatherResponse (0.1) and windResponse (2), through the ' +
+      'REAL fireRuntimeFromParams -> engine.setParams path. Wind must still move them. Reproduces the 2026-10-19 ' +
+      'report that embers and flames ignored wind: one weather-gated signal fed both the push and the suppression, ' +
+      'so the push arrived at ~2% of its strength.',
+    async run({ runId }) {
+      const st = await ensureStage();
+      const W = await import('../../src/world/index.js');
+      const { createFireParticleEngine } = await import('../../src/effects/particles/particle-engine.js');
+      const { fireRuntimeFromParams, fireScaleChain } = await import('../../src/effects/fire/fire-geometry.js');
+      const { uniform, float } = THREE.TSL;
+
+      const gridSpec = await windFixtureGrid();
+      const structure = W.bakeWindStructure({ walls: [], gridSpec });
+      const FIELD = { x: 2048, y: 2048 };
+      const windHandle = W.createWindHandle({
+        version: 1,
+        ambientWind: { directionDeg: uniform(float(90)), speed01: uniform(float(1)) },
+        grid: { originX: gridSpec.minX, originY: gridSpec.minY, cellSize: gridSpec.cellSize, cols: gridSpec.cols, rows: gridSpec.rows },
+        cells: {
+          solid: structure.solidMask,
+          openness: W.deriveWindOpenness(structure, 1),
+          wallAvoidDirX: structure.wallAvoidDirX,
+          wallAvoidDirY: structure.wallAvoidDirY,
+          wallProximity: structure.wallProximity,
+          windShadow: W.deriveWindShadow(structure, 90),
+        },
+      });
+
+      async function drift(paramsFromRuntime) {
+        const span = 1600;
+        const rect = { minX: FIELD.x - span / 2, minY: FIELD.y - span / 2, maxX: FIELD.x + span / 2, maxY: FIELD.y + span / 2 };
+        const e = createFireParticleEngine({
+          THREE,
+          kind: 'ember',
+          archetype: null,
+          system: { id: 'fire.ember', params: { capacity: 48 } },
+          worldRect: rect,
+          pxPerMeter: 100,
+          windHandle,
+        });
+        e.setSpawnPoints(await hearthCloudAt(FIELD.x, FIELD.y));
+        e.setParams({ intensity: 1, sizeScale: 4, activeCount: 40, windCountFloor: 0.3, windOpacityFloor: 0.65, ...paramsFromRuntime });
+        for (let i = 0; i < 90; i++) e.step(renderer, { dtSec: 0.05, tMs: 1000 + i * 50, worldRect: rect });
+        frameWorld(rect);
+        st.scene.clear();
+        st.scene.add(e.scene);
+        renderer.setRenderTarget(st.target);
+        renderer.setClearColor(new THREE.Color(0, 0, 0), 1);
+        renderer.clear();
+        renderer.render(st.scene, st.camera);
+        renderer.setRenderTarget(null);
+        const raw = await renderer.readRenderTargetPixelsAsync(st.target, 0, 0, STAGE_DIM, STAGE_DIM);
+        const pixels = decodeHdrReadback(raw instanceof Promise ? await raw : raw);
+        return { dx: frameStats(pixels).centroidWorldX - FIELD.x, pixels };
+      }
+
+      const chain = fireScaleChain(100, 0.02, { fuel: 'wood' });
+      const shipped = fireRuntimeFromParams({ weatherResponse: 0.1, windResponse: 2 }, chain, { speed01: 1 });
+      const calm = await drift({ windMotion01: 0, windPushMotion01: 0 });
+      // What the engine received before the fix: the gated number as the only wind signal.
+      const before = await drift({ windMotion01: shipped.windMotion01 });
+      const after = await drift({ windMotion01: shipped.windMotion01, windPushMotion01: shipped.windPushMotion01 });
+      const artifacts = [];
+      const png = await savePixels(runId, 'embers-shipped-weather-response-gale.png', after.pixels);
+      if (png) artifacts.push(png);
+      paintPixels(after.pixels, `embers, shipped dials, gale → east: drift ${after.dx.toFixed(0)} px (gated-only was ${before.dx.toFixed(0)} px)`);
+
+      const checks = [
+        evaluate('the-fixture-is-what-it-claims', () => ({
+          ok: shipped.windMotion01 < 0.2 && shipped.windPushMotion01 > 0.9,
+          measured: { windMotion01: shipped.windMotion01, windPushMotion01: shipped.windPushMotion01 },
+          expected: 'gated suppression signal < 0.2, ungated push signal > 0.9 at the shipped dials',
+        })),
+        evaluate('the-gated-signal-alone-barely-moved-embers', () => ({
+          ok: Math.abs(before.dx - calm.dx) < 60,
+          measured: { calmPx: Math.round(calm.dx), gatedOnlyPx: Math.round(before.dx) },
+          expected: 'documents the bug: weather-gated signal alone shifts embers < 60 px',
+        })),
+        evaluate('the-push-signal-moves-embers-downwind', () => ({
+          ok: after.dx - calm.dx > 120,
+          measured: { calmPx: Math.round(calm.dx), withPushPx: Math.round(after.dx), gatedOnlyPx: Math.round(before.dx) },
+          expected: '> 120 px east of calm with the push signal wired',
+        })),
+      ];
+      return { checks, artifacts, inputs: { speed01: 1, directionDeg: 90, weatherResponse: 0.1, windResponse: 2 }, stats: { calm: calm.dx, before: before.dx, after: after.dx } };
+    },
+  });
+
   scenarios.set('sealed-room-candle-field', {
     name: 'sealed-room-candle-field',
     summary:

@@ -542,6 +542,7 @@ export function createFireSubsystem({
         // does, and the particle kernel can fade flame's own calm-air
         // upward drift as wind rises. See fire-geometry.js#fireWindMotion01.
         windMotion01: runtime.windMotion01,
+        windPushMotion01: runtime.windPushMotion01,
         // The flame's floors for the PER-PARTICLE suppression curve — the engines
         // evaluate it at each sprite's own position (see `fire-sprite.js#
         // buildFireWindSuppressionNode`); the CPU no longer pre-multiplies a count.

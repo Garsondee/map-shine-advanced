@@ -32,6 +32,23 @@ import {
 
 const look = { ...WINDOW_RAIN_DEFAULTS };
 
+/** The pre-2026-10-19 dials: a few tests below assert the shape of the model at a moderate look, not the shipped one. */
+const moderateLook = {
+  ...look,
+  response: 1,
+  dropScalePx: 1.2,
+  splatDensity: 1,
+  refraction: 1,
+  caustic: 0.8,
+  rimDarken: 0.35,
+  sliders: 0.7,
+  slideSpeed: 1,
+  trail: 0.6,
+  projectionStretch: 0.35,
+  windwardBias: 0.6,
+  sheeting: 0.6,
+};
+
 /** The frame for a given rain amount, with the wet share the glass would hold in steady rain. */
 const frameFor = (rain01, extra = {}) => ({
   ...resolveRainFrame({ rain01, wet01: Math.min(1, rain01 * 1.6), look }),
@@ -237,7 +254,13 @@ export function run(t) {
   {
     // Beads and sliders only: the storm sheet and the global wet dim are broad on purpose and are tested on their own.
     const coverage = (rain01) => {
-      const frame = { ...frameFor(rain01), sheet: 0, dim: 1 };
+      const frame = {
+        ...resolveRainFrame({ rain01, wet01: Math.min(1, rain01 * 1.6), look: moderateLook }),
+        windFlowX: 0,
+        windFlowY: 1,
+        sheet: 0,
+        dim: 1,
+      };
       let n = 0;
       let total = 0;
       for (let j = 0; j < 80; j++) {
@@ -246,7 +269,7 @@ export function run(t) {
             x: 2000 + i * 2.5,
             y: 3000 + j * 2.5,
             frame,
-            look,
+            look: moderateLook,
             clock: 41.3,
             slideClock: 20,
             flow: flowSouth,
@@ -732,7 +755,7 @@ export function run(t) {
       'rain: all four drop lattices are within 1.6x of each other in size (near-uniform)',
       Math.max(...T.octScale) / Math.min(...T.octScale) < 1.6 && Math.exp(T.radiusLog) < 1.7
     );
-    const storm = resolveRainFrame({ rain01: 1, wet01: 1, look });
+    const storm = resolveRainFrame({ rain01: 1, wet01: 1, look: moderateLook });
     const old = 1.5;
     t.ok(
       'rain: a storm runs at least 10x the old gravity (' + storm.slideSpeedMul.toFixed(1) + ' vs ' + old + ')',

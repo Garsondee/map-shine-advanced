@@ -65,7 +65,7 @@ export const RAIN_FIELD_IRIS = 127.5;
 export const RAIN_FIELD_PRESENCE_MIN = 24;
 
 /** Default corner ease: how far a 90 degree corner takes to turn the flow, world px. */
-export const RAIN_FIELD_DEFAULT_EASE_PX = 96;
+export const RAIN_FIELD_DEFAULT_EASE_PX = 200; // 2026-10-19 author's Studio export (was 96)
 
 /** The longest side, in cells, of the grid the field is derived on (see `deriveWindowRainField`). */
 export const RAIN_FIELD_MAX_DIM = 256;

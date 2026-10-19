@@ -133,7 +133,8 @@ export async function run(t) {
 
   // ── 3. Rain reaches the shader; only rain counts ─────────────────────────
   {
-    const state = { enabled: true, params: {}, debugChannel: 0, perfTier: 1 };
+    // rainResponse 1 = rain passes through unscaled (the shipped default is above 1, which would clamp these amounts)
+    const state = { enabled: true, params: { rainResponse: 1 }, debugChannel: 0, perfTier: 1 };
     const envRef = { value: null };
     const outdoorsRef = { value: grid() };
     const counters = { textures: 0 };
@@ -343,6 +344,6 @@ export async function run(t) {
     state.params = {};
     envRef.value = rainyEnv({ tMs: 4000 });
     sub.sync(0);
-    ok('rain: missing dials fall back to the effect defaults', sub.getStatus().rain.uniforms.scale === 1.2);
+    ok('rain: missing dials fall back to the effect defaults', sub.getStatus().rain.uniforms.scale === 4.9); // WINDOW_PARAMS.rainDropScalePx default
   }
 }

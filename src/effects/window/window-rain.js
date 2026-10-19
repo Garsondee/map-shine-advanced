@@ -123,18 +123,19 @@ export const RAIN_TUNE = Object.freeze({
 
 /** Look defaults, mirroring `WINDOW_PARAMS.rain*` (window.js quotes these). */
 export const WINDOW_RAIN_DEFAULTS = Object.freeze({
-  response: 1,
-  dropScalePx: 1.2,
-  splatDensity: 1,
-  refraction: 1,
-  caustic: 0.8,
-  rimDarken: 0.35,
-  sliders: 0.7,
-  slideSpeed: 1,
-  trail: 0.6,
-  projectionStretch: 0.35,
-  windwardBias: 0.6,
-  sheeting: 0.6,
+  // 2026-10-19 author's Studio export (was 1 / 1.2 / 1 / 1 / 0.8 / 0.35 / 0.7 / 1 / 0.6 / 0.35 / 0.6 / 0.6 / 40)
+  response: 2,
+  dropScalePx: 4.9,
+  splatDensity: 2,
+  refraction: 0.99,
+  caustic: 1.81,
+  rimDarken: 0.2,
+  sliders: 1,
+  slideSpeed: 0.99,
+  trail: 1,
+  projectionStretch: 1,
+  windwardBias: 1,
+  sheeting: 1,
   lingerSec: 40,
 });
 

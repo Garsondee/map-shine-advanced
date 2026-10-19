@@ -85,12 +85,12 @@ export const WINDOW_MASK_IMAGE_SCALE = 0.5;
 // Was LOWERED 3 → 1 (2026-09-21) — new live-tuned default; a change lands in
 // both or neither. Was RAISED 1 → 3 = WINDOW_PARAMS.strength's own max
 // (2026-09-09) before this round.
-export const WINDOW_DEFAULT_STRENGTH = 1; // 2026-10-17 author's live-tuned defaults (was 3)
+export const WINDOW_DEFAULT_STRENGTH = 1.5; // 2026-10-19 author's Studio export (was 1)
 // RAISED 0.69 → 1 (2026-09-21) — new live-tuned default, back to neutral;
 // see `WINDOW_PARAMS.contrast`'s own header (window.js). Was LOWERED 1 →
 // 0.69 (2026-09-08, recovered from a stash that missed both this file's own
 // commit and the 0.6.4 release; applied 2026-09-18) before this round.
-export const WINDOW_DEFAULT_CONTRAST = 1;
+export const WINDOW_DEFAULT_CONTRAST = 1.72; // 2026-10-19 author's Studio export (was 1)
 
 /**
  * THE OVERCAST MOOD — author, 2026-09-10: *"overcast days should blur the

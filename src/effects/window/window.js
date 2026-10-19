@@ -46,7 +46,7 @@ export const WINDOW_PARAMS = Object.freeze({
     // own max back toward neutral; the author's own dialled-in scene,
     // recorded exactly. Was RAISED 1 → 3 (2026-09-09) before this round.
     // 2026-09-25 — author's live-tuned "new defaults" dump (was 1).
-    default: 1, // 2026-10-17 author's live-tuned defaults (was 3)
+    default: 1.5, // 2026-10-19 author's Studio export (was 1)
     category: 'Look',
     label: 'Window light',
     help: 'Master strength of every light cookie this effect draws. Turn it to 0 to see the map with no window light at all.',
@@ -61,7 +61,7 @@ export const WINDOW_PARAMS = Object.freeze({
     // header (window-render.js). Was LOWERED 1 → 0.69 (2026-09-08, recovered
     // from a stash that missed both this file's own commit and the 0.6.4
     // release; applied 2026-09-18) before this round.
-    default: 1,
+    default: 1.72, // 2026-10-19 author's Studio export (was 1)
     category: 'Look',
     label: 'Patch contrast',
     help: 'Gamma on the painted falloff. Above 1 sharpens the cookie toward a hard-edged patch; below 1 softens it toward a broad glow. 1 = exactly what you painted.',
@@ -95,7 +95,7 @@ export const WINDOW_PARAMS = Object.freeze({
     step: 0.5,
     // LOWERED 20 → 6.5 (2026-09-21) — new live-tuned default; the author's
     // own dialled-in scene, recorded exactly.
-    default: 3.5, // 2026-10-17 author's live-tuned defaults (was 6.5)
+    default: 28, // 2026-10-19 author's Studio export (was 3.5)
     category: 'Glass',
     label: 'Glass thickness',
     help: 'How much the uneven pane bends the light, as a maximum shift in world pixels. 0 = perfectly flat modern glass: no distortion, no prism, no caustics. Raise it for thick, wavy, hand-blown panes.',
@@ -188,7 +188,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 2,
     step: 0.01,
-    default: 1,
+    default: 2, // 2026-10-19 author's Studio export (was 1)
     category: 'Rain',
     label: 'Rain on the glass',
     help: 'How much rain shows on the windows. It follows the weather on its own: no rain, no drops. This scales how wet the glass gets for the rain that is falling. 0 switches rain on glass off; above 1 makes light rain read as heavier.',
@@ -198,7 +198,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0.75,
     max: 8,
     step: 0.05,
-    default: 1.2,
+    default: 4.9, // was 1.2
     category: 'Rain',
     label: 'Drop size',
     help: 'The radius of a bead of water, in map pixels. Beads are all close to this size with a little variation, and each has a ragged edge. Drops too small to see at the current zoom fade away.',
@@ -208,7 +208,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 2,
     step: 0.01,
-    default: 1,
+    default: 2, // was 1
     category: 'Rain',
     label: 'Drop count',
     help: 'How many drops land and cling to the glass. Splashes already grow from a few in a drizzle to a crowd in a storm; this scales that. 0 = none.',
@@ -218,7 +218,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 2,
     step: 0.01,
-    default: 1,
+    default: 0.99, // was 1
     category: 'Rain',
     label: 'Drop lens',
     help: 'How much each bead bends the light behind it, the wobble you see in the light pool. 0 leaves the light shape alone.',
@@ -228,7 +228,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 2,
     step: 0.01,
-    default: 0.8,
+    default: 1.81, // was 0.8
     category: 'Rain',
     label: 'Drop highlight',
     help: 'The bright spot each bead of water focuses into the light.',
@@ -238,7 +238,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.35,
+    default: 0.2, // was 0.35
     category: 'Rain',
     label: 'Drop shadow',
     help: 'How dark the edge of each bead and each wet streak is. This is the small, varying dimming the light gets under rain.',
@@ -248,7 +248,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.7,
+    default: 1, // was 0.7
     category: 'Rain',
     label: 'Running drops',
     help: 'How many drops run down the glass toward the sill. They need the outdoors mask (the buildings) to know which way is down. 0 = no running drops, only splashes.',
@@ -258,7 +258,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 3,
     step: 0.01,
-    default: 1,
+    default: 0.99, // was 1
     category: 'Rain',
     label: 'Run speed',
     help: 'How fast the running drops slide, as a multiple of the storm pace (a storm runs at about 200 px per second). They stick, then slip, then stick again; the harder it rains the less they stick, and the wind carries them sideways.',
@@ -268,7 +268,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.6,
+    default: 1, // was 0.6
     category: 'Rain',
     label: 'Wet trails',
     help: 'The thin wet streak a running drop leaves behind it. 0 = none.',
@@ -278,7 +278,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.35,
+    default: 1, // was 0.35
     category: 'Rain',
     label: 'Drop stretch',
     help: 'Stretches each drop along the way the water runs, the way a window thrown onto the floor is stretched. 0 = round drops.',
@@ -288,7 +288,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 8,
     max: 200,
     step: 1,
-    default: 96,
+    default: 200, // was 96
     category: 'Rain',
     label: 'Corner blend',
     help: 'Around a building corner, how far the running direction takes to turn, in map pixels. Small gives a sharp switch between the two walls; large a long gentle blend. Needs the outdoors mask.',
@@ -298,7 +298,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.6,
+    default: 1, // was 0.6
     category: 'Rain',
     label: 'Wind-driven rain',
     help: 'How much the wind decides which windows get wet. At 1 the windows facing into the wind stream with water and the sheltered ones stay almost dry.',
@@ -308,7 +308,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.6,
+    default: 1, // was 0.6
     category: 'Rain',
     label: 'Storm sheeting',
     help: 'In the heaviest rain, a slow sheet of water runs over the glass and dims the light unevenly. 0 = none.',

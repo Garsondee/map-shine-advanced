@@ -269,7 +269,7 @@ export function createPrecipSplashEngine({
 
   // Look dials — the only mutable numbers here. Everything per-archetype is a
   // graph literal (see the header).
-  const uSizeScale = uniform(float(1));
+  const uSizeScale = uniform(float(1.1));
   /**
    * ⚠️ DEFAULT LOWERED 1 → 0.35 (2026-09-04, live author feedback: "lower
    * their opacity by a lot"). At `uPeakBoost`'s own V2-harvested 2.75, the
@@ -280,7 +280,7 @@ export function createPrecipSplashEngine({
    * exactly what its own comment says); it is also the FIRST params-schema
    * dial exposed as `splashAlphaScale` (Precipitation control panel).
    */
-  const uAlphaScale = uniform(float(0.35));
+  const uAlphaScale = uniform(float(0.75));
   /** V2's `SPLASH_PEAK_OPACITY_BOOST` (`:115`) — its own comment says the
    * legacy 0.02–0.12 peaks *"read too faint on the map"*. Harvested as a dial
    * rather than folded into the archetype peaks, so the four stay recognisably
@@ -311,7 +311,7 @@ export function createPrecipSplashEngine({
    * the wrong phenomenon rather than a wrong magnitude. `1` is the shipped
    * strength; the two constants it feeds keep a full gale legible from above.
    */
-  const uSmearGain = uniform(float(1));
+  const uSmearGain = uniform(float(1.75));
   const uWindSpeed01 = uniform(float(0));
   const uWindDirDeg = uniform(float(0));
   /** The wind field's own px/s at full gale — the fall's calibration, shared by
@@ -1027,7 +1027,7 @@ export function createPrecipSplashEngine({
    * See the species row's `splashesPerMegapixel`. */
   let lastRect = { minX: worldRect.minX, minY: worldRect.minY, maxX: worldRect.maxX, maxY: worldRect.maxY };
   /** Rate multiplier the debug panel drives. 1 = the species row's number. */
-  let rateScale = 1;
+  let rateScale = 3;
   /** The curtain's own capacity-normalised count, 0..1 — see `setFrame`. */
   let rateFrac = 0;
 

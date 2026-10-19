@@ -64,7 +64,7 @@ export function run(t) {
     // author asked to change ("lower their opacity by a lot").
     ok(
       'splashAlphaScale`s default was lowered from the engine`s original 1.0',
-      PRECIPITATION_PARAMS.splashAlphaScale.default === 0.35
+      PRECIPITATION_PARAMS.splashAlphaScale.default === 0.75
     );
   }
   ok('the manifest points at that same schema object', PRECIPITATION.params === PRECIPITATION_PARAMS);

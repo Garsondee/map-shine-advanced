@@ -389,7 +389,7 @@ export function createPrecipEngine({
   const uSlantDirDeg = uniform(float(90));
   /** Turbulence strength — V2's dual-frequency lateral chaos (`:1450-1505`),
    * as one scalar the lab can sweep. */
-  const uChaosScale = uniform(float(3.5));
+  const uChaosScale = uniform(float(8));
   /**
    * Multiplier on the species' own `streakPerPxS`. 1.0 = exactly the table's
    * number, the same distance-from-reference convention every dial here uses.
@@ -411,7 +411,7 @@ export function createPrecipEngine({
    * re-expresses V2's factor in the new basis instead of editing the harvested
    * constant, so the table keeps meaning what its own comment says it means.
    */
-  const uStreakScale = uniform(float(1.1));
+  const uStreakScale = uniform(float(1.35));
   /**
    * How much of the derived RADIAL (falling-toward-you) motion steers a
    * streak's direction. See the derivation at its use site in `positionNode`.
@@ -429,7 +429,7 @@ export function createPrecipEngine({
    * it) would double-drive the exact same number from two different callers
    * and corrupt the gust response. 1.0 = exactly today's speed.
    */
-  const uFallSpeedScale = uniform(float(0.4));
+  const uFallSpeedScale = uniform(float(1.15));
 
   // ── ⭐ THE SKY-REACH GATE (Precipitation.md LAW 3) ────────────────────────
   //

@@ -21,6 +21,7 @@ import {
   rainKindWeight,
   stepWindowWetness,
   resolveRainFrame,
+  directionMix,
   windExposure,
   filmField,
   evalSplatLayer,
@@ -801,5 +802,100 @@ export function run(t) {
       if (Math.abs(a.gain - b.gain) > 0.02) differ++;
     }
     t.ok('rain: wind smears the beads (' + differ + ' of 400 pixels change)', differ > 5);
+  }
+
+  // ── 13. Wind and gravity share the drop direction ───────────────────────
+  {
+    // up to half wind: gravity alone, exactly as before
+    let calmOk = true;
+    for (const w of [0, 0.1, 0.25, 0.5]) {
+      const m = directionMix(w);
+      if (m.gravity !== 1 || m.wind !== 0) calmOk = false;
+    }
+    t.ok('mix: wind 0, 0.25 and 0.5 are gravity alone (weights exactly 1 and 0)', calmOk);
+    const full = directionMix(1);
+    t.ok('mix: full wind is wind alone (gravity 0, wind 1)', full.gravity === 0 && full.wind === 1);
+    const mid = directionMix(0.75);
+    t.ok(
+      'mix: wind 0.75 is a true mix (' + mid.gravity.toFixed(3) + ' / ' + mid.wind.toFixed(3) + ')',
+      mid.gravity > 0 && mid.gravity < 1 && mid.wind > 0 && mid.wind < 1 && Math.abs(mid.gravity + mid.wind - 1) < 1e-12
+    );
+    let mono = true;
+    let smooth = true;
+    let prev = directionMix(0);
+    for (let i = 1; i <= 1000; i++) {
+      const m = directionMix(i / 1000);
+      if (m.wind < prev.wind || m.gravity > prev.gravity) mono = false;
+      if (Math.abs(m.wind - prev.wind) > 0.0031) smooth = false; // smoothstep slope is at most 3 per unit wind
+      prev = m;
+    }
+    t.ok('mix: the weights change monotonically', mono);
+    t.ok('mix: no jump anywhere (slope bounded, flat at both ends)', smooth && directionMix(0.5001).wind < 1e-6);
+    t.ok('mix: out-of-range wind clamps', directionMix(-3).gravity === 1 && directionMix(9).wind === 1);
+
+    // the frame carries it, and the running water's gravity speed follows
+    const at = (w) => resolveRainFrame({ rain01: 0.8, wet01: 1, look, windSpeed01: w });
+    const base = 10 * (0.55 + (1.5 - 0.55) * 0.8) * look.slideSpeed;
+    t.ok(
+      'mix: slide speed is untouched up to half wind and gone at full wind',
+      at(0).gravityMix === 1 &&
+        at(0.5).gravityMix === 1 &&
+        Math.abs(at(0.5).slideSpeedMul - base) < 1e-9 &&
+        at(1).gravityMix === 0 &&
+        at(1).slideSpeedMul === 0
+    );
+
+    // the bead smear: identical to the old frame (no gravityMix key) at wind <= 0.5; pure wind at 1
+    const evalAt = (frame, i) =>
+      evalWindowRainPixel({
+        x: 2000 + i * 2.3,
+        y: 3000 + ((i * 7) % 40),
+        frame,
+        look,
+        clock: 7,
+        slideClock: 3,
+        flow: flowSouth,
+      });
+    const sweep = (fa, fb) => {
+      let worst = 0;
+      for (let i = 0; i < 300; i++) {
+        const a = evalAt(fa, i);
+        const b = evalAt(fb, i);
+        worst = Math.max(
+          worst,
+          Math.abs(a.gain - b.gain),
+          Math.abs(a.offsetX - b.offsetX),
+          Math.abs(a.offsetY - b.offsetY)
+        );
+      }
+      return worst;
+    };
+    const wf = { windFlowX: 1, windFlowY: 0 };
+    let sameLow = true;
+    for (const w of [0, 0.25, 0.5]) {
+      const now = { ...at(w), ...wf };
+      const old = { ...now };
+      delete old.gravityMix;
+      if (sweep(now, old) !== 0) sameLow = false;
+    }
+    t.ok('mix: wind <= 0.5 gives the identical picture to before', sameLow);
+    const f1 = { ...at(1), ...wf };
+    t.ok('mix: at full wind the gravity push is already nothing', sweep(f1, { ...f1, gravityMix: 0 }) === 0);
+    t.ok(
+      'mix: a mid wind smears differently from gravity-only at the same push',
+      sweep({ ...at(0.75), ...wf }, { ...at(0.75), ...wf, gravityMix: 1 }) > 0
+    );
+
+    // the shader reads the same number the twin does
+    const tex = () =>
+      new THREE.DataTexture(new Uint8Array([128, 128, 128, 128]), 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
+    const gpu = createWindowRain({ THREE, flowDirsTexture: tex(), flowAuxTexture: tex() });
+    gpu.build();
+    let agree = true;
+    for (const w of [0, 0.3, 0.5, 0.6, 0.75, 0.9, 1]) {
+      gpu.setFrame(at(w), { clock: 1, slideClock: 1, windFlow: [1, 0] });
+      if (gpu.snapshot().gravityMix !== directionMix(w).gravity) agree = false;
+    }
+    t.ok('mix: the shader uniform carries directionMix at every wind', agree);
   }
 }

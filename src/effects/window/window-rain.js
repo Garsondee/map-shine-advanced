@@ -179,6 +179,7 @@ const smoothstep = (a, b, x) => {
   const t = clamp01((x - a) / (b - a));
   return t * t * (3 - 2 * t);
 };
+export const DIRECTION_MIX_WIND_LO = 0.5;
 const modp = (x, m) => x - m * Math.floor(x / m);
 
 /**
@@ -259,6 +260,7 @@ export function stepWindowWetness(wet01, rain01, dtSec, lingerSec) {
  * @returns {{cover:number, live:number, impact:number, slider:number, sheet:number, gust:number, dim:number, windBias:number, presence:number, slideSpeedMul:number}}
  */
 export function resolveRainFrame({ rain01, wet01, look, windSpeed01 = 0, gust01 = 0 }) {
+  const gravityMix = directionMix(clamp01(windSpeed01)).gravity;
   const rain = clamp01(rain01);
   const wet = clamp01(wet01);
   const dens = Math.max(0, look.splatDensity);
@@ -282,10 +284,24 @@ export function resolveRainFrame({ rain01, wet01, look, windSpeed01 = 0, gust01 
     windBias: windPush * clamp01(look.windwardBias),
     // how hard the wind pushes the water (0..1), whatever the author's windward dial says
     windPush,
+    // gravity's share of the drop direction: 1 up to half wind, 0 at full wind (see `directionMix`)
+    gravityMix,
     presence: cover > 0.002 || slider > 0.002 || sheet > 0.002 ? 1 : 0,
     // gravity: ten times what it was (a storm's drops run at ~200 px/s)
-    slideSpeedMul: 10 * lerp(0.55, 1.5, rain) * Math.max(0, look.slideSpeed),
+    slideSpeedMul: 10 * lerp(0.55, 1.5, rain) * Math.max(0, look.slideSpeed) * gravityMix,
   };
+}
+
+/**
+ * How wind and gravity share the drops' direction. Wind at or below `DIRECTION_MIX_WIND_LO` (0.5): gravity alone
+ * (weights 1, 0). Above it the wind's share eases in with a smoothstep to 1 at full wind, where gravity is gone
+ * (weights 0, 1). The one place the curve lives: the CPU twin and the shader uniform both read it.
+ * @param {number} wind01
+ * @returns {{gravity:number, wind:number}}
+ */
+export function directionMix(wind01) {
+  const wind = smoothstep(DIRECTION_MIX_WIND_LO, 1, wind01);
+  return { gravity: 1 - wind, wind };
 }
 
 /** How exposed a facet is to the wind-driven rain: windward streams with water, leeward stays nearly dry. */
@@ -576,8 +592,9 @@ export function evalWindowRainPixel({
   const pxPerWorld = viewSpanPx > 0 ? T.lodRefPx / viewSpanPx : 1;
   // Gravity and wind together: a bead smears along the SUM of "toward the wall" and "where the wind blows".
   const wpush = frame.windPush ?? 0;
-  let smx = bdx * kappa * T.gravitySmear + (frame.windFlowX ?? 0) * wpush;
-  let smy = bdy * kappa * T.gravitySmear + (frame.windFlowY ?? 0) * wpush;
+  const gmix = frame.gravityMix ?? 1;
+  let smx = bdx * kappa * T.gravitySmear * gmix + (frame.windFlowX ?? 0) * wpush;
+  let smy = bdy * kappa * T.gravitySmear * gmix + (frame.windFlowY ?? 0) * wpush;
   const sml = Math.hypot(smx, smy);
   if (sml > 1) {
     smx /= sml;
@@ -717,6 +734,7 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
   const uStick = uniform(float(0.5));
   const uRate = uniform(float(1));
   const uWindPush = uniform(float(0));
+  const uGravityMix = uniform(float(1));
   /** The wind's integrated drift of the running water, world px (CPU-integrated: see `evalWindowRainPixel`). */
   const uWindShift = uniform(vec2(0, 0));
   const uLive = uniform(float(0.9));
@@ -1036,7 +1054,7 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
         const paneH = select(kappa.greaterThan(0), fl.h, F(0.5));
         const bdir = unitOrDownT(mix(fl.P, fl.S, fl.mix));
         // gravity and wind together: a bead smears along the sum of "toward the wall" and "where the wind blows"
-        const smearRaw = bdir.mul(kappa.mul(T.gravitySmear)).add(uWindFlow.mul(uWindPush));
+        const smearRaw = bdir.mul(kappa.mul(T.gravitySmear).mul(uGravityMix)).add(uWindFlow.mul(uWindPush));
         const dd = smearRaw.mul(min(F(1), F(1).div(max(length(smearRaw), F(1e-4)))));
         const dirA = select(kappa.greaterThan(0), unitOrDownT(fl.P), vec2(0, 1));
         const dirB = select(kappa.greaterThan(0), unitOrDownT(fl.S), vec2(0, 1));
@@ -1134,6 +1152,7 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
       uStick.value = num(frame.stick, 0.5);
       uRate.value = num(frame.slideSpeedMul, 1);
       uWindPush.value = num(frame.windPush, 0);
+      uGravityMix.value = num(frame.gravityMix, 1);
       uLive.value = Math.max(0.05, num(frame.live, 0.9));
       uImpact.value = num(frame.impact, 0);
       uSlider.value = num(frame.slider, 0);
@@ -1183,6 +1202,7 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
       stick: uStick.value,
       rate: uRate.value,
       windPush: uWindPush.value,
+      gravityMix: uGravityMix.value,
       windShift: [uWindShift.value.x, uWindShift.value.y],
       live: uLive.value,
       impact: uImpact.value,

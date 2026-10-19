@@ -236,11 +236,12 @@ export function computeWindowReachProfile(light, walls, bytes) {
   return count;
 }
 
+/** One lookup bin: the multiplier it gives at distance `r`, and whether it has no window at all. */
 function profileTap(bytes, idx, r, reachPx) {
   const i = ((idx % WINDOW_REACH_BINS) + WINDOW_REACH_BINS) % WINDOW_REACH_BINS;
   const d = bytes[i * 4] * 256 + bytes[i * 4 + 1];
   const soft = bytes[i * 4 + 2] / 255;
-  return windowReachAlongRay(r, d, soft, reachPx);
+  return { value: windowReachAlongRay(r, d, soft, reachPx), none: d >= WINDOW_NONE - 1 };
 }
 
 /**
@@ -256,8 +257,14 @@ export function sampleWindowReachProfile(bytes, L, P, reachPx) {
   const f = (Math.atan2(ry, rx) / (2 * Math.PI) + 0.5) * WINDOW_REACH_BINS - 0.5;
   const i0 = Math.floor(f);
   const fr = f - i0;
-  const a = profileTap(bytes, i0, r, reachPx);
-  const c = profileTap(bytes, i0 + 1, r, reachPx);
+  const ta = profileTap(bytes, i0, r, reachPx);
+  const tc = profileTap(bytes, i0 + 1, r, reachPx);
+  // NEVER BLEND A "NO WINDOW" DIRECTION INTO A WINDOW ONE. A direction whose first wall is a solid post (or open
+  // ground) reads 1 = unmodulated; blending it with a neighbouring window direction that has faded to 0 left a bright
+  // rim along the edge of every window beam, right where it meets the shadow of the post. A no-window neighbour
+  // instead takes its window neighbour's value (the light there is blocked or open anyway, so nothing else changes).
+  const a = ta.none && !tc.none ? tc.value : ta.value;
+  const c = tc.none && !ta.none ? ta.value : tc.value;
   return a + (c - a) * fr;
 }
 
@@ -292,6 +299,7 @@ export function buildWindowReachTerm({ THREE, positionWorldXY, windowCount, shar
   const i0 = floor(f);
   const fr = f.sub(i0);
 
+  // Each tap returns its multiplier AND a 0/1 "no window in this direction" flag (see sampleWindowReachProfile for why).
   const tap = (idxNode) => {
     // (idx + N) mod N, without a modulo operator: idx is only ever -1..N.
     const wrapped = select(
@@ -306,8 +314,15 @@ export function buildWindowReachTerm({ THREE, positionWorldXY, windowCount, shar
     const fade = float(1).sub(smoothstep(reach.mul(float(WINDOW_REACH_HOLD)), reach, past));
     const ramp = clamp(past.div(float(WINDOW_SOFT_RAMP_PX)), float(0), float(1));
     const value = fade.mul(float(1).sub(float(1).sub(soft).mul(ramp)));
-    return select(r.greaterThan(d), value, float(1));
+    return {
+      value: select(r.greaterThan(d), value, float(1)),
+      none: select(d.greaterThan(float(60000)), float(1), float(0)),
+    };
   };
-  const node = mix(tap(i0), tap(i0.add(float(1))), fr);
+  const ta = tap(i0);
+  const tc = tap(i0.add(float(1)));
+  const a = mix(ta.value, tc.value, ta.none.mul(float(1).sub(tc.none)));
+  const c = mix(tc.value, ta.value, tc.none.mul(float(1).sub(ta.none)));
+  const node = mix(a, c, fr);
   return { node, uLight };
 }

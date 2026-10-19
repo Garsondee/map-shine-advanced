@@ -2025,19 +2025,14 @@ export function createPointLightPool({
         apertureWallFrames
       );
       const apertureCount = lightApertures.length;
-      // WINDOW REACH — candles and fire only (the two MSA-authored lights whose wide,
-      // bounced reach is what pours out of a window); ordinary Foundry lights keep
-      // their authored radius untouched. `windowReachCount` is graph-build-time,
-      // like `apertureCount`: part of the rebuild key, and a light with windows in
-      // reach is never batched (its windows are per-light uniforms).
+      // WINDOW REACH — EVERY light (2026-10-19, second round: it was candles and fire only, and an ordinary Foundry light
+      // standing beside a window then showed the window pattern AND the full, plain arc of light it throws past it, because the
+      // pattern fades out towards the light's own edge). Light that never goes through a window is untouched.
+      // `windowReachCount` is graph-build-time, like `apertureCount`: part of the rebuild key, and a light with
+      // a window in reach is never batched (its lookup texture is per-light).
       let windowReachCount = 0;
       let windowReachTexture = null;
-      if (
-        windowReachOn &&
-        createWindowReachTexture &&
-        windowReachSegments.length > 0 &&
-        (falloffModel === 'candle' || falloffModel === 'inverseSquareWide')
-      ) {
+      if (windowReachOn && createWindowReachTexture && windowReachSegments.length > 0) {
         let wc = windowReachCache.get(light.sourceId);
         if (!wc) {
           wc = {

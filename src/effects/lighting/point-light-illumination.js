@@ -159,6 +159,7 @@ import { buildAnimationTimeNode } from './animations/light-animation-clock.js';
 import { createWindHandle } from '../../world/index.js';
 import { buildApertureGoboTerm } from './aperture-gobo-render.js';
 import { buildWindowReachTerm } from './window-reach.js';
+import { repairLightPolygonFolds } from './light-polygon-repair.js';
 
 /** A bake-less handle so an un-wired caller still gets Tier-0 organic wind
  * rather than a wind-inert light — see candle-flame-render.js's own identical
@@ -737,6 +738,9 @@ function normalizeLightPolygon(shapePoints, originX, originY, radius) {
     lx[i] = (shapePoints[i * 2] - originX) * inv;
     ly[i] = (shapePoints[i * 2 + 1] - originY) * inv;
   }
+  // Foundry's wall sweep can fold the shape over itself beside a post; that fold is drawn as a hair-thin line of light
+  // in the post's shadow. See light-polygon-repair.js.
+  repairLightPolygonFolds(lx, ly, n);
   return { lx, ly, n };
 }
 

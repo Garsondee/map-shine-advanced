@@ -31,6 +31,7 @@ import { run as runLayerSmearRender } from './layer-smear-render.test.mjs';
 import { run as runApertureGobo } from './aperture-gobo.test.mjs';
 import { run as runApertureGoboRender } from './aperture-gobo-render.test.mjs';
 import { run as runWindowReach } from './window-reach.test.mjs';
+import { run as runLightPolygonRepair } from './light-polygon-repair.test.mjs';
 import { run as runPlayerLightGeometry } from './player-light-geometry.test.mjs';
 
 let passed = 0;
@@ -83,6 +84,7 @@ const suites = [
   ['aperture-gobo', runApertureGobo],
   ['aperture-gobo-render', runApertureGoboRender],
   ['window-reach', runWindowReach],
+  ['light-polygon-repair', runLightPolygonRepair],
   ['player-light-geometry', runPlayerLightGeometry],
 ];
 for (const [name, fn] of suites) {

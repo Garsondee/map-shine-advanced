@@ -207,6 +207,33 @@ export function run(t) {
     windowReachAlongRay(401, 400, 0, 200) > 0.9 && windowReachAlongRay(400 + WINDOW_SOFT_RAMP_PX, 400, 0, 2000) < 0.1
   );
 
+  // THE RIM BUG (2026-10-19): the edge of a window beam, where it meets the shadow of the post beside it, glowed as a thin bright
+  // line, because the lookup blended the faded window direction with the neighbouring "post" direction (reads 1, unmodulated).
+  {
+    const postLight = { x: 0, y: 0, radius: 2000 };
+    const edgeWalls = [wall(-300, 400, -20, 400), wall(-20, 400, 20, 400, true), wall(20, 400, 300, 400)];
+    const edgeBytes = new Uint8Array(WINDOW_REACH_BINS * 4);
+    computeWindowReachProfile(postLight, edgeWalls, edgeBytes);
+    const reachPx = 100;
+    // walk across the window's edge, far enough past the glass that the beam has faded to nothing
+    let worst = 0;
+    for (let deg = -2.9; deg <= 2.9; deg += 0.01) {
+      const rad = (90 + deg) * (Math.PI / 180);
+      const pt = { x: Math.cos(rad) * 700, y: Math.sin(rad) * 700 };
+      const v = sampleWindowReachProfile(edgeBytes, postLight, pt, reachPx);
+      const throughWindow = Math.abs(pt.x) < 20 * (700 / 400);
+      if (throughWindow) worst = Math.max(worst, v);
+    }
+    ok(
+      'across the window beam, far past the glass, the light has faded to nothing right up to its edge (no bright rim)',
+      worst < 1e-3
+    );
+    ok(
+      'beside the beam there is nothing to curtail',
+      sampleWindowReachProfile(edgeBytes, postLight, { x: 300, y: 300 }, reachPx) === 1
+    );
+  }
+
   // no windows / no walls
   const none = new Uint8Array(WINDOW_REACH_BINS * 4);
   eq(

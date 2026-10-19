@@ -40,6 +40,39 @@
 /** @typedef {{left: number, top: number, width: number, height: number}} Rect */
 
 /**
+ * Every element that is `.application` OR `.app.window-app`, in document
+ * order — what `querySelectorAll('.application, .app.window-app')` returned,
+ * found through the class index instead.
+ *
+ * WHY (2026-10-19, measured in a live Foundry v14 page, ~9k elements, Studio
+ * open): that selector LIST cost 1.0 ms per call — Chrome walks and matches
+ * the whole tree for a list/compound selector — while `.application` alone,
+ * or `getElementsByClassName`, cost ~0.05 ms. The layout reads after it were
+ * free (the post-frame macrotask already sees clean layout). The scan is now
+ * class-index lookups and nothing else; the cost no longer grows with the
+ * size of the page (chat logs, journals, the Studio).
+ *
+ * `getElementsByClassName('app window-app')` requires BOTH classes — exactly
+ * the compound `.app.window-app`. The two lists are merged without
+ * duplicates and re-sorted into document order only when both are non-empty
+ * (legacy windows are rare), since the first {@link MAX_UI_SHADOW_STAMPS}
+ * windows in that order are the ones that cast.
+ *
+ * @param {Document} doc
+ * @returns {Element[]}
+ */
+export function findWindowCandidates(doc) {
+  const apps = [...doc.getElementsByClassName('application')];
+  const legacy = [...doc.getElementsByClassName('app window-app')];
+  if (!legacy.length) return apps;
+  if (!apps.length) return legacy;
+  const seen = new Set(apps);
+  const all = apps.concat(legacy.filter((el) => !seen.has(el)));
+  // compareDocumentPosition: bit 4 (FOLLOWING) set → b comes after a.
+  return all.sort((a, b) => (a === b ? 0 : a.compareDocumentPosition(b) & 4 ? -1 : 1));
+}
+
+/**
  * Read the canvas rect and every open, framed Foundry window's rect. ApplicationV2
  * `.application` and legacy `.app.window-app` both count, but only when they own
  * a direct-child `.window-header` (a title bar to grab) — that excludes docked UI
@@ -60,7 +93,7 @@ export function readUiWindowRects(doc, canvas) {
   const canvasRect = { left: c.left, top: c.top, width: c.width, height: c.height };
   /** @type {Rect[]} */
   const windows = [];
-  for (const el of doc.querySelectorAll('.application, .app.window-app')) {
+  for (const el of findWindowCandidates(doc)) {
     if (!el.querySelector(':scope > .window-header')) continue;
     if (el.classList.contains('minimized')) continue;
     const r = el.getBoundingClientRect();

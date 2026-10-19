@@ -24,6 +24,7 @@ import {
   projectOccluderShadow,
   mapWindowRectToStamp,
   MAX_UI_SHADOW_STAMPS,
+  uiShadowBounds,
 } from '../light-visibility.js';
 
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) < eps;
@@ -294,6 +295,112 @@ export function run(t) {
     const d5 = { x: scale5.centerX - winCenterX, y: scale5.centerY - winCenterY };
     ok('mapWindowRectToStamp defaults to the 5x offset scale', near(d5.x, d1.x * 5) && near(d5.y, d1.y * 5));
     ok('the offsetScale default does not change the penumbra', near(scale1.penumbraPx, scale5.penumbraPx));
+  }
+
+  // ======================================================================
+  // uiShadowBounds + the shader's two skip branches (perf, 2026-10-19)
+  // ======================================================================
+  // A CPU TWIN of buildUiShadowVisibility's per-pixel maths, in both forms:
+  // the old unbranched product over all six slots, and the new one that
+  // skips (a) every pixel outside uiShadowBounds and (b) each stamp where
+  // max(q) ≥ penumbra or strength is 0. The claim is EXACT equality — every
+  // skipped factor was exactly 1 — so the check is Object.is, not a tolerance.
+  {
+    const smooth = (e0, e1, x) => {
+      const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
+      return t * t * (3 - 2 * t);
+    };
+    const parts = (s, x, y) => {
+      const pen = Math.max(s.penumbraPx, 0.001);
+      const qx = Math.abs(x - s.centerX) - s.halfX;
+      const qy = Math.abs(y - s.centerY) - s.halfY;
+      const d = Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0);
+      return { pen, qx, qy, occ: s.strength * (1 - smooth(0, pen, d)) };
+    };
+    const ZERO = { centerX: 0, centerY: 0, halfX: 0, halfY: 0, penumbraPx: 0, strength: 0 };
+    const slot = (stamps, i) => (stamps && stamps[i]) || ZERO; // setStamps zeroes unused slots
+    const visFull = (stamps, x, y) => {
+      let v = 1;
+      for (let i = 0; i < MAX_UI_SHADOW_STAMPS; i++) v *= 1 - parts(slot(stamps, i), x, y).occ;
+      return v;
+    };
+    const visBranched = (stamps, x, y, b = uiShadowBounds(stamps)) => {
+      if (!(x >= b.minX && x <= b.maxX && y >= b.minY && y <= b.maxY)) return 1;
+      let v = 1;
+      for (let i = 0; i < MAX_UI_SHADOW_STAMPS; i++) {
+        const s = slot(stamps, i);
+        const p = parts(s, x, y);
+        if (Math.max(p.qx, p.qy) < p.pen && s.strength > 0) v *= 1 - p.occ;
+      }
+      return v;
+    };
+    // Deterministic LCG — the same stamps every run.
+    let seed = 12345;
+    const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
+    const randStamp = () => ({
+      centerX: rnd() * 2400 - 200,
+      centerY: rnd() * 1400 - 200,
+      halfX: rnd() * 500,
+      halfY: rnd() * 400,
+      penumbraPx: rnd() < 0.1 ? 0 : rnd() * 300,
+      strength: rnd() < 0.15 ? 0 : rnd(),
+    });
+    let mismatches = 0;
+    let shadowedSamples = 0;
+    let samples = 0;
+    for (let set = 0; set < 150; set++) {
+      const n = Math.floor(rnd() * (MAX_UI_SHADOW_STAMPS + 1));
+      const stamps = Array.from({ length: n }, randStamp);
+      for (let k = 0; k < 300; k++) {
+        // Half uniform over the canvas, half hugging a stamp's penumbra edge.
+        let x = rnd() * 2400 - 200;
+        let y = rnd() * 1400 - 200;
+        if (n && k % 2) {
+          const s = stamps[k % n];
+          const reach = Math.max(s.penumbraPx, 0.001);
+          x = s.centerX + (rnd() < 0.5 ? -1 : 1) * (s.halfX + reach * (0.9 + rnd() * 0.2));
+          y = s.centerY + (rnd() * 2 - 1) * (s.halfY + reach);
+        }
+        const full = visFull(stamps, x, y);
+        if (!Object.is(full, visBranched(stamps, x, y))) mismatches++;
+        if (full < 1) shadowedSamples++;
+        samples++;
+      }
+    }
+    ok(
+      `the branched shader maths equals the unbranched maths EXACTLY (${samples} samples, ${shadowedSamples} in shadow)`,
+      mismatches === 0 && shadowedSamples > 1000
+    );
+
+    // The twin can see a bounds bug: shrink the box below the penumbra and it must disagree.
+    let caught = 0;
+    seed = 777;
+    for (let set = 0; set < 20; set++) {
+      const stamps = [{ ...randStamp(), strength: 0.8, penumbraPx: 120 }];
+      const s = stamps[0];
+      const tight = uiShadowBounds(stamps, -60);
+      const x = s.centerX + s.halfX + 90; // inside the penumbra, outside the shrunk box
+      if (!Object.is(visFull(stamps, x, s.centerY), visBranched(stamps, x, s.centerY, tight))) caught++;
+    }
+    ok('…and that check is sensitive: a box tighter than the penumbra is caught every time', caught === 20);
+
+    const empty = uiShadowBounds([]);
+    ok(
+      'no stamps → an empty box (min > max), so every pixel skips',
+      empty.minX > empty.maxX && empty.minY > empty.maxY
+    );
+    const nullish = uiShadowBounds(null);
+    ok('nullish stamps → an empty box', nullish.minX > nullish.maxX);
+    const off = uiShadowBounds([{ centerX: 50, centerY: 50, halfX: 10, halfY: 10, penumbraPx: 5, strength: 0 }]);
+    ok('strength-0 slots cast nothing → an empty box', off.minX > off.maxX);
+    const one = uiShadowBounds(
+      [{ centerX: 100, centerY: 200, halfX: 30, halfY: 20, penumbraPx: 10, strength: 0.5 }],
+      2
+    );
+    ok(
+      'one stamp → its rect grown by penumbra + margin',
+      one.minX === 58 && one.maxX === 142 && one.minY === 168 && one.maxY === 232
+    );
   }
 
   // ======================================================================

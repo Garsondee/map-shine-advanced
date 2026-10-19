@@ -133,6 +133,16 @@ export const UI_SHADOW_PARAMS = Object.freeze({
  * §4). As it gets cheaper, that field walks down the profiles until it is simply
  * always on — the ambition lives in the same field that gates it.
  *
+ * ⚠️ The ~50fps figure predates three fixes and is no longer what it costs.
+ * Re-measured 2026-10-19 in a real Foundry v14 page (Docklands, RDNA2, 1080p,
+ * Chrome; on/off alternated): no frame-rate difference on vs off, with two
+ * windows open, with the Studio open, and while dragging a window. What it
+ * still cost then, and what was cut: the window scan's selector list (1.1 ms
+ * every 6th frame on a 9k-element page → <0.1 ms, ui-shadow-scan.js) and the
+ * per-pixel shadow maths, paid even when OFF (4K composite 0.31 → 0.23 ms,
+ * light-visibility.js#buildUiShadowVisibility). Lowering the gate is the
+ * author's call, not made here.
+ *
  * @type {import('./effect-manifest.js').EffectManifest}
  */
 export const UI_WINDOW_SHADOW = Object.freeze({

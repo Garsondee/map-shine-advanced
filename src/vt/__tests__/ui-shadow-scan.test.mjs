@@ -13,18 +13,48 @@
  *      whole fix (see ui-shadow-scan.js's header): if `request()` read
  *      synchronously, the forced reflow would be back.
  */
-import { readUiWindowRects, createPostFrameScanner } from '../ui-shadow-scan.js';
+import { readUiWindowRects, createPostFrameScanner, findWindowCandidates } from '../ui-shadow-scan.js';
 
-function fakeEl({ header = true, minimized = false, rect = { left: 10, top: 20, width: 300, height: 200 } } = {}) {
+function fakeEl({
+  header = true,
+  minimized = false,
+  rect = { left: 10, top: 20, width: 300, height: 200 },
+  classes = ['application'],
+} = {}) {
+  const cls = new Set(classes);
+  if (minimized) cls.add('minimized');
   return {
+    classes: cls,
     querySelector: (sel) => (sel === ':scope > .window-header' && header ? {} : null),
-    classList: { contains: (c) => c === 'minimized' && minimized },
+    classList: { contains: (c) => cls.has(c) },
     getBoundingClientRect: () => rect,
   };
 }
 
+/**
+ * A fake document over a flat element list (list order = document order).
+ * `getElementsByClassName` follows the DOM rule: space-separated names must ALL
+ * be present. `compareDocumentPosition` answers FOLLOWING (4) / PRECEDING (2)
+ * from list position, installed on every element so the merge can sort.
+ * `querySelectorAll` is kept and COUNTED: the scan must never use it (the slow
+ * path it replaced), so a test below asserts the count stays 0.
+ */
 function fakeDoc(els) {
-  return { querySelectorAll: (sel) => (sel === '.application, .app.window-app' ? els : []) };
+  const doc = {
+    qsaCalls: 0,
+    querySelectorAll: () => {
+      doc.qsaCalls++;
+      return [];
+    },
+    getElementsByClassName: (names) => {
+      const want = names.split(/\s+/).filter(Boolean);
+      return els.filter((el) => want.every((n) => el.classes.has(n)));
+    },
+  };
+  for (const el of els) {
+    el.compareDocumentPosition = (other) => (els.indexOf(other) > els.indexOf(el) ? 4 : 2);
+  }
+  return doc;
 }
 
 function fakeCanvas(rect = { left: 0, top: 0, width: 1920, height: 1080 }, isConnected = true) {
@@ -67,6 +97,35 @@ export function run(t) {
     readUiWindowRects(fakeDoc([fakeEl()]), fakeCanvas(undefined, false)) === null
   );
   ok('a missing canvas reads as null', readUiWindowRects(fakeDoc([fakeEl()]), null) === null);
+
+  // ── THE CLASS-INDEX LOOKUP MATCHES THE OLD SELECTOR LIST ────────────────
+  // `.application, .app.window-app` → class lookups (perf, 2026-10-19). Same
+  // set, same (document) order, never the slow querySelectorAll path.
+  {
+    const a = fakeEl({ classes: ['application'] });
+    const legacy = fakeEl({ classes: ['app', 'window-app'] });
+    const both = fakeEl({ classes: ['application', 'app', 'window-app'] });
+    const appOnly = fakeEl({ classes: ['app'] }); // `.app` alone is NOT a window
+    const winOnly = fakeEl({ classes: ['window-app'] }); // nor `.window-app` alone
+    const b = fakeEl({ classes: ['application', 'sheet'] });
+    const doc = fakeDoc([legacy, a, appOnly, both, winOnly, b]);
+    const found = findWindowCandidates(doc);
+    ok(
+      'legacy windows need BOTH .app and .window-app, exactly like the compound selector',
+      !found.includes(appOnly) && !found.includes(winOnly)
+    );
+    ok('an element with both kinds of class is listed once', found.filter((el) => el === both).length === 1);
+    ok(
+      'the merged list is in document order (the first N in that order cast)',
+      found.length === 4 && found[0] === legacy && found[1] === a && found[2] === both && found[3] === b
+    );
+    readUiWindowRects(doc, fakeCanvas());
+    ok('the scan never falls back to the slow selector-list querySelectorAll', doc.qsaCalls === 0);
+    const onlyApps = fakeDoc([a, b]);
+    ok('with no legacy windows the application list is returned as is', findWindowCandidates(onlyApps).length === 2);
+    const onlyLegacy = fakeDoc([legacy]);
+    ok('a legacy-only page still finds its windows', findWindowCandidates(onlyLegacy)[0] === legacy);
+  }
 
   // ── THE SCANNER QUEUES; IT NEVER READS INSIDE THE FRAME ─────────────────
   {

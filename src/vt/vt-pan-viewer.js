@@ -261,6 +261,7 @@ import {
   readIsGM,
   setVisibilitySuppression,
   readSceneAmbient,
+  readSceneBackground,
   readGamePaused,
   watchGamePaused,
   watchWorldTimeOfDay,
@@ -7258,6 +7259,9 @@ export async function startVtPanViewer({
       renderer.autoClearColor = prevAutoClearColor;
       renderer.setClearDepth(prevClearDepth);
     }
+    /** Scratch colours for `runGeometryWorldPass`'s scoped scene-background clear (no per-frame allocation). */
+    const sceneBackgroundScratch = new THREE.Color();
+    const sceneBackgroundSaved = new THREE.Color();
     function runGeometryWorldPass() {
       // buf:scene.depth FIRST (REORDERED 2026-08-09, PERF — a live report on
       // a 12K-map upper floor measured this whole pass's colour draw at
@@ -7287,6 +7291,28 @@ export async function startVtPanViewer({
       // targets right after this pass — save/set/restore.
       const previousMRT = renderer.getMRT();
       renderer.setMRT(sceneAttrZeroMrt);
+      // THE SCENE BACKGROUND COLOUR (mmp-am9) — this pass's clears (the
+      // early-Z prepass's, or `render()`'s own autoClear) are what fill
+      // `buf:scene.color` wherever no art is drawn: outside the map, and
+      // under transparent art (every art material is alpha-blended). Plain
+      // Foundry fills that same area with the scene's background colour
+      // (`PrimaryCanvasGroup#_render` clears to `sceneBackground`), then its
+      // ambient lighting multiplies it like anything else — which is what
+      // MSA's own lighting does to this buffer next. So clear to the scene
+      // colour, SCOPED to this one pass and restored: every other pass's
+      // clear (illum, water, vision, masks...) keeps its own black/zero and
+      // never sees the colour. `readSceneBackground` is sRGB 0..1 (Foundry's
+      // PIXI space); this buffer holds LINEAR values (art samples decode to
+      // linear), so convert exactly as the art does. Read per frame:
+      // Foundry recomputes `canvas.colors.sceneBackground` on a scene
+      // `backgroundColor` update, so the setting is live with no hook.
+      renderer.getClearColor(sceneBackgroundSaved);
+      const prevWorldClearAlpha = renderer.getClearAlpha();
+      {
+        const [bgR, bgG, bgB] = readSceneBackground().rgb;
+        sceneBackgroundScratch.setRGB(bgR, bgG, bgB, THREE.SRGBColorSpace);
+        renderer.setClearColor(sceneBackgroundScratch, 1);
+      }
       // STAGE 1 (see `earlyZComposition`'s own declaration for the full
       // account, and `runEarlyZDepthPrepassAndColorDraw`'s own header for
       // why this sequence is shared with `captureMapOnlySnapshot` rather
@@ -7313,6 +7339,7 @@ export async function startVtPanViewer({
       // Door leaves are drawn BY the world draw above — `doorGraphics.root` is
       // parented into `scene` with a top renderOrder (perf wave 2: their old
       // separate render() here was a whole extra MRT render pass, ~0.9 ms).
+      renderer.setClearColor(sceneBackgroundSaved, prevWorldClearAlpha);
       renderer.setRenderTarget(null);
       renderer.setMRT(previousMRT);
     }

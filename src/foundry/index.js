@@ -150,6 +150,11 @@ export {
   readSceneAmbient,
   deriveAmbient,
   FOUNDRY_FALLBACK_AMBIENT,
+  // THE SCENE BACKGROUND COLOUR — what shows outside the map and through
+  // transparent art, exactly as plain Foundry clears its canvas.
+  readSceneBackground,
+  deriveSceneBackground,
+  FOUNDRY_FALLBACK_BACKGROUND,
   // THE GLOBAL ILLUMINATION WRITE-BACK (2026-08-15) — closes the SECOND,
   // independent gate `publishSceneDarkness` above cannot close alone:
   // Foundry's own `environment.globalLight.enabled` toggle, schema-default

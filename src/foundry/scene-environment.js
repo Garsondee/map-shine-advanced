@@ -631,3 +631,50 @@ export function readSceneAmbient() {
     };
   }
 }
+
+/* -------------------------------------------- */
+/*  Scene background colour                     */
+/* -------------------------------------------- */
+
+/**
+ * Foundry's own fallback for "no scene background colour", `#999999`, verbatim
+ * from `EnvironmentCanvasGroup.#fallbackColors.backgroundColor`
+ * (`client/canvas/groups/environment.mjs`). A scene with none set reads as
+ * Foundry's default grey, never as black.
+ * @type {readonly [number, number, number]}
+ */
+export const FOUNDRY_FALLBACK_BACKGROUND = Object.freeze([0x99 / 255, 0x99 / 255, 0x99 / 255]);
+
+/**
+ * Fold a raw sRGB triple for the scene background colour into the value MSA
+ * clears its scene colour buffer with. Foundry clears the canvas to this colour
+ * (`PrimaryCanvasGroup#_render`) before drawing the art, so it shows OUTSIDE the
+ * map and THROUGH transparent art; Foundry's ambient lighting then multiplies
+ * it like everything else, exactly as MSA's lighting multiplies the albedo.
+ *
+ * @param {*} raw - an already-extracted rgb triple (Color->rgb done by the live reader).
+ * @returns {{rgb: [number,number,number], source: 'scene'|'default'}}
+ */
+export function deriveSceneBackground(raw) {
+  const rgb = validRgb(raw);
+  if (rgb) return { rgb, source: 'scene' };
+  return { rgb: [...FOUNDRY_FALLBACK_BACKGROUND], source: 'default' };
+}
+
+/**
+ * Live read of the scene background colour (sRGB 0..1). Reads
+ * `canvas.colors.sceneBackground`, which Foundry recomputes itself on a scene
+ * `backgroundColor` change (`Scene#_onUpdate` -> `canvas.environment.initialize`)
+ * and during a Scene Config live preview, so a per-frame read follows the
+ * setting live with no hook of our own. Never throws.
+ *
+ * @returns {ReturnType<typeof deriveSceneBackground>}
+ */
+export function readSceneBackground() {
+  try {
+    const colors = typeof canvas !== 'undefined' ? (canvas?.colors ?? null) : null;
+    return deriveSceneBackground(colors?.sceneBackground?.rgb);
+  } catch {
+    return deriveSceneBackground(null);
+  }
+}

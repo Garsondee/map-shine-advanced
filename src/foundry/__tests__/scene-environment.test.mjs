@@ -16,6 +16,9 @@ import {
   deriveGlobalLightWindow,
   shouldPublishGlobalLightWindow,
   GLOBAL_LIGHT_DAYLIGHT_MAX,
+  deriveSceneBackground,
+  readSceneBackground,
+  FOUNDRY_FALLBACK_BACKGROUND,
 } from '../scene-environment.js';
 
 export function run(t) {
@@ -331,5 +334,38 @@ export function run(t) {
       'an unreadable live source (all nulls) never triggers a pointless republish',
       shouldPublishGlobalLightWindow(next, last, { liveDisabled: null, liveMax: null }, 10000, 0) === false
     );
+  }
+
+  // ---- scene background colour (mmp-am9) ---------------------------------
+  {
+    const set = deriveSceneBackground([0.2, 0.4, 0.6]);
+    ok('a valid background rgb reads through', set.rgb[0] === 0.2 && set.rgb[1] === 0.4 && set.rgb[2] === 0.6);
+    ok('source is "scene" for a real read', set.source === 'scene');
+
+    for (const [label, raw] of [
+      ['undefined', undefined],
+      ['null', null],
+      ['short', [1, 1]],
+      ['NaN', [NaN, 0, 0]],
+    ]) {
+      const d = deriveSceneBackground(raw);
+      ok(
+        `an unset/invalid background (${label}) falls back to Foundry's #999999`,
+        d.source === 'default' && d.rgb.every((c, i) => c === FOUNDRY_FALLBACK_BACKGROUND[i])
+      );
+    }
+    ok(
+      'the fallback is #999999 (153/255)',
+      FOUNDRY_FALLBACK_BACKGROUND.every((c) => c === 0x99 / 255)
+    );
+
+    const clamped = deriveSceneBackground([2, -1, 0.5]);
+    ok('out-of-range components clamp to 0..1', clamped.rgb[0] === 1 && clamped.rgb[1] === 0 && clamped.rgb[2] === 0.5);
+
+    ok('with no canvas global the live read falls back, never throws', readSceneBackground().source === 'default');
+    globalThis.canvas = { colors: { sceneBackground: { rgb: [0.1, 0.2, 0.3] } } };
+    const live = readSceneBackground();
+    delete globalThis.canvas;
+    ok('the live read follows canvas.colors.sceneBackground', live.source === 'scene' && live.rgb[2] === 0.3);
   }
 }

@@ -55,7 +55,7 @@ import {
   stepWindowWetness,
   WINDOW_RAIN_DEFAULTS,
 } from './window-rain.js';
-import { deriveWindowRainFlow, buildWindowPresenceGrid, RAIN_FLOW_DEFAULT_EASE_PX } from './window-rain-flow.js';
+import { deriveWindowRainField, buildWindowPresenceGrid, RAIN_FIELD_DEFAULT_EASE_PX } from './window-rain-field.js';
 import { windFlowVector } from '../../world/index.js';
 
 const log = createLogger('WindowSurface');
@@ -93,7 +93,7 @@ function resolveRainLook(p) {
     windwardBias: n(p.rainWindwardBias, D.windwardBias),
     sheeting: n(p.rainSheeting, D.sheeting),
     lingerSec: n(p.rainLingerSec, D.lingerSec),
-    cornerEasePx: n(p.rainCornerEasePx, RAIN_FLOW_DEFAULT_EASE_PX),
+    cornerEasePx: n(p.rainCornerEasePx, RAIN_FIELD_DEFAULT_EASE_PX),
   };
 }
 
@@ -294,8 +294,8 @@ export function createWindowSurfaceSubsystem({
     rect: null,
     source: null,
     derived: false,
-    pools: 0,
-    twoFacet: 0,
+    litCells: 0,
+    levels: 0,
     /** How many times a derivation actually ran (the field is only re-derived when its inputs change). */
     attempts: 0,
   };
@@ -303,7 +303,8 @@ export function createWindowSurfaceSubsystem({
   function ensureNeutralFlowTextures() {
     if (neutralDirs) return;
     neutralDirs = createMaskTexture(new Uint8Array([128, 128, 128, 128]), 1, 1, 'linear');
-    neutralAux = createMaskTexture(new Uint8Array([0, 0, 0, 255]), 1, 1, 'linear');
+    // kappa 0 (splats only, no running drops), gate 255 (the rain runs everywhere there is window light)
+    neutralAux = createMaskTexture(new Uint8Array([0, 0, 128, 255]), 1, 1, 'linear');
   }
 
   /** A fresh rain handle (one per built surface: a tier rebuild makes a new material and so a new handle). */
@@ -624,13 +625,13 @@ export function createWindowSurfaceSubsystem({
    * Upload a derived flow field, rewriting the existing textures IN PLACE when the grid is the same size: a new
    * texture object is a new binding and every consumer rebuilds (the lesson of the wind bake), and the field is
    * re-derived whenever the author nudges Corner blend.
-   * @param {import('./window-rain-flow.js').RainFlowField|null} field
+   * @param {object|null} field
    */
   function uploadRainFlow(field) {
     if (!field) {
       rainFlow.derived = false;
-      rainFlow.pools = 0;
-      rainFlow.twoFacet = 0;
+      rainFlow.litCells = 0;
+      rainFlow.levels = 0;
       pushRainFlowToSurface();
       return;
     }
@@ -650,10 +651,12 @@ export function createWindowSurfaceSubsystem({
     }
     rainFlow.rect = { x: field.spec.x, y: field.spec.y, width: field.spec.width, height: field.spec.height };
     rainFlow.derived = true;
-    rainFlow.pools = field.stats.components;
-    rainFlow.twoFacet = field.stats.twoFacet;
+    rainFlow.litCells = field.stats.litCells;
+    rainFlow.levels = field.stats.levels;
     pushRainFlowToSurface();
-    log.info(`rain flow derived: ${field.stats.components} window pool(s), ${field.stats.twoFacet} with two facets`);
+    log.info(
+      `rain field derived: ${w}x${h} grid, ${field.stats.litCells} lit cells, ${field.stats.directionalCells} run toward a wall, ${field.stats.skylightCells} skylight, ${field.stats.levels} facet level(s)`
+    );
   }
 
   /**
@@ -682,17 +685,29 @@ export function createWindowSurfaceSubsystem({
       maskData: maskPixels.data,
       ease: look.cornerEasePx,
     };
-    let field = null;
-    if (outdoors) {
-      const presence = buildWindowPresenceGrid({
-        data: maskPixels.data,
-        width: maskPixels.width,
-        height: maskPixels.height,
-        rect: loadedMaskRect,
-        spec: outdoors.spec,
-      });
-      if (presence) field = deriveWindowRainFlow({ outdoors, presence, easePx: look.cornerEasePx });
-    }
+    // With no `_Outdoors` there is no wall to run toward, but the field still gates the rain to the lit area, so it
+    // is derived on a grid laid over the window mask's own rect.
+    const rectW = loadedMaskRect.maxX - loadedMaskRect.minX;
+    const rectH = loadedMaskRect.maxY - loadedMaskRect.minY;
+    const longSide = Math.max(rectW, rectH);
+    const spec = outdoors
+      ? outdoors.spec
+      : {
+          x: loadedMaskRect.minX,
+          y: loadedMaskRect.minY,
+          width: rectW,
+          height: rectH,
+          w: Math.max(2, Math.round((256 * rectW) / longSide)),
+          h: Math.max(2, Math.round((256 * rectH) / longSide)),
+        };
+    const presence = buildWindowPresenceGrid({
+      data: maskPixels.data,
+      width: maskPixels.width,
+      height: maskPixels.height,
+      rect: loadedMaskRect,
+      spec,
+    });
+    const field = presence ? deriveWindowRainField({ outdoors, spec, presence, easePx: look.cornerEasePx }) : null;
     uploadRainFlow(field);
   }
 
@@ -974,8 +989,8 @@ export function createWindowSurfaceSubsystem({
             attempts: rainFlow.attempts,
             derived: rainFlow.derived,
             grid: `${rainFlow.w}x${rainFlow.h}`,
-            pools: rainFlow.pools,
-            twoFacet: rainFlow.twoFacet,
+            litCells: rainFlow.litCells,
+            levels: rainFlow.levels,
           },
         },
         /** POOL HEALTH — see maskReloadHits' own declaration for the exact

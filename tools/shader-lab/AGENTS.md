@@ -362,7 +362,8 @@ A standalone page (not a bench on the shared `index.html`): `/tools/shader-lab/w
 Start the lab **from your worktree** (`SHADER_LAB_PORT=8951 node tools/shader-lab/serve.mjs`), open that page, then
 `window.lab.run('window-rain', '<scenario>')`. It builds a synthetic house (a building painted black in an
 `_Outdoors`-style grid, one pool of window light against each wall and one at a corner) and renders the REAL
-`buildWindowSurfaceMaterial` with the REAL `createWindowRain` handle and the REAL `deriveWindowRainFlow`. The page also
+`buildWindowSurfaceMaterial` with the REAL `createWindowRain` handle and the REAL `deriveWindowRainField` (v2: one smooth
+per-position field, not per pool; see `window-rain-field.js` for what the author's 16 real maps taught it). The page also
 has live sliders for the weather and every `Rain` dial (generated from `WINDOW_PARAMS`), a Play button that runs the clock,
 a tier switch (glass / cookie) and the debug channels 13-15.
 
@@ -371,7 +372,7 @@ a tier switch (glass / cookie) and the debug channels 13-15.
 | `dry-is-identity` | A dry pane is **byte-identical** to a material built with no rain handle at all (0 differing bytes), at both tiers; and rain does change the picture, so that is not a vacuous pass. |
 | `flow-texture-orientation` | Reads the flow field back through debug channel 13 and checks every pool reports its own wall's direction (south green, north dark green, east red, west dark red), pane height 0 at the sill, the corner blend ramping across its diagonal. A Y-flip in the texture sampling would fail it loudly. |
 | `twin-parity` | The GPU's gain and lens offset (debug channel 15) against `evalWindowRainPixel`, 65,536 pixels x 3 weathers. **Expect 0 mismatches**, worst gain error ~0.005 and offset ~0.12 px (8-bit readout quantisation). |
-| `slide-direction-per-side` | The running drops tracked frame to frame by **block matching**, per wall, sliders only: south must travel +y, north -y, east +x, west -x. Expect cosine ~1.000. (Takes ~16 s: 320 renders and a lot of SAD.) |
+| `slide-direction-per-side` | The running drops' **heads tracked frame to frame** (blobs of lens offset, nearest match), per wall, sliders only: south must travel +y, north -y, east +x, west -x. Expect cosine ~1.000. (Block matching was abandoned: heads are a few px and most stand still in stick-slip, so a global match is dragged to zero.) |
 | `corner-no-tear` | Gradient energy of the sliding-drop pattern in a band along the corner bisector against the rest of the pool; expect a ratio ~1.1. A lattice rotated per pixel tears there and scores far higher. |
 | `intensity-ladder` | Changed-pixel fraction grows with the rain (0.1% -> 66%) and a storm costs the light ~7%. Saves `ladder.png`. |
 | `cookie-tier-rain` | The no-glass build (one mask tap) still shows rain, by displacing the mask read directly. |
@@ -390,6 +391,12 @@ Things this bench learned that are worth carrying into any new shader that has a
   sides, so parity went to **0 mismatches**, and as a side effect every player's GPU now draws the same drops. If a twin
   disagrees on a few percent of pixels and means agree, suspect chaotic amplification of a precision difference before
   suspecting the transcription.
+- **Real maps beat synthetic ones.** Derive and look at the field on the author's real `_Outdoors`/`_Windows` grids before
+  trusting it (the engine hands over a band-limited GRAY ~248 px mask; binarising it costs 5-9 degrees on a diagonal wall).
+  A CPU render of the twin on a real map (see the memory note) is a fast way to judge drop SIZE at 1:1.
+- **Pack filtered textures so LINEAR blending stays meaningful.** Facet levels are stored as nearest level P, the other
+  level S and its share `mix` (0..1/2), not "lower, upper, weight": along a straight wall the angle jitters around the level
+  and a lower/upper pair flips texel to texel, blending levels 90 degrees apart into phantom frames.
 - **Time-dependent speeds must be integrated, not multiplied.** A slide speed that multiplied absolute time inside the
   shader would teleport every drop each time the rain intensity moved; the shader reads a `slideClock` the caller
   integrates against the current speed.

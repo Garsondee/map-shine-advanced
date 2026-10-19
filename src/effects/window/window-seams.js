@@ -65,7 +65,7 @@ export function createWindowSeams({ maskAuthority, getFloors, getItems, getItemC
 
     /**
      * The floor's painted `_Outdoors` grid, for the rain-on-glass flow field
-     * (`window-rain-flow.js`): its black blocks are buildings, and "down the
+     * (`window-rain-field.js`): its black blocks are buildings, and "down the
      * pane" is OUTWARD from them. Only the RAIN reads this; the light itself
      * never does.
      *

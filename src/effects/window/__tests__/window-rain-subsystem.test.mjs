@@ -248,7 +248,7 @@ export async function run(t) {
     let f = sub.getStatus().rain.flow;
     ok(
       'rain-flow: the first rain derives the field from the _Outdoors seam and the blue-only mask',
-      f.derived === true && f.pools === 1 && f.attempts === 1
+      f.derived === true && f.litCells > 0 && f.levels >= 1 && f.attempts === 1
     );
     ok('rain-flow: on the outdoors grid', f.grid === GRID + 'x' + GRID);
     const texturesAfterFirst = counters.textures;
@@ -305,10 +305,13 @@ export async function run(t) {
     sub.sync(0);
     const s = sub.getStatus().rain;
     ok('rain-flow: with no outdoors grid the rain still falls', s.presence === 1 && s.uniforms.cover > 0);
-    ok('rain-flow: and there is no flow field, so no running drops', s.flow.derived === false && s.flow.attempts === 1);
     ok(
-      'rain-flow: the shader is pointed at no field (rect all zero)',
-      s.uniforms.flowRect.every((v) => v === 0)
+      'rain-flow: and the field has no wall to run toward (no levels), only the gate',
+      s.flow.derived === true && s.flow.levels === 0 && s.flow.attempts === 1
+    );
+    ok(
+      'rain-flow: the shader is pointed at the gate field (a real rect)',
+      s.uniforms.flowRect.some((v) => v !== 0)
     );
     outdoorsRef.value = grid();
     envRef.value = rainyEnv({ tMs: 3000 });
@@ -340,6 +343,6 @@ export async function run(t) {
     state.params = {};
     envRef.value = rainyEnv({ tMs: 4000 });
     sub.sync(0);
-    ok('rain: missing dials fall back to the effect defaults', sub.getStatus().rain.uniforms.scale === 40);
+    ok('rain: missing dials fall back to the effect defaults', sub.getStatus().rain.uniforms.scale === 2);
   }
 }

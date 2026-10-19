@@ -195,13 +195,13 @@ export const WINDOW_PARAMS = Object.freeze({
   },
   rainDropScalePx: {
     type: 'float',
-    min: 12,
-    max: 120,
-    step: 1,
-    default: 40,
+    min: 0.75,
+    max: 8,
+    step: 0.05,
+    default: 2,
     category: 'Rain',
     label: 'Drop size',
-    help: 'The size of a typical bead of water, in map pixels. The large drops are about this size and the small ones half of it.',
+    help: 'The radius of a typical bead of water, in map pixels. Drops come in four sizes from half of this to four times it, many small ones and a few large ones, and a storm adds more of the large. Drops too small to see at the current zoom fade away.',
   },
   rainSplatDensity: {
     type: 'float',
@@ -288,7 +288,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 8,
     max: 200,
     step: 1,
-    default: 48,
+    default: 96,
     category: 'Rain',
     label: 'Corner blend',
     help: 'Around a building corner, how far the running direction takes to turn, in map pixels. Small gives a sharp switch between the two walls; large a long gentle blend. Needs the outdoors mask.',
@@ -474,7 +474,7 @@ export const WINDOW_DEBUG_CHANNELS = Object.freeze([
       'the far end of the pool. BLACK over a pool means no direction was found (no outdoors mask, the pool ' +
       'is not inside a building, or it sits between two opposite walls): that pool gets splashes and no ' +
       'running drops. A south-wall window that does not read green is an inverted field — see ' +
-      'window-rain-flow.js.',
+      'window-rain-field.js.',
   }),
   Object.freeze({
     n: 14,

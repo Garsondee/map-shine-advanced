@@ -44,10 +44,10 @@ import {
   RAIN_TUNE,
 } from '../../src/effects/window/window-rain.js';
 import {
-  deriveWindowRainFlow,
+  deriveWindowRainField,
   buildWindowPresenceGrid,
-  sampleWindowRainFlow,
-} from '../../src/effects/window/window-rain-flow.js';
+  sampleWindowRainField,
+} from '../../src/effects/window/window-rain-field.js';
 import { QUAD_UVS, QUAD_INDICES, buildQuadPositions } from '../../src/scene/index.js';
 import { WINDOW_DEBUG_CHANNELS } from '../../src/effects/window/window.js';
 
@@ -164,7 +164,7 @@ export function createWindowRainBench({ THREE, log }) {
     windDirDeg: 0,
     gust01: 0,
     look: { ...WINDOW_RAIN_DEFAULTS },
-    easePx: 48,
+    easePx: 96,
     /** Fields stamped over the resolved frame, to isolate one regime (e.g. sliders only). */
     override: {},
     debugChannel: 0,
@@ -200,7 +200,7 @@ export function createWindowRainBench({ THREE, log }) {
     if (!maskTexture) {
       maskTexture = dataTexture(maskPixels, MASK, MASK);
       neutralDirs = dataTexture(new Uint8Array([128, 128, 128, 128]), 1, 1);
-      neutralAux = dataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1);
+      neutralAux = dataTexture(new Uint8Array([0, 0, 128, 255]), 1, 1);
     }
     if (!field) deriveFlow(state.easePx);
   }
@@ -218,7 +218,7 @@ export function createWindowRainBench({ THREE, log }) {
       rect: { minX: 0, minY: 0, maxX: DIM, maxY: DIM },
       spec,
     });
-    field = deriveWindowRainFlow({ outdoors: { spec, data: outdoors }, presence, easePx });
+    field = deriveWindowRainField({ outdoors: { spec, data: outdoors }, presence, easePx, maxDim: 4096 });
     if (!field) throw new Error('window-rain bench: the fixture derived no flow field');
     if (!flowDirs) {
       flowDirs = dataTexture(field.dirs, GRID, GRID);
@@ -410,6 +410,47 @@ export function createWindowRainBench({ THREE, log }) {
       for (let x = 0; x < w; x++) out[y * w + x] = bytes[idx(x0 + x, y0 + y) + channel];
     }
     return { data: out, w, h };
+  }
+
+  /** The centres of the small blobs of lens offset in a region (the heads of the running drops), world-oriented. */
+  function blobsOf(bytes, x0, y0, x1, y1) {
+    const w = x1 - x0;
+    const h = y1 - y0;
+    const mag = new Float32Array(w * h);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = idx(x0 + x, y0 + y);
+        mag[y * w + x] = Math.abs(bytes[i + 1] - 128) + Math.abs(bytes[i + 2] - 128);
+      }
+    }
+    const seen = new Uint8Array(w * h);
+    const blobs = [];
+    for (let s0 = 0; s0 < w * h; s0++) {
+      if (seen[s0] || !(mag[s0] > 10)) continue;
+      const stack = [s0];
+      seen[s0] = 1;
+      let sx = 0;
+      let sy = 0;
+      let n = 0;
+      while (stack.length) {
+        const k = stack.pop();
+        const px = k % w;
+        const py = (k - px) / w;
+        sx += px;
+        sy += py;
+        n++;
+        for (const [qx, qy] of [[px + 1, py], [px - 1, py], [px, py + 1], [px, py - 1]]) {
+          if (qx < 0 || qy < 0 || qx >= w || qy >= h) continue;
+          const j = qy * w + qx;
+          if (!seen[j] && mag[j] > 10) {
+            seen[j] = 1;
+            stack.push(j);
+          }
+        }
+      }
+      if (n >= 4) blobs.push({ x: x0 + sx / n, y: y0 + sy / n });
+    }
+    return blobs;
   }
 
   /** A canvas of world-oriented pixels, `scale` times larger, for artifacts. */
@@ -632,22 +673,23 @@ export function createWindowRainBench({ THREE, log }) {
           const sill = sampleAt(flow, 512, 828).b;
           const top = sampleAt(flow, 512, 742).b;
           return {
-            ok: top > 200 && sill < 60,
+            // the pane height is ABSOLUTE now (distance from the wall over 320 px), not normalised to the pool
+            ok: sill < 60 && top > sill + 40,
             measured: { sill, top },
-            expected: 'pane height ~0 against the wall (south edge), ~1 at the far end (north edge)',
+            expected: 'pane height ~0 against the wall (south edge), rising toward the far end (north edge)',
           };
         })
       );
       checks.push(
         evaluate('the-corner-pool-blend-ramps-across-its-diagonal', () => {
-          // aux R = facet blend weight: sample along the anti-diagonal of the corner pool.
+          // aux R = the cross-fade share of the second level (0 .. 1/2): sample along the anti-diagonal of the corner pool.
           const a = sampleAt(aux, 716, 820).r; // near the south wall side
           const m = sampleAt(aux, 768, 768).r;
           const b = sampleAt(aux, 820, 716).r; // near the east wall side
           return {
-            ok: Math.abs(a - b) > 150 && m > 40 && m < 215,
+            ok: a < 20 && b < 20 && m > 30 && m <= 130,
             measured: { southSide: a, middle: m, eastSide: b },
-            expected: 'the weight is ~0 on one side, ~1 on the other, in between at the middle',
+            expected: 'a single level (mix ~0) beside each wall, a cross-fade (up to 1/2) at the diagonal between them',
           };
         })
       );
@@ -711,7 +753,7 @@ export function createWindowRainBench({ THREE, log }) {
             const gGpu = (bytes[i] / 255) * 2;
             const oxGpu = (bytes[i + 1] / 255 - 0.5) * 2 * RAIN_TUNE.maxOffsetPx;
             const oyGpu = (bytes[i + 2] / 255 - 0.5) * 2 * RAIN_TUNE.maxOffsetPx;
-            const flow = sampleWindowRainFlow(field, x + 0.5, y + 0.5);
+            const flow = sampleWindowRainField(field, x + 0.5, y + 0.5);
             const twin = evalWindowRainPixel({
               x: x + 0.5,
               y: y + 0.5,
@@ -796,7 +838,7 @@ export function createWindowRainBench({ THREE, log }) {
         calibration = 'FAILED';
         checks.push(check({ id: 'orientation-calibrated', status: 'UNMEASURED', measured: String(err.message) }));
       }
-      const DT = 0.08;
+      const DT = 0.3;
       const MAXS = 14;
       const stats = {};
       const artifacts = [];
@@ -809,39 +851,43 @@ export function createWindowRainBench({ THREE, log }) {
         let sumX = 0;
         let sumY = 0;
         let moving = 0;
+        let movedTotal = 0;
         let pairs = 0;
         let lastA = null;
         let lastB = null;
         for (let k = 0; k < 40; k++) {
-          const sc = 3 + k * 0.5;
+          const sc = 3 + k * 0.7;
           const a = await renderWith({ rain01: 0.8, wet01: 1, override: SLIDERS_ONLY, slideClock: sc, debugChannel: DEBUG_RAIN_DROPS });
           const b = await renderWith({ rain01: 0.8, wet01: 1, override: SLIDERS_ONLY, slideClock: sc + DT, debugChannel: DEBUG_RAIN_DROPS });
-          const A = grab(a, 0, x0, y0, x1, y1);
-          const B = grab(b, 0, x0, y0, x1, y1);
-          let best = { sad: Infinity, dx: 0, dy: 0 };
-          let sad0 = 0;
-          for (let dy = -MAXS; dy <= MAXS; dy++) {
-            for (let dx = -MAXS; dx <= MAXS; dx++) {
-              let sad = 0;
-              for (let y = MAXS; y < A.h - MAXS; y++) {
-                for (let x = MAXS; x < A.w - MAXS; x++) sad += Math.abs(A.data[y * A.w + x] - B.data[(y + dy) * B.w + (x + dx)]);
+          const A = blobsOf(a, x0, y0, x1, y1);
+          const B = blobsOf(b, x0, y0, x1, y1);
+          // Heads are small and most of them stand still (stick-slip), so a global block match is dragged to zero by
+          // the ones that do not move. Track each head instead: the nearest head in the next frame within MAXS px.
+          pairs++;
+          let moved = 0;
+          for (const p of A) {
+            let q = null;
+            let qd = MAXS * MAXS;
+            for (const c of B) {
+              const d2 = (c.x - p.x) ** 2 + (c.y - p.y) ** 2;
+              if (d2 < qd) {
+                qd = d2;
+                q = c;
               }
-              if (dx === 0 && dy === 0) sad0 = sad;
-              if (sad < best.sad) best = { sad, dx, dy };
+            }
+            if (q && qd >= 4) {
+              sumX += q.x - p.x;
+              sumY += q.y - p.y;
+              moved++;
             }
           }
-          pairs++;
-          // A real motion beats staying put by a clear margin; ties and near-ties are drops that did not move.
-          if (sad0 > 0 && (sad0 - best.sad) / sad0 > 0.15 && (best.dx !== 0 || best.dy !== 0)) {
-            moving++;
-            sumX += best.dx;
-            sumY += best.dy;
-          }
+          if (moved > 0) moving++;
+          movedTotal += moved;
           lastA = a;
           lastB = b;
         }
-        const mx = moving ? sumX / moving : 0;
-        const my = moving ? sumY / moving : 0;
+        const mx = movedTotal ? sumX / movedTotal : 0;
+        const my = movedTotal ? sumY / movedTotal : 0;
         const len = Math.hypot(mx, my);
         const [ex, ey] = EXPECT_DIR[side];
         const cos = len > 0 ? (mx * ex + my * ey) / len : 0;
@@ -1046,7 +1092,7 @@ export function createWindowRainBench({ THREE, log }) {
         const b = await renderWith({ rain01: r, wet01: Math.min(1, r * 1.6), clock: 10 + r * 50, slideClock: 5 + r * 30, windSpeed01: r, windDirDeg: r * 300, gust01: r });
         seen.push(litStats(b).mean);
       }
-      const dials = await renderWith({ look: { ...state.look, dropScalePx: 70, refraction: 1.8, caustic: 1.5, rimDarken: 0.8, trail: 1, projectionStretch: 0.9 } });
+      const dials = await renderWith({ look: { ...state.look, dropScalePx: 4, refraction: 1.8, caustic: 1.5, rimDarken: 0.8, trail: 1, projectionStretch: 0.9 } });
       seen.push(litStats(dials).mean);
       const afterSweep = pipelineCount();
       deriveFlow(160);
@@ -1112,7 +1158,7 @@ export function createWindowRainBench({ THREE, log }) {
           // `renderWith` has already restored the state, so the clocks this frame was drawn with are the cfg's.
           clock: cfg.clock ?? state.clock,
           slideClock: cfg.slideClock ?? state.slideClock,
-          flow: sampleWindowRainFlow(field, wx + 0.5, wy + 0.5),
+          flow: sampleWindowRainField(field, wx + 0.5, wy + 0.5),
           viewSpanPx: DIM,
         });
         twin[o] = t.gain;
@@ -1185,16 +1231,10 @@ export function createWindowRainBench({ THREE, log }) {
       buildScene();
       return `rebuilt with glass=${state.glass} rain=${state.withRain}`;
     },
-    /** TEST/DIAGNOSTIC: the derived field's components, as the flow derivation reports them. */
+    /** TEST/DIAGNOSTIC: the derived field's facet levels and counts. */
     describeFlow() {
       ensureFixture();
-      return field.components.map((c) => ({
-        cells: c.cells,
-        facetA: c.facetA,
-        facetB: c.facetB,
-        spreadDeg: +((c.spreadRad * 180) / Math.PI).toFixed(1),
-        confidence: c.confidence,
-      }));
+      return { levels: field.levels.map((a) => +a.toFixed(1)), stats: field.stats };
     },
   };
 

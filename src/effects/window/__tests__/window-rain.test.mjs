@@ -39,7 +39,7 @@ const frameFor = (rain01, extra = {}) => ({
   ...extra,
 });
 
-const flowSouth = { ax: 0, ay: 1, bx: 0, by: 1, w: 0, kappa: 1, h: 0.5 };
+const flowSouth = { px: 0, py: 1, qx: 0, qy: 1, mix: 0, kappa: 1, h: 0.5, gate: 1 };
 
 function mean(a) {
   return a.reduce((s, v) => s + v, 0) / a.length;
@@ -272,7 +272,8 @@ export function run(t) {
     for (const rain of [0.05, 0.5, 1]) {
       const frame = frameFor(rain, { gust: 1 });
       for (let i = 0; i < 600; i++) {
-        const flow = i % 3 === 0 ? { ...flowSouth, ax: 1, ay: 0, w: (i % 10) / 10 } : i % 3 === 1 ? NO_FLOW : flowSouth;
+        const flow =
+          i % 3 === 0 ? { ...flowSouth, px: 1, py: 0, mix: (i % 10) / 10 } : i % 3 === 1 ? NO_FLOW : flowSouth;
         const r = evalWindowRainPixel({
           x: ((i * 97) % 9000) - 500,
           y: (i * 61) % 7000,
@@ -320,14 +321,14 @@ export function run(t) {
   {
     // Find a live bead by scanning cells, then check its optics.
     const frame = { ...frameFor(0.6), impact: 0 }; // no crown, just the bead
+    const cell = look.dropScalePx * RAIN_TUNE.octScale[1] * RAIN_TUNE.cellMul;
     let best = null;
     for (let cy = 0; cy < 30 && !best; cy++) {
       for (let cx = 0; cx < 30 && !best; cx++) {
         const s = evalSplatLayer({
-          x: (cx + 0.5) * look.dropScalePx,
-          y: (cy + 0.5) * look.dropScalePx,
-          cellPx: look.dropScalePx,
-          seed: RAIN_TUNE.bigSeed,
+          x: (cx + 0.5) * cell,
+          y: (cy + 0.5) * cell,
+          octave: 1,
           clock: 5.5,
           frame,
           look,
@@ -347,8 +348,7 @@ export function run(t) {
       clock: 5.5,
       frame,
       look,
-      cellPx: look.dropScalePx,
-      seed: RAIN_TUNE.bigSeed,
+      octave: 1,
       ddx: 0,
       ddy: 0,
       paneH: 0.5,
@@ -356,8 +356,8 @@ export function run(t) {
     };
     for (let j = 0; j < 40; j++) {
       for (let i = 0; i < 40; i++) {
-        const x = (best.cx + i / 40) * look.dropScalePx;
-        const y = (best.cy + j / 40) * look.dropScalePx;
+        const x = (best.cx + i / 40) * cell;
+        const y = (best.cy + j / 40) * cell;
         const s = evalSplatLayer({ x, y, ...base });
         gmin = Math.min(gmin, s.gain);
         gmax = Math.max(gmax, s.gain);
@@ -373,8 +373,8 @@ export function run(t) {
     for (let j = 0; j < 20; j++) {
       for (let i = 0; i < 20; i++) {
         const s = evalSplatLayer({
-          x: (best.cx + i / 20) * look.dropScalePx,
-          y: (best.cy + j / 20) * look.dropScalePx,
+          x: (best.cx + i / 20) * cell,
+          y: (best.cy + j / 20) * cell,
           ...base,
           look: flat,
         });
@@ -401,7 +401,7 @@ export function run(t) {
       // column's centre line, so one line would lose a small head; sample across the column instead.
       const gainAt = (col, v, slideClock) => {
         let best = -Infinity;
-        for (const du of [-6, -3, 0, 3, 6]) {
+        for (const du of [-2, -1, 0, 1, 2]) {
           const u0 = (col + 0.5) * colW + du;
           const r = evalFacetFrame({
             x: u0 * nX + v * dX,
@@ -481,7 +481,7 @@ export function run(t) {
   // ── 9. Across a facet blend nothing jumps ───────────────────────────────
   {
     const frame = frameFor(0.8);
-    const A = { ax: 1, ay: 0, bx: 0, by: 1, kappa: 1, h: 0.5 };
+    const A = { px: 1, py: 0, qx: 0, qy: 1, kappa: 1, h: 0.5, gate: 1 };
     let worstStep = 0;
     for (const [x, y] of [
       [1234.5, 987.5],
@@ -489,7 +489,7 @@ export function run(t) {
       [5, 7777],
       [3333.3, 444.4],
     ]) {
-      let prev = evalWindowRainPixel({ x, y, frame, look, clock: 17.2, slideClock: 9.1, flow: { ...A, w: 0 } });
+      let prev = evalWindowRainPixel({ x, y, frame, look, clock: 17.2, slideClock: 9.1, flow: { ...A, mix: 0 } });
       for (let k = 1; k <= 100; k++) {
         const cur = evalWindowRainPixel({
           x,
@@ -498,7 +498,7 @@ export function run(t) {
           look,
           clock: 17.2,
           slideClock: 9.1,
-          flow: { ...A, w: k / 100 },
+          flow: { ...A, mix: k / 100 },
         });
         worstStep = Math.max(
           worstStep,
@@ -518,8 +518,8 @@ export function run(t) {
     for (let i = 0; i < 300; i++) {
       const x = 900 + i * 7.3;
       const y = 1500 + i * 3.1;
-      const a = evalWindowRainPixel({ x, y, frame, look, clock: 17.2, slideClock: 9.1, flow: { ...A, w: 0 } });
-      const b = evalWindowRainPixel({ x, y, frame, look, clock: 17.2, slideClock: 9.1, flow: { ...A, w: 1 } });
+      const a = evalWindowRainPixel({ x, y, frame, look, clock: 17.2, slideClock: 9.1, flow: { ...A, mix: 0 } });
+      const b = evalWindowRainPixel({ x, y, frame, look, clock: 17.2, slideClock: 9.1, flow: { ...A, mix: 1 } });
       if (Math.abs(a.gain - b.gain) > 0.02) differ++;
     }
     t.ok('rain: facet A and facet B give different water (' + differ + ' of 300 pixels differ)', differ > 5);
@@ -543,7 +543,7 @@ export function run(t) {
 
     const wetCount = (dirY) => {
       const frame = { ...frameFor(0.4), windBias: 1, windFlowX: 0, windFlowY: 1 };
-      const flow = { ax: 0, ay: dirY, bx: 0, by: dirY, w: 0, kappa: 1, h: 0.5 };
+      const flow = { px: 0, py: dirY, qx: 0, qy: dirY, mix: 0, kappa: 1, h: 0.5, gate: 1 };
       let n = 0;
       for (let j = 0; j < 60; j++)
         for (let i = 0; i < 60; i++) {

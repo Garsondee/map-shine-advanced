@@ -3,7 +3,7 @@
  *
  * Pure math over typed arrays; no THREE, no GPU, Node-tested. It lived inside
  * `effects/critters/critter-zone.js` until a second consumer (the rain-on-glass
- * flow field, `effects/window/window-rain-flow.js`) needed the same transform:
+ * flow field, `effects/window/window-rain-field.js`) needed the same transform:
  * two private copies of a 60-line algorithm is how a sign error ends up in one
  * of them, so it moved here verbatim and both import it.
  *

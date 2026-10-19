@@ -35,7 +35,7 @@
  * DOWN the pane, and "down" for a window is toward the wall it sits in — which
  * is a fact about the BUILDING, not about the painted cookie. `window-rain.js`
  * (injected as `rain`) reads a per-pool flow field derived from `_Outdoors`
- * (`window-rain-flow.js`); this module only adds the offset and gain it returns
+ * (`window-rain-field.js`); this module only adds the offset and gain it returns
  * (see `buildGlassCookie`). Omit `rain` and none of it is constructed.
  *
  * ============================================================================

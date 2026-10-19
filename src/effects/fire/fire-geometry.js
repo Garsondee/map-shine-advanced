@@ -1117,8 +1117,15 @@ export function buildFireLightSources(
     // ADDITIVE coloration below (`alpha01`), which never depended on
     // `luminosity01` at all — this only stops illumination's OWN, colour-
     // agnostic contribution from drowning it out.
-    const luminosity01 = clampNum(0.12 + 0.42 * (alive01 - 1) + 0.25 * (chain.baseTemp - 0.6), 0.05, 0.4);
-    const alpha01 = clampNum(0.55 * alive01 * chain.baseTemp, 0.05, 1);
+    // ⚠️ PEAK RAISED 2026-10-19 (luminosity base 0.12 → 0.38, cap 0.4 → 0.48; alpha 0.55 → 0.85) — author, live:
+    // the middle of a big open flame read DARK. Illumination scales the light's whole colour by `2*luminosity`
+    // (`computeExposure`, below 0.5), so at 0.12 the hottest pixel of the glow was only 0.24 of full brightness, and
+    // the old wide falloff spread that dim peak over the whole radius. The cap stays UNDER 0.5 on purpose: at and
+    // above it exposure turns positive and pushes the fragment toward white, the exact "fire light is white"
+    // failure this baseline was dropped to fix (mythica-machina-press#475). The gutter terms are unchanged, so a
+    // wind-guttered fire still dims by the same amount.
+    const luminosity01 = clampNum(0.38 + 0.42 * (alive01 - 1) + 0.25 * (chain.baseTemp - 0.6), 0.05, 0.48);
+    const alpha01 = clampNum(0.85 * alive01 * chain.baseTemp, 0.05, 1);
     const elevation = Number.isFinite(c.elevation) ? c.elevation : 0;
     if (!shapePoints || ![radius, luminosity01, alpha01].every(Number.isFinite)) continue;
 

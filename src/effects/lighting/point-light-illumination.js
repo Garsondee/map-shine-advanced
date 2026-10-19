@@ -363,7 +363,15 @@ export const INVERSE_SQUARE_STEEPNESS = 8;
  * untouched — candles are small and viewed close, where this compounding
  * is far less visible.
  */
-export const FIRE_INVERSE_SQUARE_STEEPNESS = 0.15;
+// ⚠️ 0.15 → 12, 2026-10-19 — author, live, on a night scene: "a very wide light with a soft edge, but the middle
+// of the flame area looks very dark considering it's next to a big open flame... we need a stronger core of light
+// and a rapid drop off with distance." K=0.15 (above) was tuned for a NOON scene whose ambient is already near-white,
+// where the only way to let the additive tint read was to spread it flat across the glow; at night that same curve is
+// a flat dim disc (~85% at half radius) with nothing hot in the middle. K=12 is the same windowed inverse-square
+// shape with a hot spike: ~68% at 20% of the radius, ~47% at 30%, ~22% at 50%, ~8% at 70%, 0 at the edge.
+// `fire-geometry.js#buildFireLightSources` lifts the luminosity/alpha peak with it, so the core is also brighter,
+// not just narrower. Candles keep K=8 (their own constant); this is still a separate constant for fire.
+export const FIRE_INVERSE_SQUARE_STEEPNESS = 12;
 
 /**
  * `smoothstep(edge0, edge1, x)` over plain JS numbers — the private, per-file

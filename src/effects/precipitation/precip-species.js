@@ -265,6 +265,9 @@ export const PRECIP_SPECIES = Object.freeze({
      * `buf:scene.illum` per body) is P7, recorded as a rung so it stays a
      * decision rather than a drift. */
     light: Object.freeze({
+      /** mmp-row — streaks glint as gradient lines in a light's pool
+       * (`precip-glint.js`). Only a streak body can; build-time in the runtime. */
+      glint: true,
       dayAlphaMul: 1.62,
       dayRgbMul: 0.5,
       nightAlphaMul: 0.34,

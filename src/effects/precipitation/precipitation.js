@@ -207,6 +207,35 @@ export const PRECIPITATION_PARAMS = Object.freeze({
     label: 'Light pickup',
     help: 'How much a falling drop brightens as it crosses a torch or lamp`s light. 0 = unlit sprites only.',
   }),
+  // mmp-row — the gradient-line glint (precip-glint.js). Rain only; fades to
+  // nothing in daylight, so these only matter at night near a light.
+  rainLightEnabled: Object.freeze({
+    type: 'bool',
+    default: true,
+    category: 'Light',
+    label: 'Rain glints in light',
+    help: 'Rain streaks catch the light of a torch or lamp as thin glinting lines — brightest at the end facing the light, tinted by its colour. Night only; daytime rain is unchanged.',
+  }),
+  rainLightStrength: Object.freeze({
+    type: 'float',
+    min: 0,
+    max: 2,
+    step: 0.05,
+    default: 1,
+    category: 'Light',
+    label: 'Rain light response',
+    help: 'How brightly lit rain streaks glint. 0 = no glint at all.',
+  }),
+  rainGlint: Object.freeze({
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.05,
+    default: 0.6,
+    category: 'Light',
+    label: 'Rain glint',
+    help: 'How much lit streaks differ from each other and twinkle. 0 = every lit streak glows the same, steadily.',
+  }),
 
   // ── VEIL — the distant impression curtain (curtain-render.js) ────────────
   curtainStrength: Object.freeze({

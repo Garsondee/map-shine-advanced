@@ -113,6 +113,27 @@ import { createWindHandle, windFlowVectorNode } from '../../world/index.js';
 import { createLogger } from '../../core/log.js';
 import { resolveSpecies } from '../precipitation/precip-species.js';
 import { buildSquallField } from '../precipitation/squall-field.js';
+import {
+  LUMA,
+  GLINT_DEFAULT_STRENGTH,
+  GLINT_DEFAULT_VARIATION,
+  LIT_FLOOR,
+  LIT_FULL,
+  LIT_RANGE_MIN,
+  PEAK_GAIN,
+  PEAK_REACH,
+  PROFILE_HALF_WIDTH,
+  GLINT_COLOUR_GAIN,
+  GLINT_ALPHA_GAIN,
+  TINT_WHITE_MIX,
+  TWINKLE_HZ_MIN,
+  TWINKLE_HZ_MAX,
+  CHARACTER_SPREAD,
+  TWINKLE_SWELL,
+  TWINKLE_SPARKLE,
+  luma as glintLuma,
+  nightFade as glintNightFade,
+} from '../precipitation/precip-glint.js';
 
 const log = createLogger('precip-runtime');
 const TIER0_WIND_HANDLE = createWindHandle();
@@ -601,6 +622,25 @@ export function createPrecipEngine({
    * the sky gate does) would read a completely unrelated pixel.
    */
   const illumTex = illumTexture ? TSL.texture(illumTexture) : null;
+
+  /**
+   * ⭐ mmp-row — THE GRADIENT-LINE GLINT (precip-glint.js has the why and the
+   * CPU twin). Build-time: only a species whose row says `light.glint` (rain),
+   * drawn as a streak, with the illum buffer supplied, compiles any of it in —
+   * snow, hail and every other body keep exactly today's graph.
+   */
+  const hasGlint = Boolean(S?.light?.glint) && isStreak && Boolean(illumTex);
+  /** "Rain light response" × the on/off switch: 0 = off (the output is then today's, exactly). */
+  const uGlintStrength = uniform(float(GLINT_DEFAULT_STRENGTH));
+  /** "Rain glint": per-streak variation and twinkle. */
+  const uGlintVar = uniform(float(GLINT_DEFAULT_VARIATION));
+  /** `precip-glint.js#nightFade(dayFactor01)` — 0 in full daylight. Pushed per frame. */
+  const uGlintNight = uniform(float(1));
+  /** The scene's ambient background (sRGB, the same space as illum) and its luminance. */
+  const uAmbientRgb = uniform(vec3(0.19, 0.19, 0.19));
+  const uAmbientLum = uniform(float(0.19));
+  let glintOn = true;
+  let glintStrength = GLINT_DEFAULT_STRENGTH;
   // Construction-time constant, not a uniform: `pxPerMeter` cannot change mid-session.
   const windPxPerSec = float(pxPerMeter * 3.2);
 
@@ -1320,9 +1360,14 @@ export function createPrecipEngine({
   })().toVarying('vPrecipBody');
 
   const material = new THREE.NodeMaterial();
-  material.positionNode = Fn(() => {
-    const i = instanceIndex;
-    const corner = positionGeometry.xy;
+  /**
+   * The body's drawn centre, width, length and axis — pulled out of
+   * `positionNode` UNCHANGED so the glint varying below can find the streak's
+   * two ends from the very same numbers the quad is drawn from (mmp-row). A
+   * plain JS helper (it builds nodes, it owns no stack), called once from each
+   * stage.
+   */
+  const streakAxisOf = (i) => {
     const centre = position.element(i);
     const c = custom.element(i);
     const vel = velocity.element(i);
@@ -1467,6 +1512,117 @@ export function createPrecipEngine({
     const length = width.add(speedLen.mul(float(STREAK_PER_PXS)).mul(uStreakScale).mul(uLengthMul).mul(uSizeScale));
     // Perpendicular, for the width axis.
     const perp = vec2(dir.y.negate(), dir.x);
+    return { parallaxed, width, dir, length, perp };
+  };
+
+  /**
+   * ⭐ mmp-row — THE GLINT VARYING: `(tint × amount).rgb, peak`. The TSL twin of
+   * `precip-glint.js#glintVarying` (same constants, same order of operations).
+   *
+   * Per STREAK, in the vertex stage, like the P7 pickup beside it: two illum
+   * reads (the streak's head and tail ends, found with the very axis the quad
+   * is drawn from) — the mean says how lit the streak is, head-minus-tail says
+   * which end faces the light. No loop over lights, no readback; the whole
+   * light list is already folded into `buf:scene.illum`.
+   *
+   * ⚠️ It is `(0,0,0)` — exactly, not "small" — when the dial is 0, the switch
+   * is off, it is day, or the streak is in no light, so the fragment adds
+   * literal zeros and the picture is today's.
+   */
+  let vGlint = null;
+  if (hasGlint) {
+    const sstep = (a, b, x) => {
+      const u = x
+        .sub(float(a))
+        .div(float(b - a))
+        .clamp(float(0), float(1));
+      return u.mul(u).mul(float(3).sub(u.mul(float(2))));
+    };
+    const viewSpan = uViewRect.z.sub(uViewRect.x).max(float(1));
+    const viewSpanY = uViewRect.w.sub(uViewRect.y).max(float(1));
+    const screenUvOf = (p) => vec2(p.x.sub(uViewRect.x).div(viewSpan), p.y.sub(uViewRect.y).div(viewSpanY));
+    const lumOf = (v) =>
+      v.x
+        .mul(float(LUMA.r))
+        .add(v.y.mul(float(LUMA.g)))
+        .add(v.z.mul(float(LUMA.b)));
+    vGlint = Fn(() => {
+      const i = instanceIndex;
+      const { parallaxed, dir, length } = streakAxisOf(i);
+      const half = dir.mul(length.mul(float(0.5)));
+      const zero3 = vec3(0, 0, 0);
+      const readExcess = (p) => {
+        const s = screenUvOf(p);
+        const sampled = illumTex.sample(vec2(s.x.clamp(float(0), float(1)), s.y.clamp(float(0), float(1)))).rgb;
+        return sampled.sub(uAmbientRgb).max(zero3);
+      };
+      const exH = readExcess(parallaxed.add(half));
+      const exT = readExcess(parallaxed.sub(half));
+      const lumH = lumOf(exH);
+      const lumT = lumOf(exT);
+
+      // Where the core sits: toward the end that receives more light.
+      const g = lumH
+        .sub(lumT)
+        .mul(float(PEAK_GAIN))
+        .div(lumH.add(lumT).max(float(1e-4)))
+        .clamp(float(-1), float(1));
+      const peak = g.mul(float(PEAK_REACH)).add(float(0.5));
+
+      // How lit, above the ambient — and only where the streak is on screen.
+      const range = float(1)
+        .sub(uAmbientLum.clamp(float(0), float(1)))
+        .max(float(LIT_RANGE_MIN));
+      const lit = sstep(LIT_FLOOR, LIT_FULL, lumH.add(lumT).mul(float(0.5)).div(range));
+      const cs = screenUvOf(parallaxed);
+      const inView = cs.x
+        .greaterThanEqual(float(0))
+        .and(cs.x.lessThanEqual(float(1)))
+        .and(cs.y.greaterThanEqual(float(0)))
+        .and(cs.y.lessThanEqual(float(1)))
+        .select(float(1), float(0));
+
+      // Each streak's own character and twinkle.
+      const sd = seed.element(i);
+      const bodyHash = hash11(sd.mul(float(5.7)));
+      const phaseHash = hash11(sd.mul(float(3.1)));
+      const v = uGlintVar.clamp(float(0), float(1));
+      const character = float(1).sub(v.mul(float(CHARACTER_SPREAD)).mul(bodyHash));
+      const hz = phaseHash.mul(float(TWINKLE_HZ_MAX - TWINKLE_HZ_MIN)).add(float(TWINKLE_HZ_MIN));
+      const cycle = fract(
+        uTimeMs
+          .mul(float(0.001))
+          .mul(hz)
+          .add(phaseHash.mul(float(7.31)))
+      );
+      const wave = cos(cycle.mul(float(2 * Math.PI)))
+        .mul(float(0.5))
+        .add(float(0.5));
+      const w2 = wave.mul(wave);
+      const w4 = w2.mul(w2);
+      const w8 = w4.mul(w4);
+      const twinkle = float(1)
+        .sub(v.mul(float(TWINKLE_SWELL)).mul(float(1).sub(wave)))
+        .add(v.mul(float(TWINKLE_SPARKLE)).mul(w8));
+
+      const amount = lit.mul(uGlintNight).mul(uGlintStrength).mul(character).mul(twinkle).mul(inView);
+
+      // The light's colour: the mean light above ambient, unit-max, eased toward white.
+      const exMean = exH.add(exT).mul(float(0.5));
+      const m = exMean.x.max(exMean.y).max(exMean.z).max(float(1e-4));
+      const tint = exMean
+        .div(m)
+        .mul(float(1 - TINT_WHITE_MIX))
+        .add(float(TINT_WHITE_MIX));
+      const rgb = tint.mul(amount);
+      return vec4(rgb.x, rgb.y, rgb.z, peak);
+    })().toVarying('vPrecipGlint');
+  }
+
+  material.positionNode = Fn(() => {
+    const i = instanceIndex;
+    const corner = positionGeometry.xy;
+    const { parallaxed, width, dir, length, perp } = streakAxisOf(i);
 
     let along = corner.y.mul(length);
     let across = corner.x.mul(width);
@@ -1518,6 +1674,18 @@ export function createPrecipEngine({
   /** Above bloom's threshold ⇒ this body is a light source. Build-time. */
   const EMISSIVE = S?.body.emissive01 ?? 0;
 
+  /**
+   * The glint's gradient ALONG the streak — `precip-glint.js#glintProfile`:
+   * 1 at the core (`vGlint.w`, the end facing the light), tapering smoothly to
+   * 0, squared so the falloff has no corner. `t` is `uv().y`, 0 tail → 1 head.
+   */
+  const glintCore = (t) => {
+    const k = float(1)
+      .sub(t.sub(vGlint.w).abs().div(float(PROFILE_HALF_WIDTH)))
+      .clamp(float(0), float(1));
+    return k.mul(k);
+  };
+
   material.colorNode = Fn(() => {
     const bright = vBody.y;
     // Head-to-tail along the quad's own long axis: `uv().y` is 1 at the
@@ -1536,7 +1704,11 @@ export function createPrecipEngine({
      * nothing for spore's glow (Effects.md Law 4).
      */
     if (EMISSIVE > 0) return rgb.mul(bright).mul(uRgbMul).mul(float(EMISSIVE));
-    return rgb.mul(bright).mul(uRgbMul);
+    const base = rgb.mul(bright).mul(uRgbMul);
+    if (!vGlint) return base;
+    // ⭐ mmp-row — the lit streak's gradient line, in the light's own colour.
+    // `vGlint.xyz` is (0,0,0) by day / unlit / switched off, so this adds zeros.
+    return base.add(vGlint.xyz.mul(glintCore(t)).mul(float(GLINT_COLOUR_GAIN)));
   })();
 
   material.opacityNode = Fn(() => {
@@ -1649,7 +1821,22 @@ export function createPrecipEngine({
     // exactly 1 (see the gate's own note) — an `if` would be a second place the
     // polarity could be got backwards.
     const skyGate = vBody.w;
-    return alpha.mul(edge).mul(bright).mul(uAlphaMul).mul(alive).mul(skyGate);
+    const baseAlpha = alpha.mul(edge).mul(bright).mul(uAlphaMul).mul(alive).mul(skyGate);
+    if (!vGlint) return baseAlpha;
+    // ⭐ mmp-row — rain is thin and mostly transparent, so colour alone would
+    // not show: the glint also adds opacity, along the same gradient and across
+    // a narrower core than the streak (`edge` squared), so it reads as a bright
+    // filament inside the streak. Gated by the same alive/sky terms as the
+    // streak itself — no glint on rain that is not drawn, none indoors.
+    const amount = vGlint.x.max(vGlint.y).max(vGlint.z);
+    const glintAlpha = amount
+      .mul(glintCore(t))
+      .mul(edge.mul(edge))
+      .mul(float(GLINT_ALPHA_GAIN))
+      .min(float(1))
+      .mul(alive)
+      .mul(skyGate);
+    return baseAlpha.add(glintAlpha);
   })();
 
   material.transparent = true;
@@ -1797,6 +1984,20 @@ export function createPrecipEngine({
       uViewRect.value.set(rect.minX, rect.minY, rect.maxX, rect.maxY);
     },
 
+    /**
+     * mmp-row — the scene's own light level, for the rain glint: how bright the
+     * ambient is (so only light ABOVE it counts) and how much of the day it is
+     * (so the glint fades to nothing by day). Pushed per frame beside the rect.
+     * @param {{ambientRgb?: number[]|null, dayFactor01?: number}} light
+     */
+    setGlintLight({ ambientRgb = null, dayFactor01 = 1 } = {}) {
+      if (ambientRgb && ambientRgb.length >= 3 && ambientRgb.every(Number.isFinite)) {
+        uAmbientRgb.value.set(ambientRgb[0], ambientRgb[1], ambientRgb[2]);
+        uAmbientLum.value = glintLuma(ambientRgb[0], ambientRgb[1], ambientRgb[2]);
+      }
+      uGlintNight.value = glintNightFade(Number.isFinite(dayFactor01) ? dayFactor01 : 1);
+    },
+
     setWorldRect(rect) {
       if (!rect) return;
       uRectMin.value.set(rect.minX, rect.minY);
@@ -1852,6 +2053,12 @@ export function createPrecipEngine({
       if (Number.isFinite(t.curtainBandDepth)) uSquallDepth.value = Math.max(0, Math.min(1, t.curtainBandDepth));
       if (Number.isFinite(t.curtainBandScale)) uSquallScale.value = Math.max(0.01, t.curtainBandScale);
       if (Number.isFinite(t.illumLit01)) uIllumLit01.value = Math.max(0, Math.min(1, t.illumLit01));
+      // mmp-row — the glint dials. The switch folds into the strength so the
+      // shader has ONE number whose 0 is "off" (and the output is today's).
+      if (typeof t.rainLightEnabled === 'boolean') glintOn = t.rainLightEnabled;
+      if (Number.isFinite(t.rainLightStrength)) glintStrength = Math.max(0, Math.min(2, t.rainLightStrength));
+      if (Number.isFinite(t.rainGlint)) uGlintVar.value = Math.max(0, Math.min(1, t.rainGlint));
+      uGlintStrength.value = glintOn ? glintStrength : 0;
       if (Number.isFinite(t.parallaxStreak01)) uParallaxStreak01.value = Math.max(0, Math.min(1, t.parallaxStreak01));
       if (Number.isFinite(t.cameraHeight)) camHeightBase = Math.max(1, t.cameraHeight);
       // mythica-machina-press#316 (optional Fall-parity dial) — floored well

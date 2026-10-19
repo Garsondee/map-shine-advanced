@@ -240,6 +240,23 @@ export function createPrecipitationSubsystem({
   const fogGate = () => (atmosGate.texture ? atmosGate : skyReach);
   let fireMask = { texture: null, rect: null };
   let lastTuning = null;
+  /** mmp-row — the last saved glint settings handed to the fall engines (JSON, to spot a change). */
+  let lastGlintKey = null;
+  /**
+   * The rain-glint settings (`rainLightEnabled`, `rainLightStrength`,
+   * `rainGlint`) from the cascade — so a SAVED Studio value reaches the fall
+   * engines, not only the live override. Pushed to the engines only when it
+   * changes, so a console `setPrecipitationTuning` is not trampled every frame.
+   * @param {object|null|undefined} g
+   */
+  function syncGlintTuning(g) {
+    if (!g) return;
+    const key = JSON.stringify(g);
+    if (key === lastGlintKey) return;
+    lastGlintKey = key;
+    lastTuning = { ...(lastTuning ?? {}), ...g };
+    for (const engine of engines.values()) engine.setTuning(g);
+  }
   /** ONE mantle, for the floor currently in view. Built lazily on the first
    * frame that has real scene bounds — the buffer is sized from them, so
    * building earlier would size it from a placeholder. */
@@ -419,6 +436,9 @@ export function createPrecipitationSubsystem({
     }
     if (st.sceneBounds !== undefined) engine.setSceneBounds(st.sceneBounds);
     engine.setFrame(frame);
+    // mmp-row — the scene's light level, for the rain glint (day fade + "light
+    // above the ambient").
+    engine.setGlintLight({ ambientRgb: st.ambientRgb ?? null, dayFactor01: st.dayFactor01 ?? 1 });
     // ⚠️ THE HANDLE IS RE-READ EVERY FRAME, not captured at engine build — the
     // viewer reassigns it when the wind field bakes, and a captured reference
     // goes dead silently.
@@ -666,6 +686,7 @@ export function createPrecipitationSubsystem({
       }
       const weather = st.weather ?? {};
       const precip01 = Number.isFinite(weather.precip01) ? weather.precip01 : 0;
+      syncGlintTuning(st.glintTuning);
 
       // ⭐ THE MANTLE STEPS FIRST, AND **BEFORE** THE CLEAR-DAY EARLY-OUT BELOW.
       //

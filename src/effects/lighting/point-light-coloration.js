@@ -179,6 +179,7 @@ export function buildColorationShadingCore({ THREE, inputs, shared, flags }) {
     apertureCount = 0,
     apGoboCols,
     apGoboRows,
+    windowReach = null,
     beamShape,
     cookieTexture,
   } = flags;
@@ -225,6 +226,7 @@ export function buildColorationShadingCore({ THREE, inputs, shared, flags }) {
     apGoboCols,
     apGoboRows,
     apertureGoboShared,
+    windowReach,
     beamDirection,
     beamShape,
     cookieTexture,
@@ -424,6 +426,7 @@ export function buildPointLightColorationMaterial({
   apGoboCols,
   apGoboRows,
   apertureGoboShared,
+  windowReach = null,
 }) {
   const { uniform, vec2, vec3, vec4, float, positionLocal } = THREE.TSL;
 
@@ -485,6 +488,7 @@ export function buildPointLightColorationMaterial({
       apertureCount,
       apGoboCols,
       apGoboRows,
+      windowReach,
       beamShape,
       cookieTexture,
     },

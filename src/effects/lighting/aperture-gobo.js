@@ -178,6 +178,9 @@ export const APERTURE_GOBO_DEFAULTS = Object.freeze({
   // squares at typical scene scale — generous for a lamp set back from its
   // own window, nowhere near "reaches across an outdoor map".
   maxApertureDistancePx: 400,
+  // WINDOW REACH (2026-10-19, `window-reach.js`'s own header): how far a candle's or fire's light keeps
+  // going once it has crossed a window, in scene px. 2000 (the slider's end) = no limit.
+  outsideReachPx: 200,
   // GLASS QUALITY & GRIME (round 13, 2026-08-04) — "have some fun with it."
   // 0.5 default: neither pure blob nor pure faceted, so the FIRST look at
   // this feature shows both kernels' own character at once, rather than

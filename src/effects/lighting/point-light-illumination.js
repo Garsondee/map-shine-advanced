@@ -158,6 +158,7 @@
 import { buildAnimationTimeNode } from './animations/light-animation-clock.js';
 import { createWindHandle } from '../../world/index.js';
 import { buildApertureGoboTerm } from './aperture-gobo-render.js';
+import { buildWindowReachTerm } from './window-reach.js';
 
 /** A bake-less handle so an un-wired caller still gets Tier-0 organic wind
  * rather than a wind-inert light — see candle-flame-render.js's own identical
@@ -1256,6 +1257,10 @@ function makeSdPolygonEdgeDistance(TSL) {
  *   @param {number} [args.apGoboRows] @param {object} [args.apertureGoboShared] -
  *   see `buildApertureGoboTerm`'s own params; `apertureCount` is
  *   graph-BUILD-time (`tsl/no-uniform-gates`) — 0 compiles the whole term out.
+ * @param {{count:number, shared:object, handle:(object|null)}} [args.windowReach] -
+ *   the window-reach term (`window-reach.js`): `count` windows (graph-build
+ *   time, 0 compiles it out), `shared.uWindowReachPx`, and `handle` which this
+ *   function fills with `{uLight, windows:[{uSeg}]}` for the pool to write.
  * @param {*} [args.beamDirection] - REQUIRED (with `beamShape`) when
  *   `falloffModel === 'beam'` — see {@link buildBeamFalloffNode}'s own params.
  *   Absent → a `'beam'` request falls back to the `foundry` corona rather than
@@ -1289,6 +1294,7 @@ export function buildPointLightSharedTerms({
   apGoboCols,
   apGoboRows,
   apertureGoboShared,
+  windowReach = null,
   beamDirection = null,
   beamShape = null,
   cookieTexture = null,
@@ -1390,6 +1396,25 @@ export function buildPointLightSharedTerms({
     }
   }
 
+  // WINDOW REACH (2026-10-19, `window-reach.js`'s own header): how far a candle's
+  // or fire's light keeps going once it has crossed a window. Graph-BUILD-TIME
+  // gate on `windowReach.count` (a light with no window in reach compiles none
+  // of it, and indoor fragments multiply by exactly 1). The uniform handles go
+  // back to the caller through `windowReach.handle` (an out-param, so the three
+  // wrapper return shapes above this function stay untouched).
+  if (windowReach && windowReach.count > 0) {
+    const reachResult = buildWindowReachTerm({
+      THREE,
+      positionWorldXY: positionWorld.xy,
+      windowCount: windowReach.count,
+      shared: windowReach.shared,
+    });
+    if (reachResult) {
+      falloffGoboed = falloffGoboed.mul(reachResult.node);
+      windowReach.handle = { uLight: reachResult.uLight, windows: reachResult.windows };
+    }
+  }
+
   return { dist, falloff, falloffGoboed, depthHere, depthFlagsHere, uApLampHeight, apApertures };
 }
 
@@ -1454,6 +1479,7 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
     apertureCount = 0,
     apGoboCols,
     apGoboRows,
+    windowReach = null,
     beamShape,
     cookieTexture,
   } = flags;
@@ -1544,6 +1570,7 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
     apGoboCols,
     apGoboRows,
     apertureGoboShared,
+    windowReach,
     beamDirection,
     beamShape,
     cookieTexture,
@@ -2110,6 +2137,7 @@ export function buildPointLightIlluminationMaterial({
   apGoboCols,
   apGoboRows,
   apertureGoboShared,
+  windowReach = null,
   cookieTexture = null,
   cloudUniforms,
   buildCloudField,
@@ -2223,6 +2251,7 @@ export function buildPointLightIlluminationMaterial({
         apertureCount,
         apGoboCols,
         apGoboRows,
+        windowReach,
         beamShape,
         cookieTexture,
       },

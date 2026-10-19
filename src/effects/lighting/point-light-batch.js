@@ -106,8 +106,10 @@ export function computeBucketKey({ animationType, animationResolved, animationQu
  * @param {BatchLightDescriptor} light
  * @returns {boolean}
  */
-export function canBatchLight({ apertureCount, falloffModel, cookiePattern }) {
-  if (Number(apertureCount) > 0 || cookiePattern) return false;
+export function canBatchLight({ apertureCount, windowReachCount, falloffModel, cookiePattern }) {
+  // A light with a window in reach (`window-reach.js`) carries per-light window uniforms, so it
+  // stays on the per-light path exactly like an aperture-lit one.
+  if (Number(apertureCount) > 0 || Number(windowReachCount) > 0 || cookiePattern) return false;
   return BATCH_FALLOFF_MODELS.includes(falloffModel);
 }
 

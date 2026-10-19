@@ -232,6 +232,22 @@ export const APERTURE_GOBO_PARAMS = Object.freeze({
       'window-sensed wall as its own; lower this if a big light is still picking up walls that have nothing to ' +
       'do with it, raise it if a lamp genuinely stands well back from its own window.',
   },
+  outsideReachPx: {
+    type: 'float',
+    min: 0,
+    max: 2000,
+    step: 10,
+    default: APERTURE_GOBO_DEFAULTS.outsideReachPx,
+    category: 'Reach',
+    label: 'Reach outside a window',
+    help:
+      'How far candle and fire light keeps shining once it has passed through a window, in scene pixels. ' +
+      'Candles are set to a very wide reach so they can fill a room with bounced light; without this, that ' +
+      'light poured out of every window as a long, hard-edged fan across the ground outside. The light is ' +
+      'full strength at the glass and fades away over this distance. Light that stays indoors is not ' +
+      'affected at all. Works even when the window pattern above is switched off. 2000 = no limit ' +
+      '(the old behaviour). Ordinary Foundry lights are never changed.',
+  },
   edgeSuppressPercent: {
     type: 'float',
     min: 0,

@@ -121,6 +121,26 @@ import {
   buildApertureGoboTerm,
   MAX_APERTURES_PER_LIGHT,
 } from './aperture-gobo-render.js';
+import { WINDOW_REACH_DEFAULT_PX, windowReachLimited, findWindowsForReach } from './window-reach.js';
+
+/** A window slot with no window in it: parked far away and degenerate, so it can never be hit. */
+const WINDOW_PARKED = Object.freeze({ ax: 1e7, ay: 1e7, bx: 1e7, by: 1e7 });
+
+/**
+ * Write one light's position and window list into one material's window-reach
+ * uniforms (`window-reach.js#buildWindowReachTerm`'s handle). No allocation.
+ * @param {{uLight:*, windows:Array<{uSeg:*}>}|null|undefined} handle
+ * @param {{x:number,y:number}} light
+ * @param {ReadonlyArray<{ax:number,ay:number,bx:number,by:number}>} windows
+ */
+function writeWindowReachUniforms(handle, light, windows) {
+  if (!handle) return;
+  handle.uLight.value.set(light.x, light.y);
+  for (let i = 0; i < handle.windows.length; i++) {
+    const w = windows[i] ?? WINDOW_PARKED;
+    handle.windows[i].uSeg.value.set(w.ax, w.ay, w.bx, w.by);
+  }
+}
 
 /** Starting capacity, in FAN VERTICES (not polygon vertices — see the
  * device-lost fix in {@link createPointLightPool}'s own dispose-discipline
@@ -417,6 +437,7 @@ function createLightEntry({
   apGoboCols,
   apGoboRows,
   apertureGoboShared,
+  windowReachCount = 0,
   flashlightCookieTexture,
 }) {
   const geometry = new THREE.BufferGeometry();
@@ -439,6 +460,12 @@ function createLightEntry({
   // "swap the shader class at source init" approach exactly.
   const animationType = (light.animation ?? NO_LIGHT_ANIMATION).type;
   const animationEntry = resolveLightAnimation(animationType);
+  // WINDOW REACH (window-reach.js) — one out-param holder per material (the two
+  // materials each build their own uniforms); `null` when no window is in reach.
+  const windowReachIllum =
+    windowReachCount > 0 ? { count: windowReachCount, shared: apertureGoboShared, handle: null } : null;
+  const windowReachColor =
+    windowReachCount > 0 ? { count: windowReachCount, shared: apertureGoboShared, handle: null } : null;
   const {
     material,
     uRatio,
@@ -484,6 +511,7 @@ function createLightEntry({
     apGoboCols,
     apGoboRows,
     apertureGoboShared,
+    windowReach: windowReachIllum,
     // SHARED WIND (Wind.md Tier 0/1) — OPT-IN, keyed on the light
     // descriptor actually carrying a windExposure (candle lights do, via
     // buildCandleLightSources' cluster-averaged exposure; plain Foundry
@@ -567,6 +595,7 @@ function createLightEntry({
     apGoboCols,
     apGoboRows,
     apertureGoboShared,
+    windowReach: windowReachColor,
   });
   const colorationMesh = new THREE.Mesh(geometry, colorationBuilt.material);
   colorationMesh.frustumCulled = false;
@@ -703,6 +732,9 @@ function createLightEntry({
     apertureCount,
     apGoboCols,
     apGoboRows,
+    windowReachCount,
+    windowReachIllum,
+    windowReachColor,
     uApLampHeight,
     apApertures,
     uApColLampHeight: colorationBuilt.uApColLampHeight,
@@ -1166,6 +1198,13 @@ export function createPointLightPool({
    * per-light loop never re-derives a static wall's direction/normal/length
    * from scratch every frame — see that call site's own comment. */
   let apertureSegCache = null;
+
+  /** sourceId -> {x, y, radius, src, windows} — each window-reach light's own window
+   * list (`window-reach.js#findWindowsForReach`), recomputed only when the light
+   * moves, its radius changes or `apertureSegCache` is rebuilt (walls edited or the
+   * floor changed). Pruned each frame against `seen`. */
+  const windowReachCache = new Map();
+  const NO_WINDOWS = Object.freeze([]);
 
   /** The wall-structure version (`getWallStructureVersion()`) as of the LAST
    * `update()` call — 2026-08-15, the "lights aren't occluded by walls" fix.
@@ -1711,7 +1750,15 @@ export function createPointLightPool({
     // forever at whatever version existed when the pool was constructed.
     let apertureWallSegments = [];
     let apertureWallFrames = null;
-    if (apertureGoboState.enabled) {
+    // WINDOW REACH (window-reach.js) — independent of the pattern's own on/off:
+    // it reads the SAME cached aperture-wall list, so the cache is built when
+    // EITHER consumer wants it.
+    const outsideReachPx = Number.isFinite(apertureGoboParams.outsideReachPx)
+      ? apertureGoboParams.outsideReachPx
+      : WINDOW_REACH_DEFAULT_PX;
+    const windowReachOn = windowReachLimited(outsideReachPx);
+    let windowReachSegments = NO_WINDOWS;
+    if (apertureGoboState.enabled || windowReachOn) {
       const wallVersion = getWallStructureVersion();
       if (
         !apertureSegCache ||
@@ -1755,9 +1802,13 @@ export function createPointLightPool({
       } else {
         wallClipCacheStats.apertureWalls.hits += 1;
       }
-      apertureWallSegments = apertureSegCache.segments;
-      apertureWallFrames = apertureSegCache.frames;
+      if (apertureGoboState.enabled) {
+        apertureWallSegments = apertureSegCache.segments;
+        apertureWallFrames = apertureSegCache.frames;
+      }
+      if (windowReachOn) windowReachSegments = apertureSegCache.segments;
     }
+    apertureGoboShared.uWindowReachPx.value = windowReachOn ? outsideReachPx : WINDOW_REACH_DEFAULT_PX;
     // Clamped against the SHADER's own hard cap (`aperture-gobo-render.js`'s
     // `MAX_APERTURES_PER_LIGHT`, the unroll count its uniform sets are built
     // to), not just the params schema's own declared `max` — belt and braces:
@@ -1962,6 +2013,32 @@ export function createPointLightPool({
         apertureWallFrames
       );
       const apertureCount = lightApertures.length;
+      // WINDOW REACH — candles and fire only (the two MSA-authored lights whose wide,
+      // bounced reach is what pours out of a window); ordinary Foundry lights keep
+      // their authored radius untouched. `windowReachCount` is graph-build-time,
+      // like `apertureCount`: part of the rebuild key, and a light with windows in
+      // reach is never batched (its windows are per-light uniforms).
+      let lightWindows = NO_WINDOWS;
+      if (
+        windowReachOn &&
+        windowReachSegments.length > 0 &&
+        (falloffModel === 'candle' || falloffModel === 'inverseSquareWide')
+      ) {
+        let wc = windowReachCache.get(light.sourceId);
+        if (!wc) {
+          wc = { x: NaN, y: NaN, radius: NaN, src: null, windows: [] };
+          windowReachCache.set(light.sourceId, wc);
+        }
+        if (wc.x !== light.x || wc.y !== light.y || wc.radius !== light.radius || wc.src !== apertureSegCache) {
+          findWindowsForReach(light, windowReachSegments, wc.windows);
+          wc.x = light.x;
+          wc.y = light.y;
+          wc.radius = light.radius;
+          wc.src = apertureSegCache;
+        }
+        if (wc.windows.length > 0) lightWindows = wc.windows;
+      }
+      const windowReachCount = lightWindows.length;
       apertureGoboReadout.totalFound += totalFound;
       apertureGoboReadout.dropped += dropped;
       if (apertureCount > 0) apertureGoboReadout.litLights += 1;
@@ -1996,7 +2073,8 @@ export function createPointLightPool({
       // slide: flag OFF makes `canBatch` false for every light, byte-
       // identical to before this branch existed).
       const canBatch =
-        pointLightBatchingEnabled && canBatchLight({ apertureCount, falloffModel, cookiePattern: light.cookiePattern });
+        pointLightBatchingEnabled &&
+        canBatchLight({ apertureCount, windowReachCount, falloffModel, cookiePattern: light.cookiePattern });
       if (canBatch) {
         // A light that batches THIS frame but had a per-light entry from a
         // PREVIOUS frame (its own apertureCount just dropped to 0 — the only
@@ -2136,6 +2214,7 @@ export function createPointLightPool({
           entry.animationQuality !== animationQuality ||
           entry.falloffModel !== falloffModel ||
           entry.apertureCount !== apertureCount ||
+          entry.windowReachCount !== windowReachCount ||
           // `cols`/`rows` join the rebuild key for the SAME reason
           // `apertureCount` is already in it (design 4, 2026-08-03): both
           // are graph-build-time unroll counts baked into the aperture
@@ -2181,6 +2260,7 @@ export function createPointLightPool({
           apGoboCols: apertureGoboCols,
           apGoboRows: apertureGoboRows,
           apertureGoboShared,
+          windowReachCount,
           flashlightCookieTexture,
         });
         lightMeshes.set(light.sourceId, entry);
@@ -2218,6 +2298,13 @@ export function createPointLightPool({
             dstCol.uSLAWallLen.value.set(src.sL, src.a, src.wallLen);
           }
         }
+      }
+      // WINDOW REACH uniforms — the light's own position and its nearest windows,
+      // into both materials' own uniform sets (the same duplication-across-the-
+      // mesh-pair as the aperture write above). Unused slots park far away.
+      if (windowReachCount > 0) {
+        writeWindowReachUniforms(entry.windowReachIllum?.handle, light, lightWindows);
+        writeWindowReachUniforms(entry.windowReachColor?.handle, light, lightWindows);
       }
       // RE-TRIANGULATION DIRTY-CHECK (2026-08-09) — triangulateLightFan,
       // the BufferAttribute re-upload and writeLightEdgePoints all derive
@@ -2463,6 +2550,9 @@ export function createPointLightPool({
           entry.apertureShadowDebugMesh.visible = false;
         }
       }
+    }
+    if (windowReachCache.size > 0) {
+      for (const id of windowReachCache.keys()) if (!seen.has(id)) windowReachCache.delete(id);
     }
     profiler?.endById('light.pointLightReconcile');
 

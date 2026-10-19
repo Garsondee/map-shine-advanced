@@ -47,7 +47,7 @@ import {
 } from './window-render.js';
 import { QUAD_UVS, QUAD_INDICES, buildQuadPositions } from '../../scene/index.js';
 import { computeSeedOffset } from './window-glass.js';
-import { WINDOW_DEFAULT_AMBIENT_CEILING } from './window-cookie.js';
+import { WINDOW_DEFAULT_AMBIENT_CEILING, WINDOW_ALPHA_EPSILON } from './window-cookie.js';
 import {
   createWindowRain,
   resolveRainFrame,
@@ -74,6 +74,23 @@ const RAIN_WIND_SHIFT_WRAP_PX = 1048576;
 const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
 
 /**
+ * The brightest gated value in a decoded RGBA8 mask: the peak channel times alpha (alpha under the epsilon counts as
+ * 1, exactly as the shader's `sampleCookieAt` does), 0..1. The "rain only in the brightest" dial is relative to it.
+ * 1 when there is no data, so the fade then compares against full white.
+ * @param {ArrayLike<number>|null|undefined} data
+ */
+export function computeMaskPeak01(data) {
+  if (!data || data.length < 4) return 1;
+  let best = 0;
+  for (let i = 0; i + 3 < data.length; i += 4) {
+    const a = data[i + 3] / 255;
+    const v = Math.max(data[i], data[i + 1], data[i + 2]) * (a < WINDOW_ALPHA_EPSILON ? 1 : a);
+    if (v > best) best = v;
+  }
+  return best > 0 ? best / 255 : 1;
+}
+
+/**
  * The author's rain dials, resolved from the render state's params with the effect's own defaults standing in for
  * anything missing (a Node harness passes `params: {}`).
  * @param {object} p
@@ -95,6 +112,7 @@ function resolveRainLook(p) {
     windwardBias: n(p.rainWindwardBias, D.windwardBias),
     sheeting: n(p.rainSheeting, D.sheeting),
     lingerSec: n(p.rainLingerSec, D.lingerSec),
+    maskFloorPct: n(p.rainMaskFloorPct, D.maskFloorPct),
     cornerEasePx: n(p.rainCornerEasePx, RAIN_FIELD_DEFAULT_EASE_PX),
   };
 }
@@ -287,6 +305,8 @@ export function createWindowSurfaceSubsystem({
   /** The window mask's decoded pixels (RGBA; the SAME array the texture wraps, never mutated) - what the flow
    * field pools window presence from. */
   let maskPixels = null;
+  /** The brightest gated value (peak channel x alpha, 0..1) anywhere in the loaded mask: the "brightest only" rain's unit. */
+  let maskPeak01 = 1;
   /** Neutral 1x1 flow textures (confidence 0: splats only) until a field is derived. */
   let neutralDirs = null;
   let neutralAux = null;
@@ -476,6 +496,7 @@ export function createWindowSurfaceSubsystem({
         // Keep the decoded pixels (the texture wraps this very array, so it costs nothing) for the rain's flow field,
         // and forget any field derived from the previous mask.
         maskPixels = loaded.data ? { data: loaded.data, width: loaded.width, height: loaded.height } : null;
+        maskPeak01 = computeMaskPeak01(maskPixels?.data);
         rainFlow.source = null;
         loadedContentBoundsUv = loaded.contentBounds ?? null;
         contentBoundsWorld = toWorldBounds(loaded.contentBounds, rect);
@@ -732,11 +753,13 @@ export function createWindowSurfaceSubsystem({
       look.rimDarken,
       look.trail,
       look.projectionStretch,
+      look.maskFloorPct,
     ].join('|');
     if (lookKey !== rainLookKey) {
       rainLookKey = lookKey;
       rain.setLook(look);
     }
+    rain.setMaskPeak(maskPeak01);
 
     const env = getEnv();
     const weather = env?.weather;

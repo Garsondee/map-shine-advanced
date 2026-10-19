@@ -144,7 +144,28 @@ export const WINDOW_RAIN_DEFAULTS = Object.freeze({
   windwardBias: 1,
   sheeting: 1,
   lingerSec: 40,
+  /** Rain only in the brightest N% of the mask (relative to the mask's own peak). 100 = everywhere, as before. */
+  maskFloorPct: 100,
 });
+
+/** Width (in fractions of the mask peak) of the soft edge of the "rain only in the brightest" fade. */
+export const RAIN_MASK_FADE_SOFT = 0.15;
+
+/**
+ * The "rain only in the brightest part of the mask" weight, 0..1. `maskValue` and `peak` are in the same units
+ * (the mask's gated brightness and the brightest such value anywhere in the mask). At `pct` >= 100 it is exactly 1
+ * (no change from before). Below that the threshold t = 1 - pct/100 of the peak is the fully-on point and the weight
+ * falls by a smoothstep over `RAIN_MASK_FADE_SOFT` below it, so there is never a hard cut. The shader twin is in
+ * `createWindowRain`.
+ * @param {{maskValue:number, peak:number, pct:number}} a
+ */
+export function rainMaskFade({ maskValue, peak, pct }) {
+  const p = Number.isFinite(pct) ? pct : WINDOW_RAIN_DEFAULTS.maskFloorPct;
+  if (p >= 100) return 1;
+  const t = 1 - clamp01(p / 100);
+  const rel = peak > 0 ? clamp01(maskValue / peak) : 0;
+  return smoothstep(t - RAIN_MASK_FADE_SOFT, t, rel);
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // THE JS TWIN
@@ -524,6 +545,8 @@ const unitOrDown = (vx, vy) => {
  * @param {{ax:number,ay:number,bx:number,by:number,w:number,kappa:number,h:number}|null} [a.flow]
  * @param {number} [a.viewSpanPx] - world px across the view; a drop fades out as its on-screen radius shrinks (0 = no fade).
  * @param {number} [a.windShiftX] @param {number} [a.windShiftY] - the wind's integrated drift of the running water, world px.
+ * @param {number} [a.maskValue] @param {number} [a.maskPeak] - the mask's gated brightness here and its brightest value
+ *   anywhere; with `look.maskFloorPct` below 100 they fade the drops out where the mask is dim (`rainMaskFade`).
  * @returns {{offsetX:number, offsetY:number, gain:number}}
  */
 export function evalWindowRainPixel({
@@ -537,6 +560,8 @@ export function evalWindowRainPixel({
   viewSpanPx = 0,
   windShiftX = 0,
   windShiftY = 0,
+  maskValue = 1,
+  maskPeak = 1,
 }) {
   if (!(frame.presence > 0.5)) return { offsetX: 0, offsetY: 0, gain: 1 };
   const T = RAIN_TUNE;
@@ -617,10 +642,12 @@ export function evalWindowRainPixel({
 
   const len = Math.hypot(ox, oy);
   const scale = len > T.maxOffsetPx ? T.maxOffsetPx / len : 1;
+  const fade = rainMaskFade({ maskValue, peak: maskPeak, pct: look.maskFloorPct });
+  const gainOut = clamp(gain * frame.dim, 0, T.maxGain);
   return {
-    offsetX: ox * scale,
-    offsetY: oy * scale,
-    gain: clamp(gain * frame.dim, 0, T.maxGain),
+    offsetX: ox * scale * fade,
+    offsetY: oy * scale * fade,
+    gain: fade >= 1 ? gainOut : 1 + (gainOut - 1) * fade,
   };
 }
 
@@ -700,6 +727,9 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
   const uDim = uniform(float(1));
   const uWindBias = uniform(float(0));
   const uWindFlow = uniform(vec2(0, 1));
+  /** 1 - maskFloorPct/100 (0 = rain everywhere, as before) and the mask's brightest value (see `rainMaskFade`). */
+  const uMaskT = uniform(float(0));
+  const uMaskPeak = uniform(float(1));
   const uClock = uniform(float(0));
   const uSlideClock = uniform(float(0));
   /** The flow field's world rect as (minX, minY, 1/width, 1/height); all zero until a field lands. */
@@ -992,9 +1022,11 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
   /**
    * Construct the nodes. Everything is inside one `Fn` so its `If()`s are real branches whatever context the
    * caller is in (an `If` outside an `Fn` is a silent no-op).
+   * @param {{maskGated?: (() => *)|null}} [opts] - `maskGated` builds the mask's gated brightness at this pixel
+   *   (called inside the branch, and only tapped when the author has lowered the "brightest" dial).
    * @returns {{offsetPx: *, gain: *, debugFlow: *, debugAux: *, debugDrops: *}}
    */
-  function build() {
+  function build({ maskGated = null } = {}) {
     const body = Fn(() => {
       const P = positionWorld.xy;
       const result = vec3(0, 0, 1).toVar();
@@ -1036,7 +1068,15 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
 
         const len = length(off);
         const scale = min(F(1), F(T.maxOffsetPx).div(max(len, F(1e-4))));
-        result.assign(vec3(off.x.mul(scale), off.y.mul(scale), clamp(gain.mul(uDim), 0, T.maxGain)));
+        const fade = F(1).toVar();
+        if (maskGated) {
+          If(uMaskT.greaterThan(0), () => {
+            const rel = sat(maskGated().div(max(uMaskPeak, F(1e-5))));
+            fade.assign(smoothstep(uMaskT.sub(RAIN_MASK_FADE_SOFT), uMaskT, rel));
+          });
+        }
+        const gainOut = clamp(gain.mul(uDim), 0, T.maxGain);
+        result.assign(vec3(off.x.mul(scale).mul(fade), off.y.mul(scale).mul(fade), F(1).add(gainOut.sub(1).mul(fade))));
       });
       return result;
     });
@@ -1077,6 +1117,11 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
       uRim.value = clamp01(num(look.rimDarken, D.rimDarken));
       uTrail.value = clamp01(num(look.trail, D.trail));
       uStretch.value = clamp01(num(look.projectionStretch, D.projectionStretch));
+      uMaskT.value = 1 - clamp(num(look.maskFloorPct, D.maskFloorPct), 0, 100) / 100;
+    },
+    /** The mask's brightest gated value (0..1), for the "brightest only" fade. @param {number} peak */
+    setMaskPeak(peak) {
+      uMaskPeak.value = Math.max(1e-5, num(peak, 1));
     },
     /**
      * The weather, once per frame. `frame` is `resolveRainFrame`'s result.
@@ -1131,6 +1176,8 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
       rim: uRim.value,
       trail: uTrail.value,
       stretch: uStretch.value,
+      maskT: uMaskT.value,
+      maskPeak: uMaskPeak.value,
       presence: uPresence.value,
       cover: uCover.value,
       stick: uStick.value,

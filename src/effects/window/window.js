@@ -323,6 +323,16 @@ export const WINDOW_PARAMS = Object.freeze({
     label: 'Drying time',
     help: 'How long beads cling to the glass after the rain stops, in seconds. Longer is a window that stays wet.',
   },
+  rainMaskFloorPct: {
+    type: 'float',
+    min: 0,
+    max: 100,
+    step: 1,
+    default: 100,
+    category: 'Rain',
+    label: 'Rain only in the brightest (%)',
+    help: 'Shows the raindrops only in the brightest part of the window light. 100 = drops everywhere the window light is (the normal look). 30 = drops only in the brightest 30% of the light, fading out smoothly where it is dimmer. 0 = only the very brightest spots.',
+  },
 });
 
 /**

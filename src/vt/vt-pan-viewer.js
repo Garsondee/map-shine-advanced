@@ -554,6 +554,7 @@ import {
   // world/wind-structure.js's header. The viewer owns the GPU objects and the
   // triggers; the maths and the texture-channel writers live in world/.
   bakeWindStructure,
+  outdoorsGridSignature,
   createWindGridState,
   WIND_SIM_DEFAULT_DECAY_PER_SECOND,
   WIND_SIM_DEFAULT_RELAX_ITERATIONS,
@@ -5654,6 +5655,24 @@ export async function startVtPanViewer({
     const MASK_VERSION_POLL_INTERVAL_MS = 500;
     let lastMaskVersionPollMs = -Infinity;
     let lastSeenMaskVersion = null;
+    // THE WIND'S OPEN-SKY INPUT (2026-10-19) follows the `_Outdoors` mask, so the
+    // wind structure is rebaked when that mask's content changes — but only when
+    // its fingerprint (`outdoorsGridSignature`) actually differs from what the
+    // last bake used, and debounced to once per settle: the mask version bumps
+    // dozens of times during a scene's decode burst, and the 2026-10-07 fix that
+    // took wind off this poll was exactly about not paying a bake for each.
+    // A structure bake is 40-360 ms CPU and rewrites textures in place now (no
+    // shader rebuild), so one settled rebake is cheap.
+    const WIND_OUTDOORS_REBAKE_SETTLE_MS = 1500;
+    let windBakedOutdoorsSignature = 'none';
+    let windOutdoorsRebakeDueMs = null;
+    function currentOutdoorsSignature() {
+      try {
+        return outdoorsGridSignature(getOutdoorsMaskGrid(view?.floorIndex ?? 0));
+      } catch (err) {
+        return 'none';
+      }
+    }
 
     /**
      * Called once per frame (see renderFrame): if enough wall-clock time has
@@ -5667,8 +5686,21 @@ export async function startVtPanViewer({
       lastMaskVersionPollMs = nowMs;
       const v = getMaskAuthorityVersion();
       if (v == null) return; // unwired (torture fixture) — inert, never bakes
+      if (windOutdoorsRebakeDueMs !== null && nowMs >= windOutdoorsRebakeDueMs) {
+        windOutdoorsRebakeDueMs = null;
+        if (windGrid.structure && currentOutdoorsSignature() !== windBakedOutdoorsSignature) {
+          bakeWindField('outdoors-mask');
+        }
+      }
       if (lastSeenMaskVersion === null) {
         lastSeenMaskVersion = v;
+        if (
+          windGrid.structure &&
+          windOutdoorsRebakeDueMs === null &&
+          currentOutdoorsSignature() !== windBakedOutdoorsSignature
+        ) {
+          windOutdoorsRebakeDueMs = nowMs + WIND_OUTDOORS_REBAKE_SETTLE_MS;
+        }
         // FIRST OBSERVATION — the SKY wants the mask itself, and this is the
         // earliest moment one is known to exist. Baking here is what stops the
         // sky gate sitting on its 1×1 placeholder until something unrelated
@@ -5678,6 +5710,13 @@ export async function startVtPanViewer({
       }
       if (v === lastSeenMaskVersion) return;
       lastSeenMaskVersion = v;
+      if (
+        windGrid.structure &&
+        windOutdoorsRebakeDueMs === null &&
+        currentOutdoorsSignature() !== windBakedOutdoorsSignature
+      ) {
+        windOutdoorsRebakeDueMs = nowMs + WIND_OUTDOORS_REBAKE_SETTLE_MS;
+      }
       // The sky's gate is derived from the masks, so it goes stale exactly when
       // they change. One poll, never two that could drift into disagreeing
       // about which mask version is current.
@@ -6032,7 +6071,19 @@ export async function startVtPanViewer({
         }
 
         // ── THE EXPENSIVE PART, once ─────────────────────────────────────────
-        const structure = bakeWindStructure({ walls, gridSpec });
+        // OPEN SKY INSIDE WALLS (2026-10-19): the viewed floor's painted `_Outdoors`
+        // grid lets a roofless walled yard read as open air rather than a sealed
+        // room — see `world/wind-structure.js#applyOpenSky`. Unwired (the torture
+        // fixture) or no mask yet = geometry alone; the mask-version poll below
+        // rebakes once the mask streams in.
+        let outdoorsForWind = null;
+        try {
+          outdoorsForWind = getOutdoorsMaskGrid(view?.floorIndex ?? 0);
+        } catch (err) {
+          outdoorsForWind = null;
+        }
+        windBakedOutdoorsSignature = outdoorsGridSignature(outdoorsForWind);
+        const structure = bakeWindStructure({ walls, gridSpec, outdoors: outdoorsForWind });
         const { cols, rows } = structure;
         // A REGRID is the only event that changes what consumers bake into their
         // shader graphs (origin/cellSize/cols/rows are build-time constants). On

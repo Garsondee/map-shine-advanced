@@ -803,10 +803,7 @@ export function run(t) {
       'windResponse 0 still turns the push off entirely',
       fireRuntimeFromParams({ weatherResponse: 1, windResponse: 0 }, chain66, { speed01: 1 }).windPushMotion01 === 0
     );
-    t.ok(
-      'no wind, no push',
-      fireRuntimeFromParams({}, chain66, { speed01: 0 }).windPushMotion01 === 0
-    );
+    t.ok('no wind, no push', fireRuntimeFromParams({}, chain66, { speed01: 0 }).windPushMotion01 === 0);
 
     // ⚠️ THE SPLIT, COMPLETED (2026-10-07). 2026-09-04 moved PUSH, lifespan and
     // chaos/rise to per-particle exposure and left the flame/smoke population on

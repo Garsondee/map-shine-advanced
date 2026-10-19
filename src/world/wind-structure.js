@@ -134,6 +134,98 @@ export function computeFineConnectivity(walls, gridSpec) {
 }
 
 /**
+ * A coarse cell whose painted `_Outdoors` value is at least this reads as open
+ * sky ({@link applyOpenSky}).
+ */
+export const OPEN_SKY_THRESHOLD = 0.5;
+
+/**
+ * The painted `_Outdoors` mask, sampled at the centre of every coarse wind cell.
+ *
+ * @param {{spec:{x:number,y:number,width:number,height:number,w:number,h:number}, data:ArrayLike<number>}|null|undefined} grid
+ *   the mask authority's outdoors grid (row 0 = minY, 0..255).
+ * @param {WindGridSpec} gridSpec
+ * @returns {Float32Array|null} cols×rows in [0,1], or `null` for a cell off the
+ *   mask's rect (that cell keeps whatever the geometry said), or no grid at all.
+ */
+export function sampleOutdoorsAtCells(grid, gridSpec) {
+  const s = grid?.spec;
+  const data = grid?.data;
+  if (!s || !data || !(s.w > 0) || !(s.h > 0) || !(s.width > 0) || !(s.height > 0)) return null;
+  if (data.length < s.w * s.h) return null;
+  const { cols, rows, cellSize, minX, minY } = gridSpec;
+  const out = new Float32Array(cols * rows).fill(-1);
+  const texelW = s.width / s.w;
+  const texelH = s.height / s.h;
+  for (let r = 0; r < rows; r++) {
+    const ty = Math.floor((minY + (r + 0.5) * cellSize - s.y) / texelH);
+    if (ty < 0 || ty >= s.h) continue;
+    for (let c = 0; c < cols; c++) {
+      const tx = Math.floor((minX + (c + 0.5) * cellSize - s.x) / texelW);
+      if (tx < 0 || tx >= s.w) continue;
+      out[r * cols + c] = data[ty * s.w + tx] / 255;
+    }
+  }
+  return out;
+}
+
+/**
+ * OPEN SKY IS NOT A SEALED ROOM (2026-10-19). Wall connectivity alone reads a
+ * yard enclosed by a perimeter wall as a closed pocket — openness exactly 0 — so
+ * a campfire standing in the open air of a walled compound felt no wind at all
+ * (author: "it's clearly outdoors, wind is nearly full strength, the fire isn't
+ * concerned at all"). Walls decide where wind goes through a DOOR; whether a
+ * space has a ROOF is the `_Outdoors` mask's question. A walled cell that is
+ * painted open sky now counts as exterior — it reaches 1 at every speed, like any
+ * open ground.
+ *
+ * Only ever RAISES a cell, so the no-walls case (everything already 1) and every
+ * roofed room (mask dark) are exactly what geometry alone said. Solid cells are
+ * left alone: a wall belongs to neither side.
+ *
+ * @param {WindStructure} structure - mutated in place (`exterior`, `doorDistance`).
+ * @param {Float32Array|null} outdoors - from {@link sampleOutdoorsAtCells}.
+ * @returns {number} how many cells were raised.
+ */
+export function applyOpenSky(structure, outdoors) {
+  if (!outdoors || outdoors.length !== structure.exterior.length) return 0;
+  let raised = 0;
+  for (let i = 0; i < outdoors.length; i++) {
+    if (structure.exterior[i] === 1 || structure.solidMask[i]) continue;
+    if (outdoors[i] >= OPEN_SKY_THRESHOLD) {
+      structure.exterior[i] = 1;
+      structure.doorDistance[i] = -1;
+      raised++;
+    }
+  }
+  return raised;
+}
+
+/**
+ * A cheap fingerprint of an outdoors grid: its rect and resolution plus a strided
+ * checksum of the pixels. Two grids with the same signature bake the same wind,
+ * which is what lets the mask-version poll skip the rebake when only an
+ * unrelated mask moved.
+ *
+ * @param {{spec:object, data:ArrayLike<number>}|null|undefined} grid
+ * @returns {string}
+ */
+export function outdoorsGridSignature(grid) {
+  const s = grid?.spec;
+  const data = grid?.data;
+  if (!s || !data) return 'none';
+  const n = Math.min(data.length, (s.w | 0) * (s.h | 0));
+  const stride = Math.max(1, Math.floor(n / 8192));
+  let sum = 0;
+  let sky = 0;
+  for (let i = 0; i < n; i += stride) {
+    sum += data[i];
+    if (data[i] >= OPEN_SKY_THRESHOLD * 255) sky++;
+  }
+  return `${s.w}x${s.h}@${s.x},${s.y},${s.width},${s.height}:${sum}:${sky}`;
+}
+
+/**
  * Everything that depends on walls, doors and the viewed floor and on nothing
  * else. The expensive part of the old `bakeWindField`, unchanged in substance
  * except for the final reduction, which now lets a sealed pocket win
@@ -142,9 +234,12 @@ export function computeFineConnectivity(walls, gridSpec) {
  * @param {object} args
  * @param {Array<{x1:number,y1:number,x2:number,y2:number,solid:boolean,blocksExterior:boolean}>} args.walls
  * @param {WindGridSpec} args.gridSpec - from `computeWindBakeGridSpec`.
+ * @param {{spec:object, data:ArrayLike<number>}|null} [args.outdoors] - the viewed
+ *   floor's painted `_Outdoors` grid. Omitted/null = geometry alone (a fixture
+ *   with no mask authority). See {@link applyOpenSky}.
  * @returns {WindStructure}
  */
-export function bakeWindStructure({ walls, gridSpec }) {
+export function bakeWindStructure({ walls, gridSpec, outdoors = null }) {
   const { cols, rows } = gridSpec;
 
   // The COARSE solid mask: the wind probe's display, Tier 2's solid texture,
@@ -165,7 +260,7 @@ export function bakeWindStructure({ walls, gridSpec }) {
     WIND_OPENNESS_REFINE
   );
 
-  return {
+  const structure = {
     gridSpec,
     cols,
     rows,
@@ -176,6 +271,8 @@ export function bakeWindStructure({ walls, gridSpec }) {
     exterior,
     doorDistance,
   };
+  applyOpenSky(structure, sampleOutdoorsAtCells(outdoors, gridSpec));
+  return structure;
 }
 
 /**

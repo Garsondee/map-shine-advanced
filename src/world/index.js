@@ -178,6 +178,7 @@ export { buildWindSimMaterials } from './wind-sim-gpu.js';
 export {
   createWindGridState,
   bakeWindStructure,
+  outdoorsGridSignature,
   computeFineConnectivity,
   deriveWindOpenness,
   deriveWindShadow,

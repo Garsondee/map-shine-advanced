@@ -20,6 +20,9 @@ import {
 } from '../wind-enclosure.js';
 import {
   bakeWindStructure,
+  applyOpenSky,
+  sampleOutdoorsAtCells,
+  outdoorsGridSignature,
   computeFineConnectivity,
   deriveWindOpenness,
   deriveWindShadow,
@@ -581,6 +584,102 @@ export function run(t) {
         wch.shadow === 3 &&
         ch.openness === 2 &&
         ch.exterior === 3
+    );
+  }
+
+  // ── OPEN SKY INSIDE WALLS (2026-10-19) ─────────────────────────────────────
+  // Author: a campfire in the open air of a walled compound felt no wind, because
+  // wall connectivity alone reads any enclosed yard as a sealed room. The painted
+  // `_Outdoors` mask says which enclosed space has a roof; open sky counts as exterior.
+  {
+    // A fully closed 1000x800 yard, no door at all.
+    const x0 = 1000;
+    const x1 = 2000;
+    const y0 = 800;
+    const y1 = 1600;
+    const walls = [wall(x0, y0, x1, y0), wall(x1, y0, x1, y1), wall(x1, y1, x0, y1), wall(x0, y1, x0, y0)];
+    const spec = specFor();
+    const geometry = bakeWindStructure({ walls, gridSpec: spec });
+    const inside = cellAt(geometry, 1500, 1200);
+    const outside = cellAt(geometry, 300, 300);
+    ok(
+      'fixture: geometry alone reads a closed yard as sealed (0) and the outside as open (1)',
+      deriveWindOpenness(geometry, 1)[inside] === 0 && deriveWindOpenness(geometry, 1)[outside] === 1
+    );
+
+    // A mask the size of the scene: open sky (255) everywhere except a roofed part of the yard.
+    const MW = 300;
+    const MH = 240;
+    const mask = (roof) => {
+      const data = new Uint8Array(MW * MH).fill(255);
+      if (roof) {
+        for (let y = 0; y < MH; y++) {
+          for (let x = 0; x < MW; x++) {
+            const wx = x * (SCENE_W / MW);
+            const wy = y * (SCENE_H / MH);
+            if (wx >= x0 && wx < x1 && wy >= y0 && wy < y1) data[y * MW + x] = 0;
+          }
+        }
+      }
+      return { spec: { x: 0, y: 0, width: SCENE_W, height: SCENE_H, w: MW, h: MH }, data };
+    };
+
+    const openYard = bakeWindStructure({ walls, gridSpec: spec, outdoors: mask(false) });
+    const openOp = deriveWindOpenness(openYard, 1);
+    const openOpCalm = deriveWindOpenness(openYard, 0);
+    ok('a walled yard painted open sky reads fully open (1)', openOp[inside] === 1);
+    ok('... and stays 1 at a dead calm — it is open ground, not a door falloff', openOpCalm[inside] === 1);
+    ok(
+      'wall cells themselves are not raised — a wall belongs to neither side',
+      (() => {
+        let raisedSolid = 0;
+        for (let i = 0; i < openYard.solidMask.length; i++)
+          if (openYard.solidMask[i] && openYard.exterior[i] === 1 && geometry.exterior[i] !== 1) raisedSolid++;
+        return raisedSolid === 0;
+      })()
+    );
+
+    const roofed = bakeWindStructure({ walls, gridSpec: spec, outdoors: mask(true) });
+    ok(
+      'the same yard painted ROOFED (mask dark) stays sealed (0) — mask only ever raises',
+      deriveWindOpenness(roofed, 1)[inside] === 0
+    );
+
+    const noWallsRoofed = bakeWindStructure({ walls: [], gridSpec: spec, outdoors: mask(true) });
+    ok(
+      'no walls: wind is everywhere even under a dark mask (the 2026-07-22 experiment still passes)',
+      deriveWindOpenness(noWallsRoofed, 1)[inside] === 1
+    );
+
+    ok(
+      'no mask at all = geometry alone, byte-identical',
+      (() => {
+        const a = deriveWindOpenness(bakeWindStructure({ walls, gridSpec: spec, outdoors: null }), 1);
+        const b = deriveWindOpenness(geometry, 1);
+        return a.length === b.length && a.every((v, i) => v === b[i]);
+      })()
+    );
+
+    const cells = sampleOutdoorsAtCells(mask(true), spec);
+    ok(
+      'sampleOutdoorsAtCells reads the mask at each cell centre: dark inside the roofed yard, bright outside',
+      cells[inside] === 0 && cells[outside] === 1
+    );
+    const small = { spec: { x: 0, y: 0, width: 500, height: 500, w: 5, h: 5 }, data: new Uint8Array(25).fill(255) };
+    ok(
+      'a cell off the mask rect is marked -1 (no opinion), never open sky',
+      sampleOutdoorsAtCells(small, spec)[cellAt(geometry, 2500, 2000)] === -1
+    );
+    ok(
+      'applyOpenSky ignores a mismatched array rather than writing garbage',
+      applyOpenSky(geometry, new Float32Array(3)) === 0
+    );
+
+    ok(
+      'the signature changes when the painted sky changes, and is stable when it does not',
+      outdoorsGridSignature(mask(false)) !== outdoorsGridSignature(mask(true)) &&
+        outdoorsGridSignature(mask(true)) === outdoorsGridSignature(mask(true)) &&
+        outdoorsGridSignature(null) === 'none'
     );
   }
 }

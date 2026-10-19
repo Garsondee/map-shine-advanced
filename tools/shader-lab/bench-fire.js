@@ -2250,6 +2250,285 @@ export function createFireBench({ THREE, log }) {
     },
   });
 
+  // ───────────────────────────────────────────────────────────────────────────
+  // THE BENT-FLAME GALLERY (2026-10-19) — a whole fire, through the REAL
+  // `createFireSubsystem` + `fireRuntimeFromParams`, under a row of wind/rain
+  // conditions, saved as one contact sheet you can LOOK at.
+  //
+  // Author, live: with full wind and full rain the flame read as a string of
+  // detached blobs marching off in a line, not as a flame leaning in the wind.
+  // This is the rig that judges that picture. `params.engine` picks the engine
+  // under test: 'src' (production) or 'dev' (the scratch copy in
+  // tools/shader-lab/dev/fire-bent/, never synced to the server).
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /** The author's own saved settings, 2026-10-19 (the JSON they pasted). */
+  const AUTHOR_FIRE_2026_10_19 = Object.freeze({
+    intensity: 0.05,
+    fuel: 'wood',
+    maskSensitivity: 0.04,
+    color: '#ffe7b8',
+    posterize: 0.85,
+    bandCount: 3,
+    colorHueShift: -3,
+    brightness: 0.65,
+    flameCount: 86,
+    flameLifeAtWind0: 3,
+    flameLifeAtWind1: 0.05,
+    flameSizeScale: 1.62,
+    flameOpacity: 12.35,
+    flameEmission: 250,
+    flameColorAge: 8.15,
+    flameSpawnBias: 2.4,
+    flameCohesion: 0,
+    flameWindPush: 3.7,
+    emberCount: 3,
+    emberSizeScale: 4.78,
+    emberLifeAtWind0: 0.75,
+    emberLifeAtWind1: 9.55,
+    emberChaosAtWind0: 14.15,
+    emberChaosAtWind1: 68,
+    emberRiseAtWind0: 0.1,
+    emberRiseAtWind1: 0,
+    emberWindPush: 200,
+    emberEmission: 5.5,
+    emberIndoorSuppression: 1,
+    emberIndoorLifeScale: 0.15,
+    smokeCount: 9,
+    smokeSizeScale: 0.28,
+    smokeLifeScale: 0.75,
+    smokeOpacity: 13.35,
+    smokeGrowth: 0.95,
+    smokeRise: 26.05,
+    smokeIndoorSuppression: 0,
+    smokeIndoorLifeScale: 0.15,
+    perspective: 100,
+    smokeAmount: 0.05,
+    grain: 0.5,
+    lightEnabled: true,
+    lightRadiusScale: 3,
+    lightColor: '#ffa047',
+    windResponse: 0.2,
+    animationSpeed: 0.8,
+    weatherResponse: 1,
+    canBeSnuffed: true,
+  });
+
+  /** A hearth-shaped painted disc: `radiusPx` wide, 10 px texels. */
+  async function discCloudAt(cx, cy, radiusPx) {
+    const { extractFireSpawnPoints } = await import('../../src/effects/fire/fire-spawn-points.js');
+    const texel = 10;
+    const N = Math.ceil((radiusPx * 2) / texel) + 2;
+    const data = new Uint8Array(N * N);
+    for (let y = 0; y < N; y++) {
+      for (let x = 0; x < N; x++) {
+        const dx = (x + 0.5 - N / 2) * texel;
+        const dy = (y + 0.5 - N / 2) * texel;
+        data[y * N + x] = Math.hypot(dx, dy) <= radiusPx ? 255 : 0;
+      }
+    }
+    return extractFireSpawnPoints({
+      spec: {
+        x: cx - (N * texel) / 2,
+        y: cy - (N * texel) / 2,
+        width: N * texel,
+        height: N * texel,
+        w: N,
+        h: N,
+        texelW: texel,
+        texelH: texel,
+      },
+      data,
+    });
+  }
+
+  scenarios.set('bent-flame-gallery', {
+    name: 'bent-flame-gallery',
+    summary:
+      'A whole fire (real subsystem, real runtime params, the author\'s own settings) under a row of wind/rain ' +
+      'conditions, as one contact sheet PNG. params: engine "src"|"dev", conditions [{wind,rain,label}], ' +
+      'directionDeg, fire {overrides}, devTune {extra engine params}, span, warmFrames, sheet "conditions"|"time".',
+    async run({ runId, params = {} }) {
+      const st = await ensureStage();
+      const W = await import('../../src/world/index.js');
+      const { createFireSubsystem } = await import('../../src/effects/fire/fire-subsystem.js');
+      const bust = params.v ?? Date.now();
+      const engineModule =
+        params.engine === 'dev'
+          ? await import(`./dev/fire-bent/fire-particle-runtime.dev.js?v=${bust}`)
+          : await import('../../src/effects/particles/fire-particle-runtime.js');
+      const { uniform, float } = THREE.TSL;
+
+      const FIRE = { x: 2048, y: 2400 };
+      const span = params.span ?? 1400;
+      const rect = {
+        minX: FIRE.x - span / 2,
+        minY: FIRE.y - span * 0.62,
+        maxX: FIRE.x + span / 2,
+        maxY: FIRE.y + span * 0.38,
+      };
+      const directionDeg = params.directionDeg ?? 60;
+      const conditions = params.conditions ?? [
+        { wind: 0, rain: 0, label: 'calm' },
+        { wind: 0.25, rain: 0, label: 'wind 25%' },
+        { wind: 0.5, rain: 0, label: 'wind 50%' },
+        { wind: 1, rain: 0, label: 'wind 100%' },
+        { wind: 0, rain: 1, label: 'rain 100%' },
+        { wind: 1, rain: 1, label: 'wind+rain 100%' },
+      ];
+      const fireParams = { ...AUTHOR_FIRE_2026_10_19, ...(params.fire ?? {}) };
+      const radiusPx = params.radiusPx ?? 60;
+      const cloud = await discCloudAt(FIRE.x, FIRE.y, radiusPx);
+
+      const uWind = uniform(float(0));
+      const uDir = uniform(float(directionDeg));
+      const uGust = uniform(float(0.5));
+      // `params.walls`: null = open ground, no grid; 'room' = a sealed ring round the fire; 'wall' = one long wall
+      // 80 px east of it. Real walls through the real bake, exactly as the sealed-room scenario does.
+      let gridArgs = {};
+      if (params.walls) {
+        const gridSpec = await windFixtureGrid();
+        const wl = (ax, ay, bx, by) => ({ x1: ax, y1: ay, x2: bx, y2: by, solid: true, blocksExterior: true });
+        const walls =
+          params.walls === 'room'
+            ? ringWalls(FIRE.x - 300, FIRE.y - 300, FIRE.x + 300, FIRE.y + 300)
+            : [wl(FIRE.x + 80, FIRE.y - 400, FIRE.x + 80, FIRE.y + 400)];
+        const structure = W.bakeWindStructure({ walls, gridSpec });
+        gridArgs = {
+          version: 1,
+          grid: { originX: gridSpec.minX, originY: gridSpec.minY, cellSize: gridSpec.cellSize, cols: gridSpec.cols, rows: gridSpec.rows },
+          cells: {
+            solid: structure.solidMask,
+            openness: W.deriveWindOpenness(structure, 1),
+            wallAvoidDirX: structure.wallAvoidDirX,
+            wallAvoidDirY: structure.wallAvoidDirY,
+            wallProximity: structure.wallProximity,
+            windShadow: W.deriveWindShadow(structure, directionDeg),
+          },
+        };
+      }
+      const windHandle = W.createWindHandle({
+        ...gridArgs,
+        ambientWind: { directionDeg: uDir, speed01: uWind, gustiness01: uGust },
+      });
+
+      let activeRain = 0;
+      const engines = [];
+      const state = {
+        enabled: true,
+        params: fireParams,
+        perfTier: 3,
+        mPerPx: 0.0102,
+        fires: [
+          { id: 'hearth', x: FIRE.x, y: FIRE.y, diameterPx: radiusPx * 2, intensity: 1, outdoors01: 1, windExposure: 1, elevation: 0 },
+        ],
+        spawnCloud: cloud,
+        fireLabelGrid: null,
+        precip01: 0,
+      };
+      const subsystem = createFireSubsystem({
+        THREE,
+        getFireRenderState: () => state,
+        getWindHandle: () => windHandle,
+        getPxPerMeter: () => 100,
+        getPrecip01: () => activeRain,
+        createEngine: (cfg) => {
+          const engine = engineModule.createFireParticleEngine(cfg);
+          if (params.engine === 'dev') {
+            const base = engine.setParams.bind(engine);
+            engine.setParams = (p2) => base({ ...p2, rain01: activeRain, ...(params.devTune ?? {}) });
+          }
+          engines.push(engine);
+          return engine;
+        },
+      });
+
+      const frameDt = 1 / 30;
+      let nowMs = 1000;
+      const advance = (frames) => {
+        for (let i = 0; i < frames; i++) {
+          nowMs += frameDt * 1000;
+          subsystem.sync(renderer, nowMs, frameDt, rect);
+        }
+      };
+      const capture = async () => {
+        frameWorld(rect);
+        st.scene.clear();
+        st.scene.add(subsystem.scene);
+        renderer.setRenderTarget(st.target);
+        renderer.setClearColor(new THREE.Color(0.012, 0.011, 0.01), 1);
+        renderer.clear();
+        renderer.render(st.scene, st.camera);
+        renderer.setRenderTarget(null);
+        const raw = await renderer.readRenderTargetPixelsAsync(st.target, 0, 0, STAGE_DIM, STAGE_DIM);
+        return decodeHdrReadback(raw instanceof Promise ? await raw : raw);
+      };
+
+      const tiles = [];
+      const warm = params.warmFrames ?? 330;
+      if (params.sheet === 'time') {
+        const c = conditions[0];
+        uWind.value = c.wind;
+        activeRain = c.rain ?? 0;
+        advance(warm);
+        for (let k = 0; k < (params.tiles ?? 6); k++) {
+          advance(params.stepFrames ?? 5);
+          tiles.push({ label: `${c.label} t+${k}`, pixels: await capture() });
+        }
+      } else {
+        for (const c of conditions) {
+          uWind.value = c.wind;
+          activeRain = c.rain ?? 0;
+          advance(warm);
+          tiles.push({ label: c.label, pixels: await capture() });
+        }
+      }
+
+      // One contact sheet: tiles scaled to 512 px (or `tilePx`), three across.
+      const tilePx = params.tilePx ?? 512;
+      const across = params.across ?? Math.min(3, tiles.length);
+      const down = Math.ceil(tiles.length / across);
+      const sheet = document.createElement('canvas');
+      sheet.width = tilePx * across;
+      sheet.height = tilePx * down;
+      const sctx = sheet.getContext('2d');
+      sctx.fillStyle = '#000';
+      sctx.fillRect(0, 0, sheet.width, sheet.height);
+      tiles.forEach((tile, k) => {
+        // NOT row-flipped: this renderer's readback is already top-down here (the fire sits 62% down the
+        // frame in world space and lands 62% down the tile), unlike the helpers above that assume GL order.
+        const display = toDisplay8(tile.pixels);
+        const tmp = document.createElement('canvas');
+        tmp.width = STAGE_DIM;
+        tmp.height = STAGE_DIM;
+        tmp.getContext('2d').putImageData(new ImageData(display, STAGE_DIM, STAGE_DIM), 0, 0);
+        const ox = (k % across) * tilePx;
+        const oy = Math.floor(k / across) * tilePx;
+        sctx.drawImage(tmp, ox, oy, tilePx, tilePx);
+        sctx.fillStyle = 'rgba(0,0,0,0.55)';
+        sctx.fillRect(ox + 6, oy + 6, 220, 22);
+        sctx.fillStyle = '#fff';
+        sctx.font = '15px sans-serif';
+        sctx.fillText(tile.label, ox + 12, oy + 22);
+      });
+      const png = await saveCanvasPng(runId, `gallery-${params.engine ?? 'src'}.png`, sheet);
+      paintPixels(tiles[tiles.length - 1].pixels, `bent-flame-gallery (${params.engine ?? 'src'}): ${tiles.map((t) => t.label).join(' | ')}`);
+      subsystem.dispose?.();
+      return {
+        checks: [
+          evaluate('the-gallery-rendered', () => ({
+            ok: tiles.length > 0 && tiles.every((t) => frameStats(t.pixels).maxLuma > 0),
+            measured: { tiles: tiles.length, lit: tiles.map((t) => Number(frameStats(t.pixels).litFraction.toFixed(4))) },
+            expected: 'every tile has some lit pixels',
+          })),
+        ],
+        artifacts: png ? [png] : [],
+        inputs: { engine: params.engine ?? 'src', directionDeg, conditions, span, radiusPx },
+        stats: { tiles: tiles.map((t) => ({ label: t.label, ...frameStats(t.pixels) })) },
+      };
+    },
+  });
+
   scenarios.set('sealed-room-candle-field', {
     name: 'sealed-room-candle-field',
     summary:

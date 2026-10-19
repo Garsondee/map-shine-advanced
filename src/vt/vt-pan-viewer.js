@@ -5020,6 +5020,16 @@ export async function startVtPanViewer({
           // it, which the reader treats as "no tint" — the same fail-open
           // default `dayRgbMul`/`dayAlphaMul` already use elsewhere here.
           ambientRgb: lastAmbientColors?.background ?? null,
+          // mmp-row — the SAVED rain-glint settings (switch, strength, variation),
+          // so a Studio value reaches the fall engines; the subsystem forwards
+          // them only when they change. `undefined` keys are skipped.
+          glintTuning: cascade.params
+            ? {
+                rainLightEnabled: cascade.params.rainLightEnabled,
+                rainLightStrength: cascade.params.rainLightStrength,
+                rainGlint: cascade.params.rainGlint,
+              }
+            : undefined,
           flash01: 0, // sky-flash's own consumer is a later slice.
           // BUDGET-AWARE 2026-08-29, LIVE-RESOLVED 2026-08-30 — was hardcoded
           // `1` forever (docs/planning/Effect-Tier-Gradient-Audit-2026-08-29.md

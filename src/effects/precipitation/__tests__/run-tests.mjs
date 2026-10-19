@@ -19,6 +19,7 @@ import { run as runSquall } from './squall-field.test.mjs';
 import { run as runStormFog } from './storm-fog-field.test.mjs';
 import { run as runDrips } from './drip-edges.test.mjs';
 import { run as runPrecipitation } from './precipitation.test.mjs';
+import { run as runGlint } from './precip-glint.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -54,6 +55,7 @@ const suites = [
   ['storm-fog-field', runStormFog],
   ['drip-edges', runDrips],
   ['precipitation', runPrecipitation],
+  ['precip-glint', runGlint],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

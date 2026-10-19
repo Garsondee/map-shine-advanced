@@ -84,6 +84,8 @@ const WORLD = Object.freeze({ minX: 0, minY: 0, maxX: 2000, maxY: 1500 });
  * deliberately does run the real number, because "test at the REAL tier"
  * (AGENTS.md §6) has caught a device-loss in this tool before. */
 const LAB_CAPACITY = 4000;
+/** Side of the lab's synthetic illum texture (mmp-row: repaintable in place). */
+const ILLUM_N = 64;
 
 /**
  * Where the synthetic building and a known-open patch sit, in 0..1 UV of the
@@ -197,13 +199,69 @@ class PrecipDriver {
   buildIllumTexture() {
     const THREE = this.THREE;
     if (this._illumTexture) return this._illumTexture;
-    const data = new Uint8Array([0, 0, 0, 255, 255, 250, 225, 255, 0, 0, 0, 255, 255, 250, 225, 255]);
-    const tex = new THREE.DataTexture(data, 2, 2, THREE.RGBAFormat);
+    // 64x64 so mmp-row's torch pool can repaint it IN PLACE at the same size; the
+    // default content is the original left-dark / right-bright split (a 2x2
+    // bilinear ramp from u=0.25 to u=0.75, reproduced texel for texel).
+    const N = ILLUM_N;
+    const data = new Uint8Array(N * N * 4);
+    const tex = new THREE.DataTexture(data, N, N, THREE.RGBAFormat);
     tex.minFilter = THREE.LinearFilter;
     tex.magFilter = THREE.LinearFilter;
-    tex.needsUpdate = true;
     this._illumTexture = tex;
+    this._paintIllum((u) => {
+      const k = Math.min(1, Math.max(0, (u - 0.25) / 0.5));
+      return [255 * k, 250 * k, 225 * k];
+    });
     return tex;
+  }
+
+  /** Fill the illum texture from `fn(u, v) -> [r, g, b]` (0..255), in place. */
+  _paintIllum(fn) {
+    const tex = this._illumTexture;
+    const N = ILLUM_N;
+    const data = tex.image.data;
+    for (let y = 0; y < N; y++) {
+      for (let x = 0; x < N; x++) {
+        const rgb = fn((x + 0.5) / N, (y + 0.5) / N);
+        const i = (y * N + x) * 4;
+        data[i] = Math.round(rgb[0]);
+        data[i + 1] = Math.round(rgb[1]);
+        data[i + 2] = Math.round(rgb[2]);
+        data[i + 3] = 255;
+      }
+    }
+    tex.needsUpdate = true;
+  }
+
+  /**
+   * mmp-row — repaint the synthetic illum as a REAL light pool: a warm torch on
+   * a night ambient, radial, so the rain glint has a gradient to follow (the
+   * left/right split is one smooth ramp across the whole frame, far too flat to
+   * point a streak at anything). Same size, same texture object, so the engines'
+   * bound node keeps working.
+   *
+   * @param {{ambient?:number, cx?:number, cy?:number, radius?:number, rgb?:number[]}} [o]
+   */
+  paintTorchIllum(o = {}) {
+    if (!this._illumTexture) return false;
+    const { ambient = 0.19, cx = 0.62, cy = 0.5, radius = 0.3, rgb = [1, 0.74, 0.42] } = o;
+    this._paintIllum((u, v) => {
+      // The world rect is 4:3, so measure distance in screen-proportional units.
+      const d = Math.hypot((u - cx) * (4 / 3), v - cy) / radius;
+      const pool = Math.max(0, 1 - d) ** 1.6;
+      return rgb.map((c) => 255 * Math.min(1, ambient + pool * c * (1 - ambient)));
+    });
+    return true;
+  }
+
+  /** Back to the original left-dark / right-bright split. */
+  paintSplitIllum() {
+    if (!this._illumTexture) return false;
+    this._paintIllum((u) => {
+      const k = Math.min(1, Math.max(0, (u - 0.25) / 0.5));
+      return [255 * k, 250 * k, 225 * k];
+    });
+    return true;
   }
 
   buildSkyReachTexture() {
@@ -1479,6 +1537,112 @@ export function createPrecipBench({ THREE, log }) {
         inputs: { illumLit01: [0, 1] },
         stats: { offL, offR, onL, onR },
         artifacts: [],
+      };
+    },
+  });
+
+  /**
+   * ⭐ mmp-row — THE GRADIENT-LINE GLINT. Rain streaks in a torch's pool glint
+   * (bright core tapering to the ends, shifted toward the light, tinted by it);
+   * nothing happens outside the pool, by day, or with the switch off.
+   *
+   * Every comparison is a PAIRED read of the identical, frozen population
+   * (`frames = 0` after one settle) — see the scenario above for why.
+   */
+  scenarios.set('rain-glints-in-the-light', {
+    name: 'rain-glints-in-the-light',
+    summary: 'rain streaks glint as gradient lines in a torch pool at night; day / unlit / switched-off are untouched.',
+    async run({ runId }) {
+      driver.setSpecies('rain');
+      driver.set({
+        fall: true,
+        arrival: false,
+        curtain: false,
+        skyGate: false,
+        precip01: 0.9,
+        windSpeed01: 0,
+        curtainBandDepth: 0,
+      });
+      // The rAF loop would otherwise keep advancing the population between the paired
+      // reads whenever the pane is on screen, and "identical population" would be a lie.
+      driver.set({ paused: true });
+      const POOL = { u0: 0.46, u1: 0.78, v0: 0.28, v1: 0.72 };
+      const FAR = { u0: 0.02, u1: 0.22, v0: 0.05, v1: 0.95 };
+      const engine = driver.engine;
+
+      driver.paintTorchIllum();
+      engine.setGlintLight({ ambientRgb: [0.19, 0.19, 0.19], dayFactor01: 0 });
+      engine.setTuning({ rainLightEnabled: true, rainLightStrength: 0, rainGlint: 0.6 });
+      await driver.measureCoverage(40);
+
+      const shot = async (name) => {
+        driver.renderer.setRenderTarget(null);
+        driver.renderer.setClearColor(0x11151c, 1);
+        driver.renderer.clear();
+        driver._drawLayers();
+        return saveCanvasPng(runId, name, driver.canvas);
+      };
+      const read = async () => ({
+        pool: await driver.measureRegion(POOL, 0),
+        far: await driver.measureRegion(FAR, 0),
+      });
+
+      // BEFORE: strength 0 is today's picture exactly.
+      const before = await read();
+      const pngBefore = await shot('rain-torch-before.png');
+
+      // AFTER: the shipped defaults.
+      engine.setTuning({ rainLightEnabled: true, rainLightStrength: 1, rainGlint: 0.6 });
+      const after = await read();
+      const pngAfter = await shot('rain-torch-after.png');
+
+      // Steady (no per-streak variation or twinkle), to see the bare gradient lines.
+      engine.setTuning({ rainGlint: 0 });
+      const pngSteady = await shot('rain-torch-steady.png');
+      engine.setTuning({ rainGlint: 0.6 });
+
+      // Switch OFF with the strength still up.
+      engine.setTuning({ rainLightEnabled: false });
+      const switchedOff = await read();
+      engine.setTuning({ rainLightEnabled: true });
+
+      // DAYLIGHT: the same torch, but the day factor says full day.
+      engine.setGlintLight({ ambientRgb: [0.19, 0.19, 0.19], dayFactor01: 1 });
+      const day = await read();
+      engine.setGlintLight({ ambientRgb: [0.19, 0.19, 0.19], dayFactor01: 0 });
+
+      driver.paintSplitIllum();
+      driver.set({ paused: false, arrival: true, curtain: true, precip01: 0.6, curtainBandDepth: 0.8 });
+
+      const same = (a, b) => Math.abs(a - b) < 1e-9;
+      return {
+        checks: [
+          evaluate('the-torch-pool-glints', () => ({
+            ok: after.pool.meanLuma > before.pool.meanLuma * 1.1,
+            measured: { before: +before.pool.meanLuma.toFixed(4), after: +after.pool.meanLuma.toFixed(4) },
+            expected: '> 10% brighter inside the pool than strength 0',
+          })),
+          evaluate('outside-the-pool-is-untouched', () => ({
+            ok: Math.abs(after.far.meanLuma - before.far.meanLuma) < 0.0005,
+            measured: { before: +before.far.meanLuma.toFixed(5), after: +after.far.meanLuma.toFixed(5) },
+            expected: 'unchanged (absolute, sub-quantum epsilon)',
+          })),
+          evaluate('switch-off-equals-strength-zero', () => ({
+            ok:
+              same(switchedOff.pool.meanLuma, before.pool.meanLuma) &&
+              same(switchedOff.far.meanLuma, before.far.meanLuma),
+            measured: { pool: switchedOff.pool.meanLuma, before: before.pool.meanLuma },
+            expected: 'identical to today',
+          })),
+          evaluate('full-daylight-equals-strength-zero', () => ({
+            ok: same(day.pool.meanLuma, before.pool.meanLuma) && same(day.far.meanLuma, before.far.meanLuma),
+            measured: { pool: day.pool.meanLuma, before: before.pool.meanLuma },
+            expected: 'identical to today',
+          })),
+        ],
+        inputs: { rainLightStrength: [0, 1], rainGlint: [0, 0.6], dayFactor01: [0, 1] },
+        stats: { before, after, switchedOff, day },
+        artifacts: [pngBefore, pngAfter, pngSteady].filter(Boolean),
       };
     },
   });

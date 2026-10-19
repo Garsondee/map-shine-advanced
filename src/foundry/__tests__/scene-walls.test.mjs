@@ -11,6 +11,7 @@
 import {
   deriveWallSolid,
   deriveWallBlocksExterior,
+  deriveWallLooksLikeWindow,
   deriveWallAperture,
   watchSceneWallStructure,
   watchDoorOpenings,
@@ -88,7 +89,7 @@ export function run(t) {
   ok('missing move falls back to the schema default (blocks), never throws', deriveWallBlocksExterior({}) === true);
   ok('no argument at all is also safe (never throws)', deriveWallBlocksExterior() === true);
 
-  // deriveWallAperture (2026-08-03, docs/planning/Aperture-Gobo.md §2.1) —
+  // deriveWallLooksLikeWindow (2026-08-03, docs/planning/Aperture-Gobo.md §2.1) —
   // move !== NONE && light === PROXIMITY(30). CORRECTED LIVE the same
   // session (see scene-walls.js's own header): an initial `light === NONE`
   // reading was schema-plausible and wrong — the author's own live test on a
@@ -96,62 +97,78 @@ export function run(t) {
   // produced visible knock-on effects on ordinary terrain walls.
   // `PROXIMITY` is Foundry's own real window convention: opaque beyond its
   // `threshold.light` distance, passable within it.
-  ok('move:NORMAL + light:PROXIMITY (an authored window) IS an aperture', deriveWallAperture({ move: 20, light: 30 }));
+  ok(
+    'move:NORMAL + light:PROXIMITY (an authored window) IS an aperture',
+    deriveWallLooksLikeWindow({ move: 20, light: 30 })
+  );
   ok(
     'move:NORMAL + light:NONE is NOT an aperture — NONE is permanently transparent (terrain edges, dividers, ...), not Foundry’s window convention',
-    !deriveWallAperture({ move: 20, light: 0 })
+    !deriveWallLooksLikeWindow({ move: 20, light: 0 })
   );
   ok(
     'move:NORMAL + light:NORMAL (an ordinary, unedited wall) is NOT an aperture',
-    !deriveWallAperture({ move: 20, light: 20 })
+    !deriveWallLooksLikeWindow({ move: 20, light: 20 })
   );
   ok(
     'move:NORMAL + light:DISTANCE(40) is NOT an aperture either — the COMPLEMENTARY proximity sense, a different authored intent',
-    !deriveWallAperture({ move: 20, light: 40 })
+    !deriveWallLooksLikeWindow({ move: 20, light: 40 })
   );
   ok(
     'move:NONE + light:PROXIMITY is NOT an aperture — nothing for a window to be cut into',
-    !deriveWallAperture({ move: 0, light: 30 })
+    !deriveWallLooksLikeWindow({ move: 0, light: 30 })
   );
-  ok('move:NONE + light:NORMAL is NOT an aperture either', !deriveWallAperture({ move: 0, light: 20 }));
+  ok('move:NONE + light:NORMAL is NOT an aperture either', !deriveWallLooksLikeWindow({ move: 0, light: 20 }));
   ok(
     'a missing/malformed fixture reads as an ordinary wall (schema defaults), never an aperture, never throws',
-    !deriveWallAperture({})
+    !deriveWallLooksLikeWindow({})
   );
-  ok('no argument at all is also safe (never throws)', deriveWallAperture() === false);
+  ok('no argument at all is also safe (never throws)', deriveWallLooksLikeWindow() === false);
+  // THE WINDOW FLAG (2026-10-19): the Window light pattern only appears on walls the author ticked in the wall dialog.
+  ok('a wall ticked as a window (flag true) IS an aperture for the pattern', deriveWallAperture({ windowFlag: true }));
+  ok('an unticked wall (no flag) is NOT, however it looks', !deriveWallAperture({}) && !deriveWallAperture());
+  ok('an explicitly unticked wall (flag false) is NOT', !deriveWallAperture({ windowFlag: false }));
+  ok(
+    'only the real boolean true counts (a string or number is not a tick)',
+    !deriveWallAperture({ windowFlag: 'true' }) && !deriveWallAperture({ windowFlag: 1 })
+  );
+  ok(
+    'sense settings alone never make an aperture any more',
+    !deriveWallAperture({ move: 20, light: 30, sight: 30 }) && !deriveWallAperture({ move: 20, light: 0, sight: 30 })
+  );
+
   // THE SECOND CONVENTION (2026-10-19): the Mad Scientist's Compound marks its 47 windows light:NONE + sight:PROXIMITY.
   ok(
     'move:NORMAL + light:NONE + sight:PROXIMITY (the Mad Scientist windows) IS an aperture',
-    deriveWallAperture({ move: 20, light: 0, sight: 30 })
+    deriveWallLooksLikeWindow({ move: 20, light: 0, sight: 30 })
   );
   ok(
     'light:NONE + sight:NORMAL (terrain edges: Broken Hills, Deep Forest, ...) is NOT an aperture',
-    !deriveWallAperture({ move: 20, light: 0, sight: 20 })
+    !deriveWallLooksLikeWindow({ move: 20, light: 0, sight: 20 })
   );
   ok(
     'light:NONE + sight:NONE (railings, fences, glass you can see through) is NOT an aperture',
-    !deriveWallAperture({ move: 20, light: 0, sight: 0 })
+    !deriveWallLooksLikeWindow({ move: 20, light: 0, sight: 0 })
   );
-  ok('light:NONE + sight:LIMITED is NOT an aperture', !deriveWallAperture({ move: 20, light: 0, sight: 10 }));
+  ok('light:NONE + sight:LIMITED is NOT an aperture', !deriveWallLooksLikeWindow({ move: 20, light: 0, sight: 10 }));
   ok(
     'light:NONE with no sight given reads as an ordinary sight-blocking wall, not an aperture',
-    !deriveWallAperture({ move: 20, light: 0 })
+    !deriveWallLooksLikeWindow({ move: 20, light: 0 })
   );
   ok(
     'move:NONE + light:NONE + sight:PROXIMITY IS an aperture (a window authored without a movement block, e.g. one in the Mad Scientist row)',
-    deriveWallAperture({ move: 0, light: 0, sight: 30 })
+    deriveWallLooksLikeWindow({ move: 0, light: 0, sight: 30 })
   );
   ok(
     'move:NONE + light:PROXIMITY is still NOT an aperture (the first convention needs a wall to cut into)',
-    !deriveWallAperture({ move: 0, light: 30, sight: 30 })
+    !deriveWallLooksLikeWindow({ move: 0, light: 30, sight: 30 })
   );
   ok(
     'light:NORMAL + sight:PROXIMITY is NOT an aperture (the light sense decides)',
-    !deriveWallAperture({ move: 20, light: 20, sight: 30 })
+    !deriveWallLooksLikeWindow({ move: 20, light: 20, sight: 30 })
   );
   ok(
     'a leaded-glass proximity wall (light:PROXIMITY, sight:NORMAL — blocks vision, passes light near it) IS still an aperture — sight is not read',
-    deriveWallAperture({ move: 20, light: 30, sight: 20 }) // sight is not a parameter at all — passing it is ignored
+    deriveWallLooksLikeWindow({ move: 20, light: 30, sight: 20 }) // sight is not a parameter at all — passing it is ignored
   );
 
   // watchSceneWallStructure — Node has no `Hooks` global at all, so this

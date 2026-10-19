@@ -1807,7 +1807,9 @@ export function createPointLightPool({
           frames: filteredWallFrames,
           // Every wall that stops light (windows included) — `window-reach.js` needs them to tell
           // which windows a light can actually see. Only the walls, never re-derived per light.
-          blockers: rawWallSegments.filter((seg) => seg?.blocksLight || seg?.aperture),
+          blockers: rawWallSegments.filter((seg) => seg?.blocksLight || seg?.reachWindow),
+          // The windows window REACH works from: flagged windows plus walls that look like one.
+          reachWindows: rawWallSegments.filter((seg) => seg?.reachWindow),
         };
       } else {
         wallClipCacheStats.apertureWalls.hits += 1;
@@ -1816,7 +1818,7 @@ export function createPointLightPool({
         apertureWallSegments = apertureSegCache.segments;
         apertureWallFrames = apertureSegCache.frames;
       }
-      if (windowReachOn) windowReachSegments = apertureSegCache.segments;
+      if (windowReachOn) windowReachSegments = apertureSegCache.reachWindows;
     }
     apertureGoboShared.uWindowReachPx.value = windowReachOn ? outsideReachPx : WINDOW_REACH_DEFAULT_PX;
     // Clamped against the SHADER's own hard cap (`aperture-gobo-render.js`'s

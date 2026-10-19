@@ -20,8 +20,8 @@
  * THE MATHS, per window segment AB for a light at L and a floor point P:
  *   P is "through" the window iff the segment L→P crosses AB (t in (0,1],
  *   u in [0,1]); the distance past the glass is d = (1 - t) * |P - L|; the
- *   multiplier is `windowReachFade(d, reach)` = (1 - d / reach)^2 clamped to
- *   [0,1], times `windowEdgeSoftness(u)`: the beam is full strength through the
+ *   multiplier is `windowReachFade(d, reach)` = full strength for the first
+ *   {@link WINDOW_REACH_HOLD} of the reach, then a smooth fade to 0 at `reach`, times `windowEdgeSoftness(u)`: the beam is full strength through the
  *   middle of the glass and fades over the outer {@link WINDOW_EDGE_SOFT_FRACTION}
  *   of the window at each side, so the beam has SOFT sides instead of the
  *   straight-edged wedge a bare window cut-out gives. Windows in series take the
@@ -46,8 +46,10 @@
 /** Slider range end: at this value the reach is unlimited (term compiled out). */
 export const WINDOW_REACH_OFF_PX = 2000;
 /** Default reach outside a window, in scene px (about two grid squares). */
-export const WINDOW_REACH_DEFAULT_PX = 150;
+export const WINDOW_REACH_DEFAULT_PX = 300;
 export const WINDOW_REACH_BINS = 720;
+/** The fraction of the reach, just past the glass, over which the light stays at full strength. */
+export const WINDOW_REACH_HOLD = 0.3;
 /** Over this many px past the glass the soft sides fade in (so there is no step at the glass line). */
 export const WINDOW_SOFT_RAMP_PX = 60;
 /** Distance written for "no window this way". */
@@ -69,18 +71,18 @@ export function windowReachLimited(reachPx) {
 }
 
 /**
- * The fade curve: 1 at the glass, (1 - d/reach)^2 beyond it, 0 at `reach` and
- * past it. Quadratic on purpose: the light dies fastest right outside the
- * glass (like a real lamp seen from beyond the pane) and has no hard edge,
- * because both the value and the slope end at 0.
+ * The fade curve: 1 from the glass out to {@link WINDOW_REACH_HOLD} of the reach (so the window pattern
+ * — panes, mullions — shows at full strength just outside the glass), then a smoothstep down to 0 at `reach`
+ * and past it. No hard edge: the value and the slope are both 0 at the end. (A first version faded from the
+ * glass itself, which hid the pattern entirely.)
  * @param {number} distPastPx - distance beyond the window, px.
  * @param {number} reachPx - the reach setting.
  * @returns {number} 0..1
  */
 export function windowReachFade(distPastPx, reachPx) {
   const r = Math.max(reachPx, 1e-6);
-  const f = 1 - Math.min(Math.max(distPastPx / r, 0), 1);
-  return f * f;
+  const u = Math.min(Math.max((distPastPx / r - WINDOW_REACH_HOLD) / (1 - WINDOW_REACH_HOLD), 0), 1);
+  return 1 - u * u * (3 - 2 * u);
 }
 
 /**
@@ -179,8 +181,8 @@ export function windowReachAlongRay(r, dWin, soft, reachPx) {
  * lookup texture): R,G = distance as a 16-bit number (65535 = none), B = soft-side factor 0..255, A = 255.
  *
  * @param {{x:number,y:number,radius:number}} light
- * @param {Array<{x1:number,y1:number,x2:number,y2:number,aperture?:boolean}>} walls every wall that stops
- *   light PLUS the windows (windows flagged `aperture`): the nearest one along a ray decides.
+ * @param {Array<{x1:number,y1:number,x2:number,y2:number,reachWindow?:boolean}>} walls every wall that stops
+ *   light PLUS the windows (flagged `reachWindow`): the nearest one along a ray decides.
  * @param {Uint8Array} bytes length `WINDOW_REACH_BINS * 4`, filled in place.
  * @returns {number} how many directions go through a window first (0 = this light has no window to curtail).
  */
@@ -214,7 +216,7 @@ export function computeWindowReachProfile(light, walls, bytes) {
       const u = (ax * dy - ay * dx) / denom;
       if (u < 0 || u > 1) continue;
       bestT = t;
-      bestWin = w.aperture === true;
+      bestWin = w.reachWindow === true;
       bestU = u;
     }
     const o = k * 4;
@@ -274,7 +276,7 @@ export function sampleWindowReachProfile(bytes, L, P, reachPx) {
  */
 export function buildWindowReachTerm({ THREE, positionWorldXY, windowCount, shared, profileTexture }) {
   if (!(windowCount > 0) || !profileTexture) return null;
-  const { uniform, float, vec2, select, max, clamp, length, atan, floor, texture, mix } = THREE.TSL;
+  const { uniform, float, vec2, select, max, clamp, length, atan, floor, texture, mix, smoothstep } = THREE.TSL;
   const N = WINDOW_REACH_BINS;
 
   const uLight = uniform(vec2(0, 0));
@@ -301,9 +303,9 @@ export function buildWindowReachTerm({ THREE, positionWorldXY, windowCount, shar
     const d = t.r.mul(float(65280)).add(t.g.mul(float(255)));
     const soft = t.b;
     const past = max(r.sub(d), float(0));
-    const fade = float(1).sub(clamp(past.div(reach), float(0), float(1)));
+    const fade = float(1).sub(smoothstep(reach.mul(float(WINDOW_REACH_HOLD)), reach, past));
     const ramp = clamp(past.div(float(WINDOW_SOFT_RAMP_PX)), float(0), float(1));
-    const value = fade.mul(fade).mul(float(1).sub(float(1).sub(soft).mul(ramp)));
+    const value = fade.mul(float(1).sub(float(1).sub(soft).mul(ramp)));
     return select(r.greaterThan(d), value, float(1));
   };
   const node = mix(tap(i0), tap(i0.add(float(1))), fr);

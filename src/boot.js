@@ -582,6 +582,8 @@ import {
   registerPlayerButton,
   syncPlayerButtonState,
   watchSceneWallStructure,
+  installWallWindowConfig,
+  markWallWindows,
   watchDoorOpenings,
   readSceneDoors,
   watchDoorGraphics,
@@ -10661,7 +10663,7 @@ function install() {
     getReadout: () => apertureGobo.getReadout(),
     setValue: (patch) => MapShine.setApertureGobo(patch),
     // UI parity plan, phase 5b.
-    extra: () => [buildApertureGoboDebugSelect()],
+    extra: () => [buildApertureGoboDebugSelect(), buildMarkWindowsButton()],
   });
 
   // THE CONTROL HEALTH REPORT (U6, docs/holy/UI-Testament.md §9) — what the
@@ -11106,6 +11108,11 @@ function install() {
   // `apertureGobo` key — the SAME bridge `pointLights` uses one line above
   // it in that file, not a direct call from here.
   MapShine.setApertureGobo = apertureGobo.setApertureGobo;
+  // THE WALL "WINDOW" CHECKBOX — the box itself lives in Foundry's wall dialog (foundry/wall-window-flag.js);
+  // `MapShine.markWallWindows()` ticks it on every wall of the viewed scene that looks like a window
+  // (`{dryRun:true}` only counts; `{mode:'clear'}` removes every tick).
+  installWallWindowConfig();
+  MapShine.markWallWindows = markWallWindows;
   // SMELLY FLIES / FIREFLIES — the console tuners AND the cards' write path, e.g.
   //   MapShine.setSmellyFlies({ fliesPerZone: 24, windResponse: 0.4 })
   //   MapShine.setFireflies({ alwaysActive: true, flashStyle: 'blink' })
@@ -11146,6 +11153,36 @@ function install() {
       MapShine.setApertureGoboDebugChannel(select.value);
     });
     return select;
+  }
+
+  /**
+   * "Mark windows" — ticks the wall "Window (light pattern)" box on every wall of this scene that looks like a window
+   * (light PROXIMITY, or light NONE with sight PROXIMITY), for maps made before the box existed.
+   * @returns {HTMLButtonElement}
+   */
+  function buildMarkWindowsButton() {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'msa-effect-preset-select';
+    button.textContent = 'Mark windows';
+    button.title =
+      'Tick the "Window (light pattern)" box on every wall in this scene that looks like a window (light Proximity, or light None with sight Proximity). You can still untick any wall in its own dialog.';
+    button.addEventListener('click', async () => {
+      const before = button.textContent;
+      button.disabled = true;
+      try {
+        const r = await markWallWindows({ mode: 'detected' });
+        button.textContent = r.changed ? `Marked ${r.changed}` : 'None to mark';
+      } catch (err) {
+        log.error('marking windows failed:', err);
+        button.textContent = 'Failed';
+      }
+      setTimeout(() => {
+        button.textContent = before;
+        button.disabled = false;
+      }, 2500);
+    });
+    return button;
   }
 
   MapShine.debug.registerPanel(

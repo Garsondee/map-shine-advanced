@@ -275,6 +275,11 @@ export {
 // requirement (a real Level document, never `canvas.level`).
 export { buildCandleWallClipConfig, computeCandleWallClippedShape } from './scene-wall-clip.js';
 
+// THE WALL "WINDOW" CHECKBOX (foundry/wall-window-flag.js) — the explicit per-wall switch for the Window light
+// pattern, added to the bottom of Foundry's own wall dialog, plus the one-shot helper that ticks it on every wall
+// that looks like a window.
+export { installWallWindowConfig, markWallWindows, WALL_WINDOW_FLAG } from './wall-window-flag.js';
+
 // WALL SEGMENTS — the one place `canvas.scene.walls` is read as flat
 // segments (as opposed to scene-wall-clip.js's per-point visibility sweep).
 // Feeds Wind.md Tier 1's structure bake (world/wind-bake.js): a wall or a
@@ -285,6 +290,7 @@ export {
   readSceneWallSegments,
   deriveWallSolid,
   deriveWallAperture,
+  deriveWallLooksLikeWindow,
   watchSceneWallStructure,
   watchDoorOpenings,
 } from './scene-walls.js';

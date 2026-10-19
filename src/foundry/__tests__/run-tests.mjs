@@ -26,6 +26,7 @@ import { run as runSceneLights } from './scene-lights.test.mjs';
 import { run as runSceneSyntheticLights } from './scene-synthetic-lights.test.mjs';
 import { run as runSceneWallClip } from './scene-wall-clip.test.mjs';
 import { run as runSceneWalls } from './scene-walls.test.mjs';
+import { run as runWallWindowFlag } from './wall-window-flag.test.mjs';
 import { run as runSceneDoors } from './scene-doors.test.mjs';
 import { run as runSceneRegions } from './scene-regions.test.mjs';
 import { run as runRegionDarknessOverride } from './region-darkness-override.test.mjs';
@@ -103,6 +104,7 @@ const suites = [
   ['scene-synthetic-lights', runSceneSyntheticLights],
   ['scene-wall-clip', runSceneWallClip],
   ['scene-walls', runSceneWalls],
+  ['wall-window-flag', runWallWindowFlag],
   ['scene-doors', runSceneDoors],
   ['scene-regions', runSceneRegions],
   ['region-darkness-override', runRegionDarknessOverride],

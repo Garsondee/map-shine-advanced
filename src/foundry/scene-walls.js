@@ -36,6 +36,12 @@
  * physical intuition Wind.md §4 states plainly ("doors are walls with a
  * toggle").
  *
+ * ⚠️ UPDATE 2026-10-19 — THE WINDOW PATTERN NOW READS A FLAG, NOT THE SENSES. `deriveWallAperture` is true only for
+ * a wall whose author ticked "Window (light pattern)" in the wall dialog (`foundry/wall-window-flag.js`). The sense-based
+ * guess described below survives as `deriveWallLooksLikeWindow`, which drives the window REACH of candle/fire light and
+ * the one-click "mark windows" helper; it also recognises the second convention (light NONE + sight PROXIMITY) used by
+ * the Mad Scientist's Compound.
+ *
  * APERTURE RULE (`deriveWallAperture`, 2026-08-03, `docs/planning/
  * Aperture-Gobo.md`): a wall is an aperture — solid enough to stand in a
  * doorway's frame, but a window for LIGHT — iff it blocks movement AND its
@@ -170,6 +176,16 @@ export function deriveWallBlocksExterior({ move } = {}) {
 }
 
 /**
+ * Is this wall a window for the WINDOW LIGHT PATTERN? Only when the author ticked the "Window (light pattern)" box
+ * in the wall dialog (`foundry/wall-window-flag.js`, flag `map-shine-advanced.windowPattern`). Pure.
+ * @param {{windowFlag?: unknown}} [wall]
+ * @returns {boolean}
+ */
+export function deriveWallAperture({ windowFlag } = {}) {
+  return windowFlag === true;
+}
+
+/**
  * Does this wall stop LIGHT? Pure. `light: NONE` lets it through (a window, a railing, terrain), an open
  * door lets it through, everything else (NORMAL, LIMITED, PROXIMITY, DISTANCE) stops it for the purposes
  * of "which windows can a light see" (`window-reach.js`): a window blocks like a wall until the light's
@@ -208,7 +224,7 @@ export function deriveWallBlocksLight({ light, door, ds } = {}) {
  *   as `deriveWallSolid`/`deriveWallBlocksExterior`.
  * @returns {boolean}
  */
-export function deriveWallAperture({ move, light, sight } = {}) {
+export function deriveWallLooksLikeWindow({ move, light, sight } = {}) {
   const moveVal = Number.isFinite(move) ? move : WALL_MOVEMENT_NORMAL;
   const lightVal = Number.isFinite(light) ? light : WALL_LIGHT_NORMAL;
   // A missing `sight` reads as the schema default (NORMAL): never a window.
@@ -262,7 +278,12 @@ export function readSceneWallSegments(levelId = null) {
         // a raw wall, added here rather than a second `canvas.scene.walls`
         // reader (`foundry/adapter-only` — this file is already the one place
         // that reads it).
-        aperture: deriveWallAperture({ move: wall.move, light: wall.light, sight: wall.sight }),
+        aperture: deriveWallAperture({ windowFlag: wall.flags?.['map-shine-advanced']?.windowPattern }),
+        // Looks like a window from its sense settings (or is flagged): what the window REACH of candle and fire
+        // light uses, so it never depends on a box someone forgot to tick.
+        reachWindow:
+          wall.flags?.['map-shine-advanced']?.windowPattern === true ||
+          deriveWallLooksLikeWindow({ move: wall.move, light: wall.light, sight: wall.sight }),
         // Stops light (see deriveWallBlocksLight) — `window-reach.js` uses it to find which windows a light can see.
         blocksLight: deriveWallBlocksLight({ light: wall.light, door: wall.door, ds: wall.ds }),
       });

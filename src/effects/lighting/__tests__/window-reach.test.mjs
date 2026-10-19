@@ -14,6 +14,7 @@ import {
   WINDOW_REACH_DEFAULT_PX,
   WINDOW_REACH_BINS,
   WINDOW_SOFT_RAMP_PX,
+  WINDOW_REACH_HOLD,
   WINDOW_NONE,
   WINDOW_EDGE_SOFT_FRACTION,
   windowReachLimited,
@@ -56,13 +57,18 @@ export function run(t) {
 
   // ── the fade curve ──────────────────────────────────────────────────────
   eq('full strength at the glass', windowReachFade(0, 200), 1);
+  eq(
+    'and it HOLDS full strength over the first part of the reach (so the window pattern shows)',
+    windowReachFade(200 * WINDOW_REACH_HOLD, 200),
+    1
+  );
   eq('gone at the reach', windowReachFade(200, 200), 0);
   eq('gone past the reach (never negative, never back up)', windowReachFade(5000, 200), 0);
   ok(
     'strictly dimmer as it goes further',
     windowReachFade(50, 200) > windowReachFade(100, 200) && windowReachFade(100, 200) > windowReachFade(150, 200)
   );
-  ok('no hard edge: it is nearly flat-zero just before the reach', windowReachFade(190, 200) < 0.003);
+  ok('no hard edge: it is nearly flat-zero just before the reach', windowReachFade(190, 200) < 0.02);
   eq('a zero reach does not divide by zero', windowReachFade(10, 0), 0);
 
   // ── soft sides: the beam fades in over the outer part of the glass at each side ──
@@ -120,7 +126,7 @@ export function run(t) {
   }
 
   // ── THE PROFILE: a room with MANY windows, only some of which the light shines out of ──
-  const wall = (x1, y1, x2, y2, aperture = false) => ({ x1, y1, x2, y2, aperture });
+  const wall = (x1, y1, x2, y2, reachWindow = false) => ({ x1, y1, x2, y2, reachWindow });
   // An 800 x 800 room centred on the light (walls at +-400), with a window in the south and west walls and TWO
   // on the north wall, plus 40 more windows far away that the light cannot see (the compound has 47).
   const room = [
@@ -164,7 +170,7 @@ export function run(t) {
   }
   eq('everywhere INSIDE the room the light is multiplied by exactly 1', indoorsMin, 1);
   ok('just outside the south window (middle) is nearly full strength', m(0, 410) > 0.9);
-  ok('well outside the south window is dim', m(0, 500) < 0.3);
+  ok('well outside the south window is dim', m(0, 580) < 0.1);
   eq('past the reach it is exactly 0, straight out of the south window', m(0, 400 + reach + 30), 0);
   eq('and out of the north window', m(-185 * 1.8, -400 * 1.8), 0);
   eq('and out of the SECOND north window', m(185 * 1.8, -400 * 1.8), 0);
@@ -207,7 +213,7 @@ export function run(t) {
     'a room with no windows has an empty profile',
     computeWindowReachProfile(
       light,
-      room.map((w) => ({ ...w, aperture: false })),
+      room.map((w) => ({ ...w, reachWindow: false })),
       none
     ),
     0

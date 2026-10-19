@@ -48,7 +48,14 @@
  *
  * @module effects/fire/fire-sprite
  */
-import { FIRE_RAMP_WOOD, hexToRgb01, SUPPRESSION_EASE_POWER, SMOKE_WIND_FADE_EXPONENT } from './fire-geometry.js';
+import {
+  FIRE_RAMP_WOOD,
+  hexToRgb01,
+  SUPPRESSION_EASE_POWER,
+  SMOKE_WIND_FADE_EXPONENT,
+  FIRE_LEAN,
+  FIRE_STRESS,
+} from './fire-geometry.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // THE COLOUR SPEC — ported verbatim from V2's fire-behaviors.js
@@ -693,4 +700,110 @@ export function buildFireWindSuppressionNode(TSL, { motion01, kind, countFloor, 
     };
   }
   return { countMul: float(1), opacityMul: float(1) };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE BENT FLAME AND THE WEATHER — the shader twins of `fire-geometry.js`'s CPU functions (2026-10-19).
+// Each is pinned to its twin by a parity test (`fire-sprite.test.mjs`), so the draw shader and the CPU (the cast
+// light, the tests) cannot drift into telling two different stories about how hard a fire is being hit.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Shader twin of `fire-geometry.js#fireLeanGain01`.
+ * @param {*} TSL @param {*} motion01 - float node, the local PUSH motion.
+ * @returns {*} float node 0..1.
+ */
+export function buildFireLeanGainNode(TSL, motion01) {
+  const { float, clamp } = TSL;
+  const m = clamp(motion01, float(0), float(1));
+  return m.mul(float(1).add(m.mul(float(FIRE_LEAN.gainK)))).div(float(1 + FIRE_LEAN.gainK));
+}
+
+/**
+ * Shader twin of `fire-geometry.js#fireLeanProfile01`: how far along its lean a sprite of this age sits.
+ * @param {*} TSL @param {*} age01 - float node, `age / life`. @param {*} curve - float node/uniform.
+ * @returns {*} float node 0..1.
+ */
+export function buildFireLeanProfileNode(TSL, age01, curve) {
+  const { float, clamp, pow, max } = TSL;
+  return pow(clamp(age01, float(0), float(1)), max(curve, float(0.05)));
+}
+
+/**
+ * Shader twin of `fire-geometry.js#fireWeatherStress01`.
+ * @param {*} TSL
+ * @param {object} args
+ * @param {*} args.windMotion01 - float node: LOCAL wind motion with the weather gate (`uWindMotion01 × openness`).
+ * @param {*} args.rain01 - float node: rain reaching this spot (`uRain01 × the cell's sky exposure`).
+ * @param {*} args.gain - float node/uniform: 1, or `FIRE_STRESS.immuneGain`.
+ * @returns {*} float node 0..1.
+ */
+export function buildFireWeatherStressNode(TSL, { windMotion01, rain01, gain }) {
+  const { float, clamp, pow, smoothstep } = TSL;
+  const wind = pow(
+    smoothstep(float(0), float(1), clamp(windMotion01, float(0), float(1))),
+    float(SUPPRESSION_EASE_POWER)
+  );
+  const rain = clamp(rain01, float(0), float(1));
+  const raw = wind
+    .mul(float(FIRE_STRESS.windWeight))
+    .add(rain.mul(float(FIRE_STRESS.rainWeight)))
+    .add(wind.mul(rain).mul(float(FIRE_STRESS.synergyWeight)));
+  return clamp(raw, float(0), float(1)).mul(clamp(gain, float(0), float(1)));
+}
+
+/**
+ * Shader twin of `fire-geometry.js#fireStressResponse`.
+ * @param {*} TSL @param {*} stress01 - float node 0..1.
+ * @returns {{sizeMul:*, opacityMul:*, countMul:*, emberCountMul:*}} float nodes.
+ */
+export function buildFireStressResponseNodes(TSL, stress01) {
+  const { float, clamp } = TSL;
+  const s = clamp(stress01, float(0), float(1));
+  const blend = (floor) => float(1).sub(s.mul(float(1 - floor)));
+  return {
+    sizeMul: blend(FIRE_STRESS.sizeFloor),
+    opacityMul: blend(FIRE_STRESS.opacityFloor),
+    countMul: blend(FIRE_STRESS.countFloor),
+    emberCountMul: blend(FIRE_STRESS.emberCountFloor),
+  };
+}
+
+/**
+ * THE GUTTER — a fire under stress does not just get smaller, it FLICKERS and occasionally nearly dies and revives.
+ * Two noises, both functions of (time, world position) only, so every sprite of one fire gutters TOGETHER (a flame
+ * that dims sprite by sprite reads as noise, not as a flame struggling):
+ *   fast — a quick 0..1 flicker;
+ *   cold — a slow noise thresholded so it is mostly 0 and now and then rises to 1 (a "cold period").
+ *
+ * @param {*} TSL
+ * @param {object} args
+ * @param {*} args.posXY - vec2 node, the sprite's world position (the phase source).
+ * @param {*} args.timeSec - float node, seconds on the fire's own clock.
+ * @returns {{fast:*, cold:*}} float nodes in 0..1.
+ */
+export function buildFireGutterNode(TSL, { posXY, timeSec }) {
+  const { float, sin, smoothstep } = TSL;
+  const ph = posXY.x.mul(float(0.0031)).add(posXY.y.mul(float(0.0023)));
+  const fast = float(0.5)
+    .add(sin(timeSec.mul(float(9.1)).add(ph)).mul(float(0.25)))
+    .add(
+      sin(
+        timeSec
+          .mul(float(14.7))
+          .add(ph.mul(float(1.9)))
+          .add(float(1.3))
+      ).mul(float(0.25))
+    );
+  const slow = float(0.5)
+    .add(sin(timeSec.mul(float(0.85)).add(ph.mul(float(0.7)))).mul(float(0.28)))
+    .add(
+      sin(
+        timeSec
+          .mul(float(1.93))
+          .add(ph.mul(float(1.3)))
+          .add(float(1.1))
+      ).mul(float(0.22))
+    );
+  return { fast, cold: smoothstep(float(0.62), float(0.95), slow) };
 }

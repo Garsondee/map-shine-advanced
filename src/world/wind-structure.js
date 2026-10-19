@@ -84,6 +84,9 @@ export const WIND_OPENNESS_MARGIN_CELLS = WIND_OPENNESS_REFINE * 2;
  * @property {Float32Array} wallAvoidDirX @property {Float32Array} wallAvoidDirY
  * @property {Float32Array} wallProximity
  * @property {Float32Array} exterior - 1 where a coarse cell is genuinely outdoors (never behind a door) and has no sealed pocket.
+ * @property {Float32Array} sky - 0..1 per coarse cell: the painted `_Outdoors` value there (1 = open sky, 0 = under a roof),
+ *   or 1 where no mask was supplied / the cell is off the mask. NOT wind: it answers "does rain fall here", which a walled
+ *   yard and a closed room answer differently from how the wall bake does. Read by fire's weather stress.
  * @property {Int32Array} doorDistance - threshold distance in FINE cells for a cell reached only through an open door, else -1.
  */
 
@@ -202,6 +205,21 @@ export function applyOpenSky(structure, outdoors) {
 }
 
 /**
+ * The per-cell sky exposure the particle kernels read: the sampled `_Outdoors` value, with "no opinion" (-1: no mask,
+ * or a cell off the mask's rect) read as open sky. The same fallback `safeSampleOutdoors` documents for a missing mask.
+ *
+ * @param {Float32Array|null} sampled - from {@link sampleOutdoorsAtCells}.
+ * @param {number} n - cell count.
+ * @returns {Float32Array} length n, each in [0,1].
+ */
+export function skyExposureFromCells(sampled, n) {
+  const out = new Float32Array(n).fill(1);
+  if (!sampled || sampled.length !== n) return out;
+  for (let i = 0; i < n; i++) if (sampled[i] >= 0) out[i] = Math.min(1, sampled[i]);
+  return out;
+}
+
+/**
  * A cheap fingerprint of an outdoors grid: its rect and resolution plus a strided
  * checksum of the pixels. Two grids with the same signature bake the same wind,
  * which is what lets the mask-version poll skip the rebake when only an
@@ -271,7 +289,9 @@ export function bakeWindStructure({ walls, gridSpec, outdoors = null }) {
     exterior,
     doorDistance,
   };
-  applyOpenSky(structure, sampleOutdoorsAtCells(outdoors, gridSpec));
+  const outdoorsCells = sampleOutdoorsAtCells(outdoors, gridSpec);
+  applyOpenSky(structure, outdoorsCells);
+  structure.sky = skyExposureFromCells(outdoorsCells, cols * rows);
   return structure;
 }
 
@@ -461,6 +481,7 @@ export function createWindGridState({ textures, toHalf }) {
         wallAvoidDirY: next.wallAvoidDirY,
         wallProximity: next.wallProximity,
         windShadow: shadowValues,
+        sky: next.sky,
       };
       // Structure-owned channels (written only here)…
       writeHalfFloatChannel(opennessData, OPENNESS_TEXTURE_CHANNELS.exterior, next.exterior, half, 1);

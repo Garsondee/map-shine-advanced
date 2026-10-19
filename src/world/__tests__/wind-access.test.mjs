@@ -13,7 +13,7 @@
  * does and does not prove — in short: it proves the two PATHS agree, not that
  * the GPU produces any particular number.
  */
-import { createWindHandle } from '../wind-access.js';
+import { createWindHandle, packWindCells, WIND_CELL_VEC4_STRIDE } from '../wind-access.js';
 import { TSL_STUB as T, values, storageBuffer, gridTexture } from './tsl-numeric-stub.mjs';
 
 const GRID = { originX: -100, originY: -50, cellSize: 25, cols: 8, rows: 6 };
@@ -260,6 +260,41 @@ export function run(t) {
     const k = h.kernel(T, { centerXY: T.vec2(0, 0), time: T.float(0) });
     ok('no cell buffer ⇒ openness reads 1 (open), never a silent 0', values(k.openness)[0] === 1);
     ok('no cell buffer ⇒ wall proximity reads 0 (no wall)', values(k.wallProximity)[0] === 0);
+  }
+
+  // --- SKY EXPOSURE rides the second vec4's y slot (2026-10-19) --------------
+  // It gates RAIN (fire's weather stress), not wind, and travels in the wind-cell buffer because that buffer is
+  // the one per-position store the fire engines can still bind. The REAL packer writes it; the REAL kernel reads it.
+  {
+    const sky = new Float32Array(CELLS);
+    for (let i = 0; i < CELLS; i++) sky[i] = (i % 5) / 4; // 0, .25, .5, .75, 1 — every value distinct per neighbour
+    const attr = { array: new Float32Array(CELLS * WIND_CELL_VEC4_STRIDE * 4), needsUpdate: false };
+    packWindCells(attr, { ...cells, sky }, CELLS);
+    const vec4s = [];
+    for (let i = 0; i < CELLS * WIND_CELL_VEC4_STRIDE; i++) vec4s.push(Array.from(attr.array.slice(i * 4, i * 4 + 4)));
+    const skyBuffer = storageBuffer(vec4s);
+    const h = makeHandle({ ...cells, sky });
+    let worst = 0;
+    for (let cy = 0; cy < GRID.rows; cy++) {
+      for (let cx = 0; cx < GRID.cols; cx++) {
+        const k = h.kernel(T, { centerXY: T.vec2(...cellCentre(cx, cy)), time: T.float(0), cellBuffer: skyBuffer });
+        worst = Math.max(worst, Math.abs(values(k.sky)[0] - sky[cy * GRID.cols + cx]));
+      }
+    }
+    ok('kernel().sky reads back exactly what packWindCells wrote, in every cell', worst === 0);
+    ok(
+      'the packer leaves slot 4 (shadow) and 0-3 untouched by the sky slot',
+      attr.array[4] === cells.windShadow[0] && attr.array[0] === cells.openness[0]
+    );
+
+    const noSky = { array: new Float32Array(CELLS * WIND_CELL_VEC4_STRIDE * 4), needsUpdate: false };
+    packWindCells(noSky, cells, CELLS);
+    ok(
+      'a cell array with no sky packs open sky (1), never a silent roof',
+      noSky.array[5] === 1 && noSky.array[8 * 3 + 5] === 1
+    );
+    const bare = makeHandle(cells).kernel(T, { centerXY: T.vec2(0, 0), time: T.float(0) });
+    ok('no cell buffer => sky reads 1 (open), never a silent 0', values(bare.sky)[0] === 1);
   }
 
   // --- organic and turbulence are memoized, not rebuilt per access ----------

@@ -90,6 +90,11 @@ import {
   buildLifeFade,
   buildFireOpennessGainNode,
   buildFireWindSuppressionNode,
+  buildFireLeanGainNode,
+  buildFireLeanProfileNode,
+  buildFireWeatherStressNode,
+  buildFireStressResponseNodes,
+  buildFireGutterNode,
   hueRotateNode,
   piecewiseLinear,
   piecewiseLinearRgb,
@@ -100,6 +105,7 @@ import {
   EMBER_PEAK_OPACITY,
   FIRE_HDR_LINEAR_GAIN,
 } from '../fire/fire-sprite.js';
+import { FIRE_STRESS } from '../fire/fire-geometry.js';
 
 const log = createLogger('fire-particle-runtime');
 const TIER0_WIND_HANDLE = createWindHandle();
@@ -369,7 +375,22 @@ export function createFireParticleEngine({
   depthFlagsTexNode = null,
 }) {
   const TSL = THREE.TSL;
-  const { Fn, instanceIndex, float, vec2, vec3, vec4, uniform, sin, fract, uv, mix, positionGeometry, screenUV } = TSL;
+  const {
+    Fn,
+    instanceIndex,
+    float,
+    vec2,
+    vec3,
+    vec4,
+    uniform,
+    sin,
+    fract,
+    uv,
+    mix,
+    positionGeometry,
+    screenUV,
+    smoothstep,
+  } = TSL;
 
   const K = KINDS[kind] ?? KINDS.flame;
   const p = system?.params ?? {};
@@ -630,14 +651,27 @@ export function createFireParticleEngine({
    * a separate push value.
    */
   const uWindPushMotion01 = uniform(float(0));
-  /**
-   * The flame's floors for the per-particle wind suppression curve
-   * (`buildFireWindSuppressionNode`) — how far its population and brightness
-   * can be pushed down by wind. 1 = no suppression (the safe start, until the
-   * first `setParams`); ember and smoke never read them.
-   */
-  const uWindCountFloor = uniform(float(1));
-  const uWindOpacityFloor = uniform(float(1));
+  // ── THE BENT FLAME AND THE WEATHER (2026-10-19) ──────────────────────────────────────────────────────────────
+  // See `fire-geometry.js`, "THE BENT FLAME AND THE WEATHER", for why the flame's wind is a LEAN by age rather than a
+  // force. These are the author's dials for it (all refreshed through `setParams` every frame, like the rest).
+  /** Lean length at full wind, in multiples of a sprite's own size (`flameWindPush × FIRE_LEAN.sizesPerPush`). */
+  const uLeanLength = uniform(float(2.2));
+  /** Base-to-tip curve: 1 = a straight tilted pillar, 2 = a cantilever (base anchored, tip streaming). */
+  const uLeanCurve = uniform(float(1.4));
+  /** How much a sprite narrows toward the tip, in wind. */
+  const uLeanTaper = uniform(float(0.4));
+  /** How far an old sprite stretches ALONG the wind (bridges the gaps; reads as licking flame). */
+  const uLeanStreak = uniform(float(1.2));
+  /** Gust waves travelling down the plume: it sways and surges as ONE body. */
+  const uLeanFlutter = uniform(float(0.35));
+  /** Per-sprite lateral scatter that widens toward the tip: ragged tongues instead of one tight comet. */
+  const uLeanSpread = uniform(float(0.3));
+  /** Ember motion-streak length (a short shutter along each spark's own velocity); 0 = round dots. */
+  const uEmberStreak = uniform(float(1));
+  /** Rain reaching an OPEN-SKY fire, 0..1; the per-cell sky exposure gates it per particle. */
+  const uRain01 = uniform(float(0));
+  /** 1, or `FIRE_STRESS.immuneGain` for a fire that cannot be blown out. */
+  const uStressGain = uniform(float(1));
 
   /**
    * `effectiveWindMotion` AT AN ARBITRARY POSITION — the same openness-gated
@@ -671,8 +705,24 @@ export function createFireParticleEngine({
     buildFireWindSuppressionNode(TSL, {
       motion01: windOpennessBuffer ? effectiveWindMotionAt(posVec, uWindMotion01) : uWindMotion01,
       kind,
-      countFloor: uWindCountFloor,
-      opacityFloor: uWindOpacityFloor,
+    });
+
+  /**
+   * The wind grid's answer at a world position — openness, wall geometry, sky exposure — or "open sky, no wall" when
+   * no bake exists (the same convention every consumer of the field uses). Sampled ONCE per vertex and shared.
+   */
+  const cellAt = (posVec) =>
+    windOpennessBuffer
+      ? windHandle.kernel(TSL, { centerXY: posVec, time: uTimeMs, cellBuffer: windOpennessBuffer })
+      : { openness: float(1), sky: float(1), wallAwayDirX: float(0), wallAwayDirY: float(0), wallProximity: float(0) };
+
+  /** The weather stress at a cell (`fire-geometry.js#fireWeatherStress01`): wind with the weather gate, plus the rain
+   * that reaches THIS spot — open sky only. */
+  const stressFromCell = (cell) =>
+    buildFireWeatherStressNode(TSL, {
+      windMotion01: uWindMotion01.mul(buildFireOpennessGainNode(TSL, cell.openness)),
+      rain01: uRain01.mul(cell.sky),
+      gain: uStressGain,
     });
 
   const hash11 = (x) => fract(sin(x.mul(12.9898)).mul(43758.5453));
@@ -932,10 +982,19 @@ export function createFireParticleEngine({
     // it untouched, above/below asks for more/less than the guarantee alone.
     const referenceSizePx = float((K.sizeMin + K.sizeMax) * 0.5).mul(uSizeScale);
     const accelAtMax = referenceSizePx.mul(float(windAccelPerUnitSize)).mul(uWindPushScale);
-    const windVec = windDirVec
+    const windVecForce = windDirVec
       .mul(gustPush.div(float(WIND_GUST_MAX_MULT)))
       .mul(accelAtMax)
       .mul(motionScale);
+    // ⚠️ FLAME IS NO LONGER PUSHED BY AN INTEGRATED FORCE (2026-10-19). The draw stage leans it by AGE — see
+    // `fire-geometry.js`, "THE BENT FLAME". A force made every sprite reach the same terminal speed, so sprites born at
+    // even intervals stayed evenly spaced along the wind: a string of separate blobs, not one bent flame.
+    //
+    // EMBERS keep the force (a spark that has left the fire IS a free particle) but it now RAMPS IN with age: a spark
+    // is launched from the fuel and then taken by the wind, not shoved sideways the instant it is born.
+    const t01k = ageNow.div(lifeBuf.element(i).max(float(1))).clamp(float(0), float(1));
+    const pushRamp = kind === 'ember' ? mix(float(0.25), float(1), smoothstep(float(0), float(0.35), t01k)) : float(1);
+    const windVec = kind === 'flame' ? vec2(0, 0) : windVecForce.mul(pushRamp);
     // Buoyancy: +Y (up-SCREEN) for smoke UNCONDITIONALLY — see the KINDS
     // note — plus flame's own CALM-ONLY rise (2026-09-03, `calmRiseY`): a
     // gentle upward drift on the already-mobile tips, strongest at rest for
@@ -1056,14 +1115,22 @@ export function createFireParticleEngine({
   })().toVarying('vFireLife');
 
   /**
-   * The flame's per-particle wind DIMMING, crossed to the fragment stage as a
-   * varying (storage reads are vertex-stage only on this renderer, and this one
-   * needs the wind-cell buffer). Flame only — ember and smoke have no wind
-   * opacity curve, so they build nothing.
+   * The flame's per-particle WEATHER DIMMING and its stress, crossed to the fragment stage as a varying (storage reads
+   * are vertex-stage only on this renderer, and this one needs the wind-cell buffer). x = opacity multiplier (the
+   * stress floor × the fast flicker × the slow cold dips), y = the stress itself (a stressed flame cools faster).
+   * Flame only — ember and smoke have no opacity curve, so they build nothing.
    */
   const vFireWind =
     kind === 'flame'
-      ? Fn(() => windSuppressionAt(position.element(instanceIndex)).opacityMul)().toVarying('vFireWind')
+      ? Fn(() => {
+          const centre = position.element(instanceIndex);
+          const stress = stressFromCell(cellAt(centre));
+          const resp = buildFireStressResponseNodes(TSL, stress);
+          const gut = buildFireGutterNode(TSL, { posXY: centre, timeSec: uTimeMs.mul(float(0.001)).mul(uMotionSpeed) });
+          const flicker = float(1).sub(stress.mul(float(FIRE_STRESS.flickerDepth)).mul(gut.fast));
+          const dip = float(1).sub(stress.mul(float(FIRE_STRESS.coldDepth)).mul(gut.cold));
+          return vec2(resp.opacityMul.mul(flicker).mul(dip), stress);
+        })().toVarying('vFireWind')
       : null;
 
   const material = new THREE.NodeMaterial();
@@ -1098,9 +1165,25 @@ export function createFireParticleEngine({
     // population multiplier). Slots map to spawn points at random, so thinning by
     // index thins every fire in proportion to ITS OWN wind — an indoor hearth
     // keeps its smoke on a floor where an outdoor campfire has lost its.
-    const alive = float(i)
-      .lessThan(uActiveCount.mul(windSuppressionAt(centre).countMul))
+    // ⚠️ WEATHER STRESS (2026-10-19) shrinks and thins the flame TOGETHER — a smaller, dimmer flame — instead of
+    // thinning random sprites into isolated blobs, and it thins embers too (rain puts sparks out). Smoke keeps its
+    // own wind curve. The cell is sampled once and shared by the stress, the lean direction and the lean's wall reach.
+    const cell = kind === 'smoke' ? null : cellAt(centre);
+    const stress = cell ? stressFromCell(cell) : float(0);
+    const resp = buildFireStressResponseNodes(TSL, stress);
+    const countMul = kind === 'flame' ? resp.countMul : kind === 'ember' ? resp.emberCountMul : null;
+    const alive = (countMul ?? windSuppressionAt(centre).countMul)
+      .mul(uActiveCount)
+      .greaterThan(float(i))
       .select(float(1), float(0));
+    // The slow COLD dips of a guttering flame shrink it too, so it reads as nearly going out, not just dimming.
+    const gutter =
+      kind === 'flame'
+        ? buildFireGutterNode(TSL, { posXY: centre, timeSec: uTimeMs.mul(float(0.001)).mul(uMotionSpeed) })
+        : null;
+    const sizeMul = gutter
+      ? resp.sizeMul.mul(float(1).sub(stress.mul(gutter.cold).mul(float(FIRE_STRESS.coldSizeDepth))))
+      : float(1);
 
     // ── PERSPECTIVE — V2's `M(h) = D / (D − h)`, applied per particle ──
     // A particle `h` above the ground is nearer the camera, so it appears
@@ -1111,8 +1194,122 @@ export function createFireParticleEngine({
     const persp = uCamHeight.div(uCamHeight.sub(h));
     const parallaxed = uCamCentre.add(centre.sub(uCamCentre).mul(persp));
 
-    const sizePx = c.z.mul(arc).mul(grow).mul(uSizeScale).mul(alive).mul(persp);
-    return vec3(parallaxed.x.add(corner.x.mul(sizePx)), parallaxed.y.add(corner.y.mul(sizePx)), float(zDepth));
+    const sizePx = c.z.mul(arc).mul(grow).mul(uSizeScale).mul(alive).mul(persp).mul(sizeMul);
+
+    if (kind === 'ember') {
+      // MOTION STREAK: stretch the spark along its own velocity (a short shutter), area-preserving, so a wind-blown
+      // ember reads as a streak of light and a still one as a dot.
+      const vel = velocity.element(i);
+      const speed = vel.length();
+      const dirV = vel.div(speed.max(float(1e-3)));
+      const nrmV = vec2(dirV.y.negate(), dirV.x);
+      const sigma = float(1)
+        .add(
+          speed
+            .mul(uEmberStreak)
+            .mul(float(0.03))
+            .div(sizePx.max(float(1)))
+        )
+        .min(float(10));
+      const along = corner.x.mul(dirV.x).add(corner.y.mul(dirV.y));
+      const across = corner.x.mul(nrmV.x).add(corner.y.mul(nrmV.y));
+      const streak = dirV
+        .mul(along.mul(sigma))
+        .add(nrmV.mul(across.div(sigma.sqrt())))
+        .mul(sizePx);
+      return vec3(parallaxed.x.add(streak.x), parallaxed.y.add(streak.y), float(zDepth));
+    }
+    if (kind !== 'flame') {
+      return vec3(parallaxed.x.add(corner.x.mul(sizePx)), parallaxed.y.add(corner.y.mul(sizePx)), float(zDepth));
+    }
+
+    // ══ THE LEAN (flame) ═══════════════════════════════════════════════════════════════════════════════════════
+    // Kinematic, by AGE: a newborn sprite sits on the fuel, the older it is the further the wind has carried it
+    // (`age^curve`), so the base stays anchored and the tip streams — one bent body, not a trail of blobs. The length
+    // is in multiples of THIS sprite's own size, never px/s, so it cannot fling however hard the wind blows.
+    const mPush = uWindPushMotion01.mul(buildFireOpennessGainNode(TSL, cell.openness));
+    const leanGainRaw = buildFireLeanGainNode(TSL, mPush);
+    let dirW = windFlowVectorNode(TSL, uWindDirDeg);
+    if (windOpennessBuffer) {
+      dirW = deflectAroundWalls(TSL, {
+        vector: dirW,
+        awayDirX: cell.wallAwayDirX,
+        awayDirY: cell.wallAwayDirY,
+        proximity: cell.wallProximity,
+      });
+    }
+    // The wall-deflected vector's LENGTH is the part of the wind that survives the wall: a flame standing against a
+    // wall (wind blowing into it) is almost cancelled and leans a fraction as far, instead of leaning through the
+    // brick. The direction is kept as a unit vector for the stretch.
+    const dirLen = dirW.length();
+    dirW = dirW.div(dirLen.max(float(1e-4)));
+    const leanGain = leanGainRaw.mul(dirLen.min(float(1)));
+    const nrm = vec2(dirW.y.negate(), dirW.x);
+    const tSec = uTimeMs.mul(float(0.001)).mul(uMotionSpeed);
+    const ph = centre.x.mul(float(0.0031)).add(centre.y.mul(float(0.0023)));
+    // Two waves travelling down the plume (their phase lags with age): the whole body surges and sways as ONE thing.
+    const wave1 = sin(
+      tSec
+        .mul(float(3.46))
+        .sub(t01.mul(float(6.9)))
+        .add(ph)
+    );
+    const wave2 = sin(
+      tSec
+        .mul(float(7.2))
+        .sub(t01.mul(float(11.9)))
+        .add(ph.mul(float(1.7)))
+        .add(float(1.3))
+    );
+    const surge = float(1).add(uLeanFlutter.mul(wave1.mul(float(0.6)).add(wave2.mul(float(0.4)))).mul(float(0.5)));
+    // Per-LIFE randoms (no storage): ragged tongue lengths, and a lateral scatter.
+    const rag = float(0.6).add(lifeRandomOf(seed.element(i), age.element(i), 41.0).mul(float(0.65)));
+    const fanRand = lifeRandomOf(seed.element(i), age.element(i), 57.0).sub(float(0.5)).mul(float(2));
+    const sizeBase = c.z.mul(uSizeScale).mul(sizeMul);
+    const leanPx = leanGain
+      .mul(uLeanLength)
+      .mul(sizeBase)
+      .mul(buildFireLeanProfileNode(TSL, t01, uLeanCurve))
+      .mul(rag)
+      .mul(surge);
+    const sway = uLeanFlutter
+      .mul(leanGain)
+      .mul(sizeBase)
+      .mul(float(0.3))
+      .mul(t01)
+      .mul(
+        sin(
+          tSec
+            .mul(float(5.3))
+            .sub(t01.mul(float(8.7)))
+            .add(ph.mul(float(1.3)))
+            .add(float(2.1))
+        )
+      );
+    const fan = fanRand
+      .mul(uLeanSpread)
+      .mul(leanGain)
+      .mul(sizeBase)
+      .mul(buildFireLeanProfileNode(TSL, t01, float(1.2)));
+    const lean = dirW
+      .mul(leanPx)
+      .add(nrm.mul(sway.add(fan)))
+      .mul(persp);
+
+    // ── TAPER AND STREAK: the older a sprite, the narrower it gets and the more it stretches ALONG the wind, which
+    // both bridges the gaps between sprites and reads as flame licking downwind.
+    const taper = float(1)
+      .sub(uLeanTaper.mul(leanGain).mul(buildFireLeanProfileNode(TSL, t01, float(1.4))))
+      .max(float(0.2));
+    const sigma = float(1).add(uLeanStreak.mul(leanGain).mul(t01));
+    const along = corner.x.mul(dirW.x).add(corner.y.mul(dirW.y));
+    const across = corner.x.mul(nrm.x).add(corner.y.mul(nrm.y));
+    const stretched = dirW
+      .mul(along.mul(sigma))
+      .add(nrm.mul(across.div(sigma.sqrt())))
+      .mul(sizePx)
+      .mul(taper);
+    return vec3(parallaxed.x.add(lean.x).add(stretched.x), parallaxed.y.add(lean.y).add(stretched.y), float(zDepth));
   })();
 
   material.colorNode = Fn(() => {
@@ -1125,7 +1322,9 @@ export function createFireParticleEngine({
         t01,
         heat,
         brightness: bright,
-        ageToTemperature: uColorAge,
+        // A stressed flame cools faster: wind and rain turn it from gold toward deep orange.
+        ageToTemperature:
+          kind === 'flame' ? uColorAge.mul(float(1).add(vFireWind.y.mul(float(FIRE_STRESS.coolRate)))) : uColorAge,
         posterizeAmount: uPosterize,
         bandCount: uBandCount,
         tintMul: uTintMul,
@@ -1178,7 +1377,11 @@ export function createFireParticleEngine({
         .add(sd.mul(float(97)));
       const shape = buildFlameShapeAlpha(TSL, { nx: uv().x, ny: uv().y, phase, seed: sd, archetype });
       const shade = buildFlameShading(TSL, { t01, heat: float(1), brightness: bright, ageToTemperature: uColorAge });
-      return shape.mul(shade.alpha).mul(fade).mul(uOpacityScale).mul(vFireWind).mul(occlusionGate);
+      // A radial WINDOW on the UNWARPED quad coordinate: the archetype shapes warp their own coordinates, so their
+      // alpha does not always reach zero at the quad's border, and a sprite showed straight, square-cut edges.
+      const rq = uv().sub(float(0.5)).length().mul(float(2));
+      const win = float(1).sub(smoothstep(float(0.72), float(1), rq));
+      return shape.mul(win).mul(shade.alpha).mul(fade).mul(uOpacityScale).mul(vFireWind.x).mul(occlusionGate);
     }
     // Ember and smoke are soft radial dots — V2's ember sprite is a 15×15
     // authored blur, which is what this is, minus the texture fetch.
@@ -1275,8 +1478,15 @@ export function createFireParticleEngine({
       set(uExpectedDepth, p2.expectedDepth);
       set(uWindMotion01, p2.windMotion01);
       set(uWindPushMotion01, Number.isFinite(p2.windPushMotion01) ? p2.windPushMotion01 : p2.windMotion01);
-      set(uWindCountFloor, p2.windCountFloor);
-      set(uWindOpacityFloor, p2.windOpacityFloor);
+      set(uLeanLength, p2.leanLength);
+      set(uLeanCurve, p2.leanCurve);
+      set(uLeanTaper, p2.leanTaper);
+      set(uLeanStreak, p2.leanStreak);
+      set(uLeanFlutter, p2.leanFlutter);
+      set(uLeanSpread, p2.leanSpread);
+      set(uEmberStreak, p2.streak);
+      set(uRain01, p2.rain01);
+      set(uStressGain, p2.stressGain);
       if (Array.isArray(p2.tintMul) && p2.tintMul.length === 3) {
         uTintMul.value.set(p2.tintMul[0], p2.tintMul[1], p2.tintMul[2]);
       }
@@ -1356,6 +1566,16 @@ export function createFireParticleEngine({
         riseAtWind0: uRiseAtWind0.value,
         riseAtWind1: uRiseAtWind1.value,
         windPushScale: uWindPushScale.value,
+        // THE BENT FLAME AND THE WEATHER (2026-10-19), as currently live.
+        leanLength: uLeanLength.value,
+        leanCurve: uLeanCurve.value,
+        leanTaper: uLeanTaper.value,
+        leanStreak: uLeanStreak.value,
+        leanFlutter: uLeanFlutter.value,
+        leanSpread: uLeanSpread.value,
+        emberStreak: uEmberStreak.value,
+        rain01: uRain01.value,
+        stressGain: uStressGain.value,
       };
     },
   };

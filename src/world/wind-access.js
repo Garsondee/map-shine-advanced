@@ -128,6 +128,8 @@ import {
  * @property {ArrayLike<number>} [wallAvoidDirX]
  * @property {ArrayLike<number>} [wallAvoidDirY]
  * @property {ArrayLike<number>} [wallProximity]
+ * @property {ArrayLike<number>} [sky] - 0..1 painted `_Outdoors` value (1 = open sky, 0 = roofed). Not wind: it gates
+ *   RAIN. Defaults to 1 where absent.
  * @property {ArrayLike<number>} [windShadow] - 0..1 upwind occlusion
  *   (`wind-enclosure.js#upwindShelter`), RAW — the geometry's own answer,
  *   before `wind-field.js#WIND_SHADOW_DEPTH` scales it for looks. Unlike every
@@ -260,6 +262,9 @@ export function createWindHandle({
     let wallAwayDirY = float(0);
     let wallProximity = float(0);
     let windShadow = float(0);
+    // SKY EXPOSURE — the painted `_Outdoors` value at this cell (1 = open sky, 0 = roofed). Not wind: it gates RAIN
+    // (fire's weather stress). Open sky by default, like every other "no geometry data" read here.
+    let sky = float(1);
     if (cellBuffer && grid) {
       const cx = centerXY.x
         .sub(float(grid.originX))
@@ -281,7 +286,9 @@ export function createWindHandle({
       wallAwayDirX = cell.y;
       wallAwayDirY = cell.z;
       wallProximity = cell.w;
-      windShadow = cellBuffer.element(int(flatIndex.add(float(1)))).x;
+      const cell1 = cellBuffer.element(int(flatIndex.add(float(1))));
+      windShadow = cell1.x;
+      sky = cell1.y;
     }
 
     const memo = {};
@@ -330,6 +337,7 @@ export function createWindHandle({
       wallAwayDirX,
       wallAwayDirY,
       wallProximity,
+      sky,
       /**
        * The ambient bias, deflected off nearby walls and attenuated by the wind
        * shadow, UNGATED by openness. The angle convention is METEOROLOGICAL
@@ -504,7 +512,7 @@ export const WIND_CELL_VEC4_STRIDE = 2;
  * Layout, {@link WIND_CELL_VEC4_STRIDE} vec4s per cell:
  *
  *     vec4 0: x=openness  y=wallAwayDirX  z=wallAwayDirY  w=wallProximity
- *     vec4 1: x=windShadow  y/z/w=reserved (written as 0)
+ *     vec4 1: x=windShadow  y=sky (the `_Outdoors` value; 1 = open sky)  z/w=reserved (written as 0)
  *
  * `?? 1` / `?? 0` — a missing sample defaults to "fully open" / "no wall
  * nearby" / "no shadow", never a silent "everything is sealed" or an invented
@@ -515,7 +523,7 @@ export const WIND_CELL_VEC4_STRIDE = 2;
  * @param {number} n - cell count (cols × rows).
  */
 export function packWindCells(attr, cells, n) {
-  const { openness, wallAvoidDirX, wallAvoidDirY, wallProximity, windShadow } = cells ?? {};
+  const { openness, wallAvoidDirX, wallAvoidDirY, wallProximity, windShadow, sky } = cells ?? {};
   const stride = WIND_CELL_VEC4_STRIDE * 4;
   for (let i = 0; i < n; i++) {
     const o = i * stride;
@@ -524,10 +532,11 @@ export function packWindCells(attr, cells, n) {
     attr.array[o + 2] = wallAvoidDirY?.[i] ?? 0;
     attr.array[o + 3] = wallProximity?.[i] ?? 0;
     attr.array[o + 4] = windShadow?.[i] ?? 0;
-    // Slots 5-7 are RESERVED, explicitly zeroed rather than left as whatever
-    // the allocation happened to contain — an undefined value read by a future
-    // consumer is a bug that only shows up on one backend.
-    attr.array[o + 5] = 0;
+    // Slot 5 is the SKY exposure (open sky by default). Slots 6-7 are RESERVED,
+    // explicitly zeroed rather than left as whatever the allocation happened to
+    // contain — an undefined value read by a future consumer is a bug that only
+    // shows up on one backend.
+    attr.array[o + 5] = sky?.[i] ?? 1;
     attr.array[o + 6] = 0;
     attr.array[o + 7] = 0;
   }

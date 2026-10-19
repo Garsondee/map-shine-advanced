@@ -44,6 +44,13 @@ import {
   fireRuntimeFromParams,
   fireWindSuppressionFloors,
   fireOpennessGain01,
+  fireLeanGain01,
+  fireLeanProfile01,
+  fireLeanOffsetPx,
+  fireWeatherStress01,
+  fireStressResponse,
+  FIRE_LEAN,
+  FIRE_STRESS,
   fireTintMul,
   FIRE_DEFAULT_TIER,
   FIRE_FUELS,
@@ -577,6 +584,292 @@ export function run(t) {
       'weatherResponse01=0 leaves the light exactly at its calm reading regardless of wind speed',
       near(ignoresWind[0].luminosity01, calm[0].luminosity01, 1e-9) &&
         near(ignoresWind[0].alpha01, calm[0].alpha01, 1e-9)
+    );
+  }
+
+  // ── THE BENT FLAME (2026-10-19) ────────────────────────────────────────────
+  // Author, full wind and full rain: the flame was a string of detached blobs marching off in a line. The lean is
+  // now a function of AGE, so these pin the properties that make a bent, continuous flame the only possible outcome.
+  {
+    t.ok(
+      'no wind, no lean; full wind, full lean (the gain spans exactly 0..1)',
+      fireLeanGain01(0) === 0 && near(fireLeanGain01(1), 1, 1e-12)
+    );
+    t.ok(
+      'the lean gain is superlinear: half the wind gives well under half the lean',
+      near(fireLeanGain01(0.5), (0.5 * (1 + FIRE_LEAN.gainK * 0.5)) / (1 + FIRE_LEAN.gainK), 1e-12) &&
+        fireLeanGain01(0.5) < 0.5
+    );
+    let monotone = true;
+    for (let i = 1; i <= 100; i++) if (!(fireLeanGain01(i / 100) > fireLeanGain01((i - 1) / 100))) monotone = false;
+    t.ok('the lean gain rises strictly with the wind', monotone);
+    t.ok('a non-finite wind reads as calm, never NaN', fireLeanGain01(NaN) === 0 && fireLeanGain01(undefined) === 0);
+
+    t.ok(
+      'a newborn sprite does not lean at all; the oldest leans the full length (age^curve spans exactly 0..1)',
+      fireLeanProfile01(0, 1.4) === 0 && fireLeanProfile01(1, 1.4) === 1
+    );
+    t.ok(
+      'curve 1 is a straight tilted pillar; curve 2 anchors the base harder (a cantilever)',
+      near(fireLeanProfile01(0.5, 1), 0.5, 1e-12) && fireLeanProfile01(0.5, 2) < fireLeanProfile01(0.5, 1)
+    );
+    t.ok(
+      'the push is weaker when a particle is new and stronger as it gets old: the offset never decreases with age',
+      [1, 1.4, 2, 3].every((curve) => {
+        let prev = -1;
+        for (let i = 0; i <= 50; i++) {
+          const o = fireLeanOffsetPx({ motion01: 1, age01: i / 50, sizePx: 100, lengthSizes: 2.2, curve });
+          if (o < prev) return false;
+          prev = o;
+        }
+        return true;
+      })
+    );
+    t.ok(
+      'the offset is in the sprite own size: twice the sprite, twice the lean',
+      near(
+        fireLeanOffsetPx({ motion01: 1, age01: 0.8, sizePx: 200, lengthSizes: 2, curve: 1.4 }),
+        2 * fireLeanOffsetPx({ motion01: 1, age01: 0.8, sizePx: 100, lengthSizes: 2, curve: 1.4 }),
+        1e-9
+      )
+    );
+    t.ok(
+      'a full gale on a 100 px sprite with the default length reaches 2.2 sprite-widths at the tip: bounded, never flung',
+      near(
+        fireLeanOffsetPx({ motion01: 1, age01: 1, sizePx: 100, lengthSizes: 3.7 * FIRE_LEAN.sizesPerPush, curve: 1.4 }),
+        222,
+        1e-9
+      )
+    );
+
+    // THE REGRESSION THIS WHOLE BLOCK EXISTS FOR. One flame ARCHETYPE engine holds 56 sprites (224 / 4). Spread across
+    // their ages, consecutive sprites must overlap along the lean: the widest gap between neighbours has to be a small
+    // fraction of a sprite, however hard the wind blows. (A force-driven flame at the author settings put its few young
+    // sprites hundreds of px apart: a string of separate blobs.)
+    {
+      const N = 56;
+      const sizePx = 100;
+      let widest = 0;
+      for (const curve of [1, 1.4, 2, 3]) {
+        let prev = 0;
+        for (let i = 1; i <= N; i++) {
+          const o = fireLeanOffsetPx({ motion01: 1, age01: i / N, sizePx, lengthSizes: 6, curve });
+          widest = Math.max(widest, o - prev);
+          prev = o;
+        }
+      }
+      t.ok(
+        `even 56 sprites at a long lean (6 sprite-sizes, any curve) leave no gap wider than half a sprite (widest ${widest.toFixed(1)} px of ${sizePx})`,
+        widest < sizePx * 0.5
+      );
+      let widestDefault = 0;
+      let prevDefault = 0;
+      for (let i = 1; i <= N; i++) {
+        const o = fireLeanOffsetPx({
+          motion01: 1,
+          age01: i / N,
+          sizePx,
+          lengthSizes: 3.7 * FIRE_LEAN.sizesPerPush,
+          curve: 1.4,
+        });
+        widestDefault = Math.max(widestDefault, o - prevDefault);
+        prevDefault = o;
+      }
+      t.ok(
+        `at the default length the widest gap between neighbouring sprites is a small fraction of one (${widestDefault.toFixed(1)} px of ${sizePx})`,
+        widestDefault < sizePx * 0.1
+      );
+    }
+  }
+
+  // ── WEATHER STRESS (2026-10-19) ────────────────────────────────────────────
+  // Author: a fire, outside, during full wind and full rain should be almost extinguished and barely surviving.
+  {
+    const none = fireWeatherStress01({});
+    const wind = fireWeatherStress01({ windMotion01: 1 });
+    const rain = fireWeatherStress01({ rain01: 1 });
+    const both = fireWeatherStress01({ windMotion01: 1, rain01: 1 });
+    t.ok('dry still air puts a fire under no stress', none === 0);
+    t.ok(
+      'a full gale alone, or full rain alone, is a fight the fire plainly survives (well under half stress)',
+      near(wind, FIRE_STRESS.windWeight, 1e-12) && near(rain, FIRE_STRESS.rainWeight, 1e-12) && wind < 0.5 && rain < 0.5
+    );
+    t.ok(
+      'full wind AND full rain together are far worse than either alone (the synergy)',
+      both > wind + rain * 0.9 && both === 1
+    );
+    let mono = true;
+    for (let i = 1; i <= 50; i++) {
+      const w1 = fireWeatherStress01({ windMotion01: i / 50, rain01: 0.5 });
+      const w0 = fireWeatherStress01({ windMotion01: (i - 1) / 50, rain01: 0.5 });
+      const r1 = fireWeatherStress01({ windMotion01: 0.5, rain01: i / 50 });
+      const r0 = fireWeatherStress01({ windMotion01: 0.5, rain01: (i - 1) / 50 });
+      if (!(w1 >= w0) || !(r1 >= r0)) mono = false;
+    }
+    t.ok('stress never falls as wind or rain rises', mono);
+    t.ok(
+      'half wind is eased (the curve that spared the light from being far too strong): well under half the gale stress',
+      fireWeatherStress01({ windMotion01: 0.5 }) < wind * 0.4
+    );
+    t.ok(
+      'a fire that cannot be blown out feels only the immune fraction of the stress',
+      near(
+        fireWeatherStress01({ windMotion01: 1, rain01: 1, gain: FIRE_STRESS.immuneGain }),
+        FIRE_STRESS.immuneGain,
+        1e-12
+      )
+    );
+    t.ok(
+      'non-finite inputs read as no weather, never NaN',
+      fireWeatherStress01({ windMotion01: NaN, rain01: undefined, gain: NaN }) === 0
+    );
+
+    const calm = fireStressResponse(0);
+    const dead = fireStressResponse(1);
+    t.ok(
+      'no stress leaves everything at 1',
+      calm.sizeMul === 1 &&
+        calm.opacityMul === 1 &&
+        calm.countMul === 1 &&
+        calm.emberCountMul === 1 &&
+        calm.lightMul === 1
+    );
+    t.ok(
+      'full stress lands every term on its floor: small, dim, sparse, but never exactly gone',
+      near(dead.sizeMul, FIRE_STRESS.sizeFloor, 1e-12) &&
+        near(dead.opacityMul, FIRE_STRESS.opacityFloor, 1e-12) &&
+        near(dead.countMul, FIRE_STRESS.countFloor, 1e-12) &&
+        near(dead.emberCountMul, FIRE_STRESS.emberCountFloor, 1e-12) &&
+        near(dead.lightMul, FIRE_STRESS.lightFloor, 1e-12) &&
+        dead.sizeMul > 0 &&
+        dead.opacityMul > 0
+    );
+    t.ok(
+      'the flame shrinks as a WHOLE under stress (size, brightness and count together), not by thinning sprites alone',
+      dead.sizeMul < 0.5 && dead.opacityMul < 0.5 && dead.countMul < 0.5 && fireStressResponse(0.5).sizeMul < 1
+    );
+  }
+
+  // ── RAIN AND THE BENT FLAME THROUGH THE RUNTIME ────────────────────────────
+  {
+    const chain = fireScaleChain(66, M_PER_PX);
+    const dry = fireRuntimeFromParams({}, chain, { speed01: 1 });
+    t.ok('no precipitation, no rain', dry.rain01 === 0);
+    const wet = fireRuntimeFromParams({}, chain, { speed01: 0, precip01: 0.8 });
+    t.ok('rain is the eased precipitation x weather response x rain response', near(wet.rain01, 0.8, 1e-12));
+    t.ok(
+      'weatherResponse scales rain, and 0 makes a fire ignore it',
+      near(fireRuntimeFromParams({ weatherResponse: 0.5 }, chain, { precip01: 0.8 }).rain01, 0.4, 1e-12) &&
+        fireRuntimeFromParams({ weatherResponse: 0 }, chain, { precip01: 1 }).rain01 === 0
+    );
+    t.ok(
+      'rainResponse is its own dial: 0 = rain does nothing, 2 = even a drizzle douses (clamped to 1)',
+      fireRuntimeFromParams({ rainResponse: 0 }, chain, { precip01: 1 }).rain01 === 0 &&
+        near(fireRuntimeFromParams({ rainResponse: 2 }, chain, { precip01: 0.3 }).rain01, 0.6, 1e-12) &&
+        fireRuntimeFromParams({ rainResponse: 2 }, chain, { precip01: 0.9 }).rain01 === 1
+    );
+    const wetWind = fireRuntimeFromParams({}, chain, { speed01: 0.6, precip01: 1 });
+    const dryWind = fireRuntimeFromParams({}, chain, { speed01: 0.6 });
+    t.ok(
+      'rain does NOT touch the wind signals (windMotion01 / windPushMotion01 are identical wet and dry)',
+      wetWind.windMotion01 === dryWind.windMotion01 && wetWind.windPushMotion01 === dryWind.windPushMotion01
+    );
+    t.ok(
+      'a fire that cannot be snuffed feels only the immune fraction of the stress',
+      dry.stressGain === 1 &&
+        near(fireRuntimeFromParams({ canBeSnuffed: false }, chain, {}).stressGain, FIRE_STRESS.immuneGain, 1e-12)
+    );
+
+    const lean = fireRuntimeFromParams({}, chain, {}).perKind.flame;
+    t.ok(
+      'the default flame lean: 3.7 push = 2.2 sprite-widths, a base-anchored curve, tapered, streaked',
+      near(lean.leanLength, 3.7 * FIRE_LEAN.sizesPerPush, 1e-12) &&
+        lean.leanCurve === 1.4 &&
+        lean.leanTaper === 0.4 &&
+        lean.leanStreak === 1.2 &&
+        lean.leanFlutter === 0.35 &&
+        lean.leanSpread === 0.3
+    );
+    t.ok(
+      'Flame wind push is now the lean LENGTH, and the flame has no force-push scale left at all',
+      near(fireRuntimeFromParams({ flameWindPush: 10 }, chain, {}).perKind.flame.leanLength, 6, 1e-12) &&
+        lean.windPushScale === undefined
+    );
+    const huge = fireRuntimeFromParams(
+      { flameLeanCurve: 99, flameLeanTaper: 5, flameLeanStreak: 99, flameLeanFlutter: 99, flameLeanSpread: 99 },
+      chain,
+      {}
+    ).perKind.flame;
+    const tiny = fireRuntimeFromParams(
+      { flameLeanCurve: -1, flameLeanTaper: -1, flameLeanStreak: -1, flameLeanFlutter: -1, flameLeanSpread: -1 },
+      chain,
+      {}
+    ).perKind.flame;
+    t.ok(
+      'the lean dials clamp to their declared ranges',
+      huge.leanCurve === 6 &&
+        huge.leanTaper === 1 &&
+        huge.leanStreak === 4 &&
+        huge.leanFlutter === 1.5 &&
+        huge.leanSpread === 2 &&
+        tiny.leanCurve === 0.3 &&
+        tiny.leanTaper === 0 &&
+        tiny.leanStreak === 0 &&
+        tiny.leanFlutter === 0 &&
+        tiny.leanSpread === 0
+    );
+    t.ok(
+      'embers keep their force push AND gain a streak dial',
+      fireRuntimeFromParams({ emberWindPush: 4, emberStreak: 2 }, chain, {}).perKind.ember.windPushScale === 4 &&
+        fireRuntimeFromParams({ emberStreak: 2 }, chain, {}).perKind.ember.streak === 2 &&
+        fireRuntimeFromParams({}, chain, {}).perKind.ember.streak === 1
+    );
+  }
+
+  // ── THE LIGHT FOLLOWS THE WEATHER STRESS (2026-10-19) ──────────────────────
+  {
+    const fire = { id: 'x', x: 0, y: 0, diameterPx: 20, intensity: 1, windExposure: 1, outdoors01: 1 };
+    const base = { tier: 3, mPerPx: M_PER_PX };
+    const dry = buildFireLightSources([fire], { ...base, windSpeed01: 0 })[0];
+    const rain = buildFireLightSources([fire], { ...base, windSpeed01: 0, precip01: 1 })[0];
+    const gale = buildFireLightSources([fire], { ...base, windSpeed01: 1 })[0];
+    const both = buildFireLightSources([fire], { ...base, windSpeed01: 1, precip01: 1 })[0];
+    t.ok('rain alone dims the cast light', rain.alpha01 < dry.alpha01 && rain.luminosity01 < dry.luminosity01);
+    t.ok(
+      'full wind AND full rain dim the light far more than either alone',
+      both.alpha01 < rain.alpha01 && both.alpha01 < gale.alpha01
+    );
+    t.ok('the light never goes out entirely, matching the flame that is barely surviving', both.alpha01 > 0.05);
+    const roofed = buildFireLightSources([{ ...fire, outdoors01: 0 }], { ...base, windSpeed01: 0, precip01: 1 })[0];
+    t.ok('rain does not reach a fire under a roof: the light is untouched', near(roofed.alpha01, dry.alpha01, 1e-12));
+    const immune = buildFireLightSources([fire], { ...base, windSpeed01: 1, precip01: 1, canBeSnuffed: false })[0];
+    t.ok('a fire that cannot be snuffed dims less', immune.alpha01 > both.alpha01);
+    t.ok(
+      'weatherResponse 0 leaves the light at its dry reading however hard it rains',
+      near(
+        buildFireLightSources([fire], { ...base, windSpeed01: 0, precip01: 1, weatherResponse01: 0 })[0].alpha01,
+        dry.alpha01,
+        1e-12
+      )
+    );
+    t.ok(
+      'rainResponse 0 ignores rain (wind still counts)',
+      near(
+        buildFireLightSources([fire], { ...base, windSpeed01: 0, precip01: 1, rainResponse01: 0 })[0].alpha01,
+        dry.alpha01,
+        1e-12
+      )
+    );
+    const clusters = clusterFireSources(
+      [
+        { id: 'a', x: 0, y: 0, diameterPx: 40, outdoors01: 1 },
+        { id: 'b', x: 5, y: 5, diameterPx: 40, outdoors01: 0 },
+      ],
+      500
+    );
+    t.ok(
+      'a cluster carries the AVERAGE of its fires outdoors (rain reaches half of this pair)',
+      clusters.length === 1 && near(clusters[0].outdoors, 0.5, 1e-12)
     );
   }
 

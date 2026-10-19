@@ -556,22 +556,37 @@ export function run(t) {
     );
     const closeTo = (a, b) => Number.isFinite(a) && Math.abs(a - b) < 1e-9;
     t.ok(
-      // ⚠️ REWRITTEN 2026-10-07 — the flame's population/brightness curve moved
-      // from a CPU pre-multiply (which this used to prove by watching
-      // `activeCount` move with the dial) into the draw shader, evaluated per
-      // particle. What the CPU still owes the engines — and what is observable
-      // here — is the curve's two FLOORS, and an untouched author dial.
-      "the flame's suppression floors reach every FLAME engine, and the population is the author's own dial with or without wind",
+      // ⚠️ REWRITTEN 2026-10-19 — the flame's population/brightness gutter is the WEATHER STRESS now (wind + rain in
+      // one number, evaluated per sprite in the draw shader). What the CPU still owes the engines — and what is
+      // observable here — is the stress inputs, and an untouched author dial: the population is the author's own
+      // count with or without wind.
+      "the weather-stress inputs reach every engine, and the flame population is the author's own dial with or without wind",
+      windEngines.every((e) => {
+        const windy = e.paramCalls.at(-1);
+        return Number.isFinite(windy?.rain01) && closeTo(windy?.stressGain, 1);
+      }) &&
+        windEngines
+          .filter((e) => e.kind === 'flame')
+          .every((e) => {
+            const calm = e.paramCalls.at(-2);
+            const windy = e.paramCalls.at(-1);
+            return windy.activeCount === calm.activeCount && windy.opacityScale === calm.opacityScale;
+          })
+    );
+    t.ok(
+      'the flame engines receive the lean shape (length, curve, taper, streak, flutter, spread) and no force-push scale',
       windEngines
         .filter((e) => e.kind === 'flame')
         .every((e) => {
-          const calm = e.paramCalls.at(-2);
-          const windy = e.paramCalls.at(-1);
+          const p = e.paramCalls.at(-1);
           return (
-            closeTo(windy?.windCountFloor, 0.3) &&
-            closeTo(windy?.windOpacityFloor, 0.65) &&
-            windy.activeCount === calm.activeCount &&
-            windy.opacityScale === calm.opacityScale
+            closeTo(p.leanLength, 3.7 * 0.6) &&
+            closeTo(p.leanCurve, 1.4) &&
+            closeTo(p.leanTaper, 0.4) &&
+            closeTo(p.leanStreak, 1.2) &&
+            closeTo(p.leanFlutter, 0.35) &&
+            closeTo(p.leanSpread, 0.3) &&
+            p.windPushScale === undefined
           );
         })
     );
@@ -805,6 +820,108 @@ export function run(t) {
     t.ok(
       'with no bake yet, the painted-mask exposure stays as the fallback (fail toward the old behaviour, not toward "sealed")',
       noBakeSubsystem.lightSources().find((l) => l.sourceId === 'fire:hearth')?.windExposure === 1
+    );
+  }
+
+  // ── RAIN DOUSES FIRE (2026-10-19) — the scene's precipitation reaching every engine and the light ────────────
+  {
+    const rect3 = { minX: 0, minY: 0, maxX: 100, maxY: 100 };
+    const rainEngines = [];
+    let precip = 0;
+    const rainState = {
+      enabled: true,
+      params: {},
+      perfTier: 2,
+      mPerPx: 0.02,
+      fires: [
+        { id: 'open', x: 20, y: 20, diameterPx: 66, intensity: 1, windExposure: 1, outdoors01: 1 },
+        { id: 'roofed', x: 80, y: 80, diameterPx: 66, intensity: 1, windExposure: 1, outdoors01: 0 },
+      ],
+      spawnCloud: makeCloud([[0, 0]], 1),
+    };
+    const rainSubsystem = createFireSubsystem({
+      THREE: { Scene: FakeScene },
+      getFireRenderState: () => rainState,
+      getPrecip01: () => precip,
+      createEngine: ({ kind, archetype, renderOrder }) => {
+        const e = {
+          kind,
+          archetype,
+          renderOrder,
+          scene: { visible: true, renderOrder: 0 },
+          paramCalls: [],
+          setSpawnPoints() {},
+          setParams(p) {
+            e.paramCalls.push(p);
+          },
+          step() {},
+          debugState: () => ({ kind, archetype }),
+        };
+        rainEngines.push(e);
+        return e;
+      },
+    });
+    const renderer3 = {};
+    rainSubsystem.sync(renderer3, 0, 0.016, rect3);
+    const dryAlpha = rainSubsystem.lightSources().map((l) => l.alpha01);
+    t.ok(
+      'with no precipitation every engine gets rain01 = 0',
+      rainEngines.length === 6 && rainEngines.every((e) => e.paramCalls.at(-1)?.rain01 === 0)
+    );
+    precip = 0.8;
+    rainSubsystem.sync(renderer3, 16, 0.016, rect3);
+    t.ok(
+      'the live precipitation reaches every engine as rain01 on the very next sync (flame, ember and smoke)',
+      rainEngines.every((e) => Math.abs(e.paramCalls.at(-1)?.rain01 - 0.8) < 1e-12)
+    );
+    precip = 5;
+    rainSubsystem.sync(renderer3, 32, 0.016, rect3);
+    t.ok(
+      'precipitation is clamped to 0..1 before it reaches the engines',
+      rainEngines.every((e) => e.paramCalls.at(-1)?.rain01 === 1)
+    );
+    precip = NaN;
+    rainSubsystem.sync(renderer3, 48, 0.016, rect3);
+    t.ok(
+      'a non-finite precipitation reads as dry, never NaN',
+      rainEngines.every((e) => e.paramCalls.at(-1)?.rain01 === 0)
+    );
+
+    // The light: an open-sky fire dims in the rain; one under a roof does not. (Two far-apart fires = two clusters.)
+    precip = 1;
+    rainSubsystem.sync(renderer3, 64, 0.016, rect3);
+    const wet = rainSubsystem.lightSources();
+    t.ok(
+      'rain dims the cast light of a fire under open sky',
+      wet.length >= 1 && Math.min(...wet.map((l) => l.alpha01)) < Math.min(...dryAlpha)
+    );
+
+    // Unwired (the default for every pre-existing caller): dry, never an error.
+    const dryEngines = [];
+    const dryOnly = createFireSubsystem({
+      THREE: { Scene: FakeScene },
+      getFireRenderState: () => rainState,
+      createEngine: ({ kind, archetype }) => {
+        const e = {
+          kind,
+          archetype,
+          scene: { visible: true, renderOrder: 0 },
+          paramCalls: [],
+          setSpawnPoints() {},
+          setParams(p) {
+            e.paramCalls.push(p);
+          },
+          step() {},
+          debugState: () => ({ kind, archetype }),
+        };
+        dryEngines.push(e);
+        return e;
+      },
+    });
+    dryOnly.sync(renderer3, 0, 0.016, rect3);
+    t.ok(
+      'no getPrecip01 wired: every engine reads rain01 = 0 (a dry world), never undefined',
+      dryEngines.length === 6 && dryEngines.every((e) => e.paramCalls.at(-1)?.rain01 === 0)
     );
   }
 }

@@ -34,8 +34,22 @@ import {
   flameGradientStops,
   buildFireWindSuppressionNode,
   buildFireOpennessGainNode,
+  buildFireLeanGainNode,
+  buildFireLeanProfileNode,
+  buildFireWeatherStressNode,
+  buildFireStressResponseNodes,
+  buildFireGutterNode,
 } from '../fire-sprite.js';
-import { fireWindParticleResponse, fireWindSuppressionFloors, fireOpennessGain01 } from '../fire-geometry.js';
+import {
+  fireWindParticleResponse,
+  fireWindSuppressionFloors,
+  fireOpennessGain01,
+  fireLeanGain01,
+  fireLeanProfile01,
+  fireWeatherStress01,
+  fireStressResponse,
+  FIRE_STRESS,
+} from '../fire-geometry.js';
 // The numeric TSL stub the wind tests use to EVALUATE node graphs in Node. Only
 // AGREEMENT between two paths through it is meaningful (see that file's header) —
 // which is exactly the question here: does the shader's curve equal the CPU's?
@@ -300,6 +314,104 @@ export function run(t) {
     t.ok(
       'a sealed spot has gain exactly 0 in the shader too — the old max(sqrt(o), 0.3) gave it 0.3',
       values(buildFireOpennessGainNode(TSL, f(0)))[0] === 0
+    );
+  }
+
+  // ── THE BENT FLAME AND THE WEATHER: SHADER == CPU REFERENCE (2026-10-19) ──────────────────────────────────────
+  // The draw shader builds these nodes; the cast light and the tests read the CPU functions. They must tell ONE story.
+  {
+    const TSL = {
+      ...TSL_STUB,
+      smoothstep: (e0, e1, x) => {
+        const u = TSL_STUB.clamp(x.sub(e0).div(e1.sub(e0)), TSL_STUB.float(0), TSL_STUB.float(1));
+        return u.mul(u).mul(TSL_STUB.float(3).sub(u.mul(TSL_STUB.float(2))));
+      },
+    };
+    const f = TSL.float;
+    const sweep = Array.from({ length: 21 }, (_, i) => i / 20);
+
+    let worstGain = 0;
+    for (const m of [...sweep, -0.5, 1.7]) {
+      worstGain = Math.max(worstGain, Math.abs(values(buildFireLeanGainNode(TSL, f(m)))[0] - fireLeanGain01(m)));
+    }
+    t.ok(
+      `the shader's lean gain equals fireLeanGain01, including out-of-range wind (worst error ${worstGain})`,
+      worstGain < 1e-12
+    );
+
+    let worstProfile = 0;
+    for (const age of [...sweep, -0.2, 1.4]) {
+      for (const curve of [0.3, 1, 1.4, 2, 4]) {
+        worstProfile = Math.max(
+          worstProfile,
+          Math.abs(values(buildFireLeanProfileNode(TSL, f(age), f(curve)))[0] - fireLeanProfile01(age, curve))
+        );
+      }
+    }
+    t.ok(`the shader's lean profile equals fireLeanProfile01 (worst error ${worstProfile})`, worstProfile < 1e-12);
+
+    let worstStress = 0;
+    for (const wind of sweep) {
+      for (const rain of sweep) {
+        for (const gain of [1, FIRE_STRESS.immuneGain]) {
+          const node = buildFireWeatherStressNode(TSL, { windMotion01: f(wind), rain01: f(rain), gain: f(gain) });
+          worstStress = Math.max(
+            worstStress,
+            Math.abs(values(node)[0] - fireWeatherStress01({ windMotion01: wind, rain01: rain, gain }))
+          );
+        }
+      }
+    }
+    t.ok(
+      `the shader's weather stress equals fireWeatherStress01 over a 21 x 21 wind/rain grid, snuffable and immune (worst error ${worstStress})`,
+      worstStress < 1e-12
+    );
+
+    let worstResponse = 0;
+    for (const s of [...sweep, -1, 2]) {
+      const nodes = buildFireStressResponseNodes(TSL, f(s));
+      const cpu = fireStressResponse(s);
+      worstResponse = Math.max(
+        worstResponse,
+        Math.abs(values(nodes.sizeMul)[0] - cpu.sizeMul),
+        Math.abs(values(nodes.opacityMul)[0] - cpu.opacityMul),
+        Math.abs(values(nodes.countMul)[0] - cpu.countMul),
+        Math.abs(values(nodes.emberCountMul)[0] - cpu.emberCountMul)
+      );
+    }
+    t.ok(
+      `the shader's stress response equals fireStressResponse (worst error ${worstResponse})`,
+      worstResponse < 1e-12
+    );
+
+    // THE GUTTER: only a function of (time, position), so a whole fire gutters together; always inside 0..1.
+    let lo = Infinity;
+    let hi = -Infinity;
+    let coldSeen = 0;
+    let n = 0;
+    for (let k = 0; k < 400; k++) {
+      const g = buildFireGutterNode(TSL, { posXY: TSL.vec2(100 + k * 7, 300 - k * 3), timeSec: f(k * 0.13) });
+      for (const v of [values(g.fast)[0], values(g.cold)[0]]) {
+        lo = Math.min(lo, v);
+        hi = Math.max(hi, v);
+      }
+      if (values(g.cold)[0] > 0.5) coldSeen++;
+      n++;
+    }
+    t.ok(`the gutter noises stay inside 0..1 (saw ${lo.toFixed(3)}..${hi.toFixed(3)})`, lo >= 0 && hi <= 1);
+    t.ok(
+      `cold dips are occasional, not constant and not absent (${coldSeen} of ${n} samples)`,
+      coldSeen > n * 0.02 && coldSeen < n * 0.5
+    );
+    const samePhase = (x, y) => {
+      const a = buildFireGutterNode(TSL, { posXY: TSL.vec2(x, y), timeSec: f(4.2) });
+      return [values(a.fast)[0], values(a.cold)[0]];
+    };
+    const near1 = samePhase(1000, 1000);
+    const near2 = samePhase(1006, 1004);
+    t.ok(
+      'two sprites a few px apart gutter almost in unison (position-phased, so a fire flickers as one body)',
+      Math.abs(near1[0] - near2[0]) < 0.08 && Math.abs(near1[1] - near2[1]) < 0.35
     );
   }
 }

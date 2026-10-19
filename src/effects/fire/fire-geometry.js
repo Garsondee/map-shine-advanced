@@ -862,7 +862,7 @@ export function clusterFireSources(sources, cellPx) {
     const key = `${Math.floor(x / size)}:${Math.floor(y / size)}`;
     let c = cells.get(key);
     if (!c) {
-      c = { xw: 0, yw: 0, w: 0, count: 0, ids: [], area: 0, intensity: 0, elevation: 0, exposure: 0 };
+      c = { xw: 0, yw: 0, w: 0, count: 0, ids: [], area: 0, intensity: 0, elevation: 0, exposure: 0, outdoors: 0 };
       cells.set(key, c);
     }
     // Weight the centroid by AREA, not by count: a bonfire beside three embers
@@ -876,6 +876,8 @@ export function clusterFireSources(sources, cellPx) {
     c.intensity += Number.isFinite(s?.intensity) ? s.intensity : 1;
     c.elevation += Number.isFinite(s?.elevation) ? s.elevation : 0;
     c.exposure += Number.isFinite(s?.windExposure) ? s.windExposure : 1;
+    // The roof question (the painted `_Outdoors` mask), NOT the wind one: it decides whether RAIN reaches the fire.
+    c.outdoors += Number.isFinite(s?.outdoors01) ? s.outdoors01 : 1;
     if (s?.id) c.ids.push(String(s.id));
   }
 
@@ -896,6 +898,7 @@ export function clusterFireSources(sources, cellPx) {
       intensity: c.intensity / c.count,
       elevation: c.elevation / c.count,
       exposure: c.exposure / c.count,
+      outdoors: c.outdoors / c.count,
     });
   }
   // Sorted so the descriptor list itself is deterministic frame to frame.
@@ -1010,6 +1013,8 @@ export function deriveFireSeed(x, y) {
  * @param {number} [opts.windResponseGain=1] - `FIRE_PARAMS.windResponse`, 0..2.
  * @param {number} [opts.weatherResponse01=1] - `FIRE_PARAMS.weatherResponse`, 0..1.
  * @param {boolean} [opts.canBeSnuffed=true] - `FIRE_PARAMS.canBeSnuffed`.
+ * @param {number} [opts.precip01=0] - the scene's eased precipitation, 0..1 (rain dims the light with the flame).
+ * @param {number} [opts.rainResponse01=1] - `FIRE_PARAMS.rainResponse`, 0..2.
  * @returns {Array<object>} light descriptors.
  */
 export function buildFireLightSources(
@@ -1023,6 +1028,8 @@ export function buildFireLightSources(
     windResponseGain = 1,
     weatherResponse01 = 1,
     canBeSnuffed = true,
+    precip01 = 0,
+    rainResponse01 = 1,
   } = {}
 ) {
   const plan = fireTierPlan(tier);
@@ -1070,7 +1077,23 @@ export function buildFireLightSources(
       weatherResponse01,
       snuffWind: chain.snuffWind,
     });
-    const alive01 = fireWindParticleResponse(windMotion01, canBeSnuffed).flameActiveCountMul;
+    // ⚠️ THE LIGHT FOLLOWS THE SAME WEATHER STRESS THE FLAME DOES (2026-10-19) — wind AND rain, in one number, so the
+    // cast glow dims and shrinks with the sprites instead of staying full while the flame is nearly out. Rain only
+    // reaches a fire under open sky: the cluster's own `_Outdoors` average gates it.
+    const rain01 = clampNum(
+      clampNum(Number.isFinite(precip01) ? precip01 : 0, 0, 1) *
+        clampNum(Number.isFinite(weatherResponse01) ? weatherResponse01 : 1, 0, 1) *
+        clampNum(Number.isFinite(rainResponse01) ? rainResponse01 : 1, 0, 2) *
+        clampNum(Number.isFinite(c.outdoors) ? c.outdoors : 1, 0, 1),
+      0,
+      1
+    );
+    const stress01 = fireWeatherStress01({
+      windMotion01,
+      rain01,
+      gain: canBeSnuffed ? 1 : FIRE_STRESS.immuneGain,
+    });
+    const alive01 = fireStressResponse(stress01).lightMul;
     if (!(alive01 > 0.02)) continue;
 
     const seed = deriveFireSeed(c.x, c.y);
@@ -1362,6 +1385,137 @@ export function fireWindSuppressionFloors(canBeSnuffed = true) {
   };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// THE BENT FLAME AND THE WEATHER — added 2026-10-19
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Author, live, full wind and full rain: the flame read as a STRING OF DETACHED BLOBS marching off in a straight
+// line, not as one flame leaning in the wind — and rain did nothing at all. Two separate causes, one picture.
+//
+// ⚠️ THE STRING OF BLOBS WAS PHYSICS, NOT TUNING. The flame was pushed by an integrated FORCE, the same one the
+// embers use. A damped particle under constant acceleration reaches a terminal speed in ~0.2 s, after which every
+// sprite moves at the SAME speed — so sprites born at even intervals stay evenly spaced, strung out along the wind
+// at (terminal speed × spawn interval). With the push the author had tuned that speed was thousands of px/s, so only
+// the few youngest sprites were ever inside the frame, each a separate bright blob. No dial could fix it: the model
+// had no concept of "the same flame".
+//
+// THE FIX IS KINEMATIC. A flame's lean is a FUNCTION OF ITS AGE, not an integral of a force:
+//
+//     offset = dir × leanGain(wind) × length × spriteSize × age01 ^ curve
+//
+// A newborn sprite sits on the fuel (age 0 ⇒ no lean — "the push should be weaker when a particle is new"), and the
+// older it is the further the wind has carried it. Every sprite of one age sits at the SAME offset, so the sprites
+// tile into one continuous bent body whatever the wind does; the length is in multiples of the sprite's own size so
+// it can never fling; and shortening the lifespan (the Wind-1 life dial) refreshes the flame faster without
+// changing its shape. Everything here is the CPU twin of `fire-sprite.js#buildFireLeanGainNode` and friends.
+
+/**
+ * Lean shape constants. `gainK` bends the wind→lean response (`m(1+Km)/(1+K)`): quiet at the bottom of the dial,
+ * decisive at the top, exactly 0 and 1 at the ends. `sizesPerPush` makes the author's "Flame wind push ×" dial mean
+ * what it says: 1.0 is this many sprite-sizes of lean at full wind, so the dial reads as "how far wind throws it".
+ */
+export const FIRE_LEAN = Object.freeze({
+  gainK: 2,
+  sizesPerPush: 0.6,
+});
+
+/**
+ * How much of its full lean a flame shows at a given local wind motion.
+ * @param {number} motion01 - the PUSH signal (`fireWindMotion01` without the weather gate), exposure applied.
+ * @returns {number} 0..1
+ */
+export function fireLeanGain01(motion01) {
+  const m = clampNum(Number.isFinite(motion01) ? motion01 : 0, 0, 1);
+  return (m * (1 + FIRE_LEAN.gainK * m)) / (1 + FIRE_LEAN.gainK);
+}
+
+/**
+ * Where along its lean a sprite of a given age sits, as a multiple of the full lean: 0 at birth, 1 at death.
+ * `curve` 1 is a straight tilted pillar; 2 is a cantilever (base anchored, tip streaming); below 1 front-loads it.
+ * @param {number} age01 @param {number} curve
+ * @returns {number} 0..1
+ */
+export function fireLeanProfile01(age01, curve) {
+  const t = clampNum(Number.isFinite(age01) ? age01 : 0, 0, 1);
+  const c = clampNum(Number.isFinite(curve) ? curve : 1, 0.05, 12);
+  return t ** c;
+}
+
+/**
+ * The full lean displacement, in px, of ONE flame sprite — the number the draw shader computes.
+ * @param {object} a
+ * @param {number} a.motion01 - local push motion.
+ * @param {number} a.age01 - the sprite's `age / life`.
+ * @param {number} a.sizePx - its own displayed base size (after the size dial and any weather shrink).
+ * @param {number} a.lengthSizes - lean length at full wind, in sprite sizes (`flameWindPush × FIRE_LEAN.sizesPerPush`).
+ * @param {number} a.curve - the base→tip curve.
+ * @returns {number} px along the (wall-deflected) wind direction.
+ */
+export function fireLeanOffsetPx({ motion01, age01, sizePx, lengthSizes, curve }) {
+  return fireLeanGain01(motion01) * lengthSizes * sizePx * fireLeanProfile01(age01, curve);
+}
+
+/**
+ * WEATHER STRESS: wind and rain folded into ONE 0..1 "how hard is this fire fighting to stay alive" number, and the
+ * floors it eases the flame toward. Wind ALONE at a full gale reaches ~0.45 (a bent, shrunken, flickering flame that is
+ * plainly still burning); rain alone ~0.45 (damp, smaller, steamy); the two TOGETHER reach 1 (small, dim, guttering —
+ * "almost extinguished and barely surviving"), because driven rain douses far harder than still rain.
+ *
+ * Shrinks the flame as a WHOLE (size, brightness, sprite count together) rather than thinning random sprites into
+ * isolated blobs, which is what the old count-only gutter did.
+ */
+export const FIRE_STRESS = Object.freeze({
+  windWeight: 0.45,
+  rainWeight: 0.45,
+  synergyWeight: 0.35,
+  /** What a fully stressed flame keeps of its size / brightness / sprite count / ember count / light. */
+  sizeFloor: 0.28,
+  opacityFloor: 0.3,
+  countFloor: 0.45,
+  emberCountFloor: 0.35,
+  lightFloor: 0.25,
+  /** Guttering: a fast flicker, and slow COLD dips that nearly put the flame out then let it revive. */
+  flickerDepth: 0.4,
+  coldDepth: 0.8,
+  coldSizeDepth: 0.35,
+  /** A stressed flame cools faster (its colour ramp advances (1 + coolRate × stress) × as quickly). */
+  coolRate: 0.6,
+  /** A fire that cannot be blown out feels this fraction of the stress. */
+  immuneGain: 0.4,
+});
+
+/**
+ * @param {object} [a]
+ * @param {number} [a.windMotion01=0] - local wind motion WITH the weather gate (`fireWindMotion01`), exposure in.
+ * @param {number} [a.rain01=0] - rain reaching this spot: precip × sky exposure × the author's two rain dials.
+ * @param {number} [a.gain=1] - 1, or {@link FIRE_STRESS}`.immuneGain` for a fire that cannot be blown out.
+ * @returns {number} 0..1
+ */
+export function fireWeatherStress01({ windMotion01 = 0, rain01 = 0, gain = 1 } = {}) {
+  const wind =
+    smoothstep01(0, 1, clampNum(Number.isFinite(windMotion01) ? windMotion01 : 0, 0, 1)) ** SUPPRESSION_EASE_POWER;
+  const rain = clampNum(Number.isFinite(rain01) ? rain01 : 0, 0, 1);
+  const raw = FIRE_STRESS.windWeight * wind + FIRE_STRESS.rainWeight * rain + FIRE_STRESS.synergyWeight * wind * rain;
+  return clampNum(raw, 0, 1) * clampNum(Number.isFinite(gain) ? gain : 1, 0, 1);
+}
+
+/**
+ * What a given stress does to the flame. Each is a straight blend to its floor (1 at no stress).
+ * @param {number} stress01
+ * @returns {{sizeMul:number, opacityMul:number, countMul:number, emberCountMul:number, lightMul:number}}
+ */
+export function fireStressResponse(stress01) {
+  const s = clampNum(Number.isFinite(stress01) ? stress01 : 0, 0, 1);
+  const blend = (floor) => 1 - s * (1 - floor);
+  return {
+    sizeMul: blend(FIRE_STRESS.sizeFloor),
+    opacityMul: blend(FIRE_STRESS.opacityFloor),
+    countMul: blend(FIRE_STRESS.countFloor),
+    emberCountMul: blend(FIRE_STRESS.emberCountFloor),
+    lightMul: blend(FIRE_STRESS.lightFloor),
+  };
+}
+
 /**
  * How much of the gale a particle at THIS spot feels, given the wind bake's
  * geometry-derived openness there. Exactly the openness, clamped — the CPU twin
@@ -1492,7 +1646,8 @@ export const INDOOR_SMOKE_OPACITY_FRACTION = 0.5;
  *
  * @param {object} params - a resolved param bag (`effect-cascade.js#resolveEffectParams`).
  * @param {object} chain - from {@link fireScaleChain}.
- * @param {object} [wind] - `{speed01, outdoor01}`. Omitted (the default for
+ * @param {object} [wind] - `{speed01, outdoor01, precip01}`. `precip01` is the scene's eased
+ *   precipitation (0..1); omitted reads as no rain. Omitted (the default for
  *   every pre-existing call site and test) resolves the wind signal below to
  *   exactly 0 and `outdoor01` to 1 (fully outdoors, so indoor suppression is a
  *   no-op). `outdoor01` is `fires[].outdoors01` (the `_Outdoors` mask sample)
@@ -1509,6 +1664,14 @@ export function fireRuntimeFromParams(params = {}, chain = {}, wind = {}) {
 
   const weatherResponse = clampNum(num(p.weatherResponse, 1), 0, 1);
   const windResponseGain = clampNum(num(p.windResponse, 1), 0, 2);
+  // RAIN: the scene's eased precipitation × how much weather matters to this fire × the author's rain dial. Sky
+  // exposure is NOT here — it is applied per particle in the draw shader from the wind grid's own sky channel, so a
+  // hearth under a roof and a campfire in the open on one floor each get their own answer.
+  const rain01 = clampNum(
+    clampNum(num(wind?.precip01, 0), 0, 1) * weatherResponse * clampNum(num(p.rainResponse, 1), 0, 2),
+    0,
+    1
+  );
   const canBeSnuffed = bool(p.canBeSnuffed, true);
   // ⚠️ ONE WIND SIGNAL, EXPOSURE-EXCLUDED — AND EXPOSURE IS APPLIED PER PARTICLE
   // (2026-10-07; this used to be two signals). Author, live, 2026-09-04: "test
@@ -1649,10 +1812,15 @@ export function fireRuntimeFromParams(params = {}, chain = {}, wind = {}) {
         // Default 0 (off) — known good idea, currently buggy in practice
         // (author verdict, 2026-08-13); see FIRE_PARAMS.flameCohesion's help.
         cohesion: clampNum(num(p.flameCohesion, 0), -2, 3),
-        // How hard wind physically shoves flame, ON TOP OF the self-scaled
-        // guarantee `fire-particle-runtime.js#windAccelPerUnitSize` already
-        // provides — see that constant's own construction-site note.
-        windPushScale: clampNum(num(p.flameWindPush, 1), 0, 30),
+        // ⚠️ THE FLAME'S WIND IS A LEAN, NOT A FORCE (2026-10-19) — see "THE BENT FLAME" above. `flameWindPush` keeps
+        // its name and its meaning ("how hard wind throws the flame") but now sets a LENGTH: lean at full wind, in
+        // sprite sizes. The author's saved 3.7 reads as ~2.2 sprite sizes — a long, clearly bent flame.
+        leanLength: clampNum(num(p.flameWindPush, 3.7), 0, 30) * FIRE_LEAN.sizesPerPush,
+        leanCurve: clampNum(num(p.flameLeanCurve, 1.4), 0.3, 6),
+        leanTaper: clampNum(num(p.flameLeanTaper, 0.4), 0, 1),
+        leanStreak: clampNum(num(p.flameLeanStreak, 1.2), 0, 4),
+        leanFlutter: clampNum(num(p.flameLeanFlutter, 0.35), 0, 1.5),
+        leanSpread: clampNum(num(p.flameLeanSpread, 0.3), 0, 2),
       },
       ember: {
         // ⚠️ INDOOR-SUPPRESSED (2026-09-07) — see fireIndoorParticleResponse's
@@ -1679,8 +1847,11 @@ export function fireRuntimeFromParams(params = {}, chain = {}, wind = {}) {
         chaosAtWind1: clampNum(num(p.emberChaosAtWind1, 1.5), 0, 30),
         riseAtWind0: clampNum(num(p.emberRiseAtWind0, 1), 0, 30),
         riseAtWind1: clampNum(num(p.emberRiseAtWind1, 0.15), 0, 30),
-        // Same idea as flame's own windPushScale, above.
+        // How hard wind physically shoves an ember (embers stay free-flying particles — an integrated force is
+        // right for a spark that has left the fire), ON TOP OF the self-scaled guarantee in the runtime.
         windPushScale: clampNum(num(p.emberWindPush, 1), 0, 30),
+        // How long a spark's motion streak is (a short shutter along its own velocity). 0 = round dots.
+        streak: clampNum(num(p.emberStreak, 1), 0, 5),
       },
       smoke: {
         // ⚠️ WIND- AND INDOOR-MODULATED — fades to a literal ZERO active
@@ -1739,6 +1910,12 @@ export function fireRuntimeFromParams(params = {}, chain = {}, wind = {}) {
     // `windHandle.kernel()` sample at each particle's own position).
     windMotion01,
     windPushMotion01,
+    /** Rain reaching an open-sky fire, 0..1 (attached to every engine; the sky gate is per particle in the shader). */
+    rain01,
+    /** The author's own `rainResponse` dial, 0..2 — the light applies it itself (it has no per-particle sky). */
+    rainResponse: clampNum(num(p.rainResponse, 1), 0, 2),
+    /** 1, or {@link FIRE_STRESS}`.immuneGain` — how much of the weather stress this fire feels. */
+    stressGain: canBeSnuffed ? 1 : FIRE_STRESS.immuneGain,
     /**
      * The flame's floors for the per-particle suppression curve
      * (`fire-sprite.js#buildFireWindSuppressionNode`) — what the CPU used to

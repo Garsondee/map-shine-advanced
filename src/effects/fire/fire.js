@@ -288,15 +288,70 @@ export const FIRE_PARAMS = Object.freeze({
     label: 'Cohesion (pull together)',
     help: 'Pulls every flame toward the brightest part of its own fire. 0 = spawns spread across the full painted shape. 1 = every flame collapses onto that single hottest point. Negative pushes flames apart instead, beyond their painted region.',
   },
+  // ⚠️ THE FLAME'S WIND IS A LEAN, NOT A SHOVE (2026-10-19). Author, live, full wind and full rain: the flame read as a
+  // string of detached blobs marching off in a line. Wind used to push flame sprites with a force, which makes every
+  // sprite reach the same speed and stay evenly spaced — see `fire-geometry.js`, "THE BENT FLAME". It is now a lean by
+  // AGE: a newborn sprite sits on the fuel, the older it gets the further the wind has carried it, so the flame bends as
+  // ONE body. `flameWindPush` keeps its name; the five dials after it shape the bend.
   flameWindPush: {
     type: 'float',
     min: 0,
     max: 200,
     step: 0.05,
-    default: 8.6, // 2026-10-17 author's live-tuned defaults (was 1.5)
+    default: 3.7, // 2026-10-19: now a LENGTH (was a force multiplier; 8.6 before)
     category: 'Flame',
     label: 'Flame wind push ×',
-    help: "How hard wind physically shoves flame sideways, on top of the engine's own baked-in guarantee that full wind moves a flame several times its own size. 1 = exactly that guarantee; higher throws flame further, lower holds it closer to the hearth even in a gale. Only affects flame that is actually exposed to wind (see the Response category) — sheltered flame is untouched regardless of this dial.",
+    help: "How far wind throws the flame sideways: the lean of its oldest, outermost part at full wind, in multiples of a flame sprite's own size (this dial × 0.6). 3.7 ≈ 2.2 sprite-widths — a long, clearly bent flame. Sprites are born on the fuel and lean more the older they get, so the base stays put. Only flame that wind actually reaches leans (see Wind response); a flame beside a wall leans less.",
+  },
+  flameLeanCurve: {
+    type: 'float',
+    min: 0.3,
+    max: 6,
+    step: 0.05,
+    default: 1.4,
+    category: 'Flame',
+    label: 'Lean curve (base → tip)',
+    help: 'How the lean builds from the fuel bed to the flame tip. 1 = a straight tilted pillar. 2 = a cantilever: the base barely moves and the tip streams out. Below 1 the whole flame tilts almost at once. Higher keeps a tight, upright core with a long ragged tail.',
+  },
+  flameLeanTaper: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.05,
+    default: 0.4,
+    category: 'Flame',
+    label: 'Taper into the wind',
+    help: 'How much each flame sprite narrows toward the tip while wind leans it. 0 = a uniform-width smear; 1 = a sharp tongue. Does nothing in still air.',
+  },
+  flameLeanStreak: {
+    type: 'float',
+    min: 0,
+    max: 4,
+    step: 0.05,
+    default: 1.2,
+    category: 'Flame',
+    label: 'Streak along the wind',
+    help: 'How far the older sprites stretch ALONG the wind. It bridges the gaps between sprites so the flame stays one continuous body, and reads as flame licking downwind. 0 = round puffs (they can separate into blobs at a long lean).',
+  },
+  flameLeanFlutter: {
+    type: 'float',
+    min: 0,
+    max: 1.5,
+    step: 0.05,
+    default: 0.35,
+    category: 'Flame',
+    label: 'Flutter',
+    help: 'Gust waves travelling down the flame: the whole plume surges and sways as one thing rather than every sprite wobbling on its own. 0 = a rigid, frozen lean.',
+  },
+  flameLeanSpread: {
+    type: 'float',
+    min: 0,
+    max: 2,
+    step: 0.05,
+    default: 0.3,
+    category: 'Flame',
+    label: 'Tongue spread',
+    help: 'Sideways scatter that widens toward the tip, so the leaning flame breaks into ragged tongues instead of one tight comet. 0 = a single narrow streak.',
   },
 
   // ── Ember ─────────────────────────────────────────────────────────────────
@@ -397,7 +452,17 @@ export const FIRE_PARAMS = Object.freeze({
     default: 200, // 2026-10-17 author's live-tuned defaults (was 38)
     category: 'Ember',
     label: 'Ember wind push ×',
-    help: "How hard wind physically shoves embers sideways, on top of the engine's own baked-in guarantee that full wind moves an ember many times its own (tiny) size. 1 = exactly that guarantee; higher throws sparks further, lower keeps them closer even in a gale. Only affects embers actually exposed to wind (see the Response category).",
+    help: "How hard wind physically shoves embers sideways, on top of the engine's own baked-in guarantee that full wind moves an ember many times its own (tiny) size. 1 = exactly that guarantee; higher throws sparks further, lower keeps them closer even in a gale. A spark is launched from the fuel and the wind takes hold as it ages. Only affects embers actually exposed to wind (see the Response category).",
+  },
+  emberStreak: {
+    type: 'float',
+    min: 0,
+    max: 5,
+    step: 0.05,
+    default: 1,
+    category: 'Ember',
+    label: 'Ember streak ×',
+    help: 'Stretches each spark along its own direction of travel, like a short camera shutter: a wind-blown ember reads as a streak of light, a drifting one as a dot. 0 = round dots always.',
   },
   emberEmission: {
     type: 'float',
@@ -609,10 +674,10 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 2,
     step: 0.05,
-    default: 2, // 2026-10-17 author's live-tuned defaults (was 0.9)
+    default: 1, // 2026-10-19: 1 (was 2; 0.9 before that) — the flame lean is no longer under-driven, so 1 reads as "full wind, full lean"
     category: 'Motion',
     label: 'Wind response',
-    help: 'How much wind reaches this fire at all — the master gate every other wind dial (Flame/Ember wind push, lifetime/chaos/rise Wind 1 values) multiplies against. At 0 this fire ignores wind entirely, at 2 it reacts to a fraction of the map wind other fires need. The lean grows with height on its own, so a tall fire streams further than a short one at the same setting.',
+    help: 'How much wind reaches this fire at all — the master gate every other wind dial (Flame/Ember wind push, lifetime/chaos/rise Wind 1 values) multiplies against. At 0 this fire ignores wind entirely. A small fire reaches full response at a lower wind speed than a bonfire does; above 1 a fire reaches it at a gentler breeze still.',
   },
   animationSpeed: {
     type: 'float',
@@ -631,17 +696,27 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.05,
-    default: 0.1, // 2026-10-17 author's live-tuned defaults (was 1)
+    default: 1, // 2026-10-19: back to 1 (0.1 on 2026-10-17) — rain is wired now, and this no longer weakens the wind lean
     category: 'Response',
     label: 'Weather response',
-    help: 'How much rain and wind affect this fire. At 1, rain cools and steams it and a hard enough gale blows it out; at 0 it burns regardless.',
+    help: 'How much rain and wind put this fire under stress. At 1 a full gale bends it, shrinks it and makes it gutter, full rain dampens and cools it, and the two together leave it small, dim and barely surviving. At 0 it burns regardless. Rain only reaches fire under open sky, wind only fire that wind reaches. Does NOT weaken how far wind leans the flame (that is Wind response).',
+  },
+  rainResponse: {
+    type: 'float',
+    min: 0,
+    max: 2,
+    step: 0.05,
+    default: 1,
+    category: 'Response',
+    label: 'Rain response',
+    help: 'On top of Weather response: how hard rain douses this fire. 0 = rain does nothing to it (wind still does); 2 = even a drizzle nearly drowns it. Gated by the Outdoors mask per spot, so a roofed hearth stays dry while a campfire in the open does not.',
   },
   canBeSnuffed: {
     type: 'bool',
     default: true,
     category: 'Response',
     label: 'Can blow out',
-    help: 'Whether a strong enough wind can put this fire out. The threshold scales with size on its own — a lamp gutters in a breeze a bonfire ignores.',
+    help: 'Whether wind and rain can nearly put this fire out. Off, the fire feels only 40% of the weather stress: still bent and flickering, but it stays bright.',
   },
 });
 

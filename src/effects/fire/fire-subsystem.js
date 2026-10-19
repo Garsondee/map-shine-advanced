@@ -166,6 +166,8 @@ function fireListSignature(fires) {
  *   viewer's binding is reassigned on every rebake and this is constructed
  *   before its first assignment (the same TDZ-safe pattern the light pool uses).
  * @param {() => number} [deps.getPxPerMeter]
+ * @param {() => number} [deps.getPrecip01] - getter for the scene's EASED precipitation (0..1, the live weather
+ *   axis the rain itself is drawn from). Rain dims, shrinks and cools an open-sky fire; omitted reads as dry.
  * @param {(engine: object) => void} [deps.createEngine] - the injected factory
  *   (`createFireParticleEngine`). Injected rather than imported because
  *   `particles/allocator-only` keeps every `instancedArray` under
@@ -202,6 +204,7 @@ export function createFireSubsystem({
   getFireRenderState,
   getWindHandle = null,
   getPxPerMeter = null,
+  getPrecip01 = null,
   createEngine = null,
   profiler = null,
   depthTexNode = null,
@@ -417,6 +420,9 @@ export function createFireSubsystem({
     // reason a player can see reads as broken, while an indoor hearth sharing
     // that floor merely under-suppressing is a smaller, quieter miss. A
     // purely indoor floor still reaches full suppression exactly as before.
+    // RAIN (2026-10-19): the scene's eased precipitation, read live like the wind speed above. It is gated by sky
+    // exposure PER PARTICLE in the draw shader (the wind grid's `sky` channel), and per fire for the light.
+    const precip01 = Math.max(0, Math.min(1, Number(getPrecip01?.()) || 0));
     const outdoor01 = fires.length
       ? fires.reduce((max, f) => Math.max(max, Number.isFinite(f?.outdoors01) ? f.outdoors01 : 1), 0)
       : 1;
@@ -431,7 +437,7 @@ export function createFireSubsystem({
     const runtime = fireRuntimeFromParams(
       params,
       fireScaleChain(fires[0]?.diameterPx ?? 100, mPerPx, { fuel: params?.fuel }),
-      { speed01: windSpeed01, outdoor01 }
+      { speed01: windSpeed01, outdoor01, precip01 }
     );
 
     // THE DEPTH-AUTHORITY OCCLUSION GATE'S INPUT (mythica-machina-press#469) —
@@ -543,11 +549,12 @@ export function createFireSubsystem({
         // upward drift as wind rises. See fire-geometry.js#fireWindMotion01.
         windMotion01: runtime.windMotion01,
         windPushMotion01: runtime.windPushMotion01,
-        // The flame's floors for the PER-PARTICLE suppression curve — the engines
-        // evaluate it at each sprite's own position (see `fire-sprite.js#
-        // buildFireWindSuppressionNode`); the CPU no longer pre-multiplies a count.
-        windCountFloor: runtime.windSuppression.countFloor,
-        windOpacityFloor: runtime.windSuppression.opacityFloor,
+        // WEATHER STRESS (2026-10-19): rain reaching an open-sky fire and how much of the stress this fire feels. The
+        // flame, ember and light all turn wind + rain into ONE stress number per position (`fire-geometry.js#
+        // fireWeatherStress01`); the engines evaluate it at each sprite's own spot, so a roofed hearth and an open
+        // campfire on one floor each get their own answer.
+        rain01: runtime.rain01,
+        stressGain: runtime.stressGain,
         expectedDepth,
         // ⚠️ FIXED ALONGSIDE THE ABOVE (2026-08-30) — `hueShiftRad`/
         // `posterizeAmount`/`bandCount`/`tintMul` were the other three
@@ -602,6 +609,8 @@ export function createFireSubsystem({
           windSpeed01,
           windResponseGain: runtime.windResponse,
           weatherResponse01: runtime.weatherResponse,
+          precip01,
+          rainResponse01: runtime.rainResponse,
           canBeSnuffed: runtime.canBeSnuffed,
         })
       : [];

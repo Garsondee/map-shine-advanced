@@ -2356,7 +2356,9 @@ export function createFireBench({ THREE, log }) {
       const engineModule =
         params.engine === 'dev'
           ? await import(`./dev/fire-bent/fire-particle-runtime.dev.js?v=${bust}`)
-          : await import('../../src/effects/particles/fire-particle-runtime.js');
+          : params.engine === 'old'
+            ? await import(`./dev/fire-bent/old-runtime.dev.js?v=${bust}`)
+            : await import('../../src/effects/particles/fire-particle-runtime.js');
       const { uniform, float } = THREE.TSL;
 
       const FIRE = { x: 2048, y: 2400 };
@@ -2392,7 +2394,9 @@ export function createFireBench({ THREE, log }) {
         const walls =
           params.walls === 'room'
             ? ringWalls(FIRE.x - 300, FIRE.y - 300, FIRE.x + 300, FIRE.y + 300)
-            : [wl(FIRE.x + 80, FIRE.y - 400, FIRE.x + 80, FIRE.y + 400)];
+            : params.walls === 'none'
+              ? []
+              : [wl(FIRE.x + 80, FIRE.y - 400, FIRE.x + 80, FIRE.y + 400)];
         const structure = W.bakeWindStructure({ walls, gridSpec });
         gridArgs = {
           version: 1,
@@ -2404,6 +2408,8 @@ export function createFireBench({ THREE, log }) {
             wallAvoidDirY: structure.wallAvoidDirY,
             wallProximity: structure.wallProximity,
             windShadow: W.deriveWindShadow(structure, directionDeg),
+            // `params.sky: 'roofed'` = the painted _Outdoors mask is dark everywhere (rain cannot reach the fire).
+            sky: params.sky === 'roofed' ? new Float32Array(gridSpec.cols * gridSpec.rows) : structure.sky,
           },
         };
       }
@@ -2437,6 +2443,11 @@ export function createFireBench({ THREE, log }) {
           if (params.engine === 'dev') {
             const base = engine.setParams.bind(engine);
             engine.setParams = (p2) => base({ ...p2, rain01: activeRain, ...(params.devTune ?? {}) });
+          } else if (params.engine === 'old') {
+            // The previous engine pushed flame with a FORCE scaled by `windPushScale`; the new subsystem no longer sends
+            // it for flame, so hand it the author's own dial the way the old subsystem did.
+            const base = engine.setParams.bind(engine);
+            engine.setParams = (p2) => base(cfg.kind === 'flame' ? { ...p2, windPushScale: fireParams.flameWindPush } : p2);
           }
           engines.push(engine);
           return engine;
@@ -2524,8 +2535,193 @@ export function createFireBench({ THREE, log }) {
         ],
         artifacts: png ? [png] : [],
         inputs: { engine: params.engine ?? 'src', directionDeg, conditions, span, radiusPx },
-        stats: { tiles: tiles.map((t) => ({ label: t.label, ...frameStats(t.pixels) })) },
+        stats: {
+          tiles: tiles.map((t) => {
+            const s = frameStats(t.pixels);
+            // Where the single brightest pixel is, and how many separate lit bodies there are: the numbers the
+            // 'bent-flame-is-cohesive' scenario asserts on.
+            let peak = -1;
+            let peakIndex = 0;
+            for (let i = 0; i < STAGE_DIM * STAGE_DIM; i++) {
+              const l = (t.pixels[i * 4] + t.pixels[i * 4 + 1] + t.pixels[i * 4 + 2]) / 3;
+              if (l > peak) (peak = l), (peakIndex = i);
+            }
+            const px = peakIndex % STAGE_DIM;
+            // The lit extent (world px) at a low threshold, so a dim tail counts: how far the flame reaches.
+            let minX = STAGE_DIM;
+            let maxX = -1;
+            for (let y = 0; y < STAGE_DIM; y++) {
+              for (let x = 0; x < STAGE_DIM; x++) {
+                const i = (y * STAGE_DIM + x) * 4;
+                if ((t.pixels[i] + t.pixels[i + 1] + t.pixels[i + 2]) / 3 > 3) {
+                  if (x < minX) minX = x;
+                  if (x > maxX) maxX = x;
+                }
+              }
+            }
+            const toWorldX = (x) => rect.minX + ((x + 0.5) / STAGE_DIM) * (rect.maxX - rect.minX);
+            return {
+              label: t.label,
+              ...s,
+              peakWorldX: toWorldX(px),
+              litMinWorldX: maxX >= 0 ? toWorldX(minX) : null,
+              litMaxWorldX: maxX >= 0 ? toWorldX(maxX) : null,
+              blobs: countLitBlobs(t.pixels, 3, 80),
+            };
+          }),
+        },
       };
+    },
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // THE BENT FLAME, MEASURED (2026-10-19). Numbers, not eyeballs: the same whole-fire rig as the gallery, but it asserts
+  // the properties the author asked for — a flame that LEANS with the wind, stays ONE connected body (not a string of
+  // detached blobs), keeps its base on the fuel, shrinks and dims in rain + wind, and ignores weather it cannot feel.
+  // `params.oldEngine` (a module under tools/shader-lab/dev/fire-bent/) re-runs the cohesion check against the engine
+  // that produced the string of blobs, so the instrument is shown to be able to SEE the bug (else UNMEASURED).
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /** Connected components of "lit" pixels (4-connectivity), ignoring specks under `minPx` pixels. */
+  function countLitBlobs(pixels, threshold, minPx) {
+    const N = STAGE_DIM;
+    const seen = new Uint8Array(N * N);
+    const lit = (i) => (pixels[i * 4] + pixels[i * 4 + 1] + pixels[i * 4 + 2]) / 3 > threshold;
+    let blobs = 0;
+    const stack = [];
+    for (let start = 0; start < N * N; start++) {
+      if (seen[start] || !lit(start)) continue;
+      let size = 0;
+      stack.length = 0;
+      stack.push(start);
+      seen[start] = 1;
+      while (stack.length) {
+        const p = stack.pop();
+        size++;
+        const x = p % N;
+        const y = (p - x) / N;
+        if (x > 0 && !seen[p - 1] && lit(p - 1)) (seen[p - 1] = 1), stack.push(p - 1);
+        if (x < N - 1 && !seen[p + 1] && lit(p + 1)) (seen[p + 1] = 1), stack.push(p + 1);
+        if (y > 0 && !seen[p - N] && lit(p - N)) (seen[p - N] = 1), stack.push(p - N);
+        if (y < N - 1 && !seen[p + N] && lit(p + N)) (seen[p + N] = 1), stack.push(p + N);
+      }
+      if (size >= minPx) blobs++;
+    }
+    return blobs;
+  }
+
+  scenarios.set('bent-flame-is-cohesive', {
+    name: 'bent-flame-is-cohesive',
+    summary:
+      'Whole fire, author settings, wind east: the flame must lean downwind, stay ONE connected body with its base on ' +
+      'the fuel, shrink and dim in wind + rain, and ignore weather it cannot feel (sealed room, roofed rain).',
+    async run({ params = {} }) {
+      const common = {
+        radiusPx: 25,
+        span: 900,
+        directionDeg: 90, // blows TOWARD +x (east)
+        across: 3,
+        tilePx: 400,
+        fire: { windResponse: 1, smokeCount: 0, emberCount: 0, flameEmission: 25, flameOpacity: 4, ...(params.fire ?? {}) },
+        engine: params.engine ?? 'src',
+      };
+      const FIRE_X = 2048;
+      const FIRE_Y = 2400;
+      // One run per condition through the gallery's own rig (its tiles' pixels come back via stats), reading the
+      // per-condition numbers the gallery already computes plus the blob and lean metrics measured from the frame.
+      const metrics = {};
+      async function one(label, extra, cond) {
+        const r = await window.lab.run('fire', 'bent-flame-gallery', {
+          params: { ...common, ...extra, conditions: [cond], across: 1, tilePx: 512, returnPixels: true },
+        });
+        metrics[label] = r.stats?.tiles?.[0] ?? null;
+        return r;
+      }
+      await one('calm', {}, { wind: 0, rain: 0, label: 'calm' });
+      await one('gale', {}, { wind: 1, rain: 0, label: 'gale east' });
+      await one('both', {}, { wind: 1, rain: 1, label: 'gale + rain' });
+      await one('roofedRain', { walls: 'none', sky: 'roofed' }, { wind: 0, rain: 1, label: 'rain, roofed' });
+      await one('dryOpen', { walls: 'none' }, { wind: 0, rain: 0, label: 'dry, open' });
+      await one('sealedGale', { walls: 'room' }, { wind: 1, rain: 0, label: 'gale, sealed room' });
+      await one('sealedCalm', { walls: 'room' }, { wind: 0, rain: 0, label: 'calm, sealed room' });
+      const m = metrics;
+      const shiftOf = (x) => (x ? x.centroidWorldX - FIRE_X : NaN);
+      const checks = [
+        evaluate('calm-flame-sits-on-the-fuel', () => ({
+          ok: Math.abs(shiftOf(m.calm)) < 25 && m.calm.blobs === 1,
+          measured: { centroidShiftPx: Number(shiftOf(m.calm).toFixed(1)), blobs: m.calm.blobs },
+          expected: '|shift| < 25 px and exactly one lit body',
+        })),
+        evaluate('gale-leans-the-flame-downwind', () => {
+          const reachCalm = m.calm.litMaxWorldX - FIRE_X;
+          const reachGale = m.gale.litMaxWorldX - FIRE_X;
+          return {
+            ok: reachGale > 1.6 * reachCalm && reachGale > 110 && Math.abs(m.gale.centroidWorldY - FIRE_Y) < 60,
+            measured: {
+              calmReachEastPx: Number(reachCalm.toFixed(1)),
+              galeReachEastPx: Number(reachGale.toFixed(1)),
+              centroidShiftEastPx: Number(shiftOf(m.gale).toFixed(1)),
+              offAxisPx: Number((m.gale.centroidWorldY - FIRE_Y).toFixed(1)),
+            },
+            expected: 'the flame reaches > 1.6x further east than in calm air (and > 110 px), staying on the wind axis (±60 px)',
+          };
+        }),
+        evaluate('gale-flame-is-ONE-connected-body-not-a-string-of-blobs', () => ({
+          ok: m.gale.blobs === 1,
+          measured: { blobs: m.gale.blobs },
+          expected: 'exactly one connected lit body at a low threshold (the force-driven flame at the author settings leaves a gap)',
+        })),
+        evaluate('gale-flame-keeps-its-base-on-the-fuel', () => ({
+          ok: Math.abs(m.gale.peakWorldX - FIRE_X) < 90,
+          measured: { brightestPixelFromFuelPx: Number((m.gale.peakWorldX - FIRE_X).toFixed(1)) },
+          expected: 'the brightest pixel stays within 90 px of the fuel: the base is anchored, the tip streams',
+        })),
+        evaluate('gale-and-rain-nearly-put-the-fire-out', () => ({
+          ok: m.both.meanLuma < 0.4 * m.calm.meanLuma && m.both.meanLuma > 0.01 * m.calm.meanLuma,
+          measured: { bothOverCalm: Number((m.both.meanLuma / m.calm.meanLuma).toFixed(3)) },
+          expected: '1% < luma(gale + rain) / luma(calm) < 40%: barely surviving, not gone',
+        })),
+        evaluate('rain-under-a-roof-leaves-the-fire-alone', () => ({
+          ok: m.roofedRain.meanLuma > 0.75 * m.dryOpen.meanLuma,
+          measured: { roofedOverDry: Number((m.roofedRain.meanLuma / m.dryOpen.meanLuma).toFixed(3)) },
+          expected: '> 75% of the dry reading (sky exposure 0 = no rain reaches it; the rest is flicker)',
+        })),
+        evaluate('a-sealed-room-feels-no-gale', () => ({
+          ok: Math.abs(shiftOf(m.sealedGale) - shiftOf(m.sealedCalm)) < 8,
+          measured: { calmShiftPx: Number(shiftOf(m.sealedCalm).toFixed(1)), galeShiftPx: Number(shiftOf(m.sealedGale).toFixed(1)) },
+          expected: 'the gale moves the flame centroid < 8 px in a sealed room',
+        })),
+      ];
+      if (params.oldEngine) {
+        // The previous engine at the AUTHOR'S OWN wind-response dial (0.2), where the report came from.
+        const old = await window.lab.run('fire', 'bent-flame-gallery', {
+          params: {
+            ...common,
+            fire: { ...common.fire, windResponse: 0.2 },
+            engine: 'old',
+            conditions: [{ wind: 1, rain: 0, label: 'gale east (OLD engine, author dial)' }],
+            across: 1,
+            tilePx: 512,
+          },
+        });
+        const o = old.stats?.tiles?.[0];
+        checks.push(
+          evaluate('the-rig-can-see-the-old-string-of-blobs', () => ({
+            ok: o.blobs >= 2,
+            measured: { oldEngineBlobs: o.blobs },
+            expected: '>= 2 detached lit bodies on the previous engine (else the cohesion check above would be vacuous)',
+          }))
+        );
+      } else {
+        checks.push(
+          check({
+            id: 'the-rig-can-see-the-old-string-of-blobs',
+            status: 'UNMEASURED',
+            note: 'pass params.oldEngine = true with tools/shader-lab/dev/fire-bent/old-runtime.dev.js staged (git show <old sha>:src/effects/particles/fire-particle-runtime.js, imports rewritten)',
+          })
+        );
+      }
+      return { checks, inputs: { ...common }, stats: metrics };
     },
   });
 

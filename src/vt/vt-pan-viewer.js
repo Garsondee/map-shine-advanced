@@ -4674,6 +4674,11 @@ export async function startVtPanViewer({
       THREE,
       getFireRenderState,
       getWindHandle: () => windHandle,
+      // RAIN DOUSES FIRE (2026-10-19) — the SAME eased precipitation the rain itself is drawn from
+      // (`env.weather.precip01`, read through `lastEnvSnapshot` exactly as `getPrecipRenderState` does). A getter, and
+      // TDZ-safe for the same reason `getWindHandle` is: `lastEnvSnapshot` is declared further down this function and
+      // the subsystem only calls this from the frame loop.
+      getPrecip01: () => lastEnvSnapshot?.env?.weather?.precip01 ?? 0,
       // ⚠️ MISNAMED, AND KNOWINGLY LEFT THAT WAY FOR NOW (2026-09-04,
       // mythica-machina-press#498). `distancePixels` is pixels per DISTANCE
       // UNIT (per foot on a feet-authored scene), not per metre — verified

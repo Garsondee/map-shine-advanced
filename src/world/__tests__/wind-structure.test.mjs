@@ -22,6 +22,7 @@ import {
   bakeWindStructure,
   applyOpenSky,
   sampleOutdoorsAtCells,
+  skyExposureFromCells,
   outdoorsGridSignature,
   computeFineConnectivity,
   deriveWindOpenness,
@@ -674,6 +675,29 @@ export function run(t) {
       'applyOpenSky ignores a mismatched array rather than writing garbage',
       applyOpenSky(geometry, new Float32Array(3)) === 0
     );
+
+    // SKY EXPOSURE per cell — the rain gate (2026-10-19). Not wind: the roofed yard is dark, the open one bright.
+    {
+      const withMask = bakeWindStructure({ walls, gridSpec: spec, outdoors: mask(true) });
+      ok(
+        'structure.sky is the painted _Outdoors value per cell: dark under the roof, bright outside',
+        withMask.sky[inside] === 0 && withMask.sky[outside] === 1 && withMask.sky.length === spec.cols * spec.rows
+      );
+      ok(
+        'no mask => sky is open (1) everywhere, never a silent roof',
+        geometry.sky.every((v) => v === 1)
+      );
+      const off = { spec: { x: 0, y: 0, width: 500, height: 500, w: 5, h: 5 }, data: new Uint8Array(25).fill(0) };
+      const partial = bakeWindStructure({ walls, gridSpec: spec, outdoors: off });
+      ok(
+        'a cell off the mask rect keeps open sky (the same fallback a missing mask gets)',
+        partial.sky[cellAt(geometry, 2500, 2000)] === 1
+      );
+      ok(
+        'skyExposureFromCells ignores a mismatched array',
+        skyExposureFromCells(new Float32Array(3), 9).every((v) => v === 1)
+      );
+    }
 
     ok(
       'the signature changes when the painted sky changes, and is stable when it does not',

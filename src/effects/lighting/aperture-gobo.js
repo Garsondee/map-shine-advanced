@@ -970,53 +970,6 @@ const smoothstep01 = (edge0, edge1, v) => {
   return t * t * (3 - 2 * t);
 };
 
-/** The narrowest the segment-weight ramp past a window's end may get, in
- * wall-space px — `computeApertureSegmentWeight`'s own floor. One pixel keeps
- * a sub-pixel gap between a window's end and the next wall (a drawing slip,
- * not a real opening) inside the frame's own shadow instead of a bright
- * sliver, and keeps the TSL `smoothstep` edges strictly ordered. */
-export const SEGMENT_RAMP_MIN_PX = 1;
-
-/**
- * DOES THIS RAY GO THROUGH THE GLASS AT ALL? (mmp-8nr, 2026-10-19) — the
- * weight with which ONE aperture gets a say over a floor point, from where the
- * ray light->point crosses the aperture's wall LINE (`sW`, wall-space px from
- * the wall's own A end): 1 anywhere on the segment `[0, wallLen]`, falling
- * smoothly to 0 within `rampPx` past either end.
- *
- * THE BUG THIS FIXES — "hard lines inside the light near walls": every
- * earlier design asked only "is the point on the far side of the window's
- * INFINITE line" (`projectFloorPointToWindow`'s `x > 0`), then let the frame
- * gate darken every ray that crossed that line beside the glass. That is a
- * claim over the whole half-plane: light through an open door beside the
- * window, open ground beside a building, the rest of an L-shaped room, the
- * strip of room beside a window drawn a few px in from the wall line — all
- * read 0, with a full 0->1 step exactly on the window's line where nothing
- * stands. A window has no say over light that never went through it; whether
- * such light reaches the point at all is Foundry's own sweep's question, and
- * it has already answered it with the light's polygon.
- *
- * The ramp (not a hard cut at the end) keeps the result continuous: just
- * inside the end the frame gate already reads ~0 (the casing's shadow), so
- * fading the aperture's say out over `rampPx` past the end is a soft
- * shoulder, the same blur the frame edge itself gets. With the window's end
- * sealed by a wall (the usual case) Foundry draws nothing past it, so this
- * changes nothing visible there.
- *
- * @param {number} sW - where the ray crosses the wall line (unwarped).
- * @param {number} wallLen
- * @param {number} rampPx - fade width past either end; floored at `SEGMENT_RAMP_MIN_PX`.
- * @returns {number} `[0,1]`; non-finite `sW` reads 0 (off the glass).
- */
-export function computeApertureSegmentWeight(sW, wallLen, rampPx) {
-  if (!Number.isFinite(sW)) return 0;
-  const len = Math.max(Number.isFinite(wallLen) ? wallLen : 0, 0);
-  const outside = Math.max(-sW, sW - len);
-  if (outside <= 0) return 1;
-  const ramp = Math.max(Number.isFinite(rampPx) ? rampPx : 0, SEGMENT_RAMP_MIN_PX);
-  return 1 - smoothstep01(0, ramp, outside);
-}
-
 /**
  * ONE aperture's contribution at ONE floor point. `applicable:false` (P is on
  * the interior side of THIS wall) must be excluded from any combine — see
@@ -1063,13 +1016,11 @@ export function computeApertureSegmentWeight(sW, wallLen, rampPx) {
  *   mullion pattern itself looks distorted," which is exactly what shifting
  *   ITS OWN input coordinate produces, no new gate math needed. Zero-default:
  *   every caller/test that predates round 13 is byte-identical.
- * @returns {{applicable:boolean, gobo:number, weight:number}} `weight`
- *   (`computeApertureSegmentWeight`) is how much say this aperture has at
- *   `P`: 1 when the ray crosses the glass, 0 clear of it.
+ * @returns {{applicable:boolean, gobo:number}}
  */
 export function computeApertureGoboTerm(P, aperture, h, dist01, windowParams, extraSpokeOffsetPx = 0) {
   const proj = projectFloorPointToWindow(P, aperture);
-  if (!proj) return { applicable: false, gobo: 1, weight: 0 };
+  if (!proj) return { applicable: false, gobo: 1 };
 
   const soft = computeApertureSoftPx(dist01, windowParams.softFarPx);
   const warpedSW = proj.sW + (Number.isFinite(extraSpokeOffsetPx) ? extraSpokeOffsetPx : 0);
@@ -1209,46 +1160,27 @@ export function computeApertureGoboTerm(P, aperture, h, dist01, windowParams, ex
     dimRadiusSuppress = 1 - smoothstep01(loFrac, hiFrac, Number.isFinite(dist01) ? dist01 : 0);
   }
 
-  // THE SEGMENT WEIGHT (`computeApertureSegmentWeight`, mmp-8nr) — how much
-  // say this aperture has here at all: from the UNWARPED crossing (the glass
-  // warp distorts the pattern on the glass; it does not move the wall), faded
-  // past the window's ends over the spoke axis's own blur width.
-  const weight = computeApertureSegmentWeight(proj.sW, windowParams.wallLen, spokeSoft);
-  return { applicable: true, gobo: fadedGobo * windowEdgeSuppress * dimRadiusSuppress, weight };
+  return { applicable: true, gobo: fadedGobo * windowEdgeSuppress * dimRadiusSuppress };
 }
 
 /**
- * THE LIGHT-LEVEL COMBINE — REWRITTEN mmp-8nr (2026-10-19): `min` over the
- * windows the ray light->P actually passes THROUGH, each faded in by its own
- * segment weight (`computeApertureSegmentWeight`):
- *   `t_i = gobo_i + (1 - gobo_i) * (1 - weight_i)`, result `min_i t_i`.
+ * THE LIGHT-LEVEL COMBINE — `max` over every APPLICABLE aperture
+ * (`docs/planning/Aperture-Gobo.md` §6.1: alternative light paths are a
+ * union, never a product — a product would double-shadow a pixel lit through
+ * two windows). `applicable:false` apertures are EXCLUDED from the combine
+ * entirely, never folded in as a neutral 1 — an earlier draft of this
+ * reasoning tried "inapplicable reads as 1, max as normal" and it is
+ * actually WRONG: with two+ apertures per light, a point genuinely lit
+ * (and mullion-shadowed) through window B, but on the interior side of
+ * window A's own infinite line, would let A's neutral 1 win the max over
+ * B's real, darker value — erasing a real shadow the moment a second window
+ * exists on the same light. The fix is a real "no opinion" exclusion, not a
+ * neutral value fed into the same reduction. UNCHANGED by design 4.
  *
- * WHY NOT THE OLD `max` OVER "APPLICABLE" APERTURES — the old rule
- * (`docs/planning/Aperture-Gobo.md` §6.1, "alternative light paths are a
- * union") reasoned about several paths to one pixel. In this model there is
- * exactly ONE path: the straight ray from the light to `P`. It crosses each
- * window's line at most once, so a window either lies on that ray or it does
- * not. The `max` only ever worked because "applicable" meant "P is past the
- * window's INFINITE line", which marked every ray that crossed the line
- * beside the glass as dark — and the max let a real window's value win back
- * over those false zeros. With the weight saying "this ray misses the glass"
- * directly, the false zeros are gone, and the right reduction over the
- * windows a ray DOES pass through is the darkest: light through an interior
- * glazed partition and then an outer window is shaded by the mullions and
- * the sill of BOTH (the old max let it pass through the solid wall under the
- * outer sill). `min` rather than a product so a window drawn twice, or two
- * overlapping segments, look exactly like one window.
- *
- * What did NOT change: an aperture P is on the light's side of
- * (`applicable:false`) still has no opinion; a light with no aperture on the
- * ray reads 1, fully unmodulated (fail-open,
- * `feedback_gate_polarity_must_fail_open`); a single window crossed on its
- * glass returns its own term bit for bit (`weight === 1` short-circuits, no
- * `1-(1-g)` rounding).
- *
- * Each aperture is gated with ITS OWN `wallLen` when it carries one (the GPU
- * twin already reads it per aperture from `uSLAWallLen.z`); `windowParams`'
- * own `wallLen` is the fallback for hand-built test apertures.
+ * A light with ZERO applicable apertures at this point (by far the common
+ * case — most of a room's own floor is not being viewed "through" any
+ * window) reads as 1, fully unmodulated — fail-open,
+ * `feedback_gate_polarity_must_fail_open`.
  *
  * @param {{x:number,y:number}} P
  * @param {object[]} apertures - this light's own oriented apertures (`findAperturesForLight`).
@@ -1259,18 +1191,15 @@ export function computeApertureGoboTerm(P, aperture, h, dist01, windowParams, ex
  */
 export function computeApertureGoboForLight(P, apertures, h, dist01, windowParams) {
   if (!apertures || apertures.length === 0) return 1;
-  let result = 1;
+  let anyApplicable = false;
+  let runningMax = 0;
   for (const aperture of apertures) {
-    const params =
-      Number.isFinite(aperture?.wallLen) && aperture.wallLen !== windowParams.wallLen
-        ? { ...windowParams, wallLen: aperture.wallLen }
-        : windowParams;
-    const { applicable, gobo, weight } = computeApertureGoboTerm(P, aperture, h, dist01, params);
-    if (!applicable || !(weight > 0)) continue;
-    const transmitted = weight >= 1 ? gobo : gobo + (1 - gobo) * (1 - weight);
-    if (transmitted < result) result = transmitted;
+    const { applicable, gobo } = computeApertureGoboTerm(P, aperture, h, dist01, windowParams);
+    if (!applicable) continue;
+    anyApplicable = true;
+    if (gobo > runningMax) runningMax = gobo;
   }
-  return result;
+  return anyApplicable ? runningMax : 1;
 }
 
 // ============================================================================

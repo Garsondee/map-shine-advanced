@@ -184,26 +184,16 @@ export function deriveWallBlocksExterior({ move } = {}) {
  * an aperture either — an aperture is always a deliberate authored choice,
  * never the resting state of an unedited wall.
  *
- * AN OPEN DOOR IS NEVER AN APERTURE (mmp-8nr, 2026-10-19): Foundry sets
- * every sense of an open door to NONE (`client/documents/wall.mjs`, the
- * `isOpen` branch of the edge build), so an open glass door is no edge at
- * all — light walks through it unshaped. Reading it as a window put a pane
- * pattern on light passing through an empty doorway. Closed, locked and
- * secret doors are ordinary walls to the sweep and stay apertures.
- *
- * @param {{move?: number, light?: number, door?: number, ds?: number}} [wall] -
- *   raw field values off a WallDocument (or a plain test fixture). A missing
- *   field falls back to the SCHEMA's own default (see this file's own
- *   header), same discipline as `deriveWallSolid`/`deriveWallBlocksExterior`.
+ * @param {{move?: number, light?: number}} [wall] - raw field values off a
+ *   WallDocument (or a plain test fixture). A missing field falls back to
+ *   the SCHEMA's own default (see this file's own header), same discipline
+ *   as `deriveWallSolid`/`deriveWallBlocksExterior`.
  * @returns {boolean}
  */
-export function deriveWallAperture({ move, light, door, ds } = {}) {
+export function deriveWallAperture({ move, light } = {}) {
   const moveVal = Number.isFinite(move) ? move : WALL_MOVEMENT_NORMAL;
   const lightVal = Number.isFinite(light) ? light : WALL_LIGHT_NORMAL;
-  const doorVal = Number.isFinite(door) ? door : WALL_DOOR_NONE;
-  const dsVal = Number.isFinite(ds) ? ds : WALL_DOOR_STATE_CLOSED;
-  const isOpenDoor = doorVal !== WALL_DOOR_NONE && dsVal === WALL_DOOR_STATE_OPEN;
-  return moveVal !== WALL_MOVEMENT_NONE && lightVal === WALL_LIGHT_PROXIMITY && !isOpenDoor;
+  return moveVal !== WALL_MOVEMENT_NONE && lightVal === WALL_LIGHT_PROXIMITY;
 }
 
 /**
@@ -244,7 +234,7 @@ export function readSceneWallSegments(levelId = null) {
         // a raw wall, added here rather than a second `canvas.scene.walls`
         // reader (`foundry/adapter-only` — this file is already the one place
         // that reads it).
-        aperture: deriveWallAperture({ move: wall.move, light: wall.light, door: wall.door, ds: wall.ds }),
+        aperture: deriveWallAperture({ move: wall.move, light: wall.light }),
       });
     }
     return out;

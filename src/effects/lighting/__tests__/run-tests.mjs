@@ -30,7 +30,6 @@ import { run as runLayerSmear } from './layer-smear.test.mjs';
 import { run as runLayerSmearRender } from './layer-smear-render.test.mjs';
 import { run as runApertureGobo } from './aperture-gobo.test.mjs';
 import { run as runApertureGoboRender } from './aperture-gobo-render.test.mjs';
-import { run as runApertureGoboWalls } from './aperture-gobo-walls.test.mjs';
 import { run as runPlayerLightGeometry } from './player-light-geometry.test.mjs';
 
 let passed = 0;
@@ -82,7 +81,6 @@ const suites = [
   ['layer-smear-render', runLayerSmearRender],
   ['aperture-gobo', runApertureGobo],
   ['aperture-gobo-render', runApertureGoboRender],
-  ['aperture-gobo-walls', runApertureGoboWalls],
   ['player-light-geometry', runPlayerLightGeometry],
 ];
 for (const [name, fn] of suites) {

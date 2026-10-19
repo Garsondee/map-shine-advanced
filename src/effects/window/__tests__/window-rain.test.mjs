@@ -31,6 +31,11 @@ import {
 } from '../window-rain.js';
 
 const look = { ...WINDOW_RAIN_DEFAULTS };
+const clamp01Test = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
+const smoothstepTest = (a, b, x) => {
+  const u = clamp01Test((x - a) / (b - a));
+  return u * u * (3 - 2 * u);
+};
 
 /** The pre-2026-10-19 dials: a few tests below assert the shape of the model at a moderate look, not the shipped one. */
 const moderateLook = {
@@ -496,7 +501,7 @@ export function run(t) {
       t.ok('rain: ' + name + ' sliders never run back up the pane', !backward);
       t.ok('rain: ' + name + ' sliders can be followed the whole way (' + lost + ' steps lost)', lost === 0);
       t.ok('rain: ' + name + ' sliders do travel (' + moved.toFixed(0) + ' px in ' + steps * dt + ' s)', moved > 40);
-      t.ok('rain: ' + name + ' sliders stick (' + stuck + ' of ' + steps + ' steps barely move)', stuck > steps * 0.2);
+      t.ok('rain: ' + name + ' sliders stick (' + stuck + ' of ' + steps + ' steps barely move)', stuck > steps * 0.1);
       t.ok(
         'rain: ' + name + ' sliders slip (' + slipped + ' of ' + steps + ' steps move fast)',
         slipped > steps * 0.05
@@ -763,7 +768,7 @@ export function run(t) {
     );
     t.ok(
       'rain: a storm covers the glass and its drops barely stick',
-      storm.cover === 1 && storm.stick < 0.2 && storm.slider > 0.9
+      storm.cover > 0.99 && storm.stick < 0.2 && storm.slider > 0.3
     );
 
     // the wind carries the running water: shifting the lattice by the drift moves the picture by exactly that
@@ -801,5 +806,54 @@ export function run(t) {
       if (Math.abs(a.gain - b.gain) > 0.02) differ++;
     }
     t.ok('rain: wind smears the beads (' + differ + ' of 400 pixels change)', differ > 5);
+  }
+
+  // ── 2026-10-19: far more running drops, fewer stationary ones, strongest at full wind ─────────────────────────
+  {
+    // The OLD model, for the before/after numbers: 6-wide columns, 12 periods, coverage clamp01(1.4 s) at no boost.
+    const OLD = { colWidthMul: 6, colPeriodMul: 12, beadsNoWind: true };
+    const T = RAIN_TUNE;
+    // running heads per unit glass area for a frame (coverage of columns / (column width x head spacing))
+    const heads = (slider, colWidthMul, colPeriodMul) => {
+      const colW = look.dropScalePx * colWidthMul;
+      return slider / (colW * colW * colPeriodMul * 1.05);
+    };
+    const nowHeads = (fr) => heads(fr.slider, T.colWidthMul, T.colPeriodMul);
+    const oldSlider = (rain) =>
+      clamp01Test(look.sliders * 1.4 * smoothstepTest(0.08, 0.7, Math.max(rain, 0.6 * Math.min(1, rain * 1.6))));
+    const oldHeads = (rain) => heads(oldSlider(rain), OLD.colWidthMul, OLD.colPeriodMul);
+    const at = (rain, wind) =>
+      resolveRainFrame({ rain01: rain, wet01: Math.min(1, rain * 1.6), look, windSpeed01: wind });
+
+    const gale = nowHeads(at(1, 1)) / oldHeads(1);
+    t.ok(
+      'rain: at full wind there are ~4x as many running drops as before (' + gale.toFixed(2) + 'x)',
+      gale > 3.8 && gale < 4.2
+    );
+    const calm = nowHeads(at(1, 0)) / oldHeads(1);
+    t.ok('rain: with no wind the boost is the smaller 1.5x (' + calm.toFixed(2) + 'x)', calm > 1.4 && calm < 1.6);
+    let mono = true;
+    for (let w = 0.1; w <= 1.0001; w += 0.1)
+      if (nowHeads(at(0.6, w)) < nowHeads(at(0.6, w - 0.1)) - 1e-12) mono = false;
+    t.ok('rain: the running share only rises with wind', mono);
+    t.ok('rain: the running coverage stays within the grid at full wind', at(1, 1).slider <= 1);
+    const beadsCalm = at(1, 0).cover;
+    const beadsGale = at(1, 1).cover;
+    t.ok(
+      'rain: stationary bead coverage falls with wind (' + beadsCalm.toFixed(2) + ' -> ' + beadsGale.toFixed(2) + ')',
+      beadsGale < beadsCalm && beadsGale > 0.3 * beadsCalm
+    );
+    const share = (fr) => nowHeads(fr) / (nowHeads(fr) + fr.cover);
+    t.ok(
+      'rain: running drops are a larger share of all drops at full wind than in calm',
+      share(at(1, 1)) > share(at(1, 0))
+    );
+    const off = resolveRainFrame({ rain01: 1, wet01: 1, look: { ...look, sliders: 0 }, windSpeed01: 1 });
+    t.ok('rain: sliders = 0 still means no running drops', off.slider === 0);
+    // the grid constants the CPU twin and the TSL graph both read: one table, so they cannot drift apart
+    t.ok(
+      'rain: the run grid constant matches the geometry (4x the old heads)',
+      Math.abs((6 * 6 * 12) / (T.colWidthMul * T.colWidthMul * T.colPeriodMul) - T.runGrid) < 0.05
+    );
   }
 }

@@ -82,20 +82,27 @@ export const RAIN_TUNE = Object.freeze({
   impactRingGain: 0.55,
   impactRipple: 0.3,
   // sliders
-  colWidthMul: 6,
-  colPeriodMul: 12,
-  stepFrac: 0.45,
-  cycleSec: 3.2,
-  meander: 0.11,
-  headMin: 0.17,
-  headSpan: 0.13,
+  colWidthMul: 4,
+  colPeriodMul: 6.75,
+  stepFrac: 0.6,
+  cycleSec: 1.6,
+  meander: 0.12,
+  headMin: 0.196,
+  headSpan: 0.15,
   headStretch: 0.9,
   // motion smear: heads elongate and trails lengthen as the run speed rises to `rateRef`
   headBlur: 1.4,
   trailSpeedGain: 1.2,
   rateRef: 15,
-  trailLenMul: 0.55,
+  trailLenMul: 1.47,
   trailWidthMul: 0.3,
+  // The grid carries 4x the heads of the old one (columns 1.5x as many, 2.67x as many heads per column) at the
+  // old speed and trail length in px. `runBoost*` set how many of those slots are filled: Calm = 1.5x the old
+  // running count at no wind, Gale = 4x at full wind. `beadWindCut` thins the stationary beads at full wind.
+  runGrid: 4,
+  runBoostCalm: 1.5,
+  runBoostGale: 4,
+  beadWindCut: 0.35,
   // sheet
   sheetScaleMul: 100,
   sheetSpeedPx: 5,
@@ -234,8 +241,12 @@ export function resolveRainFrame({ rain01, wet01, look, windSpeed01 = 0, gust01 
   const rain = clamp01(rain01);
   const wet = clamp01(wet01);
   const dens = Math.max(0, look.splatDensity);
-  const cover = clamp01(1.0 * Math.pow(rain, 0.85) * dens + 0.26 * wet * dens);
-  const slider = clamp01(look.sliders * 1.4 * smoothstep(0.08, 0.7, Math.max(rain, 0.6 * wet)));
+  const windPush = clamp01(windSpeed01);
+  const cover = clamp01(1.0 * Math.pow(rain, 0.85) * dens + 0.26 * wet * dens) * (1 - RAIN_TUNE.beadWindCut * windPush);
+  // coverage of the 4x finer run grid: the old coverage x boost/grid, so the running count is `boost` x the old one
+  const runBoost = lerp(RAIN_TUNE.runBoostCalm, RAIN_TUNE.runBoostGale, windPush);
+  const slider =
+    (clamp01(look.sliders * 1.4 * smoothstep(0.08, 0.7, Math.max(rain, 0.6 * wet))) * runBoost) / RAIN_TUNE.runGrid;
   const sheet = clamp01(smoothstep(0.55, 1, rain) * look.sheeting);
   return {
     cover,
@@ -247,9 +258,9 @@ export function resolveRainFrame({ rain01, wet01, look, windSpeed01 = 0, gust01 
     sheet,
     gust: clamp01(gust01),
     dim: 1 - 0.1 * Math.max(rain, 0.6 * wet),
-    windBias: clamp01(windSpeed01) * clamp01(look.windwardBias),
+    windBias: windPush * clamp01(look.windwardBias),
     // how hard the wind pushes the water (0..1), whatever the author's windward dial says
-    windPush: clamp01(windSpeed01),
+    windPush,
     presence: cover > 0.002 || slider > 0.002 || sheet > 0.002 ? 1 : 0,
     // gravity: ten times what it was (a storm's drops run at ~200 px/s)
     slideSpeedMul: 10 * lerp(0.55, 1.5, rain) * Math.max(0, look.slideSpeed),

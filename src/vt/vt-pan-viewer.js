@@ -10790,6 +10790,10 @@ export async function startVtPanViewer({
       // present.js's own tail regardless of call order here (same "ordering
       // here doesn't matter" note as pushStylize above).
       pushPlayerVisionMode();
+      gradePresent.setHeatHaze(
+        fireSubsystem.hasContent ? fireSubsystem.heatHazeSources() : [],
+        (lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value) / 1000
+      );
 
       const clock = dayClock.read();
       lastEnvSnapshot = {

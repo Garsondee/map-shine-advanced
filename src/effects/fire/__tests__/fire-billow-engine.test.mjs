@@ -1352,4 +1352,18 @@ export function run(t) {
         'stress' in open.weather[0]
     );
   }
+
+  // ── HEAT HAZE SOURCES (round 3): the hot fires in view, for the final composite's shimmer warp ───────────────────
+  {
+    const e = makeEngine();
+    e.engine.update(ctxOf());
+    const hot = e.engine.getHeatSources();
+    t.ok(
+      `a burning fire is a heat source (${hot.length}), at its place, with its radius and strength near 1`,
+      hot.length === 1 && Math.abs(hot[0].x - 700) < 1 && hot[0].r > 20 && hot[0].s > 0.9
+    );
+    const dead = makeEngine({ wind: makeWind({ openness: 1, sky: 1, speed01: 1 }) });
+    advance(dead.engine, ctxOf(), 120);
+    t.ok('a fire the wind has put out is none', dead.engine.getHeatSources().length === 0);
+  }
 }

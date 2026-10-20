@@ -195,6 +195,16 @@ export function buildGradePresentMaterial({
    * past the supplied count are left at `radiusX = 0`.
    */
   const uPlayerVisionTokens = Array.from({ length: PLAYER_VISION_TOKEN_SLOTS }, () => uniform(vec4(0, 0, 0, 0)));
+  /**
+   * HEAT HAZE (2026-10-20): a shimmer warp over every hot fire, applied to the final picture's sample position. `(worldX, worldY, radius,
+   * strength)` per source and `(reach, speed, scale, 0)` beside it; a fixed JS-unrolled list (see the token list above for why never a
+   * uniformArray loop). Slots past the supplied count have strength 0, and `uHeatActive` 0 skips the whole warp.
+   */
+  const HEAT_SLOTS = 8;
+  const uHeat = Array.from({ length: HEAT_SLOTS }, () => uniform(vec4(0, 0, 1, 0)));
+  const uHeatShape = Array.from({ length: HEAT_SLOTS }, () => uniform(vec4(2.6, 1, 1, 0)));
+  const uHeatActive = uniform(float(0));
+  const uHeatTime = uniform(float(0));
 
   /**
    * The Stylize effect's per-style colour transform, applied to the fully
@@ -255,7 +265,42 @@ export function buildGradePresentMaterial({
       const styled = buildStylizeNode(gradedArt, currentStyle);
       return styled ? mix(gradedArt, styled, uStylizeAmount) : gradedArt;
     };
-    const afterStylize = buildStyledAt(uv());
+    // THE HEAT WARP: for each hot fire, a column of rising shimmer above it (screen up), strongest just over the flame and fading out
+    // by `reach` radii; two octaves of slow noise pushed upward make the picture ripple.
+    const heatOffsetUv = (() => {
+      const { Fn, If, mx_noise_float, exp, smoothstep } = TSL;
+      return Fn(() => {
+        const viewSpanX = max(uViewRect.z.sub(uViewRect.x), float(1e-5));
+        const viewSpanY = max(uViewRect.w.sub(uViewRect.y), float(1e-5));
+        const pw = vec2(uViewRect.x.add(uv().x.mul(viewSpanX)), uViewRect.y.add(uv().y.mul(viewSpanY)));
+        const total = vec2(0, 0).toVar();
+        If(uHeatActive.greaterThan(0.5), () => {
+          for (let i = 0; i < HEAT_SLOTS; i++) {
+            const h = uHeat[i];
+            const sh = uHeatShape[i];
+            const r = max(h.z, float(8));
+            const dx = pw.x.sub(h.x).div(r);
+            const up = h.y.sub(pw.y).div(r); // screen up is -y: positive above the fire
+            const across = exp(dx.mul(dx).mul(-1.3));
+            const rise = smoothstep(float(-0.25), float(0.35), up).mul(
+              float(1).sub(smoothstep(sh.x.mul(0.35), sh.x, up))
+            );
+            const w = across.mul(rise).mul(h.w);
+            const f = sh.z.mul(0.06).div(r.mul(0.02));
+            const tt = uHeatTime.mul(sh.y);
+            const nx = mx_noise_float(vec3(pw.x.mul(f), pw.y.mul(f).add(tt.mul(1.9)), tt.mul(0.4)));
+            const ny = mx_noise_float(vec3(pw.x.mul(f).add(17.3), pw.y.mul(f).add(tt.mul(1.6)), tt.mul(0.35).add(5.1)));
+            const n2 = mx_noise_float(
+              vec3(pw.x.mul(f).mul(2.3).add(3.1), pw.y.mul(f).mul(2.3).add(tt.mul(2.8)), tt.mul(0.6))
+            );
+            const amp = r.mul(0.16).mul(w);
+            total.addAssign(vec2(nx.add(n2.mul(0.5)), ny.mul(0.7).add(n2.mul(0.3))).mul(amp));
+          }
+        });
+        return vec2(total.x.div(viewSpanX), total.y.div(viewSpanY));
+      })();
+    })();
+    const afterStylize = buildStyledAt(uv().add(heatOffsetUv));
     // Convert the token's world-pixel center using the SAME live camera rect
     // the environmental gate uses. This stays aligned while panning/zooming;
     // computing UV on the JS side would trail the camera by a frame.
@@ -526,6 +571,24 @@ export function buildGradePresentMaterial({
      * @returns {*}
      */
     getLitSource: () => presentTexNode.value,
+    /**
+     * Set this frame's heat-haze sources: `[{x, y, r, s, reach?, speed?, scale?}]` (world px, strength 0..2), at most 8; none = no warp, no cost.
+     * @param {Array<{x:number,y:number,r:number,s:number,reach?:number,speed?:number,scale?:number}>} sources
+     * @param {number} timeSec
+     */
+    setHeatHaze: (sources = [], timeSec = 0) => {
+      const n = Math.min(HEAT_SLOTS, Array.isArray(sources) ? sources.length : 0);
+      let any = 0;
+      for (let i = 0; i < HEAT_SLOTS; i++) {
+        const s = i < n ? sources[i] : null;
+        const strength = s && Number.isFinite(s.s) ? Math.max(0, s.s) : 0;
+        uHeat[i].value.set(s?.x ?? 0, s?.y ?? 0, s?.r ?? 1, strength);
+        uHeatShape[i].value.set(s?.reach ?? 2.6, s?.speed ?? 1, s?.scale ?? 1, 0);
+        if (strength > 0) any = 1;
+      }
+      uHeatActive.value = any;
+      uHeatTime.value = Number.isFinite(timeSec) ? timeSec % 1000 : 0;
+    },
     gateCompiled,
   };
 }

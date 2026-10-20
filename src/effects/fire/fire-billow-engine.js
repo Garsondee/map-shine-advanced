@@ -526,6 +526,8 @@ export function createBillowEngine({
   const spread = new Map();
   /** per fire: the weather this frame felt (for `getStatus`: why a fire does or does not react) */
   const weatherDiag = new Map();
+  /** the heat sources of the last frame (see `getHeatSources`) */
+  let heatSources = [];
   /** @type {{cloud:*, fires:*, mPerPx:number, labelGrid:*, clusters:Array<object>}} */
   let planMemo = { cloud: null, fires: null, mPerPx: -1, labelGrid: null, clusters: [] };
   let jobs = [];
@@ -637,6 +639,7 @@ export function createBillowEngine({
       /** per box: the smoke crescent width (px) and ground-shadow offset (world px), which follow the size of its billows */
       const looks = [];
       const lifeByFire = new Map();
+      const heatByFire = new Map();
       const stepped = new Set();
       const advanced = new Set();
       /** per fire: how much of it burns (the spread front), and what its mass smoke column needs */
@@ -752,6 +755,8 @@ export function createBillowEngine({
 
         // visible? (the life has been stepped either way, so a fire out of view still goes out in the rain)
         if (!inView(c)) continue;
+        if (!heatByFire.has(c.id)) heatByFire.set(c.id, { x: f.x ?? c.x, y: f.y ?? c.y, r: c.parentRadius, s: 0 });
+        heatByFire.get(c.id).s = Math.max(heatByFire.get(c.id).s, lf.vitality);
         env.quality = clamp(baseQuality * massQuality(c.siblings) * budgetQuality, 0.2, 1);
         minQuality = Math.min(minQuality, env.quality);
         const room = Math.ceil(maxLobesPerFire(c.radius, br.tune) * clamp(env.quality, 0.35, 1));
@@ -905,6 +910,7 @@ export function createBillowEngine({
       }
 
       renderer.setCounts(nf, ns);
+      heatSources = [...heatByFire.values()].filter((h) => h.s > 0.05).sort((a, b) => b.s * b.r - a.s * a.r);
       // ONE contour box per burning mass: flames whose boxes overlap are drawn as one (the contour reads the whole field, so
       // overlapping boxes would shade the same pixels twice). A mass covers more of the screen, so the bloom fills it more.
       const merged = mergeBoxes(boxes, fills, 1.7, looks);
@@ -976,6 +982,8 @@ export function createBillowEngine({
       jobs = [];
       return j;
     },
+    /** The hot fires in view, hottest first: world x/y, the fire's radius (px) and how alight it is (0..1). Feeds the heat-haze warp. */
+    getHeatSources: () => heatSources,
     getStatus: () => ({
       ...status,
       lives: lives.size(),

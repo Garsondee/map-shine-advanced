@@ -217,6 +217,8 @@ export function createFireSubsystem({
   const engines = [];
   /** The billow engine: flame, coals, smoke, spit embers, and the long life of each fire. */
   let billow = null;
+  /** the last params `sync` saw (the heat-haze dials are read from them) */
+  let lastParams = null;
   let currentLights = [];
   let hasContent = false;
   let lastSpawnSignature = null;
@@ -351,6 +353,7 @@ export function createFireSubsystem({
     if (!engines.length && !billow) return;
 
     const params = state.params ?? {};
+    lastParams = params;
     const tier = Number.isFinite(state.perfTier) ? state.perfTier : FIRE_DEFAULT_TIER;
     const firePlan = fireTierPlan(tier);
     const mPerPx = Number.isFinite(state.mPerPx) && state.mPerPx > 0 ? state.mPerPx : 0.02;
@@ -544,6 +547,21 @@ export function createFireSubsystem({
     takeFieldJobs: () => billow?.takeFieldJobs() ?? [],
     /** Merged by the viewer's point-light pool exactly like a Foundry light. */
     lightSources: () => currentLights,
+    /**
+     * HEAT HAZE: up to `max` sources for the final composite's shimmer warp, each `{x, y, r, s}` (world px centre, the fire's radius, strength
+     * 0..2 = how alight x the author's `heatDistortion` dial) plus `{reach, speed, scale}` (the other three dials).
+     */
+    heatHazeSources: (max = 8) => {
+      const amount = Math.max(0, Number(lastParams?.heatDistortion ?? 1));
+      if (!(amount > 0) || !billow?.getHeatSources) return [];
+      const reach = Number(lastParams?.heatDistortionHeight ?? 2.6);
+      const speed = Number(lastParams?.heatDistortionSpeed ?? 1);
+      const scale = Number(lastParams?.heatDistortionSize ?? 1);
+      return billow
+        .getHeatSources()
+        .slice(0, max)
+        .map((h) => ({ x: h.x, y: h.y, r: h.r, s: h.s * amount, reach, speed, scale }));
+    },
     get hasContent() {
       return hasContent;
     },

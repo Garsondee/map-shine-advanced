@@ -1263,8 +1263,20 @@ export function createFireParticleEngine({
     );
     const surge = float(1).add(uLeanFlutter.mul(wave1.mul(float(0.6)).add(wave2.mul(float(0.4)))).mul(float(0.5)));
     // Per-LIFE randoms (no storage): ragged tongue lengths, and a lateral scatter.
-    const rag = float(0.6).add(lifeRandomOf(seed.element(i), age.element(i), 41.0).mul(float(0.65)));
-    const fanRand = lifeRandomOf(seed.element(i), age.element(i), 57.0).sub(float(0.5)).mul(float(2));
+    // ⚠️ NOT `lifeRandomOf(seed, age, ...)` HERE (flicker fix, mmp-0um). That idiom rebuilds the birth time as
+    // `uTimeMs − age`, which is only constant if the clock and the integrated age advance by exactly the same step. They
+    // do not (age uses the clamped dt, the clock is a float32 that quantises at hundreds of ms of session time), so the
+    // reconstructed birth jitters by a fraction of a millisecond per frame, and a hash of it (sin × 43758) lands on a
+    // different value each frame: the tongue length and lateral fan flip frame to frame, i.e. the flame flickers
+    // between positions. The lifespan and base size are written once at birth and never change during a life, so
+    // hashing those (with the slot's seed) is a per-life random that is bit-stable for the whole life.
+    const lifeKey = seed
+      .element(i)
+      .mul(float(0.37))
+      .add(lifeBuf.element(i).mul(float(0.0137)))
+      .add(c.z.mul(float(0.71)));
+    const rag = float(0.6).add(hash11(lifeKey.add(float(41.0))).mul(float(0.65)));
+    const fanRand = hash11(lifeKey.add(float(57.0))).sub(float(0.5)).mul(float(2));
     const sizeBase = c.z.mul(uSizeScale).mul(sizeMul);
     const leanPx = leanGain
       .mul(uLeanLength)

@@ -14,7 +14,14 @@
  *  - the renderer is handed exactly what it needs: counts, contour boxes that enclose every lobe, the field jobs once.
  *  - capacity: a city block of fires drops the extras, never overruns the buffers.
  */
-import { createBillowEngine, planClusters, MAX_CLUSTER_RADIUS_M } from '../fire-billow-engine.js';
+import {
+  createBillowEngine,
+  planClusters,
+  mergeBoxes,
+  infernoHeightGain,
+  viewCameraHeight,
+  MAX_CLUSTER_RADIUS_M,
+} from '../fire-billow-engine.js';
 import { LOBE_STRIDE, KIND_FLAME, KIND_SMOKE, KIND_COAL } from '../fire-billow-geometry.js';
 import { FIRE_PARAMS } from '../fire.js';
 import { windFlowVector } from '../../../world/index.js';
@@ -211,7 +218,20 @@ export function run(t) {
     const roofPts = discOfPoints(1000, 1000, 330, 42);
     const roofCloud = makeCloud(roofPts);
     const split = planClusters(roof, roofCloud, M_PER_PX);
-    t.ok(`a wide painted roof is SEVERAL flames (${split.length})`, split.length >= 4 && split.length <= 48);
+    t.ok(`a wide painted roof is MANY flames (${split.length})`, split.length >= 12 && split.length <= 96);
+    t.ok(
+      'standing about one flame-width apart, so neighbours overlap into one burning mass',
+      (() => {
+        // every flame has a neighbour closer than two of its own radii (they touch)
+        return split.every((c) =>
+          split.some((d) => d !== c && Math.hypot(c.x - d.x, c.y - d.y) < (c.radius + d.radius) * 1.25)
+        );
+      })()
+    );
+    t.ok(
+      'each knows how big the whole fire is (so a roof’s flames can stand taller than a campfire’s)',
+      split.every((c) => near(c.parentRadius, 350) && near(c.maxRadius, maxR, 1e-6))
+    );
     t.ok(
       'and every one is a bonfire at most, never one huge flame',
       split.every((c) => c.radius <= maxR + 1e-6 && c.radius >= 6)
@@ -281,7 +301,7 @@ export function run(t) {
       makeCloud(discOfPoints(3000, 3000, 2900, 60)),
       M_PER_PX
     );
-    t.ok(`a city block's fire is capped at 48 flames (${huge.length})`, huge.length <= 48 && huge.length > 8);
+    t.ok(`a city block's fire is capped at 96 flames (${huge.length})`, huge.length === 96);
 
     // a very large cluster's points are subsampled, not dropped
     const dense = planClusters(
@@ -600,9 +620,9 @@ export function run(t) {
 
   // ── CULLING, CAPACITY AND THE BOX LIMIT ──────────────────────────────────────────────────────────────────────────
   {
-    // a few fires, a small buffer: the extras are dropped, never overrun the buffer
-    const cap = 700;
-    const { engine, renderer } = makeEngine({ flameCapacity: cap, smokeCapacity: 700 });
+    // a few fires, a tiny buffer: past thinning every flame out, the extras are dropped, never overrun the buffer
+    const cap = 200;
+    const { engine, renderer } = makeEngine({ flameCapacity: cap, smokeCapacity: 200 });
     const fires = [];
     const pts = [];
     for (let i = 0; i < 30; i++) {
@@ -616,7 +636,7 @@ export function run(t) {
     const st = engine.getStatus();
     t.ok(
       `more fires than the buffer holds: the extras are dropped (${st.dropped} dropped, ${st.flame}/${cap} flame lobes)`,
-      st.dropped > 0 && st.flame <= cap && st.smoke <= 700
+      st.dropped > 0 && st.flame <= cap && st.smoke <= 200
     );
     t.ok('every fire still has a life even when its flame was dropped', res.lifeByFire.size === 30);
     t.ok(
@@ -627,17 +647,49 @@ export function run(t) {
       })()
     );
 
-    // more than 64 contour boxes merge into the last
+    // a moderate overload thins EVERY flame out together instead of dropping some (a roof of 80 flames is 80 simpler flames)
+    {
+      const eighty = [];
+      const ePts = [];
+      for (let i = 0; i < 30; i++) {
+        const x = 150 + (i % 6) * 220;
+        const y = 150 + Math.floor(i / 6) * 220;
+        eighty.push({ id: `q${i}`, x, y, diameterPx: 80 });
+        ePts.push(...discOfPoints(x, y, 30, 12));
+      }
+      const ample = makeEngine({ flameCapacity: 20000, smokeCapacity: 20000 });
+      ample.engine.update(ctxOf({ fires: eighty, cloud: makeCloud(ePts) }));
+      const tight = makeEngine({ flameCapacity: 3000, smokeCapacity: 3000 });
+      tight.engine.update(ctxOf({ fires: eighty, cloud: makeCloud(ePts) }));
+      const a = ample.engine.getStatus();
+      const b = tight.engine.getStatus();
+      t.ok(
+        `with room to spare every flame is at full quality (${a.quality}) and none is dropped`,
+        a.quality === 1 && a.dropped === 0 && a.flame > b.flame
+      );
+      t.ok(
+        `a tight buffer thins every flame (quality ${b.quality}, ${b.flame}/3000 lobes) instead of dropping any (${b.dropped} dropped)`,
+        b.quality < 0.8 && b.quality >= 0.3 && b.dropped === 0 && b.flame <= 3000 && b.flame > 1000
+      );
+    }
+
+    // more than 64 SEPARATE burning masses fold into the last contour box
     const many = makeEngine({ flameCapacity: 20000, smokeCapacity: 20000 });
     const bigFires = [];
     const bigPts = [];
     for (let i = 0; i < 90; i++) {
-      const x = 60 + (i % 18) * 76;
-      const y = 80 + Math.floor(i / 18) * 160;
-      bigFires.push({ id: `m${i}`, x, y, diameterPx: 40 });
-      bigPts.push(...discOfPoints(x, y, 16, 8));
+      const x = 300 + (i % 10) * 400;
+      const y = 300 + Math.floor(i / 10) * 400;
+      bigFires.push({ id: `m${i}`, x, y, diameterPx: 20 });
+      bigPts.push(...discOfPoints(x, y, 8, 4));
     }
-    many.engine.update(ctxOf({ fires: bigFires, cloud: makeCloud(bigPts) }));
+    many.engine.update(
+      ctxOf({
+        fires: bigFires,
+        cloud: makeCloud(bigPts),
+        ctx: { rect: { minX: 0, minY: 0, maxX: 4400, maxY: 4000 } },
+      })
+    );
     t.ok(
       `beyond 64 fires the contour boxes are merged, never lost or over 64 (${many.seen.quadCount})`,
       many.seen.quadCount === 64 && many.seen.quads.length === 256
@@ -689,6 +741,48 @@ export function run(t) {
     t.ok(
       'the author’s hue shift (degrees) reaches the look in radians',
       near(fuelHue, Math.PI / 2, 1e-6) || Math.abs(fuelHue) > 0
+    );
+  }
+
+  // ── THE CAMERA RISES AS THE VIEW ZOOMS OUT (the real viewer showed a burning roof as comets streaking from the centre) ──
+  {
+    t.ok(
+      'the virtual camera is ~3 half-widths up, never below its floor, and survives garbage',
+      near(viewCameraHeight({ minX: 0, maxX: 2400 }), 3600, 1e-9) &&
+        viewCameraHeight({ minX: 0, maxX: 100 }) === 400 &&
+        viewCameraHeight(null) === 400 &&
+        viewCameraHeight({ minX: 5, maxX: 5 }) === 400
+    );
+    t.ok(
+      'a wider view is a higher camera',
+      viewCameraHeight({ minX: 0, maxX: 4800 }) > viewCameraHeight({ minX: 0, maxX: 2400 })
+    );
+    // the same fire, the same offset from the view centre, a view twice as wide: its perspective lean outward is smaller
+    const leanOut = (rect) => {
+      const { engine, renderer } = makeEngine({ wind: makeWind({ openness: 1, sky: 1, speed01: 0 }) });
+      const fires = [{ id: 'edge', x: 1800, y: 500, diameterPx: 90 }];
+      const cloud = makeCloud(discOfPoints(1800, 500, 40, 10));
+      const base = ctxOf({ fires, cloud, ctx: { rect } });
+      let sum = 0;
+      let n = 0;
+      let now = 0;
+      for (let k = 0; k < 16; k++) {
+        now += 250;
+        engine.update({ ...base, nowMs: now, dtSec: 0.25 });
+        const nf = engine.getStatus().flame;
+        for (let i = 0; i < nf; i++) {
+          if (renderer.flameLobes[i * LOBE_STRIDE + 8] !== KIND_FLAME) continue;
+          sum += renderer.flameLobes[i * LOBE_STRIDE] - 1800;
+          n++;
+        }
+      }
+      return sum / Math.max(1, n);
+    };
+    const narrow = leanOut({ minX: 0, minY: 0, maxX: 2400, maxY: 1000 });
+    const wide = leanOut({ minX: -1200, minY: 0, maxX: 3600, maxY: 1000 });
+    t.ok(
+      `zoomed out, a flame at the same offset from the centre leans out much less (${narrow.toFixed(1)} px -> ${wide.toFixed(1)} px)`,
+      narrow > 1 && wide < narrow * 0.7
     );
   }
 
@@ -754,22 +848,121 @@ export function run(t) {
       t.ok('zoomed out, the same flames get less of it', seen.fills[1] < 0.5);
     }
     {
-      // merged boxes keep the largest fill among them
+      // past 64 separate masses the extras fold into the last box, which keeps the largest fill among them
       const many = makeEngine({ flameCapacity: 20000, smokeCapacity: 20000 });
       const fires = [];
       const pts = [];
       for (let i = 0; i < 70; i++) {
-        const x = 60 + (i % 14) * 95;
-        const y = 80 + Math.floor(i / 14) * 150;
-        const d = i === 69 ? 200 : 40;
+        const x = 300 + (i % 10) * 400;
+        const y = 300 + Math.floor(i / 10) * 400;
+        const d = i === 69 ? 120 : 20;
         fires.push({ id: `m${i}`, x, y, diameterPx: d });
-        pts.push(...discOfPoints(x, y, d / 2, 8));
+        pts.push(...discOfPoints(x, y, d / 2, 4));
       }
-      many.engine.update(ctxOf({ fires, cloud: makeCloud(pts), ctx: { pxPerWorld: 1.5, bloom: bloomOn } }));
+      many.engine.update(
+        ctxOf({
+          fires,
+          cloud: makeCloud(pts),
+          ctx: { pxPerWorld: 1.5, bloom: bloomOn, rect: { minX: 0, minY: 0, maxX: 4400, maxY: 3600 } },
+        })
+      );
       t.ok(
-        'past 64 boxes the merged last one keeps the largest fill among the boxes it swallowed',
+        'past 64 boxes the folded last one keeps the largest fill among the boxes it swallowed',
         many.seen.quadCount === 64 && many.seen.fills.length === 64 && many.seen.fills[63] >= many.seen.fills[0]
       );
     }
+  }
+
+  // ── A BURNING MASS: overlapping flames are drawn as ONE box, and a big fire's flames stand taller ────────────────────
+  {
+    t.ok(
+      'a single flame is as tall as ever, and a fire many flames wide stands taller (to 2x, never more)',
+      infernoHeightGain(40, 59) === 1 &&
+        infernoHeightGain(59, 59) === 1 &&
+        near(infernoHeightGain(118, 59), 1.4, 1e-9) &&
+        infernoHeightGain(236, 59) > infernoHeightGain(118, 59) &&
+        infernoHeightGain(1e6, 59) === 2 &&
+        infernoHeightGain(undefined, undefined) === 1
+    );
+    const box = (x, y, w, h) => [x, y, w, h];
+    {
+      const r = mergeBoxes(
+        [...box(0, 0, 100, 100), ...box(60, 60, 100, 100), ...box(500, 500, 50, 50)],
+        [0.2, 0.7, 0.1]
+      );
+      t.ok(
+        'boxes that overlap become one (their bounding box, the larger fill) and separate ones stay',
+        r.boxes.length === 8 &&
+          r.fills.length === 2 &&
+          r.members.join() === '2,1' &&
+          r.boxes[0] === 0 &&
+          r.boxes[2] === 160 &&
+          r.boxes[3] === 160 &&
+          r.fills[0] === 0.7 &&
+          r.boxes[4] === 500
+      );
+    }
+    {
+      // touching edge to edge is not overlapping
+      const r = mergeBoxes([...box(0, 0, 100, 100), ...box(100, 0, 100, 100)], [0, 0]);
+      t.ok('boxes that only touch stay separate', r.boxes.length === 8 && r.members.join() === '1,1');
+    }
+    {
+      // a diagonal chain of overlapping boxes would make one huge, mostly empty box: it is left as it was
+      const chain = [];
+      for (let i = 0; i < 8; i++) chain.push(...box(i * 90, i * 90, 100, 100));
+      const r = mergeBoxes(chain, new Array(8).fill(0.5));
+      t.ok(
+        'a diagonal chain of overlapping boxes is not folded into one mostly-empty box',
+        r.boxes.length === chain.length && r.members.every((m) => m === 1)
+      );
+      const solid = [];
+      for (let y = 0; y < 3; y++) for (let x = 0; x < 3; x++) solid.push(...box(x * 60, y * 60, 100, 100));
+      const s = mergeBoxes(solid, new Array(9).fill(0.4));
+      t.ok(
+        'a solid block of overlapping boxes is',
+        s.boxes.length === 4 && s.members[0] === 9 && s.boxes[2] === 220 && s.boxes[3] === 220
+      );
+    }
+    t.ok('nothing in, nothing out', mergeBoxes([], []).boxes.length === 0);
+
+    // the engine: a burning roof is a few boxes (one mass), enclosing every lobe, and the flames are tall
+    const { engine, seen, renderer } = makeEngine();
+    const roof = [{ id: 'roof', x: 700, y: 500, diameterPx: 520 }];
+    const roofCloud = makeCloud(discOfPoints(700, 500, 240, 30));
+    const res = engine.update(ctxOf({ fires: roof, cloud: roofCloud }));
+    const st = engine.getStatus();
+    t.ok(
+      `a roof of ${res.clusters.length} overlapping flames is drawn as ${seen.quadCount} contour box(es), not ${res.clusters.length}`,
+      res.clusters.length >= 10 && seen.quadCount < res.clusters.length / 3 && seen.quadCount >= 1
+    );
+    let enclosed = true;
+    for (let i = 0; i < st.flame; i++) {
+      const x = renderer.flameLobes[i * LOBE_STRIDE];
+      const y = renderer.flameLobes[i * LOBE_STRIDE + 1];
+      let inAny = false;
+      for (let b = 0; b < seen.quadCount; b++) {
+        const [bx, by, bw, bh] = seen.quads.slice(b * 4, b * 4 + 4);
+        if (x >= bx && x <= bx + bw && y >= by && y <= by + bh) inAny = true;
+      }
+      if (!inAny) enclosed = false;
+    }
+    t.ok('and the boxes still enclose every flame lobe', enclosed);
+    t.ok(
+      'the mass covers more of the screen than one flame, so the bloom fills it more',
+      (() => {
+        const lone = makeEngine();
+        lone.engine.update(ctxOf({ ctx: { pxPerWorld: 1, bloom: { enabled: true, params: { threshold: 0.33 } } } }));
+        const mass = makeEngine();
+        mass.engine.update(
+          ctxOf({
+            fires: roof,
+            cloud: roofCloud,
+            ctx: { pxPerWorld: 1, bloom: { enabled: true, params: { threshold: 0.33 } } },
+          })
+        );
+        return Math.max(...mass.seen.fills) > Math.max(...lone.seen.fills);
+      })()
+    );
   }
 }

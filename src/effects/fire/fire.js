@@ -539,7 +539,11 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 2,
     step: 0.05,
-    default: 0.3, // 2026-10-20 new defaults (was 1)
+    // 2026-10-20 BILLOW REBUILD: back to 1 (it was 1 until the morning's live tuning dragged it to 0.3 for the old sprite flame).
+    // Measured in the real viewer: at 0.3 a full hurricane leans the billow flame barely a third of the way; at 1 it lies flat, trails
+    // torn flecks and streams its smoke, which is what "full wind is a hurricane" asks of an outdoor fire. A roofed or sealed fire
+    // is untouched either way (the wind bake's openness gates it). It also scales the ember wind push, so embers stream in a gale.
+    default: 1,
     category: 'Motion',
     label: 'Wind response',
     help: 'How much wind reaches this fire at all — the master gate every other wind dial (Wind lean, ember wind push, the Wind 1 values) multiplies against. At 0 this fire ignores wind entirely. A small fire reaches full response at a lower wind speed than a bonfire does; above 1 a fire reaches it at a gentler breeze still.',
@@ -561,7 +565,10 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.05,
-    default: 0.25, // 2026-10-20 new defaults (was 1)
+    // 2026-10-20 BILLOW REBUILD: 0.4 (was 0.25 from the morning's tuning, 1 before). With Wind response back at 1 this is how
+    // much a gale or a downpour STRESSES the flame (shrinks it, dims its light) on top of bending it; 0.4 leaves a hurricane flame
+    // streaming but still bright, and rain still douses it through Rain response and the life cycle.
+    default: 0.4,
     category: 'Response',
     label: 'Weather response',
     help: 'How much rain and wind put this fire under stress. At 1 a full gale bends it, shrinks it and makes it gutter, full rain dampens and cools it, and the two together leave it small, dim and barely surviving. At 0 it burns regardless. Rain only reaches fire under open sky, wind only fire that wind reaches. Does NOT weaken how far wind leans the flame (that is Wind response).',

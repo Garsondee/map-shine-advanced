@@ -34,9 +34,41 @@ export const MAX_CLUSTER_RADIUS_M = 0.9;
 /** The most spawn points one cluster keeps (an even subsample): the model only needs a footprint, not every texel. */
 const MAX_POINTS_PER_CLUSTER = 96;
 /** Beyond this many sub-flames per fire the extras are dropped (a whole city block is not one fire). */
-const MAX_CLUSTERS_PER_FIRE = 48;
+const MAX_CLUSTERS_PER_FIRE = 96;
+/** Flames of a split fire stand this close (in maxR) at their widest: close enough that neighbours overlap into one mass. */
+const CLUSTER_SPACING = 0.95;
+/** A burning mass's equivalent flame radius, as a fraction of its box's mean side (fitted to a single flame: 0.19). */
+const MASS_FILL_PER_SIDE = 0.19;
+
+/**
+ * A big fire's flames stand taller: a burning roof is not a field of campfires. 1 for a single flame, rising with how much
+ * wider the whole painted fire is than one flame can be (each doubling adds 40%), to at most 2x.
+ *
+ * @param {number} parentRadius the whole fire's radius (px) @param {number} maxRadius one flame's widest (px)
+ */
+export function infernoHeightGain(parentRadius, maxRadius) {
+  const ratio = Math.max(1, (parentRadius || 0) / Math.max(1e-3, maxRadius || 1));
+  return clamp(1 + 0.4 * Math.log2(ratio), 1, 2);
+}
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+/**
+ * The virtual camera's height (world px) that the billows' perspective parallax uses, from the visible world rect.
+ *
+ * ⚠️ IT MUST RISE AS THE VIEW ZOOMS OUT. A real camera with a fixed field of view sits ~3 half-widths above what it sees; a
+ * FIXED height (the first cut used 1000 px) made every flame far from the view centre lean radially outward by up to a
+ * quarter of its distance from the centre when zoomed out to see a whole map: the real viewer showed a burning roof as a hail
+ * of comets all streaking away from the middle of the screen. With the height tied to the view, a flame's lean outward is the
+ * same small fraction of its height at every zoom.
+ *
+ * @param {{minX:number,maxX:number}} rect the visible world rect
+ * @returns {number}
+ */
+export function viewCameraHeight(rect) {
+  const halfW = Math.max(1, ((rect?.maxX ?? 0) - (rect?.minX ?? 0)) * 0.5);
+  return Math.max(400, halfW * 3);
+}
 
 /**
  * Split the fires into flames. Pure and deterministic (Node-tested).
@@ -94,11 +126,23 @@ export function planClusters(fires, cloud, mPerPx) {
     const mine = owned[j];
     if (R <= maxR * 1.15 || mine.length < 6) {
       const { points, count } = pack(mine);
-      out.push({ fireIndex: j, id, x: f.x, y: f.y, radius: R, seed: baseSeed, points, count });
+      out.push({
+        fireIndex: j,
+        id,
+        x: f.x,
+        y: f.y,
+        radius: R,
+        parentRadius: R,
+        maxRadius: maxR,
+        seed: baseSeed,
+        points,
+        count,
+      });
       continue;
     }
-    // a wide fire: greedy farthest-point sampling over its painted points -> centres at least ~1.5 maxR apart
-    const want = clamp(Math.ceil((R / maxR) * (R / maxR) * 0.9), 2, MAX_CLUSTERS_PER_FIRE);
+    // a wide fire: greedy farthest-point sampling over its painted points -> centres about one maxR apart, so the flames
+    // overlap into ONE burning mass (a roof of flames, not a tray of candles)
+    const want = clamp(Math.ceil((R / maxR) * (R / maxR) * 1.8), 2, MAX_CLUSTERS_PER_FIRE);
     const centres = [];
     // start from the point nearest the fire's own centre, for a stable first pick
     let first = mine[0];
@@ -129,7 +173,7 @@ export function planClusters(fires, cloud, mPerPx) {
           far = i;
         }
       }
-      if (far < 0 || farD < maxR * 1.3 * (maxR * 1.3)) break;
+      if (far < 0 || farD < maxR * CLUSTER_SPACING * (maxR * CLUSTER_SPACING)) break;
       centres.push(far);
     }
     const groups = centres.map(() => []);
@@ -161,7 +205,9 @@ export function planClusters(fires, cloud, mPerPx) {
         id,
         x: pts[centres[c] * stride],
         y: pts[centres[c] * stride + 1],
-        radius: clamp(Math.max(spread * 0.8, maxR * 0.55), 6, maxR),
+        radius: clamp(Math.max(spread * 0.9, maxR * 0.8), 6, maxR),
+        parentRadius: R,
+        maxRadius: maxR,
         seed: (baseSeed + Math.imul(c + 1, 0x9e3779b1)) | 0,
         points,
         count,
@@ -169,6 +215,82 @@ export function planClusters(fires, cloud, mPerPx) {
     }
   }
   return out;
+}
+
+/**
+ * Merge overlapping contour boxes into one box per burning mass.
+ *
+ * The contour pass reads the WHOLE field inside its box, so overlapping boxes would shade the same pixels twice (a doubled
+ * edge) and a roof of 80 flames would cost 80 box-fulls of the heaviest shader in the effect. Boxes that overlap are joined
+ * (union-find over the pairwise test: O(n^2) on at most `MAX_CLUSTERS_PER_FIRE` boxes, a few thousand comparisons) and a joined
+ * group becomes its bounding box only if that box is not much emptier than the boxes it replaces: a diagonal row of separate
+ * fires chains into one overlapping group whose bounding box is mostly empty, and is better left as the separate boxes it was.
+ *
+ * @param {number[]} boxes `[minX, minY, w, h]` per box
+ * @param {number[]} fills one number per box (merged: the largest of the group)
+ * @param {number} [maxWaste=1.7] the largest allowed (bounding box area) / (sum of the member boxes' areas)
+ * @returns {{boxes:number[], fills:number[], members:number[]}} `members[i]` = how many boxes became box `i`
+ */
+export function mergeBoxes(boxes, fills, maxWaste = 1.7) {
+  const n = Math.floor(boxes.length / 4);
+  const parent = Array.from({ length: n }, (_, i) => i);
+  const find = (i) => {
+    while (parent[i] !== i) {
+      parent[i] = parent[parent[i]];
+      i = parent[i];
+    }
+    return i;
+  };
+  for (let a = 0; a < n; a++) {
+    const ax0 = boxes[a * 4];
+    const ay0 = boxes[a * 4 + 1];
+    const ax1 = ax0 + boxes[a * 4 + 2];
+    const ay1 = ay0 + boxes[a * 4 + 3];
+    for (let b = a + 1; b < n; b++) {
+      const bx0 = boxes[b * 4];
+      const by0 = boxes[b * 4 + 1];
+      if (bx0 >= ax1 || by0 >= ay1 || bx0 + boxes[b * 4 + 2] <= ax0 || by0 + boxes[b * 4 + 3] <= ay0) continue;
+      parent[find(b)] = find(a);
+    }
+  }
+  const groups = new Map();
+  for (let i = 0; i < n; i++) {
+    const r = find(i);
+    if (!groups.has(r)) groups.set(r, []);
+    groups.get(r).push(i);
+  }
+  const outBoxes = [];
+  const outFills = [];
+  const members = [];
+  for (const ids of groups.values()) {
+    let x0 = Infinity;
+    let y0 = Infinity;
+    let x1 = -Infinity;
+    let y1 = -Infinity;
+    let area = 0;
+    let fill = 0;
+    for (const i of ids) {
+      x0 = Math.min(x0, boxes[i * 4]);
+      y0 = Math.min(y0, boxes[i * 4 + 1]);
+      x1 = Math.max(x1, boxes[i * 4] + boxes[i * 4 + 2]);
+      y1 = Math.max(y1, boxes[i * 4 + 1] + boxes[i * 4 + 3]);
+      area += boxes[i * 4 + 2] * boxes[i * 4 + 3];
+      fill = Math.max(fill, fills[i] ?? 0);
+    }
+    if (ids.length === 1 || (x1 - x0) * (y1 - y0) <= maxWaste * area) {
+      outBoxes.push(x0, y0, x1 - x0, y1 - y0);
+      outFills.push(fill);
+      members.push(ids.length);
+    } else {
+      // too empty to be one mass: keep the boxes it was
+      for (const i of ids) {
+        outBoxes.push(boxes[i * 4], boxes[i * 4 + 1], boxes[i * 4 + 2], boxes[i * 4 + 3]);
+        outFills.push(fills[i] ?? 0);
+        members.push(1);
+      }
+    }
+  }
+  return { boxes: outBoxes, fills: outFills, members };
 }
 
 /**
@@ -295,7 +417,7 @@ export function createBillowEngine({
         tSec: timeSec,
         camX: cx,
         camY: cy,
-        cameraHeight: 1000,
+        cameraHeight: viewCameraHeight(rect),
         parallax: br.parallax,
         tilt: br.tilt,
         projection: 'top',
@@ -314,6 +436,22 @@ export function createBillowEngine({
       const lifeByFire = new Map();
       const stepped = new Set();
       const margin = 24;
+      const inView = (c) => {
+        const reach = c.radius * 7 + margin;
+        return !(
+          c.x + reach < rect.minX ||
+          c.x - reach > rect.maxX ||
+          c.y + reach < rect.minY ||
+          c.y - reach > rect.maxY
+        );
+      };
+
+      // THE LOBE BUDGET. What would every visible flame want at full quality? Past the buffer they ALL thin out together (a burning
+      // roof of eighty flames is eighty simpler flames, not sixty flames and twenty holes).
+      let need = 0;
+      for (const c of clusters) if (inView(c)) need += maxLobesPerFire(c.radius, br.tune);
+      const budgetQuality = need > fCap * 0.9 ? clamp((fCap * 0.9) / need, 0.3, 1) : 1;
+      env.quality = clamp(env.quality * budgetQuality, 0.2, 1);
 
       for (const c of clusters) {
         const f = fires[c.fireIndex] ?? {};
@@ -362,10 +500,8 @@ export function createBillowEngine({
         }
 
         // visible? (the life has been stepped either way, so a fire out of view still goes out in the rain)
-        const reach = c.radius * 7 + margin;
-        if (c.x + reach < rect.minX || c.x - reach > rect.maxX || c.y + reach < rect.minY || c.y - reach > rect.maxY)
-          continue;
-        const room = maxLobesPerFire(c.radius);
+        if (!inView(c)) continue;
+        const room = Math.ceil(maxLobesPerFire(c.radius, br.tune) * clamp(env.quality, 0.35, 1));
         if (nf + room > fCap || ns + room > sCap) {
           dropped++;
           continue;
@@ -381,7 +517,7 @@ export function createBillowEngine({
           turb01: chain.turb01,
           puffHz: chain.puffHz,
           flickerAmp: chain.flickerAmp,
-          heightGain: br.heightGain,
+          heightGain: br.heightGain * infernoHeightGain(c.parentRadius, c.maxRadius),
           windX: wdir.x,
           windY: wdir.y,
           windMotion01: push,
@@ -427,18 +563,29 @@ export function createBillowEngine({
       }
 
       renderer.setCounts(nf, ns);
-      // one more than the renderer holds is merged into the last box
+      // ONE contour box per burning mass: flames whose boxes overlap are drawn as one (the contour reads the whole field, so
+      // overlapping boxes would shade the same pixels twice). A mass covers more of the screen, so the bloom fills it more.
+      const merged = mergeBoxes(boxes, fills);
+      const mBoxes = merged.boxes;
+      const mFills = merged.fills;
+      for (let i = 0; i < mFills.length; i++) {
+        if (merged.members[i] > 1) {
+          const meanSide = 0.5 * (mBoxes[i * 4 + 2] + mBoxes[i * 4 + 3]);
+          mFills[i] = Math.max(mFills[i], regionFill(MASS_FILL_PER_SIDE * meanSide * pxPerWorld));
+        }
+      }
+      // (past what the renderer holds, the extras are folded into the last box)
       const maxBoxes = 64;
-      let nBoxes = boxes.length / 4;
+      let nBoxes = mBoxes.length / 4;
       if (nBoxes > maxBoxes) {
-        const keep = boxes.slice(0, maxBoxes * 4);
-        const keepFills = fills.slice(0, maxBoxes);
+        const keep = mBoxes.slice(0, maxBoxes * 4);
+        const keepFills = mFills.slice(0, maxBoxes);
         for (let b = maxBoxes; b < nBoxes; b++) {
-          keepFills[maxBoxes - 1] = Math.max(keepFills[maxBoxes - 1], fills[b]);
-          const x0 = boxes[b * 4];
-          const y0 = boxes[b * 4 + 1];
-          const x1 = x0 + boxes[b * 4 + 2];
-          const y1 = y0 + boxes[b * 4 + 3];
+          keepFills[maxBoxes - 1] = Math.max(keepFills[maxBoxes - 1], mFills[b]);
+          const x0 = mBoxes[b * 4];
+          const y0 = mBoxes[b * 4 + 1];
+          const x1 = x0 + mBoxes[b * 4 + 2];
+          const y1 = y0 + mBoxes[b * 4 + 3];
           const lx0 = keep[(maxBoxes - 1) * 4];
           const ly0 = keep[(maxBoxes - 1) * 4 + 1];
           const lx1 = lx0 + keep[(maxBoxes - 1) * 4 + 2];
@@ -451,7 +598,7 @@ export function createBillowEngine({
         renderer.setQuads(keep, maxBoxes, keepFills);
         nBoxes = maxBoxes;
       } else {
-        renderer.setQuads(boxes, nBoxes, fills);
+        renderer.setQuads(mBoxes, nBoxes, mFills);
       }
       renderer.setLook({ ...br.look, hue: br.hueShiftRad, tint: br.tint });
       renderer.uniforms.expectedDepth.value = Number.isFinite(ctx.expectedDepth) ? ctx.expectedDepth : 0;
@@ -465,6 +612,7 @@ export function createBillowEngine({
         coal: coalTotal,
         dropped,
         boxes: nBoxes,
+        quality: +env.quality.toFixed(3),
         bloomCounter: counter ? `K ${counter.K.toFixed(2)} thr ${counter.threshold} mix ${br.bloomMix}` : 'off',
       };
       return { lifeByFire, clusters };

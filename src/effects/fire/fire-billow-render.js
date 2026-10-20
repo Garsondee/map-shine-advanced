@@ -115,8 +115,8 @@ export const BILLOW_LOOK = Object.freeze({
  * @param {*} deps.THREE
  * @param {(name:string, w:number, h:number) => *} deps.createTarget half-float RGBA, linear, no depth: `allocator.create(...)`
  * @param {(rt:*) => void} [deps.disposeTarget] `allocator.dispose(rt)`
- * @param {number} [deps.flameCapacity=6144] flame + coal lobes
- * @param {number} [deps.smokeCapacity=2048]
+ * @param {number} [deps.flameCapacity=10240] flame + coal lobes (a burning roof of ~90 flames is ~7000)
+ * @param {number} [deps.smokeCapacity=3072]
  * @param {number} [deps.maxQuads=64] contour boxes (one per fire)
  * @param {object} [deps.lighting] `{illumTexNode, colorationTexNode}`: the scene's own light on the SMOKE (the flame is
  *   emissive and ignores it). Without it the smoke is lit by `uAmbient` alone.
@@ -128,8 +128,8 @@ export function createBillowRenderer({
   THREE,
   createTarget,
   disposeTarget = null,
-  flameCapacity = 6144,
-  smokeCapacity = 2048,
+  flameCapacity = 10240,
+  smokeCapacity = 3072,
   maxQuads = 64,
   lighting = null,
   depth = null,

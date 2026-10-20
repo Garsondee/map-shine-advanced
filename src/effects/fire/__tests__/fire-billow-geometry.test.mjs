@@ -422,7 +422,10 @@ export function run(t) {
       'rain on a hot fire makes WET smoke (steam): its smoke lobes carry the wetness',
       rained.wet > 0.2 && dryFire.wet < 0.01
     );
-    t.ok('and more of it than the same fire dry', rained.n >= dryFire.n);
+    t.ok(
+      `but rain beats the smoke down: a thin wisp, far less than the dry fire (${rained.n} vs ${dryFire.n} puffs)`,
+      rained.n < 0.35 * dryFire.n
+    );
     const dead = emit({ vitality01: 0, coal01: 0, rain01: 0 });
     t.ok('a cold dead fire does not smoke at all', dead.r.smoke === 0);
   }

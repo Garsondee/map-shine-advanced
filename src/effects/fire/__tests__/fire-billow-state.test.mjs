@@ -351,4 +351,23 @@ export function run(t) {
       s.phase !== 'burning'
     );
   }
+
+  // ── RAIN HISSES THE COALS OUT IN SECONDS (round 5) ───────────────────────────────────────────────────────────────
+  {
+    const coalGone = (rain) => {
+      const s = newFireLife();
+      s.phase = 'out';
+      s.vitality = 0;
+      s.coal = 1;
+      let i = 0;
+      for (; i < 4 * 400 && s.phase === 'out'; i++) stepFireLife(s, 0.25, { rain01: rain });
+      return i * 0.25;
+    };
+    const rained = coalGone(1);
+    t.ok(`full rain puts the coals out within ~6 s (${rained.toFixed(1)} s)`, rained < 6);
+    t.ok(
+      `a drizzle is slower but still far faster than dry air (${coalGone(0.15).toFixed(0)} s)`,
+      coalGone(0.15) < 0.25 * FIRE_LIFE.smoulderSec
+    );
+  }
 }

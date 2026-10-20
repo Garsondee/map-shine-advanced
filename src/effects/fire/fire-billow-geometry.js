@@ -857,7 +857,10 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
   // a hearth's smoke is drawn up the flue: thin and low; a bonfire's is a column. A doused fire smokes MORE (steam).
   // wet = steam: rain on a hot fire. Burning smoke follows the fire's power; a smouldering bed gives a thin wisp, no more.
   const wet = clamp01(clamp01(f.rain01 ?? 0) * (0.35 + 0.65 * (1 - power)) * (0.3 + 0.7 * coalHeat));
-  const smokeAmt = (0.26 + 0.74 * outdoor) * (0.12 * coalHeat + 0.88 * Math.pow(smokePower, 0.8) + 1.1 * wet);
+  // rain beats smoke down fast: a shower leaves a thin steam wisp, not a column
+  const rainKill = 1 - 0.95 * smoothstep(0.03, 0.45, clamp01(f.rain01 ?? 0));
+  const smokeAmt =
+    (0.26 + 0.74 * outdoor) * ((0.12 * coalHeat + 0.88 * Math.pow(smokePower, 0.8)) * rainKill + 0.12 * wet);
   const nSmoke = Math.max(0, Math.round(smokeRef * smokeAmt));
   for (let i = 0; i < nSmoke; i++) {
     const id = seed * 131 + i * 17 + 14000;
@@ -955,7 +958,9 @@ export function emitMassSmoke(out, start, m, env, tuneOverride) {
   const coalHeat = clamp01(m.coal01 ?? 0.35 + 0.65 * vit);
   const wet = clamp01(clamp01(m.rain01 ?? 0) * (0.35 + 0.65 * (1 - power)) * (0.3 + 0.7 * coalHeat));
   // the same smoke amount as one flame's (a hearth's goes up the flue, rain makes steam), times how much of the mass burns
-  const amt = (0.26 + 0.74 * outdoor) * (0.12 * coalHeat + 0.88 * Math.pow(smokePower, 0.8) + 1.1 * wet) * lit;
+  const rainKill = 1 - 0.95 * smoothstep(0.03, 0.45, clamp01(m.rain01 ?? 0));
+  const amt =
+    (0.26 + 0.74 * outdoor) * ((0.12 * coalHeat + 0.88 * Math.pow(smokePower, 0.8)) * rainKill + 0.12 * wet) * lit;
   // a weak column (a dying fire, a soaked roof) is made of smaller, lower puffs, not of a few big balls
   const weak = Math.min(1, amt);
   const sizeK = 0.55 + 0.45 * Math.pow(weak, 0.6);

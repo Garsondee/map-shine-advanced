@@ -1801,4 +1801,25 @@ export function run(t) {
       [0, 1, 2].every((n) => fireTierPlan(n).spriteCountScale < 1.0)
     );
   }
+
+  // ── THE LIGHT FOLLOWS THE FLAME, NOT THE SPRITE-ERA STRESS CURVE (round 5) ────────────────────────────────────────
+  {
+    const fire = { id: 'g', x: 100, y: 100, diameterPx: 300, intensity: 1, elevation: 0, windExposure: 1, ids: ['g'] };
+    const life = (v) => new Map([['g', { vitality: v, coal: 1 }]]);
+    const mk = (speed01, v) =>
+      buildFireLightSources([{ ...fire }], {
+        tier: 3,
+        mPerPx: M_PER_PX,
+        weather: lightWeather(fire, {}, { speed01 }),
+        lifeByFire: life(v),
+      });
+    const calm = mk(0, 1)[0];
+    const gale = mk(1, 1)[0];
+    t.ok(
+      'a gale on a still-burning fire keeps most of its light (while flame is drawn, light is cast)',
+      gale && gale.alpha01 > 0.6 * calm.alpha01
+    );
+    const dying = mk(1, 0.3)[0];
+    t.ok('the light drops only as the flame itself dies down', dying && dying.alpha01 < gale.alpha01 * 0.5);
+  }
 }

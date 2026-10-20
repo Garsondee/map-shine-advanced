@@ -497,6 +497,16 @@ export function createBillowRenderer({
     const ex = vec2(e.x, float(0));
     const ey = vec2(float(0), dirY(e.y));
     const c0 = flameNode.sample(p);
+    // THE COAL BED has its own, calmer warp: finer grain (2.6x the frequency), a third of the speed, a third of the push
+    const cn = local.mul(U.warpFreq.mul(2.6));
+    const ct = U.time.mul(U.warpSpeed.mul(0.3));
+    const cwarp = vec2(
+      mx_noise_float(vec3(cn.x.add(71.3), cn.y.add(3.9), ct)),
+      mx_noise_float(vec3(cn.x.add(9.1), cn.y.add(55.5), ct.mul(1.1)))
+    )
+      .mul(U.warpPx.mul(0.33))
+      .div(U.rectSize);
+    const cc = flameNode.sample(flipUV(uv0.add(cwarp)));
     const cR = flameNode.sample(p.add(ex));
     const cL = flameNode.sample(p.sub(ex));
     const cD = flameNode.sample(p.add(ey));
@@ -552,7 +562,7 @@ export function createBillowRenderer({
     const glowRgb = vec3(1.0, 0.42, 0.06).mul(glowA);
 
     // ───────────── COAL BED: cracked glowing cells, additive over whatever is painted ─────────────
-    const C = c0.z;
+    const C = cc.z;
     const coverC = smoothstep(float(0.3), float(0.8), C);
     // the cells' own outline wobbles (a straight crack reads as a tile edge, not a split in burning wood)
     const cw = vec2(
@@ -561,8 +571,8 @@ export function createBillowRenderer({
     ).mul(float(6));
     const w = worley(local.add(cw).mul(U.coalCell));
     const crack = smoothstep(float(0.0), U.coalCrack, w.f2.sub(w.f1));
-    const pulse = float(0.75).add(sin(U.time.mul(float(0.9).add(w.rnd.mul(1.7))).add(w.rnd.mul(40))).mul(0.25));
-    const coalHeat = clamp(c0.w.div(max(C, float(0.001))), float(0), float(1));
+    const pulse = float(0.75).add(sin(U.time.mul(float(0.35).add(w.rnd.mul(0.6))).add(w.rnd.mul(40))).mul(0.25));
+    const coalHeat = clamp(cc.w.div(max(C, float(0.001))), float(0), float(1));
     // rounded glowing lumps with dark gaps (not crystal facets): bright in each cell's middle, falling toward its border
     const lump = float(1).sub(smoothstep(float(0.08), float(0.6), w.f1));
     // a cooling bed goes dark FAST: the tone is raised to a power so a half-cool coal is rust, not orange

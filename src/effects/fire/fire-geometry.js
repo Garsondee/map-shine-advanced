@@ -1131,7 +1131,10 @@ export function buildFireLightSources(
       // Only the SLOW cold dip is followed (see `fireFlameBrightness01`); the fast shimmer is held at its mean.
       // (No stress = no gutter: a calm sprite is exactly 1 whatever the dips do, so the trig is skipped.)
       const cold = gutterClock === null || !(stress > 0) ? 0 : fireGutter01(gutterClock, sm.x, sm.y).cold;
-      brightSum += fireFlameBrightness01(stress, { cold });
+      // billow era (`lifeByFire` given): the flame's own life decides the light below; weather only dims it a little, because
+      // the sprite-era curve (size^2 x opacity x count) put the light out while plenty of flame was still being drawn
+      brightSum +=
+        lifeByFire && typeof lifeByFire.get === 'function' ? 1 - 0.3 * stress : fireFlameBrightness01(stress, { cold });
     }
     // ⚠️ THE FIRE'S LONG LIFE (2026-10-20, the billow fire). A fire the rain has put out casts no flame light; its hot
     // coals cast a faint orange glow (`0.16 × coal`) that fades as they cool; a fire coughing back to life brightens as

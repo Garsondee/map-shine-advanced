@@ -37,7 +37,7 @@ export const FIRE_LIFE = Object.freeze({
   douseSec: 28,
   /** Seconds for a soaked fire's wetness to drain once the rain has stopped. */
   drySec: 200,
-  /** Seconds the coals of a put-out fire stay hot (rain hisses them out up to 4x faster). */
+  /** Seconds the coals of a put-out fire stay hot (rain hisses them out up to 60x faster: a few seconds of real rain). */
   smoulderSec: 150,
   /** Seconds the cold fire stays dead, counted only while it is dry, before it starts to come back. */
   rekindleDelaySec: 900,
@@ -117,7 +117,7 @@ export function stepFireLife(state, dtSec, w = {}, life = FIRE_LIFE) {
     case 'out': {
       state.vitality = 0;
       // the coals cool; rain hisses them out much faster
-      state.coal = clamp(state.coal - (dt / Math.max(1, L.smoulderSec)) * (1 + 3 * rain), 0, 1);
+      state.coal = clamp(state.coal - (dt / Math.max(1, L.smoulderSec)) * (1 + 60 * rain), 0, 1);
       if (state.coal <= 0.02) {
         state.phase = 'dead';
         state.clock = 0;

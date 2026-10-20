@@ -56,7 +56,7 @@ const MODEST_SPACING = 1.4;
  * Most lobes written per frame before every flame is thinned out: the emitter costs ~0.7 us a lobe (measured, Node, warm), so
  * this is ~3 ms a frame. A lone campfire is ~90 lobes (0.06 ms); a whole building would otherwise be ~6000 (4.5 ms).
  */
-const CPU_LOBE_BUDGET = 4500;
+const CPU_LOBE_BUDGET = 5600;
 /** A burning mass's equivalent flame radius, as a fraction of its box's mean side (fitted to a single flame: 0.19). */
 const MASS_FILL_PER_SIDE = 0.19;
 /** A group of flames too scattered to be one contour box is covered by at most this many grid tiles. */

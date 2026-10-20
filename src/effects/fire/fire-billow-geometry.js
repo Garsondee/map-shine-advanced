@@ -150,7 +150,7 @@ export const BILLOW_SCORCH_HEX = Object.freeze(['#603826', '#4c2e21', '#432c21']
 export const BILLOW_TUNE = Object.freeze({
   // ── budget (lobes per fire at quality 1) ──
   tongueMin: 0,
-  tongueMax: 4,
+  tongueMax: 8,
   tongueLobes: 5,
   fleckBase: 5,
   fleckPerR: 0.07,
@@ -161,10 +161,10 @@ export const BILLOW_TUNE = Object.freeze({
   bodyLifeMul: 1.0, // × each layer's own cycle
   bodyHeight: 2.1, // flame-tip height, × R (a hearth burns lower, a bonfire stands up)
   // ── tongues ──
-  tongueLength: 0.55, // × plume radius
-  tongueLobe: 0.72,
+  tongueLength: 1.1, // × plume radius
+  tongueLobe: 0.55,
   tongueLife: 1.9,
-  tongueCurl: 3.2,
+  tongueCurl: 5,
   // ── flecks ──
   fleckLife: 0.8,
   fleckSpeed: 2.2,

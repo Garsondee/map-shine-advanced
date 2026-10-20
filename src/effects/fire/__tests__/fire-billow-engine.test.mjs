@@ -897,12 +897,12 @@ export function run(t) {
   // ── A BURNING MASS: overlapping flames are drawn as ONE box, and a big fire's flames stand taller ────────────────────
   {
     t.ok(
-      'a single flame is as tall as ever, and a fire many flames wide stands taller (to 2x, never more)',
+      'a single flame is as tall as ever, and a fire many flames wide stands taller (to 1.7x, never more)',
       infernoHeightGain(40, 59) === 1 &&
         infernoHeightGain(59, 59) === 1 &&
-        near(infernoHeightGain(118, 59), 1.4, 1e-9) &&
+        near(infernoHeightGain(118, 59), 1.3, 1e-9) &&
         infernoHeightGain(236, 59) > infernoHeightGain(118, 59) &&
-        infernoHeightGain(1e6, 59) === 2 &&
+        infernoHeightGain(1e6, 59) === 1.7 &&
         infernoHeightGain(undefined, undefined) === 1
     );
     t.ok(

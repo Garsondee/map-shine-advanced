@@ -13,8 +13,11 @@
  *   await fireEngineLab.shot('calm')                     // PNG under tools/shader-lab/runs/<run>/
  *   fireEngineLab.setRain(1); await fireEngineLab.advance(40); fireEngineLab.lives()
  *
- * ⚠️ No bloom and no scene lighting here (the smoke is lit by one flat ambient), exactly like the billow lab. Lab-green
- * is BUILT (unverified); only the author, on a real scene, says LIVE.
+ * ⚠️ No bloom and no scene lighting here (the smoke is lit by one flat ambient), exactly like the billow lab, so the flame
+ * shows the colours the painted palette says. The real viewer's bloom lifts a flame well past them (measured: cream arrived
+ * as acid yellow) and the flame counters it itself (`fire-billow-bloom.js`), so what you see here is what the real viewer
+ * should show with the bloom on OR off. The whole pipeline was also driven in a private real Foundry rig on 2026-10-20 (a
+ * roofed room with a doorway, an open yard, a burning roof); only the author, on a real scene, says LIVE.
  *
  * @module tools/shader-lab/fire-engine-lab
  */

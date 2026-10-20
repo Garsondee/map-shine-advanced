@@ -20,7 +20,7 @@
  * @module effects/fire/fire-billow-engine
  */
 import { createBillowRenderer } from './fire-billow-render.js';
-import { emitFireLobes, LOBE_STRIDE, maxLobesPerFire } from './fire-billow-geometry.js';
+import { emitFireLobes, hash01, LOBE_STRIDE, maxLobesPerFire } from './fire-billow-geometry.js';
 import { createFireLifeBook } from './fire-billow-state.js';
 import { billowRuntimeFromParams } from './fire-billow-params.js';
 import { bloomCounterParams, bloomCounterUniforms, regionFill } from './fire-billow-bloom.js';
@@ -40,7 +40,9 @@ const SINGLE_FLAME_REACH = 1.7;
 /** Past this many maxR wide a fire is a building: its flames stand at their closest. Between, they stand `MODEST_SPACING` apart. */
 const MASS_FROM = 3;
 /** Flames of a split fire stand this close (in maxR) at their closest: close enough that neighbours overlap into one mass. */
-const CLUSTER_SPACING = 0.95;
+const CLUSTER_SPACING = 0.85;
+/** A mass's flame centres are knocked off the sampling lattice by up to this many maxR (a roof is not a grid). */
+const CLUSTER_JITTER = 0.45;
 /** ...and this far apart (in maxR) when the fire has only just outgrown one flame. */
 const MODEST_SPACING = 1.4;
 /**
@@ -53,13 +55,13 @@ const MASS_FILL_PER_SIDE = 0.19;
 
 /**
  * A big fire's flames stand taller: a burning roof is not a field of campfires. 1 for a single flame, rising with how much
- * wider the whole painted fire is than one flame can be (each doubling adds 40%), to at most 2x.
+ * wider the whole painted fire is than one flame can be (each doubling adds 30%), to at most 1.7x.
  *
  * @param {number} parentRadius the whole fire's radius (px) @param {number} maxRadius one flame's widest (px)
  */
 export function infernoHeightGain(parentRadius, maxRadius) {
   const ratio = Math.max(1, (parentRadius || 0) / Math.max(1e-3, maxRadius || 1));
-  return clamp(1 + 0.4 * Math.log2(ratio), 1, 2);
+  return clamp(1 + 0.3 * Math.log2(ratio), 1, 1.7);
 }
 
 /**
@@ -165,7 +167,7 @@ export function planClusters(fires, cloud, mPerPx) {
     }
     // a wide fire: greedy farthest-point sampling over its painted points -> centres about one maxR apart, so the flames
     // overlap into ONE burning mass (a roof of flames, not a tray of candles)
-    const want = clamp(Math.ceil((R / maxR) * (R / maxR) * 1.8), 2, MAX_CLUSTERS_PER_FIRE);
+    const want = clamp(Math.ceil((R / maxR) * (R / maxR) * 2.8), 2, MAX_CLUSTERS_PER_FIRE);
     const centres = [];
     // a bonfire's worth of paint gets a few big flames; a building's gets a dense mass of them
     const spacing =
@@ -235,9 +237,9 @@ export function planClusters(fires, cloud, mPerPx) {
       out.push({
         fireIndex: j,
         id,
-        x: pts[centres[c] * stride],
-        y: pts[centres[c] * stride + 1],
-        radius: clamp(Math.max(spread * 0.9, maxR * 0.8), 6, maxR),
+        x: pts[centres[c] * stride] + (hash01(baseSeed, c, 11) - 0.5) * maxR * CLUSTER_JITTER,
+        y: pts[centres[c] * stride + 1] + (hash01(baseSeed, c, 12) - 0.5) * maxR * CLUSTER_JITTER,
+        radius: clamp(Math.max(spread * 0.9, maxR * 0.95), 6, maxR),
         parentRadius: R,
         maxRadius: maxR,
         siblings: centres.length,

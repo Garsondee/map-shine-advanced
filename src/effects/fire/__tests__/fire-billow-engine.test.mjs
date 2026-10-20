@@ -268,6 +268,26 @@ export function run(t) {
         JSON.stringify(again.map((c) => [c.x, c.y, c.radius, c.seed, c.count]))
     );
 
+    // a bonfire a little over the cap is ONE big flame, not two candles side by side
+    {
+      const ratio = (r) =>
+        planClusters(
+          [{ id: 'b', x: 500, y: 500, diameterPx: 2 * r * maxR }],
+          makeCloud(discOfPoints(500, 500, r * maxR, 8)),
+          M_PER_PX
+        );
+      t.ok(
+        `a fire 1.4x the cap wide is still one flame (${ratio(1.4).length})`,
+        ratio(1.4).length === 1 && ratio(1.0).length === 1
+      );
+      const few = ratio(2.2).length;
+      const many = ratio(4).length;
+      t.ok(
+        `one that has outgrown it gets a few big flames (${few}), a building a mass of them (${many})`,
+        few >= 2 && few <= 12 && many > few * 2
+      );
+    }
+
     // too few painted points to split on
     const sparse = planClusters(
       [{ id: 'wide', x: 100, y: 100, diameterPx: 700 }],

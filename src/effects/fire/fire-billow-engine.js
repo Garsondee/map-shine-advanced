@@ -35,8 +35,14 @@ export const MAX_CLUSTER_RADIUS_M = 0.9;
 const MAX_POINTS_PER_CLUSTER = 96;
 /** Beyond this many sub-flames per fire the extras are dropped (a whole city block is not one fire). */
 const MAX_CLUSTERS_PER_FIRE = 96;
-/** Flames of a split fire stand this close (in maxR) at their widest: close enough that neighbours overlap into one mass. */
+/** A fire up to this many maxR wide stays ONE (big) flame: a painted bonfire a little over the cap is not two candles side by side. */
+const SINGLE_FLAME_REACH = 1.7;
+/** Past this many maxR wide a fire is a building: its flames stand at their closest. Between, they stand `MODEST_SPACING` apart. */
+const MASS_FROM = 3;
+/** Flames of a split fire stand this close (in maxR) at their closest: close enough that neighbours overlap into one mass. */
 const CLUSTER_SPACING = 0.95;
+/** ...and this far apart (in maxR) when the fire has only just outgrown one flame. */
+const MODEST_SPACING = 1.4;
 /**
  * Most lobes written per frame before every flame is thinned out: the emitter costs ~0.7 us a lobe (measured, Node, warm), so
  * this is ~3 ms a frame. A lone campfire is ~90 lobes (0.06 ms); a whole building would otherwise be ~6000 (4.5 ms).
@@ -140,7 +146,7 @@ export function planClusters(fires, cloud, mPerPx) {
     const R = Math.max(4, (Number(f.diameterPx) || 100) / 2);
     const baseSeed = deriveFireSeed(f.x, f.y) | 0;
     const mine = owned[j];
-    if (R <= maxR * 1.15 || mine.length < 6) {
+    if (R <= maxR * SINGLE_FLAME_REACH || mine.length < 6) {
       const { points, count } = pack(mine);
       out.push({
         fireIndex: j,
@@ -161,6 +167,15 @@ export function planClusters(fires, cloud, mPerPx) {
     // overlap into ONE burning mass (a roof of flames, not a tray of candles)
     const want = clamp(Math.ceil((R / maxR) * (R / maxR) * 1.8), 2, MAX_CLUSTERS_PER_FIRE);
     const centres = [];
+    // a bonfire's worth of paint gets a few big flames; a building's gets a dense mass of them
+    const spacing =
+      maxR *
+      clamp(
+        MODEST_SPACING -
+          ((R / maxR - SINGLE_FLAME_REACH) / (MASS_FROM - SINGLE_FLAME_REACH)) * (MODEST_SPACING - CLUSTER_SPACING),
+        CLUSTER_SPACING,
+        MODEST_SPACING
+      );
     // start from the point nearest the fire's own centre, for a stable first pick
     let first = mine[0];
     let fd = Infinity;
@@ -190,7 +205,7 @@ export function planClusters(fires, cloud, mPerPx) {
           far = i;
         }
       }
-      if (far < 0 || farD < maxR * CLUSTER_SPACING * (maxR * CLUSTER_SPACING)) break;
+      if (far < 0 || farD < spacing * spacing) break;
       centres.push(far);
     }
     const groups = centres.map(() => []);

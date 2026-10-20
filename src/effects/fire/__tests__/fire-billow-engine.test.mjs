@@ -48,7 +48,18 @@ function discOfPoints(cx, cy, radius, spacing) {
 
 /** The renderer's public face with nothing behind it: records what the engine hands it. */
 function makeFakeRendererFactory({ flameCapacity = 4096, smokeCapacity = 2048 } = {}) {
-  const seen = { deps: null, counts: null, quads: null, quadCount: 0, look: null, prepares: [], disposed: false };
+  const seen = {
+    deps: null,
+    counts: null,
+    quads: null,
+    quadCount: 0,
+    fills: null,
+    bloom: null,
+    bloomSets: 0,
+    look: null,
+    prepares: [],
+    disposed: false,
+  };
   const factory = (deps) => {
     seen.deps = deps;
     const flameLobes = new Float32Array(flameCapacity * LOBE_STRIDE);
@@ -63,9 +74,14 @@ function makeFakeRendererFactory({ flameCapacity = 4096, smokeCapacity = 2048 } 
       setCounts(f, s) {
         seen.counts = { flame: f, smoke: s };
       },
-      setQuads(boxes, n) {
+      setQuads(boxes, n, fills) {
         seen.quads = Array.from(boxes).slice(0, n * 4);
         seen.quadCount = n;
+        seen.fills = fills ? Array.from(fills).slice(0, n) : null;
+      },
+      setBloomCounter(counter) {
+        seen.bloom = counter;
+        seen.bloomSets++;
       },
       setLook(look) {
         seen.look = look;
@@ -674,5 +690,86 @@ export function run(t) {
       'the author’s hue shift (degrees) reaches the look in radians',
       near(fuelHue, Math.PI / 2, 1e-6) || Math.abs(fuelHue) > 0
     );
+  }
+
+  // ── THE SCENE'S BLOOM: the flame paints the inverse of it (fire-billow-bloom.js) ────────────────────────────────────
+  {
+    const bloomOn = {
+      enabled: true,
+      params: { threshold: 0.33, knee: 0.5, strength: 1, coreStrength: 1.01, atmoStrength: 0.24, atmoTint: '#fff0dc' },
+    };
+    {
+      const { engine, seen } = makeEngine();
+      engine.update(ctxOf());
+      t.ok(
+        'with no bloom state there is nothing to counter: K is 0 (the flame is exactly its palette) and the status says off',
+        seen.bloom && seen.bloom.k === 0 && seen.bloom.mix === 0 && engine.getStatus().bloomCounter === 'off'
+      );
+    }
+    {
+      const { engine, seen } = makeEngine();
+      engine.update(ctxOf({ ctx: { bloom: bloomOn } }));
+      t.ok(
+        'with the author’s bloom on, the renderer is told its K, threshold and knee, and the dial at full',
+        seen.bloom &&
+          Math.abs(seen.bloom.k - 3.7029) < 1e-3 &&
+          seen.bloom.threshold === 0.33 &&
+          seen.bloom.knee === 0.5 &&
+          seen.bloom.mix === 1
+      );
+      t.ok('the status carries the bloom it is countering', engine.getStatus().bloomCounter.startsWith('K 3.70'));
+      const sets = seen.bloomSets;
+      engine.update(ctxOf({ ctx: { bloom: { ...bloomOn, params: { ...bloomOn.params, strength: 2 } } } }));
+      t.ok(
+        'a changed bloom reaches the renderer the very next frame (the cascade can move it at any time)',
+        seen.bloomSets === sets + 1 && Math.abs(seen.bloom.k - 7.4058) < 1e-3
+      );
+      engine.update(ctxOf({ ctx: { bloom: { enabled: false, params: bloomOn.params } } }));
+      t.ok(
+        'a bloom switched off (the performance profile can) puts the flame back to its painted colours',
+        seen.bloom.k === 0 && engine.getStatus().bloomCounter === 'off'
+      );
+    }
+    {
+      const { engine, seen } = makeEngine();
+      engine.update(ctxOf({ ctx: { bloom: bloomOn }, params: { ...defaults, bloomCounter: 0 } }));
+      t.ok('the author’s “Counter scene bloom” at 0 leaves the flame to the bloom', seen.bloom.mix === 0);
+      engine.update(ctxOf({ ctx: { bloom: bloomOn }, params: { ...defaults, bloomCounter: 0.4 } }));
+      t.ok('and in between is in between', Math.abs(seen.bloom.mix - 0.4) < 1e-9);
+    }
+    // a flame that is big on screen gets more of the bloom than a small one, per box
+    {
+      const { engine, seen } = makeEngine();
+      const fires = [
+        { id: 'small', x: 300, y: 500, diameterPx: 40 },
+        { id: 'big', x: 1000, y: 500, diameterPx: 160 },
+      ];
+      const cloud = makeCloud([...discOfPoints(300, 500, 20, 10), ...discOfPoints(1000, 500, 80, 10)]);
+      engine.update(ctxOf({ fires, cloud, ctx: { pxPerWorld: 2, bloom: bloomOn } }));
+      t.ok(
+        `each box carries its own fill, the bigger flame's larger (${seen.fills?.map((v) => v.toFixed(2)).join(', ')})`,
+        seen.fills?.length === 2 && seen.fills[1] > seen.fills[0] && seen.fills[0] > 0 && seen.fills[1] < 1
+      );
+      engine.update(ctxOf({ fires, cloud, ctx: { pxPerWorld: 0.5, bloom: bloomOn } }));
+      t.ok('zoomed out, the same flames get less of it', seen.fills[1] < 0.5);
+    }
+    {
+      // merged boxes keep the largest fill among them
+      const many = makeEngine({ flameCapacity: 20000, smokeCapacity: 20000 });
+      const fires = [];
+      const pts = [];
+      for (let i = 0; i < 70; i++) {
+        const x = 60 + (i % 14) * 95;
+        const y = 80 + Math.floor(i / 14) * 150;
+        const d = i === 69 ? 200 : 40;
+        fires.push({ id: `m${i}`, x, y, diameterPx: d });
+        pts.push(...discOfPoints(x, y, d / 2, 8));
+      }
+      many.engine.update(ctxOf({ fires, cloud: makeCloud(pts), ctx: { pxPerWorld: 1.5, bloom: bloomOn } }));
+      t.ok(
+        'past 64 boxes the merged last one keeps the largest fill among the boxes it swallowed',
+        many.seen.quadCount === 64 && many.seen.fills.length === 64 && many.seen.fills[63] >= many.seen.fills[0]
+      );
+    }
   }
 }

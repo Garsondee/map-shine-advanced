@@ -37,6 +37,7 @@
  * @module effects/fire/fire-billow-render
  */
 import { BILLOW_FLAME_RAMP, BILLOW_SMOKE_RAMP, BILLOW_FLECK_HEX, LOBE_STRIDE } from './fire-billow-geometry.js';
+import { BLOOM_SOLVE_STEPS } from './fire-billow-bloom.js';
 import { hexToRgb01 } from './fire-geometry.js';
 import { piecewiseLinearRgb, hueRotateNode } from './fire-sprite.js';
 
@@ -330,8 +331,9 @@ export function createBillowRenderer({
   const flipUV = (p) => (flipV ? vec2(p.x, float(1).sub(p.y)) : p);
   const dirY = (v) => (flipV ? v.negate() : v);
 
-  // contour boxes: one instanced quad per fire
+  // contour boxes: one instanced quad per fire (`quadFill` = how much of the scene's bloom a flame this big on screen gets)
   const quadBoxes = new Float32Array(maxQuads * 4);
+  const quadFills = new Float32Array(maxQuads);
   const resolveGeometry = new THREE.InstancedBufferGeometry();
   {
     const quad = new THREE.PlaneGeometry(1, 1);
@@ -341,13 +343,51 @@ export function createBillowRenderer({
     const attr = new THREE.InstancedBufferAttribute(quadBoxes, 4);
     attr.setUsage(THREE.DynamicDrawUsage);
     resolveGeometry.setAttribute('quadBox', attr);
+    const fillAttr = new THREE.InstancedBufferAttribute(quadFills, 1);
+    fillAttr.setUsage(THREE.DynamicDrawUsage);
+    resolveGeometry.setAttribute('quadFill', fillAttr);
     resolveGeometry.instanceCount = 0;
   }
   const quadBox = attribute('quadBox', 'vec4');
+  const quadFill = attribute('quadFill', 'float');
   const resolveMaterial = new THREE.NodeMaterial();
   const worldAt = Fn(() => quadBox.xy.add(positionGeometry.xy.add(vec2(0.5, 0.5)).mul(quadBox.zw)))();
   const vWorld = worldAt.toVarying('vBillowWorld');
+  const vFill = Fn(() => quadFill)().toVarying('vBillowFill');
   resolveMaterial.positionNode = Fn(() => vec3(worldAt, float(0)))();
+
+  // THE BLOOM COUNTER (fire-billow-bloom.js): the scene's bloom adds its glow on top of the flame, so the flame paints the
+  // INVERSE of it — for a wanted colour T with max channel `brT`, the scale `s` that solves s * (1 + K * fill * contribution(s *
+  // brT)) = 1 — and the bloom hands T back. Four uniforms (K = 0 means no bloom: s is exactly 1) and nine unrolled bisection
+  // steps; NOT a lookup texture (`gpu/textures-in-vt-only`). `inverseBloomScale` is the same algorithm in plain numbers.
+  const bloomK = uniform(float(0));
+  const bloomThr = uniform(float(1));
+  const bloomKnee = uniform(float(0.5));
+  const bloomMix = uniform(float(0));
+  const bloomScale = (brT, fill) => {
+    const kEff = bloomK.mul(clamp(fill, float(0), float(1))).toVar();
+    const kneeW = bloomThr.mul(bloomKnee).add(1e-4).toVar();
+    // the bloom bright pass's share of a pixel that is kept (bloom-render.js `brightMaterial`, line for line)
+    const contribution = (b) => {
+      const soft = clamp(b.sub(bloomThr).add(kneeW), float(0), kneeW.mul(2));
+      const softQ = soft.mul(soft).div(kneeW.mul(4).add(1e-4));
+      return max(softQ, b.sub(bloomThr))
+        .div(max(b, float(1e-4)))
+        .max(float(0));
+    };
+    let lo = float(0).toVar();
+    let hi = float(1).toVar();
+    for (let i = 0; i < BLOOM_SOLVE_STEPS; i++) {
+      const mid = lo.add(hi).mul(0.5).toVar();
+      const over = mid.mul(float(1).add(kEff.mul(contribution(mid.mul(brT))))).greaterThan(1);
+      const nextHi = select(over, mid, hi).toVar();
+      const nextLo = select(over, lo, mid).toVar();
+      hi = nextHi;
+      lo = nextLo;
+    }
+    // `hi` (not the midpoint): with no bloom `hi` never moves off 1, so the flame is exactly its palette
+    return mix(float(1), hi, bloomMix);
+  };
 
   // cellular (Worley) noise: distances to the nearest two feature points, and the nearest cell's random
   const hash22 = (p) => {
@@ -531,7 +571,11 @@ export function createBillowRenderer({
     const rgbSmoke = smokePre.add(coalPre.mul(float(1).sub(sCover)));
     const outA = cover.add(aSmoke.mul(float(1).sub(cover)));
     const outRgb = flamePre.add(rgbSmoke.mul(float(1).sub(cover)));
-    return vec4(outRgb.mul(gate), outA.mul(gate));
+    // THE BLOOM COUNTER: paint s*T so that the scene's bloom adds its share and hands T back (fire-billow-bloom.js). `s` is
+    // solved from the colour's own max channel and this fire's on-screen size; it is exactly 1 when the bloom is off.
+    const brT = max(max(outRgb.r, outRgb.g), outRgb.b);
+    const counter = bloomScale(brT, vFill);
+    return vec4(outRgb.mul(counter).mul(gate), outA.mul(gate));
   })();
   resolveMaterial.transparent = true;
   resolveMaterial.depthTest = false;
@@ -587,13 +631,28 @@ export function createBillowRenderer({
     get counts() {
       return { flame: nFlame, smoke: nSmoke };
     },
-    /** Place the contour boxes (world px): `[minX, minY, w, h]` per fire; with `n = 0` nothing is drawn. */
-    setQuads(boxes, n) {
+    /**
+     * Place the contour boxes (world px): `[minX, minY, w, h]` per fire; with `n = 0` nothing is drawn. `fills` (optional,
+     * one 0..1 number per box) says how much of the scene's bloom a flame that big on screen gets; omitted = 0 = no counter.
+     */
+    setQuads(boxes, n, fills = null) {
       nQuads = Math.max(0, Math.min(maxQuads, n | 0));
       for (let i = 0; i < nQuads * 4; i++) quadBoxes[i] = boxes[i];
+      for (let i = 0; i < nQuads; i++) quadFills[i] = fills ? Number(fills[i]) || 0 : 0;
       resolveGeometry.instanceCount = nQuads;
       resolveGeometry.attributes.quadBox.needsUpdate = true;
+      resolveGeometry.attributes.quadFill.needsUpdate = true;
       resolveMesh.visible = nQuads > 0;
+    },
+    /**
+     * Set what the flame counters (`bloomCounterUniforms(...)`): the bloom's broad-region gain `k`, its `threshold` and `knee`,
+     * and the author's `mix`. `k = 0` is no bloom: the flame is exactly its palette.
+     */
+    setBloomCounter({ k = 0, threshold = 1, knee = 0.5, mix = 0 } = {}) {
+      bloomK.value = Number.isFinite(k) ? Math.max(0, k) : 0;
+      bloomThr.value = Number.isFinite(threshold) ? Math.max(0, threshold) : 1;
+      bloomKnee.value = Number.isFinite(knee) ? Math.min(1, Math.max(0, knee)) : 0.5;
+      bloomMix.value = Number.isFinite(mix) ? Math.min(1, Math.max(0, mix)) : 0;
     },
     /** One box covering a world rect (the lab, and the first-cut engine). */
     setQuad(minX, minY, w, h) {

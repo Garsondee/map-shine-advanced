@@ -4727,6 +4727,11 @@ export async function startVtPanViewer({
       // TDZ-safe for the same reason `getWindHandle` is: `lastEnvSnapshot` is declared further down this function and
       // the subsystem only calls this from the frame loop.
       getPrecip01: () => lastEnvSnapshot?.env?.weather?.precip01 ?? 0,
+      // THE SCENE'S LIVE BLOOM (2026-10-20) — the bloom pass reads `scene.lit` AFTER the flame is drawn into it and adds its
+      // glow back, which washes a painted flame out to flat yellow-white (measured here: cream (0.99, 0.73, 0.16) arrived as
+      // (3.2, 2.1, 0.3)). The flame paints the inverse of that (`fire-billow-bloom.js`), so it needs the live params. A
+      // getter, because the cascade re-resolves them and nothing here may cache one.
+      getBloomState: () => getBloomRenderState(),
       // ⚠️ MISNAMED, AND KNOWINGLY LEFT THAT WAY FOR NOW (2026-09-04,
       // mythica-machina-press#498). `distancePixels` is pixels per DISTANCE
       // UNIT (per foot on a feet-authored scene), not per metre — verified

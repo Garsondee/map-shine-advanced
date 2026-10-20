@@ -160,11 +160,13 @@ export function stepFireLife(state, dtSec, w = {}, life = FIRE_LIFE) {
 }
 
 /**
- * A book of lives, one per fire id, for a subsystem to step each frame. Fires that stop being asked for are forgotten
- * after `forgetAfterSec` so a floor switch does not leak, but a fire that is merely off-screen keeps its state.
+ * A book of lives, one per fire id, for a subsystem to step each frame. A fire that is merely off-screen keeps (and keeps
+ * living) its state; nothing is ever forgotten except by `reset()`, because a fire put out by rain on another floor must still
+ * be out when the party comes back, and the book only ever holds one tiny record per fire the session has seen.
  *
  * @returns {{step:(id:string, dtSec:number, w:object, life?:object)=>FireLifeState, get:(id:string)=>FireLifeState|undefined,
- *   set:(id:string, partial:object)=>void, size:()=>number, reset:()=>void}}
+ *   set:(id:string, partial:object)=>void, size:()=>number, reset:()=>void,
+ *   snapshot:(limit?:number)=>Array<{id:string, phase:string, wet:number, vitality:number, coal:number}>}}
  */
 export function createFireLifeBook() {
   const lives = new Map();
@@ -186,5 +188,20 @@ export function createFireLifeBook() {
     },
     size: () => lives.size,
     reset: () => lives.clear(),
+    /** The first `limit` lives as plain rounded numbers: what `getFireStatus()` shows, so a fire's fate can be read live. */
+    snapshot(limit = 12) {
+      const out = [];
+      for (const [id, s] of lives) {
+        if (out.length >= limit) break;
+        out.push({
+          id,
+          phase: s.phase,
+          wet: +s.wet.toFixed(3),
+          vitality: +s.vitality.toFixed(3),
+          coal: +s.coal.toFixed(3),
+        });
+      }
+      return out;
+    },
   };
 }

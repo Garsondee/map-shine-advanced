@@ -23,6 +23,7 @@ import { createBillowRenderer } from './fire-billow-render.js';
 import { emitFireLobes, LOBE_STRIDE, maxLobesPerFire } from './fire-billow-geometry.js';
 import { createFireLifeBook } from './fire-billow-state.js';
 import { billowRuntimeFromParams } from './fire-billow-params.js';
+import { bloomCounterParams, bloomCounterUniforms, regionFill } from './fire-billow-bloom.js';
 import { fireScaleChain, fireWindMotion01, fireWeatherStress01, FIRE_FUELS, deriveFireSeed } from './fire-geometry.js';
 import { SPAWN_POINT_STRIDE } from './fire-spawn-points.js';
 import { buildDepthHeightGateNode } from '../lighting/point-light-illumination.js';
@@ -248,6 +249,8 @@ export function createBillowEngine({
      * @param {object} ctx.runtime `fireRuntimeFromParams(...)` — for the weather numbers it already folds
      * @param {number} ctx.precip01 the scene's eased precipitation
      * @param {number} ctx.pxPerWorld the drawing buffer's pixel density over the rect
+     * @param {{enabled?:boolean, params?:object}|null} [ctx.bloom] the scene's live bloom (`getBloomRenderState()`): the flame
+     *   paints the inverse of it so the painted colours survive (fire-billow-bloom.js). Absent = no bloom to counter.
      * @param {number} ctx.mPerPx
      * @param {number} [ctx.quality=1] the tier's lobe budget scale
      * @param {number} [ctx.expectedDepth=0]
@@ -259,6 +262,12 @@ export function createBillowEngine({
       const mPerPx = ctx.mPerPx > 0 ? ctx.mPerPx : 0.0102;
       const br = brFor(params, params?.fuel ?? 'wood');
       const timeSec = nowMs * 0.001 * br.motionSpeed;
+      const pxPerWorld = ctx.pxPerWorld > 0 ? ctx.pxPerWorld : 1;
+
+      // the scene's bloom adds its glow on top of the flame; the flame paints the inverse of it (see fire-billow-bloom.js).
+      // Four uniforms, set every frame (the cascade can move the bloom at any time, and a uniform write costs nothing).
+      const counter = bloomCounterParams(ctx.bloom);
+      renderer.setBloomCounter?.(bloomCounterUniforms(counter, br.bloomMix));
 
       // the clusters (flames) are replanned only when the paint, the fires or the grid scale change
       if (planMemo.cloud !== cloud || planMemo.fires !== fires || planMemo.mPerPx !== mPerPx) {
@@ -300,6 +309,8 @@ export function createBillowEngine({
       let dropped = 0;
       let coalTotal = 0;
       const boxes = [];
+      /** per box: how much of the bloom a flame this big on screen gets */
+      const fills = [];
       const lifeByFire = new Map();
       const stepped = new Set();
       const margin = 24;
@@ -409,7 +420,10 @@ export function createBillowEngine({
         };
         grow(renderer.flameLobes, f0, nf);
         grow(renderer.smokeLobes, s0, ns);
-        if (maxX > minX) boxes.push(minX - margin, minY - margin, maxX - minX + margin * 2, maxY - minY + margin * 2);
+        if (maxX > minX) {
+          boxes.push(minX - margin, minY - margin, maxX - minX + margin * 2, maxY - minY + margin * 2);
+          fills.push(regionFill(c.radius * pxPerWorld));
+        }
       }
 
       renderer.setCounts(nf, ns);
@@ -418,7 +432,9 @@ export function createBillowEngine({
       let nBoxes = boxes.length / 4;
       if (nBoxes > maxBoxes) {
         const keep = boxes.slice(0, maxBoxes * 4);
+        const keepFills = fills.slice(0, maxBoxes);
         for (let b = maxBoxes; b < nBoxes; b++) {
+          keepFills[maxBoxes - 1] = Math.max(keepFills[maxBoxes - 1], fills[b]);
           const x0 = boxes[b * 4];
           const y0 = boxes[b * 4 + 1];
           const x1 = x0 + boxes[b * 4 + 2];
@@ -432,17 +448,14 @@ export function createBillowEngine({
           keep[(maxBoxes - 1) * 4 + 2] = Math.max(x1, lx1) - keep[(maxBoxes - 1) * 4];
           keep[(maxBoxes - 1) * 4 + 3] = Math.max(y1, ly1) - keep[(maxBoxes - 1) * 4 + 1];
         }
-        renderer.setQuads(keep, maxBoxes);
+        renderer.setQuads(keep, maxBoxes, keepFills);
         nBoxes = maxBoxes;
       } else {
-        renderer.setQuads(boxes, nBoxes);
+        renderer.setQuads(boxes, nBoxes, fills);
       }
       renderer.setLook({ ...br.look, hue: br.hueShiftRad, tint: br.tint });
       renderer.uniforms.expectedDepth.value = Number.isFinite(ctx.expectedDepth) ? ctx.expectedDepth : 0;
-      jobs =
-        nf + ns > 0
-          ? renderer.prepareField(rect, { pxPerWorld: ctx.pxPerWorld > 0 ? ctx.pxPerWorld : 1, timeSec })
-          : [];
+      jobs = nf + ns > 0 ? renderer.prepareField(rect, { pxPerWorld, timeSec }) : [];
       renderer.scene.visible = nf + ns > 0;
       status = {
         fires: fires.length,
@@ -452,6 +465,7 @@ export function createBillowEngine({
         coal: coalTotal,
         dropped,
         boxes: nBoxes,
+        bloomCounter: counter ? `K ${counter.K.toFixed(2)} thr ${counter.threshold} mix ${br.bloomMix}` : 'off',
       };
       return { lifeByFire, clusters };
     },
@@ -462,7 +476,7 @@ export function createBillowEngine({
       jobs = [];
       return j;
     },
-    getStatus: () => ({ ...status, lives: lives.size() }),
+    getStatus: () => ({ ...status, lives: lives.size(), lifeSummary: lives.snapshot(12) }),
     dispose() {
       renderer.dispose();
     },

@@ -178,6 +178,16 @@ export const FIRE_PARAMS = Object.freeze({
     label: 'Coal glow',
     help: 'How strongly the bed of coals glows through its cracks — round the edge of a burning fire, and as the whole fire once the flame is out.',
   },
+  bloomCounter: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.05,
+    default: 1,
+    category: 'Look',
+    label: 'Counter scene bloom',
+    help: 'The scene’s bloom adds its glow on top of everything bright, and left alone it washes a painted flame out to flat yellow-white. At 1 the flame is painted pre-darkened by exactly what the live bloom will add back, so the painted colours (cream, amber, orange) come out as drawn, and it is unchanged if the bloom is off. At 0 the flame is left to the bloom.',
+  },
 
   // ── Flame ─────────────────────────────────────────────────────────────────
   flameSize: {

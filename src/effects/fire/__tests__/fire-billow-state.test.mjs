@@ -296,7 +296,21 @@ export function run(t) {
       'forcing an unknown id creates it burning',
       book.get('new').phase === 'burning' && book.get('new').coal === 0.5
     );
+    // what getFireStatus() shows, so a fire's fate can be read live in the real viewer
+    const snap = book.snapshot();
+    t.ok(
+      'the snapshot lists every life as plain rounded numbers',
+      snap.length === 3 &&
+        snap.every((s) => typeof s.id === 'string' && typeof s.phase === 'string') &&
+        snap.find((s) => s.id === 'a').vitality === 0.3 &&
+        snap.every((s) =>
+          [s.wet, s.vitality, s.coal].every(
+            (v) => Number.isFinite(v) && Math.abs(v * 1000 - Math.round(v * 1000)) < 1e-6
+          )
+        )
+    );
+    t.ok('and is capped', book.snapshot(2).length === 2 && book.snapshot(0).length === 0);
     book.reset();
-    t.ok('reset forgets everything', book.size() === 0);
+    t.ok('reset forgets everything', book.size() === 0 && book.snapshot().length === 0);
   }
 }

@@ -170,6 +170,9 @@ function buildFireLightSamples(cloud, fires, windHandle) {
  * @param {(engine: object) => void} [deps.createEngine] - the injected ember-engine factory (`createFireParticleEngine`).
  *   Injected rather than imported because `particles/allocator-only` keeps every `instancedArray` under
  *   `effects/particles/`, and this module has no business reaching for one.
+ * @param {() => ({enabled?:boolean, params?:object}|null)} [deps.getBloomState] - the scene's live bloom
+ *   (`getBloomRenderState()`). The flame paints the inverse of what that bloom will add back to it (fire-billow-bloom.js),
+ *   so its painted colours survive; omitted reads as no bloom.
  * @param {(name:string, w:number, h:number) => *} [deps.createTarget] - the allocator, for the billow field targets
  *   (`gpu/allocator-only`). Omitted = no billow flame (only the embers and the light).
  * @param {(rt:*) => void} [deps.disposeTarget]
@@ -191,6 +194,7 @@ export function createFireSubsystem({
   getWindHandle = null,
   getPxPerMeter = null,
   getPrecip01 = null,
+  getBloomState = null,
   createEngine = null,
   createTarget = null,
   disposeTarget = null,
@@ -414,6 +418,7 @@ export function createFireSubsystem({
         runtime,
         precip01,
         pxPerWorld,
+        bloom: getBloomState?.() ?? null,
         mPerPx,
         quality: firePlan.spriteCountScale,
         expectedDepth,

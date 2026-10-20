@@ -149,6 +149,13 @@ export function run(t) {
     near(withP({}, { hueShiftRad: 1.25 }).hueShiftRad, 1.25) && near(withP({}, { hueShiftRad: 1.25 }).look.hue, 1.25)
   );
   t.ok('the fuel’s height gain rides along', near(withP({}, { heightGain: 1.35 }).heightGain, 1.35));
+  t.ok(
+    '“Counter scene bloom” reaches the model, defaults to all of it, and is clamped to 0..1',
+    near(base.bloomMix, 1) &&
+      near(withP({ bloomCounter: 0.25 }).bloomMix, 0.25) &&
+      withP({ bloomCounter: 9 }).bloomMix === 1 &&
+      withP({ bloomCounter: -3 }).bloomMix === 0
+  );
 
   // ── CLAMPING: a stored value from any other schema cannot reach past the slider ────────────────────────────────
   {
@@ -225,6 +232,7 @@ export function run(t) {
       'coalGlow',
       'flameSpeed',
       'flameTint',
+      'bloomCounter',
       'posterize',
       'bandCount',
       'smokeDensity',

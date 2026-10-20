@@ -104,5 +104,7 @@ export function billowRuntimeFromParams(p = {}, extra = {}) {
     drafts: clamp(num(p.draftStrength, 1), 0, 3),
     rekindle: p.rekindle !== false,
     heightGain: extra.heightGain ?? 1,
+    // how much of the scene's bloom the flame pre-darkens for (1 = all of it, 0 = leave it to the bloom)
+    bloomMix: clamp(num(p.bloomCounter, 1), 0, 1),
   };
 }

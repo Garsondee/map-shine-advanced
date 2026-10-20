@@ -15,6 +15,8 @@
  */
 import {
   emitFireLobes,
+  emitMassSmoke,
+  MASS_SMOKE_MAX,
   basePoint,
   maxLobesPerFire,
   LOBE_STRIDE,
@@ -550,5 +552,189 @@ export function run(t) {
       emit({}, { quality: 0.4 }).r.count < emit({}, { quality: 1 }).r.count * 0.7
     );
     t.ok('an unknown tune key is harmless', emit({}, {}, { nonsense: 1 }).r.count === emit().r.count);
+  }
+
+  // ── THE SMOKE'S SHAPE: born small, grows as it climbs, rises up the page, black with soot (2026-10-20, round 2) ──────
+  {
+    const lobesAt = (extra = {}, env = {}, tune) => {
+      const out = [];
+      for (let i = 0; i < 60; i++) {
+        const e = emit({ vitality01: 1, coal01: 1, ...extra }, { tSec: 5 + i * 0.61, ...env }, tune);
+        out.push(...lobesOf(e.smoke, e.r.smoke));
+      }
+      return out;
+    };
+    const young = lobesAt().filter((l) => l.tone < 0.3);
+    const old = lobesAt().filter((l) => l.tone > 0.7);
+    t.ok(
+      `a smoke billow is born small and grows as it climbs (${mean(young.map((l) => l.r)).toFixed(1)} px young, ${mean(old.map((l) => l.r)).toFixed(1)} px old)`,
+      young.length > 20 && old.length > 20 && mean(old.map((l) => l.r)) > 1.5 * mean(young.map((l) => l.r))
+    );
+    const sootOf = (extra) => mean(lobesAt(extra).map((l) => l.heat));
+    t.ok(
+      'a sooty fuel’s smoke carries NEGATIVE colour (soot), a clean one none',
+      sootOf({ sootiness01: 0.8 }) < -0.5 && Math.abs(sootOf({ sootiness01: 0 })) < 0.01
+    );
+    t.ok(
+      'and rain washes it: wet smoke is steam (positive), soot or no soot',
+      sootOf({ sootiness01: 0.8, rain01: 1 }) > sootOf({ sootiness01: 0.8 }) + 0.3 && sootOf({ rain01: 1 }) > 0.05
+    );
+    const meanY = (tune, env) => mean(lobesAt({}, env, tune).map((l) => l.y));
+    const flatEnv = { parallax: 0, tilt: 0.3 };
+    t.ok(
+      'from above, smoke climbs UP THE PAGE faster than its height says (the lift cheat): more lift, smaller screen y',
+      meanY({ smokeLift: 3.4 }, flatEnv) < meanY({ smokeLift: 1 }, flatEnv) - 4
+    );
+    const sideEnv = { projection: 'side', groundY: 2000, sideScale: 1 };
+    t.ok(
+      'but the side view keeps the true height (no cheat there)',
+      Math.abs(meanY({ smokeLift: 3.4 }, sideEnv) - meanY({ smokeLift: 1 }, sideEnv)) < 1e-3
+    );
+  }
+
+  // ── THE COLUMN OF A BURNING MASS (emitMassSmoke) ───────────────────────────────────────────────────────────────────
+  {
+    const MASS = Object.freeze({
+      x: 3000,
+      y: 3000,
+      radius: 300,
+      baseZ: 90,
+      seed: 5,
+      lit01: 1,
+      vitality01: 1,
+      coal01: 1,
+      stress01: 0,
+      rain01: 0,
+      outdoor01: 1,
+      windX: 0,
+      windY: 0,
+      windMotion01: 0,
+      smokeMul: 1,
+      sootiness01: 0.7,
+    });
+    const column = (m = {}, env = {}, tune, tSec = 20) => {
+      const buf = new Float32Array(80 * LOBE_STRIDE).fill(-777);
+      const start = 3;
+      const r = emitMassSmoke(buf, start, { ...MASS, ...m }, { ...ENV, parallax: 0, tSec, ...env }, tune);
+      return { buf, start, count: r.count, lobes: lobesOf(buf.subarray(start * LOBE_STRIDE), r.count) };
+    };
+    const a = column();
+    t.ok(
+      `a burning mass makes a COLUMN: dozens of smoke billows (${a.count})`,
+      a.count >= 14 &&
+        a.count <= MASS_SMOKE_MAX &&
+        a.lobes.every((l) => l.kind === KIND_SMOKE && l.tone >= 0 && l.tone <= 1)
+    );
+    t.ok(
+      'they are written at `start` and nowhere else (the buffer around them is untouched), every number finite',
+      a.buf.subarray(0, a.start * LOBE_STRIDE).every((v) => v === -777) &&
+        a.buf.subarray((a.start + a.count) * LOBE_STRIDE).every((v) => v === -777) &&
+        a.lobes.every((l) => Object.values(l).every(Number.isFinite))
+    );
+    const again = column();
+    t.ok(
+      'the same mass at the same time is the same column (and the clock moves it)',
+      a.buf.every((v, i) => v === again.buf[i]) && column({}, {}, undefined, 21.3).buf.some((v, i) => v !== a.buf[i])
+    );
+    const zs = a.lobes.map((l) => l.z);
+    t.ok(
+      `it climbs well above the roof: from the flame tops (${MASS.baseZ}) to over a radius higher (${Math.max(...zs).toFixed(0)})`,
+      Math.min(...zs) >= MASS.baseZ - 1e-6 && Math.max(...zs) > MASS.baseZ + MASS.radius
+    );
+    const lowHalf = a.lobes.filter((l) => l.z < MASS.baseZ + MASS.radius * 0.8);
+    const highHalf = a.lobes.filter((l) => l.z > MASS.baseZ + MASS.radius * 1.2);
+    t.ok(
+      `and it widens as it climbs (${mean(lowHalf.map((l) => l.r)).toFixed(0)} px low, ${mean(highHalf.map((l) => l.r)).toFixed(0)} px high)`,
+      lowHalf.length > 3 && highHalf.length > 3 && mean(highHalf.map((l) => l.r)) > 1.5 * mean(lowHalf.map((l) => l.r))
+    );
+    t.ok(
+      'from above it reaches up the page (the highest billows are far above the roof on screen)',
+      a.lobes.filter((l) => l.z > MASS.baseZ + MASS.radius * 1.2).every((l) => l.y < MASS.y - 0.3 * l.z)
+    );
+    t.ok(
+      'its billows are bigger than a campfire’s (a roof’s column, not a puff)',
+      Math.max(...a.lobes.map((l) => l.r)) > 2 * Math.max(...lobesOf(emit().smoke, emit().r.smoke).map((l) => l.r))
+    );
+    const bigger = column({ radius: 600 });
+    t.ok(
+      'a bigger mass makes a bigger column (more, wider, higher)',
+      bigger.count >= a.count &&
+        Math.max(...bigger.lobes.map((l) => l.r)) > 1.5 * Math.max(...a.lobes.map((l) => l.r)) &&
+        Math.max(...bigger.lobes.map((l) => l.z)) > Math.max(...zs) * 1.3
+    );
+    t.ok(
+      'a part-lit mass (a spreading front) makes less: fewer billows from a smaller radius',
+      column({ lit01: 0.25, radius: 300 * Math.sqrt(0.25) }).count < a.count &&
+        column({ lit01: 0.25, radius: 150 }).count > 0
+    );
+    const dead = column({ vitality01: 0, coal01: 0 });
+    t.ok('a mass that is out and cold makes none', dead.count === 0);
+    const smoulder = column({ vitality01: 0, coal01: 1 });
+    t.ok('but a smouldering one still does, a little', smoulder.count > 0 && smoulder.count < a.count);
+    t.ok(
+      'indoors the column hardly climbs and is thinner (a roofed room’s smoke has nowhere to go)',
+      Math.max(...column({ outdoor01: 0 }).lobes.map((l) => l.z)) < Math.max(...zs) * 0.7 &&
+        column({ outdoor01: 0 }).count < a.count
+    );
+    t.ok(
+      'the smoke multiplier scales the number of billows',
+      column({ smokeMul: 0.4 }).count < a.count && column({ smokeMul: 0 }).count === 0
+    );
+    const xTop = (m) =>
+      mean(
+        column(m)
+          .lobes.filter((l) => l.z > MASS.baseZ + MASS.radius * 1.2)
+          .map((l) => l.x)
+      );
+    const still = xTop({});
+    t.ok(
+      'wind LEANS the column downwind, both ways, by about the same',
+      xTop({ windX: 1, windMotion01: 1 }) > still + 25 &&
+        xTop({ windX: -1, windMotion01: 1 }) < still - 25 &&
+        Math.abs(xTop({ windX: 1, windMotion01: 1 }) - still + (xTop({ windX: -1, windMotion01: 1 }) - still)) < 40
+    );
+    const heatOf = (m) => mean(column(m).lobes.map((l) => l.heat));
+    t.ok(
+      'a building’s smoke is black (soot: negative colour), more so the sootier the fuel, none for a clean one',
+      heatOf({ sootiness01: 0.8 }) < heatOf({ sootiness01: 0.4 }) &&
+        heatOf({ sootiness01: 0.4 }) < -0.1 &&
+        Math.abs(heatOf({ sootiness01: 0 })) < 0.01
+    );
+    t.ok(
+      'the base of the column is lighter than its top (lit by the fire, then greying and darkening)',
+      mean(
+        column()
+          .lobes.filter((l) => l.tone < 0.3)
+          .map((l) => l.heat)
+      ) >
+        mean(
+          column()
+            .lobes.filter((l) => l.tone > 0.7)
+            .map((l) => l.heat)
+        )
+    );
+    t.ok(
+      'and rain turns it to steam (positive colour)',
+      heatOf({ rain01: 1, sootiness01: 0 }) > 0.05 &&
+        heatOf({ rain01: 1, sootiness01: 0.7 }) > heatOf({ sootiness01: 0.7 })
+    );
+    t.ok(
+      'the author’s tune overrides reach it (a taller `massRise` climbs higher)',
+      Math.max(...column({}, {}, { massRise: BILLOW_TUNE.massRise * 2 }).lobes.map((l) => l.z)) > Math.max(...zs) * 1.4
+    );
+    const side = column({}, { projection: 'side', groundY: 3000, sideScale: 1 });
+    t.ok(
+      'the side view draws it too, with height on the vertical axis (no up-the-page lift)',
+      side.count === a.count && side.lobes.every((l) => Math.abs(l.y - (3000 - l.z)) < 5e-3)
+    );
+    t.ok(
+      'a nonsense mass is harmless: no NaN, no overrun',
+      (() => {
+        const b = column({ radius: NaN, seed: undefined, lit01: undefined, outdoor01: NaN, windX: NaN, windY: NaN });
+        return (
+          b.count >= 0 && b.count <= MASS_SMOKE_MAX && b.lobes.every((l) => Object.values(l).every(Number.isFinite))
+        );
+      })()
+    );
   }
 }

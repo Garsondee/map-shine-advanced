@@ -20,10 +20,13 @@ import {
   mergeBoxes,
   infernoHeightGain,
   massQuality,
+  massFlameGrowth,
+  massSmokeKeep,
+  massSootiness,
   viewCameraHeight,
   MAX_CLUSTER_RADIUS_M,
 } from '../fire-billow-engine.js';
-import { LOBE_STRIDE, KIND_FLAME, KIND_SMOKE, KIND_COAL } from '../fire-billow-geometry.js';
+import { LOBE_STRIDE, KIND_FLAME, KIND_SMOKE, KIND_COAL, MASS_SMOKE_MAX } from '../fire-billow-geometry.js';
 import { FIRE_PARAMS } from '../fire.js';
 import { windFlowVector } from '../../../world/index.js';
 
@@ -62,6 +65,7 @@ function makeFakeRendererFactory({ flameCapacity = 4096, smokeCapacity = 2048 } 
     quads: null,
     quadCount: 0,
     fills: null,
+    looks: null,
     bloom: null,
     bloomSets: 0,
     look: null,
@@ -82,10 +86,11 @@ function makeFakeRendererFactory({ flameCapacity = 4096, smokeCapacity = 2048 } 
       setCounts(f, s) {
         seen.counts = { flame: f, smoke: s };
       },
-      setQuads(boxes, n, fills) {
+      setQuads(boxes, n, fills, looks) {
         seen.quads = Array.from(boxes).slice(0, n * 4);
         seen.quadCount = n;
         seen.fills = fills ? Array.from(fills).slice(0, n) : null;
+        seen.looks = looks ? Array.from(looks).slice(0, n * 2) : null;
       },
       setBloomCounter(counter) {
         seen.bloom = counter;
@@ -231,11 +236,23 @@ export function run(t) {
     );
     t.ok(
       'each knows how big the whole fire is (so a roof’s flames can stand taller than a campfire’s)',
-      split.every((c) => near(c.parentRadius, 350) && near(c.maxRadius, maxR, 1e-6))
+      split.every((c) => near(c.parentRadius, 350) && near(c.maxRadius, maxR * massFlameGrowth(350 / maxR), 1e-6))
     );
     t.ok(
-      'and every one is a bonfire at most, never one huge flame',
-      split.every((c) => c.radius <= maxR + 1e-6 && c.radius >= 6)
+      'a building’s flames are bigger than a bonfire’s, but never more than twice as wide, and never smaller than 6 px',
+      split.every((c) => c.radius <= maxR * 2 + 1e-6 && c.radius >= 6 && c.radius <= c.maxRadius + 1e-6) &&
+        Math.max(...split.map((c) => c.radius)) > maxR * 1.2
+    );
+    t.ok(
+      'while a fire that has only just outgrown one flame keeps bonfire-sized ones',
+      (() => {
+        const few = planClusters(
+          [{ id: 'f', x: 500, y: 500, diameterPx: 2 * 1.8 * maxR }],
+          makeCloud(discOfPoints(500, 500, 1.8 * maxR, 8)),
+          M_PER_PX
+        );
+        return few.length >= 2 && few.every((c) => c.radius <= maxR * 1.06 + 1e-6);
+      })()
     );
     t.ok(
       'all of them belong to the roof’s one fire (one life) and carry its id',
@@ -1000,13 +1017,62 @@ export function run(t) {
       t.ok('boxes that only touch stay separate', r.boxes.length === 8 && r.members.join() === '1,1');
     }
     {
-      // a diagonal chain of overlapping boxes would make one huge, mostly empty box: it is left as it was
+      // a diagonal chain of overlapping boxes would make one huge, mostly empty box: it is covered by a TILING instead, so
+      // no pixel is drawn twice (overlapping boxes draw their overlap twice: a visible rectangle of denser smoke)
       const chain = [];
-      for (let i = 0; i < 8; i++) chain.push(...box(i * 90, i * 90, 100, 100));
-      const r = mergeBoxes(chain, new Array(8).fill(0.5));
+      const chainFills = [];
+      const chainLooks = [];
+      for (let i = 0; i < 8; i++) {
+        chain.push(...box(i * 90, i * 90, 100, 100));
+        chainFills.push(0.2 + 0.05 * i);
+        chainLooks.push(6 + i, 10 + 2 * i);
+      }
+      const r = mergeBoxes(chain, chainFills, 1.7, chainLooks);
+      const nOut = r.boxes.length / 4;
+      const overlap = (a, b) =>
+        Math.max(
+          0,
+          Math.min(r.boxes[a * 4] + r.boxes[a * 4 + 2], r.boxes[b * 4] + r.boxes[b * 4 + 2]) -
+            Math.max(r.boxes[a * 4], r.boxes[b * 4])
+        ) *
+        Math.max(
+          0,
+          Math.min(r.boxes[a * 4 + 1] + r.boxes[a * 4 + 3], r.boxes[b * 4 + 1] + r.boxes[b * 4 + 3]) -
+            Math.max(r.boxes[a * 4 + 1], r.boxes[b * 4 + 1])
+        );
+      let anyOverlap = false;
+      for (let a = 0; a < nOut; a++) for (let b = a + 1; b < nOut; b++) if (overlap(a, b) > 1e-6) anyOverlap = true;
+      const covered = (x, y) => {
+        for (let b = 0; b < nOut; b++) {
+          if (
+            x >= r.boxes[b * 4] &&
+            x < r.boxes[b * 4] + r.boxes[b * 4 + 2] &&
+            y >= r.boxes[b * 4 + 1] &&
+            y < r.boxes[b * 4 + 1] + r.boxes[b * 4 + 3]
+          )
+            return true;
+        }
+        return false;
+      };
+      let allCovered = true;
+      for (let i = 0; i < 8; i++)
+        for (let u = 0; u <= 10; u++)
+          for (let v = 0; v <= 10; v++) if (!covered(i * 90 + u * 9.99, i * 90 + v * 9.99)) allCovered = false;
+      const tileArea = r.boxes.reduce((s, _, k) => (k % 4 === 2 ? s + r.boxes[k] * r.boxes[k + 1] : s), 0);
       t.ok(
-        'a diagonal chain of overlapping boxes is not folded into one mostly-empty box',
-        r.boxes.length === chain.length && r.members.every((m) => m === 1)
+        `a diagonal chain of overlapping boxes is covered by ${nOut} disjoint tiles, not folded into one mostly-empty box`,
+        nOut > 1 && nOut <= 16 && !anyOverlap && allCovered && tileArea < 0.6 * (7 * 90 + 100) * (7 * 90 + 100)
+      );
+      t.ok(
+        'every tile carries the group’s fill, looks and size (so the tiles join without a seam)',
+        r.fills.every((f) => f === r.fills[0]) &&
+          near(r.fills[0], 0.2 + 0.05 * 7, 1e-12) &&
+          r.looks.length === nOut * 2 &&
+          r.looks.every((v, k) => v === r.looks[k % 2]) &&
+          r.looks[0] === 13 &&
+          r.looks[1] === 24 &&
+          r.members.every((m) => m === 8) &&
+          r.sides.every((sd) => near(sd, 7 * 90 + 100, 1e-9))
       );
       const solid = [];
       for (let y = 0; y < 3; y++) for (let x = 0; x < 3; x++) solid.push(...box(x * 60, y * 60, 100, 100));
@@ -1060,6 +1126,198 @@ export function run(t) {
           })
         );
         return Math.max(...mass.seen.fills) > Math.max(...lone.seen.fills);
+      })()
+    );
+  }
+
+  // ── THE COLUMN OF A BURNING MASS, AND THE SPREAD (2026-10-20, round 2) ──────────────────────────────────────────
+  {
+    t.ok(
+      'a flame in a mass keeps less and less of its own smoke, a lone campfire all of it, and a big roof’s flames none (the column is all the smoke there is)',
+      massSmokeKeep(1) === 1 &&
+        massSmokeKeep(6) === 1 &&
+        massSmokeKeep(10) === 0.5 &&
+        massSmokeKeep(14) === 0 &&
+        massSmokeKeep(53) === 0 &&
+        massSmokeKeep(10000) === 0 &&
+        massSmokeKeep(undefined) === 1 &&
+        massSmokeKeep(8) > massSmokeKeep(9)
+    );
+    t.ok(
+      'a mass’s smoke is dark and a campfire’s is pale',
+      massSootiness(1) === 0 &&
+        massSootiness(6) === 0 &&
+        massSootiness(7) >= 0.4 &&
+        massSootiness(14) > massSootiness(7) &&
+        massSootiness(1e6) === 0.85 &&
+        massSootiness(undefined) === 0
+    );
+    t.ok(
+      'a building’s flames grow with the fire’s width: 1 for a bonfire or two, up to 2x, never smaller',
+      massFlameGrowth(1) === 1 &&
+        massFlameGrowth(1.7) === 1 &&
+        massFlameGrowth(0) === 1 &&
+        massFlameGrowth(undefined) === 1 &&
+        massFlameGrowth(3.4) > 1.4 &&
+        massFlameGrowth(3.4) < 1.5 &&
+        massFlameGrowth(6) > massFlameGrowth(3) &&
+        massFlameGrowth(1e6) === 2
+    );
+
+    const roof2 = [{ id: 'roof', x: 700, y: 500, diameterPx: 520 }];
+    const roofCloud2 = makeCloud(discOfPoints(700, 500, 240, 30));
+    const planned = planClusters(roof2, roofCloud2, M_PER_PX);
+    t.ok(
+      `the front's order: one flame ignites first (0), the rest are ordered by distance from it, all within 0..1 (${planned.length} flames)`,
+      planned.every((c) => c.spreadT >= 0 && c.spreadT <= 1) &&
+        planned.filter((c) => c.spreadT === 0).length === 1 &&
+        Math.max(...planned.map((c) => c.spreadT)) > 0.7 &&
+        planClusters([{ id: 'camp', x: 0, y: 0, diameterPx: 60 }], null, M_PER_PX)[0].spreadT === 0
+    );
+    t.ok(
+      'and it is the same every time (the same paint, the same ignition corner)',
+      JSON.stringify(planned.map((c) => c.spreadT)) ===
+        JSON.stringify(planClusters(roof2, makeCloud(discOfPoints(700, 500, 240, 30)), M_PER_PX).map((c) => c.spreadT))
+    );
+
+    const radiusOf = (buf, n) => {
+      let m = 0;
+      for (let i = 0; i < n; i++) m = Math.max(m, buf[i * LOBE_STRIDE + 2]);
+      return m;
+    };
+    const sootLobes = (buf, n) => {
+      let c = 0;
+      for (let i = 0; i < n; i++) if (buf[i * LOBE_STRIDE + 4] < -0.05) c++;
+      return c;
+    };
+    const roofE = makeEngine();
+    roofE.engine.update(ctxOf({ fires: roof2, cloud: roofCloud2 }));
+    const roofSt2 = roofE.engine.getStatus();
+    const campE = makeEngine();
+    campE.engine.update(ctxOf());
+    const campSt = campE.engine.getStatus();
+    t.ok(
+      `a burning roof makes ONE column of smoke (${roofSt2.masses} mass), far bigger than a campfire's puffs (${radiusOf(roofE.renderer.smokeLobes, roofSt2.smoke).toFixed(0)} vs ${radiusOf(campE.renderer.smokeLobes, campSt.smoke).toFixed(0)} px) and dark with soot`,
+      roofSt2.masses === 1 &&
+        campSt.masses === 0 &&
+        radiusOf(roofE.renderer.smokeLobes, roofSt2.smoke) > 2 * radiusOf(campE.renderer.smokeLobes, campSt.smoke) &&
+        sootLobes(roofE.renderer.smokeLobes, roofSt2.smoke) > 5 &&
+        sootLobes(campE.renderer.smokeLobes, campSt.smoke) === 0
+    );
+    t.ok(
+      `and each flame of the mass only wisps (${(roofSt2.smoke / roofSt2.clusters).toFixed(1)} smoke lobes a flame, a lone campfire ${campSt.smoke})`,
+      roofSt2.smoke / roofSt2.clusters < campSt.smoke / 2
+    );
+    {
+      // a big roof (23 flames): none of them wisps, the column is all the smoke there is
+      const big = [{ id: 'big', x: 700, y: 500, diameterPx: 700 }];
+      const bigCloud = makeCloud(discOfPoints(700, 500, 330, 30));
+      const bigE = makeEngine();
+      const bigRes = bigE.engine.update(ctxOf({ fires: big, cloud: bigCloud }));
+      const bigSt = bigE.engine.getStatus();
+      t.ok(
+        `a big roof’s flames make no wisps of their own: the column is all the smoke there is (${bigRes.clusters.length} flames, ${bigSt.smoke} smoke lobes, at most ${MASS_SMOKE_MAX})`,
+        bigRes.clusters.length >= 14 && bigSt.smoke > 0 && bigSt.smoke <= MASS_SMOKE_MAX
+      );
+      // CAPACITY: a column is reserved whole or not drawn at all, and a scene full of burning roofs never overruns the buffer
+      const many = [];
+      const manyPts = [];
+      for (let k = 0; k < 8; k++) {
+        const cx = 350 + (k % 4) * 700;
+        const cy = 500 + Math.floor(k / 4) * 900;
+        many.push({ id: 'roof' + k, x: cx, y: cy, diameterPx: 520 });
+        manyPts.push(...discOfPoints(cx, cy, 240, 30));
+      }
+      const wide = { minX: 0, minY: 0, maxX: 3000, maxY: 2000 };
+      const crowded = makeEngine({ smokeCapacity: 700 });
+      const crowdedRes = crowded.engine.update(ctxOf({ fires: many, cloud: makeCloud(manyPts), ctx: { rect: wide } }));
+      const cs = crowded.engine.getStatus();
+      t.ok(
+        `eight burning roofs in a smoke buffer of 700 never overrun it (${cs.smoke} lobes, ${cs.dropped} flames dropped, ${cs.masses} columns) and nothing is NaN`,
+        crowdedRes.clusters.length > 60 &&
+          cs.smoke <= 700 &&
+          crowded.seen.counts.smoke === cs.smoke &&
+          (crowded.seen.quads ?? []).every(Number.isFinite) &&
+          crowded.renderer.smokeLobes.every(Number.isFinite)
+      );
+      const roomy = makeEngine();
+      roomy.engine.update(ctxOf({ fires: big, cloud: bigCloud }));
+      t.ok(
+        'and with room for it the roof’s column is drawn',
+        roomy.engine.getStatus().smoke > 10 && roomy.engine.getStatus().smoke <= MASS_SMOKE_MAX
+      );
+    }
+    t.ok(
+      'the contour boxes still enclose every smoke lobe, the column included',
+      (() => {
+        for (let i = 0; i < roofSt2.smoke; i++) {
+          const o = i * LOBE_STRIDE;
+          const x = roofE.renderer.smokeLobes[o];
+          const y = roofE.renderer.smokeLobes[o + 1];
+          let inAny = false;
+          for (let b = 0; b < roofE.seen.quadCount; b++) {
+            const [bx, by, bw, bh] = roofE.seen.quads.slice(b * 4, b * 4 + 4);
+            if (x >= bx && x <= bx + bw && y >= by && y <= by + bh) inAny = true;
+          }
+          if (!inAny) return false;
+        }
+        return true;
+      })()
+    );
+    t.ok(
+      'every contour box carries its smoke furniture (crescent px, shadow offset) and the engine hands them to the renderer',
+      roofE.seen.looks && roofE.seen.looks.length === roofE.seen.quadCount * 2 && roofE.seen.looks.every((v) => v > 0)
+    );
+
+    // THE SPREAD: a big fire catches from one end over `spreadSec` seconds
+    const litFlames = (sec, seconds, patch = {}) => {
+      const e = makeEngine();
+      const base = ctxOf({
+        fires: roof2,
+        cloud: roofCloud2,
+        params: { ...defaults, windResponse: 1, weatherResponse: 1, rainResponse: 1, spreadSec: sec },
+        ...patch,
+      });
+      const res = advance(e.engine, base, seconds);
+      return { st: e.engine.getStatus(), res, e };
+    };
+    const whole = litFlames(0, 30).st.flame;
+    const early = litFlames(60, 3).st.flame;
+    const mid = litFlames(60, 30).st.flame;
+    const late = litFlames(60, 75).st.flame;
+    t.ok(
+      `a spreading fire starts nearly dark, is part lit half way and fully lit at the end (${early} < ${mid} < ${late} flame lobes; all at once: ${whole})`,
+      early < mid && mid < late && late > 0.85 * whole && early < 0.4 * whole
+    );
+    t.ok(
+      'with the spread off the whole region burns from the first frame, as before',
+      litFlames(0, 0.25).st.flame > 0.9 * whole
+    );
+    const halfLit = litFlames(60, 30);
+    t.ok(
+      'a fire only part lit lights (and spits embers) only as far as it burns',
+      halfLit.res.lifeByFire.get('roof').vitality < 0.9 && halfLit.res.lifeByFire.get('roof').vitality > 0.1
+    );
+    const a1 = litFlames(60, 20).e.renderer.flameLobes;
+    const a2 = litFlames(60, 20).e.renderer.flameLobes;
+    t.ok(
+      'the front is deterministic (the same frames, the same picture)',
+      a1.length === a2.length && a1.every((v, i) => v === a2[i])
+    );
+    t.ok(
+      'rain slows the front (the same time, fewer flames lit)',
+      (() => {
+        const dry = litFlames(60, 30).st.flame;
+        const wet = litFlames(60, 30, { ctx: { precip01: 1 } }).st.flame;
+        return wet < dry;
+      })()
+    );
+    t.ok(
+      'a campfire is unaffected by the spread dial (one flame: there is no front)',
+      (() => {
+        const e = makeEngine();
+        e.engine.update(ctxOf({ params: { ...defaults, spreadSec: 600 } }));
+        return e.engine.getStatus().flame > 40;
       })()
     );
   }

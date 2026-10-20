@@ -74,6 +74,8 @@ export function billowRuntimeFromParams(p = {}, extra = {}) {
     coalGain: BILLOW_LOOK.coalGain * clamp(num(p.coalGlow, 1), 0, 3),
     smokeOpacity: clamp(BILLOW_LOOK.smokeOpacity * clamp(num(p.smokeThickness, 1), 0, 1.5), 0, 1),
     smokeSoot: clamp(num(p.smokeSoot, 0.2) * (extra.sootGain ?? 1), 0, 1),
+    smokeLineA: clamp(num(p.smokeLine, BILLOW_LOOK.smokeLineA), 0, 1),
+    smokeShadow: clamp(num(p.smokeShadow, BILLOW_LOOK.smokeShadow), 0, 1),
     edgeSoft: BILLOW_LOOK.edgeSoft,
     warpPx: BILLOW_LOOK.warpPx * clamp(num(p.flameRagged, 1), 0, 3),
     warpPx2: BILLOW_LOOK.warpPx2 * clamp(num(p.flameRagged, 1), 0, 3),

@@ -19,7 +19,7 @@
  * @module tools/shader-lab/fire-billow-lab
  */
 import * as THREE from '../../src/vendor/three/three.webgpu.js';
-import { createBillowRenderer, BILLOW_LOOK } from '../../src/effects/fire/fire-billow-render.js';
+import { createBillowRenderer, billowSmokeScale, BILLOW_LOOK } from '../../src/effects/fire/fire-billow-render.js';
 import { emitFireLobes, BILLOW_TUNE, LOBE_STRIDE, maxLobesPerFire } from '../../src/effects/fire/fire-billow-geometry.js';
 import { fireScaleChain } from '../../src/effects/fire/fire-geometry.js';
 import { saveCanvasPng, makeRunId } from './contract.js';
@@ -242,9 +242,17 @@ async function main() {
     };
     const n = emitFireLobes(billow.flameLobes, 0, fire, env, S.tune, billow.smokeLobes, 0);
     billow.setCounts(n.count, n.smoke);
-    billow.setLook({ ...BILLOW_LOOK, ...S.look });
+    // the smoke's furniture scales like the engine's (zoom -> the line, the fire's size -> crescents and shadow)
+    const sm = billowSmokeScale(S.zoom, fire.radius);
+    billow.setLook({ smokeLinePx: sm.linePx, ...BILLOW_LOOK, ...S.look });
+    if (S.look?.smokeLinePx === undefined) billow.setLook({ smokeLinePx: sm.linePx });
     runFieldJobs(billow.prepareField(rect, { pxPerWorld: S.zoom, timeSec: S.t }));
-    billow.setQuad(rect.minX, rect.minY, rect.maxX - rect.minX, rect.maxY - rect.minY);
+    billow.setQuads(
+      [rect.minX, rect.minY, rect.maxX - rect.minX, rect.maxY - rect.minY],
+      1,
+      null,
+      [S.smokeCrescentPx ?? sm.crescentPx, S.smokeShadowOff ?? sm.shadowOffWorld]
+    );
 
     camera.left = rect.minX;
     camera.right = rect.maxX;

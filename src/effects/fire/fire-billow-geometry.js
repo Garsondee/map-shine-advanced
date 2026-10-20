@@ -126,6 +126,10 @@ export const BILLOW_SMOKE_RAMP = Object.freeze({
   deep: '#89766f',
   /** the soot a wood fire adds on top (kept subtle: the art's smoke is pale). */
   soot: '#5a4a44',
+  /** the line round every billow and the darkest shade of a sooty column: a warm near-black, so the smoke reads on ANY floor. */
+  ink: '#352a28',
+  /** the shaded flank of a dense billow: dark enough to stand off a bright map, still warm. */
+  charcoal: '#6a5c56',
 });
 
 /** The fleck colours (measured): the colours of the little sparks scattered over the art. */
@@ -150,8 +154,8 @@ export const BILLOW_TUNE = Object.freeze({
   tongueLobes: 5,
   fleckBase: 5,
   fleckPerR: 0.07,
-  smokeBase: 7,
-  smokePerR: 0.1,
+  smokeBase: 11,
+  smokePerR: 0.14,
   // ── body billows ──
   bodyRadius: 0.625, // plume radius, × R
   bodyLifeMul: 1.0, // × each layer's own cycle
@@ -172,9 +176,13 @@ export const BILLOW_TUNE = Object.freeze({
   spitSize: 0.075, // × plume radius
   spitRange: 2.6, // × plume radius of the throw (calm); the wind carries them further
   // ── smoke ──
-  smokeLife: 3.6,
-  smokeRise: 2.6, // × R at an open fire
-  smokeSize: 0.5,
+  smokeLife: 4.6,
+  smokeRise: 3.3, // × R at an open fire
+  smokeSize: 0.58,
+  smokeStart: 0.42, // a billow is born this fraction of its full width...
+  smokeGrow: 1.9, // ...and grows by this much more as it climbs (a plume SHOULD outgrow its fire)
+  massRise: 2.4, // × the mass's radius: how far a burning building's column climbs
+  smokeLift: 3.4, // from above (the 3/4 picture) smoke rises this much faster up the page than its height says: the painted plumes reach three flames up
   smokeDrift: 5.0, // × R of downwind drift at a full gale
   // ── wind ──
   leanLength: 2.6, // × plume radius, at full lean
@@ -367,6 +375,7 @@ export function billowPower(vitality01, stress01) {
  * @property {number} [stress01=0] weather stress (`fireWeatherStress01`).
  * @property {number} [vitality01=1] the fire's slow state (1 burning, 0 out).
  * @property {number} [smokeMul=1] smoke amount (the author's dial × fuel).
+ * @property {number} [sootiness01=0] how black this fire's smoke is (0 pale .. 1 charcoal): a big mass of burning building is dark.
  * @property {number} [spawnCount=0] @property {Float32Array|null} [spawn] packed spawn points (x, y, brightness, jitter).
  * @property {number} [spawnStride=4]
  */
@@ -851,16 +860,28 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
     const drift = R * tune.smokeDrift * (0.15 + 0.85 * leanG) * (0.12 + Math.pow(a, 1.3));
     // a sealed room's smoke goes nowhere in particular: it just rises and fades
     const x = base[0] + sway + wdx * drift;
-    const y = base[1] + swayY + wdy * drift;
-    const rad = plume * tune.smokeSize * (0.55 + 1.15 * a) * Math.pow(envS, 0.6) * (0.85 + 0.35 * r3);
+    // from above, smoke climbs up the page faster than its height says (the painted plumes reach three flames up): the extra
+    // lift is a shift of the ground position, so it adds no parallax of its own (the side view keeps the true height)
+    const cheat = env.projection === 'side' ? 0 : (tune.smokeLift - 1) * (env.tilt ?? 0.45) * (z - height * 0.75);
+    const y = base[1] + swayY + wdy * drift - cheat;
+    // a plume SHOULD outgrow its fire: small and dense at the base, billowing wide as it climbs
+    const rad =
+      plume *
+      tune.smokeSize *
+      (tune.smokeStart + tune.smokeGrow * Math.pow(a, 0.85)) *
+      Math.pow(envS, 0.5) *
+      (0.85 + 0.35 * r3);
     const tone = clamp01(a * 1.05 + 0.08 * r2);
+    // the lobe's `heat` slot is the smoke's colour channel: + is steam (rain turns it white), - is soot (a sooty fuel, or a whole
+    // burning building, makes it black)
+    const soot = clamp01(f.sootiness01 ?? 0) * (1 - wet);
     put(
       x,
       y,
       z,
       rad,
       (0.5 + 0.5 * smokeAmt) * Math.pow(envS, 0.55) * (0.85 + 0.3 * r3),
-      wet,
+      wet - soot,
       1 + 0.5 * leanG * a,
       wdx,
       wdy,
@@ -870,6 +891,108 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
   }
 
   return { count: n - start, flame: flameCount, smoke: smokeCount, coal: coalCount };
+}
+
+/** The most billows one burning mass's column ever writes (the engine reserves this many before it asks for one). */
+export const MASS_SMOKE_MAX = 48;
+
+/**
+ * @typedef {object} BillowMass
+ * @property {number} x @property {number} y world px: the middle of the whole burning mass.
+ * @property {number} radius the whole mass's radius, world px.
+ * @property {number} [baseZ=0] height the column starts at (the flames' tops).
+ * @property {number} seed
+ * @property {number} [lit01=1] the fraction of the mass that is burning (a spreading fire is partly lit).
+ * @property {number} [vitality01=1] @property {number} [coal01] @property {number} [stress01=0] @property {number} [rain01=0]
+ * @property {number} [outdoor01=1] @property {number} [windX=0] @property {number} [windY=0] @property {number} [windMotion01=0]
+ * @property {number} [smokeMul=1] @property {number} [sootiness01=0.5]
+ */
+
+/**
+ * ONE column of smoke for a whole burning mass (a roof, a building). The flames of a split fire each make only a wisp (the
+ * engine turns their smoke down); the mass as a whole makes THIS: a few big billows rising from its middle, growing as they
+ * climb, dark with soot, leaning with the wind and thinning out above. From above it reaches up the page like the painted
+ * plumes do. Same lobe format as a flame's smoke, drawn into the same field.
+ *
+ * @param {Float32Array} out the smoke lobe buffer @param {number} start the lobe index to write at
+ * @param {BillowMass} m @param {BillowEnv} env @param {object} [tuneOverride]
+ * @returns {{count:number}} lobes written
+ */
+export function emitMassSmoke(out, start, m, env, tuneOverride) {
+  const tune = tuneOverride ? { ...BILLOW_TUNE, ...tuneOverride } : BILLOW_TUNE;
+  const q = clamp(env.quality ?? 1, 0.2, 1);
+  const t = env.tSec * Math.max(0.05, env.animSpeed ?? 1);
+  const Rm = Math.max(8, m.radius);
+  const seed = (m.seed | 0) >>> 0;
+  const lit = clamp01(m.lit01 ?? 1);
+  const vit = clamp01(m.vitality01 ?? 1);
+  const power = billowPower(vit, clamp01(m.stress01 ?? 0));
+  const outdoor = clamp01(m.outdoor01 ?? 1);
+  const coalHeat = clamp01(m.coal01 ?? 0.35 + 0.65 * vit);
+  const wet = clamp01(clamp01(m.rain01 ?? 0) * (0.35 + 0.65 * (1 - power)) * (0.3 + 0.7 * coalHeat));
+  // the same smoke amount as one flame's (a hearth's goes up the flue, rain makes steam), times how much of the mass burns
+  const amt = (0.18 + 0.82 * outdoor) * (0.12 * coalHeat + 0.88 * Math.pow(power, 0.8) + 1.1 * wet) * lit;
+  const count = Math.min(
+    MASS_SMOKE_MAX,
+    Math.round(clamp(14 + Rm / 12, 14, 36) * q * (m.smokeMul ?? 1) * Math.min(1.4, amt * 1.3))
+  );
+  const wx = m.windX ?? 0;
+  const wy = m.windY ?? 0;
+  const wl = Math.hypot(wx, wy) || 1;
+  const wdx = wx / wl;
+  const wdy = wy / wl;
+  const leanG = billowLeanGain(clamp01(m.windMotion01 ?? 0));
+  const baseZ = m.baseZ ?? 0;
+  const soot = clamp01(m.sootiness01 ?? 0.5) * (1 - wet);
+  const tilt = env.tilt ?? 0.45;
+  const proj = [0, 0, 1];
+  let n = start;
+  for (let i = 0; i < count; i++) {
+    const id = seed * 131 + i * 29 + 41000;
+    // a column climbs slowly: this is a big thing, not a puff
+    const P = tune.smokeLife * 1.7 * (0.8 + 0.4 * hash01(id, 0, 1)) * (0.55 + 0.45 * outdoor);
+    // evenly spread phases (a regular puff-puff-puff, not clumps), each with its own small jitter
+    const u = t / P + (i + 0.35 * hash01(id, 1, 2)) / Math.max(1, count);
+    const cyc = Math.floor(u);
+    const a = u - cyc;
+    const r1 = hash01(id, cyc, 71);
+    const r2 = hash01(id, cyc, 72);
+    const r3 = hash01(id, cyc, 73);
+    const r4 = hash01(id, cyc, 74);
+    const envS = smoothstep(0.04, 0.3, a) * (1 - smoothstep(0.66, 1, a));
+    if (envS < 0.01) continue;
+    const ang = r1 * TAU;
+    // (smoke comes off the whole roof and gathers into one column as it climbs)
+    const rho = Rm * 0.4 * Math.sqrt(r2) * (1 - 0.5 * a);
+    const climb = Rm * (tune.massRise ?? 1.6) * (0.35 + 0.65 * outdoor) * (0.82 + 0.36 * r4) * Math.pow(a, 0.9);
+    const z = baseZ + climb;
+    const drift = Rm * tune.smokeDrift * 0.35 * (0.15 + 0.85 * leanG) * (0.12 + Math.pow(a, 1.3));
+    const cheat = env.projection === 'side' ? 0 : (tune.smokeLift - 1) * tilt * climb;
+    // (the column is an S, not a pole: it sways more the higher it is, slowly, whatever the wind)
+    const bend = Math.sin(t * 0.27 + a * 2.6 + hash01(seed, 9, 9) * TAU) * Rm * 0.16 * Math.pow(a, 0.8);
+    const x = m.x + Math.cos(ang) * rho + Math.sin(t * 0.5 + r3 * TAU) * Rm * 0.05 * a + bend + wdx * drift;
+    const y = m.y + Math.sin(ang) * rho + Math.cos(t * 0.4 + r4 * TAU) * Rm * 0.04 * a + wdy * drift - cheat;
+    const rad = Rm * 0.2 * (0.4 + 1.5 * Math.pow(a, 0.8)) * Math.pow(envS, 0.5) * (0.8 + 0.45 * r3);
+    const strength = (0.55 + 0.45 * Math.min(1, amt)) * Math.pow(envS, 0.55) * (0.85 + 0.3 * r3);
+    // (the lower half of the column is still lit by the fire, the upper greys and darkens)
+    const tone = clamp01(Math.pow(a, 1.3) * 1.05 + 0.08 * r2);
+    project(env, x, y, z, proj);
+    const o = n * LOBE_STRIDE;
+    out[o] = proj[0];
+    out[o + 1] = proj[1];
+    out[o + 2] = rad * proj[2];
+    out[o + 3] = strength;
+    out[o + 4] = wet - soot * (0.5 + 0.5 * a);
+    out[o + 5] = 1;
+    out[o + 6] = wdx;
+    out[o + 7] = wdy;
+    out[o + 8] = KIND_SMOKE;
+    out[o + 9] = tone;
+    out[o + 10] = 1;
+    out[o + 11] = z;
+    n++;
+  }
+  return { count: n - start };
 }
 
 /** An upper bound on the lobes one fire can emit — what a buffer must hold per fire. */

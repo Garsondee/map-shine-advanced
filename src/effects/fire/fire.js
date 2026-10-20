@@ -465,6 +465,26 @@ export const FIRE_PARAMS = Object.freeze({
     label: 'Smoke soot',
     help: 'How dirty the smoke runs: 0 is the painted maps’ pale warm white, 1 is black wood-smoke. Oil and coal add their own soot on top.',
   },
+  smokeLine: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.05,
+    default: 0.4,
+    category: 'Smoke',
+    label: 'Smoke edge darkening',
+    help: 'A soft darker rim round the smoke, like paint pooling at a painted edge: what keeps pale smoke readable on a bright floor. 0 is none.',
+  },
+  smokeShadow: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.05,
+    default: 0.26,
+    category: 'Smoke',
+    label: 'Smoke ground shadow',
+    help: 'How dark the shadow is that the smoke throws on the floor under it (falling down and to the right): it makes the smoke float. 0 is none.',
+  },
 
   // ── Depth ─────────────────────────────────────────────────────────────────
   heightParallax: {
@@ -620,6 +640,16 @@ export const FIRE_PARAMS = Object.freeze({
     category: 'Response',
     label: 'Relight time (s)',
     help: 'How long the comeback takes, from the first glint to a full flame.',
+  },
+  spreadSec: {
+    type: 'float',
+    min: 0,
+    max: 3600,
+    step: 5,
+    default: 0,
+    category: 'Response',
+    label: 'Building fire spread time (s)',
+    help: 'For a big painted region (a burning building): how long the fire takes to catch from one end to the other. 0 lights the whole region at once. It catches at a corner, runs faster downwind, crawls in the rain, stops if the fire is put out and starts again from the corner when it relights.',
   },
 });
 

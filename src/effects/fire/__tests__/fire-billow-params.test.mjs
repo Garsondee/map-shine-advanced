@@ -8,7 +8,7 @@
 import { billowRuntimeFromParams } from '../fire-billow-params.js';
 import { FIRE_PARAMS } from '../fire.js';
 import { BILLOW_TUNE } from '../fire-billow-geometry.js';
-import { BILLOW_LOOK } from '../fire-billow-render.js';
+import { BILLOW_LOOK, billowSmokeScale } from '../fire-billow-render.js';
 import { FIRE_LIFE } from '../fire-billow-state.js';
 
 const defaults = Object.fromEntries(Object.entries(FIRE_PARAMS).map(([k, d]) => [k, d.default]));
@@ -115,6 +115,17 @@ export function run(t) {
     'Smoke soot x the fuel’s soot darkens the smoke, clamped to 1',
     withP({ smokeSoot: 0.5 }, { sootGain: 1 }).look.smokeSoot === 0.5 &&
       withP({ smokeSoot: 0.8 }, { sootGain: 2.4 }).look.smokeSoot === 1
+  );
+  t.ok(
+    'Smoke edge darkening and Smoke ground shadow reach the look, default to the renderer’s own, and are clamped to 0..1',
+    near(base.look.smokeLineA, BILLOW_LOOK.smokeLineA) &&
+      near(base.look.smokeShadow, BILLOW_LOOK.smokeShadow) &&
+      near(withP({ smokeLine: 0.9 }).look.smokeLineA, 0.9) &&
+      near(withP({ smokeShadow: 0.05 }).look.smokeShadow, 0.05) &&
+      withP({ smokeLine: 0 }).look.smokeLineA === 0 &&
+      withP({ smokeLine: 9 }).look.smokeLineA === 1 &&
+      withP({ smokeShadow: -4 }).look.smokeShadow === 0 &&
+      near(billowRuntimeFromParams({}).look.smokeLineA, BILLOW_LOOK.smokeLineA)
   );
   t.ok(
     'Spitting embers dial and size reach the model',
@@ -241,6 +252,8 @@ export function run(t) {
       'smokeDrift',
       'smokeThickness',
       'smokeSoot',
+      'smokeLine',
+      'smokeShadow',
       'spitRate',
       'spitSize',
       'heightParallax',
@@ -275,8 +288,56 @@ export function run(t) {
       retired.every((k) => FIRE_PARAMS[k] === undefined)
     );
     t.ok(
+      'the building spread dial is declared, and its default (0) leaves a big fire lighting all at once',
+      FIRE_PARAMS.spreadSec?.type === 'float' &&
+        FIRE_PARAMS.spreadSec.default === 0 &&
+        FIRE_PARAMS.spreadSec.min === 0 &&
+        FIRE_PARAMS.spreadSec.max >= 600
+    );
+    t.ok(
       'every declared default is inside its own range',
       Object.entries(FIRE_PARAMS).every(([, d]) => d.type !== 'float' || (d.default >= d.min && d.default <= d.max))
+    );
+  }
+
+  // ── THE SMOKE'S CARTOON FURNITURE FOLLOWS THE ZOOM AND THE SIZE OF THE BILLOWS ───────────────────────────────────
+  {
+    const camp = billowSmokeScale(1, 40);
+    const roof = billowSmokeScale(1, 300);
+    t.ok(
+      'a roof’s smoke gets wider crescents and a longer ground shadow than a campfire’s',
+      roof.crescentPx > camp.crescentPx * 2 && roof.shadowOffWorld > camp.shadowOffWorld * 2
+    );
+    t.ok(
+      'the outline follows the zoom (a painted line grows with the picture): thicker zoomed in, thinner zoomed out',
+      billowSmokeScale(2, 40).linePx > billowSmokeScale(1, 40).linePx &&
+        billowSmokeScale(0.25, 40).linePx < billowSmokeScale(1, 40).linePx
+    );
+    t.ok(
+      'the crescents follow the zoom too (a px width): they grow as you zoom in on the same cloud',
+      billowSmokeScale(2, 100).crescentPx > billowSmokeScale(1, 100).crescentPx
+    );
+    t.ok(
+      'and everything is held between a hair and a brush stroke (a map zoomed all the way out or in stays readable)',
+      (() => {
+        const lo = billowSmokeScale(0.001, 4);
+        const hi = billowSmokeScale(1000, 1e6);
+        return (
+          lo.linePx >= 1.2 &&
+          hi.linePx <= 6 &&
+          lo.crescentPx >= 3 &&
+          hi.crescentPx <= 48 &&
+          lo.shadowOffWorld >= 4 &&
+          hi.shadowOffWorld <= 60
+        );
+      })()
+    );
+    t.ok(
+      'a missing or nonsense zoom and radius fall back to sane numbers',
+      (() => {
+        const v = [billowSmokeScale(undefined, undefined), billowSmokeScale(NaN, -5), billowSmokeScale(0, 0)];
+        return v.every((o) => Object.values(o).every((n) => Number.isFinite(n) && n > 0));
+      })()
     );
   }
 }

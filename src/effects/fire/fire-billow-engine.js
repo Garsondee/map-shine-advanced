@@ -19,8 +19,15 @@
  *
  * @module effects/fire/fire-billow-engine
  */
-import { createBillowRenderer } from './fire-billow-render.js';
-import { emitFireLobes, hash01, LOBE_STRIDE, maxLobesPerFire } from './fire-billow-geometry.js';
+import { createBillowRenderer, billowSmokeScale } from './fire-billow-render.js';
+import {
+  emitFireLobes,
+  emitMassSmoke,
+  hash01,
+  LOBE_STRIDE,
+  maxLobesPerFire,
+  MASS_SMOKE_MAX,
+} from './fire-billow-geometry.js';
 import { createFireLifeBook } from './fire-billow-state.js';
 import { billowRuntimeFromParams } from './fire-billow-params.js';
 import { bloomCounterParams, bloomCounterUniforms, regionFill } from './fire-billow-bloom.js';
@@ -52,6 +59,12 @@ const MODEST_SPACING = 1.4;
 const CPU_LOBE_BUDGET = 4500;
 /** A burning mass's equivalent flame radius, as a fraction of its box's mean side (fitted to a single flame: 0.19). */
 const MASS_FILL_PER_SIDE = 0.19;
+/** A group of flames too scattered to be one contour box is covered by at most this many grid tiles. */
+const MAX_TILES_PER_GROUP = 16;
+/** A fire split into more flames than this is a MASS (a roof, a building): its smoke is one column, not a wisp per flame. */
+const MASS_FROM_SIBLINGS = 6;
+/** ...and by this many flames the column is all the smoke there is: a lone puff off a roof reads as a grey ball, not smoke. */
+const MASS_WISPS_END = 14;
 /** With no label field to say which blob a painted point is part of: farther than this many radii from every fire, it is part of none. */
 const OWN_REACH = 3;
 
@@ -77,7 +90,40 @@ export function massQuality(siblings) {
   return clamp(1 - 0.0125 * (Math.max(1, siblings || 1) - 4), 0.5, 1);
 }
 
+/**
+ * How much of its own smoke each flame of a MASS keeps: a roof of fifty flames each puffing its own plume was a field of white dots
+ * (and a lone puff off a roof reads as a grey ball, not smoke); the mass as a whole makes one column (`emitMassSmoke`). 1 up to a
+ * few flames, falling in a straight line to none by `MASS_WISPS_END` flames.
+ *
+ * @param {number} siblings how many flames the whole fire was split into
+ */
+export function massSmokeKeep(siblings) {
+  const n = Math.max(1, siblings || 1);
+  return n <= MASS_FROM_SIBLINGS ? 1 : clamp((MASS_WISPS_END - n) / (MASS_WISPS_END - MASS_FROM_SIBLINGS), 0, 1);
+}
+
+/**
+ * A building's flames are bigger than a bonfire's (and a roof of fifty candles is not a roaring fire): once a painted fire is
+ * wider than one flame can be, each doubling of its width adds 45% to the widest flame it may be split into, to at most 2x.
+ * 1 for anything up to a bonfire or two.
+ *
+ * @param {number} ratio the painted fire's radius over one bonfire's (`MAX_CLUSTER_RADIUS_M` in px)
+ */
+export function massFlameGrowth(ratio) {
+  return clamp(1 + 0.45 * Math.log2(Math.max(1, ratio || 1) / SINGLE_FLAME_REACH), 1, 2);
+}
+
+/** How black a mass's smoke is: a building is dark, a bonfire pale. 0 up to a few flames, then 0.4 rising to 0.85 by about twenty-two. */
+export function massSootiness(siblings) {
+  const n = Math.max(1, siblings || 1);
+  return n <= MASS_FROM_SIBLINGS ? 0 : clamp(0.4 + (0.45 * (n - MASS_FROM_SIBLINGS)) / 16, 0.4, 0.85);
+}
+
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const smooth01 = (x, a, b) => {
+  const t = clamp((x - a) / Math.max(1e-6, b - a), 0, 1);
+  return t * t * (3 - 2 * t);
+};
 
 /**
  * The virtual camera's height (world px) that the billows' perspective parallax uses, from the visible world rect.
@@ -206,6 +252,7 @@ export function planClusters(fires, cloud, mPerPx, labelGrid = null) {
         maxRadius: maxR,
         siblings: 1,
         seed: baseSeed,
+        spreadT: 0,
         points,
         count,
       });
@@ -213,11 +260,13 @@ export function planClusters(fires, cloud, mPerPx, labelGrid = null) {
     }
     // a wide fire: greedy farthest-point sampling over its painted points -> centres about one maxR apart, so the flames
     // overlap into ONE burning mass (a roof of flames, not a tray of candles)
-    const want = clamp(Math.ceil((R / maxR) * (R / maxR) * 2.8), 2, MAX_CLUSTERS_PER_FIRE);
+    // (a building's flames may be bigger than a bonfire's: fewer of them, each with room to be a flame)
+    const maxRm = maxR * massFlameGrowth(R / maxR);
+    const want = clamp(Math.ceil((R / maxRm) * (R / maxRm) * 3.4), 2, MAX_CLUSTERS_PER_FIRE);
     const centres = [];
     // a bonfire's worth of paint gets a few big flames; a building's gets a dense mass of them
     const spacing =
-      maxR *
+      maxRm *
       clamp(
         MODEST_SPACING -
           ((R / maxR - SINGLE_FLAME_REACH) / (MASS_FROM - SINGLE_FLAME_REACH)) * (MODEST_SPACING - CLUSTER_SPACING),
@@ -283,16 +332,42 @@ export function planClusters(fires, cloud, mPerPx, labelGrid = null) {
       out.push({
         fireIndex: j,
         id,
-        x: pts[centres[c] * stride] + (hash01(baseSeed, c, 11) - 0.5) * maxR * CLUSTER_JITTER,
-        y: pts[centres[c] * stride + 1] + (hash01(baseSeed, c, 12) - 0.5) * maxR * CLUSTER_JITTER,
-        radius: clamp(Math.max(spread * 0.9, maxR * 0.95), 6, maxR),
+        x: pts[centres[c] * stride] + (hash01(baseSeed, c, 11) - 0.5) * maxRm * CLUSTER_JITTER,
+        y: pts[centres[c] * stride + 1] + (hash01(baseSeed, c, 12) - 0.5) * maxRm * CLUSTER_JITTER,
+        radius: clamp(Math.max(spread * 0.9, maxRm * 0.95), 6, maxRm),
         parentRadius: R,
-        maxRadius: maxR,
+        maxRadius: maxRm,
         siblings: centres.length,
         seed: (baseSeed + Math.imul(c + 1, 0x9e3779b1)) | 0,
+        spreadT: 0,
         points,
         count,
       });
+    }
+    // WHEN THE FRONT REACHES EACH FLAME (only used when the fire is set to spread). A building catches at a corner, not always
+    // in the middle: the ignition flame is the one nearest a point on the painted fire's rim that a hash of the fire picks, and
+    // the others are ordered by their distance from it, 0 (where it starts) to 1 (the far end), with a little jitter.
+    const mine2 = out.filter((o) => o.fireIndex === j);
+    if (mine2.length > 1) {
+      const ang = hash01(baseSeed, 7, 3) * Math.PI * 2;
+      const px = f.x + Math.cos(ang) * R * 0.6;
+      const py = f.y + Math.sin(ang) * R * 0.6;
+      let ignite = mine2[0];
+      let bd = Infinity;
+      for (const o of mine2) {
+        const d = (o.x - px) ** 2 + (o.y - py) ** 2;
+        if (d < bd) {
+          bd = d;
+          ignite = o;
+        }
+      }
+      let dmax = 1e-6;
+      for (const o of mine2) dmax = Math.max(dmax, Math.hypot(o.x - ignite.x, o.y - ignite.y));
+      mine2.forEach((o, k) => {
+        const d = Math.hypot(o.x - ignite.x, o.y - ignite.y) / dmax;
+        o.spreadT = clamp(d * 0.88 + (hash01(baseSeed, k, 19) - 0.5) * 0.08, 0, 1);
+      });
+      ignite.spreadT = 0;
     }
   }
   return out;
@@ -304,15 +379,20 @@ export function planClusters(fires, cloud, mPerPx, labelGrid = null) {
  * The contour pass reads the WHOLE field inside its box, so overlapping boxes would shade the same pixels twice (a doubled
  * edge) and a roof of 80 flames would cost 80 box-fulls of the heaviest shader in the effect. Boxes that overlap are joined
  * (union-find over the pairwise test: O(n^2) on at most `MAX_CLUSTERS_PER_FIRE` boxes, a few thousand comparisons) and a joined
- * group becomes its bounding box only if that box is not much emptier than the boxes it replaces: a diagonal row of separate
- * fires chains into one overlapping group whose bounding box is mostly empty, and is better left as the separate boxes it was.
+ * group becomes its bounding box only if that box is not much emptier than the boxes it replaces. A diagonal row of separate
+ * fires chains into one overlapping group whose bounding box is mostly empty: that group is covered by a TILING instead (grid
+ * cells that any member touches), so the pixels are still drawn exactly once. (It used to be left as the overlapping boxes it
+ * was, which draws their overlap twice: a doubled edge on a flame, and a visible rectangle of denser smoke on a translucent plume.)
+ * Every tile of a group carries the group's fill and looks, so the tiles join without a seam.
  *
  * @param {number[]} boxes `[minX, minY, w, h]` per box
  * @param {number[]} fills one number per box (merged: the largest of the group)
  * @param {number} [maxWaste=1.7] the largest allowed (bounding box area) / (sum of the member boxes' areas)
- * @returns {{boxes:number[], fills:number[], members:number[]}} `members[i]` = how many boxes became box `i`
+ * @param {number[]|null} [looks] two numbers per box (the smoke's crescent width and shadow offset): merged = the largest of the group
+ * @returns {{boxes:number[], fills:number[], looks:number[], members:number[], sides:number[]}} `members[i]` = how many boxes
+ *   the group of box `i` had, `sides[i]` = the mean side of that group's bounding box
  */
-export function mergeBoxes(boxes, fills, maxWaste = 1.7) {
+export function mergeBoxes(boxes, fills, maxWaste = 1.7, looks = null) {
   const n = Math.floor(boxes.length / 4);
   const parent = Array.from({ length: n }, (_, i) => i);
   const find = (i) => {
@@ -342,7 +422,9 @@ export function mergeBoxes(boxes, fills, maxWaste = 1.7) {
   }
   const outBoxes = [];
   const outFills = [];
+  const outLooks = [];
   const members = [];
+  const sides = [];
   for (const ids of groups.values()) {
     let x0 = Infinity;
     let y0 = Infinity;
@@ -350,6 +432,8 @@ export function mergeBoxes(boxes, fills, maxWaste = 1.7) {
     let y1 = -Infinity;
     let area = 0;
     let fill = 0;
+    let cres = 0;
+    let off = 0;
     for (const i of ids) {
       x0 = Math.min(x0, boxes[i * 4]);
       y0 = Math.min(y0, boxes[i * 4 + 1]);
@@ -357,21 +441,45 @@ export function mergeBoxes(boxes, fills, maxWaste = 1.7) {
       y1 = Math.max(y1, boxes[i * 4 + 1] + boxes[i * 4 + 3]);
       area += boxes[i * 4 + 2] * boxes[i * 4 + 3];
       fill = Math.max(fill, fills[i] ?? 0);
+      cres = Math.max(cres, looks?.[i * 2] ?? 0);
+      off = Math.max(off, looks?.[i * 2 + 1] ?? 0);
     }
-    if (ids.length === 1 || (x1 - x0) * (y1 - y0) <= maxWaste * area) {
-      outBoxes.push(x0, y0, x1 - x0, y1 - y0);
+    const side = 0.5 * (x1 - x0 + (y1 - y0));
+    const emit = (bx, by, bw, bh) => {
+      outBoxes.push(bx, by, bw, bh);
       outFills.push(fill);
+      outLooks.push(cres, off);
       members.push(ids.length);
+      sides.push(side);
+    };
+    if (ids.length === 1 || (x1 - x0) * (y1 - y0) <= maxWaste * area) {
+      emit(x0, y0, x1 - x0, y1 - y0);
     } else {
-      // too empty to be one mass: keep the boxes it was
-      for (const i of ids) {
-        outBoxes.push(boxes[i * 4], boxes[i * 4 + 1], boxes[i * 4 + 2], boxes[i * 4 + 3]);
-        outFills.push(fills[i] ?? 0);
-        members.push(1);
+      // too empty to be one box: cover the members with grid tiles (each pixel drawn once, no overlap)
+      const sizes = ids.map((i) => 0.5 * (boxes[i * 4 + 2] + boxes[i * 4 + 3])).sort((a, b) => a - b);
+      let cell = Math.max(64, Math.min(sizes[sizes.length >> 1] * 1.25, side * 0.25));
+      let cells = tileCells(boxes, ids, cell);
+      for (let guard = 0; guard < 8 && cells.length > MAX_TILES_PER_GROUP; guard++) {
+        cell *= 1.5;
+        cells = tileCells(boxes, ids, cell);
       }
+      for (const [gx, gy] of cells) emit(gx * cell, gy * cell, cell, cell);
     }
   }
-  return { boxes: outBoxes, fills: outFills, members };
+  return { boxes: outBoxes, fills: outFills, looks: outLooks, members, sides };
+}
+
+/** The grid cells (size `cell`) that any of the member boxes touches, as `[gx, gy]` pairs in a stable order. */
+function tileCells(boxes, ids, cell) {
+  const seen = new Map();
+  for (const i of ids) {
+    const gx0 = Math.floor(boxes[i * 4] / cell);
+    const gx1 = Math.floor((boxes[i * 4] + boxes[i * 4 + 2]) / cell);
+    const gy0 = Math.floor(boxes[i * 4 + 1] / cell);
+    const gy1 = Math.floor((boxes[i * 4 + 1] + boxes[i * 4 + 3]) / cell);
+    for (let gy = gy0; gy <= gy1; gy++) for (let gx = gx0; gx <= gx1; gx++) seen.set(`${gx},${gy}`, [gx, gy]);
+  }
+  return [...seen.values()].sort((a, b) => a[1] - b[1] || a[0] - b[0]);
 }
 
 /**
@@ -414,6 +522,8 @@ export function createBillowEngine({
     depth: depthTexNode ? { depthTexNode, depthFlagsTexNode, buildGate } : null,
   });
   const lives = createFireLifeBook();
+  /** per big fire: how far its front has run (seconds of burning time; frozen while it is out, restarted on a rekindle) */
+  const spread = new Map();
   /** @type {{cloud:*, fires:*, mPerPx:number, labelGrid:*, clusters:Array<object>}} */
   let planMemo = { cloud: null, fires: null, mPerPx: -1, labelGrid: null, clusters: [] };
   let jobs = [];
@@ -522,8 +632,15 @@ export function createBillowEngine({
       const boxes = [];
       /** per box: how much of the bloom a flame this big on screen gets */
       const fills = [];
+      /** per box: the smoke crescent width (px) and ground-shadow offset (world px), which follow the size of its billows */
+      const looks = [];
       const lifeByFire = new Map();
       const stepped = new Set();
+      const advanced = new Set();
+      /** per fire: how much of it burns (the spread front), and what its mass smoke column needs */
+      const litStats = new Map();
+      const masses = new Map();
+      const spreadSec = clamp(Number(params?.spreadSec) || 0, 0, 3600);
       const margin = 24;
       const inView = (c) => {
         const reach = c.radius * 7 + margin;
@@ -593,6 +710,33 @@ export function createBillowEngine({
           lifeByFire.set(c.id, lf);
         }
 
+        // SPREAD: a big painted fire (a building) can catch at one end and burn across over `spreadSec` seconds. The front runs
+        // faster downwind, crawls in the rain, stands still while the fire is out, and starts again from the corner when it
+        // rekindles. 0 = the whole region at once (the default).
+        let ign = 1;
+        if (spreadSec > 0 && c.siblings > 1) {
+          let st = spread.get(c.id);
+          if (!st) {
+            st = { age: 0, phase: lf.phase };
+            spread.set(c.id, st);
+          }
+          if (!advanced.has(c.id)) {
+            advanced.add(c.id);
+            if (lf.phase === 'rekindle' && st.phase !== 'rekindle') st.age = 0;
+            st.phase = lf.phase;
+            const alive = lf.phase === 'burning' || lf.phase === 'rekindle';
+            if (alive) st.age += dtSec * (1 - 0.85 * clamp(lf.wet, 0, 1)) * (1 + 0.8 * push);
+          }
+          ign = smooth01(st.age / spreadSec, c.spreadT, c.spreadT + 0.14);
+        }
+        const stat = litStats.get(c.id) ?? { sum: 0, n: 0, wx: 0, wy: 0, w: 0 };
+        stat.sum += ign;
+        stat.n++;
+        stat.wx += c.x * ign;
+        stat.wy += c.y * ign;
+        stat.w += ign;
+        litStats.set(c.id, stat);
+
         // visible? (the life has been stepped either way, so a fire out of view still goes out in the rain)
         if (!inView(c)) continue;
         env.quality = clamp(baseQuality * massQuality(c.siblings) * budgetQuality, 0.2, 1);
@@ -602,6 +746,31 @@ export function createBillowEngine({
           dropped++;
           continue;
         }
+
+        if (c.siblings > MASS_FROM_SIBLINGS && !masses.has(c.id)) {
+          masses.set(c.id, {
+            id: c.id,
+            seed: c.seed,
+            parentRadius: c.parentRadius,
+            clusterRadius: c.radius,
+            // the flames tops: where the column starts
+            baseZ:
+              c.radius *
+              br.tune.bodyHeight *
+              (0.7 + 0.75 * outdoor01) *
+              br.heightGain *
+              infernoHeightGain(c.parentRadius, c.maxRadius) *
+              0.8,
+            outdoor01,
+            stress01,
+            rain01: rainHere,
+            windMotion01: push,
+            sootiness01: massSootiness(c.siblings),
+            lf,
+          });
+        }
+        // a flame the front has not reached yet burns nothing, and not even its bed glows
+        if (ign < 0.02) continue;
 
         const desc = {
           x: c.x,
@@ -618,10 +787,12 @@ export function createBillowEngine({
           windY: wdir.y,
           windMotion01: push,
           stress01,
-          vitality01: lf.vitality,
-          coal01: lf.coal,
+          vitality01: lf.vitality * ign,
+          coal01: lf.coal * ign,
           rain01: rainHere,
-          smokeMul: br.smokeMul,
+          // in a mass each flame only wisps; the mass as a whole makes one column (below)
+          smokeMul: br.smokeMul * massSmokeKeep(c.siblings),
+          sootiness01: massSootiness(c.siblings),
           spitMul: br.spitMul,
           draft: br.drafts,
           spawn: c.points,
@@ -653,21 +824,84 @@ export function createBillowEngine({
         grow(renderer.flameLobes, f0, nf);
         grow(renderer.smokeLobes, s0, ns);
         if (maxX > minX) {
-          boxes.push(minX - margin, minY - margin, maxX - minX + margin * 2, maxY - minY + margin * 2);
+          const sc = billowSmokeScale(pxPerWorld, c.radius);
+          const bm = margin + sc.shadowOffWorld;
+          boxes.push(minX - bm, minY - bm, maxX - minX + bm * 2, maxY - minY + bm * 2);
           fills.push(regionFill(c.radius * pxPerWorld));
+          looks.push(sc.crescentPx, sc.shadowOffWorld);
         }
+      }
+
+      // THE COLUMN OF A BURNING MASS: one plume for the whole roof, from the middle of what burns, in the same smoke field
+      for (const m of masses.values()) {
+        const stat = litStats.get(m.id);
+        const lit01 = stat && stat.n > 0 ? stat.sum / stat.n : 0;
+        if (!stat || lit01 < 0.02 || stat.w < 1e-6 || ns + MASS_SMOKE_MAX > sCap) continue;
+        const Rm = m.parentRadius * Math.sqrt(lit01);
+        const s0 = ns;
+        const res = emitMassSmoke(
+          renderer.smokeLobes,
+          ns,
+          {
+            x: stat.wx / stat.w,
+            y: stat.wy / stat.w,
+            radius: Rm,
+            baseZ: m.baseZ,
+            seed: m.seed,
+            lit01,
+            vitality01: m.lf.vitality,
+            coal01: m.lf.coal,
+            stress01: m.stress01,
+            rain01: m.rain01,
+            outdoor01: m.outdoor01,
+            windX: wdir.x,
+            windY: wdir.y,
+            windMotion01: m.windMotion01,
+            smokeMul: br.smokeMul,
+            sootiness01: m.sootiness01,
+          },
+          env,
+          br.tune
+        );
+        ns += res.count;
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+        for (let i = s0; i < ns; i++) {
+          const o = i * LOBE_STRIDE;
+          const r = renderer.smokeLobes[o + 2];
+          minX = Math.min(minX, renderer.smokeLobes[o] - r);
+          maxX = Math.max(maxX, renderer.smokeLobes[o] + r);
+          minY = Math.min(minY, renderer.smokeLobes[o + 1] - r);
+          maxY = Math.max(maxY, renderer.smokeLobes[o + 1] + r);
+        }
+        if (maxX > minX) {
+          const sc = billowSmokeScale(pxPerWorld, Rm * 0.4);
+          const bm = margin + sc.shadowOffWorld;
+          boxes.push(minX - bm, minY - bm, maxX - minX + bm * 2, maxY - minY + bm * 2);
+          fills.push(regionFill(m.clusterRadius * pxPerWorld));
+          looks.push(sc.crescentPx, sc.shadowOffWorld);
+        }
+      }
+
+      // a fire only part lit (a spreading front) lights, and spits embers, only as far as it burns
+      for (const [id, stat] of litStats) {
+        const lf = lifeByFire.get(id);
+        if (lf && stat.n > 0 && stat.sum < stat.n) lf.vitality *= stat.sum / stat.n;
       }
 
       renderer.setCounts(nf, ns);
       // ONE contour box per burning mass: flames whose boxes overlap are drawn as one (the contour reads the whole field, so
       // overlapping boxes would shade the same pixels twice). A mass covers more of the screen, so the bloom fills it more.
-      const merged = mergeBoxes(boxes, fills);
+      const merged = mergeBoxes(boxes, fills, 1.7, looks);
       const mBoxes = merged.boxes;
       const mFills = merged.fills;
+      const mLooks = merged.looks;
       for (let i = 0; i < mFills.length; i++) {
+        // (a group's tiles all carry the group's fill, from the group's whole bounding box, so they join without a seam)
         if (merged.members[i] > 1) {
-          const meanSide = 0.5 * (mBoxes[i * 4 + 2] + mBoxes[i * 4 + 3]);
-          mFills[i] = Math.max(mFills[i], regionFill(MASS_FILL_PER_SIDE * meanSide * pxPerWorld));
+          mFills[i] = Math.max(mFills[i], regionFill(MASS_FILL_PER_SIDE * merged.sides[i] * pxPerWorld));
         }
       }
       // (past what the renderer holds, the extras are folded into the last box)
@@ -676,8 +910,11 @@ export function createBillowEngine({
       if (nBoxes > maxBoxes) {
         const keep = mBoxes.slice(0, maxBoxes * 4);
         const keepFills = mFills.slice(0, maxBoxes);
+        const keepLooks = mLooks.slice(0, maxBoxes * 2);
         for (let b = maxBoxes; b < nBoxes; b++) {
           keepFills[maxBoxes - 1] = Math.max(keepFills[maxBoxes - 1], mFills[b]);
+          keepLooks[(maxBoxes - 1) * 2] = Math.max(keepLooks[(maxBoxes - 1) * 2], mLooks[b * 2]);
+          keepLooks[(maxBoxes - 1) * 2 + 1] = Math.max(keepLooks[(maxBoxes - 1) * 2 + 1], mLooks[b * 2 + 1]);
           const x0 = mBoxes[b * 4];
           const y0 = mBoxes[b * 4 + 1];
           const x1 = x0 + mBoxes[b * 4 + 2];
@@ -691,12 +928,17 @@ export function createBillowEngine({
           keep[(maxBoxes - 1) * 4 + 2] = Math.max(x1, lx1) - keep[(maxBoxes - 1) * 4];
           keep[(maxBoxes - 1) * 4 + 3] = Math.max(y1, ly1) - keep[(maxBoxes - 1) * 4 + 1];
         }
-        renderer.setQuads(keep, maxBoxes, keepFills);
+        renderer.setQuads(keep, maxBoxes, keepFills, keepLooks);
         nBoxes = maxBoxes;
       } else {
-        renderer.setQuads(mBoxes, nBoxes, mFills);
+        renderer.setQuads(mBoxes, nBoxes, mFills, mLooks);
       }
-      renderer.setLook({ ...br.look, hue: br.hueShiftRad, tint: br.tint });
+      renderer.setLook({
+        ...br.look,
+        hue: br.hueShiftRad,
+        tint: br.tint,
+        smokeLinePx: billowSmokeScale(pxPerWorld, 50).linePx,
+      });
       renderer.uniforms.expectedDepth.value = Number.isFinite(ctx.expectedDepth) ? ctx.expectedDepth : 0;
       jobs = nf + ns > 0 ? renderer.prepareField(rect, { pxPerWorld, timeSec }) : [];
       renderer.scene.visible = nf + ns > 0;
@@ -708,6 +950,7 @@ export function createBillowEngine({
         coal: coalTotal,
         dropped,
         boxes: nBoxes,
+        masses: masses.size,
         quality: +minQuality.toFixed(3),
         bloomCounter: counter ? `K ${counter.K.toFixed(2)} thr ${counter.threshold} mix ${br.bloomMix}` : 'off',
       };

@@ -100,15 +100,46 @@ export const BILLOW_LOOK = Object.freeze({
   coalGain: 1.0,
   coalCell: 0.16,
   coalCrack: 0.22,
-  /** Smoke. */
-  smokeOutline: 0.3,
-  smokeSoft: 0.2,
-  smokeOpacity: 0.92,
+  /** Smoke: the density level of its silhouette, its edge softness, how solid it is, and the soot a fuel adds. */
+  smokeOutline: 0.42,
+  smokeSoft: 0.14,
+  smokeOpacity: 0.94,
   smokeSoot: 0.0,
+  /** The darkened rim round the cloud (px wide, 0 = none) and how dark it is (0..1): the pigment pooling at a painted edge. */
+  smokeLinePx: 2.4,
+  smokeLineA: 0.4,
+  /** The soft ground shadow under the smoke (0..1 darkening). Its offset and the crescents' width follow the billows' size per box. */
+  smokeShadow: 0.26,
+  /** How steeply the cloud's overall shape tilts its shading (the shaded and lit crescents). */
+  smokeRelief: 2.4,
+  /** The smoke kernel: 0 = a soft bump (one smooth blob), 1 = a flat-topped disc (a scalloped cloud of round billows). */
+  smokeCrisp: 0.7,
+  /** How much greyer the smoke goes in a fully bright scene (so it stands off a pale floor). */
+  smokeDayDark: 0.55,
   /** Shading light direction (screen space, up-left). */
   lightX: -0.55,
   lightY: -0.55,
 });
+
+/**
+ * How the smoke's cartoon furniture scales: the line round the cloud follows the ZOOM (a painted outline grows with the
+ * picture, kept between a hair and a brush stroke), the lit and shaded crescents and the ground shadow follow the SIZE of the
+ * fire's billows (a roof's smoke is far bigger than a campfire's).
+ *
+ * @param {number} pxPerWorld screen px per world px (the zoom, at the drawing buffer's density)
+ * @param {number} radiusWorld the fire's (flame's) radius, world px
+ * @returns {{linePx:number, crescentPx:number, shadowOffWorld:number}}
+ */
+export function billowSmokeScale(pxPerWorld, radiusWorld) {
+  const z = Math.max(0.05, Number(pxPerWorld) || 1);
+  const r = Math.max(4, Number(radiusWorld) || 50);
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  return {
+    linePx: clamp(2.4 * z, 1.2, 6),
+    crescentPx: clamp(0.2 * r * z, 3, 48),
+    shadowOffWorld: clamp(0.22 * r, 4, 60),
+  };
+}
 
 /**
  * @param {object} deps
@@ -238,6 +269,12 @@ export function createBillowRenderer({
     smokeSoft: num('smokeSoft'),
     smokeOpacity: num('smokeOpacity'),
     smokeSoot: num('smokeSoot'),
+    smokeLinePx: num('smokeLinePx'),
+    smokeLineA: num('smokeLineA'),
+    smokeShadow: num('smokeShadow'),
+    smokeRelief: num('smokeRelief'),
+    smokeCrisp: num('smokeCrisp'),
+    smokeDayDark: num('smokeDayDark'),
     light: uniform(vec2(BILLOW_LOOK.lightX, BILLOW_LOOK.lightY)),
     hue: uniform(float(0)),
     tint: uniform(vec3(1, 1, 1)),
@@ -262,6 +299,7 @@ export function createBillowRenderer({
   });
   const vLocal = Fn(() => positionGeometry.xy.mul(2))().toVarying('vBillowLocal');
   const vData = Fn(() => vec4(lobeA.w, lobeB.x, lobeC.x, lobeC.y))().toVarying('vBillowData');
+  const vRad = Fn(() => lobeA.z)().toVarying('vBillowRad');
   const applySplatState = (material) => {
     material.transparent = true;
     material.depthTest = false;
@@ -300,7 +338,16 @@ export function createBillowRenderer({
   smokeSplat.fragmentNode = Fn(() => {
     const qd2 = dot(vLocal, vLocal);
     const k0 = max(float(1).sub(qd2), float(0));
-    const w = vData.x.mul(k0).mul(k0);
+    // `smokeCrisp` 0 = the soft bump; toward 1 = a flat-topped disc, so the cloud's edge is a union of round billows with
+    // crisp scallops between them (the cartoon cumulus) instead of one smooth blob
+    const qd = sqrt(qd2);
+    const kPlat = float(1).sub(smoothstep(float(0.5), float(1), qd));
+    // a big billow (a burning building's column) is more of a soft hill than a flat disc: its flanks are what the contour shades,
+    // and a flat top over a whole roof's width is a featureless potato. Billows up to ~120 world px keep the crisp scalloped edge;
+    // by ~240 they are 40% less crisp.
+    const crisp = U.smokeCrisp.mul(float(1).sub(smoothstep(float(120), float(240), vRad).mul(0.6)));
+    const k = mix(k0.mul(k0), kPlat, crisp);
+    const w = vData.x.mul(k);
     // B carries the STEAM weight (a doused fire's smoke is wet: whiter, denser)
     return vec4(w, w.mul(vData.w), w.mul(vData.y), float(0));
   })();
@@ -327,13 +374,17 @@ export function createBillowRenderer({
   const smokeShade = lin(BILLOW_SMOKE_RAMP.shade);
   const smokeDeep = lin(BILLOW_SMOKE_RAMP.deep);
   const smokeLit = lin(BILLOW_SMOKE_RAMP.lit);
-  const smokeSootC = lin(BILLOW_SMOKE_RAMP.soot);
+  const smokeInk = lin(BILLOW_SMOKE_RAMP.ink);
+  const smokeCharcoal = lin(BILLOW_SMOKE_RAMP.charcoal);
   const flipUV = (p) => (flipV ? vec2(p.x, float(1).sub(p.y)) : p);
   const dirY = (v) => (flipV ? v.negate() : v);
 
   // contour boxes: one instanced quad per fire (`quadFill` = how much of the scene's bloom a flame this big on screen gets)
   const quadBoxes = new Float32Array(maxQuads * 4);
   const quadFills = new Float32Array(maxQuads);
+  // per box: how thick the smoke's shaded/lit crescents are (field texels = px) and how far its ground shadow falls (world px).
+  // They follow the SIZE of the fire's billows (a roof's smoke is much bigger than a campfire's), so they cannot be one uniform.
+  const quadLooks = new Float32Array(maxQuads * 2);
   const resolveGeometry = new THREE.InstancedBufferGeometry();
   {
     const quad = new THREE.PlaneGeometry(1, 1);
@@ -346,14 +397,19 @@ export function createBillowRenderer({
     const fillAttr = new THREE.InstancedBufferAttribute(quadFills, 1);
     fillAttr.setUsage(THREE.DynamicDrawUsage);
     resolveGeometry.setAttribute('quadFill', fillAttr);
+    const lookAttr = new THREE.InstancedBufferAttribute(quadLooks, 2);
+    lookAttr.setUsage(THREE.DynamicDrawUsage);
+    resolveGeometry.setAttribute('quadLook', lookAttr);
     resolveGeometry.instanceCount = 0;
   }
   const quadBox = attribute('quadBox', 'vec4');
   const quadFill = attribute('quadFill', 'float');
+  const quadLook = attribute('quadLook', 'vec2');
   const resolveMaterial = new THREE.NodeMaterial();
   const worldAt = Fn(() => quadBox.xy.add(positionGeometry.xy.add(vec2(0.5, 0.5)).mul(quadBox.zw)))();
   const vWorld = worldAt.toVarying('vBillowWorld');
   const vFill = Fn(() => quadFill)().toVarying('vBillowFill');
+  const vLook = Fn(() => quadLook)().toVarying('vBillowLook');
   resolveMaterial.positionNode = Fn(() => vec3(worldAt, float(0)))();
 
   // THE BLOOM COUNTER (fire-billow-bloom.js): the scene's bloom adds its glow on top of the flame, so the flame paints the
@@ -520,7 +576,10 @@ export function createBillowRenderer({
       .clamp(0, 0.92);
     const coalRgb = piecewiseLinearRgb(TSL, coalTau, rampStops);
 
-    // ───────────── SMOKE ─────────────
+    // ───────────── SMOKE: cel-shaded billows with a line round them and a soft shadow on the ground ─────────────
+    // (2026-10-20, after the first delivery: the pale plain smoke was small, thin and vanished on a bright floor. The painted
+    // plumes read because they are lit near the fire and grey above it, shaded on the flank away from the light, edged with a
+    // soft darker rim, and throw a shadow on the floor; a sooty column is charcoal, and a bright scene greys the smoke.)
     const s0 = smokeNode.sample(p);
     const sR = smokeNode.sample(p.add(ex));
     const sL = smokeNode.sample(p.sub(ex));
@@ -528,46 +587,103 @@ export function createBillowRenderer({
     const sU = smokeNode.sample(p.sub(ey));
     const S = s0.x;
     const toneS = s0.y.div(max(S, float(0.001))).clamp(0, 1);
+    // the field's B channel is steam (+) or soot (-), density weighted
+    const bSig = s0.z.div(max(S, float(0.001)));
+    const steam = clamp(bSig, float(0), float(1));
+    const sootL = clamp(bSig.negate(), float(0), float(1));
     const sGrad = vec2(sR.x.sub(sL.x), sD2.x.sub(sU.x)).mul(0.5);
-    const sAA = clamp(length(sGrad), float(0.02), float(0.5)).add(U.smokeSoft);
-    const sCover = smoothstep(U.smokeOutline.sub(sAA), U.smokeOutline.add(sAA), S).mul(U.smokeOpacity);
+    const sGradLen = length(sGrad);
+    const sAA = clamp(sGradLen, float(0.02), float(0.5)).add(U.smokeSoft);
+    const sCover0 = smoothstep(U.smokeOutline.sub(sAA), U.smokeOutline.add(sAA), S);
     const dens = clamp(S.sub(U.smokeOutline).div(1.6), float(0), float(1));
-    // young smoke (low tone) is lit warm by the fire under it; old smoke goes grey-brown. Dense = bright core.
-    const steam = clamp(s0.z.div(max(S, float(0.001))), float(0), float(1));
-    let sRgb = mix(smokeHi, smokeMid, smoothstep(float(0.0), float(0.55), toneS));
-    sRgb = mix(sRgb, smokeShade, smoothstep(float(0.45), float(0.95), toneS).mul(0.8));
-    sRgb = mix(sRgb, smokeDeep, float(1).sub(dens).mul(0.45));
-    sRgb = mix(smokeLit, sRgb, smoothstep(float(0.0), float(0.28), toneS));
-    sRgb = mix(sRgb, smokeSootC, U.smokeSoot.mul(toneS));
+    // a thin rim or tail is see-through, the body is solid
+    const sCover = sCover0.mul(U.smokeOpacity).mul(mix(float(0.55), float(1), smoothstep(float(0), float(0.3), dens)));
+    // how many px inside the silhouette this is: (density above the edge) / (density change per px; the taps are 1.5 texels each side)
+    const edgePx = max(S.sub(U.smokeOutline), float(0)).div(max(sGradLen.mul(0.6667), float(0.0005)));
+    // THE BIG SHAPE'S SHADING: the density's slope at a distance of `vLook.x` px (the billows' own size), relative to the density
+    // there, tilts a normal; the flank facing away from the light is a shaded crescent, the one facing it a lit crescent
+    const tapX = vec2(U.texel.x.mul(vLook.x), float(0));
+    const tapY = vec2(float(0), dirY(U.texel.y.mul(vLook.x)));
+    const bigG = vec2(
+      smokeNode.sample(p.add(tapX)).x.sub(smokeNode.sample(p.sub(tapX)).x),
+      smokeNode.sample(p.add(tapY)).x.sub(smokeNode.sample(p.sub(tapY)).x)
+    ).mul(0.5);
+    const rel = bigG.div(max(S, float(0.5)));
+    const nBig = normalize(vec3(rel.x.negate().mul(U.smokeRelief), rel.y.negate().mul(U.smokeRelief), float(1)));
+    const litBig = dot(nBig, normalize(vec3(U.light.x, U.light.y, float(0.9))));
+    const shadeBand = float(1).sub(smoothstep(float(0.34), float(0.62), litBig));
+    const hiBand = smoothstep(float(0.8), float(0.95), litBig);
+    // THE PAINTED PLUME (Big Bank's thermic lance): near-white where the fire lights it, warm grey further up, darker and thinner
+    // as it ages and disperses. Dense core lighter, thin rims and tails darker.
+    let sRgb = mix(smokeHi, smokeMid, smoothstep(float(0.05), float(0.5), toneS));
+    sRgb = mix(sRgb, smokeShade, smoothstep(float(0.45), float(0.95), toneS).mul(0.85));
+    sRgb = mix(sRgb, smokeDeep, float(1).sub(dens).mul(0.35));
+    sRgb = mix(smokeLit, sRgb, smoothstep(float(0.0), float(0.22), toneS));
+    // the big shape's crescents, soft: the flank facing away from the light darker, the one facing it lighter
+    sRgb = mix(sRgb, sRgb.mul(0.7), shadeBand.mul(0.8));
+    sRgb = mix(sRgb, smokeHi, hiBand.mul(0.5));
+    // painterly mottling: slow noise lifts and sinks the value a little, so a billow is a brushed shape, not a flat fill
+    const sMottle = mx_noise_float(vec3(local.x.mul(0.05), local.y.mul(0.05), tt.mul(0.35).add(9.1)));
+    sRgb = sRgb.mul(float(1).add(sMottle.mul(0.12)));
+    // a sooty fuel's smoke, and a whole burning building's, is charcoal with its own bands
+    const sootAmt = clamp(sootL.add(U.smokeSoot.mul(toneS)), float(0), float(1));
+    const charcoalBanded = smokeCharcoal.mul(mix(mix(float(1.05), float(0.62), shadeBand), float(1.5), hiBand));
+    sRgb = mix(sRgb, charcoalBanded, sootAmt.mul(0.92));
     // steam is the brightest, whitest smoke there is
     sRgb = mix(sRgb, smokeHi, steam.mul(0.85));
-    const sNrm = normalize(vec3(sGrad.x.negate().mul(1.2), sGrad.y.negate().mul(1.2), float(1)));
-    const sLit = dot(sNrm, normalize(vec3(U.light.x, U.light.y, float(0.9))));
-    sRgb = sRgb.mul(float(0.88).add(clamp(sLit, float(-0.3), float(1)).mul(0.2)));
+    // the line: the first `smokeLinePx` px inside the silhouette, warm near-black
+    const lineA = float(1)
+      .sub(smoothstep(U.smokeLinePx.sub(0.6), U.smokeLinePx.add(0.6), edgePx))
+      .mul(U.smokeLineA)
+      .mul(smoothstep(float(0.0), float(0.6), U.smokeLinePx));
+    sRgb = mix(sRgb, smokeInk, lineA);
+    // the shadow on the ground: the same field, sampled up-left, falls down-right (the light is up-left)
+    const shOff = vec2(vLook.y.mul(0.55), dirY(vLook.y)).div(U.rectSize);
+    const shadowA = smoothstep(float(0.1), float(0.55), smokeNode.sample(p.sub(shOff)).x).mul(U.smokeShadow);
     let smokeLinear;
     if (lighting?.illumTexNode) {
       const illum = lighting.illumTexNode.sample(screenUV).rgb;
       const coloration = lighting.colorationTexNode ? lighting.colorationTexNode.sample(screenUV).rgb : vec3(0, 0, 0);
+      // a bright scene (noon, a well lit room) lights pale smoke past white, and white smoke on a pale floor is a mist, not smoke:
+      // the smoke is never lit brighter than its own paint, and in a bright scene it goes greyer so it stands off the floor
+      const illumLum = dot(illum, vec3(0.2126, 0.7152, 0.0722));
+      const illumC = illum.mul(min(float(1), float(0.95).div(max(illumLum, float(0.001)))));
+      const dayDark = smoothstep(float(0.55), float(1.0), illumLum).mul(U.smokeDayDark);
       // the scene's own composite: lit = EOTF(OETF(albedo) * illum + coloration); the painted smoke colours are sRGB albedo
-      smokeLinear = sRGBTransferEOTF(sRGBTransferOETF(sRgb).mul(illum).add(coloration));
+      smokeLinear = sRGBTransferEOTF(
+        sRGBTransferOETF(sRgb.mul(float(1).sub(dayDark)))
+          .mul(illumC)
+          .add(coloration)
+      );
     } else {
       smokeLinear = sRgb.mul(U.ambient);
     }
 
     // ───────────── COMPOSE (premultiplied): flame over smoke, glow and coals added ─────────────
-    let gate = float(1);
+    // THE FIELD ENDS WHERE ITS RECT DOES. The fields cover the visible part of the SCENE, but a tall plume's box reaches past
+    // the scene's edge, and a sample out there repeats the edge texel: a straight grey band streaked off into the padding.
+    // Nothing is drawn outside the rect (a one-texel soft edge).
+    const edgePxIn = min(
+      min(uv0.x.div(U.texel.x), float(1).sub(uv0.x).div(U.texel.x)),
+      min(uv0.y.div(U.texel.y), float(1).sub(uv0.y).div(U.texel.y))
+    );
+    let gate = clamp(edgePxIn, float(0), float(1));
     if (depth?.depthTexNode && depth?.buildGate) {
-      gate = depth.buildGate(TSL, {
-        depthTexNode: depth.depthTexNode,
-        depthFlagsTexNode: depth.depthFlagsTexNode,
-        expectedDepth: U.expectedDepth,
-      });
+      gate = gate.mul(
+        depth.buildGate(TSL, {
+          depthTexNode: depth.depthTexNode,
+          depthFlagsTexNode: depth.depthFlagsTexNode,
+          expectedDepth: U.expectedDepth,
+        })
+      );
     }
-    // bottom to top: the coal bed (painted over the ground), the smoke, the flame; the glow is added on top of all
+    // bottom to top: the smoke's shadow on the ground (black), the coal bed (painted over the ground), the smoke, the flame;
+    // the glow is added on top of all
     const coalPre = coalRgb.mul(coalA);
     const smokePre = smokeLinear.mul(sCover);
     const flamePre = rgb.mul(cover).add(glowRgb);
-    const aSmoke = sCover.add(coalA.mul(float(1).sub(sCover)));
+    const aCoal = coalA.add(shadowA.mul(float(1).sub(coalA)));
+    const aSmoke = sCover.add(aCoal.mul(float(1).sub(sCover)));
     const rgbSmoke = smokePre.add(coalPre.mul(float(1).sub(sCover)));
     const outA = cover.add(aSmoke.mul(float(1).sub(cover)));
     const outRgb = flamePre.add(rgbSmoke.mul(float(1).sub(cover)));
@@ -634,14 +750,23 @@ export function createBillowRenderer({
     /**
      * Place the contour boxes (world px): `[minX, minY, w, h]` per fire; with `n = 0` nothing is drawn. `fills` (optional,
      * one 0..1 number per box) says how much of the scene's bloom a flame that big on screen gets; omitted = 0 = no counter.
+     * `looks` (optional, two numbers per box) are the smoke's crescent width (px) and ground-shadow offset (world px), which
+     * follow the size of that fire's billows; omitted = a campfire's.
      */
-    setQuads(boxes, n, fills = null) {
+    setQuads(boxes, n, fills = null, looks = null) {
       nQuads = Math.max(0, Math.min(maxQuads, n | 0));
       for (let i = 0; i < nQuads * 4; i++) quadBoxes[i] = boxes[i];
-      for (let i = 0; i < nQuads; i++) quadFills[i] = fills ? Number(fills[i]) || 0 : 0;
+      for (let i = 0; i < nQuads; i++) {
+        quadFills[i] = fills ? Number(fills[i]) || 0 : 0;
+        const cres = looks ? Number(looks[i * 2]) : NaN;
+        const off = looks ? Number(looks[i * 2 + 1]) : NaN;
+        quadLooks[i * 2] = Number.isFinite(cres) && cres > 0 ? cres : 7;
+        quadLooks[i * 2 + 1] = Number.isFinite(off) && off >= 0 ? off : 12;
+      }
       resolveGeometry.instanceCount = nQuads;
       resolveGeometry.attributes.quadBox.needsUpdate = true;
       resolveGeometry.attributes.quadFill.needsUpdate = true;
+      resolveGeometry.attributes.quadLook.needsUpdate = true;
       resolveMesh.visible = nQuads > 0;
     },
     /**

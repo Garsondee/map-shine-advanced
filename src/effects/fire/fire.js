@@ -66,10 +66,10 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 2,
     step: 0.05,
-    default: 0.8, // 2026-10-20 new defaults (was 0.05)
+    default: 1,
     category: 'Presence',
     label: 'Fire intensity',
-    help: 'How hard everything burns. Above 1 pushes hotter and brighter; below 1 banks it down toward embers.',
+    help: 'How hard everything burns. Above 1 the flame stands taller and burns hotter; below 1 it banks down toward its coals.',
   },
   fuel: {
     type: 'enum',
@@ -84,18 +84,11 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0.02,
     max: 0.6,
     step: 0.01,
-    // ⚠️ NOT WIDENED IN THE 2026-09-04 ROH RANGE PASS — this is a threshold
-    // against a NORMALISED [0,1] paint value, not a reference multiplier;
-    // 0.6 already means "requires very bold, solid paint", and nothing past
-    // 1 can ever mean anything (no paint value exceeds 1). A real definitional
-    // bound, not an arbitrary ratchet.
-    // ⚠️ 0.05, NOT 0.2 (2026-08-16, author live on Tower Bridge — the real
-    // multi-blob `_Fire.webp` in example_map/, ~20 painted regions). At 0.2
-    // only 3 of the ~20 valid areas produced flame particles; the rest are
-    // faint/small strokes (a few native px wide, well inside a ~20-29 px-per-
-    // texel derived grid) that a bolder threshold simply never sees. 0.05
-    // lit every one of them. See fire-mask.js's own MIN_PEAK_TEXELS/
-    // PAINT_THRESHOLD headers — real authored fire is routinely this small.
+    // ⚠️ NOT WIDENED IN THE 2026-09-04 ROH RANGE PASS — this is a threshold against a NORMALISED [0,1] paint value, not a
+    // reference multiplier; nothing past 1 can ever mean anything (no paint value exceeds 1). A real definitional bound.
+    // ⚠️ 0.05, NOT 0.2 (2026-08-16, author live on Tower Bridge — the real multi-blob `_Fire.webp`, ~20 painted regions).
+    // At 0.2 only 3 of the ~20 valid areas produced flames; the rest are faint/small strokes. See fire-mask.js's own
+    // MIN_PEAK_TEXELS/PAINT_THRESHOLD headers — real authored fire is routinely this small.
     default: 0.02, // 2026-10-20 new defaults (was 0.04)
     category: 'Presence',
     label: 'Mask sensitivity',
@@ -103,49 +96,37 @@ export const FIRE_PARAMS = Object.freeze({
   },
 
   // ── Look ──────────────────────────────────────────────────────────────────
-  // ⚠️ FIXED, 2026-08-30 — `color`/`posterize`/`bandCount` were all SCHEMA-ONLY
-  // on the live particle fire until today: `fireRuntimeFromParams` computed
-  // `flameColor`/`posterize`/`bands` from them, but `fire-subsystem.js`'s
-  // `sync()` never forwarded any of the three into `engine.setParams`, so
-  // dragging any of them changed nothing (`feedback_unconsumed_api_rots_
-  // silently` — the exact "reads the param, never uses the value" shape this
-  // file's own `lightRadiusScale` note already names once). `brightness`
-  // (below) is the one member of this category left deliberately dead —
-  // "Fire intensity" (Presence) is already the live brightness control an
-  // author reaches for; wiring a second one would just be two knobs for one
-  // job. All three fixes below, plus the new `colorHueShift`, are the
-  // "CC tool set" the author asked for on 2026-08-30. See fire-sprite.js
-  // #buildFlameShading and fire-geometry.js#fireTintMul for the mechanism.
-  color: {
+  // ⚠️ THE BILLOW REBUILD (2026-10-20): the flame is now drawn as nested, cel-shaded billows in the painted-campfire palette
+  // (`fire-billow-geometry.js`). The old `color` tint (#ffe7b8 multiplied blue by 3.4), `brightness`, `perspective`,
+  // `animationSpeed` and the whole flame/smoke tuning set were retired with the sprites they tuned — see
+  // `fire-billow-params.js` for why their stored values must not be handed to a different machine.
+  flameTint: {
     type: 'color',
     space: 'srgb',
-    default: '#ffe7b8', // 2026-10-17 author's live-tuned defaults (was #fdba35)
+    default: '#ffffff',
     category: 'Look',
     label: 'Flame tint',
-    help: 'Tints the flame only — never the smoke, which is lit by the fire rather than made of it. The default matches the reference ramp’s own golden midpoint exactly, so it is a genuine no-op until you move it.',
+    help: 'Multiplies the flame’s colours. White leaves the painted-campfire palette exactly as it is; a colour pulls the whole flame toward it. (For a whole new fire colour — green alchemy, blue foxfire — use Hue shift instead.)',
   },
   posterize: {
     type: 'float',
     min: 0,
     max: 1,
     step: 0.05,
-    // 2026-10-19: the default is 0.85 (cel-shaded bands) by the author's
-    // explicit choice. It was 0 while this control was dead (see the
-    // fire-subsystem.js wiring note above); it now genuinely bands the ramp.
-    default: 0.85, // 2026-10-19 author's live-tuned defaults (was 0)
+    default: 0.62,
     category: 'Look',
     label: 'Banding',
-    help: 'How hard the colour steps between temperature bands. 0 is a smooth photographic ramp (today’s look); 1 is flat cel-shaded bands.',
+    help: 'How hard the colour steps between temperature bands. 0 is a smooth photographic ramp; 1 is flat cel-shaded bands.',
   },
   bandCount: {
     type: 'int',
     min: 3,
     max: 12,
     step: 1,
-    default: 3, // 2026-10-19 author's live-tuned defaults (was 8)
+    default: 5,
     category: 'Look',
     label: 'Band count',
-    help: 'How many distinct colour steps the banding uses once Banding is above 0. Fewer reads as more stylised.',
+    help: 'How many distinct colour steps the banding uses once Banding is above 0. The painted campfires use about five (cream, yellow, amber, orange, deep orange). Fewer reads as more stylised.',
   },
   colorHueShift: {
     type: 'float',
@@ -157,201 +138,117 @@ export const FIRE_PARAMS = Object.freeze({
     label: 'Hue shift',
     help: 'Rotates the flame, embers and smoke around the colour wheel together — the way to get a green alchemical fire or a blue foxfire without hand-picking every stop. Adds to whatever the chosen Fuel already contributes (magical fuel carries its own built-in 180° shift). ±180° already covers the whole wheel in either direction; there is no further edge to push past.',
   },
-  brightness: {
-    type: 'float',
-    min: 0,
-    max: 3,
-    step: 0.05,
-    default: 3, // 2026-10-20 new defaults (was 0.65)
-    category: 'Look',
-    label: 'Flame brightness',
-    help: 'Master brightness for the flame itself. Push it too far and the banding blows out into a flat disc.',
-  },
-
-  // ══════════════════════════════════════════════════════════════════════════
-  // THE TUNING SET (2026-08-09) — the author drives the look from here.
-  //
-  // ⚠️ EVERY RANGE HERE IS DELIBERATELY ABSURD, AND THAT IS THE REQUIREMENT.
-  // Author: *"give me lots of controls... critically I want you to give me
-  // extremely wide ranges for everything. I'll find better values for you."*
-  // A slider that cannot reach the answer is worse than no slider — it quietly
-  // rules out the region the answer was in. So these span far past anything
-  // plausible in both directions, and the DEFAULT of every multiplier is 1.0,
-  // meaning "exactly the V2-derived constant". A value is therefore always
-  // readable as a distance from the reference rather than an absolute nobody
-  // can calibrate.
-  // ══════════════════════════════════════════════════════════════════════════
-
-  // ── Flame ─────────────────────────────────────────────────────────────────
-  flameCount: {
-    type: 'float',
-    min: 0,
-    max: 500,
-    step: 1,
-    default: 500, // 2026-10-20 new defaults (was 32)
-    category: 'Flame',
-    label: 'Flame count',
-    help: 'Flame sprites per fire, PER ARCHETYPE — there are four, so the real total is four times this. V2 ran about 51 for a whole floor.',
-  },
-  // ⚠️ SPLIT INTO A WIND0/WIND1 PAIR, 2026-09-04 (was a single `flameLifeScale`)
-  // — author: "two separate controls for each element for Wind being 0 and
-  // wind being 1, we blend between those two so that I can fine tune what it
-  // looks like in both setups." Blended per-particle against how exposed
-  // THIS flame's own spawn point is to wind right now — not the map-wide
-  // dial — so a hearth tucked out of the wind keeps its Wind 0 character
-  // even while an exposed one nearby is already reading Wind 1.
-  flameLifeAtWind0: {
-    type: 'float',
-    min: 0.05,
-    max: 60,
-    step: 0.05,
-    default: 0.45, // 2026-10-20 new defaults (was 2.35)
-    category: 'Flame',
-    label: 'Flame lifetime × (Wind 0)',
-    help: 'Multiplies how long each flame sprite lives (base 2.4-4.2s) in still air. Short lives read as puffs that vanish; long ones as a steady body of fire.',
-  },
-  flameLifeAtWind1: {
-    type: 'float',
-    min: 0.05,
-    max: 200,
-    step: 0.05,
-    default: 0.05,
-    category: 'Flame',
-    label: 'Flame lifetime × (Wind 1)',
-    help: 'The same multiplier, but for a flame sitting in full wind exposure. Lower than the Wind 0 value reads as guttering — quick, flickery puffs instead of a steady body of fire. Set equal to Wind 0 to turn off wind-driven lifespan change entirely.',
-  },
-  flameSizeScale: {
-    type: 'float',
-    min: 0.02,
-    max: 100,
-    step: 0.02,
-    default: 1.62, // 2026-10-20 new defaults (was 1.16)
-    category: 'Flame',
-    label: 'Flame size ×',
-    help: 'Multiplies sprite size on top of the automatic scaling to the fire’s painted width.',
-  },
-  flameOpacity: {
-    type: 'float',
-    min: 0,
-    max: 50,
-    step: 0.05,
-    default: 6.6, // 2026-10-20 new defaults (was 50)
-    category: 'Flame',
-    label: 'Flame opacity ×',
-    help: 'How solid each flame sprite is. Raise this if the fire looks thin or washed out.',
-  },
-  flameEmission: {
-    type: 'float',
-    min: 0,
-    max: 250,
-    step: 0.1,
-    default: 14, // 2026-10-20 new defaults (was 100)
-    category: 'Flame',
-    label: 'Flame emission ×',
-    help: 'Raw brightness of the flame colour. Above about 3 the hues start saturating toward white where sprites overlap — that is the "white blur" failure.',
-  },
-  flameColorAge: {
-    type: 'float',
-    min: 0.1,
-    max: 30,
-    step: 0.05,
-    default: 6.45, // 2026-10-20 new defaults (was 8.15)
-    category: 'Flame',
-    label: 'Colour cooling rate',
-    help: 'How fast a sprite walks down the reference ramp. LOW = stays pale/white-hot for most of its life. HIGH = drops to deep orange and rust almost immediately. This is the orange-vs-white dial.',
-  },
-  flameSpawnBias: {
-    type: 'float',
-    min: -20,
-    max: 20,
-    step: 0.1,
-    default: 0, // 2026-10-20 new defaults (was 2.4)
-    category: 'Flame',
-    label: 'Spawn brightness bias',
-    help: 'Which painted texels flames prefer to spawn on. 0 = evenly across every painted texel, matching intensity to shade. Positive pulls spawns toward the brightest paint; negative toward the darkest. Saturates well before the ends of the range — no need to reach them.',
-  },
-  flameCohesion: {
-    type: 'float',
-    min: -2,
-    max: 3,
-    step: 0.02,
-    // ⚠️ NOT 0 (2026-08-17, author-confirmed live on Tower Bridge after the
-    // label-scoped rebuild — see `fire-spawn-points.js#applyCohesion`'s own
-    // header). Cohesion used to default OFF because "belongs to" was a
-    // raw-distance guess that could pull one fire's flames toward a
-    // different, disconnected fire; it is now a structural per-blob
-    // guarantee, so a real default that actually gives every fire a visible
-    // hot core is the correct ship state, not an opt-in experiment. Retuned
-    // to 0.66 in the 2026-08-27 author preset pass.
-    default: 0.56, // 2026-10-20 new defaults (was 0)
-    category: 'Flame',
-    label: 'Cohesion (pull together)',
-    help: 'Pulls every flame toward the brightest part of its own fire. 0 = spawns spread across the full painted shape. 1 = every flame collapses onto that single hottest point. Negative pushes flames apart instead, beyond their painted region.',
-  },
-  // ⚠️ THE FLAME'S WIND IS A LEAN, NOT A SHOVE (2026-10-19). Author, live, full wind and full rain: the flame read as a
-  // string of detached blobs marching off in a line. Wind used to push flame sprites with a force, which makes every
-  // sprite reach the same speed and stay evenly spaced — see `fire-geometry.js`, "THE BENT FLAME". It is now a lean by
-  // AGE: a newborn sprite sits on the fuel, the older it gets the further the wind has carried it, so the flame bends as
-  // ONE body. `flameWindPush` keeps its name; the five dials after it shape the bend.
-  flameWindPush: {
-    type: 'float',
-    min: 0,
-    max: 200,
-    step: 0.05,
-    default: 95.35, // 2026-10-20 new defaults (was 3.7)
-    category: 'Flame',
-    label: 'Flame wind push ×',
-    help: "How far wind throws the flame sideways: the lean of its oldest, outermost part at full wind, in multiples of a flame sprite's own size (this dial × 0.6). 3.7 ≈ 2.2 sprite-widths — a long, clearly bent flame. Sprites are born on the fuel and lean more the older they get, so the base stays put. Only flame that wind actually reaches leans (see Wind response); a flame beside a wall leans less.",
-  },
-  flameLeanCurve: {
-    type: 'float',
-    min: 0.3,
-    max: 6,
-    step: 0.05,
-    default: 0.3, // 2026-10-20 new defaults (was 1.4)
-    category: 'Flame',
-    label: 'Lean curve (base → tip)',
-    help: 'How the lean builds from the fuel bed to the flame tip. 1 = a straight tilted pillar. 2 = a cantilever: the base barely moves and the tip streams out. Below 1 the whole flame tilts almost at once. Higher keeps a tight, upright core with a long ragged tail.',
-  },
-  flameLeanTaper: {
+  flameShading: {
     type: 'float',
     min: 0,
     max: 1,
     step: 0.05,
-    default: 1, // 2026-10-20 new defaults (was 0.4)
-    category: 'Flame',
-    label: 'Taper into the wind',
-    help: 'How much each flame sprite narrows toward the tip while wind leans it. 0 = a uniform-width smear; 1 = a sharp tongue. Does nothing in still air.',
+    default: 0.5,
+    category: 'Look',
+    label: 'Billow shading',
+    help: 'The lit and shaded crescents along each billow’s edge, which are what make the flame read as rolling volumes rather than a flat cut-out. 0 is flat; 1 is heavily modelled.',
   },
-  flameLeanStreak: {
+  flameRagged: {
+    type: 'float',
+    min: 0,
+    max: 3,
+    step: 0.05,
+    default: 1,
+    category: 'Look',
+    label: 'Edge raggedness',
+    help: 'How rough the painted edge of the flame is: the brush-stroke wobble along every outline. 0 is a clean vector edge.',
+  },
+  flameGlow: {
     type: 'float',
     min: 0,
     max: 4,
     step: 0.05,
-    default: 4, // 2026-10-20 new defaults (was 1.2)
-    category: 'Flame',
-    label: 'Streak along the wind',
-    help: 'How far the older sprites stretch ALONG the wind. It bridges the gaps between sprites so the flame stays one continuous body, and reads as flame licking downwind. 0 = round puffs (they can separate into blobs at a long lean).',
+    default: 1,
+    category: 'Look',
+    label: 'Flame glow',
+    help: 'The faint orange halo around the flame (it also feeds the bloom). The fire’s real light on the room is the Light category.',
   },
-  flameLeanFlutter: {
+  coalGlow: {
     type: 'float',
     min: 0,
+    max: 3,
+    step: 0.05,
+    default: 1,
+    category: 'Look',
+    label: 'Coal glow',
+    help: 'How strongly the bed of coals glows through its cracks — round the edge of a burning fire, and as the whole fire once the flame is out.',
+  },
+
+  // ── Flame ─────────────────────────────────────────────────────────────────
+  flameSize: {
+    type: 'float',
+    min: 0.2,
+    max: 4,
+    step: 0.05,
+    default: 1,
+    category: 'Flame',
+    label: 'Flame size ×',
+    help: 'How wide the flame is, as a multiple of what the painted fire’s own width implies. 1 matches the painted campfires’ flame-to-logs proportion.',
+  },
+  flameHeight: {
+    type: 'float',
+    min: 0.1,
+    max: 4,
+    step: 0.05,
+    default: 1,
+    category: 'Flame',
+    label: 'Flame height ×',
+    help: 'How tall the flame stands (outdoors a fire stands about twice as tall as in a sealed room, by itself). From above this shows as the flame rising up the page and as parallax; from the side it is the whole flame.',
+  },
+  flameLick: {
+    type: 'float',
+    min: 0,
+    max: 3,
+    step: 0.05,
+    default: 1,
+    category: 'Flame',
+    label: 'Licking tongues ×',
+    help: 'How many secondary tongues curl out of the body, and how far. A calm hearth has few; a bonfire in wind has many. 0 is a single compact flame.',
+  },
+  flameWindLean: {
+    type: 'float',
+    min: 0,
+    max: 4,
+    step: 0.05,
+    default: 1,
+    category: 'Flame',
+    label: 'Wind lean ×',
+    help: 'How far wind bends and streams the flame. At 1 a hurricane lays the flame nearly flat and tears it into flecks. Only wind that actually reaches the fire leans it (see Wind response); a fire beside a wall leans less.',
+  },
+  flameFlecks: {
+    type: 'float',
+    min: 0,
+    max: 4,
+    step: 0.05,
+    default: 1,
+    category: 'Flame',
+    label: 'Flecks ×',
+    help: 'The little orange flecks that fly off the flame’s edge. Wind throws more of them, further.',
+  },
+  flameDetail: {
+    type: 'float',
+    min: 0.3,
     max: 1.5,
     step: 0.05,
-    default: 0.55, // 2026-10-20 new defaults (was 0.35)
+    default: 1,
     category: 'Flame',
-    label: 'Flutter',
-    help: 'Gust waves travelling down the flame: the whole plume surges and sways as one thing rather than every sprite wobbling on its own. 0 = a rigid, frozen lean.',
+    label: 'Billow detail ×',
+    help: 'How many billows build the flame. Fewer is cheaper and chunkier; more is finer. (The quality setting scales this as well.)',
   },
-  flameLeanSpread: {
+  flameSpeed: {
     type: 'float',
-    min: 0,
-    max: 2,
+    min: 0.1,
+    max: 3,
     step: 0.05,
-    default: 2, // 2026-10-20 new defaults (was 0.3)
+    default: 1,
     category: 'Flame',
-    label: 'Tongue spread',
-    help: 'Sideways scatter that widens toward the tip, so the leaning flame breaks into ragged tongues instead of one tight comet. 0 = a single narrow streak.',
+    label: 'Speed',
+    help: 'How fast the fire itself moves: the billows rolling, the tongues licking, the smoke climbing. 1 is the natural pace for its size (a big fire breathes slower than a small one).',
   },
 
   // ── Ember ─────────────────────────────────────────────────────────────────
@@ -375,15 +272,9 @@ export const FIRE_PARAMS = Object.freeze({
     label: 'Ember size ×',
     help: 'Base is 2.3-8.7 world px — already a third of V2’s own, at the author’s request.',
   },
-  // ⚠️ LIFE/CHAOS/RISE ARE ALL WIND0/WIND1 PAIRS, 2026-09-04 (were single
-  // `emberLifeScale`/`emberChaos`/`emberRise` dials) — same mechanism as
-  // flame's `flameLifeAtWind0`/`flameLifeAtWind1`, see that pair's own note.
-  // Author: *"embers need investigating and adding into this system too so
-  // that I can get chaotic rising embers at wind 0 and wind driven embers at
-  // high wind values that move sideways and not upwards."* The shipped
-  // defaults do exactly that split — high chaos/rise at Wind 0, low at
-  // Wind 1 — but every range is wide enough to push the balance the other
-  // way entirely.
+  // ⚠️ LIFE/CHAOS/RISE ARE ALL WIND0/WIND1 PAIRS, 2026-09-04 — author: *"embers need investigating... chaotic rising
+  // embers at wind 0 and wind driven embers at high wind values that move sideways and not upwards."* The shipped
+  // defaults split exactly that way, but every range is wide enough to push the balance the other way entirely.
   emberLifeAtWind0: {
     type: 'float',
     min: 0.05,
@@ -474,26 +365,10 @@ export const FIRE_PARAMS = Object.freeze({
     label: 'Ember brightness ×',
     help: 'Embers are ~8x hotter than flames by design — that ratio is what makes a tiny dot read as a spark rather than a speck.',
   },
-  // ⚠️ INDOOR SUPPRESSION (2026-09-07) — author: "the ability to suppress
-  // embers and smoke by a lot if that fire is indoors... start by suppressing
-  // each by 90%, make them live 15% as long." A spark or a puff that a real
-  // hearth throws has nowhere to go in a sealed room — no draft to carry it,
-  // no open air above it — so an indoor fire's embers/smoke should read as a
-  // small, contained thing even at the same painted size as an outdoor one.
-  //
-  // Gated by `fires[].outdoors01` (boot.js#sampleWindExposureAt, the SAME
-  // `_Outdoors` mask sample `windExposure` already reads — see that field's
-  // own note in fire-subsystem.js on why this is a DIFFERENT question from
-  // wind exposure even though both happen to read one mask today) — 0 under a
-  // roof, 1 under open sky. Aggregated the SAME biased way windExposure01
-  // already is (`fire-subsystem.js`'s own MAX-across-fires note): the LEAST
-  // indoor fire on a shared floor sets how hard the map-wide ember/smoke
-  // engines get cut, so a genuinely outdoor bonfire sharing a floor with a
-  // sheltered hearth never has its own embers/smoke visibly vanish for no
-  // reason a player can see. The cost of that bias is the mirror image — a
-  // lone indoor fire on a floor with any outdoor fire under-suppresses — the
-  // same lesser-evil trade the wind fix already made for the identical
-  // shared-engine limitation.
+  // ⚠️ INDOOR SUPPRESSION (2026-09-07) — author: "the ability to suppress embers and smoke by a lot if that fire is
+  // indoors... start by suppressing each by 90%, make them live 15% as long." Gated by `fires[].outdoors01`
+  // (boot.js#sampleWindExposureAt, the `_Outdoors` mask) — 0 under a roof, 1 under open sky; per fire since 2026-10-16
+  // (`dropIndoorSpawnPoints`), the lifetime scale still aggregated map-wide.
   emberIndoorSuppression: {
     type: 'float',
     min: 0,
@@ -514,126 +389,109 @@ export const FIRE_PARAMS = Object.freeze({
     label: 'Indoor lifetime ×',
     help: 'Multiplies ember lifetime once this fire is fully indoors, on top of whatever the Wind 0/Wind 1 lifetime dials already give — lower makes sparks die almost the instant they leave the fuel bed instead of drifting across a room they have no draft to cross. 1 leaves indoor embers living exactly as long as outdoor ones.',
   },
+  spitRate: {
+    type: 'float',
+    min: 0,
+    max: 6,
+    step: 0.05,
+    default: 1,
+    category: 'Ember',
+    label: 'Spitting embers ×',
+    help: 'The HEAVY embers: chunks of burning wood the fire spits out in an arc, which land and smoulder on the ground for a long while (rain hisses them out, wind makes them flare). Different from the light sparks that spiral upward. Outdoors more than in; 0 turns them off.',
+  },
+  spitSize: {
+    type: 'float',
+    min: 0.2,
+    max: 4,
+    step: 0.05,
+    default: 1,
+    category: 'Ember',
+    label: 'Spitting ember size ×',
+    help: 'How big the landed chunks are.',
+  },
 
   // ── Smoke ─────────────────────────────────────────────────────────────────
-  smokeCount: {
+  smokeDensity: {
     type: 'float',
     min: 0,
-    max: 1000,
-    step: 1,
-    default: 9, // 2026-10-17 author's live-tuned defaults (was 24)
+    max: 4,
+    step: 0.05,
+    default: 1,
     category: 'Smoke',
-    label: 'Smoke count',
-    help: 'Smoke puffs per fire. V2 ran about 139 for a whole floor.',
+    label: 'Smoke amount ×',
+    help: 'How much smoke the fire makes, on top of what its size and fuel already imply (a bonfire smokes, a clean hearth barely does, oil billows). 0 turns it off. Rained on, a fire makes MORE — white steam.',
   },
-  smokeSizeScale: {
+  smokeSize: {
     type: 'float',
-    min: 0.02,
-    max: 100,
-    step: 0.02,
-    default: 0.28,
+    min: 0.2,
+    max: 4,
+    step: 0.05,
+    default: 1,
     category: 'Smoke',
     label: 'Smoke size ×',
-    help: 'Base is 151-400 world px, and a plume SHOULD outgrow the fire that made it.',
+    help: 'How big each billow of smoke is. A plume SHOULD outgrow the fire that made it.',
   },
-  smokeLifeScale: {
+  smokeHeight: {
     type: 'float',
-    min: 0.05,
-    max: 200,
+    min: 0.1,
+    max: 4,
     step: 0.05,
-    default: 0.75, // 2026-10-17 author's live-tuned defaults (was 1)
+    default: 1,
     category: 'Smoke',
-    label: 'Smoke lifetime ×',
-    help: 'Longer-lived smoke drifts further and builds a denser column.',
+    label: 'Smoke height ×',
+    help: 'How far the plume climbs before it thins away. From above this is how far up the page it reaches.',
   },
-  smokeOpacity: {
-    type: 'float',
-    min: 0,
-    max: 100,
-    step: 0.05,
-    default: 13.35, // 2026-10-17 author's live-tuned defaults (was 10.9)
-    category: 'Smoke',
-    label: 'Smoke opacity ×',
-    help: 'Smoke is the one layer that DARKENS the map rather than adding light, so this genuinely obscures what is beneath it.',
-  },
-  smokeGrowth: {
+  smokeDrift: {
     type: 'float',
     min: 0,
-    max: 200,
+    max: 4,
     step: 0.05,
-    default: 0.95, // 2026-10-20 new defaults (was 1)
+    default: 1,
     category: 'Smoke',
-    label: 'Smoke spread ×',
-    help: 'How much a puff swells over its life. Base is a 10x expansion.',
+    label: 'Smoke wind drift ×',
+    help: 'How far the wind carries the plume sideways. At full wind it streams away in a long ribbon.',
   },
-  smokeRise: {
+  smokeThickness: {
     type: 'float',
     min: 0,
-    max: 200,
+    max: 1.5,
     step: 0.05,
-    default: 0.1, // 2026-10-17 author's live-tuned defaults (was 1)
+    default: 1,
     category: 'Smoke',
-    label: 'Smoke rise ×',
-    help: 'How fast smoke climbs, which drives its perspective growth and outward drift.',
+    label: 'Smoke thickness ×',
+    help: 'How solid the smoke is. It hides what is under it more the thicker it gets.',
   },
-  // Same mechanism as emberIndoorSuppression/emberIndoorLifeScale above — see
-  // that pair's own header for the full account of the gating signal and its
-  // MAX-across-fires bias. Smoke's own base is already the layer most likely
-  // to look wrong indoors (a column that should be pooling under a ceiling,
-  // not streaming off into open sky), so it gets the identical treatment.
-  smokeIndoorSuppression: {
+  smokeSoot: {
     type: 'float',
     min: 0,
     max: 1,
     step: 0.05,
-    default: 0,
+    default: 0.2,
     category: 'Smoke',
-    label: 'Indoor suppression',
-    help: 'How much this fire’s smoke count is cut once it is fully indoors (under a roof). Default 0: indoor smoke keeps its full count and is instead drawn at half the outdoor opacity. 1 removes indoor smoke entirely. Blends with how indoors the fire actually is, so a hearth just inside an open doorway is cut less than one deep in a sealed room.',
-  },
-  smokeIndoorLifeScale: {
-    type: 'float',
-    min: 0.05,
-    max: 30,
-    step: 0.05,
-    default: 0.15,
-    category: 'Smoke',
-    label: 'Indoor lifetime ×',
-    help: 'Multiplies smoke lifetime once this fire is fully indoors — lower makes puffs dissipate almost on top of the fire instead of building the tall column an open-air plume would. 1 leaves indoor smoke living exactly as long as outdoor smoke.',
+    label: 'Smoke soot',
+    help: 'How dirty the smoke runs: 0 is the painted maps’ pale warm white, 1 is black wood-smoke. Oil and coal add their own soot on top.',
   },
 
   // ── Depth ─────────────────────────────────────────────────────────────────
-  perspective: {
+  heightParallax: {
     type: 'float',
     min: 0,
-    max: 100,
+    max: 4,
     step: 0.05,
-    default: 22.1, // 2026-10-20 new defaults (was 20.05)
+    default: 1,
     category: 'Depth',
-    label: 'Perspective strength',
-    help: 'Fakes V2’s perspective camera per particle: risen particles grow and splay away from the view centre. 1 = V2 exactly (camera 1000 units up). 0 = perfectly flat. Best judged while panning.',
+    label: 'Height parallax',
+    help: 'How strongly height moves a flame toward or away from the middle of the screen — what V2’s perspective camera did. It is why a tall flame leans away from the view centre when you pan. 0 is perfectly flat.',
   },
-
-  // ── Detail ────────────────────────────────────────────────────────────────
-  smokeAmount: {
-    type: 'float',
-    min: 0,
-    max: 2,
-    step: 0.05,
-    default: 0.05,
-    category: 'Detail',
-    label: 'Smoke',
-    help: 'How much smoke this fire makes, on top of what its size already implies. 0 turns it off entirely.',
-  },
-  grain: {
+  heightTilt: {
     type: 'float',
     min: 0,
     max: 1,
-    step: 0.05,
-    default: 0.5,
-    category: 'Detail',
-    label: 'Smoke grain',
-    help: 'The dry-brush speckle and soot flecks through the smoke. The painted reference has quite a lot of this.',
+    step: 0.01,
+    default: 0.3,
+    category: 'Depth',
+    label: 'Height tilt',
+    help: 'How far height lifts the flame UP THE PAGE: the 3/4 view the painted campfires are drawn in. 0 is straight down (a tall flame is invisible from above); higher shows more of its height.',
   },
 
   // ── Light ─────────────────────────────────────────────────────────────────
@@ -652,11 +510,8 @@ export const FIRE_PARAMS = Object.freeze({
     default: 2.3, // 2026-10-20 new defaults (was 3)
     category: 'Light',
     label: 'Light reach',
-    // ⚠️ NOT WIDENED IN THE 2026-09-04 ROH RANGE PASS, DELIBERATELY — unlike
-    // the tuning-set "×" dials, this one has a REAL, EXPLAINED cost curve
-    // (own help text: "doubling it roughly quadruples the light's cost"), not
-    // an arbitrary ceiling. A wider max here would be an invitation to a real
-    // performance cliff, not "more room to find a look".
+    // ⚠️ NOT WIDENED IN THE 2026-09-04 ROH RANGE PASS, DELIBERATELY — this one has a REAL, EXPLAINED cost curve
+    // ("doubling it roughly quadruples the light's cost"), not an arbitrary ceiling.
     help: "Scales the light radius the fire's size already implies. This is the single most expensive number in the effect — doubling it roughly quadruples the light's cost.",
   },
   lightColor: {
@@ -677,17 +532,17 @@ export const FIRE_PARAMS = Object.freeze({
     default: 0.3, // 2026-10-20 new defaults (was 1)
     category: 'Motion',
     label: 'Wind response',
-    help: 'How much wind reaches this fire at all — the master gate every other wind dial (Flame/Ember wind push, lifetime/chaos/rise Wind 1 values) multiplies against. At 0 this fire ignores wind entirely. A small fire reaches full response at a lower wind speed than a bonfire does; above 1 a fire reaches it at a gentler breeze still.',
+    help: 'How much wind reaches this fire at all — the master gate every other wind dial (Wind lean, ember wind push, the Wind 1 values) multiplies against. At 0 this fire ignores wind entirely. A small fire reaches full response at a lower wind speed than a bonfire does; above 1 a fire reaches it at a gentler breeze still.',
   },
-  animationSpeed: {
+  draftStrength: {
     type: 'float',
-    min: 0.1,
+    min: 0,
     max: 3,
     step: 0.05,
-    default: 0.1, // 2026-10-20 new defaults (was 3)
+    default: 1,
     category: 'Motion',
-    label: 'Speed',
-    help: 'How fast the fire itself moves — the flame silhouette boiling and the turbulence carrying embers and smoke. Separate from the Life× dials (how long a particle survives) and the chaos/rise dials (how hard it gets pushed around).',
+    label: 'Indoor drafts ×',
+    help: 'A fire in a sealed room still feels a draft now and then: a soft puff that leans the flame and makes it dip. This is how strong those are. (A room that opens to the outside feels the real wind instead, through Wind response.)',
   },
 
   // ── Response ──────────────────────────────────────────────────────────────
@@ -709,14 +564,61 @@ export const FIRE_PARAMS = Object.freeze({
     default: 2, // 2026-10-20 new defaults (was 1)
     category: 'Response',
     label: 'Rain response',
-    help: 'On top of Weather response: how hard rain douses this fire. 0 = rain does nothing to it (wind still does); 2 = even a drizzle nearly drowns it. Gated by the Outdoors mask per spot, so a roofed hearth stays dry while a campfire in the open does not.',
+    help: 'On top of Weather response: how hard rain douses this fire. 0 = rain does nothing to it (wind still does); 2 = even a drizzle soaks it quickly. Gated by the Outdoors mask per spot, so a roofed hearth stays dry while a campfire in the open does not.',
   },
   canBeSnuffed: {
     type: 'bool',
     default: true,
     category: 'Response',
     label: 'Can blow out',
-    help: 'Whether wind and rain can nearly put this fire out. Off, the fire feels only 40% of the weather stress: still bent and flickering, but it stays bright.',
+    help: 'Whether wind and rain can put this fire out. Off, the fire feels only a quarter of the rain and keeps a floor of flame: still bent and flickering, but it never goes out.',
+  },
+  douseSec: {
+    type: 'float',
+    min: 2,
+    max: 600,
+    step: 1,
+    default: 28,
+    category: 'Response',
+    label: 'Rain douse time (s)',
+    help: 'Seconds of full rain it takes to soak an open-air fire through and put it out. A light drizzle takes proportionally longer, and the flame only recovers while it dries if the rain stops first.',
+  },
+  smoulderSec: {
+    type: 'float',
+    min: 5,
+    max: 7200,
+    step: 5,
+    default: 150,
+    category: 'Response',
+    label: 'Smoulder time (s)',
+    help: 'How long the coals of a put-out fire stay hot, fading from orange to coal red to cold ash. Rain hisses them out up to four times faster.',
+  },
+  rekindle: {
+    type: 'bool',
+    default: true,
+    category: 'Response',
+    label: 'Relights after a dry spell',
+    help: 'Whether a put-out fire comes back on its own. It waits out the delay below (counted only while it is dry), then the coals glint, glow, and the flame coughs back to life, very slowly.',
+  },
+  rekindleDelaySec: {
+    type: 'float',
+    min: 10,
+    max: 86400,
+    step: 10,
+    default: 900,
+    category: 'Response',
+    label: 'Relight delay (s)',
+    help: 'How long a dead fire stays cold, in dry weather, before it starts coming back. (900 s = 15 minutes.)',
+  },
+  rekindleRampSec: {
+    type: 'float',
+    min: 10,
+    max: 7200,
+    step: 10,
+    default: 420,
+    category: 'Response',
+    label: 'Relight time (s)',
+    help: 'How long the comeback takes, from the first glint to a full flame.',
   },
 });
 

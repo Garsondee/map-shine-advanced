@@ -36,7 +36,9 @@ const cdp = opt('cdp', 'http://127.0.0.1:9333');
 const timeoutMs = Number(opt('timeout', 600000));
 const waitExpr = opt('wait');
 if (!url || !scriptPath) {
-  console.error('usage: drive.mjs --url <lab page> --script <file.js> [--out dir] [--reload] [--wait <js expr>] [--cdp url] [--timeout ms]');
+  console.error(
+    'usage: drive.mjs --url <lab page> --script <file.js> [--out dir] [--reload] [--wait <js expr>] [--cdp url] [--timeout ms]'
+  );
   process.exit(2);
 }
 
@@ -47,7 +49,8 @@ const fresh = !page;
 if (!page) page = await context.newPage();
 const logs = [];
 page.on('console', (m) => {
-  if (m.type() === 'error' || m.type() === 'warning' || m.text().startsWith('[lab]')) logs.push(`[${m.type()}] ${m.text().slice(0, 500)}`);
+  if (m.type() === 'error' || m.type() === 'warning' || m.text().startsWith('[lab]'))
+    logs.push(`[${m.type()}] ${m.text().slice(0, 500)}`);
 });
 page.on('pageerror', (e) => logs.push(`[pageerror] ${String(e).slice(0, 800)}`));
 await page.bringToFront();

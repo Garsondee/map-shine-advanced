@@ -1,5 +1,10 @@
 /**
- * fire-subsystem.test.mjs — THE SPAWN-CLOUD PUSH LOGIC, WITH FAKE ENGINES.
+ * fire-subsystem.test.mjs — THE FIRE'S ORCHESTRATION, WITH FAKE ENGINES (rewritten 2026-10-20 for the billow rebuild).
+ *
+ * The flame and the smoke are now the billow engine (`fire-billow-*.js`, tested in their own files); what is left here is
+ * the part of the subsystem that is plain JS control flow: which engine gets pushed a spawn cloud and when, what each
+ * engine is handed, how the billow engine is wired (injected, so no GPU), and how the fire's LIFE shapes the light and
+ * the sparks.
  *
  * `createFireSubsystem` takes `THREE` and `createEngine` as injected
  * dependencies specifically so its orchestration — WHICH engine gets pushed a
@@ -31,7 +36,6 @@
  */
 import { createFireSubsystem } from '../fire-subsystem.js';
 import {
-  fireTintMul,
   fireTierPlan,
   fireScaleChain,
   fireRuntimeFromParams,
@@ -69,7 +73,7 @@ class FakeScene {
 
 export function run(t) {
   const engineInstances = [];
-  const makeFakeEngine = (kind, archetype, renderOrder) => {
+  const makeFakeEngine = (kind, archetype, renderOrder, extra = {}) => {
     const e = {
       kind,
       archetype,
@@ -78,6 +82,7 @@ export function run(t) {
       spawnCalls: [],
       paramCalls: [],
       stepCalls: 0,
+      ...extra,
       setSpawnPoints(cloud) {
         e.spawnCalls.push(cloud);
       },
@@ -87,6 +92,7 @@ export function run(t) {
       step() {
         e.stepCalls++;
       },
+      updateWind() {},
       debugState() {
         return { kind, archetype };
       },
@@ -97,7 +103,7 @@ export function run(t) {
 
   const state = {
     enabled: true,
-    params: { flameCohesion: 0 },
+    params: {},
     perfTier: 2,
     mPerPx: 0.02,
     fires: [{ id: 'f1', x: 50, y: 50, diameterPx: 80, intensity: 1 }],
@@ -122,633 +128,322 @@ export function run(t) {
   const rect = { minX: 0, minY: 0, maxX: 100, maxY: 100 };
   subsystem.sync(renderer, 0, 0.016, rect);
 
-  const flameEngines = engineInstances.filter((e) => e.kind === 'flame');
+  // ── THE REBUILD (2026-10-20): the flame and the smoke are the billow engine; ONE particle engine is left ────────────
   const emberEngine = engineInstances.find((e) => e.kind === 'ember');
-  const smokeEngine = engineInstances.find((e) => e.kind === 'smoke');
-
-  t.ok('four flame engines were built, one per archetype', flameEngines.length === 4);
   t.ok(
-    'every flame engine received its first spawn push',
-    flameEngines.every((e) => e.spawnCalls.length === 1)
+    'exactly one particle engine is built — the spiralling embers (flame and smoke are the billow engine now)',
+    engineInstances.length === 1 && emberEngine !== undefined
   );
-
-  // ── renderOrder MUST be a construction-time arg, not set on `engine.scene`
-  // after the fact — THREE reads it off the renderable MESH, never off an
-  // ancestor container, so the old `engine.scene.renderOrder = ...` line was
-  // a silent no-op. This asserts `createEngine` actually receives it. ──
+  t.ok('the ember engine drew its first spawn push', emberEngine.spawnCalls.length === 1);
   t.ok(
-    'flame and ember get renderOrder 0/1, smoke gets 2, passed to createEngine',
-    flameEngines.every((e) => e.renderOrder === 0) && emberEngine.renderOrder === 1 && smokeEngine.renderOrder === 2
+    'renderOrder reached the engine at CONSTRUCTION (embers draw over the billow contour); setting it on `scene` is a no-op',
+    emberEngine.renderOrder === 1
   );
+  t.ok('without `createTarget` there is no billow engine, and status says so', subsystem.getStatus().billow === null);
+  t.ok('takeFieldJobs is an empty list when there is no billow engine', subsystem.takeFieldJobs().length === 0);
 
-  // ── motionSpeed IS GLOBAL: it must reach EVERY engine, not just flame's ──
-  // Unlike cohesion (a per-KIND tune living in runtime.perKind), `motionSpeed`
-  // is attached once in fire-subsystem.js's setParams call, the same way
-  // `intensity`/`cameraHeight` are — so ember and smoke must see it too.
-  t.ok(
-    'the default Speed (animationSpeed=1) reaches every engine as motionSpeed=1',
-    engineInstances.every((e) => e.paramCalls[0]?.motionSpeed === 1)
-  );
-  state.params = { ...state.params, animationSpeed: 2.2 };
-  subsystem.sync(renderer, 8, 0.016, rect);
-  t.ok(
-    'moving Speed reaches every engine on the next sync, ember and smoke included',
-    engineInstances.every((e) => e.paramCalls.at(-1)?.motionSpeed === 2.2)
-  );
-
-  // ── THE REGRESSION: a cohesion-only change must reach EVERY flame engine ──
-  state.params = { ...state.params, flameCohesion: 1.5 };
-  subsystem.sync(renderer, 16, 0.016, rect);
-  t.ok(
-    `a cohesion change pushes to ALL FOUR flame engines, not just the first (got ${flameEngines.map((e) => e.spawnCalls.length).join(',')})`,
-    flameEngines.every((e) => e.spawnCalls.length === 2)
-  );
-
-  for (const e of flameEngines) {
-    // `.at(-1)` rather than indexing by expected count — if the push above was
-    // silently dropped for this engine, this still reads its LAST real push
-    // (possibly the stale one from construction) instead of crashing the
-    // whole suite on `undefined`, so the failure above is what gets reported.
-    const pushed = e.spawnCalls.at(-1);
-    t.ok('the cohesion push is a NEW cloud object, not the original', pushed !== state.spawnCloud);
+  // ── motionSpeed IS GLOBAL: it must reach the ember engine ──
+  {
+    const sub = createFireSubsystem({
+      THREE: { Scene: FakeScene },
+      getFireRenderState: () => ({ ...state, params: { flameSpeed: 2 } }),
+      createEngine: ({ kind, archetype, renderOrder }) => makeFakeEngine(kind, archetype, renderOrder),
+    });
+    const before = engineInstances.length;
+    sub.sync(renderer, 0, 0.016, rect);
+    const e = engineInstances[before];
     t.ok(
-      'a point actually moved toward the fire centre rather than staying at its raw spawn position',
-      Math.abs((pushed?.points?.[0] ?? 0) - 0) > 1e-6 || Math.abs((pushed?.points?.[1] ?? 0) - 0) > 1e-6
+      'the ember engine receives the resolved motionSpeed in setParams',
+      Number.isFinite(e.paramCalls.at(-1)?.motionSpeed)
     );
   }
-
-  // Ember and smoke never had their OWN cohesion touched — must not be re-pushed.
-  t.ok("ember is not re-pushed when only flame's cohesion changes", emberEngine.spawnCalls.length === 1);
-  t.ok("smoke is not re-pushed when only flame's cohesion changes", smokeEngine.spawnCalls.length === 1);
 
   // ── STABILITY: re-syncing with nothing changed must not re-push anyone ──
+  subsystem.sync(renderer, 16, 0.016, rect);
   subsystem.sync(renderer, 32, 0.016, rect);
-  t.ok(
-    'an unchanged cohesion and unchanged paint push nobody again',
-    flameEngines.every((e) => e.spawnCalls.length === 2) &&
-      emberEngine.spawnCalls.length === 1 &&
-      smokeEngine.spawnCalls.length === 1
-  );
+  t.ok('re-syncing an unchanged cloud does not re-push to the ember engine', emberEngine.spawnCalls.length === 1);
 
-  // ── A real paint edit reaches every engine regardless of cohesion staleness ──
-  state.spawnCloud = makeCloud(
-    [
-      [10, 10],
-      [90, 90],
-    ],
-    99999
-  );
-  subsystem.sync(renderer, 48, 0.016, rect);
-  t.ok(
-    'a genuine paint change re-pushes every engine, flame included',
-    flameEngines.every((e) => e.spawnCalls.length === 3) &&
-      emberEngine.spawnCalls.length === 2 &&
-      smokeEngine.spawnCalls.length === 2
-  );
-
-  // ── THE FLOOR-SWITCH REGRESSION (2026-08-12): a floor with an ANCHOR fire
-  // but no painted `_Fire` region (`spawnCloud` goes null) MUST still push an
-  // EMPTY cloud to every engine — the live bug report this test exists for
-  // was every engine spawning from the PREVIOUS floor's real paint forever,
-  // because the whole push used to be skipped outright whenever `cloud` was
-  // null (`if (cloud) {...}` around the entire block). `fires` staying
-  // non-empty (the anchor) is what keeps `sync()` past its early-return; the
-  // spawn cloud itself going null is the exact shape a floor switch away from
-  // paint produces. ──
-  state.fires = [{ id: 'anchor1', x: 20, y: 20, diameterPx: 60, intensity: 1 }];
-  state.spawnCloud = null;
-  subsystem.sync(renderer, 64, 0.016, rect);
-  t.ok(
-    'a floor with no paint (anchor fire only) still pushes EVERY engine, not just the ones already pending',
-    flameEngines.every((e) => e.spawnCalls.length === 4) &&
-      emberEngine.spawnCalls.length === 3 &&
-      smokeEngine.spawnCalls.length === 3
-  );
-  t.ok(
-    "the pushed cloud is genuinely EMPTY (count 0), not the stale previous floor's real points",
-    [...flameEngines, emberEngine, smokeEngine].every((e) => e.spawnCalls.at(-1)?.count === 0)
-  );
-
-  // Paint returning after an anchor-only floor must push again too — proves
-  // the empty state was actually TRACKED (lastSpawnSignature moved to 0),
-  // not merely "skipped, so anything looks different next time".
-  state.spawnCloud = makeCloud(
-    [
-      [30, 30],
-      [70, 70],
-    ],
-    55555
-  );
-  subsystem.sync(renderer, 80, 0.016, rect);
-  t.ok(
-    'paint returning after an anchor-only floor pushes the real cloud again, to every engine',
-    flameEngines.every((e) => e.spawnCalls.length === 5) &&
-      emberEngine.spawnCalls.length === 4 &&
-      smokeEngine.spawnCalls.length === 4
-  );
-  t.ok(
-    'every engine received the real 2-point cloud, not another empty one',
-    [...flameEngines, emberEngine, smokeEngine].every((e) => e.spawnCalls.at(-1)?.count === 2)
-  );
-
-  // ── "Fire intensity" (Presence category — p.intensity), not "Flame
-  // brightness" (Look category — p.brightness), must reach every engine's
-  // setParams as `intensity`. fireRuntimeFromParams returns BOTH: `intensity`
-  // (from p.brightness, a volumetric-material uniform that only ever reached
-  // the orphaned fire-render.js) and `fireIntensity` (from p.intensity, the
-  // control an author actually reaches for — "How hard everything burns").
-  // The live particle engine's own `intensity` param feeds its real emission
-  // uniform, so the subsystem must forward `runtime.fireIntensity` to it, not
-  // `runtime.intensity` — moving "Fire intensity" used to do nothing at all. ──
-  state.params = { ...state.params, intensity: 1.8, brightness: 0.2 };
-  subsystem.sync(renderer, 96, 0.016, rect);
-  t.ok(
-    '"Fire intensity" reaches every engine\'s setParams.intensity, not "Flame brightness"',
-    engineInstances.every((e) => e.paramCalls.at(-1)?.intensity === 1.8)
-  );
-
-  // ── THE COLOUR CC SET (2026-08-30) — hueShiftRad/posterizeAmount/bandCount/
-  // tintMul are the other four `fireRuntimeFromParams` fields nothing ever
-  // read (fire.js's "Look" category header has the full account). GLOBAL like
-  // motionSpeed/intensity above — every engine must receive them, ember and
-  // smoke included, not just flame's four archetype engines. ──
-  state.params = { ...state.params, colorHueShift: 45, posterize: 0.6, bandCount: 5, color: '#ff0000' };
-  subsystem.sync(renderer, 112, 0.016, rect);
-  const expectedTintMul = fireTintMul('#ff0000');
-  t.ok(
-    'colorHueShift (45°, no fuel contribution) reaches every engine as hueShiftRad = π/4',
-    engineInstances.every((e) => Math.abs(e.paramCalls.at(-1)?.hueShiftRad - Math.PI / 4) < 1e-6)
-  );
-  t.ok(
-    'posterize reaches every engine as posterizeAmount',
-    engineInstances.every((e) => e.paramCalls.at(-1)?.posterizeAmount === 0.6)
-  );
-  t.ok(
-    'bandCount reaches every engine unchanged',
-    engineInstances.every((e) => e.paramCalls.at(-1)?.bandCount === 5)
-  );
-  t.ok(
-    "the Flame tint swatch reaches every engine as tintMul, fireTintMul's own output",
-    engineInstances.every((e) =>
-      (e.paramCalls.at(-1)?.tintMul ?? []).every((c, i) => Math.abs(c - expectedTintMul[i]) < 1e-9)
-    )
-  );
-
-  // ── THE STALE-fires REGRESSION (2026-08-12): `fires` (cohesion's own pull
-  // TARGETS, from extractFiresFromMask) is a DIFFERENT extraction than
-  // `spawnCloud` (from extractFireSpawnPoints) over the same grid, and can
-  // settle at a different moment. The cache used to watch only `cloud`'s own
-  // signature + the cohesion value — a fire moving (or a fire appearing that
-  // was missing when cohesion last ran) with the SAME spawnCloud object must
-  // still force a fresh push, or a stale `fires` list bakes into
-  // `applyCohesion`'s result and is never asked to recompute again until the
-  // paint itself changes or the slider moves — even though the correct list
-  // was available the whole time. Cohesion (1.5) is still active from the
-  // earlier step; only `fires` moves here, `state.spawnCloud`'s object
-  // reference is untouched. ──
-  const cloudBeforeFiresMove = state.spawnCloud;
-  state.fires = [{ id: 'anchor1', x: 90, y: 90, diameterPx: 60, intensity: 1 }]; // moved from (20,20)
-  subsystem.sync(renderer, 112, 0.016, rect);
-  t.ok(
-    'state.spawnCloud is still the SAME object — this is testing fires alone, not a paint edit',
-    state.spawnCloud === cloudBeforeFiresMove
-  );
-  t.ok(
-    'a fires-list change alone (spawnCloud object untouched) still pushes every engine',
-    flameEngines.every((e) => e.spawnCalls.length === 6) &&
-      emberEngine.spawnCalls.length === 5 &&
-      smokeEngine.spawnCalls.length === 5
-  );
-  t.ok(
-    "the re-pull actually reflects the fire's NEW position, not a no-op re-push of the same result",
-    flameEngines.every((e) => {
-      const before = e.spawnCalls.at(-2)?.points;
-      const after = e.spawnCalls.at(-1)?.points;
-      return before && after && (after[0] !== before[0] || after[1] !== before[1]);
-    })
-  );
-
-  // ── THE 3RD LEVER (2026-08-30) — spriteCountScale, LIVE ──────────────────
-  // `state.perfTier` has sat at its fixture value (2) since construction;
-  // every block above exercised a DIFFERENT param without ever moving it.
-  // This is the first assertion in this file that a live PROFILE change
-  // (not a look param) reaches `activeCount` at all — before this lever
-  // existed, `activeCount` had no tier dependency whatsoever, so this same
-  // test written against yesterday's code would have found the ratios
-  // below all equal to 1.
-  const flame0 = flameEngines[0];
-  const atTier2 = flame0.paramCalls.at(-1)?.activeCount;
-  t.ok('a resolved activeCount exists at the fixture`s own tier (2)', Number.isFinite(atTier2) && atTier2 > 0);
-
-  state.perfTier = 0;
-  subsystem.sync(renderer, 128, 0.016, rect);
-  const atTier0 = flame0.paramCalls.at(-1)?.activeCount;
-  t.ok(
-    `tier 0 genuinely shrinks activeCount versus tier 2 (${atTier0} vs ${atTier2})`,
-    Number.isFinite(atTier0) && atTier0 < atTier2
-  );
-  t.ok(
-    'the shrink matches fireTierPlan(0).spriteCountScale exactly, not an approximation',
-    Math.abs(atTier0 / atTier2 - fireTierPlan(0).spriteCountScale / fireTierPlan(2).spriteCountScale) < 1e-9
-  );
-
-  state.perfTier = 5;
-  subsystem.sync(renderer, 144, 0.016, rect);
-  const atTier5 = flame0.paramCalls.at(-1)?.activeCount;
-  t.ok(
-    `tier 5 (the ceiling) is genuinely richer than tier 0 (${atTier5} vs ${atTier0})`,
-    Number.isFinite(atTier5) && atTier5 > atTier0
-  );
-
-  state.perfTier = 3;
-  subsystem.sync(renderer, 160, 0.016, rect);
-  const atTier3 = flame0.paramCalls.at(-1)?.activeCount;
-  t.ok(
-    'tier 3 (standard, the DEFAULT profile) and tier 5 (extreme) draw the identical sprite count — the ' +
-      'ceiling this lever was designed never to exceed, matching this session`s own "standard+ byte-identical" ' +
-      'discipline for every other effect',
-    atTier3 === atTier5
-  );
-  t.ok(
-    'ember and smoke engines received the SAME tier-scaled treatment as flame, not just the archetype tested above',
-    Math.abs((emberEngine.paramCalls.at(-1)?.activeCount ?? -1) / atTier3 - 10 / 12) < 1e-9 &&
-      Math.abs((smokeEngine.paramCalls.at(-1)?.activeCount ?? -1) / atTier3 - 24 / 12) < 1e-9
-  );
-
-  // ── THE DEPTH-AUTHORITY OCCLUSION GATE (mythica-machina-press#469) — fire
-  // previously had zero awareness of what was drawn above it, unlike candle/
-  // lightning which already gate on this. Two SEPARATE subsystem instances
-  // below (their own engines, their own state) so neither disturbs the long
-  // call-count sequence built up against the first subsystem above. ──
+  // ── A real paint edit reaches the engine ──
   {
-    const withGateEngines = [];
-    const withGateSubsystem = createFireSubsystem({
-      THREE: { Scene: FakeScene },
-      getFireRenderState: () => ({
-        enabled: true,
-        params: {},
-        perfTier: 2,
-        mPerPx: 0.02,
-        // fires[0] is the REPRESENTATIVE fire syncUnguarded already reads for
-        // sprite scale — a SECOND fire at a wildly different elevation proves
-        // the resolver reads fires[0] specifically, not some other one.
-        fires: [
-          { id: 'f1', x: 50, y: 50, diameterPx: 80, intensity: 1, elevation: 42 },
-          { id: 'f2', x: 10, y: 10, diameterPx: 40, intensity: 1, elevation: 999 },
-        ],
-        spawnCloud: makeCloud([[0, 0]], 1),
-      }),
-      createEngine: ({ kind, archetype, renderOrder, depthTexNode, depthFlagsTexNode }) => {
-        const e = {
-          kind,
-          archetype,
-          renderOrder,
-          depthTexNode,
-          depthFlagsTexNode,
-          scene: { visible: true, renderOrder: 0 },
-          paramCalls: [],
-          setSpawnPoints() {},
-          setParams(p) {
-            e.paramCalls.push(p);
-          },
-          step() {},
-          debugState: () => ({ kind, archetype }),
-        };
-        withGateEngines.push(e);
-        return e;
-      },
-      depthTexNode: { id: 'depthTex' },
-      depthFlagsTexNode: { id: 'depthFlagsTex' },
-      resolveExpectedDepth: (elevation) => elevation * 10,
-    });
-    withGateSubsystem.sync(renderer, 0, 0.016, rect);
-
-    t.ok('depth-authority engines were built', withGateEngines.length > 0);
-    t.ok(
-      "resolveExpectedDepth's result — from fires[0]'s elevation specifically, not fires[1]'s — reaches every " +
-        'engine as setParams.expectedDepth',
-      withGateEngines.every((e) => e.paramCalls.at(-1)?.expectedDepth === 420)
-    );
-    t.ok(
-      'depthTexNode/depthFlagsTexNode reach every engine unchanged, via createEngine',
-      withGateEngines.every((e) => e.depthTexNode?.id === 'depthTex' && e.depthFlagsTexNode?.id === 'depthFlagsTex')
-    );
+    const prev = state.spawnCloud;
+    state.spawnCloud = makeCloud([[0, 0]], 777);
+    subsystem.sync(renderer, 48, 0.016, rect);
+    t.ok('a new spawn cloud signature re-pushes the ember engine', emberEngine.spawnCalls.length === 2);
+    state.spawnCloud = prev;
+    subsystem.sync(renderer, 64, 0.016, rect);
   }
 
+  // ── THE FLOOR-SWITCH REGRESSION (2026-08-12): a floor with an ANCHOR fire but no painted `_Fire` region ──────────
+  // `cloud` is null; the early return only fires when BOTH paint and fires are empty. A null cloud must still be PUSHED
+  // (as the stable "nothing painted" value), or the engine keeps burning the PREVIOUS floor's paint.
   {
-    const noGateEngines = [];
-    const noGateSubsystem = createFireSubsystem({
-      THREE: { Scene: FakeScene },
-      getFireRenderState: () => ({
-        enabled: true,
-        params: {},
-        perfTier: 2,
-        mPerPx: 0.02,
-        fires: [{ id: 'f1', x: 50, y: 50, diameterPx: 80, intensity: 1, elevation: 42 }],
-        spawnCloud: makeCloud([[0, 0]], 1),
-      }),
-      createEngine: ({ kind, archetype, renderOrder, depthTexNode, depthFlagsTexNode }) => {
-        const e = {
-          kind,
-          archetype,
-          renderOrder,
-          depthTexNode,
-          depthFlagsTexNode,
-          scene: { visible: true, renderOrder: 0 },
-          paramCalls: [],
-          setSpawnPoints() {},
-          setParams(p) {
-            e.paramCalls.push(p);
-          },
-          step() {},
-          debugState: () => ({ kind, archetype }),
-        };
-        noGateEngines.push(e);
-        return e;
-      },
-      // depthTexNode/depthFlagsTexNode/resolveExpectedDepth all omitted —
-      // must not throw, must default every engine's expectedDepth to 0, the
-      // same "omit for byte-identical no-gate behaviour" contract candle and
-      // lightning already ship.
-    });
-    noGateSubsystem.sync(renderer, 0, 0.016, rect);
-
-    t.ok('omitting the gate params entirely does not throw, and engines were still built', noGateEngines.length > 0);
-    t.ok(
-      'expectedDepth defaults to 0 and depthTexNode/depthFlagsTexNode default to null when omitted',
-      noGateEngines.every(
-        (e) => e.paramCalls.at(-1)?.expectedDepth === 0 && e.depthTexNode === null && e.depthFlagsTexNode === null
-      )
-    );
-  }
-
-  // ── WIND (2026-09-03, mythica-machina-press#475 follow-up) — windMotion01
-  // reaching every engine, and reading the LIVE wind handle fresh each sync,
-  // not just once at construction. Own subsystem instance, same reason the
-  // depth-gate blocks above use their own — this must not disturb the long
-  // call-count sequence built up against the first subsystem. ──
-  {
-    const windEngines = [];
-    // Shape matches what fire-particle-runtime.js's real engines bind to
-    // (`windHandle.ambient.speed01`/`directionDeg`) — a plain mutable `.value`
-    // stands in for the live TSL uniform node fire-subsystem.js reads via
-    // `windHandle?.ambient?.speed01?.value`.
-    const fakeWindHandle = { ambient: { speed01: { value: 0 }, directionDeg: { value: 90 } } };
-    const windState = {
+    const engs = [];
+    const anchorState = {
       enabled: true,
       params: {},
       perfTier: 2,
       mPerPx: 0.02,
-      fires: [{ id: 'f1', x: 50, y: 50, diameterPx: 66, intensity: 1 }],
-      spawnCloud: makeCloud([[0, 0]], 1),
+      fires: [{ id: 'a1', x: 50, y: 50, diameterPx: 80, intensity: 1 }],
+      spawnCloud: makeCloud([[0, 0]], 4242),
     };
-    const windSubsystem = createFireSubsystem({
+    const sub = createFireSubsystem({
       THREE: { Scene: FakeScene },
-      getFireRenderState: () => windState,
-      getWindHandle: () => fakeWindHandle,
+      getFireRenderState: () => anchorState,
       createEngine: ({ kind, archetype, renderOrder }) => {
-        const e = {
-          kind,
-          archetype,
-          renderOrder,
-          scene: { visible: true, renderOrder: 0 },
-          paramCalls: [],
-          updateWindCalls: [],
-          setSpawnPoints() {},
-          setParams(p) {
-            e.paramCalls.push(p);
-          },
-          step() {},
-          updateWind(nextHandle) {
-            e.updateWindCalls.push(nextHandle);
-          },
-          debugState: () => ({ kind, archetype }),
-        };
-        windEngines.push(e);
+        const e = makeFakeEngine(kind, archetype, renderOrder);
+        engs.push(e);
         return e;
       },
     });
-
-    windSubsystem.sync(renderer, 0, 0.016, rect);
-
-    // ⚠️ THE FAN-OUT (2026-09-04) — `createFireSubsystem`'s own `updateWind`
-    // is the ONLY thing that reaches every one of fire's 6 engines' own
-    // `updateWind` at all; nothing called it before this existed (see
-    // fire-subsystem.js's own header note — the per-engine method was dead
-    // code, unlike the dust/gust engines' identical methods, which
-    // vt-pan-viewer.js's rebake dispatch already called directly). Engines
-    // are built lazily inside `sync()` (`ensureEngines`), so this has to run
-    // AFTER the first sync above, not before — `windEngines` is empty until
-    // then.
-    windSubsystem.updateWind(fakeWindHandle);
+    sub.sync(renderer, 0, 0.016, rect);
+    anchorState.spawnCloud = null; // switch to a floor with an anchor and no paint
+    sub.sync(renderer, 16, 0.016, rect);
+    const pushed = engs[0].spawnCalls.at(-1);
     t.ok(
-      'subsystem.updateWind fans out to every engine (4 flame archetypes + ember + smoke)',
-      windEngines.length === 6 && windEngines.every((e) => e.updateWindCalls.at(-1) === fakeWindHandle)
-    );
-
-    t.ok(
-      'a calm wind handle (speed01=0) reaches every engine as windMotion01=0',
-      windEngines.every((e) => e.paramCalls.at(-1)?.windMotion01 === 0)
-    );
-
-    // The handle is read FRESH each sync (fire-subsystem.js calls
-    // getWindHandle?.() inside syncUnguarded, not once at ensureEngines time)
-    // — mutating the SAME object's `.value` and re-syncing must move it.
-    fakeWindHandle.ambient.speed01.value = 1;
-    windSubsystem.sync(renderer, 16, 0.016, rect);
-    t.ok(
-      'a live wind-speed change reaches every engine as windMotion01 on the very next sync, ember and smoke included',
-      windEngines.every(
-        (e) => Number.isFinite(e.paramCalls.at(-1)?.windMotion01) && e.paramCalls.at(-1).windMotion01 > 0
-      )
-    );
-    const closeTo = (a, b) => Number.isFinite(a) && Math.abs(a - b) < 1e-9;
-    t.ok(
-      // ⚠️ REWRITTEN 2026-10-19 — the flame's population/brightness gutter is the WEATHER STRESS now (wind + rain in
-      // one number, evaluated per sprite in the draw shader). What the CPU still owes the engines — and what is
-      // observable here — is the stress inputs, and an untouched author dial: the population is the author's own
-      // count with or without wind.
-      "the weather-stress inputs reach every engine, and the flame population is the author's own dial with or without wind",
-      windEngines.every((e) => {
-        const windy = e.paramCalls.at(-1);
-        return Number.isFinite(windy?.rain01) && closeTo(windy?.stressGain, 1);
-      }) &&
-        windEngines
-          .filter((e) => e.kind === 'flame')
-          .every((e) => {
-            const calm = e.paramCalls.at(-2);
-            const windy = e.paramCalls.at(-1);
-            return windy.activeCount === calm.activeCount && windy.opacityScale === calm.opacityScale;
-          })
-    );
-    t.ok(
-      'the flame engines receive the lean shape (length, curve, taper, streak, flutter, spread) and no force-push scale',
-      windEngines
-        .filter((e) => e.kind === 'flame')
-        .every((e) => {
-          const p = e.paramCalls.at(-1);
-          return (
-            closeTo(p.leanLength, 3.7 * 0.6) &&
-            closeTo(p.leanCurve, 1.4) &&
-            closeTo(p.leanTaper, 0.4) &&
-            closeTo(p.leanStreak, 1.2) &&
-            closeTo(p.leanFlutter, 0.35) &&
-            closeTo(p.leanSpread, 0.3) &&
-            p.windPushScale === undefined
-          );
-        })
-    );
-
-    // ⚠️ REWRITTEN 2026-09-04 — MOTION (uWindMotion01, what reaches setParams
-    // here) is now DELIBERATELY EXPOSURE-INDEPENDENT. Author, live, on a map
-    // with more than one fire: "test the actual location... the indoor/
-    // sheltered fires be low movement, the exposed/outdoors fires be moved"
-    // — not a single map-wide number every fire's particles share. That real
-    // per-location gating now lives ENTIRELY inside the particle kernel
-    // (`fire-particle-runtime.js` samples `windHandle.kernel()` live, at each
-    // particle's own current world position — the SAME mechanism vegetation/
-    // gust-runtime.js already use), which this CPU-only fake-engine harness
-    // cannot observe. What CAN be proven here is the CPU-side contract that
-    // makes that kernel behaviour correct: `windMotion01` must NOT vary with
-    // `fires[].windExposure` at all (baking exposure in here would DOUBLE-
-    // COUNT it against the kernel's own per-particle sample — see
-    // `fire-geometry.js#fireRuntimeFromParams`'s own note on exactly this).
-    const exposedFire = { id: 'f1', x: 50, y: 50, diameterPx: 66, intensity: 1, windExposure: 1 };
-    const sealedFire = { id: 'f1', x: 50, y: 50, diameterPx: 66, intensity: 1, windExposure: 0 };
-    windState.fires = [exposedFire];
-    windSubsystem.sync(renderer, 32, 0.016, rect);
-    const windMotionExposed = windEngines[0]?.paramCalls.at(-1)?.windMotion01;
-    windState.fires = [sealedFire];
-    windSubsystem.sync(renderer, 40, 0.016, rect);
-    const windMotionSealed = windEngines[0]?.paramCalls.at(-1)?.windMotion01;
-    t.ok(
-      "windMotion01 (the kernel-facing value) is identical whether the representative fire's own windExposure is 1 or 0 — exposure is no longer baked in here",
-      Number.isFinite(windMotionExposed) && windMotionExposed === windMotionSealed
-    );
-
-    // SUPPRESSION (the flame/smoke population and brightness — the OTHER thing
-    // wind drives). It used to be a map-wide CPU aggregate that had to stay
-    // exposure-aware here ("genuinely cannot be made per-particle"). It can:
-    // 2026-10-07 moved it into the draw shader, which reads the wind-cell buffer
-    // per sprite. So the CPU-side population must now be IDENTICAL whatever the
-    // fire's own exposure is — exposure enters once, in the shader — which is
-    // exactly what lets an indoor hearth keep its smoke on a floor where an
-    // outdoor fire has lost its.
-    const flameSealed = windEngines.find((e) => e.kind === 'flame');
-    const activeCountSealed = flameSealed?.paramCalls.at(-1)?.activeCount;
-    windState.fires = [exposedFire];
-    windSubsystem.sync(renderer, 48, 0.016, rect);
-    const activeCountExposed = flameSealed?.paramCalls.at(-1)?.activeCount;
-    t.ok(
-      `flame activeCount is IDENTICAL whatever the fire's windExposure — exposure is applied per particle in the shader, never aggregated here (sealed=${activeCountSealed}, exposed=${activeCountExposed})`,
-      Number.isFinite(activeCountSealed) && activeCountSealed === activeCountExposed
-    );
-
-    // ⚠️ THE ORIGINAL REPORTED BUG (2026-09-04) — an outdoor fire "isn't
-    // reacting to wind" because a wider INDOOR fire landed at `fires[0]`
-    // (`extractFiresFromMask` sorts widest-first) and its exposure was
-    // broadcast to every shared engine; the interim fix took the MAX across
-    // fires. 2026-10-07 removes the aggregate altogether: swapping one of two
-    // fires from indoor to outdoor must change NOTHING the CPU sends (same fire
-    // count, same budget), because who is exposed is decided per particle, at the
-    // particle's own position, on the GPU. The old assertion here — that adding
-    // an outdoor fire moved the population — held only because fireCount
-    // scaling moves it too, and its "MAX exposure" reason no longer exists.
-    windState.fires = [
-      { id: 'f1', x: 10, y: 10, diameterPx: 200, intensity: 1, windExposure: 0 },
-      { id: 'f2', x: 500, y: 500, diameterPx: 40, intensity: 1, windExposure: 0 },
-    ];
-    windSubsystem.sync(renderer, 56, 0.016, rect);
-    const activeCountBothIndoor = flameSealed?.paramCalls.at(-1)?.activeCount;
-    const smokeEngineWind = windEngines.find((e) => e.kind === 'smoke');
-    const smokeCountBothIndoor = smokeEngineWind?.paramCalls.at(-1)?.activeCount;
-    windState.fires = [
-      { id: 'f1', x: 10, y: 10, diameterPx: 200, intensity: 1, windExposure: 0 },
-      { id: 'f2', x: 500, y: 500, diameterPx: 40, intensity: 1, windExposure: 1 },
-    ];
-    windSubsystem.sync(renderer, 64, 0.016, rect);
-    t.ok(
-      `an indoor/outdoor mix and an all-indoor pair (same fire count) send IDENTICAL flame and smoke populations — no map-wide exposure aggregate remains (flame ${activeCountBothIndoor} vs ${flameSealed?.paramCalls.at(-1)?.activeCount}, smoke ${smokeCountBothIndoor} vs ${smokeEngineWind?.paramCalls.at(-1)?.activeCount})`,
-      Number.isFinite(activeCountBothIndoor) &&
-        activeCountBothIndoor === flameSealed?.paramCalls.at(-1)?.activeCount &&
-        smokeCountBothIndoor === smokeEngineWind?.paramCalls.at(-1)?.activeCount
-    );
-
-    // ── INDOOR SUPPRESSION (2026-09-07) — outdoors01 reaching setParams ────
-    // Own scenario within the same shared harness. Reset wind to calm first
-    // so indoor suppression's own contribution is not confounded by the wind
-    // suppression already exercised above.
-    fakeWindHandle.ambient.speed01.value = 0;
-    const emberEngine = windEngines.find((e) => e.kind === 'ember');
-    const smokeEngine = windEngines.find((e) => e.kind === 'smoke');
-
-    windState.fires = [{ id: 'f1', x: 50, y: 50, diameterPx: 66, intensity: 1, outdoors01: 1 }];
-    windSubsystem.sync(renderer, 72, 0.016, rect);
-    const emberCountOutdoor = emberEngine?.paramCalls.at(-1)?.activeCount;
-    const smokeCountOutdoor = smokeEngine?.paramCalls.at(-1)?.activeCount;
-    const flameCountOutdoor = flameSealed?.paramCalls.at(-1)?.activeCount;
-
-    windState.fires = [{ id: 'f1', x: 50, y: 50, diameterPx: 66, intensity: 1, outdoors01: 0 }];
-    windSubsystem.sync(renderer, 80, 0.016, rect);
-    const emberCountIndoor = emberEngine?.paramCalls.at(-1)?.activeCount;
-    const smokeCountIndoor = smokeEngine?.paramCalls.at(-1)?.activeCount;
-    const flameCountIndoor = flameSealed?.paramCalls.at(-1)?.activeCount;
-
-    t.ok(
-      `a fully indoor fire makes no embers and keeps its smoke count (2026-10-16; smoke is dimmed by opacity instead) (ember outdoor=${emberCountOutdoor} indoor=${emberCountIndoor}, smoke outdoor=${smokeCountOutdoor} indoor=${smokeCountIndoor})`,
-      Number.isFinite(emberCountOutdoor) &&
-        Number.isFinite(emberCountIndoor) &&
-        Number.isFinite(smokeCountOutdoor) &&
-        Number.isFinite(smokeCountIndoor) &&
-        emberCountIndoor === 0 &&
-        emberCountOutdoor > 0 &&
-        smokeCountIndoor === smokeCountOutdoor
-    );
-    t.ok(
-      "flame's own activeCount is untouched by outdoors01 — the author's own ask was embers and smoke only",
-      flameCountOutdoor === flameCountIndoor
-    );
-    t.ok(
-      "an indoor fire's ember/smoke lifeAtWind0 both shrink too, not just their count — mythica-machina-press#512's fix is what makes smoke's half of this observable at all",
-      emberEngine?.paramCalls.at(-1)?.lifeAtWind0 < emberEngine?.paramCalls.at(-2)?.lifeAtWind0 &&
-        smokeEngine?.paramCalls.at(-1)?.lifeAtWind0 < smokeEngine?.paramCalls.at(-2)?.lifeAtWind0
-    );
-
-    // A fire with no `outdoors01` field at all (older data, an anchor from
-    // before this landed, a torture-world fixture) must fall back to fully
-    // outdoors — safe, byte-identical-to-before behaviour, never an
-    // accidental full suppression from a missing field misreading as indoors.
-    windState.fires = [{ id: 'f1', x: 50, y: 50, diameterPx: 66, intensity: 1 }];
-    windSubsystem.sync(renderer, 88, 0.016, rect);
-    const emberCountMissing = emberEngine?.paramCalls.at(-1)?.activeCount;
-    t.ok(
-      `a fire missing outdoors01 entirely reads as fully outdoors, matching the explicit outdoors01=1 case (missing=${emberCountMissing}, explicit-outdoor=${emberCountOutdoor})`,
-      emberCountMissing === emberCountOutdoor
-    );
-
-    // ── THE SAME LESSER-EVIL MAX BIAS windExposure01 ALREADY USES ──
-    // Same fire COUNT (two) in both scenarios below, so this isolates the
-    // bias itself rather than the separate, unrelated "more fires share a
-    // bigger budget" effect fireCount scaling already produces on its own.
-    windState.fires = [
-      { id: 'f1', x: 50, y: 50, diameterPx: 66, intensity: 1, outdoors01: 0 },
-      { id: 'f2', x: 500, y: 500, diameterPx: 40, intensity: 1, outdoors01: 0 },
-    ];
-    windSubsystem.sync(renderer, 96, 0.016, rect);
-    const emberCountBothIndoor = emberEngine?.paramCalls.at(-1)?.activeCount;
-
-    windState.fires = [
-      { id: 'f1', x: 50, y: 50, diameterPx: 66, intensity: 1, outdoors01: 0 },
-      { id: 'f2', x: 500, y: 500, diameterPx: 40, intensity: 1, outdoors01: 1 },
-    ];
-    windSubsystem.sync(renderer, 104, 0.016, rect);
-    const emberCountMixedFloor = emberEngine?.paramCalls.at(-1)?.activeCount;
-    t.ok(
-      `swapping one of two indoor fires for a genuinely outdoor one (same fire count both times) lifts the shared suppression toward "outdoors" rather than staying at the fully-indoor reading — an outdoor bonfire sharing a floor with a sheltered hearth must not have its own embers/smoke silently vanish (both-indoor=${emberCountBothIndoor}, mixed=${emberCountMixedFloor})`,
-      emberCountMixedFloor > emberCountBothIndoor
+      'a floor with an anchor fire but no paint pushes an EMPTY cloud, not nothing',
+      engs[0].spawnCalls.length === 2 && pushed?.count === 0
     );
   }
 
+  // ── "Fire intensity" (Presence — p.intensity), not a retired brightness dial, reaches the engine as `intensity` ──
+  {
+    const sub = createFireSubsystem({
+      THREE: { Scene: FakeScene },
+      getFireRenderState: () => ({ ...state, params: { intensity: 1.5 } }),
+      createEngine: ({ kind, archetype, renderOrder }) => makeFakeEngine(kind, archetype, renderOrder),
+    });
+    const before = engineInstances.length;
+    sub.sync(renderer, 0, 0.016, rect);
+    t.ok(
+      '"Fire intensity" is what the ember engine reads as `intensity`',
+      engineInstances[before].paramCalls.at(-1)?.intensity === 1.5
+    );
+  }
+
+  // ── THE COLOUR SET: the author's hue shift reaches the engine as radians ──
+  {
+    const sub = createFireSubsystem({
+      THREE: { Scene: FakeScene },
+      getFireRenderState: () => ({ ...state, params: { colorHueShift: 90 } }),
+      createEngine: ({ kind, archetype, renderOrder }) => makeFakeEngine(kind, archetype, renderOrder),
+    });
+    const before = engineInstances.length;
+    sub.sync(renderer, 0, 0.016, rect);
+    t.ok(
+      'colorHueShift (degrees) reaches the engine as hueShiftRad',
+      Math.abs(engineInstances[before].paramCalls.at(-1)?.hueShiftRad - Math.PI / 2) < 1e-9
+    );
+  }
+
+  // ── THE STALE-fires REGRESSION (2026-08-12): `fires` changing re-pushes the ember cloud even if the cloud did not ──
+  {
+    const engs = [];
+    const staleState = {
+      enabled: true,
+      params: {},
+      perfTier: 2,
+      mPerPx: 0.02,
+      fires: [{ id: 's1', x: 50, y: 50, diameterPx: 80, intensity: 1, outdoors01: 1 }],
+      spawnCloud: makeCloud([[10, 10]], 99),
+    };
+    const sub = createFireSubsystem({
+      THREE: { Scene: FakeScene },
+      getFireRenderState: () => staleState,
+      createEngine: ({ kind, archetype, renderOrder }) => {
+        const e = makeFakeEngine(kind, archetype, renderOrder);
+        engs.push(e);
+        return e;
+      },
+    });
+    sub.sync(renderer, 0, 0.016, rect);
+    staleState.fires = [{ id: 's1', x: 50, y: 50, diameterPx: 80, intensity: 1, outdoors01: 0 }]; // the fire went indoors
+    sub.sync(renderer, 16, 0.016, rect);
+    t.ok(
+      'an indoor/outdoor flip re-pushes the ember cloud even though the cloud itself did not change',
+      engs[0].spawnCalls.length === 2 && engs[0].spawnCalls.at(-1).count === 0
+    );
+  }
+
+  // ── THE TIER LEVER (2026-08-30): spriteCountScale reaches the ember budget ──
+  {
+    const countAt = (perfTier) => {
+      const sub = createFireSubsystem({
+        THREE: { Scene: FakeScene },
+        getFireRenderState: () => ({ ...state, perfTier }),
+        createEngine: ({ kind, archetype, renderOrder }) => makeFakeEngine(kind, archetype, renderOrder),
+      });
+      const before = engineInstances.length;
+      sub.sync(renderer, 0, 0.016, rect);
+      return engineInstances[before].paramCalls.at(-1)?.activeCount;
+    };
+    const low = countAt(0);
+    const high = countAt(3);
+    t.ok(
+      'a lower tier gives the ember engine a smaller budget',
+      Number.isFinite(low) && Number.isFinite(high) && low < high
+    );
+    t.ok(
+      'the tier plan is the multiplier (tier 0 is spriteCountScale of tier 3)',
+      Math.abs(low / high - fireTierPlan(0).spriteCountScale / fireTierPlan(3).spriteCountScale) < 1e-9
+    );
+  }
+
+  // ── THE DEPTH-AUTHORITY OCCLUSION GATE (mythica-machina-press#469) reaches the ember engine, once per sync ──
+  {
+    const seen = [];
+    const sub = createFireSubsystem({
+      THREE: { Scene: FakeScene },
+      getFireRenderState: () => state,
+      depthTexNode: { sentinel: 'depth' },
+      depthFlagsTexNode: { sentinel: 'flags' },
+      resolveExpectedDepth: (elevation) => 0.25 + elevation,
+      createEngine: (cfg) => {
+        seen.push(cfg);
+        return makeFakeEngine(cfg.kind, cfg.archetype, cfg.renderOrder);
+      },
+    });
+    sub.sync(renderer, 0, 0.016, rect);
+    t.ok(
+      'the depth nodes are forwarded to the ember engine at construction',
+      seen.length === 1 && seen[0].depthTexNode?.sentinel === 'depth' && seen[0].depthFlagsTexNode?.sentinel === 'flags'
+    );
+    const e = engineInstances.at(-1);
+    t.ok('the representative fire’s expected depth reaches setParams', e.paramCalls.at(-1)?.expectedDepth === 0.25);
+    const noGate = createFireSubsystem({
+      THREE: { Scene: FakeScene },
+      getFireRenderState: () => state,
+      createEngine: (cfg) => makeFakeEngine(cfg.kind, cfg.archetype, cfg.renderOrder),
+    });
+    noGate.sync(renderer, 0, 0.016, rect);
+    t.ok(
+      'omitting the gate params entirely does not throw, and the engine was still built',
+      engineInstances.at(-1) !== e
+    );
+  }
+
+  // ── THE BILLOW ENGINE IS WIRED (injected, so no GPU): what it is given, what it returns, and what that does ─────
+  {
+    const calls = [];
+    const lifeByFire = new Map();
+    const jobs = [{ name: 'fire.flame', count: 3 }];
+    const fakeBillow = {
+      scene: { visible: true },
+      lives: { sentinel: 'lives' },
+      update(ctx) {
+        calls.push(ctx);
+        return { lifeByFire, clusters: [] };
+      },
+      takeFieldJobs: () => jobs,
+      getStatus: () => ({ flame: 3 }),
+      dispose() {
+        calls.push('disposed');
+      },
+    };
+    const emberEngines = [];
+    let precipNow = 0.4;
+    const billowState = {
+      enabled: true,
+      params: {},
+      perfTier: 3,
+      mPerPx: 0.02,
+      fires: [
+        { id: 'live', x: 20, y: 20, diameterPx: 66, intensity: 1, windExposure: 1, outdoors01: 1 },
+        { id: 'out', x: 3000, y: 3000, diameterPx: 66, intensity: 1, windExposure: 1, outdoors01: 1 },
+      ],
+      spawnCloud: makeCloud(
+        [
+          [20, 20],
+          [3000, 3000],
+        ],
+        5
+      ),
+    };
+    class FakeVec2 {
+      set(x, y) {
+        this.x = x;
+        this.y = y;
+        return this;
+      }
+    }
+    const sizedRenderer = { getDrawingBufferSize: (v) => v.set(2000, 2000) };
+    const sub = createFireSubsystem({
+      THREE: { Scene: FakeScene, Vector2: FakeVec2 },
+      getFireRenderState: () => billowState,
+      getPrecip01: () => precipNow,
+      createEngine: (cfg) => {
+        const e = makeFakeEngine(cfg.kind, cfg.archetype, cfg.renderOrder);
+        emberEngines.push(e);
+        return e;
+      },
+      createTarget: () => ({}),
+      createBillow: () => fakeBillow,
+    });
+    const big = { minX: 0, minY: 0, maxX: 4000, maxY: 4000 };
+    sub.sync(sizedRenderer, 5000, 0.02, big);
+    const ctx = calls.find((c) => c && typeof c === 'object' && c.fires);
+    t.ok('the billow engine is built (injected) and added to the scene', sub.scene.children.includes(fakeBillow.scene));
+    t.ok(
+      'it is handed the fires, the cloud, the clock, the weather and the view',
+      ctx?.fires.length === 2 &&
+        ctx.cloud.count === 2 &&
+        ctx.nowMs === 5000 &&
+        ctx.dtSec === 0.02 &&
+        ctx.precip01 === 0.4 &&
+        ctx.rect === big
+    );
+    t.ok(
+      'and the drawing buffer’s pixel density over the rect (field resolution)',
+      Math.abs(ctx.pxPerWorld - 0.5) < 1e-9
+    );
+    t.ok(
+      'and the runtime weather numbers the light and the embers use',
+      typeof ctx.runtime?.windMotion01 === 'number' && typeof ctx.runtime?.rainResponse === 'number'
+    );
+    t.ok('takeFieldJobs forwards the billow engine’s job list for the viewer to render', sub.takeFieldJobs() === jobs);
+    t.ok('the status carries the billow engine’s numbers', sub.getStatus().billow?.flame === 3);
+    t.ok('getLives exposes the fires’ life book', sub.getLives()?.sentinel === 'lives');
+
+    // THE LIGHT FOLLOWS THE FIRE'S LIFE: a put-out fire casts none, a half-lit one casts less.
+    const lightsFor = () =>
+      sub
+        .lightSources()
+        .map((l) => l.sourceId)
+        .sort();
+    const calmAlpha = () => sub.lightSources().find((l) => l.sourceId === 'fire:live')?.alpha01;
+    lifeByFire.set('live', { vitality: 1, coal: 1, phase: 'burning' });
+    lifeByFire.set('out', { vitality: 1, coal: 1, phase: 'burning' });
+    precipNow = 0;
+    // the light EASES (0.3 s), so settle it before reading the burning value: the rain of the first sync is still in it
+    for (let i = 0; i < 40; i++)
+      sub.sync({ getDrawingBufferSize: () => ({ x: 2000, y: 2000 }) }, 5020 + i * 50, 0.05, big);
+    const full = calmAlpha();
+    t.ok('two burning fires cast two lights', lightsFor().length === 2);
+    lifeByFire.set('out', { vitality: 0, coal: 0, phase: 'dead' });
+    sub.sync({ getDrawingBufferSize: () => ({ x: 2000, y: 2000 }) }, 5040, 0.02, big);
+    t.ok('a dead fire casts no light at all', !lightsFor().includes('fire:out') && lightsFor().includes('fire:live'));
+    lifeByFire.set('out', { vitality: 0, coal: 0.8, phase: 'out' });
+    sub.sync({ getDrawingBufferSize: () => ({ x: 2000, y: 2000 }) }, 5060, 0.02, big);
+    t.ok('a put-out fire with hot coals casts a faint glow', lightsFor().includes('fire:out'));
+    lifeByFire.set('live', { vitality: 0.5, coal: 1, phase: 'burning' });
+    for (let i = 0; i < 40; i++)
+      sub.sync({ getDrawingBufferSize: () => ({ x: 2000, y: 2000 }) }, 8000 + i * 50, 0.05, big);
+    t.ok(
+      `a half-lit fire’s light eases down to about half its flame’s (${(calmAlpha() / full).toFixed(3)} of full)`,
+      calmAlpha() < full * 0.75 && calmAlpha() > full * 0.3
+    );
+
+    // A PUT-OUT FIRE SENDS NO SPARKS: its points leave the ember engine's cloud (the other fire's stay).
+    const emberEngine2 = emberEngines.at(-1);
+    lifeByFire.set('live', { vitality: 1, coal: 1, phase: 'burning' });
+    lifeByFire.set('out', { vitality: 0, coal: 0, phase: 'dead' });
+    sub.sync({ getDrawingBufferSize: () => ({ x: 2000, y: 2000 }) }, 7000, 0.02, big);
+    t.ok('the ember engine was handed a cloud after the fire went out', emberEngine2.spawnCalls.length >= 1);
+    sub.dispose();
+    t.ok(
+      'dispose releases the billow engine and removes its scene',
+      calls.includes('disposed') && !sub.scene.children.includes(fakeBillow.scene)
+    );
+  }
   // ── EACH FIRE'S WIND EXPOSURE COMES FROM THE BAKE'S GEOMETRY (2026-10-07) ──
   // `fires[].windExposure` arrives from boot.js as a sample of the painted
   // `_Outdoors` mask — the question "is there a roof", which the wind has not
@@ -874,12 +569,12 @@ export function run(t) {
     const dryAlpha = rainSubsystem.lightSources().map((l) => l.alpha01);
     t.ok(
       'with no precipitation every engine gets rain01 = 0',
-      rainEngines.length === 6 && rainEngines.every((e) => e.paramCalls.at(-1)?.rain01 === 0)
+      rainEngines.length === 1 && rainEngines.every((e) => e.paramCalls.at(-1)?.rain01 === 0)
     );
     precip = 0.8;
     rainSubsystem.sync(renderer3, 16, 0.016, rect3);
     t.ok(
-      'the live precipitation reaches every engine as rain01 on the very next sync (flame, ember and smoke)',
+      'the live precipitation reaches every engine as rain01 on the very next sync (the ember engine)',
       rainEngines.every((e) => Math.abs(e.paramCalls.at(-1)?.rain01 - 0.8) < 1e-12)
     );
     precip = 5;
@@ -928,8 +623,8 @@ export function run(t) {
     });
     dryOnly.sync(renderer3, 0, 0.016, rect3);
     t.ok(
-      'no getPrecip01 wired: every engine reads rain01 = 0 (a dry world), never undefined',
-      dryEngines.length === 6 && dryEngines.every((e) => e.paramCalls.at(-1)?.rain01 === 0)
+      'no getPrecip01 wired: the engine reads rain01 = 0 (a dry world), never undefined',
+      dryEngines.length === 1 && dryEngines.every((e) => e.paramCalls.at(-1)?.rain01 === 0)
     );
   }
 

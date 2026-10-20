@@ -1078,6 +1078,8 @@ function clusterSamples(c, samplesByFire) {
  *   no slow cold dips in the light.
  * @param {(id:string, raw:number)=>number} [opts.smoothBrightness] - per-light smoothing
  *   ({@link createFireBrightnessSmoother}); omitted = the raw brightness.
+ * @param {Map<string,{vitality:number,coal:number}>|null} [opts.lifeByFire] - each fire's flame vitality and coal heat
+ *   (`fire-billow-state.js`); a cluster's light follows the mean of `max(vitality, 0.16 × coal)` over its members.
  * @returns {Array<object>} light descriptors.
  */
 export function buildFireLightSources(
@@ -1091,6 +1093,7 @@ export function buildFireLightSources(
     samplesByFire = null,
     gutterTimeSec = null,
     smoothBrightness = null,
+    lifeByFire = null,
   } = {}
 ) {
   const plan = fireTierPlan(tier);
@@ -1130,7 +1133,25 @@ export function buildFireLightSources(
       const cold = gutterClock === null || !(stress > 0) ? 0 : fireGutter01(gutterClock, sm.x, sm.y).cold;
       brightSum += fireFlameBrightness01(stress, { cold });
     }
-    const rawBright01 = samples.length ? brightSum / samples.length : 1;
+    // ⚠️ THE FIRE'S LONG LIFE (2026-10-20, the billow fire). A fire the rain has put out casts no flame light; its hot
+    // coals cast a faint orange glow (`0.16 × coal`) that fades as they cool; a fire coughing back to life brightens as
+    // its flame does. `lifeByFire` is the engine's own `{vitality, coal}` per fire id — the same numbers the flame is drawn
+    // with — and a cluster takes the mean of its member fires. Omitted = every fire burning (the old behaviour, exactly).
+    let lifeMul = 1;
+    if (lifeByFire && typeof lifeByFire.get === 'function' && c.ids?.length) {
+      let sum = 0;
+      let n = 0;
+      for (const id of c.ids) {
+        const lf = lifeByFire.get(id);
+        if (lf) {
+          sum += Math.max(clampNum(lf.vitality ?? 1, 0, 1), 0.16 * clampNum(lf.coal ?? 1, 0, 1));
+          n++;
+        }
+      }
+      if (n) lifeMul = sum / n;
+    }
+    if (lifeMul < 0.02) continue;
+    const rawBright01 = (samples.length ? brightSum / samples.length : 1) * lifeMul;
     const bright01 = clampNum(smoothBrightness ? smoothBrightness(`fire:${c.id}`, rawBright01) : rawBright01, 0, 1);
 
     const seed = deriveFireSeed(c.x, c.y);

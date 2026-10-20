@@ -2778,6 +2778,54 @@ export async function startVtPanViewer({
     }
 
     /**
+     * ⭐ THE BILLOW FIRE'S FIELD TARGETS (2026-10-20) — here rather than in `effects/fire/` for the same `gpu/allocator-only`
+     * reason fluid's sits here. Two half-float RGBA targets (flame + coal, smoke) the billows are splatted into; bucketed to
+     * multiples of 64 and capped at the Keyhole 2048 px limit by the fire's own renderer, so no exception is needed.
+     * LINEAR, because the contour pass reads them with bilinear filtering (smooth iso-contours).
+     */
+    function createFireFieldTarget(name, width, height) {
+      return allocator.create(name, {
+        resolvedW: width,
+        resolvedH: height,
+        type: THREE.HalfFloatType,
+        format: THREE.RGBAFormat,
+        colorSpace: THREE.NoColorSpace,
+        filter: 'linear',
+        depth: false,
+      });
+    }
+    function disposeFireFieldTarget(rt) {
+      allocator.dispose(rt);
+    }
+    /**
+     * Render the fire's splat jobs (`fireSubsystem.takeFieldJobs()`): clear each field to transparent black, then draw the
+     * billows into it. Mirrors `tickFluidSim`'s split — the fire subsystem prepares a declarative job list, and the render
+     * calls live here because `renderer-state/graph-only` walls them to `vt/`. Must run with NO target bound (the `sims`
+     * block, straight after `fireSubsystem.sync`).
+     */
+    function tickFireField() {
+      const jobs = fireSubsystem.takeFieldJobs();
+      if (!jobs.length) return;
+      const prevRT = renderer.getRenderTarget();
+      const prevAuto = renderer.autoClear;
+      const prevClearColor = renderer.getClearColor(new THREE.Color());
+      const prevClearAlpha = renderer.getClearAlpha();
+      renderer.setClearColor(0x000000, 0);
+      for (const job of jobs) {
+        renderer.setRenderTarget(job.target);
+        renderer.autoClear = true;
+        renderer.clear(true, false, false);
+        if (job.count > 0) {
+          renderer.autoClear = false;
+          renderer.render(job.scene, job.camera);
+        }
+      }
+      renderer.autoClear = prevAuto;
+      renderer.setClearColor(prevClearColor, prevClearAlpha);
+      renderer.setRenderTarget(prevRT);
+    }
+
+    /**
      * ⭐ THE MANTLE's ping-pong half (Precipitation.md §5.1) — here rather than
      * in `effects/precipitation/mantle-runtime.js` for the same `gpu/allocator-
      * only` reason fluid's sits here: the allocator is the ONE place render
@@ -4697,7 +4745,13 @@ export async function startVtPanViewer({
       // subsystem: `particles/allocator-only` keeps every `instancedArray`
       // under `effects/particles/`, so fire's own module has no business
       // reaching for one. Same one-door discipline as every other engine here.
+      // (It builds the spiralling-ember engine; the flame is the billow engine below.)
       createEngine: createFireParticleEngine,
+      // THE BILLOW FLAME (2026-10-20): its field targets come from the allocator (`gpu/allocator-only`), its splat is
+      // rendered by `tickFireField` (`renderer-state/graph-only`), and its smoke is lit by the scene's own light.
+      createTarget: createFireFieldTarget,
+      disposeTarget: disposeFireFieldTarget,
+      lighting: { illumTexNode: envLight.illumTexNode, colorationTexNode: envLight.colorationTexNode },
       // So sync() can bracket its own per-frame cost (light.fireSync) —
       // perf-instrumentation-audit-2026-08-12, same shape as specular's own
       // `profiler` a few call sites down.
@@ -19504,6 +19558,8 @@ export async function startVtPanViewer({
           lastEnvSnapshot?.env?.time?.dtSec ?? 0,
           windSpawnRect
         );
+        // the billow flame's splat (the job list `sync` just prepared), straight away while no target is bound
+        tickFireField();
       }
       // THE CRITTERS' compute steps — the same no-target-bound block, for the same reason as fire's.
       //
@@ -20754,7 +20810,10 @@ export async function startVtPanViewer({
       if (windGustsEnabled && gustEngine) {
         gustEngine.step(renderer, { dtSec: WARM_UP_SIM_DT_SEC, tMs, worldRect: windSpawnRect });
       }
-      if (fireSubsystem) fireSubsystem.sync(renderer, tMs, WARM_UP_SIM_DT_SEC, windSpawnRect);
+      if (fireSubsystem) {
+        fireSubsystem.sync(renderer, tMs, WARM_UP_SIM_DT_SEC, windSpawnRect);
+        tickFireField();
+      }
       // No env snapshot yet at warm-up: flies read as a plain day and fireflies as "not yet", which
       // is exactly right for compiling the fly and maggot kernels without conjuring a colony.
       if (smellyFliesSubsystem) smellyFliesSubsystem.sync(renderer, tMs, WARM_UP_SIM_DT_SEC, windSpawnRect, null);

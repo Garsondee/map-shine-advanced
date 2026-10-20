@@ -6,26 +6,33 @@
  * THE PIPELINE: PARTICLES -> FIELD -> CONTOUR
  * ============================================================================
  *
- * 1. SPLAT. Every lobe is an instanced quad whose fragment writes the lobe's smooth kernel
- *    `k(q) = (1 - q^2)^2` (compact support, zero slope at the rim) into a half-float FIELD target with plain
- *    additive blending: R = flame density, G = flame heat-weighted density, B = smoke density,
- *    A = smoke tone-weighted density. Order-independent, so lobes can be drawn in any order and nothing pops: a
- *    lobe enters by growing from radius 0.
- * 2. CONTOUR. One quad per fire (or one for the view) reads the field and turns it into the painted look: the
- *    silhouette is the iso-contour of the density, the tone bands are higher contours (cream core where the
- *    density is highest), valleys between lobes get a darker crease, a slow noise roughens the edges, and a
- *    faint glow is the field blurred. Metaballs of lobed particles = the author's lobed daubs.
+ * 1. SPLAT. Every lobe is an instanced quad whose fragment writes the lobe's kernel into a half-float FIELD with
+ *    plain additive blending. Two fields: the FLAME field (R = flame density, G = heat-weighted density,
+ *    B = coal density, A = coal heat-weighted density) and the SMOKE field (R = density, G = tone-weighted density).
+ *    Order-independent, so lobes can be drawn in any order and nothing pops: a lobe enters by growing from radius 0.
+ * 2. CONTOUR. Instanced quads (one per fire box) read the fields and turn them into the painted look: the flame's
+ *    silhouette is the iso-contour of the density, the tone bands are the overlap count (cream where the most
+ *    billows stack), crescents ride each puff's edge, the coal bed glows through cracked cells, smoke is soft
+ *    warm-white billows lit by the scene.
  *
- * Why not draw each lobe as its own opaque disc? Overlapping discs show every circle's outline and need a depth
- * sort. A field has neither problem, and the "vitality" of a dying fire is just the contour level rising, so a
- * doused flame shrinks smoothly onto its coals instead of thinning into dots.
+ * THE FLAME KERNEL IS A PLATEAU, NOT A BUMP. Each billow adds a flat +strength inside its own edge, so the SUM counts
+ * how many billows overlap a pixel. The contour of that sum is the UNION of the discs (a cartoon cloud: crisp cusps,
+ * never a metaball's liquid fillets), the tone steps are the overlap count (translucent daubs stacked, every billow's
+ * own outline showing inside the flame — the painted campfires exactly), and the edge crescents ride each disc's own
+ * rim. The first version used a soft bump and read as orange slime.
  *
- * ⚠️ THE FIELD IS WORLD-RECT ALIGNED, NOT SCREEN ALIGNED. It covers the rect `sync()` is given (the visible
- * world, which every other engine here also takes), sized to the drawing buffer's pixel density, so it does not
- * care about the camera's jitter or the viewport's exact shape, and the contour reads it by world position.
+ * ⚠️ THE FIELDS ARE WORLD-RECT ALIGNED, NOT SCREEN ALIGNED. They cover the rect `sync()` is given (the visible
+ * world, which every other engine here also takes), sized to the drawing buffer's pixel density, so they do not
+ * care about the camera's jitter or the viewport's shape, and the contour reads them by world position.
  *
- * ⚠️ READ THE OTHER HALF OF THIS CONTRACT IN THE LAB (`tools/shader-lab/fire-billow-lab.js`): orientation of the
- * field texture is calibrated empirically there, never assumed (`feedback_y_flip_recurring_risk`).
+ * ⚠️ ORIENTATION OF THE FIELD TEXTURE IS CALIBRATED IN THE LAB (`fire-billow-lab.js#calibrate`), NEVER ASSUMED.
+ *
+ * ⚠️ THIS FILE NEVER TOUCHES THE RENDERER'S STATE OR ALLOCATES A TARGET, and that is a wall, not a style
+ * (`renderer-state/graph-only`, `gpu/allocator-only`, tools/verify-structure.mjs). The field targets come from an
+ * INJECTED `createTarget(name, w, h)` (the allocator, defined in `vt/`), and the splat is handed back as a declarative
+ * job list — `prepareField()` returns `[{target, scene, camera, count}]` and `vt-pan-viewer.js`'s `tickFireField`
+ * does the `setRenderTarget`/`clear`/`render`, exactly as `fluid-surface-subsystem.js#prepareSimTick` hands
+ * `tickFluidSim` its job list.
  *
  * @module effects/fire/fire-billow-render
  */
@@ -50,54 +57,48 @@ export function billowRampStops() {
 
 /** Defaults for every look uniform. The lab overrides any of them; the engine maps the author's dials onto them. */
 export const BILLOW_LOOK = Object.freeze({
-  /** Density level of the silhouette. A single lobe's visible radius is where (1-q^2)^2 = this (0.3 -> 0.67 r). */
+  /** Density level of the silhouette (each billow adds ~1 inside its edge, so 0.5 = the union of the discs). */
   outline: 0.5,
   /** Density above the outline at which the tone reaches the cream core. */
   span: 8.2,
   /** How much of the tone follows heat rather than density (0 = pure density). */
   toneHeat: 0.63,
-  /** Tone gamma: < 1 lifts the whole flame toward the cream end (the painted flame is ~25% cream + yellow). */
+  /** Tone gamma: < 1 lifts the whole flame toward the cream end. */
   tonePow: 0.84,
+  /** Levels on the tone (0..1): stretches it so the middle really reaches the cream stop. */
+  toneLo: 0.03,
+  toneHi: 0.8,
   /** 0 = smooth photographic ramp .. 1 = hard cel bands. */
   posterize: 0.62,
   bandCount: 5,
-  /** Painterly roughness of the edge: px of noise warp, and the noise's spatial frequency (1/px). */
+  /** The splat kernel: flat inside `plateau` of the radius, falling to 0 at the rim, with a slight `dome`. */
+  plateau: 0.8,
+  dome: 0.37,
+  /** How much cooler a disc is at its rim than its middle (0..1): a soft gradient inside every puff. */
+  discGradient: 0.555,
+  /** The flame's minimum edge softness, in density units (0.012 = razor, 0.1 = painted gouache). */
+  edgeSoft: 0.08,
+  /** Painterly roughness of the edge: px of noise warp, and the noise's spatial frequency (1/px); two octaves. */
   warpPx: 2.6,
   warpFreq: 0.05,
   warpSpeed: 0.7,
-  /** Darkening in the valleys between lobes. */
-  crease: 0.0,
-  /** The cel-shaded crescents: how steeply the density surface tilts the normal, and how far a lit / shaded flank moves the tone. */
-  relief: 2.6,
-  crescent: 0.06,
-  /** Painterly mottling of the tone (noise added to the temperature, 1/px and amount). */
-  mottle: 0.1,
-  mottleFreq: 0.07,
-  /**
-   * The splat kernel is a PLATEAU, not a bump: k = 1 inside `plateau` of the radius and falls to 0 at the rim. Each billow
-   * then adds a flat +strength inside its own edge, so the SUM counts how many billows overlap a pixel. The contour of
-   * the sum is the UNION of the discs (a cartoon cloud: crisp cusps, never a metaball's liquid fillets), the tone steps
-   * are the overlap count (translucent daubs stacked: every billow's own outline shows inside the flame), and the
-   * edge crescents ride each disc's own rim. 0 = a soft bump (the first version, which read as orange slime).
-   */
-  plateau: 0.8,
-  /** How much cooler a disc is at its rim than at its middle (0..1). */
-  discGradient: 0.555,
-  /** The dome: how much lower a disc is at its rim than its middle, so each puff has a shaded flank. */
-  dome: 0.37,
-  /** Levels on the tone (0..1): stretches the flame's tone so the middle really reaches the cream stop. */
-  toneLo: 0.03,
-  toneHi: 0.8,
-  /** The flame's minimum edge softness, in density units (0.012 = razor, 0.1 = painted gouache). */
-  edgeSoft: 0.08,
-  /** A finer second octave of edge roughness (px, 1/px). */
   warpPx2: 1.1,
   warpFreq2: 0.15,
+  /** Painterly mottling of the tone (noise added to the temperature). */
+  mottle: 0.1,
+  mottleFreq: 0.07,
+  /** The cel-shaded crescents: how steeply the density surface tilts the normal, and how far a lit/shaded flank moves the tone. */
+  relief: 2.6,
+  crescent: 0.06,
   /** Faint halo around the flame (HDR, additive: feeds the bloom). */
   glow: 0.35,
   glowRadiusPx: 14,
   /** Emission multiplier on the flame colours (1 = the painted colours exactly). */
   emission: 1.0,
+  /** The coal bed: its glow strength, the cracked cells' size (1/px) and crack width. */
+  coalGain: 1.0,
+  coalCell: 0.16,
+  coalCrack: 0.22,
   /** Smoke. */
   smokeOutline: 0.3,
   smokeSoft: 0.2,
@@ -111,14 +112,33 @@ export const BILLOW_LOOK = Object.freeze({
 /**
  * @param {object} deps
  * @param {*} deps.THREE
- * @param {number} [deps.capacity=8192] lobes
- * @param {object} [deps.lighting] `{illumTexNode, colorationTexNode}`: the scene's own light on the SMOKE (the flame
- *   is emissive and ignores it). Without it the smoke is lit by `uAmbient` alone.
+ * @param {(name:string, w:number, h:number) => *} deps.createTarget half-float RGBA, linear, no depth: `allocator.create(...)`
+ * @param {(rt:*) => void} [deps.disposeTarget] `allocator.dispose(rt)`
+ * @param {number} [deps.flameCapacity=6144] flame + coal lobes
+ * @param {number} [deps.smokeCapacity=2048]
+ * @param {number} [deps.maxQuads=64] contour boxes (one per fire)
+ * @param {object} [deps.lighting] `{illumTexNode, colorationTexNode}`: the scene's own light on the SMOKE (the flame is
+ *   emissive and ignores it). Without it the smoke is lit by `uAmbient` alone.
  * @param {object} [deps.depth] `{depthTexNode, depthFlagsTexNode, buildGate}` the occlusion gate every post-lit draw uses.
  * @param {boolean} [deps.flipV=false] field texture orientation, from the lab's calibration.
  * @returns {object}
  */
-export function createBillowRenderer({ THREE, capacity = 8192, lighting = null, depth = null, flipV = false }) {
+export function createBillowRenderer({
+  THREE,
+  createTarget,
+  disposeTarget = null,
+  flameCapacity = 6144,
+  smokeCapacity = 2048,
+  maxQuads = 64,
+  lighting = null,
+  depth = null,
+  flipV = false,
+}) {
+  if (typeof createTarget !== 'function') {
+    throw new TypeError(
+      'createBillowRenderer: `createTarget(name, w, h)` is required (the allocator, injected — see this module header).'
+    );
+  }
   const TSL = THREE.TSL;
   const {
     Fn,
@@ -128,7 +148,6 @@ export function createBillowRenderer({ THREE, capacity = 8192, lighting = null, 
     vec2,
     vec3,
     vec4,
-    uv,
     mix,
     clamp,
     smoothstep,
@@ -139,171 +158,227 @@ export function createBillowRenderer({ THREE, capacity = 8192, lighting = null, 
     pow,
     max,
     min,
-    abs,
     floor,
     fract,
     normalize,
     length,
     sin,
+    select,
     mx_noise_float,
     screenUV,
     sRGBTransferEOTF,
+    sRGBTransferOETF,
   } = TSL;
 
-  // ── the field target ────────────────────────────────────────────────────────────────────────────
-  let fieldW = 4;
-  let fieldH = 4;
-  let field = null;
-  const makeField = (w, h) => {
-    const rt = new THREE.RenderTarget(w, h, {
-      type: THREE.HalfFloatType,
-      format: THREE.RGBAFormat,
-      colorSpace: THREE.NoColorSpace,
-      depthBuffer: false,
-      minFilter: THREE.LinearFilter,
-      magFilter: THREE.LinearFilter,
-      generateMipmaps: false,
-    });
-    rt.texture.wrapS = THREE.ClampToEdgeWrapping;
-    rt.texture.wrapT = THREE.ClampToEdgeWrapping;
-    return rt;
-  };
-  field = makeField(fieldW, fieldH);
-  const fieldNode = texture(field.texture);
+  // ── the two field targets ─────────────────────────────────────────────────────────────────────
+  let fieldW = 64;
+  let fieldH = 64;
+  let flameField = createTarget('fire.flame', fieldW, fieldH);
+  let smokeField = createTarget('fire.smoke', fieldW, fieldH);
+  const flameNode = texture(flameField.texture);
+  const smokeNode = texture(smokeField.texture);
 
-  // ── instance data ─────────────────────────────────────────────────────────────────────────────
-  const cap = Math.max(16, capacity | 0);
-  const lobeArray = new Float32Array(cap * LOBE_STRIDE);
-  const geometry = new THREE.InstancedBufferGeometry();
-  const quad = new THREE.PlaneGeometry(1, 1);
-  geometry.index = quad.index;
-  geometry.setAttribute('position', quad.attributes.position);
-  geometry.setAttribute('uv', quad.attributes.uv);
-  const interleaved = new THREE.InstancedInterleavedBuffer(lobeArray, LOBE_STRIDE, 1);
-  interleaved.setUsage(THREE.DynamicDrawUsage);
-  geometry.setAttribute('lobeA', new THREE.InterleavedBufferAttribute(interleaved, 4, 0));
-  geometry.setAttribute('lobeB', new THREE.InterleavedBufferAttribute(interleaved, 4, 4));
-  geometry.setAttribute('lobeC', new THREE.InterleavedBufferAttribute(interleaved, 4, 8));
-  geometry.instanceCount = 0;
+  // ── instance data: three vec4 attributes per lobe, two buffers ────────────────────────────────
+  const makeLobeGeometry = (capacity) => {
+    const array = new Float32Array(capacity * LOBE_STRIDE);
+    const geometry = new THREE.InstancedBufferGeometry();
+    const quad = new THREE.PlaneGeometry(1, 1);
+    geometry.index = quad.index;
+    geometry.setAttribute('position', quad.attributes.position);
+    geometry.setAttribute('uv', quad.attributes.uv);
+    const interleaved = new THREE.InstancedInterleavedBuffer(array, LOBE_STRIDE, 1);
+    interleaved.setUsage(THREE.DynamicDrawUsage);
+    geometry.setAttribute('lobeA', new THREE.InterleavedBufferAttribute(interleaved, 4, 0));
+    geometry.setAttribute('lobeB', new THREE.InterleavedBufferAttribute(interleaved, 4, 4));
+    geometry.setAttribute('lobeC', new THREE.InterleavedBufferAttribute(interleaved, 4, 8));
+    geometry.instanceCount = 0;
+    return { array, geometry, interleaved };
+  };
+  const fCap = Math.max(16, flameCapacity | 0);
+  const sCap = Math.max(16, smokeCapacity | 0);
+  const flameBuf = makeLobeGeometry(fCap);
+  const smokeBuf = makeLobeGeometry(sCap);
 
   // ── uniforms ──────────────────────────────────────────────────────────────────────────────────
+  const num = (k) => uniform(float(BILLOW_LOOK[k]));
   const U = {
     rectMin: uniform(vec2(0, 0)),
     rectSize: uniform(vec2(1, 1)),
     texel: uniform(vec2(1, 1)),
     time: uniform(float(0)),
-    outline: uniform(float(BILLOW_LOOK.outline)),
-    span: uniform(float(BILLOW_LOOK.span)),
-    toneHeat: uniform(float(BILLOW_LOOK.toneHeat)),
-    tonePow: uniform(float(BILLOW_LOOK.tonePow)),
-    posterize: uniform(float(BILLOW_LOOK.posterize)),
-    bandCount: uniform(float(BILLOW_LOOK.bandCount)),
-    warpPx: uniform(float(BILLOW_LOOK.warpPx)),
-    warpFreq: uniform(float(BILLOW_LOOK.warpFreq)),
-    warpSpeed: uniform(float(BILLOW_LOOK.warpSpeed)),
-    crease: uniform(float(BILLOW_LOOK.crease)),
-    relief: uniform(float(BILLOW_LOOK.relief)),
-    crescent: uniform(float(BILLOW_LOOK.crescent)),
-    mottle: uniform(float(BILLOW_LOOK.mottle)),
-    mottleFreq: uniform(float(BILLOW_LOOK.mottleFreq)),
-    plateau: uniform(float(BILLOW_LOOK.plateau)),
-    discGradient: uniform(float(BILLOW_LOOK.discGradient)),
-    dome: uniform(float(BILLOW_LOOK.dome)),
-    toneLo: uniform(float(BILLOW_LOOK.toneLo)),
-    toneHi: uniform(float(BILLOW_LOOK.toneHi)),
-    edgeSoft: uniform(float(BILLOW_LOOK.edgeSoft)),
-    warpPx2: uniform(float(BILLOW_LOOK.warpPx2)),
-    warpFreq2: uniform(float(BILLOW_LOOK.warpFreq2)),
-    glow: uniform(float(BILLOW_LOOK.glow)),
-    glowRadiusPx: uniform(float(BILLOW_LOOK.glowRadiusPx)),
-    emission: uniform(float(BILLOW_LOOK.emission)),
-    smokeOutline: uniform(float(BILLOW_LOOK.smokeOutline)),
-    smokeSoft: uniform(float(BILLOW_LOOK.smokeSoft)),
-    smokeOpacity: uniform(float(BILLOW_LOOK.smokeOpacity)),
-    smokeSoot: uniform(float(BILLOW_LOOK.smokeSoot)),
+    outline: num('outline'),
+    span: num('span'),
+    toneHeat: num('toneHeat'),
+    tonePow: num('tonePow'),
+    toneLo: num('toneLo'),
+    toneHi: num('toneHi'),
+    posterize: num('posterize'),
+    bandCount: num('bandCount'),
+    plateau: num('plateau'),
+    dome: num('dome'),
+    discGradient: num('discGradient'),
+    edgeSoft: num('edgeSoft'),
+    warpPx: num('warpPx'),
+    warpFreq: num('warpFreq'),
+    warpSpeed: num('warpSpeed'),
+    warpPx2: num('warpPx2'),
+    warpFreq2: num('warpFreq2'),
+    mottle: num('mottle'),
+    mottleFreq: num('mottleFreq'),
+    relief: num('relief'),
+    crescent: num('crescent'),
+    glow: num('glow'),
+    glowRadiusPx: num('glowRadiusPx'),
+    emission: num('emission'),
+    coalGain: num('coalGain'),
+    coalCell: num('coalCell'),
+    coalCrack: num('coalCrack'),
+    smokeOutline: num('smokeOutline'),
+    smokeSoft: num('smokeSoft'),
+    smokeOpacity: num('smokeOpacity'),
+    smokeSoot: num('smokeSoot'),
     light: uniform(vec2(BILLOW_LOOK.lightX, BILLOW_LOOK.lightY)),
     hue: uniform(float(0)),
     tint: uniform(vec3(1, 1, 1)),
-    /** 0..1 the brightest fire's power: lowers the contour level's reach and cools the tone (a dying flame). */
-    power: uniform(float(1)),
     ambient: uniform(vec3(1, 1, 1)),
     expectedDepth: uniform(float(0)),
   };
 
-  // ── 1. THE SPLAT ────────────────────────────────────────────────────────────────────────────────
+  // ── 1. THE SPLATS ───────────────────────────────────────────────────────────────────────────────
   const lobeA = attribute('lobeA', 'vec4'); // x, y, radius, strength
-  const lobeB = attribute('lobeB', 'vec4'); // heat, stretch, dirX, dirY
-  const lobeC = attribute('lobeC', 'vec4'); // kind, tone, z, 0
+  const lobeB = attribute('lobeB', 'vec4'); // heat, along, dirX, dirY
+  const lobeC = attribute('lobeC', 'vec4'); // kind, tone, across, z
 
-  const splatMaterial = new THREE.NodeMaterial();
-  const vLocal = Fn(() => positionGeometry.xy.mul(2))().toVarying('vBillowLocal');
-  const vData = Fn(() => vec4(lobeA.w, lobeB.x, lobeC.x, lobeC.y))().toVarying('vBillowData');
-  splatMaterial.positionNode = Fn(() => {
+  const splatVertex = Fn(() => {
     const corner = positionGeometry.xy.mul(2);
     const dir = vec2(lobeB.z, lobeB.w);
     const nrm = vec2(dir.y.negate(), dir.x);
-    const st = max(lobeB.y, float(1));
-    const along = sqrt(st);
-    const across = float(1).div(along);
+    // B.y = the length scale along the lobe's direction, C.z = the width scale across it (set by the model)
+    const along = max(lobeB.y, float(1));
+    const across = max(lobeC.z, float(0.2));
     const off = dir.mul(corner.x.mul(lobeA.z).mul(along)).add(nrm.mul(corner.y.mul(lobeA.z).mul(across)));
     return vec3(lobeA.x.add(off.x), lobeA.y.add(off.y), float(0));
-  })();
-  splatMaterial.fragmentNode = Fn(() => {
-    const qd = sqrt(dot(vLocal, vLocal));
-    // FLAME: a plateau with a slight dome (so a puff has a lit side and a shaded side across its whole face);
-    // SMOKE: a soft bump (painted smoke is airy; a hard plateau made it chunky).
-    const kFlame = float(1).sub(smoothstep(U.plateau, float(1), qd)).mul(float(1).sub(U.dome.mul(qd.mul(qd))));
-    const kSoft0 = max(float(1).sub(qd.mul(qd)), float(0));
-    const k = mix(kFlame, kSoft0.mul(kSoft0), vData.z);
-    const w = vData.x.mul(k);
-    const isSmoke = vData.z;
-    const flame = float(1).sub(isSmoke);
-    // each puff is hotter at its middle than at its rim: a soft gradient inside every disc (a lit billow, not a flat coin)
-    const radialHeat = float(1).sub(U.discGradient.mul(qd.mul(qd)));
-    return vec4(w.mul(flame), w.mul(vData.y).mul(radialHeat).mul(flame), w.mul(isSmoke), w.mul(vData.w).mul(isSmoke));
-  })();
-  splatMaterial.transparent = true;
-  splatMaterial.depthTest = false;
-  splatMaterial.depthWrite = false;
-  splatMaterial.side = THREE.DoubleSide;
-  splatMaterial.toneMapped = false;
-  splatMaterial.blending = THREE.CustomBlending;
-  splatMaterial.blendEquation = THREE.AddEquation;
-  splatMaterial.blendSrc = THREE.OneFactor;
-  splatMaterial.blendDst = THREE.OneFactor;
-  splatMaterial.blendEquationAlpha = THREE.AddEquation;
-  splatMaterial.blendSrcAlpha = THREE.OneFactor;
-  splatMaterial.blendDstAlpha = THREE.OneFactor;
+  });
+  const vLocal = Fn(() => positionGeometry.xy.mul(2))().toVarying('vBillowLocal');
+  const vData = Fn(() => vec4(lobeA.w, lobeB.x, lobeC.x, lobeC.y))().toVarying('vBillowData');
+  const applySplatState = (material) => {
+    material.transparent = true;
+    material.depthTest = false;
+    material.depthWrite = false;
+    material.side = THREE.DoubleSide;
+    material.toneMapped = false;
+    material.blending = THREE.CustomBlending;
+    material.blendEquation = THREE.AddEquation;
+    material.blendSrc = THREE.OneFactor;
+    material.blendDst = THREE.OneFactor;
+    material.blendEquationAlpha = THREE.AddEquation;
+    material.blendSrcAlpha = THREE.OneFactor;
+    material.blendDstAlpha = THREE.OneFactor;
+  };
 
-  const splatMesh = new THREE.Mesh(geometry, splatMaterial);
-  splatMesh.frustumCulled = false;
-  const splatScene = new THREE.Scene();
-  splatScene.add(splatMesh);
+  // FLAME + COAL: a plateau with a slight dome. kind 0 = flame, 2 = coal (its own channels).
+  const flameSplat = new THREE.NodeMaterial();
+  flameSplat.positionNode = splatVertex();
+  flameSplat.fragmentNode = Fn(() => {
+    const qd = sqrt(dot(vLocal, vLocal));
+    const k = float(1)
+      .sub(smoothstep(U.plateau, float(1), qd))
+      .mul(float(1).sub(U.dome.mul(qd.mul(qd))));
+    const w = vData.x.mul(k);
+    const isCoal = select(vData.z.greaterThan(1.5), float(1), float(0));
+    const flame = float(1).sub(isCoal);
+    // each puff is hotter at its middle than at its rim: a soft gradient inside every disc
+    const radialHeat = float(1).sub(U.discGradient.mul(qd.mul(qd)));
+    return vec4(w.mul(flame), w.mul(vData.y).mul(radialHeat).mul(flame), w.mul(isCoal), w.mul(vData.y).mul(isCoal));
+  })();
+  applySplatState(flameSplat);
+
+  // SMOKE: a soft bump (painted smoke is airy; a hard plateau made it chunky).
+  const smokeSplat = new THREE.NodeMaterial();
+  smokeSplat.positionNode = splatVertex();
+  smokeSplat.fragmentNode = Fn(() => {
+    const qd2 = dot(vLocal, vLocal);
+    const k0 = max(float(1).sub(qd2), float(0));
+    const w = vData.x.mul(k0).mul(k0);
+    // B carries the STEAM weight (a doused fire's smoke is wet: whiter, denser)
+    return vec4(w, w.mul(vData.w), w.mul(vData.y), float(0));
+  })();
+  applySplatState(smokeSplat);
+
+  const flameMesh = new THREE.Mesh(flameBuf.geometry, flameSplat);
+  flameMesh.frustumCulled = false;
+  const smokeMesh = new THREE.Mesh(smokeBuf.geometry, smokeSplat);
+  smokeMesh.frustumCulled = false;
+  const flameScene = new THREE.Scene();
+  flameScene.add(flameMesh);
+  const smokeScene = new THREE.Scene();
+  smokeScene.add(smokeMesh);
   const splatCamera = new THREE.OrthographicCamera(0, 1, 0, 1, -1, 1);
 
   // ── 2. THE CONTOUR ──────────────────────────────────────────────────────────────────────────────
   const rampStops = billowRampStops();
-  const smokeHi = hexToLinear(BILLOW_SMOKE_RAMP.highlight);
-  const smokeMid = hexToLinear(BILLOW_SMOKE_RAMP.mid);
-  const smokeShade = hexToLinear(BILLOW_SMOKE_RAMP.shade);
-  const smokeDeep = hexToLinear(BILLOW_SMOKE_RAMP.deep);
-  const smokeLit = hexToLinear(BILLOW_SMOKE_RAMP.lit);
-  const smokeSoot = hexToLinear(BILLOW_SMOKE_RAMP.soot);
-  const rimRgb = hexToLinear('#e27b13');
+  const lin = (hex) => {
+    const c = hexToLinear(hex);
+    return vec3(c[0], c[1], c[2]);
+  };
+  const smokeHi = lin(BILLOW_SMOKE_RAMP.highlight);
+  const smokeMid = lin(BILLOW_SMOKE_RAMP.mid);
+  const smokeShade = lin(BILLOW_SMOKE_RAMP.shade);
+  const smokeDeep = lin(BILLOW_SMOKE_RAMP.deep);
+  const smokeLit = lin(BILLOW_SMOKE_RAMP.lit);
+  const smokeSootC = lin(BILLOW_SMOKE_RAMP.soot);
   const flipUV = (p) => (flipV ? vec2(p.x, float(1).sub(p.y)) : p);
+  const dirY = (v) => (flipV ? v.negate() : v);
 
-  const resolveGeometry = new THREE.PlaneGeometry(1, 1);
+  // contour boxes: one instanced quad per fire
+  const quadBoxes = new Float32Array(maxQuads * 4);
+  const resolveGeometry = new THREE.InstancedBufferGeometry();
+  {
+    const quad = new THREE.PlaneGeometry(1, 1);
+    resolveGeometry.index = quad.index;
+    resolveGeometry.setAttribute('position', quad.attributes.position);
+    resolveGeometry.setAttribute('uv', quad.attributes.uv);
+    const attr = new THREE.InstancedBufferAttribute(quadBoxes, 4);
+    attr.setUsage(THREE.DynamicDrawUsage);
+    resolveGeometry.setAttribute('quadBox', attr);
+    resolveGeometry.instanceCount = 0;
+  }
+  const quadBox = attribute('quadBox', 'vec4');
   const resolveMaterial = new THREE.NodeMaterial();
-  const uQuadMin = uniform(vec2(0, 0));
-  const uQuadSize = uniform(vec2(1, 1));
-  const worldAt = Fn(() => uQuadMin.add(positionGeometry.xy.add(vec2(0.5, 0.5)).mul(uQuadSize)))();
+  const worldAt = Fn(() => quadBox.xy.add(positionGeometry.xy.add(vec2(0.5, 0.5)).mul(quadBox.zw)))();
   const vWorld = worldAt.toVarying('vBillowWorld');
   resolveMaterial.positionNode = Fn(() => vec3(worldAt, float(0)))();
+
+  // cellular (Worley) noise: distances to the nearest two feature points, and the nearest cell's random
+  const hash22 = (p) => {
+    const q = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
+    return fract(sin(q).mul(43758.5453));
+  };
+  const worley = (p) => {
+    const ip = floor(p);
+    const fp = fract(p);
+    let f1 = float(8);
+    let f2 = float(8);
+    let rnd = float(0);
+    for (let j = -1; j <= 1; j++) {
+      for (let i = -1; i <= 1; i++) {
+        const o = vec2(i, j);
+        const h = hash22(ip.add(o));
+        const r = o.add(h).sub(fp);
+        const d = dot(r, r);
+        const closer = d.lessThan(f1);
+        rnd = select(closer, h.x, rnd);
+        f2 = min(f2, max(f1, d));
+        f1 = min(f1, d);
+      }
+    }
+    return { f1: sqrt(f1), f2: sqrt(f2), rnd };
+  };
 
   resolveMaterial.fragmentNode = Fn(() => {
     const local = vWorld.sub(U.rectMin);
     const uv0 = local.div(U.rectSize);
-    // ── edge roughening: a slow noise advected through the lookup ──
+    // ── edge roughening: slow noise advected through the lookup, two octaves ──
     const pn = local.mul(U.warpFreq);
     const tt = U.time.mul(U.warpSpeed);
     const n1 = mx_noise_float(vec3(pn.x, pn.y, tt));
@@ -314,21 +389,20 @@ export function createBillowRenderer({ THREE, capacity = 8192, lighting = null, 
     const warp = vec2(n1, n2).mul(U.warpPx).add(vec2(n3, n4).mul(U.warpPx2)).div(U.rectSize);
     const p = flipUV(uv0.add(warp));
     const e = U.texel.mul(1.5);
-    const exv = vec2(e.x, float(0));
-    const eyv = vec2(float(0), e.y);
-    const c0 = fieldNode.sample(p);
-    const cR = fieldNode.sample(p.add(flipUV(exv).sub(flipUV(vec2(0, 0)))));
-    const cL = fieldNode.sample(p.sub(flipUV(exv).sub(flipUV(vec2(0, 0)))));
-    const cD = fieldNode.sample(p.add(flipUV(eyv).sub(flipUV(vec2(0, 0)))));
-    const cU = fieldNode.sample(p.sub(flipUV(eyv).sub(flipUV(vec2(0, 0)))));
+    const ex = vec2(e.x, float(0));
+    const ey = vec2(float(0), dirY(e.y));
+    const c0 = flameNode.sample(p);
+    const cR = flameNode.sample(p.add(ex));
+    const cL = flameNode.sample(p.sub(ex));
+    const cD = flameNode.sample(p.add(ey));
+    const cU = flameNode.sample(p.sub(ey));
 
     // ───────────── FLAME ─────────────
     const D = c0.x;
     const heat = c0.y.div(max(D, float(0.001))).clamp(0, 1);
     const grad = vec2(cR.x.sub(cL.x), cD.x.sub(cU.x)).mul(0.5);
     const gradLen = length(grad);
-    const lap = cR.x.add(cL.x).add(cD.x).add(cU.x).sub(D.mul(4));
-    const theta0 = U.outline.add(float(1).sub(U.power).mul(0.55));
+    const theta0 = U.outline;
     const aa = clamp(gradLen.mul(0.9), U.edgeSoft, float(0.4));
     const cover = smoothstep(theta0.sub(aa), theta0.add(aa), D);
 
@@ -337,7 +411,7 @@ export function createBillowRenderer({ THREE, capacity = 8192, lighting = null, 
     let tau = sD.mul(float(1).sub(U.toneHeat)).add(heat.mul(U.toneHeat));
     const nm = mx_noise_float(vec3(local.x.mul(U.mottleFreq), local.y.mul(U.mottleFreq), tt.mul(0.5).add(3.3)));
     tau = clamp(tau.sub(U.toneLo).div(U.toneHi.sub(U.toneLo)), float(0), float(1));
-    tau = tau.mul(float(0.45).add(U.power.mul(0.55))).add(nm.mul(U.mottle)).add(n1.mul(0.03));
+    tau = tau.add(nm.mul(U.mottle)).add(n1.mul(0.03));
     // CEL-SHADED CRESCENTS: the density surface is a landscape of billows; the flank facing the light moves up a
     // tone, the flank facing away moves down one — the painted flame's lit and shaded crescents, for free.
     const gN = grad.mul(U.relief);
@@ -346,49 +420,87 @@ export function createBillowRenderer({ THREE, capacity = 8192, lighting = null, 
     const crescentAmt = smoothstep(float(0.8), float(0.95), litC).sub(smoothstep(float(0.64), float(0.4), litC));
     const calmCore = float(1).sub(smoothstep(float(0.35), float(0.8), sD));
     tau = tau.add(crescentAmt.mul(U.crescent).mul(inside0).mul(calmCore));
-    // while it burns the flame never goes below the painted deep orange; only a DYING fire walks down into coal reds
-    const floorTau = float(0.2).mul(smoothstep(float(0.35), float(0.95), U.power));
+    // while a flame burns it never goes below the painted deep orange; only COOL lobes (a dying fire's) walk down to coal reds
+    const floorTau = float(0.2).mul(smoothstep(float(0.08), float(0.32), heat));
     tau = pow(clamp(tau, floorTau, float(1)), U.tonePow);
     // banding with an antialiased step: floor + smoothstep(fract)
     const steps = max(U.bandCount.sub(1), float(1));
     const x = tau.mul(steps);
     const fx = fract(x);
     const soft = float(0.06).add(float(1).sub(U.posterize).mul(0.44));
-    const stepped = floor(x).add(smoothstep(float(0.5).sub(soft), float(0.5).add(soft), fx)).div(steps);
+    const stepped = floor(x)
+      .add(smoothstep(float(0.5).sub(soft), float(0.5).add(soft), fx))
+      .div(steps);
     const tauB = mix(tau, stepped, U.posterize);
     let rgb = piecewiseLinearRgb(TSL, tauB, rampStops).toVar();
-    // creases: the valleys between lobes get the rim colour, inside the body only
-    const inside = smoothstep(theta0.add(0.08), theta0.add(0.5), D);
-    const crease = clamp(lap.mul(U.crease), float(0), float(1)).mul(inside);
-    rgb = mix(rgb, vec3(rimRgb[0], rimRgb[1], rimRgb[2]), crease.mul(0.6));
-    // the very subtle light direction: lit sides a touch brighter
     rgb = rgb.mul(U.tint).mul(U.emission);
     rgb = hueRotateNode(TSL, rgb, U.hue);
 
-    // the glow: the field blurred by eight taps on a ring
+    // the glow: the density blurred by eight taps on a ring
     const gr = U.texel.mul(U.glowRadiusPx);
     let ring = c0.x.toVar();
     for (let i = 0; i < 8; i++) {
       const a = (i / 8) * Math.PI * 2;
-      ring = ring.add(fieldNode.sample(p.add(vec2(gr.x.mul(Math.cos(a)), gr.y.mul(Math.sin(a))))).x);
+      ring = ring.add(flameNode.sample(p.add(vec2(gr.x.mul(Math.cos(a)), dirY(gr.y.mul(Math.sin(a)))))).x);
     }
-    const glowD = ring.div(9);
-    const glowA = smoothstep(float(0.0), float(1.2), glowD).mul(float(1).sub(cover)).mul(U.glow);
+    const glowA = smoothstep(float(0.0), float(1.2), ring.div(9)).mul(float(1).sub(cover)).mul(U.glow);
     const glowRgb = vec3(1.0, 0.42, 0.06).mul(glowA);
 
+    // ───────────── COAL BED: cracked glowing cells, additive over whatever is painted ─────────────
+    const C = c0.z;
+    const coverC = smoothstep(float(0.3), float(0.8), C);
+    // the cells' own outline wobbles (a straight crack reads as a tile edge, not a split in burning wood)
+    const cw = vec2(
+      mx_noise_float(vec3(local.x.mul(0.07), local.y.mul(0.07), float(7.7))),
+      mx_noise_float(vec3(local.x.mul(0.07).add(31.4), local.y.mul(0.07).add(5.9), float(2.1)))
+    ).mul(float(6));
+    const w = worley(local.add(cw).mul(U.coalCell));
+    const crack = smoothstep(float(0.0), U.coalCrack, w.f2.sub(w.f1));
+    const pulse = float(0.75).add(sin(U.time.mul(float(0.9).add(w.rnd.mul(1.7))).add(w.rnd.mul(40))).mul(0.25));
+    const coalHeat = clamp(c0.w.div(max(C, float(0.001))), float(0), float(1));
+    // rounded glowing lumps with dark gaps (not crystal facets): bright in each cell's middle, falling toward its border
+    const lump = float(1).sub(smoothstep(float(0.08), float(0.6), w.f1));
+    // a cooling bed goes dark FAST: the tone is raised to a power so a half-cool coal is rust, not orange
+    const coalTau = pow(
+      clamp(
+        coalHeat
+          .mul(float(0.2).add(w.rnd.mul(0.8)))
+          .mul(pulse)
+          .mul(float(0.4).add(lump.mul(0.6)))
+          .mul(1.05),
+        float(0),
+        float(0.95)
+      ),
+      float(1.5)
+    );
+    const coalA = coverC
+      .mul(crack)
+      .mul(smoothstep(float(0.02), float(0.2), coalTau))
+      .mul(U.coalGain)
+      .clamp(0, 0.92);
+    const coalRgb = piecewiseLinearRgb(TSL, coalTau, rampStops);
+
     // ───────────── SMOKE ─────────────
-    const S = c0.z;
-    const toneS = c0.w.div(max(S, float(0.001))).clamp(0, 1);
-    const sAA = clamp(length(vec2(cR.z.sub(cL.z), cD.z.sub(cU.z))).mul(0.5), float(0.02), float(0.5)).add(U.smokeSoft);
+    const s0 = smokeNode.sample(p);
+    const sR = smokeNode.sample(p.add(ex));
+    const sL = smokeNode.sample(p.sub(ex));
+    const sD2 = smokeNode.sample(p.add(ey));
+    const sU = smokeNode.sample(p.sub(ey));
+    const S = s0.x;
+    const toneS = s0.y.div(max(S, float(0.001))).clamp(0, 1);
+    const sGrad = vec2(sR.x.sub(sL.x), sD2.x.sub(sU.x)).mul(0.5);
+    const sAA = clamp(length(sGrad), float(0.02), float(0.5)).add(U.smokeSoft);
     const sCover = smoothstep(U.smokeOutline.sub(sAA), U.smokeOutline.add(sAA), S).mul(U.smokeOpacity);
     const dens = clamp(S.sub(U.smokeOutline).div(1.6), float(0), float(1));
     // young smoke (low tone) is lit warm by the fire under it; old smoke goes grey-brown. Dense = bright core.
-    let sRgb = mix(vec3(smokeHi[0], smokeHi[1], smokeHi[2]), vec3(smokeMid[0], smokeMid[1], smokeMid[2]), smoothstep(float(0.0), float(0.55), toneS));
-    sRgb = mix(sRgb, vec3(smokeShade[0], smokeShade[1], smokeShade[2]), smoothstep(float(0.45), float(0.95), toneS).mul(0.8));
-    sRgb = mix(sRgb, vec3(smokeDeep[0], smokeDeep[1], smokeDeep[2]), float(1).sub(dens).mul(0.45));
-    sRgb = mix(vec3(smokeLit[0], smokeLit[1], smokeLit[2]), sRgb, smoothstep(float(0.0), float(0.28), toneS));
-    sRgb = mix(sRgb, vec3(smokeSoot[0], smokeSoot[1], smokeSoot[2]), U.smokeSoot.mul(toneS));
-    const sGrad = vec2(cR.z.sub(cL.z), cD.z.sub(cU.z)).mul(0.5);
+    const steam = clamp(s0.z.div(max(S, float(0.001))), float(0), float(1));
+    let sRgb = mix(smokeHi, smokeMid, smoothstep(float(0.0), float(0.55), toneS));
+    sRgb = mix(sRgb, smokeShade, smoothstep(float(0.45), float(0.95), toneS).mul(0.8));
+    sRgb = mix(sRgb, smokeDeep, float(1).sub(dens).mul(0.45));
+    sRgb = mix(smokeLit, sRgb, smoothstep(float(0.0), float(0.28), toneS));
+    sRgb = mix(sRgb, smokeSootC, U.smokeSoot.mul(toneS));
+    // steam is the brightest, whitest smoke there is
+    sRgb = mix(sRgb, smokeHi, steam.mul(0.85));
     const sNrm = normalize(vec3(sGrad.x.negate().mul(1.2), sGrad.y.negate().mul(1.2), float(1)));
     const sLit = dot(sNrm, normalize(vec3(U.light.x, U.light.y, float(0.9))));
     sRgb = sRgb.mul(float(0.88).add(clamp(sLit, float(-0.3), float(1)).mul(0.2)));
@@ -396,26 +508,29 @@ export function createBillowRenderer({ THREE, capacity = 8192, lighting = null, 
     if (lighting?.illumTexNode) {
       const illum = lighting.illumTexNode.sample(screenUV).rgb;
       const coloration = lighting.colorationTexNode ? lighting.colorationTexNode.sample(screenUV).rgb : vec3(0, 0, 0);
-      // the scene's own composite: lit = EOTF(OETF(albedo) * illum + coloration). The painted smoke colours are
-      // sRGB albedo, so they go in as they are (not pre-decoded).
-      const albedo = vec3(smokeToSrgb(sRgb));
-      smokeLinear = sRGBTransferEOTF(albedo.mul(illum).add(coloration));
+      // the scene's own composite: lit = EOTF(OETF(albedo) * illum + coloration); the painted smoke colours are sRGB albedo
+      smokeLinear = sRGBTransferEOTF(sRGBTransferOETF(sRgb).mul(illum).add(coloration));
     } else {
       smokeLinear = sRgb.mul(U.ambient);
     }
 
-    // ───────────── COMPOSE (premultiplied): smoke over flame, glow added ─────────────
+    // ───────────── COMPOSE (premultiplied): flame over smoke, glow and coals added ─────────────
     let gate = float(1);
     if (depth?.depthTexNode && depth?.buildGate) {
-      gate = depth.buildGate(TSL, { depthTexNode: depth.depthTexNode, depthFlagsTexNode: depth.depthFlagsTexNode, expectedDepth: U.expectedDepth });
+      gate = depth.buildGate(TSL, {
+        depthTexNode: depth.depthTexNode,
+        depthFlagsTexNode: depth.depthFlagsTexNode,
+        expectedDepth: U.expectedDepth,
+      });
     }
-    // The flame is IN FRONT of its smoke: from the 3/4 view the smoke climbs behind and above the body, and the
-    // painted plumes leave the flame legible at their base. Premultiplied: flame over smoke, glow added on top.
-    const flamePre = rgb.mul(cover).add(glowRgb);
-    const flameA = cover;
+    // bottom to top: the coal bed (painted over the ground), the smoke, the flame; the glow is added on top of all
+    const coalPre = coalRgb.mul(coalA);
     const smokePre = smokeLinear.mul(sCover);
-    const outA = flameA.add(sCover.mul(float(1).sub(flameA)));
-    const outRgb = flamePre.add(smokePre.mul(float(1).sub(flameA)));
+    const flamePre = rgb.mul(cover).add(glowRgb);
+    const aSmoke = sCover.add(coalA.mul(float(1).sub(sCover)));
+    const rgbSmoke = smokePre.add(coalPre.mul(float(1).sub(sCover)));
+    const outA = cover.add(aSmoke.mul(float(1).sub(cover)));
+    const outRgb = flamePre.add(rgbSmoke.mul(float(1).sub(cover)));
     return vec4(outRgb.mul(gate), outA.mul(gate));
   })();
   resolveMaterial.transparent = true;
@@ -436,42 +551,53 @@ export function createBillowRenderer({ THREE, capacity = 8192, lighting = null, 
   const resolveScene = new THREE.Scene();
   resolveScene.add(resolveMesh);
 
-  /** Linear -> sRGB for the smoke albedo (the scene composite wants sRGB albedo). */
-  function smokeToSrgb(linearRgb) {
-    return TSL.sRGBTransferOETF(linearRgb);
-  }
-
-  let count = 0;
+  let nFlame = 0;
+  let nSmoke = 0;
+  let nQuads = 0;
   const api = {
     /** The scene to draw into the frame (visible flag is the caller's). */
     scene: resolveScene,
-    /** The lobe buffer the CPU model writes (`LOBE_STRIDE` floats per lobe). */
-    lobes: lobeArray,
-    capacity: cap,
+    /** The lobe buffers the CPU model writes (`LOBE_STRIDE` floats per lobe): flame + coal, and smoke. */
+    flameLobes: flameBuf.array,
+    smokeLobes: smokeBuf.array,
+    flameCapacity: fCap,
+    smokeCapacity: sCap,
     uniforms: U,
-    get fieldTexture() {
-      return field.texture;
+    get flameTexture() {
+      return flameField.texture;
     },
-    get fieldTarget() {
-      return field;
+    get flameTarget() {
+      return flameField;
+    },
+    get smokeTarget() {
+      return smokeField;
     },
     get fieldSize() {
       return { w: fieldW, h: fieldH };
     },
-    /** Tell the renderer how many lobes of `lobes` are valid this frame. */
-    setCount(n) {
-      count = Math.max(0, Math.min(cap, n | 0));
-      geometry.instanceCount = count;
-      interleaved.needsUpdate = true;
+    /** Tell the renderer how many lobes of each buffer are valid this frame. */
+    setCounts(flame, smoke) {
+      nFlame = Math.max(0, Math.min(fCap, flame | 0));
+      nSmoke = Math.max(0, Math.min(sCap, smoke | 0));
+      flameBuf.geometry.instanceCount = nFlame;
+      smokeBuf.geometry.instanceCount = nSmoke;
+      flameBuf.interleaved.needsUpdate = true;
+      smokeBuf.interleaved.needsUpdate = true;
     },
-    get count() {
-      return count;
+    get counts() {
+      return { flame: nFlame, smoke: nSmoke };
     },
-    /** Place the contour quad (world px): the whole view, or one fire's box. */
+    /** Place the contour boxes (world px): `[minX, minY, w, h]` per fire; with `n = 0` nothing is drawn. */
+    setQuads(boxes, n) {
+      nQuads = Math.max(0, Math.min(maxQuads, n | 0));
+      for (let i = 0; i < nQuads * 4; i++) quadBoxes[i] = boxes[i];
+      resolveGeometry.instanceCount = nQuads;
+      resolveGeometry.attributes.quadBox.needsUpdate = true;
+      resolveMesh.visible = nQuads > 0;
+    },
+    /** One box covering a world rect (the lab, and the first-cut engine). */
     setQuad(minX, minY, w, h) {
-      uQuadMin.value.set(minX, minY);
-      uQuadSize.value.set(w, h);
-      resolveMesh.visible = w > 0 && h > 0;
+      this.setQuads([minX, minY, w, h], w > 0 && h > 0 ? 1 : 0);
     },
     /** Override look uniforms by name (numbers, or arrays for vec uniforms). */
     setLook(look = {}) {
@@ -483,20 +609,37 @@ export function createBillowRenderer({ THREE, capacity = 8192, lighting = null, 
       }
     },
     /**
-     * Splat every lobe into the field. Call from `sync()` (no render target bound), after `setCount`.
-     * @param {*} renderer
-     * @param {{minX:number,minY:number,maxX:number,maxY:number}} rect world rect the field covers.
+     * Get the fields ready for this frame and hand back the splat as a JOB LIST for the caller to run (this module may
+     * not touch the renderer's state — see the header). Call after `setCounts`. Each job: clear `target` to transparent
+     * black, then (if `count > 0`) `renderer.render(scene, camera)` into it.
+     *
+     * The target size is the rect at the drawing buffer's pixel density, rounded UP to a multiple of 64 and capped at
+     * `maxDim`, and the targets are only re-allocated when that bucket changes, so a pan reuses them and a zoom costs a
+     * re-allocation only when it crosses a bucket.
+     *
+     * @param {{minX:number,minY:number,maxX:number,maxY:number}} rect world rect the fields cover.
      * @param {{pxPerWorld?:number, scale?:number, maxDim?:number, timeSec?:number}} [opts]
+     * @returns {Array<{name:string, target:*, scene:*, camera:*, count:number}>}
      */
-    renderField(renderer, rect, { pxPerWorld = 1, scale = 1, maxDim = 2048, timeSec = 0 } = {}) {
+    prepareField(rect, { pxPerWorld = 1, scale = 1, maxDim = 2048, timeSec = 0 } = {}) {
       const W = Math.max(1, rect.maxX - rect.minX);
       const H = Math.max(1, rect.maxY - rect.minY);
-      const w = Math.max(16, Math.min(maxDim, Math.round(W * pxPerWorld * scale)));
-      const h = Math.max(16, Math.min(maxDim, Math.round(H * pxPerWorld * scale)));
+      const bucket = (v) => Math.max(64, Math.min(maxDim, Math.ceil((v * pxPerWorld * scale) / 64) * 64));
+      const w = bucket(W);
+      const h = bucket(H);
       if (w !== fieldW || h !== fieldH) {
+        const oldFlame = flameField;
+        const oldSmoke = smokeField;
         fieldW = w;
         fieldH = h;
-        field.setSize(w, h);
+        flameField = createTarget('fire.flame', w, h);
+        smokeField = createTarget('fire.smoke', w, h);
+        flameNode.value = flameField.texture;
+        smokeNode.value = smokeField.texture;
+        if (disposeTarget) {
+          disposeTarget(oldFlame);
+          disposeTarget(oldSmoke);
+        }
       }
       U.rectMin.value.set(rect.minX, rect.minY);
       U.rectSize.value.set(W, H);
@@ -507,29 +650,22 @@ export function createBillowRenderer({ THREE, capacity = 8192, lighting = null, 
       splatCamera.top = rect.minY;
       splatCamera.bottom = rect.maxY;
       splatCamera.updateProjectionMatrix();
-
-      const prevTarget = renderer.getRenderTarget();
-      const prevAuto = renderer.autoClear;
-      const prevColor = renderer.getClearColor(new THREE.Color());
-      const prevAlpha = renderer.getClearAlpha();
-      renderer.setRenderTarget(field);
-      renderer.setClearColor(0x000000, 0);
-      renderer.autoClear = true;
-      renderer.clear(true, false, false);
-      if (count > 0) {
-        renderer.autoClear = false;
-        renderer.render(splatScene, splatCamera);
-      }
-      renderer.autoClear = prevAuto;
-      renderer.setClearColor(prevColor, prevAlpha);
-      renderer.setRenderTarget(prevTarget);
+      return [
+        { name: 'fire.flame', target: flameField, scene: flameScene, camera: splatCamera, count: nFlame },
+        { name: 'fire.smoke', target: smokeField, scene: smokeScene, camera: splatCamera, count: nSmoke },
+      ];
     },
     dispose() {
-      geometry.dispose();
-      splatMaterial.dispose();
+      flameBuf.geometry.dispose();
+      smokeBuf.geometry.dispose();
+      flameSplat.dispose();
+      smokeSplat.dispose();
       resolveGeometry.dispose();
       resolveMaterial.dispose();
-      field.dispose();
+      if (disposeTarget) {
+        disposeTarget(flameField);
+        disposeTarget(smokeField);
+      }
     },
   };
   return api;

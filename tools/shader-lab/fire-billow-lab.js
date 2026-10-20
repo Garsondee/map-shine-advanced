@@ -79,7 +79,43 @@ async function main() {
   stage.texture.minFilter = THREE.NearestFilter;
   stage.texture.magFilter = THREE.NearestFilter;
 
-  const billow = createBillowRenderer({ THREE, capacity: 4096 });
+  // The lab stands in for the viewer: it supplies the allocator (`createTarget`) and runs the splat jobs
+  // (`tickFireField` in vt-pan-viewer.js does the same two things in the game).
+  const makeTarget = (name, w, h) => {
+    const rt = new THREE.RenderTarget(w, h, {
+      type: THREE.HalfFloatType,
+      format: THREE.RGBAFormat,
+      colorSpace: THREE.NoColorSpace,
+      depthBuffer: false,
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      generateMipmaps: false,
+    });
+    rt.texture.wrapS = THREE.ClampToEdgeWrapping;
+    rt.texture.wrapT = THREE.ClampToEdgeWrapping;
+    rt.texture.name = name;
+    return rt;
+  };
+  const billow = createBillowRenderer({ THREE, createTarget: makeTarget, disposeTarget: (rt) => rt.dispose() });
+  function runFieldJobs(jobs) {
+    const prevTarget = renderer.getRenderTarget();
+    const prevAuto = renderer.autoClear;
+    const prevColor = renderer.getClearColor(new THREE.Color());
+    const prevAlpha = renderer.getClearAlpha();
+    renderer.setClearColor(0x000000, 0);
+    for (const job of jobs) {
+      renderer.setRenderTarget(job.target);
+      renderer.autoClear = true;
+      renderer.clear(true, false, false);
+      if (job.count > 0) {
+        renderer.autoClear = false;
+        renderer.render(job.scene, job.camera);
+      }
+    }
+    renderer.autoClear = prevAuto;
+    renderer.setClearColor(prevColor, prevAlpha);
+    renderer.setRenderTarget(prevTarget);
+  }
 
   // ── the lab's state ───────────────────────────────────────────────────────────────────────────
   const BASE = {
@@ -90,7 +126,7 @@ async function main() {
     groundHex: '#222c26',
     parallax: 1,
     camOffset: [14, 10], // view centre minus fire, world px — slightly off-centre so height shows a little parallax
-    tilt: 0.5,
+    tilt: 0.3,
     quality: 1,
     fire: {
       x: 2000,
@@ -204,10 +240,10 @@ async function main() {
       groundY: rect.groundY,
       quality: S.quality,
     };
-    const n = emitFireLobes(billow.lobes, 0, fire, env, S.tune);
-    billow.setCount(n.count);
-    billow.setLook({ ...BILLOW_LOOK, ...S.look, power: Math.max(0.0001, (S.fire.vitality01 ?? 1) * (1 - 0.72 * (S.fire.stress01 ?? 0))) });
-    billow.renderField(renderer, rect, { pxPerWorld: S.zoom, timeSec: S.t });
+    const n = emitFireLobes(billow.flameLobes, 0, fire, env, S.tune, billow.smokeLobes, 0);
+    billow.setCounts(n.count, n.smoke);
+    billow.setLook({ ...BILLOW_LOOK, ...S.look });
+    runFieldJobs(billow.prepareField(rect, { pxPerWorld: S.zoom, timeSec: S.t }));
     billow.setQuad(rect.minX, rect.minY, rect.maxX - rect.minX, rect.maxY - rect.minY);
 
     camera.left = rect.minX;
@@ -514,13 +550,6 @@ async function main() {
       }
       return { values: cur, loss: best.loss, measured: best.m, trace };
     },
-    /** Read the field back and report density statistics (to set contour levels by numbers, not by eye). */
-    async fieldStats() {
-      await renderFrame();
-      const f = billow.fieldSize;
-      const raw = await renderer.readRenderTargetPixelsAsync(billow.fieldTarget ?? null, 0, 0, f.w, f.h);
-      return { size: f, note: 'use fieldTarget' };
-    },
     /** The lobe records of the current state, for numbers (positions, radii, heights). */
     lobes() {
       const rect = viewRect();
@@ -528,9 +557,10 @@ async function main() {
       const chain = chainFor(fire);
       const env = { tSec: S.t, camX: (rect.minX + rect.maxX) / 2, camY: (rect.minY + rect.maxY) / 2, parallax: S.parallax, projection: S.view, groundY: rect.groundY, quality: S.quality };
       const buf = new Float32Array(maxLobesPerFire(fire.radius) * LOBE_STRIDE);
+      const sbuf = new Float32Array(maxLobesPerFire(fire.radius) * LOBE_STRIDE);
       fire.turb01 = fire.turb01 ?? chain.turb01;
-      const n = emitFireLobes(buf, 0, fire, env, S.tune);
-      return { n, buf, stride: LOBE_STRIDE };
+      const n = emitFireLobes(buf, 0, fire, env, S.tune, sbuf, 0);
+      return { n, buf, sbuf, stride: LOBE_STRIDE };
     },
     /**
      * Orientation: put ONE lobe at a known world position near the view's top-left and find where it lands in the
@@ -543,11 +573,11 @@ async function main() {
       // one lobe at 25% across, 20% down the world rect
       const wx = rect.minX + (rect.maxX - rect.minX) * 0.25;
       const wy = rect.minY + (rect.maxY - rect.minY) * 0.2;
-      billow.lobes.fill(0);
-      billow.lobes.set([wx, wy, 40, 2.4, 1, 1, 1, 0, 0, 0.1, 0, 0], 0);
-      billow.setCount(1);
-      billow.setLook({ ...BILLOW_LOOK, power: 1 });
-      billow.renderField(renderer, rect, { pxPerWorld: S.zoom });
+      billow.flameLobes.fill(0);
+      billow.flameLobes.set([wx, wy, 40, 2.4, 1, 1, 1, 0, 0, 0.1, 1, 0], 0);
+      billow.setCounts(1, 0);
+      billow.setLook({ ...BILLOW_LOOK });
+      runFieldJobs(billow.prepareField(rect, { pxPerWorld: S.zoom }));
       billow.setQuad(rect.minX, rect.minY, rect.maxX - rect.minX, rect.maxY - rect.minY);
       camera.left = rect.minX;
       camera.right = rect.maxX;

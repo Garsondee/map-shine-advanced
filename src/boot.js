@@ -9513,15 +9513,7 @@ function install() {
       // `maskSensitivity` joined 2026-08-13: a live floor-specific miss (paint
       // that lit on one floor and not another) means this is exactly a
       // reach-for-it-mid-session control right now, not set-once detail.
-      fohKeys: [
-        'flameCount',
-        'flameLifeAtWind0',
-        'flameOpacity',
-        'flameColorAge',
-        'emberCount',
-        'smokeCount',
-        'maskSensitivity',
-      ],
+      fohKeys: ['flameSize', 'flameHeight', 'smokeDensity', 'emberCount', 'spitRate', 'maskSensitivity'],
       getValue,
       onChange,
       enabled: fireReadout.enabled,
@@ -10309,15 +10301,7 @@ function install() {
     accVar: '--c-particles',
     filterCategory: 'particles',
     schema: FIRE_PARAMS,
-    fohKeys: [
-      'flameCount',
-      'flameLifeAtWind0',
-      'flameOpacity',
-      'flameColorAge',
-      'emberCount',
-      'smokeCount',
-      'maskSensitivity',
-    ],
+    fohKeys: ['flameSize', 'flameHeight', 'smokeDensity', 'emberCount', 'spitRate', 'maskSensitivity'],
     getReadout: () => fireReadout,
     setValue: (patch) => MapShine.setFire(patch),
     // No `onPaint` override — fire DOES declare `authoring.paint`, so the

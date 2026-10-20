@@ -82,7 +82,9 @@ export function hashU32(x) {
 }
 /** Two- and three-key hashes into [0,1). */
 export function hash01(a, b = 0, c = 0) {
-  const h = hashU32(Math.imul(a | 0, 0x9e3779b1) ^ hashU32(Math.imul(b | 0, 0x85ebca6b) + Math.imul(c | 0, 0xc2b2ae35)));
+  const h = hashU32(
+    Math.imul(a | 0, 0x9e3779b1) ^ hashU32(Math.imul(b | 0, 0x85ebca6b) + Math.imul(c | 0, 0xc2b2ae35))
+  );
   return h / 4294967296;
 }
 
@@ -153,7 +155,7 @@ export const BILLOW_TUNE = Object.freeze({
   // ── body billows ──
   bodyRadius: 0.625, // plume radius, × R
   bodyLifeMul: 1.0, // × each layer's own cycle
-  bodyHeight: 1.255, // flame-tip height, × R (a hearth burns lower, a bonfire stands up)
+  bodyHeight: 2.1, // flame-tip height, × R (a hearth burns lower, a bonfire stands up)
   // ── tongues ──
   tongueLength: 0.55, // × plume radius
   tongueLobe: 0.72,
@@ -163,6 +165,12 @@ export const BILLOW_TUNE = Object.freeze({
   fleckLife: 0.8,
   fleckSpeed: 2.2,
   fleckSize: 0.06,
+  // ── spit embers: heavy chunks that arc out of the fire, land and smoulder where they fall ──
+  spitBase: 2.5,
+  spitPerR: 0.03,
+  spitLife: 24, // seconds per slot: a flight, then the smoulder
+  spitSize: 0.075, // × plume radius
+  spitRange: 2.6, // × plume radius of the throw (calm); the wind carries them further
   // ── smoke ──
   smokeLife: 3.6,
   smokeRise: 2.6, // × R at an open fire
@@ -186,12 +194,57 @@ export const BILLOW_TUNE = Object.freeze({
  */
 const BODY_LAYERS = Object.freeze([
   // the crown: a few billows that rise out of the core and cool as they climb — the flame's tip, soft, not a finger
-  Object.freeze({ count: 3, rho: [0.0, 0.3], rad: 0.4, life: 1.25, heat: [0.7, 0.92], z: [0.4, 0.8], swirl: 0.5, weight: 1.0 }),
-  Object.freeze({ count: 5, rho: [0.0, 0.25], rad: 0.5, life: 1.0, heat: [0.85, 1.0], z: [0.12, 0.4], swirl: 0.6, weight: 1.15 }),
-  Object.freeze({ count: 8, rho: [0.22, 0.62], rad: 0.55, life: 1.5, heat: [0.5, 0.78], z: [0.1, 0.35], swirl: 0.9, weight: 1.0 }),
-  Object.freeze({ count: 12, rho: [0.4, 0.62], rad: 0.46, life: 2.0, heat: [0.16, 0.44], z: [0.03, 0.2], swirl: 1.1, weight: 0.95 }),
+  Object.freeze({
+    count: 3,
+    rho: [0.0, 0.3],
+    rad: 0.4,
+    life: 1.25,
+    heat: [0.7, 0.92],
+    z: [0.4, 0.8],
+    swirl: 0.5,
+    weight: 1.0,
+  }),
+  Object.freeze({
+    count: 5,
+    rho: [0.0, 0.25],
+    rad: 0.5,
+    life: 1.0,
+    heat: [0.85, 1.0],
+    z: [0.12, 0.4],
+    swirl: 0.6,
+    weight: 1.15,
+  }),
+  Object.freeze({
+    count: 8,
+    rho: [0.22, 0.62],
+    rad: 0.55,
+    life: 1.5,
+    heat: [0.5, 0.78],
+    z: [0.1, 0.35],
+    swirl: 0.9,
+    weight: 1.0,
+  }),
+  Object.freeze({
+    count: 12,
+    rho: [0.4, 0.62],
+    rad: 0.46,
+    life: 2.0,
+    heat: [0.16, 0.44],
+    z: [0.03, 0.2],
+    swirl: 1.1,
+    weight: 0.95,
+  }),
   // the satellites: small quick scallops on the edge, the painted flame's fine ragged detail
-  Object.freeze({ count: 10, rho: [0.62, 0.95], rad: 0.2, life: 0.8, heat: [0.1, 0.34], z: [0.05, 0.4], swirl: 1.6, weight: 0.9 }),
+  Object.freeze({
+    count: 10,
+    rho: [0.62, 0.95],
+    rad: 0.2,
+    life: 0.8,
+    heat: [0.1, 0.34],
+    z: [0.05, 0.4],
+    swirl: 1.6,
+    weight: 0.9,
+  }),
 ]);
 
 /** The heart: billows that NEVER respawn (a fire's body has no hole in it), just orbit the fuel and breathe. */
@@ -205,9 +258,21 @@ const HEART = Object.freeze({ count: 3, orbit: 0.1, rad: 0.6, heat: 0.92, z: 0.1
 export const LOBE_STRIDE = 12;
 export const KIND_FLAME = 0;
 export const KIND_SMOKE = 1;
+export const KIND_COAL = 2;
 
 /** Pool offsets inside one lobe's record, for readers. */
-export const LOBE = Object.freeze({ X: 0, Y: 1, R: 2, STRENGTH: 3, HEAT: 4, STRETCH: 5, DIRX: 6, DIRY: 7, KIND: 8, TONE: 9 });
+export const LOBE = Object.freeze({
+  X: 0,
+  Y: 1,
+  R: 2,
+  STRENGTH: 3,
+  HEAT: 4,
+  STRETCH: 5,
+  DIRX: 6,
+  DIRY: 7,
+  KIND: 8,
+  TONE: 9,
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // FIRE-LEVEL QUANTITIES
@@ -228,7 +293,8 @@ export function billowLeanGain(motion01) {
  */
 export function billowPulse(tSec, puffHz, amp, seed = 0) {
   const p = tSec * puffHz + seed * 0.37;
-  const chaos = 0.55 * Math.sin(TAU * p) + 0.3 * Math.sin(TAU * (p * 1.73 + 0.37)) + 0.15 * Math.sin(TAU * (p * 2.91 + 0.11));
+  const chaos =
+    0.55 * Math.sin(TAU * p) + 0.3 * Math.sin(TAU * (p * 1.73 + 0.37)) + 0.15 * Math.sin(TAU * (p * 2.91 + 0.11));
   return Math.max(0.2, 1 + amp * chaos);
 }
 
@@ -373,14 +439,16 @@ function project(env, x, y, z, out) {
 /**
  * Write one fire's lobes at the clock `env.tSec`.
  *
- * @param {Float32Array} out the instance buffer.
+ * @param {Float32Array} out the flame + coal instance buffer (smoke goes here too unless `outSmoke` is given).
  * @param {number} start the lobe index to start writing at.
  * @param {BillowFire} f
  * @param {BillowEnv} env
  * @param {object} [tuneOverride]
- * @returns {{count:number, flame:number, smoke:number}} lobes written.
+ * @param {Float32Array|null} [outSmoke] a separate buffer for the smoke lobes (the renderer splats them into their own field).
+ * @param {number} [startSmoke=0] the smoke lobe index to start writing at.
+ * @returns {{count:number, flame:number, smoke:number, coal:number}} lobes written (`count` = in `out`; `smoke` = in `outSmoke`).
  */
-export function emitFireLobes(out, start, f, env, tuneOverride) {
+export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null, startSmoke = 0) {
   const tune = tuneOverride ? { ...BILLOW_TUNE, ...tuneOverride } : BILLOW_TUNE;
   const sz = fireSizes(f, tune);
   const { R, out: outdoor, turb, plume, height } = sz;
@@ -405,7 +473,7 @@ export function emitFireLobes(out, start, f, env, tuneOverride) {
   let wx = f.windX ?? 0;
   let wy = f.windY ?? 0;
   let m = clamp01(f.windMotion01 ?? 0);
-  const draftAmp = 0.22 * (1 - outdoor) * (1 - m);
+  const draftAmp = 0.22 * (f.draft ?? 1) * (1 - outdoor) * (1 - m);
   if (draftAmp > 1e-3) {
     const d = billowDraft(t, seed, draftAmp);
     if (d.motion01 > 1e-3) {
@@ -434,28 +502,65 @@ export function emitFireLobes(out, start, f, env, tuneOverride) {
   const proj = [0, 0, 1];
   const base = [0, 0, 1];
   let n = start;
+  let ns = startSmoke;
   let flameCount = 0;
   let smokeCount = 0;
-  const put = (x, y, z, radius, strength, heat, stretch, dx, dy, kind, tone) => {
+  let coalCount = 0;
+  let lastX = 0;
+  let lastY = 0;
+  let lastR = 0;
+  // `stretch` is the old area-preserving elongation; a chain lobe passes its own `along` and `across` instead
+  // (long and as wide as before: a tongue should not thin as it is stretched along its own path).
+  const put = (x, y, z, radius, strength, heat, stretch, dx, dy, kind, tone, along = null, across = null) => {
     project(env, x, y, z, proj);
     const M = proj[2];
-    const o = n * LOBE_STRIDE;
-    out[o] = proj[0];
-    out[o + 1] = proj[1];
-    out[o + 2] = radius * M;
-    out[o + 3] = strength;
-    out[o + 4] = heat;
-    out[o + 5] = stretch;
-    out[o + 6] = dx;
-    out[o + 7] = dy;
-    out[o + 8] = kind;
-    out[o + 9] = tone;
-    out[o + 10] = z;
-    out[o + 11] = 0;
-    n++;
+    const toSmoke = kind === KIND_SMOKE && outSmoke !== null;
+    const buf = toSmoke ? outSmoke : out;
+    const o = (toSmoke ? ns : n) * LOBE_STRIDE;
+    buf[o] = proj[0];
+    buf[o + 1] = proj[1];
+    buf[o + 2] = radius * M;
+    buf[o + 3] = strength;
+    buf[o + 4] = heat;
+    const st = Math.max(1, stretch);
+    buf[o + 5] = along === null ? Math.sqrt(st) : along;
+    buf[o + 6] = dx;
+    buf[o + 7] = dy;
+    buf[o + 8] = kind;
+    buf[o + 9] = tone;
+    buf[o + 10] = across === null ? 1 / Math.sqrt(st) : across;
+    buf[o + 11] = z;
+    lastX = proj[0];
+    lastY = proj[1];
+    lastR = radius * M;
+    if (toSmoke) ns++;
+    else n++;
     if (kind === KIND_SMOKE) smokeCount++;
+    else if (kind === KIND_COAL) coalCount++;
     else flameCount++;
   };
+
+  // ───────────────────────────── THE COAL BED ─────────────────────────────
+  // Soft footprints the renderer carves into cracked glowing cells. They carry only WHERE the bed is and HOW HOT: a
+  // burning fire shows the bed round its edge and under the flame; a dying fire is the bed alone, going from orange
+  // through rust to coal red over the (much longer) life of `coal01`.
+  const coalHeat = clamp01(f.coal01 ?? 0.35 + 0.65 * vit);
+  if (coalHeat > 0.01) {
+    const nCoal = Math.max(4, Math.round(12 * (0.7 + 0.3 * Math.min(2, R / 50)) * q));
+    for (let i = 0; i < nCoal; i++) {
+      const id = seed * 131 + i * 19 + 22000;
+      const r1 = hash01(id, 0, 51);
+      const r2 = hash01(id, 0, 52);
+      const r3 = hash01(id, 0, 53);
+      const drift = t * (0.15 + 0.2 * r3);
+      const th = r1 * TAU + drift;
+      const rho = plume * (0.1 + 0.9 * Math.sqrt(r2)) * 0.8;
+      const rad = plume * (0.42 + 0.22 * r3);
+      const x = f.x + Math.cos(th) * rho;
+      const y = f.y + Math.sin(th) * rho;
+      put(x, y, 0, rad, 1, coalHeat * (0.75 + 0.25 * r1), 1, 1, 0, KIND_COAL, 0);
+    }
+  }
 
   // ───────────────────────────── BODY BILLOWS: THREE NESTED LAYERS ─────────────────────────────
   // The painted flame is lobes inside lobes: a ring of big outer daubs that makes the lobed outline, a middle ring
@@ -504,10 +609,11 @@ export function emitFireLobes(out, start, f, env, tuneOverride) {
       const z = heightBody * lerp(L.z[0], L.z[1], Math.pow(a, 0.8)) * (0.8 + 0.4 * r5) * (0.55 + 0.45 * bright);
       const wob = plume * 0.06;
       const wph = t * (1.3 / P) * TAU + r6 * TAU;
-      const lean = leanG * tune.leanLength * plume * Math.pow(a, tune.leanCurve) * (0.35 + 0.65 * li / 2);
+      const lean = leanG * tune.leanLength * plume * Math.pow(a, tune.leanCurve) * (0.35 + (0.65 * li) / 2);
       const x = base[0] + Math.cos(th) * rho + Math.sin(wph) * wob + wdx * lean;
       const y = base[1] + Math.sin(th) * rho + Math.cos(wph * 0.83) * wob + wdy * lean;
-      const rad = plume * L.rad * (0.5 + 0.5 * envR) * Math.pow(envR, 0.45) * pulse * sizeMul * rainDamp * (0.8 + 0.4 * r4);
+      const rad =
+        plume * L.rad * (0.5 + 0.5 * envR) * Math.pow(envR, 0.45) * pulse * sizeMul * rainDamp * (0.8 + 0.4 * r4);
       const heat = lerp(L.heat[0], L.heat[1], r4) * (1 - 0.3 * a) * cool;
       put(x, y, z, rad, L.weight * bodyNorm, heat, 1 + tune.leanStreak * leanG * a, wdx, wdy, KIND_FLAME, a);
     }
@@ -516,7 +622,10 @@ export function emitFireLobes(out, start, f, env, tuneOverride) {
   // ───────────────────────────── TONGUES ─────────────────────────────
   // Chains of billows that lick out and up from the body and curl at the tip. In the 3/4 picture they rise up the
   // page; from the side they are the tall, tapering, bent shapes a flame is.
-  const nTongue = Math.round(lerp(tune.tongueMin, tune.tongueMax, clamp01(turb * (0.15 + 0.5 * outdoor) + 0.9 * leanG)) * q);
+  // tongue 0 is the flame's own TIP: always there, standing tallest, reaching little sideways. The rest are the
+  // secondary licks, rarer in still air, longer and laid downwind as the wind rises.
+  const nTongue =
+    1 + Math.round(lerp(tune.tongueMin, tune.tongueMax, clamp01(turb * (0.15 + 0.5 * outdoor) + 0.9 * leanG)) * q);
   const M = tune.tongueLobes;
   for (let k = 0; k < nTongue; k++) {
     const id = seed * 131 + k * 13 + 5000;
@@ -532,19 +641,33 @@ export function emitFireLobes(out, start, f, env, tuneOverride) {
     const r5 = hash01(id, cyc, 25);
     const r6 = hash01(id, cyc, 26);
     basePoint(f, R, r1, r2, r3, 0.55, base);
-    const envT = smoothstep(0, 0.26, a) * (1 - smoothstep(0.55, 1, a));
+    const envT =
+      k === 0
+        ? 0.45 + 0.55 * smoothstep(0, 0.26, a) * (1 - smoothstep(0.7, 1, a))
+        : smoothstep(0, 0.26, a) * (1 - smoothstep(0.55, 1, a));
     if (envT < 0.01) continue;
     // outward from the fire's centre, with jitter; a base on the centre picks any direction
-        // calm air: licks rise up the page (a hanging tongue reads as a drip); wind takes them downwind
+    // calm air: licks rise up the page (a hanging tongue reads as a drip); wind takes them downwind
     const psi0 = lerp(-Math.PI / 2 + (r4 - 0.5) * 2.2, windAng, clamp01(leanG * 2.2));
     // a hearth's tongues are short and stubby, a bonfire's long; the horizontal reach is modest, the HEIGHT is the point
-    const reach = plume * tune.tongueLength * (0.45 + 0.5 * r5) * (0.35 + 0.35 * outdoor + 0.9 * leanG) * Math.pow(envT, 0.9) * heightMul;
+    const primary = k === 0;
+    const reach =
+      plume *
+      tune.tongueLength *
+      (primary ? 0.25 + 0.9 * leanG : (0.45 + 0.5 * r5) * (0.35 + 0.35 * outdoor + 0.9 * leanG)) *
+      Math.pow(envT, 0.9) *
+      heightMul;
     const curl = (r6 - 0.5) * 2 * tune.tongueCurl;
     const dl = reach / M;
     let px = base[0];
     let py = base[1];
     const tipTaper = 0.45 + 0.55 * (1 - a);
-    const topZ = height * heightMul * (0.4 + 0.3 * r5) * (0.55 + 0.45 * Math.pow(envT, 0.7));
+    // the screen position of the chain's root, so each lobe can be drawn long toward the one before it
+    project(env, base[0], base[1], 0, proj);
+    let prevX = proj[0];
+    let prevY = proj[1];
+    const topZ =
+      height * heightMul * (primary ? 0.75 + 0.25 * r5 : 0.4 + 0.3 * r5) * (0.55 + 0.45 * Math.pow(envT, 0.7));
     for (let j = 0; j < M; j++) {
       const s = (j + 0.5) / M;
       // heading: the tongue's own curl, bending toward the wind more the further out it goes
@@ -559,9 +682,32 @@ export function emitFireLobes(out, start, f, env, tuneOverride) {
       py += hy * dl;
       // wind also lays the tongue over: height falls as the lean rises
       const z = topZ * Math.pow(s, 0.85) * (1 - 0.55 * leanG * s) + height * 0.08;
-      const rad = plume * tune.tongueLobe * Math.pow(1 - 0.62 * s, 1.1) * Math.pow(envT, 0.5) * pulse * sizeMul * rainDamp * tipTaper;
+      const rad =
+        plume *
+        tune.tongueLobe *
+        (primary ? 1.25 : 1) *
+        Math.pow(1 - 0.62 * s, 1.1) *
+        Math.pow(envT, 0.5) *
+        pulse *
+        sizeMul *
+        rainDamp *
+        tipTaper;
       const heat = (0.85 - 0.5 * s) * (1 - 0.3 * a) * cool;
-      put(px, py, z, rad, 0.95, heat, 1 + 0.5 * s, hx, hy, KIND_FLAME, lerp(a, 1, s * 0.5));
+      // write once to learn the projected point, then re-write with the direction and length of the step from the last lobe
+      const at = n;
+      put(px, py, z, rad, 0.95, heat, 1, hx, hy, KIND_FLAME, lerp(a, 1, s * 0.5));
+      const sx = lastX - prevX;
+      const sy = lastY - prevY;
+      const sl = Math.hypot(sx, sy);
+      if (sl > 1e-3 && lastR > 1e-3) {
+        const o = at * LOBE_STRIDE;
+        out[o + 5] = clamp((sl * 0.65 + lastR) / lastR, 1, 4.5);
+        out[o + 6] = sx / sl;
+        out[o + 7] = sy / sl;
+        out[o + 10] = 1;
+      }
+      prevX = lastX;
+      prevY = lastY;
     }
   }
 
@@ -592,7 +738,8 @@ export function emitFireLobes(out, start, f, env, tuneOverride) {
     const x = ox + Math.cos(thv) * dist + wdx * leanG * plume * 1.6 * a;
     const y = oy + Math.sin(thv) * dist + wdy * leanG * plume * 1.6 * a;
     const z = height * heightMul * (0.5 + 1.2 * r6) * Math.pow(a, 0.7);
-    const rad = plume * tune.fleckSize * (0.6 + 0.8 * r5) * Math.pow(1 - a, 0.8) * smoothstep(0, 0.08, a) * (0.5 + 0.5 * sizeMul);
+    const rad =
+      plume * tune.fleckSize * (0.6 + 0.8 * r5) * Math.pow(1 - a, 0.8) * smoothstep(0, 0.08, a) * (0.5 + 0.5 * sizeMul);
     const stretch = 1 + 2.6 * (1 - a) * (0.5 + 0.5 * r5) * (1 + m);
     const dxv = Math.cos(thv) * 0.8 + wdx * 0.6 * leanG;
     const dyv = Math.sin(thv) * 0.8 + wdy * 0.6 * leanG;
@@ -601,11 +748,66 @@ export function emitFireLobes(out, start, f, env, tuneOverride) {
     put(x, y, z, rad, 1.25 * fade, (0.55 - 0.25 * a) * cool, stretch, dxv / dl2, dyv / dl2, KIND_FLAME, a);
   }
 
+  // ───────────────────────────── SPIT EMBERS ─────────────────────────────
+  // The heavy kind, not the spiralling sparks (those are the ember engine's, and untouched): chunks of burning wood the
+  // fire spits out. Each slot's life is one long cycle: a short parabolic FLIGHT from the fuel bed, then it LIES where it
+  // landed and cools, cream-yellow to orange to rust to coal red to nothing, over most of the cycle. Rain hisses them out
+  // sooner; wind makes them flare. They are tiny flame-kind lobes, so they take their colour from the flame ramp for
+  // free, and being in the field they get the same glow.
+  const spitHeat = clamp01(f.coal01 ?? 0.35 + 0.65 * vit);
+  const nSpit = Math.round(
+    (tune.spitBase + tune.spitPerR * R) *
+      q *
+      (0.25 + 0.75 * outdoor) *
+      (f.spitMul ?? 1) *
+      Math.pow(Math.max(power, 0.02), 0.5) *
+      (0.4 + 0.6 * spitHeat)
+  );
+  for (let i = 0; i < nSpit; i++) {
+    const id = seed * 131 + i * 23 + 31000;
+    const P = tune.spitLife * (0.6 + 0.8 * hash01(id, 0, 1));
+    const u = t / P + hash01(id, 1, 2);
+    const cyc = Math.floor(u);
+    const a = u - cyc;
+    const r1 = hash01(id, cyc, 61);
+    const r2 = hash01(id, cyc, 62);
+    const r3 = hash01(id, cyc, 63);
+    const r4 = hash01(id, cyc, 64);
+    const r5 = hash01(id, cyc, 65);
+    const r6 = hash01(id, cyc, 66);
+    const flightT = 0.45 + 0.5 * r1;
+    const sec = a * P;
+    const fa = sec / flightT; // 0..1 in the air, past 1 once down
+    const th = lerp(r2 * TAU, windAng, clamp01(0.5 * leanG * 1.6));
+    const range = plume * tune.spitRange * (0.45 + 0.9 * r3) * (1 + 1.1 * leanG);
+    const flown = fa < 1 ? 1 - (1 - fa) * (1 - fa) : 1;
+    const skid = fa > 1 ? 0.08 * (1 - Math.exp(-(sec - flightT) / 1.4)) : 0;
+    const dist = range * (flown + skid);
+    const base0 = basePoint(f, R, r4, r5, r6, 0.9, base);
+    const x = base0[0] + Math.cos(th) * dist;
+    const y = base0[1] + Math.sin(th) * dist;
+    const z = fa < 1 ? 4 * height * (0.35 + 0.35 * r4) * fa * (1 - fa) : 0;
+    const smoulder = P * 0.78 * (1 - 0.55 * clamp01(f.rain01 ?? 0));
+    const lying = Math.max(0, sec - flightT);
+    let T = fa < 1 ? 0.95 : 0.9 * Math.pow(Math.max(0, 1 - lying / smoulder), 1.6);
+    // an ember breathes, and a gust makes it flare
+    T *= 0.86 + 0.14 * Math.sin(t * (3 + 4 * r5) + r6 * TAU);
+    T = clamp01(T + 0.12 * m * (0.5 + 0.5 * Math.sin(t * 2.7 + r6 * TAU)));
+    const live = fa < 1 ? 1 : 1 - smoothstep(smoulder * 0.9, smoulder * 1.05, lying);
+    if (live < 0.02 || T < 0.005) continue;
+    const rad =
+      plume * tune.spitSize * (0.7 + 0.6 * r5) * (fa < 1 ? 1.25 : 0.9 + 0.1 * T) * live * smoothstep(0, 0.04, a);
+    const dxv = Math.cos(th);
+    const dyv = Math.sin(th);
+    put(x, y, z, rad, 1.35, T, fa < 1 ? 1 + 2.2 * (1 - fa) : 1, dxv, dyv, KIND_FLAME, 0.5);
+  }
+
   // ───────────────────────────── SMOKE ─────────────────────────────
   const smokeRef = (tune.smokeBase + tune.smokePerR * R) * q * (f.smokeMul ?? 1);
   // a hearth's smoke is drawn up the flue: thin and low; a bonfire's is a column. A doused fire smokes MORE (steam).
-  const wet = clamp01((1 - power) * (f.vitality01 > 0.02 ? 1 : 0.6) + clamp01(f.rain01 ?? 0) * 0.5);
-  const smokeAmt = (0.18 + 0.82 * outdoor) * (0.45 + 0.55 * Math.min(1, power + wet * 0.8));
+  // wet = steam: rain on a hot fire. Burning smoke follows the fire's power; a smouldering bed gives a thin wisp, no more.
+  const wet = clamp01(clamp01(f.rain01 ?? 0) * (0.35 + 0.65 * (1 - power)) * (0.3 + 0.7 * coalHeat));
+  const smokeAmt = (0.18 + 0.82 * outdoor) * (0.12 * coalHeat + 0.88 * Math.pow(power, 0.8) + 1.1 * wet);
   const nSmoke = Math.max(0, Math.round(smokeRef * smokeAmt));
   for (let i = 0; i < nSmoke; i++) {
     const id = seed * 131 + i * 17 + 14000;
@@ -632,15 +834,35 @@ export function emitFireLobes(out, start, f, env, tuneOverride) {
     const y = base[1] + swayY + wdy * drift;
     const rad = plume * tune.smokeSize * (0.55 + 1.15 * a) * Math.pow(envS, 0.6) * (0.85 + 0.35 * r3);
     const tone = clamp01(a * 1.05 + 0.08 * r2);
-    put(x, y, z, rad, (0.5 + 0.5 * smokeAmt) * Math.pow(envS, 0.55) * (0.85 + 0.3 * r3), wet, 1 + 0.5 * leanG * a, wdx, wdy, KIND_SMOKE, tone);
+    put(
+      x,
+      y,
+      z,
+      rad,
+      (0.5 + 0.5 * smokeAmt) * Math.pow(envS, 0.55) * (0.85 + 0.3 * r3),
+      wet,
+      1 + 0.5 * leanG * a,
+      wdx,
+      wdy,
+      KIND_SMOKE,
+      tone
+    );
   }
 
-  return { count: n - start, flame: flameCount, smoke: smokeCount };
+  return { count: n - start, flame: flameCount, smoke: smokeCount, coal: coalCount };
 }
 
 /** An upper bound on the lobes one fire can emit — what a buffer must hold per fire. */
 export function maxLobesPerFire(R, tuneOverride) {
   const tune = tuneOverride ? { ...BILLOW_TUNE, ...tuneOverride } : BILLOW_TUNE;
   const body = BODY_LAYERS.reduce((n, L) => n + Math.ceil(L.count * (0.72 + 0.28 * Math.min(2, R / 50))), 0);
-  return Math.ceil(body) + tune.tongueMax * tune.tongueLobes + Math.ceil(tune.fleckBase + tune.fleckPerR * R) + Math.ceil((tune.smokeBase + tune.smokePerR * R) * 2.2) + 8;
+  return (
+    Math.ceil(body) +
+    tune.tongueMax * tune.tongueLobes +
+    Math.ceil(tune.fleckBase + tune.fleckPerR * R) +
+    Math.ceil(tune.spitBase + tune.spitPerR * R) * 3 +
+    20 +
+    Math.ceil((tune.smokeBase + tune.smokePerR * R) * 2.2) +
+    8
+  );
 }

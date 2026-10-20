@@ -16,6 +16,10 @@ import { run as runFireMask } from './fire-mask.test.mjs';
 import { run as runFireSprite } from './fire-sprite.test.mjs';
 import { run as runFireSpawnPoints } from './fire-spawn-points.test.mjs';
 import { run as runFireSubsystem } from './fire-subsystem.test.mjs';
+import { run as runFireBillowGeometry } from './fire-billow-geometry.test.mjs';
+import { run as runFireBillowState } from './fire-billow-state.test.mjs';
+import { run as runFireBillowParams } from './fire-billow-params.test.mjs';
+import { run as runFireBillowEngine } from './fire-billow-engine.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -51,6 +55,10 @@ const suites = [
   ['fire-sprite', runFireSprite],
   ['fire-spawn-points', runFireSpawnPoints],
   ['fire-subsystem', runFireSubsystem],
+  ['fire-billow-geometry', runFireBillowGeometry],
+  ['fire-billow-state', runFireBillowState],
+  ['fire-billow-params', runFireBillowParams],
+  ['fire-billow-engine', runFireBillowEngine],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

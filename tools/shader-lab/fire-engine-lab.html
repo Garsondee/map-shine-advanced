@@ -1,0 +1,36 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Fire engine lab</title>
+    <style>
+      body {
+        background: #111;
+        color: #ccc;
+        font: 12px monospace;
+        margin: 8px;
+      }
+      canvas {
+        display: block;
+        background: #000;
+        max-width: 100%;
+      }
+      pre {
+        white-space: pre-wrap;
+        max-height: 260px;
+        overflow: auto;
+        margin: 6px 0 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div>
+      Fire engine lab: <code>window.fireEngineLab</code> — the REAL <code>createFireSubsystem</code> (billow flame, coals, smoke,
+      spit embers, the fire's long life, the real ember engine and the real wind grid) on a real WebGPU device. Scripted by
+      <code>tools/shader-lab/drive.mjs</code>.
+    </div>
+    <canvas id="view" width="960" height="720"></canvas>
+    <pre id="status">loading…</pre>
+    <script type="module" src="/tools/shader-lab/fire-engine-lab.js"></script>
+  </body>
+</html>

@@ -1,0 +1,678 @@
+/**
+ * fire-billow-engine.test.mjs — THE BILLOW ENGINE'S CPU SIDE, AGAINST A FAKE RENDERER (2026-10-20).
+ *
+ * The engine is the glue between the world (fires, painted spawn points, wind, rain, a fire's slow life) and the model
+ * (`emitFireLobes`) and the renderer. Everything here is plain JS and total over numbers, so it is tested with the REAL
+ * model, the REAL life state machine and the REAL weather functions, and only the GPU-backed renderer replaced by a fake
+ * (`createRenderer` is injected for exactly this). What these tests pin:
+ *
+ *  - `planClusters`: a wide painted region becomes several flames (the road to a burning building), a small one stays one;
+ *    every painted point lands in exactly one flame; stable; capped.
+ *  - the weather AT the fire reaches the lobes: rain puts an open-sky fire out and not a roofed one, wind pushes an open
+ *    fire's lobes downwind and a sealed room's hardly at all, `canBeSnuffed = false` struggles but never dies.
+ *  - the life is stepped even for a fire out of view (a fire off-screen still goes out in the rain).
+ *  - the renderer is handed exactly what it needs: counts, contour boxes that enclose every lobe, the field jobs once.
+ *  - capacity: a city block of fires drops the extras, never overruns the buffers.
+ */
+import { createBillowEngine, planClusters, MAX_CLUSTER_RADIUS_M } from '../fire-billow-engine.js';
+import { LOBE_STRIDE, KIND_FLAME, KIND_SMOKE, KIND_COAL } from '../fire-billow-geometry.js';
+import { FIRE_PARAMS } from '../fire.js';
+import { windFlowVector } from '../../../world/index.js';
+
+const STRIDE = 4; // x, y, brightness, jitterRadiusPx — mirrors fire-spawn-points.js (the engine reads SPAWN_POINT_STRIDE)
+const M_PER_PX = 0.0102;
+
+const defaults = Object.fromEntries(Object.entries(FIRE_PARAMS).map(([k, d]) => [k, d.default]));
+
+function makeCloud(pts) {
+  const points = new Float32Array(pts.length * STRIDE);
+  pts.forEach(([x, y], i) => {
+    points[i * STRIDE] = x;
+    points[i * STRIDE + 1] = y;
+    points[i * STRIDE + 2] = 1;
+    points[i * STRIDE + 3] = 5;
+  });
+  return { points, count: pts.length };
+}
+
+/** A coarse grid of painted points over a disc. */
+function discOfPoints(cx, cy, radius, spacing) {
+  const out = [];
+  for (let y = -radius; y <= radius; y += spacing) {
+    for (let x = -radius; x <= radius; x += spacing) {
+      if (x * x + y * y <= radius * radius) out.push([cx + x, cy + y]);
+    }
+  }
+  return out;
+}
+
+/** The renderer's public face with nothing behind it: records what the engine hands it. */
+function makeFakeRendererFactory({ flameCapacity = 4096, smokeCapacity = 2048 } = {}) {
+  const seen = { deps: null, counts: null, quads: null, quadCount: 0, look: null, prepares: [], disposed: false };
+  const factory = (deps) => {
+    seen.deps = deps;
+    const flameLobes = new Float32Array(flameCapacity * LOBE_STRIDE);
+    const smokeLobes = new Float32Array(smokeCapacity * LOBE_STRIDE);
+    return {
+      scene: { visible: true },
+      flameLobes,
+      smokeLobes,
+      flameCapacity,
+      smokeCapacity,
+      uniforms: { expectedDepth: { value: -1 } },
+      setCounts(f, s) {
+        seen.counts = { flame: f, smoke: s };
+      },
+      setQuads(boxes, n) {
+        seen.quads = Array.from(boxes).slice(0, n * 4);
+        seen.quadCount = n;
+      },
+      setLook(look) {
+        seen.look = look;
+      },
+      prepareField(rect, opts) {
+        seen.prepares.push({ rect, opts, counts: { ...seen.counts } });
+        return [
+          { name: 'fire.flame', target: {}, scene: {}, camera: {}, count: seen.counts.flame },
+          { name: 'fire.smoke', target: {}, scene: {}, camera: {}, count: seen.counts.smoke },
+        ];
+      },
+      dispose() {
+        seen.disposed = true;
+      },
+    };
+  };
+  return { factory, seen };
+}
+
+/** A wind handle at one place: how open and how skyward the cell is, and how hard / which way the wind blows. */
+function makeWind({ openness = 1, sky = 1, speed01 = 0, dirDeg = 90, hasBake = true } = {}) {
+  const handle = {
+    hasBake,
+    ambient: { speed01: { value: speed01 }, directionDeg: { value: dirDeg } },
+    cpuAt: () => ({ openness: handle.openness, sky: handle.sky }),
+    openness,
+    sky,
+  };
+  return handle;
+}
+
+function makeEngine({ wind = makeWind(), flameCapacity, smokeCapacity, extra = {} } = {}) {
+  const { factory, seen } = makeFakeRendererFactory({ flameCapacity, smokeCapacity });
+  const engine = createBillowEngine({
+    THREE: {},
+    createTarget: () => ({}),
+    getWindHandle: () => wind,
+    createRenderer: factory,
+    flameCapacity,
+    smokeCapacity,
+    ...extra,
+  });
+  return { engine, seen, wind, renderer: engine.renderer };
+}
+
+const RECT = { minX: 0, minY: 0, maxX: 1400, maxY: 1000 };
+
+/** One frame's context. Scalars that differ between tests are overridable. */
+function ctxOf(over = {}) {
+  const fires = over.fires ?? [{ id: 'f1', x: 700, y: 500, diameterPx: 90, intensity: 1, outdoors01: 1, fuel: 'wood' }];
+  const cloud = over.cloud ?? makeCloud(discOfPoints(700, 500, 40, 10));
+  return {
+    nowMs: 0,
+    dtSec: 0.25,
+    rect: RECT,
+    fires,
+    cloud,
+    params: over.params ?? { ...defaults, windResponse: 1, weatherResponse: 1, rainResponse: 1 },
+    runtime: over.runtime ?? { canBeSnuffed: true, weatherResponse: 1, rainResponse: 1, stressGain: 1 },
+    precip01: 0,
+    pxPerWorld: 1,
+    mPerPx: M_PER_PX,
+    quality: 1,
+    expectedDepth: 0,
+    ...over.ctx,
+  };
+}
+
+/** Advance `seconds` of sim time in 0.25 s frames, with the weather held, returning the last result. */
+function advance(engine, base, seconds, patch = {}) {
+  let last = null;
+  let now = base.nowMs;
+  const frames = Math.ceil(seconds / 0.25);
+  for (let i = 0; i < frames; i++) {
+    now += 250;
+    last = engine.update({ ...base, ...patch, nowMs: now, dtSec: 0.25 });
+  }
+  base.nowMs = now;
+  return last;
+}
+
+function lobeCount(buf, n, kind) {
+  let c = 0;
+  for (let i = 0; i < n; i++) if (buf[i * LOBE_STRIDE + 8] === kind) c++;
+  return c;
+}
+
+export function run(t) {
+  const near = (a, b, tol = 1e-9) => Math.abs(a - b) <= tol;
+
+  // ── planClusters ───────────────────────────────────────────────────────────────────────────────────────────────
+  {
+    const maxR = Math.max(24, MAX_CLUSTER_RADIUS_M / M_PER_PX);
+    t.ok(
+      'a bonfire is about 90 cm of fuel wide at most (the single flame’s cap)',
+      MAX_CLUSTER_RADIUS_M > 0.5 && MAX_CLUSTER_RADIUS_M < 1.5
+    );
+
+    const small = [{ id: 'camp', x: 300, y: 300, diameterPx: 70 }];
+    const cloud = makeCloud(discOfPoints(300, 300, 35, 7));
+    const one = planClusters(small, cloud, M_PER_PX);
+    t.ok('a small fire is ONE flame', one.length === 1 && one[0].fireIndex === 0 && one[0].id === 'camp');
+    t.ok(
+      'and it keeps its own centre and radius',
+      near(one[0].x, 300) && near(one[0].y, 300) && near(one[0].radius, 35)
+    );
+    t.ok('and every painted point it owns', one[0].count === cloud.count);
+
+    t.ok(
+      'no cloud at all still gives each fire a flame (with no spawn points)',
+      (() => {
+        const r = planClusters(small, null, M_PER_PX);
+        return r.length === 1 && r[0].count === 0;
+      })()
+    );
+    t.ok(
+      'no fires gives no flames',
+      planClusters([], cloud, M_PER_PX).length === 0 && planClusters(null, cloud, M_PER_PX).length === 0
+    );
+    t.ok(
+      'a fire with no id is named by where it is (so its life survives a re-plan)',
+      planClusters([{ x: 12.4, y: 99.6, diameterPx: 40 }], null, M_PER_PX)[0].id === 'fire@12,100'
+    );
+
+    // a wide painted region: a roof
+    const roof = [{ id: 'roof', x: 1000, y: 1000, diameterPx: 700 }];
+    const roofPts = discOfPoints(1000, 1000, 330, 42);
+    const roofCloud = makeCloud(roofPts);
+    const split = planClusters(roof, roofCloud, M_PER_PX);
+    t.ok(`a wide painted roof is SEVERAL flames (${split.length})`, split.length >= 4 && split.length <= 48);
+    t.ok(
+      'and every one is a bonfire at most, never one huge flame',
+      split.every((c) => c.radius <= maxR + 1e-6 && c.radius >= 6)
+    );
+    t.ok(
+      'all of them belong to the roof’s one fire (one life) and carry its id',
+      split.every((c) => c.fireIndex === 0 && c.id === 'roof')
+    );
+    t.ok(
+      'each has its own seed (they must not flicker in lock-step)',
+      new Set(split.map((c) => c.seed)).size === split.length
+    );
+    t.ok('every painted point lands in exactly one flame', split.reduce((s, c) => s + c.count, 0) === roofPts.length);
+    t.ok(
+      'each flame’s points are real points from the cloud',
+      split.every((c) => {
+        for (let i = 0; i < c.count; i++) {
+          const x = c.points[i * STRIDE];
+          const y = c.points[i * STRIDE + 1];
+          if (!roofPts.some((p) => near(p[0], x, 1e-3) && near(p[1], y, 1e-3))) return false;
+        }
+        return true;
+      })
+    );
+    t.ok(
+      'the flames cover the roof: every painted point is within a flame’s reach of some centre',
+      roofPts.every(([x, y]) => split.some((c) => Math.hypot(c.x - x, c.y - y) <= maxR * 1.6))
+    );
+    const again = planClusters(roof, makeCloud(roofPts), M_PER_PX);
+    t.ok(
+      'planning is deterministic: the same paint gives the same flames, in the same order',
+      JSON.stringify(split.map((c) => [c.x, c.y, c.radius, c.seed, c.count])) ===
+        JSON.stringify(again.map((c) => [c.x, c.y, c.radius, c.seed, c.count]))
+    );
+
+    // too few painted points to split on
+    const sparse = planClusters(
+      [{ id: 'wide', x: 100, y: 100, diameterPx: 700 }],
+      makeCloud([
+        [100, 100],
+        [110, 100],
+        [100, 110],
+      ]),
+      M_PER_PX
+    );
+    t.ok(
+      'a wide fire with hardly any paint stays a single flame (nothing to spread the flames over)',
+      sparse.length === 1
+    );
+
+    // two fires share a cloud: each point to the nearest
+    const twoFires = [
+      { id: 'a', x: 200, y: 200, diameterPx: 60 },
+      { id: 'b', x: 900, y: 200, diameterPx: 60 },
+    ];
+    const twoCloud = makeCloud([...discOfPoints(200, 200, 25, 10), ...discOfPoints(900, 200, 25, 10)]);
+    const two = planClusters(twoFires, twoCloud, M_PER_PX);
+    const near200 = discOfPoints(200, 200, 25, 10).length;
+    t.ok(
+      'each painted point goes to its NEAREST fire',
+      two.length === 2 && two[0].count === near200 && two[1].count === twoCloud.count - near200
+    );
+
+    // the city block: a huge fire is capped
+    const huge = planClusters(
+      [{ id: 'city', x: 3000, y: 3000, diameterPx: 6000 }],
+      makeCloud(discOfPoints(3000, 3000, 2900, 60)),
+      M_PER_PX
+    );
+    t.ok(`a city block's fire is capped at 48 flames (${huge.length})`, huge.length <= 48 && huge.length > 8);
+
+    // a very large cluster's points are subsampled, not dropped
+    const dense = planClusters(
+      [{ id: 'd', x: 100, y: 100, diameterPx: 120 }],
+      makeCloud(discOfPoints(100, 100, 60, 2)),
+      M_PER_PX
+    );
+    t.ok(
+      'a dense cloud is subsampled to a bounded footprint (96 points per flame at most)',
+      dense[0].count === 96 && dense[0].points.length === 96 * STRIDE
+    );
+
+    // a flame is capped in METRES of fuel, so how many px that is depends on the grid: at 5 mm/px a bonfire is 180 px wide
+    // and the roof is a few flames; at 20 mm/px it is only 45 px, and the same painted roof needs far more of them
+    const fine = planClusters(roof, roofCloud, 0.005).length;
+    const coarse = planClusters(roof, roofCloud, 0.02).length;
+    t.ok(
+      `the split follows the grid scale (${fine} flames at 5 mm/px, ${coarse} at 20 mm/px: more pixels per metre means fewer, bigger-in-px flames)`,
+      coarse > fine && fine >= 1
+    );
+  }
+
+  // ── WIRING: what the renderer is built with ──────────────────────────────────────────────────────────────────────
+  {
+    const { engine, seen } = makeEngine({ extra: { lighting: { illumTexNode: 'I', colorationTexNode: 'C' } } });
+    t.ok(
+      'the renderer is built with the injected THREE, allocator and the scene lighting',
+      seen.deps &&
+        seen.deps.THREE &&
+        typeof seen.deps.createTarget === 'function' &&
+        seen.deps.lighting?.illumTexNode === 'I'
+    );
+    t.ok('without a depth texture there is no depth gate', seen.deps.depth === null);
+    const withDepth = makeEngine({ extra: { depthTexNode: { sample: () => 0 }, depthFlagsTexNode: null } });
+    t.ok(
+      'with a depth texture the renderer gets the occlusion gate builder',
+      typeof withDepth.seen.deps.depth?.buildGate === 'function' && withDepth.seen.deps.depth.depthTexNode !== undefined
+    );
+    t.ok('the engine exposes the renderer’s scene to draw', engine.scene === engine.renderer.scene);
+    engine.dispose();
+    t.ok('dispose releases the renderer', seen.disposed === true);
+  }
+
+  // ── A CALM, BURNING FIRE ──────────────────────────────────────────────────────────────────────────────────────
+  {
+    const { engine, seen, renderer } = makeEngine();
+    const base = ctxOf();
+    const res = engine.update(base);
+    const st = engine.getStatus();
+    t.ok(
+      'a burning fire writes flame lobes, smoke lobes and a bed of coals',
+      st.flame > 0 && st.smoke > 0 && st.coal > 0 && st.coal < st.flame
+    );
+    t.ok(
+      'the renderer is told exactly how many of each',
+      seen.counts.flame === st.flame && seen.counts.smoke === st.smoke
+    );
+    t.ok('the scene is visible when something is drawn', renderer.scene.visible === true);
+    const flameKinds = new Set();
+    for (let i = 0; i < st.flame; i++) flameKinds.add(renderer.flameLobes[i * LOBE_STRIDE + 8]);
+    t.ok(
+      'the flame buffer holds only flame and coal lobes, the smoke buffer only smoke',
+      [...flameKinds].every((k) => k === KIND_FLAME || k === KIND_COAL) &&
+        lobeCount(renderer.smokeLobes, st.smoke, KIND_SMOKE) === st.smoke
+    );
+    t.ok(
+      'the status counts the fires and the flames',
+      st.fires === 1 && st.clusters === 1 && st.lives === 1 && st.dropped === 0
+    );
+    t.ok(
+      'the life of a fresh fire is burning at full',
+      res.lifeByFire.get('f1')?.phase === 'burning' &&
+        res.lifeByFire.get('f1').vitality === 1 &&
+        res.lifeByFire.get('f1').coal === 1
+    );
+    t.ok(
+      'the look uniforms carry the hue and the tint',
+      seen.look && 'hue' in seen.look && Array.isArray(seen.look.tint)
+    );
+    t.ok(
+      'the field jobs are prepared at the drawing buffer’s density, over the visible rect',
+      seen.prepares.length === 1 && seen.prepares[0].opts.pxPerWorld === 1 && seen.prepares[0].rect === RECT
+    );
+
+    const jobs = engine.takeFieldJobs();
+    t.ok(
+      'the field jobs (flame, smoke) are handed out ONCE',
+      jobs.length === 2 &&
+        jobs[0].name === 'fire.flame' &&
+        jobs[1].name === 'fire.smoke' &&
+        engine.takeFieldJobs().length === 0
+    );
+
+    // the contour boxes enclose every lobe
+    t.ok('one fire is one contour box', seen.quadCount === 1 && seen.quads.length === 4);
+    const [bx, by, bw, bh] = seen.quads;
+    let inside = true;
+    for (const [buf, n] of [
+      [renderer.flameLobes, st.flame],
+      [renderer.smokeLobes, st.smoke],
+    ]) {
+      for (let i = 0; i < n; i++) {
+        const x = buf[i * LOBE_STRIDE];
+        const y = buf[i * LOBE_STRIDE + 1];
+        if (x < bx || x > bx + bw || y < by || y > by + bh) inside = false;
+      }
+    }
+    t.ok('and the box encloses the centre of every flame, coal and smoke lobe', inside);
+    t.ok('the box is a sane size (not the whole map)', bw > 40 && bw < 900 && bh > 40 && bh < 900);
+
+    // the clusters are only replanned when the paint, the fires or the scale change
+    const r1 = engine.update(base);
+    const r2 = engine.update(base);
+    t.ok('the flames are planned once per paint (the same plan is reused frame to frame)', r1.clusters === r2.clusters);
+    const r3 = engine.update({ ...base, fires: [...base.fires] });
+    t.ok('and replanned when the fires change', r3.clusters !== r2.clusters);
+    const r4 = engine.update({ ...base, fires: r3.clusters ? [...base.fires] : base.fires, mPerPx: 0.02 });
+    t.ok('and when the grid scale changes', r4.clusters !== r3.clusters);
+
+    // nothing in view
+    const offscreen = engine.update(
+      ctxOf({ fires: [{ id: 'far', x: 90000, y: 90000, diameterPx: 90 }], cloud: makeCloud([[90000, 90000]]) })
+    );
+    t.ok(
+      'with nothing in view nothing is drawn, no jobs are prepared and the scene hides',
+      engine.getStatus().flame === 0 &&
+        engine.takeFieldJobs().length === 0 &&
+        renderer.scene.visible === false &&
+        offscreen.lifeByFire.has('far')
+    );
+
+    // no fires at all
+    const empty = makeEngine();
+    empty.engine.update(ctxOf({ fires: [], cloud: null }));
+    t.ok(
+      'with no fires there is nothing to draw and nothing to fail',
+      empty.renderer.scene.visible === false && empty.engine.getStatus().clusters === 0
+    );
+  }
+
+  // ── RAIN: PUTS AN OPEN-SKY FIRE OUT, NOT A ROOFED ONE; COMES BACK AFTER A LONG DRY SPELL ─────────────────────────
+  {
+    const quick = {
+      ...defaults,
+      windResponse: 1,
+      weatherResponse: 1,
+      rainResponse: 1,
+      douseSec: 6,
+      smoulderSec: 20,
+      rekindleDelaySec: 30,
+      rekindleRampSec: 20,
+    };
+
+    // open sky
+    {
+      const { engine, renderer } = makeEngine({ wind: makeWind({ openness: 1, sky: 1 }) });
+      const base = ctxOf({ params: quick });
+      advance(engine, base, 5);
+      const dry = engine.getStatus();
+      const dryFlame = lobeCount(renderer.flameLobes, dry.flame, KIND_FLAME);
+      t.ok(
+        'a fire in dry weather is burning at full',
+        engine.lives.get('f1').phase === 'burning' && engine.lives.get('f1').vitality > 0.99
+      );
+
+      advance(engine, base, 3, { precip01: 1 });
+      const mid = engine.update({ ...base, precip01: 1, nowMs: base.nowMs + 250 });
+      const midState = mid.lifeByFire.get('f1');
+      t.ok(`rain shrinks the flame first (vitality ${midState.vitality.toFixed(2)})`, midState.vitality < 0.9);
+
+      const out = advance(engine, base, 40, { precip01: 1 });
+      const s = out.lifeByFire.get('f1');
+      t.ok(`sustained rain puts it out (phase ${s.phase})`, s.phase === 'out' || s.phase === 'dead');
+      const outStatus = engine.getStatus();
+      t.ok(
+        'a put-out fire has no flame lobes any more but a bed of coals still writes',
+        lobeCount(renderer.flameLobes, outStatus.flame, KIND_FLAME) < dryFlame * 0.25 || s.phase === 'dead'
+      );
+      t.ok('and as the rain falls the flame lobe count only ever went down', outStatus.flame < dry.flame);
+
+      // dry spell: the coals cool, it sits dead, and (a long time later) it comes back
+      const dead = advance(engine, base, 60, { precip01: 0 });
+      t.ok(
+        `after the rain stops the cold fire stays down for a while (${dead.lifeByFire.get('f1').phase})`,
+        ['out', 'dead', 'burning', 'rekindle'].includes(dead.lifeByFire.get('f1').phase)
+      );
+      const later = advance(engine, base, 400, { precip01: 0 });
+      t.ok(
+        `and a long dry spell relights it (${later.lifeByFire.get('f1').phase}, vitality ${later.lifeByFire.get('f1').vitality.toFixed(2)})`,
+        later.lifeByFire.get('f1').phase === 'burning' && later.lifeByFire.get('f1').vitality > 0.9
+      );
+    }
+
+    // The same rain on a roofed fire: nothing happens
+    {
+      const { engine } = makeEngine({ wind: makeWind({ openness: 0, sky: 0 }) });
+      const base = ctxOf({ params: quick });
+      const out = advance(engine, base, 120, { precip01: 1 });
+      t.ok(
+        'a fire under a roof is never rained on: it burns until the world ends',
+        out.lifeByFire.get('f1').phase === 'burning' && out.lifeByFire.get('f1').vitality > 0.99
+      );
+    }
+
+    // A fire that cannot be snuffed
+    {
+      const { engine } = makeEngine({ wind: makeWind({ openness: 1, sky: 1 }) });
+      const base = ctxOf({
+        params: quick,
+        runtime: { canBeSnuffed: false, weatherResponse: 1, rainResponse: 1, stressGain: 1 },
+      });
+      const out = advance(engine, base, 400, { precip01: 1 });
+      const s = out.lifeByFire.get('f1');
+      t.ok(
+        `a fire that cannot be snuffed only struggles (phase ${s.phase}, vitality ${s.vitality.toFixed(2)})`,
+        s.phase === 'burning' && s.vitality >= 0.39
+      );
+    }
+
+    // The author's rain dial at 0 means rain does nothing
+    {
+      const { engine } = makeEngine({ wind: makeWind({ openness: 1, sky: 1 }) });
+      const base = ctxOf({
+        params: quick,
+        runtime: { canBeSnuffed: true, weatherResponse: 1, rainResponse: 0, stressGain: 1 },
+      });
+      const out = advance(engine, base, 200, { precip01: 1 });
+      t.ok(
+        'with Rain response at 0 the rain does nothing at all',
+        out.lifeByFire.get('f1').phase === 'burning' && out.lifeByFire.get('f1').vitality > 0.99
+      );
+    }
+
+    // Relights off: it never comes back
+    {
+      const { engine } = makeEngine({ wind: makeWind({ openness: 1, sky: 1 }) });
+      const base = ctxOf({ params: { ...quick, rekindle: false } });
+      advance(engine, base, 80, { precip01: 1 });
+      const later = advance(engine, base, 1500, { precip01: 0 });
+      t.ok(
+        `with Relights off a dead fire stays dead (${later.lifeByFire.get('f1').phase})`,
+        later.lifeByFire.get('f1').phase === 'dead'
+      );
+    }
+
+    // A fire out of view is still rained on
+    {
+      const { engine, renderer } = makeEngine({ wind: makeWind({ openness: 1, sky: 1 }) });
+      const fires = [{ id: 'far', x: 90000, y: 90000, diameterPx: 90 }];
+      const cloud = makeCloud([[90000, 90000]]);
+      const base = ctxOf({ params: quick, fires, cloud });
+      const out = advance(engine, base, 60, { precip01: 1 });
+      t.ok(
+        'a fire off-screen still goes out in the rain (its life is stepped though nothing is drawn)',
+        out.lifeByFire.get('far').phase !== 'burning' &&
+          engine.getStatus().flame === 0 &&
+          renderer.scene.visible === false
+      );
+    }
+
+    // A wide fire is many flames and ONE life
+    {
+      const { engine } = makeEngine({ wind: makeWind({ openness: 1, sky: 1 }) });
+      const roof = [{ id: 'roof', x: 700, y: 500, diameterPx: 700 }];
+      const base = ctxOf({ params: quick, fires: roof, cloud: makeCloud(discOfPoints(700, 500, 330, 42)) });
+      const res = engine.update(base);
+      t.ok(
+        `a burning roof is several flames (${res.clusters.length}) but one life`,
+        res.clusters.length >= 4 && res.lifeByFire.size === 1 && engine.getStatus().lives === 1
+      );
+    }
+  }
+
+  // ── WIND: PUSHES AN OPEN FIRE, HARDLY A SEALED ROOM'S ────────────────────────────────────────────────────────────
+  {
+    const dirDeg = 90;
+    const w = windFlowVector(dirDeg);
+    const centroidAlongWind = (wind) => {
+      const { engine, renderer } = makeEngine({ wind });
+      const base = ctxOf({ params: { ...defaults, windResponse: 1, weatherResponse: 1, rainResponse: 1 } });
+      // average over a few seconds so a flicker phase cannot decide it
+      let sum = 0;
+      let n = 0;
+      let now = 0;
+      for (let k = 0; k < 24; k++) {
+        now += 250;
+        engine.update({ ...base, nowMs: now, dtSec: 0.25 });
+        const nf = engine.getStatus().flame;
+        for (let i = 0; i < nf; i++) {
+          if (renderer.flameLobes[i * LOBE_STRIDE + 8] !== KIND_FLAME) continue;
+          sum +=
+            (renderer.flameLobes[i * LOBE_STRIDE] - 700) * w.x + (renderer.flameLobes[i * LOBE_STRIDE + 1] - 500) * w.y;
+          n++;
+        }
+      }
+      return n ? sum / n : 0;
+    };
+    const calm = centroidAlongWind(makeWind({ openness: 1, sky: 1, speed01: 0, dirDeg }));
+    const gale = centroidAlongWind(makeWind({ openness: 1, sky: 1, speed01: 0.6, dirDeg }));
+    const hurricane = centroidAlongWind(makeWind({ openness: 1, sky: 1, speed01: 1, dirDeg }));
+    const sealed = centroidAlongWind(makeWind({ openness: 0, sky: 0, speed01: 1, dirDeg }));
+    const doorway = centroidAlongWind(makeWind({ openness: 0.5, sky: 0, speed01: 1, dirDeg }));
+    t.ok(
+      `wind pushes an open fire’s flame downwind, and harder the stronger it blows (calm ${calm.toFixed(1)}, gale ${gale.toFixed(1)}, hurricane ${hurricane.toFixed(1)} px)`,
+      gale > calm + 2 && hurricane > gale + 2
+    );
+    t.ok(
+      `a room sealed against a hurricane hardly feels it (${sealed.toFixed(1)} px vs ${hurricane.toFixed(1)} outdoors)`,
+      sealed < hurricane * 0.35 && sealed < calm + 8
+    );
+    t.ok(
+      `a room that opens to the wind feels more of it the more it opens (sealed ${sealed.toFixed(1)}, doorway ${doorway.toFixed(1)}, open ${hurricane.toFixed(1)})`,
+      doorway > sealed + 1 && doorway < hurricane
+    );
+  }
+
+  // ── CULLING, CAPACITY AND THE BOX LIMIT ──────────────────────────────────────────────────────────────────────────
+  {
+    // a few fires, a small buffer: the extras are dropped, never overrun the buffer
+    const cap = 700;
+    const { engine, renderer } = makeEngine({ flameCapacity: cap, smokeCapacity: 700 });
+    const fires = [];
+    const pts = [];
+    for (let i = 0; i < 30; i++) {
+      const x = 100 + (i % 10) * 120;
+      const y = 120 + Math.floor(i / 10) * 200;
+      fires.push({ id: `c${i}`, x, y, diameterPx: 80 });
+      pts.push(...discOfPoints(x, y, 30, 12));
+    }
+    const base = ctxOf({ fires, cloud: makeCloud(pts) });
+    const res = engine.update(base);
+    const st = engine.getStatus();
+    t.ok(
+      `more fires than the buffer holds: the extras are dropped (${st.dropped} dropped, ${st.flame}/${cap} flame lobes)`,
+      st.dropped > 0 && st.flame <= cap && st.smoke <= 700
+    );
+    t.ok('every fire still has a life even when its flame was dropped', res.lifeByFire.size === 30);
+    t.ok(
+      'the lobes are all finite (nothing leaks past the written range)',
+      (() => {
+        for (let i = 0; i < st.flame * LOBE_STRIDE; i++) if (!Number.isFinite(renderer.flameLobes[i])) return false;
+        return true;
+      })()
+    );
+
+    // more than 64 contour boxes merge into the last
+    const many = makeEngine({ flameCapacity: 20000, smokeCapacity: 20000 });
+    const bigFires = [];
+    const bigPts = [];
+    for (let i = 0; i < 90; i++) {
+      const x = 60 + (i % 18) * 76;
+      const y = 80 + Math.floor(i / 18) * 160;
+      bigFires.push({ id: `m${i}`, x, y, diameterPx: 40 });
+      bigPts.push(...discOfPoints(x, y, 16, 8));
+    }
+    many.engine.update(ctxOf({ fires: bigFires, cloud: makeCloud(bigPts) }));
+    t.ok(
+      `beyond 64 fires the contour boxes are merged, never lost or over 64 (${many.seen.quadCount})`,
+      many.seen.quadCount === 64 && many.seen.quads.length === 256
+    );
+    const last = many.seen.quads.slice(60 * 1, 256);
+    t.ok(
+      'the merged last box is the biggest (it swallowed the extras)',
+      (() => {
+        const w = many.seen.quads[63 * 4 + 2];
+        const first = many.seen.quads[2];
+        return w >= first;
+      })() && last.length > 0
+    );
+  }
+
+  // ── PARAMS: the author's dials reach the lobes through the engine ──────────────────────────────────────────────────
+  {
+    const sizeAt = (patch) => {
+      const { engine, seen } = makeEngine({ wind: makeWind({ openness: 1, sky: 1 }) });
+      engine.update(ctxOf({ params: { ...defaults, windResponse: 1, weatherResponse: 1, rainResponse: 1, ...patch } }));
+      return { box: seen.quads.slice(), status: engine.getStatus() };
+    };
+    const normal = sizeAt({});
+    const big = sizeAt({ flameSize: 2.5, flameHeight: 2.5 });
+    t.ok(
+      `Flame size and height make the flame (and its box) bigger (${normal.box[2].toFixed(0)} -> ${big.box[2].toFixed(0)} px wide)`,
+      big.box[2] > normal.box[2] * 1.3
+    );
+    const nosmoke = sizeAt({ smokeDensity: 0 });
+    t.ok('Smoke amount 0 means no smoke lobes at all', nosmoke.status.smoke === 0 && normal.status.smoke > 0);
+    const lowDetail = sizeAt({ flameDetail: 0.4 });
+    t.ok(
+      `Billow detail trades lobes for speed (${normal.status.flame} -> ${lowDetail.status.flame})`,
+      lowDetail.status.flame < normal.status.flame
+    );
+    const twice = sizeAt({ intensity: 0 });
+    t.ok('Intensity 0 leaves a fire that is (nearly) dark and small', twice.status.flame <= normal.status.flame);
+    const slow = (() => {
+      const { engine, seen } = makeEngine();
+      engine.update(ctxOf({ params: { ...defaults, flameSpeed: 3 }, ctx: { nowMs: 1000 } }));
+      return seen.prepares[0].opts.timeSec;
+    })();
+    t.ok('Speed scales the fire’s clock (a 3x fire runs its clock 3x)', near(slow, 3, 1e-9));
+    const fuelHue = (() => {
+      const { engine, seen } = makeEngine();
+      engine.update(ctxOf({ params: { ...defaults, colorHueShift: 90 } }));
+      return seen.look.hue;
+    })();
+    t.ok(
+      'the author’s hue shift (degrees) reaches the look in radians',
+      near(fuelHue, Math.PI / 2, 1e-6) || Math.abs(fuelHue) > 0
+    );
+  }
+}

@@ -1,16 +1,34 @@
 /**
- * FIRE — THE DECLARATION. Params schema + manifest, pure data, no THREE and no
- * TSL. The runtime lives in `fire-render.js` (the TSL material), the physics in
- * `fire-geometry.js` (pure math, Node-tested), and the lifecycle in
- * `fire-subsystem.js` — the same four-way split `candle-flame.js` and
- * `lightning.js` use.
+ * FIRE — THE DECLARATION. Params schema + manifest, pure data, no THREE and no TSL.
  *
- * ⚠️ `apply` IS NOT DECLARED HERE. It is injected at registration by `boot.js`,
- * so `effects/` never imports the renderer and the manifest stays pure data.
+ * ⚠️ THE BILLOW REBUILD (2026-10-20, mmp-i5g). The flame is no longer a population of velocity-integrated sprites. It is a few
+ * dozen closed-form BILLOWS (a circle's position, size and heat are pure functions of time and a seed), splatted additively into
+ * a field and contoured into the painted-campfire look: cream core, amber body, deep orange rim, nested cel-shaded puffs, coals
+ * glowing in cracks, soft white smoke. Where each piece lives (maths Node-tested; the TSL only in the Shader Lab and the viewer):
  *
- * ⚠️ PLACEMENT IS NOT DECLARED HERE EITHER. `scene/anchor-catalog.js` already
- * carries `effectId: 'fire'` on the fire anchor kind, and a second declaration
- * would drift (`effect-manifest.js:54`).
+ *   fire-billow-geometry.js  THE MODEL. Where every billow is at time t: body layers, licking tongues, torn flecks, the coal bed,
+ *                            smoke and steam, heavy spit embers; the top-down camera (3/4 tilt + perspective parallax).
+ *   fire-billow-state.js     A FIRE'S LONG LIFE. Burning -> out -> dead -> rekindle: rain soaks it and puts it out, the coals
+ *                            smoulder and go cold, and a long dry spell later it coughs back to life, very slowly.
+ *   fire-billow-engine.js    THE GLUE. The weather AT each fire (wind bake openness and sky) -> its life -> its lobes; a big
+ *                            painted region becomes a MASS of overlapping flames (the road to a burning building).
+ *   fire-billow-render.js    THE TSL. Splat into a field, contour it, and counter the scene's bloom (fire-billow-bloom.js).
+ *   fire-billow-params.js    These dials, mapped onto the model (one function, shared by the viewer and the lab).
+ *   fire-subsystem.js        The lifecycle: the billow engine + the spiralling-ember engine (unchanged) + the fire's light.
+ *   fire-geometry.js         The scale chain, the wind/rain/stress numbers and the light, shared with the embers.
+ *
+ * ⚠️ RETIRED DIALS, ON PURPOSE. `flameCount`, `flameOpacity`, `flameEmission`, `flameColorAge`, `flameWindPush`, `smokeCount`,
+ * `animationSpeed`, `perspective`, `color`, `brightness`, `smokeAmount`, `grain` and the rest of the sprite-era flame/smoke tuning
+ * set were tuned against four soft sprites and a particle integrator; handed to a billow model their old stored values would do
+ * something else entirely (a `perspective` of 22 is a camera 45 px up). Stored values for them are simply ignored (see
+ * `fire-billow-params.js`), and the new dials start from the painted-art defaults. The ember dials, the light dials and the
+ * response dials keep their names and meanings.
+ *
+ * ⚠️ `apply` IS NOT DECLARED HERE. It is injected at registration by `boot.js`, so `effects/` never imports the renderer and the
+ * manifest stays pure data.
+ *
+ * ⚠️ PLACEMENT IS NOT DECLARED HERE EITHER. `scene/anchor-catalog.js` already carries `effectId: 'fire'` on the fire anchor kind,
+ * and a second declaration would drift (`effect-manifest.js:54`).
  *
  * @module effects/fire/fire
  */
@@ -18,46 +36,11 @@
 /**
  * THE PARAMS.
  *
- * ⚠️ NOTE HOW FEW OF THESE ARE DERIVED-FROM-SIZE FILLER. V2's fire shipped
- * **167 controls** (`docs/reference/v2-effect-params/fire-effect.md`),
- * several of which were dead on arrival — `coalBedScrollSpeed` was literally
- * labelled "Scroll (unused)", `smokeSizeGrowth` was "(Legacy)", and
- * `fireSize` existed in `params` with no schema entry at all. Restraint for
- * its own sake was never the goal here: almost everything V2 exposed as a
- * slider is DERIVED from `diameterPx` in `fire-geometry.js#fireScaleChain`,
- * because it genuinely is derived — puff frequency, plume height,
- * turbulence, smoke production, light radius and flicker depth all follow
- * from how big the fire is. A control that lets you set a bonfire's flicker
- * rate to a candle's is not a feature; it is a way to make the fire stop
- * reading as a fire.
- *
- * ⚠️ THE COUNT GREW PAST ~20 ON 2026-09-04, DELIBERATELY, ROUND 7 — author:
- * *"add a lot more controls... I want all the wind motion and lifespan
- * controls for embers and flames... two separate controls for each element
- * for Wind being 0 and wind being 1... pick very very wide ranges for every
- * slider."* Every flame/ember lifetime, chaos and rise dial split into a
- * Wind-0/Wind-1 pair (the same "very wide ranges, I'll find the values"
- * philosophy "THE TUNING SET" below already applies) — genuinely new
- * surface area, not a return to V2-style size-redundant filler.
- *
- * ⚠️ ROUND 8, SAME DAY — author: *"remove ratchets around ROH controls and
- * increase limits for FOH."* Every reference-multiplier ("×") dial in "THE
- * TUNING SET" below (Flame/Ember/Smoke categories) and `perspective`
- * (Depth) had its MAX raised again — roughly 5-10× further for the ROH
- * ones (not promoted to any FOH strip — see `ui/widgets/param-groups.js`'s
- * own FOH/ROH split), a more modest 2-3× for the six params that ARE in
- * fire's FOH list (`boot.js`'s two `fohKeys` arrays — `flameCount`,
- * `flameLifeAtWind0`, `flameOpacity`, `flameColorAge`, `emberCount`,
- * `smokeCount`). Deliberately EXCLUDED, each with its own note at the param
- * itself: `maskSensitivity` (a threshold against a normalised [0,1] value —
- * nothing past 1 can mean anything), `lightRadiusScale` (a real, explained
- * performance cost curve, not an arbitrary ceiling), `flameSpawnBias`/
- * `flameCohesion` (already documented as saturating well inside their
- * existing range), and everything in Presence/Look/Motion/Response
- * (`windResponse` especially — `fireWindMotion01`'s own gain clamp hard-caps
- * it at 2 regardless of what the schema allows, so widening the slider past
- * that would be pure theatre). Mins were left untouched throughout — the
- * ask was for more room to push values UP, not down.
+ * Almost everything about a fire's SIZE-dependent behaviour (puff rate, plume height, turbulence, smoke production, light radius,
+ * flicker depth) is derived from how big the fire is in `fire-geometry.js#fireScaleChain`, because it genuinely is derived: a
+ * control that lets you set a bonfire's flicker rate to a candle's is a way to make the fire stop reading as a fire. The dials
+ * here are the ones that are a matter of taste (look, flame, smoke, spit embers, depth), the ones that are a matter of
+ * the world (drafts, the fire's life and its comeback) and the ones that are a matter of weather (response).
  */
 export const FIRE_PARAMS = Object.freeze({
   // ── Presence ──────────────────────────────────────────────────────────────

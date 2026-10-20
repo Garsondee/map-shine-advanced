@@ -19,6 +19,7 @@ import {
   planClusters,
   mergeBoxes,
   infernoHeightGain,
+  massQuality,
   viewCameraHeight,
   MAX_CLUSTER_RADIUS_M,
 } from '../fire-billow-engine.js';
@@ -884,6 +885,16 @@ export function run(t) {
         infernoHeightGain(1e6, 59) === 2 &&
         infernoHeightGain(undefined, undefined) === 1
     );
+    t.ok(
+      'each flame of a big fire is simpler (it is mostly hidden by its neighbours): 1 among a few, half for a mass of forty or more',
+      massQuality(1) === 1 &&
+        massQuality(4) === 1 &&
+        massQuality(20) < massQuality(8) &&
+        massQuality(8) < 1 &&
+        massQuality(44) === 0.5 &&
+        massQuality(500) === 0.5 &&
+        massQuality(undefined) === 1
+    );
     const box = (x, y, w, h) => [x, y, w, h];
     {
       const r = mergeBoxes(
@@ -948,6 +959,12 @@ export function run(t) {
       if (!inAny) enclosed = false;
     }
     t.ok('and the boxes still enclose every flame lobe', enclosed);
+    const lone = makeEngine().engine;
+    lone.update(ctxOf());
+    t.ok(
+      `and each of its flames is simpler than a lone campfire's (quality ${st.quality}, a lone fire 1)`,
+      st.quality < 1 && st.quality >= 0.5 && lone.getStatus().quality === 1
+    );
     t.ok(
       'the mass covers more of the screen than one flame, so the bloom fills it more',
       (() => {

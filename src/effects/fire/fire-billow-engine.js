@@ -37,6 +37,11 @@ const MAX_POINTS_PER_CLUSTER = 96;
 const MAX_CLUSTERS_PER_FIRE = 96;
 /** Flames of a split fire stand this close (in maxR) at their widest: close enough that neighbours overlap into one mass. */
 const CLUSTER_SPACING = 0.95;
+/**
+ * Most lobes written per frame before every flame is thinned out: the emitter costs ~0.7 us a lobe (measured, Node, warm), so
+ * this is ~3 ms a frame. A lone campfire is ~90 lobes (0.06 ms); a whole building would otherwise be ~6000 (4.5 ms).
+ */
+const CPU_LOBE_BUDGET = 4500;
 /** A burning mass's equivalent flame radius, as a fraction of its box's mean side (fitted to a single flame: 0.19). */
 const MASS_FILL_PER_SIDE = 0.19;
 
@@ -49,6 +54,17 @@ const MASS_FILL_PER_SIDE = 0.19;
 export function infernoHeightGain(parentRadius, maxRadius) {
   const ratio = Math.max(1, (parentRadius || 0) / Math.max(1e-3, maxRadius || 1));
   return clamp(1 + 0.4 * Math.log2(ratio), 1, 2);
+}
+
+/**
+ * How much simpler each flame of a big fire may be: in a mass of flames each one is mostly hidden by its neighbours, and the
+ * lobe emitter is the effect's whole CPU cost (~0.7 us per lobe: a lone campfire 0.06 ms, a roof of thirty flames 1.8 ms at full
+ * quality). 1 for a flame on its own or among a few, easing down to half for a mass of forty or more.
+ *
+ * @param {number} siblings how many flames the whole fire was split into
+ */
+export function massQuality(siblings) {
+  return clamp(1 - 0.0125 * (Math.max(1, siblings || 1) - 4), 0.5, 1);
 }
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
@@ -134,6 +150,7 @@ export function planClusters(fires, cloud, mPerPx) {
         radius: R,
         parentRadius: R,
         maxRadius: maxR,
+        siblings: 1,
         seed: baseSeed,
         points,
         count,
@@ -208,6 +225,7 @@ export function planClusters(fires, cloud, mPerPx) {
         radius: clamp(Math.max(spread * 0.9, maxR * 0.8), 6, maxR),
         parentRadius: R,
         maxRadius: maxR,
+        siblings: centres.length,
         seed: (baseSeed + Math.imul(c + 1, 0x9e3779b1)) | 0,
         points,
         count,
@@ -446,12 +464,17 @@ export function createBillowEngine({
         );
       };
 
-      // THE LOBE BUDGET. What would every visible flame want at full quality? Past the buffer they ALL thin out together (a burning
-      // roof of eighty flames is eighty simpler flames, not sixty flames and twenty holes).
+      // THE LOBE BUDGET. In a mass each flame is simpler (`massQuality`), and what the visible flames still want past the buffer
+      // is thinned out of ALL of them together (a burning roof of eighty flames is eighty simpler flames, not sixty flames and
+      // twenty holes).
+      const baseQuality = env.quality;
       let need = 0;
-      for (const c of clusters) if (inView(c)) need += maxLobesPerFire(c.radius, br.tune);
-      const budgetQuality = need > fCap * 0.9 ? clamp((fCap * 0.9) / need, 0.3, 1) : 1;
-      env.quality = clamp(env.quality * budgetQuality, 0.2, 1);
+      for (const c of clusters) {
+        if (inView(c)) need += maxLobesPerFire(c.radius, br.tune) * baseQuality * massQuality(c.siblings);
+      }
+      const lobeBudget = Math.min(fCap * 0.9, CPU_LOBE_BUDGET);
+      const budgetQuality = need > lobeBudget ? clamp(lobeBudget / need, 0.3, 1) : 1;
+      let minQuality = 1;
 
       for (const c of clusters) {
         const f = fires[c.fireIndex] ?? {};
@@ -501,6 +524,8 @@ export function createBillowEngine({
 
         // visible? (the life has been stepped either way, so a fire out of view still goes out in the rain)
         if (!inView(c)) continue;
+        env.quality = clamp(baseQuality * massQuality(c.siblings) * budgetQuality, 0.2, 1);
+        minQuality = Math.min(minQuality, env.quality);
         const room = Math.ceil(maxLobesPerFire(c.radius, br.tune) * clamp(env.quality, 0.35, 1));
         if (nf + room > fCap || ns + room > sCap) {
           dropped++;
@@ -612,7 +637,7 @@ export function createBillowEngine({
         coal: coalTotal,
         dropped,
         boxes: nBoxes,
-        quality: +env.quality.toFixed(3),
+        quality: +minQuality.toFixed(3),
         bloomCounter: counter ? `K ${counter.K.toFixed(2)} thr ${counter.threshold} mix ${br.bloomMix}` : 'off',
       };
       return { lifeByFire, clusters };

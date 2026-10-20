@@ -430,12 +430,15 @@ export function createWindHandle({
    * the same convention the GPU shapes use, so a caller polling this during
    * startup gets a usable answer rather than an exception.
    *
+   * `sky` is the cell's painted `_Outdoors` value (1 = open sky) — the CPU twin of the sky channel the particle
+   * kernels read, so a CPU consumer of the rain question (fire's light) asks exactly what the GPU asks.
+   *
    * @param {number} x @param {number} y - world position.
-   * @returns {{exposure: number, openness: number, solid: boolean, inGrid: boolean}}
+   * @returns {{exposure: number, openness: number, sky: number, solid: boolean, inGrid: boolean}}
    */
   function cpuAt(x, y) {
     const exposure = cpuExposureAt ? clamp01(cpuExposureAt(x, y)) : 1;
-    if (!grid || !cells) return { exposure, openness: 1, solid: false, inGrid: false };
+    if (!grid || !cells) return { exposure, openness: 1, sky: 1, solid: false, inGrid: false };
     const cx = Math.floor((x - grid.originX) / grid.cellSize);
     const cy = Math.floor((y - grid.originY) / grid.cellSize);
     const inGrid = cx >= 0 && cy >= 0 && cx < grid.cols && cy < grid.rows;
@@ -443,6 +446,7 @@ export function createWindHandle({
     return {
       exposure,
       openness: cells.openness ? clamp01(Number(cells.openness[i] ?? 1)) : 1,
+      sky: cells.sky ? clamp01(Number(cells.sky[i] ?? 1)) : 1,
       solid: cells.solid ? !!cells.solid[i] : false,
       inGrid,
     };

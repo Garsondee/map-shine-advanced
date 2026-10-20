@@ -30,7 +30,15 @@
  * just that the source param is textually referenced somewhere.
  */
 import { createFireSubsystem } from '../fire-subsystem.js';
-import { fireTintMul, fireTierPlan } from '../fire-geometry.js';
+import {
+  fireTintMul,
+  fireTierPlan,
+  fireScaleChain,
+  fireRuntimeFromParams,
+  fireWeatherStress01,
+  fireFlameBrightness01,
+  fireGutter01,
+} from '../fire-geometry.js';
 
 const SPAWN_POINT_STRIDE = 4; // x, y, brightness, jitterRadiusPx — mirrors fire-spawn-points.js
 
@@ -923,5 +931,116 @@ export function run(t) {
       'no getPrecip01 wired: every engine reads rain01 = 0 (a dry world), never undefined',
       dryEngines.length === 6 && dryEngines.every((e) => e.paramCalls.at(-1)?.rain01 === 0)
     );
+  }
+
+  // ── THE LIGHT IS THE FLAMES' OWN BRIGHTNESS (2026-10-20, mmp-26u) ──────────────────────────────────────────────
+  // Three equal fires: one in a sealed room (openness 0 west of x=1000), one in the open, and one standing in the
+  // doorway with half its spawn points on each side. The light must follow what the flame sprites standing on those
+  // spawn points would show — and ease to it, never snap.
+  {
+    const rect4 = { minX: 0, minY: 0, maxX: 4000, maxY: 4000 };
+    const near = (a, b, tol) => Math.abs(a - b) <= tol;
+    const ambient = { speed01: { value: 0 }, directionDeg: { value: 90 } };
+    const handle = {
+      hasBake: true,
+      version: 1,
+      ambient,
+      cpuAt: (x) => ({ exposure: 1, openness: x < 1000 ? 0 : 1, sky: 1, solid: false, inGrid: true }),
+    };
+    const fires = [
+      { id: 'room', x: 200, y: 200, diameterPx: 66, intensity: 1, windExposure: 1, outdoors01: 1 },
+      { id: 'door', x: 1000, y: 1500, diameterPx: 66, intensity: 1, windExposure: 1, outdoors01: 1 },
+      { id: 'yard', x: 3000, y: 200, diameterPx: 66, intensity: 1, windExposure: 1, outdoors01: 1 },
+    ];
+    const lightState = {
+      enabled: true,
+      params: {},
+      perfTier: 2,
+      mPerPx: 0.02,
+      fires,
+      spawnCloud: makeCloud(
+        [
+          [180, 200],
+          [220, 200],
+          [990, 1500],
+          [1010, 1500],
+          [2980, 200],
+          [3020, 200],
+        ],
+        7
+      ),
+    };
+    const lightSubsystem = createFireSubsystem({
+      THREE: { Scene: FakeScene },
+      getFireRenderState: () => lightState,
+      getWindHandle: () => handle,
+      createEngine: ({ kind, archetype }) => ({
+        kind,
+        archetype,
+        scene: { visible: true, renderOrder: 0 },
+        setSpawnPoints() {},
+        setParams() {},
+        step() {},
+        updateWind() {},
+        debugState: () => ({ kind, archetype }),
+      }),
+    });
+    const alphaOf = (id) => lightSubsystem.lightSources().find((l) => l.sourceId === `fire:${id}`)?.alpha01;
+    // The clock is HELD (only dt advances) so the gutter's slow cold dips are the same at every frame and the settled
+    // light has one exact expected value; the dips themselves are pinned in fire-geometry.test.mjs.
+    const CLOCK_MS = 12345;
+    const frame = (dt) => lightSubsystem.sync(renderer4, CLOCK_MS, dt, rect4);
+    const renderer4 = {};
+    // What a flame sprite standing at (x, y) shows in this gale, exactly as the draw shader computes it.
+    const gale = fireRuntimeFromParams({}, fireScaleChain(66, 0.02, { fuel: undefined }), { speed01: 0.9 });
+    const spriteBrightness = (x, y, openness) =>
+      fireFlameBrightness01(
+        fireWeatherStress01({
+          windMotion01: gale.windMotion01 * openness,
+          rain01: 0,
+          gain: gale.stressGain,
+        }),
+        { cold: fireGutter01(CLOCK_MS * 0.001 * gale.motionSpeed, x, y).cold }
+      );
+
+    frame(0.016);
+    const calm = { room: alphaOf('room'), door: alphaOf('door'), yard: alphaOf('yard') };
+    t.ok(
+      'three equal fires in calm air cast the same light',
+      calm.room > 0.05 && near(calm.room, calm.door, 1e-12) && near(calm.room, calm.yard, 1e-12)
+    );
+
+    // A gale arrives. One frame later the light has only started to move: eased, not snapped.
+    ambient.speed01.value = 0.9;
+    frame(0.016);
+    const firstStep = alphaOf('yard');
+    const moved = (calm.yard - firstStep) / calm.yard;
+    for (let i = 0; i < 200; i++) frame(0.05);
+    const settled = { room: alphaOf('room'), door: alphaOf('door'), yard: alphaOf('yard') };
+    const targetDrop = (calm.yard - settled.yard) / calm.yard;
+    t.ok(
+      `the light eases toward the gale's brightness instead of snapping (first frame covered ${(moved / targetDrop).toFixed(3)} of the way)`,
+      targetDrop > 0.3 && moved > 0 && moved / targetDrop > 0.02 && moved / targetDrop < 0.12
+    );
+    t.ok(
+      'a fire in a SEALED room keeps its calm light in a gale — its flames are untouched, so its light is',
+      near(settled.room, calm.room, 1e-9)
+    );
+    t.ok('a fire in the open is dimmed hard by the same gale', settled.yard < calm.yard * 0.7);
+    const yardExpected = (spriteBrightness(2980, 200, 1) + spriteBrightness(3020, 200, 1)) / 2;
+    t.ok(
+      `the open fire is lit by exactly what its own flames show (${yardExpected.toFixed(4)} of calm)`,
+      near(settled.yard / calm.yard, yardExpected, 1e-6)
+    );
+    const doorExpected = (spriteBrightness(990, 1500, 0) + spriteBrightness(1010, 1500, 1)) / 2;
+    t.ok(
+      'a fire in the doorway, half its flames sealed and half exposed, is lit by the MEAN of the two',
+      near(settled.door / calm.door, doorExpected, 1e-6) && settled.door > settled.yard && settled.door < settled.room
+    );
+
+    // The wind drops again and the light recovers.
+    ambient.speed01.value = 0;
+    for (let i = 0; i < 200; i++) frame(0.05);
+    t.ok('when the wind drops the light returns to its calm value', near(alphaOf('yard'), calm.yard, 1e-9));
   }
 }

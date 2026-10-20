@@ -34,11 +34,12 @@ import {
   fireScaleChain,
   fireRuntimeFromParams,
   buildFireLightSources,
+  createFireBrightnessSmoother,
   fireTierPlan,
   FIRE_DEFAULT_TIER,
 } from './fire-geometry.js';
 import { FLAME_ARCHETYPES } from './fire-sprite.js';
-import { applyCohesion, dropIndoorSpawnPoints } from './fire-spawn-points.js';
+import { applyCohesion, dropIndoorSpawnPoints, SPAWN_POINT_STRIDE } from './fire-spawn-points.js';
 
 /**
  * Map-wide particle budgets, split across every fire on the map.
@@ -152,6 +153,74 @@ function fireListSignature(fires) {
 }
 
 /**
+ * How many spawn points stand in for each fire when its light is evaluated. The light is the MEAN of the flames'
+ * brightness over these, so more points only smooth the answer across a fire that straddles a wall; 24 is plenty.
+ */
+const LIGHT_SAMPLES_PER_FIRE = 24;
+
+/**
+ * THE SPAWN POINTS OF EACH FIRE, WITH THE WIND GRID'S ANSWER AT EACH (2026-10-20, mmp-26u) — the CPU's stand-in for
+ * "where the flame sprites are". The sprites are born on the spawn points and the draw shader reads the wind grid's
+ * openness and sky at each sprite's own position, so the fire's light is evaluated over the same places with the same
+ * two cell values (`windHandle.cpuAt` is the CPU twin of that lookup). Each point goes to its nearest fire.
+ *
+ * Fires without an id get no entry (the light falls back to the fire's anchor). With no bake, openness and sky are 1:
+ * the same "open sky, no wall" answer the GPU gives.
+ *
+ * @param {{points?: Float32Array, count?: number}|null} cloud - the flame engines' (cohesed) spawn cloud.
+ * @param {Array<{id?:string,x:number,y:number}>} fires
+ * @param {object|null} windHandle
+ * @returns {Map<string, Array<{x:number,y:number,openness:number,sky:number}>>}
+ */
+function buildFireLightSamples(cloud, fires, windHandle) {
+  const out = new Map();
+  const n = cloud?.count ?? 0;
+  const pts = cloud?.points;
+  if (!(n > 0) || !pts || fires.length === 0) return out;
+  const stride = SPAWN_POINT_STRIDE;
+  const owned = fires.map(() => []);
+  for (let i = 0; i < n; i++) {
+    const x = pts[i * stride];
+    const y = pts[i * stride + 1];
+    let best = -1;
+    let bestD = Infinity;
+    for (let j = 0; j < fires.length; j++) {
+      const dx = x - fires[j].x;
+      const dy = y - fires[j].y;
+      const d = dx * dx + dy * dy;
+      if (d < bestD) {
+        bestD = d;
+        best = j;
+      }
+    }
+    if (best >= 0) owned[best].push(i);
+  }
+  const canAsk = windHandle?.hasBake && typeof windHandle.cpuAt === 'function';
+  for (let j = 0; j < fires.length; j++) {
+    const id = fires[j]?.id;
+    const mine = owned[j];
+    if (!id || mine.length === 0) continue;
+    const take = Math.min(LIGHT_SAMPLES_PER_FIRE, mine.length);
+    const step = mine.length / take;
+    const samples = [];
+    for (let k = 0; k < take; k++) {
+      const i = mine[Math.floor(k * step)];
+      const x = pts[i * stride];
+      const y = pts[i * stride + 1];
+      const cell = canAsk ? windHandle.cpuAt(x, y) : null;
+      samples.push({
+        x,
+        y,
+        openness: Number.isFinite(cell?.openness) ? cell.openness : 1,
+        sky: Number.isFinite(cell?.sky) ? cell.sky : 1,
+      });
+    }
+    out.set(String(id), samples);
+  }
+  return out;
+}
+
+/**
  * @param {object} deps
  * @param {*} deps.THREE - injected.
  * @param {() => object} deps.getFireRenderState - `{enabled, params, perfTier,
@@ -244,6 +313,13 @@ export function createFireSubsystem({
    */
   const lastCohesionByEngine = new Map();
   let lastStatus = { engines: 0, fires: 0, lights: 0, spawnPoints: 0 };
+
+  /** Light smoothing (`createFireBrightnessSmoother`): each fire light eases to the flames' brightness, never snaps. */
+  const brightnessSmoother = createFireBrightnessSmoother();
+  /** The cloud the flame engines were last handed (cohesion applied) — the places the flame sprites are born. */
+  let lastFlameCloud = null;
+  /** `buildFireLightSamples` result, kept until the cloud, the fire list or the wind bake changes. */
+  let lightSampleMemo = { cloud: null, fires: null, version: -2, result: new Map() };
 
   /**
    * EACH FIRE'S WIND EXPOSURE, FROM THE WIND BAKE'S GEOMETRY (2026-10-07).
@@ -360,6 +436,9 @@ export function createFireSubsystem({
     if (!state.enabled || !renderer || (!hasPaint && fires.length === 0)) {
       for (const { engine } of engines) engine.scene.visible = false;
       currentLights = [];
+      // No lights this frame: forget every smoothed brightness, so a fire that comes back starts fresh.
+      brightnessSmoother.begin(0);
+      brightnessSmoother.end();
       hasContent = false;
       lastStatus = { engines: engines.length, fires: fires.length, lights: 0, spawnPoints: 0 };
       return;
@@ -502,6 +581,7 @@ export function createFireSubsystem({
           transformedByKind.set(kind, cloud && cohesion ? applyCohesion(source, fires, cohesion, labelGrid) : source);
         }
         engine.setSpawnPoints(transformedByKind.get(kind));
+        if (kind === 'flame') lastFlameCloud = transformedByKind.get(kind);
         lastCohesionByEngine.set(engine, cohesion);
       }
     }
@@ -596,24 +676,38 @@ export function createFireSubsystem({
       engine.step(renderer, { dtSec, tMs: nowMs, worldRect });
     }
 
+    // THE LIGHT IS THE FLAMES' OWN BRIGHTNESS (2026-10-20, mmp-26u). It is handed the very numbers the flame engines were
+    // just given (`windMotion01`, `rain01`, `stressGain`, and the gutter clock the draw shader runs on) plus the places
+    // the sprites are born, each with the wind grid's openness and sky there — see `buildFireLightSources`. It used to
+    // be handed the raw wind speed and dials and derive its own, differently-normalised weather.
+    const flameCloud = lastFlameCloud ?? effectiveCloud;
+    const bakeVersion = windHandle?.version ?? -1;
+    if (
+      lightSampleMemo.cloud !== flameCloud ||
+      lightSampleMemo.fires !== fires ||
+      lightSampleMemo.version !== bakeVersion
+    ) {
+      lightSampleMemo = {
+        cloud: flameCloud,
+        fires,
+        version: bakeVersion,
+        result: buildFireLightSamples(flameCloud, fires, windHandle),
+      };
+    }
+    brightnessSmoother.begin(dtSec);
     currentLights = runtime.lightEnabled
       ? buildFireLightSources(fires, {
           tier,
           mPerPx,
           colorHex: runtime.lightColor,
           radiusScale: runtime.lightRadiusScale,
-          // Same three dials feeding the particles' own windMotion01 above —
-          // see buildFireLightSources' own note on why alive01 now comes
-          // from the SAME per-cluster fireWindParticleResponse call instead
-          // of a second, independent wind curve.
-          windSpeed01,
-          windResponseGain: runtime.windResponse,
-          weatherResponse01: runtime.weatherResponse,
-          precip01,
-          rainResponse01: runtime.rainResponse,
-          canBeSnuffed: runtime.canBeSnuffed,
+          weather: { windMotion01: runtime.windMotion01, rain01: runtime.rain01, stressGain: runtime.stressGain },
+          samplesByFire: lightSampleMemo.result,
+          gutterTimeSec: nowMs * 0.001 * runtime.motionSpeed,
+          smoothBrightness: brightnessSmoother.smooth,
         })
       : [];
+    brightnessSmoother.end();
 
     hasContent = true;
     lastStatus = {

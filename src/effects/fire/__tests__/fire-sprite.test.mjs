@@ -48,6 +48,7 @@ import {
   fireLeanProfile01,
   fireWeatherStress01,
   fireStressResponse,
+  fireGutter01,
   FIRE_STRESS,
 } from '../fire-geometry.js';
 // The numeric TSL stub the wind tests use to EVALUATE node graphs in Node. Only
@@ -402,6 +403,24 @@ export function run(t) {
     t.ok(
       `cold dips are occasional, not constant and not absent (${coldSeen} of ${n} samples)`,
       coldSeen > n * 0.02 && coldSeen < n * 0.5
+    );
+    // THE CPU TWIN (`fireGutter01`) is what the cast light follows, so it must be the shader's gutter, not a lookalike.
+    let worstGutter = 0;
+    for (let k = 0; k < 500; k++) {
+      const time = k * 0.137 + (k % 7) * 1900.31;
+      const x = (k * 53) % 4000;
+      const y = (k * 97) % 3000;
+      const node = buildFireGutterNode(TSL, { posXY: TSL.vec2(x, y), timeSec: f(time) });
+      const cpu = fireGutter01(time, x, y);
+      worstGutter = Math.max(
+        worstGutter,
+        Math.abs(values(node.fast)[0] - cpu.fast),
+        Math.abs(values(node.cold)[0] - cpu.cold)
+      );
+    }
+    t.ok(
+      `the CPU gutter equals the shader's gutter over 500 (time, position) samples (worst error ${worstGutter})`,
+      worstGutter < 1e-9
     );
     const samePhase = (x, y) => {
       const a = buildFireGutterNode(TSL, { posXY: TSL.vec2(x, y), timeSec: f(4.2) });

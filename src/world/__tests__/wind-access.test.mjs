@@ -317,6 +317,25 @@ export function run(t) {
     ok('cpuAt forwards the injected exposure query', h.cpuAt(-500, 0).exposure === 0 && h.cpuAt(500, 0).exposure === 1);
     const bare = createWindHandle();
     ok('cpuAt on an un-baked handle answers "open", never throws', bare.cpuAt(0, 0).openness === 1);
+    ok('cpuAt on an un-baked handle answers open sky', bare.cpuAt(0, 0).sky === 1);
+  }
+
+  // --- cpuAt().sky is the CPU twin of kernel().sky (fire's light asks the rain question the sprites ask) --
+  {
+    const sky = new Float32Array(CELLS);
+    for (let i = 0; i < CELLS; i++) sky[i] = (i % 5) / 4;
+    const h = makeHandle({ ...cells, sky });
+    let worst = 0;
+    for (let cy = 0; cy < GRID.rows; cy++) {
+      for (let cx = 0; cx < GRID.cols; cx++) {
+        worst = Math.max(worst, Math.abs(h.cpuAt(...cellCentre(cx, cy)).sky - sky[cy * GRID.cols + cx]));
+      }
+    }
+    ok('cpuAt().sky reads back the painted sky of every cell', worst === 0);
+    ok(
+      'a bake with no sky array reads open sky (1), never a silent roof',
+      makeHandle(cells).cpuAt(...cellCentre(0, 0)).sky === 1
+    );
   }
 
   // --- solid cells are reported (the CPU shape's own geometry answer) -------

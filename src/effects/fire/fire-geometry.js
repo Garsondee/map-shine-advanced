@@ -892,6 +892,8 @@ export function clusterFireSources(sources, cellPx) {
       count: c.count,
       // Stable across frames, and independent of iteration order.
       id: c.ids.length ? [...c.ids].sort().join('+') : `${Math.round(x)}_${Math.round(y)}`,
+      // The member fires, so a light can find their spawn points (`clusterSamples`).
+      ids: [...c.ids].sort(),
       // The cluster burns as one fire of the COMBINED area — √Σd² , not Σd.
       // Two 100 px fires read as one ~141 px fire, never a 200 px one.
       diameterPx: Math.sqrt(c.area),
@@ -956,6 +958,42 @@ export function deriveFireSeed(x, y) {
   return Math.floor((v - Math.floor(v)) * 1000);
 }
 
+/** At most this many spawn points stand in for a cluster's flames when the light's brightness is evaluated. */
+const MAX_LIGHT_SAMPLES_PER_CLUSTER = 64;
+
+/**
+ * The spawn points a cluster's light is evaluated over: those of its member fires, strided down to a bounded count. A
+ * cluster none of whose fires has a point (no painted cloud yet, a fire with no id) is evaluated at its own anchor, with
+ * the anchor's exposure and roof — the same place the light always stood.
+ * @param {{x:number,y:number,ids?:string[],exposure?:number,outdoors?:number}} c
+ * @param {Map<string, Array<{x:number,y:number,openness:number,sky:number}>>|null} samplesByFire
+ * @returns {Array<{x:number,y:number,openness:number,sky:number}>}
+ */
+function clusterSamples(c, samplesByFire) {
+  const gathered = [];
+  if (samplesByFire && typeof samplesByFire.get === 'function') {
+    for (const id of c.ids ?? []) {
+      const own = samplesByFire.get(id);
+      if (own?.length) for (const sm of own) gathered.push(sm);
+    }
+  }
+  if (gathered.length === 0) {
+    return [
+      {
+        x: c.x,
+        y: c.y,
+        openness: Number.isFinite(c.exposure) ? c.exposure : 1,
+        sky: Number.isFinite(c.outdoors) ? c.outdoors : 1,
+      },
+    ];
+  }
+  if (gathered.length <= MAX_LIGHT_SAMPLES_PER_CLUSTER) return gathered;
+  const stride = gathered.length / MAX_LIGHT_SAMPLES_PER_CLUSTER;
+  const strided = [];
+  for (let k = 0; k < MAX_LIGHT_SAMPLES_PER_CLUSTER; k++) strided.push(gathered[Math.floor(k * stride)]);
+  return strided;
+}
+
 /**
  * Build the light-source descriptors for a set of fires.
  *
@@ -987,10 +1025,28 @@ export function deriveFireSeed(x, y) {
  * flicker — exactly how `candleClusterLightParams` computes candle's OWN
  * baseline once per cluster with no live phase in it at all. Baking a second,
  * independent pulse in here would double it: one rhythm from this function, an
- * unrelated one from the shader. `alive01` stays — a fire dimming or guttering
- * in a gale is a real state change, not decoration, and candle's own baseline
- * responds to its analogous input (`strength`) the same way. `alive01` itself
- * changed source 2026-09-04 — see this function's own body for why.
+ * unrelated one from the shader. The brightness scale stays — a fire dimming or
+ * guttering in a gale is a real state change, not decoration, and candle's own
+ * baseline responds to its analogous input (`strength`) the same way.
+ *
+ * ⚠️ THE LIGHT IS THE FLAMES' OWN BRIGHTNESS (2026-10-20, mmp-26u). Until then the
+ * light read a SEPARATE curve (`lightMul`, floored at 0.25) fed by DIFFERENT inputs
+ * than the sprites: the cluster's own size-normalising fire and its anchor point,
+ * where the sprites use the representative fire's and each sprite's own wind cell.
+ * The two could disagree arbitrarily — a big, bright flame under a light computed
+ * as if for a small stressed one. Now a cluster's light is the mean, over the spawn
+ * points of its member fires, of {@link fireFlameBrightness01} at THAT point's
+ * stress — wind from the SAME `windMotion01` signal the engines are fed, times the
+ * point's own openness; rain from the same `rain01` times the point's own sky; the
+ * same `stressGain`; the same gutter dips at the same clock. Light strength is
+ * directly proportional to it, down to the faint floor the light always had.
+ *
+ * ⚠️ NOT A READBACK. The sprite state lives in GPU storage buffers and the particle
+ * update already binds the full 8 storage buffers a stage may have, so reading
+ * "the live particles" would mean a GPU→CPU round trip every frame. What the sprites
+ * show is a pure function of the stress at their position and the clock, and that
+ * function is evaluated here on the CPU from the same constants (the parity tests
+ * in `fire-sprite.test.mjs` pin the twins together).
  *
  * ⚠️ `ownerEffectId` IS SET, unlike the candle's. `light.drawPointLights` and
  * `light.drawColoration` currently bill to NOBODY, which is precisely why
@@ -1008,13 +1064,20 @@ export function deriveFireSeed(x, y) {
  *   `params/no-dead-controls` the whole time, because that wall checks the param
  *   is READ somewhere, not that the value it produces is USED
  *   (`feedback_unconsumed_api_rots_silently`).
- * @param {number} [opts.windSpeed01=0] - `windHandle.ambient.speed01`'s
- *   current `.value` — see {@link fireWindMotion01}.
- * @param {number} [opts.windResponseGain=1] - `FIRE_PARAMS.windResponse`, 0..2.
- * @param {number} [opts.weatherResponse01=1] - `FIRE_PARAMS.weatherResponse`, 0..1.
- * @param {boolean} [opts.canBeSnuffed=true] - `FIRE_PARAMS.canBeSnuffed`.
- * @param {number} [opts.precip01=0] - the scene's eased precipitation, 0..1 (rain dims the light with the flame).
- * @param {number} [opts.rainResponse01=1] - `FIRE_PARAMS.rainResponse`, 0..2.
+ * @param {object} [opts.weather] - the SAME three numbers the flame engines are given
+ *   (`fireRuntimeFromParams()`'s `windMotion01`, `rain01`, `stressGain`), so the light and the sprites cannot read
+ *   different weather. Omitted = calm air.
+ * @param {number} [opts.weather.windMotion01=0] - the size-normalised, weather-gated, exposure-EXCLUDED wind signal;
+ *   each sample's own openness is applied here, as the draw shader applies its cell's.
+ * @param {number} [opts.weather.rain01=0] - precipitation × weather response × rain dial; each sample's own sky applied here.
+ * @param {number} [opts.weather.stressGain=1] - 1, or `FIRE_STRESS.immuneGain` for a fire that cannot be blown out.
+ * @param {Map<string, Array<{x:number,y:number,openness:number,sky:number}>>} [opts.samplesByFire] - spawn points of
+ *   each fire (by fire id) with the wind grid's openness and sky there. A cluster uses its member fires' points; one with
+ *   none falls back to its anchor (`exposure` / `outdoors`).
+ * @param {number|null} [opts.gutterTimeSec=null] - the engines' gutter clock (`nowMs × 0.001 × motionSpeed`); null =
+ *   no slow cold dips in the light.
+ * @param {(id:string, raw:number)=>number} [opts.smoothBrightness] - per-light smoothing
+ *   ({@link createFireBrightnessSmoother}); omitted = the raw brightness.
  * @returns {Array<object>} light descriptors.
  */
 export function buildFireLightSources(
@@ -1024,12 +1087,10 @@ export function buildFireLightSources(
     mPerPx,
     colorHex = null,
     radiusScale = 1,
-    windSpeed01 = 0,
-    windResponseGain = 1,
-    weatherResponse01 = 1,
-    canBeSnuffed = true,
-    precip01 = 0,
-    rainResponse01 = 1,
+    weather = null,
+    samplesByFire = null,
+    gutterTimeSec = null,
+    smoothBrightness = null,
   } = {}
 ) {
   const plan = fireTierPlan(tier);
@@ -1042,59 +1103,35 @@ export function buildFireLightSources(
   const medianRadius = radii[Math.floor(radii.length / 2)] ?? LIGHT_RADIUS_MIN_PX;
   const clusters = clusterFireSources(list, medianRadius * plan.clusterFactor);
 
+  // The engines' own weather numbers (`fireRuntimeFromParams`), clamped the way the draw shader clamps them.
+  const weatherWind = clampNum(Number.isFinite(weather?.windMotion01) ? weather.windMotion01 : 0, 0, 1);
+  const weatherRain = clampNum(Number.isFinite(weather?.rain01) ? weather.rain01 : 0, 0, 1);
+  const weatherGain = clampNum(Number.isFinite(weather?.stressGain) ? weather.stressGain : 1, 0, 1);
+  const gutterClock = Number.isFinite(gutterTimeSec) ? gutterTimeSec : null;
+
   const out = [];
   for (const c of clusters) {
     const chain = fireScaleChain(c.diameterPx, mPerPx, { intensity: c.intensity });
-    // ⚠️ `alive01` NOW COMES FROM THE SAME SIGNAL THAT SIZES THE FLAME SPRITE
-    // POPULATION (2026-09-04) — NOT a second, independent wind-response curve.
-    // Author, live: the light's own wind dimming was "far too strong" and
-    // needed to track "the number of fire particles being created and how
-    // many are alive in that area". The old `fireWeatherResponse(chain, env,
-    // 1, c.exposure).alive01` was a HARD THRESHOLD (exactly 1 below the
-    // fire's own `snuffWind`, then a steep drop to exactly 0) computed from a
-    // totally separate formula than `fireRuntimeFromParams`' particle
-    // `activeCount` — the two could (and did) disagree arbitrarily. Reusing
-    // `fireWindParticleResponse`'s `flameActiveCountMul` — the SAME fraction
-    // `fire-subsystem.js` multiplies into every flame engine's `activeCount`
-    // — makes the light dim in lockstep with the sprite population instead: a
-    // smooth ramp from the very start of the wind range (not a cliff late in
-    // it) that floors at 15%/55% (never a hard blowout, matching the sprites
-    // never fully vanishing either) rather than exactly 0. Computed PER
-    // CLUSTER, using that cluster's own `chain.snuffWind` and `c.exposure` —
-    // MORE precise than the particle engines get, which only have one
-    // map-wide representative fire to work from.
-    //
-    // ⚠️ THIS ALSO FIXES A SECOND DEAD-CONTROL GAP: the old call never routed
-    // through `applyWeatherResponseGain` (itself unreachable dead code — see
-    // that function's own header), so the light's dimming ignored BOTH
-    // `weatherResponse` ("at 0 it burns regardless") and `canBeSnuffed`
-    // ("whether a strong enough wind can put this fire out") entirely, the
-    // same gap `fireWindMotion01` already closed for the particles.
-    const windMotion01 = fireWindMotion01({
-      windSpeed01,
-      windExposure01: c.exposure,
-      windResponseGain,
-      weatherResponse01,
-      snuffWind: chain.snuffWind,
-    });
-    // ⚠️ THE LIGHT FOLLOWS THE SAME WEATHER STRESS THE FLAME DOES (2026-10-19) — wind AND rain, in one number, so the
-    // cast glow dims and shrinks with the sprites instead of staying full while the flame is nearly out. Rain only
-    // reaches a fire under open sky: the cluster's own `_Outdoors` average gates it.
-    const rain01 = clampNum(
-      clampNum(Number.isFinite(precip01) ? precip01 : 0, 0, 1) *
-        clampNum(Number.isFinite(weatherResponse01) ? weatherResponse01 : 1, 0, 1) *
-        clampNum(Number.isFinite(rainResponse01) ? rainResponse01 : 1, 0, 2) *
-        clampNum(Number.isFinite(c.outdoors) ? c.outdoors : 1, 0, 1),
-      0,
-      1
-    );
-    const stress01 = fireWeatherStress01({
-      windMotion01,
-      rain01,
-      gain: canBeSnuffed ? 1 : FIRE_STRESS.immuneGain,
-    });
-    const alive01 = fireStressResponse(stress01).lightMul;
-    if (!(alive01 > 0.02)) continue;
+    // ⚠️ THE LIGHT'S BRIGHTNESS IS THE FLAMES' BRIGHTNESS (2026-10-20, mmp-26u) — see this function's header. It used to
+    // read its own curve (the cluster's size-normalising fire, its anchor's exposure, `lightMul`); that is gone. The mean
+    // below is over the spawn points of the cluster's member fires, each evaluated exactly the way the draw shader
+    // evaluates a sprite standing there: the representative fire's wind signal × THIS point's openness, the rain signal ×
+    // THIS point's sky, the same stress gain, the same gutter dips.
+    const samples = clusterSamples(c, samplesByFire);
+    let brightSum = 0;
+    for (const sm of samples) {
+      const stress = fireWeatherStress01({
+        windMotion01: weatherWind * fireOpennessGain01(sm.openness),
+        rain01: weatherRain * clampNum(Number.isFinite(sm.sky) ? sm.sky : 1, 0, 1),
+        gain: weatherGain,
+      });
+      // Only the SLOW cold dip is followed (see `fireFlameBrightness01`); the fast shimmer is held at its mean.
+      // (No stress = no gutter: a calm sprite is exactly 1 whatever the dips do, so the trig is skipped.)
+      const cold = gutterClock === null || !(stress > 0) ? 0 : fireGutter01(gutterClock, sm.x, sm.y).cold;
+      brightSum += fireFlameBrightness01(stress, { cold });
+    }
+    const rawBright01 = samples.length ? brightSum / samples.length : 1;
+    const bright01 = clampNum(smoothBrightness ? smoothBrightness(`fire:${c.id}`, rawBright01) : rawBright01, 0, 1);
 
     const seed = deriveFireSeed(c.x, c.y);
 
@@ -1108,9 +1145,9 @@ export function buildFireLightSources(
     // The light pool builds a fan geometry from these and one NaN takes out the
     // whole batch (see `fireCirclePolygon`'s note). A dropped light is a missing
     // glow; a NaN light is a black screen and a console flood.
-    // `alive01` — computed above, from the SAME signal the particle sprite
-    // count uses, in place of the old live `envelope` (the pulse itself moved
-    // to the GPU long before this — see this function's own header note).
+    // `bright01` — computed above, from the flames' own brightness, in place of
+    // the old live `envelope` (the pulse itself moved to the GPU long before
+    // this — see this function's own header note).
     // ⚠️ BASELINE DROPPED 0.5 → 0.12, 2026-09-02 (mythica-machina-press#475).
     // THE REAL ROOT CAUSE, found only after two earlier (real, but
     // insufficient) fixes — a live side-by-side the author ran nailed it: a
@@ -1145,10 +1182,15 @@ export function buildFireLightSources(
     // (`computeExposure`, below 0.5), so at 0.12 the hottest pixel of the glow was only 0.24 of full brightness, and
     // the old wide falloff spread that dim peak over the whole radius. The cap stays UNDER 0.5 on purpose: at and
     // above it exposure turns positive and pushes the fragment toward white, the exact "fire light is white"
-    // failure this baseline was dropped to fix (mythica-machina-press#475). The gutter terms are unchanged, so a
-    // wind-guttered fire still dims by the same amount.
-    const luminosity01 = clampNum(0.38 + 0.42 * (alive01 - 1) + 0.25 * (chain.baseTemp - 0.6), 0.05, 0.48);
-    const alpha01 = clampNum(0.85 * alive01 * chain.baseTemp, 0.05, 1);
+    // failure this baseline was dropped to fix (mythica-machina-press#475).
+    // ⚠️ BOTH CHANNELS NOW SCALE BY THE SAME `bright01` (2026-10-20, mmp-26u), so the light is directly proportional to
+    // the flames. `bright01` is exactly 1 in calm air, which leaves the calm light at the values above (luminosity
+    // `lumCalm`, alpha 0.85 × baseTemp) to the last bit. The old luminosity term (`0.42 × (alive01 − 1)`) was an
+    // offset, not a scale, and fell on a different slope from the alpha. The floors below are the ones the light always
+    // had: a flame barely surviving still casts a faint glow instead of vanishing.
+    const lumCalm = clampNum(0.38 + 0.25 * (chain.baseTemp - 0.6), 0.05, 0.48);
+    const luminosity01 = clampNum(lumCalm * bright01, 0.05, 0.48);
+    const alpha01 = clampNum(0.85 * bright01 * chain.baseTemp, 0.05, 1);
     const elevation = Number.isFinite(c.elevation) ? c.elevation : 0;
     if (!shapePoints || ![radius, luminosity01, alpha01].every(Number.isFinite)) continue;
 
@@ -1468,12 +1510,14 @@ export const FIRE_STRESS = Object.freeze({
   windWeight: 0.45,
   rainWeight: 0.45,
   synergyWeight: 0.35,
-  /** What a fully stressed flame keeps of its size / brightness / sprite count / ember count / light. */
+  /**
+   * What a fully stressed flame keeps of its size / brightness / sprite count / ember count. (There is no light floor
+   * here any more: the cast light is derived from what these four leave the flame showing — `fireFlameBrightness01`.)
+   */
   sizeFloor: 0.28,
   opacityFloor: 0.3,
   countFloor: 0.45,
   emberCountFloor: 0.35,
-  lightFloor: 0.25,
   /** Guttering: a fast flicker, and slow COLD dips that nearly put the flame out then let it revive. */
   flickerDepth: 0.4,
   coldDepth: 0.8,
@@ -1502,7 +1546,7 @@ export function fireWeatherStress01({ windMotion01 = 0, rain01 = 0, gain = 1 } =
 /**
  * What a given stress does to the flame. Each is a straight blend to its floor (1 at no stress).
  * @param {number} stress01
- * @returns {{sizeMul:number, opacityMul:number, countMul:number, emberCountMul:number, lightMul:number}}
+ * @returns {{sizeMul:number, opacityMul:number, countMul:number, emberCountMul:number}}
  */
 export function fireStressResponse(stress01) {
   const s = clampNum(Number.isFinite(stress01) ? stress01 : 0, 0, 1);
@@ -1512,7 +1556,97 @@ export function fireStressResponse(stress01) {
     opacityMul: blend(FIRE_STRESS.opacityFloor),
     countMul: blend(FIRE_STRESS.countFloor),
     emberCountMul: blend(FIRE_STRESS.emberCountFloor),
-    lightMul: blend(FIRE_STRESS.lightFloor),
+  };
+}
+
+/**
+ * THE GUTTER ON THE CPU — the twin of `fire-sprite.js#buildFireGutterNode` (a parity test pins them together). Two
+ * noises of (time, world position) only, so every sprite of one fire gutters together:
+ *   fast — a quick 0..1 flicker;
+ *   cold — a slow noise thresholded so it is mostly 0 and now and then rises to 1 (a "cold period").
+ *
+ * @param {number} timeSec - seconds on the fire's own clock (`nowMs × 0.001 × motionSpeed`, what the engines feed it).
+ * @param {number} x @param {number} y - world position (the phase source).
+ * @returns {{fast:number, cold:number}} both 0..1.
+ */
+export function fireGutter01(timeSec, x, y) {
+  const ph = x * 0.0031 + y * 0.0023;
+  const fast = 0.5 + Math.sin(timeSec * 9.1 + ph) * 0.25 + Math.sin(timeSec * 14.7 + ph * 1.9 + 1.3) * 0.25;
+  const slow = 0.5 + Math.sin(timeSec * 0.85 + ph * 0.7) * 0.28 + Math.sin(timeSec * 1.93 + ph * 1.3 + 1.1) * 0.22;
+  return { fast, cold: smoothstep01(0.62, 0.95, slow) };
+}
+
+/**
+ * HOW BRIGHT ONE FLAME SPRITE IS UNDER A GIVEN STRESS, as a fraction of the same sprite in calm air — the number the
+ * cast light follows (2026-10-20, mmp-26u: "the light a fire produces should be directly proportional to the brightness
+ * of the particles currently emitted").
+ *
+ * It is the product of the three things the draw shader does to a stressed sprite, i.e. the light it puts out:
+ *   • COUNT   — the fraction of sprite slots still alive (`countMul`);
+ *   • SIZE    — both axes shrink, so the lit AREA goes as its square (`sizeMul`, further shrunk by the slow cold dips);
+ *   • ALPHA   — the opacity floor × the fast flicker × the slow cold dips (`opacityMul × flicker × dip`).
+ * The same expressions as `fire-particle-runtime.js` (`vFireWind` for the alpha, `sizeMul` for the size), so the light and
+ * the flames can no longer disagree about how much fire there is.
+ *
+ * Exactly 1 at no stress, so a calm fire's light is untouched by construction.
+ *
+ * `gutter.fast` defaults to its MEAN (0.5), not the live value: the fast flicker is a shimmer of the sprites, and the
+ * light already has its own flicker (`firePuff`); following a 1.5-2.3 Hz shimmer as well would read as the light
+ * flickering. The slow `cold` dip is the part worth following — it is the flame nearly going out and reviving.
+ *
+ * @param {number} stress01 - from {@link fireWeatherStress01}.
+ * @param {{fast?:number, cold?:number}} [gutter] - {@link fireGutter01}; default = mean flicker, no cold dip.
+ * @returns {number} 0..1
+ */
+export function fireFlameBrightness01(stress01, gutter = {}) {
+  const s = clampNum(Number.isFinite(stress01) ? stress01 : 0, 0, 1);
+  const r = fireStressResponse(s);
+  const fast = clampNum(Number.isFinite(gutter?.fast) ? gutter.fast : 0.5, 0, 1);
+  const cold = clampNum(Number.isFinite(gutter?.cold) ? gutter.cold : 0, 0, 1);
+  const flicker = 1 - s * FIRE_STRESS.flickerDepth * fast;
+  const dip = 1 - s * FIRE_STRESS.coldDepth * cold;
+  const size = r.sizeMul * (1 - s * cold * FIRE_STRESS.coldSizeDepth);
+  return r.countMul * size * size * r.opacityMul * flicker * dip;
+}
+
+/** Time constant of the light's brightness smoothing, in seconds: short enough to follow a gust, long enough that the
+ * sprite population turning over frame to frame never reads as the light flickering. */
+export const FIRE_LIGHT_SMOOTHING_SEC = 0.3;
+
+/**
+ * A per-light exponential smoother for the brightness the cast light follows. Pure and stateful by closure (no clock of
+ * its own — the caller hands it each frame's `dtSec`), so it is Node-testable. A light seen for the first time starts AT
+ * its target (no ramp up from nothing); one that stops being asked for is forgotten, so a fire that comes back later
+ * starts fresh.
+ *
+ * Use: `begin(dt)`; `smooth(id, raw)` for every light; `end()`.
+ *
+ * @param {number} [tauSec=FIRE_LIGHT_SMOOTHING_SEC]
+ * @returns {{begin:(dtSec:number)=>void, smooth:(id:string, raw:number)=>number, end:()=>void, size:()=>number}}
+ */
+export function createFireBrightnessSmoother(tauSec = FIRE_LIGHT_SMOOTHING_SEC) {
+  const tau = Math.max(1e-3, Number.isFinite(tauSec) ? tauSec : FIRE_LIGHT_SMOOTHING_SEC);
+  const values = new Map();
+  let seen = new Set();
+  let alpha = 1;
+  return {
+    begin(dtSec) {
+      const dt = Math.max(0, Number.isFinite(dtSec) ? dtSec : 0);
+      alpha = 1 - Math.exp(-dt / tau);
+      seen = new Set();
+    },
+    smooth(id, raw) {
+      const target = clampNum(Number.isFinite(raw) ? raw : 0, 0, 1);
+      seen.add(id);
+      const prev = values.get(id);
+      const next = prev === undefined ? target : prev + (target - prev) * alpha;
+      values.set(id, next);
+      return next;
+    },
+    end() {
+      for (const id of values.keys()) if (!seen.has(id)) values.delete(id);
+    },
+    size: () => values.size,
   };
 }
 

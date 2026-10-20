@@ -49,6 +49,10 @@ import {
   fireLeanOffsetPx,
   fireWeatherStress01,
   fireStressResponse,
+  fireGutter01,
+  fireFlameBrightness01,
+  createFireBrightnessSmoother,
+  FIRE_LIGHT_SMOOTHING_SEC,
   FIRE_LEAN,
   FIRE_STRESS,
   fireTintMul,
@@ -61,6 +65,15 @@ import {
 const M_PER_PX = 1.524 / 100;
 
 const near = (a, b, tol) => Math.abs(a - b) <= tol;
+
+/**
+ * The weather the FLAME ENGINES are handed (`fireRuntimeFromParams`, from the representative fire's chain) in the shape
+ * `buildFireLightSources` takes — the same three numbers, so a test cannot give the light weather the sprites don't see.
+ */
+const lightWeather = (fire, params, wind) => {
+  const rt = fireRuntimeFromParams(params, fireScaleChain(fire.diameterPx, M_PER_PX), wind);
+  return { windMotion01: rt.windMotion01, rain01: rt.rain01, stressGain: rt.stressGain };
+};
 
 export function run(t) {
   // ── THE SCALE CHAIN ────────────────────────────────────────────────────────
@@ -540,18 +553,20 @@ export function run(t) {
   }
 
   {
-    // ⚠️ REWRITTEN 2026-09-04 — `alive01` used to come from its OWN independent
-    // wind-response curve (`fireWeatherResponse`, a hard threshold reaching
-    // exactly 0), which is exactly why a full gale used to kill the light
-    // outright while the flame SPRITES stayed at their own "mostly
-    // suppressed, never literally gone" floor: an author watching both at
-    // once saw the light as "far too strong" relative to what the flame body
-    // was actually doing. The light now reads `flameActiveCountMul` — the
-    // SAME fraction that sizes the sprite population — so it CANNOT reach a
-    // harder floor than the particles do, by construction.
+    // ⚠️ REWRITTEN 2026-09-04, AGAIN 2026-10-20 (mmp-26u) — the light used to read its own wind curve (first a hard
+    // threshold, then `lightMul`), so it could disagree arbitrarily with what the flame SPRITES were doing. It now takes
+    // the weather the engines are handed (`lightWeather`) and follows the flames' own brightness.
     const fire = { id: 'x', x: 0, y: 0, diameterPx: 20, intensity: 1, windExposure: 1 };
-    const calm = buildFireLightSources([fire], { tier: 3, mPerPx: M_PER_PX, windSpeed01: 0 });
-    const gale = buildFireLightSources([fire], { tier: 3, mPerPx: M_PER_PX, windSpeed01: 1 });
+    const calm = buildFireLightSources([fire], {
+      tier: 3,
+      mPerPx: M_PER_PX,
+      weather: lightWeather(fire, {}, { speed01: 0 }),
+    });
+    const gale = buildFireLightSources([fire], {
+      tier: 3,
+      mPerPx: M_PER_PX,
+      weather: lightWeather(fire, {}, { speed01: 1 }),
+    });
     t.ok('a calm fire and a full-gale fire both still emit light', calm.length === 1 && gale.length === 1);
     t.ok(
       'a full gale dims the light well below the calm baseline',
@@ -564,8 +579,7 @@ export function run(t) {
     const galeImmune = buildFireLightSources([fire], {
       tier: 3,
       mPerPx: M_PER_PX,
-      windSpeed01: 1,
-      canBeSnuffed: false,
+      weather: lightWeather(fire, { canBeSnuffed: false }, { speed01: 1 }),
     });
     t.ok(
       "canBeSnuffed:false dims the light less than a snuffable fire's identical gale",
@@ -577,8 +591,7 @@ export function run(t) {
     const ignoresWind = buildFireLightSources([fire], {
       tier: 3,
       mPerPx: M_PER_PX,
-      windSpeed01: 1,
-      weatherResponse01: 0,
+      weather: lightWeather(fire, { weatherResponse: 0 }, { speed01: 1 }),
     });
     t.ok(
       'weatherResponse01=0 leaves the light exactly at its calm reading regardless of wind speed',
@@ -728,11 +741,7 @@ export function run(t) {
     const dead = fireStressResponse(1);
     t.ok(
       'no stress leaves everything at 1',
-      calm.sizeMul === 1 &&
-        calm.opacityMul === 1 &&
-        calm.countMul === 1 &&
-        calm.emberCountMul === 1 &&
-        calm.lightMul === 1
+      calm.sizeMul === 1 && calm.opacityMul === 1 && calm.countMul === 1 && calm.emberCountMul === 1
     );
     t.ok(
       'full stress lands every term on its floor: small, dim, sparse, but never exactly gone',
@@ -740,7 +749,6 @@ export function run(t) {
         near(dead.opacityMul, FIRE_STRESS.opacityFloor, 1e-12) &&
         near(dead.countMul, FIRE_STRESS.countFloor, 1e-12) &&
         near(dead.emberCountMul, FIRE_STRESS.emberCountFloor, 1e-12) &&
-        near(dead.lightMul, FIRE_STRESS.lightFloor, 1e-12) &&
         dead.sizeMul > 0 &&
         dead.opacityMul > 0
     );
@@ -830,35 +838,35 @@ export function run(t) {
   {
     const fire = { id: 'x', x: 0, y: 0, diameterPx: 20, intensity: 1, windExposure: 1, outdoors01: 1 };
     const base = { tier: 3, mPerPx: M_PER_PX };
-    const dry = buildFireLightSources([fire], { ...base, windSpeed01: 0 })[0];
-    const rain = buildFireLightSources([fire], { ...base, windSpeed01: 0, precip01: 1 })[0];
-    const gale = buildFireLightSources([fire], { ...base, windSpeed01: 1 })[0];
-    const both = buildFireLightSources([fire], { ...base, windSpeed01: 1, precip01: 1 })[0];
+    const lightFor = (f, params, wind) =>
+      buildFireLightSources([f], { ...base, weather: lightWeather(f, params, wind) })[0];
+    const dry = lightFor(fire, {}, { speed01: 0 });
+    const rain = lightFor(fire, {}, { speed01: 0, precip01: 1 });
+    const gale = lightFor(fire, {}, { speed01: 1 });
+    const both = lightFor(fire, {}, { speed01: 1, precip01: 1 });
     t.ok('rain alone dims the cast light', rain.alpha01 < dry.alpha01 && rain.luminosity01 < dry.luminosity01);
     t.ok(
       'full wind AND full rain dim the light far more than either alone',
-      both.alpha01 < rain.alpha01 && both.alpha01 < gale.alpha01
+      both.alpha01 <= rain.alpha01 && both.alpha01 <= gale.alpha01 && both.luminosity01 < rain.luminosity01
     );
-    t.ok('the light never goes out entirely, matching the flame that is barely surviving', both.alpha01 > 0.05);
-    const roofed = buildFireLightSources([{ ...fire, outdoors01: 0 }], { ...base, windSpeed01: 0, precip01: 1 })[0];
+    t.ok(
+      'the light never goes out entirely — a flame barely surviving still casts the faint glow the light always had',
+      both.alpha01 >= 0.05 && both.luminosity01 >= 0.05 && Number.isFinite(both.alpha01)
+    );
+    const roofed = buildFireLightSources([{ ...fire, outdoors01: 0 }], {
+      ...base,
+      weather: lightWeather(fire, {}, { speed01: 0, precip01: 1 }),
+    })[0];
     t.ok('rain does not reach a fire under a roof: the light is untouched', near(roofed.alpha01, dry.alpha01, 1e-12));
-    const immune = buildFireLightSources([fire], { ...base, windSpeed01: 1, precip01: 1, canBeSnuffed: false })[0];
+    const immune = lightFor(fire, { canBeSnuffed: false }, { speed01: 1, precip01: 1 });
     t.ok('a fire that cannot be snuffed dims less', immune.alpha01 > both.alpha01);
     t.ok(
       'weatherResponse 0 leaves the light at its dry reading however hard it rains',
-      near(
-        buildFireLightSources([fire], { ...base, windSpeed01: 0, precip01: 1, weatherResponse01: 0 })[0].alpha01,
-        dry.alpha01,
-        1e-12
-      )
+      near(lightFor(fire, { weatherResponse: 0 }, { speed01: 0, precip01: 1 }).alpha01, dry.alpha01, 1e-12)
     );
     t.ok(
       'rainResponse 0 ignores rain (wind still counts)',
-      near(
-        buildFireLightSources([fire], { ...base, windSpeed01: 0, precip01: 1, rainResponse01: 0 })[0].alpha01,
-        dry.alpha01,
-        1e-12
-      )
+      near(lightFor(fire, { rainResponse: 0 }, { speed01: 0, precip01: 1 }).alpha01, dry.alpha01, 1e-12)
     );
     const clusters = clusterFireSources(
       [
@@ -871,6 +879,213 @@ export function run(t) {
       'a cluster carries the AVERAGE of its fires outdoors (rain reaches half of this pair)',
       clusters.length === 1 && near(clusters[0].outdoors, 0.5, 1e-12)
     );
+    t.ok(
+      'a cluster names its member fires, so a light can find their spawn points',
+      clusters[0].ids.length === 2 && clusters[0].ids.includes('a') && clusters[0].ids.includes('b')
+    );
+  }
+
+  // ── THE LIGHT IS THE FLAMES' OWN BRIGHTNESS (2026-10-20, mmp-26u) ──────────
+  // Author: "the amount of light produced by a fire should be directly proportional to the brightness of the particles
+  // currently emitted". The light used to read a separate curve with different inputs; these pin that it now cannot.
+  {
+    // The brightness model itself.
+    t.ok(
+      'with no stress a sprite is exactly as bright as in calm air, whatever the gutter says',
+      fireFlameBrightness01(0) === 1 && fireFlameBrightness01(0, { fast: 1, cold: 1 }) === 1
+    );
+    t.ok('non-finite stress reads as calm, never NaN', fireFlameBrightness01(NaN) === 1);
+    let falling = true;
+    let prev = 1;
+    for (let k = 1; k <= 40; k++) {
+      const b = fireFlameBrightness01(k / 40);
+      if (b > prev + 1e-12) falling = false;
+      prev = b;
+    }
+    t.ok('brightness only falls as stress rises', falling && prev > 0);
+    {
+      const r = fireStressResponse(0.5);
+      t.ok(
+        'it is count × size² × opacity × the mean flicker — the three things the draw shader does to a stressed sprite',
+        near(
+          fireFlameBrightness01(0.5),
+          r.countMul * r.sizeMul * r.sizeMul * r.opacityMul * (1 - 0.5 * FIRE_STRESS.flickerDepth * 0.5),
+          1e-12
+        )
+      );
+    }
+    t.ok(
+      'a cold dip dims a stressed sprite further (the flame nearly going out), and does nothing in calm air',
+      fireFlameBrightness01(0.6, { cold: 1 }) < fireFlameBrightness01(0.6, { cold: 0 }) * 0.5
+    );
+
+    // The CPU gutter: inside 0..1, and cold dips come and go.
+    let gLo = Infinity;
+    let gHi = -Infinity;
+    let coldN = 0;
+    for (let k = 0; k < 600; k++) {
+      const g = fireGutter01(k * 0.13, 100 + k * 7, 300 - k * 3);
+      gLo = Math.min(gLo, g.fast, g.cold);
+      gHi = Math.max(gHi, g.fast, g.cold);
+      if (g.cold > 0.5) coldN++;
+    }
+    t.ok('the CPU gutter stays inside 0..1', gLo >= 0 && gHi <= 1);
+    t.ok(`cold dips are occasional (${coldN} of 600)`, coldN > 600 * 0.02 && coldN < 600 * 0.5);
+
+    // The light.
+    const fire = { id: 'x', x: 0, y: 0, diameterPx: 200, intensity: 1, windExposure: 1, outdoors01: 1 };
+    const chain = fireScaleChain(200, M_PER_PX);
+    const base = { tier: 3, mPerPx: M_PER_PX };
+    const lightFor = (f, weather, extra = {}) => buildFireLightSources([f], { ...base, weather, ...extra })[0];
+    const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+    // CALM-SCENE LIGHT STAYS IDENTICAL: the numbers the light had before it followed the flames.
+    const lumBefore = clamp(0.38 + 0.42 * 0 + 0.25 * (chain.baseTemp - 0.6), 0.05, 0.48);
+    const alphaBefore = clamp(0.85 * 1 * chain.baseTemp, 0.05, 1);
+    const calm = lightFor(fire, undefined);
+    t.ok(
+      'calm air: luminosity and alpha are EXACTLY what the light had before it followed the flames',
+      near(calm.luminosity01, lumBefore, 1e-12) && near(calm.alpha01, alphaBefore, 1e-12)
+    );
+    const calmFromRuntime = lightFor(fire, lightWeather(fire, {}, { speed01: 0 }));
+    t.ok(
+      'the engines’ own calm weather gives that same light',
+      near(calmFromRuntime.luminosity01, calm.luminosity01, 1e-12) && near(calmFromRuntime.alpha01, calm.alpha01, 1e-12)
+    );
+
+    // DIRECT PROPORTION: both channels scale by exactly the flames' brightness.
+    const weather = { windMotion01: 0.8, rain01: 0, stressGain: 1 };
+    const stress = fireWeatherStress01({ windMotion01: 0.8, rain01: 0, gain: 1 });
+    const bright = fireFlameBrightness01(stress);
+    const windy = lightFor(fire, weather);
+    t.ok(`the windy flame is dimmer than calm (brightness ${bright.toFixed(3)})`, bright < 0.5 && bright > 0.1);
+    t.ok(
+      'the light is directly proportional to the flames: alpha AND luminosity scale by exactly their brightness',
+      near(windy.alpha01 / calm.alpha01, bright, 1e-9) && near(windy.luminosity01 / calm.luminosity01, bright, 1e-9)
+    );
+
+    // THE MISMATCH THIS FIXES: fires of different sizes under the SAME weather. The light used to normalise the wind by
+    // its own cluster's size, the sprites by the representative fire's, so a big bright flame could sit under a light
+    // computed for a small stressed one. Now the weather is one number for all of them.
+    const small = { id: 's', x: 0, y: 0, diameterPx: 30, intensity: 1, windExposure: 1, outdoors01: 1 };
+    const big = { id: 'b', x: 9000, y: 0, diameterPx: 300, intensity: 1, windExposure: 1, outdoors01: 1 };
+    const pair = buildFireLightSources([small, big], { ...base, tier: 5, weather });
+    const brightOf = (light, d) => light.alpha01 / clamp(0.85 * fireScaleChain(d, M_PER_PX).baseTemp, 0.05, 1);
+    const lb = pair.find((l) => l.sourceId === 'fire:b');
+    const ls = pair.find((l) => l.sourceId === 'fire:s');
+    t.ok(
+      'a small fire and a big one under the same weather are lit by the same fraction of their calm light',
+      pair.length === 2 && near(brightOf(lb, 300), bright, 1e-9) && near(brightOf(ls, 30), bright, 1e-9)
+    );
+
+    // PER-POSITION OPENNESS: the mean over the fire's own spawn points.
+    const sealedAndOpen = new Map([
+      [
+        'x',
+        [
+          { x: 0, y: 0, openness: 0, sky: 1 },
+          { x: 12, y: 0, openness: 1, sky: 1 },
+        ],
+      ],
+    ]);
+    const half = lightFor(fire, weather, { samplesByFire: sealedAndOpen });
+    t.ok(
+      'a fire half in a sealed room and half in the open is lit by the MEAN of its flames',
+      near(half.alpha01 / calm.alpha01, (1 + bright) / 2, 1e-9)
+    );
+    const allSealed = lightFor(fire, weather, {
+      samplesByFire: new Map([['x', [{ x: 0, y: 0, openness: 0, sky: 1 }]]]),
+    });
+    t.ok('every flame sealed from the wind: the light is its calm light', near(allSealed.alpha01, calm.alpha01, 1e-12));
+    const roofed = lightFor(
+      fire,
+      { windMotion01: 0, rain01: 1, stressGain: 1 },
+      {
+        samplesByFire: new Map([['x', [{ x: 0, y: 0, openness: 1, sky: 0 }]]]),
+      }
+    );
+    t.ok(
+      'rain does not reach flames under a roof (sky 0): the light is its calm light',
+      near(roofed.alpha01, calm.alpha01, 1e-12)
+    );
+    const exposedAnchor = lightFor({ ...fire, windExposure: 0 }, weather);
+    t.ok(
+      'with no spawn points the light falls back to its anchor’s exposure (a sealed anchor feels no wind)',
+      near(exposedAnchor.alpha01, calm.alpha01, 1e-12)
+    );
+
+    // THE SLOW COLD DIP is followed, the fast shimmer is not.
+    let coldAt = null;
+    let warmAt = null;
+    for (let k = 0; k < 4000 && (coldAt === null || warmAt === null); k++) {
+      const g = fireGutter01(k * 0.01, 0, 0);
+      if (coldAt === null && g.cold > 0.95) coldAt = k * 0.01;
+      if (warmAt === null && g.cold === 0) warmAt = k * 0.01;
+    }
+    t.ok('the scan found both a cold and a warm moment', coldAt !== null && warmAt !== null);
+    const noGutter = lightFor(fire, weather);
+    const atCold = lightFor(fire, weather, { gutterTimeSec: coldAt });
+    const atWarm = lightFor(fire, weather, { gutterTimeSec: warmAt });
+    t.ok(
+      'during a cold dip the light dims with the flame; between dips it is the plain stressed light',
+      atCold.alpha01 < atWarm.alpha01 && near(atWarm.alpha01, noGutter.alpha01, 1e-12)
+    );
+
+    // SMOOTHING reaches the light through the callback, keyed by the light's id.
+    const asked = [];
+    const smoothed = lightFor(fire, weather, {
+      smoothBrightness: (id, raw) => {
+        asked.push([id, raw]);
+        return 0.5;
+      },
+    });
+    t.ok(
+      'the light asks the smoother by its own id, with the raw brightness, and uses what it gives back',
+      asked.length === 1 &&
+        asked[0][0] === 'fire:x' &&
+        near(asked[0][1], bright, 1e-9) &&
+        near(smoothed.alpha01 / calm.alpha01, 0.5, 1e-9)
+    );
+  }
+
+  // ── THE SMOOTHER ───────────────────────────────────────────────────────────
+  {
+    t.ok(
+      'the smoothing is short: a fraction of a second, not a drift',
+      FIRE_LIGHT_SMOOTHING_SEC >= 0.1 && FIRE_LIGHT_SMOOTHING_SEC <= 0.6
+    );
+    const sm = createFireBrightnessSmoother(0.3);
+    sm.begin(0.016);
+    t.ok('a light seen for the first time starts AT its target (no ramp up from nothing)', sm.smooth('a', 0.4) === 0.4);
+    sm.end();
+    sm.begin(0.3);
+    const step = sm.smooth('a', 1);
+    t.ok(
+      'after one time constant a step has covered 1 − 1/e of the way (exponential, dt-aware)',
+      near(step, 0.4 + 0.6 * (1 - Math.exp(-1)), 1e-12)
+    );
+    sm.end();
+    sm.begin(0);
+    t.ok('a zero-length frame holds the value', sm.smooth('a', 0) === step);
+    sm.end();
+    sm.begin(30);
+    t.ok('a long stall converges rather than overshooting', near(sm.smooth('a', 0.2), 0.2, 1e-9));
+    sm.end();
+    sm.begin(0.016);
+    sm.smooth('a', 0.2);
+    sm.smooth('b', 0.7);
+    sm.end();
+    t.ok('both lights are remembered while they are asked for', sm.size() === 2);
+    sm.begin(0.016);
+    sm.smooth('b', 0.7);
+    sm.end();
+    t.ok('a light that stops being asked for is forgotten (a returning fire starts fresh)', sm.size() === 1);
+    sm.begin(0.016);
+    t.ok(
+      'non-finite input reads as dark, never NaN',
+      sm.smooth('b', NaN) <= 0.7 && Number.isFinite(sm.smooth('c', Infinity))
+    );
+    sm.end();
   }
 
   // ── PARAMS → RUNTIME ───────────────────────────────────────────────────────

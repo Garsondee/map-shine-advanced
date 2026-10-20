@@ -1276,7 +1276,9 @@ export function createFireParticleEngine({
       .add(lifeBuf.element(i).mul(float(0.0137)))
       .add(c.z.mul(float(0.71)));
     const rag = float(0.6).add(hash11(lifeKey.add(float(41.0))).mul(float(0.65)));
-    const fanRand = hash11(lifeKey.add(float(57.0))).sub(float(0.5)).mul(float(2));
+    const fanRand = hash11(lifeKey.add(float(57.0)))
+      .sub(float(0.5))
+      .mul(float(2));
     const sizeBase = c.z.mul(uSizeScale).mul(sizeMul);
     const leanPx = leanGain
       .mul(uLeanLength)

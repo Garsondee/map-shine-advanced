@@ -65,7 +65,7 @@ These are the masks the module discovers (the source of truth is `src/scene/mask
 
 ## Features (current)
 
-This section describes the module's actual roster as of 0.8.2 (superseding an older description that named classes — `EffectComposer`, `TokenManager`, `LightingEffect`, and similar — that no longer exist under those names in `src/`; see mythica-machina-press#567). It's grouped by capability rather than by internal class name, since those names change across refactors and a name-level list is what went stale last time.
+This section describes the module's actual roster as of 0.9.0 (superseding an older description that named classes — `EffectComposer`, `TokenManager`, `LightingEffect`, and similar — that no longer exist under those names in `src/`; see mythica-machina-press#567). It's grouped by capability rather than by internal class name, since those names change across refactors and a name-level list is what went stale last time.
 
 ### Foundry syncing (`src/foundry/`, `src/scene/`)
 
@@ -76,8 +76,8 @@ This section describes the module's actual roster as of 0.8.2 (superseding an ol
 ### Effects (`src/effects/`)
 
 - **Clouds** — ground shadow and high-altitude tops. Only the tops are zoom-gated.
-- **Water** — tiered surface with refraction, caustics and shore foam, driven by a per-floor water simulation (flow, and foam memory). Interactive ripples and splash spray are not built yet.
-- **Fire** — wind-responsive flame/spark rendering.
+- **Water** — tiered surface with refraction, caustics and shore foam drawn from the `_Water` mask, driven by a per-floor water simulation (flow, and foam memory). Spray flecks fly up where water breaks on hard edges, drift with the current, and land and fade on water or ground.
+- **Fire** — a cel-shaded, painted-campfire look built from closed-form billows (no sprite population): licking tongues, torn flecks, a coal bed, smoke and heavy spit embers, with heat haze above a burning fire. Weather drives it — wind lays flames over and streams the smoke, rain soaks a fire out over time and it rekindles after a dry spell — and a wide painted region becomes a mass of overlapping flames, the start of a burning building.
 - **Smelly Flies** — paint a `_Flies` zone and a swarm of procedurally drawn flies buzzes over it, lands, walks (with planted feet), grooms and takes off again. Species, wing detail, metallic sheen, flight height, buzz, tether and landing behaviour are all adjustable.
 - **Maggots** — paint a `_Maggots` zone and a mass of segmented, moist-looking maggots wriggles and crawls in it, clumping together and pausing to rest. Girth, gloss, segmentation, wriggle rhythm and crawl behaviour are adjustable.
 - **Fireflies** — paint a `_Fireflies` zone and a colony of glowing beetles drifts over it during the twilight window (keyed to the sun's elevation, so it follows the sky's own dusk and dawn), flashing in a chosen pattern with adjustable synchrony (no insect flashes more than three times a second).
@@ -85,11 +85,11 @@ This section describes the module's actual roster as of 0.8.2 (superseding an ol
   All three are separate effects with their own Studio cards: a short front-of-house strip for running a scene, and the full set of controls grouped by Presence, Look, Detail, Motion, Depth and more under Advanced. Each one responds to the weather on its own terms. How much **rain**, **snow**, **high wind** (above a tolerance you set) and **cold** (below a threshold you set) clears the population is adjustable per cause, and so is what the weather does to the ones that stay: wind carries flying insects downwind and makes them erratic, rain drives fliers to the ground or makes maggots squirm, cold slows everything. Flies are driven off easily, fireflies are fair-weather creatures, and maggots barely mind — and every one of those defaults is a slider.
 
 - **Vegetation** — GPU-driven wind sway and shadowing.
-- **Window** / **Specular** — mask-driven interior light pools and surface shine, both attachable to tiles.
+- **Window** / **Specular** — mask-driven interior light pools and surface shine, both attachable to tiles. A window can carry its own rain (splats, drops that run down the pane toward the wall or stream across it in wind, scaled from a trickle to a furious storm) and a light pattern that fades out over a set reach outside the glass, instead of throwing a hard-edged fan across the whole yard.
 - **Fluid** — liquid-filled tiles (troughs, cauldrons, etc.) with their own mask channel.
 - **Precipitation** — rain/snow with splash/settle behavior, Storm Fog (reduced-visibility mist at high intensity), and an authored `_Drip` mask.
 - **Rope & Chain** — GM-placed two-point spans with sag, GPU wind-spring sway, and a matching shadow.
-- **Player-carried lights** — scene-permissioned Torch and Flashlight (cursor-aimed beam, flame and embers) plus Night Vision, Low-light, Infravision and Active Infravision grades. The flashlight sits on the rim of its token and rolls round it as the cursor moves, lagging the cursor a little like a lamp held on a string; a GM carries lights on the token they have selected (Remote > Player Lights). A carried light exists only while somebody is steering it — a player's own cursor, or a GM's selection — so a scene loads with no beam frozen pointing north. A torch or flashlight also reveals Foundry's native door icons, the same way MSA's candles and fires already do.
+- **Player-carried lights** — scene-permissioned Torch (a real fire, held out toward the cursor) and Flashlight (a cursor-aimed beam that lands on a textured cookie spot with its own bounced glow) plus five vision grades: Night Vision, Low-light, Low Light (Active), Infravision and Active Infravision. The flashlight sits on the rim of its token and rolls round it as the cursor moves; a GM carries lights on the token they have selected (Remote > Player Lights). A carried light exists only while somebody is steering it — a player's own cursor, or a GM's selection — so a scene loads with no beam frozen pointing north. A torch or flashlight also reveals Foundry's native door icons, the same way MSA's candles and fires already do.
 - **Atmospheric haze** — aerial perspective that builds as you zoom out, driven by zoom and cloud cover.
 - **Prism** / **Iridescence** — TSL/WebGPU-native refraction and iridescent surface finishes.
 - **Lens** — overlay/grime texture compositing on the camera lens.

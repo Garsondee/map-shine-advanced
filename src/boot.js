@@ -3918,7 +3918,9 @@ function install() {
    * Mirrors setLightning exactly, including the "enabled writes the PLAYER
    * setting, then reapplies once the write lands" ordering (see setCandle's own
    * comment for why that matters).
-   *   MapShine.setFire({ posterize: 1, smokeAmount: 1.5 })
+   *   MapShine.setFire({ posterize: 1, smokeDensity: 1.5 })
+   * (The old sprite-era dials — flameCount, flameOpacity, smokeAmount, perspective... — were retired in the billow rebuild;
+   * a key that is not in FIRE_PARAMS is ignored here.)
    */
   MapShine.setFire = (partial = {}) => {
     const p = partial ?? {};

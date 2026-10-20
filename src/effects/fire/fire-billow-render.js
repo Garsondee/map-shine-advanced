@@ -59,13 +59,13 @@ export function billowRampStops() {
 /** Defaults for every look uniform. The lab overrides any of them; the engine maps the author's dials onto them. */
 export const BILLOW_LOOK = Object.freeze({
   /** Density level of the silhouette (each billow adds ~1 inside its edge, so 0.5 = the union of the discs). */
-  outline: 0.5,
+  outline: 0.52,
   /** Density above the outline at which the tone reaches the cream core. */
   span: 8.2,
   /** How much of the tone follows heat rather than density (0 = pure density). */
   toneHeat: 0.63,
   /** Tone gamma: < 1 lifts the whole flame toward the cream end. */
-  tonePow: 0.84,
+  tonePow: 0.58,
   /** Levels on the tone (0..1): stretches it so the middle really reaches the cream stop. */
   toneLo: 0.03,
   toneHi: 0.8,
@@ -78,33 +78,33 @@ export const BILLOW_LOOK = Object.freeze({
   /** How much cooler a disc is at its rim than its middle (0..1): a soft gradient inside every puff. */
   discGradient: 0.555,
   /** The flame's minimum edge softness, in density units (0.012 = razor, 0.1 = painted gouache). */
-  edgeSoft: 0.08,
+  edgeSoft: 0.3,
   /** Painterly roughness of the edge: px of noise warp, and the noise's spatial frequency (1/px); two octaves. */
   warpPx: 2.6,
-  warpFreq: 0.05,
-  warpSpeed: 0.7,
+  warpFreq: 0.04,
+  warpSpeed: 0.45,
   warpPx2: 1.1,
   warpFreq2: 0.15,
   /** Painterly mottling of the tone (noise added to the temperature). */
-  mottle: 0.1,
+  mottle: 0.19,
   mottleFreq: 0.07,
   /** The cel-shaded crescents: how steeply the density surface tilts the normal, and how far a lit/shaded flank moves the tone. */
-  relief: 2.6,
+  relief: 1.3,
   crescent: 0.06,
   /** Faint halo around the flame (HDR, additive: feeds the bloom). */
   glow: 0.35,
-  glowRadiusPx: 14,
+  glowRadiusPx: 17,
   /** Emission multiplier on the flame colours (1 = the painted colours exactly). */
-  emission: 1.0,
+  emission: 1.25,
   /** HDR added at the flame's hottest cream core (after the bloom counter), so the heart of the fire exceeds the bloom threshold and blooms. */
-  coreBloom: 1.2,
+  coreBloom: 0.4,
   /** The coal bed: its glow strength, the cracked cells' size (1/px) and crack width. */
   coalGain: 1.0,
-  coalCell: 0.16,
-  coalCrack: 0.22,
+  coalCell: 0.41,
+  coalCrack: 0.6,
   /** Smoke: the density level of its silhouette, its edge softness, how solid it is, and the soot a fuel adds. */
   smokeOutline: 0.42,
-  smokeSoft: 0.14,
+  smokeSoft: 0.5,
   smokeOpacity: 0.94,
   smokeSoot: 0.0,
   /** The darkened rim round the cloud (px wide, 0 = none) and how dark it is (0..1): the pigment pooling at a painted edge. */
@@ -117,7 +117,7 @@ export const BILLOW_LOOK = Object.freeze({
   /** The smoke kernel: 0 = a soft bump (one smooth blob), 1 = a flat-topped disc (a scalloped cloud of round billows). */
   smokeCrisp: 0.7,
   /** How much greyer the smoke goes in a fully bright scene (so it stands off a pale floor). */
-  smokeDayDark: 0.55,
+  smokeDayDark: 0.69,
   /** Smoke is drawn OVER the flame: how far up its life it fades in, and how opaque it is where it crosses the flame. */
   smokeFadeIn: 0.3,
   smokeOverFlame: 0.55,

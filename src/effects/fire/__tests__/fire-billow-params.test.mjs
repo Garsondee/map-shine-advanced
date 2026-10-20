@@ -11,7 +11,25 @@ import { BILLOW_TUNE } from '../fire-billow-geometry.js';
 import { BILLOW_LOOK, billowSmokeScale } from '../fire-billow-render.js';
 import { FIRE_LIFE } from '../fire-billow-state.js';
 
-const defaults = Object.fromEntries(Object.entries(FIRE_PARAMS).map(([k, d]) => [k, d.default]));
+const NEUTRAL = {
+  intensity: 1,
+  flameSize: 1,
+  flameHeight: 1,
+  flameLick: 1,
+  flameWindLean: 1,
+  flameFlecks: 1,
+  flameDetail: 1,
+  flameSpeed: 1,
+  flameRagged: 1,
+  flameShading: 0.5,
+  posterize: 0.62,
+  bandCount: 5,
+  flameGlow: 1,
+  windResponse: 1,
+  smokeLineWidth: 1,
+};
+// (the tests pin the MODEL, not the author's tuned dials: shape/size dials start from neutral)
+const defaults = { ...Object.fromEntries(Object.entries(FIRE_PARAMS).map(([k, d]) => [k, d.default])), ...NEUTRAL };
 
 export function run(t) {
   const near = (a, b, tol = 1e-9) => Math.abs(a - b) <= tol;

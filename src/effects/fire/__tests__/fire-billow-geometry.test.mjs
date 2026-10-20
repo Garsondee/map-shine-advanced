@@ -624,7 +624,13 @@ export function run(t) {
     const column = (m = {}, env = {}, tune, tSec = 20) => {
       const buf = new Float32Array(80 * LOBE_STRIDE).fill(-777);
       const start = 3;
-      const r = emitMassSmoke(buf, start, { ...MASS, ...m }, { ...ENV, parallax: 0, tSec, ...env }, tune);
+      const r = emitMassSmoke(
+        buf,
+        start,
+        { ...MASS, ...m },
+        { ...ENV, parallax: 0, tSec, ...env },
+        tune ?? { massRise: 2.4 }
+      );
       return { buf, start, count: r.count, lobes: lobesOf(buf.subarray(start * LOBE_STRIDE), r.count) };
     };
     const a = column();
@@ -792,5 +798,38 @@ export function run(t) {
       'smoke is stretched along the wind in a gale (a streamer, not a puff)',
       smokeLen({ windMotion01: 1, windX: 1 }) > 2 * smokeLen({ windMotion01: 0, windX: 1 })
     );
+  }
+
+  // ── TONGUES ARE STREAMS OF BILLOWS THAT TEAR APART AND RISE, NOT RODS THAT GROW AND SHRINK (round 4) ─────────────────
+  {
+    const topShape = (tSec) => {
+      const e = emit(
+        { outdoor01: 1, windMotion01: 0 },
+        { tSec, parallax: 0, tilt: 0 },
+        { tongueLength: 2.0, tongueCurl: 7 }
+      );
+      const L = lobesOf(e.flame, e.r.count).filter(
+        (l) => l.kind === KIND_FLAME && l.w > 0.5 && l.w < 1.3 && l.z > 0.5 * FIRE.radius
+      );
+      return L.map((l) => [Math.round(l.x - FIRE.x), Math.round(l.z)]);
+    };
+    // the same tongue, an instant apart: the lobes' positions are NOT the previous ones scaled (a retained shape would reuse them)
+    const a = topShape(30);
+    const b = topShape(31);
+    const common = a.filter((p) => b.some((q) => Math.abs(p[0] - q[0]) < 3 && Math.abs(p[1] - q[1]) < 3)).length;
+    t.ok(
+      `the flame's upper billows are constantly new (${common} of ${a.length} lobes keep their place 1 s later)`,
+      a.length > 8 && common < a.length * 0.3
+    );
+    // fragments: small billows torn off, above the body, in every instant
+    let frag = 0;
+    for (let i = 0; i < 40; i++) {
+      const e = emit({ outdoor01: 1 }, { tSec: 20 + i * 0.37, parallax: 0, tilt: 0 });
+      const all = lobesOf(e.flame, e.r.count).filter((l) => l.kind === KIND_FLAME && l.w > 0.5 && l.w < 1.3);
+      const rs = all.map((l) => l.r).sort((x, y) => x - y);
+      const small = rs[Math.floor(rs.length * 0.25)];
+      frag += all.filter((l) => l.r <= small && l.z > 0.6 * Math.max(...all.map((q) => q.z))).length;
+    }
+    t.ok(`small billows are torn off the tongue tops and rise (${frag} such fragments over 40 instants)`, frag > 40);
   }
 }

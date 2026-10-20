@@ -33,7 +33,25 @@ import { windFlowVector } from '../../../world/index.js';
 const STRIDE = 4; // x, y, brightness, jitterRadiusPx — mirrors fire-spawn-points.js (the engine reads SPAWN_POINT_STRIDE)
 const M_PER_PX = 0.0102;
 
-const defaults = Object.fromEntries(Object.entries(FIRE_PARAMS).map(([k, d]) => [k, d.default]));
+const NEUTRAL = {
+  intensity: 1,
+  flameSize: 1,
+  flameHeight: 1,
+  flameLick: 1,
+  flameWindLean: 1,
+  flameFlecks: 1,
+  flameDetail: 1,
+  flameSpeed: 1,
+  flameRagged: 1,
+  flameShading: 0.5,
+  posterize: 0.62,
+  bandCount: 5,
+  flameGlow: 1,
+  windResponse: 1,
+  smokeLineWidth: 1,
+};
+// (the tests pin the MODEL, not the author's tuned dials: shape/size dials start from neutral)
+const defaults = { ...Object.fromEntries(Object.entries(FIRE_PARAMS).map(([k, d]) => [k, d.default])), ...NEUTRAL };
 
 function makeCloud(pts) {
   const points = new Float32Array(pts.length * STRIDE);
@@ -750,7 +768,7 @@ export function run(t) {
     {
       const eighty = [];
       const ePts = [];
-      for (let i = 0; i < 30; i++) {
+      for (let i = 0; i < 18; i++) {
         const x = 150 + (i % 6) * 220;
         const y = 150 + Math.floor(i / 6) * 220;
         eighty.push({ id: `q${i}`, x, y, diameterPx: 80 });

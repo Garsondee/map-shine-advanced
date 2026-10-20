@@ -158,17 +158,17 @@ export const BILLOW_TUNE = Object.freeze({
   smokePerR: 0.14,
   // ── body billows ──
   bodyRadius: 0.66, // plume radius, × R
-  bodyLifeMul: 1.0, // × each layer's own cycle
+  bodyLifeMul: 1.1, // × each layer's own cycle
   bodyHeight: 3.0, // flame-tip height, × R (a hearth burns lower, a bonfire stands up)
   // ── tongues ──
-  tongueLength: 2.0, // × plume radius
+  tongueLength: 0.45, // × plume radius
   tongueLobe: 0.4,
   tongueLife: 1.9,
-  tongueCurl: 7,
+  tongueCurl: 8,
   // ── flecks ──
   fleckLife: 0.8,
-  fleckSpeed: 2.2,
-  fleckSize: 0.06,
+  fleckSpeed: 1.6,
+  fleckSize: 0.15,
   // ── spit embers: heavy chunks that arc out of the fire, land and smoulder where they fall ──
   spitBase: 2.5,
   spitPerR: 0.03,
@@ -181,15 +181,15 @@ export const BILLOW_TUNE = Object.freeze({
   smokeSize: 0.58,
   smokeStart: 0.42, // a billow is born this fraction of its full width...
   smokeGrow: 1.9, // ...and grows by this much more as it climbs (a plume SHOULD outgrow its fire)
-  massRise: 2.4, // × the mass's radius: how far a burning building's column climbs
+  massRise: 6, // × the mass's radius: how far a burning building's column climbs
   smokeLift: 3.4, // from above (the 3/4 picture) smoke rises this much faster up the page than its height says: the painted plumes reach three flames up
   smokeDrift: 5.0, // × R of downwind drift at a full gale
   // ── wind ──
   leanLength: 2.6, // × plume radius, at full lean
-  leanCurve: 1.5,
-  leanStreak: 1.6,
-  windShear: 1.1, // extra downwind shear of every flame lobe, x its height x the lean (a gale lays the whole body over, not just the tip)
-  windFlatten: 0.5, // how much of its height a flame loses at full lean (the wind presses it down)
+  leanCurve: 1.05,
+  leanStreak: 5,
+  windShear: 1.8, // extra downwind shear of every flame lobe, x its height x the lean (a gale lays the whole body over, not just the tip)
+  windFlatten: 0.6, // how much of its height a flame loses at full lean (the wind presses it down)
   smokeStreak: 4, // how far smoke is stretched along the wind at full lean (a plume is a streamer in a gale)
   // ── weather ──
   rainShrink: 0.62, // how much of its size a fully rained-on flame loses
@@ -661,94 +661,103 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
   }
 
   // ───────────────────────────── TONGUES ─────────────────────────────
-  // Chains of billows that lick out and up from the body and curl at the tip. In the 3/4 picture they rise up the
-  // page; from the side they are the tall, tapering, bent shapes a flame is.
-  // tongue 0 is the flame's own TIP: always there, standing tallest, reaching little sideways. The rest are the
-  // secondary licks, rarer in still air, longer and laid downwind as the wind rises.
+  // A tongue is a STREAM of billows, not a bent rod that grows and shrinks. Each billow is thrown out of the tongue's root on
+  // its own clock, flies outward and slows, is bent upward by the heat (toward the wind in a gale), sways sideways more the
+  // older it gets, swells and cools; then past ~60% of its life it TEARS into two fragments that drift apart and rise on
+  // their own while they fade. The heading the stream is thrown at wanders with time (a slow double sine), so billows
+  // thrown a moment apart fly different ways: the tongue snakes and re-forms instead of keeping one shape.
+  // tongue 0 is the flame's own TIP: always there, standing tallest, reaching little sideways.
   const nTongue =
     1 + Math.round(lerp(tune.tongueMin, tune.tongueMax, clamp01(turb * (0.15 + 0.5 * outdoor) + 0.9 * leanG)) * q);
   const M = tune.tongueLobes;
   for (let k = 0; k < nTongue; k++) {
     const id = seed * 131 + k * 13 + 5000;
     if (hash01(id, 3, 92) > thin) continue;
-    const P = (tune.tongueLife * (0.8 + 0.6 * hash01(id, 0, 1))) / (1 + 0.3 * outdoor);
-    const u = t / P + hash01(id, 1, 2);
-    const cyc = Math.floor(u);
-    const a = u - cyc;
-    const r1 = hash01(id, cyc, 21);
-    const r2 = hash01(id, cyc, 22);
-    const r3 = hash01(id, cyc, 23);
-    const r4 = hash01(id, cyc, 24);
-    const r5 = hash01(id, cyc, 25);
-    const r6 = hash01(id, cyc, 26);
-    basePoint(f, R, r1, r2, r3, 0.55, base);
-    const envT =
-      k === 0
-        ? 0.45 + 0.55 * smoothstep(0, 0.26, a) * (1 - smoothstep(0.7, 1, a))
-        : smoothstep(0, 0.26, a) * (1 - smoothstep(0.55, 1, a));
-    if (envT < 0.01) continue;
-    // outward from the fire's centre, with jitter; a base on the centre picks any direction
-    // calm air: licks rise up the page (a hanging tongue reads as a drip); wind takes them downwind
-    const psi0 = lerp(-Math.PI / 2 + (r4 - 0.5) * 2.2, windAng, clamp01(leanG * 2.2));
-    // a hearth's tongues are short and stubby, a bonfire's long; the horizontal reach is modest, the HEIGHT is the point
     const primary = k === 0;
-    const reach =
+    // the root hops slowly; the stream keeps its place meanwhile
+    const ur = t / (5 + 4 * hash01(id, 0, 1)) + hash01(id, 1, 2);
+    const rc = Math.floor(ur);
+    basePoint(f, R, hash01(id, rc, 21), hash01(id, rc, 22), hash01(id, rc, 23), 0.55, base);
+    const rootX = base[0];
+    const rootY = base[1];
+    const phi = hash01(id, 5, 27) * TAU;
+    const psiCalm = -Math.PI / 2 + (hash01(id, rc, 24) - 0.5) * 2.2;
+    const r5 = hash01(id, rc, 25);
+    // a hearth's tongues are short and stubby, a bonfire's long; the horizontal reach is modest, the HEIGHT is the point
+    const reach0 =
       plume *
       tune.tongueLength *
       (primary ? 0.25 + 0.9 * leanG : (0.45 + 0.5 * r5) * (0.35 + 0.35 * outdoor + 0.9 * leanG)) *
-      Math.pow(envT, 0.9) *
       heightMul;
-    const curl = (r6 - 0.5) * 2 * tune.tongueCurl;
-    const dl = reach / M;
-    let px = base[0];
-    let py = base[1];
-    const tipTaper = 0.45 + 0.55 * (1 - a);
-    // the screen position of the chain's root, so each lobe can be drawn long toward the one before it
-    project(env, base[0], base[1], 0, proj);
-    let prevX = proj[0];
-    let prevY = proj[1];
-    const topZ =
-      height * heightMul * (primary ? 0.75 + 0.25 * r5 : 0.4 + 0.3 * r5) * (0.55 + 0.45 * Math.pow(envT, 0.7));
+    const topZ0 = height * heightMul * (primary ? 0.75 + 0.25 * r5 : 0.4 + 0.3 * r5);
+    const lt0 = (tune.tongueLife * (0.8 + 0.6 * hash01(id, 0, 3))) / (1 + 0.3 * outdoor);
     for (let j = 0; j < M; j++) {
-      const s = (j + 0.5) / M;
-      // heading: the tongue's own curl, bending toward the wind more the further out it goes
-      const lam = clamp01(leanG * (0.25 + 1.4 * s));
-      const psi = psi0 + curl * s * s;
-      let hx = Math.cos(psi) * (1 - lam) + wdx * lam;
-      let hy = Math.sin(psi) * (1 - lam) + wdy * lam;
+      const idj = id * 17 + j * 101;
+      const lt = lt0 * (0.75 + 0.5 * hash01(idj, 0, 1));
+      const u = t / lt + (j + 0.5 * hash01(idj, 1, 2)) / M;
+      const cyc = Math.floor(u);
+      const a = u - cyc;
+      const te = t - a * lt; // when this billow was thrown
+      const wander = 0.6 * Math.sin(te * 0.9 + phi) + 0.4 * Math.sin(te * 2.1 + phi * 1.7);
+      const psi = psiCalm + wander * tune.tongueCurl * 0.18;
+      // heading: its own throw, laid toward the wind, and bent upward by the heat as it ages (calm air)
+      const lam = clamp01(leanG * (0.25 + 1.2 * a));
+      const up = 0.55 * smoothstep(0.25, 1, a) * (1 - leanG);
+      let hx = (Math.cos(psi) * (1 - lam) + wdx * lam) * (1 - up);
+      let hy = (Math.sin(psi) * (1 - lam) + wdy * lam) * (1 - up) - up;
       const hl = Math.hypot(hx, hy) || 1;
       hx /= hl;
       hy /= hl;
-      px += hx * dl;
-      py += hy * dl;
-      // wind also lays the tongue over: height falls as the lean rises
-      const z = topZ * Math.pow(s, 0.85) * (1 - 0.55 * leanG * s) + height * 0.08;
-      const rad =
-        plume *
-        tune.tongueLobe *
-        (primary ? 1.25 : 1) *
-        Math.pow(1 - 0.62 * s, 1.1) *
-        Math.pow(envT, 0.5) *
-        pulse *
-        sizeMul *
-        rainDamp *
-        tipTaper;
-      const heat = (0.85 - 0.5 * s) * (1 - 0.3 * a) * cool;
-      // write once to learn the projected point, then re-write with the direction and length of the step from the last lobe
-      const at = n;
-      put(px, py, z, rad, 0.95, heat, 1, hx, hy, KIND_FLAME, lerp(a, 1, s * 0.5));
-      const sx = lastX - prevX;
-      const sy = lastY - prevY;
-      const sl = Math.hypot(sx, sy);
-      if (sl > 1e-3 && lastR > 1e-3) {
-        const o = at * LOBE_STRIDE;
-        out[o + 5] = clamp((sl * 0.65 + lastR) / lastR, 1, 4.5);
-        out[o + 6] = sx / sl;
-        out[o + 7] = sy / sl;
-        out[o + 10] = 1;
+      const dist = reach0 * (1 - (1 - a) * (1 - a));
+      const sway = Math.sin(a * TAU * 1.15 + phi + j) * reach0 * 0.22 * a * (0.5 + 0.5 * turb);
+      const x = rootX + hx * dist - hy * sway;
+      const y = rootY + hy * dist + hx * sway;
+      const z = topZ0 * Math.pow(a, 0.85) * (1 - 0.55 * leanG * a) + height * 0.08;
+      const grow = smoothstep(0, 0.18, a);
+      const tear = 1 - smoothstep(0.58, 0.9, a);
+      const swell = Math.pow(grow, 0.6) * (1 - 0.35 * a);
+      const rad = plume * tune.tongueLobe * (primary ? 1.25 : 1) * swell * tear * pulse * sizeMul * rainDamp;
+      const heat = (0.85 - 0.55 * a) * (1 - 0.3 * a) * cool;
+      put(
+        x,
+        y,
+        z,
+        rad,
+        0.95 * (1 - 0.3 * a),
+        heat,
+        1 + 1.8 * Math.pow(1 - a, 1.5),
+        hx,
+        hy,
+        KIND_FLAME,
+        lerp(a, 1, 0.3)
+      );
+      // THE TEAR: two fragments leave the billow, fly apart across its heading and rise on their own, fading
+      if (a > 0.58 && hash01(idj, cyc, 31) > 0.35) {
+        const bk = (a - 0.58) / 0.42;
+        const baseRad =
+          plume * tune.tongueLobe * (primary ? 1.25 : 1) * Math.pow(grow, 0.6) * pulse * sizeMul * rainDamp;
+        for (let sgn = -1; sgn <= 1; sgn += 2) {
+          const sp = plume * 0.6 * bk * (0.6 + 0.8 * hash01(idj, cyc, 32 + sgn));
+          const fx = x - hy * sgn * sp + wdx * leanG * bk * plume * 0.7;
+          const fy = y + hx * sgn * sp + wdy * leanG * bk * plume * 0.7;
+          const fz = z + bk * height * 0.4 * (0.6 + 0.8 * hash01(idj, cyc, 34 + sgn));
+          const fr = baseRad * 0.5 * Math.pow(1 - bk, 0.9) * smoothstep(0, 0.12, bk + 0.1);
+          if (fr > 0.2)
+            put(
+              fx,
+              fy,
+              fz,
+              fr,
+              0.9 * (1 - 0.6 * bk),
+              (0.5 - 0.3 * bk) * cool,
+              1 + 1.2 * (1 - bk),
+              hx,
+              hy,
+              KIND_FLAME,
+              1
+            );
+        }
       }
-      prevX = lastX;
-      prevY = lastY;
     }
   }
 
@@ -1027,7 +1036,7 @@ export function maxLobesPerFire(R, tuneOverride) {
   const body = BODY_LAYERS.reduce((n, L) => n + Math.ceil(L.count * (0.72 + 0.28 * Math.min(2, R / 50))), 0);
   return (
     Math.ceil(body) +
-    tune.tongueMax * tune.tongueLobes +
+    Math.ceil(tune.tongueMax * tune.tongueLobes * 2.4) +
     Math.ceil(tune.fleckBase + tune.fleckPerR * R) +
     Math.ceil(tune.spitBase + tune.spitPerR * R) * 3 +
     20 +

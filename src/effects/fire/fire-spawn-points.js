@@ -190,7 +190,7 @@ export function extractFireSpawnPoints(grid, { maxPoints = MAX_SPAWN_POINTS, thr
  * @returns {number} the label, or -1 if unresolved (off-grid, or genuinely
  *   too far from any confirmed paint — see `fire-mask.js#propagateLabels`).
  */
-function labelAtWorldPoint(x, y, { nearestLabel, spec }) {
+export function labelAtWorldPoint(x, y, { nearestLabel, spec }) {
   const w = spec.w | 0;
   const h = spec.h | 0;
   const { texelW, texelH } = maskTexelSize(spec, w, h);

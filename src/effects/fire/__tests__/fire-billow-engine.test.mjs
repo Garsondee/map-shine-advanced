@@ -316,6 +316,67 @@ export function run(t) {
       two.length === 2 && two[0].count === near200 && two[1].count === twoCloud.count - near200
     );
 
+    // OWNERSHIP IS "WHICH FIRE IS THIS POINT PART OF", NOT "WHOSE CENTRE IS NEARER" (2026-10-20, the real viewer: a bonfire
+    // was handed two dim points off the bottom edge of the roof 330 px north of it, and every flame piece rooted on one
+    // stood alone in the air above the fire — a detached teardrop)
+    {
+      const roofFire = { id: 'roof', x: 1000, y: 1000, diameterPx: 1400 };
+      const camp = { id: 'camp', x: 1000, y: 330, diameterPx: 60 };
+      const edge = discOfPoints(1000, 400, 20, 10); // the roof's paint beside the camp: 600 from the roof's centre, 70 from the camp's
+      const campOwn = discOfPoints(1000, 330, 20, 10);
+      const plan = planClusters([roofFire, camp], makeCloud([...edge, ...campOwn]), M_PER_PX);
+      const sum = (id) => plan.filter((c) => c.id === id).reduce((s, c) => s + c.count, 0);
+      t.ok(
+        `a point inside a wide fire's disc is the WIDE fire's, though a small fire's centre is nearer (${sum('roof')} of ${edge.length} to the roof, ${sum('camp')} of ${campOwn.length} to the camp)`,
+        sum('roof') === edge.length && sum('camp') === campOwn.length
+      );
+      const lone = planClusters([camp], makeCloud([...campOwn, [1000, 900], [1400, 330]]), M_PER_PX);
+      t.ok(
+        'a point many radii from every fire is nobody’s: it roots no flame piece',
+        lone.length === 1 && lone[0].count === campOwn.length
+      );
+
+      // with the scene's label field, ownership is structural: only a fire of the point's own blob can own it
+      const W = 70;
+      const H = 50;
+      const labelGrid = (labelAt) => {
+        const nearestLabel = new Int32Array(W * H);
+        for (let r = 0; r < H; r++)
+          for (let c = 0; c < W; c++) nearestLabel[r * W + c] = labelAt((c + 0.5) * 20, (r + 0.5) * 20);
+        return { nearestLabel, spec: { x: 0, y: 0, w: W, h: H, width: 1400, height: 1000 } };
+      };
+      const grid = labelGrid((x, y) => {
+        if (Math.abs(y - 200) > 60) return -1;
+        if (x > 240 && x < 290) return 2; // a patch of B's blob that reaches toward A
+        if (x < 280) return 1;
+        if (x > 520 && x < 580) return -1; // paint no blob claims
+        if (x >= 580 && x < 700) return 7; // a blob whose fire did not survive
+        if (x > 820) return 2;
+        return -1;
+      });
+      const A = { id: 'a', x: 200, y: 200, diameterPx: 60, label: 1 };
+      const B = { id: 'b', x: 900, y: 200, diameterPx: 60, label: 2 };
+      const pts = [
+        [210, 210], // A's own
+        [260, 200], // B's blob, though A is the nearer fire
+        [910, 210], // B's own
+        [550, 200], // on no blob
+        [640, 200], // on a blob with no fire
+      ];
+      const byLabel = planClusters([A, B], makeCloud(pts), M_PER_PX, grid);
+      t.ok(
+        `with the label field a point goes to a fire of its OWN blob (a ${byLabel[0].count}, b ${byLabel[1].count}), and to none when its blob has no fire`,
+        byLabel[0].count === 1 && byLabel[1].count === 2
+      );
+      const byDistance = planClusters([A, B], makeCloud(pts), M_PER_PX);
+      t.ok(
+        'without it the nearest fire in its own radii takes the blob-less points that are close enough',
+        byDistance[0].count === 2 && byDistance[1].count === 1
+      );
+      const noLabel = planClusters([{ ...A, label: undefined }, B], makeCloud(pts), M_PER_PX, grid);
+      t.ok('a fire with no label (an anchor) is given no painted points under the label field', noLabel[0].count === 0);
+    }
+
     // the city block: a huge fire is capped
     const huge = planClusters(
       [{ id: 'city', x: 3000, y: 3000, diameterPx: 6000 }],

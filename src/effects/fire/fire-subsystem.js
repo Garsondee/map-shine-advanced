@@ -414,6 +414,7 @@ export function createFireSubsystem({
         rect,
         fires,
         cloud: effectiveCloud,
+        labelGrid,
         params,
         runtime,
         precip01,

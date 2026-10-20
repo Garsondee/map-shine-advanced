@@ -25,7 +25,7 @@ import { createFireLifeBook } from './fire-billow-state.js';
 import { billowRuntimeFromParams } from './fire-billow-params.js';
 import { bloomCounterParams, bloomCounterUniforms, regionFill } from './fire-billow-bloom.js';
 import { fireScaleChain, fireWindMotion01, fireWeatherStress01, FIRE_FUELS, deriveFireSeed } from './fire-geometry.js';
-import { SPAWN_POINT_STRIDE } from './fire-spawn-points.js';
+import { SPAWN_POINT_STRIDE, labelAtWorldPoint } from './fire-spawn-points.js';
 import { buildDepthHeightGateNode } from '../lighting/point-light-illumination.js';
 import { windFlowVector } from '../../world/index.js';
 
@@ -52,6 +52,8 @@ const MODEST_SPACING = 1.4;
 const CPU_LOBE_BUDGET = 4500;
 /** A burning mass's equivalent flame radius, as a fraction of its box's mean side (fitted to a single flame: 0.19). */
 const MASS_FILL_PER_SIDE = 0.19;
+/** With no label field to say which blob a painted point is part of: farther than this many radii from every fire, it is part of none. */
+const OWN_REACH = 3;
 
 /**
  * A big fire's flames stand taller: a burning roof is not a field of campfires. 1 for a single flame, rising with how much
@@ -95,14 +97,76 @@ export function viewCameraHeight(rect) {
 }
 
 /**
+ * Which fire each painted point is part of: `owned[j]` lists the cloud indices of fire `j`'s points. A point can belong to NO
+ * fire, and then it is simply not used (it must not be given to whichever fire happens to be nearest).
+ *
+ * ⚠️ NEVER "THE NEAREST CENTRE". A fire's centre is the middle of its inscribed circle, so on a wide painted region a point on
+ * the far side is closer to a small neighbour's centre than to its own. The first cut did exactly that and the real viewer
+ * showed it: a bonfire owned two dim points off the bottom edge of the burning roof 330 px north of it, and every flame
+ * piece rooted on one of them (a tongue, a billow, a puff of smoke) stood alone in the air above the fire, a detached
+ * teardrop of flame. `fire-spawn-points.js#applyCohesion` learned the same lesson for the embers, and the answer is the same:
+ * ownership is structural. With the scene's label field (`labelGrid`: which painted blob each texel is part of) a point
+ * only ever belongs to a fire of its OWN blob, and a point on no blob, or on one whose fire did not survive, belongs to
+ * nothing. Without a label field the best that can be done is distance measured in each fire's OWN radii (a point inside a
+ * fire's disc is that fire's), and a point more than `OWN_REACH` radii from every fire is nobody's.
+ *
+ * @param {Array<{x:number,y:number,diameterPx:number,label?:number}>} list
+ * @param {Float32Array|null} pts @param {number} n @param {number} stride
+ * @param {{nearestLabel:Int32Array, spec:object}|null} labelGrid
+ * @returns {number[][]}
+ */
+function ownPoints(list, pts, n, stride, labelGrid) {
+  const owned = list.map(() => []);
+  if (!pts || n <= 0 || !list.length) return owned;
+  const radii = list.map((f) => Math.max(4, (Number(f.diameterPx) || 100) / 2));
+  const labelled = !!(labelGrid?.nearestLabel && labelGrid?.spec);
+  const byLabel = new Map();
+  if (labelled) {
+    for (let j = 0; j < list.length; j++) {
+      const label = list[j].label;
+      if (!Number.isInteger(label) || label === -1) continue;
+      if (!byLabel.has(label)) byLabel.set(label, []);
+      byLabel.get(label).push(j);
+    }
+  }
+  for (let i = 0; i < n; i++) {
+    const x = pts[i * stride];
+    const y = pts[i * stride + 1];
+    let candidates = null;
+    if (labelled) {
+      const label = labelAtWorldPoint(x, y, labelGrid);
+      candidates = label === -1 ? null : (byLabel.get(label) ?? null);
+      if (!candidates) continue;
+    }
+    let best = -1;
+    let bd = Infinity;
+    const count = candidates ? candidates.length : list.length;
+    for (let k = 0; k < count; k++) {
+      const j = candidates ? candidates[k] : k;
+      const dx = x - list[j].x;
+      const dy = y - list[j].y;
+      const d = (dx * dx + dy * dy) / (radii[j] * radii[j]);
+      if (d < bd) {
+        bd = d;
+        best = j;
+      }
+    }
+    if (best < 0 || (!candidates && bd > OWN_REACH * OWN_REACH)) continue;
+    owned[best].push(i);
+  }
+  return owned;
+}
+
+/**
  * Split the fires into flames. Pure and deterministic (Node-tested).
  *
- * @param {Array<{id?:string,x:number,y:number,diameterPx:number}>} fires
+ * @param {Array<{id?:string,x:number,y:number,diameterPx:number,label?:number}>} fires
  * @param {{points?:Float32Array,count?:number}|null} cloud the painted spawn cloud (x, y, brightness, jitter per point)
  * @param {number} mPerPx world metres per px
+ * @param {{nearestLabel:Int32Array, spec:object}|null} [labelGrid] the scene's blob label field (see `ownPoints`)
  * @returns {Array<{fireIndex:number, id:string, x:number, y:number, radius:number, seed:number, points:Float32Array, count:number}>}
  */
-export function planClusters(fires, cloud, mPerPx) {
+export function planClusters(fires, cloud, mPerPx, labelGrid = null) {
   const out = [];
   const list = Array.isArray(fires) ? fires : [];
   const pts = cloud?.points ?? null;
@@ -110,26 +174,8 @@ export function planClusters(fires, cloud, mPerPx) {
   const stride = SPAWN_POINT_STRIDE;
   const maxR = Math.max(24, MAX_CLUSTER_RADIUS_M / Math.max(1e-4, mPerPx));
 
-  // 1. every painted point goes to its nearest fire
-  const owned = list.map(() => []);
-  if (pts && n > 0 && list.length) {
-    for (let i = 0; i < n; i++) {
-      const x = pts[i * stride];
-      const y = pts[i * stride + 1];
-      let best = 0;
-      let bd = Infinity;
-      for (let j = 0; j < list.length; j++) {
-        const dx = x - list[j].x;
-        const dy = y - list[j].y;
-        const d = dx * dx + dy * dy;
-        if (d < bd) {
-          bd = d;
-          best = j;
-        }
-      }
-      owned[best].push(i);
-    }
-  }
+  // 1. every painted point goes to the fire it is part of
+  const owned = ownPoints(list, pts, n, stride, labelGrid);
 
   const pack = (indices) => {
     const take = Math.min(MAX_POINTS_PER_CLUSTER, indices.length);
@@ -368,8 +414,8 @@ export function createBillowEngine({
     depth: depthTexNode ? { depthTexNode, depthFlagsTexNode, buildGate } : null,
   });
   const lives = createFireLifeBook();
-  /** @type {{cloud:*, fires:*, mPerPx:number, clusters:Array<object>}} */
-  let planMemo = { cloud: null, fires: null, mPerPx: -1, clusters: [] };
+  /** @type {{cloud:*, fires:*, mPerPx:number, labelGrid:*, clusters:Array<object>}} */
+  let planMemo = { cloud: null, fires: null, mPerPx: -1, labelGrid: null, clusters: [] };
   let jobs = [];
   let status = { fires: 0, clusters: 0, flame: 0, smoke: 0, coal: 0, dropped: 0 };
   let runtimeMemo = { params: null, fuelKey: '', value: null };
@@ -402,6 +448,8 @@ export function createBillowEngine({
      * @param {{minX:number,minY:number,maxX:number,maxY:number}} ctx.rect the visible world rect
      * @param {Array<object>} ctx.fires `getFireRenderState().fires` (with geometric `windExposure`)
      * @param {object|null} ctx.cloud the painted spawn cloud
+     * @param {{nearestLabel:Int32Array, spec:object}|null} [ctx.labelGrid] which painted blob each texel is part of
+     *   (`getFireRenderState().fireLabelGrid`): decides which fire a painted point belongs to (`ownPoints`)
      * @param {object} ctx.params the resolved FIRE_PARAMS values
      * @param {object} ctx.runtime `fireRuntimeFromParams(...)` — for the weather numbers it already folds
      * @param {number} ctx.precip01 the scene's eased precipitation
@@ -427,8 +475,14 @@ export function createBillowEngine({
       renderer.setBloomCounter?.(bloomCounterUniforms(counter, br.bloomMix));
 
       // the clusters (flames) are replanned only when the paint, the fires or the grid scale change
-      if (planMemo.cloud !== cloud || planMemo.fires !== fires || planMemo.mPerPx !== mPerPx) {
-        planMemo = { cloud, fires, mPerPx, clusters: planClusters(fires, cloud, mPerPx) };
+      const labelGrid = ctx.labelGrid ?? null;
+      if (
+        planMemo.cloud !== cloud ||
+        planMemo.fires !== fires ||
+        planMemo.mPerPx !== mPerPx ||
+        planMemo.labelGrid !== labelGrid
+      ) {
+        planMemo = { cloud, fires, mPerPx, labelGrid, clusters: planClusters(fires, cloud, mPerPx, labelGrid) };
       }
       const clusters = planMemo.clusters;
 

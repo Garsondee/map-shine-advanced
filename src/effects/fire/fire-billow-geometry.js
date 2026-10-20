@@ -385,8 +385,18 @@ export function billowPower(vitality01, stress01) {
  * @property {number} [animSpeed=1]
  */
 
-/** Pull one spawn point for a lobe (or a disc fallback), returning [x, y, brightness]. */
-function basePoint(f, R, h1, h2, h3, pull, scratch) {
+/** No flame piece is ever rooted farther than this many radii from its fire's centre, whatever the painted points say. */
+const BASE_REACH = 1.15;
+
+/**
+ * Pull one spawn point for a lobe (or a disc fallback), returning [x, y, brightness].
+ *
+ * ⚠️ THE ROOT IS HELD WITHIN `BASE_REACH` RADII OF THE CENTRE. A stray painted point (one that is really part of another
+ * fire's paint) used to root a tongue or a billow far from the flame, where it stood alone in the air as a detached
+ * teardrop. The engine now hands each flame only its own blob's points (`fire-billow-engine.js#ownPoints`); this is the
+ * second wall: a flame is one body, so nothing of it may grow from farther out than the body is wide.
+ */
+export function basePoint(f, R, h1, h2, h3, pull, scratch) {
   const n = f.spawnCount | 0;
   if (n > 0 && f.spawn) {
     const stride = f.spawnStride ?? 4;
@@ -398,8 +408,18 @@ function basePoint(f, R, h1, h2, h3, pull, scratch) {
     const a = h2 * TAU;
     const r = jr * Math.sqrt(h3);
     // pull toward the fire's own centre: the painted shape sets the footprint, the flame stays one body
-    scratch[0] = lerp(px + Math.cos(a) * r, f.x, pull);
-    scratch[1] = lerp(py + Math.sin(a) * r, f.y, pull);
+    let bx = lerp(px + Math.cos(a) * r, f.x, pull);
+    let by = lerp(py + Math.sin(a) * r, f.y, pull);
+    const reach = Math.max(R, 1) * BASE_REACH;
+    const dx = bx - f.x;
+    const dy = by - f.y;
+    const d = Math.hypot(dx, dy);
+    if (d > reach) {
+      bx = f.x + (dx / d) * reach;
+      by = f.y + (dy / d) * reach;
+    }
+    scratch[0] = bx;
+    scratch[1] = by;
     scratch[2] = b;
     return scratch;
   }
@@ -796,10 +816,10 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
     const live = fa < 1 ? 1 : 1 - smoothstep(smoulder * 0.9, smoulder * 1.05, lying);
     if (live < 0.02 || T < 0.005) continue;
     const rad =
-      plume * tune.spitSize * (0.7 + 0.6 * r5) * (fa < 1 ? 1.25 : 0.9 + 0.1 * T) * live * smoothstep(0, 0.04, a);
+      plume * tune.spitSize * (0.7 + 0.6 * r5) * (fa < 1 ? 1.0 : 0.9 + 0.1 * T) * live * smoothstep(0, 0.04, a);
     const dxv = Math.cos(th);
     const dyv = Math.sin(th);
-    put(x, y, z, rad, 1.35, T, fa < 1 ? 1 + 2.2 * (1 - fa) : 1, dxv, dyv, KIND_FLAME, 0.5);
+    put(x, y, z, rad, 1.35, T, fa < 1 ? 1 + 1.1 * (1 - fa) : 1, dxv, dyv, KIND_FLAME, 0.5);
   }
 
   // ───────────────────────────── SMOKE ─────────────────────────────

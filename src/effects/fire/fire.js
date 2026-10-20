@@ -387,7 +387,8 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 6,
     step: 0.05,
-    default: 1,
+    // 1.8, not 1: the heavy embers are a headline feature of the rebuild and at 1 a few tiny chunks vanish at normal zoom.
+    default: 1.8,
     category: 'Ember',
     label: 'Spitting embers ×',
     help: 'The HEAVY embers: chunks of burning wood the fire spits out in an arc, which land and smoulder on the ground for a long while (rain hisses them out, wind makes them flare). Different from the light sparks that spiral upward. Outdoors more than in; 0 turns them off.',
@@ -397,7 +398,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0.2,
     max: 4,
     step: 0.05,
-    default: 1,
+    default: 1.2,
     category: 'Ember',
     label: 'Spitting ember size ×',
     help: 'How big the landed chunks are.',

@@ -15,6 +15,7 @@
  */
 import {
   emitFireLobes,
+  basePoint,
   maxLobesPerFire,
   LOBE_STRIDE,
   LOBE,
@@ -483,6 +484,54 @@ export function run(t) {
     const e = emit({ spitMul: 6 }, { tSec: 61.1 });
     const grounded = burning(lobesOf(e.flame, e.r.count)).filter((l) => l.w > 1.3 && l.w < 1.4 && l.z === 0);
     t.ok('landed embers rest ON THE GROUND (height 0) and lie where they fell', grounded.length > 0);
+  }
+
+  // ── A STRAY PAINTED POINT CANNOT ROOT A FLAME PIECE OUTSIDE THE FIRE ──────────────────────────────────────────
+  // (2026-10-20, the real viewer: two dim points 330 px north of a bonfire, really the edge of a roof's paint, rooted
+  // tongues and billows that stood alone in the air above the flame — a detached teardrop. The engine now hands a flame
+  // only its own blob's points; this is the second wall.)
+  {
+    const R = FIRE.radius;
+    const ring = 60;
+    const cloud = new Float32Array((ring + 1) * 4);
+    for (let i = 0; i < ring; i++) {
+      const a = (i / ring) * Math.PI * 2;
+      cloud.set([FIRE.x + Math.cos(a) * R * 0.6, FIRE.y + Math.sin(a) * R * 0.6, 1, 3], i * 4);
+    }
+    cloud.set([FIRE.x, FIRE.y - 400, 0.03, 3], ring * 4); // the stray: eight radii north
+    const spawn = { spawn: cloud, spawnCount: ring + 1, spawnStride: 4 };
+
+    const out = [0, 0, 1];
+    const stray = basePoint({ x: FIRE.x, y: FIRE.y, ...spawn }, R, 60 / 61 + 0.001, 0.2, 0.3, 0.55, out);
+    const strayD = Math.hypot(stray[0] - FIRE.x, stray[1] - FIRE.y);
+    t.ok(
+      `a base rooted on the stray is held to 1.15 radii of the centre (${strayD.toFixed(1)} of ${(1.15 * R).toFixed(1)})`,
+      strayD <= 1.15 * R + 1e-6 && stray[1] < FIRE.y - 0.5 * R
+    );
+    const own = basePoint({ x: FIRE.x, y: FIRE.y, ...spawn }, R, 0.3, 0.2, 0.3, 0.55, out);
+    t.ok(
+      'and a base on one of the fire’s own points is not moved by it',
+      Math.hypot(own[0] - FIRE.x, own[1] - FIRE.y) < 0.6 * R
+    );
+
+    let far = 0;
+    let n = 0;
+    for (let i = 0; i < 240; i++) {
+      // no flecks and no spit: those are THROWN, by design, and wander off on their own
+      const e = emit(
+        { ...spawn, spitMul: 0 },
+        { tSec: 3 + i * 0.37, parallax: 0, tilt: 0 },
+        { fleckBase: 0, fleckPerR: 0 }
+      );
+      for (const l of burning(lobesOf(e.flame, e.r.count))) {
+        n++;
+        far = Math.max(far, Math.hypot(l.x - FIRE.x, l.y - FIRE.y));
+      }
+    }
+    t.ok(
+      `with a stray in the cloud, no flame lobe of 240 instants stands farther than 2.2 radii out (${far.toFixed(0)} of ${(2.2 * R).toFixed(0)}, ${n} lobes)`,
+      far <= 2.2 * R
+    );
   }
 
   // ── THE DIALS: size, height and the author's tune overrides ───────────────────────────────────────────────────

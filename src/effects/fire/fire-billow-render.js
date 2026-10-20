@@ -116,6 +116,9 @@ export const BILLOW_LOOK = Object.freeze({
   smokeCrisp: 0.7,
   /** How much greyer the smoke goes in a fully bright scene (so it stands off a pale floor). */
   smokeDayDark: 0.55,
+  /** Smoke is drawn OVER the flame: how far up its life it fades in, and how opaque it is where it crosses the flame. */
+  smokeFadeIn: 0.3,
+  smokeOverFlame: 0.55,
   /** Shading light direction (screen space, up-left). */
   lightX: -0.55,
   lightY: -0.55,
@@ -275,6 +278,8 @@ export function createBillowRenderer({
     smokeRelief: num('smokeRelief'),
     smokeCrisp: num('smokeCrisp'),
     smokeDayDark: num('smokeDayDark'),
+    smokeFadeIn: num('smokeFadeIn'),
+    smokeOverFlame: num('smokeOverFlame'),
     light: uniform(vec2(BILLOW_LOOK.lightX, BILLOW_LOOK.lightY)),
     hue: uniform(float(0)),
     tint: uniform(vec3(1, 1, 1)),
@@ -376,6 +381,7 @@ export function createBillowRenderer({
   const smokeLit = lin(BILLOW_SMOKE_RAMP.lit);
   const smokeInk = lin(BILLOW_SMOKE_RAMP.ink);
   const smokeCharcoal = lin(BILLOW_SMOKE_RAMP.charcoal);
+  const step1 = (x) => min(x.mul(1000), float(1));
   const flipUV = (p) => (flipV ? vec2(p.x, float(1).sub(p.y)) : p);
   const dirY = (v) => (flipV ? v.negate() : v);
 
@@ -686,16 +692,18 @@ export function createBillowRenderer({
         })
       );
     }
-    // bottom to top: the smoke's shadow on the ground (black), the coal bed (painted over the ground), the smoke, the flame;
-    // the glow is added on top of all
+    // bottom to top: the smoke's shadow on the ground (black), the coal bed (painted over the ground), the flame (its glow added),
+    // and OVER it the smoke, which fades in with its age (young smoke is clear, so it never overpowers the flame) and is only
+    // partly opaque where it crosses the flame itself
     const coalPre = coalRgb.mul(coalA);
-    const smokePre = smokeLinear.mul(sCover);
     const flamePre = rgb.mul(cover).add(glowRgb);
     const aCoal = coalA.add(shadowA.mul(float(1).sub(coalA)));
-    const aSmoke = sCover.add(aCoal.mul(float(1).sub(sCover)));
-    const rgbSmoke = smokePre.add(coalPre.mul(float(1).sub(sCover)));
-    const outA = cover.add(aSmoke.mul(float(1).sub(cover)));
-    const outRgb = flamePre.add(rgbSmoke.mul(float(1).sub(cover)));
+    const underA = cover.add(aCoal.mul(float(1).sub(cover)));
+    const underRgb = flamePre.add(coalPre.mul(float(1).sub(cover)));
+    const fadeIn = smoothstep(float(0), max(U.smokeFadeIn, float(0.001)), toneS);
+    const sOver = sCover.mul(mix(float(1), fadeIn, step1(U.smokeFadeIn))).mul(mix(float(1), U.smokeOverFlame, cover));
+    const outA = sOver.add(underA.mul(float(1).sub(sOver)));
+    const outRgb = smokeLinear.mul(sOver).add(underRgb.mul(float(1).sub(sOver)));
     // THE BLOOM COUNTER: paint s*T so that the scene's bloom adds its share and hands T back (fire-billow-bloom.js). `s` is
     // solved from the colour's own max channel and this fire's on-screen size; it is exactly 1 when the bloom is off.
     const brT = max(max(outRgb.r, outRgb.g), outRgb.b);

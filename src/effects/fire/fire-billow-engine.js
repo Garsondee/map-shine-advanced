@@ -937,7 +937,7 @@ export function createBillowEngine({
         ...br.look,
         hue: br.hueShiftRad,
         tint: br.tint,
-        smokeLinePx: billowSmokeScale(pxPerWorld, 50).linePx,
+        smokeLinePx: billowSmokeScale(pxPerWorld, 50).linePx * (br.smokeLineWidth ?? 1),
       });
       renderer.uniforms.expectedDepth.value = Number.isFinite(ctx.expectedDepth) ? ctx.expectedDepth : 0;
       jobs = nf + ns > 0 ? renderer.prepareField(rect, { pxPerWorld, timeSec }) : [];

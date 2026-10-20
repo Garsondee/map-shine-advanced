@@ -39,6 +39,44 @@ function hex01(hex) {
  * @returns {{look:object, tune:object, life:object, smokeMul:number, spitMul:number, parallax:number, tilt:number,
  *   motionSpeed:number, hueShiftRad:number, tint:number[], quality:number, drafts:number, rekindle:boolean}}
  */
+/** Every artistic dial that sets ONE model constant or look uniform directly: dial -> [where, key, default, min, max]. */
+const DIRECT = {
+  flameTongueLength: ['tune', 'tongueLength', 0.55, 0.1, 2],
+  flameCurl: ['tune', 'tongueCurl', 3.2, 0, 8],
+  flameCycle: ['tune', 'bodyLifeMul', 1, 0.2, 3],
+  flameFleckSize: ['tune', 'fleckSize', 0.06, 0.01, 0.3],
+  flameFleckSpeed: ['tune', 'fleckSpeed', 2.2, 0.2, 8],
+  flameLeanCurve: ['tune', 'leanCurve', 1.5, 0.3, 4],
+  flameWindStreak: ['tune', 'leanStreak', 1.6, 0, 5],
+  flameRainShrink: ['tune', 'rainShrink', 0.62, 0, 1],
+  flameEdgeSoft: ['look', 'edgeSoft', 0.08, 0.012, 0.3],
+  flameMottle: ['look', 'mottle', 0.1, 0, 0.5],
+  flameRelief: ['look', 'relief', 2.6, 0, 8],
+  flameBrightness: ['look', 'emission', 1, 0.2, 2.5],
+  flameTone: ['look', 'tonePow', 0.84, 0.4, 1.6],
+  flameFullness: ['look', 'outline', 0.5, 0.25, 0.9],
+  flameGlowRadius: ['look', 'glowRadiusPx', 14, 0, 60],
+  coalCellSize: ['look', 'coalCell', 0.16, 0.04, 0.6],
+  coalCrack: ['look', 'coalCrack', 0.22, 0.03, 0.6],
+  flameWobbleSpeed: ['look', 'warpSpeed', 0.7, 0, 3],
+  flameWobbleScale: ['look', 'warpFreq', 0.05, 0.01, 0.2],
+  smokeFadeIn: ['look', 'smokeFadeIn', 0.3, 0, 1],
+  smokeOverFlame: ['look', 'smokeOverFlame', 0.55, 0, 1],
+  smokeLife: ['tune', 'smokeLife', 4.6, 1, 20],
+  smokeStart: ['tune', 'smokeStart', 0.42, 0.1, 1.5],
+  smokeGrow: ['tune', 'smokeGrow', 1.9, 0, 5],
+  smokeLift: ['tune', 'smokeLift', 3.4, 1, 8],
+  smokeCrisp: ['look', 'smokeCrisp', 0.7, 0, 1],
+  smokeShading: ['look', 'smokeRelief', 2.4, 0, 8],
+  smokeCoverage: ['look', 'smokeOutline', 0.42, 0.15, 1.2],
+  smokeEdgeSoft: ['look', 'smokeSoft', 0.14, 0.02, 0.5],
+  smokeBrightGrey: ['look', 'smokeDayDark', 0.55, 0, 0.9],
+  smokeLineWidth: ['scale', 'smokeLineWidth', 1, 0, 3],
+  buildingSmokeHeight: ['tune', 'massRise', 2.4, 0.5, 6],
+  spitThrow: ['tune', 'spitRange', 2.6, 0.5, 8],
+  spitSmoulderSec: ['tune', 'spitLife', 24, 4, 120],
+};
+
 export function billowRuntimeFromParams(p = {}, extra = {}) {
   const size = clamp(num(p.flameSize, 1), 0.2, 4);
   const height = clamp(num(p.flameHeight, 1), 0.1, 4);
@@ -64,6 +102,15 @@ export function billowRuntimeFromParams(p = {}, extra = {}) {
     spitSize: BILLOW_TUNE.spitSize * clamp(num(p.spitSize, 1), 0.2, 4),
   };
   tune.tongueMin = Math.min(BILLOW_TUNE.tongueMin, tune.tongueMax);
+  const directLook = {};
+  let smokeLineWidth = 1;
+  for (const [dial, [where, key, def, lo, hi]] of Object.entries(DIRECT)) {
+    const v = clamp(num(p[dial], def), lo, hi);
+    if (where === 'tune')
+      tune[key] = key === 'tongueLength' ? tune[key] * (v / def) : v; // (Licking tongues already scales the length)
+    else if (where === 'look') directLook[key] = v;
+    else smokeLineWidth = v;
+  }
 
   const look = {
     posterize: clamp(num(p.posterize, BILLOW_LOOK.posterize), 0, 1),
@@ -81,6 +128,7 @@ export function billowRuntimeFromParams(p = {}, extra = {}) {
     warpPx2: BILLOW_LOOK.warpPx2 * clamp(num(p.flameRagged, 1), 0, 3),
     hue: extra.hueShiftRad ?? 0,
     tint,
+    ...directLook,
   };
 
   const life = {
@@ -92,6 +140,7 @@ export function billowRuntimeFromParams(p = {}, extra = {}) {
 
   return {
     look,
+    smokeLineWidth,
     tune,
     life,
     smokeMul: smoke * (extra.smokeGain ?? 1),

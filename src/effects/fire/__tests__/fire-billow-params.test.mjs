@@ -168,6 +168,76 @@ export function run(t) {
       withP({ bloomCounter: -3 }).bloomMix === 0
   );
 
+  // ── THE ARTISTIC DIALS (shape, look, smoke layering): defaults leave the model untouched, each one reaches it, each is clamped ──
+  {
+    const NEW = {
+      tune: {
+        flameCurl: 'tongueCurl',
+        flameCycle: 'bodyLifeMul',
+        flameFleckSize: 'fleckSize',
+        flameFleckSpeed: 'fleckSpeed',
+        flameLeanCurve: 'leanCurve',
+        flameWindStreak: 'leanStreak',
+        flameRainShrink: 'rainShrink',
+        smokeLife: 'smokeLife',
+        smokeStart: 'smokeStart',
+        smokeGrow: 'smokeGrow',
+        smokeLift: 'smokeLift',
+        buildingSmokeHeight: 'massRise',
+        spitThrow: 'spitRange',
+        spitSmoulderSec: 'spitLife',
+      },
+      look: {
+        flameEdgeSoft: 'edgeSoft',
+        flameMottle: 'mottle',
+        flameRelief: 'relief',
+        flameBrightness: 'emission',
+        flameTone: 'tonePow',
+        flameFullness: 'outline',
+        flameGlowRadius: 'glowRadiusPx',
+        coalCellSize: 'coalCell',
+        coalCrack: 'coalCrack',
+        flameWobbleSpeed: 'warpSpeed',
+        flameWobbleScale: 'warpFreq',
+        smokeFadeIn: 'smokeFadeIn',
+        smokeOverFlame: 'smokeOverFlame',
+        smokeCrisp: 'smokeCrisp',
+        smokeShading: 'smokeRelief',
+        smokeCoverage: 'smokeOutline',
+        smokeEdgeSoft: 'smokeSoft',
+        smokeBrightGrey: 'smokeDayDark',
+      },
+    };
+    let ok = true;
+    for (const [where, map] of Object.entries(NEW)) {
+      for (const [dial, key] of Object.entries(map)) {
+        const d = FIRE_PARAMS[dial];
+        const src = where === 'tune' ? BILLOW_TUNE : BILLOW_LOOK;
+        const lo = withP({ [dial]: d.min })[where][key];
+        const hi = withP({ [dial]: d.max })[where][key];
+        const def = base[where][key];
+        const clampOk =
+          withP({ [dial]: d.max * 1000 })[where][key] === hi && withP({ [dial]: -1e9 })[where][key] === lo;
+        if (!d || !near(d.default, src[key], 1e-9) || !near(def, src[key], 1e-9) || lo === hi || !clampOk) {
+          ok = false;
+          console.log('  dial problem:', dial, key, d?.default, src[key], def, lo, hi, clampOk);
+        }
+      }
+    }
+    t.ok(
+      'every artistic dial (flame shape, look, smoke layering, spit) defaults to the model own constant, reaches the model, and is clamped',
+      ok
+    );
+    t.ok(
+      'the smoke rim width multiplies the rim',
+      near(withP({ smokeLineWidth: 2 }).smokeLineWidth, 2) && base.smokeLineWidth === 1
+    );
+    t.ok(
+      'smoke is drawn OVER the flame and fades in: default fade-in and over-flame opacity are set and sane',
+      BILLOW_LOOK.smokeFadeIn > 0 && BILLOW_LOOK.smokeOverFlame > 0 && BILLOW_LOOK.smokeOverFlame < 1
+    );
+  }
+
   // ── CLAMPING: a stored value from any other schema cannot reach past the slider ────────────────────────────────
   {
     const wild = billowRuntimeFromParams({

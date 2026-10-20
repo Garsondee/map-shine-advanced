@@ -597,7 +597,7 @@ export function createBillowRenderer({
     const sCover0 = smoothstep(U.smokeOutline.sub(sAA), U.smokeOutline.add(sAA), S);
     const dens = clamp(S.sub(U.smokeOutline).div(1.6), float(0), float(1));
     // a thin rim or tail is see-through, the body is solid
-    const sCover = sCover0.mul(U.smokeOpacity).mul(mix(float(0.55), float(1), smoothstep(float(0), float(0.3), dens)));
+    const sCover = sCover0.mul(U.smokeOpacity).mul(mix(float(0.72), float(1), smoothstep(float(0), float(0.3), dens)));
     // how many px inside the silhouette this is: (density above the edge) / (density change per px; the taps are 1.5 texels each side)
     const edgePx = max(S.sub(U.smokeOutline), float(0)).div(max(sGradLen.mul(0.6667), float(0.0005)));
     // THE BIG SHAPE'S SHADING: the density's slope at a distance of `vLook.x` px (the billows' own size), relative to the density
@@ -631,24 +631,28 @@ export function createBillowRenderer({
     sRgb = mix(sRgb, charcoalBanded, sootAmt.mul(0.92));
     // steam is the brightest, whitest smoke there is
     sRgb = mix(sRgb, smokeHi, steam.mul(0.85));
+    // HOW BRIGHT THE SCENE IS HERE (noon, a well lit room): pale smoke on a pale floor is a mist, not smoke, so a bright scene greys
+    // the smoke, strengthens its rim and its shadow (a night scene needs none of that: the dark floor does the work)
+    const illum = lighting?.illumTexNode ? lighting.illumTexNode.sample(screenUV).rgb : null;
+    const illumLum = illum ? dot(illum, vec3(0.2126, 0.7152, 0.0722)) : float(0);
+    const bright = smoothstep(float(0.55), float(1.0), illumLum);
     // the line: the first `smokeLinePx` px inside the silhouette, warm near-black
     const lineA = float(1)
       .sub(smoothstep(U.smokeLinePx.sub(0.6), U.smokeLinePx.add(0.6), edgePx))
-      .mul(U.smokeLineA)
+      .mul(clamp(U.smokeLineA.mul(float(1).add(bright.mul(1.2))), float(0), float(0.9)))
       .mul(smoothstep(float(0.0), float(0.6), U.smokeLinePx));
     sRgb = mix(sRgb, smokeInk, lineA);
     // the shadow on the ground: the same field, sampled up-left, falls down-right (the light is up-left)
     const shOff = vec2(vLook.y.mul(0.55), dirY(vLook.y)).div(U.rectSize);
-    const shadowA = smoothstep(float(0.1), float(0.55), smokeNode.sample(p.sub(shOff)).x).mul(U.smokeShadow);
+    const shadowA = smoothstep(float(0.1), float(0.55), smokeNode.sample(p.sub(shOff)).x)
+      .mul(U.smokeShadow)
+      .mul(float(1).add(bright.mul(0.9)));
     let smokeLinear;
-    if (lighting?.illumTexNode) {
-      const illum = lighting.illumTexNode.sample(screenUV).rgb;
+    if (illum) {
       const coloration = lighting.colorationTexNode ? lighting.colorationTexNode.sample(screenUV).rgb : vec3(0, 0, 0);
-      // a bright scene (noon, a well lit room) lights pale smoke past white, and white smoke on a pale floor is a mist, not smoke:
       // the smoke is never lit brighter than its own paint, and in a bright scene it goes greyer so it stands off the floor
-      const illumLum = dot(illum, vec3(0.2126, 0.7152, 0.0722));
       const illumC = illum.mul(min(float(1), float(0.95).div(max(illumLum, float(0.001)))));
-      const dayDark = smoothstep(float(0.55), float(1.0), illumLum).mul(U.smokeDayDark);
+      const dayDark = bright.mul(U.smokeDayDark);
       // the scene's own composite: lit = EOTF(OETF(albedo) * illum + coloration); the painted smoke colours are sRGB albedo
       smokeLinear = sRGBTransferEOTF(
         sRGBTransferOETF(sRgb.mul(float(1).sub(dayDark)))

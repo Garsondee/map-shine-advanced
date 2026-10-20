@@ -836,7 +836,7 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
   // a hearth's smoke is drawn up the flue: thin and low; a bonfire's is a column. A doused fire smokes MORE (steam).
   // wet = steam: rain on a hot fire. Burning smoke follows the fire's power; a smouldering bed gives a thin wisp, no more.
   const wet = clamp01(clamp01(f.rain01 ?? 0) * (0.35 + 0.65 * (1 - power)) * (0.3 + 0.7 * coalHeat));
-  const smokeAmt = (0.18 + 0.82 * outdoor) * (0.12 * coalHeat + 0.88 * Math.pow(power, 0.8) + 1.1 * wet);
+  const smokeAmt = (0.26 + 0.74 * outdoor) * (0.12 * coalHeat + 0.88 * Math.pow(power, 0.8) + 1.1 * wet);
   const nSmoke = Math.max(0, Math.round(smokeRef * smokeAmt));
   for (let i = 0; i < nSmoke; i++) {
     const id = seed * 131 + i * 17 + 14000;

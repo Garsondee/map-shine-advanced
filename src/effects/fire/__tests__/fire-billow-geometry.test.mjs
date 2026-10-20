@@ -585,6 +585,15 @@ export function run(t) {
       'from above, smoke climbs UP THE PAGE faster than its height says (the lift cheat): more lift, smaller screen y',
       meanY({ smokeLift: 3.4 }, flatEnv) < meanY({ smokeLift: 1 }, flatEnv) - 4
     );
+    t.ok(
+      'a gale shrinks the flame but does not put its smoke out (it spreads it): at full stress still over 60% of the billows',
+      lobesAt({ stress01: 1 }).length > 0.6 * lobesAt({ stress01: 0 }).length
+    );
+    const maxZ = (extra) => Math.max(...lobesAt(extra).map((l) => l.z));
+    t.ok(
+      `a gale blows smoke along the ground rather than up: at full wind it climbs about half as high (${maxZ({ windMotion01: 1 }).toFixed(0)} vs ${maxZ({ windMotion01: 0 }).toFixed(0)} px)`,
+      maxZ({ windMotion01: 1 }) < maxZ({ windMotion01: 0 }) * 0.7
+    );
     const sideEnv = { projection: 'side', groundY: 2000, sideScale: 1 };
     t.ok(
       'but the side view keeps the true height (no cheat there)',
@@ -669,6 +678,17 @@ export function run(t) {
     );
     const dead = column({ vitality01: 0, coal01: 0 });
     t.ok('a mass that is out and cold makes none', dead.count === 0);
+    t.ok(
+      'a gale does not put a building’s smoke out either: at full stress more than 70% of the billows',
+      column({ stress01: 1, windMotion01: 1, windX: 1 }).count > 0.7 * a.count
+    );
+    const weakCol = column({ vitality01: 0.15, coal01: 0.3 });
+    t.ok(
+      `a weak column (a dying fire) is made of smaller, lower puffs, not a few big balls (${Math.max(...weakCol.lobes.map((l) => l.r)).toFixed(0)} px vs ${Math.max(...a.lobes.map((l) => l.r)).toFixed(0)})`,
+      weakCol.count > 0 &&
+        Math.max(...weakCol.lobes.map((l) => l.r)) < 0.8 * Math.max(...a.lobes.map((l) => l.r)) &&
+        Math.max(...weakCol.lobes.map((l) => l.z)) < Math.max(...zs) * 0.9
+    );
     const smoulder = column({ vitality01: 0, coal01: 1 });
     t.ok('but a smouldering one still does, a little', smoulder.count > 0 && smoulder.count < a.count);
     t.ok(
@@ -692,6 +712,10 @@ export function run(t) {
       xTop({ windX: 1, windMotion01: 1 }) > still + 25 &&
         xTop({ windX: -1, windMotion01: 1 }) < still - 25 &&
         Math.abs(xTop({ windX: 1, windMotion01: 1 }) - still + (xTop({ windX: -1, windMotion01: 1 }) - still)) < 40
+    );
+    t.ok(
+      'a gale flattens the column: it climbs about half as high as in a calm',
+      Math.max(...column({ windX: 1, windMotion01: 1 }).lobes.map((l) => l.z)) < Math.max(...zs) * 0.7
     );
     const heatOf = (m) => mean(column(m).lobes.map((l) => l.heat));
     t.ok(

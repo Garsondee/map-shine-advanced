@@ -489,6 +489,8 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
   const vit = clamp01(f.vitality01 ?? 1);
   const stress = clamp01(f.stress01 ?? 0);
   const power = billowPower(vit, stress);
+  // (a gale makes the flame smaller, not its smoke any less: it spreads the smoke, it does not put it out)
+  const smokePower = billowPower(vit, 0.3 * stress);
   // size, count and heat all follow the one power number: the flame as a WHOLE gets smaller, thinner and cooler
   const sizeMul = 0.3 + 0.7 * Math.pow(power, 0.75);
   const heightMul = 0.3 + 0.7 * Math.pow(power, 0.85);
@@ -836,7 +838,7 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
   // a hearth's smoke is drawn up the flue: thin and low; a bonfire's is a column. A doused fire smokes MORE (steam).
   // wet = steam: rain on a hot fire. Burning smoke follows the fire's power; a smouldering bed gives a thin wisp, no more.
   const wet = clamp01(clamp01(f.rain01 ?? 0) * (0.35 + 0.65 * (1 - power)) * (0.3 + 0.7 * coalHeat));
-  const smokeAmt = (0.26 + 0.74 * outdoor) * (0.12 * coalHeat + 0.88 * Math.pow(power, 0.8) + 1.1 * wet);
+  const smokeAmt = (0.26 + 0.74 * outdoor) * (0.12 * coalHeat + 0.88 * Math.pow(smokePower, 0.8) + 1.1 * wet);
   const nSmoke = Math.max(0, Math.round(smokeRef * smokeAmt));
   for (let i = 0; i < nSmoke; i++) {
     const id = seed * 131 + i * 17 + 14000;
@@ -853,7 +855,9 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
     if (envS < 0.01) continue;
     basePoint(f, R, r1, r2, r3, 0.75, base);
     // smoke is born ABOVE the flame body and climbs from there, thin at first
-    const zTop = R * tune.smokeRise * (0.35 + 0.65 * outdoor) * (0.75 + 0.5 * r4) * (0.6 + 0.4 * sz.iPow);
+    // (a gale blows smoke along the ground rather than up: at full wind it climbs half as high and drifts the whole way)
+    const zTop =
+      R * tune.smokeRise * (0.35 + 0.65 * outdoor) * (0.75 + 0.5 * r4) * (0.6 + 0.4 * sz.iPow) * (1 - 0.5 * leanG);
     const z = height * 0.75 + zTop * Math.pow(a, 0.9);
     const sway = plume * 0.5 * Math.sin(((t * 0.9) / P) * TAU * 0.5 + r5 * TAU) * a;
     const swayY = plume * 0.4 * Math.cos(((t * 0.7) / P) * TAU * 0.5 + r4 * TAU) * a;
@@ -927,11 +931,15 @@ export function emitMassSmoke(out, start, m, env, tuneOverride) {
   const lit = clamp01(m.lit01 ?? 1);
   const vit = clamp01(m.vitality01 ?? 1);
   const power = billowPower(vit, clamp01(m.stress01 ?? 0));
+  const smokePower = billowPower(vit, 0.3 * clamp01(m.stress01 ?? 0));
   const outdoor = clamp01(m.outdoor01 ?? 1);
   const coalHeat = clamp01(m.coal01 ?? 0.35 + 0.65 * vit);
   const wet = clamp01(clamp01(m.rain01 ?? 0) * (0.35 + 0.65 * (1 - power)) * (0.3 + 0.7 * coalHeat));
   // the same smoke amount as one flame's (a hearth's goes up the flue, rain makes steam), times how much of the mass burns
-  const amt = (0.18 + 0.82 * outdoor) * (0.12 * coalHeat + 0.88 * Math.pow(power, 0.8) + 1.1 * wet) * lit;
+  const amt = (0.26 + 0.74 * outdoor) * (0.12 * coalHeat + 0.88 * Math.pow(smokePower, 0.8) + 1.1 * wet) * lit;
+  // a weak column (a dying fire, a soaked roof) is made of smaller, lower puffs, not of a few big balls
+  const weak = Math.min(1, amt);
+  const sizeK = 0.55 + 0.45 * Math.pow(weak, 0.6);
   const count = Math.min(
     MASS_SMOKE_MAX,
     Math.round(clamp(14 + Rm / 12, 14, 36) * q * (m.smokeMul ?? 1) * Math.min(1.4, amt * 1.3))
@@ -964,7 +972,15 @@ export function emitMassSmoke(out, start, m, env, tuneOverride) {
     const ang = r1 * TAU;
     // (smoke comes off the whole roof and gathers into one column as it climbs)
     const rho = Rm * 0.4 * Math.sqrt(r2) * (1 - 0.5 * a);
-    const climb = Rm * (tune.massRise ?? 1.6) * (0.35 + 0.65 * outdoor) * (0.82 + 0.36 * r4) * Math.pow(a, 0.9);
+    // (a gale flattens the column too: it climbs half as high and drifts the whole way)
+    const climb =
+      Rm *
+      (tune.massRise ?? 1.6) *
+      (0.35 + 0.65 * outdoor) *
+      (0.82 + 0.36 * r4) *
+      Math.pow(a, 0.9) *
+      (1 - 0.5 * leanG) *
+      (0.6 + 0.4 * weak);
     const z = baseZ + climb;
     const drift = Rm * tune.smokeDrift * 0.35 * (0.15 + 0.85 * leanG) * (0.12 + Math.pow(a, 1.3));
     const cheat = env.projection === 'side' ? 0 : (tune.smokeLift - 1) * tilt * climb;
@@ -972,7 +988,7 @@ export function emitMassSmoke(out, start, m, env, tuneOverride) {
     const bend = Math.sin(t * 0.27 + a * 2.6 + hash01(seed, 9, 9) * TAU) * Rm * 0.16 * Math.pow(a, 0.8);
     const x = m.x + Math.cos(ang) * rho + Math.sin(t * 0.5 + r3 * TAU) * Rm * 0.05 * a + bend + wdx * drift;
     const y = m.y + Math.sin(ang) * rho + Math.cos(t * 0.4 + r4 * TAU) * Rm * 0.04 * a + wdy * drift - cheat;
-    const rad = Rm * 0.2 * (0.4 + 1.5 * Math.pow(a, 0.8)) * Math.pow(envS, 0.5) * (0.8 + 0.45 * r3);
+    const rad = Rm * 0.2 * sizeK * (0.4 + 1.5 * Math.pow(a, 0.8)) * Math.pow(envS, 0.5) * (0.8 + 0.45 * r3);
     const strength = (0.55 + 0.45 * Math.min(1, amt)) * Math.pow(envS, 0.55) * (0.85 + 0.3 * r3);
     // (the lower half of the column is still lit by the fire, the upper greys and darkens)
     const tone = clamp01(Math.pow(a, 1.3) * 1.05 + 0.08 * r2);

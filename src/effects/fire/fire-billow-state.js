@@ -70,6 +70,8 @@ export function newFireLife() {
  * @param {number} w.rain01 rain reaching it (precipitation x sky exposure), 0..1
  * @param {boolean} [w.snuffable=true] `canBeSnuffed`
  * @param {number} [w.rainResponse=1] the author's dial (0 = rain does nothing)
+ * @param {number} [w.wind01=0] how hard the wind is trying to blow it out, 0..1 (a gale on an exposed fire; 0 below it): like rain it soaks the
+ *   fire's life away, and rain in a gale puts it out much faster
  * @param {number} [w.seed=0] for the rekindle's cough
  * @param {number} [w.timeSec=0] the fire clock, for the cough
  * @param {Partial<typeof FIRE_LIFE>} [life] overrides of `FIRE_LIFE`
@@ -80,11 +82,19 @@ export function stepFireLife(state, dtSec, w = {}, life = FIRE_LIFE) {
   const dt = clamp(Number.isFinite(dtSec) ? dtSec : 0, 0, 0.25);
   const snuffable = w.snuffable !== false;
   const rain = clamp(Number.isFinite(w.rain01) ? w.rain01 : 0, 0, 1);
-  const rainEff = rain * clamp(Number.isFinite(w.rainResponse) ? w.rainResponse : 1, 0, 2) * (snuffable ? 1 : 0.25);
+  const wind = clamp(Number.isFinite(w.wind01) ? w.wind01 : 0, 0, 1);
+  // (rain in a gale is driven into the fire: up to 2.5x as fast)
+  const rainEff =
+    rain *
+    clamp(Number.isFinite(w.rainResponse) ? w.rainResponse : 1, 0, 2) *
+    (snuffable ? 1 : 0.25) *
+    (1 + 1.5 * wind);
+  const windEff = wind * (snuffable ? 1 : 0.25);
+  const pressure = rainEff + windEff;
 
   // wetness: the memory of the rain. It climbs at the rain's rate and drains when the rain eases.
-  const drying = (1 - Math.min(1, rainEff * 2)) / Math.max(1, L.drySec);
-  state.wet = clamp(state.wet + (rainEff / Math.max(1, L.douseSec)) * dt - drying * dt, 0, 1.15);
+  const drying = (1 - Math.min(1, pressure * 2)) / Math.max(1, L.drySec);
+  state.wet = clamp(state.wet + (pressure / Math.max(1, L.douseSec)) * dt - drying * dt, 0, 1.15);
   state.clock += dt;
 
   const flameOf = (wet) => 1 - smoothstep(0.25, 1.0, wet);
@@ -112,7 +122,7 @@ export function stepFireLife(state, dtSec, w = {}, life = FIRE_LIFE) {
         state.phase = 'dead';
         state.clock = 0;
         state.coal = 0;
-      } else if (state.wet < 0.3 && state.coal > 0.45 && rain < 0.05) {
+      } else if (state.wet < 0.3 && state.coal > 0.45 && rain < 0.05 && wind < 0.05) {
         // it was only almost out: with the rain gone, the hot coals catch the wood again
         state.phase = 'burning';
         state.clock = 0;
@@ -123,7 +133,7 @@ export function stepFireLife(state, dtSec, w = {}, life = FIRE_LIFE) {
       state.vitality = 0;
       state.coal = 0;
       // the clock counts only while it is dry; rain resets the wait
-      if (state.wet > 0.5 || rain > 0.05) state.clock = 0;
+      if (state.wet > 0.5 || rain > 0.05 || wind > 0.3) state.clock = 0;
       if (state.clock >= L.rekindleDelaySec) {
         state.phase = 'rekindle';
         state.clock = 0;
@@ -141,7 +151,7 @@ export function stepFireLife(state, dtSec, w = {}, life = FIRE_LIFE) {
           Math.sin((Number.isFinite(w.timeSec) ? w.timeSec : 0) * 0.43 + seedPhase * 1.9);
       state.coal = clamp(smoothstep(0, 0.4, ramp) * (0.75 + 0.25 * cough), 0, 1);
       state.vitality = clamp(smoothstep(0.35, 1, ramp) * (0.35 + 0.65 * Math.max(0, cough)), 0, 1);
-      if (rain > 0.3 && snuffable) {
+      if ((rain > 0.3 || wind > 0.5) && snuffable) {
         // rain came back: it relapses
         state.phase = 'out';
         state.clock = 0;

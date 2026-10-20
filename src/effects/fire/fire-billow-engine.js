@@ -31,7 +31,7 @@ import {
 import { createFireLifeBook } from './fire-billow-state.js';
 import { billowRuntimeFromParams } from './fire-billow-params.js';
 import { bloomCounterParams, bloomCounterUniforms, regionFill } from './fire-billow-bloom.js';
-import { fireScaleChain, fireWindMotion01, fireWeatherStress01, FIRE_FUELS, deriveFireSeed } from './fire-geometry.js';
+import { fireScaleChain, fireWindMotion01, FIRE_FUELS, deriveFireSeed } from './fire-geometry.js';
 import { SPAWN_POINT_STRIDE, labelAtWorldPoint } from './fire-spawn-points.js';
 import { buildDepthHeightGateNode } from '../lighting/point-light-illumination.js';
 import { windFlowVector } from '../../world/index.js';
@@ -56,7 +56,7 @@ const MODEST_SPACING = 1.4;
  * Most lobes written per frame before every flame is thinned out: the emitter costs ~0.7 us a lobe (measured, Node, warm), so
  * this is ~3 ms a frame. A lone campfire is ~90 lobes (0.06 ms); a whole building would otherwise be ~6000 (4.5 ms).
  */
-const CPU_LOBE_BUDGET = 5600;
+const CPU_LOBE_BUDGET = 7600;
 /** A burning mass's equivalent flame radius, as a fraction of its box's mean side (fitted to a single flame: 0.19). */
 const MASS_FILL_PER_SIDE = 0.19;
 /** A group of flames too scattered to be one contour box is covered by at most this many grid tiles. */
@@ -524,6 +524,8 @@ export function createBillowEngine({
   const lives = createFireLifeBook();
   /** per big fire: how far its front has run (seconds of burning time; frozen while it is out, restarted on a rekindle) */
   const spread = new Map();
+  /** per fire: the weather this frame felt (for `getStatus`: why a fire does or does not react) */
+  const weatherDiag = new Map();
   /** @type {{cloud:*, fires:*, mPerPx:number, labelGrid:*, clusters:Array<object>}} */
   let planMemo = { cloud: null, fires: null, mPerPx: -1, labelGrid: null, clusters: [] };
   let jobs = [];
@@ -692,10 +694,21 @@ export function createBillowEngine({
           snuffWind: chain.snuffWind,
         });
         const rainHere = precip * sky * weatherResponse;
-        const stress01 = fireWeatherStress01({
-          windMotion01: gated,
-          rain01: Math.min(1, rainHere * rainResponse),
-          gain: stressGain,
+        const rainFelt = Math.min(1, rainHere * rainResponse);
+        // THE FLAME'S WEATHER STRESS (stronger than the sprite era's: a gale really does beat a flame down, rain in a gale most of all)
+        const stress01 = clamp(
+          (0.75 * Math.pow(gated, 1.4) + 0.55 * rainFelt + 0.5 * gated * rainFelt) * stressGain,
+          0,
+          1
+        );
+        // a gale on an exposed fire starts to blow it out (a hurricane does it in about the time rain does); `windSnuff` is the dial
+        const wind01 = clamp(((gated - 0.72) / 0.28) * clamp(Number(params?.windSnuff ?? 1), 0, 2), 0, 1);
+        weatherDiag.set(c.id, {
+          openness: +openness.toFixed(2),
+          sky: +sky.toFixed(2),
+          wind: +gated.toFixed(2),
+          rain: +rainFelt.toFixed(2),
+          stress: +stress01.toFixed(2),
         });
 
         // its life (once per fire, however many flames it is split into)
@@ -703,7 +716,7 @@ export function createBillowEngine({
         if (!lf) {
           if (!stepped.has(c.id)) {
             stepped.add(c.id);
-            lives.step(c.id, dtSec, { rain01: rainHere, snuffable, rainResponse, seed: c.seed, timeSec }, life);
+            lives.step(c.id, dtSec, { rain01: rainHere, wind01, snuffable, rainResponse, seed: c.seed, timeSec }, life);
           }
           const s = lives.get(c.id);
           lf = { vitality: s.vitality, coal: s.coal, phase: s.phase, wet: s.wet };
@@ -963,7 +976,12 @@ export function createBillowEngine({
       jobs = [];
       return j;
     },
-    getStatus: () => ({ ...status, lives: lives.size(), lifeSummary: lives.snapshot(12) }),
+    getStatus: () => ({
+      ...status,
+      lives: lives.size(),
+      lifeSummary: lives.snapshot(12),
+      weather: [...weatherDiag].slice(0, 12).map(([id, v]) => ({ id, ...v })),
+    }),
     dispose() {
       renderer.dispose();
     },

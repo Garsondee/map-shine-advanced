@@ -313,4 +313,42 @@ export function run(t) {
     book.reset();
     t.ok('reset forgets everything', book.size() === 0 && book.snapshot().length === 0);
   }
+
+  // ── A GALE PUTS A FIRE OUT, AND RAIN IN A GALE FASTER (2026-10-20, round 3) ──────────────────────────────────────
+  {
+    const secondsToOut = (w, cap = 900) => {
+      const s = newFireLife();
+      for (let t = 0; t < cap; t += 0.25) {
+        stepFireLife(s, 0.25, w);
+        if (s.phase === 'out') return t;
+      }
+      return Infinity;
+    };
+    const wind = secondsToOut({ wind01: 1 });
+    const rain = secondsToOut({ rain01: 1 });
+    const both = secondsToOut({ rain01: 1, wind01: 1 });
+    t.ok(
+      `a hurricane on an exposed fire puts it out (${wind.toFixed(0)} s), about as fast as steady rain does (${rain.toFixed(0)} s)`,
+      Number.isFinite(wind) && wind < 3 * FIRE_LIFE.douseSec && Math.abs(wind - rain) < 2 * FIRE_LIFE.douseSec
+    );
+    t.ok(
+      `rain driven by a gale puts it out much faster (${both.toFixed(0)} s)`,
+      both < 0.6 * rain && both < 0.6 * wind
+    );
+    t.ok(
+      'no wind and no rain never does',
+      secondsToOut({}, 600) === Infinity && secondsToOut({ wind01: 0 }, 600) === Infinity
+    );
+    t.ok(
+      'a fire that cannot be snuffed is not put out by wind',
+      secondsToOut({ wind01: 1, snuffable: false }, 600) === Infinity
+    );
+    const s = newFireLife();
+    for (let i = 0; i < 4 * 200; i++) stepFireLife(s, 0.25, { wind01: 1 });
+    for (let i = 0; i < 4 * 60; i++) stepFireLife(s, 0.25, { wind01: 0 });
+    t.ok(
+      'and it stays out once the wind drops (a gale-snuffed fire is out, it does not flare back at once)',
+      s.phase !== 'burning'
+    );
+  }
 }

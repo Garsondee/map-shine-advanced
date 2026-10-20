@@ -96,6 +96,8 @@ export const BILLOW_LOOK = Object.freeze({
   glowRadiusPx: 14,
   /** Emission multiplier on the flame colours (1 = the painted colours exactly). */
   emission: 1.0,
+  /** HDR added at the flame's hottest cream core (after the bloom counter), so the heart of the fire exceeds the bloom threshold and blooms. */
+  coreBloom: 1.2,
   /** The coal bed: its glow strength, the cracked cells' size (1/px) and crack width. */
   coalGain: 1.0,
   coalCell: 0.16,
@@ -279,6 +281,7 @@ export function createBillowRenderer({
     smokeCrisp: num('smokeCrisp'),
     smokeDayDark: num('smokeDayDark'),
     smokeFadeIn: num('smokeFadeIn'),
+    coreBloom: num('coreBloom'),
     smokeOverFlame: num('smokeOverFlame'),
     light: uniform(vec2(BILLOW_LOOK.lightX, BILLOW_LOOK.lightY)),
     hue: uniform(float(0)),
@@ -708,7 +711,10 @@ export function createBillowRenderer({
     // solved from the colour's own max channel and this fire's on-screen size; it is exactly 1 when the bloom is off.
     const brT = max(max(outRgb.r, outRgb.g), outRgb.b);
     const counter = bloomScale(brT, vFill);
-    return vec4(outRgb.mul(counter).mul(gate), outA.mul(gate));
+    // the hottest cream heart is HDR on top of the (bloom-countered) painted colour, so it really does trigger the scene's bloom
+    const coreAmt = smoothstep(float(0.7), float(1.0), tauB).mul(cover).mul(U.coreBloom).mul(float(1).sub(sOver));
+    const coreHdr = vec3(1.0, 0.86, 0.5).mul(coreAmt);
+    return vec4(outRgb.mul(counter).add(coreHdr).mul(gate), outA.mul(gate));
   })();
   resolveMaterial.transparent = true;
   resolveMaterial.depthTest = false;

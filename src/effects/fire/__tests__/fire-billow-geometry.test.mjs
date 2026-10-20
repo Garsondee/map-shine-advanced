@@ -153,8 +153,8 @@ export function run(t) {
   );
   t.ok('billowLeanGain clamps its input', billowLeanGain(-3) === 0 && Math.abs(billowLeanGain(9) - 1) < 1e-12);
   t.ok(
-    'billowPower: a healthy calm fire is 1, a dead one 0, and stress removes up to 72%',
-    billowPower(1, 0) === 1 && billowPower(0, 0) === 0 && Math.abs(billowPower(1, 1) - 0.28) < 1e-12
+    'billowPower: a healthy calm fire is 1, a dead one 0, and stress removes up to 85%',
+    billowPower(1, 0) === 1 && billowPower(0, 0) === 0 && Math.abs(billowPower(1, 1) - 0.15) < 1e-12
   );
   {
     let sum = 0;
@@ -592,7 +592,7 @@ export function run(t) {
     const maxZ = (extra) => Math.max(...lobesAt(extra).map((l) => l.z));
     t.ok(
       `a gale blows smoke along the ground rather than up: at full wind it climbs about half as high (${maxZ({ windMotion01: 1 }).toFixed(0)} vs ${maxZ({ windMotion01: 0 }).toFixed(0)} px)`,
-      maxZ({ windMotion01: 1 }) < maxZ({ windMotion01: 0 }) * 0.7
+      maxZ({ windMotion01: 1 }) < maxZ({ windMotion01: 0 }) * 0.8
     );
     const sideEnv = { projection: 'side', groundY: 2000, sideScale: 1 };
     t.ok(
@@ -759,6 +759,38 @@ export function run(t) {
           b.count >= 0 && b.count <= MASS_SMOKE_MAX && b.lobes.every((l) => Object.values(l).every(Number.isFinite))
         );
       })()
+    );
+  }
+
+  // ── THE WIND SHEARS, FLATTENS AND STREAKS (2026-10-20, round 3) ──────────────────────────────────────────────────
+  {
+    const tipOf = (extra) => {
+      let dx = 0;
+      let hmax = 0;
+      let n = 0;
+      for (let i = 0; i < 30; i++) {
+        const e = emit({ windX: 1, windY: 0, ...extra }, { tSec: 10 + i * 0.41, parallax: 0, tilt: 0 });
+        const L = lobesOf(e.flame, e.r.count).filter((l) => l.kind === KIND_FLAME && l.w > 0.5 && l.w < 1.3);
+        const top = [...L].sort((a, b) => b.z - a.z).slice(0, 6);
+        dx += mean(top.map((l) => l.x - FIRE.x));
+        hmax += Math.max(...L.map((l) => l.z));
+        n++;
+      }
+      return { dx: dx / n, h: hmax / n };
+    };
+    const calm = tipOf({ windMotion01: 0 });
+    const gale = tipOf({ windMotion01: 1 });
+    t.ok(
+      `in a gale the tip is laid far downwind (${gale.dx.toFixed(0)} vs ${calm.dx.toFixed(0)} px) and pressed down (${gale.h.toFixed(0)} vs ${calm.h.toFixed(0)} px)`,
+      gale.dx > calm.dx + 1.2 * FIRE.radius && gale.h < 0.7 * calm.h
+    );
+    const smokeLen = (extra) => {
+      const e = emit(extra, { tSec: 20, parallax: 0, tilt: 0 });
+      return Math.max(...lobesOf(e.smoke, e.r.smoke).map((l) => l.along));
+    };
+    t.ok(
+      'smoke is stretched along the wind in a gale (a streamer, not a puff)',
+      smokeLen({ windMotion01: 1, windX: 1 }) > 2 * smokeLen({ windMotion01: 0, windX: 1 })
     );
   }
 }

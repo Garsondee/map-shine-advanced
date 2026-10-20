@@ -150,21 +150,21 @@ export const BILLOW_SCORCH_HEX = Object.freeze(['#603826', '#4c2e21', '#432c21']
 export const BILLOW_TUNE = Object.freeze({
   // ── budget (lobes per fire at quality 1) ──
   tongueMin: 0,
-  tongueMax: 8,
-  tongueLobes: 5,
+  tongueMax: 14,
+  tongueLobes: 7,
   fleckBase: 5,
   fleckPerR: 0.07,
   smokeBase: 11,
   smokePerR: 0.14,
   // ── body billows ──
-  bodyRadius: 0.625, // plume radius, × R
+  bodyRadius: 0.66, // plume radius, × R
   bodyLifeMul: 1.0, // × each layer's own cycle
-  bodyHeight: 2.1, // flame-tip height, × R (a hearth burns lower, a bonfire stands up)
+  bodyHeight: 3.0, // flame-tip height, × R (a hearth burns lower, a bonfire stands up)
   // ── tongues ──
-  tongueLength: 1.1, // × plume radius
-  tongueLobe: 0.55,
+  tongueLength: 2.0, // × plume radius
+  tongueLobe: 0.4,
   tongueLife: 1.9,
-  tongueCurl: 5,
+  tongueCurl: 7,
   // ── flecks ──
   fleckLife: 0.8,
   fleckSpeed: 2.2,
@@ -188,6 +188,9 @@ export const BILLOW_TUNE = Object.freeze({
   leanLength: 2.6, // × plume radius, at full lean
   leanCurve: 1.5,
   leanStreak: 1.6,
+  windShear: 1.1, // extra downwind shear of every flame lobe, x its height x the lean (a gale lays the whole body over, not just the tip)
+  windFlatten: 0.5, // how much of its height a flame loses at full lean (the wind presses it down)
+  smokeStreak: 4, // how far smoke is stretched along the wind at full lean (a plume is a streamer in a gale)
   // ── weather ──
   rainShrink: 0.62, // how much of its size a fully rained-on flame loses
   // ── camera ──
@@ -356,7 +359,7 @@ function fireSizes(f, tune) {
  * @param {number} vitality01 @param {number} stress01
  */
 export function billowPower(vitality01, stress01) {
-  return clamp01(vitality01) * (1 - 0.72 * clamp01(stress01));
+  return clamp01(vitality01) * (1 - 0.85 * clamp01(stress01));
 }
 
 /**
@@ -543,6 +546,13 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
   // `stretch` is the old area-preserving elongation; a chain lobe passes its own `along` and `across` instead
   // (long and as wide as before: a tongue should not thin as it is stretched along its own path).
   const put = (x, y, z, radius, strength, heat, stretch, dx, dy, kind, tone, along = null, across = null) => {
+    if (kind === KIND_FLAME && leanG > 0.01) {
+      // the wind lays the whole body over: shear downwind with height, and press the flame down
+      const shear = tune.windShear * leanG * z;
+      x += wdx * shear;
+      y += wdy * shear;
+      z *= 1 - tune.windFlatten * leanG;
+    }
     project(env, x, y, z, proj);
     const M = proj[2];
     const toSmoke = kind === KIND_SMOKE && outSmoke !== null;
@@ -886,7 +896,7 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
       rad,
       (0.5 + 0.5 * smokeAmt) * Math.pow(envS, 0.55) * (0.85 + 0.3 * r3),
       wet - soot,
-      1 + 0.5 * leanG * a,
+      1 + tune.smokeStreak * leanG * Math.pow(a, 0.7),
       wdx,
       wdy,
       KIND_SMOKE,
@@ -999,12 +1009,12 @@ export function emitMassSmoke(out, start, m, env, tuneOverride) {
     out[o + 2] = rad * proj[2];
     out[o + 3] = strength;
     out[o + 4] = wet - soot * (0.5 + 0.5 * a);
-    out[o + 5] = 1;
+    out[o + 5] = 1 + tune.smokeStreak * 0.5 * leanG * a;
     out[o + 6] = wdx;
     out[o + 7] = wdy;
     out[o + 8] = KIND_SMOKE;
     out[o + 9] = tone;
-    out[o + 10] = 1;
+    out[o + 10] = 1 / (1 + tune.smokeStreak * 0.25 * leanG * a);
     out[o + 11] = z;
     n++;
   }

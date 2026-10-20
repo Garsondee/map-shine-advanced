@@ -41,8 +41,12 @@ function hex01(hex) {
  */
 /** Every artistic dial that sets ONE model constant or look uniform directly: dial -> [where, key, default, min, max]. */
 const DIRECT = {
-  flameTongueLength: ['tune', 'tongueLength', 1.1, 0.1, 2],
-  flameCurl: ['tune', 'tongueCurl', 5, 0, 8],
+  flameCoreBloom: ['look', 'coreBloom', 1.2, 0, 6],
+  windShear: ['tune', 'windShear', 1.1, 0, 3],
+  windFlatten: ['tune', 'windFlatten', 0.5, 0, 0.9],
+  smokeStreak: ['tune', 'smokeStreak', 4, 0, 10],
+  flameTongueLength: ['tune', 'tongueLength', 2, 0.1, 2],
+  flameCurl: ['tune', 'tongueCurl', 7, 0, 8],
   flameCycle: ['tune', 'bodyLifeMul', 1, 0.2, 3],
   flameFleckSize: ['tune', 'fleckSize', 0.06, 0.01, 0.3],
   flameFleckSpeed: ['tune', 'fleckSpeed', 2.2, 0.2, 8],

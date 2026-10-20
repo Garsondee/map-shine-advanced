@@ -1321,4 +1321,35 @@ export function run(t) {
       })()
     );
   }
+
+  // ── A GALE PUTS AN EXPOSED FIRE OUT; A SEALED ROOM STAYS LIT (round 3) ──────────────────────────────────────────
+  {
+    const run = (wind, seconds, extra = {}) => {
+      const e = makeEngine({ wind });
+      const base = ctxOf({ params: { ...defaults, ...extra } });
+      advance(e.engine, base, seconds);
+      return e.engine.getStatus();
+    };
+    const open = run(makeWind({ openness: 1, sky: 1, speed01: 1 }), 120);
+    const sealed = run(makeWind({ openness: 0.05, sky: 0, speed01: 1 }), 120);
+    const calm = run(makeWind({ openness: 1, sky: 1, speed01: 0 }), 120);
+    t.ok(
+      `a hurricane on an exposed fire puts it out (${open.lifeSummary[0].phase}), a sealed room's fire and a calm night's burn on (${sealed.lifeSummary[0].phase}, ${calm.lifeSummary[0].phase})`,
+      open.lifeSummary[0].phase !== 'burning' &&
+        sealed.lifeSummary[0].phase === 'burning' &&
+        calm.lifeSummary[0].phase === 'burning'
+    );
+    t.ok(
+      'the "Wind puts fires out" dial at 0 keeps it alight in the same hurricane',
+      run(makeWind({ openness: 1, sky: 1, speed01: 1 }), 120, { windSnuff: 0 }).lifeSummary[0].phase === 'burning'
+    );
+    t.ok(
+      'the status says why: each fire openness, sky, wind felt, rain felt and stress',
+      Array.isArray(open.weather) &&
+        open.weather.length === 1 &&
+        open.weather[0].wind > 0.9 &&
+        'openness' in open.weather[0] &&
+        'stress' in open.weather[0]
+    );
+  }
 }

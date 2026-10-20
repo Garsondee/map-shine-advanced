@@ -593,11 +593,16 @@ export function createBillowRenderer({
     const sootL = clamp(bSig.negate(), float(0), float(1));
     const sGrad = vec2(sR.x.sub(sL.x), sD2.x.sub(sU.x)).mul(0.5);
     const sGradLen = length(sGrad);
-    const sAA = clamp(sGradLen, float(0.02), float(0.5)).add(U.smokeSoft);
+    // the painted plumes thin out and feather as they age: the top of a column dissolves into the air instead of ending at a hard edge
+    const age = smoothstep(float(0.5), float(1.0), toneS);
+    const sAA = clamp(sGradLen, float(0.02), float(0.5)).add(U.smokeSoft).add(age.mul(0.22));
     const sCover0 = smoothstep(U.smokeOutline.sub(sAA), U.smokeOutline.add(sAA), S);
     const dens = clamp(S.sub(U.smokeOutline).div(1.6), float(0), float(1));
     // a thin rim or tail is see-through, the body is solid
-    const sCover = sCover0.mul(U.smokeOpacity).mul(mix(float(0.72), float(1), smoothstep(float(0), float(0.3), dens)));
+    const sCover = sCover0
+      .mul(U.smokeOpacity)
+      .mul(mix(float(0.72), float(1), smoothstep(float(0), float(0.3), dens)))
+      .mul(float(1).sub(age.mul(0.35)));
     // how many px inside the silhouette this is: (density above the edge) / (density change per px; the taps are 1.5 texels each side)
     const edgePx = max(S.sub(U.smokeOutline), float(0)).div(max(sGradLen.mul(0.6667), float(0.0005)));
     // THE BIG SHAPE'S SHADING: the density's slope at a distance of `vLook.x` px (the billows' own size), relative to the density

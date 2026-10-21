@@ -217,9 +217,14 @@ function scalePulse(TSL, pulse, scale) {
  *   wind-driven gutter/snuff existed.
  * @param {*} [windResponse] - the effect's `windResponse` float node/uniform
  *   (default 1 when `wind` is present but this is omitted).
+ * @param {boolean} [allowSnuff=true] - false disables the TRUE-ZERO wind snuff
+ *   below, leaving only the gutter dip (floored at `BRIGHT_FLOOR`). Candles
+ *   keep the default (a gust really can blow one out); fire passes `false`
+ *   — see `buildFirePuffIlluminationSeed`'s own header for why wind alone
+ *   must never fully extinguish a fire's cast light.
  * @returns {{n: *, brightnessPulse: *, warmth: *, life: *}}
  */
-function candleLife(TSL, time, amplification, quality, wind, windResponse) {
+function candleLife(TSL, time, amplification, quality, wind, windResponse, allowSnuff = true) {
   // mx_noise_float, NOT mx_perlin_noise_float — the latter is internal-only in
   // the vendored three build (see light-animation-clock.js#buildFlickerNode).
   const { float, vec2, mx_noise_float: perlin, clamp, smoothstep, mix, length, max } = TSL;
@@ -293,8 +298,13 @@ function candleLife(TSL, time, amplification, quality, wind, windResponse) {
   // SNUFF (see WIND_SNUFF_MAG_* header) — applied AFTER the gutter-driven
   // brightness, not folded into `life` itself: a gutter dip still floors at
   // BRIGHT_FLOOR (a real but dim ember), while snuff must be able to reach
-  // TRUE zero — a distinct, stronger wind event, not just "very cold".
-  const snuff = wind ? smoothstep(float(WIND_SNUFF_MAG_LOW), float(WIND_SNUFF_MAG_HIGH), windMag) : float(0);
+  // TRUE zero — a distinct, stronger wind event, not just "very cold". Only
+  // when `allowSnuff` (fire passes `false`: wind alone can gutter a flame
+  // hard here but, per `fire-billow-state.js`'s own life model, never puts
+  // one out — only rain does; a cast light hitting true zero from wind
+  // alone contradicted the flame it was supposed to be lighting FOR).
+  const snuff =
+    wind && allowSnuff ? smoothstep(float(WIND_SNUFF_MAG_LOW), float(WIND_SNUFF_MAG_HIGH), windMag) : float(0);
   const brightnessPulse = mix(float(BRIGHT_FLOOR), float(BRIGHT_CEIL), life).mul(float(1).sub(snuff));
   const warmth = life.sub(float(0.5)).mul(float(2));
   return {
@@ -493,7 +503,13 @@ export function buildCandleFlickerIlluminationSeed({
  *   module's header) — `candleLife`'s own tier ladder still applies to the
  *   guttering pulse; only the SHAPE narrowing above it is removed.
  * @param {*} [args.wind] @param {*} [args.windResponse] - forwarded to
- *   `candleLife` for the wind-driven gutter/snuff term only.
+ *   `candleLife` for the wind-driven GUTTER term only — `allowSnuff: false`
+ *   below keeps the true-zero SNUFF candle-only (2026-10-21, author-
+ *   reported: at 70% wind the flame itself was still burning large and
+ *   bright while the cast light had vanished entirely). `fire-billow-
+ *   state.js`'s own life model is explicit that wind alone never puts a
+ *   fire out — only rain does — so the light must not either; see
+ *   `candleLife`'s own `allowSnuff` header.
  * @returns {{finalColor: *}}
  */
 export function buildFirePuffIlluminationSeed({
@@ -508,7 +524,7 @@ export function buildFirePuffIlluminationSeed({
 }) {
   const { float } = THREE.TSL;
   const amplification = uIntensityRaw.div(float(5));
-  const { n, brightnessPulse } = candleLife(THREE.TSL, time, amplification, quality, wind, windResponse);
+  const { n, brightnessPulse } = candleLife(THREE.TSL, time, amplification, quality, wind, windResponse, false);
   const jitteredRatio = buildFlickerRatioNode(THREE.TSL, uRatio, n);
   const seed = computeSwitchColorBand(jitteredRatio);
 
@@ -632,7 +648,9 @@ export function buildCandleFlickerColorationSeed({
  *   `quality >= 2` turns the wind-lean sway on; fire reaches quality 2 at
  *   its default effect tier (`fire-geometry.js`'s `FIRE_DEFAULT_TIER`).
  * @param {*} [args.wind] - the scaffold's shared wind sample, forwarded to
- *   `candleLife` (gutter/snuff) AND `candleShape` (the lean itself) below.
+ *   `candleLife` (gutter only — `allowSnuff: false`, see
+ *   `buildFirePuffIlluminationSeed`'s own header) AND `candleShape` (the
+ *   lean itself) below.
  * @param {*} [args.windResponse]
  * @returns {{finalColor: *}}
  */
@@ -650,7 +668,15 @@ export function buildFirePuffColorationSeed({
 }) {
   const { float, vec3, clamp, mix, smoothstep } = THREE.TSL;
   const amplification = uIntensityRaw.div(float(5));
-  const { brightnessPulse, warmth, life } = candleLife(THREE.TSL, time, amplification, quality, wind, windResponse);
+  const { brightnessPulse, warmth, life } = candleLife(
+    THREE.TSL,
+    time,
+    amplification,
+    quality,
+    wind,
+    windResponse,
+    false
+  );
 
   // THE WIND-DRIVEN SWAY (author's ask, round 3: "I want the fires to have
   // the light swinging around look that candles have in the wind... increase

@@ -1822,11 +1822,16 @@ function install() {
         // the vertical sliders") — same ENV_CHANNELS shape as Sky
         // light/Atmosphere/Temperature just above (own getter/commit pair, not
         // onAxisCommit: wind is not a weather axis and must never stamp
-        // weatherArchetype:'custom'). Reuses MapShine.getWind/setWind
-        // directly — the SAME source of truth the wind popover's own compass
-        // row already reads/writes, not a second copy of wind state.
-        getWindSpeed01: () => MapShine.getWind().speed01,
-        onWindSpeed01Commit: (v) => void MapShine.setWind({ speed01: v }),
+        // weatherArchetype:'custom').
+        //
+        // Routes through the real fade engine (fix: "changing the vertical
+        // wind slider never fades, it's always instant" — this used to call
+        // `MapShine.setWind` directly, the exact bug `fadeTemperatureTo`
+        // already fixed for Temperature). `getWindSpeed01` reads through
+        // `fadeSourceRegistry` so the fader shows the eased value of a fade
+        // still in flight, matching `getAxisValue`/`getTemperature` above.
+        getWindSpeed01: () => fadeSourceRegistry.readLive('wind.speed01'),
+        onWindSpeed01Commit: (v) => fadeWindSpeedTo(v, MapShine.__remote?.getFadeOverMs?.() ?? 0),
         getSceneOverride: () => skyScope.sceneOverrides === true,
         // The cloud pin glyph (2026-08-18 fix — gap-audit against the old
         // astrolabe.js's own Cloud row). `weatherPinnedAxes` already rides the
@@ -11899,6 +11904,29 @@ function install() {
     },
   });
 
+  // WIND STRENGTH (fix: the vertical Wind fader never faded — it always
+  // changed instantly, unlike the other vertical sliders. Root cause was
+  // the same shape `fadeTemperatureTo` already fixed for Temperature:
+  // `onWindSpeedCommit` called `MapShine.setWind({speed01})` directly, with
+  // no fade engine entry at all). LIVE push only, every tick, via the SAME
+  // `applyAmbientWind` commit path `MapShine.setWind` itself uses — never
+  // `MapShine.setWind` per tick, which would call `writeSceneWind` (a
+  // socket/scene-flag write) every frame of the fade, the exact "hundreds
+  // of document updates" this codebase already designed away from for
+  // Clouds/Rain/Temperature. Persistence happens once, on arrival, in
+  // `pumpWeatherFades`'s own completion loop below (`fadeWindSpeedTo`'s own
+  // gesture).
+  fadeSourceRegistry.registerSource('wind', {
+    keys: () => ['speed01'],
+    typeOf: () => 'float',
+    readLive: (field) => (field === 'speed01' ? windSpeed01 : undefined),
+    write: (field, value) => {
+      if (field !== 'speed01') return;
+      windSpeed01 = Math.max(0, Math.min(1, value));
+      applyAmbientWind();
+    },
+  });
+
   /** Record<'weather.cloudCover01'|'weather.precip01', FadeEntry> — scene-
    * scoped, reloaded from the scene flag on every canvasReady (below). */
   let fadeState = {};
@@ -12151,6 +12179,42 @@ function install() {
       nowMs
     );
     pendingSkyFadeCompletions.set(gestureId, { temperature01: value });
+    void writeFadeState(fadeState);
+  }
+
+  /**
+   * The Wind fader's own commit (fix: see `fadeSourceRegistry.registerSource
+   * ('wind', ...)`'s own doc, above, for the bug this replaces). Wind is not
+   * a weather axis (no archetype relationship, same reasoning as
+   * Temperature), so this starts its own real fade-engine entry under the
+   * 'wind' namespace rather than reusing `fadeWeatherAxisTo`. Persists via
+   * `MapShine.setWind` — the SAME write-through `wind-persistence.js` door
+   * the popover's compass row and the console already use — exactly once,
+   * on arrival, in `pumpWeatherFades`'s own completion loop (the `__wind`
+   * completion shape there).
+   * @param {number} value @param {number} overMs
+   */
+  function fadeWindSpeedTo(value, overMs) {
+    const nowMs = wallClockMs();
+    const gestureId = `wind:${nowMs}`;
+    fadeState = mergeFadeState(
+      fadeState,
+      {
+        id: gestureId,
+        label: 'Wind',
+        targets: {
+          'wind.speed01': {
+            to: value,
+            type: 'float',
+            overMs,
+            curve: 'ease',
+            from: fadeSourceRegistry.readLive('wind.speed01'),
+          },
+        },
+      },
+      nowMs
+    );
+    pendingSkyFadeCompletions.set(gestureId, { __wind: true, speed01: value });
     void writeFadeState(fadeState);
   }
 
@@ -12539,6 +12603,11 @@ function install() {
               ...(Number.isFinite(axes.precip01) ? { precip01: axes.precip01 } : {}),
             });
           }
+        } else if (completion.__wind) {
+          // fadeWindSpeedTo's own gesture — persist through the real wind
+          // door (wind-persistence.js), not editSky (completion isn't a
+          // sky patch here).
+          void MapShine.setWind({ speed01: completion.speed01 });
         } else {
           void editSky(completion);
         }
@@ -13247,6 +13316,10 @@ function install() {
             };
             const fadingTemp = liveFadeValue('weather.temperature01');
             if (fadingTemp !== null) liveAxes.temperature01 = fadingTemp;
+            // Wind, same shape as Temperature just above — fadeWindSpeedTo's
+            // own fade lives under the 'wind' namespace, not 'weather'.
+            const fadingWind = liveFadeValue('wind.speed01');
+            if (fadingWind !== null) liveAxes.windSpeed01 = fadingWind;
             MapShine.__remote?.updateLiveWeatherAxisValues?.(liveAxes);
           }
         }

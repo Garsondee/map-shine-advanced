@@ -625,6 +625,10 @@ export function renderWeatherBoard(container, ctx) {
       // needs the same live handle Clouds/Rain have — without one its cap sat at
       // the stale stored value for the whole fade ("slider never changes").
       if (channel.key === 'temperature') liveFaderHandles.temperature01 = envFader;
+      // Wind, same reason (fadeWindSpeedTo, boot.js) — fix: the vertical wind
+      // slider used to change instantly with no fade at all; now that it
+      // fades, its own thumb needs the live push too, same as Temperature.
+      else if (channel.key === 'windSpeed') liveFaderHandles.windSpeed01 = envFader;
       handGroup.row.appendChild(envFader.root);
     }
     faderHost.appendChild(rack);

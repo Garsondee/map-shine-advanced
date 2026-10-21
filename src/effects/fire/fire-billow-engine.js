@@ -573,7 +573,7 @@ export function createBillowEngine({
      * @param {number} ctx.mPerPx
      * @param {number} [ctx.quality=1] the tier's lobe budget scale
      * @param {number} [ctx.expectedDepth=0]
-     * @returns {{lifeByFire: Map<string,{vitality:number,coal:number,phase:string}>}}
+     * @returns {{lifeByFire: Map<string,{vitality:number,coal:number,phase:string,stress01:number}>}}
      */
     update(ctx) {
       const { nowMs, dtSec, rect, fires, cloud, params, runtime } = ctx;
@@ -745,6 +745,14 @@ export function createBillowEngine({
           }
           ign = smooth01(st.age / spreadSec, c.spreadT, c.spreadT + 0.14);
         }
+        // THE LIGHT FOLLOWS THE SAME STRESS NUMBER THE BILLOWS DO (2026-10-21, mmp fire/light link). The light used to
+        // recompute its own, weaker approximation from the cluster's spawn points (`fireWeatherStress01`, 0.45 wind
+        // weight) while the billow drew with THIS stronger number (0.75 wind weight — "stronger than the sprite era's:
+        // a gale really does beat a flame down", above). One fire can own several sub-clusters only when it is a big
+        // SPREAD/mass fire (`MASS_FROM_SIBLINGS`), each with its own local weather reading; last one written wins,
+        // same granularity `lifeByFire` already has (one id, one vitality/coal) — plenty for what the light does with
+        // it (one gentle `1 - 0.3×stress` term, see `buildFireLightSources`), not worth a second averaging pass over.
+        lf.stress01 = stress01;
         const stat = litStats.get(c.id) ?? { sum: 0, n: 0, wx: 0, wy: 0, w: 0 };
         stat.sum += ign;
         stat.n++;

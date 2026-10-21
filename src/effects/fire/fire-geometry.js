@@ -1121,27 +1121,50 @@ export function buildFireLightSources(
     // evaluates a sprite standing there: the representative fire's wind signal × THIS point's openness, the rain signal ×
     // THIS point's sky, the same stress gain, the same gutter dips.
     const samples = clusterSamples(c, samplesByFire);
+    const billowEra = lifeByFire && typeof lifeByFire.get === 'function';
+    // ⚠️ THE BILLOW ERA SHARES THE BILLOWS' OWN STRESS NUMBER (2026-10-21, fire/light link), not a second, weaker read
+    // computed here from the cluster's spawn points. `fire-billow-engine.js` already derives `stress01` from this
+    // exact fire's wind+rain at its own position and hands it back on `lifeByFire` — the SAME, STRONGER number
+    // (0.75 wind weight, "a gale really does beat a flame down") `emitFireLobes` draws the billows with, in place of
+    // `fireWeatherStress01` below (0.45 wind weight, built for the gentler sprite-era brightness curve). Sharing it
+    // means a gale that visibly shrinks the billows now dims the cast light by exactly as much, never more or less.
+    const sharedStress01 =
+      billowEra && c.ids?.length
+        ? (() => {
+            let sum = 0;
+            let n = 0;
+            for (const id of c.ids) {
+              const lf = lifeByFire.get(id);
+              if (Number.isFinite(lf?.stress01)) {
+                sum += clampNum(lf.stress01, 0, 1);
+                n++;
+              }
+            }
+            return n ? sum / n : null;
+          })()
+        : null;
     let brightSum = 0;
     for (const sm of samples) {
-      const stress = fireWeatherStress01({
-        windMotion01: weatherWind * fireOpennessGain01(sm.openness),
-        rain01: weatherRain * clampNum(Number.isFinite(sm.sky) ? sm.sky : 1, 0, 1),
-        gain: weatherGain,
-      });
+      const stress =
+        sharedStress01 ??
+        fireWeatherStress01({
+          windMotion01: weatherWind * fireOpennessGain01(sm.openness),
+          rain01: weatherRain * clampNum(Number.isFinite(sm.sky) ? sm.sky : 1, 0, 1),
+          gain: weatherGain,
+        });
       // Only the SLOW cold dip is followed (see `fireFlameBrightness01`); the fast shimmer is held at its mean.
       // (No stress = no gutter: a calm sprite is exactly 1 whatever the dips do, so the trig is skipped.)
       const cold = gutterClock === null || !(stress > 0) ? 0 : fireGutter01(gutterClock, sm.x, sm.y).cold;
       // billow era (`lifeByFire` given): the flame's own life decides the light below; weather only dims it a little, because
       // the sprite-era curve (size^2 x opacity x count) put the light out while plenty of flame was still being drawn
-      brightSum +=
-        lifeByFire && typeof lifeByFire.get === 'function' ? 1 - 0.3 * stress : fireFlameBrightness01(stress, { cold });
+      brightSum += billowEra ? 1 - 0.3 * stress : fireFlameBrightness01(stress, { cold });
     }
     // ⚠️ THE FIRE'S LONG LIFE (2026-10-20, the billow fire). A fire the rain has put out casts no flame light; its hot
     // coals cast a faint orange glow (`0.16 × coal`) that fades as they cool; a fire coughing back to life brightens as
     // its flame does. `lifeByFire` is the engine's own `{vitality, coal}` per fire id — the same numbers the flame is drawn
     // with — and a cluster takes the mean of its member fires. Omitted = every fire burning (the old behaviour, exactly).
     let lifeMul = 1;
-    if (lifeByFire && typeof lifeByFire.get === 'function' && c.ids?.length) {
+    if (billowEra && c.ids?.length) {
       let sum = 0;
       let n = 0;
       for (const id of c.ids) {

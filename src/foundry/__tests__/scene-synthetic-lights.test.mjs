@@ -12,6 +12,7 @@ import {
   DOOR_DAYLIGHT_DARKNESS_MAX,
   DOOR_DAYLIGHT_RADIUS_PX,
   DOOR_DAYLIGHT_PROBE_PX,
+  DOOR_DAYLIGHT_PROBE_DEPTHS_PX,
 } from '../scene-synthetic-lights.js';
 import { GLOBAL_LIGHT_DAYLIGHT_MAX } from '../scene-environment.js';
 
@@ -284,6 +285,26 @@ export function run(t) {
         sampleOutdoors: (x) => (x > 1000 + DOOR_DAYLIGHT_PROBE_PX + 1 ? 1 : 0),
         darkness01: 0,
       }).length === 0
+    );
+    // Live readings beside door kYykCvhailTY8Z25 (Speakeasy ground floor,
+    // 2026-10-21): the mask's soft edge gave 0 at 3 px, 0.46 at 24 px, 0.88 at
+    // 48 px. One 24 px probe missed it; the icon never showed at noon.
+    const softEdgeEast = (x) => {
+      const d = x - 1000;
+      return d < 20 ? 0 : d < 40 ? 0.46 : 0.88;
+    };
+    ok(
+      'a door whose open sky starts past a soft mask edge is still daylit',
+      buildDaylitDoorDescriptors({ doors: [door], sampleOutdoors: softEdgeEast, darkness01: 0 }).length === 1
+    );
+    ok(
+      'every probe depth is past the icon probes and within the reach',
+      DOOR_DAYLIGHT_PROBE_DEPTHS_PX.every((k) => k > 3 && k <= DOOR_DAYLIGHT_PROBE_PX)
+    );
+    ok(
+      'an interior door with sky a room away (150 px) is not daylit',
+      buildDaylitDoorDescriptors({ doors: [door], sampleOutdoors: (x) => (x > 1150 ? 1 : 0), darkness01: 0 })
+        .length === 0
     );
     ok(
       'secret doors are skipped',

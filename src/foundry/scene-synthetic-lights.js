@@ -138,10 +138,15 @@ export const DETECTION_RADIUS_MULTIPLIER = 2;
  * light the room around it. */
 export const DOOR_DAYLIGHT_RADIUS_PX = 12;
 
-/** How far from the door's midpoint, along its normal, the outdoors mask is
- * probed on each side (px). Past the wall's own thickness and the mask's
- * cell-edge blur, short of the next room. */
-export const DOOR_DAYLIGHT_PROBE_PX = 24;
+/** Depths from the door's midpoint, along its normal, at which the outdoors
+ * mask is probed on each side (px). Several, not one: the painted mask's soft
+ * edge sits 25-50 px off the wall line on real maps, so a single 24 px probe
+ * read 0.35-0.46 beside open sky and the doorway was never marked (Speakeasy,
+ * 2026-10-21). The deepest stays well short of the next room. */
+export const DOOR_DAYLIGHT_PROBE_DEPTHS_PX = Object.freeze([12, 24, 36, 48, 64]);
+
+/** Furthest the probes reach (px). */
+export const DOOR_DAYLIGHT_PROBE_PX = DOOR_DAYLIGHT_PROBE_DEPTHS_PX[DOOR_DAYLIGHT_PROBE_DEPTHS_PX.length - 1];
 
 /** A probe at or above this `_Outdoors` value counts as open sky. */
 export const DOOR_DAYLIGHT_OUTDOORS_MIN = 0.5;
@@ -227,7 +232,7 @@ export function buildVisionLightData(descriptor) {
  * A door qualifies when (1) it is day - `darkness01` at or under
  * `DOOR_DAYLIGHT_DARKNESS_MAX` - and (2) the `_Outdoors` mask reads open sky
  * at the doorway or just beyond it on EITHER side
- * (`DOOR_DAYLIGHT_PROBE_PX` along the wall normal). Either side, because the
+ * (`DOOR_DAYLIGHT_PROBE_DEPTHS_PX` along the wall normal). Either side, because the
  * viewer is usually on the dark one. Secret doors are skipped (Foundry hides
  * them from players regardless; no reason to mark one lit).
  *
@@ -254,11 +259,10 @@ export function buildDaylitDoorDescriptors({ doors, sampleOutdoors, darkness01 }
     if (!(len > 0)) continue;
     const nx = -dy / len;
     const ny = dx / len;
-    const probes = [
-      [mx, my],
-      [mx + nx * DOOR_DAYLIGHT_PROBE_PX, my + ny * DOOR_DAYLIGHT_PROBE_PX],
-      [mx - nx * DOOR_DAYLIGHT_PROBE_PX, my - ny * DOOR_DAYLIGHT_PROBE_PX],
-    ];
+    const probes = [[mx, my]];
+    for (const k of DOOR_DAYLIGHT_PROBE_DEPTHS_PX) {
+      probes.push([mx + nx * k, my + ny * k], [mx - nx * k, my - ny * k]);
+    }
     let outdoors = false;
     for (const [px, py] of probes) {
       const v = Number(sampleOutdoors(px, py));

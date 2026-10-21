@@ -495,10 +495,15 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
   // (a gale makes the flame smaller, not its smoke any less: it spreads the smoke, it does not put it out)
   const smokePower = billowPower(vit, 0.3 * stress);
   // size, count and heat all follow the one power number: the flame as a WHOLE gets smaller, thinner and cooler
-  const sizeMul = 0.3 + 0.7 * Math.pow(power, 0.75);
-  const heightMul = 0.3 + 0.7 * Math.pow(power, 0.85);
+  // ⚠️ FLOORS LOWERED 0.3 → 0.15, 0.5 → 0.35 (2026-10-21, author: a stressed flame "doesn't seem to get much weaker
+  // in the wind... especially very high wind"). These three floors are NOT the sprite era's count/opacity floors
+  // (`FLAME_GUTTER_COUNT_FLOOR` etc., below) — those were already pushed back up twice after "too strong" live
+  // complaints and are untouched. This is the billow's own, separate, never-live-tuned floor on the drawn body's
+  // own size/height/colour; still never zero (a flame always keeps SOME presence — "barely surviving", not gone).
+  const sizeMul = 0.15 + 0.85 * Math.pow(power, 0.75);
+  const heightMul = 0.15 + 0.85 * Math.pow(power, 0.85);
   const thin = Math.pow(smoothstep(0.015, 0.65, power), 0.7);
-  const cool = 0.5 + 0.5 * Math.pow(power, 0.8);
+  const cool = 0.35 + 0.65 * Math.pow(power, 0.8);
   const rainDamp = 1 - clamp01(f.rain01 ?? 0) * tune.rainShrink * 0.5;
 
   const pulse = billowPulse(t, (f.puffHz ?? 1.6) * (0.8 + 0.5 * outdoor), (f.flickerAmp ?? 0.3) * 0.55, seed);

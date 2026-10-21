@@ -303,8 +303,8 @@ export function run(t) {
     );
     ok(
       'an interior door with sky a room away (150 px) is not daylit',
-      buildDaylitDoorDescriptors({ doors: [door], sampleOutdoors: (x) => (x > 1150 ? 1 : 0), darkness01: 0 })
-        .length === 0
+      buildDaylitDoorDescriptors({ doors: [door], sampleOutdoors: (x) => (x > 1150 ? 1 : 0), darkness01: 0 }).length ===
+        0
     );
     ok(
       'secret doors are skipped',

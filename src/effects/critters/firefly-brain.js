@@ -45,9 +45,22 @@
  * out and a hard bounce at the range — so they drift OVER the paint and a little
  * beyond it, and never leave.
  *
+ * ============================================================================
+ * ALSO NEW: WARY OF A TOKEN
+ * ============================================================================
+ *
+ * The same `tokenPos0..7` uniforms `fly-brain.js` reads (`critter-subsystem.js`,
+ * `critter-token.js`) — this effect's own idea list never named a token-proximity
+ * stub (its one deferred idea, `ground-light`, is about LIGHTING a token, not
+ * reacting to one), so this is new scope rather than a stub closed. Gentler than a
+ * fly's own reaction by default (`fireflies.js`'s lower `tokenStartleResponse`):
+ * a firefly drifts off and is slower to settle near something large, rather than
+ * bolting from it.
+ *
  * @module effects/critters/firefly-brain
  */
 import { wrapAngle, safeAtan2 } from './critter-sdf.js';
+import { TOKEN_SLOTS } from './critter-token.js';
 
 const TAU = Math.PI * 2;
 const PH_FLY = 0;
@@ -71,7 +84,7 @@ const COUPLING = 1.1;
  * @returns {{update: (s: object) => object, spawn: (s: object) => object, lost: (s: object) => *}}
  */
 export function buildFireflyBrain(TSL, { u, zone }) {
-  const { float, vec2, vec4, select, clamp, min, max, sin, cos, exp, fract, floor, smoothstep, pow } = TSL;
+  const { float, vec2, vec4, select, clamp, min, max, sin, cos, exp, fract, floor, smoothstep, pow, length } = TSL;
 
   const angDiff = (a, b) => wrapAngle(TSL, b.sub(a));
   const dir = (a) => vec2(cos(a), sin(a));
@@ -118,6 +131,22 @@ export function buildFireflyBrain(TSL, { u, zone }) {
       .mul(sin(u('colonyPhase').sub(fph).mul(TAU)));
     const fphNext = fract(fph.add(s.dtReal.mul(float(1).div(period).add(pull))));
 
+    // ── tokens: the nearest of the eight slots, unrolled (see this module's own header and
+    // fly-brain.js's identical block for why a JS loop, never a TSL `Loop`) ──
+    let tokenDist = float(1e9);
+    let tokenAway = zero2;
+    for (let i = 0; i < TOKEN_SLOTS; i++) {
+      const delta = s.P.sub(u(`tokenPos${i}`));
+      const d = length(delta);
+      const nearer = d.lessThan(tokenDist);
+      tokenAway = vec2(select(nearer, delta.x, tokenAway.x), select(nearer, delta.y, tokenAway.y));
+      tokenDist = select(nearer, d, tokenDist);
+    }
+    const startle = float(1)
+      .sub(smoothstep(float(0), u('tokenStartleRadius'), tokenDist))
+      .mul(u('tokenStartleResponse'));
+    const awayDir = tokenAway.div(max(tokenDist, 1e-3));
+
     // ── the wall: bounce off the contour `range` px beyond the paint ──
     const wall = (Pn, Vn) => {
       const vOut = Vn.dot(s.zs.grad);
@@ -146,20 +175,26 @@ export function buildFireflyBrain(TSL, { u, zone }) {
     const outside = float(1).sub(smoothstep(range.mul(-0.5), 0, dist));
     const homing = max(edge.mul(4), outside.mul(HOMING_RATE));
     const hdgFly = hdg.add(turn.mul(s.dt)).add(angDiff(hdg, gradAng).mul(homing).mul(s.dt));
-    // Their own lazy flight, carried by the air (`windPush`, px/s; zero in calm air).
-    const vFly0 = dir(hdgFly).mul(speed).add(s.windPush);
+    // Their own lazy flight, carried by the air (`windPush`, px/s; zero in calm air) — plus a drift
+    // away from whatever is startling them, gentler than a fly's own flee kick (0.8× drift speed,
+    // not a multiple of top speed: a firefly is never in a hurry, even when wary).
+    const fleeDrift = awayDir.mul(startle).mul(u('driftSpeed')).mul(0.8);
+    const vFly0 = dir(hdgFly).mul(speed).add(s.windPush).add(fleeDrift);
     const flyWall = wall(s.P.add(vFly0.mul(s.dt)), vFly0);
     const hoverNow = hover.mul(float(1).add(sin(t.mul(0.5).add(a3)).mul(float(0.3).mul(u('hoverBob')))));
     const zFly = z.add(hoverNow.sub(z).mul(min(float(1), s.dt.mul(1.5))));
     // Rain and snow (`shelter`) make a firefly settle: up to five times as likely to land...
-    const pRest = float(1).sub(
-      exp(
-        u('restChance')
-          .mul(float(1).add(s.shelter.mul(4)))
-          .negate()
-          .mul(s.dt)
+    // ...and a startled one would much rather keep its distance than settle near it.
+    const pRest = float(1)
+      .sub(
+        exp(
+          u('restChance')
+            .mul(float(1).add(s.shelter.mul(4)))
+            .negate()
+            .mul(s.dt)
+        )
       )
-    );
+      .mul(float(1).sub(startle.mul(0.9)));
     const wantRest = s.rnd(6).lessThan(pRest).and(dist.greaterThan(s.L));
     const phFly = select(wantRest, float(PH_LAND), float(PH_FLY));
     const auxFly = select(wantRest, zFly, aux);
@@ -172,11 +207,13 @@ export function buildFireflyBrain(TSL, { u, zone }) {
     const phLand = select(doneL, float(PH_REST), float(PH_LAND).add(min(progL, 0.999)));
 
     // ── REST ── glowing on the ground until the urge to fly returns
-    // ...and, once settled, nearly 7× less likely to lift off again.
+    // ...and, once settled, nearly 7× less likely to lift off again — unless a token has come
+    // close, which adds a steep extra hazard rate exactly as `fly-brain.js`'s own `pTake` does.
     const pLift = float(1).sub(
       exp(
         u('liftChance')
           .mul(float(1).sub(s.shelter.mul(0.85)))
+          .add(startle.mul(20))
           .negate()
           .mul(s.dt)
       )

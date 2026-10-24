@@ -126,9 +126,10 @@ const DRY_PER_HOUR_MAX = 0.42;
  * grey sky still drains, it just takes most of a day. */
 const DRY_PER_HOUR_MIN = 0.06;
 
-/** How long a footprint takes to heal, in game hours, once nothing renews it.
- * ⚠️ Consumed by the runtime's recover term; the STAMP that creates a
- * footprint is not built (see `mantle-runtime.js`'s scope note). */
+/** How long a footprint takes to heal, in game hours, once nothing renews it — the DEFAULT; a GM can
+ * override it per scene via `trampleRecoverHours` (`precipitation.js`'s "Ground Disturbance" category),
+ * read by `resolveMantleStep` below. Consumed by the runtime's recover term; the stamp that CREATES a
+ * footprint lives in `world/token-activity.js#buildTrampleStamps` + `mantle-runtime.js#setStamps`. */
 const TRAMPLE_RECOVER_HOURS = 3;
 
 /**
@@ -207,9 +208,20 @@ export function gameHourDelta(prevHour, nowHour) {
  *   sky. Upstream and free (`world/weather.js` already eases it).
  * @param {number} inputs.dtGameHours - game hours since the last step. ZERO on
  *   a paused game, which is exactly why nothing moves then.
+ * @param {number} [inputs.trampleRecoverHours] - a GM's override of
+ *   {@link TRAMPLE_RECOVER_HOURS} (`precipitation.js`'s `trampleRecoverHours`
+ *   param); anything not a finite positive number keeps the default.
  * @returns {Readonly<object>} the uniform set, all finite, all clamped.
  */
-export function resolveMantleStep({ stay, stays, precip01, temperature01, cloudCover01 = 0, dtGameHours }) {
+export function resolveMantleStep({
+  stay,
+  stays,
+  precip01,
+  temperature01,
+  cloudCover01 = 0,
+  dtGameHours,
+  trampleRecoverHours,
+}) {
   const p = clamp01(precip01);
   const temp = clamp01(temperature01);
   const cover = clamp01(cloudCover01);
@@ -280,7 +292,9 @@ export function resolveMantleStep({ stay, stays, precip01, temperature01, cloudC
     /** Puddles outlive the rain; sun dries them faster than overcast does. */
     dryPerHour: dryPerHour(temp, cover),
     /** Footprints heal. */
-    trampleRecoverPerHour: 1 / TRAMPLE_RECOVER_HOURS,
+    trampleRecoverPerHour:
+      1 /
+      (Number.isFinite(trampleRecoverHours) && trampleRecoverHours > 0 ? trampleRecoverHours : TRAMPLE_RECOVER_HOURS),
     /** Falling snow fills prints faster than it raises the surface. */
     trampleBuryPerHour: buryGain,
   });

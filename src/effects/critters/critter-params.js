@@ -171,6 +171,46 @@ export function weatherParams({ noun, defaults: d }) {
   };
 }
 
+/**
+ * The token-disturbance block (the goal's "flies/fireflies react to token position/proximity/
+ * movement" ask, the sibling of `weatherParams` above — same category, `'Weather'`, because a
+ * nearby creature is the identical KIND of external-world input a swarm has no params schema
+ * section of its own for yet, and the closed category list (this file's own header) is not worth
+ * growing by one for a two-control block). Read by `critter-token.js#nearestTokenSlots`'s callers
+ * in `critter-subsystem.js`, consumed per-agent in `fly-brain.js`/`firefly-brain.js`. NOT offered to
+ * maggots — see `critter-token.js`'s own header for why.
+ *
+ * @param {object} a
+ * @param {string} a.noun - 'flies' | 'fireflies'.
+ * @param {{response: number, radiusPx: number}} a.defaults - the effect's own temperament: how
+ *   jumpy it is, and how close counts as "here".
+ * @returns {Record<string, object>}
+ */
+export function tokenParams({ noun, defaults: d }) {
+  return {
+    tokenStartleResponse: {
+      type: 'float',
+      min: 0,
+      max: 1,
+      step: 0.05,
+      default: d.response,
+      category: 'Weather',
+      label: 'Startled by tokens',
+      help: `How strongly a nearby token sends ${noun} scattering — 0 ignores tokens entirely, 1 reacts to the lightest footstep.`,
+    },
+    tokenStartleRadius: {
+      type: 'float',
+      min: 20,
+      max: 600,
+      step: 10,
+      default: d.radiusPx,
+      category: 'Weather',
+      label: 'Startle distance (px)',
+      help: `How close a token has to come before ${noun} notice it at all.`,
+    },
+  };
+}
+
 /** @param {string} s */
 function cap(s) {
   return s.charAt(0).toUpperCase() + s.slice(1);

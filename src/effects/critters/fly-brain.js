@@ -45,9 +45,26 @@
  * it before arriving, lands only well inside the paint, and picks its walking
  * targets by looking at the field, so it never has to be killed for leaving.
  *
+ * ============================================================================
+ * ALSO NEW: STARTLED BY A TOKEN
+ * ============================================================================
+ *
+ * The idea this file used to only DEFER: *"flies scattering when a token walks
+ * through the swarm... the kernel already has the takeoff transition; what it
+ * lacks is a disturbance source — a small list of token positions"*. That list
+ * is `critter-subsystem.js`'s `tokenPos0..7` (eight uniforms, nearest tokens
+ * first, an empty slot parked far off-map — see `critter-token.js`). Every
+ * agent checks all eight, unrolled in JS (not a TSL `Loop`, for the identical
+ * reason `mantle-runtime.js#setStamps` already explains) and reacts to
+ * whichever is nearest: a flying fly gets a push away and lands less readily;
+ * a landed or walking one takes off far sooner — both scaled by `nearFactor`
+ * (0 beyond `tokenStartleRadius`, 1 standing on it) so the effect switches on
+ * smoothly rather than snapping at the radius's edge.
+ *
  * @module effects/critters/fly-brain
  */
 import { wrapAngle, safeAtan2 } from './critter-sdf.js';
+import { TOKEN_SLOTS } from './critter-token.js';
 
 const TAU = Math.PI * 2;
 
@@ -134,6 +151,26 @@ export function buildFlyBrain(TSL, { u, zone }) {
       };
     };
 
+    // ───────────────────────── TOKENS (startle) ─────────────────────────
+    // The nearest of the eight slots, unrolled — see this module's own header and
+    // `mantle-runtime.js#setStamps` for why a JS loop over named uniforms, never a TSL `Loop`.
+    let tokenDist = float(1e9);
+    let tokenAway = zero2; // P minus the nearest token, i.e. the direction OUT of danger (unnormalized)
+    for (let i = 0; i < TOKEN_SLOTS; i++) {
+      const delta = s.P.sub(u(`tokenPos${i}`));
+      const d = length(delta);
+      const nearer = d.lessThan(tokenDist);
+      tokenAway = vec2(select(nearer, delta.x, tokenAway.x), select(nearer, delta.y, tokenAway.y));
+      tokenDist = select(nearer, d, tokenDist);
+    }
+    // 0 beyond the startle radius, 1 standing on the token — a smooth switch, not a snap at the
+    // edge. `1 - smoothstep(0, radius, dist)`, the same reversed-ramp idiom `edgeBias` below uses,
+    // rather than swapping smoothstep's own edges — keeping edge0 < edge1 everywhere in this file.
+    const startle = float(1)
+      .sub(smoothstep(float(0), u('tokenStartleRadius'), tokenDist))
+      .mul(u('tokenStartleResponse'));
+    const awayDir = tokenAway.div(max(tokenDist, 1e-3));
+
     // ───────────────────────────── FLY ─────────────────────────────
     const burstNow = s.TMR.lessThanEqual(0);
     const dur = mix(float(0.05), float(0.25), s.rnd(1));
@@ -160,7 +197,11 @@ export function buildFlyBrain(TSL, { u, zone }) {
           .mul(0.02)
       )
       .mul(s.dt);
-    const vRaw = s.V.add(dart).add(tetherPull);
+    // A startled fly gets an outright push away from whatever is looming, on top of its own buzz —
+    // the tether and the wall below still hold it over the zone, so this shears the swarm away from
+    // the intruder rather than scattering it off the map.
+    const fleeKick = awayDir.mul(startle).mul(u('maxSpeed')).mul(1.4).mul(s.dt);
+    const vRaw = s.V.add(dart).add(tetherPull).add(fleeKick);
     // THE AIR MOVES. Drag and the speed limit act on the velocity RELATIVE TO THE AIR, so a fly that stops
     // flapping is carried at the wind's own speed (`windPush`, px/s; zero in calm air, where this is exactly
     // V2's `V·(1 − drag·½·dt)`), and a fly that flaps hard against it still tops out at `maxSpeed` airspeed.
@@ -184,14 +225,17 @@ export function buildFlyBrain(TSL, { u, zone }) {
       hdg
     );
     // Rain and snow (`shelter`, 0..1) drive a fly down: up to four times as likely to land...
-    const pLand = float(1).sub(
-      exp(
-        u('landChance')
-          .mul(float(1).add(s.shelter.mul(3)))
-          .negate()
-          .mul(s.dt)
+    // ...and a startled one does not want to land AT ALL near whatever startled it.
+    const pLand = float(1)
+      .sub(
+        exp(
+          u('landChance')
+            .mul(float(1).add(s.shelter.mul(3)))
+            .negate()
+            .mul(s.dt)
+        )
       )
-    );
+      .mul(float(1).sub(startle.mul(0.9)));
     const wantLand = s
       .rnd(6)
       .lessThan(pLand)
@@ -254,11 +298,14 @@ export function buildFlyBrain(TSL, { u, zone }) {
     const gaitMove = gait.add(length(vMove).mul(s.dt).div(s.L.mul(STRIDE_LENGTHS)));
     const moveDone = tmrMove.lessThanEqual(0);
 
-    // ...and, once down, nearly 6× less likely to leave the ground again.
+    // ...and, once down, nearly 6× less likely to leave the ground again — UNLESS something is
+    // standing over it: `startle` adds a steep extra hazard rate so a landed fly takes off well
+    // ahead of an arriving footstep rather than waiting for one of its ordinary idle decisions.
     const pTake = float(1).sub(
       exp(
         u('takeoffChance')
           .mul(float(1).sub(s.shelter.mul(0.85)))
+          .add(startle.mul(30))
           .negate()
           .mul(s.dt)
       )

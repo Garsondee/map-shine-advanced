@@ -234,6 +234,15 @@ export {
   deriveAllValues,
 } from './fade-engine.js';
 export { schemaFadeSource, createFadeSourceRegistry } from './fade-registry.js';
+// TOKEN ACTIVITY — a position snapshot (foundry/token-activity.js) becomes
+// MOTION. Feeds the mantle's trample stamps and critter proximity; see the
+// module's own header for why there is no hook and no velocity vector.
+export {
+  MOVING_THRESHOLD_PX_PER_SEC,
+  MAX_TRAMPLE_STAMPS,
+  deriveTokenMotion,
+  buildTrampleStamps,
+} from './token-activity.js';
 // THE CLOUD FIELD (docs/planning/Clouds.md) — the analytic sky every cloud
 // consumer reads. A world module by ruling, not by convenience: at least six
 // effects want a cloud shadow and none of them may own it.

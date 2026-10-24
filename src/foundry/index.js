@@ -558,3 +558,10 @@ export { broadcastImpulse, listenForImpulses } from './impulse-broadcast.js';
 // carried-light snapshot with the aim to draw. One instance per client, owned
 // by boot.js (`playerAimChannel`). Pure rules live in ./player-aim.js.
 export { createPlayerAimChannel } from './player-aim-channel.js';
+
+// TOKEN ACTIVITY — every placed token's LIVE position, read on demand (no
+// hook, no cache; see token-activity.js's own header). Feeds the mantle's
+// trample stamp queue (precip-subsystem.js) and critter proximity
+// (critter-subsystem.js); `world/token-activity.js` is where a position
+// snapshot becomes MOTION.
+export { collectActiveTokenPoints } from './token-activity.js';

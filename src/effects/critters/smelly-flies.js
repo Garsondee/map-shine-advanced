@@ -45,7 +45,7 @@
  * @module effects/critters/smelly-flies
  */
 import { FLY_LOOKS } from './critter-species.js';
-import { freezeParams, presenceParams, weatherParams } from './critter-params.js';
+import { freezeParams, presenceParams, weatherParams, tokenParams } from './critter-params.js';
 
 export const SMELLY_FLIES_PARAMS = freezeParams({
   // ── Presence ─────────────────────────────────────────────────────────────
@@ -439,6 +439,11 @@ export const SMELLY_FLIES_PARAMS = freezeParams({
     label: 'Cold slows them',
     help: 'How sluggish the cold makes the flies that remain: every decision, dart and step slows. Uses the same "too cold below" temperature.',
   },
+
+  // ⭐ TOKENS — the "startle" idea this file used to only DEFER (see this module's own history):
+  // "flies scattering when a token walks through the swarm... a disturbance source — a small
+  // list of token positions". `critter-token.js`/`critter-subsystem.js` supply it now.
+  ...tokenParams({ noun: 'flies', defaults: { response: 0.8, radiusPx: 140 } }),
 });
 
 /**

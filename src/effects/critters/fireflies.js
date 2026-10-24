@@ -38,7 +38,7 @@
  * @module effects/critters/fireflies
  */
 import { FIREFLY_FLASH_STYLES } from './critter-species.js';
-import { freezeParams, presenceParams, weatherParams } from './critter-params.js';
+import { freezeParams, presenceParams, weatherParams, tokenParams } from './critter-params.js';
 
 export const FIREFLIES_PARAMS = freezeParams({
   // ── Presence ─────────────────────────────────────────────────────────────
@@ -422,6 +422,12 @@ export const FIREFLIES_PARAMS = freezeParams({
     label: 'Cold slows them',
     help: 'How sluggish a cold evening makes the fireflies that remain: they drift, turn and decide more slowly. Uses the same "too cold below" temperature. The flash rhythm is not slowed — it runs on real time.',
   },
+
+  // ⭐ TOKENS — new scope, not a deferred idea closed (this effect's own idea list only ever had
+  // `ground-light`, about LIGHTING a token, never about reacting to one). Softer than the flies'
+  // own response by default: a firefly settling into the dark near something large reads as
+  // wary, not panicked.
+  ...tokenParams({ noun: 'fireflies', defaults: { response: 0.5, radiusPx: 110 } }),
 });
 
 /**

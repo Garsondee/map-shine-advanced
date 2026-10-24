@@ -294,6 +294,11 @@ import {
   isSvgUrl,
   playTileVideo,
   sceneRectToMinMax,
+  // TOKEN ACTIVITY — every placed token's LIVE position, for the mantle's
+  // trample stamps (precip-subsystem.js) and critter proximity
+  // (critter-subsystem.js). Read here, never inside either effects/ module —
+  // see token-activity.js's own header.
+  collectActiveTokenPoints,
 } from '../foundry/index.js';
 import { engageFoundryFallback, clearFoundryFallback } from '../diag/render-fallback.js';
 import {
@@ -860,6 +865,12 @@ function disposeActive() {
   } catch (_) {}
   try {
     if (_active.onResize) window.removeEventListener('resize', _active.onResize);
+  } catch (_) {}
+  try {
+    _active.resizeObserver?.disconnect();
+  } catch (_) {}
+  try {
+    if (_active.onFullscreenChange) document.removeEventListener('fullscreenchange', _active.onFullscreenChange);
   } catch (_) {}
   try {
     _active.renderer.setAnimationLoop(null);
@@ -4967,6 +4978,14 @@ export async function startVtPanViewer({
       // `getWindHandle` on the point-light pool and fire below; see this
       // function's own "GETTERS VS VALUES" header.
       getWindHandle: () => windHandle,
+      // GROUND DISTURBANCE (the V2 "Ash Disturbance" effect, generalised) —
+      // every live token's position, for the mantle's trample stamps. Not
+      // level-filtered: a token's disturbance is limited to texels actually
+      // near it by the integrator's own falloff (mantle-runtime.js), so the
+      // only case this gets wrong is two floors sharing the exact same XY
+      // footprint (a token directly above/below on a different level of the
+      // same building) — a real, narrow limitation, not a silent one.
+      getActiveTokenPoints: () => collectActiveTokenPoints(),
       openSkyTexture: precipOpenSkyTexture,
       // ⭐ P7's LUXURY RUNG (§3.5) — rain glitters passing a torch.
       illumTexture: sceneIllum.texture,
@@ -19580,13 +19599,19 @@ export async function startVtPanViewer({
       // env snapshot rides along because the sky is what decides how many of them are out — daylight
       // and weather for the flies, the sun's twilight window for the fireflies — and the sky is the
       // frame's ONE, never re-derived here.
+      // GROUND DISTURBANCE'S SIBLING — the same live token snapshot the mantle's trample stamps
+      // read (precip-subsystem.js), shared across all three groups rather than each re-walking
+      // `canvas.tokens.placeables` for itself. `maggotsSubsystem` is handed it too for call-site
+      // symmetry; its own kernel never reads the uniforms (critter-token.js's own header says why).
+      const activeTokenPoints = view ? collectActiveTokenPoints() : [];
       if (view && smellyFliesSubsystem) {
         smellyFliesSubsystem.sync(
           renderer,
           lastEnvSnapshot?.env?.time?.realMs ?? uGlobalTimeMs.value,
           lastEnvSnapshot?.env?.time?.realDtSec ?? 0,
           windSpawnRect,
-          lastEnvSnapshot?.env ?? null
+          lastEnvSnapshot?.env ?? null,
+          activeTokenPoints
         );
       }
       if (view && maggotsSubsystem) {
@@ -19595,7 +19620,8 @@ export async function startVtPanViewer({
           lastEnvSnapshot?.env?.time?.realMs ?? uGlobalTimeMs.value,
           lastEnvSnapshot?.env?.time?.realDtSec ?? 0,
           windSpawnRect,
-          lastEnvSnapshot?.env ?? null
+          lastEnvSnapshot?.env ?? null,
+          activeTokenPoints
         );
       }
       if (view && firefliesSubsystem) {
@@ -19604,7 +19630,8 @@ export async function startVtPanViewer({
           lastEnvSnapshot?.env?.time?.realMs ?? uGlobalTimeMs.value,
           lastEnvSnapshot?.env?.time?.realDtSec ?? 0,
           windSpawnRect,
-          lastEnvSnapshot?.env ?? null
+          lastEnvSnapshot?.env ?? null,
+          activeTokenPoints
         );
       }
       // PRECIPITATION — its compute step, in the same no-target-bound block as
@@ -23682,6 +23709,33 @@ export async function startVtPanViewer({
     window.addEventListener('blur', clearHeldKeys);
     document.addEventListener('visibilitychange', clearHeldKeys);
     window.addEventListener('resize', onResize);
+    // A ResizeObserver on the mount host itself — not just `window` —
+    // because Foundry recomputes #board's own box (sidebar collapse, F11
+    // fullscreen entry) ASYNCHRONOUSLY relative to the window's own
+    // `resize` event, and the two listeners can run in either order
+    // depending on registration order alone. A `window.resize` listener
+    // racing that is fragile: it can read `host.clientWidth/Height` a
+    // frame before Foundry's own relayout lands, and — because the WINDOW
+    // itself never resizes again afterward — nothing fires a second time
+    // to correct it. (Bug report: F11 fullscreen leaves the render
+    // stretched/misaligned from the grid permanently, even after a
+    // Foundry "refresh grid" — which touches the grid overlay only, not
+    // `#board`'s own box, so it can't retrigger this.) Observing the host
+    // directly sidesteps the ordering race: it fires once the host's OWN
+    // box has actually changed, however that happened.
+    let resizeObserver = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      resizeObserver = new ResizeObserver(onResize);
+      resizeObserver.observe(mount.host);
+    }
+    // Belt-and-braces: a fullscreen transition can settle its final layout
+    // a couple of frames after the box-size change the observer above
+    // already saw. Re-measure once more once that transition has had time
+    // to finish.
+    const onFullscreenChange = () => {
+      requestAnimationFrame(() => requestAnimationFrame(onResize));
+    };
+    document.addEventListener('fullscreenchange', onFullscreenChange);
 
     // Mouse pan/zoom lives on the canvas itself (topmost element over the map
     // area, so events land here, not on the occluded PIXI canvas beneath). They
@@ -24500,6 +24554,8 @@ export async function startVtPanViewer({
       renderer,
       canvas,
       onResize,
+      resizeObserver,
+      onFullscreenChange,
       itemStates,
       occlusionMask,
       cache,

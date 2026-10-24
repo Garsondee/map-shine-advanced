@@ -317,6 +317,53 @@ export const PRECIPITATION_PARAMS = Object.freeze({
     help: 'How dark and glossy rain-wetted ground reads while it dries.',
   }),
 
+  // ── GROUND DISTURBANCE — tokens trampling the mantle (the V2 "Ash
+  // Disturbance" effect, generalised — Precipitation.md §5.2's own named gap:
+  // a token's footsteps dent `trample01`, which the darken/brighten meshes
+  // already thin snow and dust by. Ash is the showcase (soot kicked bare
+  // where something just walked) but the mechanism is the channel, not the
+  // species — footprints in fresh snow are the identical code path. Same
+  // `category: 'Ground'` as the three strengths above, not a new category:
+  // `ui/widgets/param-groups.js#CATEGORY_ORDER` is a closed list (see this
+  // file's own test), and these are four more dials on the same mantle.
+  trampleEnabled: Object.freeze({
+    type: 'bool',
+    default: true,
+    category: 'Ground',
+    label: 'Tokens disturb the ground',
+    help: 'A moving token stamps the mantle it is standing on — footprints in snow, bare patches kicked clear of ash — healing back once it stops.',
+  }),
+  trampleStrength: Object.freeze({
+    type: 'float',
+    min: 0,
+    max: 2,
+    step: 0.05,
+    default: 1,
+    category: 'Ground',
+    label: 'Disturbance depth',
+    help: 'How deep one footstep digs into the mantle. Higher reads as a heavier, more deliberate print.',
+  }),
+  trampleRadiusScale: Object.freeze({
+    type: 'float',
+    min: 0.3,
+    max: 3,
+    step: 0.05,
+    default: 1,
+    category: 'Ground',
+    label: 'Disturbance radius',
+    help: "Multiplies each token's own footprint size — a cat and a dragon leave different-sized prints without separate tuning.",
+  }),
+  trampleRecoverHours: Object.freeze({
+    type: 'float',
+    min: 0.1,
+    max: 24,
+    step: 0.1,
+    default: 3,
+    category: 'Ground',
+    label: 'Recovery time (hours)',
+    help: 'Game hours for an undisturbed footprint to heal back to clean ground.',
+  }),
+
   // ── DRIPS — roof/eave runoff (precip-drip-runtime.js) ─────────────────────
   dripSizeScale: Object.freeze({
     type: 'float',

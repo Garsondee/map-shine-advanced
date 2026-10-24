@@ -67,10 +67,19 @@ import { buildSquallField } from './squall-field.js';
  * SAME table rather than authoring a second "what colour is rainy air" map
  * that could drift from this one. Both are the identical physical quantity
  * (air-light), just two different intensities of it.
+ *
+ * ⚠️ `sand`/`ash` WERE MISSING DESPITE THIS FILE'S OWN INSTRUCTION ABOVE —
+ * P6 (`e5a6be0a`/`a24ad15c`) added both species to `precip-species.js` and
+ * neither row landed here, so an ash-storm or a sandstorm veiled the air in
+ * `DEFAULT_TINT`'s neutral grey-blue instead of its own colour. Added now,
+ * matching each species' own `body.headRgba` (§3.4's *"ash brown-grey, sand
+ * ochre"*) rather than inventing a fresh value.
  */
 export const VEIL_TINT = Object.freeze({
   rain: Object.freeze([0.62, 0.68, 0.78]),
   snow: Object.freeze([0.92, 0.94, 0.98]),
+  ash: Object.freeze([0.4, 0.37, 0.35]),
+  sand: Object.freeze([0.74, 0.62, 0.42]),
 });
 /** ⭐ EXPORTED alongside {@link VEIL_TINT} — same reuse reason. */
 export const DEFAULT_TINT = Object.freeze([0.7, 0.72, 0.76]);

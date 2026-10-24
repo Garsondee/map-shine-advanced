@@ -314,4 +314,33 @@ export function run(t) {
       PRECIP_SPECIES.snow.stay.surface.sparkle01 > 0 && PRECIP_SPECIES.rain.stay.surface.sparkle01 === 0
     );
   }
+
+  // ---- a GM's trampleRecoverHours override ("Ground Disturbance" category) --
+  {
+    const base = resolveMantleStep({ stay: null, precip01: 0, temperature01: warm, dtGameHours: 1 });
+    t.ok('the default recovers over 3 game hours', Math.abs(base.trampleRecoverPerHour - 1 / 3) < 1e-9);
+
+    const slow = resolveMantleStep({
+      stay: null,
+      precip01: 0,
+      temperature01: warm,
+      dtGameHours: 1,
+      trampleRecoverHours: 12,
+    });
+    t.ok('a longer override recovers slower', Math.abs(slow.trampleRecoverPerHour - 1 / 12) < 1e-9);
+
+    for (const bad of [0, -1, NaN, 'three', null]) {
+      const fallback = resolveMantleStep({
+        stay: null,
+        precip01: 0,
+        temperature01: warm,
+        dtGameHours: 1,
+        trampleRecoverHours: bad,
+      });
+      t.ok(
+        `a non-positive override (${JSON.stringify(bad)}) keeps the default`,
+        fallback.trampleRecoverPerHour === base.trampleRecoverPerHour
+      );
+    }
+  }
 }

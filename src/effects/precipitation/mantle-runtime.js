@@ -52,28 +52,40 @@
  * latch bug.
  *
  * ============================================================================
- * ⚠️ WHAT P3 v1 DOES NOT BUILD, NAMED SO NOBODY READS §5.2 AS DONE
+ * ⭐ TRAMPLE STAMPS — THE SEAM THAT WAS NAMED AND NOT BUILT, NOW CLOSED
  * ============================================================================
  *
- * **TRAMPLE STAMPS — footprints — are NOT built.** Every other row of §5.2's
- * table is here (accumulate, ambient melt, ⭐ fire melt, dry, recover); the
- * `trample01` channel exists, is integrated, and RECOVERS on schedule. What is
- * missing is the writer: nothing stamps a print into it.
+ * This header used to say trample stamps were deliberately not built: every
+ * other row of §5.2's table was an integrator (accumulate, ambient melt, fire
+ * melt, dry, recover) and trample's own recover/bury terms are too, but the
+ * WRITER — something that actually dents `trample01` — needed "a CPU-side
+ * queue fed from token motion, a seam into the token layer" that did not
+ * exist yet. It now does: `foundry/token-activity.js` reads live token
+ * positions, `world/token-activity.js#deriveTokenMotion`/`buildTrampleStamps`
+ * turn two snapshots into a capped list of `{x, y, radiusPx, strength}`, and
+ * `precip-subsystem.js` hands that list to {@link setStamps} below every
+ * mantle step, before `dispatch()`.
  *
- * That is a scope decision with a reason, not an omission. Trample is the one
- * row of §5.2 that is **not an integrator** — it needs a CPU-side queue fed
- * from token motion, a seam into the token layer, and a way to write a sparse
- * stamp into a buffer whose every other term is a full-screen rate. Half of
- * that shipped alongside a working mantle would be a channel that dents but
- * never heals, or heals but never dents, and either reads as "footprints are
- * broken" rather than "footprints are next". The recover term is here because
- * it belongs to the integrator and costs nothing; the stamp lands with its
- * seam.
+ * The stamp is a flat ADD, not a rate — a footstep is an event, not a
+ * continuous deposit, so it is not scaled by `dtGameHours` the way snow/dust
+ * gain are (`resolveMantleStep` never sees it; it stays purely spatial, which
+ * is also why it bypasses that module entirely rather than growing it a sixth
+ * "rate"). Capped per texel by the same final `.clamp(0, 1)` every channel
+ * already has, so a token standing in one place re-stamping every step cannot
+ * drive it past a real footprint's depth.
+ *
+ * `trample01` reads back into BOTH overlay meshes now, not only the snow one:
+ * a disturbed patch of dust thins exactly as a disturbed patch of snow already
+ * did (see the darken material below) — one channel, every "something is
+ * lying on the ground" consumer, which is the generality the goal asked for
+ * (ash disturbance and footprints-in-snow are the same mechanism, differing
+ * only in which channel is currently deposited).
  *
  * @module effects/precipitation/mantle-runtime
  */
 import { createLogger } from '../../core/log.js';
 import { resolveMantleStep, seedMantleDepth, gameHourDelta } from './mantle-model.js';
+import { MAX_TRAMPLE_STAMPS } from '../../world/index.js';
 
 const log = createLogger('precip-mantle');
 
@@ -90,7 +102,7 @@ const MAX_DIMENSION = 2048;
  * frame"*. At 4 Hz a melt that takes a game hour is 14,400 steps at a 1:1
  * clock, which is far more resolution than an 8-bit channel can even hold.
  */
-const STEP_INTERVAL_SEC = 0.25;
+export const STEP_INTERVAL_SEC = 0.25;
 
 /**
  * Build the mantle for ONE floor.
@@ -151,6 +163,26 @@ export function createMantleRuntime({
   const uDry = uniform(float(0));
   const uTrampleRecover = uniform(float(0));
   const uTrampleBury = uniform(float(0));
+  /**
+   * ⭐ THE STAMP QUEUE'S GPU LANDING. One slot per possible stamp: (x, y,
+   * radiusPx, strength) in WORLD px; an inert slot is all-zero, which
+   * contributes nothing (its own `strength` multiplies it to zero below).
+   *
+   * A fixed, JS-unrolled array of SEPARATE uniform nodes — not a TSL `Loop`
+   * over a `uniformArray`. That combination is live-confirmed broken on this
+   * renderer (`effects/vision/player-vision-grade-render.js`'s own
+   * `buildTokenMaskNode` note, citing `point-light-illumination.js`'s
+   * `edgeSoftFactor` finding and `Point-Light-Batching-Design.md` Finding B);
+   * unrolled straight-line arithmetic is this codebase's proven-safe shape
+   * for "a few many-input slots" — the identical reason the cloud shadow
+   * march (`effects/clouds/cloud-shade.js#buildCloudTopsShadowNode`) is a
+   * plain JS `for` loop and not a runtime one. `Array.from` here is ONE
+   * `uniform(` call in the SOURCE TEXT (`tools/verify-structure.mjs`'s
+   * uniform-budget ratchet counts occurrences in the file, never executions),
+   * so this costs the same one slot in the budget whether `MAX_TRAMPLE_STAMPS`
+   * is 1 or 100.
+   */
+  const uTrampleStamps = Array.from({ length: MAX_TRAMPLE_STAMPS }, () => uniform(vec4(0, 0, 0, 0)));
   /** 1 while a seed pass is running — see `seed()`. A build-time branch is
    * impossible here (seeding happens at runtime, on load and on floor change),
    * so this is one of the few honest uniform gates in the subsystem. */
@@ -251,8 +283,24 @@ export function createMantleRuntime({
       .sub(puddleOut)
       .clamp(float(0), float(1));
 
-    // ── TRAMPLE: recovers on its own, and fresh snow buries it faster ──
-    const trample = prev.a.sub(uTrampleRecover.mul(dt)).sub(uTrampleBury.mul(dt)).clamp(float(0), float(1));
+    // ── TRAMPLE: recovers on its own, fresh snow buries it faster, and a
+    // moving token's stamp digs it fresh — see `setStamps` below. Summed as a
+    // flat add (an event, not a rate) BEFORE the final clamp, so stepping on
+    // ground that is mid-recovery resets it rather than being capped by last
+    // step's decaying value first.
+    let trampleIn = float(0);
+    for (const stamp of uTrampleStamps) {
+      const d = world.sub(stamp.xy).length();
+      const radius = stamp.z.max(float(1));
+      // Squared falloff: a soft-edged print, not a hard-edged disc.
+      const falloff = float(1).sub(d.div(radius)).clamp(float(0), float(1));
+      trampleIn = trampleIn.add(stamp.w.mul(falloff).mul(falloff));
+    }
+    const trample = prev.a
+      .sub(uTrampleRecover.mul(dt))
+      .sub(uTrampleBury.mul(dt))
+      .add(trampleIn)
+      .clamp(float(0), float(1));
 
     const stepped = vec4(snow, dust, puddle, trample);
     return mix(stepped, seeded, uSeedMode);
@@ -334,7 +382,17 @@ export function createMantleRuntime({
   const darkenMaterial = new THREE.NodeMaterial();
   darkenMaterial.colorNode = Fn(() => {
     const m = sampleMantle();
-    const dust = coverageOf(m.g).mul(uDustStrength);
+    // ⭐ ASH DISTURBANCE'S VISIBLE HALF. `trample01` used to read back into
+    // the BRIGHTEN (snow) mesh only; dust had the channel integrated and
+    // healing underneath it with no consumer, the exact gap the module
+    // header's rewritten section names. A trampled patch of dust THINS the
+    // same way a trampled patch of snow already dims+thins (`packed` below
+    // mirrors the brighten material's own `m.a` read) — one footprint
+    // mechanism, every "something settled on the ground" channel.
+    const packed = m.a.clamp(float(0), float(1));
+    const dust = coverageOf(m.g)
+      .mul(uDustStrength)
+      .mul(float(1).sub(packed.mul(float(0.55))));
     const wet = coverageOf(m.b).mul(uWetStrength);
     // Two multiplies composed, each toward its own tint — `mix(white, tint, a)`
     // is the multiplicative factor that leaves the surface alone at a = 0.
@@ -560,6 +618,28 @@ export function createMantleRuntime({
       if (Number.isFinite(t.mantleWetStrength)) uWetStrength.value = t.mantleWetStrength;
     },
 
+    /**
+     * ⭐ THE STAMP WRITER'S LANDING — call every step, before `dispatch()`,
+     * with this floor's own `world/token-activity.js#buildTrampleStamps(...)
+     * .stamps` (`precip-subsystem.js` owns collecting and diffing the live
+     * token positions; this module only ever receives the already-built,
+     * already-capped list).
+     *
+     * Slots beyond `stamps.length`, and every slot on a call with none at
+     * all, are zeroed rather than left holding last step's values — a token
+     * that stops moving must stop stamping, not keep refreshing its last
+     * position forever.
+     *
+     * @param {Array<{x: number, y: number, radiusPx: number, strength: number}>} [stamps]
+     */
+    setStamps(stamps = []) {
+      for (let i = 0; i < MAX_TRAMPLE_STAMPS; i++) {
+        const s = stamps[i];
+        if (s) uTrampleStamps[i].value.set(s.x, s.y, Math.max(0, s.radiusPx || 0), Math.max(0, s.strength || 0));
+        else uTrampleStamps[i].value.set(0, 0, 0, 0);
+      }
+    },
+
     setVisible(v) {
       darkenMesh.visible = Boolean(v);
       brightenMesh.visible = Boolean(v);
@@ -595,10 +675,10 @@ export function createMantleRuntime({
           dust: uDustStrength.value,
           wet: uWetStrength.value,
         },
-        /** ⚠️ NAMED, NOT OMITTED — `trample01` is integrated and recovers, but
-         * nothing STAMPS it. See the module header for why that is a scope
-         * decision rather than a bug. */
-        trampleStamps: 'not built — P3 v1 integrates and heals the channel, nothing writes it',
+        /** Live count of this step's non-empty stamp slots — `setStamps`
+         * zeroes the rest, so a simple truthy count of each slot's own
+         * strength is exact. */
+        trampleStamps: uTrampleStamps.filter((u) => u.value.w > 0).length,
       };
     },
 

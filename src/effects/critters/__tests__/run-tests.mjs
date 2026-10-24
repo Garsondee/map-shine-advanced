@@ -6,6 +6,7 @@
 import { run as runZone } from './critter-zone.test.mjs';
 import { run as runActivity } from './critter-activity.test.mjs';
 import { run as runWeather } from './critter-weather.test.mjs';
+import { run as runToken } from './critter-token.test.mjs';
 import { run as runDeclarations } from './critter-declarations.test.mjs';
 import { run as runSubsystem } from './critter-subsystem.test.mjs';
 import { run as runRegistration } from './critter-registration.test.mjs';
@@ -43,6 +44,7 @@ const t = {
 runZone(t);
 runActivity(t);
 runWeather(t);
+runToken(t);
 runDeclarations(t);
 runSubsystem(t);
 await runRegistration(t);

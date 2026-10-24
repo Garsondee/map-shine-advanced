@@ -51,6 +51,7 @@ import {
 } from './critter-zone.js';
 import { flyActivity, maggotActivity, fireflyActivity, approach, activeSlotCount } from './critter-activity.js';
 import { skyFeel, weatherDrive, CALM_DRIVE } from './critter-weather.js';
+import { nearestTokenSlots, TOKEN_SLOTS } from './critter-token.js';
 import {
   critterTierPlan,
   critterRefAreaPx2,
@@ -137,6 +138,12 @@ const driveChanged = (a, b) =>
   Math.abs(a.agitation - b.agitation) > 1e-3 ||
   Math.abs(a.shelter - b.shelter) > 1e-3 ||
   Math.abs(a.tempo - b.tempo) > 1e-3;
+
+/** Same "did this actually move enough to matter" discipline as `driveChanged`, for the token
+ * slot list: a sub-pixel float jitter between two identical-looking frames must not re-push eight
+ * uniforms every frame forever, but a real step clearly must. `a`/`b` are same-length arrays from
+ * `nearestTokenSlots`, always, so no length check is needed. */
+const tokenSlotsChanged = (a, b) => a.some((s, i) => Math.abs(s.x - b[i].x) > 0.5 || Math.abs(s.y - b[i].y) > 0.5);
 
 /**
  * GPU allocations that outlive a subsystem. A storage buffer cannot be freed
@@ -463,13 +470,17 @@ export function createCritterSubsystem({
    * @param {number} nowMs @param {number} dtSec - REAL seconds (flies are presentation, not world time).
    * @param {object} [worldRect] - the visible rect, for the perspective centre.
    * @param {object|null} [env] - the frame's env snapshot (`world/environment.js`).
+   * @param {Array<import('../../foundry/token-activity.js').TokenPoint>} [tokenPoints] - this
+   *   frame's live token snapshot (`foundry/token-activity.js#collectActiveTokenPoints`), for the
+   *   fly/firefly "startled by a nearby token" response (`critter-token.js`). Absent ⇒ CALM_DRIVE's
+   *   sibling: every token slot reads as the far sentinel and nothing startles.
    */
-  function sync(renderer, nowMs, dtSec, worldRect, env = null) {
+  function sync(renderer, nowMs, dtSec, worldRect, env = null, tokenPoints = []) {
     // Standing down after a fault: the swarm is hidden and the frame goes on without it.
     if (fault && nowMs < fault.untilMs) return;
     profiler?.beginById(groupDef.syncZone);
     try {
-      syncUnguarded(renderer, nowMs, dtSec, worldRect, env);
+      syncUnguarded(renderer, nowMs, dtSec, worldRect, env, tokenPoints);
     } catch (err) {
       const message = String(err?.message ?? err);
       fault = { message, count: (fault?.count ?? 0) + 1, untilMs: nowMs + FAULT_RETRY_MS };
@@ -488,7 +499,7 @@ export function createCritterSubsystem({
     }
   }
 
-  function syncUnguarded(renderer, nowMs, dtSec, worldRect, env) {
+  function syncUnguarded(renderer, nowMs, dtSec, worldRect, env, tokenPoints = []) {
     const state = getRenderState() ?? {};
     const params = state.params ?? {};
     const wantsAny = specs.some((s) => (Number(params[s.perZoneParam]) || 0) > 0);
@@ -559,6 +570,26 @@ export function createCritterSubsystem({
       if (!slot.pushedDrive || driveChanged(slot.drive, slot.pushedDrive)) {
         slot.engine.setParams(slot.drive);
         slot.pushedDrive = slot.drive;
+      }
+
+      // ⭐ TOKENS — flies and fireflies only (critter-token.js's own header says why maggots don't
+      // get this). NOT eased like the weather drive above — a token's position is itself the live
+      // signal, so the brain kernel's own reaction should feel immediate — but still gated on
+      // "did it actually move enough to matter", the same discipline `driveChanged` applies to
+      // weather: an unmoving scene must not re-push eight unchanged vec2s every frame forever.
+      if (spec.kind !== 'maggot') {
+        const viewCentre = worldRect
+          ? { x: (worldRect.minX + worldRect.maxX) / 2, y: (worldRect.minY + worldRect.maxY) / 2 }
+          : { x: 0, y: 0 };
+        const tokenSlots = nearestTokenSlots(tokenPoints, viewCentre, TOKEN_SLOTS);
+        if (!slot.pushedTokenSlots || tokenSlotsChanged(tokenSlots, slot.pushedTokenSlots)) {
+          const tokenUniforms = {};
+          for (let i = 0; i < tokenSlots.length; i++) {
+            tokenUniforms[`tokenPos${i}`] = [tokenSlots[i].x, tokenSlots[i].y];
+          }
+          slot.engine.setParams(tokenUniforms);
+          slot.pushedTokenSlots = tokenSlots;
+        }
       }
 
       if (

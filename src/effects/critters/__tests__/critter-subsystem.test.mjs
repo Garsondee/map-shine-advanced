@@ -157,6 +157,7 @@ const RENDERER = {};
 /** An engine's setParams calls, split into the two kinds the subsystem makes: the author's values and the weather drive. */
 const valueCalls = (e) => e.paramCalls.filter((c) => 'expectedDepth' in c);
 const driveCalls = (e) => e.paramCalls.filter((c) => 'windPush' in c);
+const tokenCalls = (e) => e.paramCalls.filter((c) => 'tokenPos0' in c);
 const RECT = { minX: 0, minY: 0, maxX: 640, maxY: 480 };
 
 export function run(t) {
@@ -285,16 +286,53 @@ export function run(t) {
     t.ok('the occlusion gate’s expected depth is resolved from the floor elevation', pushed.expectedDepth === 1);
     t.ok('it has something to draw', sub.hasContent === true && sub.scene.visible === true);
     t.ok('the engine’s scene is attached to the subsystem’s', sub.scene.children.includes(e.scene));
+    t.ok(
+      'a fly engine also gets the (empty) token-slot uniforms once, every slot the far sentinel',
+      tokenCalls(e).length === 1 && tokenCalls(e)[0].tokenPos0[0] < -1e6
+    );
 
     // a second frame changes nothing structural and does not re-push unchanged params
     sub.sync(RENDERER, 1016, 0.016, RECT, DAY);
     t.ok('frame 2: no rebuild, no second zone write', spy.engines.length === 1 && zb.writes.length === 1);
-    t.ok('frame 2: unchanged params and an unchanged sky are not pushed again', e.paramCalls.length === 2);
+    t.ok(
+      'frame 2: unchanged params, an unchanged sky and an unchanged token snapshot are not pushed again',
+      valueCalls(e).length === 1 && driveCalls(e).length === 1 && tokenCalls(e).length === 1
+    );
     t.ok('frame 2: but the kernel steps every frame', e.steps.length === 2);
     t.ok(
       'status reports the zone and the engines',
       sub.getStatus().zones === 1 && sub.getStatus().engines[0].kind === 'fly'
     );
+  }
+
+  // ---- a real token snapshot reaches the fly engine, nearest-first, and re-pushes on a real move ---
+  {
+    const { sub, spy } = harness('smellyFlies');
+    const tok = (id, x, y) => ({ id, x, y, elevation: 0, disposition: 0, hidden: false, radiusPx: 20 });
+    // RECT's centre is (320, 240) — 'near' is genuinely nearer to it than 'far'.
+    sub.sync(RENDERER, 1000, 0.016, RECT, DAY, [tok('far', 10000, 10000), tok('near', 300, 200)]);
+    const e = spy.engines[0];
+    const first = tokenCalls(e).at(-1);
+    t.ok(
+      'the nearer token (to the view centre) fills slot 0',
+      first.tokenPos0[0] === 300 && first.tokenPos0[1] === 200
+    );
+    t.ok('the farther one fills slot 1', first.tokenPos1[0] === 10000 && first.tokenPos1[1] === 10000);
+    t.ok('unused slots hold the far sentinel', first.tokenPos2[0] < -1e6);
+
+    // the SAME snapshot, unchanged: no second push (this is the general change-detection gate, not
+    // specific to tokens — proven again here because a naive per-frame re-rank could easily jitter).
+    sub.sync(RENDERER, 1016, 0.016, RECT, DAY, [tok('far', 10000, 10000), tok('near', 300, 200)]);
+    t.ok('an unchanged token snapshot does not re-push', tokenCalls(e).length === 1);
+
+    // the near token actually walks: a real step must re-push.
+    sub.sync(RENDERER, 1032, 0.016, RECT, DAY, [tok('far', 10000, 10000), tok('near', 340, 200)]);
+    t.ok('a real token move re-pushes the slots', tokenCalls(e).length === 2);
+    t.ok('…with the new position', tokenCalls(e).at(-1).tokenPos0[0] === 340);
+
+    // a hidden token never reaches the kernel at all.
+    sub.sync(RENDERER, 1048, 0.016, RECT, DAY, [tok('near', 340, 200), { ...tok('ghost', 310, 200), hidden: true }]);
+    t.ok('a hidden token is excluded, not just the nearest slot', tokenCalls(e).at(-1).tokenPos1[0] < -1e6);
   }
 
   // ---- maggots are their own effect: their own mask, engine and sky rules --------------------------
@@ -317,6 +355,9 @@ export function run(t) {
       e.args.plan === critterTierPlan('fly', 2)
     );
     t.ok('the maggot colour reached the shader as an sRGB triple', Array.isArray(valueCalls(e).at(-1).color));
+    // maggots do not get the token-startle uniforms at all — critter-token.js's own header says
+    // why (they live IN the thing being eaten; a footstep does not send them anywhere).
+    t.ok('a maggot engine never receives token-slot uniforms', tokenCalls(e).length === 0);
     // rain drives them under, a little (default rainResponse 0.25), but a gale does not touch them
     for (let i = 0; i < 30; i++) sub.sync(RENDERER, 2000 + i * 500, 0.5, RECT, { ...NIGHT, weather: { precip01: 1 } });
     t.ok('heavy rain thins the maggots only a little', e.active > pop * 0.6 && e.active < pop * 0.95);

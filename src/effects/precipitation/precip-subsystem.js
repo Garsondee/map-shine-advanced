@@ -31,7 +31,8 @@
  */
 import { createPrecipEngine } from '../particles/precip-runtime.js';
 import { createPrecipSplashEngine } from '../particles/precip-splash-runtime.js';
-import { createMantleRuntime } from './mantle-runtime.js';
+import { createMantleRuntime, STEP_INTERVAL_SEC as MANTLE_STEP_INTERVAL_SEC } from './mantle-runtime.js';
+import { deriveTokenMotion, buildTrampleStamps } from '../../world/index.js';
 import { createPrecipCurtain, VEIL_TINT, DEFAULT_TINT } from './curtain-render.js';
 import { createStormFog } from './storm-fog-render.js';
 import { createPrecipDripEngine } from '../particles/precip-drip-runtime.js';
@@ -141,11 +142,20 @@ export function resolveActivePopulations(precipKind, mixWeight = 0) {
  *   snapshot and `boot.js` stays the composition root.
  * @param {object} [deps.windHandle]
  * @param {number} [deps.pxPerMeter]
+ * @param {() => Array<import('../../foundry/token-activity.js').TokenPoint>} [deps.getActiveTokenPoints] -
+ *   the mantle's trample stamps (`stepMantle`'s own `stampTrample` helper). A
+ *   GETTER, same reason `getWindHandle` is one and not a value: `foundry/`
+ *   is read live, every call, never cached here (`effects/` never imports
+ *   `foundry/` itself — `zones/one-door` plus the "every Foundry read is
+ *   injected" convention every sibling subsystem in this file already
+ *   follows). Absent ⇒ no tokens disturb anything, the honest "nobody wired
+ *   this scene's token layer in" answer rather than a crash.
  * @returns {object}
  */
 export function createPrecipitationSubsystem({
   THREE,
   getPrecipRenderState,
+  getActiveTokenPoints = () => [],
   // ⚠️ GETTERS, NOT VALUES, AND THIS IS A TDZ FIX WITH A LIVE FAILURE BEHIND
   // IT. A first cut took `windHandle`/`pxPerMeter` as plain values. Both are
   // declared FURTHER DOWN `startVtPanViewer` than this factory is called, so
@@ -240,6 +250,53 @@ export function createPrecipitationSubsystem({
   const fogGate = () => (atmosGate.texture ? atmosGate : skyReach);
   let fireMask = { texture: null, rect: null };
   let lastTuning = null;
+  /** ⭐ THE STAMP QUEUE'S OWN STATE — `id → {x, y}` as of the last SAMPLE (not
+   * the last frame; sampling runs at the mantle's own cadence, see
+   * `sampleTrampleStamps`). A fresh Map after a floor change (`notifyFloorChanged`
+   * clears it) so a token's position on the PREVIOUS floor can never read as a
+   * teleport-fast "move" the instant the new floor's mantle starts stepping. */
+  let tokenPrevById = new Map();
+  /** Real seconds since the stamp queue last sampled token positions — its own
+   * throttle, independent of (but matched to) the mantle's `STEP_INTERVAL_SEC`:
+   * sampling `canvas.tokens.placeables` every RENDERED frame when the GPU side
+   * only consumes it a few times a second would be pure waste. */
+  let sinceTokenSampleSec = 0;
+
+  /**
+   * ⭐ ASH DISTURBANCE, GENERALISED — the stamp queue `docs/planning/
+   * Precipitation.md` §5.2 named and never built. Reads this floor's live
+   * token positions (`getActiveTokenPoints`), diffs them against last
+   * sample's to find who is actually WALKING (`world/token-activity.js#
+   * deriveTokenMotion`), and turns the movers into the mantle's own
+   * fixed-size stamp list (`buildTrampleStamps`). Called from `stepMantle`,
+   * before `mantle.step()`, so a disabled/zero-strength scene clears any
+   * stale stamps the instant a GM turns the slider down rather than leaving
+   * the last-known footprint frozen forever.
+   *
+   * @param {object} mantleInstance
+   * @param {number} dtRealSec
+   */
+  function sampleTrampleStamps(mantleInstance, dtRealSec) {
+    const enabled = lastTuning?.trampleEnabled !== false;
+    if (!enabled) {
+      mantleInstance.setStamps([]);
+      return;
+    }
+
+    sinceTokenSampleSec += Math.max(0, dtRealSec || 0);
+    if (sinceTokenSampleSec < MANTLE_STEP_INTERVAL_SEC) return; // keep last sample's stamps live between ticks
+    const elapsed = sinceTokenSampleSec;
+    sinceTokenSampleSec = 0;
+
+    const points = getActiveTokenPoints?.() ?? [];
+    const { motion, nextById } = deriveTokenMotion(tokenPrevById, points, elapsed);
+    tokenPrevById = nextById;
+    const { stamps } = buildTrampleStamps(motion, {
+      radiusScale: lastTuning?.trampleRadiusScale ?? 1,
+      strength: lastTuning?.trampleStrength ?? 1,
+    });
+    mantleInstance.setStamps(stamps);
+  }
   /** mmp-row — the last saved glint settings handed to the fall engines (JSON, to spot a change). */
   let lastGlintKey = null;
   /**
@@ -662,12 +719,16 @@ export function createPrecipitationSubsystem({
     });
     const stay = precip01 > 0 && heaviest.speciesId ? (PRECIP_SPECIES[heaviest.speciesId]?.stay ?? null) : null;
     mantle.setSurface(stay);
+    // Before `step()` dispatches — see `sampleTrampleStamps`'s own header for
+    // why this runs at the stamp queue's own cadence, not every frame.
+    sampleTrampleStamps(mantle, dtRealSec);
     mantle.step(dtRealSec, st.todHour, {
       stays,
       stay,
       precip01,
       temperature01: weather.temperature01 ?? 0.55,
       cloudCover01: weather.cloudCover01 ?? 0,
+      trampleRecoverHours: lastTuning?.trampleRecoverHours,
     });
   }
 
@@ -1057,6 +1118,12 @@ export function createPrecipitationSubsystem({
      * that has been falling on it.
      */
     notifyFloorChanged(floorIndex) {
+      // The stamp queue's own floor-specific state (see its declaration,
+      // above `stepMantle`) — cleared so a token's last position on the
+      // PREVIOUS floor can never read as an instant teleport-speed "move" on
+      // this one.
+      tokenPrevById = new Map();
+      sinceTokenSampleSec = 0;
       if (!mantle) return { reseeded: false, reason: 'no mantle built yet' };
       const st = getPrecipRenderState?.() ?? null;
       const weather = st?.weather ?? {};

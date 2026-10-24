@@ -24,6 +24,7 @@
  *
  * @module effects/critters/critter-uniforms
  */
+import { TOKEN_SLOT_FAR } from './critter-token.js';
 
 /**
  * name → default. A number is a float uniform; a 2- or 3-array is a vec2/vec3.
@@ -54,6 +55,21 @@ export const CRITTER_UNIFORM_DEFAULTS = Object.freeze({
   agitation: 1,
   shelter: 0,
   tempo: 1,
+  // ── nearby tokens (set by the subsystem each frame — `critter-token.js#nearestTokenSlots`;
+  // flies and fireflies only, see that module's own header). A fixed, JS-unrolled set of
+  // positions, not a `uniformArray` — mantle-runtime.js's own note explains why. Each defaults to
+  // `TOKEN_SLOT_FAR`, a position no real agent is ever near, so an empty slot costs nothing and
+  // needs no separate "is this slot live" flag.
+  tokenPos0: [TOKEN_SLOT_FAR, TOKEN_SLOT_FAR],
+  tokenPos1: [TOKEN_SLOT_FAR, TOKEN_SLOT_FAR],
+  tokenPos2: [TOKEN_SLOT_FAR, TOKEN_SLOT_FAR],
+  tokenPos3: [TOKEN_SLOT_FAR, TOKEN_SLOT_FAR],
+  tokenPos4: [TOKEN_SLOT_FAR, TOKEN_SLOT_FAR],
+  tokenPos5: [TOKEN_SLOT_FAR, TOKEN_SLOT_FAR],
+  tokenPos6: [TOKEN_SLOT_FAR, TOKEN_SLOT_FAR],
+  tokenPos7: [TOKEN_SLOT_FAR, TOKEN_SLOT_FAR],
+  tokenStartleResponse: 0,
+  tokenStartleRadius: 150,
   // ── shared by every kind ──
   opacity: 1,
   speed: 1,
@@ -125,10 +141,16 @@ export const CRITTER_UNIFORM_DEFAULTS = Object.freeze({
  * 4 px there but a firefly's 3). Applied over the base when a kind's bank is built.
  */
 export const CRITTER_KIND_DEFAULTS = Object.freeze({
-  fly: Object.freeze({}),
-  // `color` is the glow's in the table (a firefly's) and the skin's here; a maggot rests in longer pauses than a fly.
+  // `tokenStartleResponse`/`tokenStartleRadius` mirror smelly-flies.js's own defaults — a fly
+  // startles hard and from a wide radius.
+  fly: Object.freeze({ tokenStartleResponse: 0.8, tokenStartleRadius: 140 }),
+  // `color` is the glow's in the table (a firefly's) and the skin's here; a maggot rests in longer
+  // pauses than a fly. Maggots never read the token uniforms at all (critter-token.js's own
+  // header), so no override is needed here for them.
   maggot: Object.freeze({ size: 6, sizeVariation: 0.65, color: [0.902, 0.863, 0.722], pauseMin: 0.9, pauseMax: 3.6 }),
-  firefly: Object.freeze({ size: 3, sizeVariation: 0.2 }),
+  // `tokenStartleResponse`/`tokenStartleRadius` mirror fireflies.js's own defaults — softer and
+  // closer-range than a fly's: wary, not panicked.
+  firefly: Object.freeze({ size: 3, sizeVariation: 0.2, tokenStartleResponse: 0.5, tokenStartleRadius: 110 }),
 });
 
 /**

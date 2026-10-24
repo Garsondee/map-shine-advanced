@@ -38,18 +38,21 @@
  *
  * V2 suffixes deliberately NOT declared yet (Stage 6 rethink rule,
  * keyhole-stage6-effects-approach: audit + rethink per effect, never a
- * mechanical port): _Roughness/_Normal/_Dust/_Ash.
+ * mechanical port): _Roughness/_Normal/_Dust.
  * The wall still reserves their literals — the day an effect needs one, its
  * declaration lands HERE (one line) or the build fails, which is the funnel
  * working as designed. `_Fluid` came off that list on 2026-07-26, `_Prism`
- * came off it on 2026-09-19 (mythica-machina-press#137), and `_Iridescence`
- * came off it the same night (mythica-machina-press#136, Prism's own direct
- * sibling): the funnel working exactly as designed each time — Fluid needed
- * its declaration for `docs/planning/Fluid.md` Phase 1, Prism and
- * Iridescence each needed theirs for a standalone, rethought-for-TSL surface
- * finish (see `effects/prism/prism.js`'s/`effects/iridescence/iridescence.js`'s
- * own headers for the full design), so each declaration landed here rather
- * than as a literal somewhere in effects/.
+ * came off it on 2026-09-19 (mythica-machina-press#137), `_Iridescence` came
+ * off it the same night (mythica-machina-press#136, Prism's own direct
+ * sibling), and `_Ash` came off it rebuilding Ash Disturbance (the day that
+ * effect needed it, per the rule — V2 used `_Ash` as its disturbance
+ * effect's spawn mask, and the author's own existing maps already paint it):
+ * the funnel working exactly as designed each time — Fluid needed its
+ * declaration for `docs/planning/Fluid.md` Phase 1, Prism and Iridescence
+ * each needed theirs for a standalone, rethought-for-TSL surface finish (see
+ * `effects/prism/prism.js`'s/`effects/iridescence/iridescence.js`'s own
+ * headers for the full design), so each declaration landed here rather than
+ * as a literal somewhere in effects/.
  *
  * @module scene/mask-catalog
  */
@@ -246,6 +249,29 @@ export const MASK_KINDS = Object.freeze([
       'at dusk (and dawn, if enabled) and drift over it, glowing, then settle again as the sky darkens or ' +
       'the rain comes. Each separate painted blob is its own colony. The paint never shows — only the ' +
       'fireflies do, and only while the sun is in their twilight window. Absent = no fireflies anywhere.',
+  },
+  {
+    id: 'ash',
+    suffixes: ['_Ash'],
+    channels: 'gray',
+    // Not a packed-trio member, for the same reason `drip`/`flies` are not: the trio is
+    // author-confirmed complete at exactly three.
+    packChannel: null,
+    absentValue: 0,
+    // A CPU consumer is a consumer (the `fire`/`drip`/`flies` case) — AND a GPU one: this grid is
+    // also baked to a texture (`vt-pan-viewer.js#bakeAshMaskTexture`) for `effects/precipitation`'s
+    // mantle to sample directly, the same two-use shape `fire` already has (CPU spawn extraction
+    // AND a GPU clip texture from the identical bake).
+    rasterize: true,
+    meaning:
+      'white = ash/soot/dust already lies here, independent of weather: a burnt-out room, a forge ' +
+      'floor, a battlefield. Sets a FLOOR under the mantle’s dust01 (effects/precipitation/mantle-' +
+      'runtime.js) — the painted value never fades below what is painted, whatever the sky is doing, ' +
+      'and a passing ash-storm or sandstorm still deposits more on top of it. A token walking through ' +
+      'disturbs it exactly as it disturbs weather-deposited dust (the trample channel does not care ' +
+      'which source filled dust01). V2’s own `_Ash` was its Ash Disturbance effect’s spawn mask; ' +
+      'existing V2-authored maps paint it and are read unchanged. Absent = no authored ash anywhere ' +
+      '(a floor can still gather weather-driven dust without one).',
   },
   {
     id: 'specular',

@@ -5523,6 +5523,20 @@ function install() {
     }
   };
 
+  // ASH DISTURBANCE'S AUTHORED FLOOR (rebuilding Ash Disturbance) — the exact same shape as
+  // `getFireMaskGrid` above, one kind id later: `_Ash` is `rasterize: true` for the identical reason
+  // `_Fire` is (a GPU consumer, `vt-pan-viewer.js#bakeAshMaskTexture`, bakes this grid straight to a
+  // texture `effects/precipitation/mantle-runtime.js` samples as a floor under `dust01`). Swallowed
+  // like `_Fire`/`_Drip` above: an absent `_Ash` is the ordinary case (most floors have none painted
+  // at all), never the required-mask loud throw `_Outdoors` gets.
+  const getAshMaskGrid = (floorIndex) => {
+    try {
+      return maskAuthority.getDerived('ash', floorIndex)?.grid ?? null;
+    } catch {
+      return null;
+    }
+  };
+
   // PRECIPITATION'S SKY-REACH SEAM (P1, 2026-08-16) — `skyReach` is the DERIVED
   // product `outdoors ∧ ¬coverAbove`, and it is the input LAW 3 rests on: rain
   // must be unrepresentable indoors. Handed to `vt/` to bake as a texture so
@@ -14491,6 +14505,11 @@ function install() {
         // unwired/torture-fixture default of `() => null` leaves every fire
         // unclipped (the fail-open default `bakeFireMaskTexture` already has).
         getFireMaskGrid,
+        // ASH DISTURBANCE's authored floor — same shape as `getFireMaskGrid`;
+        // an unwired/torture-fixture default of `() => null` leaves the
+        // mantle's dust floor absent everywhere (`bakeAshMaskTexture`'s own
+        // fail-open default).
+        getAshMaskGrid,
         getSkyReachGrid,
         getCoverAboveGrid,
         getCasterHeightGrid,

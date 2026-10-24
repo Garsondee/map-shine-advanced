@@ -196,15 +196,20 @@ export function createMantleRuntime({
   const uSkyHasBake = uniform(float(0));
   const uFireRect = uniform(vec4(0, 0, 1, 1));
   const uFireHasBake = uniform(float(0));
+  /** Ash Disturbance's authored floor (Precipitation.md §5.2) — same shape as the fire mask pair
+   * just above, one kind id later. */
+  const uAshRect = uniform(vec4(0, 0, 1, 1));
+  const uAshHasBake = uniform(float(0));
 
   const openPixel = openSkyTexture ?? null;
   /** ⚠️ SEPARATE `texture()` NODES PER CONSUMER — a shared node carries the
-   * wrong uv. Both start on the 1×1 white placeholder, whose content IS the
-   * fail-open answer: sky fully open, no fire anywhere is the `hasBake` flag's
-   * job rather than the texel's. */
+   * wrong uv. All three start on the 1×1 white placeholder, whose content IS
+   * the fail-open answer: sky fully open, no fire anywhere, no authored ash
+   * anywhere is each one's own `hasBake` flag's job rather than the texel's. */
   const prevTex = read ? TSL.texture(read.texture) : null;
   const skyTex = openPixel ? TSL.texture(openPixel) : null;
   const fireTex = openPixel ? TSL.texture(openPixel) : null;
+  const ashTex = openPixel ? TSL.texture(openPixel) : null;
 
   /** World position of this texel. The buffer spans the floor rect exactly, so
    * this is a plain lerp — no margin, no padding, nothing to get wrong. */
@@ -242,6 +247,10 @@ export function createMantleRuntime({
     const world = worldAt(texUv);
     const sky = sampleMask(skyTex, uSkyRect, uSkyHasBake, world, 1);
     const fire = sampleMask(fireTex, uFireRect, uFireHasBake, world, 0);
+    // ⭐ ASH DISTURBANCE's AUTHORED FLOOR (Precipitation.md §5.2) — read
+    // regardless of sky reach, deliberately: a burnt-out room's soot does not
+    // need an open roof any more than the fire mask's own melt halo does.
+    const ashFloor = sampleMask(ashTex, uAshRect, uAshHasBake, world, 0);
 
     if (!prevTex) return vec4(0, 0, 0, 0);
     const prev = prevTex.sample(texUv);
@@ -252,7 +261,10 @@ export function createMantleRuntime({
     // genuinely gone) but the SHAPE is right on the very first frame, because
     // sky reach still multiplies it: snow lies in the courtyard and not under
     // the colonnade, immediately.
-    const seeded = vec4(uSeedSnow.mul(sky), uSeedDust.mul(sky), uSeedPuddle.mul(sky), float(0));
+    // The seed's own dust channel gets the SAME authored floor the stepped path gets below — a
+    // scene that opens on a freshly-seeded mantle must not show a frame of bare ground where `_Ash`
+    // says there should not be one.
+    const seeded = vec4(uSeedSnow.mul(sky), uSeedDust.mul(sky).max(ashFloor), uSeedPuddle.mul(sky), float(0));
 
     // ── ACCUMULATE — only where sky reaches (LAW 3, on the ground this time) ──
     const dt = uDtHours;
@@ -271,7 +283,12 @@ export function createMantleRuntime({
     const puddleOut = uDry.mul(dt);
 
     const snow = prev.r.add(snowIn).sub(snowOut).clamp(float(0), float(1));
-    const dust = prev.g.add(dustIn).clamp(float(0), float(1));
+    // `dust01` never reads BELOW its authored floor, whatever the sky or the weather has done —
+    // `max`, not an add, because the floor is a FACT about the ground ("ash already lies here"),
+    // not a deposit that could double up with weather's own and run past what was painted. A
+    // passing ash-storm still reads HIGHER while it lasts; dust01 has no decay term at all (same as
+    // `_Fire`'s halo melts snow but nothing melts dust), so it settles back to the floor on its own.
+    const dust = prev.g.add(dustIn).clamp(float(0), float(1)).max(ashFloor);
     // ⭐ MELTWATER BECOMES PUDDLE. The one transfer between channels, and it is
     // what stops a thaw reading as snow simply being deleted: what leaves `snow`
     // by AMBIENT melt arrives in `puddle` (fire melt does not — it boils off,
@@ -574,10 +591,10 @@ export function createMantleRuntime({
       return stepValues;
     },
 
-    /** LAW 3's input, and the fire mask that carves the melt halo. Both fail
-     * OPEN (sky reaches, no fire) when disarmed. */
-    setMasks({ skyReach, fireMask } = {}) {
-      const armed = { sky: false, fire: false };
+    /** LAW 3's input, the fire mask that carves the melt halo, and Ash Disturbance's authored
+     * dust floor. All three fail OPEN (sky reaches, no fire, no authored ash) when disarmed. */
+    setMasks({ skyReach, fireMask, ashMask } = {}) {
+      const armed = { sky: false, fire: false, ash: false };
       if (skyTex) {
         if (skyReach?.texture && skyReach.rect) {
           skyTex.value = skyReach.texture;
@@ -598,6 +615,17 @@ export function createMantleRuntime({
         } else if (openPixel) {
           fireTex.value = openPixel;
           uFireHasBake.value = 0;
+        }
+      }
+      if (ashTex) {
+        if (ashMask?.texture && ashMask.rect) {
+          ashTex.value = ashMask.texture;
+          uAshRect.value.set(ashMask.rect.minX, ashMask.rect.minY, ashMask.rect.maxX, ashMask.rect.maxY);
+          uAshHasBake.value = 1;
+          armed.ash = true;
+        } else if (openPixel) {
+          ashTex.value = openPixel;
+          uAshHasBake.value = 0;
         }
       }
       return armed;
@@ -669,7 +697,11 @@ export function createMantleRuntime({
         lastGameHours,
         lastStep,
         visible: brightenMesh.visible,
-        masks: { skyArmed: uSkyHasBake.value === 1, fireArmed: uFireHasBake.value === 1 },
+        masks: {
+          skyArmed: uSkyHasBake.value === 1,
+          fireArmed: uFireHasBake.value === 1,
+          ashArmed: uAshHasBake.value === 1,
+        },
         strengths: {
           snow: uSnowStrength.value,
           dust: uDustStrength.value,

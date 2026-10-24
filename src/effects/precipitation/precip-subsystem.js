@@ -249,6 +249,8 @@ export function createPrecipitationSubsystem({
   let atmosGate = { texture: null, rect: null };
   const fogGate = () => (atmosGate.texture ? atmosGate : skyReach);
   let fireMask = { texture: null, rect: null };
+  /** Ash Disturbance's authored floor — the mantle's own `ashMask` input (`setAshMaskTexture` below). */
+  let ashMask = { texture: null, rect: null };
   let lastTuning = null;
   /** ⭐ THE STAMP QUEUE'S OWN STATE — `id → {x, y}` as of the last SAMPLE (not
    * the last frame; sampling runs at the mantle's own cadence, see
@@ -659,7 +661,7 @@ export function createPrecipitationSubsystem({
         worldRect: bounds,
         openSkyTexture,
       });
-      mantle.setMasks({ skyReach, fireMask });
+      mantle.setMasks({ skyReach, fireMask, ashMask });
       if (lastTuning) mantle.setTuning(lastTuning);
       onMantleMeshes?.(mantle.meshes);
       mantleReason = null;
@@ -994,7 +996,7 @@ export function createPrecipitationSubsystem({
       for (const [id, engine] of splashEngines) results[`${id}:arrive`] = engine.setSkyReachTexture(texture, rect);
       // The mantle gates ACCUMULATION on the same mask — snow must not pile up
       // under a roof any more than it may fall through one.
-      if (mantle) results.mantle = mantle.setMasks({ skyReach, fireMask });
+      if (mantle) results.mantle = mantle.setMasks({ skyReach, fireMask, ashMask });
       // The curtain gates on the same mask — a veil over a hall is rain the
       // player can see indoors just as surely as a drop is.
       for (const [id, c] of curtains)
@@ -1031,7 +1033,23 @@ export function createPrecipitationSubsystem({
      */
     setFireMaskTexture(texture, rect) {
       fireMask = { texture: texture ?? null, rect: rect ?? null };
-      return mantle ? mantle.setMasks({ skyReach, fireMask }) : { sky: false, fire: false };
+      return mantle ? mantle.setMasks({ skyReach, fireMask, ashMask }) : { sky: false, fire: false };
+    },
+
+    /**
+     * ⭐ ASH DISTURBANCE's AUTHORED FLOOR (Precipitation.md §5.2, rebuilt) —
+     * the mantle's `dust01` never reads below this wherever it is painted,
+     * whatever the sky is doing (a burnt room has soot with no weather
+     * involved at all). Nothing else in precipitation reads it — the exact
+     * shape `setFireMaskTexture` already has for the identical reason.
+     *
+     * Disarming (`texture: null`) leaves NO authored floor anywhere, which is
+     * the fail-open direction: absent data must not manufacture ash a GM
+     * never painted.
+     */
+    setAshMaskTexture(texture, rect) {
+      ashMask = { texture: texture ?? null, rect: rect ?? null };
+      return mantle ? mantle.setMasks({ skyReach, fireMask, ashMask }) : { sky: false, fire: false, ash: false };
     },
 
     /**

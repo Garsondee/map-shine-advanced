@@ -31,26 +31,29 @@
  * `effects/fluid/fluid-registration.js#createFluidSeams`, and the vegetation
  * URL block in `boot.js`).
  *
- * ⚠️ ONLY ELEVEN TILES, NOT FIFTEEN. `scene/mask-catalog.js#MASK_KINDS` has
- * fifteen entries (`prism` joined 2026-09-19, mythica-machina-press#137;
+ * ⚠️ ONLY ELEVEN TILES, NOT SIXTEEN. `scene/mask-catalog.js#MASK_KINDS` has
+ * sixteen entries (`prism` joined 2026-09-19, mythica-machina-press#137;
  * `iridescence` joined the same night, mythica-machina-press#136, Prism's
  * own direct sibling; `drip` joined 2026-09-20, mythica-machina-press#316;
  * `flies`, `maggots` and `fireflies` joined with the procedural critters —
  * three separate masks, so a corpse can have flies and maggots and a puddle
- * of blood only flies),
+ * of blood only flies; `ash` joined rebuilding Ash Disturbance),
  * but only eleven effects declare `authoring.paint`
  * (fire, water, window, specular, fluid, prism, iridescence, vegetation,
  * smellyFlies, maggots, fireflies — vegetation covers two masks, tree+bush, as one
  * tile). `shadow`/`outdoors`/
- * `drip` have no owning effect at all (precipitation's authored-drip layer
- * reads `drip` straight off the mask authority, the same seam fire's own
- * tile is built on, but #316 deliberately did not give it a Studio tile or an
- * `authoring.paint` declaration this pass — see that feature's own commit for
- * why) — Law 5 applies here exactly as it does to `ui/no-dead-axis` for
- * weather: a mask kind with no OWNING TILE doesn't get one just because the
- * painter's OWN internal kind-picker still lists it.
- * `PAINT_REACH` below still covers all fifteen, because that picker DOES list
- * all fifteen and the tile-less kinds are exactly where a wrong belief
+ * `drip`/`ash` have no owning effect at all (precipitation's authored-drip
+ * layer, and now its authored-ash floor, both read their mask straight off
+ * the mask authority, the same seam fire's own tile is built on, but neither
+ * got a Studio tile or an `authoring.paint` declaration — precipitation's
+ * own look is weather-driven, not painted, and grafting a paint tool onto it
+ * for one channel would be a second authoring model bolted onto an effect
+ * that deliberately has none; see #316's own commit for the drip half of
+ * the same call) — Law 5 applies here exactly as it does to `ui/no-dead-axis`
+ * for weather: a mask kind with no OWNING TILE doesn't get one just because
+ * the painter's OWN internal kind-picker still lists it.
+ * `PAINT_REACH` below still covers all sixteen, because that picker DOES list
+ * all sixteen and the tile-less kinds are exactly where a wrong belief
  * has nothing to correct it. Prism gets a real tile despite `graph/
  * passes.js#surface.prism` being a declared `seam` — `authoring.paint` and
  * "does the render pass exist yet" are different questions (`effects/
@@ -80,8 +83,8 @@ import { iconMarkup } from '../../widgets/icon-sprite.js';
  *   'file-only' — the effect resolves a real file URL and never consults
  *                 painted content. Paint saves, and nothing renders.
  *
- * Exhaustive over `MASK_KINDS` on purpose (fifteen entries, including the
- * three with no tile). `paintReachOf` falls back to the PESSIMISTIC verdict for an
+ * Exhaustive over `MASK_KINDS` on purpose (sixteen entries, including the
+ * four with no tile). `paintReachOf` falls back to the PESSIMISTIC verdict for an
  * id absent here and says "not evaluated" out loud, so a new kind added to
  * the catalog cannot silently inherit a confident wrong answer — the
  * `feedback_seam_default_hides_unwired` shape, refused by making the default
@@ -176,6 +179,17 @@ export const PAINT_REACH = Object.freeze({
   fireflies: {
     reach: 'renders',
     why: 'The colony reads the painted grid directly — paint a meadow and fireflies rise from it at dusk.',
+  },
+  // `ash` — Ash Disturbance's authored floor (`effects/precipitation/mantle-runtime.js`), read the
+  // same way `fire` is: `getDerived('ash', floor)` baked straight to the texture the mantle samples.
+  // No tile of its own (the same scope call as `drip`/`shadow`/`outdoors`, above): precipitation's
+  // OWN look is weather-driven, not painted, so grafting a paint tool onto it for one channel would
+  // be a second authoring model bolted onto an effect that deliberately has none. Existing V2-era
+  // `_Ash` files — this mask's own original purpose there — are read unchanged; painting a NEW one
+  // (today, through the painter's internal kind-picker, which lists every catalog kind) renders too.
+  ash: {
+    reach: 'renders',
+    why: 'The mantle reads the painted grid directly as a floor under dust01 — paint it and that ground never looks clean, weather or not.',
   },
 });
 

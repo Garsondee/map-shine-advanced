@@ -1344,6 +1344,8 @@ export async function startVtPanViewer({
   probeMaskAuthorityLiveAt,
   getOutdoorsMaskGrid,
   getFireMaskGrid,
+  // Ash Disturbance's authored floor — structurally identical to getFireMaskGrid above.
+  getAshMaskGrid,
   getSkyReachGrid,
   getCoverAboveGrid,
   getCasterHeightGrid,
@@ -1427,6 +1429,11 @@ export async function startVtPanViewer({
   // grid and every fire fail-open (unclipped) — the same "renders exactly as
   // it did before this feature existed" shape as `getOutdoorsMaskGrid` above.
   getFireMaskGrid ??= () => null;
+  // ASH DISTURBANCE's authored floor — `null` = unwired (the torture
+  // fixture), which leaves `bakeAshMaskTexture` unable to find a grid and
+  // the mantle's dust floor absent everywhere, the same fail-open shape
+  // `getFireMaskGrid` above has.
+  getAshMaskGrid ??= () => null;
   // PRECIPITATION's sky-reach seam (LAW 3). Same "behaves exactly as it did
   // before this feature existed" shape as the two above — absent means the
   // gate never arms, and a disarmed gate RAINS (fail-open), which is the
@@ -2621,6 +2628,20 @@ export async function startVtPanViewer({
     /** Mirrors `lastOutdoorsBakeResult` — see that field's own note. */
     let lastFireMaskBakeResult = null;
 
+    // ASH DISTURBANCE's authored floor (rebuilding Ash Disturbance) — the same bake shape as fire's
+    // mask just above, minus the uniform-rect twin: nothing here needs a shader-side clip rect of
+    // its own, because the ONLY consumer is `effects/precipitation/mantle-runtime.js`, which takes
+    // the texture and a plain `{minX,minY,maxX,maxY}` rect through `precipitationSubsystem.
+    // setAshMaskTexture` exactly as the fire mask already does through `setFireMaskTexture`.
+    let ashMaskTexture = makeOutdoorsPlaceholderTexture(THREE);
+    let ashMaskRect = {
+      minX: dimensions.sceneRect.x,
+      minY: dimensions.sceneRect.y,
+      maxX: dimensions.sceneRect.x + dimensions.sceneRect.width,
+      maxY: dimensions.sceneRect.y + dimensions.sceneRect.height,
+    };
+    let lastAshMaskBakeResult = null;
+
     // ── SUN SHADOWS (docs/planning/Sun-Shadows.md) ───────────────────────
     // Extracted (2026-07-25, VT-Pan-Viewer-Extraction.md step 1) into its own
     // module — `effects/lighting/sun-shadow-subsystem.js` — the first
@@ -2930,6 +2951,10 @@ export async function startVtPanViewer({
       const outdoors = bakeOutdoorsTexture(idx);
       // Fire's mask-clip gate, per-floor for the identical reason.
       const fire = bakeFireMaskTexture(idx);
+      // Ash Disturbance's authored floor under the mantle's dust01 — the
+      // identical per-floor reason: a cellar's soot must not bleed onto the
+      // street above it any more than its fire should.
+      const ash = bakeAshMaskTexture(idx);
       // ⭐ PRECIPITATION's LAW 3 gate. One texture, FOUR consumers — the fall,
       // the splashes, the curtain and the mantle's accumulation — every one of
       // which was reading the wrong floor's roofs until this line existed.
@@ -2959,6 +2984,7 @@ export async function startVtPanViewer({
         reason,
         outdoors,
         fire,
+        ash,
         skyReach,
         roofline: { count: roofline.count, edgeTexels: roofline.edgeTexels, heightSource: roofline.heightSource },
         authoredDrip: {
@@ -4202,6 +4228,55 @@ export async function startVtPanViewer({
       precipitationSubsystem?.setFireMaskTexture(tex, fireMaskRect);
       lastFireMaskBakeResult = { ok: true, floorIndex, cols: w, rows: h, rect: fireMaskRect };
       return lastFireMaskBakeResult;
+    }
+
+    /**
+     * ⭐ ASH DISTURBANCE's AUTHORED FLOOR (Precipitation.md §5.2, rebuilt) —
+     * structurally identical to `bakeFireMaskTexture` just above (same grid
+     * shape, same RGBA-replicate bake, same per-floor lifetime), handed to
+     * `effects/precipitation/mantle-runtime.js` as a floor under `dust01`
+     * rather than to a flame shader as a clip. An absent `_Ash` is the
+     * ORDINARY case — most floors have none painted — so there is no loud
+     * warning here, matching `bakeFireMaskTexture`'s own posture.
+     */
+    function bakeAshMaskTexture(floorIndex) {
+      const grid = getAshMaskGrid(floorIndex);
+      if (!grid?.spec || !grid?.data) {
+        lastAshMaskBakeResult = { ok: false, floorIndex, reason: 'no ash mask for this floor' };
+        return lastAshMaskBakeResult;
+      }
+      const { w, h } = grid.spec;
+      if (!(w > 0 && h > 0)) {
+        lastAshMaskBakeResult = { ok: false, floorIndex, reason: `degenerate grid ${w}x${h}` };
+        return lastAshMaskBakeResult;
+      }
+
+      // Same RGBA-replicate-of-one-byte shape as `bakeFireMaskTexture` — see
+      // that function's own note on row 0 = minY / flipY:false.
+      const data = new Uint8Array(w * h * 4);
+      for (let i = 0; i < w * h; i++) {
+        const v = grid.data[i] ?? 0;
+        data[i * 4 + 0] = v;
+        data[i * 4 + 1] = v;
+        data[i * 4 + 2] = v;
+        data[i * 4 + 3] = 255;
+      }
+      // LINEAR — the mantle's own sampling already softens everything it
+      // touches (`sampleMask`'s bilinear fetch); a razor edge here would only
+      // fight it, the identical reason the fire mask bake picks it.
+      const tex = createMaskDataTexture(data, w, h, 'linear', false);
+
+      ashMaskTexture?.dispose();
+      ashMaskTexture = tex;
+      ashMaskRect = {
+        minX: grid.spec.x,
+        minY: grid.spec.y,
+        maxX: grid.spec.x + grid.spec.width,
+        maxY: grid.spec.y + grid.spec.height,
+      };
+      precipitationSubsystem?.setAshMaskTexture(tex, ashMaskRect);
+      lastAshMaskBakeResult = { ok: true, floorIndex, cols: w, rows: h, rect: ashMaskRect };
+      return lastAshMaskBakeResult;
     }
     // QuadMesh (never a hand-rolled quad — same Y-flip law the present pass
     // documents at length below): the vendor owns v=0-at-top on both backends.

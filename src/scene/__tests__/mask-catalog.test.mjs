@@ -111,10 +111,10 @@ export async function run(t) {
   // `maggots` is the third critter mask, between the other two: flies, maggots and fireflies are painted
   // separately (a puddle of blood wants flies and no maggots; a compost heap wants maggots and no swarm).
   t.ok(
-    'outdoors, fire, drip, flies, maggots, fireflies, specular, window, water, fluid, prism and iridescence are the rasterized kinds',
+    'outdoors, fire, drip, flies, maggots, fireflies, ash, specular, window, water, fluid, prism and iridescence are the rasterized kinds',
     rasterizedKinds()
       .map((k) => k.id)
-      .join(',') === 'outdoors,fire,drip,flies,maggots,fireflies,specular,window,water,fluid,prism,iridescence'
+      .join(',') === 'outdoors,fire,drip,flies,maggots,fireflies,ash,specular,window,water,fluid,prism,iridescence'
   );
   t.ok(
     'the three critters are three separate single-file gray masks, each with its own suffix',

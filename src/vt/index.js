@@ -16,6 +16,7 @@ export {
   startVtPanViewer,
   stopVtPanViewer,
   getVtPanViewerDiagnostics,
+  getVtPanViewerPresentationReport,
   getVtPanViewerRenderTargets,
   setVtPanViewerFloor,
   // FLOOR PREPARE/COMMIT (2026-08-15) — prepareVtPanViewerFloor front-loads a
@@ -25,6 +26,7 @@ export {
   prepareVtPanViewerFloor,
   cancelVtPanViewerFloorPrepare,
   prewarmVtPanViewerAdjacentFloors,
+  afterNextVtPanViewerFrame,
   setVtPanViewerGpuProbe,
   // PER-PASS GPU TIMING (docs/planning/Performance.md). Distinct from the probe
   // above: that one measures the WHOLE frame and must throttle the loop to do
@@ -205,6 +207,9 @@ export { getPyramidStoreStats } from './pyramid-store.js';
 // module-level like the pyramid store above — the Reckoning Report reads them
 // to tell "warm v10 cache" from "silent quota failure re-encoding every session".
 export { getCompressedTextureStats } from './compressed-textures.js';
+
+// Warm the persistent art cache for a scene nobody is viewing yet (loading audit, phase 4).
+export { planArtPrewarm, prewarmArtCompression } from './scene-prewarm.js';
 // resolveRendererRequiredLimits: the boot heartbeat renderer (boot.js) needs
 // the SAME raised WebGPU texture cap as the VT viewer, or the flight recorder
 // (which reads the heartbeat's device) misreports the limit. Cross-zone, so it

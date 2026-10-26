@@ -141,15 +141,50 @@ export function createSpecularSurfaceSubsystem({
    * like the effect having died. */
   let maskTexture = createMaskTexture(new Uint8Array([0, 0, 0, 255]), 1, 1, 'linear');
   let islandPackTexture = createPackTexture(new Uint8Array([191, 128, 0, 0]), 1, 1);
+  /** The neutral pack, kept so a slot with no pack of its own can fall back to it. */
+  const placeholderPackTexture = islandPackTexture;
+  const placeholderMaskTexture = maskTexture;
   let maskInfo = null;
   let islandInfo = null;
   /** Mirrors the value last pushed to `surface.setIslandBakeStatus`, so the
    * JS-side report can be cross-checked against what channel 6 is actually
    * showing without needing GPU access. 0 = never baked. */
   let islandBakeStatus = 0;
+  // ============================================================================
+  // PER-FLOOR SLOTS (2026-10-25, loading audit P-03)
+  // ============================================================================
+  // This subsystem still draws ONE mesh, but it used to track exactly ONE
+  // floor's mask in a handful of variables and a single `loading` boolean. That
+  // had three consequences, all observed as "the lower floor's shine is still
+  // there after I went up":
+  //   1. nothing hid the mesh when the viewed floor changed, so the old floor's
+  //      quad, mask and island pack kept drawing until the NEW floor's mask had
+  //      been fetched, decoded and baked — on the visible path, after the flip;
+  //   2. the boolean meant a floor change during a load never requested the new
+  //      floor at all, and when the old load landed it was installed as the
+  //      shown mask (wrong floor, visible), costing a second full load;
+  //   3. floor prepare could not warm it, because there was nowhere to put a
+  //      mask for a floor that is not the shown one.
+  // A SLOT is everything one floor needs: its mask texture, rect, crop bounds,
+  // decoded bytes and baked island pack. Slots load in the background (prepare
+  // calls `prefetchMask`), and `sync(floor)` swaps the mesh onto the slot for the
+  // floor being presented in the same call that precedes the draw — or hides the
+  // mesh if that slot is not ready. Absent beats wrong.
+  //
+  // The variables below (`loadedUrl`, `loadedFloor`, `maskTexture`, …) remain,
+  // but now mean "what the ACTIVE slot has bound to the surface right now".
+  /** @type {Map<number, object>} floor index -> the loaded slot. */
+  const slots = new Map();
+  /** @type {Map<number, string>} floor index -> the url whose load is in flight. */
+  const loadingFloors = new Map();
+  /** @type {Map<number, string>} floor index -> a url whose load failed (logged by the loader); not retried every frame. */
+  const failedLoads = new Map();
+  /** @type {object|null} the slot currently bound to the mesh, or null when hidden for lack of one. */
+  let activeSlot = null;
+  /** The floor the last `sync` was asked to present (-1 before the first). */
+  let syncedFloor = -1;
   let loadedUrl = null;
   let loadedFloor = -1;
-  let loading = false;
   /** The world AABB of what is actually painted, or null while unknown. */
   let contentBoundsWorld = null;
   let enabled = true;
@@ -162,15 +197,12 @@ export function createSpecularSurfaceSubsystem({
   /** The crop's extent in mask-UV space — the ENTIRE mask lookup. */
   let paddedBoundsUv = null;
   let lastViewRect = null;
-  /** The decoded mask bytes, held only until the pack is baked from them.
-   * Released immediately after: a full-resolution RGBA buffer is tens of MB and
-   * nothing needs it once the labels are packed. */
-  let pendingBytes = null;
+  // The decoded mask bytes now live on each SLOT (`slot.pendingBytes`), kept so
+  // an islandSpread change can rebake without a refetch.
   // BAKE-COUNT HEALTH (cache-completeness pass, 2026-08-12) — bakeIslandPack
-  // has no internal skip branch of its own (the `!pendingBytes` guard just
-  // below is a one-time "no mask loaded yet" startup gate, never cleared
-  // again after the first load — see `pendingBytes`' own comment — so
-  // counting it as an ongoing hit would be a fabrication). Its TWO call
+  // has no internal skip branch of its own (the `!target?.pendingBytes` guard
+  // is a "no mask loaded yet" startup gate, so counting it as an ongoing hit
+  // would be a fabrication). Its TWO call
   // sites (a mask-load continuation vs. a live islandSpread drag) have
   // incomparable upstream gating, so — same doctrine as
   // vt-pan-viewer.js's bakeWindField — this is a MISSES-only lifetime tally,
@@ -232,7 +264,10 @@ export function createSpecularSurfaceSubsystem({
    * genuinely free rather than merely cheap.
    */
   function refreshVisibility() {
-    mesh.visible = enabled && !!loadedUrl && !!contentBoundsWorld;
+    // `activeSlot` is only ever the slot for the floor `sync` was last asked to
+    // present (it is cleared the moment that floor has no ready slot), so this
+    // is also the "is the shine on screen the shine of the floor on screen" gate.
+    mesh.visible = enabled && !!activeSlot && !!loadedUrl && !!contentBoundsWorld;
     mesh.material = debugChannel > 0 ? surface.debugMaterial : surface.specularMaterial;
   }
 
@@ -252,28 +287,39 @@ export function createSpecularSurfaceSubsystem({
    *
    * @param {number} spread
    */
-  function bakeIslandPack(spread) {
-    if (!pendingBytes) return;
+  function bakeIslandPack(spread, slot = activeSlot) {
+    const target = slot;
+    if (!target?.pendingBytes) return;
     islandPackBakeCount += 1;
     profiler?.beginById('surface.specularIslandBake');
     try {
       const pack = buildSpecularIslandPack({
-        rgba: pendingBytes.data,
-        width: pendingBytes.width,
-        height: pendingBytes.height,
+        rgba: target.pendingBytes.data,
+        width: target.pendingBytes.width,
+        height: target.pendingBytes.height,
         spread,
       });
-      islandPackTexture?.dispose?.();
-      islandPackTexture = createPackTexture(pack.data, pack.w, pack.h);
-      surface.setIslandPackTexture(islandPackTexture);
+      // The pack belongs to the SLOT; it only reaches the surface if that slot
+      // is the one on screen (a background bake for another floor must not
+      // touch what is being drawn).
+      target.packTexture?.dispose?.();
+      target.packTexture = createPackTexture(pack.data, pack.w, pack.h);
+      target.bakedSpread = spread;
+      if (target === activeSlot) {
+        islandPackTexture = target.packTexture;
+        surface.setIslandPackTexture(islandPackTexture);
+      }
       // Debug channel 6's own status — set ONLY on a successful bake, so a
       // THROW below (caught further down) leaves it at whatever it already
       // was rather than claiming success: never-baked stays 0, a re-bake that
       // fails after an earlier good one keeps reporting the LAST good state
       // rather than silently reverting to "never baked".
-      islandBakeStatus = pack.islandCount > 0 ? 2 : 1;
-      surface.setIslandBakeStatus(islandBakeStatus);
-      islandInfo = {
+      target.bakeStatus = pack.islandCount > 0 ? 2 : 1;
+      if (target === activeSlot) {
+        islandBakeStatus = target.bakeStatus;
+        surface.setIslandBakeStatus(islandBakeStatus);
+      }
+      const info = {
         grid: `${pack.w}x${pack.h}`,
         // The same two numbers UNFORMATTED, because `grid` is a display string
         // and `getStatus().coverage` needs to divide by the real grid area.
@@ -300,6 +346,8 @@ export function createSpecularSurfaceSubsystem({
         preClusterComponents: pack.preClusterComponents,
         estimatedPerIslandGridFraction: pack.estimatedPerIslandGridFraction,
       };
+      target.islandInfo = info;
+      if (target === activeSlot) islandInfo = info;
     } catch (err) {
       // Loud, and the effect still draws: the pack's placeholder is the global
       // parallax, so a failed bake costs per-object variety and nothing else.
@@ -353,85 +401,177 @@ export function createSpecularSurfaceSubsystem({
    * the Painter department's own tile states that this effect reads the file
    * only, instead of reporting a save that renders nothing.
    *
+   * Idempotent. Safe to call for ANY floor, not only the presented one — that is
+   * what lets floor prepare warm the next floor's slot in the background.
+   *
    * @param {number} floorIndex
+   * @returns {object|null} the READY slot for this floor (loaded, and for the
+   *   url the scene currently declares), or null while it is loading, failed,
+   *   or the floor has no `_Specular` at all.
    */
   function ensureMaskImage(floorIndex) {
     const url = getSpecularMaskUrl(floorIndex);
-    // ⚠️ THE VIEWED FLOOR HAS NO MASK OF ITS OWN — clear whatever an EARLIER
-    // floor left behind, rather than leaving it up. Live bug, 2026-08-03: this
-    // subsystem tracks exactly ONE floor's quad (its geometry, its mask), set
-    // only when a NEW mask successfully loads. Without this branch, switching
-    // to a floor with no `_Specular` authored left the PREVIOUS floor's quad
-    // fully intact — visible, still sampling its own real mask (so
-    // `mask`/`tint`/`presence` keep reading real, plausible values, since
-    // floors share the same x,y footprint), gated by whatever rank THAT
-    // floor's background item happened to resolve to — no longer this floor's
-    // own background, once `resolveExpectedDepth` is fed the NEW `floorIndex`
-    // (STAGE 3, 2026-08-05 — the same rank comparison that used to be
-    // `floorMatch` reading 0 under the old `attrTexture` gate). `strength` at
-    // any value would change nothing either way, which is indistinguishable
-    // from the effect being dead. Hiding the mesh here is the honest state: no
-    // `_Specular` is authored for what is actually on screen via the
-    // background-image path.
+    // ⚠️ A FLOOR WITH NO MASK OF ITS OWN HAS NO SHINE. Live bug, 2026-08-03: the
+    // PREVIOUS floor's quad was left fully intact when the viewed floor had no
+    // `_Specular` authored — visible, still sampling its own real mask (floors
+    // share the same x,y footprint), gated by the NEW floor's background rank.
+    // `strength` at any value would change nothing, which is indistinguishable
+    // from the effect being dead. Dropping the slot is the honest state: no
+    // `_Specular` is authored for what is actually on screen. (2026-10-25: the
+    // same discipline now applies to a floor whose mask merely has not landed
+    // yet — `sync` hides the mesh unless the presented floor's slot is ready.)
     if (!url) {
-      if (loadedUrl !== null || contentBoundsWorld !== null) {
-        loadedUrl = null;
-        loadedFloor = -1;
-        contentBoundsWorld = null;
-        paddedBoundsUv = null;
-        refreshVisibility();
+      const stale = slots.get(floorIndex);
+      if (stale) {
+        slots.delete(floorIndex);
+        if (stale === activeSlot) deactivateSlot();
+        disposeSlot(stale);
       }
-      return;
+      loadingFloors.delete(floorIndex);
+      failedLoads.delete(floorIndex);
+      return null;
     }
     // Keyed on floor AS WELL AS url: two floors can legitimately share a file
-    // path in a scene built by duplication, and re-reading the rect on a floor
-    // switch is what keeps the mapping right when they do.
-    if (loading || (url === loadedUrl && floorIndex === loadedFloor)) return;
-    loading = true;
+    // path in a scene built by duplication, and the rect is read per floor.
+    const existing = slots.get(floorIndex);
+    if (existing && existing.url === url) return existing;
+    if (loadingFloors.get(floorIndex) === url) return null; // this exact load is already in flight
+    // A load that already failed is not retried every frame (it used to be: a
+    // failed fetch left nothing recorded, so the very next `sync` asked again,
+    // forever). A source that starts working later needs a reload — the same
+    // trade the residency loop makes for permanently broken items.
+    if (failedLoads.get(floorIndex) === url) return null;
+    loadingFloors.set(floorIndex, url);
     const requestedFloor = floorIndex;
     loadMaskImage({ url, scale: SPECULAR_MASK_IMAGE_SCALE, channels: 'rgb' })
       .then((loaded) => {
-        loading = false;
-        if (!loaded) return; // already logged loudly by the loader
+        // Superseded (the floor's url changed while this was in flight): drop it.
+        if (loadingFloors.get(requestedFloor) !== url) {
+          loaded?.texture?.dispose?.();
+          return;
+        }
+        loadingFloors.delete(requestedFloor);
+        if (!loaded) {
+          failedLoads.set(requestedFloor, url); // already logged loudly by the loader
+          return;
+        }
         const rect = getSpecularMaskRect(requestedFloor);
         if (!rect) {
           log.error(`specular mask loaded for floor ${requestedFloor} but the authority served no rect — hidden`);
+          failedLoads.set(requestedFloor, url);
+          loaded.texture?.dispose?.();
           return;
         }
-        maskTexture?.dispose?.();
-        maskTexture = loaded.texture;
-        surface.setMaskTexture(loaded.texture);
-        loadedUrl = url;
-        loadedFloor = requestedFloor;
-        loadedMaskRect = rect;
-        loadedContentBoundsUv = loaded.contentBounds ?? null;
-        contentBoundsWorld = toWorldBounds(loaded.contentBounds, rect);
         // THE MASK LOOKUP'S ONLY INPUT, derived from the SAME world bounds the
         // quad is cropped to rather than from `contentBounds` directly — so the
         // AABB pad is carried automatically and the two can never disagree
         // about where the quad's edges are.
-        paddedBoundsUv = toUvBounds(contentBoundsWorld, rect);
-        if (paddedBoundsUv) surface.setMaskUvBounds(paddedBoundsUv);
-        pendingBytes = loaded.data ? { data: loaded.data, width: loaded.width, height: loaded.height } : null;
-        bakeIslandPack(islandSpread);
-        maskInfo = {
+        const boundsWorld = toWorldBounds(loaded.contentBounds, rect);
+        const slot = {
+          floor: requestedFloor,
           url,
-          uploaded: `${loaded.width}x${loaded.height}`,
-          native: `${loaded.nativeWidth}x${loaded.nativeHeight}`,
-          mb: +(loaded.bytes / (1024 * 1024)).toFixed(1),
-          // A file with metal painted edge to edge is legitimate and reports
-          // the full rect; a file reporting NOTHING painted is the case worth
-          // seeing, because the mesh then stays hidden and "no shine" would
-          // otherwise look identical to "effect broken".
-          painted: contentBoundsWorld ? 'yes' : 'NOTHING PAINTED',
+          maskTexture: loaded.texture,
+          rect,
+          contentBoundsUv: loaded.contentBounds ?? null,
+          contentBoundsWorld: boundsWorld,
+          paddedBoundsUv: toUvBounds(boundsWorld, rect),
+          pendingBytes: loaded.data ? { data: loaded.data, width: loaded.width, height: loaded.height } : null,
+          packTexture: null,
+          bakedSpread: null,
+          bakeStatus: 0,
+          islandInfo: null,
+          maskInfo: {
+            url,
+            uploaded: `${loaded.width}x${loaded.height}`,
+            native: `${loaded.nativeWidth}x${loaded.nativeHeight}`,
+            mb: +(loaded.bytes / (1024 * 1024)).toFixed(1),
+            // A file with metal painted edge to edge is legitimate and reports
+            // the full rect; a file reporting NOTHING painted is the case worth
+            // seeing, because the mesh then stays hidden and "no shine" would
+            // otherwise look identical to "effect broken".
+            painted: boundsWorld ? 'yes' : 'NOTHING PAINTED',
+          },
         };
-        cropGeometry();
-        refreshVisibility();
+        // The pack is baked HERE, into the slot, in the background — never on
+        // the frame that presents the floor (a connected-component labelling
+        // pass over up to 512x512 texels).
+        bakeIslandPack(islandSpread, slot);
+        const previous = slots.get(requestedFloor);
+        slots.set(requestedFloor, slot);
+        if (previous) {
+          if (previous === activeSlot) deactivateSlot();
+          disposeSlot(previous);
+        }
+        // If this is the floor on screen, bind it NOW rather than waiting for
+        // the next frame's sync — otherwise the shine would appear a frame late
+        // for no reason. A slot for any other floor just waits to be presented.
+        if (requestedFloor === syncedFloor) activateSlot(slot);
       })
       .catch((err) => {
-        loading = false;
+        if (loadingFloors.get(requestedFloor) === url) loadingFloors.delete(requestedFloor);
+        failedLoads.set(requestedFloor, url);
         log.error('specular mask image load rejected —', err);
       });
+    return null;
+  }
+
+  /**
+   * Bind a READY slot to the surface and the mesh. Synchronous, cheap (texture
+   * rebinds, one uniform-sized bounds write and a four-vertex position write),
+   * and it is the whole of what "presenting" this effect's floor costs: the
+   * fetch, the decode and the island bake all happened in the slot's load.
+   * @param {object} slot
+   */
+  function activateSlot(slot) {
+    activeSlot = slot;
+    maskTexture = slot.maskTexture;
+    surface.setMaskTexture(slot.maskTexture);
+    loadedUrl = slot.url;
+    loadedFloor = slot.floor;
+    loadedMaskRect = slot.rect;
+    loadedContentBoundsUv = slot.contentBoundsUv;
+    contentBoundsWorld = slot.contentBoundsWorld;
+    paddedBoundsUv = slot.paddedBoundsUv;
+    if (paddedBoundsUv) surface.setMaskUvBounds(paddedBoundsUv);
+    maskInfo = slot.maskInfo;
+    // A slot baked at an OLD island spread (the author dragged the slider while
+    // another floor was on screen) is re-baked now; otherwise its own pack is
+    // simply bound.
+    if (slot.pendingBytes && slot.bakedSpread !== islandSpread) bakeIslandPack(islandSpread, slot);
+    // A slot whose bake threw has no pack of its own: bind the neutral
+    // placeholder (global parallax) rather than leaving the PREVIOUS floor's
+    // per-object motion on this floor's mask.
+    islandPackTexture = slot.packTexture ?? placeholderPackTexture;
+    surface.setIslandPackTexture(islandPackTexture);
+    islandInfo = slot.islandInfo;
+    islandBakeStatus = slot.bakeStatus;
+    surface.setIslandBakeStatus(islandBakeStatus);
+    cropGeometry();
+    refreshVisibility();
+  }
+
+  /** Unbind: nothing is shown until a slot for the presented floor is ready. */
+  function deactivateSlot() {
+    activeSlot = null;
+    loadedUrl = null;
+    loadedFloor = -1;
+    contentBoundsWorld = null;
+    paddedBoundsUv = null;
+    // Rebind the placeholders so the surface never holds a texture a following
+    // `disposeSlot` is about to free (a tier rebuild builds its material from
+    // the bound textures).
+    maskTexture = placeholderMaskTexture;
+    islandPackTexture = placeholderPackTexture;
+    surface.setMaskTexture(maskTexture);
+    surface.setIslandPackTexture(islandPackTexture);
+    refreshVisibility();
+  }
+
+  /** Free what a slot owns. Never called on the active slot without deactivating first. */
+  function disposeSlot(slot) {
+    slot.maskTexture?.dispose?.();
+    slot.packTexture?.dispose?.();
+    slot.pendingBytes = null;
   }
 
   /**
@@ -559,7 +699,17 @@ export function createSpecularSurfaceSubsystem({
       lastSkyKey = '';
     }
 
-    ensureMaskImage(floorIndex);
+    // THE PRESENTED FLOOR'S SLOT — or nothing. `ensureMaskImage` returns the
+    // slot only when it is loaded for the url the scene declares RIGHT NOW; the
+    // mesh is bound to exactly that slot or hidden, in this same call, before
+    // the draw. There is no frame on which the previous floor's shine can be
+    // drawn for this floor (loading audit P-03).
+    syncedFloor = floorIndex;
+    const readySlot = ensureMaskImage(floorIndex);
+    if (readySlot !== activeSlot) {
+      if (readySlot) activateSlot(readySlot);
+      else if (activeSlot) deactivateSlot();
+    }
 
     // THE EXPECTED DEPTH — STAGE 3 (2026-08-05). Pushed every frame and NEVER
     // gated on a cached key, unlike the old `uFloorIndex01` (a static property
@@ -699,15 +849,50 @@ export function createSpecularSurfaceSubsystem({
      * (Effects.md Law 4: gating by uniform is not gating). */
     hasContent: () => mesh.visible,
     /**
+     * What the presentation monitor reads (`diag/presentation-monitor.js`, loading audit §6.7):
+     * the floor whose shine is ACTUALLY on the mesh right now — the active slot's own floor, not the
+     * floor `sync` was last asked for — and whether the mesh is showing it. This is the exact pair
+     * that was wrong in "the lower floor's shine lingers after going up".
+     * @returns {{visible: boolean, floor: number|null}}
+     */
+    getPresentation: () => ({
+      visible: mesh.visible && activeSlot !== null,
+      floor: activeSlot ? activeSlot.floor : null,
+    }),
+    /**
      * SCENE READINESS (vt/settle.js probe `specularMaskLoad`) — is a mask image
      * fetch in flight right now? See water-surface-subsystem's own copy of this
      * accessor for why `loading` is the safe thing to gate on and a
      * "has it baked yet?" flag would not be.
      */
-    isLoadingMask: () => loading,
+    isLoadingMask: () => loadingFloors.size > 0,
+    /**
+     * FLOOR PREPARE (loading audit P-03/P-04): fetch, decode and bake this
+     * floor's slot in the background WITHOUT touching what is on screen. Water
+     * and window export the same name; `prepareFloor` calls all three.
+     * @param {number} floorIndex
+     */
+    prefetchMask: (floorIndex) => {
+      ensureMaskImage(floorIndex);
+    },
+    /**
+     * Is there nothing left to wait for on this floor? True when no mask is
+     * authored, when the slot is loaded, and when the load FAILED (a failure is
+     * settled, not pending — waiting on it would hang a floor change forever).
+     * @param {number} floorIndex
+     */
+    isMaskReady: (floorIndex) => {
+      const url = getSpecularMaskUrl(floorIndex);
+      if (!url) return true;
+      if (slots.get(floorIndex)?.url === url) return true;
+      return failedLoads.get(floorIndex) === url;
+    },
     getStatus() {
       return {
         visible: mesh.visible,
+        /** Floors whose slot is loaded (shown or not) and floors still loading. */
+        slotFloors: [...slots.keys()],
+        loadingFloors: [...loadingFloors.keys()],
         // Non-zero means the author is looking at a DIAGNOSTIC, not at the
         // effect — reported so a channel can never be silently left on and then
         // mistaken for a rendering bug.
@@ -831,9 +1016,13 @@ export function createSpecularSurfaceSubsystem({
       // The debug material too — built eagerly whether or not a channel was
       // ever picked, so "nobody used it" is not a reason to leave it.
       surface.debugMaterial?.dispose?.();
-      maskTexture?.dispose?.();
-      islandPackTexture?.dispose?.();
-      pendingBytes = null;
+      for (const slot of slots.values()) disposeSlot(slot);
+      slots.clear();
+      loadingFloors.clear();
+      failedLoads.clear();
+      activeSlot = null;
+      placeholderMaskTexture?.dispose?.();
+      placeholderPackTexture?.dispose?.();
     },
   };
 }

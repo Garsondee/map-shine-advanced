@@ -188,6 +188,36 @@ export async function run(t) {
     t.ok(`exactly 1 of ${total} fact combinations suppresses`, suppressCount === 1);
   }
 
+  // ---- WHO MAY OWN THE ART (loading audit P-09, 2026-10-25). Suppression is only
+  // right while an MSA viewer is going to paint; the old facts were all about
+  // whether the PIXI canvas COULD be transparent, none about whether MSA was there
+  // to show through it. A disabled/failed/stopped viewer used to be re-blanked by
+  // visibilityRefresh within moments of being given Foundry's art back.
+  {
+    const refused = decideArtSuppression({ ...HEALTHY, msaMayOwnArt: false });
+    t.ok(
+      'MSA not rendering => refuse, with its own code',
+      refused.suppress === false && refused.code === 'msa-not-rendering'
+    );
+    t.ok(
+      '…even when every PIXI fact is perfect',
+      decideArtSuppression({ ...HEALTHY, msaMayOwnArt: false }).suppress === false
+    );
+    t.ok(
+      'MSA allowed => the healthy case still suppresses',
+      decideArtSuppression({ ...HEALTHY, msaMayOwnArt: true }).suppress === true
+    );
+    t.ok(
+      'an unknown (omitted) answer keeps the old meaning — it is only a refusal when explicitly false',
+      decideArtSuppression(HEALTHY).suppress === true
+    );
+    t.ok(
+      'it is checked FIRST, so the reason names the real cause rather than a PIXI fact',
+      decideArtSuppression({ contextAlpha: false, clearAlpha: 1, groupsPresent: false, msaMayOwnArt: false }).code ===
+        'msa-not-rendering'
+    );
+  }
+
   // ---- the seam's scope, pinned. `visibility` (fog/vision) is deliberately NOT
   // ours yet — the author's direction is that MSA takes it EVENTUALLY
   // (keyhole-vision-fog-direction). If someone adds it here, that is a real

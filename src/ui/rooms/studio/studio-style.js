@@ -121,6 +121,11 @@ ${IN} .msa-chev{display:inline-block; transition:transform 160ms var(--ease-out)
 ${IN} details[open] > summary .msa-chev{transform:rotate(90deg)}
 
 /* ---- effects department ------------------------------------------------------ */
+${IN} .msa-resetall{display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+  margin-bottom:12px; padding:10px 12px; background:var(--bg1);
+  border:1px solid var(--line); border-radius:var(--r-card)}
+${IN} .msa-resetall .msa-btn{font-weight:600}
+${IN} .msa-resetall-note{color:var(--ink2); font-size:.72rem}
 ${IN} .msa-strip{display:flex; flex-wrap:wrap; gap:6px; margin-bottom:12px}
 ${IN} .msa-grid{display:grid; gap:12px; align-content:start; align-items:start;
   grid-template-columns:repeat(2, minmax(0, 1fr))}

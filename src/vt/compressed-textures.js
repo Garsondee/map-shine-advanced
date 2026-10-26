@@ -137,6 +137,11 @@ const _stats = {
    * priority lanes are not actually being exercised and any conclusion drawn
    * from "the floor switch felt fast" is about the cache, not about this code. */
   maxQueueDepth: 0,
+  /** Queued jobs thrown away by {@link dropQueuedJobs} because the viewer that asked
+   * for them was disposed (loading audit L-10). Reads 0 on a session with no scene
+   * change; a scene change that leaves it at 0 while `queued` was non-zero at the
+   * time means the drop is not wired and the old scene is still being compressed. */
+  droppedQueued: 0,
   /** Total `onerror` events across the whole session — surfaced so a report
    * can tell "never errored" from "errored once and recovered" from "errored
    * repeatedly and gave up" (mythica-machina-press#483), none of which read
@@ -229,11 +234,11 @@ function _pump() {
 }
 
 /** Accept a job into its lane and try to dispatch. */
-function _enqueue({ message, mode, priority }) {
+function _enqueue({ message, mode, priority, owner }) {
   const id = _nextId++;
   return new Promise((resolve) => {
     const lane = priority === PRIORITY_INTERACTIVE ? PRIORITY_INTERACTIVE : PRIORITY_BACKGROUND;
-    _queue[lane].push({ id, message: { ...message, id }, mode, resolve });
+    _queue[lane].push({ id, message: { ...message, id }, mode, resolve, owner });
     const depth = _queueDepth();
     if (depth > _stats.maxQueueDepth) _stats.maxQueueDepth = depth;
     _pump();
@@ -325,7 +330,10 @@ function ensureWorker() {
  * ever exists to be drawn, so it outranks anything nothing is looking at.
  *
  * @param {string} src root-absolute asset URL (same string the raw path fetches)
- * @param {{priority?: string}} [opts]
+ * @param {{priority?: string, owner?: unknown}} [opts] `owner`: an opaque token naming who
+ *   is waiting, so {@link dropQueuedJobs} can discard the job if that owner goes away
+ *   before the job reaches the worker. Omit it for work that must outlive its asker
+ *   (a pre-warm exists precisely to leave an answer behind).
  * @returns {Promise<
  *   | { format: 'bc1'|'bc7', levels: Array<{width:number,height:number,blocks:Uint8Array}>,
  *       width: number, height: number, cached: boolean,
@@ -334,14 +342,14 @@ function ensureWorker() {
  *   | null                              // worker unavailable/failed — caller uses a raw texture
  * >}
  */
-export function requestCompressedTexture(src, { priority = PRIORITY_INTERACTIVE } = {}) {
+export function requestCompressedTexture(src, { priority = PRIORITY_INTERACTIVE, owner } = {}) {
   _stats.requests++;
   const w = ensureWorker();
   if (!w) {
     _stats.unavailable++;
     return Promise.resolve(null);
   }
-  return _enqueue({ message: { src }, mode: 'bc', priority });
+  return _enqueue({ message: { src }, mode: 'bc', priority, owner });
 }
 
 /**
@@ -362,18 +370,62 @@ export function requestCompressedTexture(src, { priority = PRIORITY_INTERACTIVE 
  * gates a visible mesh should pass {@link PRIORITY_INTERACTIVE} explicitly.
  *
  * @param {string} src root-absolute asset URL (the same string the raw path fetches)
- * @param {{priority?: string}} [opts]
+ * @param {{priority?: string, owner?: unknown}} [opts] `owner`: see {@link requestCompressedTexture}.
  * @returns {Promise<{width:number, height:number, gridW:number, gridH:number,
  *   grid:Uint8Array, cached:boolean} | null>}
  */
-export function requestCoarseAlphaGrid(src, { priority = PRIORITY_BACKGROUND } = {}) {
+export function requestCoarseAlphaGrid(src, { priority = PRIORITY_BACKGROUND, owner } = {}) {
   _stats.alphaRequests++;
   const w = ensureWorker();
   if (!w) {
     _stats.unavailable++;
     return Promise.resolve(null);
   }
-  return _enqueue({ message: { src, mode: 'alphaGrid' }, mode: 'alphaGrid', priority });
+  return _enqueue({ message: { src, mode: 'alphaGrid' }, mode: 'alphaGrid', priority, owner });
+}
+
+/**
+ * Throw away every job `owner` asked for that has NOT yet been handed to the worker,
+ * resolving each caller `null` (the module's one "no result" answer). Returns how many.
+ *
+ * WHY (loading audit L-10, 2026-10-25): the worker is one shared FIFO per lane, and a
+ * scene change used to cancel nothing. The old scene's whole-image compressions and
+ * its shadow-priming alpha grids stayed in the queue behind the job in flight, and the
+ * new scene's INTERACTIVE requests queued FIFO against the old scene's — so a player
+ * who switched away from a 12 000² mansion waited for floors they had already left
+ * before the floor they were looking at. The 12 000² decode is 18-27 s each.
+ *
+ * ⚠️ QUEUED ONLY. A job already posted to the worker is left alone: it cannot be
+ * recalled without terminating the worker (which would also kill whatever the NEW
+ * scene — or a pre-warm — has in flight), and its answer is not wasted, because the
+ * worker writes it to the IndexedDB cache the next visit reads. ⚠️ AND OWNER-LESS JOBS
+ * ARE NEVER MATCHED: a `null`/`undefined` owner drops nothing, so a pre-warm (which
+ * passes none) cannot be cancelled by a viewer going away.
+ *
+ * The callers must treat `null` as "stand down" when their viewer is gone — the viewer's
+ * request sites do (they check their own teardown flag after the await).
+ *
+ * @param {unknown} owner the token passed as `opts.owner` when the jobs were requested
+ * @returns {number} jobs dropped
+ */
+export function dropQueuedJobs(owner) {
+  if (owner === null || owner === undefined) return 0;
+  let dropped = 0;
+  for (const lane of [PRIORITY_INTERACTIVE, PRIORITY_BACKGROUND]) {
+    const keep = [];
+    for (const job of _queue[lane]) {
+      if (job.owner === owner) {
+        job.resolve(null);
+        dropped++;
+      } else {
+        keep.push(job);
+      }
+    }
+    _queue[lane].length = 0;
+    _queue[lane].push(...keep);
+  }
+  _stats.droppedQueued += dropped;
+  return dropped;
 }
 
 /** Snapshot of the client's counters for the flight recorder. */

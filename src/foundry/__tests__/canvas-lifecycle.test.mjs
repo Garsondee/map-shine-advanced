@@ -6,10 +6,36 @@
  * split as canvas-compositing.js's decideArtSuppression vs
  * registerCanvasCompositing).
  */
-import { isOrphanedTeardown } from '../canvas-lifecycle.js';
+import { isOrphanedTeardown, decideTeardownKind } from '../canvas-lifecycle.js';
 
 export function run(t) {
   const { ok } = t;
+
+  // --- THE PRIMARY SIGNAL (2026-10-25, loading audit P-02): Foundry's own
+  // canvasTearDown options say whether a draw follows. `board.mjs:1125/1346`.
+  const scene = { id: 's' };
+  const level = { id: 'l' };
+  ok(
+    'a level change (same scene, next level set) is a redraw — never stop anything',
+    decideTeardownKind({ nextScene: scene, nextLevel: level }) === 'redraw'
+  );
+  ok(
+    'a scene change (new scene, next level set) is a redraw',
+    decideTeardownKind({ nextScene: { id: 'other' }, nextLevel: level }) === 'redraw'
+  );
+  ok('draw(null): no scene, no level => blank', decideTeardownKind({ nextScene: null, nextLevel: null }) === 'blank');
+  ok(
+    'a scene with no resolvable level => blank (Foundry itself goes to #drawBlank, board.mjs:1139)',
+    decideTeardownKind({ nextScene: scene, nextLevel: undefined }) === 'blank'
+  );
+  ok('an explicit null nextLevel => blank', decideTeardownKind({ nextScene: scene, nextLevel: null }) === 'blank');
+  ok(
+    'no options at all => unknown, so the caller falls back to inference',
+    decideTeardownKind(undefined) === 'unknown'
+  );
+  ok('null options => unknown', decideTeardownKind(null) === 'unknown');
+  ok('options without a nextLevel key => unknown', decideTeardownKind({ nextScene: scene }) === 'unknown');
+  ok('a non-object => unknown', decideTeardownKind('x') === 'unknown');
 
   // --- the happy paths: a real draw always follows ------------------------
   ok(

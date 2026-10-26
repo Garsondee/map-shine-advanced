@@ -24,6 +24,9 @@ import {
   sampleOutdoorsAtCells,
   skyExposureFromCells,
   outdoorsGridSignature,
+  createWindStructureMemo,
+  wallsSignature,
+  objectIdentity,
   computeFineConnectivity,
   deriveWindOpenness,
   deriveWindShadow,
@@ -704,6 +707,83 @@ export function run(t) {
       outdoorsGridSignature(mask(false)) !== outdoorsGridSignature(mask(true)) &&
         outdoorsGridSignature(mask(true)) === outdoorsGridSignature(mask(true)) &&
         outdoorsGridSignature(null) === 'none'
+    );
+  }
+
+  // ── THE PER-FLOOR STRUCTURE MEMO (loading audit P-06, 2026-10-25) ─────────────
+  // Floor PREPARE runs the 40-360 ms structure bake for the target floor off screen;
+  // the commit's own bake must then be a lookup — and must NEVER be served a stale
+  // structure after a wall, a door or the painted sky changed.
+  {
+    let bakes = 0;
+    const fakeBake = ({ walls }) => ({ bakedFor: walls.length, id: ++bakes });
+    const memo = createWindStructureMemo(fakeBake);
+    const wallA = { x1: 0, y1: 0, x2: 100, y2: 0, solid: true, blocksExterior: true };
+    const wallB = { x1: 0, y1: 0, x2: 0, y2: 100, solid: true, blocksExterior: true };
+    const spec = { cols: 8, rows: 8, cellSize: 25, minX: 0, minY: 0 };
+    const outdoors = {
+      spec: { x: 0, y: 0, width: 200, height: 200, w: 2, h: 2 },
+      data: new Uint8Array([255, 255, 0, 0]),
+    };
+
+    const first = memo.get(1, { walls: [wallA], gridSpec: spec, outdoors });
+    ok('memo: the first request bakes', first.hit === false && bakes === 1);
+    const second = memo.get(1, { walls: [{ ...wallA }], gridSpec: spec, outdoors });
+    ok(
+      'memo: the same inputs on the same floor are a hit (the commit finds prepare’s work)',
+      second.hit === true && bakes === 1
+    );
+    ok('…and return the SAME structure object', second.structure === first.structure);
+
+    ok(
+      'memo: a changed wall list re-bakes',
+      memo.get(1, { walls: [wallA, wallB], gridSpec: spec, outdoors }).hit === false && bakes === 2
+    );
+    const doorOpened = { ...wallA, solid: false };
+    ok(
+      'memo: a door changing state (solid flips) re-bakes',
+      memo.get(1, { walls: [wallA, wallB].map((w) => (w === wallA ? doorOpened : w)), gridSpec: spec, outdoors })
+        .hit === false && bakes === 3
+    );
+    ok(
+      'memo: a different grid spec re-bakes',
+      memo.get(1, { walls: [wallA, wallB], gridSpec: { ...spec, cols: 16 }, outdoors }).hit === false
+    );
+
+    const rederived = { spec: outdoors.spec, data: new Uint8Array([255, 255, 0, 0]) };
+    const before = bakes;
+    ok(
+      'memo: a RE-DERIVED outdoors grid (new array, equal bytes) re-bakes — never a stale structure',
+      memo.get(1, { walls: [wallA, wallB], gridSpec: spec, outdoors: rederived }).hit === false && bakes === before + 1
+    );
+    const edited = { spec: outdoors.spec, data: new Uint8Array([0, 0, 255, 255]) };
+    ok(
+      'memo: different painted sky re-bakes',
+      memo.get(1, { walls: [wallA, wallB], gridSpec: spec, outdoors: edited }).hit === false
+    );
+
+    const other = memo.get(2, { walls: [wallA], gridSpec: spec, outdoors });
+    ok('memo: floors are separate — floor 2 does not borrow floor 1’s entry', other.hit === false);
+    ok(
+      'memo: …and floor 1 is still held independently',
+      memo.get(1, { walls: [wallA, wallB], gridSpec: spec, outdoors: edited }).hit === true
+    );
+    ok(
+      'memo: stats count hits and misses',
+      memo.stats().hits >= 2 && memo.stats().misses >= 5 && memo.stats().floors === 2
+    );
+    memo.clear();
+    ok('memo: clear forgets everything', memo.stats().floors === 0);
+
+    ok('wallsSignature: empty and missing lists are stable', wallsSignature([]) === wallsSignature(undefined));
+    ok('wallsSignature: order-sensitive coordinates differ', wallsSignature([wallA]) !== wallsSignature([wallB]));
+    ok('wallsSignature: solid flag matters', wallsSignature([wallA]) !== wallsSignature([{ ...wallA, solid: false }]));
+    const o = {};
+    ok(
+      'objectIdentity: stable per object, distinct across objects, none for non-objects',
+      objectIdentity(o) === objectIdentity(o) &&
+        objectIdentity(o) !== objectIdentity({}) &&
+        objectIdentity(null) === 'none'
     );
   }
 }

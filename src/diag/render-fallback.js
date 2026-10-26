@@ -47,6 +47,10 @@
  * @module diag/render-fallback
  */
 
+import { createLogger } from '../core/log.js';
+
+const log = createLogger('render-fallback');
+
 /**
  * How long the fallback banner stays on screen. Long enough to read and register
  * without hunting for it; short enough that it does not become permanent furniture
@@ -55,6 +59,27 @@
  */
 const NOTICE_LINGER_MS = 20_000;
 const NOTICE_ID = 'msa-render-fallback-notice';
+
+/**
+ * Listeners told the instant rendering is handed back to Foundry (loading audit
+ * P-09, 2026-10-25). This module removes MSA's canvas but cannot reach Foundry's
+ * canvas groups (`diag/` has no business there), so the composition root
+ * subscribes and gives Foundry's art back. Without it the slide left Foundry's
+ * `primary`/`effects` groups suppressed UNDER a canvas that no longer existed —
+ * the grid drawn over nothing — and `visibilityRefresh` re-blanked them whenever
+ * it fired.
+ * @type {Set<(info: {reason: string}) => void>}
+ */
+const fallbackListeners = new Set();
+
+/**
+ * @param {(info: {reason: string}) => void} fn
+ * @returns {() => void} unsubscribe
+ */
+export function onFoundryFallback(fn) {
+  fallbackListeners.add(fn);
+  return () => fallbackListeners.delete(fn);
+}
 
 /** @type {{active: boolean, reason: string|null, detail: string|null, at: string|null}} */
 const state = { active: false, reason: null, detail: null, at: null };
@@ -97,6 +122,15 @@ export function engageFoundryFallback({ reason, detail, canvas }) {
   state.detail = detail ?? null;
   state.at = new Date().toISOString();
   console.error(`[msa] renderer unavailable — falling back to Foundry's own rendering: ${reason}`, detail ?? '');
+
+  // 1b. Foundry's art, back on screen (see `fallbackListeners`).
+  for (const fn of fallbackListeners) {
+    try {
+      fn({ reason });
+    } catch (err) {
+      log.error('a fallback listener threw — the slide continues:', err);
+    }
+  }
 
   // 2. Say so unmissably, without being able to interfere.
   try {

@@ -108,6 +108,17 @@ export const GLOBAL_SETTING_KEYS = Object.freeze({
    * own default "always try to suppress Foundry's art" behaviour.
    */
   rendererOverride: 'rendererOverride',
+  /** PREPARE BEFORE SWITCHING (world, 2026-10-25, loading audit) — when ON, a floor
+   * or scene change first prepares everything in the background (the old view stays
+   * live; Foundry's own progress notification says what is happening) and only then
+   * lets Foundry redraw, so the switch lands in one step instead of a grey screen and
+   * a trickle of pop-in. Off = Foundry redraws immediately and MSA catches up after,
+   * the behaviour before this existed. World-scoped: it is the table's safety lever
+   * for the new behaviour, and the scene half is coordinated across clients. */
+  prepareBeforeSwitch: 'prepareBeforeSwitch',
+  /** How long the GM waits for players to finish preparing a scene before switching
+   * anyway (world). */
+  switchWaitSeconds: 'switchWaitSeconds',
 });
 
 /**
@@ -270,6 +281,28 @@ export function describeEffectSettings(manifests = []) {
       config: true,
       name: 'Map Shine — Renderer (GM master override)',
       hint: 'Which renderer draws the map for EVERY connected client, GM and players alike. Switch to Foundry if MSA is causing problems mid-session — this is the table-wide safety switch, not a personal preference.',
+    },
+    {
+      key: GLOBAL_SETTING_KEYS.prepareBeforeSwitch,
+      scope: 'world',
+      kind: 'bool',
+      default: true,
+      config: true,
+      name: 'Map Shine — Prepare before switching floors and scenes (GM)',
+      hint:
+        'When on, changing floor or scene first loads everything in the background — the old view stays live and a ' +
+        'progress notification shows what is happening — and only then switches, all at once. Changing scene also ' +
+        'waits for your players to be ready. Turn off to switch immediately and let the new view fill in afterwards.',
+    },
+    {
+      key: GLOBAL_SETTING_KEYS.switchWaitSeconds,
+      scope: 'world',
+      kind: 'enum',
+      choices: { 30: '30 seconds', 60: '60 seconds', 120: '2 minutes', 0: 'Wait as long as it takes' },
+      default: '60',
+      config: true,
+      name: 'Map Shine — Longest wait for players when changing scene (GM)',
+      hint: 'When you change scene, the switch waits for every player to finish preparing, up to this long, then goes ahead regardless. A player who has not finished simply sees their own loading screen.',
     },
     {
       key: GLOBAL_SETTING_KEYS.theme,

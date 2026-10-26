@@ -518,6 +518,8 @@ export function createFireSubsystem({
           mPerPx,
           colorHex: runtime.lightColor,
           radiusScale: runtime.lightRadiusScale,
+          innerRadiusScale: runtime.lightCoreSize,
+          falloffSoftness: runtime.lightFalloffSoftness,
           weather: { windMotion01: runtime.windMotion01, rain01: runtime.rain01, stressGain: runtime.stressGain },
           samplesByFire: lightSampleMemo.result,
           gutterTimeSec: nowMs * 0.001 * runtime.motionSpeed,

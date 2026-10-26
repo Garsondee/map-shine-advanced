@@ -200,6 +200,10 @@ export function createFluidSurfaceSubsystem({
   const entries = new Map();
   let enabled = true;
   let syncs = 0;
+  /** Floor PREPARE draws every entry once, off screen, so its shader pipeline is
+   * compiled before the floor is shown (loading audit P-05). While true, a parked
+   * entry's mesh is visible so the renderer does not skip it. */
+  let warmUpAll = false;
   let bakes = 0;
   let lastParamsKey = '';
   /** Every url that failed, so a broken file is reported ONCE not every frame. */
@@ -209,7 +213,7 @@ export function createFluidSurfaceSubsystem({
     for (const e of entries.values()) {
       // Both meshes share one fate — they are the same liquid, two blend
       // equations of it — so one flag drives both.
-      const visible = enabled && !!e.net && e.net.tubeCount > 0;
+      const visible = enabled && (e.presented === true || warmUpAll) && !!e.net && e.net.tubeCount > 0;
       if (e.absorbMesh) e.absorbMesh.visible = visible;
       if (e.emitMesh) e.emitMesh.visible = visible;
     }
@@ -448,6 +452,7 @@ export function createFluidSurfaceSubsystem({
    * @param {object} entry @param {number} tier
    */
   function rebuildMaterialsForTier(entry, tier) {
+    entry.warmed = false;
     const oldBuilt = entry.built;
     entry.built = buildFluidSurfaceMaterials({
       THREE,
@@ -479,6 +484,7 @@ export function createFluidSurfaceSubsystem({
    * External callers that mean "this item is really gone" want `disposeEntry`
    * below, not this. */
   function disposeMesh(entry) {
+    entry.warmed = false; // a new mesh/material is a new pipeline to warm
     if (entry.absorbMesh) scene.remove(entry.absorbMesh);
     if (entry.emitMesh) scene.remove(entry.emitMesh);
     entry.built?.absorbMaterial?.dispose?.();
@@ -516,6 +522,128 @@ export function createFluidSurfaceSubsystem({
   }
 
   /**
+   * Make sure an entry exists for this item and that its mask is baking (or
+   * baked) for the url the item declares RIGHT NOW. Shared by `sync` (which then
+   * PRESENTS the entry) and `prefetchItems` (which does not).
+   * @param {{id: string, url: string, corners: Array<{x:number,y:number}>, renderOrder: number|null}} item
+   * @returns {object} the entry
+   */
+  function trackItem(item) {
+    let entry = entries.get(item.id);
+    if (!entry) {
+      entry = {
+        id: item.id,
+        url: null,
+        corners: item.corners,
+        renderOrder: item.renderOrder,
+        net: null,
+        pack: null,
+        absorbMesh: null,
+        emitMesh: null,
+        loading: false,
+        // Remembered for a later tier-only rebuild — see `buildMesh`'s own
+        // comment on `entry.maskTexture` and `rebuildMaterialsForTier`.
+        maskTexture: null,
+        builtForTier: null,
+        // THE SIM — populated by buildSim, torn down by disposeSim. Listed
+        // explicitly here (rather than left to appear dynamically) so this
+        // object literal stays the one place a reader sees an entry's whole
+        // shape.
+        simPingRT: null,
+        simPongRT: null,
+        simPingIsCurrent: true,
+        simNeedsClear: false,
+        simProfileTexture: null,
+        simPumpTexture: null,
+        simPersonalities: null,
+        simQScales: null,
+        simAdvect: null,
+        simTubeCount: 0,
+        presented: false,
+        lastSeenSync: syncs,
+      };
+      entries.set(item.id, entry);
+    }
+    // The host's renderOrder can change without its url or corners doing so
+    // (a floor re-sort — e.g. another item's elevation changes). Refresh it,
+    // and the live meshes if they already exist, every sync — cheap (a
+    // couple of field writes), and mirrors `refreshWholeImageItem`'s own
+    // unconditional `mesh.renderOrder = item.renderOrder` for the same
+    // reason. A null this frame (host not yet resolved) never clobbers a
+    // previously-good value.
+    if (typeof item.renderOrder === 'number' && entry.renderOrder !== item.renderOrder) {
+      entry.renderOrder = item.renderOrder;
+      if (entry.absorbMesh) entry.absorbMesh.renderOrder = entry.renderOrder - FLUID_RENDER_ORDER_ABSORB_MAGNITUDE;
+      if (entry.emitMesh) entry.emitMesh.renderOrder = entry.renderOrder - FLUID_RENDER_ORDER_EMIT_MAGNITUDE;
+    }
+    if (entry.url !== item.url) {
+      entry.url = item.url;
+      entry.corners = item.corners;
+      entry.net = null;
+      entry.pack = null;
+      disposeEntry(entry);
+      loadAndBake(item);
+    } else if (entry.emitMesh && cornersMoved(entry.corners, item.corners)) {
+      // The tile was dragged, rotated or resized: move the quad rather than
+      // rebaking — the mask and its tube net are unchanged, only where they sit.
+      entry.corners = item.corners;
+      const pos = entry.geometry.getAttribute('position');
+      const buf = buildQuadPositions(item.corners);
+      for (let i = 0; i < buf.length; i++) pos.array[i] = buf[i];
+      pos.needsUpdate = true;
+      entry.geometry.computeBoundingSphere();
+    }
+    return entry;
+  }
+
+  /**
+   * HIDE, NEVER DISPOSE (loading audit P-05, 2026-10-25) — see the specular tile
+   * subsystem's identical function. Entries for items not on the drawn floor stay
+   * baked but invisible, and are skipped by the sim tick; the OLDEST are disposed
+   * beyond a small cap.
+   * @param {Set<string>} seen - ids presented this sync
+   */
+  function parkUnseen(seen) {
+    let parked = 0;
+    for (const [id, entry] of entries) {
+      if (seen.has(id)) continue;
+      entry.presented = false;
+      parked++;
+    }
+    if (parked <= MAX_PARKED_ENTRIES) return;
+    const oldestFirst = [...entries.values()]
+      .filter((e) => !e.presented)
+      .sort((a, b) => a.lastSeenSync - b.lastSeenSync);
+    for (const entry of oldestFirst.slice(0, parked - MAX_PARKED_ENTRIES)) {
+      if (entry.loading) continue; // let an in-flight bake land; evicted on a later sync
+      disposeEntry(entry);
+      entries.delete(entry.id);
+    }
+  }
+
+  /** FLOOR PREPARE: start baking these items' masks without presenting them. @param {Array<object>} items */
+  function prefetchItems(items) {
+    for (const item of items ?? []) trackItem(item);
+  }
+
+  /**
+   * Nothing left to wait for on these items? Baked (a mask with no tubes is
+   * settled too), or settled as failed.
+   * @param {Array<object>} items
+   * @returns {boolean}
+   */
+  function areItemsReady(items) {
+    for (const item of items ?? []) {
+      const entry = entries.get(item.id);
+      if (!entry || entry.loading) return false;
+      if (entry.net) continue;
+      if (failedUrls.has(item.url)) continue;
+      return false;
+    }
+    return true;
+  }
+
+  /**
    * Per-frame. Cheap to call: the common case is one array walk and one string
    * compare.
    * @param {number} floorIndex
@@ -529,75 +657,14 @@ export function createFluidSurfaceSubsystem({
     const seen = new Set();
     for (const item of items) {
       seen.add(item.id);
-      let entry = entries.get(item.id);
-      if (!entry) {
-        entry = {
-          id: item.id,
-          url: null,
-          corners: item.corners,
-          renderOrder: item.renderOrder,
-          net: null,
-          pack: null,
-          absorbMesh: null,
-          emitMesh: null,
-          loading: false,
-          // Remembered for a later tier-only rebuild — see `buildMesh`'s own
-          // comment on `entry.maskTexture` and `rebuildMaterialsForTier`.
-          maskTexture: null,
-          builtForTier: null,
-          // THE SIM — populated by buildSim, torn down by disposeSim. Listed
-          // explicitly here (rather than left to appear dynamically) so this
-          // object literal stays the one place a reader sees an entry's whole
-          // shape.
-          simPingRT: null,
-          simPongRT: null,
-          simPingIsCurrent: true,
-          simNeedsClear: false,
-          simProfileTexture: null,
-          simPumpTexture: null,
-          simPersonalities: null,
-          simQScales: null,
-          simAdvect: null,
-          simTubeCount: 0,
-        };
-        entries.set(item.id, entry);
-      }
-      // The host's renderOrder can change without its url or corners doing so
-      // (a floor re-sort — e.g. another item's elevation changes). Refresh it,
-      // and the live meshes if they already exist, every sync — cheap (a
-      // couple of field writes), and mirrors `refreshWholeImageItem`'s own
-      // unconditional `mesh.renderOrder = item.renderOrder` for the same
-      // reason. A null this frame (host not yet resolved) never clobbers a
-      // previously-good value.
-      if (typeof item.renderOrder === 'number' && entry.renderOrder !== item.renderOrder) {
-        entry.renderOrder = item.renderOrder;
-        if (entry.absorbMesh) entry.absorbMesh.renderOrder = entry.renderOrder - FLUID_RENDER_ORDER_ABSORB_MAGNITUDE;
-        if (entry.emitMesh) entry.emitMesh.renderOrder = entry.renderOrder - FLUID_RENDER_ORDER_EMIT_MAGNITUDE;
-      }
-      if (entry.url !== item.url) {
-        entry.url = item.url;
-        entry.corners = item.corners;
-        entry.net = null;
-        entry.pack = null;
-        disposeEntry(entry);
-        loadAndBake(item);
-      } else if (entry.emitMesh && cornersMoved(entry.corners, item.corners)) {
-        // The tile was dragged, rotated or resized: move the quad rather than
-        // rebaking — the mask and its tube net are unchanged, only where they sit.
-        entry.corners = item.corners;
-        const pos = entry.geometry.getAttribute('position');
-        const buf = buildQuadPositions(item.corners);
-        for (let i = 0; i < buf.length; i++) pos.array[i] = buf[i];
-        pos.needsUpdate = true;
-        entry.geometry.computeBoundingSphere();
-      }
+      const entry = trackItem(item);
+      // PRESENTED = on the floor being drawn right now; everything else stays
+      // resident but hidden — see `parkUnseen` (loading audit P-05).
+      entry.presented = true;
+      entry.lastSeenSync = syncs;
     }
-    // An item that left this floor (or the scene) takes its mesh with it.
-    for (const [id, entry] of entries) {
-      if (seen.has(id)) continue;
-      disposeEntry(entry);
-      entries.delete(id);
-    }
+    // An item that left this floor is HIDDEN, not torn down (loading audit P-05).
+    parkUnseen(seen);
 
     // ── TIER-CHANGE REBUILD (2026-08-30) ────────────────────────────────
     // A live profile change resolves a different tier without touching the
@@ -674,6 +741,9 @@ export function createFluidSurfaceSubsystem({
     const flowSpeed = Number.isFinite(flowSpeedRaw) ? Math.max(0, flowSpeedRaw) : 1;
 
     for (const entry of entries.values()) {
+      // A parked entry (another floor's) is not drawn, so its sim is not stepped:
+      // a real render pass whose result nothing looks at (loading audit P-05).
+      if (!entry.presented) continue;
       if (!entry.simAdvect || !entry.net || entry.net.tubeCount === 0) continue;
 
       // The pump buffer is rewritten in place every tick — the SAME Float32Array
@@ -743,7 +813,9 @@ export function createFluidSurfaceSubsystem({
       bakes,
       // Zero masked items with tubes painted on the map means the LOOKUP is
       // wrong, not the shader. That distinction cost two rounds.
-      maskedItemCount: entries.size,
+      maskedItemCount: [...entries.values()].filter((e) => e.presented).length,
+      // Baked but on another floor (hidden, sim not stepped) — loading audit P-05.
+      parkedItemCount: [...entries.values()].filter((e) => !e.presented).length,
       items: [...entries.values()].map((e) => ({
         id: e.id,
         url: e.url,
@@ -906,6 +978,9 @@ export function createFluidSurfaceSubsystem({
   function getFootprintRects() {
     const out = [];
     for (const entry of entries.values()) {
+      // A parked entry belongs to another floor: its liquid is not on screen, so
+      // it must not tint this floor's shadows (loading audit P-05).
+      if (!entry.presented) continue;
       if (!Array.isArray(entry.corners) || entry.corners.length === 0) continue;
       out.push({ id: entry.id, rect: worldRectFromCorners(entry.corners) });
     }
@@ -917,12 +992,33 @@ export function createFluidSurfaceSubsystem({
     prepareSimTick,
     getStatus,
     dispose,
+    /** FLOOR PREPARE (loading audit P-05): start baking these items without presenting them. */
+    prefetchItems,
+    /** True when nothing is left to wait for on these items. */
+    areItemsReady,
+    /**
+     * FLOOR PREPARE's warm-up draw (loading audit P-05): show every loaded entry —
+     * parked ones included — so the off-screen frame compiles their pipelines,
+     * then hide them again with `false`. @param {boolean} on
+     */
+    setWarmUpVisible(on) {
+      warmUpAll = on === true;
+      // Everything that was visible for the warm-up draw has now compiled.
+      if (!on) for (const e of entries.values()) if (e.mesh || e.absorbMesh) e.warmed = true;
+      refreshVisibility();
+    },
+    /** True while some parked entry has not been through a warm-up draw yet. */
+    hasUnwarmed: () => [...entries.values()].some((e) => (e.mesh || e.absorbMesh) && !e.presented && !e.warmed),
     getMaskTextureForItem,
     setFadeForItem,
     getTintForItem,
     getFootprintRects,
   };
 }
+
+/** How many entries for items NOT on the drawn floor stay baked (hidden) before
+ * the oldest are disposed — loading audit P-05. */
+const MAX_PARKED_ENTRIES = 24;
 
 /** Have any of the four corners actually moved? */
 function cornersMoved(a, b) {

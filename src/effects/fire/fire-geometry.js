@@ -1064,6 +1064,14 @@ function clusterSamples(c, samplesByFire) {
  *   `params/no-dead-controls` the whole time, because that wall checks the param
  *   is READ somewhere, not that the value it produces is USED
  *   (`feedback_unconsumed_api_rots_silently`).
+ * @param {number} [opts.innerRadiusScale=0.35] - "Light core size"
+ *   (`FIRE_PARAMS.lightCoreSize`) — Foundry-parity `ratio` (bright-radius /
+ *   total-radius), the same knob lightning's `originFlashInnerRadiusScale`
+ *   already exposes for its origin light. Was a fixed 0.35 until 2026-10-24.
+ * @param {number} [opts.falloffSoftness=0.6] - "Light edge softness"
+ *   (`FIRE_PARAMS.lightFalloffSoftness`) — Foundry-parity `attenuation01`,
+ *   the softness of the band outside the core. Was a fixed 0.6 until
+ *   2026-10-24.
  * @param {object} [opts.weather] - the SAME three numbers the flame engines are given
  *   (`fireRuntimeFromParams()`'s `windMotion01`, `rain01`, `stressGain`), so the light and the sprites cannot read
  *   different weather. Omitted = calm air.
@@ -1089,6 +1097,8 @@ export function buildFireLightSources(
     mPerPx,
     colorHex = null,
     radiusScale = 1,
+    innerRadiusScale = 0.35,
+    falloffSoftness = 0.6,
     weather = null,
     samplesByFire = null,
     gutterTimeSec = null,
@@ -1251,8 +1261,13 @@ export function buildFireLightSources(
       windExposure: Number.isFinite(c.exposure) ? c.exposure : 1,
       windResponse: FIRE_WIND_RESPONSE,
       shapePoints,
-      ratio: 0.35,
-      attenuation01: 0.6,
+      // Foundry-parity falloff shape — see this function's own `innerRadiusScale`/
+      // `falloffSoftness` doc. `Math.max(0.05, …)` mirrors lightning's own
+      // guard (`lightning-geometry.js`): both are divisors/exponents somewhere
+      // downstream in the shared point-light pool, so a 0 here is one more way
+      // to get a NaN light, not a harder edge.
+      ratio: Math.max(0.05, clampNum(Number.isFinite(innerRadiusScale) ? innerRadiusScale : 0.35, 0.05, 0.9)),
+      attenuation01: Math.max(0.05, clampNum(Number.isFinite(falloffSoftness) ? falloffSoftness : 0.6, 0.05, 1)),
       luminosity01,
       hasColor: true,
       alpha01,
@@ -1942,6 +1957,11 @@ export function fireRuntimeFromParams(params = {}, chain = {}, wind = {}) {
      * OWN per-cluster chain and so cannot use the pre-multiplied px value above
      * (a cluster's diameter is not any one fire's). */
     lightRadiusScale: clampNum(num(p.lightRadiusScale, 1), 0.25, 3),
+    // Foundry-parity falloff shape — see `buildFireLightSources`'s own
+    // `ratio`/`attenuation01` doc for what these mean. Matches
+    // FIRE_PARAMS.lightCoreSize/lightFalloffSoftness's own declared range.
+    lightCoreSize: clampNum(num(p.lightCoreSize, 0.35), 0.05, 0.9),
+    lightFalloffSoftness: clampNum(num(p.lightFalloffSoftness, 0.6), 0.05, 1),
     lightColor: typeof p.lightColor === 'string' ? p.lightColor : '#ff9a3c',
     flameColor: typeof p.color === 'string' ? p.color : FIRE_RAMP_WOOD[3].hex,
     /** `color`'s ready-to-multiply form — see `fireTintMul`'s own header. */

@@ -15,6 +15,8 @@ import {
   registerPixiProxy,
   getPixiProxyStats,
   urlsToEvictOnSceneChange,
+  planProxySeeding,
+  isPixiSrcCached,
 } from '../pixi-proxy-textures.js';
 
 export async function run(t) {
@@ -191,5 +193,42 @@ export async function run(t) {
   {
     const r = urlsToEvictOnSceneChange('scene-A', ['a.webp', '', null, 'b.webp'], 'scene-B', []);
     ok('falsy entries in prevUrls are never returned for release', r.every(Boolean) && r.length === 2);
+  }
+  // --- seeding ORDER (loading audit C-01, 2026-10-25): the hook this runs from is
+  // not awaited by Foundry, so it races Foundry's own texture loader; whatever is
+  // seeded first is likeliest to win. The viewed floor goes first. -----------
+  {
+    const floors = [
+      { index: 0, url: 'f0.webp' },
+      { index: 1, url: 'f1.webp' },
+      { index: 2, url: 'f2.webp' },
+    ];
+    const none = () => false;
+    const r = planProxySeeding(floors, 1, none);
+    ok('the VIEWED floor is seeded first', r.todo[0].index === 1);
+    ok('…the rest keep their elevation order', r.todo[1].index === 0 && r.todo[2].index === 2);
+    ok('nothing cached => nothing in the cached list', r.cached.length === 0);
+
+    const r2 = planProxySeeding(floors, 2, (u) => u === 'f0.webp');
+    ok('a floor PIXI already holds is listed as cached, not todo', r2.cached.length === 1 && r2.cached[0].index === 0);
+    ok('…and the viewed floor still leads the todo list', r2.todo[0].index === 2 && r2.todo.length === 2);
+
+    const r3 = planProxySeeding([{ index: 0, url: 'a' }, { index: 1, url: '' }, { index: 2 }, null], 0, none);
+    ok('floors without a url (and junk entries) are ignored, never thrown on', r3.todo.length === 1);
+    ok(
+      'an unknown viewed floor leaves the order alone',
+      planProxySeeding(floors, 9, none)
+        .todo.map((f) => f.index)
+        .join() === '0,1,2'
+    );
+    ok('undefined floors => empty plan', planProxySeeding(undefined, 0, none).todo.length === 0);
+  }
+
+  // --- isPixiSrcCached: a Map lookup, safe without PIXI ----------------------
+  {
+    const PIXI = { Assets: { cache: { has: (u) => u === 'seeded.webp' } } };
+    ok('isPixiSrcCached: true for a seeded src', isPixiSrcCached('seeded.webp', PIXI) === true);
+    ok('isPixiSrcCached: false for an unseen src', isPixiSrcCached('other.webp', PIXI) === false);
+    ok('isPixiSrcCached: false (not a throw) when PIXI is unavailable', isPixiSrcCached('x', {}) === false);
   }
 }

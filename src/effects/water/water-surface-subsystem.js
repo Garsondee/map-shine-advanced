@@ -78,6 +78,19 @@ export function resolveGatedWaterTier(rawTier) {
 }
 
 /**
+ * The wind handle's rebuild key for a graph-building consumer — its
+ * `layoutVersion` (`world/wind-access.js#createWindHandle`), falling back to
+ * `version` for a handle minted without one, and `-1` for no handle at all
+ * (so "no handle" never misreads as a change on every `sync()`).
+ * @param {{version?: number, layoutVersion?: number}|null|undefined} handle
+ * @returns {number}
+ */
+export function windLayoutVersionOf(handle) {
+  if (!handle) return -1;
+  return Number.isFinite(handle.layoutVersion) ? handle.layoutVersion : (handle.version ?? -1);
+}
+
+/**
  * THE REBUILD-STORM TRIPWIRE'S POLICY (2026-10-14). `sync()` runs every frame,
  * but a floor should rebuild its water materials only a handful of times a
  * session: once when its body pack first lands, on a profile change, on a wind
@@ -159,6 +172,22 @@ let _foamStructureGateOff = false;
 export function setWaterFoamStructureGateOff(off) {
   _foamStructureGateOff = off === true;
   return { off: _foamStructureGateOff };
+}
+
+/**
+ * THE SHARED-EVALUATION RESOLVE'S OFF SWITCH (2026-10-25, Water-Performance-
+ * Audit W-02). `true` rebuilds every floor's water with the old per-mesh
+ * evaluation on its next `sync()` (no restart). Two callers: the viewer flips
+ * it on its own if `runWaterResolvePass` ever throws — a broken resolve would
+ * otherwise leave the composites reading an empty target, i.e. invisible
+ * water — and `MapShine.setWaterSharedResolveOff(true)` for a live A/B of
+ * what the resolve saves. Module-level for the same reason as the gates above.
+ * @type {boolean} */
+let _sharedResolveOff = false;
+/** @param {boolean} off */
+export function setWaterSharedResolveOff(off) {
+  _sharedResolveOff = off === true;
+  return { off: _sharedResolveOff };
 }
 
 /**
@@ -257,6 +286,15 @@ export function setWaterFoamStructureGateOff(off) {
  *   getStatus: () => object, dispose: () => void}}
  */
 export function createWaterSurfaceSubsystem({
+  // W-08 — `() => ({ texture, uRect }) | null`, the viewer's per-frame wind
+  // strength texture (see `water-field.js`'s `windStrengthField`). Read FRESH
+  // on every build, like `getWindHandle`.
+  getWindStrengthField = null,
+  // THE SHARED-EVALUATION RESOLVE (2026-10-25, W-02) — see
+  // `water-render.js`'s `sharedResolve`. The viewer passes `true` and renders
+  // `getResolveScene()` before the scene draw; tests and older callers keep the
+  // direct per-mesh evaluation.
+  sharedResolve = false,
   THREE,
   scene,
   waterBody,
@@ -358,11 +396,24 @@ export function createWaterSurfaceSubsystem({
   /** Same bind-by-identity discipline as `boundFlowPackTexture` — see
    * `setWaterSimTexture`'s own doc. */
   let boundWaterSimTexture = waterSimPlaceholder;
+  /** The sim's pre-blurred foam (W-06/W-12) — same placeholder discipline. */
+  const waterSimSoftPlaceholder = createMaskTexture(new Uint8Array([0, 0, 0, 0]), 1, 1, 'linear');
+  let boundWaterSimSoftTexture = waterSimSoftPlaceholder;
+  /** The sim's spray emitter (W-05/W-10) — same placeholder discipline. */
+  const waterSprayPlaceholder = createMaskTexture(new Uint8Array([0, 0, 0, 0]), 1, 1, 'linear');
+  let boundWaterSprayTexture = waterSprayPlaceholder;
+  /** THE RESOLVE's targets (W-02) — 1×1 zero placeholders until the viewer
+   * allocates the real MRT target. Zero is neutral for every composite read
+   * (`1 − 0` for the multiply, `0` for the add, alpha 0 for refraction). */
+  const resolvePlaceholder = createMaskTexture(new Uint8Array([0, 0, 0, 0]), 1, 1, 'nearest');
+  let boundResolveTextures = { output: resolvePlaceholder, absorb: resolvePlaceholder, refract: resolvePlaceholder };
   /** The bake generation the geometry was cropped for (-1 = never). */
   let builtForBake = -1;
   /** The resolved-params signature last pushed, so a quiet frame is one string
    * compare rather than three uniform writes. */
   let lastParamsKey = '';
+  /** The render-state OBJECT the key was last built from (W-18 — see `sync`). */
+  let lastParamsState = null;
   /** The sky signature last pushed — mirrors `specular-surface-subsystem.js`'s
    * own `lastSkyKey`, and for the same reason: the sky only changes when the
    * clock or the weather does, unlike the eye, which moves every pan. */
@@ -405,6 +456,7 @@ export function createWaterSurfaceSubsystem({
   let builtForCausticsGateForce = getWaterCausticsGateForce().forced;
   let builtForCausticsInsideGateOff = _causticsInsideGateOff;
   let builtForFoamStructureGateOff = _foamStructureGateOff;
+  let builtForSharedResolveOff = _sharedResolveOff;
   /** The `windHandle.version` the CURRENT materials were built against
    * (mythica-machina-press#18) — same reasoning as `builtForCausticsGate
    * Force` immediately above: `world/wind-access.js`'s own handle is
@@ -414,7 +466,19 @@ export function createWaterSurfaceSubsystem({
    * move at all. `-1` (never a real version) so the very first build is
    * always seen as "the handle changed" if a real one is already wired at
    * construction time. */
-  let builtForWindVersion = getWindHandle()?.version ?? -1;
+  let builtForWindVersion = windLayoutVersionOf(getWindHandle());
+  /** Superseded surfaces, disposed at the NEXT `sync()` — see the rebuild block. */
+  const pendingDispose = [];
+  function flushPendingDispose() {
+    while (pendingDispose.length > 0) {
+      const old = pendingDispose.pop();
+      old.absorbMaterial?.dispose?.();
+      old.inscatterMaterial?.dispose?.();
+      old.peekDebugMaterial?.()?.dispose?.(); // only if a debug channel ever built it
+      old.refractMaterial?.dispose?.(); // null below tier 5
+      old.resolveMaterial?.dispose?.(); // null without a shared resolve
+    }
+  }
   /** The last value `resolveExpectedDepth` actually returned (raw, BEFORE
    * `setExpectedDepth`'s own null→0 coercion) — see `refreshVisibility`'s own
    * use of it, and `resolveExpectedDepth`'s doc above for why `null` must hide
@@ -460,6 +524,9 @@ export function createWaterSurfaceSubsystem({
     meshes[1].material = showDebug ? surface.debugMaterial : surface.inscatterMaterial;
     meshes[1].visible = bakedReady;
     meshes[2].visible = bakedReady && !showDebug && !!surface.refractMaterial;
+    // THE RESOLVE draws exactly when the absorb mesh does (W-02): both are
+    // off during a debug channel, which reads the full graph itself.
+    resolveMesh.visible = meshes[0].visible && !!surface.resolveMaterial;
   }
 
   /** Build (or, called again from `sync`, REBUILD) the two tier-gated
@@ -509,6 +576,7 @@ export function createWaterSurfaceSubsystem({
       // last compared, and building against a stale closed-over reference
       // here would be the exact bug this getter shape exists to prevent.
       windHandle: getWindHandle(),
+      windStrengthField: getWindStrengthField?.() ?? null,
       // THE DEPTH-AUTHORITY GATE (2026-08-15) — floor-INDEPENDENT (the SAME
       // `buf:scene.depth` attachment every instance reads), so it rebuilds
       // fine on a tier change like everything else here; only `uExpectedDepth`
@@ -526,6 +594,10 @@ export function createWaterSurfaceSubsystem({
       // `waterSimPlaceholder` and re-pointed by `setWaterSimTexture` on its
       // own (per-frame) cadence, independent of this rebuild.
       waterSimTexture: boundWaterSimTexture,
+      waterSimSoftTexture: boundWaterSimSoftTexture,
+      waterSprayTexture: boundWaterSprayTexture,
+      sharedResolve: sharedResolve && !_sharedResolveOff,
+      resolveTextures: boundResolveTextures,
       // THE CAST-SHADOW GATE (2026-08-16). ⚠️ THIS DECIDES ONLY WHETHER THE
       // LOOKUP EXISTS IN THE COMPILED SHADER — it is NOT the field this floor
       // reads. That is a per-frame push (`syncSunShadow` below), because which
@@ -653,6 +725,58 @@ export function createWaterSurfaceSubsystem({
   }
 
   /**
+   * The sim's PRE-BLURRED foam (`water-sim-subsystem.js#softTexture`, 2026-10-25,
+   * W-06/W-12) — what the surface's soft gather now reads with one tap. Same
+   * contract as `setWaterSimTexture` above; its identity only changes on a sim
+   * regrid, so this is an identity compare on almost every frame.
+   * @param {*|null|undefined} texture
+   */
+  /**
+   * Point the composites at the viewer's resolve target (W-02) — all three
+   * reads together (`feedback_texture_nodes_must_be_repointed_together`).
+   * `refract` may be null below tier 5; it falls back to the placeholder.
+   * @param {{output: *, absorb: *, refract?: *|null}} textures
+   */
+  function setResolveTextures({ output, absorb, refract = null }) {
+    const next = {
+      output: output ?? resolvePlaceholder,
+      absorb: absorb ?? resolvePlaceholder,
+      refract: refract ?? resolvePlaceholder,
+    };
+    if (
+      next.output === boundResolveTextures.output &&
+      next.absorb === boundResolveTextures.absorb &&
+      next.refract === boundResolveTextures.refract
+    ) {
+      return;
+    }
+    boundResolveTextures = next;
+    const nodes = surface.resolveTexNodes;
+    if (nodes?.output) nodes.output.value = next.output;
+    if (nodes?.absorb) nodes.absorb.value = next.absorb;
+    if (nodes?.refract) nodes.refract.value = next.refract;
+  }
+
+  /**
+   * The sim's spray emitter (`water-sim-subsystem.js#sprayTexture`, W-05/W-10)
+   * — what break spray's `sprayAt` reads. Same contract as `setWaterSimTexture`.
+   * @param {*|null|undefined} texture
+   */
+  function setWaterSprayTexture(texture) {
+    const t = texture ?? waterSprayPlaceholder;
+    if (t === boundWaterSprayTexture) return;
+    boundWaterSprayTexture = t;
+    if (surface.waterSprayTexNode) surface.waterSprayTexNode.value = t;
+  }
+
+  function setWaterSimSoftTexture(texture) {
+    const t = texture ?? waterSimSoftPlaceholder;
+    if (t === boundWaterSimSoftTexture) return;
+    boundWaterSimSoftTexture = t;
+    if (surface.waterSimSoftTexNode) surface.waterSimSoftTexNode.value = t;
+  }
+
+  /**
    * Push THIS floor's sim grid dimensions to the material's smooth-texel
    * reconstruction (`water-render.js#setWaterSimTexSize`) — the C2-eased UV
    * remap (`buildSmoothTexelUv`) needs the real texel pitch of whatever
@@ -777,6 +901,15 @@ export function createWaterSurfaceSubsystem({
     m.visible = false; // until BOTH a bake and the hi-res mask land
     (i === 2 ? refractMeshScene : scene).add(m);
   }
+  /** THE RESOLVE's own mesh (W-02) — the same geometry, in a scene of its own
+   * that the viewer renders into the resolve target before the scene draw. */
+  const resolveMeshPlaceholderMaterial = new THREE.NodeMaterial();
+  const resolveScene = new THREE.Scene();
+  const resolveMesh = Object.assign(
+    new THREE.Mesh(geometry, surface.resolveMaterial ?? resolveMeshPlaceholderMaterial),
+    { frustumCulled: false, visible: false }
+  );
+  resolveScene.add(resolveMesh);
 
   /**
    * THE SHORELINE'S ACTUAL SOURCE. Loads the resolved floor's `_Water` file at
@@ -830,7 +963,11 @@ export function createWaterSurfaceSubsystem({
    * generation, so a quiet frame is one integer compare and the geometry is
    * re-cropped only when the flood actually produced something new.
    * @param {number} floorIndex - the VIEWED floor; the body pack resolves the
-   *   borrow itself, and `getWaterMaskUrl` is asked for the RESOLVED one.
+   *   borrow itself. `getWaterMaskUrl` is asked for THIS floor's own mask
+   *   (`ensureMaskImage`), not the resolved one: in the per-floor loop a floor
+   *   with no water resolves to the floor below, whose own instance already
+   *   draws that water, so this floor correctly draws nothing (and its body
+   *   pack reports that as a terminal state — W-19).
    * @param {{minX:number,minY:number,maxX:number,maxY:number}|null} [viewRect] -
    *   the camera's world rect, for tier 3's synthesised eye position. Optional:
    *   a caller that never passes it just never moves the eye, which is a
@@ -838,6 +975,7 @@ export function createWaterSurfaceSubsystem({
    */
   function sync(floorIndex, viewRect) {
     syncCount++;
+    flushPendingDispose();
     ensureMaskImage(floorIndex);
 
     // THE LOOK/TIER STATE — fetched ONCE, at the top, because the tier-rebuild
@@ -867,15 +1005,17 @@ export function createWaterSurfaceSubsystem({
     // already cheap (this whole block), unlike the whole-image compositing
     // materials that toggle need a full viewer restart to reach.
     const resolvedCausticsGateForce = getWaterCausticsGateForce().forced;
-    // ⚠️ WIND REBAKE ALSO REBUILDS (mythica-machina-press#18) — same `!==`
-    // shape as the caustics-force check immediately above, and for the
-    // identical reason `world/wind-access.js`'s own header gives: a rebake
-    // makes a NEW, differently-versioned handle whose `.node()` closure
-    // bakes fresh grid constants into the graph, so this is a genuine
-    // rebuild, never a live uniform re-point. `?? -1` matches
-    // `builtForWindVersion`'s own initial value, so "no handle at all"
-    // never misreads as a version change on every single sync().
-    const resolvedWindVersion = getWindHandle()?.version ?? -1;
+    // ⚠️ A WIND *LAYOUT* CHANGE ALSO REBUILDS (mythica-machina-press#18;
+    // narrowed 2026-10-25, Water-Performance-Audit W-01) — `windHandle.node()`
+    // bakes the wind grid's origin/cell size/cols/rows into the graph as
+    // constants and binds the three field textures by identity, so a regrid
+    // or a texture swap is a genuine rebuild. An ambient-wind change is NOT:
+    // it rewrites those textures in place and moves uniforms read by
+    // reference, and comparing the handle's plain `version` here (as this did
+    // until 2026-10-25) rebuilt every water material on every floor on EVERY
+    // FRAME of a Remote wind fade. `layoutVersion` is the owner's count of
+    // the changes that actually matter (`world/wind-access.js`).
+    const resolvedWindVersion = windLayoutVersionOf(getWindHandle());
     // ⚠️ COMPARE WHAT A REBUILD WOULD COMPILE AT, NOT WHAT WAS ASKED FOR. The
     // builder clamps the requested tier (no body pack → 0; tier 5 with no
     // capture yet → 4), so `resolvedTier !== builtForTier` stayed true forever
@@ -897,6 +1037,7 @@ export function createWaterSurfaceSubsystem({
       resolvedCausticsGateForce !== builtForCausticsGateForce ||
       _causticsInsideGateOff !== builtForCausticsInsideGateOff ||
       _foamStructureGateOff !== builtForFoamStructureGateOff ||
+      _sharedResolveOff !== builtForSharedResolveOff ||
       resolvedWindVersion !== builtForWindVersion
     ) {
       const prev = surface;
@@ -905,10 +1046,16 @@ export function createWaterSurfaceSubsystem({
       meshes[0].material = surface.absorbMaterial;
       meshes[1].material = surface.inscatterMaterial;
       meshes[2].material = surface.refractMaterial ?? refractPlaceholderMaterial;
-      prev.absorbMaterial?.dispose?.(); // free the superseded materials on a tier change
-      prev.inscatterMaterial?.dispose?.();
-      prev.debugMaterial?.dispose?.(); // the THIRD material built every rebuild, same as the other two
-      prev.refractMaterial?.dispose?.(); // the FOURTH — null below tier 5, so guarded like the others aren't
+      resolveMesh.material = surface.resolveMaterial ?? resolveMeshPlaceholderMaterial;
+      // ⚠️ DISPOSED ONE SYNC LATE (2026-10-25, Water-Performance-Audit W-16),
+      // not here. three's pipeline cache keys each shader stage by its WGSL
+      // SOURCE and frees a stage the moment nothing uses it
+      // (`Pipelines.getForRender`/`delete`). Disposing the old materials
+      // before the new ones had drawn released stages the new build was about
+      // to ask for again — identical code, compiled twice. Kept alive until
+      // the next `sync()` (one drawn frame later), every unchanged stage is a
+      // cache hit instead.
+      pendingDispose.push(prev);
       // ⚠️ `surface.tier`, NOT `resolvedTier` (2026-08-18) — a real, previously
       // dormant bug this line's own neighbour (the `getStatus()` comment on
       // `perfTier`/`builtForTier`, below) already documents the CONTRACT for:
@@ -937,12 +1084,14 @@ export function createWaterSurfaceSubsystem({
       builtForCausticsGateForce = resolvedCausticsGateForce;
       builtForCausticsInsideGateOff = _causticsInsideGateOff;
       builtForFoamStructureGateOff = _foamStructureGateOff;
+      builtForSharedResolveOff = _sharedResolveOff;
       builtForWindVersion = resolvedWindVersion;
       // Force every cached value below to re-push onto the FRESH material — it
       // starts back at its constructor defaults, and the key-based caches
       // below exist to skip REDUNDANT writes, not the first write to a new
       // object.
       lastParamsKey = '';
+      lastParamsState = null; // …and the key must actually be rebuilt, not reused
       lastSkyKey = '';
       // ⚠️ THE SHADOW SLOT IS ONE OF THEM, and forgetting it here would be
       // silent: a tier change would leave the new material's shadow mix at its
@@ -1024,83 +1173,93 @@ export function createWaterSurfaceSubsystem({
     // class this codebase has already paid for once
     // (`feedback_residency_sync_vs_render_loop`). `state` was already fetched
     // at the top of this function, ahead of the tier gate.
+    // ⚠️ SKIPPED OUTRIGHT WHILE THE STATE OBJECT IS UNCHANGED (2026-10-25,
+    // Water-Performance-Audit W-18). `getWaterRenderState()` now hands back
+    // the SAME object until the registry replaces its readout or the debug
+    // channel moves, so an identical object means an identical key — and the
+    // 70-element join below (every element read through the U6 tracking
+    // Proxy) no longer runs every frame per floor just to find that out.
+    const paramsStateChanged = state !== lastParamsState;
+    lastParamsState = state;
     const p = state.params ?? {};
-    const key = [
-      state.enabled ? 1 : 0,
-      state.debugChannel ?? 0,
-      p.tint,
-      p.opacity,
-      p.depth,
-      p.pollution,
-      p.shorelineDepth,
-      p.absorption,
-      p.depthScalePx,
-      p.inscatter,
-      p.foam,
-      // ⚠️ `flowEnabled` MUST be in this key, not just read below. The whole
-      // block under `key !== lastParamsKey` is skipped when the key is
-      // unchanged, so a switch that never appears here would flip in the UI,
-      // persist to the scene flag, and change nothing on screen until some
-      // OTHER param happened to move (mythica-machina-press#581).
-      p.flowEnabled,
-      p.flowSpeedPx,
-      p.flowAngleDeg,
-      p.waveScalePx,
-      p.chop,
-      p.wetBandPx,
-      p.wetStrength,
-      p.sunGlint,
-      p.skySheen,
-      p.glossiness,
-      p.viewerHeight,
-      p.shadowResponse,
-      p.swashFoam,
-      p.breakFoam,
-      p.foamTrail,
-      p.caustics,
-      p.causticSharpness,
-      p.causticScale,
-      p.causticNetting,
-      p.causticWaveWarp,
-      p.causticWaveWarpCap,
-      p.causticGrowth,
-      p.causticGrowthCap,
-      p.causticGrowthScale,
-      p.causticGrowthSpeed,
-      p.causticEvolveSpeed,
-      p.causticJunctionWidth,
-      p.causticLineFloor,
-      p.causticSpecularInfluence,
-      p.refractStrengthPx,
-      p.foamEdgeSharpness,
-      p.foamPatchiness,
-      p.foamPatchSizePx,
-      // ROH TUNING (2026-08-19) — bankWarp/flowWarp + buildFoamCellularStructure's own knobs.
-      p.bankInfluence,
-      p.flowWarpInfluence,
-      p.foamFlowNudge,
-      p.foamEdgeFar,
-      p.foamEdgeAaPx,
-      p.foamBubbleAmount,
-      p.foamBubbleOctave,
-      p.foamBubbleTimeScale,
-      p.foamGrainAmount,
-      p.foamGrainOctave,
-      p.foamGrainTimeScale,
-      p.simClumpLo,
-      p.simClumpHi,
-      p.simClumpAaPx,
-      p.simFoamSmoothing,
-      p.shoreFoam,
-      p.shoreFoamLevel,
-      p.shoreFoamWidthPx,
-      p.shoreFoamSwashPx,
-      p.shoreFoamSoftPx,
-      p.foamTexturePx,
-      p.shoreFoamVariation,
-      p.breakSpray,
-      p.windRipple,
-    ].join('|');
+    const key = !paramsStateChanged
+      ? lastParamsKey
+      : [
+          state.enabled ? 1 : 0,
+          state.debugChannel ?? 0,
+          p.tint,
+          p.opacity,
+          p.depth,
+          p.pollution,
+          p.shorelineDepth,
+          p.absorption,
+          p.depthScalePx,
+          p.inscatter,
+          p.foam,
+          // ⚠️ `flowEnabled` MUST be in this key, not just read below. The whole
+          // block under `key !== lastParamsKey` is skipped when the key is
+          // unchanged, so a switch that never appears here would flip in the UI,
+          // persist to the scene flag, and change nothing on screen until some
+          // OTHER param happened to move (mythica-machina-press#581).
+          p.flowEnabled,
+          p.flowSpeedPx,
+          p.flowAngleDeg,
+          p.waveScalePx,
+          p.chop,
+          p.wetBandPx,
+          p.wetStrength,
+          p.sunGlint,
+          p.skySheen,
+          p.glossiness,
+          p.viewerHeight,
+          p.shadowResponse,
+          p.swashFoam,
+          p.breakFoam,
+          p.foamTrail,
+          p.caustics,
+          p.causticSharpness,
+          p.causticScale,
+          p.causticNetting,
+          p.causticWaveWarp,
+          p.causticWaveWarpCap,
+          p.causticGrowth,
+          p.causticGrowthCap,
+          p.causticGrowthScale,
+          p.causticGrowthSpeed,
+          p.causticEvolveSpeed,
+          p.causticJunctionWidth,
+          p.causticLineFloor,
+          p.causticSpecularInfluence,
+          p.refractStrengthPx,
+          p.foamEdgeSharpness,
+          p.foamPatchiness,
+          p.foamPatchSizePx,
+          // ROH TUNING (2026-08-19) — bankWarp/flowWarp + buildFoamCellularStructure's own knobs.
+          p.bankInfluence,
+          p.flowWarpInfluence,
+          p.foamFlowNudge,
+          p.foamEdgeFar,
+          p.foamEdgeAaPx,
+          p.foamBubbleAmount,
+          p.foamBubbleOctave,
+          p.foamBubbleTimeScale,
+          p.foamGrainAmount,
+          p.foamGrainOctave,
+          p.foamGrainTimeScale,
+          p.simClumpLo,
+          p.simClumpHi,
+          p.simClumpAaPx,
+          p.simFoamSmoothing,
+          p.shoreFoam,
+          p.shoreFoamLevel,
+          p.shoreFoamWidthPx,
+          p.shoreFoamSwashPx,
+          p.shoreFoamSoftPx,
+          p.foamTexturePx,
+          p.shoreFoamVariation,
+          p.breakSpray,
+          p.windRipple,
+        ].join('|');
     if (key !== lastParamsKey) {
       lastParamsKey = key;
       if (Array.isArray(p.tint)) surface.setTint(p.tint);
@@ -1289,9 +1448,33 @@ export function createWaterSurfaceSubsystem({
      * learned the expensive way a second time.
      */
     getFullResMaskTexture: () => (loadedUrl ? maskTexture : null),
+    /**
+     * Is this floor's water on screen this frame — absorb or in-scatter
+     * visible (enabled, baked, mask loaded, depth rank resolved)? The frame
+     * loop's gate for the per-frame sim and capture (2026-10-25,
+     * Water-Performance-Audit W-03): a hidden, disabled or unresolved floor
+     * draws nothing, so nothing should be simulated or captured for it.
+     */
+    isDrawing: () => meshes[0].visible || meshes[1].visible,
+    /**
+     * Should tier 5's capture run for this floor this frame? Keyed on the
+     * RESOLVED (requested) tier, never the built one: the builder clamps tier
+     * 5 to 4 until a capture exists (`resolveWaterBuildTier`), so gating on
+     * the built tier would mean the first capture could never happen.
+     */
+    wantsRefractionCapture: () => enabled && lastResolvedTier >= 5 && (meshes[0].visible || meshes[1].visible),
     setFlowPackTexture,
     setFlowPackTexSize,
     setWaterSimTexture,
+    setWaterSimSoftTexture,
+    setWaterSprayTexture,
+    setResolveTextures,
+    /** The resolve's scene (W-02) — render it into the resolve target. */
+    getResolveScene: () => resolveScene,
+    /** Does this floor need its resolve rendered this frame? */
+    needsResolve: () => resolveMesh.visible,
+    /** Does the built material read a tier-5 `waterRefract` attachment? */
+    wantsRefractResolve: () => !!surface.resolveTexNodes?.refract,
     setWaterSimTexSize,
     /** For the `water-body` report — merged into the body pack's own status. */
     getStatus() {
@@ -1414,14 +1597,20 @@ export function createWaterSurfaceSubsystem({
       // rather than throw. See the mesh-creation loop's own comment above.
       for (const [i, m] of meshes.entries()) (i === 2 ? refractMeshScene : scene).remove(m);
       geometry.dispose(); // shared by both meshes — disposed once, not per mesh
+      flushPendingDispose(); // any surface superseded on the very last sync()
       surface.absorbMaterial?.dispose?.();
       surface.inscatterMaterial?.dispose?.();
-      surface.debugMaterial?.dispose?.();
+      surface.peekDebugMaterial?.()?.dispose?.();
       surface.refractMaterial?.dispose?.();
       refractPlaceholderMaterial.dispose(); // the ONE object never touched by a tier rebuild — freed here instead
       maskTexture?.dispose?.();
       flowPackPlaceholder?.dispose?.();
       waterSimPlaceholder?.dispose?.();
+      waterSimSoftPlaceholder?.dispose?.();
+      waterSprayPlaceholder?.dispose?.();
+      resolvePlaceholder?.dispose?.();
+      surface.resolveMaterial?.dispose?.();
+      resolveMeshPlaceholderMaterial.dispose();
     },
   };
 }

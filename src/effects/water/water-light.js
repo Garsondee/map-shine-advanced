@@ -284,6 +284,32 @@ export function waterKeyLightDirection(key) {
 }
 
 /**
+ * THE CAST-SHADOW TAP ON ITS OWN (split out of `buildWaterSpecular`
+ * 2026-10-25, Water-Performance-Audit W-07) — so a caller can build it before
+ * the surface field and pass the SAME nodes to both the caustic branch and the
+ * specular. See `buildWaterSpecular`'s own "THE CAST-SHADOW GATE" comment for
+ * what each piece means; nothing about them changed.
+ * @param {*} TSL @param {{positionWorld: *, sunShadowTexture: *|null}} args
+ * @returns {{sunShadowTexNode: *|null, uSunShadowRect: *, uSunShadowMix: *, shadowVis: *|null, sunVis: *}}
+ */
+export function buildWaterSunVisibility(TSL, { positionWorld, sunShadowTexture = null }) {
+  const { vec4, float, uniform, texture, clamp, mix } = TSL;
+  const sunShadowTexNode = sunShadowTexture ? texture(sunShadowTexture) : null;
+  const uSunShadowRect = uniform(vec4(0, 0, 1, 1));
+  const uSunShadowMix = uniform(float(0));
+  const shadowVis = buildWorldSpaceSunVisibilityNode(TSL, {
+    worldX: positionWorld.x,
+    worldY: positionWorld.y,
+    uShadowRect: uSunShadowRect,
+    shadowTexNode: sunShadowTexNode,
+  });
+  // 1 = this pixel sees the sun. `mix(1, field, bound)` folds the "is a field
+  // bound" question and the field itself into one expression with no branch.
+  const sunVis = shadowVis ? mix(float(1), clamp(shadowVis, 0, 1), uSunShadowMix) : float(1);
+  return { sunShadowTexNode, uSunShadowRect, uSunShadowMix, shadowVis, sunVis };
+}
+
+/**
  * Build tier 3's sky/sun reflection term.
  *
  * @param {object} args
@@ -347,8 +373,14 @@ export function buildWaterSpecular({
   sunShadowTexture = null,
   slopeXY = null,
   cloudVisNode = null,
+  // A `buildWaterSunVisibility` result built EARLIER by the caller
+  // (2026-10-25): tier 4's caustic branch needs `sunVis` before the surface
+  // field exists, and this rung needs that field's slope — so the caller builds
+  // the one shadow tap first and hands it in, rather than this building a
+  // second copy of it (one signal, one register).
+  sunVisibility = null,
 }) {
-  const { vec2, vec3, vec4, float, uniform, texture, clamp, max, dot, normalize, sqrt, mix } = TSL;
+  const { vec2, vec3, float, uniform, clamp, max, dot, normalize, sqrt, mix } = TSL;
 
   const uViewCentre = uniform(vec2(0, 0));
   const uViewerHeight = uniform(float(viewerHeight));
@@ -451,18 +483,8 @@ export function buildWaterSpecular({
   // dark would put a black river on screen, which is a far worse failure than a
   // glint that briefly outstays a shadow (`feedback_gate_polarity_must_fail_
   // open`).
-  const sunShadowTexNode = sunShadowTexture ? texture(sunShadowTexture) : null;
-  const uSunShadowRect = uniform(vec4(0, 0, 1, 1));
-  const uSunShadowMix = uniform(float(0));
-  const shadowVis = buildWorldSpaceSunVisibilityNode(TSL, {
-    worldX: positionWorld.x,
-    worldY: positionWorld.y,
-    uShadowRect: uSunShadowRect,
-    shadowTexNode: sunShadowTexNode,
-  });
-  // 1 = this pixel sees the sun. `mix(1, field, bound)` folds the "is a field
-  // bound" question and the field itself into one expression with no branch.
-  const sunVis = shadowVis ? mix(float(1), clamp(shadowVis, 0, 1), uSunShadowMix) : float(1);
+  const { sunShadowTexNode, uSunShadowRect, uSunShadowMix, shadowVis, sunVis } =
+    sunVisibility ?? buildWaterSunVisibility(TSL, { positionWorld, sunShadowTexture });
   // `shadowResponse` interpolates between "shadows are ignored" (0, the
   // pre-2026-08-16 look) and "a shadow puts the glint out completely" (1).
   const sunShadowFactor = mix(float(1), sunVis, uShadowResponse);

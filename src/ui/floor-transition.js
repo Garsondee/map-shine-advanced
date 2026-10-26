@@ -108,7 +108,7 @@ function resolveHost() {
   return board?.parentElement ?? document.body;
 }
 
-function buildOverlay(headline) {
+function buildOverlay(headline, actions) {
   const root = document.createElement('div');
   root.id = OVERLAY_ID;
   Object.assign(root.style, {
@@ -173,37 +173,49 @@ function buildOverlay(headline) {
     document.head.appendChild(style);
   }
 
-  const cancel = document.createElement('button');
-  cancel.type = 'button';
-  cancel.textContent = 'Cancel';
-  Object.assign(cancel.style, {
-    // Opts BACK IN to pointer events — this is the one control on the whole
-    // overlay a click must reach. See this file's header on why a switch
-    // with no deadline needs a real way out.
-    pointerEvents: 'auto',
-    marginTop: '2px',
-    padding: '3px 10px',
-    font: '11px/1.2 Signika, sans-serif',
-    color: '#cfe8ff',
-    background: 'rgba(143,214,255,0.10)',
-    border: '1px solid rgba(143,214,255,0.35)',
-    borderRadius: '3px',
-    cursor: 'pointer',
-  });
-  cancel.addEventListener('click', () => {
-    // Disabled, not removed — endFloorTransition() (called once the caller's
-    // own cancellation actually lands) is what takes the overlay away. A
-    // click that visibly did nothing reads as broken; one that visibly
-    // disables itself reads as received.
-    cancel.disabled = true;
-    cancel.textContent = 'Cancelling…';
-    cancel.style.cursor = 'default';
-    onCancel?.();
-  });
+  // The buttons. By default ONE, "Cancel" (a floor change has no deadline, so this
+  // is its only way out). A caller with a different choice to offer — the GM
+  // waiting on players: only "Cancel" — passes its own `actions`. An empty list means no buttons
+  // (a change that completes by itself).
+  const buttons = actions ?? [{ label: 'Cancel', pendingLabel: 'Cancelling…', onClick: () => onCancel?.() }];
+  const row = document.createElement('div');
+  Object.assign(row.style, { display: 'flex', gap: '6px', marginTop: '2px' });
+  for (const action of buttons) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = action.label;
+    Object.assign(button.style, {
+      // Opts BACK IN to pointer events — these are the only controls on the whole
+      // overlay a click must reach. See this file's header on why a switch
+      // with no deadline needs a real way out.
+      pointerEvents: 'auto',
+      padding: '3px 10px',
+      font: '11px/1.2 Signika, sans-serif',
+      color: '#cfe8ff',
+      background: 'rgba(143,214,255,0.10)',
+      border: '1px solid rgba(143,214,255,0.35)',
+      borderRadius: '3px',
+      cursor: 'pointer',
+    });
+    button.addEventListener('click', () => {
+      // Disabled, not removed — endFloorTransition() (called once the caller's
+      // own action actually lands) is what takes the overlay away. A
+      // click that visibly did nothing reads as broken; one that visibly
+      // disables itself reads as received. ALL the buttons lock together: the
+      // choices are alternatives.
+      for (const other of row.children) {
+        other.disabled = true;
+        other.style.cursor = 'default';
+      }
+      button.textContent = action.pendingLabel ?? `${action.label}…`;
+      action.onClick?.();
+    });
+    row.appendChild(button);
+  }
 
-  root.append(head, detail, bar, cancel);
+  root.append(head, detail, bar, row);
   resolveHost().appendChild(root);
-  return { root, head, detail, cancel };
+  return { root, head, detail, row };
 }
 
 /**
@@ -212,18 +224,24 @@ function buildOverlay(headline) {
  * PREVIOUS transition's overlay is still up (a rapid second floor-switch
  * request): it is torn down first, so there is never more than one on screen.
  *
- * @param {{fromFloorIndex?:number|null, toFloorIndex?:number|null, onCancel?:Function}} args
+ * @param {{fromFloorIndex?:number|null, toFloorIndex?:number|null, onCancel?:Function, headline?:string|null, actions?:Array<{label:string, pendingLabel?:string, onClick:Function}>|null}} args
  */
-export function beginFloorTransition({ fromFloorIndex = null, toFloorIndex = null, onCancel: cancelFn } = {}) {
+export function beginFloorTransition({
+  fromFloorIndex = null,
+  toFloorIndex = null,
+  onCancel: cancelFn,
+  headline: headlineOverride = null,
+  actions = null,
+} = {}) {
   endFloorTransition(); // never stack two overlays, same discipline loading-screen.js's beginSceneLoad uses
   startedAtMs = perfNowMs();
   onCancel = typeof cancelFn === 'function' ? cancelFn : null;
   lastBlockersText = '';
-  const headline = formatFloorTransitionHeadline(fromFloorIndex, toFloorIndex);
+  const headline = headlineOverride ?? formatFloorTransitionHeadline(fromFloorIndex, toFloorIndex);
   if (typeof document === 'undefined') return; // console-safe outside a browser, same posture as every ui/ module
   showTimer = setTimeout(() => {
     showTimer = null;
-    el = buildOverlay(headline);
+    el = buildOverlay(headline, actions);
   }, SHOW_AFTER_MS);
 }
 

@@ -112,3 +112,7 @@ export { createDepthAuthority, BELOW_EVERYTHING } from './depth-authority.js';
 // THE EXACT DISTANCE TRANSFORM on a byte grid — one implementation, shared by critter zones and the rain-on-glass
 // flow field (it lived privately inside critter-zone.js until a second consumer needed it).
 export { squaredDistanceField, EDT_INF } from './grid-edt.js';
+
+// ONE-TIME RGBA EXPANSION of a one-byte mask grid, cached by array identity, so floor PREPARE can do it off screen and
+// the commit frame gets the bytes for free (loading audit P-06).
+export { expandGridToRgba, getGridRgbaStats } from './grid-rgba.js';

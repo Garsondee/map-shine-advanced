@@ -265,14 +265,26 @@ export function jfaStrideForStep(i, steps) {
  *   here via UV, so it is resolution-independent of `width`/`height` below.
  * @param {number} args.width @param {number} args.height - the FLOOD's own
  *   grid, texels — `WATER_BODY_SUPERSAMPLE ×` `maskTexture`'s native size.
- * @returns {{material:*, quad:*, maskTexNode:*, setPresenceThreshold:(v:number)=>void}}
+ * @param {*} [args.fractionTexture] - TWO-PASS MODE (2026-10-25, Water-
+ *   Performance-Audit W-20): a NEAREST scratch target of exactly
+ *   `width`×`height` (the flood's own pong target — idle at seed time). When
+ *   given, the returned `fraction.quad` must be rendered INTO it first: it
+ *   writes each texel's 16-sub-sample presence fraction ONCE, and the seed
+ *   pass then reads its own and its 4 neighbours' fractions (5 fetches)
+ *   instead of recomputing all five from the mask (80 taps). A sum of 16
+ *   steps over 16 is a multiple of 1/16, which half float stores exactly, so
+ *   the boundary decision is unchanged — except at the map border, where a
+ *   clamped neighbour now reads the border texel's OWN fraction (exactly "the
+ *   map border is never itself an interface", below) rather than a half-texel-
+ *   shifted footprint. Omitted: the original single-pass material.
+ * @returns {{material:*, quad:*, maskTexNode:*, setPresenceThreshold:(v:number)=>void, fraction:({material:*, quad:*}|null)}}
  *   `maskTexNode.value` is re-pointed when the mask rebakes; the material is
  *   NOT rebuilt. `setPresenceThreshold` re-points the LIVE uniform behind the
  *   boundary test below — see its own call site (`water-body-subsystem.js`)
  *   for why this needs a REBAKE (a JFA flood, not a per-frame poke) to take
  *   effect, unlike every other live water uniform.
  */
-export function buildWaterSeedMaterial({ THREE, maskTexture, width, height }) {
+export function buildWaterSeedMaterial({ THREE, maskTexture, width, height, fractionTexture = null }) {
   const { texture, uv, vec2, vec4, float, uniform, step, abs, max, clamp } = THREE.TSL;
 
   const texelX = 1 / Math.max(1, width);
@@ -363,7 +375,18 @@ export function buildWaterSeedMaterial({ THREE, maskTexture, width, height }) {
    * sub-sample corner is exactly the case this fix exists for. */
   const WATER_SEED_BOUNDARY_EPS = 1 / (SEED_SUBSAMPLES * SEED_SUBSAMPLES * 4);
 
-  const hereFraction = seedFraction(uv0);
+  // TWO-PASS MODE (W-20 — see `fractionTexture` above): the fraction is
+  // computed once per texel by `fraction.quad`, then fetched here.
+  let fraction = null;
+  let fractionAt = seedFraction;
+  if (fractionTexture) {
+    const fractionMaterial = new THREE.NodeMaterial();
+    fractionMaterial.fragmentNode = vec4(seedFraction(uv0), 0, 0, 1);
+    fraction = { material: fractionMaterial, quad: new THREE.QuadMesh(fractionMaterial) };
+    fractionAt = (centerUv) => texture(fractionTexture, centerUv).r;
+  }
+
+  const hereFraction = fractionAt(uv0);
 
   // Four-neighbour interface test. `clamp` pins the sample inside the grid, so
   // a texel on the map edge compares against ITSELF there — i.e. the map
@@ -379,7 +402,7 @@ export function buildWaterSeedMaterial({ THREE, maskTexture, width, height }) {
   let maxDelta = float(0);
   for (const [dx, dy] of NEIGHBORS) {
     const nUv = clamp(uv0.add(vec2(dx * texelX, dy * texelY)), vec2(0, 0), vec2(1, 1));
-    const neighborFraction = seedFraction(nUv);
+    const neighborFraction = fractionAt(nUv);
     maxDelta = max(maxDelta, abs(hereFraction.sub(neighborFraction)));
   }
   // Also seed a texel whose OWN footprint straddles the interface even if
@@ -404,6 +427,7 @@ export function buildWaterSeedMaterial({ THREE, maskTexture, width, height }) {
     quad,
     maskTexNode,
     maskTexNodes,
+    fraction,
     setPresenceThreshold(v) {
       uPresenceThreshold.value = Number.isFinite(v) ? v : WATER_PRESENCE_EPS;
     },

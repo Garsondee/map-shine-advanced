@@ -169,6 +169,10 @@ function sizeBodyGrid(rect) {
  * sits mid-texel is still fully covered. */
 const WATER_BOUNDS_PAD_PX = 64;
 
+/** How long the flood's ping-pong scratch outlives its flood (W-05) — see
+ * `releaseJfaScratch`. */
+export const WATER_BODY_SCRATCH_IDLE_RELEASE_MS = 10_000;
+
 /**
  * Intersect a padded water AABB with the rect the mask actually covers — pure,
  * exported, and Node-tested, because the bug it fixes was VISIBLE ON SCREEN and
@@ -281,6 +285,15 @@ export function createWaterBodySubsystem({
    * from — `NaN` so the very first bake's own comparison never accidentally
    * reads as "unchanged" against a real number. See `deriveBodyPresenceThreshold`. */
   let bakedShorelineDepth = NaN;
+  /** The derived water grid OBJECT and full-res mask texture the last flood
+   * read — W-13's content key (see `maybeBake`). `uploadedGrid`/
+   * `uploadedMaskTexture` are what the in-flight `uploadMask` just read. */
+  let bakedGrid = null;
+  let bakedMaskTexture = null;
+  let uploadedGrid = null;
+  let uploadedMaskTexture = null;
+  let versionOnlyRebakesSkipped = 0;
+  let scratchReleases = 0;
   let lastBake = null;
   let lastResolve = null;
   /** Wall-clock ms of the last COMPLETED bake, `-Infinity` so the very first
@@ -338,7 +351,10 @@ export function createWaterBodySubsystem({
    */
   function ensureTargets(w, h) {
     const key = `${w}x${h}`;
-    if (key === gridKey) return;
+    if (key === gridKey) {
+      if (!jfaPingRt) allocateJfaScratch(w, h); // released while idle — see `releaseJfaScratch`
+      return;
+    }
 
     allocator.dispose(bodyRt);
     allocator.dispose(jfaPingRt);
@@ -363,12 +379,48 @@ export function createWaterBodySubsystem({
     // LINEAR — this is the finished, smoothly-varying field every consumer
     // reads (see the header note just above).
     bodyRt = allocator.create('water.body', describe('linear'));
-    // NEAREST — mid-flood offset VECTORS; interpolating them is meaningless
-    // (see this function's own doc, first paragraph).
-    jfaPingRt = allocator.create('water.jfa.ping', describe('nearest'));
-    jfaPongRt = allocator.create('water.jfa.pong', describe('nearest'));
     gridKey = key;
     jfaSteps = jfaStepCount(w, h);
+    allocateJfaScratch(w, h);
+  }
+
+  /** The flood's ping-pong pair — scratch, only read while a flood runs. */
+  function allocateJfaScratch(w, h) {
+    const describe = {
+      resolvedW: w,
+      resolvedH: h,
+      screenSized: false,
+      type: THREE.HalfFloatType,
+      format: THREE.RGBAFormat,
+      colorSpace: THREE.NoColorSpace,
+      // NEAREST — mid-flood offset VECTORS; interpolating them is meaningless
+      // (see `ensureTargets`' own doc, first paragraph).
+      filter: 'nearest',
+      depth: false,
+    };
+    jfaPingRt = allocator.create('water.jfa.ping', describe);
+    jfaPongRt = allocator.create('water.jfa.pong', describe);
+    // The materials bind the pair (the seed's fraction pass, the first JFA
+    // round), so a fresh pair means fresh materials — `uploadMask` re-points
+    // their mask nodes on every bake anyway.
+    materials?.dispose?.();
+    materials = null;
+  }
+
+  /**
+   * FREE THE FLOOD'S SCRATCH WHEN IDLE (2026-10-25, Water-Performance-Audit
+   * W-05). The ping-pong pair is two full RGBA16F grids (17.6 MB on a 2:1
+   * map, 38 MB square) that nothing reads between floods. Kept for
+   * `WATER_BODY_SCRATCH_IDLE_RELEASE_MS` after the last flood, so continuous
+   * editing reuses it, then released; the next flood reallocates it.
+   */
+  function releaseJfaScratch() {
+    allocator.dispose(jfaPingRt);
+    allocator.dispose(jfaPongRt);
+    jfaPingRt = jfaPongRt = null;
+    materials?.dispose?.();
+    materials = null;
+    scratchReleases++;
   }
 
   /**
@@ -380,7 +432,15 @@ export function createWaterBodySubsystem({
    */
   function ensureMaterials(w, h) {
     if (materials) return;
-    const seed = buildWaterSeedMaterial({ THREE, maskTexture, width: w, height: h });
+    // TWO-PASS seed (W-20): the presence fraction is rendered into the idle
+    // pong target first — see `buildWaterSeedMaterial`'s `fractionTexture`.
+    const seed = buildWaterSeedMaterial({
+      THREE,
+      maskTexture,
+      width: w,
+      height: h,
+      fractionTexture: jfaPongRt.texture,
+    });
     const jfa = buildWaterJfaStepMaterial({ THREE, prevTexture: jfaPingRt.texture, width: w, height: h });
     const resolve = buildWaterBodyResolveMaterial({
       THREE,
@@ -396,6 +456,7 @@ export function createWaterBodySubsystem({
       resolve,
       dispose() {
         seed.material?.dispose?.();
+        seed.fraction?.material?.dispose?.();
         jfa.material?.dispose?.();
         resolve.material?.dispose?.();
         // NOT the quads' geometry — QuadMesh shares ONE module-level
@@ -543,6 +604,8 @@ export function createWaterBodySubsystem({
             maskRect
           )
         : null;
+    uploadedGrid = grid;
+    uploadedMaskTexture = tex;
     return { ok: true, cols: w, rows: h, waterTexels: maxTx >= minTx ? 'present' : 'none' };
   }
 
@@ -560,6 +623,7 @@ export function createWaterBodySubsystem({
   function runFlood(reason, floorIndex) {
     const started = polls;
     // Seed writes into ping; the ladder alternates from there.
+    if (materials.seed.fraction) renderWaterPass(jfaPongRt, materials.seed.fraction.quad);
     renderWaterPass(jfaPingRt, materials.seed.quad);
     let readFromPing = true;
     for (let i = 0; i < jfaSteps; i++) {
@@ -631,7 +695,17 @@ export function createWaterBodySubsystem({
       resolved.floorIndex === bakedFloor &&
       overrideKey === bakedOverride &&
       shorelineDepth === bakedShorelineDepth;
-    if (unchanged) return;
+    if (unchanged) {
+      if (
+        jfaPingRt &&
+        Number.isFinite(nowMs) &&
+        Number.isFinite(lastBakeWallClockMs) &&
+        nowMs - lastBakeWallClockMs > WATER_BODY_SCRATCH_IDLE_RELEASE_MS
+      ) {
+        releaseJfaScratch();
+      }
+      return;
+    }
 
     // Captured BEFORE the assignments below — reading `bakedVersion` after
     // writing it would make the reason string say 'mask/floor change' on the
@@ -653,6 +727,61 @@ export function createWaterBodySubsystem({
       bakedShorelineDepth = shorelineDepth;
       lastBake = { reason: 'no water in this scene', floorIndex: null, skipped: true };
       return;
+    }
+
+    // A BORROWING FLOOR WITH NO MASK OF ITS OWN (2026-10-25, Water-Performance-
+    // Audit W-19). In the per-floor loop every floor resolves the borrow with
+    // ITSELF as the viewed floor, so a floor with no water of its own resolves
+    // to the floor below — whose own instance already draws that water. This
+    // floor's surface asks for its OWN floor's mask URL (`ensureMaskImage`),
+    // gets none, and so `uploadMask` below could only ever decline. That
+    // decline is deliberately not stamped (it is normally a mask still
+    // loading), so before this the bake retried every frame for the rest of
+    // the session. It is a stable state, like "no water in this scene" above:
+    // stamp it, say why once, and let a real mask/floor change re-open it.
+    if (resolved.borrowed && waterSurface.hasOwnMaskUrl && !waterSurface.hasOwnMaskUrl()) {
+      bakedVersion = version;
+      bakedFloor = resolved.floorIndex;
+      bakedOverride = overrideKey;
+      bakedShorelineDepth = shorelineDepth;
+      lastBake = {
+        reason: `borrows floor ${resolved.floorIndex}, which draws that water itself — nothing of its own to bake`,
+        floorIndex: resolved.floorIndex,
+        skipped: true,
+      };
+      return;
+    }
+
+    // ⚠️ THE SCENE-WIDE VERSION MOVED, BUT DID *THIS* WATER? (2026-10-25,
+    // Water-Performance-Audit W-13). `getMaskAuthorityVersion()` is ONE
+    // counter for the whole scene: a wall-height drag, a region edit or
+    // another floor's paint all bump it, and each bump cost a full upload +
+    // jump flood (~90 ms) per water floor. mask-authority's derive cache hands
+    // back the SAME grid object for a kind whose inputs did not change
+    // (`scene/mask-derive.js#deriveFloorProducts`, the per-kind memo) and a
+    // fresh copy when they did (`rasterizeAuthoredIncremental`), so identity
+    // is an exact content key. Same grid, same full-res mask texture, and
+    // nothing else in the key moved → the flood would reproduce its own
+    // output, so stamp the new version and skip it.
+    if (
+      bakedGrid !== null &&
+      version !== bakedVersion &&
+      resolved.floorIndex === bakedFloor &&
+      overrideKey === bakedOverride &&
+      shorelineDepth === bakedShorelineDepth &&
+      waterSurface.getFullResMaskTexture() === bakedMaskTexture
+    ) {
+      let sameGrid = false;
+      try {
+        sameGrid = getWaterMaskGrid(resolved.floorIndex)?.grid === bakedGrid;
+      } catch {
+        sameGrid = false; // let the ordinary path below report the throw
+      }
+      if (sameGrid) {
+        bakedVersion = version;
+        versionOnlyRebakesSkipped++;
+        return;
+      }
     }
 
     // THE THROTTLE — see `lastBakeWallClockMs`'s own doc for the full "shared
@@ -713,6 +842,8 @@ export function createWaterBodySubsystem({
     bakedFloor = resolved.floorIndex;
     bakedOverride = overrideKey;
     bakedShorelineDepth = shorelineDepth;
+    bakedGrid = uploadedGrid;
+    bakedMaskTexture = uploadedMaskTexture;
     // Stamped even when `nowMs` is undefined (→ NaN): a NaN here reproduces
     // today's untimed behaviour exactly, since `nowMs - NaN` is NaN on every
     // later poll too and the throttle's own `Number.isFinite(nowMs)` guard
@@ -778,6 +909,10 @@ export function createWaterBodySubsystem({
         bakes,
         polls,
         pollsSinceLastBake,
+        // W-13: scene-wide mask edits that did NOT touch this water (a wall,
+        // a region, another floor's paint) and so cost no flood.
+        versionOnlyRebakesSkipped,
+        scratchReleases,
         // The FLOOD's own water-owned resolution (`sizeBodyGrid`) — a
         // DIFFERENT number from `lastBake.cols`×`lastBake.rows` (the coarse
         // MASK's own native grid, still used for the AABB scan) on purpose;
@@ -803,6 +938,7 @@ export function createWaterBodySubsystem({
       bodyRt = jfaPingRt = jfaPongRt = null;
       materials = null;
       gridKey = '';
+      bakedGrid = bakedMaskTexture = uploadedGrid = uploadedMaskTexture = null;
     },
   };
 }

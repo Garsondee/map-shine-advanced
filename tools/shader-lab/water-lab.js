@@ -75,6 +75,10 @@ function registerWaterAdapter() {
     'tier4-gate-ladder-no-dead-term',
     'shore-foam-has-real-coverage',
     'tier5-refraction-does-not-capture-itself',
+    'regression-snapshot',
+    'real-underground-river-flow',
+    'real-underground-river-sim',
+    'synthetic-river-flow-avoids-island',
   ];
   const placeholderScenarios = new Map(scenarioNames.map((n) => [n, { name: n }]));
   contract.registerBench({

@@ -157,11 +157,25 @@ export function createWaterRegistration({
    * and show up as a permanently false "orphaned" param despite being read
    * every single frame.
    */
+  /** The last render state built, and what it was built from — see below. */
+  let renderStateCache = null;
+  let renderStateReadout = null;
+  let renderStateDebugChannel = -1;
   function getRenderState() {
+    // ⚠️ MEMOISED ON READOUT IDENTITY (2026-10-25, Water-Performance-Audit
+    // W-18). This is called ~7 times per floor per frame, and each call used
+    // to allocate a Proxy, its handler, a wrapper and a tint array. `readout`
+    // is REPLACED wholesale on every change (the registry callback above), and
+    // `debugChannel` is a plain value, so an unchanged pair is an unchanged
+    // state. Reads still go through the same tracking Proxy, so U6's "has this
+    // param ever reached the renderer" record is unaffected.
+    if (renderStateCache && renderStateReadout === readout && renderStateDebugChannel === debugChannel) {
+      return renderStateCache;
+    }
     const p = readout.params ?? {};
     const tracked = wrapForReadTracking('water', p);
     const rawTint = tracked.tint;
-    return {
+    renderStateCache = {
       enabled: readout.enabled,
       perfTier: readout.perfTier,
       params: Object.assign(Object.create(tracked), {
@@ -169,6 +183,9 @@ export function createWaterRegistration({
       }),
       debugChannel,
     };
+    renderStateReadout = readout;
+    renderStateDebugChannel = debugChannel;
+    return renderStateCache;
   }
 
   /**

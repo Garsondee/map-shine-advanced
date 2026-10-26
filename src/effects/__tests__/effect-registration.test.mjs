@@ -393,8 +393,9 @@ export function run(t) {
     const descriptors = describeEffectSettings([UI_WINDOW_SHADOW]);
     const byKey = (k) => descriptors.find((d) => d.key === k);
 
-    // 9 global (2026-09-14: +studioPinnedEffects, hidden internal UI state) + 2 per-effect.
-    ok('one effect → 9 global + 2 per-effect descriptors', descriptors.length === 11);
+    // 11 global (2026-09-14: +studioPinnedEffects, hidden internal UI state; 2026-10-25: +prepareBeforeSwitch
+    // and +switchWaitSeconds, the loading-audit gate's two world settings) + 2 per-effect.
+    ok('one effect → 11 global + 2 per-effect descriptors', descriptors.length === 13);
 
     const master = byKey(GLOBAL_SETTING_KEYS.msaEnabled);
     ok(
@@ -507,7 +508,7 @@ export function run(t) {
       'every descriptor is config:true, except the one deliberate internal exception',
       descriptors.every((d) => d.config === true || d.key === GLOBAL_SETTING_KEYS.studioPinnedEffects)
     );
-    ok('no manifests → just the 9 global descriptors', describeEffectSettings([]).length === 9);
+    ok('no manifests → just the 11 global descriptors', describeEffectSettings([]).length === 11);
     ok(
       'the master off-switch exists even with zero effects registered — it gates BEFORE the cascade',
       describeEffectSettings([]).some((d) => d.key === GLOBAL_SETTING_KEYS.msaEnabled)

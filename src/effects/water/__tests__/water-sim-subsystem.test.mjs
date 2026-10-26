@@ -122,8 +122,11 @@ export function run(t) {
   {
     const { subsystem, pass, allocator } = buildHarness();
     subsystem.tick(0.016);
-    ok('first tick: exactly 3 render passes (clear ping + clear pong + one step)', pass.calls === 3);
-    ok('first tick: allocates exactly 2 targets (ping + pong)', allocator.created === 2);
+    ok(
+      'first tick: exactly 7 render passes (clear ping + pong + soft + spray, the spray emitter, one step, one soft gather)',
+      pass.calls === 7
+    );
+    ok('first tick: allocates exactly 4 targets (ping + pong + soft + spray)', allocator.created === 4);
     ok('first tick: exactly one material rebuild', subsystem.getStatus().rebuilds === 1);
     ok('first tick: steps is 1', subsystem.getStatus().steps === 1);
     ok('first tick: the subsystem exposes a real texture afterward', !!subsystem.texture);
@@ -137,7 +140,7 @@ export function run(t) {
     const callsAfterFirst = pass.calls;
     const createdAfterFirst = allocator.created;
     subsystem.tick(0.016);
-    ok('second tick: exactly one more render pass', pass.calls === callsAfterFirst + 1);
+    ok('second tick: exactly two more render passes (the step + the soft gather)', pass.calls === callsAfterFirst + 2);
     ok('second tick: no new targets allocated', allocator.created === createdAfterFirst);
     ok('second tick: no additional rebuild', subsystem.getStatus().rebuilds === 1);
     ok('second tick: steps is now 2', subsystem.getStatus().steps === 2);
@@ -168,7 +171,10 @@ export function run(t) {
     setFlowTexture(stubTexture('flow-2')); // author drags the flow-angle slider; water-flow-subsystem rebuilds wholesale
     subsystem.tick(0.016);
     ok('flow rebake: no new targets allocated (foam memory survives)', allocator.created === createdAfterFirst);
-    ok('flow rebake: exactly one more render pass (the step only, no re-clear)', pass.calls === callsAfterFirst + 1);
+    ok(
+      'flow rebake: exactly three more render passes (spray emitter + step + soft gather, no re-clear)',
+      pass.calls === callsAfterFirst + 3
+    );
     ok('flow rebake: a second material rebuild happened', subsystem.getStatus().rebuilds === 2);
   }
 
@@ -198,5 +204,47 @@ export function run(t) {
       threw = true;
     }
     ok('setReachPx never throws, even on NaN/negative/zero input', !threw);
+  }
+
+  // ══ IDLE + WARM-UP (2026-10-25, Water-Performance-Audit W-03) ══════════
+  {
+    const { subsystem, pass } = buildHarness();
+    subsystem.tick(0.016); // 3 passes: two clears + one step
+    const before = pass.calls;
+    for (let i = 0; i < 120; i++) subsystem.idle(1 / 60);
+    ok('idle frames run no render passes', pass.calls === before);
+    ok(
+      '…and report themselves',
+      subsystem.getStatus().idles === 120 && subsystem.getStatus().lastStatus.startsWith('idle')
+    );
+    subsystem.tick(1 / 60);
+    const warm = pass.calls - before;
+    ok(`resuming after 2 s idle warms up in several steps, then one soft gather (${warm})`, warm > 2 && warm <= 7);
+    ok('…and counts one warm-up', subsystem.getStatus().warmups === 1 && subsystem.getStatus().pausedSec === 0);
+    const after = pass.calls;
+    subsystem.tick(1 / 60);
+    ok('the next ordinary tick is one step (+ its soft gather) again', pass.calls === after + 2);
+  }
+  {
+    const { subsystem, pass } = buildHarness();
+    subsystem.tick(0.016);
+    const before = pass.calls;
+    subsystem.idle(1 / 60);
+    subsystem.tick(1 / 60);
+    ok('a one-frame pause catches up in a single step (+ its soft gather)', pass.calls === before + 2);
+  }
+
+  // ══ THE SPRAY EMITTER RE-RENDERS ONLY WHEN ITS INPUTS MOVE (W-05/W-10) ══
+  {
+    const { subsystem, pass, params } = buildHarness();
+    subsystem.tick(1 / 60);
+    const steady = pass.calls;
+    subsystem.tick(1 / 60);
+    ok('a steady tick does not re-render the spray emitter (step + soft only)', pass.calls === steady + 2);
+    params.simNearSolidGain = 3.3;
+    const before = pass.calls;
+    subsystem.tick(1 / 60);
+    ok('a near-solid gain change re-renders it once (spray + step + soft)', pass.calls === before + 3);
+    ok('the spray texture is exposed', !!subsystem.sprayTexture);
   }
 }

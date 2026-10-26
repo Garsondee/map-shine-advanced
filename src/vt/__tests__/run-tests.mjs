@@ -31,6 +31,7 @@ import { run as runTaaResolve } from './taa-resolve.test.mjs';
 import { run as runBakedFormat } from './baked-format.test.mjs';
 import { run as runBakedTextures } from './baked-textures.test.mjs';
 import { run as runWarmUpChunking } from './warm-up-chunking.test.mjs';
+import { run as runScenePrewarm } from './scene-prewarm.test.mjs';
 import { run as runImageHeaderSize } from './image-header-size.test.mjs';
 import { run as runMaskRepack } from './mask-repack.test.mjs';
 import { run as runPanCompileProbe } from './pan-compile-probe.test.mjs';
@@ -95,6 +96,7 @@ const suites = [
   ['baked-format', runBakedFormat],
   ['baked-textures', runBakedTextures],
   ['warm-up-chunking', runWarmUpChunking],
+  ['scene-prewarm', runScenePrewarm],
   ['image-header-size', runImageHeaderSize],
   ['mask-repack', runMaskRepack],
   ['pan-compile-probe', runPanCompileProbe],

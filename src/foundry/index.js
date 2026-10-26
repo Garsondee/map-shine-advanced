@@ -101,6 +101,8 @@ export {
   getPixiResidencyReport,
   getPixiProxyStats,
   urlsToEvictOnSceneChange,
+  planProxySeeding,
+  isPixiSrcCached,
 } from './pixi-proxy-textures.js';
 
 // THE INTERFACE SEAM — MSA owns the art, PIXI keeps the interactive chrome.
@@ -108,6 +110,10 @@ export {
   registerCanvasCompositing,
   applyArtSuppression,
   restoreFoundryArt,
+  // WHO MAY OWN THE ART (loading audit P-09): boot.js raises this when a viewer
+  // starts and lowers it on every hand-back to Foundry.
+  setMsaMayOwnArt,
+  getMsaMayOwnArt,
   getCanvasCompositingReport,
   // ⚖️ RECKONING (TEMPORARY): how much Foundry's OWN renderer is still doing —
   // the one large GPU consumer MSA's per-pass timestamps cannot see.
@@ -128,7 +134,41 @@ export {
 // THE BLANK-CANVAS WATCHDOG — detects a canvasTearDown that nothing follows
 // (Scene#unview(), the active scene being deleted), which canvasInit/
 // canvasReady alone can never see.
-export { registerCanvasTearDownWatchdog, isOrphanedTeardown } from './canvas-lifecycle.js';
+export { registerCanvasTearDownWatchdog, isOrphanedTeardown, decideTeardownKind } from './canvas-lifecycle.js';
+
+// PREPARE, THEN LET FOUNDRY DRAW (loading audit, 2026-10-25) — the one wrap of Scene#view, and Foundry's own progress
+// notification for what it is doing.
+export { classifyViewRequest, createViewGate, installSceneSwitchGate } from './scene-switch-gate.js';
+export {
+  createProgressNotice,
+  describeStep,
+  formatPrepareMessage,
+  escapeNoticeText,
+  FLOOR_PREPARE_STEPS,
+  SCENE_PREPARE_STEPS,
+  notifyUser,
+  NOTICE_SHOW_AFTER_MS,
+} from './progress-notice.js';
+
+// PREPARE THE WHOLE TABLE, THEN SWITCH (loading audit, phase 4) — the GM's wait, its socket transport, and the gate on
+// Scene#activate.
+export { createPrepareCoordinator, PREPARE_MESSAGE } from './prepare-coordinator.js';
+export {
+  newPrepareToken,
+  listActivePlayerIds,
+  userDisplayName,
+  currentUserIsGM,
+  currentUserId,
+  findScene,
+  currentSceneId,
+  sceneNameForUser,
+  sendPrepareRequest,
+  sendPrepareReady,
+  sendPrepareHere,
+  sendPrepareCancel,
+  listenForPrepareMessages,
+} from './scene-prepare-channel.js';
+export { classifyActivation, createActivationGate, installSceneActivationGate } from './scene-activation-gate.js';
 
 // THE SCENE-ENVIRONMENT READER — feeds world/environment.js#buildEnvSnapshot's
 // `ambientInput`, and reads `canvas.scene.environment.darknessLevel` for

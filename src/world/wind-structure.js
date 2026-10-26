@@ -244,6 +244,96 @@ export function outdoorsGridSignature(grid) {
 }
 
 /**
+ * A fingerprint of a wall list: its length plus a rolling hash of every segment's
+ * coordinates (to 1/8 px) and the two derived flags the structure bake reads
+ * (`solid`, `blocksExterior`). Door state reaches the bake only through `solid`,
+ * so an opened door changes the signature. Cheap — one pass, no allocation.
+ *
+ * @param {Array<{x1:number,y1:number,x2:number,y2:number,solid?:boolean,blocksExterior?:boolean}>} walls
+ * @returns {string}
+ */
+export function wallsSignature(walls) {
+  let h = 0x811c9dc5 | 0;
+  const mix = (v) => {
+    h = Math.imul(h ^ (v | 0), 0x01000193);
+  };
+  for (const w of walls ?? []) {
+    mix(Math.round(w.x1 * 8));
+    mix(Math.round(w.y1 * 8));
+    mix(Math.round(w.x2 * 8));
+    mix(Math.round(w.y2 * 8));
+    mix((w.solid ? 1 : 0) | (w.blocksExterior ? 2 : 0));
+  }
+  return `${(walls ?? []).length}:${h >>> 0}`;
+}
+
+let identitySeq = 0;
+const identityIds = new WeakMap();
+/**
+ * A stable small id for an object, for building cache keys from "is this the same
+ * array as last time". The mask authority hands back the SAME product object until
+ * something that feeds it changes, so identity is an exact version stamp there.
+ * @param {object|null|undefined} o @returns {number|string}
+ */
+export function objectIdentity(o) {
+  if (!o || (typeof o !== 'object' && typeof o !== 'function')) return 'none';
+  let id = identityIds.get(o);
+  if (id === undefined) {
+    id = ++identitySeq;
+    identityIds.set(o, id);
+  }
+  return id;
+}
+
+/**
+ * Memoise {@link bakeWindStructure} per floor (loading audit P-06, 2026-10-25).
+ *
+ * The structure bake (rasterise walls, flood-fill connectivity, distance fields)
+ * is the 40-360 ms CPU part of a wind bake, and it used to run on the commit
+ * frame of every floor change. It is a pure function of (walls, grid spec,
+ * outdoors grid), so floor PREPARE can run it for the target floor while the old
+ * one is still on screen, and the commit finds it already done.
+ *
+ * The key includes the outdoors grid's object identity AND its strided signature,
+ * so a re-derived mask is never served a stale structure.
+ *
+ * @param {(args: object) => object} [bake] - injected for tests.
+ */
+export function createWindStructureMemo(bake = bakeWindStructure) {
+  const byFloor = new Map();
+  let hits = 0;
+  let misses = 0;
+  return {
+    /**
+     * @param {number|string} floorKey
+     * @param {{walls: Array<object>, gridSpec: object, outdoors?: object|null}} inputs
+     * @returns {{structure: object, hit: boolean}}
+     */
+    get(floorKey, { walls, gridSpec, outdoors = null }) {
+      const key = [
+        JSON.stringify(gridSpec),
+        wallsSignature(walls),
+        objectIdentity(outdoors?.data),
+        outdoorsGridSignature(outdoors),
+      ].join('|');
+      const cached = byFloor.get(floorKey);
+      if (cached && cached.key === key) {
+        hits++;
+        return { structure: cached.structure, hit: true };
+      }
+      misses++;
+      const structure = bake({ walls, gridSpec, outdoors });
+      byFloor.set(floorKey, { key, structure });
+      return { structure, hit: false };
+    },
+    stats: () => ({ hits, misses, floors: byFloor.size }),
+    clear() {
+      byFloor.clear();
+    },
+  };
+}
+
+/**
  * Everything that depends on walls, doors and the viewed floor and on nothing
  * else. The expensive part of the old `bakeWindField`, unchanged in substance
  * except for the final reduction, which now lets a sealed pocket win

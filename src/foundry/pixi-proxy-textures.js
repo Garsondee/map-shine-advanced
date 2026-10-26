@@ -208,6 +208,47 @@ export async function registerPixiProxy(realSrc, sourceBitmap, opts = {}) {
 }
 
 /**
+ * Decide what a proxy-seeding pass has to do. Pure — the ORDER is the point.
+ *
+ * Seeding races Foundry's own texture loader (the hook it runs from is not
+ * awaited — loading audit C-01), so whatever is seeded FIRST is the likeliest
+ * to win: the floor being viewed goes first, and anything PIXI already holds is
+ * skipped without paying for a full-resolution fetch and decode.
+ *
+ * @param {Array<{index:number, url?:string|null}>} floors
+ * @param {number|null|undefined} viewedFloorIndex
+ * @param {(url: string) => boolean} isCached - e.g. {@link isPixiSrcCached}
+ * @returns {{todo: Array<object>, cached: Array<object>}} `todo` in seeding order.
+ */
+export function planProxySeeding(floors, viewedFloorIndex, isCached) {
+  const todo = [];
+  const cached = [];
+  for (const floor of floors ?? []) {
+    if (!floor?.url) continue;
+    (isCached(floor.url) ? cached : todo).push(floor);
+  }
+  // Stable: every floor but the viewed one keeps its elevation order.
+  todo.sort((a, b) => Number(b.index === viewedFloorIndex) - Number(a.index === viewedFloorIndex));
+  return { todo, cached };
+}
+
+/**
+ * Is PIXI already holding something under this src — a proxy from an earlier
+ * pass, or whatever Foundry's own loader got to first? Cheap (a Map lookup), so
+ * callers can skip the expensive part — a full-resolution fetch and decode —
+ * BEFORE doing it, rather than discovering inside `registerPixiProxy` that the
+ * work was pointless (loading audit C-01, 2026-10-25).
+ *
+ * @param {string} realSrc
+ * @param {any} [PIXIOverride] - injected for testability; defaults to `globalThis.PIXI`.
+ * @returns {boolean} false when PIXI is unavailable (nothing to seed into either).
+ */
+export function isPixiSrcCached(realSrc, PIXIOverride) {
+  const PIXI = PIXIOverride ?? globalThis.PIXI;
+  return !!PIXI?.Assets?.cache?.has?.(realSrc);
+}
+
+/**
  * Ground-truth diagnostic (not theory) — inspects PIXI's ACTUAL cache for a
  * list of srcs and reports what's really resident: dimensions + approximate
  * bytes. This is what distinguishes "the proxy took effect" (small dims

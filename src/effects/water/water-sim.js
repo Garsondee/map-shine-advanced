@@ -248,10 +248,14 @@ export const WATER_SIM_NOISE_FLOOR = 0.15;
  *   AND the thing to collect for re-pointing (the same node, one name).
  */
 function clampedNeighborSample(TSL, tex, centerUv, dx, dy, texelU, texelV) {
-  const { texture, vec2, clamp } = TSL;
+  const { texture, vec2, clamp, float } = TSL;
   const rawUv = centerUv.add(vec2(dx * texelU, dy * texelV));
   const clampedUv = clamp(rawUv, vec2(0, 0), vec2(1, 1));
-  return texture(tex, clampedUv);
+  // EXPLICIT LEVEL 0 (2026-10-25) — every caller now samples inside the
+  // step's per-texel `If` (see `buildWaterSimStepMaterial`), where WGSL
+  // forbids `textureSample`'s implicit derivatives. These textures have no
+  // mip chain, so level 0 is exactly what the implicit LOD picked anyway.
+  return texture(tex, clampedUv, float(0));
 }
 
 /**
@@ -347,6 +351,13 @@ export function buildWaterSimStepMaterial({
   uPatchiness = null,
   uPatchSizePx = null,
   uRectOrigin = null,
+  // 'step' (the per-frame sim step) or 'spray' (2026-10-25, W-05/W-10): the
+  // SAME graph, outputting only G — the spray emitter — into its own target.
+  // G depends on the flow and body packs, `uNearSolidGain` and whether the
+  // current runs at all, never on the foam memory, so it does not need to ride
+  // the ping-pong (which now stores foam alone, R16F); the subsystem re-renders
+  // it only when one of those inputs changes.
+  mode = 'step',
 }) {
   const TSL = THREE.TSL;
   const {
@@ -365,6 +376,8 @@ export function buildWaterSimStepMaterial({
     smoothstep,
     sin,
     mx_fractal_noise_float,
+    Fn,
+    If,
   } = TSL;
 
   const uv0 = uv();
@@ -402,7 +415,7 @@ export function buildWaterSimStepMaterial({
   const uvPerWorldPx = vec2(1 / Math.max(1, rectWidthPx), 1 / Math.max(1, rectHeightPx));
   const advectedUv = clamp(uv0.sub(velWorld.mul(uDtSec).mul(uvPerWorldPx)), vec2(0, 0), vec2(1, 1));
 
-  const prevSharpNode = texture(simPrevTexture, advectedUv);
+  const prevSharpNode = texture(simPrevTexture, advectedUv, float(0)); // level 0: read inside the solidity `If`, below
   const simPrevTexNodes = [prevSharpNode];
   let blurSum = prevSharpNode.r; // the centre tap, reused rather than re-sampled
   for (const [dx, dy] of [
@@ -456,7 +469,7 @@ export function buildWaterSimStepMaterial({
   // for any texel on the land side, matching `water-shore.js#d01`'s own "0
   // at the waterline" contract exactly, so the imported band constants mean
   // the same thing here that they do there.
-  const bodyTexNode = texture(bodyTexture, uv0);
+  const bodyTexNode = texture(bodyTexture, uv0, float(0)); // level 0: read inside the solidity `If`, below
   const shoreDist = max(bodyTexNode.r.negate(), float(0));
   const reach = max(uReachPx, float(1));
   const d01 = clamp(shoreDist.div(reach), float(0), float(1));
@@ -536,8 +549,66 @@ export function buildWaterSimStepMaterial({
     float(0),
     float(1)
   );
-  material.fragmentNode = vec4(storedR, sprayEmit, prevSharpNode.b, prevSharpNode.a);
+  // ⚠️ A FULLY SOLID TEXEL SKIPS THE WHOLE STEP (2026-10-25, Water-
+  // Performance-Audit W-10). `storedR` and `sprayEmit` are both multiplied by
+  // `1 − solidity`, and B/A start at zero and are only ever copied, so a texel
+  // with `solidity == 1` (dry land or a solid obstacle — the finest level's
+  // 16-sub-sample average is exactly 1 there) always wrote `vec4(0)`, after
+  // paying 14 taps and two fractal noises for it. On a map that is mostly
+  // land that was most of the grid. The condition reads only the flow centre
+  // tap, which stays outside the branch; every tap inside is level 0.
+  const stepped =
+    mode === 'spray' ? vec4(sprayEmit, 0, 0, 1) : vec4(storedR, sprayEmit, prevSharpNode.b, prevSharpNode.a);
+  material.fragmentNode = Fn(() => {
+    const out = vec4(0, 0, 0, 0).toVar('waterSimOut');
+    If(solidityHere.lessThan(float(1)), () => {
+      out.assign(stepped);
+    });
+    return out;
+  })();
   const quad = new THREE.QuadMesh(material);
 
   return { material, quad, flowTexNodes, bodyTexNode, simPrevTexNodes };
+}
+
+/**
+ * THE SIM FOAM'S SOFT GATHER, ON THE SIM GRID (2026-10-25, Water-Performance-
+ * Audit W-06/W-12). `water-render.js` used to take this 5×5 binomial gather
+ * ([1 4 6 4 1]² / 256, taps `spacing` texels apart) PER SCREEN PIXEL, in both
+ * water meshes and at every tier — but one sim texel (~7 world px) covers
+ * dozens of screen pixels, all repeating the same 25 taps. Rendered here once
+ * per sim step into a single-channel target, the surface reads it back with
+ * ONE tap through the same C2 reconstruction.
+ *
+ * Not bit-identical, and said so: the surface used to blur the C2-RECONSTRUCTED
+ * field; now the C2 reconstruction runs over the blurred grid. Both are linear
+ * filters, but the C2's quintic ease does not commute with the default 1.5-
+ * texel tap spacing, so the soft band can differ by a hair. At spacing 0 they
+ * are identical (every tap is the texel itself).
+ *
+ * @param {object} args
+ * @param {*} args.THREE
+ * @param {*} args.simTexture - the sim pack this pass blurs (R = foam).
+ * @param {number} args.width @param {number} args.height - the sim grid, texels.
+ * @param {*} args.uSpacing - uniform node, tap spacing in sim texels
+ *   (`simFoamSmoothing`).
+ * @returns {{material:*, quad:*}}
+ */
+export function buildWaterSimSoftMaterial({ THREE, simTexture, width, height, uSpacing }) {
+  const { texture, uv, vec2, vec4, float, clamp } = THREE.TSL;
+  const texel = vec2(1 / Math.max(1, width), 1 / Math.max(1, height));
+  const W = [1, 4, 6, 4, 1];
+  const uv0 = uv();
+  let sum = null;
+  for (let iy = -2; iy <= 2; iy++) {
+    for (let ix = -2; ix <= 2; ix++) {
+      const w = (W[ix + 2] * W[iy + 2]) / 256;
+      const tapUv = clamp(uv0.add(vec2(float(ix), float(iy)).mul(texel).mul(uSpacing)), vec2(0, 0), vec2(1, 1));
+      const tap = texture(simTexture, tapUv).r.mul(float(w));
+      sum = sum ? sum.add(tap) : tap;
+    }
+  }
+  const material = new THREE.NodeMaterial();
+  material.fragmentNode = vec4(sum, 0, 0, 1);
+  return { material, quad: new THREE.QuadMesh(material) };
 }

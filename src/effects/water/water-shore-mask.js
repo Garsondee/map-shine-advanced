@@ -367,9 +367,18 @@ const FLECK_OPACITY = 0.75;
  * @param {(w: *) => *} args.sprayAt - world vec2 → emitter 0..1 there.
  * @param {(w: *) => *} args.waterAt - world vec2 → water presence 0..1 there.
  * @param {*} args.uSpray - strength, 0 = off.
+ * @param {*} [args.shoreAbsDist] - |signed distance| to the nearest shore, world px
+ *   (the body pack's SDF). Given, the fleck loop only runs within reach of a
+ *   shore (see {@link fleckReachPx}) — `sprayAt`/`waterAt` must then sample at an
+ *   EXPLICIT level, since they run inside a per-pixel branch.
+ * @param {*} [args.emitterBandPx] - how far from the SDF's own zero contour a
+ *   spray emitter can sit, world px (a few sim/body texels — see the caller).
  * @returns {*} coverage 0..1
  */
-export function buildBreakSpecks(THREE, { worldXY, tSec, velocityPx, insideHere, sprayAt, waterAt, uSpray }) {
+export function buildBreakSpecks(
+  THREE,
+  { worldXY, tSec, velocityPx, insideHere, sprayAt, waterAt, uSpray, shoreAbsDist = null, emitterBandPx = null }
+) {
   const {
     vec2,
     vec3,
@@ -386,91 +395,156 @@ export function buildBreakSpecks(THREE, { worldXY, tSec, velocityPx, insideHere,
     smoothstep,
     fwidth,
     mx_cell_noise_float,
+    Fn,
+    If,
   } = THREE.TSL;
   const cellPx = float(FLECK_CELL_PX);
   const inWater = step(float(0.5), insideHere);
-  let out = float(0);
-  for (let g = 0; g < 2; g++) {
-    for (let k = 0; k < FLECK_DIRECTIONS; k++) {
-      const phase = tSec.div(float(FLECK_LIFE_SEC)).add(float(g * 0.5 + k * 0.137));
-      const generation = floor(phase);
-      const age = fract(phase);
-      const tau = age.mul(float(FLECK_LIFE_SEC));
-      // This frame's launch: direction k, turned a different amount every generation,
-      // at a speed of its own.
-      const turn = fract(generation.mul(float(0.618034)).add(float(k * 0.271)));
-      const angle = float(k / FLECK_DIRECTIONS)
-        .add(turn.mul(float(1 / FLECK_DIRECTIONS)))
-        .mul(float(2 * Math.PI));
-      const speed = mix(
-        float(FLECK_SPEED_MIN),
-        float(FLECK_SPEED_MAX),
-        fract(generation.mul(float(0.3719)).add(float(k * 0.4142)))
-      );
-      const dir = vec2(cos(angle), sin(angle));
-      const tAir = min(tau, float(FLECK_AIR_SEC));
-      const airFrac = tAir.div(float(FLECK_AIR_SEC));
-      // Out along the launch direction, slowing as it falls.
-      const flight = dir
-        .mul(speed)
-        .mul(tAir)
-        .mul(float(1).sub(airFrac.mul(float(0.4))));
-      const landOffset = dir.mul(speed).mul(float(FLECK_AIR_SEC * 0.6));
-      const afterAir = max(tau.sub(float(FLECK_AIR_SEC)), float(0));
-      const scatter = vec2(dir.y.negate(), dir.x).mul(
-        fract(generation.mul(float(0.7311)).add(float(k * 0.1913)))
-          .sub(float(0.5))
-          .mul(float(2 * FLECK_SCATTER_PX))
-      );
-      const drift = velocityPx.add(scatter).mul(afterAir).mul(inWater);
-      const q = worldXY.sub(flight).sub(drift);
+  // The 12-fleck loop, as a function so the gated path below can run it
+  // inside a branch. Unchanged maths.
+  const fleckCoverage = () => {
+    let out = float(0);
+    for (let g = 0; g < 2; g++) {
+      for (let k = 0; k < FLECK_DIRECTIONS; k++) {
+        const phase = tSec.div(float(FLECK_LIFE_SEC)).add(float(g * 0.5 + k * 0.137));
+        const generation = floor(phase);
+        const age = fract(phase);
+        const tau = age.mul(float(FLECK_LIFE_SEC));
+        // This frame's launch: direction k, turned a different amount every generation,
+        // at a speed of its own.
+        const turn = fract(generation.mul(float(0.618034)).add(float(k * 0.271)));
+        const angle = float(k / FLECK_DIRECTIONS)
+          .add(turn.mul(float(1 / FLECK_DIRECTIONS)))
+          .mul(float(2 * Math.PI));
+        const speed = mix(
+          float(FLECK_SPEED_MIN),
+          float(FLECK_SPEED_MAX),
+          fract(generation.mul(float(0.3719)).add(float(k * 0.4142)))
+        );
+        const dir = vec2(cos(angle), sin(angle));
+        const tAir = min(tau, float(FLECK_AIR_SEC));
+        const airFrac = tAir.div(float(FLECK_AIR_SEC));
+        // Out along the launch direction, slowing as it falls.
+        const flight = dir
+          .mul(speed)
+          .mul(tAir)
+          .mul(float(1).sub(airFrac.mul(float(0.4))));
+        const landOffset = dir.mul(speed).mul(float(FLECK_AIR_SEC * 0.6));
+        const afterAir = max(tau.sub(float(FLECK_AIR_SEC)), float(0));
+        const scatter = vec2(dir.y.negate(), dir.x).mul(
+          fract(generation.mul(float(0.7311)).add(float(k * 0.1913)))
+            .sub(float(0.5))
+            .mul(float(2 * FLECK_SCATTER_PX))
+        );
+        const drift = velocityPx.add(scatter).mul(afterAir).mul(inWater);
+        const q = worldXY.sub(flight).sub(drift);
 
-      const cell = floor(q.div(cellPx));
-      const seed = vec3(cell.x, cell.y, generation.add(float(k * 131 + g * 977)));
-      const hExist = mx_cell_noise_float(seed);
-      const hX = mx_cell_noise_float(seed.add(vec3(13, 0, 0)));
-      const hY = mx_cell_noise_float(seed.add(vec3(0, 29, 0)));
-      const hSize = mx_cell_noise_float(seed.add(vec3(0, 0, 71)));
-      const hLead = mx_cell_noise_float(seed.add(vec3(53, 0, 19)));
-      // Spawn well inside the cell, so a 2×2 fleck is never clipped by a neighbour.
-      const spawn = cell.add(vec2(hX, hY).mul(float(0.5)).add(float(0.25))).mul(cellPx);
-      // Waves come in sets: a whole stretch of wall throws, or doesn't, per generation.
-      const hBurst = mx_cell_noise_float(
-        vec3(floor(spawn.x.div(float(48))), floor(spawn.y.div(float(48))), generation.add(float(k * 7)))
-      );
-      // Where this fleck actually left the water: back along its own path by its lead.
-      const launchedAt = spawn.sub(dir.mul(hLead.mul(float(FLECK_LEAD_PX))));
-      const thrown = step(hExist, sprayAt(launchedAt).mul(float(FLECK_DENSITY)).mul(uSpray)).mul(
-        step(float(0.35), hBurst)
-      );
+        const cell = floor(q.div(cellPx));
+        const seed = vec3(cell.x, cell.y, generation.add(float(k * 131 + g * 977)));
+        const hExist = mx_cell_noise_float(seed);
+        const hX = mx_cell_noise_float(seed.add(vec3(13, 0, 0)));
+        const hY = mx_cell_noise_float(seed.add(vec3(0, 29, 0)));
+        const hSize = mx_cell_noise_float(seed.add(vec3(0, 0, 71)));
+        const hLead = mx_cell_noise_float(seed.add(vec3(53, 0, 19)));
+        // Spawn well inside the cell, so a 2×2 fleck is never clipped by a neighbour.
+        const spawn = cell.add(vec2(hX, hY).mul(float(0.5)).add(float(0.25))).mul(cellPx);
+        // Waves come in sets: a whole stretch of wall throws, or doesn't, per generation.
+        const hBurst = mx_cell_noise_float(
+          vec3(floor(spawn.x.div(float(48))), floor(spawn.y.div(float(48))), generation.add(float(k * 7)))
+        );
+        // Where this fleck actually left the water: back along its own path by its lead.
+        const launchedAt = spawn.sub(dir.mul(hLead.mul(float(FLECK_LEAD_PX))));
+        const thrown = step(hExist, sprayAt(launchedAt).mul(float(FLECK_DENSITY)).mul(uSpray)).mul(
+          step(float(0.35), hBurst)
+        );
 
-      const landedWet = step(float(0.25), waterAt(spawn.add(landOffset)));
-      const airborne = step(tau, float(FLECK_AIR_SEC));
-      const riding = inWater.mul(landedWet).mul(float(1).sub(smoothstep(float(0.65), float(1), age)));
-      const grounded = float(1)
-        .sub(inWater)
-        .mul(float(1).sub(landedWet))
-        .mul(float(1).sub(smoothstep(float(FLECK_AIR_SEC), float(FLECK_AIR_SEC + FLECK_GROUND_FADE_SEC), tau)));
-      const visible = airborne
-        .add(float(1).sub(airborne).mul(riding.add(grounded)))
-        .mul(smoothstep(float(0), float(0.02), age));
+        const landedWet = step(float(0.25), waterAt(spawn.add(landOffset)));
+        const airborne = step(tau, float(FLECK_AIR_SEC));
+        const riding = inWater.mul(landedWet).mul(float(1).sub(smoothstep(float(0.65), float(1), age)));
+        const grounded = float(1)
+          .sub(inWater)
+          .mul(float(1).sub(landedWet))
+          .mul(float(1).sub(smoothstep(float(FLECK_AIR_SEC), float(FLECK_AIR_SEC + FLECK_GROUND_FADE_SEC), tau)));
+        const visible = airborne
+          .add(float(1).sub(airborne).mul(riding.add(grounded)))
+          .mul(smoothstep(float(0), float(0.02), age));
 
-      // Height of the arc: 2×2 and a touch brighter near the top.
-      const height = airFrac.mul(float(1).sub(airFrac)).mul(float(4)).mul(airborne);
-      const size = float(1).add(max(step(float(0.5), height), step(float(0.55), hSize)));
-      const corner = floor(spawn);
-      const pix = floor(q);
-      const inside = step(corner.x.sub(float(0.5)), pix.x)
-        .mul(step(pix.x, corner.x.add(size).sub(float(0.5))))
-        .mul(step(corner.y.sub(float(0.5)), pix.y))
-        .mul(step(pix.y, corner.y.add(size).sub(float(0.5))));
-      const bright = mix(float(FLECK_OPACITY), float(0.95), height);
-      out = max(out, inside.mul(thrown).mul(visible).mul(bright));
+        // Height of the arc: 2×2 and a touch brighter near the top.
+        const height = airFrac.mul(float(1).sub(airFrac)).mul(float(4)).mul(airborne);
+        const size = float(1).add(max(step(float(0.5), height), step(float(0.55), hSize)));
+        const corner = floor(spawn);
+        const pix = floor(q);
+        const inside = step(corner.x.sub(float(0.5)), pix.x)
+          .mul(step(pix.x, corner.x.add(size).sub(float(0.5))))
+          .mul(step(corner.y.sub(float(0.5)), pix.y))
+          .mul(step(pix.y, corner.y.add(size).sub(float(0.5))));
+        const bright = mix(float(FLECK_OPACITY), float(0.95), height);
+        out = max(out, inside.mul(thrown).mul(visible).mul(bright));
+      }
     }
-  }
+    return out;
+  };
   // Zoomed far out a fleck is smaller than a screen pixel and would only sparkle.
-  const fadeOut = smoothstep(float(2.5), float(1), fwidth(worldXY.x));
-  return clamp(out.mul(fadeOut), float(0), float(1));
+  if (!shoreAbsDist) {
+    const fadeOut = smoothstep(float(2.5), float(1), fwidth(worldXY.x));
+    return clamp(fleckCoverage().mul(fadeOut), float(0), float(1));
+  }
+  // ⚠️ ONLY WHERE A FLECK CAN BE (2026-10-25, Water-Performance-Audit W-06).
+  // The loop above is 12 flecks × 6 cell hashes + a burst hash + sin/cos + two
+  // DEPENDENT texture reads, and it ran on every pixel of both meshes. A fleck
+  // is thrown from a spray EMITTER, which production writes only on the
+  // water side of a solid face (`water-sim.js#sprayEmit` — not advected), so
+  // every pixel it can ever cover lies within `fleckReachPx` of a shore.
+  // Past that, and when zoomed out past the fade, and with spray at 0, the
+  // result was exactly 0 already. `fadeOut`'s derivative is ASSIGNED in the
+  // body before the `If` (uniform control flow) — a node merely built outside
+  // would still be emitted at its first use, inside the branch.
+  const reach = fleckReachPx(THREE.TSL, { velocityPx, emitterBandPx: emitterBandPx ?? float(64) });
+  return Fn(() => {
+    const fadeOut = smoothstep(float(2.5), float(1), fwidth(worldXY.x)).toVar('fleckFadeOut');
+    const result = float(0).toVar('fleckCoverage');
+    If(
+      fadeOut
+        .greaterThan(float(0))
+        .and(uSpray.greaterThan(float(0)))
+        .and(shoreAbsDist.lessThan(reach)),
+      () => {
+        result.assign(clamp(fleckCoverage().mul(fadeOut), float(0), float(1)));
+      }
+    );
+    return result;
+  })();
+}
+
+/**
+ * The farthest a break-spray fleck can be drawn from the SDF's zero contour,
+ * world px — a CONSERVATIVE bound, summed term by term from
+ * `buildBreakSpecks`' own motion: the emitter's own offset from the contour
+ * (`emitterBandPx`), the lead back along its path (`FLECK_LEAD_PX`), the
+ * flight (≤ max speed × air time), the ride on the current after landing
+ * (≤ (|velocity| + scatter) × the rest of its life), and one cell plus a 2×2
+ * fleck. Exported for the Node test that checks it against brute force.
+ * @param {*} TSL @param {{velocityPx: *, emitterBandPx: *}} args
+ * @returns {*} a float node
+ */
+export function fleckReachPx(TSL, { velocityPx, emitterBandPx }) {
+  const { float, length } = TSL;
+  const ride = length(velocityPx)
+    .add(float(FLECK_SCATTER_PX))
+    .mul(float(FLECK_LIFE_SEC - FLECK_AIR_SEC));
+  return emitterBandPx.add(float(FLECK_LEAD_PX + FLECK_SPEED_MAX * FLECK_AIR_SEC + FLECK_CELL_PX + 2)).add(ride);
+}
+
+/** {@link fleckReachPx} in plain numbers, for tests and reports. */
+export function fleckReachPxNumber({ speedPx, emitterBandPx }) {
+  return (
+    emitterBandPx +
+    FLECK_LEAD_PX +
+    FLECK_SPEED_MAX * FLECK_AIR_SEC +
+    FLECK_CELL_PX +
+    2 +
+    (Math.abs(speedPx) + FLECK_SCATTER_PX) * (FLECK_LIFE_SEC - FLECK_AIR_SEC)
+  );
 }
 
 /** One flow-map cycle, seconds: how long the foam texture rides the current before it
@@ -513,11 +587,6 @@ export function buildFoamTexture(THREE, { worldXY, density, tSec, texturePx, vel
   } = THREE.TSL;
   const scale = max(texturePx, float(4));
   const p = worldXY.div(scale);
-  // Screen-space AA widths, from the domain's own derivative, OUTSIDE the branch.
-  const fwP = fwidth(p.x).add(fwidth(p.y));
-  const k = max(float(0.14), fwP.mul(float(4)));
-  const aaA = max(float(0.05), fwP.mul(float(2.8 * 1.5)));
-  const aaB = max(float(0.05), fwP.mul(float(6.1 * 1.5)));
   const d = clamp(density, float(0), float(1));
   const vel = velocityPx ? velocityPx.div(scale) : vec2(0, 0);
   const cyc = tSec.div(float(FLOW_CYCLE_SEC));
@@ -527,7 +596,7 @@ export function buildFoamTexture(THREE, { worldXY, density, tSec, texturePx, vel
   const w0 = float(1).sub(abs(ph0.mul(float(2)).sub(float(1))));
   const w1 = float(1).sub(w0);
 
-  const layer = (q) => {
+  const layer = (q, aaA, aaB) => {
     // Warp: two low-frequency noises push the domain around by ~a third of a clump,
     // so neither the clumps nor the bubbles line up into a visible lattice.
     const warp = vec2(
@@ -554,10 +623,22 @@ export function buildFoamTexture(THREE, { worldXY, density, tSec, texturePx, vel
   };
 
   return Fn(() => {
+    // Screen-space AA widths, from the domain's own derivative, OUTSIDE the branch.
+    // ⚠️ ASSIGNED HERE, INSIDE THE `Fn` (fixed 2026-10-25). These used to be
+    // built above the `Fn`, which does not decide where they are EMITTED: TSL
+    // writes a node at its first use, which was inside the `If`, so the
+    // generated WGSL ran `fwidth` per-pixel-branched (seen in the shader dump)
+    // and a quad straddling `d > 0.002` differentiated against lanes that
+    // never computed `p`. A `toVar` made in the body is assigned at this
+    // statement, in uniform control flow.
+    const fwP = fwidth(p.x).add(fwidth(p.y)).toVar('foamTextureFw');
+    const k = max(float(0.14), fwP.mul(float(4)));
+    const aaA = max(float(0.05), fwP.mul(float(2.8 * 1.5)));
+    const aaB = max(float(0.05), fwP.mul(float(6.1 * 1.5)));
     const out = float(0).toVar('foamTextureOut');
     If(d.greaterThan(float(0.002)), () => {
-      const l0 = layer(p.sub(vel.mul(ph0.mul(float(FLOW_CYCLE_SEC)))));
-      const l1 = layer(p.sub(vel.mul(ph1.mul(float(FLOW_CYCLE_SEC)))).add(vec2(37.1, 11.3)));
+      const l0 = layer(p.sub(vel.mul(ph0.mul(float(FLOW_CYCLE_SEC)))), aaA, aaB);
+      const l1 = layer(p.sub(vel.mul(ph1.mul(float(FLOW_CYCLE_SEC)))).add(vec2(37.1, 11.3)), aaA, aaB);
       // Variance-preserving blend of the two noises BEFORE the threshold, so clumps
       // stay crisp mid-fade instead of becoming a double exposure.
       const norm = sqrt(w0.mul(w0).add(w1.mul(w1)));

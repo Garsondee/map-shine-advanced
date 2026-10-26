@@ -104,7 +104,12 @@ import {
   WATER_MASK_FILTER,
   WATER_BODY_SUPERSAMPLE,
 } from '../../src/effects/water/water-body.js';
-import { WATER_DEBUG_CHANNELS } from '../../src/effects/water/water.js';
+import { WATER_DEBUG_CHANNELS, WATER_PARAMS } from '../../src/effects/water/water.js';
+import { createWindHandle } from '../../src/world/wind-access.js';
+// A namespace import, so this bench still loads against an older `water-sim.js`
+// that has no `buildWaterSimSoftMaterial` (the regression snapshot's baselines).
+import * as waterSimModule from '../../src/effects/water/water-sim.js';
+import { hexToRgb01 } from '../../src/effects/candle-flame-geometry.js';
 import { buildWorldSpaceOutdoorsGate } from '../../src/effects/lighting/environmental-light.js';
 import { computeCameraFrustum, QUAD_UVS, QUAD_INDICES, buildQuadPositions } from '../../src/scene/world-quad.js';
 // ── REAL-MAP SCENARIO (2026-08-18) — see `real-underground-river-flow`
@@ -132,7 +137,7 @@ import { createWaterRefractionSubsystem } from '../../src/effects/water/water-re
 // one member"), not a silent skip. `buildSceneAttrZeroMrt` is the real,
 // unmodified production fix — imported, never transcribed.
 import { buildSceneAttrZeroMrt } from '../../src/vt/scene-attr.js';
-import { evaluate } from './contract.js';
+import { evaluate, saveArtifact } from './contract.js';
 
 /** The bench's world rect — bigger than specular's (2000²): a river needs
  * room for real bends, and `WATER_TIER1_DEPTH_SCALE_PX` (256) and the foam
@@ -501,8 +506,15 @@ export function createWaterBench({ THREE, renderer, log }) {
   function rebuildBodyMaterials() {
     const prevJfa = bodyMaterials?.jfa;
     bodyMaterials?.seed?.material?.dispose?.();
+    bodyMaterials?.seed?.fraction?.material?.dispose?.();
     bodyMaterials?.resolve?.material?.dispose?.();
-    const seed = buildWaterSeedMaterial({ THREE, maskTexture, width: floodW, height: floodH });
+    const seed = buildWaterSeedMaterial({
+      THREE,
+      maskTexture,
+      width: floodW,
+      height: floodH,
+      fractionTexture: jfaPongRt.texture, // production's two-pass seed (W-20)
+    });
     const jfa =
       prevJfa ?? buildWaterJfaStepMaterial({ THREE, prevTexture: jfaPingRt.texture, width: floodW, height: floodH });
     const resolve = buildWaterBodyResolveMaterial({
@@ -521,6 +533,7 @@ export function createWaterBench({ THREE, renderer, log }) {
    * own targets. One-shot: the bench's mask never changes mid-session, so
    * there is no per-frame poll to replicate, only the bake itself. */
   function bakeBody() {
+    if (bodyMaterials.seed.fraction) renderQuadPass(jfaPongRt, bodyMaterials.seed.fraction.quad);
     renderQuadPass(jfaPingRt, bodyMaterials.seed.quad);
     let readFromPing = true;
     for (let i = 0; i < jfaSteps; i++) {
@@ -680,10 +693,12 @@ export function createWaterBench({ THREE, renderer, log }) {
     meshRefract.visible = !showDebug && !!surface.refractMaterial;
   }
 
+  /** `regression-snapshot`'s optional view centre (world px) — null = the world centre. */
+  let viewCentreOverride = null;
   /** The camera rect currently on screen — zoom 1 is the whole world rect. */
   function viewRect() {
-    const cx = (WATER_RECT.minX + WATER_RECT.maxX) / 2;
-    const cy = (WATER_RECT.minY + WATER_RECT.maxY) / 2;
+    const cx = viewCentreOverride ? viewCentreOverride.x : (WATER_RECT.minX + WATER_RECT.maxX) / 2;
+    const cy = viewCentreOverride ? viewCentreOverride.y : (WATER_RECT.minY + WATER_RECT.maxY) / 2;
     const halfW = ((WATER_RECT.maxX - WATER_RECT.minX) / 2) * state.zoom;
     const halfH = ((WATER_RECT.maxY - WATER_RECT.minY) / 2) * state.zoom;
     return { minX: cx - halfW, minY: cy - halfH, maxX: cx + halfW, maxY: cy + halfH };
@@ -1493,6 +1508,7 @@ export function createWaterBench({ THREE, renderer, log }) {
         renderWaterPass: renderQuadPass,
         createFlowTexture: (data, w, h, filter) => makeTex(data, w, h, filter),
         getWaterRenderState: () => ({ params: { flowAngleDeg: bearingDeg } }),
+        texelBudgetPerFrame: Infinity, // the whole bake in one call (production slices it over frames)
       });
       flow.maybeBake();
       const flowStatus = flow.getStatus();
@@ -2169,6 +2185,7 @@ export function createWaterBench({ THREE, renderer, log }) {
         renderWaterPass: renderQuadPass,
         createFlowTexture: (data, w, h, filter) => makeTex(data, w, h, filter),
         getWaterRenderState: () => ({ params: { flowAngleDeg: bearingDeg } }),
+        texelBudgetPerFrame: Infinity, // the whole bake in one call (production slices it over frames)
       });
       flow.maybeBake();
       const flowStatus = flow.getStatus();
@@ -2257,8 +2274,15 @@ export function createWaterBench({ THREE, renderer, log }) {
         const buf = await renderer.readRenderTargetPixelsAsync(rt, 0, 0, gw, gh);
         const raw = buf instanceof Promise ? await buf : buf;
         const u16 = raw instanceof Uint16Array ? raw : new Uint16Array(raw.buffer ?? raw);
+        // The sim pack is single-channel (R16F) since 2026-10-25 (W-05/W-10);
+        // read the row stride off the buffer itself, since a GPU readback can
+        // pad rows, and the channel count off the target's format.
+        const channels = rt.texture.format === THREE.RedFormat ? 1 : 4;
+        const rowStride = u16.length / gh;
         const foam = new Float32Array(gw * gh);
-        for (let i = 0; i < gw * gh; i++) foam[i] = halfToFloat(u16[i * 4]);
+        for (let y = 0; y < gh; y++) {
+          for (let x = 0; x < gw; x++) foam[y * gw + x] = halfToFloat(u16[y * rowStride + x * channels]);
+        }
         return { foam, w: gw, h: gh };
       }
 
@@ -2692,10 +2716,15 @@ export function createWaterBench({ THREE, renderer, log }) {
         renderWaterPass: renderQuadPass,
         createFlowTexture: (data, w, h, filter) => makeTex(data, w, h, filter),
         getWaterRenderState: () => ({ params: { flowAngleDeg: bearingDeg } }),
+        texelBudgetPerFrame: Infinity, // the whole bake in one call (production slices it over frames)
       });
       flow.maybeBake();
       const flowStatus = flow.getStatus();
-      const finestPackRt = packRtCandidates.find((rt) => rt.texture === flow.texture) ?? null;
+      // The finest level's own FULL-FLOAT scratch pack — created last of the
+      // `*.pack` targets. `flow.texture` itself is now the RGBA16F PUBLISHED
+      // copy (`water.flow.published`, W-05), which this Float32 readback must
+      // not be pointed at.
+      const finestPackRt = packRtCandidates[packRtCandidates.length - 1] ?? null;
       const finestW = finestPackRt?.width ?? 0;
       const finestH = finestPackRt?.height ?? 0;
       if (!finestPackRt) {
@@ -3204,6 +3233,495 @@ export function createWaterBench({ THREE, renderer, log }) {
       return null;
     }
   }
+
+  // ── THE PERFORMANCE-REGRESSION SNAPSHOT (2026-10-25) ────────────────────
+  // `docs/planning/Water-Performance-Fix-Proposals-2026-10-25.md` changes how
+  // the water shaders are BUILT (branches, gates, discards) without meaning to
+  // change what they DRAW. This scenario is the proof: it builds a FRESH
+  // production material at every tier with every input wired (sim pack, flow
+  // pack, wind handle, sun-shadow field, depth-authority occluder, capture),
+  // pushes every schema default the way `water-surface-subsystem.js#sync`
+  // does, renders at fixed clocks, and either SAVES the raw half-float frames
+  // (`params.save: true` → a baseline) or DIFFS them against a saved run
+  // (`params.baseline: '<runId>'`). Every case also has to compile and draw —
+  // a WGSL uniformity error shows up here as a failed check, not as a black
+  // river on the author's map.
+  scenarios.set('regression-snapshot', {
+    name: 'regression-snapshot',
+    summary:
+      'Fresh production material per tier (0-5) with every input wired, every schema default pushed, ' +
+      'fixed clocks. params.save=true writes the baseline frames; params.baseline=<runId> diffs against one.',
+    async run({ runId, params = {} }) {
+      const calOk = await selfTest();
+      applyFixture(paintRiver);
+      bakeBody();
+      const { uniform: uni, float: flt, vec4: v4 } = THREE.TSL;
+      // `params.zoom` < 1 zooms in about the world centre — needed to see break
+      // spray at all (its flecks fade out past 2.5 world px per screen px).
+      const savedZoom = state.zoom;
+      if (Number.isFinite(params.zoom)) state.zoom = params.zoom;
+      // `params.centre` ({x, y} world px) re-centres the zoomed view.
+      const savedCentre = viewCentreOverride;
+      if (params.centre) viewCentreOverride = params.centre;
+
+      // ── synthetic but non-degenerate inputs ─────────────────────────────
+      const N = 256;
+      const presenceAt = (u, v) => (paintRiver(u, v)[0] > 0 ? 1 : 0);
+      const simData = new Uint8Array(N * N * 4);
+      const flowData = new Float32Array(N * N * 4);
+      for (let y = 0; y < N; y++) {
+        for (let x = 0; x < N; x++) {
+          const u = (x + 0.5) / N;
+          const v = (y + 0.5) / N;
+          const i = (y * N + x) * 4;
+          const wet = presenceAt(u, v);
+          const blob = Math.max(0, Math.sin(u * 41) * Math.sin(v * 37) + Math.sin(u * 13 + v * 9) * 0.5);
+          simData[i] = Math.round(255 * Math.min(1, blob) * wet);
+          // G (spray emitter) only where production writes it: on the water
+          // side of a solid face (`water-sim.js` — the current driving into a
+          // wall). Filled in by the shore pass below.
+          simData[i + 1] = 0;
+          simData[i + 3] = 255;
+          const vx = 0.35 * Math.sin(v * 9 + u * 3);
+          const vy = 0.9 + 0.2 * Math.cos(u * 7);
+          flowData[i] = vx * wet;
+          flowData[i + 1] = vy * wet;
+          flowData[i + 2] = (Math.hypot(vx, vy) / 2.5) * wet;
+          flowData[i + 3] = 1 - wet;
+        }
+      }
+      for (let y = 0; y < N; y++) {
+        for (let x = 0; x < N; x++) {
+          if (!presenceAt((x + 0.5) / N, (y + 0.5) / N)) continue;
+          let nearSolid = false;
+          for (let dy = -2; dy <= 2 && !nearSolid; dy++) {
+            for (let dx = -2; dx <= 2 && !nearSolid; dx++) {
+              const nx = x + dx;
+              const ny = y + dy;
+              if (nx < 0 || ny < 0 || nx >= N || ny >= N) continue;
+              if (!presenceAt((nx + 0.5) / N, (ny + 0.5) / N)) nearSolid = true;
+            }
+          }
+          if (nearSolid) {
+            const u = (x + 0.5) / N;
+            const v = (y + 0.5) / N;
+            simData[(y * N + x) * 4 + 1] = Math.round(255 * Math.max(0, Math.sin(u * 23 + v * 31)));
+          }
+        }
+      }
+      const simTex = makeTex(simData, N, N, 'linear');
+      // The spray emitter as production now feeds it (W-05/W-10): its own
+      // texture, R = the same bytes as `simData`'s G.
+      const sprayData = new Uint8Array(N * N * 4);
+      for (let i = 0; i < N * N; i++) {
+        sprayData[i * 4] = simData[i * 4 + 1];
+        sprayData[i * 4 + 3] = 255;
+      }
+      const sprayTex = makeTex(sprayData, N, N, 'linear');
+      // The sim's PRE-BLURRED foam, made by production's own soft-gather pass
+      // (W-06/W-12) when this checkout has it — `params.noSoft` forces the old
+      // per-pixel gather.
+      let simSoftRt = null;
+      if (!params.noSoft && typeof waterSimModule.buildWaterSimSoftMaterial === 'function') {
+        simSoftRt = new THREE.RenderTarget(N, N, {
+          type: THREE.HalfFloatType,
+          format: THREE.RedFormat,
+          colorSpace: THREE.NoColorSpace,
+          depthBuffer: false,
+          minFilter: THREE.LinearFilter,
+          magFilter: THREE.LinearFilter,
+        });
+        const soft = waterSimModule.buildWaterSimSoftMaterial({
+          THREE,
+          simTexture: simTex,
+          width: N,
+          height: N,
+          uSpacing: uni(flt(WATER_PARAMS.simFoamSmoothing?.default ?? 1.5)),
+        });
+        renderQuadPass(simSoftRt, soft.quad);
+        soft.material.dispose();
+      }
+      const flowTex = new THREE.DataTexture(flowData, N, N, THREE.RGBAFormat, THREE.FloatType);
+      flowTex.minFilter = THREE.NearestFilter;
+      flowTex.magFilter = THREE.NearestFilter;
+      flowTex.needsUpdate = true;
+      const shadowData = new Uint8Array(128 * 128 * 4);
+      for (let y = 0; y < 128; y++) {
+        for (let x = 0; x < 128; x++) {
+          const i = (y * 128 + x) * 4;
+          const lit = x < 40 || x > 62 ? 255 : 0;
+          shadowData[i] = lit;
+          shadowData[i + 1] = lit;
+          shadowData[i + 2] = lit;
+          shadowData[i + 3] = 255;
+        }
+      }
+      const shadowTex = makeTex(shadowData, 128, 128, 'linear');
+      const windHandle = createWindHandle({
+        version: 1,
+        ambientWind: { directionDeg: uni(flt(35)), speed01: uni(flt(0.6)), gustiness01: uni(flt(0.4)) },
+      });
+      // The depth-authority occluder: a "roof" over one part of the river.
+      const depthRt = new THREE.RenderTarget(SCREEN_DIM, SCREEN_DIM, { depthBuffer: true });
+      depthRt.depthTexture = new THREE.DepthTexture(SCREEN_DIM, SCREEN_DIM);
+      depthRt.depthTexture.type = THREE.FloatType;
+      const roofMat = new THREE.NodeMaterial();
+      roofMat.colorNode = v4(0, 0, 0, 1);
+      roofMat.depthNode = flt(0.25);
+      roofMat.depthTest = false;
+      roofMat.depthWrite = true;
+      roofMat.side = THREE.DoubleSide;
+      const roofGeo = new THREE.BufferGeometry();
+      roofGeo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(QUAD_UVS), 2));
+      roofGeo.setIndex(Array.from(QUAD_INDICES));
+      roofGeo.setAttribute(
+        'position',
+        new THREE.BufferAttribute(
+          new Float32Array(
+            buildQuadPositions([
+              { x: 2300, y: 600 },
+              { x: 3600, y: 600 },
+              { x: 3600, y: 1900 },
+              { x: 2300, y: 1900 },
+            ])
+          ),
+          3
+        )
+      );
+      const roofScene = new THREE.Scene();
+      roofScene.add(Object.assign(new THREE.Mesh(roofGeo, roofMat), { frustumCulled: false }));
+
+      const v = viewRect();
+      const f = computeCameraFrustum(v);
+      Object.assign(camera, { left: f.left, right: f.right, top: f.top, bottom: f.bottom });
+      camera.updateProjectionMatrix();
+      {
+        const prev = renderer.getRenderTarget();
+        renderer.setRenderTarget(depthRt);
+        renderer.render(roofScene, camera);
+        renderer.setRenderTarget(prev);
+      }
+
+      const defaults = {};
+      for (const [k, spec] of Object.entries(WATER_PARAMS)) if ('default' in spec) defaults[k] = spec.default;
+      const pushDefaults = (s, overrides = {}) => {
+        const p = { ...defaults, ...overrides };
+        for (const [k, val] of Object.entries(p)) {
+          const setter = `set${k[0].toUpperCase()}${k.slice(1)}`;
+          if (typeof s[setter] !== 'function') continue;
+          if (k === 'tint') s.setTint(typeof val === 'string' ? hexToRgb01(val) : val);
+          else if (typeof val === 'number' || typeof val === 'boolean') s[setter](val);
+        }
+        s.setFlowPackTexSize?.(N, N);
+        s.setWaterSimTexSize?.(N, N);
+        s.setBodyTexSize?.(floodW, floodH);
+        s.setSunShadowRect?.(WATER_RECT);
+        s.setSunShadowMix?.(1);
+        s.setExpectedDepth?.(0.5);
+        s.setSky({
+          keyDir: waterKeyLightDirection({ elevationDeg: 55, dirX: 0.6, dirY: -0.8 }),
+          keyColor: [1, 0.96, 0.88],
+          keyStrength: 1,
+          fillColor: [0.65, 0.75, 0.9],
+          fillStrength: 0.35,
+        });
+        s.setViewCentre((v.minX + v.maxX) / 2, (v.minY + v.maxY) / 2);
+      };
+
+      // THE SHARED-EVALUATION RESOLVE (W-02) — `params.sharedResolve` renders
+      // production's resolve pass into an MRT target of the frame's own size
+      // before the scene draw, exactly as `vt-pan-viewer.js#runWaterResolvePass`
+      // does, and builds the composites to read it.
+      let resolveRt = null;
+      const resolveScene = new THREE.Scene();
+      const resolveMesh = Object.assign(new THREE.Mesh(geometry, new THREE.NodeMaterial()), { frustumCulled: false });
+      resolveScene.add(resolveMesh);
+      if (params.sharedResolve) {
+        resolveRt = new THREE.RenderTarget(SCREEN_DIM, SCREEN_DIM, {
+          count: 3,
+          type: THREE.HalfFloatType,
+          colorSpace: THREE.NoColorSpace,
+          depthBuffer: false,
+          minFilter: THREE.NearestFilter,
+          magFilter: THREE.NearestFilter,
+        });
+        resolveRt.textures[0].name = 'output';
+        resolveRt.textures[1].name = 'waterAbsorb';
+        resolveRt.textures[2].name = 'waterRefract';
+      }
+      const resolveBaseMrt = THREE.TSL.mrt({
+        output: THREE.TSL.output,
+        waterAbsorb: v4(0, 0, 0, 0),
+        waterRefract: v4(0, 0, 0, 0),
+      });
+      // THE PRE-SAMPLED WIND STRENGTH (W-08) — `params.windField` renders the
+      // viewer's own per-frame pass (length of the real handle's node over a
+      // world rect, 512² R16F) and hands the material the field.
+      let windField = null;
+      let windFieldQuad = null;
+      if (params.windField) {
+        const { uv: uvFn, length: lengthFn, vec2: vec2Fn } = THREE.TSL;
+        const windRt = new THREE.RenderTarget(512, 512, {
+          type: THREE.HalfFloatType,
+          format: THREE.RedFormat,
+          colorSpace: THREE.NoColorSpace,
+          depthBuffer: false,
+          minFilter: THREE.LinearFilter,
+          magFilter: THREE.LinearFilter,
+        });
+        const uRect = uni(v4(WATER_RECT.minX, WATER_RECT.minY, WATER_RECT.maxX, WATER_RECT.maxY));
+        const worldXY = vec2Fn(uRect.x, uRect.y).add(uvFn().mul(vec2Fn(uRect.z.sub(uRect.x), uRect.w.sub(uRect.y))));
+        const windMat = new THREE.NodeMaterial();
+        windMat.fragmentNode = v4(lengthFn(windHandle.node(THREE.TSL, { centerXY: worldXY, time: uTimeMs })), 0, 0, 1);
+        windFieldQuad = new THREE.QuadMesh(windMat);
+        windField = { texture: windRt.texture, uRect, rt: windRt, material: windMat };
+      }
+      const build = (tier) =>
+        buildWaterSurfaceMaterial({
+          windStrengthField: windField ? { texture: windField.texture, uRect: windField.uRect } : null,
+          sharedResolve: !!params.sharedResolve,
+          resolveTextures: resolveRt
+            ? { output: resolveRt.textures[0], absorb: resolveRt.textures[1], refract: resolveRt.textures[2] }
+            : null,
+          THREE,
+          maskTexture,
+          maskRect: WATER_RECT,
+          bodyTexture: bodyRt.texture,
+          bodyRect: WATER_RECT,
+          bodyTexSize: [floodW, floodH],
+          timeMsNode: uTimeMs,
+          uViewRect,
+          uOutdoorsRect,
+          outdoorsTexNode,
+          buildOutdoorsGate: buildWorldSpaceOutdoorsGate,
+          windHandle,
+          depthTexture: depthRt.depthTexture,
+          sunShadowTexture: shadowTex,
+          flowPackTexture: flowTex,
+          flowPackTexSize: { width: N, height: N },
+          waterSimTexture: simTex,
+          waterSimTexSize: { width: N, height: N },
+          waterSimSoftTexture: simSoftRt?.texture ?? null,
+          waterSprayTexture: params.noSpray ? null : sprayTex,
+          capturedTexture: makeCheckerTex(64, 64, 8),
+          capturedRect: WATER_RECT,
+          capturedTexSize: { width: 64, height: 64 },
+          tier,
+          debugChannel: 0,
+        });
+
+      const restore = {
+        a: meshAbsorb.material,
+        i: meshInscatter.material,
+        r: meshRefract.material,
+        av: meshAbsorb.visible,
+        iv: meshInscatter.visible,
+        rv: meshRefract.visible,
+      };
+      const renderRaw = async () => {
+        const prevTarget = renderer.getRenderTarget();
+        const prevClear = new THREE.Color();
+        renderer.getClearColor(prevClear);
+        const prevAlpha = renderer.getClearAlpha();
+        const previousMRT = renderer.getMRT();
+        if (resolveRt && resolveMesh.material?.isNodeMaterial && meshAbsorb.visible) {
+          renderer.setClearColor(new THREE.Color(0, 0, 0), 0);
+          renderer.setMRT(resolveBaseMrt);
+          renderer.setRenderTarget(resolveRt);
+          renderer.render(resolveScene, camera);
+        }
+        renderer.setClearColor(new THREE.Color(...state.bedColor), 1);
+        renderer.setMRT(waterZeroMrt);
+        renderer.setRenderTarget(rt);
+        renderer.render(scene, camera);
+        renderer.setRenderTarget(prevTarget);
+        renderer.setMRT(previousMRT);
+        renderer.setClearColor(prevClear, prevAlpha);
+        const buf = await renderer.readRenderTargetPixelsAsync(rt, 0, 0, SCREEN_DIM, SCREEN_DIM);
+        const raw = buf instanceof Promise ? await buf : buf;
+        return new Uint16Array((raw instanceof Uint16Array ? raw : new Uint16Array(raw.buffer ?? raw)).slice());
+      };
+      const fnv = (u16) => {
+        let h = 0x811c9dc5;
+        for (let i = 0; i < u16.length; i++) {
+          h ^= u16[i];
+          h = Math.imul(h, 0x01000193) >>> 0;
+        }
+        return h.toString(16).padStart(8, '0');
+      };
+
+      const cases = [];
+      const tiers = params.tiers ?? [0, 1, 2, 3, 4, 5];
+      const clocks = params.clocks ?? [1234, 98765];
+      const debugTiers = params.debugTiers ?? [4, 5];
+      const errors = [];
+      for (const tier of tiers) {
+        let s;
+        try {
+          s = build(tier);
+        } catch (err) {
+          errors.push(`tier ${tier} build threw: ${err?.message ?? err}`);
+          continue;
+        }
+        pushDefaults(s, params.overrides ?? {});
+        meshAbsorb.material = s.absorbMaterial;
+        meshInscatter.material = s.inscatterMaterial;
+        if (s.resolveMaterial) resolveMesh.material = s.resolveMaterial;
+        meshRefract.material = s.refractMaterial ?? restore.r;
+        meshAbsorb.visible = true;
+        meshInscatter.visible = true;
+        meshRefract.visible = !!s.refractMaterial;
+        for (const t of clocks) {
+          uTimeMs.value = t;
+          if (windFieldQuad) renderQuadPass(windField.rt, windFieldQuad);
+          try {
+            cases.push({ id: `t${tier}-final-${t}`, builtTier: s.tier, u16: await renderRaw() });
+            if (params.dumpResolve && resolveRt) {
+              for (let k = 0; k < 3; k++) {
+                const b = await renderer.readRenderTargetPixelsAsync(resolveRt, 0, 0, SCREEN_DIM, SCREEN_DIM, k);
+                const raw = b instanceof Promise ? await b : b;
+                const u16 = new Uint16Array(
+                  (raw instanceof Uint16Array ? raw : new Uint16Array(raw.buffer ?? raw)).slice()
+                );
+                cases.push({ id: `t${tier}-resolve${k}-${t}`, builtTier: s.tier, u16 });
+              }
+            }
+          } catch (err) {
+            errors.push(`tier ${tier} @${t} render threw: ${err?.message ?? err}`);
+          }
+        }
+        if (debugTiers.includes(tier)) {
+          const debugMaterial = s.debugMaterial ?? s.buildDebugMaterial?.();
+          meshAbsorb.visible = false;
+          meshRefract.visible = false;
+          meshInscatter.material = debugMaterial;
+          uTimeMs.value = clocks[0];
+          if (windFieldQuad) renderQuadPass(windField.rt, windFieldQuad);
+          for (const ch of WATER_DEBUG_CHANNELS) {
+            if (ch.n === 0) continue;
+            s.setDebugChannel(ch.n);
+            try {
+              cases.push({ id: `t${tier}-dbg${ch.n}-${ch.id}`, builtTier: s.tier, u16: await renderRaw() });
+            } catch (err) {
+              errors.push(`tier ${tier} channel ${ch.id} render threw: ${err?.message ?? err}`);
+            }
+          }
+          s.setDebugChannel(0);
+          debugMaterial?.dispose?.();
+        }
+        s.absorbMaterial.dispose();
+        s.inscatterMaterial.dispose();
+        s.refractMaterial?.dispose?.();
+        s.resolveMaterial?.dispose?.();
+      }
+      state.zoom = savedZoom;
+      viewCentreOverride = savedCentre;
+      Object.assign(meshAbsorb, { material: restore.a, visible: restore.av });
+      Object.assign(meshInscatter, { material: restore.i, visible: restore.iv });
+      Object.assign(meshRefract, { material: restore.r, visible: restore.rv });
+      simTex.dispose();
+      sprayTex.dispose();
+      windField?.rt.dispose();
+      windField?.material.dispose();
+      simSoftRt?.dispose();
+      resolveRt?.dispose();
+      flowTex.dispose();
+      shadowTex.dispose();
+      depthRt.dispose();
+      roofMat.dispose();
+
+      // ── save, or diff ───────────────────────────────────────────────────
+      const manifest = cases.map((c) => ({ id: c.id, builtTier: c.builtTier, hash: fnv(c.u16) }));
+      if (params.save) {
+        for (const c of cases) await saveArtifact(runId, `${c.id}.u16`, new Blob([c.u16.buffer]));
+        await saveArtifact(runId, 'manifest.json', JSON.stringify(manifest, null, 1));
+      }
+      const diffs = [];
+      if (params.baseline) {
+        const base = `/tools/shader-lab/runs/${encodeURIComponent(params.baseline)}`;
+        const baseManifest = await (await fetch(`${base}/manifest.json`)).json();
+        const byId = new Map(baseManifest.map((m) => [m.id, m]));
+        for (const c of cases) {
+          const b = byId.get(c.id);
+          if (!b) {
+            diffs.push({ id: c.id, status: 'new case' });
+            continue;
+          }
+          if (b.hash === fnv(c.u16)) {
+            diffs.push({ id: c.id, status: 'identical' });
+            continue;
+          }
+          const bu16 = new Uint16Array(await (await fetch(`${base}/${encodeURIComponent(c.id)}.u16`)).arrayBuffer());
+          let maxAbs = 0;
+          let changed = 0;
+          let over1Lsb = 0;
+          let sumAbs = 0;
+          const px = c.u16.length / 4;
+          for (let p = 0; p < px; p++) {
+            let pixMax = 0;
+            for (let k = 0; k < 3; k++) {
+              const d = Math.abs(halfToFloat(c.u16[p * 4 + k]) - halfToFloat(bu16[p * 4 + k]));
+              if (d > pixMax) pixMax = d;
+            }
+            if (pixMax > 0) changed++;
+            if (pixMax > 1 / 255) over1Lsb++;
+            if (pixMax > maxAbs) maxAbs = pixMax;
+            sumAbs += pixMax;
+          }
+          diffs.push({
+            id: c.id,
+            status: 'differs',
+            builtTier: c.builtTier,
+            baseBuiltTier: b.builtTier,
+            maxAbs: Number(maxAbs.toPrecision(4)),
+            meanAbs: Number((sumAbs / px).toPrecision(4)),
+            changedPx: changed,
+            over1LsbPx: over1Lsb,
+          });
+        }
+        for (const b of baseManifest)
+          if (!cases.find((c) => c.id === b.id)) diffs.push({ id: b.id, status: 'missing' });
+      }
+      const tol = params.tolerance ?? 1 / 255;
+      const checks = [
+        evaluate('calibration-orientation', () => ({ ok: calOk, measured: calOk })),
+        evaluate('every-case-builds-and-draws', () => ({
+          ok: errors.length === 0,
+          measured: errors.length,
+          expected: 0,
+          note: errors.slice(0, 6).join(' | '),
+        })),
+      ];
+      if (params.baseline) {
+        const bad = diffs.filter(
+          (d) =>
+            d.status === 'missing' || (d.status === 'differs' && (d.maxAbs > tol || d.builtTier !== d.baseBuiltTier))
+        );
+        checks.push(
+          evaluate('matches-baseline-within-tolerance', () => ({
+            ok: bad.length === 0,
+            measured: bad.length,
+            expected: 0,
+            note: bad
+              .slice(0, 8)
+              .map((d) => `${d.id}: ${d.status}${d.maxAbs != null ? ` max ${d.maxAbs} (${d.over1LsbPx}px>1LSB)` : ''}`)
+              .join(' | '),
+          }))
+        );
+      }
+      return {
+        checks,
+        inputs: { tiers, clocks, debugTiers, baseline: params.baseline ?? null, saved: !!params.save },
+        stats: {
+          cases: manifest.length,
+          errors,
+          identical: diffs.filter((d) => d.status === 'identical').length,
+          diffs: diffs.filter((d) => d.status !== 'identical'),
+          manifest,
+        },
+      };
+    },
+  });
 
   applyFixture(paintRiver);
   bakeBody();

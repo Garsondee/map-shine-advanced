@@ -93,6 +93,7 @@ import {
   requestCompressedTexture,
   requestCoarseAlphaGrid,
   getCompressedTextureStats,
+  dropQueuedJobs,
   PRIORITY_INTERACTIVE,
 } from './compressed-textures.js';
 // The pure half of the coarse-alpha grid (dims + channel extraction) — reused
@@ -120,6 +121,9 @@ import {
   computePagePlacement,
 } from './decode-pool.js';
 import { createLogger } from '../core/log.js';
+// "Two floors on screen" detector (loading audit §6.7) — armed at each floor commit,
+// checked once per frame afterwards. Reports only; see the module's header.
+import { createPresentationMonitor } from '../diag/presentation-monitor.js';
 import { buildViewerDiagnostics, describeParallelShaderCompile } from './vt-pan-viewer-diagnostics.js';
 import { loadMaskImageTexture } from './mask-image.js';
 import { createPostFrameScanner, readUiWindowRects } from './ui-shadow-scan.js';
@@ -216,6 +220,9 @@ import {
   composeDripCover,
   quantizeOpacity,
   tileOpacity,
+  // The one-byte-grid -> RGBA expansion four per-floor gates share, cached by array
+  // identity so floor PREPARE does it off screen (loading audit P-06).
+  expandGridToRgba,
 } from '../scene/index.js';
 import {
   computeCameraFrustum,
@@ -455,6 +462,7 @@ import {
   createWaterSimSubsystem,
   waterFoamReachPx,
   createWaterRefractionSubsystem,
+  setWaterSharedResolveOff,
   createFluidSurfaceSubsystem,
   createSpecularSurfaceSubsystem,
   createSpecularTileSurfaceSubsystem,
@@ -560,6 +568,7 @@ import {
   // triggers; the maths and the texture-channel writers live in world/.
   bakeWindStructure,
   outdoorsGridSignature,
+  createWindStructureMemo,
   createWindGridState,
   WIND_SIM_DEFAULT_DECAY_PER_SECOND,
   WIND_SIM_DEFAULT_RELAX_ITERATIONS,
@@ -849,6 +858,12 @@ let _latestGpuDevice = null;
 
 function disposeActive() {
   if (!_active) return;
+  // FIRST, before anything slow: tell this viewer's own async work it is over, and take its
+  // not-yet-started compression jobs out of the shared worker queue so the next scene's
+  // requests are not queued behind them (loading audit L-10). Jobs already inside the worker
+  // finish — they warm the persistent cache the next visit reads.
+  _active.markTornDown?.();
+  dropQueuedJobs(_active.compressionOwner);
   // { capture: true } MUST match the addEventListener call exactly — the two
   // are treated as distinct registrations otherwise, and removal silently no-ops.
   try {
@@ -868,10 +883,14 @@ function disposeActive() {
   } catch (_) {}
   try {
     _active.resizeObserver?.disconnect();
-  } catch (_) {}
+  } catch (err) {
+    log.warn('resize observer disconnect failed — a stray observer may outlive this viewer:', err);
+  }
   try {
     if (_active.onFullscreenChange) document.removeEventListener('fullscreenchange', _active.onFullscreenChange);
-  } catch (_) {}
+  } catch (err) {
+    log.warn('fullscreenchange listener removal failed — a stray listener may outlive this viewer:', err);
+  }
   try {
     _active.renderer.setAnimationLoop(null);
   } catch (_) {}
@@ -1230,7 +1249,44 @@ export function stopVtPanViewer() {
  *   comes back on. Injected so vt/ never reaches into the interface seam itself.
  * @returns {Promise<object>} initial diagnostics (see getDiagnostics() for the shape).
  */
-export async function startVtPanViewer({
+export function startVtPanViewer(options) {
+  // ONE START AT A TIME (loading audit L-03, 2026-10-25). `_active` is assigned at the
+  // very END of a start, after every await in it, so a second start that began while
+  // the first was still booting found `_active` null, its `disposeActive()` did
+  // nothing, and when the first finished and the second then overwrote `_active` the
+  // first viewer — renderer, canvas, rAF loop, window listeners — was orphaned and
+  // never freed. A second `canvasReady` while one is booting is a documented quirk of
+  // Foundry's initial load (and of any module that redraws the canvas). Starts are
+  // now chained: the second begins only after the first has settled, so its
+  // `disposeActive()` genuinely disposes it. The wait is bounded so a start that hangs
+  // outright cannot stand in front of every later scene for the rest of the session.
+  const previous = _startChain;
+  const run = waitForEarlierStart(previous).then(() => startVtPanViewerUnserialized(options));
+  _startChain = run.then(
+    () => undefined,
+    () => undefined
+  );
+  return run;
+}
+
+/** The most a start will wait for an earlier one before going ahead regardless. */
+export const START_CHAIN_MAX_WAIT_MS = 120000;
+
+/** The tail of the start chain: settles when the most recent start has. */
+let _startChain = Promise.resolve();
+
+/** Resolves when `previous` has settled, or after the bound — whichever is first (and drops the timer). */
+function waitForEarlierStart(previous) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, START_CHAIN_MAX_WAIT_MS);
+    previous.then(() => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
+async function startVtPanViewerUnserialized({
   THREE,
   followFoundryCamera = false,
   // RENDER-SCALE SETTING (2026-08-27) — the player's REAL, persisted choice
@@ -2915,6 +2971,56 @@ export async function startVtPanViewer({
     }
 
     /**
+     * FLOOR PREPARE (loading audit P-06, 2026-10-25): do the EXPENSIVE, floor-
+     * independent half of `rebakePerFloorMasks` for `floorIndex` NOW, while the
+     * previous floor is still on screen, so the commit frame only assigns.
+     *
+     * Two costs used to land on the commit:
+     *   1. the first READ of each derived grid. `maskAuthority.getDerived`
+     *      recomputes "synchronously, on the read, inside renderFrame"
+     *      (`scene/mask-authority.js`'s header, ~2.8-4.5 s measured for a whole
+     *      kind), and prepare's own mask loading is exactly what makes it dirty.
+     *      Reading every grid the commit will read pays that here.
+     *   2. the one-byte-to-RGBA expansion of the four gate grids — a 4M-iteration
+     *      loop on a 2048² grid. `expandGridToRgba` caches it against the grid's
+     *      array identity, so the commit's bake finds it done.
+     * It touches no live state: nothing here assigns a texture, moves a gate or
+     * re-points a subsystem. A throw is logged and skipped — the commit then pays
+     * for that one item exactly as it always did.
+     *
+     * @param {number} floorIndex
+     * @returns {{read: string[], failed: string[]}} what was warmed (for the report).
+     */
+    function warmPerFloorBakeInputs(floorIndex) {
+      const read = [];
+      const failed = [];
+      const warm = (label, readGrid, fallbackByte = null) => {
+        try {
+          const grid = readGrid();
+          if (!grid?.data || !grid?.spec) return;
+          const { w, h } = grid.spec;
+          if (fallbackByte !== null && w > 0 && h > 0) expandGridToRgba(grid.data, w, h, fallbackByte);
+          read.push(label);
+        } catch (err) {
+          failed.push(label);
+          log.debug?.(`floor ${floorIndex} bake warm-up: ${label} unavailable (${err?.message ?? err})`);
+        }
+      };
+      warm('outdoors', () => getOutdoorsMaskGrid(floorIndex), 255);
+      warm('fire', () => getFireMaskGrid(floorIndex), 0);
+      warm('ash', () => getAshMaskGrid(floorIndex), 0);
+      // The restrictor product composes per frame (it depends on live tile fades),
+      // so only the plain sky-reach branch is expanded here; reading the product
+      // still pays its derive.
+      warm('weatherRestrictors', () => getWeatherRestrictors(floorIndex)?.sky ?? null);
+      warm('skyReach', () => getSkyReachGrid(floorIndex), 255);
+      warm('coverAbove', () => getCoverAboveGrid(floorIndex));
+      warm('casterHeight', () => getCasterHeightGrid(floorIndex));
+      warm('drip', () => getDripMaskGrid(floorIndex));
+      return { read, failed };
+    }
+
+    /**
      * ⭐ EVERY PER-FLOOR MASK BAKE, IN ONE PLACE — and it exists because the
      * hand-maintained alternative has now been forgotten FOUR TIMES.
      *
@@ -3143,6 +3249,9 @@ export async function startVtPanViewer({
         // same fix until now.
         waterSurface: {
           getFullResMaskTexture: () => getWaterSurfaceForFloor(floorIndex)?.getFullResMaskTexture() ?? null,
+          // W-19 (2026-10-25): lets a BORROWING floor recognise that it has no
+          // mask of its own to load, and stop retrying its bake every frame.
+          hasOwnMaskUrl: () => !!getWaterMaskUrl(floorIndex),
         },
       });
     }
@@ -4136,14 +4245,10 @@ export async function startVtPanViewer({
       // convention), and DataTexture defaults to flipY:false, so uv.v=0 samples
       // row 0 = minY — which is exactly what `quadUvToWorld` hands it. Three
       // spaces, one direction (see environmental-light.js's own orientation note).
-      const data = new Uint8Array(w * h * 4);
-      for (let i = 0; i < w * h; i++) {
-        const v = grid.data[i] ?? 255;
-        data[i * 4 + 0] = v;
-        data[i * 4 + 1] = v;
-        data[i * 4 + 2] = v;
-        data[i * 4 + 3] = 255;
-      }
+      // (`expandGridToRgba`: cached by the grid's array identity — floor PREPARE
+      // expands the target floor's grid off screen, so on the commit frame this is
+      // a lookup. Loading audit P-06.)
+      const data = expandGridToRgba(grid.data, w, h, 255);
       const tex = new THREE.DataTexture(data, w, h, THREE.RGBAFormat, THREE.UnsignedByteType);
       // LINEAR so a doorway reads as a soft transition rather than a stair-step
       // of mask texels — the sky fading in at a threshold is the whole point.
@@ -4196,14 +4301,7 @@ export async function startVtPanViewer({
       // Row 0 = minY (`MaskGrid`'s own convention), DataTexture defaults to
       // flipY:false, so uv.v=0 samples row 0 = minY — the same one-direction
       // agreement `bakeOutdoorsTexture` already documents.
-      const data = new Uint8Array(w * h * 4);
-      for (let i = 0; i < w * h; i++) {
-        const v = grid.data[i] ?? 0;
-        data[i * 4 + 0] = v;
-        data[i * 4 + 1] = v;
-        data[i * 4 + 2] = v;
-        data[i * 4 + 3] = 255;
-      }
+      const data = expandGridToRgba(grid.data, w, h, 0); // cached — see bakeOutdoorsTexture
       // LINEAR — a razor edge here would fight the flame's own soft, noisy
       // silhouette rather than blend with it (`feedback_sdf_does_not_draw_
       // the_edge`: this coarse grid was never meant to draw a crisp edge on
@@ -4253,14 +4351,7 @@ export async function startVtPanViewer({
 
       // Same RGBA-replicate-of-one-byte shape as `bakeFireMaskTexture` — see
       // that function's own note on row 0 = minY / flipY:false.
-      const data = new Uint8Array(w * h * 4);
-      for (let i = 0; i < w * h; i++) {
-        const v = grid.data[i] ?? 0;
-        data[i * 4 + 0] = v;
-        data[i * 4 + 1] = v;
-        data[i * 4 + 2] = v;
-        data[i * 4 + 3] = 255;
-      }
+      const data = expandGridToRgba(grid.data, w, h, 0); // cached — see bakeOutdoorsTexture
       // LINEAR — the mantle's own sampling already softens everything it
       // touches (`sampleMask`'s bilinear fetch); a razor edge here would only
       // fight it, the identical reason the fire mask bake picks it.
@@ -4979,14 +5070,7 @@ export async function startVtPanViewer({
           outdoors: restrictors.outdoors,
         });
       } else {
-        data = new Uint8Array(w * h * 4);
-        for (let i = 0; i < w * h; i++) {
-          const v = grid.data[i] ?? 255;
-          data[i * 4 + 0] = v;
-          data[i * 4 + 1] = v;
-          data[i * 4 + 2] = v;
-          data[i * 4 + 3] = 255;
-        }
+        data = expandGridToRgba(grid.data, w, h, 255); // cached — see bakeOutdoorsTexture
       }
       const tex = createMaskDataTexture(data, w, h, 'linear', false);
       precipSkyReachTexture?.dispose();
@@ -5757,6 +5841,11 @@ export async function startVtPanViewer({
      * forever (see this file's own `updateWindFieldOverlay` for the hand-found
      * instance that motivated it). */
     let windHandleVersion = 0;
+    /** The handle's `layoutVersion` and what it was minted against — see
+     * `publishWindHandle`. Bumps on a regrid or a field-texture swap only. */
+    let windLayoutVersion = 0;
+    let windLayoutKey = '';
+    let windLayoutTextures = [null, null, null];
     /**
      * THE WIND GRID STATE (world/wind-structure.js#createWindGridState) — the
      * baked textures, their backing arrays, the raw per-cell arrays and the
@@ -6102,13 +6191,34 @@ export async function startVtPanViewer({
     function publishWindHandle() {
       windHandleVersion += 1;
       const g = windGrid.structure.gridSpec;
+      // THE LAYOUT VERSION (2026-10-25, Water-Performance-Audit W-01) — moves
+      // only when what a consumer's shader GRAPH bakes in changes: the grid
+      // constants `node()` closes over, or the identity of a field texture.
+      // An ambient-wind change (every tick of a Remote wind fade) rewrites the
+      // textures in place and moves the uniforms, so it bumps `version` (the
+      // particle engines re-copy their buffers) but NOT this — and water,
+      // which rebuilds its materials on a layout change, no longer rebuilds
+      // them every frame of a fade.
+      const liveTexture = windPublishRT?.texture ?? null;
+      const layoutKey = [g.minX, g.minY, g.cellSize, g.cols, g.rows].join('|');
+      if (
+        layoutKey !== windLayoutKey ||
+        windGrid.opennessTexture !== windLayoutTextures[0] ||
+        windGrid.wallAvoidTexture !== windLayoutTextures[1] ||
+        liveTexture !== windLayoutTextures[2]
+      ) {
+        windLayoutVersion += 1;
+        windLayoutKey = layoutKey;
+        windLayoutTextures = [windGrid.opennessTexture, windGrid.wallAvoidTexture, liveTexture];
+      }
       windHandle = createWindHandle({
         version: windHandleVersion,
+        layoutVersion: windLayoutVersion,
         ambientWind: { directionDeg: uWindDirectionDeg, speed01: uWindSpeed01, gustiness01: uWindGustiness01 },
         grid: { originX: g.minX, originY: g.minY, cellSize: g.cellSize, cols: g.cols, rows: g.rows },
         opennessTexture: windGrid.opennessTexture,
         wallAvoidTexture: windGrid.wallAvoidTexture,
-        liveTexture: windPublishRT?.texture ?? null,
+        liveTexture,
         cells: windGrid.cells,
         cpuExposureAt: sampleWindExposureAt,
       });
@@ -6126,6 +6236,49 @@ export async function startVtPanViewer({
       particleEngine?.updateWind(windHandle);
       gustEngine?.updateWind(windHandle);
       fireSubsystem?.updateWind(windHandle);
+    }
+
+    /** Per-floor memo of the wind STRUCTURE bake (loading audit P-06) — see
+     * `createWindStructureMemo` and the call in `bakeWindField`. */
+    const windStructureMemo = createWindStructureMemo(bakeWindStructure);
+
+    /**
+     * FLOOR PREPARE: run the wind structure bake for `floorIndex` NOW, off screen,
+     * so the commit's `bakeWindField('floor-change')` finds it done. Gathers the
+     * SAME inputs `bakeWindField` gathers (it must — a different key is just a
+     * cache miss, never a wrong answer). Never throws; a failure here only means
+     * the commit pays for the bake as it always did.
+     * @param {number} floorIndex
+     * @returns {{warmed: boolean, hit?: boolean, reason?: string}}
+     */
+    function warmWindStructureForFloor(floorIndex) {
+      try {
+        const gridSpec = computeWindBakeGridSpec({
+          sceneX: dimensions.sceneX,
+          sceneY: dimensions.sceneY,
+          sceneWidth: dimensions.sceneWidth,
+          sceneHeight: dimensions.sceneHeight,
+          gridSizePixels: readGridSizePixels().gridSizePixels / 4,
+          maxAxisCells: 512,
+        });
+        const floorsResult = getActiveSceneFloors(globalThis.canvas?.scene ?? null);
+        if (!floorsResult.ok) return { warmed: false, reason: `getActiveSceneFloors failed: ${floorsResult.error}` };
+        const floor = floorsResult.floors.find((f) => f.index === floorIndex);
+        if (!floor) return { warmed: false, reason: `no floor with index ${floorIndex}` };
+        const walls = readSceneWallSegments(floor.id ?? null);
+        let outdoors = null;
+        try {
+          outdoors = getOutdoorsMaskGrid(floorIndex);
+        } catch (err) {
+          outdoors = null; // same fallback bakeWindField takes: geometry alone
+          log.debug?.(`wind structure warm-up: no outdoors grid for floor ${floorIndex} (${err?.message ?? err})`);
+        }
+        const { hit } = windStructureMemo.get(floorIndex, { walls, gridSpec, outdoors });
+        return { warmed: true, hit };
+      } catch (err) {
+        log.warn(`wind structure warm-up for floor ${floorIndex} failed — the commit will bake it instead:`, err);
+        return { warmed: false, reason: String(err?.message ?? err) };
+      }
     }
 
     /**
@@ -6241,7 +6394,16 @@ export async function startVtPanViewer({
           outdoorsForWind = null;
         }
         windBakedOutdoorsSignature = outdoorsGridSignature(outdoorsForWind);
-        const structure = bakeWindStructure({ walls, gridSpec, outdoors: outdoorsForWind });
+        // MEMOISED PER FLOOR (loading audit P-06): floor PREPARE
+        // (`warmWindStructureForFloor`) runs this same bake for the TARGET floor
+        // while the old one is on screen, so on the commit frame it is a lookup.
+        // Anything else that changes the inputs (a wall, a door, the painted
+        // sky) changes the key and re-bakes, exactly as before.
+        const { structure } = windStructureMemo.get(view?.floorIndex ?? 0, {
+          walls,
+          gridSpec,
+          outdoors: outdoorsForWind,
+        });
         const { cols, rows } = structure;
         // A REGRID is the only event that changes what consumers bake into their
         // shader graphs (origin/cellSize/cols/rows are build-time constants). On
@@ -7468,6 +7630,192 @@ export async function startVtPanViewer({
       renderer.autoClearColor = prevAutoClearColor;
       renderer.setClearDepth(prevClearDepth);
     }
+    // ── THE WATER RESOLVE (2026-10-25, Water-Performance-Audit W-02) ──────────
+    // Water draws as two blends (multiply, then add) inside the world scene,
+    // and each used to evaluate the whole water graph per pixel — field, wind,
+    // foam stack, specular, caustics — twice (three times at tier 5). Each
+    // drawn floor's graph now runs ONCE here, into an MRT target the size of
+    // `buf:scene.color` (`output` = in-scatter (and tier 5's alpha), `waterAbsorb` = 1 − absorb, and at tier 5
+    // `waterRefract`), and the scene's water meshes read it back with one
+    // load per pixel (`water-render.js`, "THE RESOLVE"). Cleared to 0, which
+    // every reader treats as "no water here". One target per floor, because
+    // every floor's water composites in the same scene draw; freed as soon as
+    // its floor stops drawing water.
+    const waterResolveTargetsByFloor = new Map();
+    const waterResolveMrt = {
+      withRefract: null,
+      plain: null,
+    };
+    function describeWaterResolve(w, h, withRefract) {
+      return {
+        resolvedW: w,
+        resolvedH: h,
+        screenSized: true,
+        type: THREE.HalfFloatType,
+        colorSpace: THREE.NoColorSpace,
+        filter: 'nearest', // read back with an integer load, never filtered
+        depth: false,
+        mrtCount: withRefract ? 3 : 2,
+        attachments: withRefract
+          ? [{ outputName: 'output' }, { outputName: 'waterAbsorb' }, { outputName: 'waterRefract' }]
+          : [{ outputName: 'output' }, { outputName: 'waterAbsorb' }],
+      };
+    }
+    function runWaterResolvePass() {
+      if (waterSurfacesByFloor.size === 0 && waterResolveTargetsByFloor.size === 0) return;
+      const w = sceneColor.width;
+      const h = sceneColor.height;
+      let previousTarget = null;
+      let previousMRT = null;
+      let previousClearAlpha = 0;
+      let saved = false;
+      for (const [floorIndex, surface] of waterSurfacesByFloor) {
+        let entry = waterResolveTargetsByFloor.get(floorIndex);
+        if (!surface.needsResolve?.()) {
+          if (entry) {
+            allocator.dispose(entry.rt);
+            waterResolveTargetsByFloor.delete(floorIndex);
+          }
+          continue;
+        }
+        const withRefract = !!surface.wantsRefractResolve?.();
+        if (!entry || entry.w !== w || entry.h !== h || entry.withRefract !== withRefract) {
+          if (entry) allocator.dispose(entry.rt);
+          entry = {
+            rt: allocator.create(`water.resolve.F${floorIndex}`, describeWaterResolve(w, h, withRefract)),
+            w,
+            h,
+            withRefract,
+          };
+          waterResolveTargetsByFloor.set(floorIndex, entry);
+        }
+        surface.setResolveTextures({
+          output: entry.rt.textures[0],
+          absorb: entry.rt.textures[1],
+          refract: withRefract ? entry.rt.textures[2] : null,
+        });
+        if (!saved) {
+          saved = true;
+          previousTarget = renderer.getRenderTarget();
+          previousMRT = renderer.getMRT();
+          renderer.getClearColor(_waterResolveClearSaved);
+          previousClearAlpha = renderer.getClearAlpha();
+          renderer.setClearColor(0x000000, 0);
+          if (!waterResolveMrt.plain) {
+            const { mrt, output, vec4 } = THREE.TSL;
+            waterResolveMrt.plain = mrt({ output, waterAbsorb: vec4(0, 0, 0, 0) });
+            waterResolveMrt.withRefract = mrt({
+              output,
+              waterAbsorb: vec4(0, 0, 0, 0),
+              waterRefract: vec4(0, 0, 0, 0),
+            });
+          }
+        }
+        renderer.setMRT(withRefract ? waterResolveMrt.withRefract : waterResolveMrt.plain);
+        renderer.setRenderTarget(entry.rt);
+        renderer.render(surface.getResolveScene(), camera);
+      }
+      // A floor that left the scene (pruned) leaves no target behind.
+      for (const [floorIndex, entry] of waterResolveTargetsByFloor) {
+        if (!waterSurfacesByFloor.has(floorIndex)) {
+          allocator.dispose(entry.rt);
+          waterResolveTargetsByFloor.delete(floorIndex);
+        }
+      }
+      if (saved) {
+        renderer.setClearColor(_waterResolveClearSaved, previousClearAlpha);
+        renderer.setMRT(previousMRT);
+        renderer.setRenderTarget(previousTarget);
+      }
+    }
+    const _waterResolveClearSaved = new THREE.Color();
+
+    // ── THE WATER WIND STRENGTH (2026-10-25, Water-Performance-Audit W-08) ───
+    // Water reads the wind only as a LENGTH (`water-field.js`, the wind ripple),
+    // yet sampled the full wind field per pixel — a turbulence stack of ~13
+    // noise evaluations plus the baked-field taps. That length is rendered here
+    // once per frame into a 512² world-space texture over the wind grid's rect
+    // (~20 world px a texel on a 10k map, against a smallest turbulence eddy of
+    // ~260 px), and the water material takes one bilinear tap of it. The
+    // texture is allocated once and never replaced, so the materials bound to
+    // it never need re-pointing; only the pass material is rebuilt, on a wind
+    // regrid (`layoutVersion`), when the handle's baked-in grid changes.
+    let waterWindStrengthField = null;
+    let waterWindStrengthRT = null;
+    let waterWindStrengthQuad = null;
+    let waterWindStrengthLayout = null;
+    function getWaterWindStrengthField() {
+      if (!waterWindStrengthField) {
+        waterWindStrengthRT = allocator.create('water.windStrength', {
+          resolvedW: 512,
+          resolvedH: 512,
+          screenSized: false,
+          type: THREE.HalfFloatType,
+          format: THREE.RedFormat,
+          colorSpace: THREE.NoColorSpace,
+          filter: 'linear',
+          depth: false,
+        });
+        const { uniform, vec4 } = THREE.TSL;
+        waterWindStrengthField = { texture: waterWindStrengthRT.texture, uRect: uniform(vec4(0, 0, 1, 1)) };
+      }
+      return waterWindStrengthField;
+    }
+    function renderWaterWindStrength() {
+      if (!waterWindStrengthField || !windHandle) return;
+      let anyDrawing = false;
+      for (const surface of waterSurfacesByFloor.values()) {
+        if (surface.isDrawing?.()) {
+          anyDrawing = true;
+          break;
+        }
+      }
+      if (!anyDrawing) return;
+      const layout = windHandle.layoutVersion ?? windHandle.version;
+      if (!waterWindStrengthQuad || layout !== waterWindStrengthLayout) {
+        waterWindStrengthQuad?.material?.dispose?.();
+        const { uv, vec2, vec4, length } = THREE.TSL;
+        const r = waterWindStrengthField.uRect;
+        const worldXY = vec2(r.x, r.y).add(uv().mul(vec2(r.z.sub(r.x), r.w.sub(r.y))));
+        const material = new THREE.NodeMaterial();
+        material.fragmentNode = vec4(
+          length(windHandle.node(THREE.TSL, { centerXY: worldXY, time: uGlobalTimeMs })),
+          0,
+          0,
+          1
+        );
+        waterWindStrengthQuad = new THREE.QuadMesh(material);
+        waterWindStrengthLayout = layout;
+      }
+      // The rect the texture covers: the wind grid's own, or — before the first
+      // wind bake — the drawn water bodies' rects, so it always covers the water.
+      const g = windHandle.grid;
+      if (g) {
+        waterWindStrengthField.uRect.value.set(
+          g.originX,
+          g.originY,
+          g.originX + g.cols * g.cellSize,
+          g.originY + g.rows * g.cellSize
+        );
+      } else {
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+        for (const body of waterBodiesByFloor.values()) {
+          const rect = body.getRect?.();
+          if (!rect) continue;
+          minX = Math.min(minX, rect.minX);
+          minY = Math.min(minY, rect.minY);
+          maxX = Math.max(maxX, rect.maxX);
+          maxY = Math.max(maxY, rect.maxY);
+        }
+        if (maxX > minX && maxY > minY) waterWindStrengthField.uRect.value.set(minX, minY, maxX, maxY);
+      }
+      renderSunShadowPass(waterWindStrengthRT, waterWindStrengthQuad);
+    }
+    let waterResolveFailed = false;
+
     /** Scratch colours for `runGeometryWorldPass`'s scoped scene-background clear (no per-frame allocation). */
     const sceneBackgroundScratch = new THREE.Color();
     const sceneBackgroundSaved = new THREE.Color();
@@ -7495,6 +7843,24 @@ export async function startVtPanViewer({
       profiler?.begin(Z.geomDepth);
       runSceneDepthPass();
       profiler?.end(Z.geomDepth);
+      // THE WATER RESOLVE (W-02) — after the depth pass (its occlusion test
+      // reads `buf:scene.depth`) and before the colour draw (whose water
+      // meshes read what it writes).
+      profiler?.begin(Z.waterResolve);
+      try {
+        renderWaterWindStrength();
+        runWaterResolvePass();
+      } catch (err) {
+        // A broken resolve would leave the water meshes reading an empty
+        // target (invisible water). Fall back to the per-mesh evaluation —
+        // every floor rebuilds on its next sync — and say so once.
+        if (!waterResolveFailed) {
+          waterResolveFailed = true;
+          log.error('water resolve pass failed — falling back to the per-mesh water evaluation:', err);
+          setWaterSharedResolveOff(true);
+        }
+      }
+      profiler?.end(Z.waterResolve);
       // MRT scoped, never left set (scene-attr.js's own header): a stale MRT
       // node would silently empty light.accumulate's single-attachment
       // targets right after this pass — save/set/restore.
@@ -8001,7 +8367,15 @@ export async function startVtPanViewer({
       // `lastBakeWallClockMs` doc, `water-body-subsystem.js`, for why the
       // bake itself now needs a throttle at all).
       const waterBakeNowMs = env.time?.realMs ?? 0;
-      for (const floor of waterFloors) getWaterBodyForFloor(floor.index).maybeBake(floor.index, waterBakeNowMs);
+      // ⚠️ GATED ON `enabled` (2026-10-25, Water-Performance-Audit W-03). With
+      // Water switched off the surface only HID its meshes; every bake, the
+      // per-frame sim and the per-frame capture kept running. A bake that is
+      // skipped here is not lost: its version gate still reads "changed", so
+      // the first frame after Water is switched back on bakes for real.
+      const waterEnabled = getWaterRenderState()?.enabled !== false;
+      if (waterEnabled) {
+        for (const floor of waterFloors) getWaterBodyForFloor(floor.index).maybeBake(floor.index, waterBakeNowMs);
+      }
       profiler?.end(Z.lightWaterBake);
       // Re-crop each floor's own tier-0 surface quad to ITS water's AABB —
       // gated on that floor's own bake generation, so a quiet frame costs one
@@ -8036,7 +8410,7 @@ export async function startVtPanViewer({
       profiler?.begin(Z.lightWaterFlowBake);
       for (const floor of waterFloors) {
         const flow = getWaterFlowForFloor(floor.index);
-        flow.maybeBake();
+        if (waterEnabled) flow.maybeBake(waterBakeNowMs); // W-03 — see the body bake's own gate above
         // THE `flowSolidity`/`flowVelocity` DEBUG CHANNELS' OWN re-point
         // (2026-08-17, S2+S3) — cheap every frame (one identity compare
         // inside), and independent of both the mask-load re-point and the
@@ -8066,8 +8440,29 @@ export async function startVtPanViewer({
       // in scope at this exact point — see that module's own header for the
       // full reasoning.
       profiler?.begin(Z.lightWaterSimTick);
+      const waterSimViewRect = view ? viewToWorldRect(view, canvasW / canvasH) : null;
       for (const floor of waterFloors) {
         const sim = getWaterSimForFloor(floor.index);
+        // ⚠️ ONLY FOR WATER SOMEONE CAN SEE (2026-10-25, Water-Performance-Audit
+        // W-03/W-10). A full-grid pass per floor per frame used to run for
+        // hidden floors, off-screen water and with Water switched off. A
+        // skipped frame is `idle()`: the sim counts the time it missed and, on
+        // resuming, warms back up in a few large steps (`water-sim-subsystem.js
+        // #tick`), so the foam returns settled rather than regrowing from where
+        // it froze. Nobody saw the paused foam, so the warm-up is not visible.
+        const simSurface = getWaterSurfaceForFloor(floor.index);
+        const simBounds = simSurface.isDrawing() ? getWaterBodyForFloor(floor.index).getWaterBounds() : null;
+        const simOnScreen =
+          !!simBounds &&
+          (!waterSimViewRect ||
+            (simBounds.maxX > waterSimViewRect.minX &&
+              simBounds.minX < waterSimViewRect.maxX &&
+              simBounds.maxY > waterSimViewRect.minY &&
+              simBounds.minY < waterSimViewRect.maxY));
+        if (!waterEnabled || !simOnScreen) {
+          sim.idle(env.time?.dtSec ?? 0);
+          continue;
+        }
         sim.tick(env.time?.dtSec ?? 0);
         // ⚠️ THE FOAM-BAND REACH — genuinely missing until now, found while
         // tidying: `water-sim-subsystem.js`'s own header documents this as
@@ -8092,6 +8487,8 @@ export async function startVtPanViewer({
         // own doc).
         const floorSurface = getWaterSurfaceForFloor(floor.index);
         floorSurface.setWaterSimTexture(sim.texture);
+        floorSurface.setWaterSimSoftTexture(sim.softTexture); // the pre-blurred foam (W-06/W-12)
+        floorSurface.setWaterSprayTexture(sim.sprayTexture); // the spray emitter (W-05/W-10)
         // The smooth-texel reconstruction (`buildSmoothTexelUv`, added to fix
         // the author's live "when I zoom in you can see a pixelated look"
         // report) needs the REAL texel pitch of whatever `sim.texture` is
@@ -8462,6 +8859,7 @@ export async function startVtPanViewer({
       // call, like every per-floor render call in this same loop, rides
       // inside the outer `Z.lightDrawWindow` zone rather than getting a
       // bracket of its own.
+      tileEffectSyncedFloor.windowTiles = view?.floorIndex ?? 0;
       windowTileSurface.sync(view?.floorIndex ?? 0);
       if (windowTileSurface.hasContent()) renderer.render(windowTileSurface.scene, camera);
       profiler?.end(Z.lightDrawWindow);
@@ -8941,6 +9339,7 @@ export async function startVtPanViewer({
       // mythica-machina-press#538/#539 — the per-TILE population, synced
       // right alongside the floor one; see `specularTileSurface`'s own
       // construction for why this stays single-viewed-floor scope.
+      tileEffectSyncedFloor.specularTiles = view?.floorIndex ?? 0;
       specularTileSurface.sync(view?.floorIndex ?? 0, view ? viewToWorldRect(view, canvasW / canvasH) : null);
       const floorHasContent = specularSurface.hasContent();
       const tilesHaveContent = specularTileSurface.hasContent();
@@ -9000,6 +9399,7 @@ export async function startVtPanViewer({
       const items = getPrismMaskItems(floorIndex) ?? [];
       const st = getPrismRenderState();
       if (items.length === 0 || st.enabled !== true) {
+        tileEffectSyncedFloor.prism = view?.floorIndex ?? 0;
         prismSurface.sync([], { behindTexture: null, capturedRect: null, capturedTexSize: null });
         return;
       }
@@ -9034,6 +9434,7 @@ export async function startVtPanViewer({
         profiler?.end(Z.prismRefraction);
       }
 
+      tileEffectSyncedFloor.prism = view?.floorIndex ?? 0;
       prismSurface.sync(items, {
         behindTexture: prismRefraction.texture,
         capturedRect: prismRefraction.capturedRect,
@@ -9101,10 +9502,12 @@ export async function startVtPanViewer({
       const items = getIridescenceMaskItems(floorIndex) ?? [];
       const st = getIridescenceRenderState();
       if (items.length === 0 || st.enabled !== true) {
+        tileEffectSyncedFloor.iridescence = view?.floorIndex ?? 0;
         iridescenceSurface.sync([]);
         return;
       }
 
+      tileEffectSyncedFloor.iridescence = view?.floorIndex ?? 0;
       iridescenceSurface.sync(items);
 
       // THE CLOCK + CAMERA CENTRE — pushed AFTER sync() has ensured every
@@ -12844,6 +13247,28 @@ export async function startVtPanViewer({
       return loadNewItem(item);
     }
 
+    /** WHO IS ASKING THE COMPRESSION WORKER (loading audit L-10, 2026-10-25). Tagged onto the
+     * big requests this viewer makes (whole-image compression, shadow-priming alpha grids)
+     * so `disposeActive` can throw away the ones still queued when the viewer goes — a
+     * scene change used to cancel nothing, and the next scene's interactive requests waited
+     * FIFO behind floors nobody was looking at any more. `viewerTornDown` is the other half:
+     * a dropped request resolves `null`, which every request site reads as "use the raw
+     * texture" — right for a worker fault, wrong for a viewer that no longer exists, so those
+     * sites stand down on this flag instead of falling through to a giant raw decode. */
+    const compressionOwner = Symbol('vt-pan-viewer');
+    let viewerTornDown = false;
+
+    /** THE PRESENTATION MONITOR (loading audit §6.7) and the floors the tile-attached effects were
+     * last synced for. Their `sync` is called with the viewed floor every frame, so a consumer
+     * whose recorded floor differs from the viewed one while it still shows something is one
+     * that was SKIPPED on a frame it should have run — which is how the lingering-specular
+     * bug (P-03) looked from the inside. Probes are registered after the subsystems exist. */
+    const presentationMonitor = createPresentationMonitor({ log });
+    /** One-shot callbacks run after the NEXT rendered frame (the floor-change timeline's "first frame
+     * after the commit"). Drained once per frame; a throwing callback is logged, never fatal. */
+    const nextFrameCallbacks = [];
+    const tileEffectSyncedFloor = { specularTiles: null, windowTiles: null, prism: null, iridescence: null };
+
     /** Items whose coarse alpha has been asked for — one request per item per
      * session (the worker's own IndexedDB cache handles across sessions). */
     const alphaRequested = new Set();
@@ -12903,8 +13328,9 @@ export async function startVtPanViewer({
       if (!item?.src || alphaRequested.has(item.id)) return;
       alphaRequested.add(item.id);
       alphaGridStats.requested++;
-      requestCoarseAlphaGrid(item.src)
+      requestCoarseAlphaGrid(item.src, { owner: compressionOwner })
         .then((res) => {
+          if (viewerTornDown) return; // dropped (or answered) after this viewer was disposed
           if (!res?.grid) {
             alphaGridStats.failed++;
             return;
@@ -13182,6 +13608,8 @@ export async function startVtPanViewer({
         THREE,
         scene,
         refractScene: waterRefractScene,
+        sharedResolve: true, // W-02 — `runWaterResolvePass` renders its resolve before the scene draw
+        getWindStrengthField: getWaterWindStrengthField, // W-08 — `renderWaterWindStrength`
         waterBody: getWaterBodyForFloor(floorIndex),
         getWaterMaskUrl,
         createMaskTexture: createMaskDataTexture,
@@ -13426,6 +13854,17 @@ export async function startVtPanViewer({
           : [{ index: view?.floorIndex ?? 0 }];
       const viewRect = view ? viewToWorldRect(view, canvasW / canvasH) : null;
       if (!viewRect) return;
+      // ⚠️ ONLY WHEN TIER 5 IS ASKED FOR AND SOMETHING IS DRAWN (2026-10-25,
+      // Water-Performance-Audit W-03/W-11). This pass used to capture a
+      // half-res copy of the view per floor and render `waterRefractScene`
+      // into `sceneLit` EVERY frame — at tiers 0-4, where no refraction
+      // material exists to read the capture, and with Water switched off.
+      // `wantsRefractionCapture` keys on the REQUESTED tier, so the very first
+      // capture still lands and lifts the builder's tier-5 clamp.
+      const capturingFloors = refractionFloors.filter((floor) =>
+        getWaterSurfaceForFloor(floor.index).wantsRefractionCapture()
+      );
+      if (capturingFloors.length === 0) return;
       // mythica-machina-press#553 — this whole pass (the per-floor capture
       // quads below, EACH a real renderer.render() call via renderWaterPass,
       // AND the tier-5 draw at the bottom of this function) had ZERO
@@ -13437,7 +13876,7 @@ export async function startVtPanViewer({
       // for. ONE zone for the whole function: the per-floor capture loop and
       // the final draw always run together, never independently gated.
       profiler?.begin(Z.waterRefraction);
-      for (const floor of refractionFloors) {
+      for (const floor of capturingFloors) {
         const refraction = getWaterRefractionForFloor(floor.index);
         const body = getWaterBodyForFloor(floor.index);
         // ⚠️ `sceneLit.texture`, NOT `sceneColor.texture` — REAL BUG, FOUND
@@ -13454,8 +13893,28 @@ export async function startVtPanViewer({
         // order, a few hundred lines up — so capturing it here is exactly
         // as safe from self-reference as capturing `sceneColor` was: still
         // strictly BEFORE this same pass's own draw half, below.
+        // ⚠️ THE WATER'S OWN BOUNDS, NOT THE LEVEL RECT (2026-10-25,
+        // Water-Performance-Audit W-11). `getRect()` is the whole mask/level
+        // rect, which fills the view almost always, so this copied nearly the
+        // whole screen even for a pond. A refracted tap can land at most
+        // `refractStrengthPx` from its own fragment (the slope is clamped to
+        // unit length and depth01 <= 1, `water-render.js` tier 5), and every
+        // fragment lies inside `getWaterBounds()` (the padded mesh rect), so
+        // growing it by that reach plus two capture texels (bilinear + the
+        // ±1-texel fringe) covers every read the material can make.
+        const refractWaterBounds = body.getWaterBounds?.() ?? null;
+        const refractReachPx =
+          Math.max(0, Number(getWaterRenderState()?.params?.refractStrengthPx) || 0) +
+          (2 * 2 * Math.max(viewRect.maxX - viewRect.minX, 1)) / Math.max(1, internalW);
         refraction.tick({
-          bodyRect: body.getRect?.() ?? null,
+          bodyRect: refractWaterBounds
+            ? {
+                minX: refractWaterBounds.minX - refractReachPx,
+                minY: refractWaterBounds.minY - refractReachPx,
+                maxX: refractWaterBounds.maxX + refractReachPx,
+                maxY: refractWaterBounds.maxY + refractReachPx,
+              }
+            : null,
           viewRect,
           // INTERNAL tier, not canvasW/H (CSS px — a real bug, live since
           // this call's first wiring commit d60322c, 2026-08-23: silently
@@ -13950,6 +14409,22 @@ export async function startVtPanViewer({
       getIridescenceRenderState,
       profiler,
     });
+
+    // ── PRESENTATION MONITOR PROBES (loading audit §6.7) ────────────────────
+    // Every consumer that keeps floor-specific content on screen and can say which floor. Specular
+    // reports the floor of the slot it is actually showing; the four tile-attached effects report the
+    // floor their last `sync` was given (`tileEffectSyncedFloor`) while they still show anything.
+    // Water, window and fluid are not listed on purpose: water and window are one instance PER FLOOR
+    // drawn only when that floor is viewed, and fluid is a simulation, not a floor-scoped mesh.
+    presentationMonitor.register('specular', () => specularSurface.getPresentation());
+    for (const [name, effect, key] of [
+      ['specular tiles', specularTileSurface, 'specularTiles'],
+      ['window tiles', windowTileSurface, 'windowTiles'],
+      ['prism', prismSurface, 'prism'],
+      ['iridescence', iridescenceSurface, 'iridescence'],
+    ]) {
+      presentationMonitor.register(name, () => ({ visible: effect.hasContent(), floor: tileEffectSyncedFloor[key] }));
+    }
 
     // ── PER-EFFECT READINESS PROBES ─────────────────────────────────────────
     // Registered HERE, at the one point where all four owners exist
@@ -16631,13 +17106,16 @@ export async function startVtPanViewer({
             // uses) cannot decode a vector document, so this could only return
             // null after a wasted round-trip and a warn log. Falling straight
             // through to the raw path is the same place a null result lands.
-            const c = svgSource ? null : await requestCompressedTexture(item.src);
+            const c = svgSource ? null : await requestCompressedTexture(item.src, { owner: compressionOwner });
             // Superseded while compression ran (possibly minutes) — discard
             // the result without committing it. Nothing GPU-resident exists
             // yet at this exact point (the CompressedTexture below is not
             // built until the `if` below succeeds), so there is nothing to
             // dispose here; just don't build it.
-            if (isStale()) return;
+            // `viewerTornDown`: this viewer was disposed while the job waited (a scene change),
+            // and its queued request was dropped to `null` — which must NOT read as "fall
+            // through to the raw path" (loading audit L-10).
+            if (isStale() || viewerTornDown) return;
             if (c && (c.format === 'bc1' || c.format === 'bc7') && c.levels?.length) {
               // A block-compressed texture's dimensions MUST be a multiple of 4
               // (the 4×4 block). The worker encodes ceil(w/4)×ceil(h/4) blocks with
@@ -19262,6 +19740,7 @@ export async function startVtPanViewer({
       // Added 2026-09-16 (perf-instrumentation-audit, #553) — see
       // runWaterRefractionCapturePass's own bracket.
       waterRefraction: profiler?.indexOf('surface.waterRefraction') ?? -1,
+      waterResolve: profiler?.indexOf('geometry.waterResolve') ?? -1,
       lightFluidSync: profiler?.indexOf('light.fluidSurfaceSync') ?? -1,
       lightRegions: profiler?.indexOf('light.regionSetup') ?? -1,
       lightPointUpdate: profiler?.indexOf('light.pointLightUpdate') ?? -1,
@@ -19796,6 +20275,18 @@ export async function startVtPanViewer({
       // yields a `pass.<id>` zone for every live pass, so a pass going live later
       // is instrumented for free and no second copy of the frame order exists.
       lastFramePlanRan = runPassPlan(framePlan.ids, passImpls, {}, profiler?.passHooks);
+      // Every consumer has synced for this frame: is any of them still showing another floor?
+      // A comparison and a return unless a floor change armed it.
+      presentationMonitor.checkFrame(view?.floorIndex ?? 0);
+      if (nextFrameCallbacks.length > 0) {
+        for (const cb of nextFrameCallbacks.splice(0)) {
+          try {
+            cb();
+          } catch (err) {
+            log.error('an after-next-frame callback threw:', err);
+          }
+        }
+      }
 
       frameTimes.push(perfNowMs() - t0);
       if (frameTimes.length > 120) frameTimes.shift();
@@ -22395,6 +22886,24 @@ export async function startVtPanViewer({
 
     let residencyInFlight = false;
     let residencyDirty = false;
+    /** Resolvers waiting for the in-flight residency loop to end (see `whenResidencyIdle`). */
+    const residencyIdleWaiters = [];
+    /**
+     * A promise that resolves when no residency pass is in flight, or `null` if
+     * none is (so a caller in the common case does not even pay a microtask).
+     *
+     * Exists for ONE caller, the floor-change commit (loading audit P-08):
+     * `scheduleResidencyUpdate` returns immediately when a pass is already
+     * running, so a floor flip made THEN left the hide-old/show-new swap to a
+     * later task while `view.floorIndex` had already moved — frames could draw
+     * the old floor's meshes against the new floor's per-floor state. Waiting for
+     * idle FIRST means the flip and the swap run in one synchronous stretch.
+     * @returns {Promise<void>|null}
+     */
+    function whenResidencyIdle() {
+      if (!residencyInFlight) return null;
+      return new Promise((resolve) => residencyIdleWaiters.push(resolve));
+    }
     /**
      * THE ONLY WAY TO RUN A RESIDENCY PASS. The sole caller of
      * `updateResidencyUnguarded` — see its header for the pin leak that six
@@ -22448,6 +22957,7 @@ export async function startVtPanViewer({
         } while (residencyDirty);
       } finally {
         residencyInFlight = false;
+        for (const wake of residencyIdleWaiters.splice(0)) wake();
       }
     }
 
@@ -22695,8 +23205,20 @@ export async function startVtPanViewer({
      * @param {number} floorIndex
      * @returns {Promise<boolean>} true if the floor actually changed.
      */
-    async function setFloorIndex(floorIndex) {
+    async function setFloorIndex(floorIndex, { atFlip = null } = {}) {
       if (!view || view.floorIndex === floorIndex) return false;
+      // WAIT FOR A QUIET RESIDENCY LOOP BEFORE FLIPPING (loading audit P-08).
+      // Everything from here to `scheduleResidencyUpdate()` below is ONE
+      // synchronous stretch — no `await` — and `scheduleResidencyUpdate` runs its
+      // first pass inline when nothing is in flight, so the flip, the per-floor
+      // bakes, the caller's `atFlip` work and the hide-old/show-new swap all land
+      // before any frame can render. If a pass WAS in flight, the old code flipped
+      // anyway and `scheduleResidencyUpdate` merely set `residencyDirty`, leaving
+      // the swap to a later task while `view.floorIndex` (and everything keyed on
+      // it) had already moved. `whenResidencyIdle()` is null in the common case,
+      // so this costs nothing there.
+      for (let idle = whenResidencyIdle(); idle; idle = whenResidencyIdle()) await idle;
+      if (!view || view.floorIndex === floorIndex) return false; // someone else got there while we waited
       // A floor switch starts a NEW settle, not a continued one (settle.js's
       // own test suite documents this contract) — without this reset, the
       // tracker kept reporting the OLD floor's already-quiet state, so
@@ -22747,9 +23269,27 @@ export async function startVtPanViewer({
       // line at all for precipitation, so climbing a floor left the sky-reach
       // gate on the floor below's roofs. See `rebakePerFloorMasks`.
       rebakePerFloorMasks(floorIndex, 'floor-change');
+      // The caller's own per-floor work (boot.js: move `activeFloorContext`,
+      // re-resolve every effect) runs HERE, inside the same synchronous stretch
+      // as the flip — see the wait-for-idle note above. It used to run before
+      // this function was called or after it resolved, with an `await` between,
+      // so a frame could land between "the viewer is on floor N" and "the effects
+      // know it".
+      if (atFlip) {
+        try {
+          atFlip(floorIndex);
+        } catch (err) {
+          log.error(`setFloorIndex(${floorIndex}): the caller's atFlip work threw — the flip continues:`, err);
+        }
+      }
+      presentationMonitor.arm(`floor-change to ${floorIndex}`);
       await scheduleResidencyUpdate();
       return true;
     }
+
+    /** Meshes `prepareFloor`'s PHASE 4 has already put through a warm-up draw (or
+     * that were on screen, so have drawn). A WeakSet: a disposed mesh simply goes. */
+    const warmedMeshes = new WeakSet();
 
     /**
      * Bumped on every `prepareFloor` call and on every `cancelFloorPrepare`
@@ -22829,11 +23369,13 @@ export async function startVtPanViewer({
      * to the same unobservable single JS tick.
      *
      * @param {number} floorIndex
-     * @param {(p: {phase:'items'|'compress'|'masks'|'warmup', done:number, total:number}) => void} [onProgress]
+     * @param {(p: {phase:'items'|'compress'|'masks'|'bakes'|'warmup', done:number, total:number}) => void} [onProgress]
      * @returns {Promise<{ok:boolean, reason?:string}>}
      */
     async function prepareFloor(floorIndex, onProgress) {
       const myGeneration = ++floorPrepareGeneration;
+      // NOTE the memo `warmedMeshes` (just above) — PHASE 4 skips meshes it has
+      // already warmed, so a second prepare of an already-prepared floor is cheap.
       const isStale = () => myGeneration !== floorPrepareGeneration;
 
       const items = buildItems(floorIndex);
@@ -22897,10 +23439,51 @@ export async function startVtPanViewer({
       // N — i.e., after commit, after the floor was already visually on
       // screen — which is exactly the reported symptom: the map appeared,
       // then window light popped in roughly however long the image fetch took.
+      // SPECULAR joined 2026-10-25 (loading audit P-03/P-04). It is ONE shared
+      // surface, not one per floor, so its readiness is asked PER FLOOR
+      // (`isMaskReady(floorIndex)`) — water and window are per-floor instances,
+      // so "is this instance loading" already is the per-floor question. It was
+      // the missing piece behind "the lower floor's shine lingers after going
+      // up": nothing fetched the new floor's mask until the first frame AFTER
+      // the flip, and the old floor's shine kept drawing until it landed.
       const maskWaits = [
-        { label: 'water', surface: getWaterSurfaceForFloor(floorIndex) },
-        { label: 'window', surface: getWindowSurfaceForFloor(floorIndex) },
+        {
+          label: 'water',
+          surface: getWaterSurfaceForFloor(floorIndex),
+          pending: () => getWaterSurfaceForFloor(floorIndex).isLoadingMask(),
+        },
+        {
+          label: 'window',
+          surface: getWindowSurfaceForFloor(floorIndex),
+          pending: () => getWindowSurfaceForFloor(floorIndex).isLoadingMask(),
+        },
+        {
+          label: 'specular',
+          surface: specularSurface,
+          pending: () => !specularSurface.isMaskReady(floorIndex),
+        },
       ];
+      // THE FIVE TILE-ATTACHED EFFECTS (loading audit P-05, 2026-10-25). Each
+      // keeps one entry per masked TILE and used to build the new floor's entries
+      // only on the first frame AFTER the flip (and dispose the old floor's on the
+      // same frame): fetch, decode, bake and a GPU build on the visible path, every
+      // time. They now keep entries resident but hidden, and prepare builds the
+      // target floor's here, off screen. Their item lists are the same seams their
+      // per-frame `sync` reads, evaluated for the TARGET floor.
+      for (const [label, effect, items] of [
+        ['specular tiles', specularTileSurface, getSpecularMaskItems(floorIndex) ?? []],
+        ['window tiles', windowTileSurface, getWindowMaskItems(floorIndex) ?? []],
+        ['fluid', fluidSurface, getFluidMaskItems(floorIndex) ?? []],
+        ['prism', prismSurface, getPrismMaskItems(floorIndex) ?? []],
+        ['iridescence', iridescenceSurface, getIridescenceMaskItems(floorIndex) ?? []],
+      ]) {
+        if (items.length === 0) continue; // nothing authored on this floor: nothing to wait for
+        maskWaits.push({
+          label,
+          surface: { prefetchMask: () => effect.prefetchItems(items) },
+          pending: () => !effect.areItemsReady(items),
+        });
+      }
       for (const { surface } of maskWaits) surface.prefetchMask(floorIndex);
       onProgress?.({ phase: 'masks', done: 0, total: maskWaits.length });
       // POLLED, not event-driven — neither subsystem exposes its internal
@@ -22915,12 +23498,27 @@ export async function startVtPanViewer({
       const MASK_POLL_MS = 40;
       for (;;) {
         if (isStale()) return { ok: false, reason: 'superseded' };
-        const stillLoading = maskWaits.filter(({ surface }) => surface.isLoadingMask());
+        const stillLoading = maskWaits.filter(({ pending }) => pending());
         if (stillLoading.length === 0) break;
         onProgress?.({ phase: 'masks', done: maskWaits.length - stillLoading.length, total: maskWaits.length });
         await new Promise((r) => setTimeout(r, MASK_POLL_MS));
       }
       onProgress?.({ phase: 'masks', done: maskWaits.length, total: maskWaits.length });
+      if (isStale()) return { ok: false, reason: 'superseded' };
+
+      // PHASE 3b (loading audit P-06, 2026-10-25) — the per-floor BAKE INPUTS.
+      // Everything the commit's `setFloorIndex` bakes (the wind structure, the
+      // outdoors/fire/ash/sky-reach gates and the derived grids behind them) used
+      // to be computed on the commit frame, on top of an authority recompute that
+      // prepare's own mask loading had just made dirty. Done here instead, while
+      // the old floor is still what is on screen, the commit finds each one
+      // already cached and only assigns. Synchronous CPU: the old floor may stall
+      // for the duration — in front of a "Preparing…" notification, rather than
+      // at the instant the new floor is meant to appear.
+      onProgress?.({ phase: 'bakes', done: 0, total: 1 });
+      warmPerFloorBakeInputs(floorIndex);
+      warmWindStructureForFloor(floorIndex);
+      onProgress?.({ phase: 'bakes', done: 1, total: 1 });
       if (isStale()) return { ok: false, reason: 'superseded' };
 
       // PHASE 4 (added 2026-08-24, live report: "changing floors freezes the
@@ -22954,24 +23552,54 @@ export async function startVtPanViewer({
       // the same `itemStates.get(item.id)?.wholeImage?.tiles[].mesh` lookup)
       // `captureMapOnlySnapshot` already uses elsewhere in this file — not a
       // new technique.
+      //
+      // ONLY MESHES THAT HAVE NOT BEEN WARMED YET (loading audit, 2026-10-25). With
+      // the scene-switch gate, a floor change prepares the target floor BEFORE
+      // Foundry redraws, and the post-draw commit (`switchToPreparedFloor`) calls
+      // prepare again. Every mesh that already went through a warm-up draw — or is
+      // already on screen, so has drawn normally — is skipped, so the second call is
+      // a handful of Map lookups instead of another synchronous full-frame GPU draw.
       const warmUpRestore = [];
+      const newlyWarmed = [];
+      const needsWarmUp = (mesh) => !warmedMeshes.has(mesh) && mesh.visible !== true;
       for (const item of items) {
         const state = itemStates.get(item.id);
         const tiles = state?.wholeImage?.tiles;
         if (!tiles) continue;
         for (const t of tiles) {
           if (t.mesh) {
-            warmUpRestore.push([t.mesh, t.mesh.visible]);
-            t.mesh.visible = true;
+            if (needsWarmUp(t.mesh)) {
+              warmUpRestore.push([t.mesh, t.mesh.visible]);
+              newlyWarmed.push(t.mesh);
+              t.mesh.visible = true;
+            } else warmedMeshes.add(t.mesh);
           }
           if (t.shadow?.mesh) {
-            warmUpRestore.push([t.shadow.mesh, t.shadow.mesh.visible]);
-            t.shadow.mesh.visible = true;
+            if (needsWarmUp(t.shadow.mesh)) {
+              warmUpRestore.push([t.shadow.mesh, t.shadow.mesh.visible]);
+              newlyWarmed.push(t.shadow.mesh);
+              t.shadow.mesh.visible = true;
+            } else warmedMeshes.add(t.shadow.mesh);
           }
         }
       }
       onProgress?.({ phase: 'warmup', done: 0, total: 1 });
-      if (warmUpRestore.length > 0) warmUpDrawState({ includePresent: false });
+      // THE TILE-ATTACHED EFFECTS ride the same draw (loading audit P-05): their
+      // parked entries are hidden, and the renderer skips a hidden mesh outright,
+      // so — exactly like the art above — their pipelines would otherwise compile on
+      // the first frame the floor is SHOWN. `setWarmUpVisible` shows every loaded
+      // entry for the length of this one off-screen draw, then hides them again.
+      const tileEffects = [specularTileSurface, windowTileSurface, fluidSurface, prismSurface, iridescenceSurface];
+      const effectsNeedWarmUp = tileEffects.some((e) => e.hasUnwarmed());
+      if (warmUpRestore.length > 0 || effectsNeedWarmUp) {
+        for (const e of tileEffects) e.setWarmUpVisible(true);
+        try {
+          warmUpDrawState({ includePresent: false });
+        } finally {
+          for (const e of tileEffects) e.setWarmUpVisible(false);
+        }
+        for (const mesh of newlyWarmed) warmedMeshes.add(mesh);
+      }
       for (const [mesh, wasVisible] of warmUpRestore) mesh.visible = wasVisible;
       onProgress?.({ phase: 'warmup', done: 1, total: 1 });
       // Restoring visibility unconditionally, before this check, is
@@ -23719,6 +24347,8 @@ export async function startVtPanViewer({
     }
 
     function prewarmAdjacentFloors(centerFloorIndex) {
+      // Run now: a still-pending settle-deferred prewarm of the same centre would only repeat it.
+      if (pendingPrewarmFloor === centerFloorIndex) pendingPrewarmFloor = null;
       const adjacentFloors = [];
       for (let f = 0; f < floorCount; f++) {
         if (f === centerFloorIndex) continue;
@@ -23734,7 +24364,9 @@ export async function startVtPanViewer({
           })
           .catch((err) => log.warn(`prewarm floor ${f} failed:`, err));
       }
-      (async () => {
+      // Returned so a caller that wants to WAIT for the neighbouring floors (boot.js holds the cold
+      // load's curtain for them) can; every other caller ignores it, as before.
+      return (async () => {
         for (const f of adjacentFloors) {
           try {
             await prepareFloor(f);
@@ -24628,6 +25260,14 @@ export async function startVtPanViewer({
       THREE,
       renderer,
       canvas,
+      compressionOwner,
+      markTornDown() {
+        viewerTornDown = true;
+      },
+      getPresentationReport: () => presentationMonitor.getReport(),
+      afterNextFrame(fn) {
+        if (typeof fn === 'function') nextFrameCallbacks.push(fn);
+      },
       onResize,
       resizeObserver,
       onFullscreenChange,
@@ -25532,6 +26172,16 @@ export async function startVtPanViewer({
         fluidSurface.dispose();
         for (const body of waterBodiesByFloor.values()) body.dispose();
         waterBodiesByFloor.clear();
+        // W-02/W-08 (2026-10-25): the per-floor resolve targets and the wind
+        // strength texture + its pass material.
+        for (const entry of waterResolveTargetsByFloor.values()) allocator.dispose(entry.rt);
+        waterResolveTargetsByFloor.clear();
+        waterWindStrengthQuad?.material?.dispose?.();
+        waterWindStrengthQuad = null;
+        waterWindStrengthLayout = null;
+        if (waterWindStrengthRT) allocator.dispose(waterWindStrengthRT);
+        waterWindStrengthRT = null;
+        waterWindStrengthField = null;
       },
       /** Tear down SHINE's two meshes, their shared geometry, both
        * NodeMaterials and the uploaded `_Specular` DataTexture. That texture is
@@ -27608,6 +28258,14 @@ export async function startVtPanViewer({
   }
 }
 
+/**
+ * The "two floors on screen" detector's report (`diag/presentation-monitor.js`), or `null` when no
+ * viewer is running. `verdict` is `'clean'` only if the monitor was armed and checked frames.
+ */
+export function getVtPanViewerPresentationReport() {
+  return _active?.getPresentationReport?.() ?? null;
+}
+
 /** For the debug panel: current diagnostics without restarting anything. */
 export function getVtPanViewerDiagnostics() {
   if (!_active) return { active: false };
@@ -27691,9 +28349,9 @@ export async function getParticleReadback(n = 32) {
   return _active.getParticleReadback(n);
 }
 
-export async function setVtPanViewerFloor(floorIndex) {
+export async function setVtPanViewerFloor(floorIndex, opts) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
-  const changed = await _active.setFloorIndex(floorIndex);
+  const changed = await _active.setFloorIndex(floorIndex, opts);
   return { changed, ..._active.getDiagnostics() };
 }
 
@@ -27739,8 +28397,20 @@ export function cancelVtPanViewerFloorPrepare() {
  */
 export async function prewarmVtPanViewerAdjacentFloors(floorIndex) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
-  _active.prewarmAdjacentFloors(floorIndex);
-  return { started: true };
+  const done = _active.prewarmAdjacentFloors(floorIndex);
+  return { started: true, done };
+}
+
+/**
+ * Run `fn` once, right after the viewer's next rendered frame. `false` when no viewer is running
+ * (nothing will render, so nothing would ever call it).
+ * @param {() => void} fn
+ * @returns {boolean}
+ */
+export function afterNextVtPanViewerFrame(fn) {
+  if (!_active?.afterNextFrame) return false;
+  _active.afterNextFrame(fn);
+  return true;
 }
 
 /**

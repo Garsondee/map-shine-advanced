@@ -175,6 +175,120 @@ export function run(t) {
     ok('poll 4: unchanged after a real bake renders nothing new', pass.calls === rendersBefore);
   }
 
+  // ══ A SCENE-WIDE VERSION BUMP THAT DID NOT TOUCH THIS WATER (W-13) ══════
+  // mask-authority hands back the SAME grid object when the water kind's
+  // inputs did not change; a wall/region/other-floor edit still bumps the one
+  // scene-wide version. That must not cost a flood any more.
+  {
+    const allocator = fakeAllocator();
+    const pass = fakeRenderPass();
+    let version = 1;
+    let grid = fakeMaskGrid();
+    const fullRes = { name: 'full-res-mask' };
+    const subsystem = createWaterBodySubsystem({
+      THREE,
+      allocator,
+      getWaterMaskGrid: () => grid,
+      getFloorsWithWater: () => [0],
+      getMaskAuthorityVersion: () => version,
+      renderWaterPass: (tg, q) => pass.run(tg, q),
+      createWaterMaskTexture: (data, w, h, filter) => {
+        const tx = new THREE.DataTexture(data, w, h, THREE.RGBAFormat, THREE.UnsignedByteType);
+        tx.needsUpdate = true;
+        tx.__filter = filter;
+        return tx;
+      },
+      waterSurface: { getFullResMaskTexture: () => fullRes, hasOwnMaskUrl: () => true },
+    });
+    subsystem.maybeBake(0, 0);
+    ok('W-13: the first bake happens', subsystem.getStatus().bakes === 1);
+    const rendersAfterFirst = pass.calls;
+    for (let i = 1; i <= 10; i++) {
+      version++; // a wall drag elsewhere in the scene
+      subsystem.maybeBake(0, i * 1000);
+    }
+    ok('W-13: 10 unrelated version bumps cost 0 floods', subsystem.getStatus().bakes === 1);
+    ok('W-13: …and 0 render passes', pass.calls === rendersAfterFirst);
+    ok('W-13: …and are reported as skipped', subsystem.getStatus().versionOnlyRebakesSkipped === 10);
+    grid = fakeMaskGrid(); // the water itself was repainted: a NEW grid object
+    version++;
+    subsystem.maybeBake(0, 20000);
+    ok('W-13: a real water repaint (new grid object) still bakes', subsystem.getStatus().bakes === 2);
+  }
+
+  // ══ THE FLOOD SCRATCH IS FREED WHEN IDLE, AND COMES BACK FOR A REBAKE (W-05) ══
+  {
+    const allocator = fakeAllocator();
+    const pass = fakeRenderPass();
+    let grid = fakeMaskGrid();
+    let version = 1;
+    const subsystem = createWaterBodySubsystem({
+      THREE,
+      allocator,
+      getWaterMaskGrid: () => grid,
+      getFloorsWithWater: () => [0],
+      getMaskAuthorityVersion: () => version,
+      renderWaterPass: (tg, q) => pass.run(tg, q),
+      createWaterMaskTexture: (data, w, h, filter) => {
+        const tx = new THREE.DataTexture(data, w, h, THREE.RGBAFormat, THREE.UnsignedByteType);
+        tx.needsUpdate = true;
+        tx.__filter = filter;
+        return tx;
+      },
+      waterSurface: { getFullResMaskTexture: () => ({ name: 'mask' }), hasOwnMaskUrl: () => true },
+    });
+    subsystem.maybeBake(0, 0);
+    const created = allocator.created;
+    subsystem.maybeBake(0, 5_000);
+    ok('W-05: the flood scratch survives a short idle', allocator.disposed === 0);
+    subsystem.maybeBake(0, 20_000);
+    ok(
+      'W-05: …and is released after the idle window (the ping-pong pair only)',
+      allocator.disposed === 2 && subsystem.getStatus().scratchReleases === 1
+    );
+    ok('W-05: the body pack itself stays', subsystem.texture !== null);
+    grid = fakeMaskGrid();
+    version++;
+    subsystem.maybeBake(0, 30_000);
+    ok(
+      'W-05: a later real bake reallocates the pair and floods again',
+      subsystem.getStatus().bakes === 2 && allocator.created === created + 2
+    );
+  }
+
+  // ══ A BORROWING FLOOR WITH NO MASK OF ITS OWN IS TERMINAL TOO (W-19) ════
+  // Floor 1 has no water; floor 0 does. In the per-floor loop floor 1
+  // resolves to floor 0, whose own instance draws it — and floor 1's surface
+  // never loads a mask, so the old code retried this bake every frame.
+  {
+    const allocator = fakeAllocator();
+    const pass = fakeRenderPass();
+    let gridCalls = 0;
+    const subsystem = createWaterBodySubsystem({
+      THREE,
+      allocator,
+      getWaterMaskGrid: () => {
+        gridCalls++;
+        return fakeMaskGrid();
+      },
+      getFloorsWithWater: () => [0],
+      getMaskAuthorityVersion: () => 1,
+      renderWaterPass: (tg, q) => pass.run(tg, q),
+      createWaterMaskTexture: (data, w, h, filter) => {
+        const tx = new THREE.DataTexture(data, w, h, THREE.RGBAFormat, THREE.UnsignedByteType);
+        tx.needsUpdate = true;
+        tx.__filter = filter;
+        return tx;
+      },
+      waterSurface: { getFullResMaskTexture: () => null, hasOwnMaskUrl: () => false },
+    });
+    for (let i = 0; i < 100; i++) subsystem.maybeBake(1, i * 16);
+    const st = subsystem.getStatus();
+    ok('borrowing floor: 100 polls, zero bakes, zero renders', st.bakes === 0 && pass.calls === 0);
+    ok('borrowing floor: the mask grid is never even fetched', gridCalls === 0);
+    ok('borrowing floor: the report says it borrows', String(st.lastBake?.reason ?? '').includes('borrows floor 0'));
+  }
+
   // ══ "NO WATER IN THIS SCENE" IS A STABLE TERMINAL STATE, NOT A RETRY LOOP
   // — the OTHER place this function stamps bakedVersion/bakedFloor/
   // bakedOverride, confirmed still correct after the fix above ═════════════

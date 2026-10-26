@@ -72,6 +72,7 @@ import {
   WATER_SIM_DIFFUSE,
   WATER_SIM_SHEAR_GAIN,
   WATER_SIM_NEAR_SOLID_GAIN,
+  buildWaterSimSoftMaterial,
 } from './water-sim.js';
 // The shared `flowEnabled` + `flowSpeedPx` resolver (mythica-machina-press
 // #581). The surface subsystem reads the identical function: if the author
@@ -87,6 +88,16 @@ import { WATER_FOAM_PATCHINESS, WATER_FOAM_PATCH_SIZE_PX } from './water-shore.j
  * (a zero reach would divide-by-near-zero in `water-sim.js#d01`, clamped
  * there but meaningless as a band width). */
 const WATER_SIM_DEFAULT_REACH_PX = 64;
+
+/** Warm-up step length after a pause, seconds — see `tick()`. */
+export const WATER_SIM_WARMUP_STEP_SEC = 0.25;
+/** The soft gather's default tap spacing, sim texels — `water-render.js`'s
+ * `WATER_SIM_FOAM_SMOOTH_TEXELS`, duplicated rather than imported so this
+ * module stays free of the material builder (the `simFoamSmoothing` param
+ * overrides it every tick anyway). */
+const WATER_SIM_SOFT_SPACING_DEFAULT = 1.5;
+/** At most this many steps in one warm-up frame — see `tick()`. */
+export const WATER_SIM_WARMUP_MAX_STEPS = 6;
 
 /**
  * @param {object} args
@@ -155,6 +166,18 @@ export function createWaterSimSubsystem({
 
   let simPingRt = null;
   let simPongRt = null;
+  /** The pre-blurred foam (`buildWaterSimSoftMaterial`) — R only, written after
+   * every step, read by the surface with one tap (W-06/W-12). */
+  let simSoftRt = null;
+  let softFromPing = null;
+  let softFromPong = null;
+  /** THE SPRAY EMITTER on its own (W-05/W-10) — R16F, re-rendered only when
+   * `sprayKey` (its inputs) moves. */
+  let simSprayRt = null;
+  let sprayMaterial = null;
+  let sprayKey = '';
+  /** Tap spacing of the soft gather, sim texels — `simFoamSmoothing`. */
+  const uSoftSpacing = uniform(float(WATER_SIM_SOFT_SPACING_DEFAULT));
   let gridKey = '';
   /** `true`: the NEXT step reads ping, writes pong. Flips every step. */
   let writingPong = true;
@@ -166,6 +189,10 @@ export function createWaterSimSubsystem({
 
   let ticks = 0;
   let steps = 0;
+  /** Sim seconds missed while `idle()` — paid back by `tick()`'s warm-up. */
+  let pausedSec = 0;
+  let idles = 0;
+  let warmups = 0;
   let rebuilds = 0;
   let stepsSinceLastRebuild = 0;
   let lastStatus = 'never ticked';
@@ -173,16 +200,28 @@ export function createWaterSimSubsystem({
   function disposeTargets() {
     allocator.dispose(simPingRt);
     allocator.dispose(simPongRt);
+    allocator.dispose(simSoftRt);
+    allocator.dispose(simSprayRt);
     simPingRt = null;
     simPongRt = null;
+    simSoftRt = null;
+    simSprayRt = null;
+    sprayKey = '';
     gridKey = '';
   }
 
   function disposeMaterials() {
     stepPingToPong?.material?.dispose?.();
     stepPongToPing?.material?.dispose?.();
+    softFromPing?.material?.dispose?.();
+    softFromPong?.material?.dispose?.();
     stepPingToPong = null;
     stepPongToPing = null;
+    softFromPing = null;
+    softFromPong = null;
+    sprayMaterial?.material?.dispose?.();
+    sprayMaterial = null;
+    sprayKey = '';
     boundFlowTexture = null;
     boundBodyTexture = null;
   }
@@ -205,7 +244,10 @@ export function createWaterSimSubsystem({
       // family already uses everywhere else, and nothing here needs the
       // flow pack's own exception.
       type: THREE.HalfFloatType,
-      format: THREE.RGBAFormat,
+      // R ONLY (2026-10-25, W-05/W-10): the ping-pong holds the foam memory
+      // and nothing else — G (spray) has its own target (`simSprayRt`), B/A
+      // were reserved zeros. A quarter of the bytes every step reads and writes.
+      format: THREE.RedFormat,
       colorSpace: THREE.NoColorSpace,
       // LINEAR: the advected sample (`water-sim.js#advectedUv`) lands at a
       // genuinely sub-texel position most frames — bilinear interpolation
@@ -216,6 +258,8 @@ export function createWaterSimSubsystem({
     });
     simPingRt = allocator.create('water.sim.ping', describe());
     simPongRt = allocator.create('water.sim.pong', describe());
+    simSoftRt = allocator.create('water.sim.soft', describe());
+    simSprayRt = allocator.create('water.sim.spray', describe());
     gridKey = key;
     // Explicit clear, not an assumed zero-init — `water-flow-subsystem.js`'s
     // own separate, explicit `zeroPressureTexture` makes the same choice for
@@ -226,6 +270,8 @@ export function createWaterSimSubsystem({
     // it out — a flash of noise on every scene load or resolution change.
     renderWaterPass(simPingRt, zeroQuad);
     renderWaterPass(simPongRt, zeroQuad);
+    renderWaterPass(simSoftRt, zeroQuad);
+    renderWaterPass(simSprayRt, zeroQuad);
     writingPong = true;
     return true;
   }
@@ -255,6 +301,11 @@ export function createWaterSimSubsystem({
     };
     stepPingToPong = buildWaterSimStepMaterial({ ...common, simPrevTexture: simPingRt.texture });
     stepPongToPing = buildWaterSimStepMaterial({ ...common, simPrevTexture: simPongRt.texture });
+    const softArgs = { THREE, width, height, uSpacing: uSoftSpacing };
+    softFromPing = buildWaterSimSoftMaterial({ ...softArgs, simTexture: simPingRt.texture });
+    softFromPong = buildWaterSimSoftMaterial({ ...softArgs, simTexture: simPongRt.texture });
+    sprayMaterial = buildWaterSimStepMaterial({ ...common, simPrevTexture: simPingRt.texture, mode: 'spray' });
+    sprayKey = '';
     boundFlowTexture = flowTexture;
     boundBodyTexture = bodyTexture;
     rebuilds++;
@@ -271,7 +322,8 @@ export function createWaterSimSubsystem({
    */
   function tick(dtSec) {
     ticks++;
-    uDtSec.value = Number.isFinite(dtSec) && dtSec > 0 ? dtSec : 0;
+    const frameDt = Number.isFinite(dtSec) && dtSec > 0 ? dtSec : 0;
+    uDtSec.value = frameDt;
 
     const flowTexture = waterFlow.texture;
     const bodyTexture = waterBody.texture;
@@ -302,6 +354,9 @@ export function createWaterSimSubsystem({
       : WATER_SIM_NEAR_SOLID_GAIN;
     uPatchiness.value = Number.isFinite(params.foamPatchiness) ? params.foamPatchiness : WATER_FOAM_PATCHINESS;
     uPatchSizePx.value = Number.isFinite(params.foamPatchSizePx) ? params.foamPatchSizePx : WATER_FOAM_PATCH_SIZE_PX;
+    uSoftSpacing.value = Number.isFinite(params.simFoamSmoothing)
+      ? Math.max(0, params.simFoamSmoothing)
+      : WATER_SIM_SOFT_SPACING_DEFAULT;
     uRectOrigin.value.set(rect.minX, rect.minY);
 
     ensureTargets(flowW, flowH);
@@ -309,15 +364,61 @@ export function createWaterSimSubsystem({
       rebuildMaterials(flowTexture, bodyTexture, flowW, flowH, rect);
     }
 
-    if (writingPong) {
-      renderWaterPass(simPongRt, stepPingToPong.quad);
-    } else {
-      renderWaterPass(simPingRt, stepPongToPing.quad);
+    // THE SPRAY EMITTER — only when what it reads changed (W-05/W-10): the
+    // flow/body packs (a rebuild resets the key), the near-solid gain, and
+    // whether the current runs at all (`velDir` is the flow's own direction for
+    // ANY positive speed, and zero at zero).
+    const nextSprayKey = `${uNearSolidGain.value}|${uFlowSpeedPx.value > 0 ? 1 : 0}`;
+    if (nextSprayKey !== sprayKey) {
+      sprayKey = nextSprayKey;
+      renderWaterPass(simSprayRt, sprayMaterial.quad);
     }
-    writingPong = !writingPong;
-    steps++;
-    stepsSinceLastRebuild++;
+
+    // THE WARM-UP AFTER A PAUSE (2026-10-25, Water-Performance-Audit W-03).
+    // The frame loop calls `idle()` instead of `tick()` while this floor's
+    // water is not on screen. Resuming with one ordinary step would show the
+    // foam exactly as it froze, then let it drift back over ~τ seconds. So the
+    // missed time is paid back now, capped at 3τ (past that the foam has
+    // fully turned over), in at most WATER_SIM_WARMUP_MAX_STEPS steps. Large
+    // steps are safe: advection is semi-Lagrangian (unconditionally stable)
+    // and decay is the exact `exp(-dt/τ)`. Nobody saw the paused state, so a
+    // slightly different foam pattern than continuous ticking would have made
+    // is not a visible change.
+    let stepCount = 1;
+    if (pausedSec > 0) {
+      const tau = Math.max(1e-3, uTauFoamSec.value);
+      const span = Math.min(pausedSec + frameDt, 3 * tau);
+      stepCount = Math.min(WATER_SIM_WARMUP_MAX_STEPS, Math.max(1, Math.ceil(span / WATER_SIM_WARMUP_STEP_SEC)));
+      uDtSec.value = span / stepCount;
+      pausedSec = 0;
+      if (stepCount > 1) warmups++;
+    }
+    for (let i = 0; i < stepCount; i++) {
+      if (writingPong) {
+        renderWaterPass(simPongRt, stepPingToPong.quad);
+      } else {
+        renderWaterPass(simPingRt, stepPongToPing.quad);
+      }
+      writingPong = !writingPong;
+      steps++;
+      stepsSinceLastRebuild++;
+    }
+    // The soft gather of the state just written (W-06/W-12) — once per tick,
+    // after any warm-up steps, never per step.
+    renderWaterPass(simSoftRt, writingPong ? softFromPing.quad : softFromPong.quad);
     lastStatus = 'ok';
+  }
+
+  /**
+   * A frame this floor's water is not simulated (hidden, off screen, or Water
+   * switched off) — counts the sim time missed so the next `tick()` can warm
+   * back up. No GPU work.
+   * @param {number} dtSec
+   */
+  function idle(dtSec) {
+    idles++;
+    if (Number.isFinite(dtSec) && dtSec > 0) pausedSec = Math.min(pausedSec + dtSec, 3600);
+    lastStatus = 'idle: the water on this floor is not on screen';
   }
 
   return {
@@ -329,6 +430,17 @@ export function createWaterSimSubsystem({
       // `writingPong` has already flipped for NEXT time by the point a
       // caller can observe it — `false` means "just wrote pong".
       return writingPong ? simPingRt.texture : simPongRt.texture;
+    },
+    /** The pre-blurred foam (R), same grid as `texture` — `null` until the first
+     * tick allocates it. Its identity is stable for a grid (unlike the
+     * ping-pong `texture`), so the surface re-points it only on a regrid. */
+    get softTexture() {
+      return simSoftRt ? simSoftRt.texture : null;
+    },
+    /** The spray emitter (R) — `water-render.js`'s break-spray `sprayAt` reads
+     * it. Same grid as `texture`; identity stable for a grid. */
+    get sprayTexture() {
+      return simSprayRt ? simSprayRt.texture : null;
     },
     /** The sim grid's own texel dimensions — `null` until the first tick
      * allocates it, same contract as `texture` above. Exists so a display
@@ -343,6 +455,7 @@ export function createWaterSimSubsystem({
       return simPingRt ? simPingRt.height : null;
     },
     tick,
+    idle,
     /** Push the SAME body-derived reach `water-render.js#setDepthScalePx`
      * already computes — see this module's header on why this is pushed
      * rather than re-derived here. */
@@ -356,6 +469,9 @@ export function createWaterSimSubsystem({
       return {
         ticks,
         steps,
+        idles,
+        warmups,
+        pausedSec: Number(pausedSec.toFixed(3)),
         rebuilds,
         stepsSinceLastRebuild,
         grid: gridKey || 'not allocated',

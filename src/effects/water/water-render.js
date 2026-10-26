@@ -284,6 +284,7 @@ import {
 } from './water-field.js';
 import {
   buildWaterSpecular,
+  buildWaterSunVisibility,
   WATER_TIER3_SUN_GLINT,
   WATER_TIER3_SKY_SHEEN,
   WATER_TIER3_GLOSSINESS,
@@ -904,6 +905,16 @@ export const WATER_TIER5_FRINGE_SPECULAR_HI = 3.0;
 export const WATER_TIER5_DISABLED_PENDING_SELF_CAPTURE_FIX = false;
 
 /**
+ * How far onto DRY land (positive SDF, world px) a water pixel can still draw
+ * anything, beyond the wet band — see the dry-land discard in
+ * `buildWaterSurfaceMaterial` (2026-10-25, Water-Performance-Audit W-14).
+ * Grounded spray flecks reach ~130 px past their emitter; the shore-foam
+ * level contour can sit past the SDF's zero contour on a softly painted
+ * ramp. 448 covers both with a wide margin.
+ */
+export const WATER_DRY_DISCARD_REACH_PX = 448;
+
+/**
  * The tier-0 surface material.
  *
  * @param {object} args
@@ -1019,6 +1030,8 @@ export function buildWaterSurfaceMaterial({
   // here does — `null` (omitted) is itself the "no wind" default.
   windRipple = WATER_TIER2_WIND_RIPPLE,
   windHandle = null,
+  // W-08 — see `water-field.js#buildWaterSurfaceField`'s own `windStrengthField`.
+  windStrengthField = null,
   timeMsNode = null,
   wetBandPx = WATER_TIER1_WET_BAND_PX,
   wetStrength = WATER_TIER1_WET_STRENGTH,
@@ -1048,6 +1061,25 @@ export function buildWaterSurfaceMaterial({
   // ── THE SIM PACK — foam's own ping-ponged memory (2026-08-18, S5) ──────────
   waterSimTexture = null,
   waterSimTexSize = null,
+  // THE SIM FOAM, PRE-BLURRED ON THE SIM GRID (2026-10-25, W-06/W-12) —
+  // `water-sim-subsystem.js`'s `softTexture` (R, same grid as `waterSimTexture`).
+  // Given, the 25-tap soft gather below becomes ONE tap of it; `null` keeps the
+  // per-pixel gather (construction-only tests, older callers).
+  waterSimSoftTexture = null,
+  // THE SPRAY EMITTER's own texture (2026-10-25, W-05/W-10) — the sim's
+  // `sprayTexture` (R). `null` reads G of `waterSimTexture`, as before.
+  waterSprayTexture = null,
+  // ── THE SHARED-EVALUATION RESOLVE (2026-10-25, Water-Performance-Audit W-02) ──
+  // `true` builds `resolveMaterial` — the whole water graph, ONCE per pixel,
+  // writing absorb/in-scatter (and tier 5's refraction inputs) to an MRT
+  // target the CALLER renders before the scene draw — and turns the absorb,
+  // in-scatter and refraction materials into reads of that target. See the
+  // "THE RESOLVE" block at the end of this function. `resolveTextures` are the
+  // initial bindings (placeholders), re-pointed through `resolveTexNodes`.
+  // `false` (tests, the bench, any older caller): every mesh evaluates the
+  // graph itself, exactly as before.
+  sharedResolve = false,
+  resolveTextures = null,
   // ── TIER 4 (2026-08-16) ─────────────────────────────────────────────────
   swashFoam = WATER_TIER4_SWASH_FOAM,
   breakFoam = WATER_TIER4_BREAK_FOAM,
@@ -1182,6 +1214,10 @@ export function buildWaterSurfaceMaterial({
     luminance,
     Fn,
     If,
+    textureLoad,
+    screenCoordinate,
+    ivec2,
+    floor,
   } = THREE.TSL;
 
   const uMaskRect = uniform(vec4(maskRect.minX, maskRect.minY, maskRect.maxX, maskRect.maxY));
@@ -1541,25 +1577,65 @@ export function buildWaterSurfaceMaterial({
   const simSoftBaseUv = vec2(clamp(maskU, 0, 1), clamp(maskV, 0, 1));
   const SIM_SOFT_W = [1, 4, 6, 4, 1];
   let simSoft = null;
-  for (let iy = -2; iy <= 2; iy++) {
-    for (let ix = -2; ix <= 2; ix++) {
-      const w = (SIM_SOFT_W[ix + 2] * SIM_SOFT_W[iy + 2]) / 256;
-      const tap =
-        ix === 0 && iy === 0
-          ? waterSimTexNode.r
-          : waterSimTexNode.sample(
-              buildSmoothTexelUv(THREE.TSL, {
-                uvNode: clamp(
-                  simSoftBaseUv.add(vec2(float(ix), float(iy)).mul(simTexelUv).mul(uSimFoamSmooth)),
-                  vec2(0, 0),
-                  vec2(1, 1)
-                ),
-                uTexSize: uWaterSimTexSize,
-              })
-            ).r;
-      simSoft = simSoft ? simSoft.add(tap.mul(float(w))) : tap.mul(float(w));
+  // ⚠️ ONE TAP OF THE PRE-BLURRED GRID WHEN THE SIM PROVIDES IT (2026-10-25,
+  // Water-Performance-Audit W-06/W-12). The same [1 4 6 4 1]² kernel now runs
+  // once per sim texel per step (`water-sim.js#buildWaterSimSoftMaterial`)
+  // instead of once per screen pixel in both meshes, at every tier. Read
+  // through the same C2 reconstruction. A raw `texture()` node, re-pointed by
+  // `water-surface-subsystem.js#setWaterSimSoftTexture` like `waterSimTexNode`.
+  //
+  // READ AS A CUBIC B-SPLINE, NOT THROUGH THE C2 EASE. The ease (`buildSmooth
+  // TexelUv`) has zero slope at every texel centre; the old gather averaged
+  // those flat spots away across 25 offset taps, but one eased tap of the
+  // pre-blurred grid shows them as a faint texel grid along foam edges (seen
+  // on the bench). A B-spline is C2 everywhere with no flat spots, and it
+  // takes four bilinear taps (Sigg & Hadwiger's fast filtering) — still
+  // 21 taps fewer than the gather it replaces.
+  const waterSimSoftTexNode = waterSimSoftTexture ? texture(waterSimSoftTexture, simSoftBaseUv) : null;
+  /** The spray emitter's raw node (re-pointed like `waterSimTexNode`); break
+   * spray reads it through `.sample()` clones. */
+  const waterSprayTexNode = waterSprayTexture ? texture(waterSprayTexture, simSoftBaseUv) : null;
+  if (waterSimSoftTexNode) {
+    const size = max(uWaterSimTexSize, vec2(1, 1));
+    const p = simSoftBaseUv.mul(size).sub(vec2(0.5, 0.5));
+    const i = floor(p);
+    const f = p.sub(i);
+    const f2 = f.mul(f);
+    const f3 = f2.mul(f);
+    const oneMinus = vec2(1, 1).sub(f);
+    const w0 = oneMinus.mul(oneMinus).mul(oneMinus).div(6);
+    const w1 = f3.mul(3).sub(f2.mul(6)).add(4).div(6);
+    const w2 = f3.mul(-3).add(f2.mul(3)).add(f.mul(3)).add(1).div(6);
+    const w3 = f3.div(6);
+    const g0 = w0.add(w1);
+    const g1 = w2.add(w3);
+    // Texel-centre coordinates of the two combined fetches per axis.
+    const c0 = i.sub(vec2(0.5, 0.5)).add(w1.div(g0));
+    const c1 = i.add(vec2(1.5, 1.5)).add(w3.div(g1));
+    const at = (cx, cy) => waterSimSoftTexNode.sample(vec2(cx, cy).div(size)).r;
+    simSoft = g0.y
+      .mul(g0.x.mul(at(c0.x, c0.y)).add(g1.x.mul(at(c1.x, c0.y))))
+      .add(g1.y.mul(g0.x.mul(at(c0.x, c1.y)).add(g1.x.mul(at(c1.x, c1.y)))));
+  } else
+    for (let iy = -2; iy <= 2; iy++) {
+      for (let ix = -2; ix <= 2; ix++) {
+        const w = (SIM_SOFT_W[ix + 2] * SIM_SOFT_W[iy + 2]) / 256;
+        const tap =
+          ix === 0 && iy === 0
+            ? waterSimTexNode.r
+            : waterSimTexNode.sample(
+                buildSmoothTexelUv(THREE.TSL, {
+                  uvNode: clamp(
+                    simSoftBaseUv.add(vec2(float(ix), float(iy)).mul(simTexelUv).mul(uSimFoamSmooth)),
+                    vec2(0, 0),
+                    vec2(1, 1)
+                  ),
+                  uTexSize: uWaterSimTexSize,
+                })
+              ).r;
+        simSoft = simSoft ? simSoft.add(tap.mul(float(w))) : tap.mul(float(w));
+      }
     }
-  }
   const clumpCenter = uSimClumpLo.add(uSimClumpHi).mul(float(0.5));
   const clumpHalfWidth = max(
     uSimClumpHi.sub(uSimClumpLo).mul(float(0.5)),
@@ -1751,6 +1827,17 @@ export function buildWaterSurfaceMaterial({
   // `tangentXY` reads `bodyTexNode`, which is only non-null once
   // `activeTier >= 2` (rungs are cumulative — tier 2 can never be reached
   // without tier 1 already being affordable, effect-cascade.js#resolveEffectTier).
+  // THE SUN-SHADOW TAP, BUILT BEFORE THE FIELD (2026-10-25, Water-Performance-
+  // Audit W-07). Tier 4's caustic net is multiplied by `sunVis` in the end
+  // (`causticExcess`, below), so wherever the sun is fully blocked — or the
+  // Caustics dial is at 0 — the two 3-D Worley layers were computed only to be
+  // multiplied by zero. Feeding the product into the net's own per-pixel
+  // branch skips them there instead. Built once here and handed to tier 3's
+  // specular too, so it stays ONE shadow tap (one signal, one register).
+  const sunVisibility =
+    activeTier >= 3 ? buildWaterSunVisibility(THREE.TSL, { positionWorld, sunShadowTexture }) : null;
+  const causticsVisible = sunVisibility ? max(uCaustics, float(0)).mul(sunVisibility.sunVis) : max(uCaustics, float(0));
+
   let field = {
     foam: float(0),
     turbidity: float(0),
@@ -1807,6 +1894,7 @@ export function buildWaterSurfaceMaterial({
       shoaling: activeTier >= 4,
       caustics: causticsGateForce ?? activeTier >= 4,
       causticsInsideGate,
+      causticsVisible,
       // WIND-DRIVEN RIPPLE (mythica-machina-press#18) — UNCONDITIONAL, not
       // gated behind an `if (activeTier >= N)` the way shoaling/caustics
       // are: it rides tier 2's own fetch (the SAME "no new fetch" reasoning
@@ -1814,6 +1902,7 @@ export function buildWaterSurfaceMaterial({
       // makes it a provable no-op on its own — a second gate here would only
       // duplicate that, never change it.
       windHandle,
+      windStrengthField,
       uWindRipple,
     });
   }
@@ -1925,6 +2014,7 @@ export function buildWaterSurfaceMaterial({
       // `buf:scene.illum` and `buf:scene.vis`" — this is the half of that row
       // that shipped missing.
       sunShadowTexture,
+      sunVisibility,
       // THE WAVE NORMAL. Non-null here by construction — rungs are cumulative,
       // so reaching tier 3 means tier 2 built the field above. Passing it is
       // what separates a visible rung from the flat 0.0084 wash this shipped
@@ -1951,70 +2041,81 @@ export function buildWaterSurfaceMaterial({
   // i.e. "at the waterline / no structure / no wave / facing away") describe
   // the same "this term does not exist yet" state the debug channels' own
   // "reads" text promises below tier 4.
-  let shore = {
-    foam: float(0),
-    breakOnly: float(0),
-    tailOnly: float(0),
-    d01: float(0),
-    lace: float(0),
-    swashBand: float(0),
-    breakFacing: float(0),
+  // DEBUG-ONLY SINCE 2026-10-17 (`shore.foam` no longer reaches the screen —
+  // see `waterSimFoam` below), so it is built LAZILY, by `buildDebugMaterial`
+  // (2026-10-25, Water-Performance-Audit W-16): every material rebuild used to
+  // construct this whole graph on the CPU for a channel nobody had selected.
+  const buildShoreForDebug = () => {
+    let shore = {
+      foam: float(0),
+      breakOnly: float(0),
+      tailOnly: float(0),
+      d01: float(0),
+      lace: float(0),
+      swashBand: float(0),
+      breakFacing: float(0),
+    };
+    if (activeTier >= 4) {
+      shore = buildWaterShoreFoam({
+        TSL: THREE.TSL,
+        worldXY: vec2(positionWorld.x, positionWorld.y),
+        timeMsNode: timeMsNode ?? float(0),
+        // The SAME safe domain shift tier 2's own fetch used — see
+        // `water-shore.js`'s header for why re-deriving this independently
+        // (even correctly) would be a second copy of a thing this file has
+        // already shipped two bugs in.
+        domainOffset: field.domainOffset,
+        // THE SHORE NORMAL's SOURCE — break foam rotates this tangent 90° to ask
+        // "is the current heading into my nearest bank". Non-null here by
+        // construction: rungs are cumulative, so reaching tier 4 means tier 1
+        // built `bodyTexNode`.
+        tangentXY: vec2(bodyTexNode.b, bodyTexNode.a),
+        flowDir: uFlowDir,
+        // S4 (2026-08-18) — the REAL solved local direction/speed, already
+        // sampled once above (with the bank/solid fallback baked in) and
+        // reused here rather than re-derived. See `water-shore.js`'s own S4
+        // header block for exactly which three terms this reaches and why the
+        // rest (the domain offset, the tail's march) deliberately stay global.
+        localFlowDir: localFlowDirSafe,
+        localSpeed01: flowPackGated.b,
+        shoreDist,
+        insideWater: inside,
+        uReachPx: uFoamReachPx,
+        uSwash: uSwashFoam,
+        uBreak: uBreakFoam,
+        uTrail: uFoamTrail,
+        foamStructureUniforms,
+        // THE TAIL'S BODY-PACK TAP. Built HERE because this is where the body
+        // rect, the grid size and the smooth (C2) reconstruction all already
+        // live — `water-shore.js` re-deriving any of that would be a second copy
+        // of the mapping this file has already shipped bugs in. Takes a WORLD
+        // offset so the caller never has to know the UV convention at all.
+        sampleBodyAt: (offsetXY) => {
+          const at = vec2(positionWorld.x.add(offsetXY.x), positionWorld.y.add(offsetXY.y));
+          const u = at.x.sub(uBodyRect.x).div(uBodyRect.z.sub(uBodyRect.x));
+          const v = at.y.sub(uBodyRect.y).div(uBodyRect.w.sub(uBodyRect.y));
+          // ⚠️ CLAMPED, and here the clamp is CORRECT rather than an extrusion
+          // (`feedback_uv_clamp_is_an_extrusion_not_a_boundary`): a tap that
+          // marches off the body rect is asking about water outside the baked
+          // field, and the edge texel's own "no shore near here" answer is the
+          // honest one. Nothing downstream treats it as membership — `inside`,
+          // at THIS pixel, is what gates the result.
+          // `bodyTexNode.sample(...)`, NOT a fresh `texture(bodyTexture, ...)` —
+          // a `.sample()` clone reads its texture through `bodyTexNode`'s own
+          // reference, so `water-surface-subsystem.js`'s one re-point of
+          // `bodyTexNode` on a body regrid reaches these taps too. A fresh node
+          // would keep sampling whatever body texture existed at build time.
+          return bodyTexNode.sample(
+            buildSmoothTexelUv(THREE.TSL, {
+              uvNode: vec2(clamp(u, 0, 1), clamp(v, 0, 1)),
+              uTexSize: uBodyTexSize,
+            })
+          );
+        },
+      });
+    }
+    return shore;
   };
-  if (activeTier >= 4) {
-    shore = buildWaterShoreFoam({
-      TSL: THREE.TSL,
-      worldXY: vec2(positionWorld.x, positionWorld.y),
-      timeMsNode: timeMsNode ?? float(0),
-      // The SAME safe domain shift tier 2's own fetch used — see
-      // `water-shore.js`'s header for why re-deriving this independently
-      // (even correctly) would be a second copy of a thing this file has
-      // already shipped two bugs in.
-      domainOffset: field.domainOffset,
-      // THE SHORE NORMAL's SOURCE — break foam rotates this tangent 90° to ask
-      // "is the current heading into my nearest bank". Non-null here by
-      // construction: rungs are cumulative, so reaching tier 4 means tier 1
-      // built `bodyTexNode`.
-      tangentXY: vec2(bodyTexNode.b, bodyTexNode.a),
-      flowDir: uFlowDir,
-      // S4 (2026-08-18) — the REAL solved local direction/speed, already
-      // sampled once above (with the bank/solid fallback baked in) and
-      // reused here rather than re-derived. See `water-shore.js`'s own S4
-      // header block for exactly which three terms this reaches and why the
-      // rest (the domain offset, the tail's march) deliberately stay global.
-      localFlowDir: localFlowDirSafe,
-      localSpeed01: flowPackGated.b,
-      shoreDist,
-      insideWater: inside,
-      uReachPx: uFoamReachPx,
-      uSwash: uSwashFoam,
-      uBreak: uBreakFoam,
-      uTrail: uFoamTrail,
-      foamStructureUniforms,
-      // THE TAIL'S BODY-PACK TAP. Built HERE because this is where the body
-      // rect, the grid size and the smooth (C2) reconstruction all already
-      // live — `water-shore.js` re-deriving any of that would be a second copy
-      // of the mapping this file has already shipped bugs in. Takes a WORLD
-      // offset so the caller never has to know the UV convention at all.
-      sampleBodyAt: (offsetXY) => {
-        const at = vec2(positionWorld.x.add(offsetXY.x), positionWorld.y.add(offsetXY.y));
-        const u = at.x.sub(uBodyRect.x).div(uBodyRect.z.sub(uBodyRect.x));
-        const v = at.y.sub(uBodyRect.y).div(uBodyRect.w.sub(uBodyRect.y));
-        // ⚠️ CLAMPED, and here the clamp is CORRECT rather than an extrusion
-        // (`feedback_uv_clamp_is_an_extrusion_not_a_boundary`): a tap that
-        // marches off the body rect is asking about water outside the baked
-        // field, and the edge texel's own "no shore near here" answer is the
-        // honest one. Nothing downstream treats it as membership — `inside`,
-        // at THIS pixel, is what gates the result.
-        return texture(
-          bodyTexture,
-          buildSmoothTexelUv(THREE.TSL, {
-            uvNode: vec2(clamp(u, 0, 1), clamp(v, 0, 1)),
-            uTexSize: uBodyTexSize,
-          })
-        );
-      },
-    });
-  }
   // ⚠️ BOTH 8-TAP OBSTACLE-RING SYSTEMS REMOVED 2026-08-18, author's explicit
   // repeated request ("get rid of the damn eight tap... I keep asking you to
   // get rid of it and you don't"). First round removed only `obstacleFoam`
@@ -2211,7 +2312,7 @@ export function buildWaterSurfaceMaterial({
     ...simFoamStructureArgs,
     gate: foamStructureGate ? waterSimFoam : null,
   });
-  const simFoamStructureFull = buildFoamCellularStructure(simFoamStructureArgs).structure;
+  // The ungated twin is DEBUG-ONLY, built lazily by `buildDebugMaterial`.
   const simFoamStructure = simFoamStructureBuild.structure;
   const waterSimFoamStructured = waterSimFoam.mul(simFoamStructure);
 
@@ -2265,7 +2366,24 @@ export function buildWaterSurfaceMaterial({
     // see the constant block's own doc for why that is load-bearing, not
     // incidental: every map that has never touched this slider gets
     // byte-identical foam to before this fix.
-    foamSharpnessFactor = mix(float(1), foamSharpnessGate, uFoamEdgeSharpness);
+    //
+    // ⚠️ AND AT 0 THE FOUR TAPS ARE NOT EVEN TAKEN (2026-10-25, Water-
+    // Performance-Audit W-12). `mix(1, gate, 0)` is exactly 1, but the taps
+    // feeding `gate` ran on every pixel of both meshes regardless. A UNIFORM
+    // branch, so their implicit-LOD samples stay legal. The tap NODES are
+    // still built eagerly above (and pushed to `maskTexNodes`), never inside
+    // the `Fn` — an `Fn` body runs at shader-build time, after the subsystem
+    // may already have re-pointed the mask, and a node born then would keep
+    // the 1×1 placeholder forever. The debug channel reads `foamSharpnessGate`
+    // itself, unbranched, as before.
+    const sharpnessGate = foamSharpnessGate;
+    foamSharpnessFactor = Fn(() => {
+      const out = float(1).toVar('waterFoamSharpnessFactor');
+      If(uFoamEdgeSharpness.greaterThan(float(0)), () => {
+        out.assign(mix(float(1), sharpnessGate, uFoamEdgeSharpness));
+      });
+      return out;
+    })();
   }
 
   // THE PATCH FIELD on tier 2's crest foam (2026-09-25) — the SAME
@@ -2355,14 +2473,32 @@ export function buildWaterSurfaceMaterial({
     // the current driving into a solid face whose water is already deep, i.e. a hard
     // edge) — so it can fly, land and ride the current far from where it was thrown,
     // and soft shores never throw one. Whether it landed wet or dry is the mask itself.
+    // GATED TO THE FLECK REACH OF A SHORE (W-06 — `buildBreakSpecks`' own doc).
+    // The two taps run inside that per-pixel branch, so they sample level 0
+    // explicitly (neither texture has mips: identical to the implicit LOD).
+    // The emitter band: a spray emitter sits within ~1 flow/sim texel of a
+    // solid face, read through a bilinear tap (+1 texel), measured against a
+    // body SDF good to ~1 body texel — four of the coarser texel, plus slack.
+    const simTexelWorld = max(
+      spanX.div(max(uWaterSimTexSize.x, float(1))),
+      spanY.div(max(uWaterSimTexSize.y, float(1)))
+    );
+    const bodyTexelWorld = max(
+      uBodyRect.z.sub(uBodyRect.x).div(max(uBodyTexSize.x, float(1))),
+      uBodyRect.w.sub(uBodyRect.y).div(max(uBodyTexSize.y, float(1)))
+    );
     breakSpecks = buildBreakSpecks(THREE, {
       worldXY: vec2(positionWorld.x, positionWorld.y),
       tSec: tSecFoam,
       velocityPx: fleckCurrentPx,
       insideHere: inside,
-      sprayAt: (w) => waterSimTexNode.sample(maskUvOfWorld(w)).g,
-      waterAt: (w) => maskTexNode.sample(maskUvOfWorld(w)).r,
+      sprayAt: waterSprayTexNode
+        ? (w) => waterSprayTexNode.sample(maskUvOfWorld(w)).level(float(0)).r
+        : (w) => waterSimTexNode.sample(maskUvOfWorld(w)).level(float(0)).g,
+      waterAt: (w) => maskTexNode.sample(maskUvOfWorld(w)).level(float(0)).r,
       uSpray: maskShore.uSpray,
+      shoreAbsDist: abs(bodyTexNode.r),
+      emitterBandPx: max(simTexelWorld, bodyTexelWorld).mul(float(4)).add(float(32)),
     });
   }
   const foamDrawn = foamTexture ? (breakSpecks ? max(foamTexture, breakSpecks) : foamTexture) : null;
@@ -2430,6 +2566,8 @@ export function buildWaterSurfaceMaterial({
   // that should hide it (a token, an upper floor), so it reads this SAME
   // depth-authority value mesh 1/2 already trust, not a separate check.
   let notOccluded = float(1);
+  /** The same test as a BOOL, for `material.maskNode` — see MESH 1/2 below. */
+  let visibleByDepth = null;
   let floorGateCompiled = false;
   if (depthTexture && uViewRect) {
     const viewSpanX = max(uViewRect.z.sub(uViewRect.x), float(1));
@@ -2444,9 +2582,47 @@ export function buildWaterSurfaceMaterial({
     // SAME single ordinal comparison every other depth-authority consumer
     // already uses; no tolerance/softness needed, a real rank is exact.
     notOccluded = step(uExpectedDepth, depthHere);
+    visibleByDepth = depthHere.greaterThanEqual(uExpectedDepth);
     floorGateCompiled = true;
   }
 
+  // ⚠️ DRY LAND THE WATER CANNOT REACH IS DISCARDED TOO (2026-10-25,
+  // Water-Performance-Audit W-14). The mesh is the water's padded AABB, and on
+  // a diagonal or winding river most of that is dry ground, where every term
+  // of both meshes evaluates to its blend's neutral: depth, in-scatter,
+  // reflection, caustics and the tier-2 crest are all multiplied by `inside`;
+  // the sim's foam and the shore density die within a few texels of the
+  // shore. What DOES reach onto land — the wet band (`uWetBandPx`, SDF-based),
+  // grounded spray flecks (~130 px plus the emitter band, `fleckReachPx`) and
+  // a shore-foam level contour that a soft painted ramp can push past the
+  // SDF's own zero — is all bounded well inside `WATER_DRY_DISCARD_REACH_PX`
+  // plus a few texels of slack, so a pixel farther than that onto land
+  // provably drew nothing. Same discard (and the same "lossless because a
+  // discard is every blend's neutral") as the occlusion test above.
+  let drawMask = visibleByDepth;
+  if (bodyTexNode) {
+    const texelSlack = max(
+      uBodyRect.z.sub(uBodyRect.x).div(max(uBodyTexSize.x, float(1))),
+      uBodyRect.w.sub(uBodyRect.y).div(max(uBodyTexSize.y, float(1)))
+    ).mul(float(8));
+    const reachesLand = bodyTexNode.r.lessThan(max(uWetBandPx, float(WATER_DRY_DISCARD_REACH_PX)).add(texelSlack));
+    drawMask = drawMask ? drawMask.and(reachesLand) : reachesLand;
+  }
+
+  /** THE RESOLVE's own pixel address — see "THE RESOLVE" at the end. The
+   * resolve target is the SAME size as the target the composites draw into
+   * and is rasterised from the SAME quad with the SAME camera, so the
+   * fragment's own integer pixel is the exact texel the resolve wrote. */
+  const resolvePixel = sharedResolve ? ivec2(screenCoordinate.xy) : null;
+  /** The resolve's `output` read — built here (not in "THE RESOLVE") because
+   * tier 5 reads its `.w`: see the alpha note there. */
+  const resolveOutputNode = sharedResolve ? textureLoad(resolveTextures.output, resolvePixel) : null;
+  /** What tier 5 hands the resolve: offset (world px), fringe suppression, alpha. */
+  let refractResolveOut = null;
+  let refractResolveAlpha = null;
+
+  /** The tier-5 resolve read, when there is one (re-pointed with the others). */
+  let refractTexNodeForResolve = null;
   let refractMaterial = null;
   /** Every `texture(capturedTexture, …)` node tier 5 builds — see the fringe
    * comment below for why re-pointing needs all three, always this array,
@@ -2486,7 +2662,14 @@ export function buildWaterSurfaceMaterial({
     const slopeMagnitude = length(field.slope);
     const slopeBounded = field.slope.div(max(slopeMagnitude, float(1)));
     const refractOffsetWorld = slopeBounded.mul(depth01).mul(uRefractStrengthPx);
-    const refractedWorldXY = vec2(positionWorld.x, positionWorld.y).add(refractOffsetWorld);
+    // SHARED RESOLVE (W-02/W-15): the offset, the fringe suppression and the
+    // alpha below were the ONLY things this material needed the whole field
+    // and specular graph for. With a resolve they are read back from it (one
+    // load), and this material keeps only its own capture/depth taps.
+    const refractResolved = sharedResolve ? textureLoad(resolveTextures.refract, resolvePixel) : null;
+    const refractedWorldXY = vec2(positionWorld.x, positionWorld.y).add(
+      refractResolved ? refractResolved.xy : refractOffsetWorld
+    );
 
     const capturedSpanX = max(uCapturedRect.z.sub(uCapturedRect.x), float(1));
     const capturedSpanY = max(uCapturedRect.w.sub(uCapturedRect.y), float(1));
@@ -2551,7 +2734,9 @@ export function buildWaterSurfaceMaterial({
       float(WATER_TIER5_FRINGE_SPECULAR_HI),
       specularLuma
     );
-    const fringeUv = vec2(uCapturedTexelUv.x, float(0)).mul(float(1).sub(fringeSuppress));
+    const fringeUv = vec2(uCapturedTexelUv.x, float(0)).mul(
+      float(1).sub(refractResolved ? refractResolved.z : fringeSuppress)
+    );
     const refractRNode = texture(capturedTexture, tapUv.add(fringeUv));
     const refractGNode = texture(capturedTexture, tapUv);
     const refractBNode = texture(capturedTexture, tapUv.sub(fringeUv));
@@ -2568,8 +2753,11 @@ export function buildWaterSurfaceMaterial({
     // this file's own module header already names as a real, once-shipped
     // regression class.
     const refractAlpha = inside.mul(notOccluded).mul(float(WATER_TIER5_MAX_ALPHA));
+    refractResolveOut = vec4(refractOffsetWorld, fringeSuppress, refractAlpha);
+    refractResolveAlpha = refractAlpha;
     refractMaterial = new THREE.NodeMaterial();
-    refractMaterial.colorNode = vec4(refractColor, refractAlpha);
+    refractMaterial.colorNode = vec4(refractColor, refractResolved ? resolveOutputNode.w : refractAlpha);
+    if (refractResolved) refractTexNodeForResolve = refractResolved;
     configureShared(refractMaterial);
     refractMaterial.blendSrc = THREE.SrcAlphaFactor;
     refractMaterial.blendDst = THREE.OneMinusSrcAlphaFactor;
@@ -2726,6 +2914,21 @@ export function buildWaterSurfaceMaterial({
   // blend state is not per-attachment on WebGL2. Already occlusion-safe as-is
   // (white is neutral regardless of `notOccluded`), so it needs no gating.
   absorbMaterial.mrtNode = mrt({ attr: vec4(1, 1, 1, 1) });
+  // ⚠️ AN OCCLUDED PIXEL IS DISCARDED BEFORE ANY OF THE ABOVE RUNS (2026-10-25,
+  // Water-Performance-Audit W-14). The depth gate used to be only the final
+  // `mix` above, so water under a roof, an upper floor or a token computed the
+  // whole field/foam/caustic stack and then threw it away — in both meshes.
+  // `maskNode` is three's own early-discard hook: `NodeMaterial#setupDiffuseColor`
+  // runs `bool(maskNode).not().discard()` as its FIRST statement, before
+  // `colorNode` and the MRT merge (the geometry pass's early-Z relies on the
+  // same ordering, `vt-pan-viewer.js` — the whole-image `maskNode`).
+  // Lossless: a discard leaves colour AND `attr` untouched, which is exactly
+  // what this pass's occluded output did (white is the multiply's neutral),
+  // and the same holds for MESH 2's add (zero). `discard` demotes to a helper
+  // invocation in WGSL, so the derivatives further down stay legal. NOT on the
+  // tier-5 refraction material: its alpha blend writes `refractAlpha` into the
+  // destination ALPHA, so a discard there would not be byte-identical.
+  if (drawMask) absorbMaterial.maskNode = drawMask;
 
   // ── MESH 2: IN-SCATTER ───────────────────────────────────────────────────
   // `src + dst`, premultiplied — the light the volume sends back. Zero outside
@@ -2798,6 +3001,65 @@ export function buildWaterSurfaceMaterial({
   // "vec4(0) always means don't touch it", and the next reader needs to see
   // that this one was checked rather than left to luck.
   inscatterMaterial.mrtNode = mrt({ attr: vec4(0, 0, 0, 0) });
+  // Same early discard as MESH 1 (W-14) — an occluded add of zero, skipped.
+  if (drawMask) inscatterMaterial.maskNode = drawMask;
+
+  // ── THE RESOLVE (2026-10-25, Water-Performance-Audit W-02/W-15) ───────────
+  // Two blends need two draws (multiply, then add — the header's physical
+  // reason), but each draw used to evaluate EVERYTHING its output depends on:
+  // the field, the wind sampler, the whole tier-4 foam stack, specular, and
+  // (absorb) the caustic net — twice per pixel, three times at tier 5, since
+  // separate materials share nothing at run time. With `sharedResolve` the
+  // whole graph runs ONCE, in `resolveMaterial`, which the caller renders —
+  // the same quad, the same camera, a target the same size as the scene's —
+  // just before the scene draw, writing:
+  //   output         inscatterFinalColor (0 is the add's neutral); .w carries
+  //                  tier 5's alpha
+  //   waterAbsorb    1 − absorbFinalColor  (the COMPLEMENT, so the cleared 0 is
+  //                                         the multiply's neutral: 1 − 0 = 1)
+  //   waterRefract   tier 5's offset and fringe suppression
+  // and the absorb/in-scatter meshes become ONE integer load each, at their
+  // own pixel. Every fragment, derivative and implicit-LOD tap in the resolve
+  // is the one the old meshes computed (same raster, same camera), so the only
+  // difference is half-float storage of finished values (≤ ~0.05%). A pixel the
+  // resolve discards (`drawMask`) keeps the cleared 0 — neutral for every read.
+  let resolveMaterial = null;
+  const resolveTexNodes = { output: null, absorb: null, refract: refractTexNodeForResolve };
+  if (sharedResolve) {
+    resolveMaterial = new THREE.NodeMaterial();
+    // ⚠️ THE LAYOUT IS DICTATED BY TWO THINGS three DOES (both verified on the
+    // bench, both in vendor/three):
+    //  • `colorNode` (attachment 0, `output`) is clamped `max(0)` on the way
+    //    out — extra MRT outputs are not. `1 − absorb` goes NEGATIVE wherever
+    //    dry-ground foam lifts the bed (`foamLift` > 1), so it must ride an
+    //    extra attachment (`waterAbsorb`); the in-scatter is never negative and
+    //    takes attachment 0.
+    //  • the WebGPU backend clears attachments after the first to (0,0,0,1) —
+    //    alpha hard-coded to 1 (`_clearValue`) — while attachment 0 gets the
+    //    renderer's clear colour, which the caller sets to (0,0,0,0). So tier
+    //    5's ALPHA rides `output.w` (an unwritten pixel reads alpha 0), and
+    //    every extra attachment is read only through its RGB (cleared to 0,
+    //    which is `1 − 1`: the multiply's neutral).
+    resolveMaterial.colorNode = vec4(inscatterFinalColor, refractResolveAlpha ?? float(0));
+    resolveMaterial.mrtNode = mrt(
+      refractResolveOut
+        ? { waterAbsorb: vec4(vec3(1, 1, 1).sub(absorbFinalColor), 1), waterRefract: refractResolveOut }
+        : { waterAbsorb: vec4(vec3(1, 1, 1).sub(absorbFinalColor), 1) }
+    );
+    resolveMaterial.transparent = false;
+    resolveMaterial.blending = THREE.NoBlending;
+    resolveMaterial.depthTest = false;
+    resolveMaterial.depthWrite = false;
+    resolveMaterial.side = THREE.DoubleSide;
+    if (drawMask) resolveMaterial.maskNode = drawMask;
+
+    resolveTexNodes.output = resolveOutputNode;
+    resolveTexNodes.absorb = textureLoad(resolveTextures.absorb, resolvePixel);
+    absorbMaterial.colorNode = vec4(vec3(1, 1, 1).sub(resolveTexNodes.absorb.rgb), 1);
+    absorbMaterial.maskNode = null; // the resolve already discarded; 0 reads as neutral here
+    inscatterMaterial.colorNode = vec4(resolveTexNodes.output.rgb, 1);
+    inscatterMaterial.maskNode = null;
+  }
 
   // ── THE INSTRUMENT (2026-08-16, Water-Testament W0) — a third material no
   // mesh draws until asked ──────────────────────────────────────────────────
@@ -2820,121 +3082,149 @@ export function buildWaterSurfaceMaterial({
   // free without needing two different formulas for two display channels.
   // Every other channel below is its raw node, unclamped, on purpose: a value
   // legitimately outside [0,1] on one of THOSE is itself the finding.
-  const depth01Display = clamp(depth01, float(0), float(1));
-  const bedVisibility = dot(bedTransmit, vec3(1 / 3, 1 / 3, 1 / 3));
-  const turbidityDisplay = clamp(field.turbidity.mul(float(0.5)).add(float(0.5)), float(0), float(1));
-  const causticDisplay = clamp(causticExcess.mul(float(0.5)).add(float(0.5)), float(0), float(1));
-  const debugNodes = {
-    quad: vec3(1, 0, 1),
-    mask: vec3(maskTexNode.r, maskTexNode.r, maskTexNode.r),
-    inside: vec3(inside, inside, inside),
-    shoreDist01: vec3(depthRamp, depthRamp, depthRamp),
-    depth01: vec3(depth01Display, depth01Display, depth01Display),
-    bedVisibility: vec3(bedVisibility, bedVisibility, bedVisibility),
-    turbidity: vec3(turbidityDisplay, turbidityDisplay, turbidityDisplay),
-    foamCrest: vec3(field.foam, field.foam, field.foam),
-    foamD01: vec3(shore.d01, shore.d01, shore.d01),
-    worleyLace: vec3(shore.lace, shore.lace, shore.lace),
-    swashBand: vec3(shore.swashBand, shore.swashBand, shore.swashBand),
-    breakFacing: vec3(shore.breakFacing, shore.breakFacing, shore.breakFacing),
-    breakFoam: vec3(shore.breakOnly, shore.breakOnly, shore.breakOnly),
-    foamTail: vec3(shore.tailOnly, shore.tailOnly, shore.tailOnly),
-    totalFoam: vec3(totalFoam, totalFoam, totalFoam),
-    causticExcess: vec3(causticDisplay, causticDisplay, causticDisplay),
-    // RAW tier-3 output, ungated by `inside`/`foamHide` — isolating "does
-    // tier 3 itself produce signal" from "does the water gate multiply it
-    // correctly", the same split channels 8 and 12 already draw for foam.
-    // Channel 18 (`inscatterFinal`) is the gated readback of this same term.
-    reflection: specular.reflection,
-    absorbFinal: absorbFinalColor,
-    inscatterFinal: inscatterFinalColor,
-    // `.a`, NOT `.r` — S3's pack moved solidity to the ALPHA channel to make
-    // room for RG velocity + B speed01 (`buildWaterProjectPackMaterial`'s own
-    // B4 doc); reading `.r` here now would show VELOCITY-X mislabelled as
-    // solidity, exactly the kind of channel-layout drift this project's own
-    // `feedback_shared_field_two_meanings_two_registries` bug class names.
-    flowSolidity: vec3(flowPackGated.a, flowPackGated.a, flowPackGated.a),
-    flowVelocity: flowVelocityColor,
-    // RAW accumulator (no clump threshold) — deliberately the UNCLAMPED
-    // value, same "isolate the source from its own gate" split channels 7
-    // and 12 already draw: `simFoam` below shows what actually reaches the
-    // water, this shows what the buffer itself actually contains.
-    simFoamRaw: vec3(waterSimTexNode.r, waterSimTexNode.r, waterSimTexNode.r),
-    simFoam: vec3(waterSimFoam, waterSimFoam, waterSimFoam),
-    // The cellular "net with holes" mask ALONE (2026-08-19) — no accumulator
-    // involved, so an author can judge the texture itself (cell size, streak
-    // stretch, hole density) independent of where the sim buffer happens to
-    // be bright this frame. `simFoamStructured` (below) is what actually
-    // reaches the water: this × `simFoam` above.
-    simFoamStructure: vec3(simFoamStructureFull, simFoamStructureFull, simFoamStructureFull),
-    simFoamStructured: vec3(waterSimFoamStructured, waterSimFoamStructured, waterSimFoamStructured),
-    // `flowWarp` ALONE (`field.flowWarp`, `water-field.js`) — NOT `domainOffset`,
-    // which this channel could not use even if it wanted to: `drift` (unbounded,
-    // growing with elapsed time) dwarfs `flowWarp` within seconds of scene load,
-    // so anything summed with it reads as flat/saturated almost immediately.
-    // Existence proof for the 2026-08-19 sign fix: R/G > 0.5 means the warp
-    // points +X/+Y; divided by 10 (a display range picked to keep typical
-    // measured magnitudes, a few world-px, comfortably inside [0,1] without
-    // saturating) rather than the term's own (much larger) safety cap.
-    flowWarp: vec3(
-      clamp(field.flowWarp.x.div(float(10)).add(float(0.5)), float(0), float(1)),
-      clamp(field.flowWarp.y.div(float(10)).add(float(0.5)), float(0), float(1)),
-      float(0.5)
-    ),
-    // THE RAW GATE (2026-08-24), NOT `foamSharpnessFactor` — isolating "how
-    // sharp does this pixel's local mask edge measure" from "is the slider
-    // even turned on", the same split every OTHER gate in this list draws.
-    // White = a sharp, hard-painted edge; black = a soft, gradual one;
-    // mid-grey = ambiguous, between the two calibrated bounds. Flat white
-    // (or flat black) everywhere on a mask with BOTH edge styles painted
-    // means `WATER_FOAM_EDGE_SHARPNESS_TAP_PX`'s own calibration needs
-    // revisiting for that map's own resolution, not that the mechanism is
-    // broken.
-    foamEdgeSharpness: vec3(foamSharpnessGate, foamSharpnessGate, foamSharpnessGate),
-    foamPatch: vec3(crestPatch, crestPatch, crestPatch),
-    // THE FOAM DENSITY (2026-10-17) — what the one foam texture is drawn from, tier 4+;
-    // see `water-shore-mask.js`. Black below tier 4 (the old path, no density).
-    foamDensity: vec3(foamDensity ?? float(0), foamDensity ?? float(0), foamDensity ?? float(0)),
-  };
-  // ⚠️ ARITHMETIC, NOT `select()` — see `effects/debug-channel-select.js`'s
-  // header for the twelve specular rounds this trap cost before anyone dumped
-  // the real WGSL. Water shares `bodyTexNode`/`field`/`shore` across many of
-  // the channels above; a `select()` fold would assign each shared `.toVar()`
-  // in whichever branch the graph walk reached first and leave every other
-  // channel reading it as an unassigned zero.
-  const debugColor = buildDebugChannelColor(THREE.TSL, {
-    channels: WATER_DEBUG_CHANNELS,
-    nodes: debugNodes,
-    uDebugChannel,
-    label: 'water',
-  });
-  const debugMaterial = new THREE.NodeMaterial();
-  debugMaterial.colorNode = vec4(debugColor, 1);
-  configureShared(debugMaterial);
-  // OPAQUE where the effect ADDS: a diagnostic whose "this is zero" answer
-  // rendered as *nothing added* would reproduce the very ambiguity it exists
-  // to remove.
-  debugMaterial.blendSrc = THREE.OneFactor;
-  debugMaterial.blendDst = THREE.ZeroFactor;
-  // ⚠️ `attr` TOO — and unlike the two real meshes above, REPLACE (One/Zero)
-  // has no value that means "leave the destination alone": `absorbMaterial`
-  // could pick WHITE as multiply's neutral and `inscatterMaterial` could rely
-  // on add's zero-is-neutral default, but a replace blend always overwrites
-  // `attr` with whatever this material's own `attr` output is, full stop —
-  // there is no "don't touch it" available on either backend (blend state is
-  // not per-attachment on WebGL2, so `attr` cannot quietly keep a gentler
-  // blend while `colorNode` replaces). Explicit zero, not an unexamined
-  // renderer-global default, so a future reader sees this was CHECKED: while
-  // any non-zero debug channel is on screen, `attr` reads zero under the
-  // water AABB. Accepted rather than avoided — this material never ships in
-  // the normal render path (Water-Testament W0), and nothing consumes `attr`
-  // as part of reading the SAME diagnostic the picker is open for.
-  debugMaterial.mrtNode = mrt({ attr: vec4(0, 0, 0, 0) });
+  // ⚠️ BUILT ON DEMAND (2026-10-25, Water-Performance-Audit W-16). The selector
+  // below reaches every debug channel (the ungated sim-foam lattice, the whole
+  // debug-only shore-foam graph, the flow HSV maths), and it used to be built on
+  // the CPU on EVERY material rebuild although no mesh draws it at channel 0.
+  // `debugMaterial` (below, a getter) builds it the first time a caller asks —
+  // `water-surface-subsystem.js#refreshVisibility` only does when a channel is
+  // selected — and `peekDebugMaterial()` answers without building (for dispose).
+  let debugMaterialCache = null;
+  function buildDebugMaterial() {
+    if (debugMaterialCache) return debugMaterialCache;
+    const depth01Display = clamp(depth01, float(0), float(1));
+    const bedVisibility = dot(bedTransmit, vec3(1 / 3, 1 / 3, 1 / 3));
+    const turbidityDisplay = clamp(field.turbidity.mul(float(0.5)).add(float(0.5)), float(0), float(1));
+    const causticDisplay = clamp(causticExcess.mul(float(0.5)).add(float(0.5)), float(0), float(1));
+    const shore = buildShoreForDebug();
+    const simFoamStructureFull = buildFoamCellularStructure(simFoamStructureArgs).structure;
+    const debugNodes = {
+      quad: vec3(1, 0, 1),
+      mask: vec3(maskTexNode.r, maskTexNode.r, maskTexNode.r),
+      inside: vec3(inside, inside, inside),
+      shoreDist01: vec3(depthRamp, depthRamp, depthRamp),
+      depth01: vec3(depth01Display, depth01Display, depth01Display),
+      bedVisibility: vec3(bedVisibility, bedVisibility, bedVisibility),
+      turbidity: vec3(turbidityDisplay, turbidityDisplay, turbidityDisplay),
+      foamCrest: vec3(field.foam, field.foam, field.foam),
+      foamD01: vec3(shore.d01, shore.d01, shore.d01),
+      worleyLace: vec3(shore.lace, shore.lace, shore.lace),
+      swashBand: vec3(shore.swashBand, shore.swashBand, shore.swashBand),
+      breakFacing: vec3(shore.breakFacing, shore.breakFacing, shore.breakFacing),
+      breakFoam: vec3(shore.breakOnly, shore.breakOnly, shore.breakOnly),
+      foamTail: vec3(shore.tailOnly, shore.tailOnly, shore.tailOnly),
+      totalFoam: vec3(totalFoam, totalFoam, totalFoam),
+      causticExcess: vec3(causticDisplay, causticDisplay, causticDisplay),
+      // RAW tier-3 output, ungated by `inside`/`foamHide` — isolating "does
+      // tier 3 itself produce signal" from "does the water gate multiply it
+      // correctly", the same split channels 8 and 12 already draw for foam.
+      // Channel 18 (`inscatterFinal`) is the gated readback of this same term.
+      reflection: specular.reflection,
+      absorbFinal: absorbFinalColor,
+      inscatterFinal: inscatterFinalColor,
+      // `.a`, NOT `.r` — S3's pack moved solidity to the ALPHA channel to make
+      // room for RG velocity + B speed01 (`buildWaterProjectPackMaterial`'s own
+      // B4 doc); reading `.r` here now would show VELOCITY-X mislabelled as
+      // solidity, exactly the kind of channel-layout drift this project's own
+      // `feedback_shared_field_two_meanings_two_registries` bug class names.
+      flowSolidity: vec3(flowPackGated.a, flowPackGated.a, flowPackGated.a),
+      flowVelocity: flowVelocityColor,
+      // RAW accumulator (no clump threshold) — deliberately the UNCLAMPED
+      // value, same "isolate the source from its own gate" split channels 7
+      // and 12 already draw: `simFoam` below shows what actually reaches the
+      // water, this shows what the buffer itself actually contains.
+      simFoamRaw: vec3(waterSimTexNode.r, waterSimTexNode.r, waterSimTexNode.r),
+      simFoam: vec3(waterSimFoam, waterSimFoam, waterSimFoam),
+      // The cellular "net with holes" mask ALONE (2026-08-19) — no accumulator
+      // involved, so an author can judge the texture itself (cell size, streak
+      // stretch, hole density) independent of where the sim buffer happens to
+      // be bright this frame. `simFoamStructured` (below) is what actually
+      // reaches the water: this × `simFoam` above.
+      simFoamStructure: vec3(simFoamStructureFull, simFoamStructureFull, simFoamStructureFull),
+      simFoamStructured: vec3(waterSimFoamStructured, waterSimFoamStructured, waterSimFoamStructured),
+      // `flowWarp` ALONE (`field.flowWarp`, `water-field.js`) — NOT `domainOffset`,
+      // which this channel could not use even if it wanted to: `drift` (unbounded,
+      // growing with elapsed time) dwarfs `flowWarp` within seconds of scene load,
+      // so anything summed with it reads as flat/saturated almost immediately.
+      // Existence proof for the 2026-08-19 sign fix: R/G > 0.5 means the warp
+      // points +X/+Y; divided by 10 (a display range picked to keep typical
+      // measured magnitudes, a few world-px, comfortably inside [0,1] without
+      // saturating) rather than the term's own (much larger) safety cap.
+      flowWarp: vec3(
+        clamp(field.flowWarp.x.div(float(10)).add(float(0.5)), float(0), float(1)),
+        clamp(field.flowWarp.y.div(float(10)).add(float(0.5)), float(0), float(1)),
+        float(0.5)
+      ),
+      // THE RAW GATE (2026-08-24), NOT `foamSharpnessFactor` — isolating "how
+      // sharp does this pixel's local mask edge measure" from "is the slider
+      // even turned on", the same split every OTHER gate in this list draws.
+      // White = a sharp, hard-painted edge; black = a soft, gradual one;
+      // mid-grey = ambiguous, between the two calibrated bounds. Flat white
+      // (or flat black) everywhere on a mask with BOTH edge styles painted
+      // means `WATER_FOAM_EDGE_SHARPNESS_TAP_PX`'s own calibration needs
+      // revisiting for that map's own resolution, not that the mechanism is
+      // broken.
+      foamEdgeSharpness: vec3(foamSharpnessGate, foamSharpnessGate, foamSharpnessGate),
+      foamPatch: vec3(crestPatch, crestPatch, crestPatch),
+      // THE FOAM DENSITY (2026-10-17) — what the one foam texture is drawn from, tier 4+;
+      // see `water-shore-mask.js`. Black below tier 4 (the old path, no density).
+      foamDensity: vec3(foamDensity ?? float(0), foamDensity ?? float(0), foamDensity ?? float(0)),
+    };
+    // ⚠️ ARITHMETIC, NOT `select()` — see `effects/debug-channel-select.js`'s
+    // header for the twelve specular rounds this trap cost before anyone dumped
+    // the real WGSL. Water shares `bodyTexNode`/`field`/`shore` across many of
+    // the channels above; a `select()` fold would assign each shared `.toVar()`
+    // in whichever branch the graph walk reached first and leave every other
+    // channel reading it as an unassigned zero.
+    const debugColor = buildDebugChannelColor(THREE.TSL, {
+      channels: WATER_DEBUG_CHANNELS,
+      nodes: debugNodes,
+      uDebugChannel,
+      label: 'water',
+    });
+    const debugMaterial = new THREE.NodeMaterial();
+    debugMaterial.colorNode = vec4(debugColor, 1);
+    configureShared(debugMaterial);
+    // OPAQUE where the effect ADDS: a diagnostic whose "this is zero" answer
+    // rendered as *nothing added* would reproduce the very ambiguity it exists
+    // to remove.
+    debugMaterial.blendSrc = THREE.OneFactor;
+    debugMaterial.blendDst = THREE.ZeroFactor;
+    // ⚠️ `attr` TOO — and unlike the two real meshes above, REPLACE (One/Zero)
+    // has no value that means "leave the destination alone": `absorbMaterial`
+    // could pick WHITE as multiply's neutral and `inscatterMaterial` could rely
+    // on add's zero-is-neutral default, but a replace blend always overwrites
+    // `attr` with whatever this material's own `attr` output is, full stop —
+    // there is no "don't touch it" available on either backend (blend state is
+    // not per-attachment on WebGL2, so `attr` cannot quietly keep a gentler
+    // blend while `colorNode` replaces). Explicit zero, not an unexamined
+    // renderer-global default, so a future reader sees this was CHECKED: while
+    // any non-zero debug channel is on screen, `attr` reads zero under the
+    // water AABB. Accepted rather than avoided — this material never ships in
+    // the normal render path (Water-Testament W0), and nothing consumes `attr`
+    // as part of reading the SAME diagnostic the picker is open for.
+    debugMaterial.mrtNode = mrt({ attr: vec4(0, 0, 0, 0) });
+    debugMaterialCache = debugMaterial;
+    return debugMaterial;
+  }
 
   return {
     absorbMaterial,
     inscatterMaterial,
-    debugMaterial,
+    /** THE RESOLVE (W-02) — `null` unless built with `sharedResolve`. The
+     * caller renders it into an MRT target (`output`, `waterAbsorb`, and at
+     * tier 5 `waterRefract`) before the scene draw. */
+    resolveMaterial,
+    /** The composites' reads of that target — re-point all three together
+     * (`.value`) whenever the caller's target is (re)allocated. */
+    resolveTexNodes,
+    get debugMaterial() {
+      return buildDebugMaterial();
+    },
+    /** The debug material if it has been built, else `null` — never builds. */
+    peekDebugMaterial() {
+      return debugMaterialCache;
+    },
     /** Tier 5's own third mesh — `null` below tier 5 (the same convention
      * `bodyTexNode` uses), a real `THREE.NodeMaterial` at tier >= 5. Callers
      * add/remove this from the draw list on a tier rebuild exactly like the
@@ -2965,6 +3255,10 @@ export function buildWaterSurfaceMaterial({
      * caller re-points this via `setWaterSimTexture`, on its own cadence
      * (per-frame, unlike the flow pack's own bake-on-change cadence). */
     waterSimTexNode,
+    /** The pre-blurred sim foam's own node — `null` when built without one. */
+    waterSimSoftTexNode,
+    /** The spray emitter's own node — `null` when built without one. */
+    waterSprayTexNode,
     /** The rung this material graph was actually BUILT at (Effects.md Law 4) —
      * for the debug report and for the caller's own rebuild-on-change check
      * (`water-surface-subsystem.js`). */

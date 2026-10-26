@@ -11,6 +11,10 @@ import { run as runActiveSceneSource } from './active-scene-source.test.mjs';
 import { run as runCameraPath } from './camera-path.test.mjs';
 import { run as runCanvasCompositing } from './canvas-compositing.test.mjs';
 import { run as runCanvasLifecycle } from './canvas-lifecycle.test.mjs';
+import { run as runSceneSwitchGate } from './scene-switch-gate.test.mjs';
+import { run as runProgressNotice } from './progress-notice.test.mjs';
+import { run as runPrepareCoordinator } from './prepare-coordinator.test.mjs';
+import { run as runSceneActivationGate } from './scene-activation-gate.test.mjs';
 import { run as runDrawListDocuments } from './draw-list-documents.test.mjs';
 import { run as runMaskDiscovery } from './mask-discovery.test.mjs';
 import { run as runPaintAdapter } from './paint-adapter.test.mjs';
@@ -89,6 +93,10 @@ const suites = [
   ['camera-path', runCameraPath],
   ['canvas-compositing', runCanvasCompositing],
   ['canvas-lifecycle', runCanvasLifecycle],
+  ['scene-switch-gate', runSceneSwitchGate],
+  ['progress-notice', runProgressNotice],
+  ['prepare-coordinator', runPrepareCoordinator],
+  ['scene-activation-gate', runSceneActivationGate],
   ['draw-list-documents', runDrawListDocuments],
   ['mask-discovery', runMaskDiscovery],
   ['paint-adapter', runPaintAdapter],

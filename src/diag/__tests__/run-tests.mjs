@@ -34,6 +34,8 @@ import { run as runUiPerf } from './ui-perf.test.mjs';
 import { run as runLoadReport } from './load-report.test.mjs';
 import { run as runRunConditions } from './run-conditions.test.mjs';
 import { run as runGpuQueueProbe } from './gpu-queue-probe.test.mjs';
+import { run as runPresentationMonitor } from './presentation-monitor.test.mjs';
+import { run as runFloorTimeline } from './floor-timeline.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -82,6 +84,8 @@ const suites = [
   ['load-report', runLoadReport],
   ['run-conditions', runRunConditions],
   ['gpu-queue-probe', runGpuQueueProbe],
+  ['presentation-monitor', runPresentationMonitor],
+  ['floor-timeline', runFloorTimeline],
 ];
 
 for (const [name, fn] of suites) {

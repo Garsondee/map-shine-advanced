@@ -190,12 +190,22 @@ export async function run(t) {
 
   items = []; // the tile left the floor (moved away, deleted, or the mask removed)
   flip.sync(0);
+  // HIDE, NEVER DISPOSE (loading audit P-05, 2026-10-25): parked, not torn down.
+  const parkedMeshes = flip.scene.children.filter((c) => c.isMesh);
   ok(
-    'a tile that leaves the mask list is torn down, not left stale in the scene',
-    flip.scene.children.filter((c) => c.isMesh).length === 0
+    'a tile that leaves the mask list is PARKED — still loaded, no longer drawn',
+    parkedMeshes.length === 1 && parkedMeshes[0].visible === false
   );
-  ok('hasContent() agrees', flip.hasContent() === false);
-  ok('getStatus reports zero attached tiles', flip.getStatus().maskedTileCount === 0);
+  ok('hasContent() agrees — nothing is drawn', flip.hasContent() === false);
+  ok('getStatus reports zero attached tiles on the drawn floor', flip.getStatus().maskedTileCount === 0);
+  ok('…and one parked', flip.getStatus().parkedTileCount === 1);
+
+  items = [staticItem]; // it comes back
+  flip.sync(0);
+  ok(
+    'a parked tile that returns is drawn again at once, from the SAME mesh (no reload)',
+    flip.hasContent() === true && flip.scene.children.filter((c) => c.isMesh)[0] === parkedMeshes[0]
+  );
 
   staticSub.dispose();
   movingSub.dispose();

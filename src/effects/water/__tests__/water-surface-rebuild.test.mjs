@@ -35,7 +35,8 @@
  */
 import * as THREE from '../../../vendor/three/three.webgpu.js';
 import { buildWorldSpaceOutdoorsGate } from '../../lighting/environmental-light.js';
-import { createWaterSurfaceSubsystem, describeRebuildHealth } from '../water-surface-subsystem.js';
+import { createWaterSurfaceSubsystem, describeRebuildHealth, windLayoutVersionOf } from '../water-surface-subsystem.js';
+import { createWindHandle } from '../../../world/wind-access.js';
 import { buildWaterSurfaceMaterial, resolveWaterBuildTier, WATER_DEFAULT_TIER } from '../water-render.js';
 
 const RECT = { minX: 0, minY: 0, maxX: 1000, maxY: 1000 };
@@ -76,7 +77,7 @@ function builderArgs(overrides = {}) {
  * generation moves, exactly the two things `water-body-subsystem.js` does.
  * @param {number} perfTier
  */
-function makeFloor(perfTier) {
+function makeFloor(perfTier, { getWindHandle } = {}) {
   const { uniform, vec4, float } = THREE.TSL;
   const scene = new THREE.Scene();
   let bodyTexture = null;
@@ -108,12 +109,14 @@ function makeFloor(perfTier) {
     outdoorsTexNode: THREE.TSL.texture(stubTexture()),
     buildOutdoorsGate: buildWorldSpaceOutdoorsGate,
     getSkyHandle: () => null,
+    ...(getWindHandle ? { getWindHandle } : {}),
   });
   const meshes = scene.children.filter((c) => c.isMesh);
   let seen = meshes.map((m) => m.material);
   return {
     sub,
     state,
+    meshes,
     giveWater() {
       bodyTexture = stubTexture();
       waterBody.bakeGeneration++;
@@ -284,6 +287,102 @@ export function run(t) {
     ok('…then settles', settled === 0);
     ok('…at the new tier', floor.sub.getStatus().perfTier === 2);
   }
+
+  // ── A WIND FADE IS NOT A REBUILD (2026-10-25, Water-Performance-Audit W-01) ──
+  // Every tick of a Remote wind fade publishes a new handle (`version` + 1)
+  // whose grid and textures are unchanged. Before the fix this rebuilt every
+  // water material on every floor on every frame of the fade.
+  {
+    const { uniform, float } = THREE.TSL;
+    const ambientWind = { directionDeg: uniform(float(0)), speed01: uniform(float(0.5)) };
+    const grid = { originX: 0, originY: 0, cellSize: 50, cols: 20, rows: 20 };
+    const openness = stubTexture();
+    let handle = createWindHandle({ version: 1, layoutVersion: 1, ambientWind, grid, opennessTexture: openness });
+    const floor = makeFloor(4, { getWindHandle: () => handle });
+    floor.giveWater();
+    floor.syncFrames(3);
+    const rebuildsBefore = floor.sub.getStatus().rebuilds;
+    let fadeSwaps = 0;
+    for (let v = 2; v <= 61; v++) {
+      handle = createWindHandle({ version: v, layoutVersion: 1, ambientWind, grid, opennessTexture: openness });
+      fadeSwaps += floor.syncFrames(1);
+    }
+    ok(`a 60-frame wind fade (same layout) swaps no materials (${fadeSwaps} swaps)`, fadeSwaps === 0);
+    ok('…and counts no rebuilds', floor.sub.getStatus().rebuilds === rebuildsBefore);
+    handle = createWindHandle({
+      version: 62,
+      layoutVersion: 2,
+      ambientWind,
+      grid: { ...grid, cols: 40 },
+      opennessTexture: stubTexture(),
+    });
+    const regrid = floor.syncFrames(1);
+    const settled = floor.syncFrames(5);
+    ok('a wind regrid (new layoutVersion) rebuilds exactly once', regrid === 1 && settled === 0);
+  }
+  // ── SUPERSEDED MATERIALS ARE DISPOSED ONE SYNC LATE (W-16) ──────────────
+  // So a rebuild whose shader code did not change finds its pipeline stages
+  // still cached (three frees a stage the moment nothing uses it).
+  {
+    const floor = makeFloor(4);
+    floor.giveWater();
+    floor.syncFrames(1); // the arrival rebuild
+    floor.state.perfTier = 2;
+    let disposedEarly = false;
+    let disposedLate = false;
+    // Watch the CURRENT materials, which the next sync supersedes.
+    const st0 = floor.sub.getStatus();
+    const meshesBefore = floor.meshes.map((m) => m.material);
+    for (const m of meshesBefore) m.addEventListener('dispose', () => (disposedEarly = true));
+    floor.syncFrames(1); // the profile-change rebuild: old materials must survive this sync
+    const survivedRebuildFrame = !disposedEarly;
+    disposedEarly = false;
+    for (const m of meshesBefore) m.addEventListener('dispose', () => (disposedLate = true));
+    floor.syncFrames(1);
+    ok(
+      `a rebuild keeps the superseded materials alive through its own sync (tier ${st0.perfTier} -> 2)`,
+      survivedRebuildFrame
+    );
+    ok('…and disposes them on the next one', disposedLate);
+  }
+  {
+    const built = buildWaterSurfaceMaterial(builderArgs({ tier: 4 }));
+    ok('the debug material is not built until asked for', built.peekDebugMaterial() === null);
+    const dm = built.debugMaterial;
+    ok(
+      '…the getter builds it once',
+      !!dm?.isNodeMaterial && built.peekDebugMaterial() === dm && built.debugMaterial === dm
+    );
+  }
+  {
+    // W-08: the pre-sampled wind strength builds (graph construction runs the
+    // field's wind block outside any Fn, so a missing TSL name throws here).
+    const { uniform, vec4, float } = THREE.TSL;
+    const ambientWind = { directionDeg: uniform(float(0)), speed01: uniform(float(0.5)) };
+    let threw = null;
+    try {
+      buildWaterSurfaceMaterial(
+        builderArgs({
+          tier: 4,
+          windHandle: createWindHandle({ version: 1, ambientWind }),
+          windStrengthField: { texture: stubTexture(), uRect: uniform(vec4(0, 0, 1000, 1000)) },
+        })
+      );
+    } catch (err) {
+      threw = err;
+    }
+    ok(`a material with a pre-sampled wind strength field builds (${threw?.message ?? 'ok'})`, threw === null);
+  }
+  ok('windLayoutVersionOf: no handle reads -1', windLayoutVersionOf(null) === -1);
+  ok(
+    'windLayoutVersionOf: a handle minted without a layoutVersion keys on its version',
+    windLayoutVersionOf({ version: 7 }) === 7
+  );
+  ok(
+    'createWindHandle: layoutVersion defaults to version, and is carried when given',
+    createWindHandle({ version: 4 }).layoutVersion === 4 &&
+      createWindHandle({ version: 4, layoutVersion: 1 }).layoutVersion === 1
+  );
 
   // ── A TIER CHANGE ON A WATERLESS FLOOR COSTS NOTHING ────────────────────
   // Every request clamps to the same tier 0, so there is nothing to rebuild.

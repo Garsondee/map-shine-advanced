@@ -123,10 +123,15 @@ export function run(t) {
     const src = readFileSync(VT_PAN_VIEWER_PATH, 'utf8').replace(/\r\n/g, '\n');
 
     // ---- Property: the floor-switch call site is untouched ------------------
-    const FLOOR_SWITCH_LINE = 'if (warmUpRestore.length > 0) warmUpDrawState({ includePresent: false });';
+    // (2026-10-25, loading audit: the call now sits inside an `if (warmUpRestore.length > 0 ||
+    // effectsNeedWarmUp)` block so the tile-attached effects ride the same off-screen draw.
+    // What this pin defends is unchanged and is asserted by the block checks below: the call is
+    // the plain SYNCHRONOUS warmUpDrawState with includePresent:false, and nothing between the
+    // visible=true flip and its restore can yield.)
+    const FLOOR_SWITCH_CALL = 'warmUpDrawState({ includePresent: false });';
     ok(
       'the floor-switch call site still calls the plain synchronous warmUpDrawState, includePresent:false — verbatim',
-      src.includes(FLOOR_SWITCH_LINE)
+      src.includes(FLOOR_SWITCH_CALL) && !/await\s+warmUpDrawState\(\{\s*includePresent: false/.test(src)
     );
 
     // The whole visibility-flip/warm-up/restore block, bounded by two

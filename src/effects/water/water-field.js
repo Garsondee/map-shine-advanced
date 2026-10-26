@@ -880,6 +880,22 @@ export function buildWaterSurfaceField({
   shoaling = false,
   caustics = false,
   causticsInsideGate = false,
+  // 2026-10-25 (Water-Performance-Audit W-07) — the caller's "can a caustic be
+  // SEEN here" factor: the Caustics dial × the sun-shadow visibility, both of
+  // which the finished net is multiplied by downstream anyway. Folded into the
+  // `causticsInsideGate` branch's condition, so a shadowed pixel (or a dial at
+  // 0) skips the net instead of computing it and multiplying it away. `null`
+  // = no extra gate (old callers, construction-only tests).
+  causticsVisible = null,
+  // THE WIND'S STRENGTH, PRE-SAMPLED (2026-10-25, Water-Performance-Audit W-08)
+  // — `{ texture, uRect }`: a small world-space texture whose R is
+  // `length(windHandle.node(...))`, re-rendered once per frame by the viewer
+  // over `uRect` (vec4 minX, minY, maxX, maxY). Water only ever needs that
+  // LENGTH, and the wind field's finest structure (its smallest turbulence
+  // eddy) is ~260 world px, so one bilinear tap of a ~20-30 px grid stands in
+  // for the ~13 noise evaluations + field taps the full sampler costs per
+  // pixel. `null`: sample the handle per pixel, as before.
+  windStrengthField = null,
   // THE REAL SOLVED LOCAL DIRECTION (S3's pressure solve, already
   // dead-zone-guarded by the caller — `water-render.js`'s own
   // `localFlowDirSafe`, the SAME node shore foam's `localFlowDir` reads).
@@ -1231,14 +1247,39 @@ export function buildWaterSurfaceField({
   // `slope`.
   let windRipple = float(0);
   if (windHandle) {
-    const windVec = windHandle.node(TSL, { centerXY: worldXY, time: timeMsNode });
-    const windStrength = length(windVec);
+    let windStrength;
+    if (windStrengthField) {
+      const r = windStrengthField.uRect;
+      const spanX = max(r.z.sub(r.x), float(1));
+      const spanY = max(r.w.sub(r.y), float(1));
+      const windUv = vec2(
+        TSL.clamp(worldXY.x.sub(r.x).div(spanX), 0, 1),
+        TSL.clamp(worldXY.y.sub(r.y).div(spanY), 0, 1)
+      );
+      windStrength = TSL.texture(windStrengthField.texture, windUv).r;
+    } else {
+      const windVec = windHandle.node(TSL, { centerXY: worldXY, time: timeMsNode });
+      windStrength = length(windVec);
+    }
     // Shelter-aware for free: `windStrength` is already near zero in a
     // sheltered spot (the SAME `openness`/wall-deflection every other wind
     // consumer reads through this handle), which is what makes "glassy-calm
     // in sheltered spots" fall out of this multiply rather than needing a
     // second, hand-rolled shelter test.
-    windRipple = windStrength.mul(length(vec2(shoaledY, shoaledZ))).mul(windRippleNode);
+    const rippleExpr = windStrength.mul(length(vec2(shoaledY, shoaledZ))).mul(windRippleNode);
+    // ⚠️ THE WHOLE WIND SAMPLER ONLY WHEN THE DIAL IS UP (2026-10-25, Water-
+    // Performance-Audit W-08). `sampleWind` is a turbulence stack plus field
+    // taps, and at `windRipple = 0` its result was multiplied by zero. A
+    // UNIFORM branch (its texture taps stay legal); the nodes are built
+    // eagerly above, outside the `Fn`, so nothing is created at shader-build
+    // time.
+    windRipple = Fn(() => {
+      const out = float(0).toVar('waterWindRipple');
+      If(windRippleNode.greaterThan(float(0)), () => {
+        out.assign(rippleExpr);
+      });
+      return out;
+    })();
   }
 
   // ⚠️ TIER 4 — CAUSTICS, REBUILT 2026-08-27 AS A WORLEY F2−F1 CELL-EDGE NET.
@@ -1536,7 +1577,20 @@ export function buildWaterSurfaceField({
         .mul(causticEvolveSpeedNode.mul(float(WATER_CAUSTICS_NET_SCALE_RATIO)))
         .add(float(WATER_CAUSTICS_NET_TIME_PHASE));
       const fineNet = netAt(fineCell, zTimeFine, WATER_CAUSTICS_NET_SCALE_RATIO);
-      return mix(primaryNet, max(primaryNet, fineNet), causticNettingNode);
+      // ⚠️ THE SECOND LAYER ONLY WHEN NETTING IS ON (2026-10-25, Water-
+      // Performance-Audit W-07). `mix(p, max(p, f), 0)` is exactly `p`, yet the
+      // fine layer's whole 27-cell 3-D Worley search ran at netting 0 (the
+      // param's own help text admitted it). A UNIFORM branch, so legal even
+      // inside the per-pixel `If` that calls this — and only taken on the
+      // gated path (`aaFw` given), where nothing in here needs a derivative.
+      // The ungated diagnostic path (`aaFw` null) is called outside any `Fn`,
+      // where an `If` cannot live, so it keeps the plain expression.
+      if (!aaFw) return mix(primaryNet, max(primaryNet, fineNet), causticNettingNode);
+      const netted = primaryNet.toVar('waterCausticNetted');
+      If(causticNettingNode.greaterThan(float(0)), () => {
+        netted.assign(mix(primaryNet, max(primaryNet, fineNet), causticNettingNode));
+      });
+      return netted;
     };
 
     // PHYSICAL PLAUSIBILITY, CHEAPLY — dead-calm water (`chop=0`) shows no
@@ -1575,10 +1629,23 @@ export function buildWaterSurfaceField({
     let combinedNet;
     if (causticsInsideGate) {
       const cellFw = fwidth(netCellPreOrganic);
-      const aaFw = cellFw.x.add(cellFw.y).mul(float(1.25)).toVar('waterCausticAaFw');
       combinedNet = Fn(() => {
+        // ⚠️ `toVar` HERE, INSIDE THE `Fn` AND BEFORE THE `If` (fixed
+        // 2026-10-25). The derivative used to be `.toVar()`'d OUT here, which
+        // does not fix WHERE it is emitted: TSL writes a var's assignment at
+        // its first use, and the first use was inside the `If` — so the
+        // generated WGSL computed `netCellPreOrganic` AND its `fwidth` inside
+        // the per-pixel branch (seen in the shader dump), and a quad
+        // straddling the branch took derivatives against lanes that never ran
+        // it. Harmless at the shoreline (the net is multiplied by ~0 there),
+        // but any new gate on this branch — the sun-visibility one, W-07 —
+        // drew one-pixel seams. A `toVar` made inside the body is assigned at
+        // this statement, in uniform control flow, which is what the comment
+        // above always intended.
+        const aaFw = cellFw.x.add(cellFw.y).mul(float(1.25)).toVar('waterCausticAaFw');
         const out = float(0).toVar('waterCausticNetGated');
-        If(insideWater.mul(chopGate).greaterThan(float(0)), () => {
+        const netCanShow = causticsVisible ? insideWater.mul(chopGate).mul(causticsVisible) : insideWater.mul(chopGate);
+        If(netCanShow.greaterThan(float(0)), () => {
           out.assign(buildCombinedNet(aaFw));
         });
         return out;

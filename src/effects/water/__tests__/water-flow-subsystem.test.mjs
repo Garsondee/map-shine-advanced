@@ -62,7 +62,7 @@ function fakeRenderPass() {
   };
 }
 
-function buildHarness({ bearingDeg = 180 } = {}) {
+function buildHarness({ bearingDeg = 180, texelBudgetPerFrame = Infinity } = {}) {
   const allocator = fakeAllocator();
   const pass = fakeRenderPass();
   const maskTexture = stubTexture();
@@ -83,6 +83,7 @@ function buildHarness({ bearingDeg = 180 } = {}) {
     renderWaterPass: (t, q) => pass.run(t, q),
     createFlowTexture,
     getWaterRenderState,
+    texelBudgetPerFrame,
   });
   return { subsystem, allocator, pass, params };
 }
@@ -102,12 +103,16 @@ export function run(t) {
     const { subsystem, allocator, pass } = buildHarness();
     subsystem.maybeBake();
     const expectedPassesPerLevel = 1 + 2 + WATER_FLOW_SOLVE_ITERATIONS_PER_LEVEL * 2 + 1;
-    const expectedTotalPasses = expectedPassesPerLevel * 5;
+    const expectedTotalPasses = expectedPassesPerLevel * 5 + 1;
     ok(
-      `one full bake runs exactly ${expectedTotalPasses} render passes (5 levels × [1 solidity + 2 + ${WATER_FLOW_SOLVE_ITERATIONS_PER_LEVEL}×2 SOR half-steps + 1 pack])`,
+      `one full bake runs exactly ${expectedTotalPasses} render passes (5 levels × [1 solidity + 2 + ${WATER_FLOW_SOLVE_ITERATIONS_PER_LEVEL}×2 SOR half-steps + 1 pack] + 1 publish copy)`,
       pass.calls === expectedTotalPasses
     );
-    ok('one full bake allocates exactly 30 targets (5 levels × 6 targets each)', allocator.created === 30);
+    ok(
+      'one full bake allocates exactly 31 targets (5 levels × 6 scratch targets + the published pack)',
+      allocator.created === 31
+    );
+    ok('…and reports its own pass count', subsystem.getStatus().lastBake.passes === expectedTotalPasses);
     ok('the subsystem exposes a real texture after baking', !!subsystem.texture);
     const status = subsystem.getStatus();
     ok('getStatus reports bakes:1 after the first bake', status.bakes === 1);
@@ -173,9 +178,11 @@ export function run(t) {
     subsystem.maybeBake();
     const callsAfterSecond = pass.calls;
     ok('changing flowSolveIterations triggers a second full bake', callsAfterSecond > callsAfterFirst);
-    const expectedSecondBakePasses = (1 + 2 + 10 * 2 + 1) * 5;
+    // The scratch from the first bake is still alive (same grid, same mask),
+    // so solidity is NOT re-rendered (W-04): 5 × [2 + 10×2 + 1 pack] + 1 publish.
+    const expectedSecondBakePasses = (2 + 10 * 2 + 1) * 5 + 1;
     ok(
-      `the second bake runs exactly ${expectedSecondBakePasses} passes (5 levels × [1 solidity + 2 + 10×2 SOR half-steps + 1 pack]) — the new iteration count reached the SOR loop, not just the gate`,
+      `the second bake runs exactly ${expectedSecondBakePasses} passes (5 levels × [2 + 10×2 SOR half-steps + 1 pack] + 1 publish, solidity reused) — the new iteration count reached the SOR loop, not just the gate`,
       callsAfterSecond - callsAfterFirst === expectedSecondBakePasses
     );
   }
@@ -212,5 +219,57 @@ export function run(t) {
       'no mask yet: status names the reason',
       subsystem.getStatus().lastBake.reason?.includes('no full-resolution mask')
     );
+  }
+
+  // ══ A PARAMETER-ONLY REBAKE ALLOCATES NOTHING (2026-10-25, W-04) ═══════
+  {
+    const { subsystem, allocator, params } = buildHarness();
+    subsystem.maybeBake(0);
+    const created = allocator.created;
+    const texture = subsystem.texture;
+    params.flowAngleDeg = 45;
+    subsystem.maybeBake(100);
+    ok('a compass rebake reuses every scratch target (0 new allocations)', allocator.created === created);
+    ok('…and publishes into the SAME texture (consumers keep their bindings)', subsystem.texture === texture);
+  }
+
+  // ══ A SLICED BAKE (W-04): same passes, spread over frames, old pack kept ══
+  {
+    const sliced = buildHarness({ texelBudgetPerFrame: 48_000_000 });
+    const whole = buildHarness();
+    whole.subsystem.maybeBake(0);
+    let frames = 0;
+    let sawNullTextureMidBake = false;
+    while (frames < 200) {
+      sliced.subsystem.maybeBake(frames * 16);
+      frames++;
+      if (sliced.subsystem.getStatus().bakes === 1) break;
+      if (sliced.subsystem.texture === null) sawNullTextureMidBake = true;
+    }
+    ok(`a sliced first bake completes over several frames (${frames})`, frames > 3 && frames < 200);
+    ok('…runs exactly the passes the single-call bake runs', sliced.pass.calls === whole.pass.calls);
+    ok('…and publishes nothing until it is done (texture null mid-way on a first bake)', sawNullTextureMidBake);
+    const firstTexture = sliced.subsystem.texture;
+    sliced.params.flowAngleDeg = 10;
+    sliced.subsystem.maybeBake(5000);
+    ok(
+      'during a REbake the previous pack stays published',
+      sliced.subsystem.getStatus().baking !== false && sliced.subsystem.texture === firstTexture
+    );
+  }
+
+  // ══ THE SCRATCH IS FREED WHEN IDLE (W-05) ══════════════════════════════
+  {
+    const { subsystem, allocator } = buildHarness();
+    subsystem.maybeBake(0);
+    subsystem.maybeBake(5_000);
+    ok('the scratch survives a short idle', subsystem.getStatus().levelCount === 5);
+    subsystem.maybeBake(20_000);
+    const st = subsystem.getStatus();
+    ok(
+      '…and is freed after the idle window (30 scratch targets disposed)',
+      st.levelCount === 0 && allocator.disposed === 30
+    );
+    ok('…while the published pack stays', !!subsystem.texture && st.published === '1536x714');
   }
 }

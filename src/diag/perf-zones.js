@@ -342,6 +342,22 @@ export const ZONES = Object.freeze(
       false,
       'runGeometryWorldPass'
     ),
+    // THE WATER RESOLVE (2026-10-25, Water-Performance-Audit W-02/W-21) — the
+    // whole tier 0-4 (and tier 5's inputs) water evaluation, ONE render call
+    // per drawn water floor, before the scene draw. Before it existed, water's
+    // shading cost was buried inside `geometry.worldDraw` and could only be
+    // priced by restart-based A/B diagnostics.
+    z(
+      'geometry.waterResolve',
+      'Water resolve (the shared per-pixel water evaluation)',
+      'geometry',
+      'geometry.world',
+      'water',
+      'both',
+      'conditional',
+      false,
+      'runWaterResolvePass'
+    ),
     // buf:scene.depth (docs/planning/Depth-Buffer.md) — its own real scene,
     // its own camera, one extra renderer.render() call every frame. §11's
     // OWN named risk ("the all-floors draw list costs draws the colour pass

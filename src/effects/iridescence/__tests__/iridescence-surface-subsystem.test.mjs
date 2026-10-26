@@ -161,9 +161,30 @@ export async function run(t) {
 
   items = [];
   flip.sync(items);
-  ok('a tile that leaves the mask list is torn down, not left stale in the scene', flip.scene.children.length === 0);
-  ok('hasContent() agrees', flip.hasContent() === false);
-  ok('getStatus reports zero attached tiles', flip.getStatus().maskedTileCount === 0);
+  // HIDE, NEVER DISPOSE (loading audit P-05, 2026-10-25): parked, not torn down.
+  const parkedMeshes = flip.scene.children.filter((c) => c.isMesh);
+  ok(
+    'a tile that leaves the mask list is PARKED — still loaded, no longer drawn',
+    parkedMeshes.length === 1 && parkedMeshes[0].visible === false
+  );
+  ok('hasContent() agrees — nothing is drawn', flip.hasContent() === false);
+  ok('getStatus reports zero attached tiles on the drawn floor', flip.getStatus().maskedTileCount === 0);
+  ok('…and one parked', flip.getStatus().parkedTileCount === 1);
+
+  items = [item]; // it comes back
+  flip.sync(items);
+  ok(
+    'a parked tile that returns is drawn again at once, from the SAME mesh (no reload)',
+    flip.hasContent() === true && flip.scene.children.filter((c) => c.isMesh)[0] === parkedMeshes[0]
+  );
+  {
+    const other = { id: 'tileOther', url: 'stub://tileOther_Iridescence.webp', corners: squareCorners(0, 400, 100) };
+    ok('prefetch: an unseen item is not ready yet', flip.areItemsReady([other]) === false);
+    flip.prefetchItems([other]);
+    await settle();
+    ok('prefetch: ready once loaded', flip.areItemsReady([other]) === true);
+    ok('prefetch: …and it was NOT presented', flip.getStatus().maskedTileCount === 1);
+  }
 
   // ── A FAILED MASK LOAD DOES NOT THROW AND LEAVES THE TILE INVISIBLE ─────
   const failSub = createIridescenceSurfaceSubsystem(baseArgs({ loadMaskImage: async () => null }));

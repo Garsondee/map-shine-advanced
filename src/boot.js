@@ -38,6 +38,8 @@ import * as THREE from './vendor/three/three.webgpu.js';
 import { installSoak } from './diag/soak.js';
 import { installDebugPanel } from './diag/debug-panel.js';
 import { installFlightRecorder, downloadText } from './diag/flight-recorder.js';
+// One record per level/scene change: what happened, in order, and how long each stretch took.
+import { createFloorTimeline, TIMELINE_EVENTS } from './diag/floor-timeline.js';
 import { createPerfLab, runSweep, runSweepStructuralAB } from './diag/perf-lab.js';
 // ALBEDO CLARITY STRUCTURAL A/B (2026-08-15) — deliberately imported DIRECTLY
 // here rather than threaded through perf-session.js/buildPerfReport the way
@@ -281,6 +283,7 @@ import {
   startVtPanViewer,
   stopVtPanViewer,
   getVtPanViewerDiagnostics,
+  getVtPanViewerPresentationReport,
   getVtPanViewerRenderTargets,
   setVtPanViewerFloor,
   prepareVtPanViewerFloor,
@@ -291,6 +294,7 @@ import {
   // on this floor, not switch to another" to express.
   cancelVtPanViewerFloorPrepare,
   prewarmVtPanViewerAdjacentFloors,
+  afterNextVtPanViewerFrame,
   setVtPanViewerGpuProbe,
   setVtPanViewerGpuZoneTimer,
   getVtPanViewerGpuZoneStatus,
@@ -401,6 +405,8 @@ import {
   getVtPanViewerWindBakeStats,
   getPyramidStoreStats,
   getCompressedTextureStats,
+  planArtPrewarm,
+  prewarmArtCompression,
   setVtPanViewerEarlyZComposition,
   getVtPanViewerEarlyZComposition,
   getVtPanViewerReckoningCensus,
@@ -561,14 +567,39 @@ import {
   getPixiResidencyReport,
   getPixiProxyStats,
   urlsToEvictOnSceneChange,
+  planProxySeeding,
+  isPixiSrcCached,
   registerCanvasCompositing,
   applyArtSuppression,
   restoreFoundryArt,
+  setMsaMayOwnArt,
   getCanvasCompositingReport,
   getFoundryRendererCensus,
   setExploredFogBase,
   getExploredFogBase,
   registerCanvasTearDownWatchdog,
+  installSceneSwitchGate,
+  installSceneActivationGate,
+  createPrepareCoordinator,
+  newPrepareToken,
+  listActivePlayerIds,
+  userDisplayName,
+  currentUserIsGM,
+  findScene,
+  currentSceneId,
+  sceneNameForUser,
+  sendPrepareRequest,
+  sendPrepareReady,
+  sendPrepareHere,
+  sendPrepareCancel,
+  listenForPrepareMessages,
+  SCENE_PREPARE_STEPS,
+  escapeNoticeText,
+  notifyUser,
+  createProgressNotice,
+  describeStep,
+  formatPrepareMessage,
+  FLOOR_PREPARE_STEPS,
   registerSettings,
   readSetting,
   writeSetting,
@@ -652,7 +683,7 @@ import {
   // each aimable carried light with the aim to draw (`playerAimChannel`).
   createPlayerAimChannel,
 } from './foundry/index.js';
-import { engageFoundryFallback, getDescribeRenderModeStats } from './diag/render-fallback.js';
+import { engageFoundryFallback, getDescribeRenderModeStats, onFoundryFallback } from './diag/render-fallback.js';
 import { registerMarkerSource, getAllMarkerPoints } from './diag/marker-overlay.js';
 import {
   beginSceneLoad,
@@ -724,6 +755,7 @@ import {
   getWaterCausticsGateForce,
   setWaterCausticsInsideGateOff,
   setWaterFoamStructureGateOff,
+  setWaterSharedResolveOff,
   createFluidSeams,
   createFluidRegistration,
   FLUID_PARAMS,
@@ -1164,6 +1196,9 @@ MapShine.setCloudTopsInlineShadow = setVtPanViewerCloudTopsInlineShadow;
 MapShine.setWaterCausticsGateForce = setWaterCausticsGateForce;
 MapShine.setWaterCausticsInsideGateOff = setWaterCausticsInsideGateOff;
 MapShine.setWaterFoamStructureGateOff = setWaterFoamStructureGateOff;
+// W-02 (2026-10-25) — `true` falls back to the old per-mesh water evaluation
+// (no restart), for a live A/B of what the shared resolve saves.
+MapShine.setWaterSharedResolveOff = setWaterSharedResolveOff;
 MapShine.getCloudTopsLowOctaves = getVtPanViewerCloudTopsLowOctaves;
 // Console-exposed directly (2026-08-12, S2.7) so a pixel-diff gate can prove
 // NON-VACUITY without paying for a full perf-run-full capture — illumBuckets/
@@ -2015,6 +2050,20 @@ function install() {
     // sees it: start the aim sender and the socket listener that carries it
     // (`playerAimChannel`, declared beside the carried-light getter further down).
     playerAimChannel.start();
+    // A GM activating a scene asks every client to warm it first; answer, and hear the
+    // players' answers (`coordinateSceneActivation`, below). Like the two socket features
+    // above, only possible once the socket exists, i.e. here.
+    listenForPrepareMessages({
+      onRequest: handleScenePrepareRequest,
+      onPresent: (m) => prepareCoordinator.handlePresent(m),
+      onReady: (m) => prepareCoordinator.handleReady(m),
+      onCancel: ({ token }) => {
+        cancelledPrepareTokens.add(token);
+        // Bounded: a session-long set of tokens is a leak with a name.
+        if (cancelledPrepareTokens.size > 20)
+          cancelledPrepareTokens.delete(cancelledPrepareTokens.values().next().value);
+      },
+    });
   }); // end Hooks.once('ready', ...) — see the deferral comment above installStudio
   // THE PLAYER ROOM (U5, docs/holy/UI-Testament.md §5.5) — safe to construct
   // unconditionally for every client, GM or not (its own header explains
@@ -3342,6 +3391,325 @@ function install() {
     });
   };
 
+  // ===========================================================================
+  // THE SCENE-SWITCH GATE'S PREPARE (loading audit, 2026-10-25)
+  // ===========================================================================
+  // `foundry/scene-switch-gate.js` wraps `Scene#view` and calls `prepareSwitchRequest`
+  // BEFORE Foundry starts its redraw. Everything below runs while the OLD view is
+  // still fully live. See that file's header for why this has to happen before the
+  // draw rather than inside it: Foundry does not wait for a module's hooks.
+  //
+  // The post-draw half — `canvasReady` → `switchToPreparedFloor` — still runs, but
+  // now finds its floor prepared, so it is the quick commit it was always meant to be.
+
+  /** Foundry's own progress notification, for floor/scene changes. */
+  const switchNotice = createProgressNotice();
+  /** The installed gates, for the diagnostics report. `null` until `init`, or if one could not install. */
+  let sceneSwitchGate = null;
+  /** THE FLOOR-CHANGE TIMELINE (loading audit, Phase 0): fed by the gate, Foundry's canvas hooks, the
+   * commit and the viewer's next frame. A debug report, so it rides into the flight bundle. */
+  const floorTimeline = createFloorTimeline({ log });
+  let sceneActivationGate = null;
+
+  /** The GM's world setting. Unreadable => the gate is OFF (fail toward Foundry). */
+  function isSwitchGateEnabled() {
+    try {
+      return readSetting(MODULE_ID, GLOBAL_SETTING_KEYS.prepareBeforeSwitch) !== false;
+    } catch (err) {
+      log.warn('could not read the prepareBeforeSwitch setting — the switch gate stays off:', err);
+      return false;
+    }
+  }
+
+  /**
+   * A same-scene LEVEL change: prepare the target floor in the viewer.
+   * @param {{scene: object, levelId: string}} request
+   * @param {{isCancelled: () => boolean}} control
+   * @returns {Promise<{ok: boolean, cancelled?: boolean, reason?: string}>}
+   */
+  async function prepareLevelSwitch(request, control) {
+    if (!getVtPanViewerDiagnostics().active) return { ok: false, reason: 'no viewer running — nothing to prepare' };
+    const floorsResult = getActiveSceneFloors(request.scene);
+    if (!floorsResult.ok) return { ok: false, reason: floorsResult.error };
+    const target = floorsResult.floors.find((f) => f.id === request.levelId);
+    if (!target) return { ok: false, reason: `no floor for level ${request.levelId}` };
+
+    let cancelled = false;
+    const subject = { name: target.name ?? `floor ${target.index}` };
+    const bar = switchNotice.begin(formatPrepareMessage(subject, describeStep(FLOOR_PREPARE_STEPS, null)));
+    // The overlay is now ONLY the Cancel control (a notification has no buttons).
+    beginFloorTransition({
+      fromFloorIndex: activeFloorContext?.floorIndex ?? null,
+      toFloorIndex: target.index,
+      onCancel: () => {
+        cancelled = true;
+        cancelVtPanViewerFloorPrepare();
+      },
+    });
+    let prepared = null;
+    try {
+      prepared = await prepareVtPanViewerFloor(target.index, (p) => {
+        const d = describeStep(FLOOR_PREPARE_STEPS, p);
+        bar.update(formatPrepareMessage(subject, d), d.pct);
+        updateFloorTransitionProgress(MapShine.getSceneReady?.().waitingFor ?? []);
+      });
+    } finally {
+      endFloorTransition();
+      bar.end();
+    }
+    if (cancelled) return { ok: false, cancelled: true, reason: 'cancelled by the user' };
+    if (control.isCancelled()) return { ok: false, reason: 'superseded by a newer request' };
+    return { ok: prepared?.ok === true, reason: prepared?.reason };
+  }
+
+  /** How long a scene prepare may take before the switch goes ahead anyway (ms; 0 = as long as it takes). */
+  function switchWaitMs() {
+    try {
+      const seconds = Number(readSetting(MODULE_ID, GLOBAL_SETTING_KEYS.switchWaitSeconds));
+      return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0;
+    } catch (err) {
+      log.warn('could not read the switch wait setting — using 60 s:', err);
+      return 60000;
+    }
+  }
+
+  /**
+   * WARM EVERYTHING A SCENE'S FIRST VIEW WILL ASK FOR, for a scene no viewer exists
+   * for yet (loading audit, phase 4). Three steps, each an existing cache:
+   *  1. mask discovery — the `FilePicker.browse` round trips (`discoverMasksCached`);
+   *  2. PIXI proxies for the floors Foundry will load, so its own loader never
+   *     decodes the real art;
+   *  3. whole-image BC compression of the art the first view draws — the biggest
+   *     single cost of a cold load, persisted by the worker in IndexedDB, so the
+   *     real viewer's identical request is a cache hit (`vt/scene-prewarm.js`).
+   * It builds no viewer and no GPU object: two viewers would mean two sets of GPU
+   * memory. It asks for exactly the same files the real start will — it uses the
+   * SAME `collectSceneLayers` call — so a player is never made to fetch art their
+   * first view would not have fetched anyway.
+   *
+   * @param {object} sceneDoc
+   * @param {string|null} levelId - the level about to be viewed; null = the scene's initial level.
+   * @param {{onStep?: (p: {phase: string, done: number, total: number}) => void, isCancelled?: () => boolean,
+   *   only?: string[]}} [ctl] `only`: run just these steps ('masks' | 'proxies' | 'compress'); default all.
+   * @returns {Promise<{ok: boolean, cancelled?: boolean, reason?: string, art?: object}>}
+   */
+  async function prewarmSceneForSwitch(sceneDoc, levelId, { onStep, isCancelled, only } = {}) {
+    const wants = (step) => !only || only.includes(step);
+    const floorsResult = getActiveSceneFloors(sceneDoc);
+    if (!floorsResult.ok) return { ok: false, reason: floorsResult.error };
+    const floors = floorsResult.floors;
+    const viewedLevelId = levelId ?? sceneDoc?.initialLevel?.id ?? floors[0]?.id ?? null;
+    const viewed = floors.find((f) => f.id === viewedLevelId) ?? floors[0];
+    if (!viewed) return { ok: false, reason: 'the scene has no floors' };
+    const isGM = currentUserIsGM(); // via the adapter — boot.js does not read `game` itself
+
+    // 1. Painted masks (remembered; the real start's identical call then finds it done).
+    if (wants('masks')) {
+      onStep?.({ phase: 'masks', done: 0, total: 1 });
+      const allLevelIds = floors.map((f) => f.id).filter(Boolean);
+      const everyLevel = collectSceneLayers(sceneDoc, {
+        viewedLevelId: viewed.id,
+        visibleLevelIds: allLevelIds,
+        isGM: true,
+      });
+      await discoverMasksCached(sceneDoc.id ?? null, discoveryTargetsFrom(everyLevel.items));
+      onStep?.({ phase: 'masks', done: 1, total: 1 });
+      if (isCancelled?.()) return { ok: false, cancelled: true };
+    }
+
+    // 2. PIXI proxies for the floors Foundry will load for this view.
+    if (wants('proxies')) {
+      onStep?.({ phase: 'proxies', done: 0, total: 1 });
+      await registerFloorProxies(sceneDoc, { viewedLevelId: viewed.id, visibleOnly: true, evictPrevious: false });
+      onStep?.({ phase: 'proxies', done: 1, total: 1 });
+      if (isCancelled?.()) return { ok: false, cancelled: true };
+    }
+    if (!wants('compress')) return { ok: true };
+
+    // 3. Compress the art the first view will draw.
+    const visibleLevelIds = computeVisibleFloorIndices(floors, viewed.index)
+      .map((i) => floors.find((f) => f.index === i)?.id)
+      .filter(Boolean);
+    const visible = collectSceneLayers(sceneDoc, { viewedLevelId: viewed.id, visibleLevelIds, isGM });
+    const art = await prewarmArtCompression(planArtPrewarm(visible.items), {
+      onProgress: ({ done, total }) => onStep?.({ phase: 'compress', done, total }),
+      isCancelled,
+    });
+    return { ok: true, cancelled: art.cancelled, art };
+  }
+
+  /**
+   * A SCENE change (or the very first draw), asked of THIS client by its own
+   * `Scene#view`: warm what the first view needs, with Foundry's progress
+   * notification, then let Foundry draw. Bounded by the GM's wait setting — after
+   * that, Foundry draws and the curtain covers what is left;
+   * the warm-up keeps filling the caches in the background either way.
+   * @param {{scene: object, levelId: string|null}} request
+   * @param {{isCancelled: () => boolean}} control
+   */
+  async function prepareSceneSwitch(request, control) {
+    const sceneDoc = request.scene;
+    const subject = { name: sceneNameForUser(sceneDoc) };
+    // THE VERY FIRST DRAW of a session has no loading curtain yet — it is raised by the
+    // `canvasInit` this call is about to let happen — so spending a minute compressing art
+    // here would show a black screen with a corner notification, where the curtain already
+    // explains a cold load better. Only the step that must precede Foundry's draw (the PIXI
+    // proxies, which have to win the race with Foundry's own loader) runs.
+    const cold = request.kind === 'cold';
+    // The cold path runs no masks step here (see above), so start discovery now: it then runs
+    // during Foundry's own draw instead of after it.
+    if (cold) kickMaskDiscovery(sceneDoc);
+    const steps = cold ? SCENE_PREPARE_STEPS.filter((s) => s.id === 'proxies') : SCENE_PREPARE_STEPS;
+    let release = () => {};
+    let released = false;
+    const releasedPromise = new Promise((resolve) => {
+      release = resolve;
+    });
+    const letGo = () => {
+      released = true;
+      release();
+    };
+    const waitMs = switchWaitMs();
+    const timer = waitMs > 0 ? setTimeout(letGo, waitMs) : null;
+    const bar = switchNotice.begin(formatPrepareMessage(subject, describeStep(steps, null)));
+    // No buttons. Nobody is waiting on a click here: the switch goes ahead by itself when the
+    // warm-up finishes, or when the wait set by the GM runs out (the timer above).
+    beginFloorTransition({
+      headline: `Preparing ${subject.name}`,
+      actions: [],
+    });
+    try {
+      const work = prewarmSceneForSwitch(sceneDoc, request.levelId, {
+        onStep: (p) => {
+          const d = describeStep(steps, p);
+          bar.update(formatPrepareMessage(subject, d), d.pct);
+        },
+        isCancelled: () => released || control.isCancelled(),
+        only: cold ? ['proxies'] : undefined,
+      });
+      // If the wait runs out first, the warm-up carries on in the background (it is only
+      // filling caches); its eventual failure must not become an unhandled rejection.
+      work.catch((err) => log.warn('the scene warm-up failed:', err));
+      await Promise.race([work, releasedPromise]);
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+      endFloorTransition();
+      bar.end();
+    }
+    return { ok: true };
+  }
+
+  // ---------------------------------------------------------------------------
+  // THE WHOLE TABLE (loading audit, phase 4): a GM activating a scene asks every
+  // connected player to prepare it FIRST, and waits for them.
+  // ---------------------------------------------------------------------------
+  const prepareCoordinator = createPrepareCoordinator();
+  /** How long the GM waits, after asking, for players to say they are here. A player without the
+   * module never answers, so this bounds what they cost every scene change (2026-10-25). */
+  const PRESENCE_WINDOW_MS = 2500;
+  /** Tokens of requests the GM has since cancelled, so a player's warm-up stops. */
+  const cancelledPrepareTokens = new Set();
+
+  /**
+   * The GM side. Called by the gate on `Scene#activate`, BEFORE the activation is
+   * sent. Returns `{cancelled: true}` only if the GM pressed Cancel.
+   * @param {object} scene
+   */
+  async function coordinateSceneActivation(scene) {
+    const recipients = listActivePlayerIds();
+    // Nobody else connected: this client's own gated `view` does all the preparing.
+    if (recipients.length === 0) return {};
+
+    const token = newPrepareToken();
+    const name = sceneNameForUser(scene);
+    const count = recipients.length;
+    const people = `${count} player${count === 1 ? '' : 's'}`;
+    const bar = switchNotice.begin(`Preparing ${escapeNoticeText(name)} for ${people}…`);
+    const session = prepareCoordinator.begin({
+      token,
+      recipients,
+      presenceMs: PRESENCE_WINDOW_MS,
+      timeoutMs: switchWaitMs(),
+      onChange: ({ ready, missing, total }) => {
+        // A real fraction here: players ready out of players asked.
+        const waiting =
+          missing.length > 0 && missing.length <= 3
+            ? ` — waiting for ${missing.map(userDisplayName).map(escapeNoticeText).join(', ')}`
+            : '';
+        bar.update(
+          `Preparing ${escapeNoticeText(name)} — ${ready.length} of ${total} players ready${waiting}`,
+          ready.length / total
+        );
+      },
+    });
+    sendPrepareRequest({ token, sceneId: scene.id, levelId: null, recipients });
+    // The switch goes ahead by itself: when every player has answered, or when the wait runs out.
+    // Cancel is the GM's only way out, and it leaves the scene where it is.
+    beginFloorTransition({
+      headline: `Waiting for ${people}`,
+      actions: [{ label: 'Cancel', pendingLabel: 'Cancelling…', onClick: () => session.cancel() }],
+    });
+    // The GM warms the scene too, alongside, so the GM is not the straggler.
+    const own = prewarmSceneForSwitch(scene, null, { isCancelled: () => session.status().done });
+    own.catch((err) => log.warn('the GM-side scene warm-up failed:', err));
+    let end;
+    try {
+      end = await session.promise;
+      if (end.reason === 'all-ready') await own; // everyone else is ready; do not leave the GM behind
+    } finally {
+      endFloorTransition();
+      bar.end();
+    }
+    if (end.reason === 'cancelled') {
+      sendPrepareCancel({ token, recipients });
+      return { cancelled: true };
+    }
+    if (end.reason === 'timeout' && end.missing.length > 0) {
+      const who = end.missing.map(userDisplayName).map(escapeNoticeText).join(', ');
+      notifyUser(
+        'warn',
+        `Switching to ${escapeNoticeText(name)} without waiting longer for ${who} — they will see their own loading screen.`
+      );
+    }
+    return {};
+  }
+
+  /**
+   * The PLAYER side: a GM asked this client to prepare a scene. Warm it, show Foundry's
+   * progress notification, and ALWAYS answer — a failure here must never hold the table.
+   * @param {{token: string, sceneId: string, levelId: string|null, from: string}} request
+   */
+  async function handleScenePrepareRequest({ token, sceneId, levelId, from }) {
+    let bar = null;
+    try {
+      // "Here", before any work: the GM waits only for players who answer this (a player
+      // without the module never does, and must not hold the table).
+      sendPrepareHere({ token, gmUserId: from });
+      const scene = findScene(sceneId);
+      // Not applicable here: gate off, MSA off, unknown scene, or already there.
+      if (!scene || !isSwitchGateEnabled() || !isMsaEnabledSetting() || currentSceneId() === sceneId) return;
+      const subject = { verb: `${userDisplayName(from)} is preparing`, name: sceneNameForUser(scene) };
+      bar = switchNotice.begin(formatPrepareMessage(subject, describeStep(SCENE_PREPARE_STEPS, null)));
+      await prewarmSceneForSwitch(scene, levelId, {
+        onStep: (p) => {
+          const d = describeStep(SCENE_PREPARE_STEPS, p);
+          bar?.update(formatPrepareMessage(subject, d), d.pct);
+        },
+        isCancelled: () => cancelledPrepareTokens.has(token),
+      });
+    } catch (err) {
+      log.error('preparing a scene at the GM’s request failed — answering ready anyway:', err);
+    } finally {
+      bar?.end();
+      sendPrepareReady({ token, gmUserId: from, ok: true });
+    }
+  }
+
+  /** What the gate calls, for every request that will cause a redraw. */
+  function prepareSwitchRequest(request, control) {
+    return request.kind === 'level' ? prepareLevelSwitch(request, control) : prepareSceneSwitch(request, control);
+  }
+
   /**
    * PREPARE, THEN COMMIT a same-scene floor switch (2026-08-15, unified
    * 2026-08-24 — see [[feedback_direct_floor_switch_caller_skips_context_sync]]
@@ -3432,13 +3800,30 @@ function install() {
     // re-point every per-frame anchor filter (fire/candle/lightning) and
     // door scoping at floor N while floor M's art was still what the user
     // was looking at, for however long prepare took.
-    syncActiveFloorContext(targetFloorIndex);
-    const result = await setVtPanViewerFloor(targetFloorIndex);
-    // EFFECT_REAPPLIERS — per-floor correctness rests entirely on each
-    // effect's own per-frame memo re-reading `activeFloorContext` by
-    // closure; every entry already tolerates being called with nothing to
-    // do (reapplyAll's own try/catch-per-entry).
-    reapplyAll('floor switch');
+    //
+    // THE CONTEXT MOVE AND THE RE-RESOLVE RIDE INSIDE THE FLIP (loading audit
+    // P-08, 2026-10-25). `syncActiveFloorContext` used to run BEFORE
+    // `setVtPanViewerFloor` and `reapplyAll` AFTER it, with an `await` between —
+    // so a frame could render with the context already on floor N and the viewer
+    // still on M (or the viewer on N and the effects still resolved for M).
+    // `setFloorIndex` now calls `atFlip` in the same synchronous stretch as the
+    // view flip, the per-floor bakes and the hide-old/show-new swap, after waiting
+    // for any in-flight residency pass to end. If the viewer was already on this
+    // floor (no flip happened) the same two calls still run, below.
+    let flipped = false;
+    const commitContext = () => {
+      flipped = true;
+      floorTimeline.mark(TIMELINE_EVENTS.COMMIT, { floorIndex: targetFloorIndex });
+      afterNextVtPanViewerFrame(() => floorTimeline.mark(TIMELINE_EVENTS.FIRST_FRAME));
+      syncActiveFloorContext(targetFloorIndex);
+      // EFFECT_REAPPLIERS — per-floor correctness rests entirely on each
+      // effect's own per-frame memo re-reading `activeFloorContext` by
+      // closure; every entry already tolerates being called with nothing to
+      // do (reapplyAll's own try/catch-per-entry).
+      reapplyAll('floor switch');
+    };
+    const result = await setVtPanViewerFloor(targetFloorIndex, { atFlip: commitContext });
+    if (!flipped) commitContext();
     log.info(`real-scene VT viewer synced to floor ${targetFloorIndex}.`, result);
     syncInterfaceSeam('floor switch');
 
@@ -13915,6 +14300,93 @@ function install() {
     }
   }
 
+  /**
+   * The drawables that can host their own mask, in the shape `discoverAuthoredMasks`
+   * takes. ONE definition, shared by the real start and the scene prewarm, so the
+   * prewarm's discovery is a cache hit for the start rather than a near-miss.
+   * @param {Array<{id: string, src: string, kind: string}>} items
+   */
+  function discoveryTargetsFrom(items) {
+    return items
+      .filter((it) => it.kind === 'levelBackground' || it.kind === 'levelForeground' || it.kind === 'tile')
+      .map((it) => ({ id: it.id, url: it.src, name: it.id }));
+  }
+
+  /**
+   * MASK DISCOVERY, REMEMBERED FOR A WHILE (loading audit L-04, 2026-10-25).
+   * `discoverAuthoredMasks` is a `FilePicker.browse` socket round trip per art
+   * directory — serial network I/O that sat in front of the GPU on every scene
+   * visit and kept its listing cache local to each call. Now the RESULT is kept
+   * for ten minutes, keyed by the scene and the exact target list (so a different
+   * target set is a miss, never a wrong answer), which lets a scene prewarm do it
+   * ahead of the switch and the real start find it done. A result with any failure
+   * is never kept — a transient listing error is retried next time. The result is
+   * treated as read-only (`maskAuthority.setDiscovery` only reads it).
+   */
+  const MASK_DISCOVERY_TTL_MS = 10 * 60 * 1000;
+  const MASK_DISCOVERY_MAX_ENTRIES = 6;
+  const maskDiscoveryCache = new Map();
+  /** key -> the listing still running for it. A second caller JOINS it instead of listing again —
+   * which is what lets discovery start early (`kickMaskDiscovery`) and the viewer start find it
+   * under way or done (loading audit L-04, Phase 5.2: overlap discovery with start-up). */
+  const maskDiscoveryInflight = new Map();
+  async function discoverMasksCached(sceneId, targets, onProgress) {
+    const key = `${sceneId}|${targets.map((t) => `${t.id}=${t.url}`).join(';')}`;
+    const hit = maskDiscoveryCache.get(key);
+    if (hit && wallClockMs() - hit.at < MASK_DISCOVERY_TTL_MS) {
+      onProgress?.({ done: targets.length, total: targets.length, detail: 'remembered from earlier' });
+      return hit.result;
+    }
+    const running = maskDiscoveryInflight.get(key);
+    if (running) {
+      const joined = await running;
+      onProgress?.({ done: targets.length, total: targets.length, detail: 'started earlier, now finished' });
+      return joined;
+    }
+    const listing = discoverAuthoredMasks({ floors: targets, onProgress });
+    maskDiscoveryInflight.set(key, listing);
+    let result;
+    try {
+      result = await listing;
+    } finally {
+      maskDiscoveryInflight.delete(key);
+    }
+    if (!(result?.failures?.length > 0)) {
+      maskDiscoveryCache.set(key, { at: wallClockMs(), result });
+      while (maskDiscoveryCache.size > MASK_DISCOVERY_MAX_ENTRIES)
+        maskDiscoveryCache.delete(maskDiscoveryCache.keys().next().value);
+    }
+    return result;
+  }
+
+  /**
+   * START MASK DISCOVERY NOW, AWAIT IT LATER (loading audit Phase 5.2). Discovery is a file-listing
+   * round trip that used to begin only inside `startRealSceneViewer`, after Foundry's whole draw.
+   * Started here — before Foundry draws (the gate's cold prepare) or at `canvasInit` — it runs
+   * alongside Foundry's own loading, and the start's identical call joins it. Same targets as the
+   * start computes (every level visible), so it is the same cache key. Fire-and-forget: a failure
+   * here only means the start lists again.
+   * @param {object|null} sceneDoc
+   */
+  function kickMaskDiscovery(sceneDoc) {
+    try {
+      if (!sceneDoc || !isMsaEnabledSetting()) return;
+      const floorsResult = getActiveSceneFloors(sceneDoc);
+      if (!floorsResult.ok || floorsResult.floors.length === 0) return;
+      const allLevelIds = floorsResult.floors.map((f) => f.id).filter(Boolean);
+      const everyLevel = collectSceneLayers(sceneDoc, {
+        viewedLevelId: floorsResult.floors[0].id,
+        visibleLevelIds: allLevelIds,
+        isGM: true,
+      });
+      discoverMasksCached(sceneDoc.id ?? null, discoveryTargetsFrom(everyLevel.items)).catch((err) =>
+        log.warn('early mask discovery failed — the scene start will list again:', err)
+      );
+    } catch (err) {
+      log.warn('could not start mask discovery early — the scene start will do it:', err);
+    }
+  }
+
   async function startRealSceneViewer(initialFloorIndex = 0) {
     // THE OFF-SWITCH — checked before anything else in this function, including
     // the loading curtain and the art-availability check below: a player who
@@ -13952,6 +14424,11 @@ function install() {
       return { ok: false, error: floorsResult.error };
     }
     const { floors, skipped } = floorsResult;
+    // Every precondition for rendering this scene has passed (MSA is on, the
+    // scene has art): a viewer is about to exist, so the seam may take Foundry's
+    // art. Lowered again by `onFoundryFallback` if the start fails (loading
+    // audit P-09).
+    setMsaMayOwnArt(true);
     const dimensions = computeSceneDimensions(sceneDoc);
     const isGM = typeof game !== 'undefined' ? !!game.user?.isGM : true;
     // Track the floor being opened so the candle marker overlay shows only its
@@ -14063,9 +14540,7 @@ function install() {
     // initially-visible ones (see that const's own comment) — so a floor with
     // NO background or foreground art at all — an all-Tile floor — contributes
     // no floor-level target and still gets full mask support from its tiles.
-    const discoveryTargets = allLevelsLayers.items
-      .filter((it) => it.kind === 'levelBackground' || it.kind === 'levelForeground' || it.kind === 'tile')
-      .map((it) => ({ id: it.id, url: it.src, name: it.id }));
+    const discoveryTargets = discoveryTargetsFrom(allLevelsLayers.items);
 
     // MASK DISCOVERY + AUTHORITY RESET — before the viewer starts, so
     // `layersForItem` is a sync manifest lookup by the time packs build.
@@ -14088,10 +14563,9 @@ function install() {
     beginSceneLoadPhase(LOAD_PHASES.MASKS, { total: discoveryTargets.length });
     let maskDiscovery = null;
     try {
-      maskDiscovery = await discoverAuthoredMasks({
-        floors: discoveryTargets,
-        onProgress: ({ done, total, detail }) => reportSceneLoadProgress(LOAD_PHASES.MASKS, { done, total, detail }),
-      });
+      maskDiscovery = await discoverMasksCached(sceneDoc?.id ?? null, discoveryTargets, ({ done, total, detail }) =>
+        reportSceneLoadProgress(LOAD_PHASES.MASKS, { done, total, detail })
+      );
     } catch (err) {
       log.error('mask discovery failed outright — this scene serves absence defaults:', err);
     }
@@ -14662,23 +15136,71 @@ function install() {
   // mid-decode with.
   let lastProxiedSceneId = null;
   let lastProxiedFloorUrls = [];
-  async function registerFloorProxies(sceneDoc) {
+  /**
+   * Seed PIXI's texture cache with small proxies for a scene's floors so Foundry
+   * never decodes the real art.
+   *
+   * TWO CALLERS, and the difference is the point (loading audit C-01):
+   *  - `canvasInit` calls it fire-and-forget, because Foundry does not await hooks
+   *    — it RACES Foundry's own texture loader and wins only when it is quick.
+   *  - The scene-switch gate (`foundry/scene-switch-gate.js`) calls it BEFORE
+   *    Foundry's draw starts and awaits the floors Foundry is about to load, so
+   *    for any draw that goes through `Scene#view` the proxy is in place by
+   *    construction rather than by timing. The remaining floors continue in the
+   *    background (`background` in the result).
+   *
+   * @param {object} sceneDoc
+   * @param {object} [opts]
+   * @param {string|null} [opts.viewedLevelId] - the level about to be viewed; defaults to `canvas.level`.
+   * @param {boolean} [opts.visibleOnly] - resolve once the floors Foundry will load for this view
+   *   are seeded; the rest finish in the background.
+   * @param {boolean} [opts.evictPrevious] - release the previous scene's pinned source bitmaps.
+   *   The gate passes false: the OLD scene is still on screen, and `canvasInit` evicts later.
+   * @returns {Promise<{background: Promise<void>}>}
+   */
+  async function registerFloorProxies(
+    sceneDoc,
+    { viewedLevelId = null, visibleOnly = false, evictPrevious = true } = {}
+  ) {
     const sceneId = sceneDoc?.id ?? null;
     const floorsResult = getActiveSceneFloors(sceneDoc);
     const nextUrls = floorsResult.ok ? floorsResult.floors.map((f) => f.url).filter(Boolean) : [];
 
-    for (const url of urlsToEvictOnSceneChange(lastProxiedSceneId, lastProxiedFloorUrls, sceneId, nextUrls)) {
-      releaseSourceBitmap(url);
+    if (evictPrevious) {
+      for (const url of urlsToEvictOnSceneChange(lastProxiedSceneId, lastProxiedFloorUrls, sceneId, nextUrls)) {
+        releaseSourceBitmap(url);
+      }
+      lastProxiedSceneId = sceneId;
+      lastProxiedFloorUrls = nextUrls;
     }
-    lastProxiedSceneId = sceneId;
-    lastProxiedFloorUrls = nextUrls;
 
-    if (!floorsResult.ok) return;
-    for (const floor of floorsResult.floors) {
+    if (!floorsResult.ok) return { background: Promise.resolve() };
+    // ORDER (loading audit C-01): the VIEWED floor goes first — it is the one
+    // whose full-resolution PIXI decode actually costs something while it is on
+    // screen — and floors PIXI already holds are listed last.
+    // `urlsToEvictOnSceneChange` above and the decode-pool pin below are
+    // unchanged: the pin is deliberate (the viewer's slice decode reuses it
+    // rather than decoding the same 576MB image twice — `acquireSliceSource`).
+    const floors = floorsResult.floors;
+    const byLevel = viewedLevelId ? floors.findIndex((f) => f.id === viewedLevelId) : -1;
+    const viewedFloorIndex = byLevel >= 0 ? floors[byLevel].index : resolveFloorDescriptor(sceneDoc, floors);
+    const { todo, cached } = planProxySeeding(floors, viewedFloorIndex, isPixiSrcCached);
+    const willLoad = new Set(computeVisibleFloorIndices(floors, viewedFloorIndex));
+    const seed = async (floor) => {
       const bitmap = await getSourceBitmap(floor.url);
       const result = await registerPixiProxy(floor.url, bitmap);
       log.info(`VRAM severance — floor ${floor.index} (${floor.name}):`, result);
-    }
+    };
+    const first = todo.filter((f) => willLoad.has(f.index));
+    const rest = [...todo.filter((f) => !willLoad.has(f.index)), ...cached];
+    for (const floor of first) await seed(floor);
+    // Never rejects: a floor that cannot be proxied is logged and the rest go on
+    // (an unobserved rejection from a background pass would be an unhandled one).
+    const background = (async () => {
+      for (const floor of rest) await seed(floor);
+    })().catch((err) => log.warn('VRAM severance — a background floor could not be proxied:', err));
+    if (!visibleOnly) await background;
+    return { background };
   }
 
   // THE TSL SPIKE (docs/planning/Shaders.md §7.5). Loads the node build LAZILY —
@@ -14716,6 +15238,39 @@ function install() {
   );
 
   MapShine.debug.registerReport('interface-seam', 'Interface seam (art vs chrome)', () => getCanvasCompositingReport());
+
+  MapShine.debug.registerReport('floor-timeline', 'Floor/scene change timeline (where the time went)', () => ({
+    report: 'floor-timeline',
+    generatedAt: new Date().toISOString(),
+    ...floorTimeline.getReport(),
+  }));
+
+  MapShine.debug.registerReport('presentation', 'Presentation (are two floors ever on screen at once?)', () => ({
+    report: 'presentation',
+    generatedAt: new Date().toISOString(),
+    monitor: getVtPanViewerPresentationReport(),
+    note:
+      'Armed for ~120 frames at every floor change. verdict "clean" = frames were checked and no consumer showed another ' +
+      'floor; "never-armed" = no floor change has happened yet (it proves nothing); "mixed-floors-seen" = see examples ' +
+      'and perConsumer. unreportedConsumers are showing something but cannot name their floor. It reports; it never hides.',
+  }));
+
+  MapShine.debug.registerReport('scene-switch-gate', 'Scene-switch gate (prepare before Foundry draws)', () => ({
+    report: 'scene-switch-gate',
+    generatedAt: new Date().toISOString(),
+    installed: sceneSwitchGate !== null,
+    enabled: isSwitchGateEnabled(),
+    status: sceneSwitchGate?.getStatus() ?? null,
+    activation: {
+      installed: sceneActivationGate !== null,
+      status: sceneActivationGate?.getStatus() ?? null,
+      waiting: prepareCoordinator.getActive(),
+    },
+    note:
+      'gated = switches that were prepared first; passedThrough = changeless or Foundry-refused views; ' +
+      'failedOpen = a prepare (or the gate itself) threw and Foundry drew immediately; superseded/cancelled = the ' +
+      'switch never happened. installed:false means Foundry draws immediately, as it did before the gate existed.',
+  }));
 
   // RENDERER A/B TOGGLE (2026-07-18, author request: "a button that lets me
   // toggle back to the native PIXI render and back again to threejs, for
@@ -14756,10 +15311,12 @@ function install() {
     () => (getCanvasCompositingReport().foundryArtRenderable ? 'foundry' : 'msa'),
     async (mode) => {
       if (mode === 'foundry') {
+        setMsaMayOwnArt(false); // so visibilityRefresh does not re-suppress it
         if (!restoreFoundryArt())
           throw new Error("restoreFoundryArt() could not restore Foundry's own art — see console.");
         return;
       }
+      if (getVtPanViewerDiagnostics().active) setMsaMayOwnArt(true);
       const result = applyArtSuppression();
       if (!result.applied) throw new Error(`refused (${result.code}): ${result.reason}`);
     }
@@ -15962,6 +16519,18 @@ function install() {
   {
     const seam = registerCanvasCompositing();
     if (!seam.registered) log.warn(`interface seam not registered — ${seam.reason}`);
+    // EVERY hand-back to Foundry gives Foundry its art back (loading audit
+    // P-09). `engageFoundryFallback` removes MSA's canvas from many places (the
+    // MSA-off setting, a scene with no art, a viewer that threw while starting);
+    // none of them touched Foundry's `primary`/`effects` groups, which stayed
+    // suppressed under a canvas that was gone — and `visibilityRefresh`
+    // re-blanked them whenever it fired. One subscription covers all of them,
+    // including the ones added later.
+    onFoundryFallback(() => {
+      setMsaMayOwnArt(false);
+      restoreFoundryArt();
+      MapShine.debug?.refreshControls?.();
+    });
   }
 
   if (typeof Hooks !== 'undefined') {
@@ -15994,8 +16563,15 @@ function install() {
         stopVtPanViewer();
         lastRealSceneId = null;
         endSceneLoad({ error: 'canvas is blank (scene unviewed or deleted)' });
+        // The viewer is GONE, so the next draw of even this same scene is a
+        // cold start and must raise the curtain. The loading screen keeps its
+        // own "last scene I showed a curtain for" memory (loading audit L-08);
+        // without this reset it answers "same scene — a floor switch" and the
+        // whole rebuild runs invisibly.
+        resetLoadingSceneMemory();
       },
       logInfo: (msg) => log.info(msg),
+      onTearDown: (kind) => floorTimeline.mark(TIMELINE_EVENTS.TEAR_DOWN, { kind }),
     });
     if (!tearDownWatchdog.registered) log.warn(`blank-canvas watchdog not registered — ${tearDownWatchdog.reason}`);
 
@@ -16004,6 +16580,7 @@ function install() {
 
     Hooks.on('canvasInit', (canvasRef) => {
       tearDownWatchdog.markCovered(); // this draw is real — see foundry/canvas-lifecycle.js
+      floorTimeline.mark(TIMELINE_EVENTS.CANVAS_INIT);
       // GPU QUEUE PROBE (2026-09-24) — armed for the whole load, from the same
       // moment the curtain starts; see diag/gpu-queue-probe.js. start() also
       // resets a probe a previous (failed) load left running.
@@ -16014,6 +16591,20 @@ function install() {
       }
       try {
         const sceneDoc = canvasRef?.scene ?? null;
+        // ONE FACT DECIDES BOTH THE CURTAIN AND THE RESTART (loading audit L-08).
+        // The curtain used to ask the loading screen's own memory ("the last scene I
+        // showed one for") while the canvasReady handler decides to restart from
+        // `lastRealSceneId && viewer active` — two memories that disagree after a
+        // debug Stop, a failed start, or a viewer stopped for a blank canvas. The
+        // result was a full cold start with NO curtain, and `shouldStopWaitingForReady`
+        // returning at once. So: if this draw will NOT keep a live viewer for this scene,
+        // it is a cold start and must show the curtain — unless a load is already
+        // showing one (a redundant second canvasInit must not restart the clock).
+        const viewerSurvivesThisDraw =
+          lastRealSceneId === (sceneDoc?.id ?? null) && getVtPanViewerDiagnostics().active === true;
+        if (!viewerSurvivesThisDraw && !getLoadingScreenState().showing) resetLoadingSceneMemory();
+        // A draw that will start a viewer: begin its mask discovery now, alongside Foundry's draw.
+        if (!viewerSurvivesThisDraw) kickMaskDiscovery(sceneDoc);
         const verdict = beginSceneLoad({ sceneId: sceneDoc?.id ?? null, sceneName: sceneDoc?.name });
         if (!verdict.shown) log.info(`loading screen suppressed — ${verdict.reason}`);
       } catch (err) {
@@ -16048,6 +16639,15 @@ function install() {
     // cheap event was the actual crash: repeated full 512MB-atlas
     // reallocation on ordinary floor toggles.
     let lastRealSceneId = null;
+    // WHICH COLD LOAD IS THE CURRENT ONE (loading audit L-03). `canvasReady` is not
+    // awaited by Foundry, so a second one can begin while the first is still booting (a
+    // documented quirk of the initial load, and of any module that redraws the canvas).
+    // Each cold load takes a number; after every await it checks it still holds the
+    // latest, and a superseded one STANDS DOWN — it must not end the newer load's
+    // curtain (the loading screen is a singleton), clear its render-scale clamp, or
+    // write its diagnostics. `startVtPanViewer` itself is serialised, so the newer
+    // load disposes this one's viewer cleanly.
+    let sceneLoadGeneration = 0;
     // THE LAST LOAD'S "WHAT ATE THE TIME" DIAGNOSTICS (mythica-machina-press#400
     // follow-up, 2026-09-01) — shader/pipeline rebuild timing plus a before/
     // after snapshot of the art-streaming caches, gathered automatically
@@ -16303,6 +16903,7 @@ function install() {
     // block entirely. See its own doc, near `reapplyAll`, for the full
     // reasoning.
     Hooks.on('canvasReady', async (canvasRef) => {
+      floorTimeline.mark(TIMELINE_EVENTS.CANVAS_READY);
       try {
         const sceneDoc = canvasRef?.scene ?? null;
         if (!sceneDoc) return;
@@ -16684,8 +17285,15 @@ function install() {
         // costs no resize at all on the way in.
         //
         // Released before WARMING, NOT at reveal — see the release site below.
+        const myLoadGeneration = ++sceneLoadGeneration;
+        const superseded = () => myLoadGeneration !== sceneLoadGeneration;
         setVtPanViewerLoadRenderScale(DEFAULT_LOAD_RENDER_SCALE);
         const result = await startRealSceneViewer(targetFloorIndex);
+        if (result?.ok !== false) floorTimeline.mark(TIMELINE_EVENTS.VIEWER_STARTED, { floorIndex: targetFloorIndex });
+        if (superseded()) {
+          log.info('a newer scene load has taken over — this one stands down without touching the curtain.');
+          return;
+        }
         if (result.ok === false) {
           log.warn(`real-scene VT viewer did not start:`, result.error);
           lastLoadDiagnostics = null; // a failed load must not show a stale earlier load's numbers
@@ -16778,6 +17386,8 @@ function install() {
         // "Ready" being true and being the §7 "Ready!" lie under a new name.
         beginSceneLoadPhase(LOAD_PHASES.FIRST_FRAME);
         await waitForFirstPaint();
+        if (superseded()) return; // see `sceneLoadGeneration`
+        floorTimeline.mark(TIMELINE_EVENTS.FIRST_FRAME, { cold: true });
 
         // ONLY NOW hand the art over. MSA has painted a real frame, so
         // suppressing Foundry's `primary`/`effects` swaps one picture for
@@ -16817,7 +17427,35 @@ function install() {
         // an expensive one, which is the "Ready!" lie wearing a new costume.
         setVtPanViewerLoadRenderScale(null);
         beginSceneLoadPhase(LOAD_PHASES.WARMING);
+        // THE NEIGHBOURING FLOORS, BEHIND THE CURTAIN (2026-10-25, author: "improve the time of
+        // loading for moving between floor ... even at the cost of a longer initial load"). The ±1
+        // floors used to be prepared only after the scene SETTLED (plus 120 frames, or a 30 s
+        // fallback — vt-pan-viewer.js, mythica-machina-press#582), so a floor change in the first
+        // half-minute after loading still found a cold floor. They are now prepared here, while the
+        // curtain is still up, and the curtain waits for them. Same work and same VRAM as before —
+        // only earlier. Bounded by exactly what bounds the warm-up hold below (the hard deadline,
+        // "Show me anyway", no curtain at all): a slow neighbour carries on in the background.
+        {
+          const warm = await prewarmVtPanViewerAdjacentFloors(targetFloorIndex);
+          if (warm?.done) {
+            let neighboursDone = false;
+            warm.done.then(
+              () => (neighboursDone = true),
+              () => (neighboursDone = true)
+            );
+            while (!neighboursDone && !superseded() && !shouldStopWaitingForReady().stop) {
+              await new Promise((r) => setTimeout(r, READY_POLL_MS));
+            }
+            log.info(
+              neighboursDone
+                ? 'neighbouring floors prepared before the curtain lifted.'
+                : 'neighbouring floors still preparing — the curtain will not wait longer; they finish in the background.'
+            );
+          }
+        }
+        if (superseded()) return; // see `sceneLoadGeneration`
         const readyOutcome = await waitForSceneReady();
+        if (superseded()) return; // see `sceneLoadGeneration`
         // THE CURTAIN IS COMING DOWN — from here on, ANY pipeline compile
         // happens in front of the user, which is exactly the bug #614 fixed.
         // Arming the detector here means MSA notices a regression itself, on
@@ -17137,6 +17775,44 @@ function install() {
         log.error('region darkness override settings registration failed:', err);
       }
 
+      // THE SCENE-SWITCH GATE (loading audit, 2026-10-25) — prepare a floor or
+      // scene in the background, THEN let Foundry draw. The one wrap of
+      // `Scene#view` (foundry/scene-switch-gate.js); it fails open, so a wrap that
+      // cannot be installed just means Foundry draws immediately, as before.
+      // Installed in `init` — before `setup`, so before the cold-load draw that
+      // `Game#initializeCanvas` makes through `scene.view()` — and in the SAME
+      // shared `init` hook as the blocks around it, for the `adapter-only` reason
+      // spelled out above. `isEnabled` reads the GM's world setting live, so
+      // switching it off takes effect on the very next switch without a reload.
+      try {
+        const gateInstall = installSceneSwitchGate({
+          prepare: prepareSwitchRequest,
+          isEnabled: isSwitchGateEnabled,
+          onEvent: (event, detail) => floorTimeline.mark(event, detail),
+        });
+        sceneSwitchGate = gateInstall.gate ?? null;
+        if (gateInstall.installed) log.info(`scene-switch gate: ${gateInstall.reason ?? 'installed'}`);
+        else log.warn(`scene-switch gate not installed — ${gateInstall.reason}`);
+      } catch (err) {
+        log.error('scene-switch gate installation failed — Foundry will draw immediately:', err);
+      }
+
+      // THE ACTIVATION GATE — a GM activating a scene first asks every connected player to
+      // prepare it and waits (foundry/scene-activation-gate.js). GM clients only act on it;
+      // on a player's client the wrap is inert. Same fail-open rules as the gate above.
+      try {
+        const activationInstall = installSceneActivationGate({
+          coordinate: coordinateSceneActivation,
+          isEnabled: isSwitchGateEnabled,
+          isGM: currentUserIsGM,
+        });
+        sceneActivationGate = activationInstall.gate ?? null;
+        if (activationInstall.installed) log.info(`scene-activation gate: ${activationInstall.reason ?? 'installed'}`);
+        else log.warn(`scene-activation gate not installed — ${activationInstall.reason}`);
+      } catch (err) {
+        log.error('scene-activation gate installation failed — Foundry will activate immediately:', err);
+      }
+
       // THE ALMANAC (docs/holy/Almanac-Testament.md, stage A1) — installs the
       // active calendar into CONFIG.time so game.time.components is calendar-
       // aware for MSA and every other module in the world alike. Same "same
@@ -17316,12 +17992,19 @@ function syncInterfaceSeam(context) {
   // setting-sync already does that job.
   const override = readSetting(MODULE_ID, GLOBAL_SETTING_KEYS.rendererOverride);
   if (override === 'foundry') {
+    // Lowered, not just restored: `visibilityRefresh` re-applies suppression on
+    // every fog/vision refresh, which used to undo this within moments (loading
+    // audit P-09).
+    setMsaMayOwnArt(false);
     const result = restoreFoundryArt();
     log.info(`interface seam: GM override forces Foundry's own renderer (${context}).`);
     MapShine.debug?.refreshControls?.();
     MapShine.__remote?.updateRendererState?.(true);
     return { applied: false, forcedFoundry: true, result };
   }
+  // A viewer is running (every real call site is after one started) and the
+  // override is not forcing Foundry: MSA may own the art again.
+  if (getVtPanViewerDiagnostics().active) setMsaMayOwnArt(true);
   const seam = applyArtSuppression();
   if (seam.applied) {
     log.info(

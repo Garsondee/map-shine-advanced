@@ -179,6 +179,11 @@ export {
   createWindGridState,
   bakeWindStructure,
   outdoorsGridSignature,
+  // Per-floor memo of the structure bake, so floor PREPARE can run it off screen
+  // (loading audit P-06).
+  createWindStructureMemo,
+  wallsSignature,
+  objectIdentity,
   computeFineConnectivity,
   deriveWindOpenness,
   deriveWindShadow,

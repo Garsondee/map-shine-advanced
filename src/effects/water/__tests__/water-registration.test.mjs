@@ -111,4 +111,22 @@ export function run(t) {
       health.read === 3
     );
   }
+
+  // ---- the render state is memoised on readout identity (W-18) -------------
+  {
+    const water = createWaterRegistration(makeFakes());
+    water.reapply();
+    const a = water.getRenderState();
+    const b = water.getRenderState();
+    ok('two calls with an unchanged readout return the SAME object (no per-frame allocation)', a === b);
+    water.setWaterLive({ opacity: 0.42 });
+    const c = water.getRenderState();
+    ok(
+      'a param change (a new readout) returns a NEW object carrying the new value',
+      c !== a && c.params.opacity === 0.42
+    );
+    water.setDebugChannel(3);
+    const d = water.getRenderState();
+    ok('a debug-channel change also returns a new object', d !== c && d.debugChannel === 3);
+  }
 }

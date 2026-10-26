@@ -148,6 +148,66 @@ function meshesOf(sub) {
 
 const VIEW_RECT = { minX: 0, minY: 0, maxX: 1000, maxY: 1000 };
 
+/** What `loadMaskImage` resolves with for the painted fixture. */
+function loadedFixture() {
+  return {
+    texture: stubTexture(),
+    contentBounds: { minU: 0.1, minV: 0.1, maxU: 0.9, maxV: 0.9 },
+    data: paintedRgba(32, 32),
+    width: 32,
+    height: 32,
+    nativeWidth: 64,
+    nativeHeight: 64,
+    bytes: 32 * 32 * 4,
+  };
+}
+
+/**
+ * A subsystem whose mask loads are CONTROLLED: every `loadMaskImage` call is
+ * recorded and stays pending until the test resolves it, so "the new floor's
+ * mask has not landed yet" is a state a test can sit in. Every floor in
+ * `floors` has its own url.
+ * @param {number[]} floors
+ */
+function makeControlled(floors) {
+  const calls = [];
+  const pending = new Map(); // url -> { resolve, reject }
+  const sub = createSpecularSurfaceSubsystem({
+    THREE,
+    getSpecularMaskUrl: (f) => (floors.includes(f) ? `stub://floor${f}_Specular.webp` : null),
+    getSpecularMaskRect: () => ({ minX: 0, minY: 0, maxX: 1000, maxY: 1000 }),
+    loadMaskImage: ({ url }) => {
+      calls.push(url);
+      return new Promise((resolve, reject) => pending.set(url, { resolve, reject }));
+    },
+    createMaskTexture: (data, w, h) => {
+      const t = new THREE.DataTexture(data, w, h, THREE.RGBAFormat, THREE.UnsignedByteType);
+      t.needsUpdate = true;
+      return t;
+    },
+    createPackTexture: (data, w, h) => {
+      const t = new THREE.DataTexture(data, w, h, THREE.RGBAFormat, THREE.UnsignedByteType);
+      t.needsUpdate = true;
+      return t;
+    },
+    illumTexture: stubTexture(),
+    depthTexture: stubTexture(),
+    timeMsNode: THREE.TSL.uniform(THREE.TSL.float(0)),
+    uViewRect: THREE.TSL.uniform(THREE.TSL.vec4(0, 0, 1000, 1000)),
+    uOutdoorsRect: THREE.TSL.uniform(THREE.TSL.vec4(0, 0, 1000, 1000)),
+    outdoorsTexNode: THREE.TSL.texture(stubTexture()),
+    buildOutdoorsGate: buildWorldSpaceOutdoorsGate,
+    getSpecularRenderState: () => ({ enabled: true, params: {}, debugChannel: 0 }),
+    getSkyHandle: () => null,
+  });
+  const land = async (floor) => {
+    pending.get(`stub://floor${floor}_Specular.webp`)?.resolve(loadedFixture());
+    await Promise.resolve();
+    await Promise.resolve();
+  };
+  return { sub, calls, pending, land, mesh: meshesOf(sub)[0] };
+}
+
 /** @param {{ok: Function}} t */
 export async function run(t) {
   const { ok } = t;
@@ -489,6 +549,115 @@ export async function run(t) {
   await Promise.resolve();
   ok('switching back to floor 0 reloads and shows it again', flipMesh.visible === true);
   ok('…and getStatus reports floor 0 again', flip.getStatus().floor === 0);
+
+  // ── PER-FLOOR SLOTS: THE LOWER FLOOR'S SHINE MUST NOT LINGER ────────────
+  // Live report, 2026-10-25 (loading audit P-03): "going up a floor we sometimes
+  // leave the lower floor's specular effect on display for a while". Both floors
+  // have an authored mask here — unlike the block above — so the only thing that
+  // can hide floor 0's shine on floor 1 is the subsystem refusing to show a slot
+  // that is not the presented floor's.
+  {
+    const c = makeControlled([0, 1]);
+    c.sub.sync(0, VIEW_RECT);
+    await c.land(0);
+    ok('slots: floor 0 shows once its mask lands', c.mesh.visible === true && c.sub.getStatus().floor === 0);
+    ok(
+      'getPresentation names the floor actually on the mesh (what the presentation monitor reads)',
+      c.sub.getPresentation().visible === true && c.sub.getPresentation().floor === 0
+    );
+
+    // Go up. Floor 1's mask has NOT landed.
+    c.sub.sync(1, VIEW_RECT);
+    ok('slots: on floor 1 with its mask still loading, floor 0’s shine is HIDDEN', c.mesh.visible === false);
+    ok('…and hasContent() agrees, so the pass early-returns', c.sub.hasContent() === false);
+    ok(
+      '…and getPresentation reports NOTHING showing, not floor 0 (the lingering-shine shape)',
+      c.sub.getPresentation().visible === false && c.sub.getPresentation().floor === null
+    );
+    ok('…and floor 1’s load was requested straight away', c.calls.includes('stub://floor1_Specular.webp'));
+    ok('…and isLoadingMask() reports it', c.sub.isLoadingMask() === true);
+    ok(
+      '…and isMaskReady(1) is false while it loads, isMaskReady(0) true',
+      !c.sub.isMaskReady(1) && c.sub.isMaskReady(0)
+    );
+
+    await c.land(1);
+    ok(
+      'slots: when floor 1’s mask lands it shows, as floor 1',
+      c.mesh.visible === true && c.sub.getStatus().floor === 1
+    );
+    ok('…and isMaskReady(1) is now true', c.sub.isMaskReady(1) === true);
+    ok(
+      '…and getPresentation now says floor 1',
+      c.sub.getPresentation().visible === true && c.sub.getPresentation().floor === 1
+    );
+
+    // Back down: floor 0's slot is still resident, so this is a rebind — no reload, no gap.
+    const callsBefore = c.calls.length;
+    c.sub.sync(0, VIEW_RECT);
+    ok('slots: going back to a loaded floor rebinds with NO new fetch', c.calls.length === callsBefore);
+    ok('…and shows floor 0 again at once', c.mesh.visible === true && c.sub.getStatus().floor === 0);
+    c.sub.dispose();
+  }
+
+  // A load for floor 0 still in flight when the author changes floor must not be
+  // installed as floor 1's mask, and must not block floor 1's own load (the old
+  // single `loading` boolean did both).
+  {
+    const c = makeControlled([0, 1]);
+    c.sub.sync(0, VIEW_RECT); // floor 0 load in flight, never lands first
+    c.sub.sync(1, VIEW_RECT);
+    ok(
+      'overlap: floor 1’s load is requested even though floor 0’s is still in flight',
+      c.calls.length === 2 && c.calls[1] === 'stub://floor1_Specular.webp'
+    );
+    await c.land(0); // the OLD floor's mask arrives while floor 1 is presented
+    ok('overlap: floor 0’s late mask does NOT show on floor 1', c.mesh.visible === false);
+    ok('…and floor 1 is still loading', c.sub.isMaskReady(1) === false);
+    await c.land(1);
+    ok('overlap: floor 1 shows when its own mask lands', c.mesh.visible === true && c.sub.getStatus().floor === 1);
+    c.sub.dispose();
+  }
+
+  // PREFETCH: prepare warms a floor that is not on screen, and presenting it is
+  // then instant.
+  {
+    const c = makeControlled([0, 1]);
+    c.sub.sync(0, VIEW_RECT);
+    await c.land(0);
+    c.sub.prefetchMask(1);
+    ok('prefetch: requests floor 1’s mask', c.calls.includes('stub://floor1_Specular.webp'));
+    ok(
+      'prefetch: floor 0 stays on screen while floor 1 loads',
+      c.mesh.visible === true && c.sub.getStatus().floor === 0
+    );
+    await c.land(1);
+    ok('prefetch: landing floor 1 does NOT swap it onto the screen', c.sub.getStatus().floor === 0);
+    ok('prefetch: …but it is ready', c.sub.isMaskReady(1) === true);
+    const before = c.calls.length;
+    c.sub.sync(1, VIEW_RECT);
+    ok(
+      'prefetch: presenting floor 1 is a synchronous rebind — visible on the very sync, no new fetch',
+      c.mesh.visible === true && c.sub.getStatus().floor === 1 && c.calls.length === before
+    );
+    c.sub.dispose();
+  }
+
+  // A FAILED load is settled, not pending, and is not retried every frame.
+  {
+    const c = makeControlled([0]);
+    c.sub.sync(0, VIEW_RECT);
+    c.pending.get('stub://floor0_Specular.webp').resolve(null); // the loader logs and resolves null
+    await Promise.resolve();
+    await Promise.resolve();
+    ok('failure: mesh stays hidden', c.mesh.visible === false);
+    ok('failure: isMaskReady is TRUE — a failed load must not hang a floor change', c.sub.isMaskReady(0) === true);
+    const n = c.calls.length;
+    for (let i = 0; i < 5; i++) c.sub.sync(0, VIEW_RECT);
+    ok('failure: five more frames do not retry the load', c.calls.length === n);
+    ok('failure: not reported as loading', c.sub.isLoadingMask() === false);
+    c.sub.dispose();
+  }
 
   flip.dispose();
   sub.dispose();

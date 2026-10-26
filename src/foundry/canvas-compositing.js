@@ -257,7 +257,23 @@ export const MSA_OWNED_GROUPS = Object.freeze(['primary', 'effects']);
  *   and `canvas.effects` all exist to suppress?
  * @returns {{suppress: boolean, code: string, reason: string}}
  */
-export function decideArtSuppression({ contextAlpha, clearAlpha, groupsPresent }) {
+export function decideArtSuppression({ contextAlpha, clearAlpha, groupsPresent, msaMayOwnArt }) {
+  // FIRST, and its own code (loading audit P-09, 2026-10-25): suppression is only
+  // ever right while an MSA viewer is actually going to paint. Every other fact
+  // below is about whether the PIXI canvas CAN be transparent; none asked
+  // whether MSA is there to show through it. `visibilityRefresh` re-applies
+  // suppression on every fog/vision refresh, so a disabled, failed or stopped
+  // viewer used to be re-blanked within moments of being given Foundry's art
+  // back — grid over nothing. `undefined` (a caller that does not know) is
+  // treated as allowed so the pure facts keep their old meaning.
+  if (msaMayOwnArt === false) {
+    return {
+      suppress: false,
+      code: 'msa-not-rendering',
+      reason:
+        'Map Shine Advanced is not rendering this scene (disabled, failed to start, or stopped), so Foundry keeps drawing its own art. This is a deliberate state, not a fault.',
+    };
+  }
   if (contextAlpha === null || contextAlpha === undefined) {
     return {
       suppress: false,
@@ -398,6 +414,17 @@ export function readCompositingFacts() {
         ? null
         : false;
 
+  // The fourth lever's own fact (loading audit P-01): is Foundry's transition
+  // overlay allowed to paint? It is the opaque level-colour snapshot Foundry puts
+  // over the whole board for the length of every redraw.
+  let transitionRenderable = null;
+  try {
+    const tr = typeof canvas !== 'undefined' ? (canvas?.transition ?? null) : null;
+    if (tr && typeof tr.renderable === 'boolean') transitionRenderable = tr.renderable;
+  } catch (err) {
+    readErrors.push(`reading canvas.transition.renderable threw: ${err?.message ?? err}`);
+  }
+
   return {
     contextAlpha,
     clearAlpha,
@@ -409,8 +436,40 @@ export function readCompositingFacts() {
     effectsRenderable,
     primaryRenderable,
     foundryArtRenderable,
+    transitionRenderable,
+    msaMayOwnArt,
     readErrors,
   };
+}
+
+// ============================================================================
+// WHO MAY OWN THE ART (loading audit P-09, 2026-10-25)
+// ============================================================================
+// Module state, set by the composition root (boot.js) — this file cannot see the
+// viewer (`foundry/` may not import `vt/`), so it is told. Default FALSE: until a
+// viewer has passed its start-up checks, fail toward Foundry (the safety slide).
+// boot.js raises it when a scene's viewer starts, and lowers it on every path that
+// hands rendering back to Foundry (`diag/render-fallback.js` calls a listener).
+let msaMayOwnArt = false;
+
+/**
+ * Tell the seam whether an MSA viewer is (about to be) painting. Lowering it also
+ * hands Foundry's art back at once, so no code path can leave art suppressed under
+ * a viewer that is not there.
+ * @param {boolean} allowed
+ * @returns {boolean} the new value
+ */
+export function setMsaMayOwnArt(allowed) {
+  const next = allowed === true;
+  const changed = next !== msaMayOwnArt;
+  msaMayOwnArt = next;
+  if (changed && !next) restoreFoundryArt();
+  return msaMayOwnArt;
+}
+
+/** @returns {boolean} */
+export function getMsaMayOwnArt() {
+  return msaMayOwnArt;
 }
 
 /** Re-assert the transparent clear alpha after Foundry clobbers it. See header §2. */
@@ -705,8 +764,21 @@ export function applyArtSuppression({ silent = false } = {}) {
   if (!decision.suppress) {
     // ANNOUNCE, ALWAYS (unless `silent` — see param doc above) — never a
     // silent fallback (feedback_safety_slide_outranks_doctrine).
-    // 'no-render-targets' is the one benign case: it just means no scene is drawn yet.
-    if (!silent && decision.code !== 'no-render-targets') {
+    // 'no-render-targets' (no scene drawn yet) and 'msa-not-rendering' (a
+    // deliberate hand-back) are the benign cases.
+    if (decision.code === 'msa-not-rendering') {
+      // Not merely "do not suppress": if the groups are CURRENTLY suppressed (a
+      // viewer that has since died left them so), give Foundry its art back.
+      // Idempotent, and only touches anything when something is actually hidden.
+      if (
+        facts.primarySpriteRenderable === false ||
+        facts.effectsRenderable === false ||
+        facts.primaryRenderable === false ||
+        facts.transitionRenderable === false
+      ) {
+        restoreFoundryArt();
+      }
+    } else if (!silent && decision.code !== 'no-render-targets') {
       console.warn(
         `[MSA] interface seam: NOT suppressing Foundry's art (${decision.code}) — ${decision.reason} ` +
           'Foundry is rendering the scene normally; MSA is underneath and invisible.'
@@ -724,6 +796,21 @@ export function applyArtSuppression({ silent = false } = {}) {
     // for one live consumer, the fog filter's explored wash, and MSA now supplies
     // that directly. Nothing left reads the texture, so nothing needs it built.
     canvas.primary.renderable = false;
+    // ...and the FOURTH (loading audit P-01, 2026-10-25): Foundry's own
+    // transition overlay. Every `Canvas#draw` starts by rendering the PIXI stage —
+    // MSA's art is not in it — into a texture cleared OPAQUE to the level's
+    // background colour (default #999999), and shows that full-screen at z-index
+    // +Infinity until the redraw ends (client/canvas/board.mjs:1099-1101,
+    // transition.mjs:8-14,116-139,291-309). With the art suppressed that snapshot
+    // is "grey plus the grid", and it sat ABOVE MSA's canvas for the whole redraw:
+    // the grey screen on every level change. `TransitionContainer` only ever
+    // writes `visible`, never `renderable` (transition.mjs:11,125,137,299,308,360,
+    // 391,471), so this one assignment persists; PIXI's own render() early-returns
+    // on `!renderable` before walking children. With it off, MSA's last frame
+    // stays on screen through the redraw instead of being covered by a grey fill.
+    // Reversed by `restoreFoundryArt`, so a Foundry-rendered scene keeps its
+    // transitions.
+    if (canvas.transition) canvas.transition.renderable = false;
   } catch (err) {
     console.error('[MSA] interface seam: suppressing Foundry primary/effects failed:', err);
     return {
@@ -770,6 +857,9 @@ export function restoreFoundryArt() {
       restoreFoundryFogBase();
       restored = true;
     }
+    // The fourth lever, reversed: Foundry's scene transitions work again.
+    const transition = typeof canvas !== 'undefined' ? (canvas?.transition ?? null) : null;
+    if (transition) transition.renderable = true;
     return restored;
   } catch (err) {
     console.error('[MSA] interface seam: restoring canvas.primary/canvas.effects failed:', err);
@@ -916,6 +1006,11 @@ export function getCanvasCompositingReport() {
     effectsRenderable: facts.effectsRenderable,
     primaryRenderable: facts.primaryRenderable,
     foundryArtRenderable: facts.foundryArtRenderable,
+    // FOURTH LEVER: false is healthy while MSA owns the art — Foundry's opaque
+    // redraw snapshot cannot paint over MSA's canvas. true with the other levers
+    // suppressed means level changes will flash Foundry's grey fill again.
+    transitionRenderable: facts.transitionRenderable,
+    msaMayOwnArt: facts.msaMayOwnArt,
     readErrors: facts.readErrors,
     decision,
     msaOwnedGroups: [...MSA_OWNED_GROUPS],

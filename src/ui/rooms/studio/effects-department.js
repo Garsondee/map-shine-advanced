@@ -170,6 +170,55 @@ function buildCopySettingsButton(model) {
 }
 
 /**
+ * Replay every schema key's own declared default through `model.onChange` —
+ * the exact path a GM dragging each slider back by hand would take.
+ * `onChange` already owns the liveOverride write, the scene-flag write, and
+ * the reapply (see e.g. `water-registration.js#setWater`), so resetting
+ * needs no persistence of its own, just enough calls to put every param back
+ * where its own schema says it starts. `action` params (buttons, not values)
+ * and any decl missing its own required `default` (should not happen —
+ * `validateParamsSchema` already refuses that at build time) are skipped.
+ * @param {EffectCardModel} model
+ */
+function resetModelToDefaults(model) {
+  if (!model?.schema || typeof model.onChange !== 'function') return;
+  for (const [key, decl] of Object.entries(model.schema)) {
+    if (!decl || decl.type === 'action' || !('default' in decl)) continue;
+    model.onChange(key, decl.default);
+  }
+  model.onRequestRerender?.();
+}
+
+/**
+ * Does this model have at least one real (non-action) param to reset? Same
+ * guard `buildCopySettingsButton`'s own call site uses — a card with nothing
+ * to copy has nothing to reset either.
+ * @param {EffectCardModel} model
+ */
+function hasResettableParams(model) {
+  return Object.values(model?.schema ?? {}).some((d) => d && d.type !== 'action' && 'default' in d);
+}
+
+/**
+ * The per-card "reset to defaults" button — two-click armed, same posture as
+ * a preset delete (`buildArmButton`, see the trash button in `buildPresetRow`):
+ * putting back every control a GM may have spent real time hand-tuning is
+ * exactly the kind of thing a stray click must not do.
+ * @param {object} model @returns {HTMLElement}
+ */
+function buildResetDefaultsButton(model) {
+  const name = model.title ?? model.id;
+  return buildArmButton({
+    icon: 'reset',
+    armedLabel: 'Reset?',
+    title: `Reset ${name} to its default values`,
+    armedTitle: `Click again to reset ${name} to its defaults`,
+    className: 'hbtn',
+    onConfirm: () => resetModelToDefaults(model),
+  });
+}
+
+/**
  * The PRESET row: pick one to apply it, save the current look under a name,
  * and manage (delete) your own.
  *
@@ -460,6 +509,14 @@ function buildStudioEffectCard(model) {
   if (model.schema && Object.keys(model.schema).length > 0) {
     headMeta.append(buildCopySettingsButton(model));
   }
+  // The per-card "reset to defaults" button (2026-10-24, on the author's own
+  // ask: a well-placed, obvious way to put one effect's tuning back to
+  // normal). Same guard as copy-settings just above, narrowed to real
+  // (non-action) params — a card made entirely of buttons has nothing a
+  // default value could mean.
+  if (hasResettableParams(model)) {
+    headMeta.append(buildResetDefaultsButton(model));
+  }
   head.append(headMeta);
   card.append(head);
 
@@ -721,6 +778,36 @@ export function renderEffectsDepartment(container, ctx) {
   }
   const models = [...ctx.effectCardFactories.entries()].map(([id, factory]) => ({ id, model: factory() }));
 
+  // THE RESET-ALL ROW (2026-10-24, on the author's own ask: "a large obvious
+  // and well placed button in MSA Studio to reset all the maps effects to
+  // their default values"). Its own full-width row, ABOVE the filter/search
+  // strip, so it reads as acting on the whole department rather than as one
+  // more chip among the category filters. Two-click armed like every other
+  // destructive control in this room (`buildArmButton`) — this one can touch
+  // every registered effect's tuning in a single press.
+  const resetAllRow = el('div', 'msa-resetall');
+  const resettable = models.filter(({ model }) => hasResettableParams(model));
+  const resetAllBtn = buildArmButton({
+    icon: 'reset',
+    label: 'Reset ALL effects to defaults',
+    armedLabel: () => `Click again to reset all ${resettable.length} effects`,
+    title: "Put every registered effect's tuning on this scene back to its shipped defaults.",
+    armedTitle: 'This resets EVERY effect card below — click again within a few seconds to confirm.',
+    className: 'msa-btn',
+    onConfirm: () => {
+      for (const { model } of resettable) resetModelToDefaults(model);
+      renderEffectsDepartment(container, ctx);
+    },
+  });
+  resetAllBtn.disabled = resettable.length === 0;
+  resetAllRow.append(resetAllBtn);
+  const resetAllNote = el(
+    'span',
+    'msa-resetall-note',
+    resettable.length > 0 ? `Affects all ${resettable.length} registered effects on this scene.` : ''
+  );
+  resetAllRow.append(resetAllNote);
+
   const strip = el('div', 'msa-strip');
   // Fixed at exactly two columns (mythica-machina-press#548) — the previous
   // auto-fill(minmax(320px,...)) happily packed in a 3rd column on any wide
@@ -834,7 +921,7 @@ export function renderEffectsDepartment(container, ctx) {
   applySearchFilter(searchQuery);
 
   container.innerHTML = '';
-  container.append(strip, grid);
+  container.append(resetAllRow, strip, grid);
   return `${models.length} registered — every card generated from its schema`;
 }
 

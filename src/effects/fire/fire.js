@@ -536,6 +536,33 @@ export const FIRE_PARAMS = Object.freeze({
     label: 'Light colour',
     help: "The colour this fire throws into the room, separate from the flame's own tint.",
   },
+  // 2026-10-24: fire's `ratio`/`attenuation01` (buildFireLightSources) were
+  // fixed constants (0.35/0.6) — every other light that shares this exact
+  // Foundry-parity falloff pair (lightning's originFlashInnerRadiusScale/
+  // originFlashAttenuation, candle's own fixed CANDLE_LIGHT_RATIO) either had
+  // no dial or has one already; fire had neither, on the author's own ask for
+  // "the ability to fine tune how the falloff happens... a brighter core and
+  // a softer large radius fade out". Same ranges/shape as lightning's pair.
+  lightCoreSize: {
+    type: 'float',
+    min: 0.05,
+    max: 0.9,
+    step: 0.01,
+    default: 0.35, // the old fixed `ratio`
+    category: 'Light',
+    label: 'Light core size',
+    help: "Radius of the fire light's brighter inner core, as a fraction of its outer reach. Higher keeps the glow at full strength further out before it starts to fade.",
+  },
+  lightFalloffSoftness: {
+    type: 'float',
+    min: 0.05,
+    max: 1,
+    step: 0.01,
+    default: 0.6, // the old fixed `attenuation01`
+    category: 'Light',
+    label: 'Light edge softness',
+    help: 'How gradually the light fades out past its core. Lower is a harder-edged pool of light; higher spreads a softer, more gradual fade across the rest of the radius.',
+  },
 
   // ── Motion ────────────────────────────────────────────────────────────────
   windResponse: {

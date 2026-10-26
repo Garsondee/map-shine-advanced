@@ -151,6 +151,16 @@ import {
  *
  * @param {object} [spec]
  * @param {number} [spec.version] - bumped by the owner on every rebake.
+ * @param {number} [spec.layoutVersion] - bumped by the owner ONLY when what a
+ *   compiled shader graph bakes in changes: the grid spec (origin, cell size,
+ *   cols, rows — `node()` closes over them as constants) or the identity of
+ *   one of the three field textures (a new texture object is a new binding).
+ *   A consumer that BUILDS GRAPHS from `node()` compares this, never
+ *   `version`: an ambient-wind change rewrites the textures in place and
+ *   moves the uniforms, so a new `version` with the same `layoutVersion`
+ *   compiles to the identical shader (Water-Performance-Audit W-01).
+ *   Defaults to `version`, so an owner that never passes it keeps the old
+ *   "every rebake rebuilds" behaviour rather than silently never rebuilding.
  * @param {{directionDeg: *, speed01: *, gustiness01?: *}} [spec.ambientWind] -
  *   live TSL uniform NODES (not numbers) for the prevailing breeze. Passed by
  *   reference, so a direction/speed/gustiness change is picked up with no
@@ -176,6 +186,7 @@ import {
  */
 export function createWindHandle({
   version = 0,
+  layoutVersion = version,
   ambientWind = null,
   grid = null,
   opennessTexture = null,
@@ -454,6 +465,8 @@ export function createWindHandle({
 
   return Object.freeze({
     version,
+    /** See `spec.layoutVersion` — the rebuild key for graph-building consumers. */
+    layoutVersion,
     /** True once a real bake has happened — before that every shape answers "open outdoors". */
     hasBake: !!bakedFieldRef,
     /**

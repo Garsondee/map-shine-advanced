@@ -61,6 +61,11 @@ import { QUAD_UVS, QUAD_INDICES, buildQuadPositions } from '../../scene/index.js
 
 const log = createLogger('SpecularTileSurface');
 
+/** How many entries for items NOT on the drawn floor stay loaded (hidden) before
+ * the oldest are disposed. A floor change then costs a visibility flip instead
+ * of a cold fetch + decode + bake — loading audit P-05. */
+const MAX_PARKED_ENTRIES = 24;
+
 /** Have any of the four corners actually moved? Mirrors
  * `fluid-surface-subsystem.js`'s own helper of the same name and contract. */
 function cornersMoved(a, b) {
@@ -129,13 +134,17 @@ export function createSpecularTileSurfaceSubsystem({
 
   let enabled = true;
   let syncs = 0;
+  /** Floor PREPARE draws every entry once, off screen, so its shader pipeline is
+   * compiled before the floor is shown (loading audit P-05). While true, a parked
+   * entry's mesh is visible so the renderer does not skip it. */
+  let warmUpAll = false;
   const failedUrls = new Set();
   /** One entry per masked TILE, keyed by item id. */
   const entries = new Map();
 
   function refreshVisibility() {
     for (const e of entries.values()) {
-      if (e.mesh) e.mesh.visible = enabled && !!e.loadedUrl;
+      if (e.mesh) e.mesh.visible = enabled && (e.presented === true || warmUpAll) && !!e.loadedUrl;
       if (e.mesh) e.mesh.material = e.debugChannel > 0 ? e.built?.debugMaterial : e.built?.specularMaterial;
     }
   }
@@ -245,6 +254,7 @@ export function createSpecularTileSurfaceSubsystem({
   }
 
   function disposeMesh(entry) {
+    entry.warmed = false; // a new mesh/material is a new pipeline to warm
     if (entry.mesh) scene.remove(entry.mesh);
     entry.built?.specularMaterial?.dispose?.();
     entry.built?.debugMaterial?.dispose?.();
@@ -267,6 +277,7 @@ export function createSpecularTileSurfaceSubsystem({
    * change — mirrors the floor subsystem's own tier-rebuild re-push
    * discipline: a fresh material starts at its own constructor defaults. */
   function rebuildEntryMaterials(entry, tier) {
+    entry.warmed = false;
     const prev = entry.built;
     entry.tileMotionBag = getItemTileMotion(entry.item) ?? null;
     entry.built = buildSurfaceForEntry(entry, tier);
@@ -281,6 +292,121 @@ export function createSpecularTileSurfaceSubsystem({
 
   let lastParamsKey = '';
   let lastSkyKey = '';
+
+  /**
+   * Make sure an entry exists for this item and that its mask is loading (or
+   * loaded) for the url the item declares RIGHT NOW. Shared by `sync` (which then
+   * PRESENTS the entry) and `prefetchItems` (which does not) — the load is the
+   * same work either way; presenting is only a visibility flag.
+   * @param {object} item
+   * @returns {object} the entry
+   */
+  function trackItem(item) {
+    let entry = entries.get(item.id);
+    if (!entry) {
+      entry = {
+        id: item.id,
+        item,
+        // ⚠️ `null`, NOT `item.url` — see window-tile-surface-subsystem.js's
+        // own identical comment: the very next branch is `entry.url !==
+        // item.url`, and this sentinel is what makes it fire for a
+        // brand-new entry, mirroring `fluid-surface-subsystem.js`'s own
+        // entry literal.
+        url: null,
+        corners: item.corners,
+        renderOrder: item.renderOrder,
+        loading: false,
+        loadedUrl: null,
+        maskTexture: null,
+        islandPackTexture: null,
+        islandBakeStatus: 0,
+        islandSpread: SPECULAR_DEFAULT_ISLAND_SPREAD,
+        pendingBytes: null,
+        tileMotionBag: null,
+        builtForTier: null,
+        geometry: null,
+        mesh: null,
+        built: null,
+        debugChannel: 0,
+        presented: false,
+        lastSeenSync: syncs,
+      };
+      entries.set(item.id, entry);
+    }
+    entry.item = item; // refreshed every sync — getItemTileMotion needs the LIVE item
+
+    if (entry.url !== item.url) {
+      entry.url = item.url;
+      entry.corners = item.corners;
+      entry.loadedUrl = null;
+      disposeEntry(entry);
+      loadAndBuild(item);
+    } else if (entry.mesh && cornersMoved(entry.corners, item.corners)) {
+      entry.corners = item.corners;
+      const pos = entry.geometry.getAttribute('position');
+      const buf = buildQuadPositions(item.corners);
+      for (let i = 0; i < buf.length; i++) pos.array[i] = buf[i];
+      pos.needsUpdate = true;
+      entry.geometry.computeBoundingSphere();
+    }
+    return entry;
+  }
+
+  /**
+   * HIDE, NEVER DISPOSE (loading audit P-05, 2026-10-25). Entries for items that
+   * are not on the floor being drawn used to be disposed on the spot, so going up
+   * threw away the lower floor's tiles and building the upper floor's started from
+   * a cold fetch + decode + bake on the visible frames AFTER the flip — and going
+   * back down did the same again. The residency loop already follows "hide, never
+   * dispose" for art; this brings the tile effects in line. Parked entries stay
+   * loaded but invisible, and the OLDEST are disposed beyond a small cap so a
+   * scene with many masked tiles cannot grow without bound.
+   * @param {Set<string>} seen - ids presented this sync
+   */
+  function parkUnseen(seen) {
+    let parked = 0;
+    for (const [id, entry] of entries) {
+      if (seen.has(id)) continue;
+      entry.presented = false;
+      if (entry.mesh) entry.mesh.visible = warmUpAll && enabled && !!entry.loadedUrl;
+      parked++;
+    }
+    if (parked <= MAX_PARKED_ENTRIES) return;
+    const oldestFirst = [...entries.values()]
+      .filter((e) => !e.presented)
+      .sort((a, b) => a.lastSeenSync - b.lastSeenSync);
+    for (const entry of oldestFirst.slice(0, parked - MAX_PARKED_ENTRIES)) {
+      if (entry.loading) continue; // let an in-flight load land; it is evicted on a later sync
+      disposeEntry(entry);
+      entries.delete(entry.id);
+    }
+  }
+
+  /**
+   * FLOOR PREPARE: start loading these items' masks without presenting them.
+   * Idempotent; the same items again just re-check each entry's url.
+   * @param {Array<object>} items
+   */
+  function prefetchItems(items) {
+    for (const item of items ?? []) trackItem(item);
+  }
+
+  /**
+   * Is there nothing left to wait for on these items? Loaded, or settled as
+   * failed (a failure is not pending — waiting on it would hang a floor change).
+   * @param {Array<object>} items
+   * @returns {boolean}
+   */
+  function areItemsReady(items) {
+    for (const item of items ?? []) {
+      const entry = entries.get(item.id);
+      if (!entry) return false;
+      if (entry.loadedUrl === item.url) continue;
+      if (failedUrls.has(item.url) && !entry.loading) continue;
+      return false;
+    }
+    return true;
+  }
 
   /**
    * @param {number} floorIndex - the VIEWED floor.
@@ -312,51 +438,11 @@ export function createSpecularTileSurfaceSubsystem({
     const seen = new Set();
     for (const item of items) {
       seen.add(item.id);
-      let entry = entries.get(item.id);
-      if (!entry) {
-        entry = {
-          id: item.id,
-          item,
-          // ⚠️ `null`, NOT `item.url` — see window-tile-surface-subsystem.js's
-          // own identical comment: the very next branch is `entry.url !==
-          // item.url`, and this sentinel is what makes it fire for a
-          // brand-new entry, mirroring `fluid-surface-subsystem.js`'s own
-          // entry literal.
-          url: null,
-          corners: item.corners,
-          renderOrder: item.renderOrder,
-          loading: false,
-          loadedUrl: null,
-          maskTexture: null,
-          islandPackTexture: null,
-          islandBakeStatus: 0,
-          islandSpread: SPECULAR_DEFAULT_ISLAND_SPREAD,
-          pendingBytes: null,
-          tileMotionBag: null,
-          builtForTier: null,
-          geometry: null,
-          mesh: null,
-          built: null,
-          debugChannel: 0,
-        };
-        entries.set(item.id, entry);
-      }
-      entry.item = item; // refreshed every sync — getItemTileMotion needs the LIVE item
-
-      if (entry.url !== item.url) {
-        entry.url = item.url;
-        entry.corners = item.corners;
-        entry.loadedUrl = null;
-        disposeEntry(entry);
-        loadAndBuild(item);
-      } else if (entry.mesh && cornersMoved(entry.corners, item.corners)) {
-        entry.corners = item.corners;
-        const pos = entry.geometry.getAttribute('position');
-        const buf = buildQuadPositions(item.corners);
-        for (let i = 0; i < buf.length; i++) pos.array[i] = buf[i];
-        pos.needsUpdate = true;
-        entry.geometry.computeBoundingSphere();
-      }
+      const entry = trackItem(item);
+      // PRESENTED = on the floor being drawn right now. Everything else stays
+      // resident but hidden ("parked") — see `parkUnseen` (loading audit P-05).
+      entry.presented = true;
+      entry.lastSeenSync = syncs;
 
       if (typeof item.renderOrder === 'number') entry.renderOrder = item.renderOrder;
 
@@ -376,11 +462,7 @@ export function createSpecularTileSurfaceSubsystem({
         entry.built.setViewCentre((viewRect.minX + viewRect.maxX) / 2, (viewRect.minY + viewRect.maxY) / 2);
       }
     }
-    for (const [id, entry] of entries) {
-      if (seen.has(id)) continue;
-      disposeEntry(entry);
-      entries.delete(id);
-    }
+    parkUnseen(seen);
 
     // THE SUN'S AZIMUTH — shared across every entry, cached on a key exactly
     // like the floor subsystem's own `sync()`.
@@ -491,11 +573,32 @@ export function createSpecularTileSurfaceSubsystem({
       for (const e of entries.values()) if (e.loading) return true;
       return false;
     },
+    /** FLOOR PREPARE (loading audit P-05): start loading these items' masks
+     * without presenting them. @param {Array<object>} items */
+    prefetchItems,
+    /** True when nothing is left to wait for on these items. @param {Array<object>} items */
+    areItemsReady,
+    /**
+     * FLOOR PREPARE's warm-up draw (loading audit P-05): show every loaded entry —
+     * parked ones included — so the off-screen frame compiles their pipelines,
+     * then hide them again with `false`. @param {boolean} on
+     */
+    setWarmUpVisible(on) {
+      warmUpAll = on === true;
+      // Everything that was visible for the warm-up draw has now compiled.
+      if (!on) for (const e of entries.values()) if (e.mesh || e.absorbMesh) e.warmed = true;
+      refreshVisibility();
+    },
+    /** True while some parked entry has not been through a warm-up draw yet. */
+    hasUnwarmed: () => [...entries.values()].some((e) => (e.mesh || e.absorbMesh) && !e.presented && !e.warmed),
     getStatus() {
       return {
         enabled,
         syncs,
-        maskedTileCount: entries.size,
+        // Tiles on the floor being drawn. Parked (loaded but hidden, on another
+        // floor) tiles are counted separately.
+        maskedTileCount: [...entries.values()].filter((e) => e.presented).length,
+        parkedTileCount: [...entries.values()].filter((e) => !e.presented).length,
         items: [...entries.values()].map((e) => ({
           id: e.id,
           url: e.loadedUrl,

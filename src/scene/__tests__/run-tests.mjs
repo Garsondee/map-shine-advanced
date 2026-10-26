@@ -21,6 +21,7 @@ import { run as runAnchorAuthority } from './anchor-authority.test.mjs';
 import { run as runDepthAuthority } from './depth-authority.test.mjs';
 import { run as runWeatherRestrict } from './weather-restrict.test.mjs';
 import { run as runGridEdt } from './grid-edt.test.mjs';
+import { run as runGridRgba } from './grid-rgba.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -70,6 +71,7 @@ const suites = [
   ['depth-authority', runDepthAuthority],
   ['weather-restrict', runWeatherRestrict],
   ['grid-edt', runGridEdt],
+  ['grid-rgba', runGridRgba],
 ];
 
 for (const [name, fn] of suites) {

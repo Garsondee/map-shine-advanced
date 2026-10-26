@@ -23,6 +23,7 @@ import {
   requestCoarseAlphaGrid,
   getCompressedTextureStats,
   disposeCompressedTextureWorker,
+  dropQueuedJobs,
   MAX_CONSECUTIVE_WORKER_FAILURES,
   WORKER_RECONSTRUCT_COOLDOWN_MS,
 } from '../compressed-textures.js';
@@ -138,6 +139,55 @@ export async function run(t) {
       'every queued caller was RESOLVED by dispose, never left hanging',
       disposed.every((x) => x === null)
     );
+
+    // --- L-10: a scene change drops the OLD scene's queued jobs and nothing else --
+    // The old viewer's work: one job already in the worker, two still waiting. A
+    // pre-warm (no owner) and the NEW viewer's job sit in the same queue.
+    const oldViewer = Symbol('old viewer');
+    const newViewer = Symbol('new viewer');
+    const oldInFlight = requestCompressedTexture('old-in-flight', { owner: oldViewer });
+    const oldQueuedBc = requestCompressedTexture('old-queued-bc', { owner: oldViewer });
+    const oldQueuedAlpha = requestCoarseAlphaGrid('old-queued-alpha', { owner: oldViewer });
+    const prewarm = requestCoarseAlphaGrid('prewarm-no-owner');
+    const newJob = requestCompressedTexture('new-job', { owner: newViewer });
+    const wo = FakeWorker.latest;
+    ok('the first job of the old viewer is the one in the worker', wo.current.src === 'old-in-flight');
+    const before = getCompressedTextureStats();
+
+    ok('a null owner drops nothing — it must never match owner-less work', dropQueuedJobs(null) === 0);
+    ok('...nor an undefined one', dropQueuedJobs(undefined) === 0);
+    ok('...nor an owner nothing was asked by', dropQueuedJobs(Symbol('nobody')) === 0);
+    ok('nothing was lost to those no-op calls', getCompressedTextureStats().pending === before.pending);
+
+    const droppedCount = dropQueuedJobs(oldViewer);
+    ok('exactly the TWO queued jobs of the old viewer were dropped', droppedCount === 2);
+    ok('...and counted, for the flight recorder', getCompressedTextureStats().droppedQueued === 2);
+    const dropResults = await Promise.all([oldQueuedBc, oldQueuedAlpha]);
+    ok(
+      'each dropped caller was RESOLVED null, not left hanging',
+      dropResults.every((x) => x === null)
+    );
+    ok(
+      'the in-flight job is NOT recalled (it cannot be, and its answer warms the cache)',
+      getCompressedTextureStats().inFlight === 1 && wo.posted.length === 1
+    );
+    ok('what is left is the job in flight plus the two it must not touch', getCompressedTextureStats().pending === 3);
+
+    wo.replyBc(wo.current.id);
+    ok('the in-flight job still resolves with its real answer', (await oldInFlight)?.format === 'bc1');
+    ok(
+      'the interactive job of the NEW viewer is served next, ahead of the owner-less background one',
+      wo.current.src === 'new-job'
+    );
+    wo.replyBc(wo.current.id);
+    ok('...and then the pre-warm', wo.current.src === 'prewarm-no-owner');
+    wo.replyAlpha(wo.current.id);
+    ok(
+      'both survivors resolved with real results',
+      (await newJob)?.format === 'bc1' && (await prewarm)?.grid instanceof Uint8Array
+    );
+    ok('the queue drained', getCompressedTextureStats().pending === 0);
+    disposeCompressedTextureWorker(); // hand the next section a fresh worker
 
     // --- a worker error no longer permanently condemns every OTHER asset ----
     // (mythica-machina-press#483: one bad asset used to latch `_unavailable`

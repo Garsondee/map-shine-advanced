@@ -264,12 +264,60 @@ export async function run(t) {
 
   items = []; // the tile left the floor (moved away, deleted, or the mask removed)
   flip.sync(0, { minX: 0, minY: 0, maxX: 1000, maxY: 1000 });
+  // HIDE, NEVER DISPOSE (loading audit P-05, 2026-10-25). It used to be torn down
+  // on the spot, so a floor change threw away one floor's tiles and rebuilt the
+  // other's from a cold fetch on the visible frames after the flip.
+  const parkedMeshes = flip.scene.children.filter((c) => c.isMesh);
   ok(
-    'a tile that leaves the mask list is torn down, not left stale in the scene',
-    flip.scene.children.filter((c) => c.isMesh).length === 0
+    'a tile that leaves the mask list is PARKED — still loaded, no longer drawn',
+    parkedMeshes.length === 1 && parkedMeshes[0].visible === false
   );
-  ok('hasContent() agrees', flip.hasContent() === false);
-  ok('getStatus reports zero attached tiles', flip.getStatus().maskedTileCount === 0);
+  ok('hasContent() agrees — nothing is drawn', flip.hasContent() === false);
+  ok('getStatus reports zero attached tiles on the drawn floor', flip.getStatus().maskedTileCount === 0);
+  ok('…and one parked', flip.getStatus().parkedTileCount === 1);
+
+  items = [staticItem]; // it comes back (going back to the floor)
+  flip.sync(0, { minX: 0, minY: 0, maxX: 1000, maxY: 1000 });
+  ok(
+    'a parked tile that returns is drawn again at once, from the SAME mesh (no reload)',
+    flip.hasContent() === true && flip.scene.children.filter((c) => c.isMesh)[0] === parkedMeshes[0]
+  );
+
+  // PREFETCH: a floor that is not the drawn one can be warmed.
+  const warm = createSpecularTileSurfaceSubsystem(
+    baseArgs({ getSpecularMaskItems: () => [], getItemTileMotion: () => null })
+  );
+  warm.prefetchItems([staticItem]);
+  ok('prefetch: not ready while the mask is still loading', warm.areItemsReady([staticItem]) === false);
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  ok('prefetch: ready once loaded', warm.areItemsReady([staticItem]) === true);
+  ok(
+    'prefetch: loading did NOT present anything',
+    warm.hasContent() === false && warm.getStatus().maskedTileCount === 0
+  );
+  warm.dispose();
+
+  // THE CAP: a scene with very many masked tiles cannot grow without bound.
+  {
+    const many = Array.from({ length: 30 }, (_, i) => ({
+      ...staticItem,
+      id: `cap-${i}`,
+      url: `stub://cap${i}_Specular.webp`,
+    }));
+    let capItems = many;
+    const capped = createSpecularTileSurfaceSubsystem(
+      baseArgs({ getSpecularMaskItems: () => capItems, getItemTileMotion: () => null })
+    );
+    capped.sync(0, { minX: 0, minY: 0, maxX: 1000, maxY: 1000 });
+    for (let i = 0; i < 6; i++) await Promise.resolve();
+    capItems = [];
+    capped.sync(0, { minX: 0, minY: 0, maxX: 1000, maxY: 1000 });
+    const left = capped.scene.children.filter((c) => c.isMesh).length;
+    ok('the parked cap: 30 tiles left the floor, only the newest 24 stay resident', left === 24);
+    capped.dispose();
+  }
 
   staticSub.dispose();
   movingSub.dispose();

@@ -676,6 +676,36 @@ export function run(t) {
         c2.stats.composites.hit - stats2.composites.hit === 2 &&
         c2.stats.outdoors.hit - stats2.outdoors.hit === 2
     );
+
+    // ⚠️ LOAD-BEARING FOR WATER (2026-10-25, Water-Performance-Audit W-13):
+    // `water-body-subsystem.js#maybeBake` skips its ~90 ms flood when the
+    // water grid OBJECT is the one it last baked. That is only sound while an
+    // unchanged kind hands back the SAME object and a changed one a NEW one —
+    // never a grid mutated in place.
+    const c3 = createDeriveCache();
+    const firstProducts = deriveFloorProducts({ ...withFire, cache: c3 });
+    const againProducts = deriveFloorProducts({ ...withFire, cache: c3 });
+    t.ok(
+      'claims: an unchanged authored kind returns the SAME grid object (identity is a content key)',
+      firstProducts[1].authored.fire === againProducts[1].authored.fire
+    );
+    const firstData = Array.from(firstProducts[1].authored.fire.data);
+    const repainted = {
+      ...withFire,
+      floors: [
+        withFire.floors[0],
+        {
+          ...withFire.floors[1],
+          authored: { fire: { sources: [{ content: solid(6, 90), placement: full, ownerId: 'f2' }], absentValue: 0 } },
+        },
+      ],
+    };
+    const changedProducts = deriveFloorProducts({ ...repainted, cache: c3 });
+    t.ok(
+      'claims: a repainted authored kind returns a NEW grid object, and the old one is untouched',
+      changedProducts[1].authored.fire !== firstProducts[1].authored.fire &&
+        Array.from(firstProducts[1].authored.fire.data).every((v, i) => v === firstData[i])
+    );
   }
 
   // ── 5. worldIndexMap IS sampleMaskGridWorld, hoisted ─────────────────────────────────────────────────────────────

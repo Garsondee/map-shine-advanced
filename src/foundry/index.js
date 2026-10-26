@@ -592,6 +592,10 @@ export {
 } from './player-light-mode.js';
 export { broadcastImpulse, listenForImpulses } from './impulse-broadcast.js';
 
+// THE PUBLIC API — what other modules may call (floors.prewarm, remote.registerSection) and the floor hooks it
+// announces. See public-api.js's own header for the promise.
+export { installPublicApi, announceFloor, PUBLIC_API_VERSION } from './public-api.js';
+
 // PLAYER AIM (mythica-machina-press#77) — the live half of "a carried flashlight
 // points where its bearer's cursor points": reads Foundry's own cursor, relays
 // the bearer's aim angle over the module socket and stamps every aimable

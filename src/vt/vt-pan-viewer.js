@@ -23307,6 +23307,10 @@ async function startVtPanViewerUnserialized({
      */
     let floorPrepareGeneration = 0;
 
+    /** Floors a prepare has finished for since this viewer started. Prepare keeps what it builds (hide, never
+     * dispose), so a floor stays prepared and this only grows. Public API: `floors.isPrepared`. */
+    const preparedFloors = new Set();
+
     /** Invalidate any prepare currently in flight. Safe to call with nothing running. */
     function cancelFloorPrepare() {
       floorPrepareGeneration++;
@@ -23640,6 +23644,7 @@ async function startVtPanViewerUnserialized({
       // Lower residual risk than it sounds: the depth-writer shader is much
       // simpler than the whole-image colour shader PHASE 4 already covers,
       // so a cold compile there is comparatively cheap.
+      preparedFloors.add(floorIndex);
       return { ok: true };
     }
 
@@ -27973,6 +27978,7 @@ async function startVtPanViewerUnserialized({
       prepareFloor,
       cancelFloorPrepare,
       prewarmAdjacentFloors, // exposed so a real floor-switch commit can re-scope the ±1 window to wherever the viewer just landed
+      isFloorPrepared: (floorIndex) => preparedFloors.has(floorIndex),
       requestInternalRescale, // exposed so releasing the cold-load render-scale clamp can rebuild the real targets at once (mythica-machina-press#589)
       getPanCompileReport: () => panCompileProbe.read(),
       notePanCompileRevealed: () => panCompileProbe.noteRevealed(),
@@ -28399,6 +28405,14 @@ export async function prewarmVtPanViewerAdjacentFloors(floorIndex) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   const done = _active.prewarmAdjacentFloors(floorIndex);
   return { started: true, done };
+}
+
+/**
+ * Has a prepare finished for this floor since the viewer started? (`false` with no viewer running.)
+ * @param {number} floorIndex
+ */
+export function isVtPanViewerFloorPrepared(floorIndex) {
+  return _active?.isFloorPrepared?.(floorIndex) === true;
 }
 
 /**

@@ -249,6 +249,12 @@ ${R} .msa-menu-item{width:100%; height:26px; display:flex; align-items:center; t
 ${R} .msa-menu-item[aria-pressed="true"]{color:var(--shine)}
 ${R} .msa-astro-status{min-height:14px; font-size:.68rem; color:var(--ink2); text-align:center}
 ${R} .msa-remote-sep{height:1px; background:var(--line); margin:2px 0}
+/* Sections other modules register (extension-sections.js): a host that adds no gap of its own, and the
+   two small pieces of the kit the weather board has no equivalent for. */
+${R} .msa-ext-host{display:flex; flex-direction:column; gap:12px}
+${R} .msa-ext-content{display:flex; flex-direction:column; gap:6px}
+${R} .msa-ext-row{display:flex; flex-wrap:wrap; align-items:center; gap:5px}
+${R} .msa-ext-note{font-size:.66rem; color:var(--ink2)}
 
 /* ---- the weather board -------------------------------------------------------------- */
 ${R} .msa-wx-host{display:flex; flex-direction:column; gap:12px}

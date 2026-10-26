@@ -37,6 +37,11 @@
         "compatibility": {
           "verified": "4.0.1"
         }
+      },
+      {
+        "id": "footfall",
+        "type": "module",
+        "reason": "Footfall adds click-to-walk pathfinding across floors, marching formations and GM pathing marks. Beside Map Shine Advanced it prepares the next floor ahead of the walk and adds a Pathing section to the Remote."
       }
     ]
   },

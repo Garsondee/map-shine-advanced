@@ -22,10 +22,12 @@ export {
   onPerfProgressText,
 } from './perf-progress-overlay.js';
 export { installCompressionStatusBadge } from './compression-status.js';
+export { registerRemoteSection, removeRemoteSection, buildRemoteKit } from './rooms/remote/extension-sections.js';
 export {
   beginFloorTransition,
   updateFloorTransitionProgress,
   endFloorTransition,
+  isFloorTransitionActive,
   formatFloorTransitionHeadline,
   formatFloorTransitionBlockers,
 } from './floor-transition.js';

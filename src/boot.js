@@ -294,6 +294,7 @@ import {
   // on this floor, not switch to another" to express.
   cancelVtPanViewerFloorPrepare,
   prewarmVtPanViewerAdjacentFloors,
+  isVtPanViewerFloorPrepared,
   afterNextVtPanViewerFrame,
   setVtPanViewerGpuProbe,
   setVtPanViewerGpuZoneTimer,
@@ -587,6 +588,8 @@ import {
   currentUserIsGM,
   findScene,
   currentSceneId,
+  installPublicApi,
+  announceFloor,
   sceneNameForUser,
   sendPrepareRequest,
   sendPrepareReady,
@@ -716,6 +719,9 @@ import {
   endFloorTransition,
   installStudio,
   installRemote,
+  registerRemoteSection,
+  removeRemoteSection,
+  isFloorTransitionActive,
   installPlayer,
   LOAD_PHASES,
   blockerSignature,
@@ -3705,6 +3711,79 @@ function install() {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // THE PUBLIC API'S FLOORS (foundry/public-api.js): what a companion module — Footfall, walking a party up a
+  // tower — may ask of the floor machinery without reaching into it.
+  // ---------------------------------------------------------------------------
+  /** `${sceneId}:${floorIndex}` of every floor already announced as prepared, so a gated switch (which
+   * prepares twice: before the redraw and again at the commit) says it once. */
+  const announcedPrepared = new Set();
+
+  /** The floor of the viewed scene at this index, with the scene's id — or null. */
+  function viewedSceneFloor(floorIndex) {
+    const sceneId = currentSceneId();
+    const scene = sceneId ? findScene(sceneId) : null;
+    const floorsResult = scene ? getActiveSceneFloors(scene) : null;
+    const floor = floorsResult?.ok ? floorsResult.floors.find((f) => f.index === floorIndex) : null;
+    return floor ? { sceneId, levelId: floor.id, floorIndex } : null;
+  }
+
+  /** Tell other modules this floor is prepared (once per scene and floor). */
+  function announceFloorPrepared(floorIndex) {
+    const detail = viewedSceneFloor(floorIndex);
+    if (!detail) return;
+    const key = `${detail.sceneId}:${floorIndex}`;
+    if (announcedPrepared.has(key)) return;
+    announcedPrepared.add(key);
+    announceFloor('prepared', detail);
+  }
+
+  /** `api.floors.isPrepared`: the floor on screen counts, as does any a prepare finished for. */
+  function isFloorPreparedForApi(levelId) {
+    const sceneId = currentSceneId();
+    const scene = sceneId ? findScene(sceneId) : null;
+    const floorsResult = scene ? getActiveSceneFloors(scene) : null;
+    const floor = floorsResult?.ok ? floorsResult.floors.find((f) => f.id === levelId) : null;
+    if (!floor) return false;
+    return floor.index === activeFloorContext?.floorIndex || isVtPanViewerFloorPrepared(floor.index);
+  }
+
+  /**
+   * `api.floors.prewarm`: prepare floors of the viewed scene in the background, one at a time, without switching.
+   * A real floor switch always wins: `prepareFloor` shares one staleness counter with every real prepare, so
+   * starting one while a switch is under way would cancel the switch — this stops (`busy`) instead.
+   * @param {string[]} levelIds
+   */
+  async function prewarmFloorsForApi(levelIds) {
+    const result = { ok: true, prepared: [], skipped: [] };
+    const sceneId = currentSceneId();
+    const scene = sceneId ? findScene(sceneId) : null;
+    if (!scene || !getVtPanViewerDiagnostics().active) {
+      return { ...result, ok: false, reason: 'no viewer running' };
+    }
+    const floorsResult = getActiveSceneFloors(scene);
+    if (!floorsResult.ok) return { ...result, ok: false, reason: floorsResult.error };
+    for (const levelId of levelIds) {
+      const floor = floorsResult.floors.find((f) => f.id === levelId);
+      if (!floor) {
+        result.skipped.push({ levelId, reason: 'unknown level' });
+        continue;
+      }
+      if (isFloorPreparedForApi(levelId)) {
+        result.skipped.push({ levelId, reason: 'already prepared' });
+        continue;
+      }
+      if (isFloorTransitionActive() || currentSceneId() !== sceneId) {
+        return { ...result, ok: false, reason: 'busy' };
+      }
+      const prepared = await prepareVtPanViewerFloor(floor.index);
+      if (prepared?.ok !== true) return { ...result, ok: false, reason: prepared?.reason ?? 'not prepared' };
+      announceFloorPrepared(floor.index);
+      result.prepared.push(levelId);
+    }
+    return result;
+  }
+
   /** What the gate calls, for every request that will cause a redraw. */
   function prepareSwitchRequest(request, control) {
     return request.kind === 'level' ? prepareLevelSwitch(request, control) : prepareSceneSwitch(request, control);
@@ -3788,6 +3867,8 @@ function install() {
       return prepared;
     }
 
+    announceFloorPrepared(targetFloorIndex);
+
     // COMMIT — everything floor N needs is already GPU-resident (art,
     // masks AND compiled shader pipelines — see prepareFloor's PHASE 4),
     // so every step below is fast and, per prepareFloor's own analysis,
@@ -3836,6 +3917,8 @@ function install() {
     // the SECOND hop too, not just the first. Fire-and-forget, same
     // posture as the original: a background prewarm succeeding or failing
     // must never affect this (already-completed) switch.
+    const presented = viewedSceneFloor(targetFloorIndex);
+    if (presented) announceFloor('presented', presented);
     prewarmVtPanViewerAdjacentFloors(targetFloorIndex).catch((err) =>
       log.warn(`adjacent-floor prewarm from floor ${targetFloorIndex} failed:`, err)
     );
@@ -17654,6 +17737,12 @@ function install() {
   if (typeof Hooks !== 'undefined') {
     Hooks.once('init', () => {
       log.info(`init — ${MODULE_ID}`);
+      // THE PUBLIC API (foundry/public-api.js): on the module record from `init` on, so a companion module
+      // finds it at its own `init` or `ready`, whichever order the two load in.
+      installPublicApi({
+        floors: { prewarm: prewarmFloorsForApi, isPrepared: isFloorPreparedForApi },
+        remote: { registerSection: registerRemoteSection, removeSection: removeRemoteSection },
+      });
       // Register every effect's cascade settings (client profile + a11y, and a
       // GM-default + player-override enable per effect), DERIVED from the registry
       // so a new effect gets its settings for free (the velocity test). game.

@@ -35,7 +35,11 @@ import { renderWeatherBoard } from './weather-board.js';
 import { renderPlayerLightBoard } from './player-light-board.js';
 import { renderCueDeck } from './cue-deck.js';
 import { renderDebugStrip } from './debug-strip.js';
+import { listRemoteSections, onRemoteSectionsChanged, buildRemoteKit } from './extension-sections.js';
+import { createLogger } from '../../../core/log.js';
 import { raiseRoom, raiseRoomOnPress } from '../room-stack.js';
+
+const log = createLogger('Remote');
 
 const ROOM_ID = REMOTE_ROOM_ID;
 const STYLE_ID = 'msa-remote-style';
@@ -313,6 +317,46 @@ export function installRemote(opts = {}) {
   let astrolabePanelHandle = null;
   /** @type {{update: () => void}|null} */
   let debugStripHandle = null;
+  /** Where sections other modules registered are drawn (extension-sections.js). */
+  let extensionHost = null;
+  /** @type {Array<{destroy?: () => void, refresh?: () => void}|null>} */
+  let extensionHandles = [];
+
+  /**
+   * SECTIONS OTHER MODULES REGISTERED (extension-sections.js): rebuilt whenever one is added or removed, each
+   * under its own title, with the Remote's own controls to build from. One that throws is replaced by a
+   * note, never allowed to take the rest of the Remote down with it.
+   */
+  function renderExtensionSections() {
+    if (!extensionHost) return;
+    for (const handle of extensionHandles) {
+      try {
+        handle?.destroy?.();
+      } catch (err) {
+        log.error('a Remote section failed to clean up:', err);
+      }
+    }
+    extensionHandles = [];
+    extensionHost.replaceChildren();
+    const kit = buildRemoteKit(document);
+    // installRemote returns early for a non-GM, so everyone here is one.
+    for (const section of listRemoteSections({ isGM: true })) {
+      const sep = document.createElement('div');
+      sep.className = 'msa-remote-sep';
+      const host = document.createElement('div');
+      host.className = 'msa-wx-host';
+      const content = document.createElement('div');
+      content.className = 'msa-ext-content';
+      host.append(kit.label(section.title), content);
+      extensionHost.append(sep, host);
+      try {
+        extensionHandles.push(section.render(content, { kit, isGM: true }) ?? null);
+      } catch (err) {
+        log.error(`the Remote section "${section.id}" failed to render:`, err);
+        content.append(kit.note(`${section.title} could not be shown (see the console).`));
+      }
+    }
+  }
 
   function buildBody() {
     if (bodyBuilt) return;
@@ -385,6 +429,12 @@ export function installRemote(opts = {}) {
       body.append(sep3, cueHost);
       cueDeckHandle = renderCueDeck(cueHost, opts.cueDeck);
     }
+
+    extensionHost = document.createElement('div');
+    extensionHost.className = 'msa-ext-host';
+    body.append(extensionHost);
+    renderExtensionSections();
+    onRemoteSectionsChanged(renderExtensionSections);
 
     if (opts.debugStrip) {
       // 2026-08-18 fix (author report: "buttons/sections are touching each

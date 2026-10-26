@@ -26,6 +26,7 @@ export {
   prepareVtPanViewerFloor,
   cancelVtPanViewerFloorPrepare,
   prewarmVtPanViewerAdjacentFloors,
+  isVtPanViewerFloorPrepared,
   afterNextVtPanViewerFrame,
   setVtPanViewerGpuProbe,
   // PER-PASS GPU TIMING (docs/planning/Performance.md). Distinct from the probe

@@ -37,10 +37,11 @@ export function freezeParams(map) {
  * @param {number} a.max - the most one reference-sized blob may hold.
  * @param {number} a.count - the default head-count.
  * @param {number} a.areaScaling - the default area scaling.
+ * @param {number} [a.maskSensitivity] - the default mask sensitivity (0.15 unless an effect says otherwise).
  * @param {string} [a.countHelpExtra] - appended to the head-count's help.
  * @returns {Record<string, object>}
  */
-export function presenceParams({ countId, noun, unit, max, count, areaScaling, countHelpExtra = '' }) {
+export function presenceParams({ countId, noun, unit, max, count, areaScaling, maskSensitivity = 0.15, countHelpExtra = '' }) {
   return {
     [countId]: {
       type: 'int',
@@ -67,7 +68,7 @@ export function presenceParams({ countId, noun, unit, max, count, areaScaling, c
       min: 0.02,
       max: 0.6,
       step: 0.01,
-      default: 0.15,
+      default: maskSensitivity,
       category: 'Presence',
       label: 'Mask sensitivity',
       help: `How much paint counts as part of a ${unit}’s zone. LOWER catches faint or thin strokes — turn it DOWN if ${noun} you painted are not appearing. HIGHER wants bold, solid paint.`,
